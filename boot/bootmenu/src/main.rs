@@ -4,6 +4,12 @@
 #![cfg_attr(target_os = "uefi", no_main)]
 
 #[cfg(target_os = "uefi")]
+extern crate alloc;
+
+#[cfg(target_os = "uefi")]
+mod efi;
+
+#[cfg(target_os = "uefi")]
 mod uefi_main {
     use uefi::prelude::*;
 
@@ -18,7 +24,7 @@ mod uefi_main {
         if uefi::helpers::init().is_err() {
             return Status::ABORTED;
         }
-        Status::SUCCESS
+        crate::efi::run()
     }
 }
 
