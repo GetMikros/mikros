@@ -9,3 +9,4 @@ uefi = { version = "0.41.0", features = ["alloc", "global_allocator", "panic_han
 
 [dependencies]
 fontdue = { version = "0.9.5", default-features = false, features = ["hashbrown"] }
+libm = "0.2.16"

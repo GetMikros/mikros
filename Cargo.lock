@@ -102,6 +102,7 @@ name = "bootmenu"
 version = "0.0.0"
 dependencies = [
  "fontdue",
+ "libm",
  "uefi",
 ]
 
