@@ -26,6 +26,19 @@ repository. Code and commits refer to them by ID, such as `MIKSPEC-0012.R3`.
 
 Folders appear as work on them starts.
 
+## Development environment
+
+All development tasks are subcommands of `cargo xtask`. The Rust toolchain is
+pinned in `rust-toolchain.toml` and installed by rustup on first use.
+
+The host needs these tools, which `cargo xtask setup` checks:
+
+| Tool | Minimum version |
+|---|---|
+| QEMU (`qemu-system-x86_64`) | 8.2.0 |
+| GDB | 12.1.0 |
+| `mkfs.btrfs` (btrfs-progs) | 6.6.0 |
+
 ## Contributing
 
 - Only requirements that are approved in `spec/` are implemented.
