@@ -1,5 +1,7 @@
-//! `cargo xtask setup`: checks the host tools.
+//! `cargo xtask setup`: checks the host tools and fetches the pinned
+//! firmware.
 
+use crate::firmware;
 use crate::tools::{Distro, Status, TOOLS, Tool};
 use anyhow::{Context, Result, bail};
 use std::io::{self, BufRead, Write};
@@ -33,6 +35,8 @@ pub fn run(args: &Args) -> Result<()> {
             }
         }
     }
+
+    firmware::fetch()?;
 
     if missing.is_empty() {
         return Ok(());

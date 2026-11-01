@@ -1,9 +1,11 @@
 //! Development tasks for the Mikros repository, run with `cargo xtask`.
 
+mod firmware;
 mod setup;
 mod tools;
 
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -17,6 +19,14 @@ struct Cli {
 enum Command {
     /// Check the host tools and fetch the pinned firmware.
     Setup(setup::Args),
+}
+
+/// The root of the repository, which holds the Cargo workspace.
+pub fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask is inside the workspace")
+        .to_owned()
 }
 
 fn main() -> ExitCode {
