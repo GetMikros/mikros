@@ -5,4 +5,6 @@
 
 extern crate alloc;
 
+pub mod canvas;
 pub mod entries;
+pub mod text;
