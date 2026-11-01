@@ -1,0 +1,8 @@
+[package]
+name = "bootmenu"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[target.'cfg(target_os = "uefi")'.dependencies]
+uefi = { version = "0.41.0", features = ["alloc", "global_allocator", "panic_handler"] }

@@ -1,5 +1,6 @@
 //! Development tasks for the Mikros repository, run with `cargo xtask`.
 
+mod build;
 mod firmware;
 mod setup;
 mod tools;
@@ -17,6 +18,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Build the system components.
+    Build(build::Args),
     /// Check the host tools and fetch the pinned firmware.
     Setup(setup::Args),
 }
@@ -32,6 +35,7 @@ pub fn workspace_root() -> PathBuf {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
+        Command::Build(args) => build::run(&args),
         Command::Setup(args) => setup::run(&args),
     };
     match result {
