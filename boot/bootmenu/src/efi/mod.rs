@@ -1,5 +1,7 @@
 //! The boot manager's use of UEFI.
 
+mod launch;
+mod power;
 mod screen;
 
 use alloc::format;
@@ -8,10 +10,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use bootmenu::canvas::{Canvas, Color};
 use bootmenu::entries::Config;
+use bootmenu::input::{Action, Event, Input};
 use bootmenu::menu::{Card, FocusSource, Item, Menu, Power};
 use bootmenu::text::Text;
 use screen::Screen;
 use uefi::fs::FileSystem;
+use uefi::proto::console::text::{Key, ScanCode};
+use uefi::proto::device_path::DevicePath;
 use uefi::runtime::{self, VariableVendor};
 use uefi::{Status, boot, cstr16, system};
 
@@ -87,27 +92,98 @@ fn build_menu(config: &Config, notice: Option<String>) -> Menu {
     }
 }
 
-pub fn run() -> Status {
-    let (config, notice) = load_config();
-    let menu = build_menu(&config, notice);
+/// The bootloader, started when there is no entry to start instead.
+const MIKROSBOOT_PATH: &str = "\\EFI\\Mikros\\mikrosboot.efi";
 
-    let Some(mut screen) = Screen::open() else {
-        return Status::UNSUPPORTED;
-    };
+/// Translates a key from the console into a menu event.
+fn translate(key: Key) -> Event {
+    match key {
+        Key::Special(ScanCode::RIGHT | ScanCode::DOWN) => Event::Next,
+        Key::Special(ScanCode::LEFT | ScanCode::UP) => Event::Previous,
+        Key::Printable(c) => match char::from(c) {
+            '\t' => Event::Next,
+            '\r' | '\n' | ' ' => Event::Activate,
+            _ => Event::OtherKey,
+        },
+        Key::Special(_) => Event::OtherKey,
+    }
+}
+
+/// Waits for the next key press and translates it.
+fn next_event() -> Event {
+    system::with_stdin(|input| {
+        loop {
+            if let Ok(event) = input.wait_for_key_event() {
+                let _ = boot::wait_for_event(&[event]);
+            }
+            match input.read_key() {
+                Ok(Some(key)) => return translate(key),
+                Ok(None) => continue,
+                Err(_) => return Event::OtherKey,
+            }
+        }
+    })
+}
+
+/// Shows `menu` on `screen` until an item is activated, and returns it. The
+/// screen is released when this returns.
+fn show(menu: &mut Menu, mut screen: Screen, text: &mut Text, default: usize) -> Item {
+    let _ = boot::set_watchdog_timer(0, 0x10000, None);
+    let (width, height) = screen.size();
+    let mut canvas = Canvas::new(width, height);
+    let mut input = Input::new(width as i32, height as i32, default);
+    menu.draw(text, &mut canvas);
+    screen.present(&canvas);
+    loop {
+        match input.handle(menu, next_event()) {
+            Action::None => {}
+            Action::Redraw => {
+                menu.draw(text, &mut canvas);
+                screen.present(&canvas);
+            }
+            Action::Activate(item) => return item,
+        }
+    }
+}
+
+/// Starts `path` on the boot volume with `args`.
+fn start(volume: Option<&DevicePath>, path: &str, args: Option<&str>) -> Result<(), String> {
+    let volume = volume.ok_or_else(|| String::from("the boot volume was not found"))?;
+    launch::start(volume, path, args)
+}
+
+pub fn run() -> Status {
+    let (config, config_notice) = load_config();
+    let mut menu = build_menu(&config, config_notice.clone());
+    let volume = launch::boot_volume();
+    let default = config.default_index();
     let Some(mut text) = Text::new() else {
         return Status::LOAD_ERROR;
     };
-    let _ = boot::set_watchdog_timer(0, 0x10000, None);
 
-    let (width, height) = screen.size();
-    let mut canvas = Canvas::new(width, height);
-    menu.draw(&mut text, &mut canvas);
-    screen.present(&canvas);
-
-    system::with_stdin(|input| {
-        if let Ok(event) = input.wait_for_key_event() {
-            let _ = boot::wait_for_event(&[event]);
+    loop {
+        let Some(screen) = Screen::open() else {
+            let (path, args) = match config.entries.get(default) {
+                Some(entry) => (entry.path.as_str(), entry.args.as_deref()),
+                None => (MIKROSBOOT_PATH, None),
+            };
+            return match start(volume.as_deref(), path, args) {
+                Ok(()) => Status::SUCCESS,
+                Err(_) => Status::LOAD_ERROR,
+            };
+        };
+        match show(&mut menu, screen, &mut text, default) {
+            Item::Button(power) => power::act(power),
+            Item::Card(index) => {
+                let entry = &config.entries[index];
+                let result = start(volume.as_deref(), &entry.path, entry.args.as_deref());
+                menu.notice = match result {
+                    Ok(()) => config_notice.clone(),
+                    Err(reason) => Some(format!("Couldn't start {}: {reason}", entry.name)),
+                };
+                menu.focus = Some((Item::Card(index), FocusSource::Keyboard));
+                menu.countdown = None;
+            }
         }
-    });
-    Status::SUCCESS
+    }
 }
