@@ -8,6 +8,7 @@ extern crate alloc;
 pub mod canvas;
 pub mod display;
 pub mod entries;
+pub mod input;
 pub mod menu;
 pub mod shape;
 pub mod text;
