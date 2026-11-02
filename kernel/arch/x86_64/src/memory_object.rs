@@ -43,6 +43,9 @@ pub struct MemoryObject {
     /// The address spaces with regions that map the object, so that
     /// pages can be unmapped when the object changes.
     spaces: SpinLock<Vec<Weak<AddressSpace>>>,
+    /// Room to hold every space in `spaces` while the pages are locked,
+    /// kept as large as `spaces` by `add_space`.
+    scratch: SpinLock<Vec<Arc<AddressSpace>>>,
     /// The seals of `mem_seal`, never removed. Checks and changes are
     /// serialized because system calls run one at a time on the one
     /// processor.
@@ -130,6 +133,7 @@ impl MemoryObject {
             pages: SpinLock::new(pages),
             physical: None,
             spaces: SpinLock::new(Vec::new()),
+            scratch: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
             paged: None,
         })
@@ -160,6 +164,7 @@ impl MemoryObject {
             pages: SpinLock::new(pages),
             physical: None,
             spaces: SpinLock::new(Vec::new()),
+            scratch: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
             paged: Some(Paged {
                 pager,
@@ -474,6 +479,7 @@ impl MemoryObject {
             pages: SpinLock::new(pages),
             physical: Some((base, policy)),
             spaces: SpinLock::new(Vec::new()),
+            scratch: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
             paged: None,
         })
@@ -522,14 +528,12 @@ impl MemoryObject {
     }
 
     /// Whether a region of some address space maps the object writable.
+    /// The pages must be locked.
     fn mapped_writable(&self) -> bool {
-        let spaces: Vec<_> = self
-            .spaces
-            .lock()
-            .iter()
-            .filter_map(Weak::upgrade)
-            .collect();
-        spaces.iter().any(|space| space.maps_writable(self))
+        let spaces = self.live_spaces();
+        let writable = spaces.iter().any(|space| space.maps_writable(self));
+        self.return_spaces(spaces);
+        writable
     }
 
     pub fn is_physical(&self) -> bool {
@@ -580,13 +584,22 @@ impl MemoryObject {
         self.pages.lock().check_range(offset, len)
     }
 
-    /// Records that `space` has regions that map the object.
-    pub fn add_space(&self, space: &Arc<AddressSpace>) {
+    /// Records that `space` has regions that map the object, or fails
+    /// with `NoMemory` without room for it.
+    pub fn add_space(&self, space: &Arc<AddressSpace>) -> Result<(), Error> {
+        // The pages lock keeps `scratch` from being in use meanwhile.
+        let _pages = self.pages.lock();
         let mut spaces = self.spaces.lock();
         spaces.retain(|s| s.strong_count() > 0);
         if !spaces.iter().any(|s| core::ptr::eq(s.as_ptr(), &**space)) {
+            spaces.try_reserve(1).map_err(|_| Error::NoMemory)?;
+            self.scratch
+                .lock()
+                .try_reserve(spaces.len() + 1)
+                .map_err(|_| Error::NoMemory)?;
             spaces.push(Arc::downgrade(space));
         }
+        Ok(())
     }
 
     /// Records that `space` has no regions left that map the object.
@@ -596,18 +609,33 @@ impl MemoryObject {
             .retain(|s| !core::ptr::eq(s.as_ptr(), space));
     }
 
+    /// The live address spaces in `spaces`, in the room of `scratch`, to
+    /// be handed back to `return_spaces`. The pages must be locked, so
+    /// that no other caller holds the room.
+    fn live_spaces(&self) -> Vec<Arc<AddressSpace>> {
+        let mut list = core::mem::take(&mut *self.scratch.lock());
+        let spaces = self.spaces.lock();
+        debug_assert!(list.is_empty() && list.capacity() >= spaces.len());
+        list.extend(spaces.iter().filter_map(Weak::upgrade));
+        list
+    }
+
+    /// Hands back the room of `live_spaces`, dropping the spaces outside
+    /// the spaces and scratch locks, as dropping the last reference to
+    /// one ends it.
+    fn return_spaces(&self, mut list: Vec<Arc<AddressSpace>>) {
+        list.clear();
+        *self.scratch.lock() = list;
+    }
+
     /// Removes the pages that map pages `first` to `end`, exclusive, of
     /// the object from every address space. The pages must be locked.
     fn unmap_pages(&self, first: u64, end: u64) {
-        let spaces: Vec<_> = self
-            .spaces
-            .lock()
-            .iter()
-            .filter_map(Weak::upgrade)
-            .collect();
-        for space in spaces {
+        let spaces = self.live_spaces();
+        for space in &spaces {
             space.unmap_object(self, first, end);
         }
+        self.return_spaces(spaces);
     }
 
     /// Gives page `index` a frame and removes the translations of the

@@ -271,7 +271,7 @@ impl AddressSpace {
         if size > USER_END - USER_START {
             return Err(Error::OutOfRange);
         }
-        mem.add_space(self);
+        mem.add_space(self)?;
         let mut regions = self.regions.lock();
         let start = if options.specific {
             Ok(addr)
