@@ -293,7 +293,7 @@ impl HandleTable {
         let Err(e) = publish(new) else {
             return Ok(new);
         };
-        let entry = self.take(new)?;
+        let entry = self.take(new).expect("just inserted");
         if self.slots.len() > added {
             // `take` put the slot on the free list last.
             self.free.pop();
