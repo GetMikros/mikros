@@ -1,5 +1,6 @@
 //! Kernel objects: their types, IDs, rights and signals.
 
+use alloc::sync::Arc;
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -172,6 +173,12 @@ pub trait Object: Any + Send + Sync {
     fn related_koid(&self) -> u64 {
         0
     }
+}
+
+/// The object behind `object` as a `T`, if it is one.
+pub fn downcast<T: Object>(object: Arc<dyn Object>) -> Option<Arc<T>> {
+    let any: Arc<dyn Any + Send + Sync> = object;
+    any.downcast::<T>().ok()
 }
 
 /// The topic of the basic information record.

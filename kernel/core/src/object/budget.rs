@@ -64,7 +64,12 @@ pub struct Budget {
     kernel: Account,
     pages: Account,
     process_count: AtomicU32,
+    /// The budget charged `BUDGET_COST` for this one.
+    charged: Option<Arc<Budget>>,
 }
+
+/// The kernel memory charged for a budget created by a system call.
+pub const BUDGET_COST: u64 = size_of::<Budget>() as u64;
 
 impl Budget {
     /// The root budget, with no limits.
@@ -73,13 +78,25 @@ impl Budget {
     }
 
     /// A child budget of `parent` with the given limits and no usage. The
-    /// child keeps its parent alive.
-    pub fn child(parent: &Arc<Budget>, kernel_limit: u64, page_limit: u64) -> Arc<Budget> {
-        Arc::new(Budget::with(Some(parent.clone()), kernel_limit, page_limit))
+    /// child keeps its parent alive. When `charge` is given, `BUDGET_COST`
+    /// is charged to it, and released when the child is dropped.
+    pub fn child(
+        parent: &Arc<Budget>,
+        kernel_limit: u64,
+        page_limit: u64,
+        charge: Option<&Arc<Budget>>,
+    ) -> Result<Arc<Budget>, Error> {
+        if let Some(charge) = charge {
+            charge.charge_kernel(BUDGET_COST)?;
+        }
+        let mut child = Budget::with(Some(parent.clone()), kernel_limit, page_limit);
+        child.charged = charge.cloned();
+        Ok(Arc::new(child))
     }
 
     fn with(parent: Option<Arc<Budget>>, kernel_limit: u64, page_limit: u64) -> Budget {
         Budget {
+            charged: None,
             header: Header::new(ObjectType::Budget),
             parent,
             kernel: Account::new(kernel_limit),
@@ -221,6 +238,14 @@ impl Object for Budget {
     }
 }
 
+impl Drop for Budget {
+    fn drop(&mut self) {
+        if let Some(charged) = &self.charged {
+            charged.release_kernel(BUDGET_COST);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,9 +257,9 @@ mod tests {
     #[test]
     fn charges_the_whole_path_or_nothing() {
         let root = Budget::root();
-        let mid = Budget::child(&root, 1000, UNLIMITED);
-        let leaf = Budget::child(&mid, UNLIMITED, 5);
-        let sibling = Budget::child(&mid, UNLIMITED, UNLIMITED);
+        let mid = Budget::child(&root, 1000, UNLIMITED, None).unwrap();
+        let leaf = Budget::child(&mid, UNLIMITED, 5, None).unwrap();
+        let sibling = Budget::child(&mid, UNLIMITED, UNLIMITED, None).unwrap();
         leaf.charge_kernel(600).unwrap();
         assert_eq!(sibling.charge_kernel(401), Err(Error::NoResources));
         assert_eq!(mid.kernel.used(), 600);
@@ -254,7 +279,7 @@ mod tests {
     #[test]
     fn lets_limits_drop_below_usage() {
         let root = Budget::root();
-        let b = Budget::child(&root, UNLIMITED, UNLIMITED);
+        let b = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
         b.charge_pages(10).unwrap();
         b.set_limits(UNLIMITED, 4);
         assert_eq!(b.charge_pages(1), Err(Error::NoResources));
@@ -266,7 +291,7 @@ mod tests {
     #[test]
     fn signals_usage_over_a_threshold() {
         let root = Budget::root();
-        let b = Budget::child(&root, UNLIMITED, UNLIMITED);
+        let b = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
         b.set_thresholds(100, UNLIMITED);
         root.set_thresholds(UNLIMITED, 2);
         let over = |b: &Budget| b.header.signals() & signals::OVER_THRESHOLD != 0;
@@ -285,8 +310,8 @@ mod tests {
     #[test]
     fn writes_the_information_record() {
         let root = Budget::root();
-        let b = Budget::child(&root, 1 << 20, 64);
-        let child = Budget::child(&b, UNLIMITED, UNLIMITED);
+        let b = Budget::child(&root, 1 << 20, 64, None).unwrap();
+        let child = Budget::child(&b, UNLIMITED, UNLIMITED, None).unwrap();
         child.charge_kernel(300).unwrap();
         child.charge_pages(3).unwrap();
         b.add_process();
@@ -307,10 +332,25 @@ mod tests {
     fn children_keep_parents_alive() {
         let root = Budget::root();
         let weak = Arc::downgrade(&root);
-        let child = Budget::child(&root, UNLIMITED, UNLIMITED);
+        let child = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
         drop(root);
         assert!(weak.upgrade().is_some());
         drop(child);
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn charges_a_created_budget_to_the_creator() {
+        let root = Budget::root();
+        let creator = Budget::child(&root, BUDGET_COST, UNLIMITED, None).unwrap();
+        let b = Budget::child(&root, UNLIMITED, UNLIMITED, Some(&creator)).unwrap();
+        assert_eq!(word(&creator.info(), 0x08), BUDGET_COST);
+        assert_eq!(word(&b.info(), 0x08), 0);
+        assert_eq!(
+            Budget::child(&b, 1, 1, Some(&creator)).err(),
+            Some(Error::NoResources)
+        );
+        drop(b);
+        assert_eq!(word(&root.info(), 0x08), 0);
     }
 }

@@ -212,8 +212,8 @@ impl HandleTable {
     }
 
     /// Like `duplicate`, but passes the new handle to `publish` and keeps
-    /// it only when `publish` succeeds; otherwise the table is left as it
-    /// was and the error is returned.
+    /// it only when `publish` succeeds; otherwise the table and the charges
+    /// are left as they were and the error is returned.
     pub fn duplicate_then(
         &mut self,
         handle: Handle,
@@ -221,12 +221,46 @@ impl HandleTable {
         budget: Option<&Arc<Budget>>,
         publish: impl FnOnce(Handle) -> Result<(), Error>,
     ) -> Result<Handle, Error> {
+        let added = self.slots.len();
         let new = self.duplicate(handle, rights, budget)?;
-        if let Err(e) = publish(new) {
-            self.take(new).map(drop)?;
-            return Err(e);
+        self.keep_if_published(new, added, publish)
+    }
+
+    /// Like `insert`, but passes the new handle to `publish` and keeps it
+    /// only when `publish` succeeds; otherwise the table and the charges
+    /// are left as they were and the error is returned.
+    pub fn insert_then(
+        &mut self,
+        object: Arc<dyn Object>,
+        rights: u32,
+        budget: Option<&Arc<Budget>>,
+        publish: impl FnOnce(Handle) -> Result<(), Error>,
+    ) -> Result<Handle, Error> {
+        let added = self.slots.len();
+        let new = self.insert(object, rights, budget)?;
+        self.keep_if_published(new, added, publish)
+    }
+
+    /// Passes `new` to `publish` and removes it again when that fails,
+    /// together with its slot and the slot's charge if the slot was added
+    /// at index `added`.
+    fn keep_if_published(
+        &mut self,
+        new: Handle,
+        added: usize,
+        publish: impl FnOnce(Handle) -> Result<(), Error>,
+    ) -> Result<Handle, Error> {
+        let Err(e) = publish(new) else {
+            return Ok(new);
+        };
+        let entry = self.take(new)?;
+        if self.slots.len() > added {
+            // `take` put the slot on the free list last.
+            self.free.pop();
+            self.slots.pop();
         }
-        Ok(new)
+        drop(entry);
+        Err(e)
     }
 
     /// Like `replace`, but first passes the value the new handle will
@@ -396,8 +430,8 @@ mod tests {
     #[test]
     fn charges_new_slots_to_the_given_budget() {
         let root = Budget::root();
-        let small = Budget::child(&root, SLOT_COST, UNLIMITED);
-        let other = Budget::child(&root, UNLIMITED, UNLIMITED);
+        let small = Budget::child(&root, SLOT_COST, UNLIMITED, None).unwrap();
+        let other = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
         let used = |b: &Budget| u64::from_le_bytes(b.info()[8..16].try_into().unwrap());
         let mut t = HandleTable::new();
         let a = t.insert(event(), rights::DUPLICATE, Some(&small)).unwrap();
@@ -407,6 +441,16 @@ mod tests {
             Err(Error::NoResources)
         );
         assert_eq!(t.len(), 1);
+        let fail = |_| Err(Error::InvalidArgs);
+        assert_eq!(
+            t.duplicate_then(a, rights::SAME_RIGHTS, Some(&other), fail),
+            Err(Error::InvalidArgs)
+        );
+        assert_eq!(
+            t.insert_then(event(), 0, Some(&other), fail),
+            Err(Error::InvalidArgs)
+        );
+        assert_eq!((used(&other), t.len()), (0, 1));
         let b = t.duplicate(a, rights::SAME_RIGHTS, Some(&other)).unwrap();
         assert_eq!(used(&other), SLOT_COST);
         // A freed slot is reused without a new charge.

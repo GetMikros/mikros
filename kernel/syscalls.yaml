@@ -65,3 +65,34 @@ syscalls:
       - {name: buf, type: "*mut u8", dir: out}
       - {name: len, type: u64, dir: in}
       - {name: out_len, type: "*mut u64", dir: out}
+
+  - name: budget_create
+    number: 5
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0021.R3]
+    args:
+      - {name: parent, type: Handle, dir: in, object: Budget, rights: [WRITE]}
+      - {name: kernel_limit, type: u64, dir: in}
+      - {name: page_limit, type: u64, dir: in}
+      - {name: out, type: "*mut Handle", dir: out}
+
+  - name: budget_set_limits
+    number: 6
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0021.R4]
+    args:
+      - {name: budget, type: Handle, dir: in, object: Budget, rights: [MANAGE]}
+      - {name: kernel_limit, type: u64, dir: in}
+      - {name: page_limit, type: u64, dir: in}
+
+  - name: budget_set_thresholds
+    number: 7
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0021.R13]
+    args:
+      - {name: budget, type: Handle, dir: in, object: Budget, rights: [MANAGE]}
+      - {name: kernel_threshold, type: u64, dir: in}
+      - {name: page_threshold, type: u64, dir: in}
