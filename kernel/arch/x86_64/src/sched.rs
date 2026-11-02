@@ -680,6 +680,14 @@ pub fn preempt_point() {
     }
 }
 
+/// Calls `preempt_point` when no lock is held, for work that may run
+/// either way, such as destroying an object.
+pub fn preempt_point_if_unlocked() {
+    if kernel_core::sync::none_held() {
+        preempt_point();
+    }
+}
+
 /// Ends the running thread.
 pub fn exit() -> ! {
     if let Some(current) = this_cpu().lock().current.as_ref() {

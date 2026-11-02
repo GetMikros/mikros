@@ -68,6 +68,26 @@ impl HandleTable {
         self.count
     }
 
+    /// Destroys up to `limit` slots of a table that is no longer used,
+    /// with their handles, last slot first, and returns whether none is
+    /// left.
+    pub fn destroy_some(&mut self, limit: usize) -> bool {
+        for _ in 0..limit {
+            let Some(slot) = self.slots.pop() else {
+                break;
+            };
+            if slot.entry.is_some() {
+                self.count -= 1;
+            }
+            drop(slot);
+        }
+        if self.slots.is_empty() {
+            self.free = Vec::new();
+            return true;
+        }
+        false
+    }
+
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
@@ -372,6 +392,23 @@ mod tests {
         assert!(t.get(a).is_err());
         assert_eq!(t.get(seen).unwrap().rights, rights::READ);
         assert_eq!(t.len(), 2);
+    }
+
+    #[test]
+    fn destroys_a_table_in_steps() {
+        let root = Budget::root();
+        let owner = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
+        let mut t = HandleTable::new();
+        let object = event();
+        let handles: std::vec::Vec<Handle> = (0..5)
+            .map(|_| t.insert(object.clone(), 0, Some(&owner)).unwrap())
+            .collect();
+        t.close(handles[1]).unwrap();
+        assert!(!t.destroy_some(2));
+        assert_eq!((t.len(), Arc::strong_count(&object)), (2, 3));
+        assert!(t.destroy_some(3));
+        assert_eq!((t.len(), Arc::strong_count(&object)), (0, 1));
+        assert_eq!(kernel_used(&owner), 0);
     }
 
     fn kernel_used(budget: &Budget) -> u64 {

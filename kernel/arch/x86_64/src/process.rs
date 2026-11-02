@@ -428,8 +428,10 @@ impl Process {
         self.aspace.remove_all_regions();
         // Objects are dropped after the lock is released, as dropping one
         // can drop further objects.
-        let handles = core::mem::take(&mut *self.handles.lock());
-        drop(handles);
+        let mut handles = core::mem::take(&mut *self.handles.lock());
+        while !handles.destroy_some(crate::publish::ITEM_STEP) {
+            crate::sched::preempt_point_if_unlocked();
+        }
         crate::wait::process_ended(self);
         drop(core::mem::take(&mut *self.stopped.lock()));
         self.header

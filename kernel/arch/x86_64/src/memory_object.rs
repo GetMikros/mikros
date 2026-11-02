@@ -1030,11 +1030,20 @@ impl MemoryObject {
     /// is locked, as the heap gives pages back to it: frames are taken
     /// from `frames`, whose iterator may free memory, in batches with the
     /// allocator unlocked, and charges are released after each batch.
+    ///
+    /// When no lock is held, as when an object is destroyed by closing
+    /// its last handle, a reschedule check follows every `ITEM_STEP`
+    /// frames.
     fn free(&self, frames: impl IntoIterator<Item = u64>) {
         const BATCH: usize = 64;
         let mut frames = frames.into_iter();
         let mut count = 0;
+        let mut since_check = 0;
         loop {
+            if since_check >= ITEM_STEP {
+                crate::sched::preempt_point_if_unlocked();
+                since_check = 0;
+            }
             let mut batch = [0u64; BATCH];
             let mut len = 0;
             for (slot, phys) in batch.iter_mut().zip(frames.by_ref()) {
@@ -1044,6 +1053,7 @@ impl MemoryObject {
             if len == 0 {
                 break;
             }
+            since_check += len;
             let batch = &batch[..len];
             if let Some(allocator) = FRAMES.lock().as_mut() {
                 for &phys in batch {

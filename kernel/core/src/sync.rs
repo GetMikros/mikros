@@ -5,7 +5,17 @@
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+/// The number of spin locks held. The kernel runs one thread at a time on
+/// one processor and switches threads only where no lock is held, so
+/// this counts the locks of the running thread.
+static HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether no spin lock is held.
+pub fn none_held() -> bool {
+    HELD.load(Ordering::Relaxed) == 0
+}
 
 pub struct SpinLock<T> {
     locked: AtomicBool,
@@ -32,6 +42,7 @@ impl<T> SpinLock<T> {
         {
             core::hint::spin_loop();
         }
+        HELD.fetch_add(1, Ordering::Relaxed);
         Guard { lock: self }
     }
 
@@ -40,7 +51,10 @@ impl<T> SpinLock<T> {
         self.locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .ok()
-            .map(|_| Guard { lock: self })
+            .map(|_| {
+                HELD.fetch_add(1, Ordering::Relaxed);
+                Guard { lock: self }
+            })
     }
 }
 
@@ -66,6 +80,7 @@ impl<T> DerefMut for Guard<'_, T> {
 impl<T> Drop for Guard<'_, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
+        HELD.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
