@@ -110,6 +110,12 @@ fn unmap(virt: u64, size: u64, mut unmapped: impl FnMut(u64, u64)) {
 /// Maps `size` bytes of device memory at `phys` uncached into the dynamic
 /// region and returns the address of `phys` there.
 pub fn map_device(phys: u64, size: u64) -> u64 {
+    map_physical(phys, size, Policy::UncachedDevice)
+}
+
+/// Maps `size` bytes of physical memory at `phys` with `policy` into the
+/// dynamic region and returns the address of `phys` there.
+pub fn map_physical(phys: u64, size: u64, policy: Policy) -> u64 {
     let first = phys / PAGE_SIZE * PAGE_SIZE;
     let len = (phys + size).next_multiple_of(PAGE_SIZE) - first;
     let virt = reserve_dynamic(len);
@@ -118,7 +124,7 @@ pub fn map_device(phys: u64, size: u64) -> u64 {
         executable: false,
         global: true,
         user: false,
-        policy: Policy::UncachedDevice,
+        policy,
     };
     let mut tables = FrameTables;
     let mut mapper = Mapper::existing(&mut tables, root(), gib_pages());

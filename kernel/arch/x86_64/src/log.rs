@@ -24,7 +24,10 @@ pub fn write_user(koid: u64, severity: Severity, message: &[u8]) {
 
 fn append(koid: u64, severity: Severity, source: Source, message: &[u8]) {
     LOG.write(crate::time::now(), koid, severity, source, message);
-    LOG.drain(|record| serial::write(line(record, b"\r\n").as_bytes()));
+    LOG.drain(|record| {
+        serial::write(line(record, b"\r\n").as_bytes());
+        crate::console::write(line(record, b"\n").as_bytes());
+    });
 }
 
 /// The record with the smallest sequence above `after` still in the log.
