@@ -666,9 +666,77 @@ fn memory_operations(s: &Startup) -> Result {
     )
 }
 
+fn seal(mem: Handle, seals: u32) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::mem_seal(mem, seals) }
+}
+
+fn set_size(mem: Handle, size: u64) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::mem_set_size(mem, size) }
+}
+
+/// Seals stop resizing, every way of writing, and further sealing.
+fn seals(s: &Startup) -> Result {
+    let mut mem = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating", unsafe {
+        sys::mem_create(2 * PAGE_SIZE, 1, &mut mem)
+    })?;
+    ensure("refusing other bits", seal(mem, 1 << 4) == -10)?;
+    check("sealing the size", seal(mem, 2 | 4))?;
+    ensure("refusing to shrink", set_size(mem, PAGE_SIZE) == -13)?;
+    ensure("refusing to grow", set_size(mem, 3 * PAGE_SIZE) == -13)?;
+    check("keeping the size", set_size(mem, 2 * PAGE_SIZE))?;
+
+    let at = map(s.process, mem, 2 * PAGE_SIZE)?;
+    ensure("refusing while mapped writable", seal(mem, 8) == -20)?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, 2 * PAGE_SIZE)
+    })?;
+    check("sealing writes", seal(mem, 8))?;
+    let byte = [1u8];
+    // SAFETY: the pointer and length describe `byte`.
+    ensure(
+        "refusing mem_write",
+        unsafe { sys::mem_write(mem, 0, byte.as_ptr(), 1) } == -13,
+    )?;
+    // SAFETY: the call takes no pointers.
+    ensure(
+        "refusing decommit",
+        unsafe { sys::mem_op(mem, 2, 0, PAGE_SIZE) } == -13,
+    )?;
+    let mut out = 0;
+    // SAFETY: the pointer is valid for the call.
+    let writable = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ | PERM_WRITE,
+            0,
+            mem,
+            0,
+            PAGE_SIZE,
+            &mut out,
+        )
+    };
+    ensure("refusing writable mappings", writable == -13)?;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::vm_map(s.process, PERM_READ, 0, mem, 0, PAGE_SIZE, &mut out) };
+    check("mapping read-only", status)?;
+    ensure(
+        "refusing to make it writable",
+        protect(s, PERM_READ | PERM_WRITE, out, PAGE_SIZE) == -13,
+    )?;
+    let record = info::<0x18>(mem, 4)?;
+    ensure("reporting the seals", u32_at(&record, 0x10) == 2 | 4 | 8)?;
+    check("sealing sealing", seal(mem, 1))?;
+    ensure("refusing more seals", seal(mem, 0) == -13)
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 10] = [
+const TESTS: [(&str, Test); 11] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -676,6 +744,7 @@ const TESTS: [(&str, Test); 10] = [
     ("ports", ports),
     ("log_readers", log_readers),
     ("memory_operations", memory_operations),
+    ("seals", seals),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
