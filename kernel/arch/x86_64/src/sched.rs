@@ -37,7 +37,10 @@ pub const DELIVER_SIGNAL: u32 = 3;
 
 pub struct Thread {
     header: Header,
-    #[allow(dead_code, reason = "names are only for diagnostics, which nothing prints yet")]
+    #[allow(
+        dead_code,
+        reason = "names are only for diagnostics, which nothing prints yet"
+    )]
     name: Name,
     /// The process of a user thread.
     process: Option<Arc<Process>>,
@@ -161,7 +164,10 @@ impl Thread {
         })
     }
 
-    #[allow(dead_code, reason = "names are only for diagnostics, which nothing prints yet")]
+    #[allow(
+        dead_code,
+        reason = "names are only for diagnostics, which nothing prints yet"
+    )]
     pub fn name(&self) -> &Name {
         &self.name
     }
