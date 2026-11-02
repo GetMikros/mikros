@@ -441,10 +441,18 @@ impl MemoryObject {
     pub fn revoke(&self) -> Result<(), Error> {
         let paged = self.paged.as_ref().ok_or(Error::NotSupported)?;
         self.wait_unpinned();
-        let pages = self.pages.lock();
-        paged.state.lock().revoke();
-        self.unmap_pages(0, u64::MAX);
-        drop(pages);
+        let count = {
+            let pages = self.pages.lock();
+            paged.state.lock().revoke();
+            pages.count()
+        };
+        // No page can be entered once revoked, and the size stays, so the
+        // translations go in pieces.
+        let _ = in_pieces(0, count, |from, to| {
+            let _pages = self.pages.lock();
+            self.unmap_pages(from, to);
+            Ok(())
+        });
         crate::pager::wake(self.header.koid(), 0, u64::MAX);
         Ok(())
     }
