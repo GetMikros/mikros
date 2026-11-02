@@ -245,6 +245,12 @@ impl Endpoint {
         let mut shared = self.shared.lock();
         let queue = &mut shared.queues[self.side];
         queue.calls.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        // Room to record every outstanding call as abandoned, so that
+        // `abandon_call` never allocates.
+        queue
+            .abandoned
+            .try_reserve(queue.calls.len() + 1)
+            .map_err(|_| Error::NoMemory)?;
         let id = loop {
             let id = CALL_ID | (queue.next_id & !CALL_ID);
             queue.next_id = queue.next_id.wrapping_add(1);
@@ -274,7 +280,8 @@ impl Endpoint {
         let queue = &mut shared.queues[self.side];
         let i = queue.calls.iter().position(|c| c.id == id)?;
         let call = queue.calls.swap_remove(i);
-        if call.reply.is_none() && queue.abandoned.try_reserve(1).is_ok() {
+        if call.reply.is_none() {
+            debug_assert!(queue.abandoned.len() < queue.abandoned.capacity());
             queue.abandoned.push(id);
         }
         call.reply
@@ -430,6 +437,29 @@ mod tests {
         // A reply that came before the call ended is handed back.
         assert!(b.write(message(&next.to_le_bytes(), vec![])).is_ok());
         assert!(a.abandon_call(next).is_some());
+    }
+
+    #[test]
+    fn abandons_calls_without_allocating() {
+        let (a, b) = Endpoint::pair(None).unwrap();
+        let ids: std::vec::Vec<u32> = (0..5).map(|_| a.begin_call().unwrap()).collect();
+        let capacity = {
+            let shared = a.shared.lock();
+            let queue = &shared.queues[a.side];
+            assert!(queue.abandoned.capacity() >= queue.abandoned.len() + queue.calls.len());
+            queue.abandoned.capacity()
+        };
+        for &id in &ids {
+            assert!(a.abandon_call(id).is_none());
+        }
+        assert_eq!(
+            a.shared.lock().queues[a.side].abandoned.capacity(),
+            capacity
+        );
+        for &id in &ids {
+            assert_eq!(b.write(message(&id.to_le_bytes(), vec![])).ok(), Some(None));
+        }
+        assert_eq!(read(&a), Err(Error::ShouldWait));
     }
 
     #[test]
