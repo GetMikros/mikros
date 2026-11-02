@@ -200,6 +200,17 @@ impl Endpoint {
         &self,
         accept: impl FnOnce(&[u8], &[Entry]) -> Result<(), E>,
     ) -> Result<(), E> {
+        // The handles were installed by `accept`; dropping the message
+        // drops only its own references.
+        self.take(accept).map(drop)
+    }
+
+    /// Like `read`, but returns what `accept` returned together with the
+    /// removed message, which keeps its charge until it is dropped.
+    pub fn take<T, E: From<Error>>(
+        &self,
+        accept: impl FnOnce(&[u8], &[Entry]) -> Result<T, E>,
+    ) -> Result<(T, Message), E> {
         let mut shared = self.shared.lock();
         let peer = shared.ends[self.peer_side()].clone();
         let queue = &mut shared.queues[self.side];
@@ -210,7 +221,7 @@ impl Endpoint {
             }
             .into());
         };
-        accept(&message.bytes, &message.handles)?;
+        let accepted = accept(&message.bytes, &message.handles)?;
         let message = queue.messages.pop_front().expect("checked above");
         queue.bytes -= message.bytes.len();
         if queue.messages.is_empty() {
@@ -225,10 +236,7 @@ impl Endpoint {
         }
         drop(shared);
         drop(peer);
-        // The handles were installed by `accept`; dropping the message
-        // drops only its own references.
-        drop(message);
-        Ok(())
+        Ok((accepted, message))
     }
 }
 
@@ -384,5 +392,22 @@ mod tests {
         assert_eq!(used(&budget), CHANNEL_COST);
         drop(b);
         assert_eq!(used(&budget), 0);
+    }
+
+    #[test]
+    fn take_returns_the_message_with_its_charge() {
+        let budget = Budget::root();
+        let (a, b) = Endpoint::pair(Some(&budget)).unwrap();
+        let m = Message::new(vec![1, 2, 3], Vec::new(), Some(&budget)).unwrap();
+        a.write(m).ok().unwrap();
+        let used = |b: &Budget| u64::from_le_bytes(b.info()[8..16].try_into().unwrap());
+        let charged = used(&budget);
+        let (len, message) = b.take(|bytes, _| Ok::<_, Error>(bytes.len())).unwrap();
+        assert_eq!((len, message.bytes.as_slice()), (3, &[1, 2, 3][..]));
+        assert_eq!(b.header().signals() & signals::READABLE, 0);
+        assert_eq!(used(&budget), charged);
+        drop(message);
+        assert_eq!(used(&budget), CHANNEL_COST);
+        assert_eq!(read(&b), Err(Error::ShouldWait));
     }
 }
