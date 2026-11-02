@@ -40,6 +40,11 @@ The host needs these tools, which `cargo xtask setup` checks:
 | GDB | 12.1.0 |
 | `mkfs.btrfs` (btrfs-progs) | 6.12.0 |
 
+## License
+
+The kernel, under `kernel/`, is licensed under the Mozilla Public License
+2.0; see [kernel/LICENSE](kernel/LICENSE).
+
 ## Contributing
 
 - Only requirements that are approved in `spec/` are implemented.
