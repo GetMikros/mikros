@@ -9,3 +9,4 @@ pub mod cmdline;
 pub mod display;
 pub mod elf;
 pub mod load;
+pub mod memmap;
