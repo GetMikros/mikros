@@ -115,7 +115,6 @@ pub fn init(info: &BootInfo) {
 }
 
 /// Fills `out` with random bytes.
-#[expect(dead_code, reason = "nothing asks for random bytes yet")]
 pub fn fill(out: &mut [u8]) -> Result<(), Error> {
     RNG.lock().fill(out)
 }

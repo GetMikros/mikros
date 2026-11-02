@@ -9,10 +9,11 @@ use crate::sched::Thread;
 use alloc::sync::Arc;
 use kernel_core::object::budget::{Budget, INFO_BUDGET};
 use kernel_core::object::handles::Handle;
-use kernel_core::object::memory::INFO_MEMORY;
+use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::{
     INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
 };
+use kernel_core::regions::MapOptions;
 use kernel_core::status::Error;
 
 /// The object of a handle the dispatch has checked to be a `T`.
@@ -265,4 +266,47 @@ pub fn mem_write(mem: Checked, offset: u64, buf: UserIn<u8>, len: u64) -> Result
 
 pub fn mem_set_size(mem: Checked, size: u64) -> Result<(), Error> {
     object::<MemoryObject>(mem).set_size(size)
+}
+
+pub fn vm_map(
+    process: Checked,
+    options: u32,
+    addr: u64,
+    mem: Checked,
+    offset: u64,
+    len: u64,
+    out_addr: UserOut<u64>,
+) -> Result<(), Error> {
+    let options = MapOptions::parse(options, addr)?;
+    if len == 0 || !offset.is_multiple_of(PAGE_SIZE) {
+        return Err(Error::InvalidArgs);
+    }
+    let needed = options.rights();
+    if mem.rights & needed != needed {
+        return Err(Error::AccessDenied);
+    }
+    let mem = object::<MemoryObject>(mem);
+    mem.check_range(offset, len)?;
+    if !out_addr.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    // The range check bounds `len` by the object size, so this cannot
+    // overflow.
+    let size = len.next_multiple_of(PAGE_SIZE);
+    let aspace = object::<Process>(process).aspace().clone();
+    let start = aspace.add_region(options, addr, size, &mem, offset)?;
+    out_addr.write(start).inspect_err(|_| {
+        aspace.remove_regions(start, start + size);
+    })
+}
+
+pub fn vm_unmap(process: Checked, addr: u64, len: u64) -> Result<(), Error> {
+    if len == 0 || !addr.is_multiple_of(PAGE_SIZE) {
+        return Err(Error::InvalidArgs);
+    }
+    let end = addr.saturating_add(len.saturating_add(PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE);
+    object::<Process>(process)
+        .aspace()
+        .remove_regions(addr, end);
+    Ok(())
 }

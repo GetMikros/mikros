@@ -1,9 +1,10 @@
 //! Anonymous memory objects: their frames and the copies to and from them.
 
-use crate::aspace::{USER_END, USER_START};
+use crate::aspace::{AddressSpace, USER_END, USER_START};
 use crate::memory::FRAMES;
 use crate::space;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use kernel_core::object::budget::Budget;
 use kernel_core::object::memory::{INFO_MEMORY_SIZE, PAGE_ENTRY_COST, PAGE_SIZE, Pages};
 use kernel_core::object::{Header, Object, ObjectType};
@@ -25,6 +26,9 @@ pub struct MemoryObject {
     /// Kernel memory charged to the budget for the object itself.
     charged: u64,
     pages: SpinLock<Pages>,
+    /// The address spaces with regions that map the object, so that
+    /// pages can be unmapped when the object changes.
+    spaces: SpinLock<Vec<Weak<AddressSpace>>>,
 }
 
 /// The bytes of the frame at `phys`.
@@ -60,6 +64,7 @@ impl MemoryObject {
             budget: budget.clone(),
             charged,
             pages: SpinLock::new(pages),
+            spaces: SpinLock::new(Vec::new()),
         }))
     }
 
@@ -67,6 +72,36 @@ impl MemoryObject {
     /// inside the object.
     pub fn check_range(&self, offset: u64, len: u64) -> Result<(), Error> {
         self.pages.lock().check_range(offset, len)
+    }
+
+    /// Records that `space` has regions that map the object.
+    pub fn add_space(&self, space: &Arc<AddressSpace>) {
+        let mut spaces = self.spaces.lock();
+        spaces.retain(|s| s.strong_count() > 0);
+        if !spaces.iter().any(|s| core::ptr::eq(s.as_ptr(), &**space)) {
+            spaces.push(Arc::downgrade(space));
+        }
+    }
+
+    /// Records that `space` has no regions left that map the object.
+    pub fn remove_space(&self, space: &AddressSpace) {
+        self.spaces
+            .lock()
+            .retain(|s| !core::ptr::eq(s.as_ptr(), space));
+    }
+
+    /// Removes the pages that map pages `first` to `end`, exclusive, of
+    /// the object from every address space. The pages must be locked.
+    fn unmap_pages(&self, first: u64, end: u64) {
+        let spaces: Vec<_> = self
+            .spaces
+            .lock()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for space in spaces {
+            space.unmap_object(self, first, end);
+        }
     }
 
     /// Gives page `index` a zeroed frame, charging the frame to the
@@ -167,6 +202,7 @@ impl MemoryObject {
             let frame = unsafe { frame_bytes(phys) };
             frame[from..].fill(0);
         }
+        self.unmap_pages(pages.count(), u64::MAX);
         drop(pages);
         self.free(resized.freed.into_values());
         Ok(())

@@ -3,12 +3,15 @@
 use crate::control::CR4_PCIDE;
 use crate::cpu;
 use crate::memory::FRAMES;
+use crate::memory_object::MemoryObject;
 use crate::paging::{self, Flags, Mapper, PAGE_SIZE, Policy, Tables};
 use crate::percpu;
 use crate::space;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::object::budget::Budget;
+use kernel_core::regions::{MapOptions, Region, Regions};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
@@ -16,6 +19,8 @@ use kernel_core::sync::SpinLock;
 pub const USER_START: u64 = 0x0000_0000_0001_0000;
 /// The end of the user address range, exclusive.
 pub const USER_END: u64 = 0x0000_7FFF_FFFF_F000;
+/// The end of the range `BELOW_4G` mappings are placed in.
+const END_4G: u64 = 0x1_0000_0000;
 
 /// Whether the `len` bytes from `addr` lie in the user address range.
 pub fn in_user_range(addr: u64, len: u64) -> bool {
@@ -77,14 +82,27 @@ struct Inner {
     charged: u64,
 }
 
-/// The page tables of one process.
+/// The page tables of one process, and the regions that say what they
+/// may map.
+///
+/// Locks are taken in this order: a memory object's pages, `regions`,
+/// `inner`.
 pub struct AddressSpace {
     id: u64,
     budget: Arc<Budget>,
     /// Bumped whenever a translation is removed, so that
     /// processors flush the space's PCID before using it again.
     generation: AtomicU64,
+    regions: SpinLock<Regions<Arc<MemoryObject>>>,
     inner: SpinLock<Inner>,
+}
+
+/// A random value from the kernel's random number generator, which is
+/// seeded during boot.
+fn random() -> Result<u64, Error> {
+    let mut bytes = [0u8; 8];
+    crate::random::fill(&mut bytes).map_err(|_| Error::Internal)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 /// Page table frames from the frame allocator, optionally charged to a
@@ -156,6 +174,7 @@ impl AddressSpace {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             budget,
             generation: AtomicU64::new(0),
+            regions: SpinLock::new(Regions::default()),
             inner: SpinLock::new(Inner { root, charged }),
         })
     }
@@ -221,6 +240,98 @@ impl AddressSpace {
             self.flush_elsewhere(loaded);
         }
         Ok(())
+    }
+
+    /// Maps the `size` bytes of `mem` from `offset`, a multiple of the
+    /// page size, with `options`: at `addr` when they are `SPECIFIC`,
+    /// otherwise at a random free address. Returns the start. Pages are
+    /// entered into the tables only when they are accessed.
+    pub fn add_region(
+        self: &Arc<Self>,
+        options: MapOptions,
+        addr: u64,
+        size: u64,
+        mem: &Arc<MemoryObject>,
+        offset: u64,
+    ) -> Result<u64, Error> {
+        if options.specific && !in_user_range(addr, size) {
+            return Err(Error::OutOfRange);
+        }
+        if size > USER_END - USER_START {
+            return Err(Error::OutOfRange);
+        }
+        mem.add_space(self);
+        let mut regions = self.regions.lock();
+        let start = if options.specific {
+            Ok(addr)
+        } else {
+            let end = if options.below_4g { END_4G } else { USER_END };
+            regions.choose(size, USER_START, end, random)
+        };
+        let result = start.and_then(|start| {
+            regions.insert(Region {
+                start,
+                len: size,
+                offset,
+                perms: options.perms,
+                inheritance: options.inheritance,
+                mem: mem.clone(),
+            })?;
+            Ok(start)
+        });
+        let unused = !regions.iter().any(|r| Arc::ptr_eq(&r.mem, mem));
+        drop(regions);
+        if unused {
+            mem.remove_space(self);
+        }
+        result
+    }
+
+    /// Removes the parts of regions from `start` to `end` and their pages.
+    pub fn remove_regions(&self, start: u64, end: u64) {
+        let start = start.max(USER_START);
+        let end = end.min(USER_END);
+        if start >= end {
+            return;
+        }
+        let mut regions = self.regions.lock();
+        let removed = regions.remove(start, end);
+        for r in &removed {
+            self.unmap(r.start, r.len, |_| {})
+                .expect("regions are page-aligned and in the user range");
+        }
+        let unused: Vec<&Arc<MemoryObject>> = removed
+            .iter()
+            .map(|r| &r.mem)
+            .filter(|mem| !regions.iter().any(|r| Arc::ptr_eq(&r.mem, mem)))
+            .collect();
+        drop(regions);
+        for mem in unused {
+            mem.remove_space(self);
+        }
+        // Dropping the regions can destroy memory objects, which takes
+        // their locks, so it happens last.
+        drop(removed);
+    }
+
+    /// Removes the pages that map pages `first` to `end`, exclusive, of
+    /// `mem`. The caller holds the object's pages lock.
+    pub fn unmap_object(&self, mem: &MemoryObject, first: u64, end: u64) {
+        let regions = self.regions.lock();
+        let ours = regions.iter().filter(|r| core::ptr::eq(&*r.mem, mem));
+        let ranges: Vec<(u64, u64)> = ours
+            .filter_map(|r| {
+                let base = r.offset / PAGE_SIZE;
+                let pages = r.len / PAGE_SIZE;
+                let from = first.saturating_sub(base).min(pages);
+                let to = end.saturating_sub(base).min(pages);
+                (from < to).then(|| (r.start + from * PAGE_SIZE, (to - from) * PAGE_SIZE))
+            })
+            .collect();
+        for (from, len) in ranges {
+            self.unmap(from, len, |_| {})
+                .expect("regions are page-aligned and in the user range");
+        }
     }
 
     /// Makes processors that do not have the space loaded flush its PCID

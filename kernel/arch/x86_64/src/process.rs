@@ -21,7 +21,7 @@ pub struct Process {
     budget: Arc<Budget>,
     /// Kernel memory charged to the budget for the process itself.
     charged: u64,
-    aspace: AddressSpace,
+    aspace: Arc<AddressSpace>,
     handles: SpinLock<HandleTable>,
     state: AtomicU32,
     exit_code: AtomicI64,
@@ -57,7 +57,7 @@ impl Process {
             name,
             budget: budget.clone(),
             charged,
-            aspace,
+            aspace: Arc::new(aspace),
             handles: SpinLock::new(HandleTable::new()),
             state: AtomicU32::new(NEW),
             exit_code: AtomicI64::new(0),
@@ -74,7 +74,7 @@ impl Process {
         &self.budget
     }
 
-    pub fn aspace(&self) -> &AddressSpace {
+    pub fn aspace(&self) -> &Arc<AddressSpace> {
         &self.aspace
     }
 
@@ -199,7 +199,9 @@ impl Process {
             self.state.store(TERMINATED, Ordering::Release);
             threads
         };
-        // Frames belong to whoever mapped them, so they are not freed.
+        self.aspace.remove_regions(USER_START, USER_END);
+        // Frames mapped outside regions belong to whoever mapped them, so
+        // they are not freed.
         self.aspace
             .unmap(USER_START, USER_END - USER_START, |_| {})
             .expect("user mappings are 4 KiB pages inside the user range");

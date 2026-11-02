@@ -216,3 +216,27 @@ syscalls:
     args:
       - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [WRITE]}
       - {name: size, type: u64, dir: in}
+
+  - name: vm_map
+    number: 20
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R17, MIKSPEC-0006.R18, MIKSPEC-0006.R26, MIKSPEC-0071.R6, MIKSPEC-0071.R9]
+    args:
+      - {name: process, type: Handle, dir: in, object: Process, rights: [MAP]}
+      - {name: options, type: u32, dir: in}
+      - {name: addr, type: u64, dir: in}
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [MAP]}
+      - {name: offset, type: u64, dir: in}
+      - {name: len, type: u64, dir: in}
+      - {name: out_addr, type: "*mut u64", dir: out}
+
+  - name: vm_unmap
+    number: 21
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R19]
+    args:
+      - {name: process, type: Handle, dir: in, object: Process, rights: [MAP]}
+      - {name: addr, type: u64, dir: in}
+      - {name: len, type: u64, dir: in}
