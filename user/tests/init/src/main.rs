@@ -149,9 +149,26 @@ fn threads(s: &Startup) -> Result {
     // The entry is called as if by a call instruction, which leaves the
     // stack 8 bytes below a 16-byte boundary.
     let entry = thread_entry as *const () as u64;
-    // SAFETY: the call takes no pointers; the stack is mapped and unused.
-    let status = unsafe { sys::thread_start(thread, entry, at + stack_size - 8, 77, 0) };
-    check("starting the thread", status)?;
+    let top = 0x7FFF_FFFF_F000;
+    // SAFETY: the calls take no pointers; the stack is mapped and unused.
+    unsafe {
+        // Addresses outside the user range are refused and leave the
+        // thread NEW; unmapped ones inside it are not checked.
+        ensure(
+            "refusing entry 0",
+            sys::thread_start(thread, 0, at, 0, 0) == -10,
+        )?;
+        ensure(
+            "refusing a stack past the user range",
+            sys::thread_start(thread, entry, top + PAGE_SIZE, 0, 0) == -10,
+        )?;
+        ensure(
+            "refusing a kernel entry",
+            sys::thread_start(thread, 0xFFFF_8000_0000_0000, at, 0, 0) == -10,
+        )?;
+        let status = sys::thread_start(thread, entry, at + stack_size - 8, 77, 0);
+        check("starting the thread", status)?;
+    }
     for _ in 0..1000 {
         if THREAD_RAN.load(Ordering::Acquire) == 77 {
             return Ok(());

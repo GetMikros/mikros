@@ -50,6 +50,17 @@ pub struct Process {
     cpu_time: AtomicI64,
 }
 
+/// Fails with `InvalidArgs` unless `entry` lies in the user address range
+/// and `stack` lies in it or is its end, the top of a stack that ends
+/// there. Neither needs to be mapped.
+fn check_start(entry: u64, stack: u64) -> Result<(), Error> {
+    use crate::aspace::{USER_END, USER_START, in_user_range};
+    if !in_user_range(entry, 1) || !(USER_START..=USER_END).contains(&stack) {
+        return Err(Error::InvalidArgs);
+    }
+    Ok(())
+}
+
 /// The I/O port ranges of a process, start and exclusive end, and the
 /// charge for each.
 #[derive(Default)]
@@ -347,9 +358,10 @@ impl Process {
     /// Moves `arg` into the handle table of `process`, sets it `RUNNING`
     /// and starts `thread` at `entry` with stack pointer `stack`, the new
     /// handle value (or `HANDLE_INVALID` without `arg`) and `arg2` as its
-    /// arguments. Fails with `BadState` unless the process is `NEW` and
-    /// `thread` is one of its threads and `NEW`. A new handle table slot
-    /// for `arg` is charged to `budget`, if given.
+    /// arguments. Fails with `InvalidArgs` as `check_start` does and
+    /// with `BadState` unless the process is `NEW` and `thread` is one of
+    /// its threads and `NEW`, in each case changing nothing. A new handle
+    /// table slot for `arg` is charged to `budget`, if given.
     pub fn start(
         process: &Arc<Process>,
         thread: &Arc<Thread>,
@@ -359,6 +371,7 @@ impl Process {
         arg2: u64,
         budget: Option<&Arc<Budget>>,
     ) -> Result<(), Error> {
+        check_start(entry, stack)?;
         let threads = process.threads.lock();
         let ours = thread.process().is_some_and(|p| Arc::ptr_eq(p, process));
         if process.state() != NEW || !ours || thread.state() != sched::NEW {
@@ -380,7 +393,7 @@ impl Process {
 
     /// Starts a further `NEW` thread of a `RUNNING` process at `entry`
     /// with stack pointer `stack` and the two arguments, or fails with
-    /// `BadState`.
+    /// `InvalidArgs` as `check_start` does or with `BadState`.
     pub fn start_thread(
         thread: &Arc<Thread>,
         entry: u64,
@@ -388,6 +401,7 @@ impl Process {
         arg1: u64,
         arg2: u64,
     ) -> Result<(), Error> {
+        check_start(entry, stack)?;
         let Some(process) = thread.process() else {
             return Err(Error::BadState);
         };
