@@ -105,10 +105,11 @@ unsafe extern "sysv64" {
 
 /// Points the `SYSCALL` instruction at the entry point.
 pub fn init() {
-    // SYSRET takes the user selectors from 0x18: SS at 0x20 and the
-    // 64-bit CS at 0x28.
+    // SYSRET takes the user selectors from 0x1B: SS at 0x23 and the
+    // 64-bit CS at 0x2B. The base carries RPL 3 because AMD processors
+    // load SS from it without setting the RPL themselves.
     const _: () = assert!(USER_DATA == 0x18 + 8 && USER_CODE == 0x18 + 16);
-    let star = 0x18u64 << 48 | u64::from(KERNEL_CODE) << 32;
+    let star = (0x18u64 | 3) << 48 | u64::from(KERNEL_CODE) << 32;
     let mask = RFLAGS_IF | RFLAGS_TF | RFLAGS_DF | RFLAGS_AC | RFLAGS_NT;
     // SAFETY: EFER.SCE is set, the selectors match the GDT, and the entry
     // point switches stacks before using one.
