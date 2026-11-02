@@ -525,14 +525,74 @@ fn u64_at(record: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(record[at..at + 8].try_into().unwrap())
 }
 
+const READABLE: u32 = 1 << 0;
+const SHOULD_WAIT: i64 = -22;
+
+/// Reads the next record of `reader`.
+fn read_record(reader: Handle) -> (i64, [u8; 288]) {
+    let mut record = [0u8; 288];
+    // SAFETY: the pointer describes `record`.
+    let status = unsafe { sys::log_reader_read(reader, record.as_mut_ptr()) };
+    (status, record)
+}
+
+/// A log reader reads every record in order, and READABLE follows
+/// whether one is left.
+fn log_readers(s: &Startup) -> Result {
+    let mut reader = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating a reader", unsafe {
+        sys::log_reader_create(s.log, 0, &mut reader)
+    })?;
+    ensure("starting readable", wait(reader, READABLE, 0).0 == 0)?;
+    let mut last = 0;
+    loop {
+        let (status, record) = read_record(reader);
+        if status == SHOULD_WAIT {
+            break;
+        }
+        check("reading a record", status)?;
+        let sequence = u64_at(&record, 0);
+        ensure("reading in order", sequence > last)?;
+        last = sequence;
+    }
+    ensure("reading some records", last > 0)?;
+    ensure(
+        "clearing READABLE",
+        wait(reader, READABLE, soon()).0 == TIMED_OUT,
+    )?;
+
+    let text = b"log reader test";
+    // SAFETY: the pointer and length describe `text`.
+    check("writing", unsafe {
+        sys::log_write(s.log, 2, text.as_ptr(), text.len() as u64)
+    })?;
+    ensure("becoming readable", wait(reader, READABLE, soon()).0 == 0)?;
+    let (status, record) = read_record(reader);
+    check("reading the new record", status)?;
+    ensure("reading the next sequence", u64_at(&record, 0) == last + 1)?;
+    ensure("reading the fields", record[0x18] == 2 && record[0x19] == 1)?;
+    let basic = info::<24>(s.process, 1)?;
+    ensure(
+        "naming the writer",
+        u64_at(&record, 0x10) == u64_at(&basic, 0),
+    )?;
+    ensure(
+        "reading the message",
+        &record[0x20..0x20 + text.len()] == text,
+    )?;
+    ensure("reading to the end", read_record(reader).0 == SHOULD_WAIT)
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 8] = [
+const TESTS: [(&str, Test); 9] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
     ("priorities", priorities),
     ("ports", ports),
+    ("log_readers", log_readers),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
