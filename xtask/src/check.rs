@@ -167,7 +167,8 @@ pub fn run(args: &Args) -> Result<()> {
         problems.push("the code is not formatted with rustfmt".to_owned());
     }
 
-    // The boot manager's UEFI code is only compiled for the UEFI target.
+    // The UEFI code of the boot manager and the bootloader is only compiled
+    // for the UEFI target.
     let clippy_runs: [&[&str]; 2] = [
         &[
             "clippy",
@@ -181,6 +182,8 @@ pub fn run(args: &Args) -> Result<()> {
             "clippy",
             "--package",
             "bootmenu",
+            "--package",
+            "mikrosboot",
             "--target",
             "x86_64-unknown-uefi",
             "--",

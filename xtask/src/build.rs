@@ -60,9 +60,11 @@ pub struct Built {
 pub fn build(kind: Kind) -> Result<Built> {
     let bootmenu = cargo_build("bootmenu", "x86_64-unknown-uefi", kind)?;
     println!("built    {}", bootmenu.display());
+    let bootloader = cargo_build("mikrosboot", "x86_64-unknown-uefi", kind)?;
+    println!("built    {}", bootloader.display());
     Ok(Built {
         bootmenu,
-        bootloader: None,
+        bootloader: Some(bootloader),
         kernel: None,
         boot_image: None,
     })
