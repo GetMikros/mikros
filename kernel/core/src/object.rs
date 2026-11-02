@@ -8,6 +8,7 @@ pub mod budget;
 pub mod channel;
 pub mod handles;
 pub mod memory;
+pub mod resource;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
