@@ -37,6 +37,9 @@ mod heap;
 #[cfg_attr(test, allow(dead_code))]
 mod idt;
 #[cfg(target_os = "none")]
+#[expect(dead_code, reason = "init is not started yet")]
+mod init;
+#[cfg(target_os = "none")]
 mod log;
 #[cfg(target_os = "none")]
 mod memory;

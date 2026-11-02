@@ -245,6 +245,14 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Chooses a start for a mapping of `size` bytes, a multiple of the
+    /// page size, as `add_region` does without `SPECIFIC`.
+    pub fn choose(&self, size: u64) -> Result<u64, Error> {
+        self.regions
+            .lock()
+            .choose(size, USER_START, USER_END, random)
+    }
+
     /// Maps the `size` bytes of `mem` from `offset`, a multiple of the
     /// page size, with `options`: at `addr` when they are `SPECIFIC`,
     /// otherwise at a random free address. Returns the start. Pages are

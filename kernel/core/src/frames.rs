@@ -7,13 +7,15 @@ use boot_protocol::{Kind, MemoryMapEntry, PAGE_SIZE};
 pub const MAX_ALIGN: u64 = 512;
 
 /// The kinds of memory the allocator can hand out: `Usable` from the
-/// start, and the boot memory the kernel reclaims later.
+/// start, the boot memory the kernel reclaims later, and the boot image,
+/// whose frames return when its memory object is destroyed.
 fn allocatable(kind: u32) -> bool {
     [
         Kind::Usable,
         Kind::BootloaderReclaimable,
         Kind::PageTables,
         Kind::KernelStack,
+        Kind::BootImage,
     ]
     .iter()
     .any(|&k| k as u32 == kind)

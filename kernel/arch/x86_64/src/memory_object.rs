@@ -86,6 +86,31 @@ impl MemoryObject {
         }))
     }
 
+    /// An anonymous object of `count` pages that takes over the `count`
+    /// frames from `phys`, charging them to `budget`. The frames return
+    /// to the frame allocator when the object is destroyed.
+    pub fn from_frames(
+        budget: &Arc<Budget>,
+        phys: u64,
+        count: u64,
+    ) -> Result<Arc<MemoryObject>, Error> {
+        budget.charge_pages(count)?;
+        if let Err(e) = budget.charge_kernel(count * PAGE_ENTRY_COST) {
+            budget.release_pages(count);
+            return Err(e);
+        }
+        let object = MemoryObject::new(budget, count * PAGE_SIZE, 0).inspect_err(|_| {
+            budget.release_pages(count);
+            budget.release_kernel(count * PAGE_ENTRY_COST);
+        })?;
+        let mut pages = object.pages.lock();
+        for index in 0..count {
+            pages.insert(index, phys + index * PAGE_SIZE);
+        }
+        drop(pages);
+        Ok(object)
+    }
+
     /// Fails with `OutOfRange` unless the `len` bytes from `offset` lie
     /// inside the object.
     pub fn check_range(&self, offset: u64, len: u64) -> Result<(), Error> {

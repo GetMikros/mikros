@@ -328,6 +328,7 @@ impl Process {
             self.state.store(TERMINATED, Ordering::Release);
             threads
         };
+        crate::init::terminated(self, code);
         self.aspace.remove_regions(USER_START, USER_END);
         // Frames mapped outside regions belong to whoever mapped them, so
         // they are not freed.
