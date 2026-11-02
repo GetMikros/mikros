@@ -1126,9 +1126,120 @@ fn clones(_: &Startup) -> Result {
     ensure("refusing other options", bad == -10)
 }
 
+/// The pager handle of the pager test, and how many page requests its
+/// pager thread answered.
+static PAGER: AtomicU64 = AtomicU64::new(0);
+static REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+/// Answers the page requests on `port` for `mem` until none comes for a
+/// second, supplying pages that start with "page N".
+extern "sysv64" fn pager_thread(port: u64, mem: u64) -> ! {
+    let pager = PAGER.load(Ordering::Acquire) as Handle;
+    loop {
+        let (status, p) = take_packet(port as Handle, now() + 1_000_000_000);
+        if status != 0 || u32_at(&p, 8) != 3 || u32_at(&p, 16) != 1 {
+            break;
+        }
+        REQUESTS.fetch_add(1, Ordering::AcqRel);
+        let offset = u64_at(&p, 24);
+        let Ok(source) = create_memory(PAGE_SIZE) else {
+            break;
+        };
+        let text = [
+            b'p',
+            b'a',
+            b'g',
+            b'e',
+            b' ',
+            b'0' + (offset / PAGE_SIZE) as u8,
+        ];
+        let _ = mem_write_at(source, 0, &text);
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::pager_supply(pager, mem as Handle, offset, PAGE_SIZE, source, 0) };
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A paged object requests each absent page once, from mappings and
+/// system calls, and gets the frames its pager supplies.
+fn pagers(s: &Startup) -> Result {
+    let (mut pager, mut port, mut mem) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 5, 2 * PAGE_SIZE, 0, &mut mem);
+        check("creating a paged object", status)?;
+    }
+    ensure("reporting the kind", u32_at(&info::<0x18>(mem, 4)?, 8) == 5)?;
+    PAGER.store(u64::from(pager), Ordering::Release);
+    spawn2(s, pager_thread, u64::from(port), u64::from(mem))?;
+    let at = map(s.process, mem, 2 * PAGE_SIZE)?;
+    // SAFETY: the mapping covers both pages; reading them waits for the
+    // pager.
+    let (first, second) = unsafe {
+        (
+            (at as *const [u8; 6]).read_volatile(),
+            ((at + PAGE_SIZE) as *const [u8; 6]).read_volatile(),
+        )
+    };
+    ensure(
+        "supplying through faults",
+        first == *b"page 0" && second == *b"page 1",
+    )?;
+    ensure(
+        "reading through mem_read",
+        mem_read_at::<6>(mem, PAGE_SIZE)? == *b"page 1",
+    )?;
+    // SAFETY: the mapping is writable.
+    unsafe { (at as *mut u8).write_volatile(b'P') };
+    ensure("keeping writes", mem_read_at::<6>(mem, 0)? == *b"Page 0")?;
+    ensure(
+        "requesting each page once",
+        REQUESTS.load(Ordering::Acquire) == 2,
+    )?;
+
+    let source = create_memory(PAGE_SIZE)?;
+    mem_write_at(source, 0, b"left")?;
+    let (mut other, plain) = (0, create_memory(PAGE_SIZE)?);
+    // SAFETY: the pointer is valid for the call.
+    check("creating another pager", unsafe {
+        sys::pager_create(0, &mut other)
+    })?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        ensure(
+            "needing its pager",
+            sys::pager_supply(other, mem, 0, PAGE_SIZE, source, 0) == -13,
+        )?;
+        ensure(
+            "needing a paged object",
+            sys::pager_supply(pager, plain, 0, PAGE_SIZE, source, 0) == -2,
+        )?;
+        check(
+            "supplying present pages",
+            sys::pager_supply(pager, mem, 0, PAGE_SIZE, source, 0),
+        )?;
+    }
+    ensure(
+        "leaving present pages alone",
+        mem_read_at::<6>(mem, 0)? == *b"Page 0",
+    )?;
+    ensure(
+        "decommitting the source",
+        mem_read_at::<4>(source, 0)? == [0; 4],
+    )?;
+    check("sealing a source", seal(plain, 8))?;
+    // SAFETY: the call takes no pointers.
+    let sealed = unsafe { sys::pager_supply(pager, mem, 0, PAGE_SIZE, plain, 0) };
+    ensure("refusing a sealed source", sealed == -13)
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 16] = [
+const TESTS: [(&str, Test); 17] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1142,6 +1253,7 @@ const TESTS: [(&str, Test); 16] = [
     ("timelines", timelines),
     ("streams", streams),
     ("clones", clones),
+    ("pagers", pagers),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
