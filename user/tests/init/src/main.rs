@@ -1669,6 +1669,7 @@ fn paged_outputs(s: &Startup) -> Result {
 
 const IO: i64 = -28;
 const BAD_STATE: i64 = -20;
+const NOT_FOUND: i64 = -25;
 
 fn pager_op(pager: Handle, mem: Handle, op: u32, offset: u64, len: u64) -> i64 {
     // SAFETY: the call takes no pointers.
@@ -2276,7 +2277,85 @@ fn suspend_in_call(s: &Startup) -> Result {
     ensure("writing the request once", status == SHOULD_WAIT)
 }
 
-const TESTS: [(&str, Test); 33] = [
+/// The object ID of the object of `handle`.
+fn koid(handle: Handle) -> Result<u64> {
+    Ok(u64_at(&info::<0x18>(handle, 1)?, 0))
+}
+
+/// The `THREADS` record of `process`: up to 128 object IDs and their
+/// count.
+fn thread_list(process: Handle) -> Result<([u64; 128], usize)> {
+    let mut record = [0u8; 1024];
+    let mut len = 0;
+    // SAFETY: the pointers and length describe `record` and `len`.
+    check("listing threads", unsafe {
+        sys::object_get_info(process, 7, record.as_mut_ptr(), 1024, &mut len)
+    })?;
+    let count = len as usize / 8;
+    let mut koids = [0u64; 128];
+    for (i, k) in koids.iter_mut().enumerate().take(count) {
+        *k = u64_at(&record, 8 * i);
+    }
+    Ok((koids, count))
+}
+
+fn get_thread(process: Handle, koid: u64) -> (i64, Handle) {
+    let mut thread = 0;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::process_get_thread(process, koid, &mut thread) };
+    (status, thread)
+}
+
+/// A process lists its threads that are not dead, and hands out handles
+/// to them by object ID.
+fn thread_lists(s: &Startup) -> Result {
+    let mut event = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let thread = spawn(s, wait_forever, u64::from(event))?;
+    let id = koid(thread)?;
+    let (koids, count) = thread_list(s.process)?;
+    ensure(
+        "listing this thread",
+        koids[..count].contains(&koid(s.thread)?),
+    )?;
+    ensure("listing the new thread", koids[..count].contains(&id))?;
+    let (status, got) = get_thread(s.process, id);
+    check("getting the thread", status)?;
+    let (basic, created) = (info::<0x18>(got, 1)?, info::<0x18>(thread, 1)?);
+    ensure(
+        "returning the thread with the default rights",
+        u64_at(&basic, 0) == id && u32_at(&basic, 0x14) == u32_at(&created, 0x14),
+    )?;
+    let mut short = [0u8; 8];
+    let mut len = 0;
+    // SAFETY: the pointers and length describe `short` and `len`.
+    let status = unsafe { sys::object_get_info(s.process, 7, short.as_mut_ptr(), 8, &mut len) };
+    ensure(
+        "giving the size to a short buffer",
+        status == -15 && len == 8 * count as u64,
+    )?;
+    // SAFETY: as above.
+    let status = unsafe { sys::object_get_info(thread, 7, short.as_mut_ptr(), 8, &mut len) };
+    ensure("listing only for processes", status == -12)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(thread) })?;
+    ensure("ending", wait(thread, TERMINATED, soon()).0 == 0)?;
+    let (koids, count) = thread_list(s.process)?;
+    ensure("leaving out dead threads", !koids[..count].contains(&id))?;
+    ensure(
+        "not finding a dead thread",
+        get_thread(s.process, id).0 == NOT_FOUND,
+    )?;
+    ensure(
+        "not finding another object",
+        get_thread(s.process, koid(event)?).0 == NOT_FOUND,
+    )
+}
+
+const TESTS: [(&str, Test); 34] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2308,6 +2387,7 @@ const TESTS: [(&str, Test); 33] = [
     ("suspend_threads", suspend_threads),
     ("suspend_blocked_waits", suspend_blocked_waits),
     ("suspend_in_call", suspend_in_call),
+    ("thread_lists", thread_lists),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
 ];

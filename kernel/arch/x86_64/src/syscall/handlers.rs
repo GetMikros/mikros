@@ -141,6 +141,8 @@ pub fn object_get_info(
         from.len()
     }
     let mut record = [0u8; RECORD_MAX];
+    let mut list = Vec::new();
+    let mut scratch = Scratch::new(Some(current_process()?.budget()));
     let kind = handle.object.header().kind();
     let size = match topic {
         INFO_BASIC => copy(&mut record, &basic_info(&*handle.object, handle.rights)),
@@ -156,9 +158,16 @@ pub fn object_get_info(
         crate::sched::INFO_THREAD if kind == ObjectType::Thread => {
             copy(&mut record, &object::<Thread>(handle).info())
         }
+        crate::process::INFO_THREADS if kind == ObjectType::Process => {
+            list = object::<Process>(handle).thread_list(&mut scratch)?;
+            list.len()
+        }
         _ => return Err(Error::WrongType),
     };
-    let record = &record[..size];
+    let record = match topic {
+        crate::process::INFO_THREADS => &list[..],
+        _ => &record[..size],
+    };
     let size = record.len() as u64;
     // Both addresses are checked before anything is written.
     if !out_len.fits(1) || (len >= size && !buf.fits(size)) {
@@ -798,6 +807,13 @@ pub fn thread_resume_from_exception(thread: Checked, action: u32) -> Result<(), 
         _ => return Err(Error::InvalidArgs),
     }
     Ok(())
+}
+
+pub fn process_get_thread(process: Checked, koid: u64, out: UserOut<Handle>) -> Result<(), Error> {
+    let process = object::<Process>(process);
+    let mut scratch = Scratch::new(Some(current_process()?.budget()));
+    let thread = process.thread(koid, &mut scratch)?.ok_or(Error::NotFound)?;
+    give(thread, ObjectType::Thread, out)
 }
 
 pub fn thread_suspend(thread: Checked) -> Result<(), Error> {

@@ -20,6 +20,8 @@ pub const STOPPED: u32 = 3;
 
 /// The topic and size of the process information record.
 pub const INFO_PROCESS: u32 = 2;
+/// The topic of the list of a process's threads.
+pub const INFO_THREADS: u32 = 7;
 pub const INFO_PROCESS_SIZE: usize = 0x20;
 
 pub struct Process {
@@ -272,6 +274,27 @@ impl Process {
         live.extend(threads.iter().filter_map(Weak::upgrade));
         drop(threads);
         Ok(live)
+    }
+
+    /// The `THREADS` information record: the object IDs of the threads
+    /// that are not `DEAD`, listed in room charged to `scratch`.
+    pub fn thread_list(&self, scratch: &mut Scratch) -> Result<Vec<u8>, Error> {
+        let live = self.live_threads(scratch)?;
+        let mut list = Vec::new();
+        scratch.reserve_exact(&mut list, live.len() * size_of::<u64>())?;
+        for thread in live.iter().filter(|t| t.state() != sched::DEAD) {
+            list.extend_from_slice(&thread.header().koid().to_le_bytes());
+        }
+        Ok(list)
+    }
+
+    /// The thread with object ID `koid` that is not `DEAD`, looked up in
+    /// room charged to `scratch`.
+    pub fn thread(&self, koid: u64, scratch: &mut Scratch) -> Result<Option<Arc<Thread>>, Error> {
+        let live = self.live_threads(scratch)?;
+        Ok(live
+            .into_iter()
+            .find(|t| t.header().koid() == koid && t.state() != sched::DEAD))
     }
 
     /// The signal that terminated the process, or 0.
