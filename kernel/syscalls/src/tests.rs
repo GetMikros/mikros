@@ -1,3 +1,4 @@
+use crate::generate::{kernel_dispatch, user_bindings_x86_64};
 use crate::table::{Dir, HandleCheck, Type, read};
 
 const ENTRY: &str = "  - name: obj_op\n    number: 7\n    arch: [x86_64]\n    fuzz_only: false\n    spec: [MIKSPEC-0007.R12]\n";
@@ -25,6 +26,18 @@ fn reads_the_kernel_table() {
             allow_invalid: true
         })
     );
+    // The generated code is valid Rust syntax as far as balance goes.
+    for code in [
+        kernel_dispatch(&read.table, "x86_64"),
+        user_bindings_x86_64(&read.table),
+    ] {
+        let depth = code.chars().fold(0i32, |d, c| match c {
+            '{' | '(' | '[' => d + 1,
+            '}' | ')' | ']' => d - 1,
+            _ => d,
+        });
+        assert_eq!(depth, 0);
+    }
 }
 
 #[test]
@@ -118,4 +131,42 @@ fn refuses_bad_entries() {
     assert_eq!(error(&arch), "unknown architecture `vax`");
     let fuzz = format!("syscalls:\n{}", ENTRY.replace("false", "'false'"));
     assert_eq!(error(&fuzz), "expected `true` or `false`");
+}
+
+#[test]
+fn generates_handle_checks_and_bindings() {
+    let text = table(
+        "      - {name: a, type: Handle, dir: in, object: any, rights: [], allow_invalid: true}\n\
+         \x20     - {name: b, type: Handle, dir: in, object: Budget, rights: [WRITE, MANAGE]}\n\
+         \x20     - {name: c, type: i32, dir: in}\n\
+         \x20     - {name: d, type: '*mut Handle', dir: out}\n",
+    );
+    let mut table = read(text.as_bytes()).unwrap().table;
+    let kernel = kernel_dispatch(&table, "x86_64");
+    assert!(kernel.contains("pub const OBJ_OP: u64 = 7;"));
+    assert!(kernel.contains("handle(args[0] as u32, None, 0)"));
+    assert!(kernel.contains("HANDLE_INVALID => None"));
+    assert!(kernel.contains(
+        "handle(args[1] as u32, Some(&[ObjectType::Budget]), rights::WRITE | rights::MANAGE)"
+    ));
+    assert!(kernel.contains("let c = args[2] as u32 as i32;"));
+    assert!(kernel.contains("UserOut::<kernel_core::object::handles::Handle>::new(args[3])"));
+    assert!(kernel.contains("status(handlers::obj_op(a, b, c, d))"));
+    let user = user_bindings_x86_64(&table);
+    assert!(
+        user.contains(
+            "pub unsafe fn obj_op(a: Handle, b: Handle, c: i32, d: *mut Handle) -> Status"
+        )
+    );
+    assert!(user.contains("inlateout(\"rax\") 7u64 => status"));
+    assert!(user.contains("in(\"rdi\") a as u64"));
+    assert!(user.contains("in(\"rdx\") c as u32 as u64"));
+    assert!(user.contains("in(\"r10\") d as u64"));
+
+    table.calls[0].fuzz_only = true;
+    let kernel = kernel_dispatch(&table, "x86_64");
+    assert_eq!(kernel.matches("#[cfg(feature = \"fuzz\")]").count(), 2);
+    table.calls[0].arches.clear();
+    assert!(!kernel_dispatch(&table, "x86_64").contains("OBJ_OP"));
+    assert!(!user_bindings_x86_64(&table).contains("obj_op"));
 }
