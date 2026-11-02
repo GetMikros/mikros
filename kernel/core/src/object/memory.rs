@@ -158,6 +158,21 @@ impl Pages {
         Ok(Resized { zero, freed })
     }
 
+    /// Takes the frames of pages `first` to `end`, exclusive, which then
+    /// read as zero, and returns those to free now: while the pages are
+    /// pinned they are kept until `unpin` instead.
+    pub fn decommit(&mut self, first: u64, end: u64) -> Vec<u64> {
+        let mut tail = self.frames.split_off(&first);
+        let mut after = tail.split_off(&end);
+        self.frames.append(&mut after);
+        let taken: Vec<u64> = tail.into_values().collect();
+        if self.pins > 0 {
+            self.orphans.extend(taken);
+            return Vec::new();
+        }
+        taken
+    }
+
     /// The memory information record of an object of `kind`, with no
     /// seals.
     pub fn info(&self, kind: u32) -> [u8; INFO_MEMORY_SIZE] {
@@ -192,6 +207,23 @@ mod tests {
         assert!(pages.check_range(100, 0).is_ok());
         assert_eq!(pages.check_range(99, 2), Err(Error::OutOfRange));
         assert_eq!(pages.check_range(1, u64::MAX), Err(Error::OutOfRange));
+    }
+
+    #[test]
+    fn decommits_ranges() {
+        let mut pages = Pages::new(4 * PAGE_SIZE, 0, MAX).unwrap();
+        for i in 0..4 {
+            pages.insert(i, 0x1000 * (i + 1));
+        }
+        assert_eq!(pages.decommit(1, 3), [0x2000, 0x3000]);
+        assert_eq!(
+            (pages.frame(0), pages.frame(1), pages.frame(3)),
+            (Some(0x1000), None, Some(0x4000))
+        );
+        pages.pin();
+        assert!(pages.decommit(0, 4).is_empty());
+        assert_eq!(pages.allocated(), 0);
+        assert_eq!(pages.unpin(), [0x1000, 0x4000]);
     }
 
     #[test]

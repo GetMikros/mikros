@@ -623,3 +623,22 @@ syscalls:
     args:
       - {name: reader, type: Handle, dir: in, object: LogReader, rights: [READ]}
       - {name: out, type: "*mut u8", dir: out}
+
+  - name: mem_op
+    number: 61
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R27]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [WRITE]}
+      - {name: op, type: u32, dir: in}
+      - {name: offset, type: u64, dir: in}
+      - {name: len, type: u64, dir: in}
+
+  - name: system_get_memory_info
+    number: 62
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R34]
+    args:
+      - {name: out, type: "*mut u8", dir: out}

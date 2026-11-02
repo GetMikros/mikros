@@ -1035,3 +1035,23 @@ pub fn log_reader_read(reader: Checked, out: UserOut<u8>) -> Result<(), Error> {
     reader.advance(record.sequence);
     Ok(())
 }
+
+pub fn mem_op(mem: Checked, op: u32, offset: u64, len: u64) -> Result<(), Error> {
+    let mem = object::<MemoryObject>(mem);
+    match op {
+        1 => mem.commit(offset, len),
+        2 => mem.decommit(offset, len),
+        _ => Err(Error::InvalidArgs),
+    }
+}
+
+pub fn system_get_memory_info(out: UserOut<u8>) -> Result<(), Error> {
+    let (total, free) = match crate::memory::FRAMES.lock().as_ref() {
+        Some(frames) => (frames.total_count(), frames.free_count()),
+        None => (0, 0),
+    };
+    let mut record = [0u8; 16];
+    record[0..8].copy_from_slice(&total.to_le_bytes());
+    record[8..16].copy_from_slice(&free.to_le_bytes());
+    out.write_bytes(&record)
+}

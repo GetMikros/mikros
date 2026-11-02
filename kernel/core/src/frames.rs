@@ -36,13 +36,19 @@ pub fn bitmap_words(memory_map: impl IntoIterator<Item = MemoryMapEntry>) -> usi
 pub struct Frames<'a> {
     bits: &'a mut [u64],
     free: u64,
+    /// The frames the allocator manages, free or in use.
+    total: u64,
 }
 
 impl<'a> Frames<'a> {
     /// An allocator over `bits` with every frame in use.
     pub fn new(bits: &'a mut [u64]) -> Self {
         bits.fill(0);
-        Frames { bits, free: 0 }
+        Frames {
+            bits,
+            free: 0,
+            total: 0,
+        }
     }
 
     fn frames(&self) -> u64 {
@@ -77,8 +83,21 @@ impl<'a> Frames<'a> {
     /// Makes free every frame of the ranges of `kind` in `memory_map`.
     pub fn add_kind(&mut self, memory_map: impl IntoIterator<Item = MemoryMapEntry>, kind: Kind) {
         for e in memory_map.into_iter().filter(|e| e.kind == kind as u32) {
+            let before = self.free;
             self.add(e.phys_start / PAGE_SIZE, e.page_count);
+            self.total += self.free - before;
         }
+    }
+
+    /// Counts `count` frames in use, which come back with `free`, as
+    /// managed.
+    pub fn adopt(&mut self, count: u64) {
+        self.total += count;
+    }
+
+    /// The number of frames the allocator manages.
+    pub fn total_count(&self) -> u64 {
+        self.total
     }
 
     /// Marks the frames of `count` from `first` as in use.
@@ -192,6 +211,10 @@ mod tests {
         frames.add_kind(map.iter().copied(), Kind::Usable);
         frames.add_kind(map.iter().copied(), Kind::BootloaderReclaimable);
         assert_eq!(frames.free_count(), 1116);
+        // Allocating changes what is free, not what is managed.
+        frames.alloc().unwrap();
+        frames.adopt(3);
+        assert_eq!((frames.free_count(), frames.total_count()), (1115, 1119));
     }
 
     #[test]

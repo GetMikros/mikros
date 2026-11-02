@@ -128,6 +128,10 @@ impl MemoryObject {
         count: u64,
     ) -> Result<Arc<MemoryObject>, Error> {
         budget.charge_pages(count)?;
+        // The frames come back to the allocator with the object.
+        if let Some(frames) = FRAMES.lock().as_mut() {
+            frames.adopt(count);
+        }
         if let Err(e) = budget.charge_kernel(count * PAGE_ENTRY_COST) {
             budget.release_pages(count);
             return Err(e);
@@ -429,6 +433,39 @@ impl MemoryObject {
             frame[inside..inside + n].copy_from_slice(&buf[..n]);
             done += n as u64;
         }
+        Ok(())
+    }
+
+    /// Gives every page of the `len` bytes from `offset` a frame, as
+    /// `mem_op` `COMMIT` does.
+    pub fn commit(&self, offset: u64, len: u64) -> Result<(), Error> {
+        if self.is_physical() {
+            return Err(Error::NotSupported);
+        }
+        let mut pages = self.pages.lock();
+        pages.check_range(offset, len)?;
+        let end = (offset + len).div_ceil(PAGE_SIZE);
+        for index in offset / PAGE_SIZE..end {
+            if pages.frame(index).is_none() {
+                self.alloc_mapped(&mut pages, index)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Frees the frames of every page of the `len` bytes from `offset`,
+    /// which then read as zero, as `mem_op` `DECOMMIT` does.
+    pub fn decommit(&self, offset: u64, len: u64) -> Result<(), Error> {
+        if self.is_physical() {
+            return Err(Error::NotSupported);
+        }
+        let mut pages = self.pages.lock();
+        pages.check_range(offset, len)?;
+        let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
+        self.unmap_pages(first, end);
+        let freed = pages.decommit(first, end);
+        drop(pages);
+        self.free(freed);
         Ok(())
     }
 
