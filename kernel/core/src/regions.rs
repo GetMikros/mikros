@@ -1,9 +1,9 @@
 //! The regions of a user address space: which range maps which part of
 //! which memory object, and with what permissions.
 
+use crate::nodes::{self, INSERT, Map};
 use crate::object::rights;
 use crate::status::Error;
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 pub const PAGE_SIZE: u64 = 4096;
@@ -130,14 +130,12 @@ impl<M> Region<M> {
 
 /// Non-overlapping regions, keyed by their start.
 pub struct Regions<M> {
-    map: BTreeMap<u64, Region<M>>,
+    map: Map<u64, Region<M>>,
 }
 
 impl<M> Default for Regions<M> {
     fn default() -> Self {
-        Regions {
-            map: BTreeMap::new(),
-        }
+        Regions { map: nodes::map() }
     }
 }
 
@@ -154,16 +152,24 @@ impl<M: Clone> Regions<M> {
         self.find(start).is_some() || self.map.range(start..end).next().is_some()
     }
 
-    /// Adds `region`, or fails with `AlreadyExists` when it overlaps one.
+    /// Adds `region`, or fails with `AlreadyExists` when it overlaps one
+    /// and with `NoMemory` without room for it.
     pub fn insert(&mut self, region: Region<M>) -> Result<(), Error> {
         if self.overlaps(region.start, region.len) {
             return Err(Error::AlreadyExists);
         }
+        let _claim = nodes::claim_insert()?;
         self.map.insert(region.start, region);
         Ok(())
     }
 
-    /// Splits the region containing `addr` so that one starts there.
+    /// Claims room for splitting the regions at both ends of a range.
+    fn claim_splits() -> Result<nodes::Claim, Error> {
+        nodes::claim(2 * INSERT)
+    }
+
+    /// Splits the region containing `addr` so that one starts there. The
+    /// caller holds a claim for the split.
     fn split_at(&mut self, addr: u64) {
         let Some(r) = self.find(addr) else {
             return;
@@ -183,26 +189,37 @@ impl<M: Clone> Regions<M> {
 
     /// Removes every part of a region inside the range from `start` to
     /// `end` and returns the removed parts, splitting regions that extend
-    /// beyond it.
-    pub fn remove(&mut self, start: u64, end: u64) -> Vec<Region<M>> {
+    /// beyond it. Fails with `NoMemory`, changing nothing, without room
+    /// for the splits or the removed parts.
+    pub fn remove(&mut self, start: u64, end: u64) -> Result<Vec<Region<M>>, Error> {
+        let straddles = self.find(start).is_some_and(|r| r.start < start);
+        let count = self.map.range(start..end).count() + usize::from(straddles);
+        let mut removed = Vec::new();
+        removed
+            .try_reserve_exact(count)
+            .map_err(|_| Error::NoMemory)?;
+        let _claim = Self::claim_splits()?;
         self.split_at(start);
         self.split_at(end);
-        let starts: Vec<u64> = self.map.range(start..end).map(|(&s, _)| s).collect();
-        let mut removed = Vec::with_capacity(starts.len());
-        for s in starts {
-            removed.extend(self.map.remove(&s));
-        }
-        removed
+        removed.extend(self.map.extract_if(start..end, |_, _| true).map(|(_, r)| r));
+        Ok(removed)
+    }
+
+    /// Removes every region and returns them, by start.
+    pub fn take_all(&mut self) -> Map<u64, Region<M>> {
+        core::mem::replace(&mut self.map, nodes::map())
     }
 
     /// Sets the inheritance of every page from `start` to `end`, splitting
-    /// regions that extend beyond the range. Fails with `NotFound`, and
-    /// changes nothing, when a page in the range is not mapped.
+    /// regions that extend beyond the range. Fails with `NotFound` when a
+    /// page in the range is not mapped and with `NoMemory` without room
+    /// for the splits, in both cases changing nothing.
     pub fn set_inheritance(&mut self, start: u64, end: u64, inheritance: u32) -> Result<(), Error> {
         let mut at = start;
         while at < end {
             at = self.find(at).ok_or(Error::NotFound)?.end();
         }
+        let _claim = Self::claim_splits()?;
         self.split_at(start);
         self.split_at(end);
         for r in self.map.range_mut(start..end).map(|(_, r)| r) {
@@ -215,7 +232,8 @@ impl<M: Clone> Regions<M> {
     /// splitting regions that extend beyond the range. Fails with
     /// `NotFound` when a page in the range is not mapped and with
     /// `AccessDenied` when `perms` goes beyond a region's maximum or
-    /// `allowed` refuses a region, in both cases changing nothing.
+    /// `allowed` refuses a region, and with `NoMemory` without room for
+    /// the splits, in each case changing nothing.
     pub fn set_perms(
         &mut self,
         start: u64,
@@ -235,6 +253,7 @@ impl<M: Clone> Regions<M> {
             }
             at = r.end();
         }
+        let _claim = Self::claim_splits()?;
         self.split_at(start);
         self.split_at(end);
         for r in self.map.range_mut(start..end).map(|(_, r)| r) {
@@ -388,7 +407,7 @@ mod tests {
         let mut r = Regions::default();
         r.insert(region(2 * P, 4 * P, 10 * P)).unwrap();
         r.insert(region(8 * P, 2 * P, 0)).unwrap();
-        let removed = r.remove(3 * P, 9 * P);
+        let removed = r.remove(3 * P, 9 * P).unwrap();
         assert_eq!(
             removed
                 .iter()
@@ -397,7 +416,7 @@ mod tests {
             [(3 * P, 3 * P, 11 * P), (8 * P, P, 0)]
         );
         assert_eq!(starts(&r), [(2 * P, P, 10 * P), (9 * P, P, P)]);
-        assert!(r.remove(20 * P, 30 * P).is_empty());
+        assert!(r.remove(20 * P, 30 * P).unwrap().is_empty());
         assert_eq!(r.find(9 * P).unwrap().page(9 * P + 1), 1);
     }
 

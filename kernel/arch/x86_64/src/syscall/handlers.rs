@@ -451,8 +451,7 @@ pub fn vm_unmap(process: Checked, addr: u64, len: u64) -> Result<(), Error> {
     let end = page_range_end(addr, len)?;
     object::<Process>(process)
         .aspace()
-        .remove_regions(addr, end);
-    Ok(())
+        .remove_regions(addr, end)
 }
 
 pub fn vm_set_inheritance(

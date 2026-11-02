@@ -57,7 +57,7 @@ fuzz_target!(|ops: Vec<Op>| {
             }
             Op::Remove { page, pages } => {
                 let (start, end) = (u64::from(page) % PAGES, u64::from(page) % PAGES + u64::from(pages) % 16);
-                let removed = regions.remove(start * PAGE_SIZE, end * PAGE_SIZE);
+                let removed = regions.remove(start * PAGE_SIZE, end * PAGE_SIZE).unwrap();
                 let pages: u64 = removed.iter().map(|r| r.len / PAGE_SIZE).sum();
                 let expected = (start..end).filter(|p| model.remove(p).is_some()).count() as u64;
                 assert_eq!(pages, expected);

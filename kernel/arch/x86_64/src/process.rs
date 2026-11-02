@@ -420,7 +420,7 @@ impl Process {
             threads
         };
         crate::init::terminated(self, code);
-        self.aspace.remove_regions(USER_START, USER_END);
+        self.aspace.remove_all_regions();
         // Frames mapped outside regions belong to whoever mapped them, so
         // they are not freed.
         self.aspace

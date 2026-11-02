@@ -8,7 +8,6 @@ use crate::paging::{self, Flags, Mapper, PAGE_SIZE, Policy, Tables};
 use crate::percpu;
 use crate::space;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::object::budget::Budget;
 use kernel_core::regions::{MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions};
@@ -301,26 +300,47 @@ impl AddressSpace {
     }
 
     /// Removes the parts of regions from `start` to `end` and their pages.
-    pub fn remove_regions(&self, start: u64, end: u64) {
+    /// Fails with `NoMemory`, removing nothing, without room to split the
+    /// regions at the ends or to list the removed parts.
+    pub fn remove_regions(&self, start: u64, end: u64) -> Result<(), Error> {
         let start = start.max(USER_START);
         let end = end.min(USER_END);
         if start >= end {
-            return;
+            return Ok(());
         }
         let mut regions = self.regions.lock();
-        let removed = regions.remove(start, end);
+        let mut removed = regions.remove(start, end)?;
         for r in &removed {
             self.unmap(r.start, r.len, |_| {})
                 .expect("regions are page-aligned and in the user range");
         }
-        let unused: Vec<&Arc<MemoryObject>> = removed
+        // The parts whose object no remaining region maps come first.
+        removed.sort_unstable_by_key(|part| regions.iter().any(|r| Arc::ptr_eq(&r.mem, &part.mem)));
+        let unused = removed
             .iter()
-            .map(|r| &r.mem)
-            .filter(|mem| !regions.iter().any(|r| Arc::ptr_eq(&r.mem, mem)))
-            .collect();
+            .take_while(|part| !regions.iter().any(|r| Arc::ptr_eq(&r.mem, &part.mem)))
+            .count();
         drop(regions);
-        for mem in unused {
-            mem.remove_space(self);
+        for part in &removed[..unused] {
+            part.mem.remove_space(self);
+        }
+        // Dropping the regions can destroy memory objects, which takes
+        // their locks, so it happens last.
+        drop(removed);
+        Ok(())
+    }
+
+    /// Removes every region and its pages.
+    pub fn remove_all_regions(&self) {
+        let mut regions = self.regions.lock();
+        let removed = regions.take_all();
+        for r in removed.values() {
+            self.unmap(r.start, r.len, |_| {})
+                .expect("regions are page-aligned and in the user range");
+        }
+        drop(regions);
+        for r in removed.values() {
+            r.mem.remove_space(self);
         }
         // Dropping the regions can destroy memory objects, which takes
         // their locks, so it happens last.
@@ -360,19 +380,15 @@ impl AddressSpace {
     /// `mem`. The caller holds the object's pages lock.
     pub fn unmap_object(&self, mem: &MemoryObject, first: u64, end: u64) {
         let regions = self.regions.lock();
-        let ours = regions.iter().filter(|r| core::ptr::eq(&*r.mem, mem));
-        let ranges: Vec<(u64, u64)> = ours
-            .filter_map(|r| {
-                let base = r.offset / PAGE_SIZE;
-                let pages = r.len / PAGE_SIZE;
-                let from = first.saturating_sub(base).min(pages);
-                let to = end.saturating_sub(base).min(pages);
-                (from < to).then(|| (r.start + from * PAGE_SIZE, (to - from) * PAGE_SIZE))
-            })
-            .collect();
-        for (from, len) in ranges {
-            self.unmap(from, len, |_| {})
-                .expect("regions are page-aligned and in the user range");
+        for r in regions.iter().filter(|r| core::ptr::eq(&*r.mem, mem)) {
+            let base = r.offset / PAGE_SIZE;
+            let pages = r.len / PAGE_SIZE;
+            let from = first.saturating_sub(base).min(pages);
+            let to = end.saturating_sub(base).min(pages);
+            if from < to {
+                self.unmap(r.start + from * PAGE_SIZE, (to - from) * PAGE_SIZE, |_| {})
+                    .expect("regions are page-aligned and in the user range");
+            }
         }
     }
 
