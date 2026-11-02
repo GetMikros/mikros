@@ -923,25 +923,61 @@ impl MemoryObject {
         space: &AddressSpace,
         virt: u64,
     ) -> Result<Held, Error> {
-        let mut pages = self.pages.lock();
-        let mine = |r: Option<&aspace::RegionOf>| {
-            r.filter(|r| core::ptr::eq(&*r.mem, &**self))
-                .map(|r| (r.page(virt), r.perms))
-        };
-        let Some((index, perms)) = space.with_region(virt, mine) else {
-            return Err(Error::InvalidArgs);
-        };
-        if !aspace::allows(perms, true, false) || index >= pages.count() {
-            return Err(Error::InvalidArgs);
+        loop {
+            let pages = self.pages.lock();
+            let mine = |r: Option<&aspace::RegionOf>| {
+                r.filter(|r| core::ptr::eq(&*r.mem, &**self))
+                    .map(|r| (r.page(virt), r.perms))
+            };
+            let Some((index, perms)) = space.with_region(virt, mine) else {
+                return Err(Error::InvalidArgs);
+            };
+            if !aspace::allows(perms, true, false) || index >= pages.count() {
+                return Err(Error::InvalidArgs);
+            }
+            if let Some(held) = self.hold_page(pages, index)? {
+                return Ok(held);
+            }
         }
+    }
+
+    /// Holds page `index` as the destination of a debug write, as
+    /// `hold_for_write` does whatever maps it. Fails with `AccessDenied`
+    /// when the object has the `WRITE` seal or is revoked, with
+    /// `OutOfRange` when the page lies beyond its end, and with
+    /// `NotSupported` for a physical object.
+    pub fn hold_for_debug(self: &Arc<Self>, index: u64) -> Result<Held, Error> {
+        if self.is_physical() {
+            return Err(Error::NotSupported);
+        }
+        loop {
+            let pages = self.pages.lock();
+            self.check_writable()?;
+            if index >= pages.count() {
+                return Err(Error::OutOfRange);
+            }
+            if let Some(held) = self.hold_page(pages, index)? {
+                return Ok(held);
+            }
+        }
+    }
+
+    /// Holds page `index` with the pages locked, or waits for what it
+    /// needs with them unlocked and returns `None`, so that the caller
+    /// looks again.
+    fn hold_page(
+        self: &Arc<Self>,
+        mut pages: kernel_core::sync::Guard<'_, Pages>,
+        index: u64,
+    ) -> Result<Option<Held>, Error> {
         if let Some((base, policy)) = self.physical {
             drop(pages);
             let virt = space::map_physical_page(base + index * PAGE_SIZE, policy)
                 .ok_or(Error::NoMemory)?;
-            return Ok(Held {
+            return Ok(Some(Held {
                 mem: self.clone(),
                 backing: Some(Backing::Mapped(virt)),
-            });
+            }));
         }
         if let Some(paged) = &self.paged {
             let mut state = paged.state.lock();
@@ -952,32 +988,32 @@ impl MemoryObject {
                 drop(state);
                 drop(pages);
                 self.obtain(index)?;
-                return self.hold_for_write(space, virt);
+                return Ok(None);
             };
             state.written(index)?;
             drop(state);
             pages.pin();
-            return Ok(Held {
+            return Ok(Some(Held {
                 mem: self.clone(),
                 backing: Some(Backing::Frame(phys)),
-            });
+            }));
         }
         if self.is_changing(index) {
             drop(pages);
             self.wait_settled(index)?;
-            return self.hold_for_write(space, virt);
+            return Ok(None);
         }
         let Some(phys) = pages.frame(index) else {
             self.alloc_changing(&mut pages, index)?;
             drop(pages);
             self.settle(index, index + 1);
-            return self.hold_for_write(space, virt);
+            return Ok(None);
         };
         pages.pin();
-        Ok(Held {
+        Ok(Some(Held {
             mem: self.clone(),
             backing: Some(Backing::Frame(phys)),
-        })
+        }))
     }
 
     /// Gives every page a frame and keeps the frames until `unpin_all`,

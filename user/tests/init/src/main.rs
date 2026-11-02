@@ -2440,7 +2440,118 @@ fn read_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 35] = [
+fn write_memory(process: Handle, addr: u64, bytes: &[u8]) -> i64 {
+    // SAFETY: the pointer and length describe `bytes`.
+    unsafe { sys::process_write_memory(process, addr, bytes.as_ptr(), bytes.len() as u64) }
+}
+
+/// Maps `len` bytes of `mem` into this process with `options` at `addr`.
+fn map_with(s: &Startup, options: u32, addr: u64, mem: Handle, len: u64) -> Result<u64> {
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("mapping", unsafe {
+        sys::vm_map(s.process, options, addr, mem, 0, len, &mut at)
+    })?;
+    Ok(at)
+}
+
+/// A debugger writes the memory of a process whatever the permissions
+/// of its mappings, and new code runs; mappings from handles without
+/// `WRITE`, sealed objects and revoked objects refuse the whole write.
+fn write_process_memory(s: &Startup) -> Result {
+    const EXECUTE: u32 = 4;
+    const SPECIFIC: u32 = 1 << 8;
+    let mem = create_memory(2 * PAGE_SIZE)?;
+    let at = map(s.process, mem, 2 * PAGE_SIZE)?;
+    check(
+        "making the mapping read-only",
+        protect(s, PERM_READ, at + PAGE_SIZE, PAGE_SIZE),
+    )?;
+    check(
+        "writing across regions",
+        write_memory(s.process, at + PAGE_SIZE - 3, b"ABCDEF"),
+    )?;
+    ensure(
+        "writing the bytes",
+        mem_read_at::<6>(mem, PAGE_SIZE - 3)? == *b"ABCDEF",
+    )?;
+
+    let code = create_memory(PAGE_SIZE)?;
+    let entry = map_with(s, PERM_READ | EXECUTE, 0, code, PAGE_SIZE)?;
+    // SAFETY: the mapping is executable and holds the code written next.
+    let run = unsafe { core::mem::transmute::<u64, extern "sysv64" fn() -> u32>(entry) };
+    // mov eax, 42; ret
+    check(
+        "writing code",
+        write_memory(s.process, entry, &[0xB8, 42, 0, 0, 0, 0xC3]),
+    )?;
+    ensure("running the code", run() == 42)?;
+    check(
+        "changing the code",
+        write_memory(s.process, entry + 1, &[7]),
+    )?;
+    ensure("running the new code", run() == 7)?;
+
+    // The second page of the range comes from a handle without WRITE.
+    let mut read_only = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("duplicating without WRITE", unsafe {
+        sys::handle_duplicate(mem, (1 << 2) | (1 << 5), &mut read_only)
+    })?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at + PAGE_SIZE, PAGE_SIZE)
+    })?;
+    map_with(
+        s,
+        PERM_READ | SPECIFIC,
+        at + PAGE_SIZE,
+        read_only,
+        PAGE_SIZE,
+    )?;
+    ensure(
+        "refusing a mapping without WRITE",
+        write_memory(s.process, at + PAGE_SIZE - 3, b"xyzxyz") == ACCESS_DENIED,
+    )?;
+    ensure(
+        "writing nothing",
+        mem_read_at::<6>(mem, PAGE_SIZE - 3)? == *b"ABCDEF",
+    )?;
+
+    let sealed = create_memory(PAGE_SIZE)?;
+    let sat = map_with(s, PERM_READ, 0, sealed, PAGE_SIZE)?;
+    ensure("sealing", seal(sealed, 1 << 3) == 0)?;
+    ensure(
+        "refusing a sealed object",
+        write_memory(s.process, sat, b"x") == ACCESS_DENIED,
+    )?;
+
+    let (pager, paged) = paged_object(s, 2, 2)?;
+    let pat = map_with(s, PERM_READ, 0, paged, 2 * PAGE_SIZE)?;
+    check(
+        "writing a paged object",
+        write_memory(s.process, pat + PAGE_SIZE, b"P"),
+    )?;
+    let (ranges, count) = dirty(pager, paged, 2 * PAGE_SIZE)?;
+    ensure(
+        "marking the page dirty",
+        count == 1 && ranges[..2] == [PAGE_SIZE, PAGE_SIZE],
+    )?;
+    let mut got = [0u8; 6];
+    check(
+        "reading back",
+        read_memory(s.process, pat + PAGE_SIZE, &mut got),
+    )?;
+    ensure("keeping the supplied rest", got == *b"Page 1")?;
+    // SAFETY: the call takes no pointers.
+    check("revoking", unsafe { sys::pager_revoke(pager, paged) })?;
+    ensure(
+        "refusing a revoked object",
+        write_memory(s.process, pat, b"x") == ACCESS_DENIED,
+    )
+}
+
+const TESTS: [(&str, Test); 36] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2474,6 +2585,7 @@ const TESTS: [(&str, Test); 35] = [
     ("suspend_in_call", suspend_in_call),
     ("thread_lists", thread_lists),
     ("read_process_memory", read_process_memory),
+    ("write_process_memory", write_process_memory),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
 ];

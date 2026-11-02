@@ -6,7 +6,7 @@ use super::{Checked, UserIn, UserOut, bytes_of, current_process};
 use crate::aspace::Piece;
 use crate::memory_object::{Held, MemoryObject};
 use crate::process::Process;
-use crate::publish::{Outputs, Work};
+use crate::publish::{Outputs, Page, Work};
 use crate::sched::Thread;
 use crate::thread_state::{self, DEBUG_SIZE, GENERAL_SIZE, General};
 use alloc::sync::Arc;
@@ -24,7 +24,7 @@ use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
     INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
 };
-use kernel_core::regions::MapOptions;
+use kernel_core::regions::{MapOptions, PERM_WRITE};
 use kernel_core::signal::{self as sig, ACTION_SIZE, Action, Info, UNBLOCKABLE};
 use kernel_core::status::Error;
 
@@ -890,6 +890,70 @@ pub fn process_read_memory(
     outputs.release(&mut work);
     for source in sources {
         source.release(&mut work);
+    }
+    Ok(())
+}
+
+pub fn process_write_memory(
+    process: Checked,
+    addr: u64,
+    buf: UserIn<u8>,
+    len: u64,
+) -> Result<(), Error> {
+    let target = object::<Process>(process);
+    let mut scratch = Scratch::new(Some(current_process()?.budget()));
+    let pieces = debug_pieces(&target, addr, len, &mut scratch)?;
+    let refused = |p: &Piece| p.max & PERM_WRITE == 0 || p.mem.check_writable().is_err();
+    if pieces.iter().any(refused) {
+        return Err(Error::AccessDenied);
+    }
+    if !buf.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    // Every page is held before any byte is written: holding checks the
+    // seal and revocation again, marks the page written, and keeps both
+    // off until the pages are let go.
+    let page_range = |p: &Piece| p.offset / PAGE_SIZE..(p.offset + p.len).div_ceil(PAGE_SIZE);
+    let count: u64 = pieces.iter().map(|p| page_range(p).count() as u64).sum();
+    let mut held = Vec::new();
+    scratch.reserve_exact(&mut held, count as usize)?;
+    let mut work = Work::new(crate::sched::preempt_point);
+    for piece in &pieces {
+        for index in page_range(piece) {
+            work.item();
+            held.push(piece.mem.hold_for_debug(index)?);
+        }
+    }
+    // The bytes reach the frames through the direct map. The processor
+    // invalidates cached instructions that a write changes by physical
+    // address, so the target runs the new bytes once it returns to user
+    // mode on this, the only, processor.
+    let mut pages = held.iter();
+    let mut chunk = [0u8; 256];
+    let mut done = 0;
+    for piece in &pieces {
+        let end = piece.offset + piece.len;
+        let mut at = piece.offset;
+        while at < end {
+            let page = pages.next().expect("a held page for every page");
+            let to = end.min((at / PAGE_SIZE + 1) * PAGE_SIZE);
+            while at < to {
+                let n = ((to - at) as usize).min(chunk.len());
+                work.copy(n);
+                buf.at(done).read_bytes(&mut chunk[..n])?;
+                // SAFETY: the page is held, so its frame stays the
+                // object's, and `n` bytes from the offset lie inside it.
+                unsafe {
+                    let into = page.base().add((at % PAGE_SIZE) as usize);
+                    core::ptr::copy_nonoverlapping(chunk.as_ptr(), into, n);
+                }
+                at += n as u64;
+                done += n as u64;
+            }
+        }
+    }
+    for page in held {
+        page.release(&mut work);
     }
     Ok(())
 }
