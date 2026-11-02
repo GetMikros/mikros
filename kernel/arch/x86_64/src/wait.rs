@@ -193,3 +193,98 @@ pub fn wait_call(
         .retain(|c| !(c.koid == header.koid() && c.id == id));
     result
 }
+
+/// A thread in `futex_wait`.
+struct FutexWaiter {
+    /// The memory object's object ID and the offset in it.
+    key: (u64, u64),
+    thread: Arc<Thread>,
+    woken: AtomicBool,
+}
+
+/// The threads waiting on futexes, oldest first.
+static FUTEXES: SpinLock<Vec<Arc<FutexWaiter>>> = SpinLock::new(Vec::new());
+
+/// The futex key of `addr` in `process`: the object ID of the memory
+/// object mapped readable there and the offset in it. Fails with
+/// `InvalidArgs` when `addr` is not 4-byte aligned or not mapped
+/// readable.
+fn futex_key(process: &Process, addr: u64) -> Result<(u64, u64), Error> {
+    if !addr.is_multiple_of(4) {
+        return Err(Error::InvalidArgs);
+    }
+    process
+        .aspace()
+        .with_region(addr, |r| {
+            r.filter(|r| r.perms & kernel_core::regions::PERM_READ != 0)
+                .map(|r| (r.mem.header().koid(), r.offset + (addr - r.start)))
+        })
+        .ok_or(Error::InvalidArgs)
+}
+
+/// Blocks the running thread on the futex at `addr` if the `u32` there
+/// is `expected`, as `futex_wait` does. The comparison and the
+/// registration happen in one system call, which nothing else runs
+/// during, so no wake can come in between.
+pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> {
+    let thread = sched::current().ok_or(Error::BadState)?;
+    let process = thread.process().cloned().ok_or(Error::BadState)?;
+    let key = futex_key(&process, addr)?;
+    let value: u32 = crate::syscall::UserIn::<u32>::new(addr)
+        .read()
+        .map_err(|_| Error::InvalidArgs)?;
+    if value != expected {
+        return Err(Error::BadState);
+    }
+    let waiter = Arc::new(FutexWaiter {
+        key,
+        thread: thread.clone(),
+        woken: AtomicBool::new(false),
+    });
+    {
+        let mut futexes = FUTEXES.lock();
+        futexes.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        futexes.push(waiter.clone());
+    }
+    let result = loop {
+        if waiter.woken.load(Ordering::Acquire) {
+            break Ok(());
+        }
+        if crate::signal::interrupted(&thread, &process) {
+            break Err(Error::Interrupted);
+        }
+        if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+            break Err(Error::TimedOut);
+        }
+        if let Err(e) = sched::wait_for_signals(&thread, deadline) {
+            break Err(e);
+        }
+    };
+    FUTEXES.lock().retain(|w| !Arc::ptr_eq(w, &waiter));
+    // A wake that came together with the end of the wait counts.
+    if waiter.woken.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    result
+}
+
+/// Wakes up to `count` threads waiting on the futex at `addr`, oldest
+/// first, and returns how many, as `futex_wake` does.
+pub fn futex_wake(addr: u64, count: u32) -> Result<u32, Error> {
+    let process = sched::current()
+        .and_then(|t| t.process().cloned())
+        .ok_or(Error::BadState)?;
+    let key = futex_key(&process, addr)?;
+    let mut woken = 0;
+    let mut futexes = FUTEXES.lock();
+    futexes.retain(|w| {
+        if woken == count || w.key != key {
+            return true;
+        }
+        w.woken.store(true, Ordering::Release);
+        sched::wake_sleeper(&w.thread);
+        woken += 1;
+        false
+    });
+    Ok(woken)
+}

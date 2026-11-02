@@ -1186,3 +1186,15 @@ pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result
 pub fn mem_seal(mem: Checked, seals: u32) -> Result<(), Error> {
     object::<MemoryObject>(mem).seal(seals)
 }
+
+pub fn futex_wait(addr: UserIn<u32>, expected: u32, deadline: i64) -> Result<(), Error> {
+    crate::wait::futex_wait(addr.0, expected, deadline)
+}
+
+pub fn futex_wake(addr: UserIn<u32>, count: u32, woken: UserOut<u32>) -> Result<(), Error> {
+    if !woken.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let n = crate::wait::futex_wake(addr.0, count)?;
+    woken.write(n)
+}

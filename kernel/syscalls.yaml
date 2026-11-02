@@ -674,3 +674,23 @@ syscalls:
       - {name: deadline, type: i64, dir: in}
       - {name: call_args, type: "*const u8", dir: in}
       - {name: out, type: "*mut u8", dir: out}
+
+  - name: futex_wait
+    number: 66
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R23, MIKSPEC-0009.R24, MIKSPEC-0008.R22, MIKSPEC-0020.R21]
+    args:
+      - {name: addr, type: "*const u32", dir: in}
+      - {name: expected, type: u32, dir: in}
+      - {name: deadline, type: i64, dir: in}
+
+  - name: futex_wake
+    number: 67
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R23, MIKSPEC-0009.R25]
+    args:
+      - {name: addr, type: "*const u32", dir: in}
+      - {name: count, type: u32, dir: in}
+      - {name: woken, type: "*mut u32", dir: out}
