@@ -1,6 +1,7 @@
 //! The kernel entry point.
 
 use crate::features::{Leaves, Missing};
+use crate::log::log;
 use crate::serial;
 use boot_protocol::{BootInfo, NOTE_TYPE, VERSION_MAJOR, VERSION_MINOR};
 use kernel_core::bootinfo::{self, HEADER_SIZE};
@@ -49,6 +50,13 @@ extern "sysv64" fn _start(info: *const u8) -> ! {
     if leaves.missing().next().is_some() {
         panic!("missing CPU features: {}", Missing(&leaves));
     }
-    let _info = boot_info(info);
+    let info = boot_info(info);
+    log!(
+        Info,
+        "boot protocol {}.{}, {} memory map entries",
+        info.version_major,
+        info.version_minor,
+        info.memory_map_count
+    );
     crate::cpu::halt()
 }

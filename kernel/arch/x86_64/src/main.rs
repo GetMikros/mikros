@@ -12,6 +12,8 @@ mod entry;
 #[cfg(any(target_os = "none", test))]
 mod features;
 #[cfg(target_os = "none")]
+mod log;
+#[cfg(target_os = "none")]
 mod panic;
 #[cfg(target_os = "none")]
 mod serial;
