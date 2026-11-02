@@ -3,7 +3,7 @@
 
 #![no_main]
 
-use kernel_core::regions::{PAGE_SIZE, Region, Regions};
+use kernel_core::regions::{Charge, PAGE_SIZE, Region, Regions};
 use kernel_core::status::Error;
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 use libfuzzer_sys::fuzz_target;
@@ -48,6 +48,7 @@ fuzz_target!(|ops: Vec<Op>| {
                     inheritance: 0,
                     mem: id,
                     removal: 0,
+                    charge: Charge::NONE,
                 };
                 assert_eq!(regions.insert(region).is_ok(), free);
                 if free {
@@ -58,7 +59,7 @@ fuzz_target!(|ops: Vec<Op>| {
             }
             Op::Remove { page, pages } => {
                 let (start, end) = (u64::from(page) % PAGES, u64::from(page) % PAGES + u64::from(pages) % 16);
-                let removed = regions.remove(start * PAGE_SIZE, end * PAGE_SIZE, 1).unwrap();
+                let removed = regions.remove(start * PAGE_SIZE, end * PAGE_SIZE, 1, None).unwrap();
                 let pages: u64 = removed.iter().map(|r| r.len / PAGE_SIZE).sum();
                 let expected = (start..end).filter(|p| model.remove(p).is_some()).count() as u64;
                 assert_eq!(pages, expected);
@@ -67,7 +68,7 @@ fuzz_target!(|ops: Vec<Op>| {
                 let (start, end) = (u64::from(page) % PAGES, u64::from(page) % PAGES + u64::from(pages) % 16);
                 let mapped = (start..end).all(|p| model.contains_key(&p));
                 let value = u32::from(value % 3);
-                assert_eq!(regions.set_inheritance(start * PAGE_SIZE, end * PAGE_SIZE, value).is_ok(), mapped);
+                assert_eq!(regions.set_inheritance(start * PAGE_SIZE, end * PAGE_SIZE, value, None).is_ok(), mapped);
                 if mapped {
                     for p in start..end {
                         model.get_mut(&p).unwrap().2 = value;
@@ -79,7 +80,7 @@ fuzz_target!(|ops: Vec<Op>| {
                 let perms = u32::from(perms) % 8;
                 let mapped = (start..end).all(|p| model.contains_key(&p));
                 let fits = (start..end).all(|p| model.get(&p).is_none_or(|m| perms & !max(m.0) == 0));
-                let result = regions.set_perms(start * PAGE_SIZE, end * PAGE_SIZE, perms, |_| allow);
+                let result = regions.set_perms(start * PAGE_SIZE, end * PAGE_SIZE, perms, |_| allow, None);
                 let expected = if !mapped {
                     Err(Error::NotFound)
                 } else if !fits || (!allow && start < end) {

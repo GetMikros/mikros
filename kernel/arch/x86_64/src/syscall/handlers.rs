@@ -430,10 +430,11 @@ pub fn vm_map(
         return Err(Error::InvalidArgs);
     }
     let size = len;
-    let outputs = prepare(&current_process()?, &[out_addr.range(1)])?;
+    let caller = current_process()?;
+    let outputs = prepare(&caller, &[out_addr.range(1)])?;
     let aspace = object::<Process>(process).aspace().clone();
     let max = MapOptions::allowed_by(handle_rights);
-    let start = aspace.add_region(options, addr, size, &mem, offset, max)?;
+    let start = aspace.add_region(options, addr, size, &mem, offset, max, caller.budget())?;
     publish(outputs, &[bytes_of(&[start])]);
     Ok(())
 }
@@ -452,7 +453,7 @@ pub fn vm_unmap(process: Checked, addr: u64, len: u64) -> Result<(), Error> {
     let end = page_range_end(addr, len)?;
     object::<Process>(process)
         .aspace()
-        .remove_regions(addr, end)
+        .remove_regions(addr, end, current_process()?.budget())
 }
 
 pub fn vm_set_inheritance(
@@ -465,9 +466,12 @@ pub fn vm_set_inheritance(
     if inheritance > 2 {
         return Err(Error::InvalidArgs);
     }
-    object::<Process>(process)
-        .aspace()
-        .set_inheritance(addr, end, inheritance)
+    object::<Process>(process).aspace().set_inheritance(
+        addr,
+        end,
+        inheritance,
+        current_process()?.budget(),
+    )
 }
 
 pub fn channel_create(
@@ -1384,11 +1388,13 @@ pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result
         return Err(Error::NotFound);
     }
     let writes = perms & kernel_core::regions::PERM_WRITE != 0;
+    let caller = current_process()?;
+    let allowed = |r: &crate::aspace::RegionOf| {
+        r.mem.check_revoked().is_ok() && (!writes || r.mem.check_writable().is_ok())
+    };
     object::<Process>(process)
         .aspace()
-        .protect(addr, end, perms, |r| {
-            r.mem.check_revoked().is_ok() && (!writes || r.mem.check_writable().is_ok())
-        })
+        .protect(addr, end, perms, allowed, caller.budget())
 }
 
 pub fn mem_seal(mem: Checked, seals: u32) -> Result<(), Error> {

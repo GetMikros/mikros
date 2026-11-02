@@ -2,8 +2,10 @@
 //! which memory object, and with what permissions.
 
 use crate::nodes::{self, INSERT, Map};
+use crate::object::budget::Budget;
 use crate::object::rights;
 use crate::status::Error;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 pub const PAGE_SIZE: u64 = 4096;
@@ -100,8 +102,51 @@ impl MapOptions {
     }
 }
 
+/// The kernel memory charged for a region: its entry and that entry's
+/// share of the map storage.
+pub const REGION_COST: u64 = 2 * (size_of::<u64>() + size_of::<Region<Arc<()>>>()) as u64;
+
+/// A region's entry charged to a budget, which is released when the
+/// region goes.
+#[derive(Default)]
+pub struct Charge(Option<Arc<Budget>>);
+
+impl Charge {
+    /// No charge.
+    pub const NONE: Charge = Charge(None);
+
+    /// Charges one region to `budget`, if there is one.
+    pub fn new(budget: Option<&Arc<Budget>>) -> Result<Charge, Error> {
+        match budget {
+            Some(budget) => {
+                budget.charge_kernel(REGION_COST)?;
+                Ok(Charge(Some(budget.clone())))
+            }
+            None => Ok(Charge::NONE),
+        }
+    }
+}
+
+impl Drop for Charge {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.0 {
+            budget.release_kernel(REGION_COST);
+        }
+    }
+}
+
+impl core::fmt::Debug for Charge {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Charge"
+        } else {
+            "Charge::NONE"
+        })
+    }
+}
+
 /// A mapped range. `M` is the memory object.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Region<M> {
     pub start: u64,
     pub len: u64,
@@ -118,6 +163,7 @@ pub struct Region<M> {
     /// stays. A region being removed keeps its range and object, but no
     /// page of it can be entered or changed.
     pub removal: u64,
+    pub charge: Charge,
 }
 
 impl<M> Region<M> {
@@ -178,35 +224,79 @@ impl<M: Clone> Regions<M> {
         nodes::claim(2 * INSERT)
     }
 
+    /// Whether `split_at(addr)` would split a region.
+    fn splits(&self, addr: u64) -> bool {
+        self.find(addr).is_some_and(|r| r.start != addr)
+    }
+
+    /// Charges `budget`, if there is one, for the regions that splitting
+    /// at `start` and then at `end` adds, which `split_ends` takes.
+    fn charge_splits(
+        &self,
+        start: u64,
+        end: u64,
+        budget: Option<&Arc<Budget>>,
+    ) -> Result<[Charge; 2], Error> {
+        let first = if self.splits(start) {
+            Charge::new(budget)?
+        } else {
+            Charge::NONE
+        };
+        let second = if end != start && self.splits(end) {
+            Charge::new(budget)?
+        } else {
+            Charge::NONE
+        };
+        Ok([first, second])
+    }
+
+    /// Splits the regions at `start` and `end` with the charges from
+    /// `charge_splits`. The caller holds a claim for the splits.
+    fn split_ends(&mut self, start: u64, end: u64, [first, second]: [Charge; 2]) {
+        self.split_at(start, first);
+        self.split_at(end, second);
+    }
+
     /// Splits the region containing `addr`, unless it is being removed,
-    /// so that one starts there. The caller holds a claim for the split.
-    fn split_at(&mut self, addr: u64) {
+    /// so that one starts there, giving the new region `charge`. The
+    /// caller holds a claim for the split.
+    fn split_at(&mut self, addr: u64, charge: Charge) {
         let Some(r) = self.find(addr) else {
             return;
         };
-        let start = r.start;
-        if start == addr {
+        if r.start == addr {
             return;
         }
-        let mut tail = r.clone();
-        let head = self.map.get_mut(&start).expect("found above");
-        head.len = addr - head.start;
-        tail.offset += head.len;
-        tail.len -= head.len;
-        tail.start = addr;
+        let head_len = addr - r.start;
+        let tail = Region {
+            start: addr,
+            len: r.len - head_len,
+            offset: r.offset + head_len,
+            perms: r.perms,
+            max: r.max,
+            inheritance: r.inheritance,
+            mem: r.mem.clone(),
+            removal: r.removal,
+            charge,
+        };
+        let start = r.start;
+        self.map.get_mut(&start).expect("found above").len = head_len;
         self.map.insert(addr, tail);
     }
 
     /// Begins removal `id`, not 0, of every part of a region inside the
     /// range from `start` to `end`, splitting regions that extend beyond
     /// it, and returns room for the parts. Regions that another removal
-    /// is taking are left to it. Fails with `NoMemory`, changing nothing,
-    /// without room for the splits or the parts.
+    /// is taking are left to it. Regions the splits add are charged to
+    /// `budget`, if there is one. Fails with `NoMemory`, changing nothing,
+    /// without room for the splits or the parts, and with `NoResources`
+    /// when the budget refuses the charge.
     pub fn begin_removal(
         &mut self,
         start: u64,
         end: u64,
         id: u64,
+        budget: Option<&Arc<Budget>>,
     ) -> Result<Vec<Region<M>>, Error> {
         debug_assert!(id != 0);
         let straddles = self.find(start).is_some_and(|r| r.start < start);
@@ -216,9 +306,9 @@ impl<M: Clone> Regions<M> {
         parts
             .try_reserve_exact(count)
             .map_err(|_| Error::NoMemory)?;
+        let charges = self.charge_splits(start, end, budget)?;
         let _claim = Self::claim_splits()?;
-        self.split_at(start);
-        self.split_at(end);
+        self.split_ends(start, end, charges);
         for r in self.map.range_mut(start..end).map(|(_, r)| r) {
             if r.removal == 0 {
                 r.removal = id;
@@ -260,24 +350,37 @@ impl<M: Clone> Regions<M> {
 
     /// Removes every part of a region inside the range from `start` to
     /// `end` at once, as removal `id` would, and returns the parts.
-    pub fn remove(&mut self, start: u64, end: u64, id: u64) -> Result<Vec<Region<M>>, Error> {
-        let mut parts = self.begin_removal(start, end, id)?;
+    pub fn remove(
+        &mut self,
+        start: u64,
+        end: u64,
+        id: u64,
+        budget: Option<&Arc<Budget>>,
+    ) -> Result<Vec<Region<M>>, Error> {
+        let mut parts = self.begin_removal(start, end, id, budget)?;
         self.end_removal(start, end, id, &mut parts);
         Ok(parts)
     }
 
     /// Sets the inheritance of every page from `start` to `end`, splitting
     /// regions that extend beyond the range. Fails with `NotFound` when a
-    /// page in the range is not mapped and with `NoMemory` without room
-    /// for the splits, in both cases changing nothing.
-    pub fn set_inheritance(&mut self, start: u64, end: u64, inheritance: u32) -> Result<(), Error> {
+    /// page in the range is not mapped, with `NoMemory` without room for
+    /// the splits and with `NoResources` when `budget` refuses the charge
+    /// for them, in each case changing nothing.
+    pub fn set_inheritance(
+        &mut self,
+        start: u64,
+        end: u64,
+        inheritance: u32,
+        budget: Option<&Arc<Budget>>,
+    ) -> Result<(), Error> {
         let mut at = start;
         while at < end {
             at = self.find(at).ok_or(Error::NotFound)?.end();
         }
+        let charges = self.charge_splits(start, end, budget)?;
         let _claim = Self::claim_splits()?;
-        self.split_at(start);
-        self.split_at(end);
+        self.split_ends(start, end, charges);
         for r in self.map.range_mut(start..end).map(|(_, r)| r) {
             r.inheritance = inheritance;
         }
@@ -288,14 +391,16 @@ impl<M: Clone> Regions<M> {
     /// splitting regions that extend beyond the range. Fails with
     /// `NotFound` when a page in the range is not mapped and with
     /// `AccessDenied` when `perms` goes beyond a region's maximum or
-    /// `allowed` refuses a region, and with `NoMemory` without room for
-    /// the splits, in each case changing nothing.
+    /// `allowed` refuses a region, with `NoMemory` without room for the
+    /// splits and with `NoResources` when `budget` refuses the charge for
+    /// them, in each case changing nothing.
     pub fn set_perms(
         &mut self,
         start: u64,
         end: u64,
         perms: u32,
         allowed: impl Fn(&Region<M>) -> bool,
+        budget: Option<&Arc<Budget>>,
     ) -> Result<(), Error> {
         let mut at = start;
         while at < end {
@@ -309,9 +414,9 @@ impl<M: Clone> Regions<M> {
             }
             at = r.end();
         }
+        let charges = self.charge_splits(start, end, budget)?;
         let _claim = Self::claim_splits()?;
-        self.split_at(start);
-        self.split_at(end);
+        self.split_ends(start, end, charges);
         for r in self.map.range_mut(start..end).map(|(_, r)| r) {
             r.perms = perms;
         }
@@ -393,6 +498,7 @@ mod tests {
             inheritance: 0,
             mem: 7,
             removal: 0,
+            charge: Charge::NONE,
         }
     }
 
@@ -405,17 +511,49 @@ mod tests {
         let mut r = Regions::default();
         r.insert(region(0, 4 * P, 0)).unwrap();
         r.insert(region(6 * P, P, 0)).unwrap();
-        assert_eq!(r.set_perms(3 * P, 7 * P, 3, |_| true), Err(Error::NotFound));
-        assert_eq!(r.set_perms(P, 2 * P, 5, |_| true), Err(Error::AccessDenied));
         assert_eq!(
-            r.set_perms(P, 2 * P, 3, |_| false),
+            r.set_perms(3 * P, 7 * P, 3, |_| true, None),
+            Err(Error::NotFound)
+        );
+        assert_eq!(
+            r.set_perms(P, 2 * P, 5, |_| true, None),
+            Err(Error::AccessDenied)
+        );
+        assert_eq!(
+            r.set_perms(P, 2 * P, 3, |_| false, None),
             Err(Error::AccessDenied)
         );
         assert_eq!(starts(&r).len(), 2);
-        r.set_perms(P, 2 * P, 3, |_| true).unwrap();
+        r.set_perms(P, 2 * P, 3, |_| true, None).unwrap();
         let perms: std::vec::Vec<u32> = r.iter().map(|r| r.perms).collect();
         assert_eq!(perms, [1, 3, 1, 1]);
         assert_eq!(starts(&r)[1], (P, P, P));
+    }
+
+    #[test]
+    fn charges_regions_that_splits_add() {
+        use crate::object::budget::{Budget, UNLIMITED};
+        let root = Budget::root();
+        let budget = Budget::child(&root, 2 * REGION_COST, UNLIMITED, None).unwrap();
+        let charged = |start, len| Region {
+            charge: Charge::new(Some(&budget)).unwrap(),
+            ..region(start, len, 0)
+        };
+        let mut r = Regions::default();
+        r.insert(charged(0, 8 * P)).unwrap();
+        // Two splits need two more charges, which the budget refuses.
+        assert_eq!(
+            r.set_perms(P, 2 * P, 3, |_| true, Some(&budget)),
+            Err(Error::NoResources)
+        );
+        assert_eq!(starts(&r).len(), 1);
+        // One split fits.
+        r.set_inheritance(0, P, 1, Some(&budget)).unwrap();
+        assert_eq!(starts(&r).len(), 2);
+        assert_eq!(budget.charge_kernel(1), Err(Error::NoResources));
+        // Removing the parts releases their charges.
+        drop(r.remove(0, 8 * P, 1, None).unwrap());
+        budget.charge_kernel(2 * REGION_COST).unwrap();
     }
 
     #[test]
@@ -464,7 +602,7 @@ mod tests {
         let mut r = Regions::default();
         r.insert(region(2 * P, 4 * P, 10 * P)).unwrap();
         r.insert(region(8 * P, 2 * P, 0)).unwrap();
-        let removed = r.remove(3 * P, 9 * P, 1).unwrap();
+        let removed = r.remove(3 * P, 9 * P, 1, None).unwrap();
         assert_eq!(
             removed
                 .iter()
@@ -473,7 +611,7 @@ mod tests {
             [(3 * P, 3 * P, 11 * P), (8 * P, P, 0)]
         );
         assert_eq!(starts(&r), [(2 * P, P, 10 * P), (9 * P, P, P)]);
-        assert!(r.remove(20 * P, 30 * P, 1).unwrap().is_empty());
+        assert!(r.remove(20 * P, 30 * P, 1, None).unwrap().is_empty());
         assert_eq!(r.find(9 * P).unwrap().page(9 * P + 1), 1);
     }
 
@@ -481,17 +619,23 @@ mod tests {
     fn hides_regions_being_removed() {
         let mut r = Regions::default();
         r.insert(region(2 * P, 4 * P, 0)).unwrap();
-        let mut parts = r.begin_removal(3 * P, 5 * P, 1).unwrap();
+        let mut parts = r.begin_removal(3 * P, 5 * P, 1, None).unwrap();
         assert_eq!(parts.capacity(), 1);
         // The part being removed keeps its range but cannot be found,
         // changed or mapped over; the rest of the region stays.
         assert!(r.find(3 * P).is_none() && r.find(2 * P).is_some());
         assert!(r.overlaps(4 * P, P));
-        assert_eq!(r.set_perms(3 * P, 4 * P, 0, |_| true), Err(Error::NotFound));
-        assert_eq!(r.set_inheritance(3 * P, 4 * P, 1), Err(Error::NotFound));
+        assert_eq!(
+            r.set_perms(3 * P, 4 * P, 0, |_| true, None),
+            Err(Error::NotFound)
+        );
+        assert_eq!(
+            r.set_inheritance(3 * P, 4 * P, 1, None),
+            Err(Error::NotFound)
+        );
         assert_eq!(r.insert(region(4 * P, P, 0)), Err(Error::AlreadyExists));
         // Another removal leaves it to the first.
-        let mut other = r.begin_removal(2 * P, 6 * P, 2).unwrap();
+        let mut other = r.begin_removal(2 * P, 6 * P, 2, None).unwrap();
         r.end_removal(2 * P, 6 * P, 2, &mut other);
         assert_eq!(starts_of(&other), [(2 * P, P, 0), (5 * P, P, 3 * P)]);
         assert_eq!(starts(&r), [(3 * P, 2 * P, P)]);
@@ -509,10 +653,13 @@ mod tests {
         let mut r = Regions::default();
         r.insert(region(2 * P, 2 * P, 0)).unwrap();
         r.insert(region(4 * P, 2 * P, 0)).unwrap();
-        assert_eq!(r.set_inheritance(P, 3 * P, 1), Err(Error::NotFound));
-        assert_eq!(r.set_inheritance(5 * P, 7 * P, 1), Err(Error::NotFound));
+        assert_eq!(r.set_inheritance(P, 3 * P, 1, None), Err(Error::NotFound));
+        assert_eq!(
+            r.set_inheritance(5 * P, 7 * P, 1, None),
+            Err(Error::NotFound)
+        );
         assert_eq!(starts(&r), [(2 * P, 2 * P, 0), (4 * P, 2 * P, 0)]);
-        r.set_inheritance(3 * P, 5 * P, 2).unwrap();
+        r.set_inheritance(3 * P, 5 * P, 2, None).unwrap();
         let got: Vec<_> = r.iter().map(|r| (r.start, r.len, r.inheritance)).collect();
         assert_eq!(
             got,

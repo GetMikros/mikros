@@ -12,7 +12,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::object::budget::Budget;
-use kernel_core::regions::{MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions};
+use kernel_core::regions::{
+    Charge, MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions,
+};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
@@ -314,7 +316,9 @@ impl AddressSpace {
     /// Maps the `size` bytes of `mem` from `offset`, a multiple of the
     /// page size, with `options`: at `addr` when they are `SPECIFIC`,
     /// otherwise at a random free address. Returns the start. Pages are
-    /// entered into the tables only when they are accessed.
+    /// entered into the tables only when they are accessed. The region is
+    /// charged to `budget`.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_region(
         self: &Arc<Self>,
         options: MapOptions,
@@ -323,6 +327,7 @@ impl AddressSpace {
         mem: &Arc<MemoryObject>,
         offset: u64,
         max: u32,
+        budget: &Arc<Budget>,
     ) -> Result<u64, Error> {
         if options.specific && !in_user_range(addr, size) {
             return Err(Error::OutOfRange);
@@ -330,6 +335,7 @@ impl AddressSpace {
         if size > USER_END - USER_START {
             return Err(Error::OutOfRange);
         }
+        let charge = Charge::new(Some(budget))?;
         mem.add_space(self)?;
         let mut regions = self.regions.lock();
         let start = if options.specific {
@@ -348,6 +354,7 @@ impl AddressSpace {
                 inheritance: options.inheritance,
                 mem: mem.clone(),
                 removal: 0,
+                charge,
             })?;
             Ok(start)
         });
@@ -360,13 +367,15 @@ impl AddressSpace {
     }
 
     /// Removes the parts of regions from `start` to `end` and their pages.
-    /// Fails with `NoMemory`, removing nothing, without room to split the
-    /// regions at the ends or to list the removed parts.
+    /// Regions the splits at the ends add are charged to `budget`. Fails
+    /// with `NoMemory`, removing nothing, without room to split the
+    /// regions at the ends or to list the removed parts, and with
+    /// `NoResources` when the budget refuses the charge.
     ///
     /// The parts stay, hidden from faults and changes, while their
     /// translations go in steps, so that an object that loses pages
     /// meanwhile still finds them. No lock may be held.
-    pub fn remove_regions(&self, start: u64, end: u64) -> Result<(), Error> {
+    pub fn remove_regions(&self, start: u64, end: u64, budget: &Arc<Budget>) -> Result<(), Error> {
         let start = start.max(USER_START);
         let end = end.min(USER_END);
         if start >= end {
@@ -376,7 +385,7 @@ impl AddressSpace {
         let mut ranges = Vec::new();
         let mut parts = {
             let mut regions = self.regions.lock();
-            let parts = regions.begin_removal(start, end, id)?;
+            let parts = regions.begin_removal(start, end, id, Some(budget))?;
             if ranges.try_reserve_exact(parts.capacity()).is_err() {
                 regions.cancel_removal(start, end, id);
                 return Err(Error::NoMemory);
@@ -434,9 +443,18 @@ impl AddressSpace {
     }
 
     /// Sets the inheritance of every page from `start` to `end`, or fails
-    /// with `NotFound` when one is not mapped.
-    pub fn set_inheritance(&self, start: u64, end: u64, inheritance: u32) -> Result<(), Error> {
-        self.regions.lock().set_inheritance(start, end, inheritance)
+    /// with `NotFound` when one is not mapped. Regions that splitting adds
+    /// are charged to `budget`.
+    pub fn set_inheritance(
+        &self,
+        start: u64,
+        end: u64,
+        inheritance: u32,
+        budget: &Arc<Budget>,
+    ) -> Result<(), Error> {
+        self.regions
+            .lock()
+            .set_inheritance(start, end, inheritance, Some(budget))
     }
 
     /// Whether a region maps `mem` writable.
@@ -450,15 +468,19 @@ impl AddressSpace {
     /// Sets `perms` on every page from `start` to `end`, as `vm_protect`
     /// does, and removes their translations, so that the next access
     /// enters them with the new permissions. `allowed` decides whether a
-    /// region's object accepts them.
+    /// region's object accepts them. Regions that splitting adds are
+    /// charged to `budget`.
     pub fn protect(
         &self,
         start: u64,
         end: u64,
         perms: u32,
         allowed: impl Fn(&RegionOf) -> bool,
+        budget: &Arc<Budget>,
     ) -> Result<(), Error> {
-        self.regions.lock().set_perms(start, end, perms, allowed)?;
+        self.regions
+            .lock()
+            .set_perms(start, end, perms, allowed, Some(budget))?;
         self.unmap_in_steps(start, end - start)
     }
 

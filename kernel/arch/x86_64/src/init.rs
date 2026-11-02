@@ -92,6 +92,7 @@ fn map(
             &mem,
             0,
             PERM_READ | PERM_WRITE | PERM_EXECUTE,
+            budget,
         )
         .unwrap_or_else(|e| panic!("mapping init at {addr:#x}: {e:?}"));
     mem
