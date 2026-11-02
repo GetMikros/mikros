@@ -135,35 +135,16 @@ pub fn receive(
     table: &mut HandleTable,
     budget: Option<&alloc::sync::Arc<Budget>>,
 ) -> Result<(), Error> {
-    let mut values = [0; HANDLES_MAX];
-    let mut installed = 0;
-    let mut result = Ok(());
-    for entry in entries {
-        match table.insert(entry.object.clone(), entry.rights, budget) {
-            Ok(handle) => {
-                values[installed] = handle;
-                installed += 1;
-            }
-            Err(e) => {
-                result = Err(e);
-                break;
-            }
-        }
-    }
-    let values = &values[..installed];
-    result = result.and_then(|()| channel_message(memory, outputs, bytes, values));
-    if let Err(e) = result {
-        for &handle in values {
-            table.close(handle).expect("just inserted");
-        }
-        if e == Error::NoResources {
-            channel_sizes(
-                memory,
-                [outputs[2], outputs[3]],
-                bytes.len() as u64,
-                entries.len() as u64,
-            )?;
-        }
+    let result = table.insert_many_then::<HANDLES_MAX>(entries, budget, |values| {
+        channel_message(memory, outputs, bytes, values)
+    });
+    if result == Err(Error::NoResources) {
+        channel_sizes(
+            memory,
+            [outputs[2], outputs[3]],
+            bytes.len() as u64,
+            entries.len() as u64,
+        )?;
     }
     result
 }

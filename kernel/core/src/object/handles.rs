@@ -246,6 +246,41 @@ impl HandleTable {
         self.keep_if_published(new, added, publish)
     }
 
+    /// Inserts cloned entries and passes their handles, in order, to `publish`.
+    /// On insertion or publication failure, removes the inserted handles and
+    /// any slots added by this batch, releasing those slots' charges.
+    pub fn insert_many_then<const N: usize>(
+        &mut self,
+        entries: &[Entry],
+        budget: Option<&Arc<Budget>>,
+        publish: impl FnOnce(&[Handle]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        assert!(entries.len() <= N);
+        let added = self.slots.len();
+        let mut handles = [HANDLE_INVALID; N];
+        let mut inserted = 0;
+        let result = (|| {
+            for entry in entries {
+                handles[inserted] = self.insert(entry.object.clone(), entry.rights, budget)?;
+                inserted += 1;
+            }
+            publish(&handles[..inserted])
+        })();
+        if let Err(e) = result {
+            for &handle in handles[..inserted].iter().rev() {
+                let entry = self.take(handle)?;
+                if self.slots.len() > added {
+                    // Reverse insertion order puts the appended slot last in both lists.
+                    self.free.pop();
+                    self.slots.pop();
+                }
+                drop(entry);
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Passes `new` to `publish` and removes it again when that fails,
     /// together with its slot and the slot's charge if the slot was added
     /// at index `added`.
@@ -337,6 +372,177 @@ mod tests {
         assert!(t.get(a).is_err());
         assert_eq!(t.get(seen).unwrap().rights, rights::READ);
         assert_eq!(t.len(), 2);
+    }
+
+    fn kernel_used(budget: &Budget) -> u64 {
+        u64::from_le_bytes(budget.info()[8..16].try_into().unwrap())
+    }
+
+    #[test]
+    fn batch_insertion_budget_failure_rolls_back_partial_progress() {
+        for reused in 0..=2 {
+            let root = Budget::root();
+            let owner = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
+            let small = Budget::child(&root, SLOT_COST, UNLIMITED, None).unwrap();
+            let mut t = HandleTable::new();
+            let live = t.insert(event(), rights::READ, Some(&owner)).unwrap();
+
+            let mut old = [HANDLE_INVALID; 2];
+            for h in &mut old[..reused] {
+                *h = t.insert(event(), 0, Some(&owner)).unwrap();
+            }
+            for &h in &old[..reused] {
+                t.close(h).unwrap();
+            }
+            let slots = t.slots.len();
+            let free = t.free.clone();
+            let count = t.len();
+            let charged = kernel_used(&owner);
+            let entries = core::array::from_fn::<_, 4, _>(|_| Entry {
+                object: event(),
+                rights: rights::READ,
+            });
+            for _ in 0..8 {
+                assert_eq!(
+                    t.insert_many_then::<4>(&entries, Some(&small), |_| {
+                        panic!("partial insertion must not publish")
+                    }),
+                    Err(Error::NoResources)
+                );
+                assert_eq!((t.slots.len(), t.len()), (slots, count));
+                assert_eq!(t.free, free);
+                assert_eq!(kernel_used(&small), 0);
+                assert_eq!(kernel_used(&owner), charged);
+                assert_eq!(kernel_used(&root), charged);
+                assert_eq!(t.get(live).unwrap().rights, rights::READ);
+                for &h in &old[..reused] {
+                    assert_eq!(t.get(h).err(), Some(Error::BadHandle));
+                }
+                for entry in &entries {
+                    assert_eq!(Arc::strong_count(&entry.object), 1);
+                }
+            }
+            drop(t);
+            assert_eq!(kernel_used(&root), 0);
+        }
+    }
+
+    #[test]
+    fn batch_publication_failure_restores_slots_and_charges() {
+        for reused in 0..=3 {
+            let root = Budget::root();
+            let owner = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
+            let batch = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
+            let mut t = HandleTable::new();
+            let live = t.insert(event(), rights::WAIT, Some(&owner)).unwrap();
+            let mut old = [HANDLE_INVALID; 3];
+            for h in &mut old[..reused] {
+                *h = t.insert(event(), 0, Some(&owner)).unwrap();
+            }
+            for &h in &old[..reused] {
+                t.close(h).unwrap();
+            }
+            let free = t.free.clone();
+            let slots = t.slots.len();
+            let charged = kernel_used(&owner);
+            let entries = core::array::from_fn::<_, 3, _>(|_| Entry {
+                object: event(),
+                rights: rights::READ,
+            });
+            for _ in 0..8 {
+                let mut seen = [HANDLE_INVALID; 3];
+                assert_eq!(
+                    t.insert_many_then::<3>(&entries, Some(&batch), |handles| {
+                        seen.copy_from_slice(handles);
+                        assert_eq!(kernel_used(&batch), (3 - reused) as u64 * SLOT_COST);
+                        Err(Error::InvalidArgs)
+                    }),
+                    Err(Error::InvalidArgs)
+                );
+                assert_eq!((t.slots.len(), t.len()), (slots, 1));
+                assert_eq!(t.free, free);
+                assert_eq!(kernel_used(&batch), 0);
+                assert_eq!(kernel_used(&owner), charged);
+                assert_eq!(kernel_used(&root), charged);
+                assert_eq!(t.get(live).unwrap().rights, rights::WAIT);
+                for h in seen {
+                    assert_eq!(t.get(h).err(), Some(Error::BadHandle));
+                }
+                for &h in &old[..reused] {
+                    assert_eq!(t.get(h).err(), Some(Error::BadHandle));
+                }
+                for entry in &entries {
+                    assert_eq!(Arc::strong_count(&entry.object), 1);
+                }
+                for (&index, handle) in free.iter().rev().zip(seen) {
+                    assert_ne!(
+                        value(index as usize, t.slots[index as usize].generation),
+                        handle
+                    );
+                }
+            }
+            drop(t);
+            assert_eq!(kernel_used(&root), 0);
+        }
+    }
+
+    #[test]
+    fn batch_success_keeps_cloned_entries_in_order() {
+        let root = Budget::root();
+        let mut t = HandleTable::new();
+        let live = t.insert(event(), rights::WAIT, Some(&root)).unwrap();
+        let old = t.insert(event(), 0, Some(&root)).unwrap();
+        t.close(old).unwrap();
+        let entries = [
+            Entry {
+                object: event(),
+                rights: rights::READ,
+            },
+            Entry {
+                object: event(),
+                rights: rights::WRITE,
+            },
+        ];
+        let mut seen = [HANDLE_INVALID; 2];
+        assert_eq!(
+            t.insert_many_then::<4>(&entries, Some(&root), |handles| {
+                seen.copy_from_slice(handles);
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert_eq!((t.len(), t.slots.len(), t.free.len()), (3, 3, 0));
+        assert_eq!(kernel_used(&root), 3 * SLOT_COST);
+        assert_eq!(t.get(live).unwrap().rights, rights::WAIT);
+        assert_eq!(t.get(old).err(), Some(Error::BadHandle));
+        assert_ne!(seen[0], old);
+        assert_eq!(seen[0] >> GENERATION_BITS, old >> GENERATION_BITS);
+        for (handle, entry) in seen.into_iter().zip(&entries) {
+            let installed = t.get(handle).unwrap();
+            assert_eq!(installed.rights, entry.rights);
+            assert!(Arc::ptr_eq(&installed.object, &entry.object));
+            assert_eq!(Arc::strong_count(&entry.object), 2);
+        }
+        drop(t);
+        assert_eq!(kernel_used(&root), 0);
+    }
+
+    #[test]
+    fn empty_batch_publishes_once() {
+        let mut t = HandleTable::new();
+        let mut calls = 0;
+        assert_eq!(
+            t.insert_many_then::<0>(&[], None, |handles| {
+                calls += 1;
+                assert!(handles.is_empty());
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert_eq!(calls, 1);
+        assert!(t.is_empty());
+        assert!(t.slots.is_empty());
+        assert!(t.free.is_empty());
     }
 
     #[test]

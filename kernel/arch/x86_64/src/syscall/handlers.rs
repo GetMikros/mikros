@@ -365,22 +365,17 @@ pub fn channel_create(
     let (a, b) = Endpoint::pair(budget)?;
     let rights = default_rights(ObjectType::Channel);
     let mut table = process.handles().lock();
-    let h0 = table.insert(a, rights, budget)?;
-    let written =
-        table.insert(b, rights, budget).and_then(|h1| {
-            match crate::output::channel_pair(process.aspace().as_ref(), [out0.0, out1.0], [h0, h1])
-            {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    table.close(h1).expect("just inserted");
-                    Err(e)
-                }
-            }
-        });
-    if written.is_err() {
-        table.close(h0).expect("just inserted");
-    }
-    written
+    let entries = [
+        kernel_core::object::handles::Entry { object: a, rights },
+        kernel_core::object::handles::Entry { object: b, rights },
+    ];
+    table.insert_many_then::<2>(&entries, budget, |values| {
+        crate::output::channel_pair(
+            process.aspace().as_ref(),
+            [out0.0, out1.0],
+            [values[0], values[1]],
+        )
+    })
 }
 
 pub fn channel_write(
