@@ -4,7 +4,7 @@ use crate::aspace::AddressSpace;
 use crate::sched::{self, Thread};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use kernel_core::exception::DEBUG_EVENTS;
 use kernel_core::object::budget::{Budget, Held, Scratch};
 use kernel_core::object::channel::{Endpoint, PeerObserver};
@@ -56,6 +56,53 @@ pub struct Process {
     /// an end of 0 means no gate.
     gate_start: AtomicU64,
     gate_end: AtomicU64,
+    /// The neighbours in the list of all processes, or null.
+    prev: AtomicPtr<Process>,
+    next: AtomicPtr<Process>,
+}
+
+/// The first of all processes, newest first, linked through
+/// `Process::next` and `Process::prev`, which the kernel debugger
+/// scripts follow. The links change only under `REGISTRY`, and a
+/// process leaves the list before its memory goes.
+static FIRST_PROCESS: AtomicPtr<Process> = AtomicPtr::new(core::ptr::null_mut());
+static REGISTRY: SpinLock<()> = SpinLock::new(());
+
+/// Adds `process` to the list of all processes.
+fn register(process: &Arc<Process>) {
+    let _registry = REGISTRY.lock();
+    let this = Arc::as_ptr(process).cast_mut();
+    let first = FIRST_PROCESS.load(Ordering::Relaxed);
+    process.next.store(first, Ordering::Relaxed);
+    if !first.is_null() {
+        // SAFETY: listed processes are alive, and the lock is held.
+        unsafe { &*first }.prev.store(this, Ordering::Relaxed);
+    }
+    FIRST_PROCESS.store(this, Ordering::Release);
+}
+
+/// Removes `process`, which is being dropped, from the list of all
+/// processes, if it is listed.
+fn unregister(process: &Process) {
+    let _registry = REGISTRY.lock();
+    let this = core::ptr::from_ref(process).cast_mut();
+    let (prev, next) = (
+        process.prev.load(Ordering::Relaxed),
+        process.next.load(Ordering::Relaxed),
+    );
+    if prev.is_null() && FIRST_PROCESS.load(Ordering::Relaxed) != this {
+        return;
+    }
+    // SAFETY: listed processes are alive, and the lock is held.
+    unsafe {
+        match prev.is_null() {
+            true => FIRST_PROCESS.store(next, Ordering::Release),
+            false => (*prev).next.store(next, Ordering::Relaxed),
+        }
+        if !next.is_null() {
+            (*next).prev.store(prev, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The policy bits of `process_set_policy`.
@@ -165,7 +212,10 @@ impl Process {
             policy: AtomicU32::new(0),
             gate_start: AtomicU64::new(0),
             gate_end: AtomicU64::new(0),
+            prev: AtomicPtr::new(core::ptr::null_mut()),
+            next: AtomicPtr::new(core::ptr::null_mut()),
         })
+        .inspect(register)
     }
 
     #[expect(dead_code, reason = "no call reads process names yet")]
@@ -575,6 +625,7 @@ impl Object for Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
+        unregister(self);
         self.budget.remove_process();
         self.budget.release_kernel(self.charged);
     }
