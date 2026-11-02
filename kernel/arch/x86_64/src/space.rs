@@ -138,15 +138,13 @@ pub fn unmap_device(virt: u64, phys: u64, size: u64) {
     release_dynamic(start, len);
 }
 
-/// Maps a new stack of `size` bytes, with an unmapped page below it, into
-/// the dynamic region and returns its top.
-pub fn new_stack(size: u64) -> u64 {
-    let phys = FRAMES
-        .lock()
-        .as_mut()
-        .and_then(|f| f.alloc_contiguous(size / PAGE_SIZE, 1))
-        .unwrap_or_else(|| panic!("no memory for a stack of {size} bytes"));
-    let virt = reserve_dynamic(size);
+/// Maps `size` bytes of new memory, writable and not executable, with an
+/// unmapped page below it, into the dynamic region and returns its start.
+/// Returns `None`, with nothing left allocated, when memory or address
+/// space runs out.
+pub fn alloc_pages(size: u64) -> Option<u64> {
+    let size = size.next_multiple_of(PAGE_SIZE);
+    let virt = DYNAMIC.lock().alloc(size + PAGE_SIZE, PAGE_SIZE)? + PAGE_SIZE;
     let flags = Flags {
         writable: true,
         executable: false,
@@ -155,23 +153,53 @@ pub fn new_stack(size: u64) -> u64 {
     };
     let mut tables = FrameTables;
     let mut mapper = Mapper::existing(&mut tables, root(), gib_pages());
-    mapper
-        .map(virt, phys, size, flags)
-        .unwrap_or_else(|e| panic!("mapping a stack: {e}"));
-    virt + size
+    let mut mapped = 0;
+    while mapped < size {
+        let Some(phys) = FRAMES.lock().as_mut().and_then(|f| f.alloc()) else {
+            break;
+        };
+        if mapper.map(virt + mapped, phys, PAGE_SIZE, flags).is_err() {
+            if let Some(frames) = FRAMES.lock().as_mut() {
+                frames.free(phys, 1);
+            }
+            break;
+        }
+        mapped += PAGE_SIZE;
+    }
+    if mapped < size {
+        if mapped > 0 {
+            free_pages(virt, mapped);
+        }
+        return None;
+    }
+    Some(virt)
 }
 
-/// Frees a stack made by `new_stack` with the same `size`, given its top.
-/// Nothing may run on it.
-#[expect(dead_code, reason = "no thread exits yet")]
-pub fn free_stack(top: u64, size: u64) {
-    let start = top - size;
+/// Frees `size` bytes from `alloc_pages` at `start`: unmaps them, frees
+/// their frames and releases the address space.
+pub fn free_pages(start: u64, size: u64) {
+    let size = size.next_multiple_of(PAGE_SIZE);
     unmap(start, size, |phys, page| {
         if let Some(frames) = FRAMES.lock().as_mut() {
             frames.free(phys, page / PAGE_SIZE);
         }
     });
     release_dynamic(start, size);
+}
+
+/// Maps a new stack of `size` bytes, with an unmapped page below it, into
+/// the dynamic region and returns its top.
+pub fn new_stack(size: u64) -> u64 {
+    let start =
+        alloc_pages(size).unwrap_or_else(|| panic!("no memory for a stack of {size} bytes"));
+    start + size
+}
+
+/// Frees a stack made by `new_stack` with the same `size`, given its top.
+/// Nothing may run on it.
+#[expect(dead_code, reason = "no thread exits yet")]
+pub fn free_stack(top: u64, size: u64) {
+    free_pages(top - size, size);
 }
 
 fn gib_pages() -> bool {

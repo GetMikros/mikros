@@ -4,6 +4,9 @@
 #![cfg_attr(target_os = "none", no_main)]
 
 #[cfg(target_os = "none")]
+extern crate alloc;
+
+#[cfg(target_os = "none")]
 mod apic;
 #[cfg(any(target_os = "none", test))]
 mod backtrace;
@@ -21,6 +24,8 @@ mod features;
 #[cfg(any(target_os = "none", test))]
 #[cfg_attr(test, allow(dead_code))]
 mod gdt;
+#[cfg(target_os = "none")]
+mod heap;
 #[cfg(any(target_os = "none", test))]
 #[cfg_attr(test, allow(dead_code))]
 mod idt;

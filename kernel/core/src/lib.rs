@@ -7,6 +7,7 @@ pub mod acpi;
 pub mod bootinfo;
 pub mod clock;
 pub mod frames;
+pub mod heap;
 pub mod log;
 pub mod panic;
 pub mod random;
