@@ -4,6 +4,7 @@ use super::{Header, Object, ObjectType, signals};
 use crate::status::Error;
 use crate::sync::SpinLock;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// The limit or threshold that is never reached.
@@ -277,6 +278,64 @@ impl Drop for Held {
     }
 }
 
+/// Kernel memory charged for the buffers that a call uses while it runs,
+/// which grows as they do and is released when this is dropped. Without
+/// a budget nothing is charged.
+pub struct Scratch {
+    budget: Option<Arc<Budget>>,
+    bytes: u64,
+}
+
+impl Scratch {
+    pub fn new(budget: Option<&Arc<Budget>>) -> Scratch {
+        Scratch {
+            budget: budget.cloned(),
+            bytes: 0,
+        }
+    }
+
+    /// Charges `bytes` more, or fails with no effect.
+    pub fn charge(&mut self, bytes: u64) -> Result<(), Error> {
+        if let Some(budget) = &self.budget {
+            budget.charge_kernel(bytes)?;
+        }
+        self.bytes += bytes;
+        Ok(())
+    }
+
+    /// Makes room in `vec` for `additional` more elements, charging the
+    /// room it adds first. Grows the room at least twofold, as `Vec` does.
+    pub fn reserve<T>(&mut self, vec: &mut Vec<T>, additional: usize) -> Result<(), Error> {
+        let needed = vec.len().checked_add(additional).ok_or(Error::NoMemory)?;
+        self.reserve_to(vec, needed.max(2 * vec.capacity()).max(4))
+    }
+
+    /// Makes room in `vec` for exactly `additional` more elements,
+    /// charging the room it adds first.
+    pub fn reserve_exact<T>(&mut self, vec: &mut Vec<T>, additional: usize) -> Result<(), Error> {
+        let needed = vec.len().checked_add(additional).ok_or(Error::NoMemory)?;
+        self.reserve_to(vec, needed)
+    }
+
+    fn reserve_to<T>(&mut self, vec: &mut Vec<T>, capacity: usize) -> Result<(), Error> {
+        if capacity <= vec.capacity() {
+            return Ok(());
+        }
+        let added = (capacity - vec.capacity()) as u64 * size_of::<T>() as u64;
+        self.charge(added)?;
+        vec.try_reserve_exact(capacity - vec.len())
+            .map_err(|_| Error::NoMemory)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.budget {
+            budget.release_kernel(self.bytes);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +437,23 @@ mod tests {
         assert_eq!(b.hold_kernel(41).err(), Some(Error::NoResources));
         assert_eq!(word(&root.info(), 0x08), 60);
         drop(held);
+        assert_eq!(word(&root.info(), 0x08), 0);
+    }
+
+    #[test]
+    fn charges_scratch_room_before_adding_it() {
+        let root = Budget::root();
+        let b = Budget::child(&root, 48, UNLIMITED, None).unwrap();
+        let mut scratch = Scratch::new(Some(&b));
+        let mut v: Vec<u64> = Vec::new();
+        scratch.reserve_exact(&mut v, 3).unwrap();
+        assert_eq!((v.capacity(), word(&b.info(), 0x08)), (3, 24));
+        v.extend([1, 2, 3]);
+        assert_eq!(scratch.reserve(&mut v, 4), Err(Error::NoResources));
+        assert_eq!(v.capacity(), 3);
+        scratch.reserve(&mut v, 2).unwrap();
+        assert_eq!((v.capacity(), word(&b.info(), 0x08)), (6, 48));
+        drop(scratch);
         assert_eq!(word(&root.info(), 0x08), 0);
     }
 

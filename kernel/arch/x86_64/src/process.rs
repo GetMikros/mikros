@@ -6,7 +6,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use kernel_core::exception::DEBUG_EVENTS;
-use kernel_core::object::budget::{Budget, Held};
+use kernel_core::object::budget::{Budget, Held, Scratch};
 use kernel_core::object::channel::{Endpoint, PeerObserver};
 use kernel_core::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
 use kernel_core::object::{Header, Name, Object, ObjectType, signals};
@@ -191,13 +191,12 @@ impl Process {
         &self.signals
     }
 
-    /// The threads of the process that still exist, or `NoMemory`
-    /// without room to list them.
-    pub fn live_threads(&self) -> Result<Vec<Arc<Thread>>, Error> {
+    /// The threads of the process that still exist, listed in room
+    /// charged to `scratch`, or `NoMemory` without room to list them.
+    pub fn live_threads(&self, scratch: &mut Scratch) -> Result<Vec<Arc<Thread>>, Error> {
         let threads = self.threads.lock();
         let mut live = Vec::new();
-        live.try_reserve_exact(threads.len())
-            .map_err(|_| Error::NoMemory)?;
+        scratch.reserve_exact(&mut live, threads.len())?;
         live.extend(threads.iter().filter_map(Weak::upgrade));
         drop(threads);
         Ok(live)

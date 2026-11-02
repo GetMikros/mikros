@@ -11,7 +11,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::nodes::{self, Map};
-use kernel_core::object::budget::Budget;
+use kernel_core::object::budget::{Budget, Scratch};
 use kernel_core::object::memory::{
     INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_PAGED, KIND_PHYSICAL, PAGE_ENTRY_COST, PAGE_SIZE, Pages,
     RESIZABLE, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE, SEALS, TRACK_DIRTY,
@@ -415,7 +415,13 @@ impl MemoryObject {
     /// The dirty ranges of the `len` bytes from `offset`, as byte offsets
     /// and lengths of whole pages, as `pager_query_dirty` finds them, up
     /// to the first `cap`. The dirty pages are found in steps.
-    pub fn dirty_ranges(&self, offset: u64, len: u64, cap: u64) -> Result<Vec<(u64, u64)>, Error> {
+    pub fn dirty_ranges(
+        &self,
+        offset: u64,
+        len: u64,
+        cap: u64,
+        scratch: &mut Scratch,
+    ) -> Result<Vec<(u64, u64)>, Error> {
         let paged = self.paged.as_ref().ok_or(Error::NotSupported)?;
         {
             let pages = self.pages.lock();
@@ -435,7 +441,7 @@ impl MemoryObject {
                 match ranges.last_mut() {
                     Some(r) if r.1 == index => r.1 += 1,
                     _ => {
-                        ranges.try_reserve(1).map_err(|_| Error::NoMemory)?;
+                        scratch.reserve(&mut ranges, 1)?;
                         ranges.push((index, index + 1));
                     }
                 }

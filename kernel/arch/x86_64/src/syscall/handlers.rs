@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use kernel_core::exception::{self, DEBUG_EVENTS};
 use kernel_core::log::{MESSAGE_MAX, RECORD_SIZE, Severity};
-use kernel_core::object::budget::{Budget, INFO_BUDGET};
+use kernel_core::object::budget::{Budget, INFO_BUDGET, Scratch};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
@@ -520,6 +520,9 @@ fn send(
         return Err(Error::OutOfRange);
     }
     let (len, count) = (len as usize, count as usize);
+    let process = current_process()?;
+    // The message's charge covers its buffers from the start.
+    let charge = process.budget().hold_kernel(Message::cost(len, count))?;
     let mut data = Vec::new();
     data.try_reserve_exact(len).map_err(|_| Error::NoMemory)?;
     data.resize(len, 0);
@@ -535,7 +538,6 @@ fn send(
             return Err(Error::InvalidArgs);
         }
     }
-    let process = current_process()?;
     let mut table = process.handles().lock();
     let mut entries = Vec::new();
     entries
@@ -544,7 +546,7 @@ fn send(
     for &h in values.iter() {
         entries.push(table.check(h, &[], rights::TRANSFER)?.clone());
     }
-    let message = Message::new(data, entries, Some(process.budget()))?;
+    let message = Message::charged(data, entries, Some(charge));
     // A message that was not queued drops only its own references, as
     // the handles are still in the table.
     let delivered = endpoint.write(message).map_err(|(e, _)| e)?;
@@ -833,9 +835,8 @@ pub fn thread_read_state(
     // published after it is let go.
     let mut general = [0u8; GENERAL_SIZE];
     let mut extended = Vec::new();
-    extended
-        .try_reserve_exact(size as usize)
-        .map_err(|_| Error::NoMemory)?;
+    let mut scratch = Scratch::new(Some(current_process()?.budget()));
+    scratch.reserve_exact(&mut extended, size as usize)?;
     thread
         .with_stopped_state(|frame, bases, ext| match kind {
             STATE_GENERAL => general = General::from_frame(frame, bases[0], bases[1]).bytes(),
@@ -864,9 +865,8 @@ pub fn thread_write_state(
         return Err(Error::BufferTooSmall);
     }
     let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(size as usize)
-        .map_err(|_| Error::NoMemory)?;
+    let mut scratch = Scratch::new(Some(current_process()?.budget()));
+    scratch.reserve_exact(&mut bytes, size as usize)?;
     bytes.resize(size as usize, 0);
     buf.read_bytes(&mut bytes)?;
     if kind == STATE_DEBUG {
@@ -924,7 +924,7 @@ pub fn signal_set_action(signo: u32, action: UserIn<u8>, old: UserOut<u8>) -> Re
         return Err(Error::InvalidArgs);
     }
     let process = current_process()?;
-    let threads = process.live_threads()?;
+    let threads = process.live_threads(&mut Scratch::new(Some(process.budget())))?;
     let outputs = prepare_optional(&process, &old, ACTION_SIZE as u64)?;
     let mut state = process.signals().lock();
     let slot = signo as usize - 1;
@@ -1478,11 +1478,11 @@ pub fn stream_create(
 }
 
 /// A kernel buffer for up to one queue's worth of the `len` bytes of a
-/// stream call.
-fn stream_buffer(len: u64) -> Result<Vec<u8>, Error> {
+/// stream call, charged to `scratch`.
+fn stream_buffer(len: u64, scratch: &mut Scratch) -> Result<Vec<u8>, Error> {
     let n = len.min(STREAM_QUEUE_BYTES as u64) as usize;
     let mut buf = Vec::new();
-    buf.try_reserve_exact(n).map_err(|_| Error::NoMemory)?;
+    scratch.reserve_exact(&mut buf, n)?;
     buf.resize(n, 0);
     Ok(buf)
 }
@@ -1496,9 +1496,11 @@ pub fn stream_write(
     if !actual.fits(1) || !bytes.fits(len) {
         return Err(Error::InvalidArgs);
     }
-    let mut buf = stream_buffer(len)?;
+    let process = current_process()?;
+    let mut scratch = Scratch::new(Some(process.budget()));
+    let mut buf = stream_buffer(len, &mut scratch)?;
     bytes.read_bytes(&mut buf)?;
-    let outputs = prepare(&current_process()?, &[actual.range(1)])?;
+    let outputs = prepare(&process, &[actual.range(1)])?;
     let written = object::<StreamEnd>(stream).write(&buf)? as u64;
     publish(outputs, &[bytes_of(&[written])]);
     Ok(())
@@ -1513,11 +1515,13 @@ pub fn stream_read(
     if !actual.fits(1) || !bytes.fits(len) {
         return Err(Error::InvalidArgs);
     }
-    let mut buf = stream_buffer(len)?;
+    let process = current_process()?;
+    let mut scratch = Scratch::new(Some(process.budget()));
+    let mut buf = stream_buffer(len, &mut scratch)?;
     // Every byte the read could return has backing before any leaves the
     // queue.
     let ranges = [bytes.range(buf.len() as u64), actual.range(1)];
-    let outputs = prepare(&current_process()?, &ranges)?;
+    let outputs = prepare(&process, &ranges)?;
     let n = object::<StreamEnd>(stream).read(&mut buf)?;
     publish(outputs, &[&buf[..n], bytes_of(&[n as u64])]);
     Ok(())
@@ -1648,20 +1652,20 @@ pub fn pager_query_dirty(
     if !count.fits(1) {
         return Err(Error::InvalidArgs);
     }
-    let ranges = paged_of(pager, mem)?.dirty_ranges(offset, len, cap)?;
+    let process = current_process()?;
+    let mut scratch = Scratch::new(Some(process.budget()));
+    let ranges = paged_of(pager, mem)?.dirty_ranges(offset, len, cap, &mut scratch)?;
     let n = ranges.len() as u64;
     if !out.fits(n * 16) {
         return Err(Error::InvalidArgs);
     }
     let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(n as usize * 16)
-        .map_err(|_| Error::NoMemory)?;
+    scratch.reserve_exact(&mut bytes, n as usize * 16)?;
     for &(at, length) in ranges.iter().take(n as usize) {
         bytes.extend_from_slice(&at.to_le_bytes());
         bytes.extend_from_slice(&length.to_le_bytes());
     }
-    let outputs = prepare(&current_process()?, &[out.range(n * 16), count.range(1)])?;
+    let outputs = prepare(&process, &[out.range(n * 16), count.range(1)])?;
     publish(outputs, &[&bytes, bytes_of(&[n])]);
     Ok(())
 }

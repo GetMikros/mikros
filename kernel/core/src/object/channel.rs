@@ -25,10 +25,16 @@ const QUEUE_BYTES: usize = 524288;
 pub struct Message {
     pub bytes: Vec<u8>,
     pub handles: Vec<Entry>,
-    charged: Option<(Arc<Budget>, u64)>,
+    _charge: Option<Held>,
 }
 
 impl Message {
+    /// The kernel memory charged for a message of `len` bytes and `count`
+    /// handles.
+    pub fn cost(len: usize, count: usize) -> u64 {
+        (size_of::<Message>() + len + count * size_of::<Entry>()) as u64
+    }
+
     /// A message holding `bytes` and `handles`. Its kernel memory is
     /// charged to `budget`, if given.
     pub fn new(
@@ -36,28 +42,18 @@ impl Message {
         handles: Vec<Entry>,
         budget: Option<&Arc<Budget>>,
     ) -> Result<Message, Error> {
-        let charged = match budget {
-            Some(budget) => {
-                let cost = (size_of::<Message>()
-                    + bytes.capacity()
-                    + handles.capacity() * size_of::<Entry>()) as u64;
-                budget.charge_kernel(cost)?;
-                Some((budget.clone(), cost))
-            }
-            None => None,
-        };
-        Ok(Message {
+        let cost = Message::cost(bytes.capacity(), handles.capacity());
+        let charge = budget.map(|b| b.hold_kernel(cost)).transpose()?;
+        Ok(Message::charged(bytes, handles, charge))
+    }
+
+    /// A message holding `bytes` and `handles`, whose kernel memory
+    /// `charge` covers.
+    pub fn charged(bytes: Vec<u8>, handles: Vec<Entry>, charge: Option<Held>) -> Message {
+        Message {
             bytes,
             handles,
-            charged,
-        })
-    }
-}
-
-impl Drop for Message {
-    fn drop(&mut self) {
-        if let Some((budget, cost)) = &self.charged {
-            budget.release_kernel(*cost);
+            _charge: charge,
         }
     }
 }

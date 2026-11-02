@@ -9,7 +9,7 @@ use crate::thread_state::{self, GENERAL_SIZE, General};
 use crate::usercopy::{copy_in, copy_out};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use kernel_core::object::budget::Budget;
+use kernel_core::object::budget::{Budget, Scratch};
 use kernel_core::signal::{
     Action, CODE_EXCEPTION, CONT, Default as DefaultAction, HANDLER_DEFAULT, HANDLER_IGNORE,
     INFO_SIZE, Info, KILL, NODEFER, ONSTACK, Pending, RESETHAND, RESTART, SEGV, SIG_MAX,
@@ -75,7 +75,7 @@ pub fn send(
     info: Info,
     budget: &Arc<Budget>,
 ) -> Result<(), Error> {
-    let threads = process.live_threads()?;
+    let threads = process.live_threads(&mut Scratch::new(Some(budget)))?;
     let mut state = process.signals().lock();
     discard(&mut state, &threads, discarded_by(info.signo));
     let ProcessSignals {
@@ -381,9 +381,8 @@ fn restore(frame: &mut Frame, thread: &Thread, context: u64) -> Result<(), Error
         return Err(Error::InvalidArgs);
     }
     let mut xsave = Vec::new();
-    xsave
-        .try_reserve_exact(size as usize)
-        .map_err(|_| Error::NoMemory)?;
+    let mut scratch = Scratch::new(thread.process().map(|p| p.budget()));
+    scratch.reserve_exact(&mut xsave, size as usize)?;
     xsave.resize(size as usize, 0);
     copy_in(&mut xsave, context + XSAVE_OFFSET)?;
     extended.save();
