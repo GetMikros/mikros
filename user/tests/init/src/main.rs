@@ -853,9 +853,98 @@ fn channel_calls(s: &Startup) -> Result {
     ensure("ending on a closed peer", status == -24)
 }
 
+/// The futex word of the futex test and the order its waiters woke in.
+static FUTEX_ORDER: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static FUTEX_WOKEN: AtomicU64 = AtomicU64::new(0);
+
+extern "sysv64" fn futex_waiter(addr: u64, index: u64) -> ! {
+    // SAFETY: `addr` is a mapped, aligned word.
+    let status = unsafe { sys::futex_wait(addr as *const u32, 0, i64::MAX) };
+    if status == 0 {
+        let at = FUTEX_WOKEN.fetch_add(1, Ordering::AcqRel) as usize;
+        FUTEX_ORDER[at].store(index, Ordering::Release);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Starts a thread of this process at `entry` with both arguments.
+fn spawn2(s: &Startup, entry: extern "sysv64" fn(u64, u64) -> !, a: u64, b: u64) -> Result<Handle> {
+    let stack_size = 16 * 1024;
+    let stack = create_memory(stack_size)?;
+    let at = map(s.process, stack, stack_size)?;
+    let mut thread = 0;
+    let name = b"helper";
+    // SAFETY: the pointers describe `name` and `thread`.
+    let status =
+        unsafe { sys::thread_create(s.process, name.as_ptr(), name.len() as u64, &mut thread) };
+    check("creating a thread", status)?;
+    // SAFETY: the call takes no pointers; the stack is mapped and unused.
+    let status =
+        unsafe { sys::thread_start(thread, entry as *const () as u64, at + stack_size - 8, a, b) };
+    check("starting the thread", status)?;
+    Ok(thread)
+}
+
+fn futex_wake(addr: u64, count: u32) -> Result<u32> {
+    let mut woken = 0;
+    // SAFETY: the pointers are valid for the call.
+    check("waking", unsafe {
+        sys::futex_wake(addr as *const u32, count, &mut woken)
+    })?;
+    Ok(woken)
+}
+
+/// Futexes compare before blocking, time out, wake in arrival order and
+/// are keyed by memory object and offset.
+fn futexes(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let first = map(s.process, mem, PAGE_SIZE)?;
+    let second = map(s.process, mem, PAGE_SIZE)?;
+    let word = first + 64;
+    // SAFETY: the calls read the mapped word or check the address.
+    unsafe {
+        ensure(
+            "comparing",
+            sys::futex_wait(word as *const u32, 1, i64::MAX) == -20,
+        )?;
+        ensure(
+            "needing alignment",
+            sys::futex_wait((word + 2) as *const u32, 0, i64::MAX) == -10,
+        )?;
+        ensure(
+            "needing a mapping",
+            sys::futex_wait(0x1000 as *const u32, 0, i64::MAX) == -10,
+        )?;
+        ensure(
+            "timing out",
+            sys::futex_wait(word as *const u32, 0, soon()) == TIMED_OUT,
+        )?;
+    }
+    for index in 1..=3 {
+        spawn2(s, futex_waiter, word, index)?;
+        sleep_ms(5);
+    }
+    ensure("waking one", futex_wake(word, 1)? == 1)?;
+    sleep_ms(5);
+    ensure(
+        "waking the oldest",
+        FUTEX_ORDER[0].load(Ordering::Acquire) == 1,
+    )?;
+    // The second mapping reaches the same futex.
+    ensure("waking the rest", futex_wake(second + 64, u32::MAX)? == 2)?;
+    sleep_ms(5);
+    ensure(
+        "waking in order",
+        FUTEX_ORDER[1].load(Ordering::Acquire) == 2 && FUTEX_ORDER[2].load(Ordering::Acquire) == 3,
+    )?;
+    ensure("waking nobody", futex_wake(word, 1)? == 0)
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 12] = [
+const TESTS: [(&str, Test); 13] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -865,6 +954,7 @@ const TESTS: [(&str, Test); 12] = [
     ("memory_operations", memory_operations),
     ("seals", seals),
     ("channel_calls", channel_calls),
+    ("futexes", futexes),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
