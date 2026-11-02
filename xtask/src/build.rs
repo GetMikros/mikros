@@ -14,6 +14,15 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The name of the kind on the command line.
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Production => "production",
+            Kind::Debug => "debug",
+            Kind::Fuzz => "fuzz",
+        }
+    }
+
     /// The Cargo profile used for this kind.
     fn profile(self) -> &'static str {
         match self {
@@ -38,10 +47,29 @@ pub struct Args {
     pub kind: Kind,
 }
 
-pub fn run(args: &Args) -> Result<()> {
-    let bootmenu = cargo_build("bootmenu", "x86_64-unknown-uefi", args.kind)?;
+/// The paths of the built components. Components that are not built yet
+/// are `None`.
+pub struct Built {
+    pub bootmenu: PathBuf,
+    pub bootloader: Option<PathBuf>,
+    pub kernel: Option<PathBuf>,
+    pub boot_image: Option<PathBuf>,
+}
+
+/// Builds every component of the build kind `kind`.
+pub fn build(kind: Kind) -> Result<Built> {
+    let bootmenu = cargo_build("bootmenu", "x86_64-unknown-uefi", kind)?;
     println!("built    {}", bootmenu.display());
-    Ok(())
+    Ok(Built {
+        bootmenu,
+        bootloader: None,
+        kernel: None,
+        boot_image: None,
+    })
+}
+
+pub fn run(args: &Args) -> Result<()> {
+    build(args.kind).map(drop)
 }
 
 /// Builds the binary of `package` for `target` and returns its path.

@@ -2,6 +2,7 @@
 
 mod build;
 mod firmware;
+mod image;
 mod setup;
 mod tools;
 
@@ -20,6 +21,8 @@ struct Cli {
 enum Command {
     /// Build the system components.
     Build(build::Args),
+    /// Create a bootable disk image.
+    Image(image::Args),
     /// Check the host tools and fetch the pinned firmware.
     Setup(setup::Args),
 }
@@ -36,6 +39,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Build(args) => build::run(&args),
+        Command::Image(args) => image::run(&args),
         Command::Setup(args) => setup::run(&args),
     };
     match result {

@@ -1,0 +1,187 @@
+//! `cargo xtask image`: creates a bootable GPT disk image.
+
+mod esp;
+mod gpt;
+
+use crate::build::{self, Kind};
+use anyhow::{Context, Result, bail};
+use std::fs::{self, File};
+use std::io::{self, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
+
+const ESP_TYPE: Uuid = Uuid::from_u128(0xc12a7328_f81f_11d2_ba4b_00a0c93ec93b);
+const ROOT_TYPE: Uuid = Uuid::from_u128(0xfa730af6_8ba3_42d9_b155_466909d08135);
+
+#[derive(clap::Args)]
+pub struct Args {
+    /// The build kind to put in the image.
+    #[arg(long, value_enum, default_value_t = Kind::Debug)]
+    pub kind: Kind,
+    /// Create an image with only the EFI system partition, which runs the
+    /// whole system from the boot image.
+    #[arg(long)]
+    pub live: bool,
+}
+
+/// Where the image of a build kind is written.
+pub fn path(kind: Kind, live: bool) -> PathBuf {
+    let name = format!(
+        "mikros-{}{}.img",
+        kind.name(),
+        if live { "-live" } else { "" }
+    );
+    crate::workspace_root().join("target/image").join(name)
+}
+
+/// The contents of a partition.
+enum Data<'a> {
+    Bytes(&'a [u8]),
+    File(&'a Path),
+}
+
+impl Data<'_> {
+    fn len(&self) -> Result<u64> {
+        Ok(match self {
+            Data::Bytes(bytes) => bytes.len() as u64,
+            Data::File(path) => fs::metadata(path)?.len(),
+        })
+    }
+}
+
+struct Part<'a> {
+    type_guid: Uuid,
+    guid: Uuid,
+    name: &'static str,
+    data: Data<'a>,
+}
+
+/// Writes a disk image at `path` holding `parts` in order.
+fn write_image(path: &Path, parts: &[Part]) -> Result<()> {
+    let sizes = parts
+        .iter()
+        .map(|p| p.data.len())
+        .collect::<Result<Vec<_>>>()?;
+    let (places, sectors) = gpt::layout(&sizes);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut disk = File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    disk.set_len(sectors * gpt::SECTOR)?;
+    let table: Vec<gpt::Partition> = parts
+        .iter()
+        .zip(&places)
+        .map(|(p, &(first_lba, last_lba))| gpt::Partition {
+            type_guid: p.type_guid,
+            guid: p.guid,
+            name: p.name,
+            first_lba,
+            last_lba,
+        })
+        .collect();
+    gpt::write(&mut disk, sectors, Uuid::new_v4(), &table)?;
+    for (part, &(first_lba, _)) in parts.iter().zip(&places) {
+        disk.seek(SeekFrom::Start(first_lba * gpt::SECTOR))?;
+        match &part.data {
+            Data::Bytes(bytes) => disk.write_all(bytes)?,
+            Data::File(file) => {
+                io::copy(&mut File::open(file)?, &mut disk)?;
+            }
+        }
+    }
+    disk.sync_all()?;
+    Ok(())
+}
+
+/// Creates the btrfs file system of the root partition and returns the
+/// path of its image.
+fn root_partition(_kind: Kind) -> Result<PathBuf> {
+    bail!("the contents of the root partition are not defined yet (MIKSPEC-0052)")
+}
+
+pub fn run(args: &Args) -> Result<()> {
+    if args.live {
+        bail!("live images are not supported yet: the boot image's contents are not defined");
+    }
+    let built = build::build(args.kind)?;
+    let (Some(bootloader), Some(kernel), Some(boot_image)) =
+        (&built.bootloader, &built.kernel, &built.boot_image)
+    else {
+        bail!(
+            "cannot create a disk image: `cargo xtask build` does not build the bootloader, \
+             kernel and boot image yet"
+        );
+    };
+    let root_guid = Uuid::new_v4();
+    let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
+    let bootmenu = read(&built.bootmenu)?;
+    let command_line = format!("root=PARTUUID={root_guid}");
+    let contents = [
+        ("EFI/Mikros/bootmenu.efi", bootmenu.clone()),
+        ("EFI/BOOT/BOOTX64.EFI", bootmenu),
+        ("EFI/Mikros/mikrosboot.efi", read(bootloader)?),
+        ("EFI/Mikros/kernel", read(kernel)?),
+        ("EFI/Mikros/boot.img", read(boot_image)?),
+        ("EFI/Mikros/boot.conf", command_line.into_bytes()),
+    ];
+    let files: Vec<(&str, &[u8])> = contents.iter().map(|(p, d)| (*p, d.as_slice())).collect();
+    let total = files.iter().map(|(_, d)| d.len() as u64).sum();
+    let esp = esp::build(esp::size_for(total), &files)?;
+    let root = root_partition(args.kind)?;
+
+    let out = path(args.kind, false);
+    write_image(
+        &out,
+        &[
+            Part {
+                type_guid: ESP_TYPE,
+                guid: Uuid::new_v4(),
+                name: "EFI system partition",
+                data: Data::Bytes(&esp),
+            },
+            Part {
+                type_guid: ROOT_TYPE,
+                guid: root_guid,
+                name: "Mikros",
+                data: Data::File(&root),
+            },
+        ],
+    )?;
+    println!("created  {}", out.display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_partitions_at_their_places() {
+        let dir = std::env::temp_dir().join(format!("xtask-image-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let second = dir.join("second.bin");
+        fs::write(&second, b"root").unwrap();
+        let image = dir.join("disk.img");
+        let parts = [
+            Part {
+                type_guid: ESP_TYPE,
+                guid: Uuid::from_u128(1),
+                name: "a",
+                data: Data::Bytes(b"esp"),
+            },
+            Part {
+                type_guid: ROOT_TYPE,
+                guid: Uuid::from_u128(2),
+                name: "b",
+                data: Data::File(&second),
+            },
+        ];
+        write_image(&image, &parts).unwrap();
+        let bytes = fs::read(&image).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(bytes.len() as u64, (6144 + 33) * gpt::SECTOR);
+        assert_eq!(&bytes[512..520], b"EFI PART");
+        assert_eq!(&bytes[2048 * 512..][..3], b"esp");
+        assert_eq!(&bytes[4096 * 512..][..4], b"root");
+    }
+}
