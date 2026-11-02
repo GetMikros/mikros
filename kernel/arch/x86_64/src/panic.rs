@@ -133,7 +133,7 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
         Report {
             title,
             build_id: build_id(),
-            cpu: 0,
+            cpu: crate::percpu::index(),
             registers,
             frames: backtrace::frames(rbp, stack, read),
         },

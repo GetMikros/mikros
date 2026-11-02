@@ -1,8 +1,5 @@
 //! The global descriptor table and the task state segment.
 
-use core::arch::asm;
-use core::mem::size_of;
-
 pub const KERNEL_CODE: u16 = 0x08;
 pub const KERNEL_DATA: u16 = 0x10;
 pub const TSS_SELECTOR: u16 = 0x30;
@@ -93,7 +90,11 @@ pub fn set_rsp0(top: u64) {
 
 /// Builds the GDT and the TSS, with the IST stacks whose tops are given,
 /// and loads them. Every segment register is reloaded.
+#[cfg(target_os = "none")]
 pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64) {
+    use crate::cpu::{read_msr, write_msr};
+    use crate::percpu::{IA32_GS_BASE, IA32_KERNEL_GS_BASE};
+    use core::arch::asm;
     let tss = &raw mut TSS;
     // SAFETY: nothing else uses the TSS or the GDT before they are loaded
     // here, on the only running processor.
@@ -117,6 +118,10 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64) {
             limit: (size_of::<[u64; 8]>() - 1) as u16,
             base: gdt as u64,
         };
+        // Loading a null selector into GS may clear its base, so both GS
+        // bases are kept across the reload.
+        let gs = read_msr(IA32_GS_BASE);
+        let kernel_gs = read_msr(IA32_KERNEL_GS_BASE);
         // The far return reloads CS; the other data segment registers
         // take the kernel data or the null selector.
         asm!(
@@ -139,6 +144,8 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64) {
             tss = in(reg) u64::from(TSS_SELECTOR),
             tmp = out(reg) _,
         );
+        write_msr(IA32_GS_BASE, gs);
+        write_msr(IA32_KERNEL_GS_BASE, kernel_gs);
     }
 }
 

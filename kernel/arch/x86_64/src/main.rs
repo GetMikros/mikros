@@ -33,6 +33,8 @@ mod paging;
 #[cfg(target_os = "none")]
 mod panic;
 #[cfg(target_os = "none")]
+mod percpu;
+#[cfg(target_os = "none")]
 mod serial;
 #[cfg(target_os = "none")]
 mod space;

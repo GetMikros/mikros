@@ -78,6 +78,12 @@ global_asm!(
     ".set vector, vector + 1",
     ".endr",
     "interrupt_common:",
+    // Swap to the kernel GS base when the interrupted code ran in user
+    // mode, as its saved CS shows, and back before returning to it.
+    "test byte ptr [rsp + 24], 3",
+    "jz 2f",
+    "swapgs",
+    "2:",
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
@@ -88,6 +94,10 @@ global_asm!(
     "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
     "pop rcx", "pop rbx", "pop rax",
     "add rsp, 16",
+    "test byte ptr [rsp + 8], 3",
+    "jz 3f",
+    "swapgs",
+    "3:",
     "iretq",
     ".popsection",
     mask = const ERROR_CODE_VECTORS,

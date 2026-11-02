@@ -53,6 +53,7 @@ extern "sysv64" fn _start(info: *const u8) -> ! {
         panic!("missing CPU features: {}", Missing(&leaves));
     }
     crate::cpu::init();
+    crate::percpu::init();
     let info = boot_info(info);
     log!(
         Info,
