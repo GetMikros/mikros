@@ -110,6 +110,7 @@ fn mask_pics() {
 
 /// Masks every redirection entry of the I/O APIC at `phys`.
 fn mask_io_apic(phys: u64) {
+    crate::reserved::reserve_mmio(phys, 0x20);
     let base = map_device(phys, 0x20);
     let select = base as *mut u32;
     let window = (base + 0x10) as *mut u32;
@@ -141,6 +142,7 @@ fn init_local(madt: &[u8]) {
         if x2apic {
             write_msr(IA32_APIC_BASE, base | APIC_ENABLE | APIC_X2);
         } else {
+            crate::reserved::reserve_mmio(base & 0x000F_FFFF_FFFF_F000, 0x1000);
             XAPIC.store(
                 map_device(base & 0x000F_FFFF_FFFF_F000, 0x1000),
                 Ordering::Relaxed,

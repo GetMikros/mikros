@@ -53,6 +53,11 @@ pub fn init() {
     PRESENT.store(true, Ordering::Relaxed);
 }
 
+/// Whether the port was found.
+pub fn present() -> bool {
+    PRESENT.load(Ordering::Relaxed)
+}
+
 /// Writes `bytes`, waiting for the transmitter before each one.
 pub fn write(bytes: &[u8]) {
     if !PRESENT.load(Ordering::Relaxed) {

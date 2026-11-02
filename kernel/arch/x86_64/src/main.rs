@@ -61,6 +61,8 @@ mod publish;
 #[cfg(target_os = "none")]
 mod random;
 #[cfg(target_os = "none")]
+mod reserved;
+#[cfg(target_os = "none")]
 mod sched;
 #[cfg(target_os = "none")]
 mod serial;

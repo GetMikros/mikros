@@ -12,6 +12,7 @@ use kernel_core::acpi::{self, Address, PmTimer, Tables};
 use kernel_core::clock::{Extender, ticks_to_ns};
 use kernel_core::object::budget::Budget;
 use kernel_core::object::memory::PAGE_SIZE;
+use kernel_core::object::resource::KIND_IOPORT;
 use kernel_core::status::Error;
 
 const NONE: u8 = 0;
@@ -138,8 +139,13 @@ fn measure_with_pit(counter: &dyn Fn() -> u64) -> Option<u64> {
 
 fn use_pm_timer(pm: PmTimer) {
     match pm.address {
-        Address::Io(port) => ADDRESS.store(u64::from(port), Ordering::Relaxed),
+        Address::Io(port) => {
+            let port = u64::from(port);
+            crate::reserved::reserve(KIND_IOPORT, port, port + 4);
+            ADDRESS.store(port, Ordering::Relaxed);
+        }
         Address::Memory(phys) => {
+            crate::reserved::reserve_mmio(phys, 4);
             ADDRESS.store(crate::space::map_device(phys, 4), Ordering::Relaxed);
             PM_IN_MEMORY.store(1, Ordering::Relaxed);
         }
@@ -172,6 +178,7 @@ pub fn init(info: &BootInfo) {
         }
     };
     let hpet = hpet.map(|base| {
+        crate::reserved::reserve_mmio(base, HPET_SIZE);
         let virt = crate::space::map_device(base, HPET_SIZE);
         let config = hpet_read(virt, HPET_CONFIG);
         // SAFETY: setting the enable bit only starts the main counter.

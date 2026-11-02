@@ -76,6 +76,7 @@ extern "sysv64" fn on_kernel_tables() -> ! {
     gdt::init(space::stack_top(), ist(), ist(), ist());
     crate::idt::init();
     crate::console::init(&info);
+    crate::reserved::init(&info);
     crate::syscall::init();
     crate::apic::init(&info);
     crate::time::init(&info);

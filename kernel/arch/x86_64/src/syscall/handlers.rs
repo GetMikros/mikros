@@ -16,6 +16,7 @@ use kernel_core::object::budget::{Budget, INFO_BUDGET};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
+use kernel_core::object::resource::{Request, Resource};
 use kernel_core::object::{
     INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
 };
@@ -816,4 +817,32 @@ pub fn clock_get_monotonic(out: UserOut<i64>) -> Result<(), Error> {
 
 pub fn thread_sleep(deadline: i64) -> Result<(), Error> {
     crate::signal::sleep(deadline)
+}
+
+pub fn resource_create(
+    parent: Checked,
+    kind: u32,
+    base: u64,
+    size: u64,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let request = Request {
+        kind,
+        base,
+        size,
+        options,
+    };
+    let budget = current_process()?.budget().clone();
+    let resource = Resource::create(
+        &object(parent),
+        request,
+        &budget,
+        true,
+        crate::reserved::denied,
+    )?;
+    give(resource, ObjectType::Resource, out)
 }
