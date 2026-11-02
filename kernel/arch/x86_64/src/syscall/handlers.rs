@@ -3,11 +3,13 @@
 //! argument.
 
 use super::{Checked, UserIn, UserOut, current_process};
+use crate::memory_object::MemoryObject;
 use crate::process::Process;
 use crate::sched::Thread;
 use alloc::sync::Arc;
 use kernel_core::object::budget::{Budget, INFO_BUDGET};
 use kernel_core::object::handles::Handle;
+use kernel_core::object::memory::INFO_MEMORY;
 use kernel_core::object::{
     INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
 };
@@ -74,6 +76,9 @@ pub fn object_get_info(
         INFO_BASIC => copy(&mut record, &basic_info(&*handle.object, handle.rights)),
         INFO_BUDGET if kind == ObjectType::Budget => {
             copy(&mut record, &object::<Budget>(handle).info())
+        }
+        INFO_MEMORY if kind == ObjectType::MemoryObject => {
+            copy(&mut record, &object::<MemoryObject>(handle).info())
         }
         _ => return Err(Error::WrongType),
     };
@@ -223,4 +228,41 @@ pub fn task_kill(handle: Checked) -> Result<(), Error> {
         _ => Process::kill_thread(&object(handle)),
     }
     Ok(())
+}
+
+pub fn mem_create(size: u64, options: u32, out: UserOut<Handle>) -> Result<(), Error> {
+    let mem = MemoryObject::new(current_process()?.budget(), size, options)?;
+    give(mem, ObjectType::MemoryObject, out)
+}
+
+pub fn mem_read(mem: Checked, offset: u64, buf: UserOut<u8>, len: u64) -> Result<(), Error> {
+    let mem = object::<MemoryObject>(mem);
+    mem.check_range(offset, len)?;
+    if !buf.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    let mut done = 0;
+    mem.read(offset, len, |bytes| {
+        buf.at(done).write_bytes(bytes)?;
+        done += bytes.len() as u64;
+        Ok(())
+    })
+}
+
+pub fn mem_write(mem: Checked, offset: u64, buf: UserIn<u8>, len: u64) -> Result<(), Error> {
+    let mem = object::<MemoryObject>(mem);
+    mem.check_range(offset, len)?;
+    if !buf.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    let mut done = 0;
+    mem.write(offset, len, |bytes| {
+        buf.at(done).read_bytes(bytes)?;
+        done += bytes.len() as u64;
+        Ok(())
+    })
+}
+
+pub fn mem_set_size(mem: Checked, size: u64) -> Result<(), Error> {
+    object::<MemoryObject>(mem).set_size(size)
 }

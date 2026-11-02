@@ -38,6 +38,8 @@ mod idt;
 mod log;
 #[cfg(target_os = "none")]
 mod memory;
+#[cfg(target_os = "none")]
+mod memory_object;
 #[cfg(any(target_os = "none", test))]
 mod paging;
 #[cfg(target_os = "none")]

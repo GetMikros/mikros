@@ -184,6 +184,12 @@ impl<T: Plain> UserIn<T> {
         UserIn(addr, PhantomData)
     }
 
+    /// Whether `len` values fit at the address inside the user range.
+    pub fn fits(&self, len: u64) -> bool {
+        let bytes = len.checked_mul(size_of::<T>() as u64);
+        bytes.is_some_and(|b| b == 0 || crate::aspace::in_user_range(self.0, b))
+    }
+
     /// Copies the value in once.
     pub fn read(&self) -> Result<T, Error> {
         let mut value = core::mem::MaybeUninit::<T>::zeroed();
@@ -202,6 +208,11 @@ impl UserIn<u8> {
     /// Copies `dst.len()` bytes in once.
     pub fn read_bytes(&self, dst: &mut [u8]) -> Result<(), Error> {
         copy_in(dst, self.0)
+    }
+
+    /// The address `offset` bytes further on.
+    pub fn at(&self, offset: u64) -> Self {
+        UserIn::new(self.0.wrapping_add(offset))
     }
 }
 
@@ -230,6 +241,11 @@ impl<T: Plain> UserOut<T> {
 impl UserOut<u8> {
     pub fn write_bytes(&self, src: &[u8]) -> Result<(), Error> {
         copy_out(self.0, src)
+    }
+
+    /// The address `offset` bytes further on.
+    pub fn at(&self, offset: u64) -> Self {
+        UserOut::new(self.0.wrapping_add(offset))
     }
 }
 

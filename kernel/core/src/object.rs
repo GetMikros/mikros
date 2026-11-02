@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub mod budget;
 pub mod handles;
+pub mod memory;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]

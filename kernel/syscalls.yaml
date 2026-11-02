@@ -175,3 +175,44 @@ syscalls:
     spec: [MIKSPEC-0008.R8]
     args:
       - {name: handle, type: Handle, dir: in, object: [Process, Thread], rights: [MANAGE]}
+
+  - name: mem_create
+    number: 16
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R12]
+    args:
+      - {name: size, type: u64, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out}
+
+  - name: mem_read
+    number: 17
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R13]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [READ]}
+      - {name: offset, type: u64, dir: in}
+      - {name: buf, type: "*mut u8", dir: out}
+      - {name: len, type: u64, dir: in}
+
+  - name: mem_write
+    number: 18
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R13]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [WRITE]}
+      - {name: offset, type: u64, dir: in}
+      - {name: buf, type: "*const u8", dir: in}
+      - {name: len, type: u64, dir: in}
+
+  - name: mem_set_size
+    number: 19
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R14]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [WRITE]}
+      - {name: size, type: u64, dir: in}
