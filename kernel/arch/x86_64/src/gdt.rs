@@ -90,6 +90,21 @@ pub fn set_rsp0(top: u64) {
     unsafe { (&raw mut TSS.rsp[0]).write_unaligned(top) };
 }
 
+/// Allows or denies user-mode access to the I/O ports from `start` to
+/// `end`, exclusive, which must not exceed 0x10000.
+pub fn set_ports(start: u64, end: u64, allow: bool) {
+    for port in start..end {
+        let (byte, bit) = ((port / 8) as usize, 1u8 << (port % 8));
+        // SAFETY: only this processor uses its TSS, `byte` lies inside
+        // the bitmap, and the processor reads the bitmap only on I/O
+        // instructions in user mode, which cannot run while this does.
+        unsafe {
+            let at = &raw mut TSS.io_bitmap[byte];
+            *at = if allow { *at & !bit } else { *at | bit };
+        }
+    }
+}
+
 /// Builds the GDT and the TSS, with the IST stacks whose tops are given,
 /// and loads them. Every segment register is reloaded.
 #[cfg(target_os = "none")]

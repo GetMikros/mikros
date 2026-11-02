@@ -327,6 +327,7 @@ impl Thread {
         percpu::this().thread_stack.store(top, Ordering::Relaxed);
         self.extended.restore();
         self.load_breakpoints();
+        crate::process::switch_ports(self.process.as_deref());
         let Some(process) = &self.process else {
             return;
         };

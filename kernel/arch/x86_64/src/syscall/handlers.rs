@@ -16,7 +16,7 @@ use kernel_core::object::budget::{Budget, INFO_BUDGET};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
-use kernel_core::object::resource::{Request, Resource};
+use kernel_core::object::resource::{KIND_IOPORT, Request, Resource};
 use kernel_core::object::{
     INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
 };
@@ -845,4 +845,23 @@ pub fn resource_create(
         crate::reserved::denied,
     )?;
     give(resource, ObjectType::Resource, out)
+}
+
+pub fn process_ioports_enable(
+    process: Checked,
+    resource: Checked,
+    base: u64,
+    size: u64,
+) -> Result<(), Error> {
+    let resource = object::<Resource>(resource);
+    if resource.kind() != KIND_IOPORT {
+        return Err(Error::WrongType);
+    }
+    if size == 0 {
+        return Err(Error::InvalidArgs);
+    }
+    if !resource.covers(base, size) {
+        return Err(Error::OutOfRange);
+    }
+    object::<Process>(process).enable_ioports(base, base + size)
 }

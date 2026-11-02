@@ -39,6 +39,35 @@ pub struct Process {
     term_signal: AtomicU32,
     /// The threads waiting while the process is stopped.
     stopped: SpinLock<Vec<Arc<Thread>>>,
+    /// The I/O port ranges, start and exclusive end, that the process's
+    /// threads may access.
+    ioports: SpinLock<Vec<(u64, u64)>>,
+}
+
+/// The I/O port ranges the bitmap allows now.
+static OPEN_PORTS: SpinLock<Vec<(u64, u64)>> = SpinLock::new(Vec::new());
+
+/// Makes the I/O permission bitmap allow exactly the ports of `process`,
+/// or none for a kernel thread. Called as a thread is switched in.
+pub fn switch_ports(process: Option<&Process>) {
+    let mut open = OPEN_PORTS.lock();
+    let ports = process.map(|p| p.ioports.lock());
+    let wanted: &[(u64, u64)] = ports.as_deref().map_or(&[], Vec::as_slice);
+    if *open == wanted {
+        return;
+    }
+    for &(start, end) in open.iter() {
+        crate::gdt::set_ports(start, end, false);
+    }
+    open.clear();
+    // Without room to record them, no ports are opened.
+    if open.try_reserve(wanted.len()).is_err() {
+        return;
+    }
+    for &(start, end) in wanted {
+        crate::gdt::set_ports(start, end, true);
+        open.push((start, end));
+    }
 }
 
 /// The endpoint of a process's exception channel that the kernel keeps.
@@ -82,12 +111,29 @@ impl Process {
             signals: SpinLock::new(crate::signal::ProcessSignals::default()),
             term_signal: AtomicU32::new(0),
             stopped: SpinLock::new(Vec::new()),
+            ioports: SpinLock::new(Vec::new()),
         }))
     }
 
     #[expect(dead_code, reason = "no call reads process names yet")]
     pub fn name(&self) -> &Name {
         &self.name
+    }
+
+    /// Lets the threads of the process access the ports from `start` to
+    /// `end`, exclusive, until it terminates.
+    pub fn enable_ioports(&self, start: u64, end: u64) -> Result<(), Error> {
+        let mut ports = self.ioports.lock();
+        ports.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        ports.push((start, end));
+        drop(ports);
+        let running_here = sched::current()
+            .and_then(|t| t.process().cloned())
+            .is_some_and(|p| core::ptr::eq(&*p, self));
+        if running_here {
+            switch_ports(Some(self));
+        }
+        Ok(())
     }
 
     pub fn budget(&self) -> &Arc<Budget> {
