@@ -10,5 +10,6 @@ pub mod display;
 pub mod entries;
 pub mod input;
 pub mod menu;
+pub mod pointer;
 pub mod shape;
 pub mod text;

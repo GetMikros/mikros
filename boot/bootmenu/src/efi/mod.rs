@@ -1,6 +1,7 @@
 //! The boot manager's use of UEFI.
 
 mod launch;
+mod pointers;
 mod power;
 mod screen;
 
@@ -12,15 +13,17 @@ use bootmenu::canvas::{Canvas, Color};
 use bootmenu::entries::Config;
 use bootmenu::input::{Action, Event, Input};
 use bootmenu::menu::{Card, FocusSource, Item, Menu, Power};
+use bootmenu::pointer;
 use bootmenu::text::Text;
 use core::time::Duration;
+use pointers::Pointers;
 use screen::Screen;
-use uefi::boot::{EventType, OpenProtocolAttributes, OpenProtocolParams, TimerTrigger, Tpl};
+use uefi::boot::{EventType, TimerTrigger, Tpl};
 use uefi::fs::FileSystem;
 use uefi::proto::console::text::{InputEx, Key, ScanCode};
 use uefi::proto::device_path::DevicePath;
 use uefi::runtime::{self, VariableVendor};
-use uefi::{Handle, Status, boot, cstr16, system, table};
+use uefi::{Status, boot, cstr16, system};
 use uefi_raw::protocol::console::KeyToggleState;
 
 const ENTRIES_PATH: &str = "\\EFI\\Mikros\\entries.yaml";
@@ -116,24 +119,7 @@ fn translate(key: Key) -> Event {
 /// discards, every pending key stroke, including Shift on its own where the
 /// console reports it.
 fn key_held() -> bool {
-    let console = table::system_table_raw().and_then(|st| {
-        // SAFETY: the system table pointer is valid while boot services run,
-        // and its console input handle is either null or a valid handle.
-        unsafe { Handle::from_ptr(st.as_ref().stdin_handle) }
-    });
-    let Some(handle) = console else {
-        return false;
-    };
-    let params = OpenProtocolParams {
-        handle,
-        agent: boot::image_handle(),
-        controller: None,
-    };
-    // SAFETY: GetProtocol does not take ownership of the protocol, so the
-    // console keeps using it; it is closed again when this function returns.
-    let opened =
-        unsafe { boot::open_protocol::<InputEx>(params, OpenProtocolAttributes::GetProtocol) };
-    let Ok(mut input) = opened else {
+    let Some(mut input) = pointers::open_on_console::<InputEx>() else {
         return false;
     };
     let _ = input.set_state(KeyToggleState::VALID | KeyToggleState::EXPOSED);
@@ -153,53 +139,76 @@ fn second_timer() -> Option<uefi::Event> {
     Some(event)
 }
 
-/// Waits for the next key press or tick of `timer`, and translates it.
-fn next_event(timer: Option<&uefi::Event>) -> Event {
+/// Waits for the next key press, pointer input or tick of `timer`, and
+/// translates it into menu events.
+fn next_events(timer: Option<&uefi::Event>, pointers: &mut Pointers) -> Vec<Event> {
     system::with_stdin(|input| {
         loop {
             if let Ok(key) = input.wait_for_key_event() {
                 // SAFETY: the clone is only used for this wait, while the
                 // timer event is still open.
+                let timer = timer.map(|t| unsafe { t.unsafe_clone() });
+                let has_timer = timer.is_some();
                 let events: Vec<uefi::Event> = core::iter::once(key)
-                    .chain(timer.map(|t| unsafe { t.unsafe_clone() }))
+                    .chain(timer)
+                    .chain(pointers.wait_events())
                     .collect();
-                if let Ok(1) = boot::wait_for_event(&events) {
-                    return Event::Second;
+                match boot::wait_for_event(&events) {
+                    Ok(1) if has_timer => return vec![Event::Second],
+                    Ok(0) | Err(_) => {}
+                    Ok(_) => {
+                        let events = pointers.read();
+                        if events.is_empty() {
+                            continue;
+                        }
+                        return events;
+                    }
                 }
             }
             match input.read_key() {
-                Ok(Some(key)) => return translate(key),
+                Ok(Some(key)) => return vec![translate(key)],
                 Ok(None) => continue,
-                Err(_) => return Event::OtherKey,
+                Err(_) => return vec![Event::OtherKey],
             }
         }
     })
 }
 
+/// Draws `menu`, and the pointer once it has moved, and shows the result.
+fn redraw(menu: &Menu, input: &Input, text: &mut Text, canvas: &mut Canvas, screen: &mut Screen) {
+    menu.draw(text, canvas);
+    if let Some((x, y)) = input.pointer() {
+        pointer::draw(canvas, x, y);
+    }
+    screen.present(canvas);
+}
+
 /// Shows `menu` on `screen` until an item is activated, and returns it. The
-/// screen is released when this returns.
+/// screen and the pointers are released when this returns.
 fn show(menu: &mut Menu, mut screen: Screen, text: &mut Text, default: usize) -> Item {
     let _ = boot::set_watchdog_timer(0, 0x10000, None);
     let (width, height) = screen.size();
     let mut canvas = Canvas::new(width, height);
     let mut input = Input::new(width as i32, height as i32, default);
+    let mut pointers = Pointers::open(width, height);
     let mut timer = menu.countdown.as_ref().and_then(|_| second_timer());
-    menu.draw(text, &mut canvas);
-    screen.present(&canvas);
-    let item = loop {
-        let action = input.handle(menu, next_event(timer.as_ref()));
+    redraw(menu, &input, text, &mut canvas, &mut screen);
+    let item = 'outer: loop {
+        let mut changed = false;
+        for event in next_events(timer.as_ref(), &mut pointers) {
+            match input.handle(menu, event) {
+                Action::None => {}
+                Action::Redraw => changed = true,
+                Action::Activate(item) => break 'outer item,
+            }
+        }
         if menu.countdown.is_none()
             && let Some(event) = timer.take()
         {
             let _ = boot::close_event(event);
         }
-        match action {
-            Action::None => {}
-            Action::Redraw => {
-                menu.draw(text, &mut canvas);
-                screen.present(&canvas);
-            }
-            Action::Activate(item) => break item,
+        if changed {
+            redraw(menu, &input, text, &mut canvas, &mut screen);
         }
     };
     if let Some(event) = timer {
