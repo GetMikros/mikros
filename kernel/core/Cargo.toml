@@ -7,3 +7,5 @@ publish = false
 
 [dependencies]
 boot-protocol = { path = "../../boot/protocol" }
+blake2 = { version = "=0.10.6", default-features = false }
+chacha20 = { version = "=0.9.1", default-features = false }

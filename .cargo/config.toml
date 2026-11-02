@@ -7,4 +7,7 @@ rustflags = [
     "-C", "relocation-model=static",
     "-C", "code-model=kernel",
     "-C", "force-frame-pointers=yes",
+    # Keep chacha20 on its portable backend; it would otherwise select
+    # SSE2 or AVX2 code at run time.
+    "--cfg", "chacha20_force_soft",
 ]

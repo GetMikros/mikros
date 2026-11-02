@@ -9,4 +9,5 @@ pub mod clock;
 pub mod frames;
 pub mod log;
 pub mod panic;
+pub mod random;
 pub mod sync;
