@@ -71,7 +71,7 @@ fuzz_target!(|input: Input| {
                     m.requested = true;
                     Absent::Request
                 };
-                assert_eq!(p.absent(i), expected);
+                assert_eq!(p.absent(i), Ok(expected));
             }
             Op::Supply(i) => {
                 let i = u64::from(i) % PAGES;
@@ -89,7 +89,7 @@ fuzz_target!(|input: Input| {
             }
             Op::Fail(a, b) => {
                 let (first, end) = range(a, b);
-                p.fail(first, end);
+                assert_eq!(p.fail(first, end), Ok(()));
                 for m in &mut pages[first as usize..end as usize] {
                     if !m.present {
                         m.requested = false;
@@ -113,7 +113,7 @@ fuzz_target!(|input: Input| {
                 if !pages[i as usize].present {
                     continue;
                 }
-                p.written(i);
+                assert_eq!(p.written(i), Ok(()));
                 if track {
                     pages[i as usize].dirty = true;
                     if let Some(w) = &mut writeback
@@ -186,7 +186,7 @@ fuzz_target!(|input: Input| {
                 assert_eq!(p.writable_without_fault(i), m.dirty && !pending);
             }
         }
-        let dirty: Vec<u64> = p.dirty_ranges(0, PAGES).iter().flat_map(|&(a, b)| a..b).collect();
+        let dirty: Vec<u64> = p.dirty_ranges(0, PAGES).unwrap().iter().flat_map(|&(a, b)| a..b).collect();
         let expected: Vec<u64> = (0..PAGES).filter(|&i| pages[i as usize].dirty).collect();
         assert_eq!(dirty, expected);
     }

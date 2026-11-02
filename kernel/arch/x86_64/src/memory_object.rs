@@ -231,12 +231,14 @@ impl MemoryObject {
             if pages.frame(index).is_some() {
                 return Ok(());
             }
-            let absent = state.absent(index);
+            let absent = state.absent(index)?;
             drop(state);
             drop(pages);
             match absent {
                 Absent::Request if !self.request(paged, index) => {
-                    paged.state.lock().fail(index, index + 1);
+                    // Without room to record the failure, the next
+                    // access requests the page again.
+                    let _ = paged.state.lock().fail(index, index + 1);
                     crate::pager::wake(koid, index, index + 1);
                     return Err(Error::Io);
                 }
@@ -297,8 +299,11 @@ impl MemoryObject {
         let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
         let mut state = paged.state.lock();
         let mut freed = Vec::new();
+        let mut result = Ok(());
         match op {
-            OP_FAIL => state.fail(first, end),
+            // The waiting threads are woken also when not every page could
+            // be failed: those whose request was forgotten request again.
+            OP_FAIL => result = state.fail(first, end),
             OP_EVICT => {
                 for index in first..end {
                     if !state.evictable(index) || freed.try_reserve(1).is_err() {
@@ -335,7 +340,7 @@ impl MemoryObject {
         if op == OP_FAIL {
             crate::pager::wake(self.header.koid(), first, end);
         }
-        Ok(())
+        result
     }
 
     /// The dirty ranges of the `len` bytes from `offset`, as byte offsets
@@ -347,11 +352,11 @@ impl MemoryObject {
         let state = paged.state.lock();
         state.need_dirty_tracking()?;
         let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
-        Ok(state
-            .dirty_ranges(first, end)
-            .into_iter()
-            .map(|(a, b)| (a * PAGE_SIZE, (b - a) * PAGE_SIZE))
-            .collect())
+        let mut ranges = state.dirty_ranges(first, end)?;
+        for (offset, len) in &mut ranges {
+            (*offset, *len) = (*offset * PAGE_SIZE, (*len - *offset) * PAGE_SIZE);
+        }
+        Ok(ranges)
     }
 
     /// Revokes the whole paged object for good, as `pager_revoke` does:
@@ -642,8 +647,8 @@ impl MemoryObject {
             // mapping only on a write, which marks it dirty.
             let writable =
                 perms & PERM_WRITE != 0 && (write || state.writable_without_fault(index));
-            if write {
-                state.written(index);
+            if write && state.written(index).is_err() {
+                return Fault::OutOfMemory;
             }
             drop(state);
             let access = Access {
@@ -725,7 +730,7 @@ impl MemoryObject {
                 self.obtain(index)?;
                 return self.hold_for_write(space, virt);
             };
-            state.written(index);
+            state.written(index)?;
             drop(state);
             pages.pin();
             return Ok(Held {
@@ -963,7 +968,7 @@ impl MemoryObject {
                         let Some(phys) = frame else {
                             continue;
                         };
-                        state.written(index);
+                        state.written(index)?;
                         phys
                     }
                     (None, Some(phys)) => phys,

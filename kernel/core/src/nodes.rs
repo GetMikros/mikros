@@ -56,7 +56,8 @@ struct Reserve {
     free: Option<NonNull<Free>>,
     /// The number of free blocks.
     count: usize,
-    /// The number of free blocks that live claims may still take.
+    /// The number of blocks promised to live claims, including those
+    /// they already took.
     claimed: usize,
 }
 
@@ -106,7 +107,6 @@ impl Reserve {
         // SAFETY: free blocks hold a `Free`.
         self.free = unsafe { free.read().next };
         self.count -= 1;
-        self.claimed = self.claimed.min(self.count);
         Some(free.cast())
     }
 }
@@ -125,7 +125,9 @@ pub fn claim(count: usize) -> Result<Claim, Error> {
     loop {
         let missing = {
             let mut reserve = RESERVE.lock();
-            let available = reserve.count - reserve.claimed;
+            // Blocks a claim used stay claimed until it ends, so that
+            // claims never count on blocks another claim may still take.
+            let available = reserve.count.saturating_sub(reserve.claimed);
             if available >= count {
                 reserve.claimed += count;
                 return Ok(Claim { count });
