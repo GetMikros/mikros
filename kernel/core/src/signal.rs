@@ -1,8 +1,9 @@
 //! Process signals: numbers, actions, information records and the sets
 //! of pending signals.
 
+use crate::nodes::{self, Map};
 use crate::status::Error;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 
 /// The highest signal number.
 pub const SIG_MAX: u32 = 64;
@@ -167,11 +168,20 @@ impl Info {
 }
 
 /// The signals pending for a process or a thread.
-#[derive(Default)]
 pub struct Pending {
     /// Signals 1 to 31, at index `signo - 1`.
     standard: [Option<Info>; (SIG_RT_MIN - 1) as usize],
-    realtime: BTreeMap<u32, VecDeque<Info>>,
+    /// The queued real-time signals, by number. No queue is empty.
+    realtime: Map<u32, VecDeque<Info>>,
+}
+
+impl core::default::Default for Pending {
+    fn default() -> Self {
+        Pending {
+            standard: [None; (SIG_RT_MIN - 1) as usize],
+            realtime: nodes::map(),
+        }
+    }
 }
 
 impl Pending {
@@ -200,9 +210,16 @@ impl Pending {
         if *queued >= RT_QUEUE_MAX {
             return Err(Error::ShouldWait);
         }
-        let queue = self.realtime.entry(info.signo).or_default();
-        queue.try_reserve(1).map_err(|_| Error::NoMemory)?;
-        queue.push_back(info);
+        if let Some(queue) = self.realtime.get_mut(&info.signo) {
+            queue.try_reserve(1).map_err(|_| Error::NoMemory)?;
+            queue.push_back(info);
+        } else {
+            let mut queue = VecDeque::new();
+            queue.try_reserve(1).map_err(|_| Error::NoMemory)?;
+            queue.push_back(info);
+            let _claim = nodes::claim_insert()?;
+            self.realtime.insert(info.signo, queue);
+        }
         *queued += 1;
         Ok(())
     }
@@ -334,6 +351,16 @@ mod tests {
         p.add(info(SEGV, 0), &mut queued).unwrap();
         p.discard(!0, &mut queued);
         assert_eq!((p.mask(), queued), (0, RT_QUEUE_MAX - 1));
+    }
+
+    #[test]
+    fn leaves_nothing_pending_without_room() {
+        let mut p = Pending::default();
+        let mut queued = 0;
+        let added = crate::nodes::tests::without_claims(|| p.add(info(40, 0), &mut queued));
+        assert_eq!(added, Err(Error::NoMemory));
+        assert_eq!((p.mask(), queued), (0, 0));
+        assert_eq!(p.take(!0, &mut queued), None);
     }
 
     #[test]

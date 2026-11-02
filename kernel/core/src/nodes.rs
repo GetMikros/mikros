@@ -122,6 +122,10 @@ pub struct Claim {
 /// Claims blocks for `count` nodes, taking them from the heap if the
 /// reserve does not have them, or fails with `NoMemory`.
 pub fn claim(count: usize) -> Result<Claim, Error> {
+    #[cfg(test)]
+    if tests::CLAIMS_FAIL.with(|fail| fail.get()) {
+        return Err(Error::NoMemory);
+    }
     loop {
         let missing = {
             let mut reserve = RESERVE.lock();
@@ -219,6 +223,16 @@ pub(crate) mod tests {
     std::thread_local! {
         /// Makes this thread's heap allocations for nodes fail.
         pub static HEAP_FULL: Cell<bool> = const { Cell::new(false) };
+        /// Makes this thread's claims fail.
+        pub static CLAIMS_FAIL: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Runs `f` with every claim on this thread failing.
+    pub(crate) fn without_claims<R>(f: impl FnOnce() -> R) -> R {
+        CLAIMS_FAIL.with(|fail| fail.set(true));
+        let result = f();
+        CLAIMS_FAIL.with(|fail| fail.set(false));
+        result
     }
 
     fn heap_full(full: bool) {
