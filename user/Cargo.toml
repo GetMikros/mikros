@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["init", "mikros-rt"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+
+# Programs built without the standard library abort on panic.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

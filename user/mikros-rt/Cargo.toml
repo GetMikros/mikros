@@ -1,0 +1,13 @@
+[package]
+name = "mikros-rt"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[features]
+# Includes the bindings of the system calls that exist only for fuzzing.
+fuzz = []
+
+[build-dependencies]
+syscall-table = { path = "../../kernel/syscalls" }
