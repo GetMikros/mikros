@@ -3,6 +3,8 @@
 mod build;
 mod firmware;
 mod image;
+mod qemu;
+mod run;
 mod setup;
 mod tools;
 
@@ -23,6 +25,8 @@ enum Command {
     Build(build::Args),
     /// Create a bootable disk image.
     Image(image::Args),
+    /// Boot the disk image in QEMU.
+    Run(run::Args),
     /// Check the host tools and fetch the pinned firmware.
     Setup(setup::Args),
 }
@@ -40,6 +44,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Build(args) => build::run(&args),
         Command::Image(args) => image::run(&args),
+        Command::Run(args) => run::run(&args),
         Command::Setup(args) => setup::run(&args),
     };
     match result {

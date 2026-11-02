@@ -2,6 +2,7 @@
 //! firmware.
 
 use crate::firmware;
+use crate::qemu::{self, Gpu};
 use crate::tools::{Distro, Status, TOOLS, Tool};
 use anyhow::{Context, Result, bail};
 use std::io::{self, BufRead, Write};
@@ -12,6 +13,17 @@ pub struct Args {
     /// Offer to install missing tools, asking before each command.
     #[arg(long)]
     install: bool,
+    /// Also check that QEMU supports this graphics device.
+    #[arg(long, value_enum)]
+    gpu: Option<Gpu>,
+}
+
+/// Whether QEMU's virtio-gpu-gl-pci device has the `venus` property.
+fn qemu_supports_venus() -> bool {
+    Command::new(qemu::QEMU)
+        .args(["-device", "virtio-gpu-gl-pci,help"])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("venus="))
 }
 
 pub fn run(args: &Args) -> Result<()> {
@@ -37,6 +49,16 @@ pub fn run(args: &Args) -> Result<()> {
     }
 
     firmware::fetch()?;
+
+    if args.gpu == Some(Gpu::Venus) {
+        if qemu_supports_venus() {
+            println!("ok       QEMU supports Venus");
+        } else {
+            bail!(
+                "QEMU does not support Venus: its virtio-gpu-gl-pci device has no venus                  property; build QEMU with virglrenderer 1.0 or newer"
+            );
+        }
+    }
 
     if missing.is_empty() {
         return Ok(());
