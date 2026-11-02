@@ -7,6 +7,7 @@ extern crate alloc;
 
 pub mod bmp;
 pub mod canvas;
+pub mod detect;
 pub mod display;
 pub mod entries;
 pub mod input;
