@@ -17,6 +17,7 @@ use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{KIND_IOPORT, KIND_PRIORITY, KIND_ROOT, Request, Resource};
+use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
     INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
 };
@@ -1240,4 +1241,77 @@ pub fn timeline_wait_async(
         key,
         value,
     )
+}
+
+pub fn stream_create(
+    options: u32,
+    out0: UserOut<Handle>,
+    out1: UserOut<Handle>,
+) -> Result<(), Error> {
+    if options != 0 || !out0.fits(1) || !out1.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let process = current_process()?;
+    let budget = Some(process.budget());
+    let (a, b) = StreamEnd::pair(budget)?;
+    let rights = default_rights(ObjectType::Stream);
+    let mut table = process.handles().lock();
+    let h0 = table.insert(a, rights, budget)?;
+    let written = table.insert(b, rights, budget).and_then(|h1| {
+        match out0.write(h0).and_then(|()| out1.write(h1)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                table.close(h1).expect("just inserted");
+                Err(e)
+            }
+        }
+    });
+    if written.is_err() {
+        table.close(h0).expect("just inserted");
+    }
+    written
+}
+
+/// A kernel buffer for up to one queue's worth of the `len` bytes of a
+/// stream call.
+fn stream_buffer(len: u64) -> Result<Vec<u8>, Error> {
+    let n = len.min(STREAM_QUEUE_BYTES as u64) as usize;
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(n).map_err(|_| Error::NoMemory)?;
+    buf.resize(n, 0);
+    Ok(buf)
+}
+
+pub fn stream_write(
+    stream: Checked,
+    bytes: UserIn<u8>,
+    len: u64,
+    actual: UserOut<u64>,
+) -> Result<(), Error> {
+    if !actual.fits(1) || !bytes.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    let mut buf = stream_buffer(len)?;
+    bytes.read_bytes(&mut buf)?;
+    let written = object::<StreamEnd>(stream).write(&buf)?;
+    actual.write(written as u64)
+}
+
+pub fn stream_read(
+    stream: Checked,
+    bytes: UserOut<u8>,
+    len: u64,
+    actual: UserOut<u64>,
+) -> Result<(), Error> {
+    if !actual.fits(1) || !bytes.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    let mut buf = stream_buffer(len)?;
+    let end = object::<StreamEnd>(stream);
+    let n = end.peek(&mut buf)?;
+    // The bytes leave the queue only once they have been copied out.
+    bytes.write_bytes(&buf[..n])?;
+    actual.write(n as u64)?;
+    end.consume(n);
+    Ok(())
 }

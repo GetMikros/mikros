@@ -744,3 +744,34 @@ syscalls:
       - {name: key, type: u64, dir: in}
       - {name: value, type: u64, dir: in}
 
+  - name: stream_create
+    number: 73
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R28, MIKSPEC-0009.R30]
+    args:
+      - {name: options, type: u32, dir: in}
+      - {name: out0, type: "*mut Handle", dir: out, object: Stream}
+      - {name: out1, type: "*mut Handle", dir: out, object: Stream}
+
+  - name: stream_write
+    number: 74
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R29, MIKSPEC-0009.R30]
+    args:
+      - {name: stream, type: Handle, dir: in, object: Stream, rights: [WRITE]}
+      - {name: bytes, type: "*const u8", dir: in}
+      - {name: len, type: u64, dir: in}
+      - {name: actual, type: "*mut u64", dir: out}
+
+  - name: stream_read
+    number: 75
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R29, MIKSPEC-0009.R30]
+    args:
+      - {name: stream, type: Handle, dir: in, object: Stream, rights: [READ]}
+      - {name: bytes, type: "*mut u8", dir: out}
+      - {name: len, type: u64, dir: in}
+      - {name: actual, type: "*mut u64", dir: out}

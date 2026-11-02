@@ -10,6 +10,7 @@ pub mod event;
 pub mod handles;
 pub mod memory;
 pub mod resource;
+pub mod stream;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
