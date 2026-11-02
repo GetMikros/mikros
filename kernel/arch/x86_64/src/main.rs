@@ -16,6 +16,9 @@ mod features;
 #[cfg(any(target_os = "none", test))]
 #[cfg_attr(test, allow(dead_code))]
 mod gdt;
+#[cfg(any(target_os = "none", test))]
+#[cfg_attr(test, allow(dead_code))]
+mod idt;
 #[cfg(target_os = "none")]
 mod log;
 #[cfg(target_os = "none")]

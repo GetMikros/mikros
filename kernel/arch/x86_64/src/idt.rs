@@ -1,0 +1,277 @@
+//! The interrupt descriptor table and the common interrupt entry path.
+
+#[cfg(target_os = "none")]
+use crate::gdt::Pointer;
+use crate::gdt::{IST_DOUBLE_FAULT, IST_MACHINE_CHECK, IST_NMI, KERNEL_CODE};
+#[cfg(target_os = "none")]
+use core::arch::{asm, global_asm};
+use core::fmt;
+
+/// The distance between two entry stubs.
+const STUB_SIZE: u64 = 16;
+
+pub const NMI: u8 = 2;
+pub const BREAKPOINT: u8 = 3;
+pub const DOUBLE_FAULT: u8 = 8;
+pub const MACHINE_CHECK: u8 = 18;
+
+/// The vectors for which the processor pushes an error code, as a mask.
+pub const ERROR_CODE_VECTORS: u32 = 1 << 8
+    | 1 << 10
+    | 1 << 11
+    | 1 << 12
+    | 1 << 13
+    | 1 << 14
+    | 1 << 17
+    | 1 << 21
+    | 1 << 29
+    | 1 << 30;
+
+/// The registers saved on entry, lowest address first.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Frame {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rbp: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
+    pub vector: u64,
+    /// The processor's error code, or zero for vectors without one.
+    pub error: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+// One 16-byte stub per vector: it pushes a zero in place of an error code
+// for vectors without one, and the vector number, then saves the general
+// registers and calls `interrupt` with the frame. The processor aligns
+// the stack to 16 bytes before it pushes, so the 22 words of the frame
+// leave it aligned for the call.
+#[cfg(target_os = "none")]
+global_asm!(
+    ".pushsection .text.interrupt_stubs, \"ax\"",
+    ".balign 16",
+    ".global interrupt_stubs",
+    "interrupt_stubs:",
+    ".set vector, 0",
+    ".rept 256",
+    ".balign 16",
+    ".if vector >= 32 || ((({mask} >> vector) & 1) == 0)",
+    "push 0",
+    ".endif",
+    "push vector",
+    "jmp interrupt_common",
+    ".set vector, vector + 1",
+    ".endr",
+    "interrupt_common:",
+    "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
+    "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
+    "push r13", "push r14", "push r15",
+    "cld",
+    "mov rdi, rsp",
+    "call {interrupt}",
+    "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10",
+    "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
+    "pop rcx", "pop rbx", "pop rax",
+    "add rsp, 16",
+    "iretq",
+    ".popsection",
+    mask = const ERROR_CODE_VECTORS,
+    interrupt = sym interrupt,
+);
+
+#[cfg(target_os = "none")]
+unsafe extern "C" {
+    static interrupt_stubs: u8;
+}
+
+/// An interrupt gate descriptor.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Gate {
+    offset_low: u16,
+    selector: u16,
+    ist: u8,
+    attributes: u8,
+    offset_mid: u16,
+    offset_high: u32,
+    reserved: u32,
+}
+
+impl Gate {
+    const EMPTY: Gate = Gate {
+        offset_low: 0,
+        selector: 0,
+        ist: 0,
+        attributes: 0,
+        offset_mid: 0,
+        offset_high: 0,
+        reserved: 0,
+    };
+
+    fn new(handler: u64, ist: u8, dpl: u8) -> Gate {
+        Gate {
+            offset_low: handler as u16,
+            selector: KERNEL_CODE,
+            ist,
+            // Present, 64-bit interrupt gate.
+            attributes: 0x8E | dpl << 5,
+            offset_mid: (handler >> 16) as u16,
+            offset_high: (handler >> 32) as u32,
+            reserved: 0,
+        }
+    }
+}
+
+/// The IST entry vector `vector` uses, or 0 for none.
+pub fn ist(vector: u8) -> u8 {
+    match vector {
+        DOUBLE_FAULT => IST_DOUBLE_FAULT,
+        NMI => IST_NMI,
+        MACHINE_CHECK => IST_MACHINE_CHECK,
+        _ => 0,
+    }
+}
+
+/// The privilege level that may raise vector `vector` with INT.
+pub fn dpl(vector: u8) -> u8 {
+    if vector == BREAKPOINT { 3 } else { 0 }
+}
+
+#[cfg(target_os = "none")]
+static mut IDT: [Gate; 256] = [Gate::EMPTY; 256];
+
+/// Fills the IDT and loads it. The GDT and the TSS must be loaded.
+#[cfg(target_os = "none")]
+pub fn init() {
+    let stubs = (&raw const interrupt_stubs) as u64;
+    let idt = (&raw mut IDT).cast::<Gate>();
+    for vector in 0..=255u8 {
+        let handler = stubs + u64::from(vector) * STUB_SIZE;
+        // SAFETY: the IDT has 256 gates, and nothing reads it before it is
+        // loaded here, on the only running processor.
+        unsafe {
+            idt.add(usize::from(vector))
+                .write(Gate::new(handler, ist(vector), dpl(vector)))
+        };
+    }
+    let pointer = Pointer {
+        limit: (size_of::<[Gate; 256]>() - 1) as u16,
+        base: idt as u64,
+    };
+    // SAFETY: every gate points at its entry stub in the kernel code
+    // segment, and the IST entries they name are set in the TSS.
+    unsafe { asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags)) };
+}
+
+/// The name of exception vector `vector`.
+pub fn exception_name(vector: u8) -> &'static str {
+    match vector {
+        0 => "divide error",
+        1 => "debug exception",
+        2 => "NMI",
+        3 => "breakpoint",
+        4 => "overflow",
+        5 => "bound range exceeded",
+        6 => "invalid opcode",
+        7 => "device not available",
+        8 => "double fault",
+        9 => "coprocessor segment overrun",
+        10 => "invalid TSS",
+        11 => "segment not present",
+        12 => "stack fault",
+        13 => "general protection fault",
+        14 => "page fault",
+        16 => "x87 floating-point exception",
+        17 => "alignment check",
+        18 => "machine check",
+        19 => "SIMD floating-point exception",
+        20 => "virtualization exception",
+        21 => "control protection exception",
+        28 => "hypervisor injection exception",
+        29 => "VMM communication exception",
+        30 => "security exception",
+        _ => "reserved exception",
+    }
+}
+
+/// The panic title for an exception.
+pub struct Exception<'a>(pub &'a Frame);
+
+impl fmt::Display for Exception<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let vector = self.0.vector as u8;
+        write!(f, "{} (vector {vector})", exception_name(vector))?;
+        if ERROR_CODE_VECTORS >> vector & 1 != 0 {
+            write!(f, ", error code {:#x}", self.0.error)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "none")]
+extern "sysv64" fn interrupt(frame: &mut Frame) {
+    let vector = frame.vector as u8;
+    // No exception is handled yet, and no user mode exists, so each one
+    // stops the kernel. Interrupts stay disabled until something handles
+    // them.
+    if vector < 32 {
+        crate::panic::exception(frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_ist_stacks_only_for_fatal_vectors() {
+        let with_ist: std::vec::Vec<u8> = (0..=255).filter(|&v| ist(v) != 0).collect();
+        assert_eq!(with_ist, [2, 8, 18]);
+        assert_eq!((ist(8), ist(2), ist(18)), (1, 2, 3));
+        let user: std::vec::Vec<u8> = (0..=255).filter(|&v| dpl(v) != 0).collect();
+        assert_eq!(user, [3]);
+    }
+
+    #[test]
+    fn encodes_gates() {
+        let g = Gate::new(0xFFFF_FFFF_8012_3456, 2, 3);
+        assert_eq!(
+            (g.offset_low, g.offset_mid, g.offset_high),
+            (0x3456, 0x8012, 0xFFFF_FFFF)
+        );
+        assert_eq!((g.selector, g.ist, g.attributes), (0x08, 2, 0xEE));
+        assert_eq!(size_of::<Gate>(), 16);
+    }
+
+    #[test]
+    fn names_the_exception() {
+        let mut frame = Frame {
+            vector: 14,
+            error: 2,
+            cs: 0x08,
+            ..Frame::default()
+        };
+        let title = std::format!("{}", Exception(&frame));
+        assert_eq!(title, "page fault (vector 14), error code 0x2");
+        frame.vector = 6;
+        assert_eq!(
+            std::format!("{}", Exception(&frame)),
+            "invalid opcode (vector 6)"
+        );
+    }
+}

@@ -1,6 +1,7 @@
 //! Stopping the kernel on a panic.
 
 use crate::backtrace;
+use crate::idt::{Exception, Frame};
 use crate::serial::Serial;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,10 +37,10 @@ fn build_id() -> &'static [u8] {
 #[inline(always)]
 fn registers() -> [(&'static str, u64); 22] {
     let mut gp = [0u64; 16];
-    let (rip, rflags, cr0, cr2, cr3, cr4): (u64, u64, u64, u64, u64, u64);
+    let (rip, rflags): (u64, u64);
     // SAFETY: the stores go to `gp`, which has room for 16 values; reading
-    // the instruction pointer, the flags and control registers has no side
-    // effects. RAX holds the address of `gp`, so its stored value is that.
+    // the instruction pointer and the flags has no side effects. RAX holds
+    // the address of `gp`, so its stored value is that.
     unsafe {
         asm!(
             "mov [rax], rax", "mov [rax+8], rbx", "mov [rax+16], rcx",
@@ -53,11 +54,8 @@ fn registers() -> [(&'static str, u64); 22] {
         );
         asm!("lea {}, [rip]", out(reg) rip, options(nomem, nostack, preserves_flags));
         asm!("pushfq", "pop {}", out(reg) rflags, options(preserves_flags));
-        asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
-        asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags));
-        asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
-        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
     }
+    let [cr0, cr2, cr3, cr4] = control_registers();
     [
         ("rip", rip),
         ("rsp", gp[7]),
@@ -84,6 +82,19 @@ fn registers() -> [(&'static str, u64); 22] {
     ]
 }
 
+/// CR0, CR2, CR3 and CR4.
+fn control_registers() -> [u64; 4] {
+    let (cr0, cr2, cr3, cr4);
+    // SAFETY: reading control registers has no side effects.
+    unsafe {
+        asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
+        asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags));
+        asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+    }
+    [cr0, cr2, cr3, cr4]
+}
+
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
 /// The bounds of the stack the kernel runs on, once it has left the boot
@@ -97,16 +108,14 @@ pub fn set_stack(start: u64, end: u64) {
     STACK_END.store(end, Ordering::Relaxed);
 }
 
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
+/// Writes the panic report and stops. `rbp` starts the backtrace.
+fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> ! {
     // SAFETY: disabling interrupts touches no memory.
     unsafe { asm!("cli", options(nomem, nostack)) };
     // A panic while writing the report stops without a second one.
     if PANICKING.swap(true, Ordering::Relaxed) {
         crate::cpu::halt();
     }
-    let registers = registers();
-    let rbp = registers[2].1;
     let stack = match STACK_END.load(Ordering::Relaxed) {
         0 => {
             let top = (&raw const __kernel_start) as u64;
@@ -119,14 +128,54 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let read = |address: u64| unsafe { (address as *const u64).read() };
     let _ = panic::write(
         &mut Serial,
-        "\r\n",
+        "
+",
         Report {
-            title: &info.message(),
+            title,
             build_id: build_id(),
             cpu: 0,
-            registers: &registers,
+            registers,
             frames: backtrace::frames(rbp, stack, read),
         },
     );
     crate::cpu::halt()
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let registers = registers();
+    stop(&info.message(), &registers, registers[2].1)
+}
+
+/// Stops the kernel on an exception, reporting the interrupted registers.
+pub fn exception(frame: &Frame) -> ! {
+    let [cr0, cr2, cr3, cr4] = control_registers();
+    let f = frame;
+    let registers = [
+        ("rip", f.rip),
+        ("rsp", f.rsp),
+        ("rbp", f.rbp),
+        ("rflags", f.rflags),
+        ("rax", f.rax),
+        ("rbx", f.rbx),
+        ("rcx", f.rcx),
+        ("rdx", f.rdx),
+        ("rsi", f.rsi),
+        ("rdi", f.rdi),
+        ("r8", f.r8),
+        ("r9", f.r9),
+        ("r10", f.r10),
+        ("r11", f.r11),
+        ("r12", f.r12),
+        ("r13", f.r13),
+        ("r14", f.r14),
+        ("r15", f.r15),
+        ("cr0", cr0),
+        ("cr2", cr2),
+        ("cr3", cr3),
+        ("cr4", cr4),
+        ("cs", f.cs),
+        ("ss", f.ss),
+    ];
+    stop(&Exception(frame), &registers, f.rbp)
 }
