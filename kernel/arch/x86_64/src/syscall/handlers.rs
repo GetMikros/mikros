@@ -1315,3 +1315,53 @@ pub fn stream_read(
     end.consume(n);
     Ok(())
 }
+
+pub fn mem_clone(
+    mem: Checked,
+    options: u32,
+    offset: u64,
+    len: u64,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if options & !kernel_core::object::memory::RESIZABLE != 0 || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let rights = mem.rights;
+    let source = object::<MemoryObject>(mem);
+    if source.is_physical() {
+        return Err(Error::NotSupported);
+    }
+    source.check_range(offset, len)?;
+    let process = current_process()?;
+    let budget = process.budget();
+    let clone = MemoryObject::new(budget, len, options)?;
+    let mut work = Work::new(crate::sched::preempt_point);
+    let held = source.hold_for_read(offset, len, Some(budget), &mut work)?;
+    // The bytes are copied at once, in pieces that stay within one page
+    // of each object; pieces that read as zero are left without a frame.
+    let mut piece = [0u8; PAGE_SIZE as usize];
+    let mut done = 0;
+    let mut copied = Ok(());
+    while done < len && copied.is_ok() {
+        let at = offset + done;
+        let n = (PAGE_SIZE - at % PAGE_SIZE)
+            .min(PAGE_SIZE - done % PAGE_SIZE)
+            .min(len - done) as usize;
+        let bytes = &mut piece[..n];
+        held.read(at, bytes);
+        if bytes.iter().any(|&b| b != 0) {
+            copied = clone.write(done, n as u64, |to| {
+                to.copy_from_slice(&bytes[..to.len()]);
+                Ok(())
+            });
+        }
+        done += n as u64;
+        work.item();
+    }
+    held.release(&mut work);
+    copied?;
+    let mut table = process.handles().lock();
+    table
+        .insert_then(clone, rights, Some(budget), |h| out.write(h))
+        .map(drop)
+}
