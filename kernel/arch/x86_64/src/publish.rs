@@ -58,10 +58,17 @@ impl<F: FnMut()> Work<F> {
     }
 }
 
-/// A destination page held writable until it is dropped.
-pub trait Page {
+/// A destination page held writable until it is released or dropped.
+pub trait Page: Sized {
     /// The start of the page's bytes in the kernel's address space.
     fn base(&self) -> *mut u8;
+
+    /// Releases the page, accounting for the pages that releasing it
+    /// processes.
+    fn release<F: FnMut()>(self, work: &mut Work<F>) {
+        work.item();
+        drop(self);
+    }
 }
 
 /// Prepared outputs: for each, its user address, its length and the
@@ -155,8 +162,7 @@ impl<P: Page> Outputs<P> {
     /// Releases every page, and the charge for recording them.
     pub fn release<F: FnMut()>(mut self, work: &mut Work<F>) {
         while let Some(page) = self.pages.pop() {
-            work.item();
-            drop(page);
+            page.release(work);
         }
     }
 }

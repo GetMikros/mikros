@@ -3,6 +3,7 @@
 use crate::aspace::{self, Access, AddressSpace, Fault, USER_END, USER_START};
 use crate::memory::FRAMES;
 use crate::paging::Policy;
+use crate::publish::{ITEM_STEP, Work};
 use crate::space;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -259,7 +260,7 @@ impl MemoryObject {
                 .ok_or(Error::NoMemory)?;
             return Ok(Held {
                 mem: self.clone(),
-                backing: Backing::Mapped(virt),
+                backing: Some(Backing::Mapped(virt)),
             });
         }
         let phys = match pages.frame(index) {
@@ -269,8 +270,70 @@ impl MemoryObject {
         pages.pin();
         Ok(Held {
             mem: self.clone(),
-            backing: Backing::Frame(phys),
+            backing: Some(Backing::Frame(phys)),
         })
+    }
+
+    /// Records the frame of every page of the `len` bytes from `offset`,
+    /// keeping each until the result is released, so that they can be read
+    /// without the pages locked. Pages without a frame read as zeros and
+    /// get none. The record is charged to `budget`. Fails with `OutOfRange`
+    /// when the range stops lying inside the object meanwhile.
+    pub fn hold_for_read<F: FnMut()>(
+        self: &Arc<Self>,
+        offset: u64,
+        len: u64,
+        budget: Option<&Arc<Budget>>,
+        work: &mut Work<F>,
+    ) -> Result<Source, Error> {
+        debug_assert!(!self.is_physical());
+        let first = offset / PAGE_SIZE;
+        let count = match len {
+            0 => 0,
+            _ => (offset + len).div_ceil(PAGE_SIZE) - first,
+        };
+        let bytes = count * size_of::<Option<u64>>() as u64;
+        if let Some(budget) = budget {
+            budget.charge_kernel(bytes)?;
+        }
+        let mut source = Source {
+            mem: self.clone(),
+            offset,
+            frames: Vec::new(),
+            pinned: false,
+            charged: budget.map(|budget| (budget.clone(), bytes)),
+        };
+        if source.frames.try_reserve_exact(count as usize).is_err() {
+            return Err(Error::NoMemory);
+        }
+        self.pages.lock().pin();
+        source.pinned = true;
+        for index in first..first + count {
+            work.item();
+            let pages = self.pages.lock();
+            let found = pages.check_range(offset, len).map(|()| pages.frame(index));
+            drop(pages);
+            match found {
+                Ok(frame) => source.frames.push(frame),
+                Err(e) => {
+                    source.release(work);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(source)
+    }
+
+    /// Ends one pin of the pages, and frees the frames that were taken
+    /// from them while pinned once none is left.
+    fn unpin<F: FnMut()>(&self, work: &mut Work<F>) {
+        let orphans = self.pages.lock().unpin();
+        for batch in orphans.chunks(ITEM_STEP) {
+            for _ in batch {
+                work.item();
+            }
+            self.free(batch.iter().copied());
+        }
     }
 
     /// Gives page `index` a zeroed frame, charging the frame to the
@@ -307,36 +370,6 @@ impl MemoryObject {
             }
         }
         self.release(count);
-    }
-
-    /// Passes the `len` bytes from `offset` to `sink`, in chunks. Pages
-    /// without a frame read as zeros and get none.
-    pub fn read(
-        &self,
-        offset: u64,
-        len: u64,
-        mut sink: impl FnMut(&[u8]) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        if self.is_physical() {
-            return Err(Error::NotSupported);
-        }
-        self.check_range(offset, len)?;
-        let mut done = 0;
-        while done < len {
-            let (index, inside, n) = chunk(offset + done, len - done);
-            let mut buf = [0u8; CHUNK];
-            {
-                let pages = self.pages.lock();
-                if let Some(phys) = pages.frame(index) {
-                    // SAFETY: the pages are locked.
-                    let frame = unsafe { frame_bytes(phys) };
-                    buf[..n].copy_from_slice(&frame[inside..inside + n]);
-                }
-            }
-            sink(&buf[..n])?;
-            done += n as u64;
-        }
-        Ok(())
     }
 
     /// Fills the `len` bytes from `offset` from `source`, in chunks.
@@ -405,26 +438,85 @@ enum Backing {
 /// A page of a memory object held for writing by `hold_for_write`.
 pub struct Held {
     mem: Arc<MemoryObject>,
-    backing: Backing,
+    /// `None` once released.
+    backing: Option<Backing>,
+}
+
+impl Held {
+    fn end<F: FnMut()>(&mut self, work: &mut Work<F>) {
+        match self.backing.take() {
+            Some(Backing::Frame(_)) => self.mem.unpin(work),
+            Some(Backing::Mapped(virt)) => space::unmap_physical_page(virt),
+            None => {}
+        }
+    }
 }
 
 impl crate::publish::Page for Held {
     fn base(&self) -> *mut u8 {
         match self.backing {
-            Backing::Frame(phys) => space::direct(phys) as *mut u8,
-            Backing::Mapped(virt) => virt as *mut u8,
+            Some(Backing::Frame(phys)) => space::direct(phys) as *mut u8,
+            Some(Backing::Mapped(virt)) => virt as *mut u8,
+            None => unreachable!("a released page is never written"),
         }
+    }
+
+    fn release<F: FnMut()>(mut self, work: &mut Work<F>) {
+        work.item();
+        self.end(work);
     }
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
-        match self.backing {
-            Backing::Frame(_) => {
-                let orphans = self.mem.pages.lock().unpin();
-                self.mem.free(orphans);
-            }
-            Backing::Mapped(virt) => space::unmap_physical_page(virt),
+        self.end(&mut Work::new(|| {}));
+    }
+}
+
+/// The frames of a range of an anonymous object recorded by
+/// `hold_for_read`, by page from the range's first page.
+pub struct Source {
+    mem: Arc<MemoryObject>,
+    offset: u64,
+    frames: Vec<Option<u64>>,
+    pinned: bool,
+    charged: Option<(Arc<Budget>, u64)>,
+}
+
+impl Source {
+    /// Copies the bytes from offset `at` of the object into `buf`, all of
+    /// which must come from one recorded page.
+    pub fn read(&self, at: u64, buf: &mut [u8]) {
+        let index = (at / PAGE_SIZE - self.offset / PAGE_SIZE) as usize;
+        let inside = (at % PAGE_SIZE) as usize;
+        assert!(inside + buf.len() <= PAGE_SIZE as usize);
+        match self.frames[index] {
+            // SAFETY: the frame is pinned, so it stays allocated, and the
+            // direct map covers it. Writers may change it meanwhile, which
+            // only changes the bytes read.
+            Some(phys) => unsafe {
+                let from = (space::direct(phys) as *const u8).add(inside);
+                core::ptr::copy_nonoverlapping(from, buf.as_mut_ptr(), buf.len());
+            },
+            None => buf.fill(0),
+        }
+    }
+
+    /// Releases the frames, accounting for the work that takes.
+    pub fn release<F: FnMut()>(mut self, work: &mut Work<F>) {
+        if core::mem::take(&mut self.pinned) {
+            self.mem.unpin(work);
+        }
+    }
+}
+
+impl Drop for Source {
+    fn drop(&mut self) {
+        if core::mem::take(&mut self.pinned) {
+            self.mem.unpin(&mut Work::new(|| {}));
+        }
+        if let Some((budget, bytes)) = self.charged.take() {
+            budget.release_kernel(bytes);
         }
     }
 }

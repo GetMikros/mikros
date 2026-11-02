@@ -320,11 +320,6 @@ impl UserOut<u8> {
     pub fn write_bytes(&self, src: &[u8]) -> Result<(), Error> {
         copy_out(self.0, src)
     }
-
-    /// The address `offset` bytes further on.
-    pub fn at(&self, offset: u64) -> Self {
-        UserOut::new(self.0.wrapping_add(offset))
-    }
 }
 
 /// A user address the kernel reads from and writes back to.

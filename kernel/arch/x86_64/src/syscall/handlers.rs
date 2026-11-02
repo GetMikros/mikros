@@ -257,12 +257,35 @@ pub fn mem_read(mem: Checked, offset: u64, buf: UserOut<u8>, len: u64) -> Result
     if !buf.fits(len) {
         return Err(Error::InvalidArgs);
     }
+    let process = current_process()?;
+    let budget = Some(process.budget());
+    let aspace = process.aspace();
+    let mut work = Work::new(crate::sched::preempt_point);
+    let source = mem.hold_for_read(offset, len, budget, &mut work)?;
+    let outputs = Outputs::prepare(&[(buf.0, len)], budget, &mut work, |page| {
+        aspace.hold_for_write(page)
+    });
+    let outputs = match outputs {
+        Ok(outputs) => outputs,
+        Err(e) => {
+            source.release(&mut work);
+            return Err(e);
+        }
+    };
+    // Bytes go through a kernel buffer, as `buf` may be backed by the
+    // object itself.
+    let mut chunk = [0u8; 256];
     let mut done = 0;
-    mem.read(offset, len, |bytes| {
-        buf.at(done).write_bytes(bytes)?;
-        done += bytes.len() as u64;
-        Ok(())
-    })
+    while done < len {
+        let at = offset + done;
+        let n = ((PAGE_SIZE - at % PAGE_SIZE).min(len - done) as usize).min(chunk.len());
+        source.read(at, &mut chunk[..n]);
+        outputs.write(0, done, &chunk[..n], &mut work);
+        done += n as u64;
+    }
+    outputs.release(&mut work);
+    source.release(&mut work);
+    Ok(())
 }
 
 pub fn mem_write(mem: Checked, offset: u64, buf: UserIn<u8>, len: u64) -> Result<(), Error> {
