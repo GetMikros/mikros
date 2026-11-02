@@ -10,6 +10,7 @@ mod image;
 mod qemu;
 mod run;
 mod setup;
+mod symbolize;
 mod test;
 mod tools;
 
@@ -40,6 +41,9 @@ enum Command {
     Run(run::Args),
     /// Check the host tools and fetch the pinned firmware.
     Setup(setup::Args),
+    /// Replace the backtrace addresses in the panic reports of a serial
+    /// log with their functions, files and lines.
+    Symbolize(symbolize::Args),
     /// Run the host unit tests and the integration tests in QEMU.
     Test(test::Args),
 }
@@ -62,6 +66,7 @@ fn main() -> ExitCode {
         Command::Image(args) => image::run(&args),
         Command::Run(args) => run::run(&args),
         Command::Setup(args) => setup::run(&args),
+        Command::Symbolize(args) => symbolize::run(&args),
         Command::Test(args) => test::run(&args),
     };
     match result {

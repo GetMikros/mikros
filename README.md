@@ -46,6 +46,8 @@ The host needs these tools, which `cargo xtask setup` checks:
 `cargo xtask debug` boots the disk image in QEMU halted and starts GDB
 attached to the kernel, with the `mikros` commands of `kernel/gdb/mikros.py`
 loaded; `help mikros` lists them.
+`cargo xtask symbolize LOG` prints a serial log with the backtrace addresses
+of its kernel panic reports replaced by functions, files and lines.
 
 ## License
 
