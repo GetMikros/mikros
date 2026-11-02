@@ -125,7 +125,11 @@ const SYSCALL_LEN: u64 = 2;
 
 extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     let at = frame.rip.wrapping_sub(SYSCALL_LEN);
-    if current_process().is_ok_and(|p| !p.syscall_allowed(at)) {
+    let Some(thread) = crate::sched::current() else {
+        unreachable!("a system call without a running thread");
+    };
+    if thread.process().is_some_and(|p| !p.syscall_allowed(at)) {
+        drop(thread);
         refuse(frame, at);
         crate::sched::preempt_user();
         before_user_return(frame);
@@ -137,19 +141,57 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
         frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9, frame.r12, frame.r13,
     ];
     let number = frame.rax;
-    frame.rax = generated::dispatch(number, &args) as u64;
-    if frame.rax == Error::Interrupted as i64 as u64
-        && let Some(thread) = crate::sched::current()
-    {
-        thread.set_interrupted(number);
+    thread.set_syscall_frame(frame);
+    let result = generated::dispatch(number, &args);
+    thread.set_syscall_frame(core::ptr::null_mut());
+    let changed = thread.take_syscall_changed();
+    frame.rax = result as u64;
+    if result == Error::Interrupted as i64 {
+        // A wait that ended for a suspension leaves the thread at its
+        // SYSCALL instruction with the number restored, so that the call
+        // runs again with the same arguments.
+        if thread.take_restart() {
+            frame.rip = at;
+            frame.rax = number;
+        } else {
+            thread.set_interrupted(number);
+        }
+    } else {
+        thread.take_restart();
     }
+    drop(thread);
     crate::sched::preempt_user();
     let reported = before_user_return(frame);
     crate::sched::exit_if_dead();
     // SYSRET to an address outside the user range would fault in ring 0,
-    // and after a report the handler may have changed RCX and R11, which
-    // SYSRET overwrites.
-    u64::from(reported || !(USER_START..USER_END).contains(&frame.rip))
+    // and after a report or a suspension the handler may have changed RCX
+    // and R11, which SYSRET overwrites.
+    u64::from(reported || changed || !(USER_START..USER_END).contains(&frame.rip))
+}
+
+/// Keeps the running `thread`, which waits in a system call, in state
+/// `SUSPENDED` while it is to be suspended, with the registers it entered
+/// the call with available to `thread_read_state` and
+/// `thread_write_state`. Returns whether it was suspended.
+pub fn stay_suspended(thread: &Arc<crate::sched::Thread>) -> bool {
+    let frame = thread.syscall_frame();
+    if frame.is_null() || !thread.suspend_pending() {
+        return false;
+    }
+    // SAFETY: the frame lies on the running thread's kernel stack below
+    // the handler, which uses it again only after the call returns.
+    let frame = unsafe { &mut *frame };
+    let suspended = with_interrupt_frame(frame, |regs| {
+        let mut suspended = false;
+        while crate::sched::suspend(thread, regs) {
+            suspended = true;
+        }
+        suspended
+    });
+    if suspended {
+        thread.mark_syscall_changed();
+    }
+    suspended
 }
 
 /// Puts the calling thread, whose `SYSCALL` instruction at `at` lies

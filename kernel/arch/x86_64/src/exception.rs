@@ -33,8 +33,9 @@ pub fn report_event(frame: &mut Frame, kind: u32, address: u64) {
 
 /// Makes the reports that wait for the running user thread to return to
 /// user mode with its registers in `frame`: a debug exception its
-/// breakpoints raised in kernel mode, and its exit when it is to end.
-/// Returns whether it reported anything.
+/// breakpoints raised in kernel mode, and its exit when it is to end;
+/// and suspends it when it is to be suspended. Returns whether `frame`
+/// may have changed.
 pub fn before_user_return(frame: &mut Frame) -> bool {
     let Some(thread) = sched::current() else {
         return false;
@@ -52,7 +53,22 @@ pub fn before_user_return(frame: &mut Frame) -> bool {
     }
     reported |= crate::signal::deliver(frame);
     // A stop may have held the thread when it was asked to end.
-    reported | end_if_requested(frame, &thread)
+    reported |= end_if_requested(frame, &thread);
+    reported | stay_suspended(frame, &thread)
+}
+
+/// Keeps the running user `thread`, about to return to user mode with
+/// its registers in `frame`, in state `SUSPENDED` while it is to be
+/// suspended, and then delivers what arrived meanwhile. Returns whether
+/// it was suspended, so that `frame` may have changed.
+pub fn stay_suspended(frame: &mut Frame, thread: &alloc::sync::Arc<sched::Thread>) -> bool {
+    let mut suspended = false;
+    while sched::suspend(thread, frame) {
+        suspended = true;
+        crate::signal::deliver(frame);
+        end_if_requested(frame, thread);
+    }
+    suspended
 }
 
 /// Ends the running `thread`, with its user registers in `frame`, when

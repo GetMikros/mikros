@@ -2070,7 +2070,213 @@ fn evict_waits_for_outputs(s: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 30] = [
+const SUSPENDED: u32 = 1 << 5;
+const STATE_BLOCKED: u32 = 2;
+const STATE_SUSPENDED: u32 = 5;
+
+/// The state of `thread`.
+fn thread_state(thread: Handle) -> Result<u32> {
+    Ok(u32_at(&info::<0x18>(thread, 3)?, 0))
+}
+
+fn suspend(thread: Handle) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_suspend(thread) }
+}
+
+fn resume_thread(thread: Handle) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_resume(thread) }
+}
+
+/// Suspends `thread` and waits until it is suspended.
+fn suspend_and_wait(thread: Handle) -> Result {
+    check("suspending", suspend(thread))?;
+    let (status, _) = wait(thread, SUSPENDED, now() + 1_000_000_000);
+    check("becoming suspended", status)?;
+    ensure("being SUSPENDED", thread_state(thread)? == STATE_SUSPENDED)
+}
+
+/// Reads the general registers of `thread`.
+fn general_registers(thread: Handle) -> (i64, [u8; 160]) {
+    let mut regs = [0u8; 160];
+    // SAFETY: the pointer and length describe `regs`.
+    let status = unsafe { sys::thread_read_state(thread, 0, regs.as_mut_ptr(), 160) };
+    (status, regs)
+}
+
+/// The loops the spinning thread has made.
+static SPINS: AtomicU64 = AtomicU64::new(0);
+
+extern "sysv64" fn spin(_: u64, _: u64) -> ! {
+    loop {
+        SPINS.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// A suspended thread stops running until every suspension is undone,
+/// shows its registers, and can be killed.
+fn suspend_threads(s: &Startup) -> Result {
+    let mut fresh = 0;
+    let name = b"fresh";
+    // SAFETY: the pointers describe `name` and `fresh`.
+    check("creating a thread", unsafe {
+        sys::thread_create(s.process, name.as_ptr(), name.len() as u64, &mut fresh)
+    })?;
+    ensure("refusing a new thread", suspend(fresh) == BAD_STATE)?;
+    ensure(
+        "refusing to resume a new thread",
+        resume_thread(fresh) == BAD_STATE,
+    )?;
+    let thread = spawn(s, spin, 0)?;
+    sleep_ms(5);
+    ensure("spinning", SPINS.load(Ordering::Acquire) > 0)?;
+    ensure(
+        "hiding the registers of a running thread",
+        general_registers(thread).0 == BAD_STATE,
+    )?;
+    suspend_and_wait(thread)?;
+    let (status, regs) = general_registers(thread);
+    check("reading the registers", status)?;
+    ensure(
+        "stopping in user code",
+        (0x1_0000..0x7FFF_FFFF_F000).contains(&u64_at(&regs, 0x80)),
+    )?;
+    let count = SPINS.load(Ordering::Acquire);
+    sleep_ms(20);
+    ensure("not running", SPINS.load(Ordering::Acquire) == count)?;
+    check("suspending again", suspend(thread))?;
+    check("resuming once", resume_thread(thread))?;
+    sleep_ms(10);
+    ensure(
+        "counting suspensions",
+        SPINS.load(Ordering::Acquire) == count && thread_state(thread)? == STATE_SUSPENDED,
+    )?;
+    check("resuming", resume_thread(thread))?;
+    sleep_ms(10);
+    ensure("running again", SPINS.load(Ordering::Acquire) > count)?;
+    let (_, observed) = wait(thread, SUSPENDED, 0);
+    ensure("clearing SUSPENDED", observed & SUSPENDED == 0)?;
+    ensure("refusing a zero count", resume_thread(thread) == BAD_STATE)?;
+    suspend_and_wait(thread)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(thread) })?;
+    ensure("ending", wait(thread, TERMINATED, soon()).0 == 0)?;
+    ensure("refusing a dead thread", suspend(thread) == BAD_STATE)
+}
+
+/// What the waiting thread's wait returned.
+static WAIT_STATUS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+extern "sysv64" fn wait_for_user0(event: u64, _: u64) -> ! {
+    let (status, _) = wait(event as Handle, USER0, i64::MAX);
+    WAIT_STATUS.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread suspended in a wait waits again once resumed, without
+/// noticing the suspension.
+fn suspend_blocked_waits(s: &Startup) -> Result {
+    let mut event = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let thread = spawn(s, wait_for_user0, u64::from(event))?;
+    sleep_ms(5);
+    ensure("blocking", thread_state(thread)? == STATE_BLOCKED)?;
+    suspend_and_wait(thread)?;
+    check("resuming", resume_thread(thread))?;
+    sleep_ms(5);
+    ensure(
+        "waiting again",
+        thread_state(thread)? == STATE_BLOCKED && WAIT_STATUS.load(Ordering::Acquire) == u64::MAX,
+    )?;
+    suspend_and_wait(thread)?;
+    signal(event, 0, USER0)?;
+    sleep_ms(10);
+    ensure(
+        "not returning while suspended",
+        WAIT_STATUS.load(Ordering::Acquire) == u64::MAX,
+    )?;
+    check("resuming", resume_thread(thread))?;
+    ensure("ending", wait(thread, TERMINATED, soon()).0 == 0)?;
+    ensure(
+        "completing the wait",
+        WAIT_STATUS.load(Ordering::Acquire) == 0,
+    )
+}
+
+/// What the calling thread's call returned: 0 with the expected reply.
+static CALL_STATUS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+extern "sysv64" fn call_peer(channel: u64, _: u64) -> ! {
+    let (status, _, reply, _) = call(channel as Handle, b"ping", None, 64, i64::MAX);
+    let result = match status {
+        0 if &reply[4..8] == b"pong" => 0,
+        0 => 1,
+        e => e,
+    };
+    CALL_STATUS.store(result as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread suspended in `channel_call` keeps its call outstanding and
+/// takes the reply once resumed; the request is written once.
+fn suspend_in_call(s: &Startup) -> Result {
+    let (mut ours, mut theirs) = (0, 0);
+    // SAFETY: the pointers are valid for the call.
+    check("creating a channel", unsafe {
+        sys::channel_create(0, &mut ours, &mut theirs)
+    })?;
+    let thread = spawn(s, call_peer, u64::from(theirs))?;
+    let request = read_message(ours, 1000)?;
+    ensure(
+        "receiving the request",
+        &request.bytes[4..request.len] == b"ping",
+    )?;
+    ensure("blocking", thread_state(thread)? == STATE_BLOCKED)?;
+    suspend_and_wait(thread)?;
+    let (status, regs) = general_registers(thread);
+    check("reading the registers", status)?;
+    ensure("showing the call's number", u64_at(&regs, 0) == 65)?;
+    let mut reply = [0u8; 8];
+    reply[..4].copy_from_slice(&request.bytes[..4]);
+    reply[4..].copy_from_slice(b"pong");
+    // SAFETY: the pointer and length describe `reply`.
+    check("replying", unsafe {
+        sys::channel_write(ours, reply.as_ptr(), 8, core::ptr::null(), 0)
+    })?;
+    sleep_ms(10);
+    ensure(
+        "not returning while suspended",
+        CALL_STATUS.load(Ordering::Acquire) == u64::MAX,
+    )?;
+    check("resuming", resume_thread(thread))?;
+    ensure("ending", wait(thread, TERMINATED, soon()).0 == 0)?;
+    ensure("taking the reply", CALL_STATUS.load(Ordering::Acquire) == 0)?;
+    let mut probe = [0u8; 64];
+    let (mut len, mut count) = (0u64, 0u64);
+    // SAFETY: the pointers describe `probe`, `len` and `count`.
+    let status = unsafe {
+        sys::channel_read(
+            ours,
+            probe.as_mut_ptr(),
+            64,
+            core::ptr::null_mut(),
+            0,
+            &mut len,
+            &mut count,
+        )
+    };
+    ensure("writing the request once", status == SHOULD_WAIT)
+}
+
+const TESTS: [(&str, Test); 33] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2099,6 +2305,9 @@ const TESTS: [(&str, Test); 30] = [
     ("random_bytes", random_bytes),
     ("write_execute_policy", write_execute_policy),
     ("syscall_gate", syscall_gate),
+    ("suspend_threads", suspend_threads),
+    ("suspend_blocked_waits", suspend_blocked_waits),
+    ("suspend_in_call", suspend_in_call),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
 ];

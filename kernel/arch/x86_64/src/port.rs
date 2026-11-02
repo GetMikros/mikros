@@ -179,7 +179,7 @@ impl Port {
             if !self.state.lock().packets.is_empty() {
                 break Ok(());
             }
-            if crate::signal::interrupted(&thread, &process) {
+            if crate::signal::interrupted(&thread, &process) || thread.leave_wait_to_suspend() {
                 break Err(Error::Interrupted);
             }
             if thread.state() == sched::DEAD || deadline <= crate::time::now() {

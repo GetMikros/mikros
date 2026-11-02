@@ -295,12 +295,13 @@ fn current_thread() -> Result<Arc<Thread>, Error> {
 
 /// Ends `thread`, after a `THREAD_EXITING` report on its way back to
 /// user mode when its process asks for thread events. A thread asked to
-/// end is woken from a wait or a stop so that it gets there.
+/// end is woken from a wait, a stop or a suspension so that it gets there.
 fn end_thread(thread: &Arc<Thread>) {
     match thread.process() {
         Some(process) if process.debug_events() => {
             thread.request_exit();
             crate::sched::wake_sleeper(thread);
+            crate::sched::wake_suspended(thread);
             process.wake_stopped();
         }
         _ => Process::kill_thread(thread),
@@ -795,6 +796,25 @@ pub fn thread_resume_from_exception(thread: Checked, action: u32) -> Result<(), 
             crate::sched::resume_exception(&thread, crate::sched::DELIVER_SIGNAL);
         }
         _ => return Err(Error::InvalidArgs),
+    }
+    Ok(())
+}
+
+pub fn thread_suspend(thread: Checked) -> Result<(), Error> {
+    let thread = object::<Thread>(thread);
+    thread.suspend()?;
+    // A thread in a wait or a stop leaves it to be suspended.
+    crate::sched::wake_sleeper(&thread);
+    if let Some(process) = thread.process() {
+        process.wake_stopped();
+    }
+    Ok(())
+}
+
+pub fn thread_resume(thread: Checked) -> Result<(), Error> {
+    let thread = object::<Thread>(thread);
+    if thread.resume()? {
+        crate::sched::wake_suspended(&thread);
     }
     Ok(())
 }

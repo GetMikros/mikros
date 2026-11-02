@@ -157,8 +157,9 @@ pub fn deliver(frame: &mut Frame) -> bool {
             info.map(|info| (info, actions[info.signo as usize - 1]))
         };
         let Some((info, action)) = next else {
-            // A thread that is to end leaves the stop to report its exit.
-            if stopped && !thread.exit_requested() {
+            // A thread that is to end leaves the stop to report its exit,
+            // and one that is to be suspended to be suspended.
+            if stopped && !thread.exit_requested() && !thread.suspend_pending() {
                 process.stop_here(&thread);
                 continue;
             }
@@ -302,7 +303,7 @@ pub fn sleep(deadline: i64) -> Result<(), Error> {
     let thread = sched::current().ok_or(Error::BadHandle)?;
     let process = thread.process().cloned().ok_or(Error::BadHandle)?;
     loop {
-        if interrupted(&thread, &process) {
+        if interrupted(&thread, &process) || thread.leave_wait_to_suspend() {
             return Err(Error::Interrupted);
         }
         if thread.state() == sched::DEAD || deadline <= crate::time::now() {
@@ -329,6 +330,9 @@ pub fn wait_pending(mask: u64, deadline: i64) -> Result<(), Error> {
             if interrupting(&state.actions, &state.pending, &own) {
                 return Err(Error::Interrupted);
             }
+        }
+        if thread.leave_wait_to_suspend() {
+            return Err(Error::Interrupted);
         }
         if thread.state() == sched::DEAD || deadline <= crate::time::now() {
             return Err(Error::TimedOut);

@@ -107,7 +107,7 @@ pub fn wait_one(
         if waiter.canceled.load(Ordering::Acquire) {
             break Err(Error::Canceled);
         }
-        if crate::signal::interrupted(&thread, process) {
+        if crate::signal::interrupted(&thread, process) || thread.leave_wait_to_suspend() {
             break Err(Error::Interrupted);
         }
         if thread.state() == sched::DEAD || deadline <= crate::time::now() {
@@ -190,6 +190,10 @@ pub fn wait_call(
         if crate::signal::call_interrupted(&thread, process) {
             break Err(Error::Interrupted);
         }
+        // The call stays outstanding while the thread is suspended.
+        if crate::syscall::stay_suspended(&thread) {
+            continue;
+        }
         if thread.state() == sched::DEAD || deadline <= crate::time::now() {
             break Err(Error::TimedOut);
         }
@@ -262,7 +266,7 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> 
         if waiter.woken.load(Ordering::Acquire) {
             break Ok(());
         }
-        if crate::signal::interrupted(&thread, &process) {
+        if crate::signal::interrupted(&thread, &process) || thread.leave_wait_to_suspend() {
             break Err(Error::Interrupted);
         }
         if thread.state() == sched::DEAD || deadline <= crate::time::now() {

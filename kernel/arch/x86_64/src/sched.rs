@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use kernel_core::deadline::{Deadlines, INFINITE};
-use kernel_core::object::{Header, Name, Object, ObjectType};
+use kernel_core::object::{Header, Name, Object, ObjectType, signals};
 use kernel_core::sched::{DEFAULT_PRIORITY, Entity, Fair};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
@@ -27,6 +27,7 @@ pub const RUNNABLE: u32 = 1;
 pub const BLOCKED: u32 = 2;
 pub const EXCEPTION: u32 = 3;
 pub const DEAD: u32 = 4;
+pub const SUSPENDED: u32 = 5;
 
 /// Why a thread left state `EXCEPTION`: resumed by its handler, or woken
 /// because the handler's endpoint was closed.
@@ -61,9 +62,20 @@ pub struct Thread {
     /// Nanoseconds the thread has run.
     cpu_time: AtomicI64,
     user: SpinLock<UserState>,
-    /// The user registers of the thread while it is in state `EXCEPTION`,
-    /// on its kernel stack, or null.
+    /// The user registers of the thread while it is in state `EXCEPTION`
+    /// or `SUSPENDED`, on its kernel stack, or null.
     exception_frame: AtomicPtr<crate::idt::Frame>,
+    /// The registers the thread entered its current system call with, on
+    /// its kernel stack, or null.
+    syscall_frame: AtomicPtr<crate::syscall::Frame>,
+    /// Set when the registers of `syscall_frame` may have been changed
+    /// while the thread was suspended in the call.
+    syscall_changed: AtomicBool,
+    /// The number of `thread_suspend` calls not yet undone.
+    suspend_count: AtomicU64,
+    /// Set when a wait ended because the thread is to be suspended, so
+    /// that its system call runs again.
+    restart: AtomicBool,
     /// `RESUMED` or `HANDLER_GONE` once the thread leaves `EXCEPTION`.
     woken: AtomicU32,
     /// DR0 to DR3, DR6 and DR7 of a user thread, checked as
@@ -144,6 +156,10 @@ impl Thread {
             cpu_time: AtomicI64::new(0),
             user: SpinLock::new(UserState::default()),
             exception_frame: AtomicPtr::new(core::ptr::null_mut()),
+            syscall_frame: AtomicPtr::new(core::ptr::null_mut()),
+            syscall_changed: AtomicBool::new(false),
+            suspend_count: AtomicU64::new(0),
+            restart: AtomicBool::new(false),
             woken: AtomicU32::new(0),
             debug: SpinLock::new([0; 6]),
             debug_pending: AtomicBool::new(false),
@@ -259,10 +275,18 @@ impl Thread {
         BREAKPOINTS_LOADED.store(true, Ordering::Relaxed);
     }
 
+    /// Whether the thread is in state `EXCEPTION` or `SUSPENDED` with its
+    /// user registers available.
+    fn stopped(&self) -> bool {
+        matches!(self.state(), EXCEPTION | SUSPENDED)
+            && !self.exception_frame.load(Ordering::Acquire).is_null()
+    }
+
     /// Calls `f` with the debug registers of a thread in state
-    /// `EXCEPTION`, or returns `None` when it is in another state.
+    /// `EXCEPTION` or `SUSPENDED`, or returns `None` when it is in another
+    /// state.
     pub fn with_stopped_debug<R>(&self, f: impl FnOnce(&mut [u64; 6]) -> R) -> Option<R> {
-        if self.state() != EXCEPTION || self.exception_frame.load(Ordering::Acquire).is_null() {
+        if !self.stopped() {
             return None;
         }
         Some(f(&mut self.debug.lock()))
@@ -337,6 +361,71 @@ impl Thread {
         self.exit_requested.swap(false, Ordering::AcqRel)
     }
 
+    /// Increases the suspend count. Fails with `BadState` when the thread
+    /// is `NEW` or `DEAD`.
+    pub fn suspend(&self) -> Result<(), Error> {
+        if matches!(self.state(), NEW | DEAD) {
+            return Err(Error::BadState);
+        }
+        self.suspend_count.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Decreases the suspend count and returns whether it reached zero.
+    /// Fails with `BadState` when the thread is `NEW` or `DEAD` or the
+    /// count is zero.
+    pub fn resume(&self) -> Result<bool, Error> {
+        let count = self.suspend_count.load(Ordering::Acquire);
+        if matches!(self.state(), NEW | DEAD) || count == 0 {
+            return Err(Error::BadState);
+        }
+        self.suspend_count.store(count - 1, Ordering::Release);
+        Ok(count == 1)
+    }
+
+    /// Whether the thread is to be suspended.
+    pub fn suspend_pending(&self) -> bool {
+        self.suspend_count.load(Ordering::Acquire) != 0
+    }
+
+    /// Whether a wait in a system call must end because the thread is to
+    /// be suspended; the call then runs again once it is resumed.
+    pub fn leave_wait_to_suspend(&self) -> bool {
+        let leave = self.suspend_pending();
+        if leave {
+            self.restart.store(true, Ordering::Release);
+        }
+        leave
+    }
+
+    /// Whether the system call that just ended is to run again, clearing
+    /// the mark.
+    pub fn take_restart(&self) -> bool {
+        self.restart.swap(false, Ordering::AcqRel)
+    }
+
+    /// Records the registers the thread entered a system call with, or
+    /// null once it leaves the call.
+    pub fn set_syscall_frame(&self, frame: *mut crate::syscall::Frame) {
+        self.syscall_frame.store(frame, Ordering::Release);
+    }
+
+    /// The registers of the system call the thread is in, or null.
+    pub fn syscall_frame(&self) -> *mut crate::syscall::Frame {
+        self.syscall_frame.load(Ordering::Acquire)
+    }
+
+    /// Records that the registers of the system call may have changed.
+    pub fn mark_syscall_changed(&self) {
+        self.syscall_changed.store(true, Ordering::Release);
+    }
+
+    /// Whether the registers of the system call may have changed,
+    /// clearing the mark.
+    pub fn take_syscall_changed(&self) -> bool {
+        self.syscall_changed.swap(false, Ordering::AcqRel)
+    }
+
     /// Whether the thread has breakpoints enabled.
     pub fn has_breakpoints(&self) -> bool {
         self.debug.lock()[5] != 0
@@ -375,16 +464,17 @@ impl Thread {
     }
 
     /// Calls `f` with the user registers, the user FS and GS bases and the
-    /// extended state of a thread in state `EXCEPTION`, or returns `None`
-    /// when it is in another state. The thread does not run meanwhile.
+    /// extended state of a thread in state `EXCEPTION` or `SUSPENDED`, or
+    /// returns `None` when it is in another state. The thread does not
+    /// run meanwhile.
     pub fn with_stopped_state<R>(
         &self,
         f: impl FnOnce(&mut crate::idt::Frame, &mut [u64; 2], &context::ExtendedState) -> R,
     ) -> Option<R> {
-        let frame = self.exception_frame.load(Ordering::Acquire);
-        if self.state() != EXCEPTION || frame.is_null() {
+        if !self.stopped() {
             return None;
         }
+        let frame = self.exception_frame.load(Ordering::Acquire);
         let mut user = self.user.lock();
         let mut bases = [user.fs_base, user.gs_base];
         // SAFETY: the frame is on the thread's kernel stack, which stays
@@ -728,10 +818,47 @@ pub fn make_dead(thread: &Arc<Thread>) -> u32 {
         } else {
             cpu.fair.enqueue(Queued::new(thread.clone()), entity);
         }
-    } else if was == EXCEPTION {
+    } else if was == EXCEPTION || was == SUSPENDED {
         queue(thread);
     }
     was
+}
+
+/// Puts the running user `thread`, whose user registers are in `frame`,
+/// in state `SUSPENDED` while its suspend count is above zero, until
+/// `wake_suspended` or `make_dead`. Returns whether it was suspended; it
+/// is not while it is to end.
+pub fn suspend(thread: &Arc<Thread>, frame: &mut crate::idt::Frame) -> bool {
+    if !thread.suspend_pending() || thread.exit_requested() {
+        return false;
+    }
+    thread.exception_frame.store(frame, Ordering::Release);
+    let suspended = thread
+        .state
+        .compare_exchange(RUNNABLE, SUSPENDED, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    if suspended {
+        thread.header.update_signals(0, signals::SUSPENDED);
+        schedule(false);
+        // A thread made DEAD was not woken by `wake_suspended`.
+        thread.header.update_signals(signals::SUSPENDED, 0);
+    }
+    thread
+        .exception_frame
+        .store(core::ptr::null_mut(), Ordering::Release);
+    suspended
+}
+
+/// Makes `thread` RUNNABLE and queues it if it is in state `SUSPENDED`.
+pub fn wake_suspended(thread: &Arc<Thread>) {
+    if thread
+        .state
+        .compare_exchange(SUSPENDED, RUNNABLE, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        thread.header.update_signals(signals::SUSPENDED, 0);
+        queue(thread);
+    }
 }
 
 /// Blocks the running `thread` until `wake` or `make_dead`, calling
@@ -902,8 +1029,8 @@ fn user_entry(_: usize) {
     };
     let [rip, rsp, arg1, arg2] = thread.user.lock().start;
     let report = thread.process().is_some_and(|p| p.debug_events());
-    drop(thread);
-    if !report {
+    if !report && !thread.suspend_pending() {
+        drop(thread);
         exit_if_dead();
         // SAFETY: `switch_in` loaded the thread's address space, extended
         // state and user bases before switching to it.
@@ -919,11 +1046,15 @@ fn user_entry(_: usize) {
         ss: u64::from(crate::gdt::USER_DATA) | 3,
         ..Default::default()
     };
-    crate::exception::report_event(
-        &mut frame,
-        kernel_core::exception::kind::THREAD_STARTING,
-        rip,
-    );
+    if report {
+        crate::exception::report_event(
+            &mut frame,
+            kernel_core::exception::kind::THREAD_STARTING,
+            rip,
+        );
+    }
+    crate::exception::stay_suspended(&mut frame, &thread);
+    drop(thread);
     exit_if_dead();
     // SAFETY: as above; the handler could change only what
     // `thread_write_state` allows.
