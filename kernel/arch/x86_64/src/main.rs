@@ -59,6 +59,9 @@ mod space;
 mod time;
 #[cfg(target_os = "none")]
 mod timer;
+#[cfg(target_os = "none")]
+#[expect(dead_code, reason = "no system call copies user memory yet")]
+mod usercopy;
 
 /// The kernel only runs on its own target. This lets the workspace build
 /// on the host.

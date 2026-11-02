@@ -13,6 +13,8 @@ const STUB_SIZE: u64 = 16;
 pub const NMI: u8 = 2;
 pub const BREAKPOINT: u8 = 3;
 pub const DOUBLE_FAULT: u8 = 8;
+pub const GENERAL_PROTECTION: u8 = 13;
+pub const PAGE_FAULT: u8 = 14;
 pub const MACHINE_CHECK: u8 = 18;
 
 /// The vectors for which the processor pushes an error code, as a mask.
@@ -238,8 +240,9 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
     let vector = frame.vector as u8;
     use crate::apic::{PIC_BASE, SPURIOUS_VECTOR, TIMER_VECTOR};
     match vector {
-        // No exception is handled yet, and no user mode exists, so each
-        // one stops the kernel.
+        // A fault in the user copy routine makes the copy fail. No other
+        // exception is handled yet, so each one stops the kernel.
+        GENERAL_PROTECTION | PAGE_FAULT if crate::usercopy::recover(frame) => {}
         0..32 => crate::panic::exception(frame),
         // The PICs are masked; what arrives from them is ignored, and the
         // local APIC expects no end of interrupt for them or for its
