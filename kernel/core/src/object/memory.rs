@@ -3,6 +3,7 @@
 
 use crate::status::Error;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 pub const PAGE_SIZE: u64 = 4096;
 
@@ -29,6 +30,11 @@ pub struct Pages {
     options: u32,
     /// The frame of each page that has one, by page index.
     frames: BTreeMap<u64, u64>,
+    /// How many retained writers or readers may still use frames that
+    /// were taken from the pages.
+    pins: u64,
+    /// Frames taken from the pages while pinned, freed once unpinned.
+    orphans: Vec<u64>,
 }
 
 /// What changing the size leaves to the caller.
@@ -36,7 +42,8 @@ pub struct Resized {
     /// The frame whose bytes from this offset to its end must be zeroed,
     /// so that bytes past the smaller of the two sizes read as zero.
     pub zero: Option<(u64, usize)>,
-    /// The frames of the pages past the new size, by page index.
+    /// The frames of the pages past the new size, by page index. Frames
+    /// taken while the pages are pinned are kept until `unpin` instead.
     pub freed: BTreeMap<u64, u64>,
 }
 
@@ -60,6 +67,8 @@ impl Pages {
             size,
             options,
             frames: BTreeMap::new(),
+            pins: 0,
+            orphans: Vec::new(),
         })
     }
 
@@ -103,9 +112,27 @@ impl Pages {
         debug_assert!(old.is_none(), "page {index} already has a frame");
     }
 
-    /// Takes every frame, by page index.
+    /// Takes every frame, by page index. Nothing may be pinned.
     pub fn take_all(&mut self) -> BTreeMap<u64, u64> {
+        debug_assert!(self.pins == 0 && self.orphans.is_empty());
         core::mem::take(&mut self.frames)
+    }
+
+    /// Keeps frames that later leave the pages from being returned until
+    /// the matching `unpin`.
+    pub fn pin(&mut self) {
+        self.pins += 1;
+    }
+
+    /// Ends one `pin`, and returns the frames to free once none is left.
+    pub fn unpin(&mut self) -> Vec<u64> {
+        debug_assert!(self.pins > 0, "unpinned more than pinned");
+        self.pins -= 1;
+        if self.pins == 0 {
+            core::mem::take(&mut self.orphans)
+        } else {
+            Vec::new()
+        }
     }
 
     /// Changes the size to `size`, at most `max`. Fails with
@@ -123,7 +150,11 @@ impl Pages {
             self.frame(kept / PAGE_SIZE).map(|phys| (phys, tail))
         };
         self.size = size;
-        let freed = self.frames.split_off(&self.count());
+        let mut freed = self.frames.split_off(&self.count());
+        if self.pins > 0 {
+            self.orphans
+                .extend(core::mem::take(&mut freed).into_values());
+        }
         Ok(Resized { zero, freed })
     }
 
@@ -185,6 +216,28 @@ mod tests {
             [(2, 0x3000), (3, 0x4000)]
         );
         assert_eq!((pages.count(), pages.allocated()), (2, 2));
+    }
+
+    #[test]
+    fn keeps_frames_taken_while_pinned_until_the_last_unpin() {
+        let mut pages = Pages::new(4 * PAGE_SIZE, RESIZABLE, MAX).unwrap();
+        for i in 0..4 {
+            pages.insert(i, 0x1000 * (i + 1));
+        }
+        pages.pin();
+        pages.pin();
+        assert!(pages.set_size(3 * PAGE_SIZE, MAX).unwrap().freed.is_empty());
+        pages.set_size(4 * PAGE_SIZE, MAX).unwrap();
+        pages.insert(3, 0x9000);
+        assert!(pages.set_size(PAGE_SIZE, MAX).unwrap().freed.is_empty());
+        assert_eq!(pages.allocated(), 1);
+        assert!(pages.unpin().is_empty());
+        assert_eq!(pages.unpin(), [0x4000, 0x2000, 0x3000, 0x9000]);
+        pages.set_size(2 * PAGE_SIZE, MAX).unwrap();
+        pages.insert(1, 0xa000);
+        let freed = pages.set_size(PAGE_SIZE, MAX).unwrap().freed;
+        assert_eq!(freed.into_values().collect::<Vec<_>>(), [0xa000]);
+        assert_eq!((pages.pins, pages.orphans.len()), (0, 0));
     }
 
     #[test]
