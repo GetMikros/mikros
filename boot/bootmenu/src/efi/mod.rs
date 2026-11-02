@@ -1,6 +1,7 @@
 //! The boot manager's use of UEFI.
 
 mod launch;
+mod others;
 mod pointers;
 mod power;
 mod screen;
@@ -11,12 +12,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use bootmenu::bmp;
 use bootmenu::canvas::{Canvas, Color};
-use bootmenu::entries::Config;
+use bootmenu::entries::{self, Config};
 use bootmenu::input::{Action, Event, Input};
 use bootmenu::menu::{Card, FocusSource, ICON_SIZE, Item, Menu, Power};
 use bootmenu::pointer;
 use bootmenu::text::Text;
 use core::time::Duration;
+use others::Detected;
 use pointers::Pointers;
 use screen::Screen;
 use uefi::boot::{EventType, TimerTrigger, Tpl};
@@ -34,8 +36,9 @@ const ENTRIES_PATH: &str = "\\EFI\\Mikros\\entries.yaml";
 const BOOT_TO_FW_UI: u64 = 1;
 
 /// Reads the entries file from the volume the boot manager was loaded from.
-/// Returns the configuration and a notice naming any problem with the file.
-fn load_config(volume: Result<&mut FileSystem, Status>) -> (Config, Option<String>) {
+/// Returns the configuration, a notice naming any problem with the file, and
+/// whether the file is missing.
+fn load_config(volume: Result<&mut FileSystem, Status>) -> (Config, Option<String>, bool) {
     let unusable = |problem: String| {
         let config = Config {
             default: None,
@@ -46,6 +49,7 @@ fn load_config(volume: Result<&mut FileSystem, Status>) -> (Config, Option<Strin
         (
             config,
             Some(format!("Couldn't use {ENTRIES_PATH}: {problem}")),
+            false,
         )
     };
     let volume = match volume {
@@ -54,11 +58,11 @@ fn load_config(volume: Result<&mut FileSystem, Status>) -> (Config, Option<Strin
     };
     match volume.read(cstr16!("\\EFI\\Mikros\\entries.yaml")) {
         Ok(bytes) => match Config::parse(&bytes) {
-            Ok(config) => (config, None),
+            Ok(config) => (config, None, false),
             Err(err) => unusable(format!("{err}")),
         },
         Err(uefi::fs::Error::Io(err)) if err.uefi_error.status() == Status::NOT_FOUND => {
-            (Config::for_missing_file(), None)
+            (Config::for_missing_file(), None, true)
         }
         Err(err) => unusable(format!("{err}")),
     }
@@ -94,10 +98,11 @@ fn load_icon(volume: Option<&mut FileSystem>, path: &str) -> Result<bmp::Image, 
     Ok(image.fit_within(ICON_SIZE))
 }
 
-/// Builds the menu for `config`. Notices about the entries file and about
+/// Builds the menu for `config`, followed by the `detected` systems. Notices about the entries file and about
 /// icons that could not be loaded are joined into the menu's notice.
 fn build_menu(
     config: &Config,
+    detected: &[Detected],
     mut volume: Option<&mut FileSystem>,
     config_notice: Option<String>,
 ) -> Menu {
@@ -125,6 +130,16 @@ fn build_menu(
                 icon,
             }
         })
+        .chain(detected.iter().map(|system| Card {
+            name: system.name.clone(),
+            detail: system.other_disk.then(|| String::from("Other disk")),
+            color: Color::rgb(
+                entries::Color::DEFAULT_TILE.r,
+                entries::Color::DEFAULT_TILE.g,
+                entries::Color::DEFAULT_TILE.b,
+            ),
+            icon: None,
+        }))
         .collect::<Vec<_>>();
     let notice = (!notices.is_empty()).then(|| notices.join("; "));
     let mut buttons = vec![Power::Restart, Power::ShutDown];
@@ -271,11 +286,18 @@ pub fn run() -> Status {
     let mut file_system = boot::get_image_file_system(boot::image_handle())
         .map(FileSystem::new)
         .map_err(|err| err.status());
-    let (config, config_notice) = load_config(file_system.as_mut().map_err(|s| *s));
-    let mut menu = build_menu(&config, file_system.as_mut().ok(), config_notice);
+    let (mut config, config_notice, missing) = load_config(file_system.as_mut().map_err(|s| *s));
+    let volume = launch::boot_volume();
+    let detected = match &volume {
+        Some(volume) if config.detect => others::find(&config, volume),
+        _ => Vec::new(),
+    };
+    if missing && !detected.is_empty() {
+        config.timeout = Some(5);
+    }
+    let mut menu = build_menu(&config, &detected, file_system.as_mut().ok(), config_notice);
     drop(file_system);
     let startup_notice = menu.notice.clone();
-    let volume = launch::boot_volume();
     let default = config.default_index();
     let Some(mut text) = Text::new() else {
         return Status::LOAD_ERROR;
@@ -314,11 +336,20 @@ pub fn run() -> Status {
         match item {
             Item::Button(power) => power::act(power),
             Item::Card(index) => {
-                let entry = &config.entries[index];
-                let result = start(volume.as_deref(), &entry.path, entry.args.as_deref());
+                let (name, result) = match config.entries.get(index) {
+                    Some(entry) => (
+                        &entry.name,
+                        start(volume.as_deref(), &entry.path, entry.args.as_deref()),
+                    ),
+                    None => {
+                        let system = &detected[index - config.entries.len()];
+                        let result = launch::start_image(&system.device_path, &system.path, None);
+                        (&system.name, result)
+                    }
+                };
                 menu.notice = match result {
                     Ok(()) => startup_notice.clone(),
-                    Err(reason) => Some(format!("Couldn't start {}: {reason}", entry.name)),
+                    Err(reason) => Some(format!("Couldn't start {name}: {reason}")),
                 };
                 menu.focus = Some((Item::Card(index), FocusSource::Keyboard));
                 menu.countdown = None;

@@ -27,10 +27,8 @@ fn reason(path: &str, status: Status) -> String {
     }
 }
 
-/// Loads the image at `path` on `volume` and starts it with `args` as its
-/// load options. Returns when the image exits, or with the reason it could
-/// not be loaded or started.
-pub fn start(volume: &DevicePath, path: &str, args: Option<&str>) -> Result<(), String> {
+/// The device path of the file at `path` on `volume`.
+pub fn file_device_path(volume: &DevicePath, path: &str) -> Result<Box<DevicePath>, String> {
     let file = CString16::try_from(path).map_err(|_| format!("{path}: invalid path"))?;
     let mut buf = Vec::new();
     let mut builder = DevicePathBuilder::with_vec(&mut buf);
@@ -39,11 +37,23 @@ pub fn start(volume: &DevicePath, path: &str, args: Option<&str>) -> Result<(), 
             .push(&node)
             .map_err(|_| format!("{path}: invalid device path"))?;
     }
-    let full_path = builder
+    builder
         .push(&build::media::FilePath { path_name: &file })
         .and_then(|b| b.finalize())
-        .map_err(|_| format!("{path}: invalid device path"))?;
+        .map(DevicePath::to_boxed)
+        .map_err(|_| format!("{path}: invalid device path"))
+}
 
+/// Loads the image at `path` on `volume` and starts it with `args` as its
+/// load options. Returns when the image exits, or with the reason it could
+/// not be loaded or started.
+pub fn start(volume: &DevicePath, path: &str, args: Option<&str>) -> Result<(), String> {
+    start_image(&file_device_path(volume, path)?, path, args)
+}
+
+/// Loads the image at the full device path `full_path` and starts it with
+/// `args` as its load options. `path` names the image in reasons.
+pub fn start_image(full_path: &DevicePath, path: &str, args: Option<&str>) -> Result<(), String> {
     let source = LoadImageSource::FromDevicePath {
         device_path: full_path,
         boot_policy: BootPolicy::ExactMatch,
