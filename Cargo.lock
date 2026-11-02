@@ -506,6 +506,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel-core"
+version = "0.0.0"
+dependencies = [
+ "boot-protocol",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
