@@ -47,6 +47,11 @@ pub struct MemoryObject {
     mappings: SpinLock<Map<(u64, u64), Weak<AddressSpace>>>,
     /// The number of regions that map the object writable.
     writable: AtomicU64,
+    /// The page ranges, first and exclusive end, that were given frames
+    /// in place of the shared zero page and whose translations of it are
+    /// still being removed. Nothing may write to their frames or map them
+    /// until then. Locked after the pages.
+    changing: SpinLock<Vec<(u64, u64)>>,
     /// The seals of `mem_seal`, never removed. Checks and changes are
     /// serialized because system calls run one at a time on the one
     /// processor.
@@ -135,6 +140,7 @@ impl MemoryObject {
             physical: None,
             mappings: SpinLock::new(nodes::map()),
             writable: AtomicU64::new(0),
+            changing: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
             paged: None,
         })
@@ -168,6 +174,7 @@ impl MemoryObject {
             physical: None,
             mappings: SpinLock::new(nodes::map()),
             writable: AtomicU64::new(0),
+            changing: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
             paged: Some(Paged {
                 pager,
@@ -346,15 +353,17 @@ impl MemoryObject {
                             return Err(e);
                         }
                     };
+                    drop(state);
+                    drop(pages);
                     // Writes through mappings fault again and are seen.
-                    for index in recorded {
-                        self.unmap_pages(index, index + 1);
+                    // Writes before the translations go come before the
+                    // pager reads the pages, after this call.
+                    if let (Some(&low), Some(&high)) = (recorded.first(), recorded.last()) {
+                        self.unmap_in_steps(low, high + 1);
                     }
                     if done {
                         return Ok(());
                     }
-                    drop(state);
-                    drop(pages);
                     crate::sched::preempt_point();
                 }
             }
@@ -404,13 +413,14 @@ impl MemoryObject {
                 continue;
             }
             if let Ok(taken) = pages.decommit(index, index + 1) {
-                self.unmap_pages(index, index + 1);
                 freed.extend(taken);
                 state.removed(index);
             }
         }
         drop(state);
         drop(pages);
+        // The translations go before the frames.
+        self.unmap_in_steps(first, end);
         self.free(freed);
     }
 
@@ -475,8 +485,7 @@ impl MemoryObject {
         // No page can be entered once revoked, and the size stays, so the
         // translations go in pieces.
         let _ = in_pieces(0, count, |from, to| {
-            let _pages = self.pages.lock();
-            self.unmap_pages(from, to);
+            self.unmap_in_steps(from, to);
             Ok(())
         });
         crate::pager::wake(self.header.koid(), 0, u64::MAX);
@@ -582,7 +591,9 @@ impl MemoryObject {
         }
         let (first, end) = (offset / PAGE_SIZE, (offset + len) / PAGE_SIZE);
         let taken = pages.decommit(first, end)?;
-        self.unmap_pages(first, end);
+        drop(pages);
+        // No translation of the frames is left when they move.
+        self.unmap_in_steps(first, end);
         Ok(taken)
     }
 
@@ -607,6 +618,7 @@ impl MemoryObject {
             physical: Some((base, policy)),
             mappings: SpinLock::new(nodes::map()),
             writable: AtomicU64::new(0),
+            changing: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
             paged: None,
         })
@@ -721,17 +733,25 @@ impl MemoryObject {
         Mapping::add(self, (id, start), Arc::downgrade(space), writable)
     }
 
-    /// Removes the pages that map pages `first` to `end`, exclusive, of
-    /// the object from every region that maps it. The pages must be
-    /// locked.
-    fn unmap_pages(&self, first: u64, end: u64) {
-        // The mappings are visited one at a time, none of them locked
-        // while a region is.
+    /// Removes the translations of pages `first` to `end`, exclusive, of
+    /// the object from every region that maps it, in steps with reschedule
+    /// checks. No lock may be held.
+    ///
+    /// The caller has changed the pages first, so that translations made
+    /// meanwhile reflect the change and may stay. Only the regions with
+    /// records from before the start are visited: a newer region has only
+    /// such translations, and a split keeps its record's ID, so a part
+    /// split off a region not visited yet is still visited.
+    fn unmap_in_steps(&self, first: u64, end: u64) {
+        let last = NEXT_RECORD.load(Ordering::Relaxed);
         let mut next = (0, 0);
+        let mut visited = 0;
         loop {
+            // The mappings are visited one at a time, none of them locked
+            // while a region is.
             let entry = {
                 let mappings = self.mappings.lock();
-                let entry = mappings.range(next..).next();
+                let entry = mappings.range(next..(last, 0)).next();
                 entry.map(|(&key, space)| (key, space.clone()))
             };
             let Some(((id, start), space)) = entry else {
@@ -739,17 +759,83 @@ impl MemoryObject {
             };
             next = (id, start + 1);
             if let Some(space) = space.upgrade() {
-                space.unmap_mapping(self, start, first, end);
+                space.unmap_mapping_in_steps(self, start, first, end);
+            }
+            visited += 1;
+            if visited % ITEM_STEP == 0 {
+                crate::sched::preempt_point();
             }
         }
     }
 
-    /// Gives page `index` a frame and removes the translations of the
-    /// shared zero page that stood in for it.
-    fn alloc_mapped(&self, pages: &mut Pages, index: u64) -> Result<u64, Error> {
-        let phys = self.alloc(pages, index)?;
-        self.unmap_pages(index, index + 1);
-        Ok(phys)
+    /// Gives page `index` a frame in place of the shared zero page, and
+    /// marks it changing until `settle` has removed the translations of
+    /// the zero page that stood in for it.
+    fn alloc_changing(&self, pages: &mut Pages, index: u64) -> Result<u64, Error> {
+        self.mark(index, index + 1)?;
+        self.alloc(pages, index)
+            .inspect_err(|_| self.unmark(index, index + 1))
+    }
+
+    /// Marks pages `first` to `end` as changing, or fails with `NoMemory`
+    /// without room to. The pages are locked.
+    fn mark(&self, first: u64, end: u64) -> Result<(), Error> {
+        let mut changing = self.changing.lock();
+        changing.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        changing.push((first, end));
+        Ok(())
+    }
+
+    /// Ends the mark of `mark` on pages `first` to `end`, and wakes the
+    /// threads waiting for them.
+    fn unmark(&self, first: u64, end: u64) {
+        let mut changing = self.changing.lock();
+        let at = changing.iter().position(|&m| m == (first, end));
+        changing.swap_remove(at.expect("the pages were marked"));
+        drop(changing);
+        crate::pager::wake(self.header.koid(), first, end);
+    }
+
+    /// Removes the old translations of pages `first` to `end`, marked by
+    /// `mark` and then changed, and ends the mark. No lock may be held.
+    fn settle(&self, first: u64, end: u64) {
+        self.unmap_in_steps(first, end);
+        self.unmark(first, end);
+    }
+
+    /// Whether page `index` is marked changing. The pages are locked.
+    fn is_changing(&self, index: u64) -> bool {
+        let changing = self.changing.lock();
+        changing
+            .iter()
+            .any(|&(first, end)| (first..end).contains(&index))
+    }
+
+    /// Waits until page `index` is not marked changing. Fails with `Io`
+    /// when the thread is killed meanwhile, and with `NoResources` when
+    /// the wait cannot be charged.
+    pub fn wait_settled(&self, index: u64) -> Result<(), Error> {
+        let koid = self.header.koid();
+        let _charge = crate::pager::charge_wait()?;
+        loop {
+            let pages = self.pages.lock();
+            if !self.is_changing(index) {
+                return Ok(());
+            }
+            let thread = crate::pager::wait_for(koid, index)?;
+            drop(pages);
+            let slept = crate::sched::wait_for_signals(&thread, i64::MAX);
+            crate::pager::stop_waiting(koid, &thread);
+            slept?;
+            if thread.state() == crate::sched::DEAD {
+                return Err(Error::Io);
+            }
+        }
+    }
+
+    /// Settles page `index`, which a fault gave a frame and marked.
+    pub fn settle_page(&self, index: u64) {
+        self.settle(index, index + 1);
     }
 
     /// Enters the page at `virt` of `space` into its tables for a fault
@@ -795,11 +881,15 @@ impl MemoryObject {
                 Err(_) => Fault::OutOfMemory,
             };
         }
+        if self.physical.is_none() && self.is_changing(index) {
+            return Fault::Busy(index);
+        }
         let (phys, writable) = match (self.physical, pages.frame(index)) {
             (Some((base, _)), _) => (base + index * PAGE_SIZE, perms & PERM_WRITE != 0),
             (None, Some(phys)) => (phys, perms & PERM_WRITE != 0),
-            (None, None) if write => match self.alloc_mapped(&mut pages, index) {
-                Ok(phys) => (phys, true),
+            // The page is entered once the zero page is gone everywhere.
+            (None, None) if write => match self.alloc_changing(&mut pages, index) {
+                Ok(_) => return Fault::Changed(index),
                 Err(_) => return Fault::OutOfMemory,
             },
             (None, None) => match zero_frame() {
@@ -872,9 +962,16 @@ impl MemoryObject {
                 backing: Some(Backing::Frame(phys)),
             });
         }
-        let phys = match pages.frame(index) {
-            Some(phys) => phys,
-            None => self.alloc_mapped(&mut pages, index)?,
+        if self.is_changing(index) {
+            drop(pages);
+            self.wait_settled(index)?;
+            return self.hold_for_write(space, virt);
+        }
+        let Some(phys) = pages.frame(index) else {
+            self.alloc_changing(&mut pages, index)?;
+            drop(pages);
+            self.settle(index, index + 1);
+            return self.hold_for_write(space, virt);
         };
         pages.pin();
         Ok(Held {
@@ -897,15 +994,29 @@ impl MemoryObject {
         frames
             .try_reserve_exact(pages.count() as usize)
             .map_err(|_| Error::NoMemory)?;
-        for index in 0..pages.count() {
+        let count = pages.count();
+        self.mark(0, count)?;
+        let mut result = Ok(());
+        for index in 0..count {
             let phys = match pages.frame(index) {
                 Some(phys) => phys,
-                None => self.alloc_mapped(&mut pages, index)?,
+                None => match self.alloc(&mut pages, index) {
+                    Ok(phys) => phys,
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
+                },
             };
             frames.push(phys);
         }
-        pages.pin();
-        Ok((frames, pages.size()))
+        if result.is_ok() {
+            pages.pin();
+        }
+        let size = pages.size();
+        drop(pages);
+        self.settle(0, count);
+        result.map(|()| (frames, size))
     }
 
     /// Ends a pin of `pin_all`.
@@ -1122,6 +1233,11 @@ impl MemoryObject {
                 self.obtain(index)?;
                 let mut pages = self.pages.lock();
                 self.check_writable()?;
+                if self.is_changing(index) {
+                    drop(pages);
+                    self.wait_settled(index)?;
+                    continue;
+                }
                 let phys = match (&self.paged, pages.frame(index)) {
                     (Some(paged), frame) => {
                         let mut state = paged.state.lock();
@@ -1135,7 +1251,12 @@ impl MemoryObject {
                         phys
                     }
                     (None, Some(phys)) => phys,
-                    (None, None) => self.alloc_mapped(&mut pages, index)?,
+                    (None, None) => {
+                        self.alloc_changing(&mut pages, index)?;
+                        drop(pages);
+                        self.settle(index, index + 1);
+                        continue;
+                    }
                 };
                 // SAFETY: the pages are locked.
                 let frame = unsafe { frame_bytes(phys) };
@@ -1159,12 +1280,19 @@ impl MemoryObject {
             let mut pages = self.pages.lock();
             // The object may have shrunk since the last piece.
             pages.check_range(from * PAGE_SIZE, (to - from) * PAGE_SIZE)?;
+            self.mark(from, to)?;
+            let mut result = Ok(());
             for index in from..to {
-                if pages.frame(index).is_none() {
-                    self.alloc_mapped(&mut pages, index)?;
+                if pages.frame(index).is_none()
+                    && let Err(e) = self.alloc(&mut pages, index)
+                {
+                    result = Err(e);
+                    break;
                 }
             }
-            Ok(())
+            drop(pages);
+            self.settle(from, to);
+            result
         })
     }
 
@@ -1189,8 +1317,9 @@ impl MemoryObject {
                 return Ok(());
             }
             let freed = pages.decommit(from, end)?;
-            self.unmap_pages(from, end);
             drop(pages);
+            // The translations go before the frames.
+            self.unmap_in_steps(from, end);
             self.free(freed);
             Ok(())
         })
@@ -1238,10 +1367,10 @@ impl MemoryObject {
         // The pieces cannot fail: one waits until the frames it cannot
         // keep for kernel copies are no longer used.
         let _ = in_pieces(new, old, |from, to| {
+            // The translations go before the frames.
+            self.unmap_in_steps(from, to);
             loop {
                 let mut pages = self.pages.lock();
-                // The translations go before the frames.
-                self.unmap_pages(from, to);
                 if pages.pinned() {
                     // Kernel copies may still use the frames, which stay
                     // until the last of them ends.

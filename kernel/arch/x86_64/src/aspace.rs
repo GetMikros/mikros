@@ -451,21 +451,28 @@ impl AddressSpace {
         self.unmap_in_steps(start, end - start)
     }
 
-    /// Removes the pages that map pages `first` to `end`, exclusive, of
-    /// `mem` through the region from `start`, if it still maps `mem`. The
-    /// caller holds the object's pages lock.
-    pub fn unmap_mapping(&self, mem: &MemoryObject, start: u64, first: u64, end: u64) {
-        let regions = self.regions.lock();
-        let region = regions.starting_at(start);
-        if let Some(r) = region.filter(|r| core::ptr::eq(&*r.mem, mem)) {
-            let base = r.offset / PAGE_SIZE;
-            let pages = r.len / PAGE_SIZE;
-            let from = first.saturating_sub(base).min(pages);
-            let to = end.saturating_sub(base).min(pages);
-            if from < to {
-                self.unmap(r.start + from * PAGE_SIZE, (to - from) * PAGE_SIZE, |_| {})
-                    .expect("regions are page-aligned and in the user range");
-            }
+    /// Removes the translations of pages `first` to `end`, exclusive, of
+    /// `mem` through the region from `start`, if it still maps `mem`, in
+    /// steps with reschedule checks. No lock may be held.
+    pub fn unmap_mapping_in_steps(&self, mem: &MemoryObject, start: u64, first: u64, end: u64) {
+        let range = {
+            let regions = self.regions.lock();
+            let region = regions.starting_at(start);
+            region
+                .filter(|r| core::ptr::eq(&*r.mem, mem))
+                .and_then(|r| {
+                    let base = r.offset / PAGE_SIZE;
+                    let pages = r.len / PAGE_SIZE;
+                    let from = first.saturating_sub(base).min(pages);
+                    let to = end.saturating_sub(base).min(pages);
+                    (from < to).then(|| (r.start + from * PAGE_SIZE, (to - from) * PAGE_SIZE))
+                })
+        };
+        // A region that goes meanwhile has its translations removed by
+        // its removal too; removing them twice does no harm.
+        if let Some((at, len)) = range {
+            self.unmap_in_steps(at, len)
+                .expect("regions are page-aligned and in the user range");
         }
     }
 
@@ -561,6 +568,11 @@ pub enum Fault {
     OutOfMemory,
     /// The page of a paged object is absent and must be obtained first.
     Absent(u64),
+    /// The page was given a frame in place of the zero page, whose
+    /// translations must go before the access is tried again.
+    Changed(u64),
+    /// The page is changing; the access waits until it has changed.
+    Busy(u64),
 }
 
 /// Resolves a page fault at `addr`, raised by user code or by the user
@@ -586,6 +598,12 @@ pub fn resolve_fault(frame: &crate::idt::Frame, addr: u64) -> Fault {
     loop {
         match mem.fault(aspace, addr & !(PAGE_SIZE - 1), write, fetch) {
             Fault::Absent(index) => match mem.obtain(index) {
+                Ok(()) => {}
+                Err(Error::NoResources) => return Fault::OutOfMemory,
+                Err(_) => return Fault::Denied,
+            },
+            Fault::Changed(index) => mem.settle_page(index),
+            Fault::Busy(index) => match mem.wait_settled(index) {
                 Ok(()) => {}
                 Err(Error::NoResources) => return Fault::OutOfMemory,
                 Err(_) => return Fault::Denied,

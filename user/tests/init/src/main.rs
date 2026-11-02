@@ -57,6 +57,47 @@ fn memory_objects(s: &Startup) -> Result {
     check("closing the object", unsafe { sys::handle_close(mem) })
 }
 
+/// Two mappings of one object stay in step when a page read through one
+/// as zeros gets a frame through the other, is decommitted, and is
+/// written by the kernel.
+fn shared_mappings(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let a = map(s.process, mem, PAGE_SIZE)? as *mut u64;
+    let b = map(s.process, mem, PAGE_SIZE)? as *mut u64;
+    // SAFETY: both mappings are a readable and writable page of `mem`.
+    unsafe {
+        ensure("reading zeros through the first", a.read_volatile() == 0)?;
+        b.write_volatile(0x5eed);
+        ensure(
+            "seeing the write through the first",
+            a.read_volatile() == 0x5eed,
+        )?;
+    }
+    // SAFETY: the call takes no pointers.
+    check("decommitting", unsafe { sys::mem_op(mem, 2, 0, PAGE_SIZE) })?;
+    // SAFETY: as above.
+    unsafe {
+        ensure("reading zeros after decommit", a.read_volatile() == 0)?;
+        ensure("reading zeros through both", b.read_volatile() == 0)?;
+    }
+    mem_write_at(mem, 0, &7u64.to_le_bytes())?;
+    // SAFETY: as above.
+    unsafe {
+        ensure(
+            "seeing the kernel write",
+            a.read_volatile() == 7 && b.read_volatile() == 7,
+        )?;
+    }
+    for at in [a, b] {
+        // SAFETY: the call takes no pointers.
+        check("unmapping", unsafe {
+            sys::vm_unmap(s.process, at as u64, PAGE_SIZE)
+        })?;
+    }
+    // SAFETY: the call takes no pointers.
+    check("closing the object", unsafe { sys::handle_close(mem) })
+}
+
 static THREAD_RAN: AtomicU64 = AtomicU64::new(0);
 
 extern "sysv64" fn thread_entry(value: u64, _arg2: u64) -> ! {
@@ -1876,7 +1917,7 @@ fn evict_waits_for_outputs(s: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 26] = [
+const TESTS: [(&str, Test); 27] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1901,6 +1942,7 @@ const TESTS: [(&str, Test); 26] = [
     ("seal_waits_for_outputs", seal_waits_for_outputs),
     ("evict_waits_for_outputs", evict_waits_for_outputs),
     ("memory_objects", memory_objects),
+    ("shared_mappings", shared_mappings),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
 ];
