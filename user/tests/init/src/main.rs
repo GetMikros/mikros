@@ -1669,9 +1669,34 @@ fn kill_stopped_thread(s: &Startup) -> Result {
     )
 }
 
+/// In a fuzz build, coverage goes only into an anonymous object and
+/// records the kernel's blocks while it is on.
+#[cfg(feature = "fuzz")]
+fn coverage(s: &Startup) -> Result {
+    let (_pager, paged) = paged_object(s, 1, 0)?;
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::fuzz_cov_enable(paged) };
+    ensure("refusing a paged object", status == -12)?;
+    let mem = create_memory(4 * PAGE_SIZE)?;
+    // SAFETY: the calls take no pointers or a valid one.
+    unsafe {
+        check("enabling coverage", sys::fuzz_cov_enable(mem))?;
+        now();
+        check("disabling coverage", sys::fuzz_cov_disable())?;
+    }
+    let count = u64::from_le_bytes(mem_read_at::<8>(mem, 0)?);
+    ensure("recording blocks", count > 0)
+}
+
+/// Outside fuzz builds there is nothing to test.
+#[cfg(not(feature = "fuzz"))]
+fn coverage(_: &Startup) -> Result {
+    Ok(())
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 22] = [
+const TESTS: [(&str, Test); 23] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1691,6 +1716,7 @@ const TESTS: [(&str, Test); 22] = [
     ("paged_outputs", paged_outputs),
     ("kill_blocked_thread", kill_blocked_thread),
     ("kill_stopped_thread", kill_stopped_thread),
+    ("coverage", coverage),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),

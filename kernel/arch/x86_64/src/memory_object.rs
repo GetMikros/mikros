@@ -696,11 +696,11 @@ impl MemoryObject {
 
     /// Gives every page a frame and keeps the frames until `unpin_all`,
     /// even when the object shrinks meanwhile, and returns them in page
-    /// order with the object's size. Fails with `WrongType` for a
-    /// physical object.
+    /// order with the object's size. Fails with `WrongType` unless the
+    /// object is anonymous: a paged object's frames come from its pager.
     #[cfg(feature = "fuzz")]
     pub fn pin_all(&self) -> Result<(Vec<u64>, u64), Error> {
-        if self.is_physical() {
+        if !self.is_anonymous() {
             return Err(Error::WrongType);
         }
         let mut pages = self.pages.lock();

@@ -161,13 +161,17 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     // The user workspace has its own configuration, which Cargo reads
     // from the directory it runs in.
-    let status = Command::new(cargo)
+    let mut command = Command::new(cargo);
+    command
         .current_dir(root.join("user"))
         .args(["build", "--package", bin, "--bin", bin, "--target"])
         .arg(root.join(USER_TARGET))
-        .args(["--profile", kind.profile()])
-        .status()
-        .context("failed to run cargo")?;
+        .args(["--profile", kind.profile()]);
+    // The test init of a fuzz build also tests the fuzz-only calls.
+    if matches!(kind, Kind::Fuzz) && bin == "test-init" {
+        command.args(["--features", "fuzz"]);
+    }
+    let status = command.status().context("failed to run cargo")?;
     if !status.success() {
         bail!("building {bin} failed");
     }
