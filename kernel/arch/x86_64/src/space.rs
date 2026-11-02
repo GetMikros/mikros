@@ -34,6 +34,11 @@ static DYNAMIC_NEXT: AtomicU64 = AtomicU64::new(DYNAMIC_START);
 /// The physical address of the kernel's top-level table.
 static ROOT: AtomicU64 = AtomicU64::new(0);
 
+/// The kernel's top-level table, once it runs on it.
+pub fn root() -> u64 {
+    ROOT.load(Ordering::Relaxed)
+}
+
 /// The virtual address of physical memory in the direct map.
 pub fn direct(phys: u64) -> u64 {
     DIRECT_MAP_BASE.load(Ordering::Relaxed) + phys
@@ -67,6 +72,26 @@ pub fn reserve_dynamic(size: u64) -> u64 {
     start + PAGE_SIZE
 }
 
+/// Maps `size` bytes of device memory at `phys` uncached into the dynamic
+/// region and returns the address of `phys` there.
+pub fn map_device(phys: u64, size: u64) -> u64 {
+    let first = phys / PAGE_SIZE * PAGE_SIZE;
+    let len = (phys + size).next_multiple_of(PAGE_SIZE) - first;
+    let virt = reserve_dynamic(len);
+    let flags = Flags {
+        writable: true,
+        executable: false,
+        global: true,
+        policy: Policy::UncachedDevice,
+    };
+    let mut tables = FrameTables;
+    let mut mapper = Mapper::existing(&mut tables, root(), gib_pages());
+    mapper
+        .map(virt, first, len, flags)
+        .unwrap_or_else(|e| panic!("mapping device memory: {e}"));
+    virt + (phys - first)
+}
+
 fn gib_pages() -> bool {
     core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 26) != 0
 }
@@ -76,7 +101,7 @@ fn symbol(s: *const u8) -> u64 {
 }
 
 /// The kinds of memory the kernel's direct map covers.
-const DIRECT_KINDS: [Kind; 9] = [
+pub const DIRECT_KINDS: [Kind; 9] = [
     Kind::Usable,
     Kind::BootloaderReclaimable,
     Kind::KernelStack,

@@ -5,6 +5,8 @@
 
 #[cfg(any(target_os = "none", test))]
 mod backtrace;
+#[cfg(any(target_os = "none", test))]
+mod clock;
 #[cfg(target_os = "none")]
 mod cpu;
 #[cfg(target_os = "none")]
@@ -23,6 +25,8 @@ mod panic;
 mod serial;
 #[cfg(target_os = "none")]
 mod space;
+#[cfg(target_os = "none")]
+mod time;
 
 /// The kernel only runs on its own target. This lets the workspace build
 /// on the host.

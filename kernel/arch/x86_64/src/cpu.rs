@@ -70,3 +70,23 @@ pub unsafe fn write_cr4(value: u64) {
     // SAFETY: the caller guarantees the value is valid.
     unsafe { asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
 }
+
+/// Reads 32 bits from the I/O port `port`.
+///
+/// # Safety
+///
+/// The read must not break an invariant of the device at `port`.
+pub unsafe fn in32(port: u16) -> u32 {
+    let value;
+    // SAFETY: the caller guarantees the read is harmless; `in` touches no
+    // memory.
+    unsafe { asm!("in eax, dx", in("dx") port, out("eax") value, options(nomem, nostack)) };
+    value
+}
+
+/// The time stamp counter.
+pub fn rdtsc() -> u64 {
+    // SAFETY: the TSC is a required feature and CR4.TSD is clear, so RDTSC
+    // only reads the counter.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}

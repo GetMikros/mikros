@@ -68,6 +68,7 @@ extern "sysv64" fn on_kernel_tables() -> ! {
     let Some(info) = *space::BOOT_INFO.lock() else {
         panic!("BootInfo was not kept");
     };
+    crate::time::init(&info);
     let free = space::reclaim_boot_memory(&info);
     log!(
         Info,

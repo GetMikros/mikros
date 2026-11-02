@@ -26,7 +26,7 @@ pub const PAT_VALUE: u64 = u64::from_le_bytes([6, 1, 7, 0, 6, 5, 7, 4]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "device and framebuffer mappings come later")
+    expect(dead_code, reason = "framebuffer and uncached mappings come later")
 )]
 pub enum Policy {
     Cached = 0,
@@ -127,6 +127,15 @@ impl<'t, T: Tables> Mapper<'t, T> {
             root,
             gib_pages,
         })
+    }
+
+    /// The hierarchy whose top-level table is at `root`.
+    pub fn existing(tables: &'t mut T, root: u64, gib_pages: bool) -> Self {
+        Mapper {
+            tables,
+            root,
+            gib_pages,
+        }
     }
 
     pub fn root(&self) -> u64 {
@@ -292,5 +301,12 @@ mod tests {
         assert_eq!(size(dm + GIB_1), Some(MIB_2));
         assert_eq!(size(dm + GIB_1 + MIB_2), Some(PAGE_SIZE));
         assert_eq!(size(dm + GIB_1 + MIB_2 + PAGE_SIZE), None);
+
+        // The same hierarchy, reopened, sees the earlier mappings.
+        let mut again = Mapper::existing(&mut pool, root, true);
+        assert_eq!(
+            again.map(dm, 0, PAGE_SIZE, KERNEL_DATA),
+            Err(Error::AlreadyMapped(dm))
+        );
     }
 }

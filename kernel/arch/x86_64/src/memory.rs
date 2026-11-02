@@ -45,3 +45,32 @@ pub fn init(info: &BootInfo) -> u64 {
     *FRAMES.lock() = Some(allocator);
     free
 }
+
+/// Physical memory read through the direct map, limited to the ranges the
+/// direct map covers. Used while the memory map is still in place.
+pub struct DirectMem<'a>(pub &'a BootInfo);
+
+impl kernel_core::acpi::PhysRead for DirectMem<'_> {
+    fn read(&self, phys: u64, len: usize) -> Option<&[u8]> {
+        let end = phys.checked_add(len as u64)?;
+        let mut page = phys / PAGE_SIZE * PAGE_SIZE;
+        while page < end {
+            let covered = memory_map(self.0).any(|e| {
+                let start = e.phys_start;
+                let stop = start + e.page_count * PAGE_SIZE;
+                crate::space::DIRECT_KINDS
+                    .iter()
+                    .any(|&k| k as u32 == e.kind)
+                    && (start..stop).contains(&page)
+            });
+            if !covered {
+                return None;
+            }
+            page += PAGE_SIZE;
+        }
+        // SAFETY: every page of the range is in the kernel's direct map,
+        // which maps it readable, and boot memory is not reclaimed while
+        // this reader is used.
+        Some(unsafe { core::slice::from_raw_parts(crate::space::direct(phys) as *const u8, len) })
+    }
+}
