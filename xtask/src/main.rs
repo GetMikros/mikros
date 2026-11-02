@@ -1,6 +1,7 @@
 //! Development tasks for the Mikros repository, run with `cargo xtask`.
 
 mod build;
+mod check;
 mod firmware;
 mod image;
 mod qemu;
@@ -23,6 +24,8 @@ struct Cli {
 enum Command {
     /// Build the system components.
     Build(build::Args),
+    /// Check formatting, lints and the commits since the base branch.
+    Check(check::Args),
     /// Create a bootable disk image.
     Image(image::Args),
     /// Boot the disk image in QEMU.
@@ -43,6 +46,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Build(args) => build::run(&args),
+        Command::Check(args) => check::run(&args),
         Command::Image(args) => image::run(&args),
         Command::Run(args) => run::run(&args),
         Command::Setup(args) => setup::run(&args),
