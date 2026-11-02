@@ -41,7 +41,8 @@ pub struct MemoryObject {
     /// of its mappings. Its pages then never hold frames.
     physical: Option<(u64, Policy)>,
     /// The address spaces with regions that map the object, so that
-    /// pages can be unmapped when the object changes.
+    /// pages can be unmapped when the object changes. Each region's
+    /// `REGION_COST` covers the entries here and in `scratch`.
     spaces: SpinLock<Vec<Weak<AddressSpace>>>,
     /// Room to hold every space in `spaces` while the pages are locked,
     /// kept as large as `spaces` by `add_space`.

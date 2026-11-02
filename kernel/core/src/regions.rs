@@ -103,8 +103,11 @@ impl MapOptions {
 }
 
 /// The kernel memory charged for a region: its entry and that entry's
-/// share of the map storage.
-pub const REGION_COST: u64 = 2 * (size_of::<u64>() + size_of::<Region<Arc<()>>>()) as u64;
+/// share of the map storage, and room for the two pointers a memory
+/// object keeps for each address space with a region that maps it, with
+/// their share of the lists that hold them.
+pub const REGION_COST: u64 =
+    2 * (size_of::<u64>() + size_of::<Region<Arc<()>>>() + 2 * size_of::<usize>()) as u64;
 
 /// A region's entry charged to a budget, which is released when the
 /// region goes.
