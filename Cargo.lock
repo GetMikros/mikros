@@ -104,6 +104,7 @@ dependencies = [
  "fontdue",
  "libm",
  "uefi",
+ "uefi-raw",
 ]
 
 [[package]]
