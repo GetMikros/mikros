@@ -14,6 +14,8 @@ mod features;
 #[cfg(target_os = "none")]
 mod log;
 #[cfg(target_os = "none")]
+mod memory;
+#[cfg(target_os = "none")]
 mod panic;
 #[cfg(target_os = "none")]
 mod serial;

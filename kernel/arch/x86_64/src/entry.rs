@@ -58,5 +58,7 @@ extern "sysv64" fn _start(info: *const u8) -> ! {
         info.version_minor,
         info.memory_map_count
     );
+    let free = crate::memory::init(&info);
+    log!(Info, "{} MiB of memory free", (free * 4096) >> 20);
     crate::cpu::halt()
 }
