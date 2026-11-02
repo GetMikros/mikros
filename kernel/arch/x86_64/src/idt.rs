@@ -308,7 +308,7 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
     }
     if frame.cs & 3 == 3 {
         crate::sched::preempt_user();
-        crate::exception::deferred_debug(frame);
+        crate::exception::before_user_return(frame);
         crate::sched::exit_if_dead();
     }
 }

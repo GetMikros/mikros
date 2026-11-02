@@ -217,8 +217,17 @@ fn current_thread() -> Result<Arc<Thread>, Error> {
     crate::sched::current().ok_or(Error::BadHandle)
 }
 
+/// Ends `thread`, after a `THREAD_EXITING` report on its way back to
+/// user mode when its process asks for thread events.
+fn end_thread(thread: &Arc<Thread>) {
+    match thread.process() {
+        Some(process) if process.debug_events() => thread.request_exit(),
+        _ => Process::kill_thread(thread),
+    }
+}
+
 pub fn thread_exit() -> Result<(), Error> {
-    Process::kill_thread(&current_thread()?);
+    end_thread(&current_thread()?);
     Ok(())
 }
 
@@ -230,7 +239,7 @@ pub fn process_exit(code: i64) -> Result<(), Error> {
 pub fn task_kill(handle: Checked) -> Result<(), Error> {
     match handle.object.header().kind() {
         ObjectType::Process => object::<Process>(handle).terminate(-1),
-        _ => Process::kill_thread(&object(handle)),
+        _ => end_thread(&object(handle)),
     }
     Ok(())
 }
@@ -498,9 +507,16 @@ pub fn thread_resume_from_exception(thread: Checked, action: u32) -> Result<(), 
                 process.terminate(exception::EXIT_CODE);
             }
         }
-        // Delivering the exception as a process signal comes with
-        // process signals.
-        exception::DELIVER_SIGNAL => return Err(Error::NotSupported),
+        exception::DELIVER_SIGNAL => {
+            let event = thread.exception_kind();
+            if event == exception::kind::THREAD_STARTING || event == exception::kind::THREAD_EXITING
+            {
+                return Err(Error::BadState);
+            }
+            // Delivering the exception as a process signal comes with
+            // process signals.
+            return Err(Error::NotSupported);
+        }
         _ => return Err(Error::InvalidArgs),
     }
     Ok(())

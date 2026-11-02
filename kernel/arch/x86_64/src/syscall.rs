@@ -126,7 +126,7 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     ];
     frame.rax = generated::dispatch(frame.rax, &args) as u64;
     crate::sched::preempt_user();
-    let reported = deferred_debug(frame);
+    let reported = before_user_return(frame);
     crate::sched::exit_if_dead();
     // SYSRET to an address outside the user range would fault in ring 0,
     // and after a report the handler may have changed RCX and R11, which
@@ -134,10 +134,10 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     u64::from(reported || !(USER_START..USER_END).contains(&frame.rip))
 }
 
-/// Reports a deferred debug exception of the calling thread, with its
-/// registers in the layout of an interrupt frame while the handler may
-/// read and change them. Returns whether it reported one.
-fn deferred_debug(frame: &mut Frame) -> bool {
+/// Makes the reports that wait for the calling thread to return to user
+/// mode, with its registers in the layout of an interrupt frame while the
+/// handler may read and change them. Returns whether it reported any.
+fn before_user_return(frame: &mut Frame) -> bool {
     let f = frame;
     let mut regs = crate::idt::Frame {
         r15: f.r15,
@@ -163,7 +163,7 @@ fn deferred_debug(frame: &mut Frame) -> bool {
         rsp: f.rsp,
         ss: f.ss,
     };
-    if !crate::exception::deferred_debug(&mut regs) {
+    if !crate::exception::before_user_return(&mut regs) {
         return false;
     }
     let r = regs;

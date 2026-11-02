@@ -110,7 +110,6 @@ impl Process {
 
     /// Whether the exception channel asks for thread start and exit
     /// reports.
-    #[allow(dead_code, reason = "thread start and exit reports come later")]
     pub fn debug_events(&self) -> bool {
         let exception = self.exception.lock();
         exception

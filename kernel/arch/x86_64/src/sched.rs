@@ -63,6 +63,11 @@ pub struct Thread {
     /// that a `DEBUG` exception is reported before it returns to user
     /// mode.
     debug_pending: AtomicBool,
+    /// The type of the exception the thread is or was last in.
+    exception_kind: AtomicU32,
+    /// Set when the thread is to end, after a `THREAD_EXITING` report,
+    /// before it returns to user mode.
+    exit_requested: AtomicBool,
 }
 
 /// The value DR6 has when no debug condition is recorded.
@@ -119,6 +124,8 @@ impl Thread {
             woken: AtomicU32::new(0),
             debug: SpinLock::new([0; 6]),
             debug_pending: AtomicBool::new(false),
+            exception_kind: AtomicU32::new(0),
+            exit_requested: AtomicBool::new(false),
         }))
     }
 
@@ -235,6 +242,22 @@ impl Thread {
     /// Whether a debug exception was deferred, clearing the mark.
     pub fn take_deferred_debug(&self) -> bool {
         self.debug_pending.swap(false, Ordering::AcqRel)
+    }
+
+    /// The type of the exception the thread is in.
+    pub fn exception_kind(&self) -> u32 {
+        self.exception_kind.load(Ordering::Acquire)
+    }
+
+    /// Makes the thread end before it next returns to user mode, after
+    /// reporting it.
+    pub fn request_exit(&self) {
+        self.exit_requested.store(true, Ordering::Release);
+    }
+
+    /// Whether the thread is to end, clearing the request.
+    pub fn take_exit_request(&self) -> bool {
+        self.exit_requested.swap(false, Ordering::AcqRel)
     }
 
     /// Whether the thread has breakpoints enabled.
@@ -561,10 +584,21 @@ fn queue(thread: &Arc<Thread>) {
 
 /// Puts the running user thread, whose user registers are in `frame`,
 /// in state `EXCEPTION`. It goes on running until `wait_exception`.
-pub fn enter_exception(thread: &Thread, frame: &mut crate::idt::Frame) {
+/// Returns false, changing nothing, when it is not RUNNABLE.
+pub fn enter_exception(thread: &Thread, frame: &mut crate::idt::Frame, kind: u32) -> bool {
     thread.exception_frame.store(frame, Ordering::Release);
     thread.woken.store(0, Ordering::Relaxed);
-    thread.state.store(EXCEPTION, Ordering::Release);
+    thread.exception_kind.store(kind, Ordering::Release);
+    let entered = thread
+        .state
+        .compare_exchange(RUNNABLE, EXCEPTION, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    if !entered {
+        thread
+            .exception_frame
+            .store(core::ptr::null_mut(), Ordering::Release);
+    }
+    entered
 }
 
 /// Takes the running thread out of state `EXCEPTION` before it waited.
@@ -655,11 +689,33 @@ fn user_entry(_: usize) {
         unreachable!("a user thread started without being current");
     };
     let [rip, rsp, arg1, arg2] = thread.user.lock().start;
+    let report = thread.process().is_some_and(|p| p.debug_events());
     drop(thread);
+    if !report {
+        exit_if_dead();
+        // SAFETY: `switch_in` loaded the thread's address space, extended
+        // state and user bases before switching to it.
+        unsafe { context::enter_user(rip, rsp, arg1, arg2) }
+    }
+    let mut frame = crate::idt::Frame {
+        rdi: arg1,
+        rsi: arg2,
+        rip,
+        cs: u64::from(crate::gdt::USER_CODE) | 3,
+        rflags: 0x202,
+        rsp,
+        ss: u64::from(crate::gdt::USER_DATA) | 3,
+        ..Default::default()
+    };
+    crate::exception::report_event(
+        &mut frame,
+        kernel_core::exception::kind::THREAD_STARTING,
+        rip,
+    );
     exit_if_dead();
-    // SAFETY: `switch_in` loaded the thread's address space, extended
-    // state and user bases before switching to it.
-    unsafe { context::enter_user(rip, rsp, arg1, arg2) }
+    // SAFETY: as above; the handler could change only what
+    // `thread_write_state` allows.
+    unsafe { context::enter_user_frame(&frame) }
 }
 
 /// Switches threads, before an interrupt returns to user mode, if the

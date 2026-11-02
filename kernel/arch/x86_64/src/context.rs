@@ -69,7 +69,34 @@ global_asm!(
     user_code = const crate::gdt::USER_CODE as u64 | 3,
 );
 
+// Leaves for user mode with every register taken from the interrupt
+// frame at RDI. The user GS base must be in IA32_KERNEL_GS_BASE.
+global_asm!(
+    ".global context_enter_user_frame",
+    "context_enter_user_frame:",
+    "mov rsp, rdi",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rbp",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "pop rbx",
+    "pop rax",
+    "add rsp, 16",
+    "swapgs",
+    "iretq",
+);
+
 unsafe extern "sysv64" {
+    fn context_enter_user_frame(frame: *const crate::idt::Frame) -> !;
     fn context_switch(save: *mut u64, load: u64);
     fn context_start();
     fn context_enter_user(rip: u64, rsp: u64, arg1: u64, arg2: u64) -> !;
@@ -85,6 +112,18 @@ unsafe extern "sysv64" {
 pub unsafe fn switch(save: *mut u64, load: u64) {
     // SAFETY: the caller guarantees `load` is a switchable stack.
     unsafe { context_switch(save, load) };
+}
+
+/// Leaves the kernel for user mode with the registers in `frame`, which
+/// lies on the running thread's kernel stack and is abandoned with it.
+///
+/// # Safety
+///
+/// As for `enter_user`; `frame` must hold user segment selectors and a
+/// RIP in the user range.
+pub unsafe fn enter_user_frame(frame: &crate::idt::Frame) -> ! {
+    // SAFETY: the caller guarantees the frame and the user state.
+    unsafe { context_enter_user_frame(frame) }
 }
 
 /// Leaves the kernel for user mode at `rip` with stack pointer `rsp`

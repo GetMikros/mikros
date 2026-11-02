@@ -2,6 +2,7 @@
 //! channel.
 
 use crate::idt::{self, Frame};
+use crate::process::Process;
 use crate::sched;
 use alloc::vec::Vec;
 use kernel_core::exception::{EXIT_CODE, REPORT_SIZE, Report, kind};
@@ -24,16 +25,35 @@ pub fn raise(frame: &mut Frame, kind: u32, address: u64) {
     raise_with_code(frame, kind, address, idt::arch_code(frame));
 }
 
-/// Reports a debug exception that the running user thread's breakpoints
-/// raised in kernel mode, if there is one, as it returns to user mode
-/// with its user registers in `frame`. Returns whether it reported one.
-pub fn deferred_debug(frame: &mut Frame) -> bool {
-    if !sched::current().is_some_and(|t| t.take_deferred_debug()) {
+/// Reports a thread start or exit event of type `kind` at `address` for
+/// the running thread, with its user registers in `frame`.
+pub fn report_event(frame: &mut Frame, kind: u32, address: u64) {
+    raise_with_code(frame, kind, address, 0);
+}
+
+/// Makes the reports that wait for the running user thread to return to
+/// user mode with its registers in `frame`: a debug exception its
+/// breakpoints raised in kernel mode, and its exit when it is to end.
+/// Returns whether it reported anything.
+pub fn before_user_return(frame: &mut Frame) -> bool {
+    let Some(thread) = sched::current() else {
         return false;
+    };
+    let mut reported = false;
+    if thread.take_deferred_debug() && thread.state() != sched::DEAD {
+        let rip = frame.rip;
+        raise_with_code(frame, kind::DEBUG, rip, u64::from(idt::DEBUG));
+        reported = true;
     }
-    let rip = frame.rip;
-    raise_with_code(frame, kind::DEBUG, rip, u64::from(idt::DEBUG));
-    true
+    if thread.take_exit_request() {
+        let process = thread.process().cloned();
+        if process.is_some_and(|p| p.debug_events()) && thread.state() != sched::DEAD {
+            raise_with_code(frame, kind::THREAD_EXITING, 0, 0);
+            reported = true;
+        }
+        Process::kill_thread(&thread);
+    }
+    reported
 }
 
 fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
@@ -43,9 +63,13 @@ fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
     let Some(process) = thread.process().cloned() else {
         crate::panic::exception(frame);
     };
-    // Process signals take exceptions that no channel handles; until
-    // they exist, such an exception stops the kernel as before.
     let Some(channel) = process.exception_channel() else {
+        // Thread events are reported only on a channel.
+        if kind == kind::THREAD_STARTING || kind == kind::THREAD_EXITING {
+            return;
+        }
+        // Process signals take exceptions that no channel handles;
+        // until they exist, such an exception stops the kernel as before.
         crate::panic::exception(frame);
     };
     let report = Report {
@@ -55,7 +79,9 @@ fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
         address,
         arch_code,
     };
-    sched::enter_exception(&thread, frame);
+    if !sched::enter_exception(&thread, frame, kind) {
+        return;
+    }
     let (mut bytes, mut handles) = (Vec::new(), Vec::new());
     let queued = bytes
         .try_reserve_exact(REPORT_SIZE)
