@@ -16,6 +16,7 @@ pub mod elf;
 pub mod exception;
 pub mod fallible;
 pub mod frames;
+pub mod gaps;
 pub mod heap;
 pub mod log;
 pub mod nodes;
