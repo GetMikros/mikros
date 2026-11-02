@@ -398,13 +398,141 @@ fn priorities(s: &Startup) -> Result {
     check("going back to 16", set_priority(s.thread, INVALID, 16))
 }
 
+/// Waits for a packet on `port` until `deadline`.
+fn take_packet(port: Handle, deadline: i64) -> (i64, [u8; 48]) {
+    let mut packet = [0u8; 48];
+    // SAFETY: the pointer describes `packet`.
+    let status = unsafe { sys::port_wait(port, deadline, packet.as_mut_ptr()) };
+    (status, packet)
+}
+
+fn soon() -> i64 {
+    now() + 5_000_000
+}
+
+fn signal(event: Handle, clear: u32, set: u32) -> Result {
+    // SAFETY: the call takes no pointers.
+    check("signalling", unsafe {
+        sys::object_signal(event, clear, set)
+    })
+}
+
+fn wait_async(object: Handle, port: Handle, key: u64, signals: u32, options: u32) -> Result {
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::object_wait_async(object, port, key, signals, options) };
+    check("registering a wait", status)
+}
+
+/// Ports with user packets, one-shot and edge waits, cancelling and
+/// closing.
+fn ports(_: &Startup) -> Result {
+    let (mut port, mut event) = (0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    check("creating a port", unsafe { sys::port_create(0, &mut port) })?;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    ensure(
+        "timing out on an empty port",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+
+    let mut user = [0u8; 48];
+    user[..8].copy_from_slice(&7u64.to_le_bytes());
+    user[8..16].copy_from_slice(&[9; 8]);
+    user[16..20].copy_from_slice(b"ping");
+    // SAFETY: the pointer describes `user`.
+    check("queueing", unsafe { sys::port_queue(port, user.as_ptr()) })?;
+    let (status, p) = take_packet(port, soon());
+    ensure(
+        "reading a user packet",
+        status == 0 && u64_at(&p, 0) == 7 && u32_at(&p, 8) == 2,
+    )?;
+    ensure(
+        "clearing the status",
+        u32_at(&p, 12) == 0 && &p[16..20] == b"ping",
+    )?;
+
+    wait_async(event, port, 1, USER0, 0)?;
+    ensure("not firing early", take_packet(port, soon()).0 == TIMED_OUT)?;
+    signal(event, 0, USER0)?;
+    let (status, p) = take_packet(port, soon());
+    ensure(
+        "firing",
+        status == 0 && u64_at(&p, 0) == 1 && u32_at(&p, 8) == 1,
+    )?;
+    ensure(
+        "reporting the signals",
+        u32_at(&p, 16) == USER0 && u32_at(&p, 20) == USER0,
+    )?;
+    signal(event, USER0, 0)?;
+    signal(event, 0, USER0)?;
+    ensure("firing only once", take_packet(port, soon()).0 == TIMED_OUT)?;
+    wait_async(event, port, 2, USER0, 0)?;
+    ensure("firing at once", take_packet(port, soon()).0 == 0)?;
+    signal(event, USER0, 0)?;
+
+    wait_async(event, port, 3, USER1, 1)?;
+    signal(event, 0, USER1)?;
+    signal(event, USER1, 0)?;
+    signal(event, 0, USER1)?;
+    let (status, p) = take_packet(port, soon());
+    ensure("firing on an edge", status == 0 && u64_at(&p, 0) == 3)?;
+    ensure(
+        "queueing one packet at a time",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    signal(event, USER1, 0)?;
+    signal(event, 0, USER1)?;
+    ensure("firing on the next edge", take_packet(port, soon()).0 == 0)?;
+    signal(event, USER1, 0)?;
+    signal(event, 0, USER1)?;
+    // SAFETY: the call takes no pointers.
+    check("cancelling", unsafe { sys::port_cancel(port, event, 3) })?;
+    ensure(
+        "dropping the cancelled packet",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    signal(event, USER1, 0)?;
+
+    let mut copy = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("duplicating", unsafe {
+        sys::handle_duplicate(event, 0x8000_0000, &mut copy)
+    })?;
+    wait_async(copy, port, 4, USER1, 0)?;
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(copy) })?;
+    signal(event, 0, USER1)?;
+    ensure(
+        "ending with the handle",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+
+    for _ in 0..4096 {
+        // SAFETY: the pointer describes `user`.
+        check("filling the port", unsafe {
+            sys::port_queue(port, user.as_ptr())
+        })?;
+    }
+    // SAFETY: the pointer describes `user`.
+    let full = unsafe { sys::port_queue(port, user.as_ptr()) };
+    ensure("limiting user packets", full == -22)
+}
+
+fn u64_at(record: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(record[at..at + 8].try_into().unwrap())
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 7] = [
+const TESTS: [(&str, Test); 8] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
     ("priorities", priorities),
+    ("ports", ports),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
