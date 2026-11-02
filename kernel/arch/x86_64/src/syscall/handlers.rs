@@ -1351,8 +1351,11 @@ pub fn mem_clone(
         let bytes = &mut piece[..n];
         held.read(at, bytes);
         if bytes.iter().any(|&b| b != 0) {
+            let mut rest: &[u8] = bytes;
             copied = clone.write(done, n as u64, |to| {
-                to.copy_from_slice(&bytes[..to.len()]);
+                let (now, later) = rest.split_at(to.len());
+                to.copy_from_slice(now);
+                rest = later;
                 Ok(())
             });
         }

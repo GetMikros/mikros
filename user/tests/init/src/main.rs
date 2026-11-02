@@ -1121,6 +1121,21 @@ fn clones(_: &Startup) -> Result {
     )?;
     let record = info::<0x18>(clone, 4)?;
     ensure("sizing the clone", u64_at(&record, 0) == PAGE_SIZE + 100)?;
+    // A whole page whose bytes never repeat with a period of the kernel's
+    // copy chunk, so every chunk of the clone is checked.
+    let mut page = [0u8; PAGE_SIZE as usize];
+    for (i, b) in page.iter_mut().enumerate() {
+        *b = (i / 3) as u8 ^ (i >> 9) as u8;
+    }
+    mem_write_at(source, PAGE_SIZE, &page)?;
+    let mut whole = 0;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::mem_clone(source, 0, PAGE_SIZE, PAGE_SIZE, &mut whole) };
+    check("cloning a page", status)?;
+    ensure(
+        "copying every chunk",
+        mem_read_at::<{ PAGE_SIZE as usize }>(whole, 0)? == page,
+    )?;
     // SAFETY: the pointer is valid for the call.
     let bad = unsafe { sys::mem_clone(source, 2, 0, 1, &mut clone) };
     ensure("refusing other options", bad == -10)
