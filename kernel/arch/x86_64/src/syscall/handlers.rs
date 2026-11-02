@@ -797,3 +797,11 @@ pub fn log_read(_log: Checked, after: u64, out: UserOut<u8>) -> Result<(), Error
     let record = crate::log::next_after(after).ok_or(Error::ShouldWait)?;
     out.write_bytes(&record.bytes())
 }
+
+pub fn clock_get_monotonic(out: UserOut<i64>) -> Result<(), Error> {
+    out.write(crate::time::now())
+}
+
+pub fn thread_sleep(deadline: i64) -> Result<(), Error> {
+    crate::signal::sleep(deadline)
+}

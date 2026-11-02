@@ -425,3 +425,19 @@ syscalls:
       - {name: log, type: Handle, dir: in, object: Log, rights: [READ]}
       - {name: after, type: u64, dir: in}
       - {name: out, type: "*mut u8", dir: out}
+
+  - name: clock_get_monotonic
+    number: 40
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R21]
+    args:
+      - {name: out, type: "*mut i64", dir: out}
+
+  - name: thread_sleep
+    number: 41
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R23, MIKSPEC-0008.R22, MIKSPEC-0020.R21]
+    args:
+      - {name: deadline, type: i64, dir: in}

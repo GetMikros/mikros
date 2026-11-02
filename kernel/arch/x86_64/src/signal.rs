@@ -247,6 +247,35 @@ const SYSCALL_LEN: u64 = 2;
 /// its process, and takes it. Fails with `Interrupted` when a signal
 /// outside `mask` that is not ignored becomes deliverable first, and with
 /// `TimedOut` when `deadline` passes.
+/// Whether a signal pending for the thread with `own` signal state or its
+/// process is unmasked and not ignored, so that a blocking call must end.
+fn interrupting(actions: &[Action], pending: &Pending, own: &ThreadSignals) -> bool {
+    let deliverable = (own.pending.mask() | pending.mask()) & !own.mask;
+    (1..=SIG_MAX)
+        .filter(|&s| deliverable & bit(s) != 0)
+        .any(|s| !actions[s as usize - 1].ignores(s))
+}
+
+/// Blocks the running thread until `deadline`, or fails with
+/// `Interrupted` once a signal that would run an action is pending for it.
+pub fn sleep(deadline: i64) -> Result<(), Error> {
+    let thread = sched::current().ok_or(Error::BadHandle)?;
+    let process = thread.process().cloned().ok_or(Error::BadHandle)?;
+    loop {
+        {
+            let state = process.signals().lock();
+            let own = thread.signals().lock();
+            if interrupting(&state.actions, &state.pending, &own) {
+                return Err(Error::Interrupted);
+            }
+        }
+        if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+            return Ok(());
+        }
+        sched::wait_for_signals(&thread, deadline)?;
+    }
+}
+
 pub fn wait(mask: u64, deadline: i64) -> Result<Info, Error> {
     let thread = sched::current().ok_or(Error::BadHandle)?;
     let process = thread.process().cloned().ok_or(Error::BadHandle)?;
@@ -267,11 +296,7 @@ pub fn wait(mask: u64, deadline: i64) -> Result<Info, Error> {
             if let Some(info) = taken {
                 return Ok(info);
             }
-            let deliverable = (own.pending.mask() | pending.mask()) & !own.mask;
-            let interrupting = (1..=SIG_MAX)
-                .filter(|&s| deliverable & bit(s) != 0)
-                .any(|s| !actions[s as usize - 1].ignores(s));
-            if interrupting {
+            if interrupting(actions, pending, &own) {
                 return Err(Error::Interrupted);
             }
         }
