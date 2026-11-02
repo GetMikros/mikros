@@ -4,16 +4,18 @@
 #![cfg_attr(target_os = "uefi", no_main)]
 
 #[cfg(target_os = "uefi")]
+extern crate alloc;
+
+#[cfg(target_os = "uefi")]
+mod efi;
+
+#[cfg(target_os = "uefi")]
 mod uefi_main {
     use uefi::prelude::*;
 
     #[entry]
     fn main() -> Status {
-        if uefi::helpers::init().is_err() {
-            return Status::ABORTED;
-        }
-        // Loading and entering the kernel are added in later commits.
-        Status::UNSUPPORTED
+        crate::efi::run()
     }
 }
 
