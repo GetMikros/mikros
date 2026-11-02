@@ -28,7 +28,7 @@ use kernel_core::status::Error;
 /// Prepares the output `ranges` of `process`, which have been checked to
 /// fit, by obtaining writable backing for every page, waiting for page
 /// requests as needed. No lock may be held.
-fn prepare(process: &Process, ranges: &[(u64, u64)]) -> Result<Outputs<Held>, Error> {
+fn prepare(process: &Arc<Process>, ranges: &[(u64, u64)]) -> Result<Outputs<Held>, Error> {
     let aspace = process.aspace();
     let mut work = Work::new(crate::sched::preempt_point);
     Outputs::prepare(ranges, Some(process.budget()), &mut work, |page| {
@@ -414,12 +414,12 @@ pub fn vm_map(
     // The range check bounds `len` by the object size, so this cannot
     // overflow.
     let size = len.next_multiple_of(PAGE_SIZE);
+    let outputs = prepare(&current_process()?, &[out_addr.range(1)])?;
     let aspace = object::<Process>(process).aspace().clone();
     let max = MapOptions::allowed_by(handle_rights);
     let start = aspace.add_region(options, addr, size, &mem, offset, max)?;
-    out_addr.write(start).inspect_err(|_| {
-        aspace.remove_regions(start, start + size);
-    })
+    publish(outputs, &[bytes_of(&[start])]);
+    Ok(())
 }
 
 /// The end of the `len` bytes from `addr`, rounded up to whole pages, or
@@ -652,7 +652,7 @@ fn message_ranges(
 
 /// Prepares and writes only the two sizes of a received message.
 fn publish_sizes(
-    process: &Process,
+    process: &Arc<Process>,
     sizes: &[UserOut<u64>; 2],
     len: u64,
     count: u64,
@@ -803,12 +803,14 @@ pub fn thread_read_state(
     if !buf.fits(size) {
         return Err(Error::InvalidArgs);
     }
+    let outputs = prepare(&current_process()?, &[buf.range(size)])?;
     if kind == STATE_DEBUG {
         let regs = thread.with_stopped_debug(|r| *r).ok_or(Error::BadState)?;
-        return buf.write_bytes(&thread_state::debug_bytes(&regs));
+        publish(outputs, &[&thread_state::debug_bytes(&regs)]);
+        return Ok(());
     }
-    // The state is copied out after the thread is let go, as the copy can
-    // fault.
+    // The state is copied to kernel buffers while the thread is held and
+    // published after it is let go.
     let mut general = [0u8; GENERAL_SIZE];
     let mut extended = Vec::new();
     extended
@@ -824,9 +826,10 @@ pub fn thread_read_state(
         })
         .ok_or(Error::BadState)?;
     match kind {
-        STATE_GENERAL => buf.write_bytes(&general),
-        _ => buf.write_bytes(&extended),
+        STATE_GENERAL => publish(outputs, &[&general]),
+        _ => publish(outputs, &[&extended]),
     }
+    Ok(())
 }
 
 pub fn thread_write_state(
@@ -901,37 +904,64 @@ pub fn signal_set_action(signo: u32, action: UserIn<u8>, old: UserOut<u8>) -> Re
         return Err(Error::InvalidArgs);
     }
     let process = current_process()?;
+    let outputs = prepare_optional(&process, &old, ACTION_SIZE as u64)?;
     let threads = process.live_threads();
     let mut state = process.signals().lock();
     let slot = signo as usize - 1;
-    if !old.is_null() {
-        old.write_bytes(&state.actions[slot].bytes())?;
-    }
+    let previous = state.actions[slot].bytes();
     if let Some(new) = new {
         state.actions[slot] = new;
         if new.ignores(signo) {
             crate::signal::discard(&mut state, &threads, sig::bit(signo));
         }
     }
+    drop(state);
+    publish_optional(outputs, &old, &previous);
     Ok(())
+}
+
+/// Prepares the output of `len` values at `out`, which has been checked
+/// to fit, unless its address is zero, in which case nothing is prepared
+/// and publishing writes nothing.
+fn prepare_optional<T: super::Plain>(
+    process: &Arc<Process>,
+    out: &UserOut<T>,
+    len: u64,
+) -> Result<Outputs<Held>, Error> {
+    match out.is_null() {
+        true => prepare(process, &[(0, 0)]),
+        false => prepare(process, &[out.range(len)]),
+    }
 }
 
 pub fn signal_set_mask(how: u32, mask: u64, old: UserOut<u64>) -> Result<(), Error> {
     if how > 2 {
         return Err(Error::InvalidArgs);
     }
+    if !old.is_null() && !old.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let outputs = prepare_optional(&current_process()?, &old, 1)?;
     let thread = current_thread()?;
     let mut state = thread.signals().lock();
-    if !old.is_null() {
-        old.write(state.mask)?;
-    }
+    let previous = state.mask;
     let mask = mask & !UNBLOCKABLE;
     state.mask = match how {
         0 => state.mask | mask,
         1 => state.mask & !mask,
         _ => mask,
     };
+    drop(state);
+    publish_optional(outputs, &old, bytes_of(&[previous]));
     Ok(())
+}
+
+/// Publishes `bytes` to an output `prepare_optional` prepared for `out`.
+fn publish_optional<T: super::Plain>(outputs: Outputs<Held>, out: &UserOut<T>, bytes: &[u8]) {
+    match out.is_null() {
+        true => publish(outputs, &[]),
+        false => publish(outputs, &[bytes]),
+    }
 }
 
 /// The minimum size of an alternate signal stack.
@@ -942,16 +972,19 @@ pub fn signal_set_altstack(base: u64, size: u64, old: UserOut<u64>) -> Result<()
     if !remove && (size < ALTSTACK_MIN || !crate::aspace::in_user_range(base, size)) {
         return Err(Error::InvalidArgs);
     }
+    if !old.is_null() && !old.fits(2) {
+        return Err(Error::InvalidArgs);
+    }
+    let outputs = prepare_optional(&current_process()?, &old, 2)?;
     let thread = current_thread()?;
     let mut state = thread.signals().lock();
     if state.on_altstack(crate::percpu::user_rsp()) {
         return Err(Error::BadState);
     }
-    if !old.is_null() {
-        let (b, s) = state.altstack;
-        old.write_all(&[b, s])?;
-    }
+    let (b, s) = state.altstack;
     state.altstack = (base, size);
+    drop(state);
+    publish_optional(outputs, &old, bytes_of(&[b, s]));
     Ok(())
 }
 
@@ -1001,9 +1034,17 @@ pub fn thread_signal(thread: Checked, signo: u32, value: u64) -> Result<(), Erro
 }
 
 pub fn signal_get_pending(out: UserOut<u64>) -> Result<(), Error> {
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
     let thread = current_thread()?;
     let process = current_process()?;
-    out.write(crate::signal::pending_mask(&process, &thread))
+    let outputs = prepare(&process, &[out.range(1)])?;
+    publish(
+        outputs,
+        &[bytes_of(&[crate::signal::pending_mask(&process, &thread)])],
+    );
+    Ok(())
 }
 
 pub fn signal_return(context: u64) -> Result<(), Error> {
@@ -1040,8 +1081,10 @@ pub fn log_read(_log: Checked, after: u64, out: UserOut<u8>) -> Result<(), Error
     if !out.fits(RECORD_SIZE as u64) {
         return Err(Error::InvalidArgs);
     }
+    let outputs = prepare(&current_process()?, &[out.range(RECORD_SIZE as u64)])?;
     let record = crate::log::next_after(after).ok_or(Error::ShouldWait)?;
-    out.write_bytes(&record.bytes())
+    publish(outputs, &[&record.bytes()]);
+    Ok(())
 }
 
 pub fn log_console_release(_log: Checked) -> Result<(), Error> {
@@ -1050,7 +1093,12 @@ pub fn log_console_release(_log: Checked) -> Result<(), Error> {
 }
 
 pub fn clock_get_monotonic(out: UserOut<i64>) -> Result<(), Error> {
-    out.write(crate::time::now())
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let outputs = prepare(&current_process()?, &[out.range(1)])?;
+    publish(outputs, &[bytes_of(&[crate::time::now()])]);
+    Ok(())
 }
 
 pub fn thread_sleep(deadline: i64) -> Result<(), Error> {
@@ -1129,8 +1177,9 @@ pub fn object_wait_one(
     let process = current_process()?;
     let state = crate::wait::wait_one(&handle.object, &process, handle.value, signals, deadline);
     // The deadline passing also reports the state.
+    let outputs = prepare(&process, &[observed.range(1)])?;
     let current = handle.object.header().signals();
-    observed.write(state.unwrap_or(current))?;
+    publish(outputs, &[bytes_of(&[state.unwrap_or(current)])]);
     state.map(drop)
 }
 
@@ -1283,6 +1332,10 @@ pub fn mem_op(mem: Checked, op: u32, offset: u64, len: u64) -> Result<(), Error>
 }
 
 pub fn system_get_memory_info(out: UserOut<u8>) -> Result<(), Error> {
+    if !out.fits(16) {
+        return Err(Error::InvalidArgs);
+    }
+    let outputs = prepare(&current_process()?, &[out.range(16)])?;
     let (total, free) = match crate::memory::FRAMES.lock().as_ref() {
         Some(frames) => (frames.total_count(), frames.free_count()),
         None => (0, 0),
@@ -1290,7 +1343,8 @@ pub fn system_get_memory_info(out: UserOut<u8>) -> Result<(), Error> {
     let mut record = [0u8; 16];
     record[0..8].copy_from_slice(&total.to_le_bytes());
     record[8..16].copy_from_slice(&free.to_le_bytes());
-    out.write_bytes(&record)
+    publish(outputs, &[&record]);
+    Ok(())
 }
 
 pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result<(), Error> {
@@ -1319,8 +1373,10 @@ pub fn futex_wake(addr: UserIn<u32>, count: u32, woken: UserOut<u32>) -> Result<
     if !woken.fits(1) {
         return Err(Error::InvalidArgs);
     }
+    let outputs = prepare(&current_process()?, &[woken.range(1)])?;
     let n = crate::wait::futex_wake(addr.0, count)?;
-    woken.write(n)
+    publish(outputs, &[bytes_of(&[n])]);
+    Ok(())
 }
 
 pub fn timeline_create(initial: u64, options: u32, out: UserOut<Handle>) -> Result<(), Error> {
@@ -1336,7 +1392,13 @@ pub fn timeline_signal(timeline: Checked, value: u64) -> Result<(), Error> {
 }
 
 pub fn timeline_get(timeline: Checked, out: UserOut<u64>) -> Result<(), Error> {
-    out.write(object::<crate::timeline::Timeline>(timeline).value())
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let outputs = prepare(&current_process()?, &[out.range(1)])?;
+    let value = object::<crate::timeline::Timeline>(timeline).value();
+    publish(outputs, &[bytes_of(&[value])]);
+    Ok(())
 }
 
 pub fn timeline_wait(timeline: Checked, value: u64, deadline: i64) -> Result<(), Error> {
@@ -1400,7 +1462,7 @@ pub fn stream_write(
     }
     let mut buf = stream_buffer(len)?;
     bytes.read_bytes(&mut buf)?;
-    let outputs = prepare(&*current_process()?, &[actual.range(1)])?;
+    let outputs = prepare(&current_process()?, &[actual.range(1)])?;
     let written = object::<StreamEnd>(stream).write(&buf)? as u64;
     publish(outputs, &[bytes_of(&[written])]);
     Ok(())
@@ -1419,7 +1481,7 @@ pub fn stream_read(
     // Every byte the read could return has backing before any leaves the
     // queue.
     let ranges = [bytes.range(buf.len() as u64), actual.range(1)];
-    let outputs = prepare(&*current_process()?, &ranges)?;
+    let outputs = prepare(&current_process()?, &ranges)?;
     let n = object::<StreamEnd>(stream).read(&mut buf)?;
     publish(outputs, &[&buf[..n], bytes_of(&[n as u64])]);
     Ok(())
@@ -1557,8 +1619,9 @@ pub fn pager_query_dirty(
         bytes.extend_from_slice(&at.to_le_bytes());
         bytes.extend_from_slice(&length.to_le_bytes());
     }
-    out.write_bytes(&bytes)?;
-    count.write(n)
+    let outputs = prepare(&current_process()?, &[out.range(n * 16), count.range(1)])?;
+    publish(outputs, &[&bytes, bytes_of(&[n])]);
+    Ok(())
 }
 
 pub fn pager_revoke(pager: Checked, mem: Checked) -> Result<(), Error> {

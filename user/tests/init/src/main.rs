@@ -1081,6 +1081,15 @@ fn streams(_: &Startup) -> Result {
 
 const INVALID_ARGS: i64 = -10;
 
+/// Waits on the word at `addr` until woken, then exits.
+extern "sysv64" fn word_waiter(addr: u64, _: u64) -> ! {
+    // SAFETY: `addr` is a mapped, aligned word.
+    unsafe { sys::futex_wait(addr as *const u32, 0, i64::MAX) };
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
 /// A call whose output lies on a read-only page fails before changing
 /// any state: written bytes are not queued, and read bytes and packets
 /// stay queued.
@@ -1133,7 +1142,17 @@ fn failed_outputs(s: &Startup) -> Result {
     let status = unsafe { sys::port_wait(port, soon(), ro as *mut u8) };
     ensure("failing a wait", status == INVALID_ARGS)?;
     let (status, p) = take_packet(port, soon());
-    ensure("keeping the packet", status == 0 && u64_at(&p, 0) == 5)
+    ensure("keeping the packet", status == 0 && u64_at(&p, 0) == 5)?;
+
+    let word = create_memory(PAGE_SIZE)?;
+    let addr = map(s.process, word, PAGE_SIZE)?;
+    spawn2(s, word_waiter, addr, 0)?;
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_sleep(now() + 20_000_000) };
+    // SAFETY: the word is mapped; the count lies on a read-only page.
+    let status = unsafe { sys::futex_wake(addr as *const u32, 1, ro as *mut u32) };
+    ensure("failing a wake", status == INVALID_ARGS)?;
+    ensure("leaving the waiter waiting", futex_wake(addr, 1)? == 1)
 }
 
 fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
