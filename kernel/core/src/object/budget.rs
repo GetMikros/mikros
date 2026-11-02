@@ -242,6 +242,14 @@ impl Budget {
     }
 }
 
+impl core::fmt::Debug for Budget {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Budget")
+            .field("koid", &self.header.koid())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Object for Budget {
     fn header(&self) -> &Header {
         &self.header

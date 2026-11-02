@@ -2,8 +2,15 @@
 //! requests, failures, revocation, dirty tracking and writeback.
 
 use crate::nodes::{self, INSERT, Map, Set};
+use crate::object::budget::Budget;
 use crate::status::Error;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+
+/// The kernel memory charged for each entry of the state: the entry and
+/// its share of the tree's nodes. A present page counts as two entries,
+/// its generation and the record of the budget its frame is charged to.
+pub const STATE_ENTRY_COST: u64 = 2 * size_of::<(u64, u64)>() as u64;
 
 /// What an access to an absent page has to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,11 +53,17 @@ pub struct Paging {
     writeback: Option<Writeback>,
     revoked: bool,
     pager_gone: bool,
+    /// The budget the entries are charged to, if any, and how many are
+    /// charged, which is never fewer than there are.
+    budget: Option<Arc<Budget>>,
+    charged: u64,
 }
 
 impl Paging {
     pub fn new(track_dirty: bool) -> Paging {
         Paging {
+            budget: None,
+            charged: 0,
             track_dirty,
             generations: nodes::map(),
             next_generation: 0,
@@ -61,6 +74,46 @@ impl Paging {
             revoked: false,
             pager_gone: false,
         }
+    }
+
+    /// Charges the entries of the state to `budget` from now on.
+    pub fn charged_to(mut self, budget: Arc<Budget>) -> Paging {
+        debug_assert_eq!(self.charged, 0);
+        self.budget = Some(budget);
+        self
+    }
+
+    /// The number of entries the state holds.
+    fn entries(&self) -> u64 {
+        let writeback = self
+            .writeback
+            .as_ref()
+            .map_or(0, |w| w.recorded.len() + w.written.len());
+        (2 * self.generations.len()
+            + self.requested.len()
+            + self.failed.len()
+            + self.dirty.len()
+            + writeback) as u64
+    }
+
+    /// Charges room for `count` more entries, or fails with no effect.
+    fn reserve(&mut self, count: u64) -> Result<(), Error> {
+        if let Some(budget) = &self.budget {
+            budget.charge_kernel(count * STATE_ENTRY_COST)?;
+        }
+        self.charged += count;
+        Ok(())
+    }
+
+    /// Releases the charges of the entries reserved but not there.
+    fn settle(&mut self) {
+        let extra = self.charged - self.entries();
+        if let Some(budget) = &self.budget
+            && extra > 0
+        {
+            budget.release_kernel(extra * STATE_ENTRY_COST);
+        }
+        self.charged -= extra;
     }
 
     pub fn track_dirty(&self) -> bool {
@@ -88,6 +141,7 @@ impl Paging {
             Absent::Wait
         } else {
             let _claim = nodes::claim_insert()?;
+            self.reserve(1)?;
             self.requested.insert(index);
             Absent::Request
         })
@@ -105,11 +159,13 @@ impl Paging {
             return Ok(false);
         }
         let _claim = nodes::claim_insert()?;
+        self.reserve(2)?;
         self.requested.remove(&index);
         self.failed.remove(&index);
         self.dirty.remove(&index);
         self.generations.insert(index, self.next_generation);
         self.next_generation += 1;
+        self.settle();
         Ok(true)
     }
 
@@ -118,14 +174,27 @@ impl Paging {
     /// as failed, whose request is then forgotten, so that the next access
     /// requests it again.
     pub fn fail(&mut self, first: u64, end: u64) -> Result<(), Error> {
+        let mut result = Ok(());
         for index in first..end {
             if !self.present(index) {
                 self.requested.remove(&index);
-                let _claim = nodes::claim_insert()?;
+                let claim = nodes::claim_insert().and_then(|c| self.reserve(1).map(|()| c));
+                if let Err(e) = claim {
+                    result = Err(e);
+                    break;
+                }
                 self.failed.insert(index);
             }
         }
-        Ok(())
+        self.settle();
+        result
+    }
+
+    /// Forgets the request for page `index`, so that the next access
+    /// requests it again.
+    pub fn withdraw(&mut self, index: u64) {
+        self.requested.remove(&index);
+        self.settle();
     }
 
     /// Makes every unanswered and later request fail, as when the pager
@@ -133,12 +202,14 @@ impl Paging {
     pub fn pager_gone(&mut self) {
         self.pager_gone = true;
         self.requested.clear();
+        self.settle();
     }
 
     /// Revokes the object for good.
     pub fn revoke(&mut self) {
         self.revoked = true;
         self.requested.clear();
+        self.settle();
     }
 
     /// Whether page `index` may be evicted: present, clean and not part
@@ -164,6 +235,7 @@ impl Paging {
         {
             self.dirty.remove(&index);
         }
+        self.settle();
     }
 
     /// Records a write to the present page `index`. Fails with
@@ -173,12 +245,14 @@ impl Paging {
             return Ok(());
         }
         let _claim = nodes::claim(2 * INSERT)?;
+        self.reserve(2)?;
         self.dirty.insert(index);
         if let Some(w) = &mut self.writeback
             && w.recorded.contains_key(&index)
         {
             w.written.insert(index);
         }
+        self.settle();
         Ok(())
     }
 
@@ -242,37 +316,50 @@ impl Paging {
     /// Fails with `NoMemory` without room to record them, which ends the
     /// writeback.
     pub fn writeback_record(&mut self, limit: usize) -> Result<(Vec<u64>, bool), Error> {
-        let Some(w) = self.writeback.as_mut() else {
+        let Some(w) = self.writeback.as_ref() else {
             return Err(Error::BadState);
         };
         let Some(at) = w.recording else {
             return Ok((Vec::new(), true));
         };
+        let end = w.end;
         let mut pages = Vec::new();
         let mut seen = 0;
-        let mut next = w.end;
-        let mut failed = false;
-        for &index in self.dirty.range(at..w.end).take(limit) {
+        let mut next = end;
+        let mut failed = None;
+        let mut cursor = at;
+        while seen < limit {
+            let Some(&index) = self.dirty.range(cursor..end).next() else {
+                break;
+            };
             seen += 1;
             next = index + 1;
+            cursor = next;
             if let Some(&generation) = self.generations.get(&index) {
                 let Ok(_claim) = nodes::claim_insert() else {
-                    failed = true;
+                    failed = Some(Error::NoMemory);
                     break;
                 };
                 if pages.try_reserve(1).is_err() {
-                    failed = true;
+                    failed = Some(Error::NoMemory);
                     break;
                 }
+                if let Err(e) = self.reserve(1) {
+                    failed = Some(e);
+                    break;
+                }
+                let w = self.writeback.as_mut().expect("opened");
                 w.recorded.insert(index, generation);
                 pages.push(index);
             }
         }
-        if failed {
+        if let Some(e) = failed {
             self.writeback = None;
-            return Err(Error::NoMemory);
+            self.settle();
+            return Err(e);
         }
-        let done = seen < limit || next >= w.end;
+        let done = seen < limit || next >= end;
+        let w = self.writeback.as_mut().expect("opened");
         w.recording = (!done).then_some(next);
         Ok((pages, done))
     }
@@ -316,11 +403,12 @@ impl Paging {
                 self.dirty.remove(&index);
             }
         }
-        if w.recorded.is_empty() {
+        let ended = w.recorded.is_empty();
+        if ended {
             self.writeback = None;
-            return true;
         }
-        false
+        self.settle();
+        ended
     }
 
     /// Begins a writeback of the pages from `first` to `end` and records
@@ -354,6 +442,14 @@ impl Paging {
     }
 }
 
+impl Drop for Paging {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.budget {
+            budget.release_kernel(self.charged * STATE_ENTRY_COST);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +465,34 @@ mod tests {
         assert!(p.present(3));
         p.removed(3);
         assert_eq!(p.absent(3), Ok(Absent::Request));
+    }
+
+    #[test]
+    fn charges_entries_until_they_go() {
+        use crate::object::budget::UNLIMITED;
+        let root = Budget::root();
+        let small = Budget::child(&root, 3 * STATE_ENTRY_COST, UNLIMITED, None).unwrap();
+        let used = |b: &Budget| u64::from_le_bytes(b.info()[8..16].try_into().unwrap());
+        let mut p = Paging::new(true).charged_to(small.clone());
+        assert_eq!(p.absent(0), Ok(Absent::Request));
+        assert_eq!(used(&small), STATE_ENTRY_COST);
+        // The request makes way for the present page.
+        assert_eq!(p.supply(0), Ok(true));
+        assert_eq!(used(&small), 2 * STATE_ENTRY_COST);
+        // Over the limit, nothing changes.
+        assert_eq!(p.written(0), Err(Error::NoResources));
+        assert!(!p.writable_without_fault(0));
+        assert_eq!(p.fail(1, 3), Err(Error::NoResources));
+        assert_eq!(p.absent(1), Ok(Absent::Failed));
+        assert_eq!(p.absent(2), Err(Error::NoResources));
+        assert_eq!(used(&small), 3 * STATE_ENTRY_COST);
+        p.removed(0);
+        assert_eq!(p.absent(2), Ok(Absent::Request));
+        assert_eq!(used(&small), 2 * STATE_ENTRY_COST);
+        p.withdraw(2);
+        assert_eq!(used(&small), STATE_ENTRY_COST);
+        drop(p);
+        assert_eq!((used(&small), used(&root)), (0, 0));
     }
 
     #[test]

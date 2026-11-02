@@ -139,18 +139,24 @@ impl Port {
         Ok(())
     }
 
-    /// Queues a packet that the kernel makes, such as a page request.
-    pub fn queue_kernel(&self, bytes: [u8; PACKET_SIZE]) -> Result<(), Error> {
+    /// Queues a packet that the kernel makes, such as a page request,
+    /// charged to `budget` until it is read.
+    pub fn queue_kernel(
+        &self,
+        bytes: [u8; PACKET_SIZE],
+        budget: &Arc<Budget>,
+    ) -> Result<(), Error> {
         let mut state = self.state.lock();
         let room = state.registrations + 1;
         state
             .packets
             .try_reserve(room)
             .map_err(|_| Error::NoMemory)?;
+        budget.charge_kernel(USER_COST)?;
         let packet = Queued {
             bytes,
             registration: None,
-            charged: None,
+            charged: Some(budget.clone()),
         };
         // A kernel packet does not count as a user packet when read.
         state.users += 1;

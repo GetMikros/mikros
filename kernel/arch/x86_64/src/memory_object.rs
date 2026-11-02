@@ -171,7 +171,9 @@ impl MemoryObject {
                 pager,
                 port: Arc::downgrade(port),
                 key,
-                state: SpinLock::new(Paging::new(options & TRACK_DIRTY != 0)),
+                state: SpinLock::new(
+                    Paging::new(options & TRACK_DIRTY != 0).charged_to(budget.clone()),
+                ),
                 charges: SpinLock::new(nodes::map()),
                 writeback: SpinLock::new(None),
             }),
@@ -202,18 +204,16 @@ impl MemoryObject {
             .is_some_and(|p| p.pager == pager.header().koid())
     }
 
-    /// Queues a request for page `index` on the object's port. Returns
-    /// whether it was queued.
-    fn request(&self, paged: &Paged, index: u64) -> bool {
+    /// Queues a request for page `index` on the object's port, charged to
+    /// the object's budget until it is read.
+    fn request(&self, paged: &Paged, index: u64) -> Result<(), Error> {
         let mut payload = [0u8; 24];
         payload[0..4].copy_from_slice(&PAGER_READ.to_le_bytes());
         payload[8..16].copy_from_slice(&(index * PAGE_SIZE).to_le_bytes());
         payload[16..24].copy_from_slice(&PAGE_SIZE.to_le_bytes());
         let packet = crate::port::packet(paged.key, PACKET_PAGER, 0, &payload);
-        paged
-            .port
-            .upgrade()
-            .is_some_and(|port| port.queue_kernel(packet).is_ok())
+        let port = paged.port.upgrade().ok_or(Error::PeerClosed)?;
+        port.queue_kernel(packet, &self.budget)
     }
 
     /// Waits until page `index` of a paged object is present, requesting
@@ -246,14 +246,24 @@ impl MemoryObject {
             drop(state);
             drop(pages);
             match absent {
-                Absent::Request if !self.request(paged, index) => {
-                    // Without room to record the failure, the next
-                    // access requests the page again.
-                    let _ = paged.state.lock().fail(index, index + 1);
-                    crate::pager::wake(koid, index, index + 1);
-                    return Err(Error::Io);
-                }
-                Absent::Request | Absent::Wait => {}
+                Absent::Request => match self.request(paged, index) {
+                    Ok(()) => {}
+                    // The page is requested again by the next access,
+                    // also by the threads waiting for it.
+                    Err(Error::NoResources) => {
+                        paged.state.lock().withdraw(index);
+                        crate::pager::wake(koid, index, index + 1);
+                        return Err(Error::NoResources);
+                    }
+                    Err(_) => {
+                        // Without room to record the failure, the next
+                        // access requests the page again.
+                        let _ = paged.state.lock().fail(index, index + 1);
+                        crate::pager::wake(koid, index, index + 1);
+                        return Err(Error::Io);
+                    }
+                },
+                Absent::Wait => {}
                 Absent::Failed => return Err(Error::Io),
                 Absent::Revoked => return Err(Error::AccessDenied),
             }
@@ -512,6 +522,9 @@ impl MemoryObject {
                 }
             };
             let (from, to) = (first + from, first + to);
+            // Once the object's budget refuses a page, the rest of the
+            // piece stays with the source and the call fails.
+            let mut refused = Ok(());
             {
                 let mut pages = self.pages.lock();
                 let mut state = paged.state.lock();
@@ -521,9 +534,18 @@ impl MemoryObject {
                     let claims = fits
                         .then(|| Some((nodes::claim_insert().ok()?, nodes::claim_insert().ok()?)))
                         .flatten();
-                    if let Some((charge, page)) = claims
-                        && state.supply(index) == Ok(true)
-                    {
+                    let supplied = match claims {
+                        Some(claims) if refused.is_ok() => match state.supply(index) {
+                            Ok(true) => Some(claims),
+                            Err(Error::NoResources) => {
+                                refused = Err(Error::NoResources);
+                                None
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some((charge, page)) = supplied {
                         charges.insert(phys, source.budget.clone());
                         drop(charge);
                         pages.insert(index, phys, page);
@@ -534,7 +556,7 @@ impl MemoryObject {
             }
             source.free(leftover);
             crate::pager::wake(self.header.koid(), from, to);
-            Ok(())
+            refused
         })
     }
 
