@@ -16,7 +16,6 @@ const DYNAMIC_END: u64 = 0xFFFF_FF80_0000_0000;
 const STACK_SIZE: u64 = 64 << 10;
 
 const IA32_PAT: u32 = 0x277;
-const CR4_PGE: u64 = 1 << 7;
 
 unsafe extern "C" {
     static __kernel_start: u8;
@@ -259,8 +258,6 @@ pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
     // the bootloader's tables can select, at the memory types of their
     // reset values.
     unsafe { crate::cpu::write_msr(IA32_PAT, PAT_VALUE) };
-    // SAFETY: global pages are a required feature.
-    unsafe { crate::cpu::write_cr4(crate::cpu::read_cr4() | CR4_PGE) };
 
     let mut tables = FrameTables;
     let mut mapper = Mapper::new(&mut tables, gib_pages())

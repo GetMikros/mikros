@@ -111,3 +111,65 @@ pub fn rdtsc() -> u64 {
     // only reads the counter.
     unsafe { core::arch::x86_64::_rdtsc() }
 }
+
+pub fn read_cr0() -> u64 {
+    let value;
+    // SAFETY: reading CR0 has no side effects.
+    unsafe { asm!("mov {}, cr0", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    value
+}
+
+/// Writes CR0.
+///
+/// # Safety
+///
+/// The value must keep the processor in the mode the kernel runs in.
+pub unsafe fn write_cr0(value: u64) {
+    // SAFETY: the caller guarantees the value is valid.
+    unsafe { asm!("mov cr0, {}", in(reg) value, options(nostack, preserves_flags)) };
+}
+
+/// Writes the extended control register `xcr`.
+///
+/// # Safety
+///
+/// CR4.OSXSAVE must be set, and the value must be valid for the register.
+pub unsafe fn write_xcr(xcr: u32, value: u64) {
+    // SAFETY: the caller guarantees the write is valid.
+    unsafe {
+        asm!(
+            "xsetbv",
+            in("ecx") xcr,
+            in("eax") value as u32,
+            in("edx") (value >> 32) as u32,
+            options(nomem, nostack, preserves_flags),
+        )
+    };
+}
+
+const IA32_EFER: u32 = 0xC000_0080;
+
+/// Sets up CR0, EFER, CR4 and XCR0. The required features must be
+/// present.
+pub fn init() {
+    use crate::control::{self, CR4_LA57, Optional};
+    let features = Optional::read(|leaf, subleaf| {
+        let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+        [r.eax, r.ebx, r.ecx, r.edx]
+    });
+    // CR4.LA57 cannot change in long mode; the bootloader leaves it clear.
+    if read_cr4() & CR4_LA57 != 0 {
+        panic!("5-level paging is enabled");
+    }
+    // SAFETY: the new values keep paging, protected mode and long mode
+    // on, and set only bits for features that are required or reported.
+    // PCIDE may be set because the low bits of CR3 are clear, and XCR0 is
+    // written after OSXSAVE is set, with components that XSAVE, AVX and
+    // AVX-512F imply.
+    unsafe {
+        write_cr0(control::cr0(read_cr0()));
+        write_msr(IA32_EFER, control::efer(read_msr(IA32_EFER)));
+        write_cr4(control::cr4(read_cr4(), features));
+        write_xcr(0, control::xcr0(features));
+    }
+}

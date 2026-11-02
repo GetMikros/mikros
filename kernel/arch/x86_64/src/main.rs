@@ -9,6 +9,9 @@ mod apic;
 mod backtrace;
 #[cfg(any(target_os = "none", test))]
 mod clock;
+#[cfg(any(target_os = "none", test))]
+#[cfg_attr(test, allow(dead_code))]
+mod control;
 #[cfg(target_os = "none")]
 mod cpu;
 #[cfg(target_os = "none")]
