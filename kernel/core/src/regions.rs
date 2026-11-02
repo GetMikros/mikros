@@ -2,7 +2,7 @@
 //! which memory object, and with what permissions.
 
 use crate::nodes::{self, INSERT, Map};
-use crate::object::budget::Budget;
+use crate::object::budget::{Budget, Held};
 use crate::object::rights;
 use crate::status::Error;
 use alloc::sync::Arc;
@@ -112,7 +112,7 @@ pub const REGION_COST: u64 =
 /// A region's entry charged to a budget, which is released when the
 /// region goes.
 #[derive(Default)]
-pub struct Charge(Option<Arc<Budget>>);
+pub struct Charge(Option<Held>);
 
 impl Charge {
     /// No charge.
@@ -121,19 +121,8 @@ impl Charge {
     /// Charges one region to `budget`, if there is one.
     pub fn new(budget: Option<&Arc<Budget>>) -> Result<Charge, Error> {
         match budget {
-            Some(budget) => {
-                budget.charge_kernel(REGION_COST)?;
-                Ok(Charge(Some(budget.clone())))
-            }
+            Some(budget) => Ok(Charge(Some(budget.hold_kernel(REGION_COST)?))),
             None => Ok(Charge::NONE),
-        }
-    }
-}
-
-impl Drop for Charge {
-    fn drop(&mut self) {
-        if let Some(budget) = &self.0 {
-            budget.release_kernel(REGION_COST);
         }
     }
 }

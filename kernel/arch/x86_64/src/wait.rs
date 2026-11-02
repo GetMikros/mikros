@@ -28,6 +28,13 @@ struct Waiter {
 /// the hook never drops a thread.
 static WAITERS: SpinLock<Vec<Arc<Waiter>>> = SpinLock::new(Vec::new());
 
+/// The kernel memory charged for the length of a wait to the waiting
+/// process: a shared record of `T` with its reference counts, and its
+/// place in a list of them with that place's share of the list storage.
+const fn record_cost<T>() -> u64 {
+    (2 * size_of::<usize>() + size_of::<T>() + 2 * size_of::<Arc<T>>()) as u64
+}
+
 /// The signal hook: wakes the threads waiting for a signal now set on
 /// the object of `header`.
 fn signals_changed(header: &Header, signals: u32) {
@@ -77,6 +84,7 @@ pub fn wait_one(
 ) -> Result<u32, Error> {
     let thread = sched::current().ok_or(Error::BadState)?;
     let header = object.header();
+    let _charge = process.budget().hold_kernel(record_cost::<Waiter>())?;
     let waiter = kernel_core::fallible::try_arc(Waiter {
         koid: header.koid(),
         mask,
@@ -148,6 +156,9 @@ pub fn wait_call(
 ) -> Result<Message, Error> {
     let thread = sched::current().ok_or(Error::BadState)?;
     let header = endpoint.header();
+    let _charge = process
+        .budget()
+        .hold_kernel(record_cost::<Waiter>() + 2 * size_of::<Caller>() as u64)?;
     let waiter = kernel_core::fallible::try_arc(Waiter {
         koid: header.koid(),
         mask: signals::PEER_CLOSED,
@@ -236,6 +247,7 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> 
     if value != expected {
         return Err(Error::BadState);
     }
+    let _charge = process.budget().hold_kernel(record_cost::<FutexWaiter>())?;
     let waiter = kernel_core::fallible::try_arc(FutexWaiter {
         key,
         thread: thread.clone(),

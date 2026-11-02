@@ -167,6 +167,16 @@ impl Budget {
         self.release(Kind::Kernel, bytes)
     }
 
+    /// Charges `bytes` of kernel memory as `charge_kernel` does, and
+    /// returns the charge, which releases it when dropped.
+    pub fn hold_kernel(self: &Arc<Self>, bytes: u64) -> Result<Held, Error> {
+        self.charge_kernel(bytes)?;
+        Ok(Held {
+            budget: self.clone(),
+            bytes,
+        })
+    }
+
     /// Charges `pages` pages to this budget and its ancestors, or fails
     /// with no effect when that would exceed a limit.
     pub fn charge_pages(&self, pages: u64) -> Result<(), Error> {
@@ -243,6 +253,19 @@ impl Drop for Budget {
         if let Some(charged) = &self.charged {
             charged.release_kernel(BUDGET_COST);
         }
+    }
+}
+
+/// Kernel memory charged by `Budget::hold_kernel`, released when this is
+/// dropped.
+pub struct Held {
+    budget: Arc<Budget>,
+    bytes: u64,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.budget.release_kernel(self.bytes);
     }
 }
 
@@ -337,6 +360,17 @@ mod tests {
         assert!(weak.upgrade().is_some());
         drop(child);
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn releases_held_charges_when_dropped() {
+        let root = Budget::root();
+        let b = Budget::child(&root, 100, UNLIMITED, None).unwrap();
+        let held = b.hold_kernel(60).unwrap();
+        assert_eq!(b.hold_kernel(41).err(), Some(Error::NoResources));
+        assert_eq!(word(&root.info(), 0x08), 60);
+        drop(held);
+        assert_eq!(word(&root.info(), 0x08), 0);
     }
 
     #[test]
