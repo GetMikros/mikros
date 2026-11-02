@@ -304,36 +304,62 @@ impl MemoryObject {
                 Ok(())
             }),
             OP_WRITEBACK_BEGIN => {
-                // Writeback begins only once no kernel copy holds the
-                // frames: a page being written must not go unrecorded.
-                let pages = loop {
-                    self.wait_unpinned();
+                {
                     let pages = self.pages.lock();
-                    if !pages.pinned() {
-                        break pages;
-                    }
-                };
-                pages.check_range(offset, len)?;
-                let mut state = paged.state.lock();
-                let recorded = state.writeback_begin(first, end)?;
-                *paged.writeback.lock() = Some((offset, len));
-                // Writes through mappings fault again and are seen.
-                for index in recorded {
-                    self.unmap_pages(index, index + 1);
+                    pages.check_range(offset, len)?;
+                    paged.state.lock().writeback_open(first, end)?;
+                    *paged.writeback.lock() = Some((offset, len));
                 }
-                Ok(())
+                // The dirty pages are recorded in steps, each once no
+                // kernel copy holds the frames: a page being written must
+                // not go unrecorded.
+                loop {
+                    let pages = self.pages.lock();
+                    if pages.pinned() {
+                        drop(pages);
+                        self.wait_unpinned();
+                        continue;
+                    }
+                    let mut state = paged.state.lock();
+                    let (recorded, done) = match state.writeback_record(ITEM_STEP) {
+                        Ok(step) => step,
+                        Err(e) => {
+                            *paged.writeback.lock() = None;
+                            return Err(e);
+                        }
+                    };
+                    // Writes through mappings fault again and are seen.
+                    for index in recorded {
+                        self.unmap_pages(index, index + 1);
+                    }
+                    if done {
+                        return Ok(());
+                    }
+                    drop(state);
+                    drop(pages);
+                    crate::sched::preempt_point();
+                }
             }
             _ => {
-                let _pages = self.pages.lock();
-                let mut state = paged.state.lock();
-                state.need_dirty_tracking()?;
-                let mut writeback = paged.writeback.lock();
-                if *writeback != Some((offset, len)) {
-                    return Err(Error::BadState);
+                {
+                    let mut state = paged.state.lock();
+                    state.need_dirty_tracking()?;
+                    if *paged.writeback.lock() != Some((offset, len)) {
+                        return Err(Error::BadState);
+                    }
+                    state.writeback_close(first, end, op == OP_WRITEBACK_END)?;
                 }
-                state.writeback_end(first, end, op == OP_WRITEBACK_END)?;
-                *writeback = None;
-                Ok(())
+                // The recorded pages are handled in steps; the writeback
+                // stays outstanding until the last.
+                loop {
+                    let mut state = paged.state.lock();
+                    if state.writeback_finish(ITEM_STEP) {
+                        *paged.writeback.lock() = None;
+                        return Ok(());
+                    }
+                    drop(state);
+                    crate::sched::preempt_point();
+                }
             }
         }
     }
@@ -369,15 +395,40 @@ impl MemoryObject {
     }
 
     /// The dirty ranges of the `len` bytes from `offset`, as byte offsets
-    /// and lengths of whole pages, as `pager_query_dirty` finds them.
-    pub fn dirty_ranges(&self, offset: u64, len: u64) -> Result<Vec<(u64, u64)>, Error> {
+    /// and lengths of whole pages, as `pager_query_dirty` finds them, up
+    /// to the first `cap`. The dirty pages are found in steps.
+    pub fn dirty_ranges(&self, offset: u64, len: u64, cap: u64) -> Result<Vec<(u64, u64)>, Error> {
         let paged = self.paged.as_ref().ok_or(Error::NotSupported)?;
-        let pages = self.pages.lock();
-        pages.check_range(offset, len)?;
-        let state = paged.state.lock();
-        state.need_dirty_tracking()?;
-        let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
-        let mut ranges = state.dirty_ranges(first, end)?;
+        {
+            let pages = self.pages.lock();
+            pages.check_range(offset, len)?;
+            paged.state.lock().need_dirty_tracking()?;
+        }
+        let (mut at, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
+        // Page index ranges, one more than `cap` once the last is known
+        // to have ended.
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        while at < end && ranges.len() as u64 <= cap {
+            let state = paged.state.lock();
+            let mut seen = 0;
+            for index in state.dirty(at, end).take(ITEM_STEP) {
+                seen += 1;
+                at = index + 1;
+                match ranges.last_mut() {
+                    Some(r) if r.1 == index => r.1 += 1,
+                    _ => {
+                        ranges.try_reserve(1).map_err(|_| Error::NoMemory)?;
+                        ranges.push((index, index + 1));
+                    }
+                }
+            }
+            drop(state);
+            if seen < ITEM_STEP {
+                break;
+            }
+            crate::sched::preempt_point();
+        }
+        ranges.truncate(ranges.len().min(cap as usize));
         for (offset, len) in &mut ranges {
             (*offset, *len) = (*offset * PAGE_SIZE, (*len - *offset) * PAGE_SIZE);
         }

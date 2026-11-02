@@ -26,6 +26,10 @@ struct Writeback {
     end: u64,
     recorded: Map<u64, u64>,
     written: Set<u64>,
+    /// The page from which recording goes on, while it does.
+    recording: Option<u64>,
+    /// Whether the end was persisted, once the writeback is ending.
+    ending: Option<bool>,
 }
 
 /// The pager state of one paged memory object, by page index. The frames
@@ -192,6 +196,11 @@ impl Paging {
         self.dirty.contains(&index) && !pending
     }
 
+    /// The dirty pages from `first` to `end`, in order.
+    pub fn dirty(&self, first: u64, end: u64) -> impl Iterator<Item = u64> + '_ {
+        self.dirty.range(first..end).copied()
+    }
+
     /// The dirty ranges from `first` to `end`, as page index ranges.
     /// Fails with `NoMemory` without room for them.
     pub fn dirty_ranges(&self, first: u64, end: u64) -> Result<Vec<(u64, u64)>, Error> {
@@ -208,54 +217,131 @@ impl Paging {
         Ok(ranges)
     }
 
-    /// Begins a writeback of the pages from `first` to `end`, recording
-    /// the dirty ones, as `WRITEBACK_BEGIN` does. Returns the recorded
-    /// pages, whose mappings must stop being writable without a fault.
-    /// Fails with `NoMemory`, beginning nothing, without room to record
-    /// them.
-    pub fn writeback_begin(&mut self, first: u64, end: u64) -> Result<Vec<u64>, Error> {
+    /// Opens a writeback of the pages from `first` to `end`, as
+    /// `WRITEBACK_BEGIN` does, which records their dirty pages in steps
+    /// of `writeback_record`. It cannot end before they are recorded.
+    pub fn writeback_open(&mut self, first: u64, end: u64) -> Result<(), Error> {
         self.need_dirty_tracking()?;
         if self.writeback.is_some() {
             return Err(Error::BadState);
         }
-        let mut recorded = nodes::map();
-        let mut pages = Vec::new();
-        for &index in self.dirty.range(first..end) {
-            if let Some(&generation) = self.generations.get(&index) {
-                let _claim = nodes::claim_insert()?;
-                pages.try_reserve(1).map_err(|_| Error::NoMemory)?;
-                recorded.insert(index, generation);
-                pages.push(index);
-            }
-        }
         self.writeback = Some(Writeback {
             first,
             end,
-            recorded,
+            recorded: nodes::map(),
             written: nodes::set(),
+            recording: Some(first),
+            ending: None,
         });
-        Ok(pages)
+        Ok(())
     }
 
-    /// Ends the writeback of exactly `first` to `end`: with `persisted`,
-    /// recorded pages that are still the same page and were not written
-    /// since become clean, as `WRITEBACK_END` does; without it they stay
-    /// dirty, as `WRITEBACK_ABORT` does.
-    pub fn writeback_end(&mut self, first: u64, end: u64, persisted: bool) -> Result<(), Error> {
-        self.need_dirty_tracking()?;
-        match &self.writeback {
-            Some(w) if w.first == first && w.end == end => {}
-            _ => return Err(Error::BadState),
-        }
-        let w = self.writeback.take().expect("checked above");
-        if persisted {
-            for (index, generation) in w.recorded {
-                let same = self.generations.get(&index) == Some(&generation);
-                if same && !w.written.contains(&index) {
-                    self.dirty.remove(&index);
+    /// Records up to `limit` more dirty pages of the opening writeback.
+    /// Returns the pages recorded, whose mappings must stop being
+    /// writable without a fault, and whether every page is recorded.
+    /// Fails with `NoMemory` without room to record them, which ends the
+    /// writeback.
+    pub fn writeback_record(&mut self, limit: usize) -> Result<(Vec<u64>, bool), Error> {
+        let Some(w) = self.writeback.as_mut() else {
+            return Err(Error::BadState);
+        };
+        let Some(at) = w.recording else {
+            return Ok((Vec::new(), true));
+        };
+        let mut pages = Vec::new();
+        let mut seen = 0;
+        let mut next = w.end;
+        let mut failed = false;
+        for &index in self.dirty.range(at..w.end).take(limit) {
+            seen += 1;
+            next = index + 1;
+            if let Some(&generation) = self.generations.get(&index) {
+                let Ok(_claim) = nodes::claim_insert() else {
+                    failed = true;
+                    break;
+                };
+                if pages.try_reserve(1).is_err() {
+                    failed = true;
+                    break;
                 }
+                w.recorded.insert(index, generation);
+                pages.push(index);
             }
         }
+        if failed {
+            self.writeback = None;
+            return Err(Error::NoMemory);
+        }
+        let done = seen < limit || next >= w.end;
+        w.recording = (!done).then_some(next);
+        Ok((pages, done))
+    }
+
+    /// Begins ending the writeback of exactly `first` to `end`, whose
+    /// pages are all recorded: with `persisted`, recorded pages that are
+    /// still the same page and were not written since become clean, as
+    /// `WRITEBACK_END` does; without it they stay dirty, as
+    /// `WRITEBACK_ABORT` does. The pages are handled in steps of
+    /// `writeback_finish`.
+    pub fn writeback_close(&mut self, first: u64, end: u64, persisted: bool) -> Result<(), Error> {
+        self.need_dirty_tracking()?;
+        match &mut self.writeback {
+            Some(w)
+                if w.first == first
+                    && w.end == end
+                    && w.recording.is_none()
+                    && w.ending.is_none() =>
+            {
+                w.ending = Some(persisted);
+                Ok(())
+            }
+            _ => Err(Error::BadState),
+        }
+    }
+
+    /// Handles up to `limit` recorded pages of the ending writeback, and
+    /// returns whether it has ended.
+    pub fn writeback_finish(&mut self, limit: usize) -> bool {
+        let Some(w) = self.writeback.as_mut() else {
+            return true;
+        };
+        let persisted = w.ending == Some(true);
+        for _ in 0..limit {
+            let Some((index, generation)) = w.recorded.pop_first() else {
+                break;
+            };
+            let written = w.written.remove(&index);
+            let same = self.generations.get(&index) == Some(&generation);
+            if persisted && same && !written {
+                self.dirty.remove(&index);
+            }
+        }
+        if w.recorded.is_empty() {
+            self.writeback = None;
+            return true;
+        }
+        false
+    }
+
+    /// Begins a writeback of the pages from `first` to `end` and records
+    /// all of their dirty pages at once. Returns the recorded pages.
+    pub fn writeback_begin(&mut self, first: u64, end: u64) -> Result<Vec<u64>, Error> {
+        self.writeback_open(first, end)?;
+        let mut all = Vec::new();
+        loop {
+            let (pages, done) = self.writeback_record(usize::MAX)?;
+            all.extend(pages);
+            if done {
+                return Ok(all);
+            }
+        }
+    }
+
+    /// Ends the writeback of exactly `first` to `end` at once, as
+    /// `writeback_close` and `writeback_finish` do.
+    pub fn writeback_end(&mut self, first: u64, end: u64, persisted: bool) -> Result<(), Error> {
+        self.writeback_close(first, end, persisted)?;
+        while !self.writeback_finish(usize::MAX) {}
         Ok(())
     }
 
@@ -350,6 +436,41 @@ mod tests {
         p.writeback_begin(0, 2).unwrap();
         p.writeback_end(0, 2, false).unwrap();
         assert_eq!(p.dirty_ranges(0, 2), Ok(vec![(0, 2)]));
+    }
+
+    #[test]
+    fn records_and_ends_writebacks_in_steps() {
+        let mut p = Paging::new(true);
+        for i in 0..4 {
+            p.supply(i).unwrap();
+            p.written(i).unwrap();
+        }
+        p.writeback_open(0, 4).unwrap();
+        assert_eq!(p.writeback_record(3), Ok((vec![0, 1, 2], false)));
+        // Recording is not done, so the writeback cannot end yet.
+        assert_eq!(p.writeback_close(0, 4, true), Err(Error::BadState));
+        assert_eq!(p.writeback_record(3), Ok((vec![3], true)));
+        p.writeback_close(0, 4, true).unwrap();
+        assert_eq!(p.writeback_close(0, 4, true), Err(Error::BadState));
+        assert!(!p.writeback_finish(2));
+        // Page 3, written while the end is under way, stays dirty; the
+        // others become clean.
+        p.written(3).unwrap();
+        assert!(p.writeback_finish(2));
+        assert_eq!(p.dirty_ranges(0, 4), Ok(vec![(3, 4)]));
+        assert_eq!(p.writeback_begin(0, 4), Ok(vec![3]));
+    }
+
+    #[test]
+    fn ends_a_writeback_that_cannot_record() {
+        let mut p = Paging::new(true);
+        p.supply(0).unwrap();
+        p.written(0).unwrap();
+        p.writeback_open(0, 1).unwrap();
+        let recorded = crate::nodes::tests::without_claims(|| p.writeback_record(8));
+        assert_eq!(recorded, Err(Error::NoMemory));
+        assert_eq!(p.writeback_end(0, 1, true), Err(Error::BadState));
+        assert_eq!(p.writeback_begin(0, 1), Ok(vec![0]));
     }
 
     #[test]

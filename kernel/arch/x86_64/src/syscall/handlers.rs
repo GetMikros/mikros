@@ -1640,8 +1640,8 @@ pub fn pager_query_dirty(
     if !count.fits(1) {
         return Err(Error::InvalidArgs);
     }
-    let ranges = paged_of(pager, mem)?.dirty_ranges(offset, len)?;
-    let n = (ranges.len() as u64).min(cap);
+    let ranges = paged_of(pager, mem)?.dirty_ranges(offset, len, cap)?;
+    let n = ranges.len() as u64;
     if !out.fits(n * 16) {
         return Err(Error::InvalidArgs);
     }
