@@ -85,6 +85,9 @@ pub struct Arg {
     pub dir: Dir,
     /// Set for handle arguments.
     pub handle: Option<HandleCheck>,
+    /// For a `*mut Handle` argument, the object type of the handles the
+    /// call returns there, when it is always the same.
+    pub returns: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -239,12 +242,22 @@ impl Reader {
                 allow_invalid,
             })
         } else {
+            let returns_handle = ty == Type::Mut("Handle".into());
             for key in ["object", "rights", "allow_invalid"] {
+                if key == "object" && returns_handle {
+                    continue;
+                }
                 if let Some(v) = map.get(key) {
                     return Err(v.at.error(format!("`{key}` applies only to handles")));
                 }
             }
             None
+        };
+        let returns = match map.get("object") {
+            Some(object) if handle.is_none() => {
+                Some(self.one_of(object, &OBJECT_TYPES, "object type")?)
+            }
+            _ => None,
         };
         self.done(&map);
         Ok(Arg {
@@ -252,6 +265,7 @@ impl Reader {
             ty,
             dir,
             handle,
+            returns,
         })
     }
 

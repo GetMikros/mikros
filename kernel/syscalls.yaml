@@ -75,7 +75,7 @@ syscalls:
       - {name: parent, type: Handle, dir: in, object: Budget, rights: [WRITE]}
       - {name: kernel_limit, type: u64, dir: in}
       - {name: page_limit, type: u64, dir: in}
-      - {name: out, type: "*mut Handle", dir: out}
+      - {name: out, type: "*mut Handle", dir: out, object: Budget}
 
   - name: budget_set_limits
     number: 6
@@ -106,7 +106,7 @@ syscalls:
       - {name: budget, type: Handle, dir: in, object: Budget, rights: [WRITE]}
       - {name: name, type: "*const u8", dir: in}
       - {name: name_len, type: u64, dir: in}
-      - {name: out, type: "*mut Handle", dir: out}
+      - {name: out, type: "*mut Handle", dir: out, object: Process}
 
   - name: thread_create
     number: 9
@@ -117,7 +117,7 @@ syscalls:
       - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
       - {name: name, type: "*const u8", dir: in}
       - {name: name_len, type: u64, dir: in}
-      - {name: out, type: "*mut Handle", dir: out}
+      - {name: out, type: "*mut Handle", dir: out, object: Thread}
 
   - name: process_start
     number: 10
@@ -184,7 +184,7 @@ syscalls:
     args:
       - {name: size, type: u64, dir: in}
       - {name: options, type: u32, dir: in}
-      - {name: out, type: "*mut Handle", dir: out}
+      - {name: out, type: "*mut Handle", dir: out, object: MemoryObject}
 
   - name: mem_read
     number: 17
@@ -259,8 +259,8 @@ syscalls:
     spec: [MIKSPEC-0009.R1]
     args:
       - {name: options, type: u32, dir: in}
-      - {name: out0, type: "*mut Handle", dir: out}
-      - {name: out1, type: "*mut Handle", dir: out}
+      - {name: out0, type: "*mut Handle", dir: out, object: Channel}
+      - {name: out1, type: "*mut Handle", dir: out, object: Channel}
 
   - name: channel_write
     number: 24
@@ -296,7 +296,7 @@ syscalls:
     args:
       - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
       - {name: options, type: u32, dir: in}
-      - {name: out, type: "*mut Handle", dir: out}
+      - {name: out, type: "*mut Handle", dir: out, object: Channel}
 
   - name: thread_resume_from_exception
     number: 27
@@ -461,7 +461,7 @@ syscalls:
       - {name: base, type: u64, dir: in}
       - {name: size, type: u64, dir: in}
       - {name: options, type: u32, dir: in}
-      - {name: out, type: "*mut Handle", dir: out}
+      - {name: out, type: "*mut Handle", dir: out, object: Resource}
 
   - name: process_ioports_enable
     number: 44
