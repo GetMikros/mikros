@@ -2,6 +2,7 @@
 
 mod build;
 mod check;
+mod debug;
 mod debuginfo;
 mod firmware;
 mod fuzz;
@@ -29,6 +30,8 @@ enum Command {
     Build(build::Args),
     /// Check formatting, lints and the commits since the base branch.
     Check(check::Args),
+    /// Boot the disk image in QEMU halted and attach GDB to the kernel.
+    Debug(debug::Args),
     /// Run a host fuzz target.
     Fuzz(fuzz::Args),
     /// Create a bootable disk image.
@@ -54,6 +57,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Build(args) => build::run(&args),
         Command::Check(args) => check::run(&args),
+        Command::Debug(args) => debug::run(&args),
         Command::Fuzz(args) => fuzz::run(&args),
         Command::Image(args) => image::run(&args),
         Command::Run(args) => run::run(&args),

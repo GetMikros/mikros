@@ -127,19 +127,20 @@ pub fn run(args: &Args) -> Result<()> {
     for line in serial.lines().filter(|l| l.contains("TEST")) {
         println!("{line}");
     }
-    match verdict(code, &serial) {
-        Ok(()) => {
-            println!(
-                "integration tests passed; serial output in {}",
-                log.display()
-            );
-            Ok(())
-        }
-        Err(why) => bail!(
+    if let Err(why) = verdict(code, &serial) {
+        bail!(
             "integration tests failed: {why}; serial output in {}",
             log.display()
-        ),
+        );
     }
+    println!(
+        "integration tests passed; serial output in {}",
+        log.display()
+    );
+    let gdb_log = dir.join("gdb-serial.log");
+    crate::debug::check_scripts(&args.machine, &built.kernel, &disk, &gdb_log)?;
+    println!("kernel debugger scripts passed");
+    Ok(())
 }
 
 #[cfg(test)]

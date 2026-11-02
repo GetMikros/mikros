@@ -25,6 +25,7 @@ repository. Code and commits refer to them by ID, such as `MIKSPEC-0012.R3`.
 | `kernel/core/` | Architecture-independent kernel |
 | `kernel/arch/x86_64/` | x86_64 support |
 | `kernel/fuzz/` | Host fuzz targets |
+| `kernel/gdb/` | GDB commands for inspecting the kernel |
 | `user/init/` | The initial process |
 
 Folders appear as work on them starts.
@@ -41,6 +42,10 @@ The host needs these tools, which `cargo xtask setup` checks:
 | QEMU (`qemu-system-x86_64`) | 8.2.0 |
 | GDB | 12.1.0 |
 | `mkfs.btrfs` (btrfs-progs) | 6.12.0 |
+
+`cargo xtask debug` boots the disk image in QEMU halted and starts GDB
+attached to the kernel, with the `mikros` commands of `kernel/gdb/mikros.py`
+loaded; `help mikros` lists them.
 
 ## License
 
