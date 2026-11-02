@@ -389,8 +389,17 @@ impl Drop for Endpoint {
             }
         }
         // Discarded messages close their handles, which can destroy
-        // further objects, so this happens with no lock held.
-        drop(discarded);
+        // further objects, so this happens with no lock held, accounted
+        // for one message at a time.
+        let Queue {
+            messages, calls, ..
+        } = discarded;
+        let replies = calls.into_iter().filter_map(|c| c.reply);
+        for message in messages.into_iter().chain(replies) {
+            let count = 1 + message.handles.len();
+            drop(message);
+            crate::sync::destroyed(count);
+        }
     }
 }
 

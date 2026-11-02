@@ -17,6 +17,40 @@ pub fn none_held() -> bool {
     HELD.load(Ordering::Relaxed) == 0
 }
 
+/// The number of objects destroyed between reschedule checks.
+pub const DESTROY_STEP: usize = 512;
+
+/// The scheduler's preemption point, as a `fn()`, or 0 before it is set.
+static PREEMPT_HOOK: AtomicUsize = AtomicUsize::new(0);
+/// The objects destroyed since the last reschedule check.
+static DESTROYED: AtomicUsize = AtomicUsize::new(0);
+
+/// Installs `hook`, which checks for a pending reschedule and lets other
+/// threads run, as the preemption point of `destroyed`.
+pub fn set_preempt_hook(hook: fn()) {
+    PREEMPT_HOOK.store(hook as usize, Ordering::Release);
+}
+
+/// Accounts for destroying `count` objects. Once `DESTROY_STEP` have been
+/// destroyed since the last check, checks for a reschedule through the
+/// preemption point when no lock is held. The count is shared by nested
+/// destruction, so a chain of objects that each destroy a few more is
+/// checked too.
+pub fn destroyed(count: usize) {
+    let total = DESTROYED.fetch_add(count, Ordering::Relaxed) + count;
+    if total < DESTROY_STEP || !none_held() {
+        return;
+    }
+    DESTROYED.store(0, Ordering::Relaxed);
+    let hook = PREEMPT_HOOK.load(Ordering::Acquire);
+    if hook != 0 {
+        // SAFETY: only `set_preempt_hook` stores a nonzero value, which
+        // is a `fn()`.
+        let hook: fn() = unsafe { core::mem::transmute(hook) };
+        hook();
+    }
+}
+
 pub struct SpinLock<T> {
     locked: AtomicBool,
     value: UnsafeCell<T>,

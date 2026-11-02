@@ -94,6 +94,7 @@ extern "sysv64" fn on_kernel_tables() -> ! {
     crate::reserved::init(&info);
     crate::syscall::init();
     crate::wait::init();
+    kernel_core::sync::set_preempt_hook(crate::sched::preempt_point);
     crate::apic::init(&info);
     crate::time::init(&info);
     crate::timer::init();
