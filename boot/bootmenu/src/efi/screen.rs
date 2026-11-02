@@ -2,12 +2,13 @@
 
 use alloc::vec::Vec;
 use bootmenu::canvas::Canvas;
-use bootmenu::display::{self, Choice, ModeInfo};
+use bootmenu::display::{self, Choice, Kind, ModeInfo};
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode, PixelFormat};
 use uefi::{Handle, table};
 
-/// A graphics output in a mode with 32-bit pixels.
+/// A graphics output in a linear 32-bit or Blt-only mode, drawn to only
+/// through `Blt()`.
 pub struct Screen {
     gop: ScopedProtocol<GraphicsOutput>,
     width: usize,
@@ -45,25 +46,31 @@ fn open_gop() -> Option<ScopedProtocol<GraphicsOutput>> {
 }
 
 fn mode_info(index: u32, info: &uefi::proto::console::gop::ModeInfo) -> ModeInfo {
-    let linear_32bit = match info.pixel_format() {
-        PixelFormat::Rgb | PixelFormat::Bgr => true,
-        PixelFormat::Bitmask => info
-            .pixel_bitmask()
-            .is_some_and(|m| display::bitmask_is_32bit(m.red, m.green, m.blue, m.reserved)),
-        PixelFormat::BltOnly => false,
+    let kind = match info.pixel_format() {
+        PixelFormat::Rgb | PixelFormat::Bgr => Kind::Linear32,
+        PixelFormat::Bitmask
+            if info
+                .pixel_bitmask()
+                .is_some_and(|m| display::bitmask_is_32bit(m.red, m.green, m.blue, m.reserved)) =>
+        {
+            Kind::Linear32
+        }
+        PixelFormat::Bitmask => Kind::Other,
+        PixelFormat::BltOnly => Kind::BltOnly,
     };
     let (width, height) = info.resolution();
     ModeInfo {
         index,
         width,
         height,
-        linear_32bit,
+        kind,
     }
 }
 
 impl Screen {
-    /// Opens the graphics output and puts it in a mode with 32-bit pixels.
-    /// Returns `None` when there is no graphics output or no such mode.
+    /// Opens the graphics output and puts it in the mode `display::choose`
+    /// picks. Returns `None` when there is no graphics output or no usable
+    /// mode.
     pub fn open() -> Option<Screen> {
         let mut gop = open_gop()?;
         // Modes are identified by their position in `modes`; the index of

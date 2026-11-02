@@ -6,8 +6,18 @@ pub struct ModeInfo {
     pub index: u32,
     pub width: usize,
     pub height: usize,
-    /// Whether the mode has a linear framebuffer with 32-bit pixels.
-    pub linear_32bit: bool,
+    pub kind: Kind,
+}
+
+/// How a mode's pixels can be reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A linear framebuffer with 32-bit pixels.
+    Linear32,
+    /// No framebuffer; pixels are only reachable through `Blt()`.
+    BltOnly,
+    /// Any other pixel format, which is not used.
+    Other,
 }
 
 /// What to do about the display mode.
@@ -21,20 +31,32 @@ pub enum Choice {
     Unusable,
 }
 
-/// Keeps the current mode when it is usable, and otherwise picks the usable
-/// mode with the most pixels. Of modes with equally many pixels, the first
-/// is taken.
-pub fn choose(current: ModeInfo, modes: impl IntoIterator<Item = ModeInfo>) -> Choice {
-    if current.linear_32bit {
-        return Choice::Keep;
+/// Keeps the current mode when it is linear 32-bit, and otherwise picks the
+/// linear 32-bit mode with the most pixels. Without one, does the same with
+/// Blt-only modes. Of modes with equally many pixels, the first is taken.
+pub fn choose(current: ModeInfo, modes: impl IntoIterator<Item = ModeInfo> + Clone) -> Choice {
+    [Kind::Linear32, Kind::BltOnly]
+        .into_iter()
+        .find_map(|kind| choose_kind(kind, current, modes.clone()))
+        .unwrap_or(Choice::Unusable)
+}
+
+/// `choose` restricted to modes of `kind`, or `None` when there is none.
+fn choose_kind(
+    kind: Kind,
+    current: ModeInfo,
+    modes: impl IntoIterator<Item = ModeInfo>,
+) -> Option<Choice> {
+    if current.kind == kind {
+        return Some(Choice::Keep);
     }
     let mut best: Option<ModeInfo> = None;
-    for mode in modes.into_iter().filter(|m| m.linear_32bit) {
+    for mode in modes.into_iter().filter(|m| m.kind == kind) {
         if best.is_none_or(|b| mode.width * mode.height > b.width * b.height) {
             best = Some(mode);
         }
     }
-    best.map_or(Choice::Unusable, |m| Choice::Switch(m.index))
+    best.map(|m| Choice::Switch(m.index))
 }
 
 /// Whether pixels with these channel masks are 32 bits wide, which is the
@@ -47,39 +69,65 @@ pub fn bitmask_is_32bit(red: u32, green: u32, blue: u32, reserved: u32) -> bool 
 mod tests {
     use super::*;
 
-    fn mode(index: u32, width: usize, height: usize, linear_32bit: bool) -> ModeInfo {
+    fn mode(index: u32, width: usize, height: usize, kind: Kind) -> ModeInfo {
         ModeInfo {
             index,
             width,
             height,
-            linear_32bit,
+            kind,
         }
     }
 
     #[test]
     fn keeps_a_usable_current_mode() {
-        let current = mode(2, 800, 600, true);
-        let modes = [mode(0, 1920, 1080, true), current];
+        let current = mode(2, 800, 600, Kind::Linear32);
+        let modes = [mode(0, 1920, 1080, Kind::Linear32), current];
         assert_eq!(choose(current, modes), Choice::Keep);
     }
 
     #[test]
     fn switches_to_the_largest_usable_mode() {
-        let current = mode(0, 640, 480, false);
+        let current = mode(0, 640, 480, Kind::Other);
         let modes = [
             current,
-            mode(1, 1024, 768, true),
-            mode(2, 2560, 1440, false),
-            mode(3, 1920, 1080, true),
-            mode(4, 1080, 1920, true),
+            mode(1, 1024, 768, Kind::Linear32),
+            mode(2, 2560, 1440, Kind::Other),
+            mode(3, 1920, 1080, Kind::Linear32),
+            mode(4, 1080, 1920, Kind::Linear32),
         ];
         assert_eq!(choose(current, modes), Choice::Switch(3));
     }
 
     #[test]
     fn reports_when_no_mode_is_usable() {
-        let current = mode(0, 640, 480, false);
+        let current = mode(0, 640, 480, Kind::Other);
         assert_eq!(choose(current, [current]), Choice::Unusable);
+    }
+
+    #[test]
+    fn prefers_linear_modes_to_blt_only_ones() {
+        let current = mode(0, 2560, 1440, Kind::BltOnly);
+        let modes = [current, mode(1, 800, 600, Kind::Linear32)];
+        assert_eq!(choose(current, modes), Choice::Switch(1));
+    }
+
+    #[test]
+    fn keeps_a_blt_only_current_mode_without_linear_modes() {
+        let current = mode(1, 800, 600, Kind::BltOnly);
+        let modes = [mode(0, 1920, 1080, Kind::BltOnly), current];
+        assert_eq!(choose(current, modes), Choice::Keep);
+    }
+
+    #[test]
+    fn switches_to_the_largest_blt_only_mode_without_linear_modes() {
+        let current = mode(0, 640, 480, Kind::Other);
+        let modes = [
+            current,
+            mode(1, 1024, 768, Kind::BltOnly),
+            mode(2, 2560, 1440, Kind::Other),
+            mode(3, 1280, 800, Kind::BltOnly),
+        ];
+        assert_eq!(choose(current, modes), Choice::Switch(3));
     }
 
     #[test]
