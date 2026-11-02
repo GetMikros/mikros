@@ -8,6 +8,7 @@ extern crate alloc;
 pub mod acpi;
 pub mod bootinfo;
 pub mod clock;
+pub mod console;
 pub mod deadline;
 pub mod elf;
 pub mod exception;
