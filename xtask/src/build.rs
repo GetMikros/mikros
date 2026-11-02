@@ -152,7 +152,7 @@ pub fn run(args: &Args) -> Result<()> {
 pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
 
 /// The target user-space programs are built for.
-const USER_TARGET: &str = "targets/x86_64-unknown-mikros.json";
+pub const USER_TARGET: &str = "targets/x86_64-unknown-mikros.json";
 
 /// Builds the user-space program `bin`, a package of the `user`
 /// workspace of the same name, and returns its path.

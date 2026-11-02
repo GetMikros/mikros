@@ -21,6 +21,14 @@ fn cargo() -> Command {
     command
 }
 
+/// Cargo in the user workspace, whose own configuration Cargo reads from
+/// the directory it runs in.
+fn user_cargo() -> Command {
+    let mut command = cargo();
+    command.current_dir(crate::workspace_root().join("user"));
+    command
+}
+
 /// Runs `command` and returns whether it succeeded.
 fn passes(mut command: Command) -> Result<bool> {
     Ok(command.status().context("failed to run cargo")?.success())
@@ -207,6 +215,39 @@ pub fn run(args: &Args) -> Result<()> {
         if !passes(clippy)? {
             problems.push(format!(
                 "`cargo {}` reported warnings",
+                clippy_args.join(" ")
+            ));
+        }
+    }
+
+    let mut fmt = user_cargo();
+    fmt.args(["fmt", "--all", "--check"]);
+    if !passes(fmt)? {
+        problems.push("the user workspace is not formatted with rustfmt".to_owned());
+    }
+
+    // User programs are only compiled for the user target. The test init
+    // has code that only fuzz builds compile.
+    let target = crate::workspace_root().join(crate::build::USER_TARGET);
+    let target = target.to_str().context("the workspace path is not UTF-8")?;
+    let user_clippy_runs: [&[&str]; 2] = [
+        &["clippy", "--workspace", "--target", target],
+        &[
+            "clippy",
+            "--package",
+            "test-init",
+            "--features",
+            "fuzz",
+            "--target",
+            target,
+        ],
+    ];
+    for clippy_args in user_clippy_runs {
+        let mut clippy = user_cargo();
+        clippy.args(clippy_args).args(["--", "-D", "warnings"]);
+        if !passes(clippy)? {
+            problems.push(format!(
+                "`cargo {}` in the user workspace reported warnings",
                 clippy_args.join(" ")
             ));
         }
