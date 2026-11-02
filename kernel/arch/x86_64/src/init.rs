@@ -110,12 +110,19 @@ fn load_segment(process: &Process, budget: &Arc<Budget>, file: &[u8], segment: &
     let mem = map(process, budget, pages.start, pages.end - pages.start, perms);
     let data = &file[segment.offset as usize..][..segment.filesz as usize];
     let mut rest = data;
-    mem.write(segment.vaddr - pages.start, segment.filesz, |chunk| {
-        let (now, later) = rest.split_at(chunk.len());
-        chunk.copy_from_slice(now);
-        rest = later;
-        Ok(())
-    })
+    // This runs during boot, where no other thread could run.
+    let mut work = crate::publish::Work::new(|| {});
+    mem.write(
+        segment.vaddr - pages.start,
+        segment.filesz,
+        &mut work,
+        |chunk| {
+            let (now, later) = rest.split_at(chunk.len());
+            chunk.copy_from_slice(now);
+            rest = later;
+            Ok(())
+        },
+    )
     .unwrap_or_else(|e| panic!("no memory for init: {e:?}"));
 }
 

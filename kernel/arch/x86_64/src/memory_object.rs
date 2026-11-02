@@ -981,11 +981,13 @@ impl MemoryObject {
         self.release(count);
     }
 
-    /// Fills the `len` bytes from `offset` from `source`, in chunks.
-    pub fn write(
+    /// Fills the `len` bytes from `offset` from `source`, in chunks,
+    /// accounting for the copied bytes in `work` with no lock held.
+    pub fn write<F: FnMut()>(
         &self,
         offset: u64,
         len: u64,
+        work: &mut Work<F>,
         mut source: impl FnMut(&mut [u8]) -> Result<(), Error>,
     ) -> Result<(), Error> {
         if self.is_physical() {
@@ -995,6 +997,7 @@ impl MemoryObject {
         let mut done = 0;
         while done < len {
             let (index, inside, n) = chunk(offset + done, len - done);
+            work.copy(n);
             let mut buf = [0u8; CHUNK];
             source(&mut buf[..n])?;
             // The chunk is read from the source once; a page of a paged

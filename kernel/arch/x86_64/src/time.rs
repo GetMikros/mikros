@@ -257,7 +257,9 @@ pub fn create_clock_page(budget: &Arc<Budget>) -> Result<Arc<MemoryObject>, Erro
     });
     let header = clock_page(tsc);
     let page = MemoryObject::new(budget, PAGE_SIZE, 0)?;
-    page.write(0, header.len() as u64, |chunk| {
+    // This runs during boot, where no other thread could run.
+    let mut work = crate::publish::Work::new(|| {});
+    page.write(0, header.len() as u64, &mut work, |chunk| {
         chunk.copy_from_slice(&header[..chunk.len()]);
         Ok(())
     })?;

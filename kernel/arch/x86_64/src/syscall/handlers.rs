@@ -388,7 +388,8 @@ pub fn mem_write(mem: Checked, offset: u64, buf: UserIn<u8>, len: u64) -> Result
         return Err(Error::InvalidArgs);
     }
     let mut done = 0;
-    mem.write(offset, len, |bytes| {
+    let mut work = Work::new(crate::sched::preempt_point);
+    mem.write(offset, len, &mut work, |bytes| {
         buf.at(done).read_bytes(bytes)?;
         done += bytes.len() as u64;
         Ok(())
@@ -1552,7 +1553,7 @@ pub fn mem_clone(
         held.read(at, bytes);
         if bytes.iter().any(|&b| b != 0) {
             let mut rest: &[u8] = bytes;
-            copied = clone.write(done, n as u64, |to| {
+            copied = clone.write(done, n as u64, &mut work, |to| {
                 let (now, later) = rest.split_at(to.len());
                 to.copy_from_slice(now);
                 rest = later;
