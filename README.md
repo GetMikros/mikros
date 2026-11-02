@@ -3,6 +3,8 @@
 The Mikros operating system: boot manager, bootloader, kernel and user space
 in one repository. Mikros is a microkernel-based OS.
 
+[![CI](https://github.com/GetMikros/mikros/actions/workflows/ci.yml/badge.svg)](https://github.com/GetMikros/mikros/actions/workflows/ci.yml)
+
 ## Getting the source
 
     git clone --recurse-submodules https://github.com/GetMikros/mikros.git
