@@ -214,6 +214,28 @@ impl<'t, T: Tables> Mapper<'t, T> {
         unreachable!()
     }
 
+    /// Whether the 4 KiB mapping at `virt` is user-writable at every level.
+    /// Does not allocate or change entries; large pages are rejected.
+    /// The caller validates the address range and keeps the tables stable.
+    pub fn user_writable(&mut self, virt: u64) -> bool {
+        let required = PRESENT | USER | WRITABLE;
+        let mut table = self.root;
+        for level in (0..=3).rev() {
+            let entry = self.tables.table(table)[index(virt, level)];
+            if entry & required != required {
+                return false;
+            }
+            if level == 0 {
+                return true;
+            }
+            if entry & HUGE != 0 {
+                return false;
+            }
+            table = entry & ADDR_MASK;
+        }
+        unreachable!()
+    }
+
     /// The table holding the leaf entry for `virt`, the entry's index and
     /// its page size, or `None` when `virt` is not mapped.
     fn find_leaf(&mut self, virt: u64) -> Option<(u64, usize, u64)> {
@@ -516,6 +538,92 @@ mod tests {
         let u = *pool.table(user);
         assert_eq!(k[256..], u[256..]);
         assert!(u[..256].iter().all(|&e| e == 0));
+    }
+
+    #[test]
+    fn user_writable_checks_every_level_without_changing_tables() {
+        let mut pool = Pool(Vec::new());
+        let mut mapper = Mapper::new(&mut pool, false).unwrap();
+        let virt = 0x12_3456_7000;
+        mapper.map(virt, 0x9000, PAGE_SIZE, USER_DATA).unwrap();
+        let original = mapper.tables.0.clone();
+        assert!(mapper.user_writable(virt));
+        let mut table = mapper.root();
+        for level in (0..=3).rev() {
+            let i = index(virt, level);
+            let entry = mapper.tables.table(table)[i];
+            for bit in [PRESENT, USER, WRITABLE] {
+                mapper.tables.table(table)[i] = entry & !bit;
+                assert!(!mapper.user_writable(virt), "level {level}, bit {bit}");
+            }
+            mapper.tables.table(table)[i] = 0;
+            assert!(!mapper.user_writable(virt), "missing level {level}");
+            mapper.tables.table(table)[i] = entry;
+            assert!(mapper.user_writable(virt));
+            table = entry & ADDR_MASK;
+        }
+        assert_eq!(mapper.tables.0, original);
+    }
+
+    #[test]
+    fn user_writable_checks_page_boundaries() {
+        let mut pool = Pool(Vec::new());
+        let mut mapper = Mapper::new(&mut pool, false).unwrap();
+        let base = MIB_2 - PAGE_SIZE;
+        mapper.map(base, 0x9000, PAGE_SIZE, USER_DATA).unwrap();
+        mapper
+            .map(
+                base + PAGE_SIZE,
+                0xa000,
+                PAGE_SIZE,
+                Flags {
+                    writable: false,
+                    ..USER_DATA
+                },
+            )
+            .unwrap();
+        mapper
+            .map(
+                base + 2 * PAGE_SIZE,
+                0xb000,
+                PAGE_SIZE,
+                Flags {
+                    user: false,
+                    ..USER_DATA
+                },
+            )
+            .unwrap();
+        let original = mapper.tables.0.clone();
+        assert!(!mapper.user_writable(base - 1));
+        for offset in [0, 1, PAGE_SIZE - 1] {
+            assert!(mapper.user_writable(base + offset));
+            for page in 1..=3 {
+                assert!(!mapper.user_writable(base + page * PAGE_SIZE + offset));
+            }
+        }
+        assert_eq!(mapper.tables.0, original);
+    }
+
+    #[test]
+    fn user_writable_rejects_large_pages_but_not_leaf_pat() {
+        let mut pool = Pool(Vec::new());
+        let mut mapper = Mapper::new(&mut pool, true).unwrap();
+        mapper
+            .map(0, 0, GIB_1 + MIB_2 + PAGE_SIZE, USER_DATA)
+            .unwrap();
+        let small = GIB_1 + MIB_2;
+        let (table, i, _) = mapper.find_leaf(small).unwrap();
+        mapper.tables.table(table)[i] |= PAT_4K;
+        let original = mapper.tables.0.clone();
+        for (base, size) in [(0, GIB_1), (GIB_1, MIB_2)] {
+            for offset in [0, 1, PAGE_SIZE - 1, size - 1] {
+                assert!(!mapper.user_writable(base + offset));
+            }
+        }
+        assert!(mapper.user_writable(small));
+        assert!(mapper.user_writable(small + PAGE_SIZE - 1));
+        assert!(!mapper.user_writable(small + PAGE_SIZE));
+        assert_eq!(mapper.tables.0, original);
     }
 
     #[test]

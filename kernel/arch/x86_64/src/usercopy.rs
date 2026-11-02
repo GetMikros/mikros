@@ -15,9 +15,15 @@ use kernel_core::status::Error;
 // only between STAC and CLAC.
 global_asm!(
     ".global user_copy",
+    ".global user_copy_prepared",
     ".global user_copy_end",
     ".global user_copy_fault",
+    "user_copy_prepared:",
+    "mov r9d, 1",
+    "jmp 5f",
     "user_copy:",
+    "xor r9d, r9d",
+    "5:",
     "mov r8d, ecx",
     "test r8d, r8d",
     "jz 2f",
@@ -40,6 +46,7 @@ global_asm!(
 
 unsafe extern "sysv64" {
     fn user_copy(dst: *mut u8, src: *const u8, len: usize, smap: u32) -> u64;
+    fn user_copy_prepared(dst: *mut u8, src: *const u8, len: usize, smap: u32) -> u64;
     static user_copy_end: u8;
     static user_copy_fault: u8;
 }
@@ -86,8 +93,28 @@ pub fn copy_out(dst: u64, src: &[u8]) -> Result<(), Error> {
     copy(dst as *mut u8, src.as_ptr(), src.len())
 }
 
-/// Whether the exception in `frame` was raised inside the copy routine.
+/// Publishes bytes to a destination with stable writable page-table entries.
+///
+/// # Safety
+///
+/// Every destination page must be present, user-accessible and writable in
+/// the current address space, with its translation and backing held stable
+/// until this returns. The caller must not switch address spaces.
+// SAFETY: the caller guarantees stable writable user mappings in the
+// active address space for the duration of this bounded copy.
+pub unsafe fn copy_prepared(dst: u64, src: &[u8]) {
+    // SAFETY: the caller holds the checked destination stable; src is a
+    // kernel slice. The assembly enables SMAP access only during the copy.
+    let failed = unsafe { user_copy_prepared(dst as *mut u8, src.as_ptr(), src.len(), smap()) };
+    assert_eq!(failed, 0, "prepared output lost its writable backing");
+}
+
+/// Whether the exception occurred in a copy that may resolve demand faults.
 pub fn in_copy(frame: &Frame) -> bool {
+    in_routine(frame) && frame.r9 == 0
+}
+
+fn in_routine(frame: &Frame) -> bool {
     let start = user_copy as *const () as u64;
     let end = (&raw const user_copy_end) as u64;
     frame.cs & 3 == 0 && (start..end).contains(&frame.rip)
@@ -96,7 +123,7 @@ pub fn in_copy(frame: &Frame) -> bool {
 /// Makes a fault inside the copy routine resume at its recovery label.
 /// Returns whether the fault was one.
 pub fn recover(frame: &mut Frame) -> bool {
-    if !in_copy(frame) {
+    if !in_routine(frame) {
         return false;
     }
     frame.rip = (&raw const user_copy_fault) as u64;

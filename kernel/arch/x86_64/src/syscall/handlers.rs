@@ -95,12 +95,8 @@ pub fn object_get_info(
     if !out_len.fits(1) || (len >= size && !buf.fits(size)) {
         return Err(Error::InvalidArgs);
     }
-    if len < size {
-        out_len.write(size)?;
-        return Err(Error::BufferTooSmall);
-    }
-    buf.write_bytes(record)?;
-    out_len.write(size)
+    let process = current_process()?;
+    crate::output::information(process.aspace().as_ref(), buf.0, len, record, out_len.0)
 }
 
 pub fn budget_create(
