@@ -7,3 +7,4 @@ extern crate alloc;
 
 pub mod cmdline;
 pub mod display;
+pub mod elf;
