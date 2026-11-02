@@ -323,7 +323,17 @@ pub fn task_kill(handle: Checked) -> Result<(), Error> {
     Ok(())
 }
 
+/// Fails with `InvalidArgs` unless every one of `values`, the addresses,
+/// offsets and sizes of a memory call, is a multiple of the page size.
+fn page_aligned(values: &[u64]) -> Result<(), Error> {
+    match values.iter().all(|v| v.is_multiple_of(PAGE_SIZE)) {
+        true => Ok(()),
+        false => Err(Error::InvalidArgs),
+    }
+}
+
 pub fn mem_create(size: u64, options: u32, out: UserOut<Handle>) -> Result<(), Error> {
+    page_aligned(&[size])?;
     let mem = MemoryObject::new(current_process()?.budget(), size, options)?;
     give(mem, ObjectType::MemoryObject, out)
 }
@@ -386,6 +396,7 @@ pub fn mem_write(mem: Checked, offset: u64, buf: UserIn<u8>, len: u64) -> Result
 }
 
 pub fn mem_set_size(mem: Checked, size: u64) -> Result<(), Error> {
+    page_aligned(&[size])?;
     object::<MemoryObject>(mem).set_size(size)
 }
 
@@ -399,7 +410,8 @@ pub fn vm_map(
     out_addr: UserOut<u64>,
 ) -> Result<(), Error> {
     let options = MapOptions::parse(options, addr)?;
-    if len == 0 || !offset.is_multiple_of(PAGE_SIZE) {
+    page_aligned(&[addr, offset, len])?;
+    if len == 0 {
         return Err(Error::InvalidArgs);
     }
     let needed = options.rights();
@@ -416,9 +428,7 @@ pub fn vm_map(
     if !out_addr.fits(1) {
         return Err(Error::InvalidArgs);
     }
-    // The range check bounds `len` by the object size, so this cannot
-    // overflow.
-    let size = len.next_multiple_of(PAGE_SIZE);
+    let size = len;
     let outputs = prepare(&current_process()?, &[out_addr.range(1)])?;
     let aspace = object::<Process>(process).aspace().clone();
     let max = MapOptions::allowed_by(handle_rights);
@@ -437,6 +447,7 @@ fn page_range_end(addr: u64, len: u64) -> Result<u64, Error> {
 }
 
 pub fn vm_unmap(process: Checked, addr: u64, len: u64) -> Result<(), Error> {
+    page_aligned(&[len])?;
     let end = page_range_end(addr, len)?;
     object::<Process>(process)
         .aspace()
@@ -1338,6 +1349,7 @@ pub fn log_reader_read(reader: Checked, out: UserOut<u8>) -> Result<(), Error> {
 }
 
 pub fn mem_op(mem: Checked, op: u32, offset: u64, len: u64) -> Result<(), Error> {
+    page_aligned(&[offset, len])?;
     let mem = object::<MemoryObject>(mem);
     match op {
         1 => mem.commit(offset, len),
@@ -1364,6 +1376,7 @@ pub fn system_get_memory_info(out: UserOut<u8>) -> Result<(), Error> {
 
 pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result<(), Error> {
     let perms = MapOptions::parse_protection(options)?;
+    page_aligned(&[len])?;
     let end = page_range_end(addr, len)?;
     if !crate::aspace::in_user_range(addr, end - addr) {
         return Err(Error::NotFound);
@@ -1512,6 +1525,7 @@ pub fn mem_clone(
     if options & !kernel_core::object::memory::RESIZABLE != 0 || !out.fits(1) {
         return Err(Error::InvalidArgs);
     }
+    page_aligned(&[offset, len])?;
     let rights = mem.rights;
     let source = object::<MemoryObject>(mem);
     if source.is_physical() {
@@ -1568,6 +1582,7 @@ pub fn pager_create_memory(
     options: u32,
     out: UserOut<Handle>,
 ) -> Result<(), Error> {
+    page_aligned(&[size])?;
     if !out.fits(1) {
         return Err(Error::InvalidArgs);
     }
@@ -1606,6 +1621,7 @@ pub fn pager_supply(
 }
 
 pub fn pager_op(pager: Checked, mem: Checked, op: u32, offset: u64, len: u64) -> Result<(), Error> {
+    page_aligned(&[offset, len])?;
     paged_of(pager, mem)?.pager_op(op, offset, len)
 }
 
@@ -1618,6 +1634,7 @@ pub fn pager_query_dirty(
     cap: u64,
     count: UserOut<u64>,
 ) -> Result<(), Error> {
+    page_aligned(&[offset, len])?;
     if !count.fits(1) {
         return Err(Error::InvalidArgs);
     }

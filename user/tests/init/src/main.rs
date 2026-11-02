@@ -663,6 +663,32 @@ fn memory_operations(s: &Startup) -> Result {
         "refusing other ops",
         unsafe { sys::mem_op(mem, 3, 0, PAGE_SIZE) } == -10,
     )?;
+    // Every address, offset and size of these calls is a whole number of
+    // pages.
+    // SAFETY: the calls take no pointers or a valid one.
+    unsafe {
+        ensure(
+            "refusing an unaligned op",
+            sys::mem_op(mem, 1, 0, PAGE_SIZE + 1) == -10,
+        )?;
+        ensure(
+            "refusing an unaligned size",
+            sys::mem_set_size(mem, PAGE_SIZE + 1) == -10,
+        )?;
+        let mut unused = 0;
+        ensure(
+            "refusing an unaligned mapping",
+            sys::vm_map(s.process, PERM_READ, 0, mem, 0, 100, &mut unused) == -10,
+        )?;
+        ensure(
+            "refusing an unaligned unmapping",
+            sys::vm_unmap(s.process, at, 100) == -10,
+        )?;
+    }
+    ensure(
+        "refusing an unaligned protection",
+        protect(s, PERM_READ, at, 100) == -10,
+    )?;
 
     check("making it read-only", protect(s, PERM_READ, at, PAGE_SIZE))?;
     // SAFETY: the page is readable.
@@ -1213,25 +1239,35 @@ fn clones(_: &Startup) -> Result {
     mem_write_at(source, PAGE_SIZE - 3, b"across pages")?;
     let mut clone = 0;
     // SAFETY: the pointer is valid for the call.
-    let status = unsafe { sys::mem_clone(source, 0, PAGE_SIZE - 5, PAGE_SIZE + 100, &mut clone) };
+    let status = unsafe { sys::mem_clone(source, 0, 0, 2 * PAGE_SIZE, &mut clone) };
     check("cloning", status)?;
     ensure(
         "copying the range",
-        mem_read_at::<14>(clone, 0)? == *b"\0\0across pages",
+        mem_read_at::<12>(clone, PAGE_SIZE - 3)? == *b"across pages",
     )?;
     ensure(
         "reading zero elsewhere",
         mem_read_at::<8>(clone, 200)? == [0; 8],
     )?;
     mem_write_at(source, PAGE_SIZE - 3, b"AC")?;
-    ensure("keeping the clone", mem_read_at::<4>(clone, 2)? == *b"acro")?;
-    mem_write_at(clone, 2, b"x")?;
+    ensure(
+        "keeping the clone",
+        mem_read_at::<4>(clone, PAGE_SIZE - 3)? == *b"acro",
+    )?;
+    mem_write_at(clone, PAGE_SIZE - 3, b"x")?;
     ensure(
         "keeping the source",
         mem_read_at::<4>(source, PAGE_SIZE - 3)? == *b"ACro",
     )?;
     let record = info::<0x18>(clone, 4)?;
-    ensure("sizing the clone", u64_at(&record, 0) == PAGE_SIZE + 100)?;
+    ensure("sizing the clone", u64_at(&record, 0) == 2 * PAGE_SIZE)?;
+    let mut unaligned = 0;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::mem_clone(source, 0, PAGE_SIZE - 5, PAGE_SIZE, &mut unaligned) };
+    ensure("refusing an unaligned offset", status == -10)?;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::mem_clone(source, 0, 0, PAGE_SIZE + 100, &mut unaligned) };
+    ensure("refusing an unaligned length", status == -10)?;
     // A whole page whose bytes never repeat with a period of the kernel's
     // copy chunk, so every chunk of the clone is checked.
     let mut page = [0u8; PAGE_SIZE as usize];
