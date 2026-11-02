@@ -5,7 +5,9 @@ use crate::sched::{self, Thread};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use kernel_core::exception::DEBUG_EVENTS;
 use kernel_core::object::budget::Budget;
+use kernel_core::object::channel::{Endpoint, PeerObserver};
 use kernel_core::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
 use kernel_core::object::{Header, Name, Object, ObjectType, signals};
 use kernel_core::status::Error;
@@ -30,6 +32,13 @@ pub struct Process {
     threads: SpinLock<Vec<Weak<Thread>>>,
     /// The started threads that are not DEAD, changed under `threads`.
     started: AtomicU32,
+    exception: SpinLock<Option<ExceptionChannel>>,
+}
+
+/// The endpoint of a process's exception channel that the kernel keeps.
+struct ExceptionChannel {
+    end: Arc<Endpoint>,
+    options: u32,
 }
 
 impl Process {
@@ -63,6 +72,7 @@ impl Process {
             exit_code: AtomicI64::new(0),
             threads: SpinLock::new(Vec::new()),
             started: AtomicU32::new(0),
+            exception: SpinLock::new(None),
         }))
     }
 
@@ -88,6 +98,46 @@ impl Process {
 
     pub fn exit_code(&self) -> i64 {
         self.exit_code.load(Ordering::Acquire)
+    }
+
+    /// The kernel's endpoint of the exception channel, while the returned
+    /// endpoint is open.
+    pub fn exception_channel(&self) -> Option<Arc<Endpoint>> {
+        let exception = self.exception.lock();
+        let channel = exception.as_ref().filter(|c| !c.end.peer_closed())?;
+        Some(channel.end.clone())
+    }
+
+    /// Whether the exception channel asks for thread start and exit
+    /// reports.
+    #[allow(dead_code, reason = "thread start and exit reports come later")]
+    pub fn debug_events(&self) -> bool {
+        let exception = self.exception.lock();
+        exception
+            .as_ref()
+            .is_some_and(|c| !c.end.peer_closed() && c.options & DEBUG_EVENTS != 0)
+    }
+
+    /// Creates the exception channel with `options`, charged to `budget`,
+    /// and returns the endpoint for user space. Fails with
+    /// `AlreadyExists` while an earlier one is open.
+    pub fn create_exception_channel(
+        process: &Arc<Process>,
+        options: u32,
+        budget: &Arc<Budget>,
+    ) -> Result<Arc<Endpoint>, Error> {
+        let mut exception = process.exception.lock();
+        if exception.as_ref().is_some_and(|c| !c.end.peer_closed()) {
+            return Err(Error::AlreadyExists);
+        }
+        let (end, user) = Endpoint::pair(Some(budget))?;
+        let observer: Weak<dyn PeerObserver> = Arc::downgrade(process) as _;
+        end.set_observer(observer);
+        // A replaced channel's kernel endpoint is dropped after the lock.
+        let old = exception.replace(ExceptionChannel { end, options });
+        drop(exception);
+        drop(old);
+        Ok(user)
     }
 
     /// Creates a thread in state `NEW` that belongs to `process`. Fails
@@ -212,6 +262,17 @@ impl Process {
         self.header.update_signals(0, signals::TERMINATED);
         for thread in &threads {
             thread.header().update_signals(0, signals::TERMINATED);
+        }
+    }
+}
+
+impl PeerObserver for Process {
+    /// The handler's endpoint is gone: threads waiting in an exception
+    /// wake up and terminate the process.
+    fn peer_closed(&self) {
+        let threads = self.threads.lock();
+        for thread in threads.iter().filter_map(Weak::upgrade) {
+            sched::resume_exception(&thread, sched::HANDLER_GONE);
         }
     }
 }

@@ -6,6 +6,7 @@ use crate::gdt::{IST_DOUBLE_FAULT, IST_MACHINE_CHECK, IST_NMI, KERNEL_CODE};
 #[cfg(target_os = "none")]
 use core::arch::{asm, global_asm};
 use core::fmt;
+use kernel_core::exception::kind;
 
 /// The distance between two entry stubs.
 const STUB_SIZE: u64 = 16;
@@ -28,6 +29,37 @@ pub const ERROR_CODE_VECTORS: u32 = 1 << 8
     | 1 << 21
     | 1 << 29
     | 1 << 30;
+
+/// Whether vector `vector` always stops the kernel, even from user mode.
+pub fn fatal(vector: u8) -> bool {
+    matches!(vector, NMI | DOUBLE_FAULT | MACHINE_CHECK)
+}
+
+/// The exception type of vector `vector` raised in user mode.
+pub fn exception_type(vector: u8) -> u32 {
+    match vector {
+        0 => kind::ARITHMETIC,
+        1 => kind::DEBUG,
+        3 => kind::BREAKPOINT,
+        6 => kind::UNDEFINED_INSTRUCTION,
+        10..=13 | 21 => kind::PROTECTION,
+        14 => kind::PAGE_FAULT,
+        16 | 19 => kind::FLOATING_POINT,
+        17 => kind::ALIGNMENT,
+        _ => kind::GENERAL,
+    }
+}
+
+/// The architecture code of an exception report for `frame`: the vector
+/// and, where the processor pushes one, the error code.
+pub fn arch_code(frame: &Frame) -> u64 {
+    let vector = frame.vector & 0xFF;
+    if ERROR_CODE_VECTORS >> vector & 1 != 0 {
+        vector | (frame.error & 0xFFFF_FFFF) << 32
+    } else {
+        vector
+    }
+}
 
 /// The registers saved on entry, lowest address first.
 #[repr(C)]
@@ -237,14 +269,30 @@ impl fmt::Display for Exception<'_> {
 
 #[cfg(target_os = "none")]
 extern "sysv64" fn interrupt(frame: &mut Frame) {
+    use crate::aspace::Fault;
     let vector = frame.vector as u8;
     use crate::apic::{PIC_BASE, SPURIOUS_VECTOR, TIMER_VECTOR};
     match vector {
-        // A page fault on a user page that a region allows is resolved. A
-        // fault in the user copy routine otherwise makes the copy fail. No
-        // other exception is handled yet, so each one stops the kernel.
-        PAGE_FAULT if crate::aspace::resolve_fault(frame) => {}
-        GENERAL_PROTECTION | PAGE_FAULT if crate::usercopy::recover(frame) => {}
+        // A page fault on a user page that a region allows is resolved.
+        // Other exceptions from user mode are reported; a fault in the
+        // user copy routine makes the copy fail, and anything else stops
+        // the kernel.
+        PAGE_FAULT => {
+            let addr = crate::cpu::read_cr2();
+            match crate::aspace::resolve_fault(frame, addr) {
+                Fault::Resolved => {}
+                _ if frame.cs & 3 == 0 && crate::usercopy::recover(frame) => {}
+                _ if frame.cs & 3 == 0 => crate::panic::exception(frame),
+                Fault::Denied => crate::exception::raise(frame, kind::PAGE_FAULT, addr),
+                Fault::OutOfMemory => {
+                    crate::exception::raise(frame, kind::OUT_OF_MEMORY, frame.rip)
+                }
+            }
+        }
+        GENERAL_PROTECTION if crate::usercopy::recover(frame) => {}
+        v @ 0..32 if frame.cs & 3 == 3 && !fatal(v) => {
+            crate::exception::raise(frame, exception_type(v), frame.rip)
+        }
         0..32 => crate::panic::exception(frame),
         // The PICs are masked; what arrives from them is ignored, and the
         // local APIC expects no end of interrupt for them or for its
@@ -271,6 +319,27 @@ mod tests {
         assert_eq!((ist(8), ist(2), ist(18)), (1, 2, 3));
         let user: std::vec::Vec<u8> = (0..=255).filter(|&v| dpl(v) != 0).collect();
         assert_eq!(user, [3]);
+    }
+
+    #[test]
+    fn maps_vectors_to_exception_types() {
+        let types: std::vec::Vec<u32> = (0..32).map(exception_type).collect();
+        assert_eq!(&types[..8], &[4, 7, 1, 6, 1, 1, 3, 1]);
+        assert_eq!(&types[10..22], &[8, 8, 8, 8, 2, 1, 5, 9, 1, 5, 1, 8]);
+        assert_eq!(types[31], kind::GENERAL);
+        assert!(fatal(2) && fatal(8) && fatal(18) && !fatal(14));
+    }
+
+    #[test]
+    fn encodes_the_arch_code() {
+        let mut frame = Frame {
+            vector: 14,
+            error: 0x7,
+            ..Frame::default()
+        };
+        assert_eq!(arch_code(&frame), 0x7_0000_000E);
+        frame.vector = 6;
+        assert_eq!(arch_code(&frame), 6);
     }
 
     #[test]

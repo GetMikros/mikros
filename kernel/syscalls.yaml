@@ -287,3 +287,22 @@ syscalls:
       - {name: handles_cap, type: u64, dir: in}
       - {name: out_len, type: "*mut u64", dir: out}
       - {name: out_count, type: "*mut u64", dir: out}
+
+  - name: exception_channel_create
+    number: 26
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R26]
+    args:
+      - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out}
+
+  - name: thread_resume_from_exception
+    number: 27
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R29]
+    args:
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
+      - {name: action, type: u32, dir: in}

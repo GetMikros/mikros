@@ -411,23 +411,31 @@ const FAULT_WRITE: u64 = 1 << 1;
 const FAULT_RESERVED: u64 = 1 << 3;
 const FAULT_FETCH: u64 = 1 << 4;
 
-/// Resolves a page fault on a user page, raised by user code or by the
-/// user copy routine, when a region allows the access. Returns whether it
-/// was resolved.
-pub fn resolve_fault(frame: &crate::idt::Frame) -> bool {
-    let addr = cpu::read_cr2();
+/// How a page fault on a user page ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fault {
+    Resolved,
+    /// No region allows the access.
+    Denied,
+    /// A region allows it, but no frame or page table could be had.
+    OutOfMemory,
+}
+
+/// Resolves a page fault at `addr`, raised by user code or by the user
+/// copy routine, when a region allows the access.
+pub fn resolve_fault(frame: &crate::idt::Frame, addr: u64) -> Fault {
     if frame.error & FAULT_RESERVED != 0
         || !in_user_range(addr, 1)
         || (frame.cs & 3 == 0 && !crate::usercopy::in_copy(frame))
     {
-        return false;
+        return Fault::Denied;
     }
     let Some(process) = crate::sched::current().and_then(|t| t.process().cloned()) else {
-        return false;
+        return Fault::Denied;
     };
     let aspace = process.aspace();
     let Some(mem) = aspace.with_region(addr, |r| r.map(|r| r.mem.clone())) else {
-        return false;
+        return Fault::Denied;
     };
     let write = frame.error & FAULT_WRITE != 0;
     let fetch = frame.error & FAULT_FETCH != 0;

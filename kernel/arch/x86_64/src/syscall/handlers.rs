@@ -8,6 +8,7 @@ use crate::process::Process;
 use crate::sched::Thread;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use kernel_core::exception::{self, DEBUG_EVENTS};
 use kernel_core::object::budget::{Budget, INFO_BUDGET};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use kernel_core::object::handles::Handle;
@@ -467,4 +468,39 @@ pub fn channel_read(
         }
         result
     })
+}
+
+pub fn exception_channel_create(
+    process: Checked,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if options & !DEBUG_EVENTS != 0 || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let caller = current_process()?;
+    let end = Process::create_exception_channel(&object(process), options, caller.budget())?;
+    give(end, ObjectType::Channel, out)
+}
+
+pub fn thread_resume_from_exception(thread: Checked, action: u32) -> Result<(), Error> {
+    let thread = object::<Thread>(thread);
+    if thread.state() != crate::sched::EXCEPTION {
+        return Err(Error::BadState);
+    }
+    match action {
+        exception::RESUME => {
+            crate::sched::resume_exception(&thread, crate::sched::RESUMED);
+        }
+        exception::TERMINATE => {
+            if let Some(process) = thread.process() {
+                process.terminate(exception::EXIT_CODE);
+            }
+        }
+        // Delivering the exception as a process signal comes with
+        // process signals.
+        exception::DELIVER_SIGNAL => return Err(Error::NotSupported),
+        _ => return Err(Error::InvalidArgs),
+    }
+    Ok(())
 }

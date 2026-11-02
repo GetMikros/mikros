@@ -1,6 +1,6 @@
 //! Anonymous memory objects: their frames and the copies to and from them.
 
-use crate::aspace::{self, Access, AddressSpace, USER_END, USER_START};
+use crate::aspace::{self, Access, AddressSpace, Fault, USER_END, USER_START};
 use crate::memory::FRAMES;
 use crate::paging::Policy;
 use crate::space;
@@ -132,29 +132,30 @@ impl MemoryObject {
 
     /// Enters the page at `virt` of `space` into its tables for a fault
     /// that was a write or a fetch as given. Pages read before they were
-    /// written map the shared zero page read-only. Returns whether the
-    /// region at `virt`, which maps this object, allows the access.
-    pub fn fault(&self, space: &AddressSpace, virt: u64, write: bool, fetch: bool) -> bool {
+    /// written map the shared zero page read-only. Fails with `Denied`
+    /// unless the region at `virt`, which maps this object, allows the
+    /// access.
+    pub fn fault(&self, space: &AddressSpace, virt: u64, write: bool, fetch: bool) -> Fault {
         let mut pages = self.pages.lock();
         let mine = |r: Option<&aspace::RegionOf>| {
             r.filter(|r| core::ptr::eq(&*r.mem, self))
                 .map(|r| (r.page(virt), r.perms))
         };
         let Some((index, perms)) = space.with_region(virt, mine) else {
-            return false;
+            return Fault::Denied;
         };
         if !aspace::allows(perms, write, fetch) || index >= pages.count() {
-            return false;
+            return Fault::Denied;
         }
         let (phys, writable) = match pages.frame(index) {
             Some(phys) => (phys, perms & PERM_WRITE != 0),
             None if write => match self.alloc_mapped(&mut pages, index) {
                 Ok(phys) => (phys, true),
-                Err(_) => return false,
+                Err(_) => return Fault::OutOfMemory,
             },
             None => match zero_frame() {
                 Some(phys) => (phys, false),
-                None => return false,
+                None => return Fault::OutOfMemory,
             },
         };
         let access = Access {
@@ -163,8 +164,13 @@ impl MemoryObject {
             policy: Policy::Cached,
         };
         // The region may have gone while the zero page was being removed.
-        space.with_region(virt, |r| mine(r) == Some((index, perms)))
-            && space.replace(virt, phys, access).is_ok()
+        if !space.with_region(virt, |r| mine(r) == Some((index, perms))) {
+            return Fault::Denied;
+        }
+        match space.replace(virt, phys, access) {
+            Ok(()) => Fault::Resolved,
+            Err(_) => Fault::OutOfMemory,
+        }
     }
 
     /// Gives page `index` a zeroed frame, charging the frame to the

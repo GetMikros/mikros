@@ -10,7 +10,7 @@ use crate::percpu;
 use crate::process::Process;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use kernel_core::deadline::{Deadlines, INFINITE};
 use kernel_core::object::{Header, Name, Object, ObjectType};
 use kernel_core::sched::{DEFAULT_PRIORITY, Entity, Fair};
@@ -25,7 +25,13 @@ pub const KERNEL_STACK_SIZE: u64 = 32 << 10;
 pub const NEW: u32 = 0;
 pub const RUNNABLE: u32 = 1;
 pub const BLOCKED: u32 = 2;
+pub const EXCEPTION: u32 = 3;
 pub const DEAD: u32 = 4;
+
+/// Why a thread left state `EXCEPTION`: resumed by its handler, or woken
+/// because the handler's endpoint was closed.
+pub const RESUMED: u32 = 1;
+pub const HANDLER_GONE: u32 = 2;
 
 pub struct Thread {
     header: Header,
@@ -45,6 +51,11 @@ pub struct Thread {
     /// Nanoseconds the thread has run.
     cpu_time: AtomicI64,
     user: SpinLock<UserState>,
+    /// The user registers of the thread while it is in state `EXCEPTION`,
+    /// on its kernel stack, or null.
+    exception_frame: AtomicPtr<crate::idt::Frame>,
+    /// `RESUMED` or `HANDLER_GONE` once the thread leaves `EXCEPTION`.
+    woken: AtomicU32,
 }
 
 /// The user-mode state of a user thread that is not in its registers
@@ -90,6 +101,8 @@ impl Thread {
             entity: SpinLock::new(Entity::new(DEFAULT_PRIORITY)),
             cpu_time: AtomicI64::new(0),
             user: SpinLock::new(UserState::default()),
+            exception_frame: AtomicPtr::new(core::ptr::null_mut()),
+            woken: AtomicU32::new(0),
         }))
     }
 
@@ -435,8 +448,67 @@ pub fn make_dead(thread: &Arc<Thread>) -> u32 {
             let entity = *thread.entity.lock();
             cpu.fair.enqueue(queued, entity);
         }
+    } else if was == EXCEPTION {
+        queue(thread);
     }
     was
+}
+
+/// Queues `thread`, which is not running and not queued.
+fn queue(thread: &Arc<Thread>) {
+    let entity = *thread.entity.lock();
+    this_cpu()
+        .lock()
+        .fair
+        .enqueue(Queued::new(thread.clone()), entity);
+}
+
+/// Puts the running user thread, whose user registers are in `frame`,
+/// in state `EXCEPTION`. It goes on running until `wait_exception`.
+pub fn enter_exception(thread: &Thread, frame: &mut crate::idt::Frame) {
+    thread.exception_frame.store(frame, Ordering::Release);
+    thread.woken.store(0, Ordering::Relaxed);
+    thread.state.store(EXCEPTION, Ordering::Release);
+}
+
+/// Takes the running thread out of state `EXCEPTION` before it waited.
+pub fn leave_exception(thread: &Thread) {
+    thread
+        .exception_frame
+        .store(core::ptr::null_mut(), Ordering::Release);
+    let _ = thread
+        .state
+        .compare_exchange(EXCEPTION, RUNNABLE, Ordering::AcqRel, Ordering::Acquire);
+}
+
+/// Runs other threads until the running thread, which `enter_exception`
+/// put in state `EXCEPTION`, is resumed or made DEAD. Returns why it left
+/// the state, or 0 when it was made DEAD.
+pub fn wait_exception(thread: &Thread) -> u32 {
+    // Nothing else runs on this processor before the thread switches
+    // out, so nothing can have queued it yet.
+    if thread.state() == EXCEPTION {
+        schedule(false);
+    }
+    thread
+        .exception_frame
+        .store(core::ptr::null_mut(), Ordering::Release);
+    thread.woken.load(Ordering::Acquire)
+}
+
+/// Makes `thread` RUNNABLE and queues it if it is in state `EXCEPTION`,
+/// recording `why`. Returns whether it was.
+pub fn resume_exception(thread: &Arc<Thread>, why: u32) -> bool {
+    if thread
+        .state
+        .compare_exchange(EXCEPTION, RUNNABLE, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    thread.woken.store(why, Ordering::Release);
+    queue(thread);
+    true
 }
 
 /// Ends the running thread if it is DEAD. Called before every return

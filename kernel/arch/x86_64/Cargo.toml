@@ -13,6 +13,10 @@ path = "src/main.rs"
 boot-protocol = { path = "../../../boot/protocol" }
 kernel-core = { path = "../../core" }
 
+# The host tests use the shared definitions too.
+[dev-dependencies]
+kernel-core = { path = "../../core" }
+
 [build-dependencies]
 syscall-table = { path = "../../syscalls" }
 

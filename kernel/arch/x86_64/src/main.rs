@@ -24,6 +24,8 @@ mod control;
 mod cpu;
 #[cfg(target_os = "none")]
 mod entry;
+#[cfg(target_os = "none")]
+mod exception;
 #[cfg(any(target_os = "none", test))]
 mod features;
 #[cfg(any(target_os = "none", test))]
