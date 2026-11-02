@@ -73,6 +73,11 @@ pub struct Thread {
     signals: SpinLock<crate::signal::ThreadSignals>,
     /// The context address `signal_return` was called with, or 0.
     sigreturn: AtomicU64,
+    /// Set while the thread waits in `signal_wait`.
+    waiting_for_signals: AtomicBool,
+    /// The number of the system call that last ended with
+    /// `ERR_INTERRUPTED`, until signals are next delivered, or 0.
+    interrupted: AtomicU64,
 }
 
 /// The value DR6 has when no debug condition is recorded.
@@ -133,6 +138,8 @@ impl Thread {
             exit_requested: AtomicBool::new(false),
             signals: SpinLock::new(crate::signal::ThreadSignals::default()),
             sigreturn: AtomicU64::new(0),
+            waiting_for_signals: AtomicBool::new(false),
+            interrupted: AtomicU64::new(0),
         }))
     }
 
@@ -260,6 +267,21 @@ impl Thread {
     /// The context `request_sigreturn` stored, clearing it.
     pub fn take_sigreturn(&self) -> Option<u64> {
         Some(self.sigreturn.swap(0, Ordering::AcqRel)).filter(|&c| c != 0)
+    }
+
+    /// Records that system call `number` ended with `ERR_INTERRUPTED`.
+    pub fn set_interrupted(&self, number: u64) {
+        self.interrupted.store(number, Ordering::Release);
+    }
+
+    /// The system call that ended with `ERR_INTERRUPTED`, clearing it.
+    pub fn take_interrupted(&self) -> Option<u64> {
+        Some(self.interrupted.swap(0, Ordering::AcqRel)).filter(|&n| n != 0)
+    }
+
+    /// Whether the thread waits in `signal_wait`.
+    pub fn waits_for_signals(&self) -> bool {
+        self.waiting_for_signals.load(Ordering::Acquire)
     }
 
     pub fn extended_state(&self) -> &context::ExtendedState {
@@ -529,7 +551,6 @@ fn arm(cpu: &CpuSched) {
     }
 }
 
-#[allow(dead_code, reason = "nothing starts kernel threads yet")]
 /// Blocks the running thread until the monotonic clock reaches
 /// `deadline`. Returns at once when it already has.
 pub fn sleep_until(deadline: i64) -> Result<(), Error> {
@@ -551,6 +572,26 @@ pub fn sleep_until(deadline: i64) -> Result<(), Error> {
     }
     schedule(false);
     Ok(())
+}
+
+/// Blocks the running thread in `signal_wait` until `deadline` or until
+/// `wake_waiter` wakes it.
+pub fn wait_for_signals(thread: &Thread, deadline: i64) -> Result<(), Error> {
+    thread.waiting_for_signals.store(true, Ordering::Release);
+    let result = sleep_until(deadline);
+    thread.waiting_for_signals.store(false, Ordering::Release);
+    result
+}
+
+/// Wakes `thread` before its deadline if it sleeps.
+pub fn wake_sleeper(thread: &Arc<Thread>) {
+    let mut cpu = this_cpu().lock();
+    let queued = Queued(Arc::as_ptr(thread));
+    if thread.state() == BLOCKED && cpu.sleepers.remove(&queued) {
+        thread.state.store(RUNNABLE, Ordering::Release);
+        let entity = *thread.entity.lock();
+        cpu.fair.enqueue(queued, entity);
+    }
 }
 
 /// Gives up the processor to the next queued thread, if any.

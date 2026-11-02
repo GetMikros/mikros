@@ -124,7 +124,13 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     let args = [
         frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9, frame.r12, frame.r13,
     ];
-    frame.rax = generated::dispatch(frame.rax, &args) as u64;
+    let number = frame.rax;
+    frame.rax = generated::dispatch(number, &args) as u64;
+    if frame.rax == Error::Interrupted as i64 as u64
+        && let Some(thread) = crate::sched::current()
+    {
+        thread.set_interrupted(number);
+    }
     crate::sched::preempt_user();
     let reported = before_user_return(frame);
     crate::sched::exit_if_dead();

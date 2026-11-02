@@ -394,3 +394,13 @@ syscalls:
     spec: [MIKSPEC-0020.R20, MIKSPEC-0016.R16]
     args:
       - {name: context, type: u64, dir: in}
+
+  - name: signal_wait
+    number: 37
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0020.R23, MIKSPEC-0020.R14, MIKSPEC-0020.R21]
+    args:
+      - {name: mask, type: u64, dir: in}
+      - {name: deadline, type: i64, dir: in}
+      - {name: out, type: "*mut u8", dir: out}

@@ -11,8 +11,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use kernel_core::signal::{
     Action, CODE_EXCEPTION, CONT, Default as DefaultAction, HANDLER_DEFAULT, HANDLER_IGNORE,
-    INFO_SIZE, Info, KILL, NODEFER, ONSTACK, Pending, RESETHAND, SEGV, SIG_MAX, UNBLOCKABLE, bit,
-    default_action, discarded_by, for_exception,
+    INFO_SIZE, Info, KILL, NODEFER, ONSTACK, Pending, RESETHAND, RESTART, SEGV, SIG_MAX,
+    UNBLOCKABLE, bit, default_action, discarded_by, for_exception,
 };
 use kernel_core::status::Error;
 
@@ -79,6 +79,10 @@ pub fn send(process: &Process, thread: Option<&Arc<Thread>>, info: Info) -> Resu
         None => pending.add(info, queued)?,
     }
     drop(state);
+    let waiting = threads.iter().filter(|t| t.waits_for_signals());
+    for waiter in waiting.filter(|t| thread.is_none_or(|target| Arc::ptr_eq(t, target))) {
+        sched::wake_sleeper(waiter);
+    }
     if info.signo == CONT {
         process.continue_threads();
     } else if info.signo == KILL {
@@ -146,6 +150,7 @@ pub fn deliver(frame: &mut Frame) -> bool {
                 process.stop_here(&thread);
                 continue;
             }
+            thread.take_interrupted();
             return changed;
         };
         match action.handler {
@@ -198,6 +203,14 @@ fn write_frame(
     if !in_user_range(bottom, size + BELOW_CONTEXT) {
         return Err(Error::InvalidArgs);
     }
+    // A system call this signal interrupted runs again after the handler
+    // returns when the action asks for it.
+    if let Some(number) = thread.take_interrupted()
+        && action.flags & RESTART != 0
+    {
+        frame.rip -= SYSCALL_LEN;
+        frame.rax = number;
+    }
     let (fs, gs) = sched::user_bases();
     let general = General::from_frame(frame, fs, gs);
     let mut head = [0u8; (BELOW_CONTEXT + XSAVE_OFFSET) as usize];
@@ -227,6 +240,47 @@ fn write_frame(
 }
 
 const RFLAGS_DF: u64 = 1 << 10;
+/// The length of the SYSCALL instruction.
+const SYSCALL_LEN: u64 = 2;
+
+/// Waits until a signal in `mask` is pending for the running thread or
+/// its process, and takes it. Fails with `Interrupted` when a signal
+/// outside `mask` that is not ignored becomes deliverable first, and with
+/// `TimedOut` when `deadline` passes.
+pub fn wait(mask: u64, deadline: i64) -> Result<Info, Error> {
+    let thread = sched::current().ok_or(Error::BadHandle)?;
+    let process = thread.process().cloned().ok_or(Error::BadHandle)?;
+    let mask = mask & !UNBLOCKABLE;
+    loop {
+        {
+            let mut state = process.signals().lock();
+            let ProcessSignals {
+                actions,
+                pending,
+                queued,
+            } = &mut *state;
+            let mut own = thread.signals().lock();
+            let taken = own
+                .pending
+                .take(mask, queued)
+                .or_else(|| pending.take(mask, queued));
+            if let Some(info) = taken {
+                return Ok(info);
+            }
+            let deliverable = (own.pending.mask() | pending.mask()) & !own.mask;
+            let interrupting = (1..=SIG_MAX)
+                .filter(|&s| deliverable & bit(s) != 0)
+                .any(|s| !actions[s as usize - 1].ignores(s));
+            if interrupting {
+                return Err(Error::Interrupted);
+            }
+        }
+        if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+            return Err(Error::TimedOut);
+        }
+        sched::wait_for_signals(&thread, deadline)?;
+    }
+}
 
 /// Restores the registers, the extended state and the mask of the
 /// running thread from the context at `context`, into `frame`. A context

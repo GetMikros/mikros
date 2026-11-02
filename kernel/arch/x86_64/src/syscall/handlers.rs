@@ -759,3 +759,11 @@ pub fn signal_return(context: u64) -> Result<(), Error> {
     current_thread()?.request_sigreturn(context.max(1));
     Ok(())
 }
+
+pub fn signal_wait(mask: u64, deadline: i64, out: UserOut<u8>) -> Result<(), Error> {
+    if !out.fits(sig::INFO_SIZE as u64) {
+        return Err(Error::InvalidArgs);
+    }
+    let info = crate::signal::wait(mask, deadline)?;
+    out.write_bytes(&info.bytes())
+}
