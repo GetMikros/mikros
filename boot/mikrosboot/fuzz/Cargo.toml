@@ -1,0 +1,30 @@
+[package]
+name = "mikrosboot-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+boot-protocol = { path = "../../protocol" }
+mikrosboot = { path = ".." }
+
+# The targets run with debug assertions and overflow checks.
+[profile.release]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "kernel_elf"
+path = "fuzz_targets/kernel_elf.rs"
+test = false
+doc = false
+bench = false
