@@ -6,7 +6,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use kernel_core::object::budget::Budget;
-use kernel_core::object::handles::HandleTable;
+use kernel_core::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
 use kernel_core::object::{Header, Name, Object, ObjectType};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
@@ -103,6 +103,62 @@ impl Process {
         let thread = sched::Thread::new_user(process.clone(), name, charge)?;
         threads.push(Arc::downgrade(&thread));
         Ok(thread)
+    }
+
+    /// Moves `arg` into the handle table of `process`, sets it `RUNNING`
+    /// and starts `thread` at `entry` with stack pointer `stack`, the new
+    /// handle value (or `HANDLE_INVALID` without `arg`) and `arg2` as its
+    /// arguments. Fails with `BadState` unless the process is `NEW` and
+    /// `thread` is one of its threads and `NEW`. On failure `arg` is
+    /// returned with the error, so that the caller keeps it.
+    pub fn start(
+        process: &Arc<Process>,
+        thread: &Arc<Thread>,
+        entry: u64,
+        stack: u64,
+        arg: Option<Entry>,
+        arg2: u64,
+    ) -> Result<(), (Error, Option<Entry>)> {
+        let threads = process.threads.lock();
+        let ours = thread.process().is_some_and(|p| Arc::ptr_eq(p, process));
+        if process.state() != NEW || !ours || thread.state() != sched::NEW {
+            return Err((Error::BadState, arg));
+        }
+        let handle: Handle = match arg {
+            Some(entry) => {
+                let inserted = process
+                    .handles
+                    .lock()
+                    .insert(entry.object.clone(), entry.rights);
+                inserted.map_err(|e| (e, Some(entry)))?
+            }
+            None => HANDLE_INVALID,
+        };
+        process.state.store(RUNNING, Ordering::Release);
+        Thread::start_user(thread, entry, stack, u64::from(handle), arg2);
+        drop(threads);
+        Ok(())
+    }
+
+    /// Starts a further `NEW` thread of a `RUNNING` process at `entry`
+    /// with stack pointer `stack` and the two arguments, or fails with
+    /// `BadState`.
+    pub fn start_thread(
+        thread: &Arc<Thread>,
+        entry: u64,
+        stack: u64,
+        arg1: u64,
+        arg2: u64,
+    ) -> Result<(), Error> {
+        let Some(process) = thread.process() else {
+            return Err(Error::BadState);
+        };
+        let _threads = process.threads.lock();
+        if thread.state() != sched::NEW || process.state() != RUNNING {
+            return Err(Error::BadState);
+        }
+        Thread::start_user(thread, entry, stack, arg1, arg2);
+        Ok(())
     }
 }
 

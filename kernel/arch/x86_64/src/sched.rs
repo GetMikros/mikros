@@ -17,6 +17,8 @@ use kernel_core::sched::{DEFAULT_PRIORITY, Entity, Fair};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
+const IA32_FS_BASE: u32 = 0xC000_0100;
+
 /// The size of a kernel thread's stack.
 pub const KERNEL_STACK_SIZE: u64 = 32 << 10;
 
@@ -42,6 +44,17 @@ pub struct Thread {
     entity: SpinLock<Entity>,
     /// Nanoseconds the thread has run.
     cpu_time: AtomicI64,
+    user: SpinLock<UserState>,
+}
+
+/// The user-mode state of a user thread that is not in its registers
+/// while the thread runs in the kernel.
+#[derive(Clone, Copy, Default)]
+struct UserState {
+    /// The entry point, stack pointer and two arguments it starts with.
+    start: [u64; 4],
+    fs_base: u64,
+    gs_base: u64,
 }
 
 // SAFETY: `rsp` is written only by `context_switch` while switching away
@@ -76,6 +89,7 @@ impl Thread {
             stack_top: AtomicU64::new(stack + KERNEL_STACK_SIZE),
             entity: SpinLock::new(Entity::new(DEFAULT_PRIORITY)),
             cpu_time: AtomicI64::new(0),
+            user: SpinLock::new(UserState::default()),
         }))
     }
 
@@ -109,6 +123,55 @@ impl Thread {
 
     pub fn state(&self) -> u32 {
         self.state.load(Ordering::Acquire)
+    }
+
+    /// Starts a `NEW` user thread in user mode at `rip` with stack
+    /// pointer `rsp` and the two arguments, and queues it. The caller has
+    /// checked the thread's and its process's state.
+    pub fn start_user(thread: &Arc<Thread>, rip: u64, rsp: u64, arg1: u64, arg2: u64) {
+        debug_assert!(thread.process.is_some() && thread.state() == NEW);
+        thread.user.lock().start = [rip, rsp, arg1, arg2];
+        let top = thread.stack_top.load(Ordering::Relaxed);
+        // SAFETY: a NEW thread has never run, so nothing uses its stack
+        // or reads its saved pointer.
+        unsafe { *thread.rsp.get() = context::prepare(top, user_entry as *const () as u64, 0) };
+        thread.state.store(RUNNABLE, Ordering::Release);
+        let mut cpu = this_cpu().lock();
+        let entity = *thread.entity.lock();
+        cpu.fair.enqueue(Queued::new(thread.clone()), entity);
+    }
+
+    /// Saves the user state that the next thread replaces.
+    fn switch_out(&self) {
+        self.extended.save();
+        if self.process.is_some() {
+            let mut user = self.user.lock();
+            // SAFETY: both MSRs exist in long mode; in the kernel the user
+            // GS base is in IA32_KERNEL_GS_BASE.
+            unsafe {
+                user.fs_base = crate::cpu::read_msr(IA32_FS_BASE);
+                user.gs_base = crate::cpu::read_msr(percpu::IA32_KERNEL_GS_BASE);
+            }
+        }
+    }
+
+    /// Loads the user state of the thread about to run: its extended
+    /// state, and for a user thread its address space, its kernel stack
+    /// for entries from user mode, and its FS and GS bases.
+    fn switch_in(&self) {
+        self.extended.restore();
+        let Some(process) = &self.process else {
+            return;
+        };
+        process.aspace().activate();
+        crate::gdt::set_rsp0(self.stack_top.load(Ordering::Relaxed));
+        let user = *self.user.lock();
+        // SAFETY: the bases are user addresses or zero, and the kernel
+        // uses neither FS nor the inactive GS base.
+        unsafe {
+            crate::cpu::write_msr(IA32_FS_BASE, user.fs_base);
+            crate::cpu::write_msr(percpu::IA32_KERNEL_GS_BASE, user.gs_base);
+        }
     }
 
     #[allow(dead_code, reason = "nothing starts kernel threads yet")]
@@ -252,12 +315,12 @@ fn schedule(requeue: bool) {
         return;
     }
     let save = current.rsp.get();
-    current.extended.save();
+    current.switch_out();
     let load = match picked {
         Some((next, entity)) => {
             let next = next.take();
             *next.entity.lock() = entity;
-            next.extended.restore();
+            next.switch_in();
             // SAFETY: `next` is not running, so its saved pointer is
             // stable.
             let rsp = unsafe { *next.rsp.get() };
@@ -362,6 +425,27 @@ pub extern "sysv64" fn thread_start(entry: usize, arg: usize) -> ! {
     exit()
 }
 
+/// The first code of a user thread, on its kernel stack.
+fn user_entry(_: usize) {
+    let thread = this_cpu().lock().current.clone();
+    let Some(thread) = thread else {
+        unreachable!("a user thread started without being current");
+    };
+    let [rip, rsp, arg1, arg2] = thread.user.lock().start;
+    drop(thread);
+    // SAFETY: `switch_in` loaded the thread's address space, extended
+    // state and user bases before switching to it.
+    unsafe { context::enter_user(rip, rsp, arg1, arg2) }
+}
+
+/// Switches threads, before an interrupt returns to user mode, if the
+/// running thread's slice has ended.
+pub fn preempt_user() {
+    if RESCHEDULE.swap(false, Ordering::Relaxed) {
+        schedule(true);
+    }
+}
+
 /// Handles the timer interrupt: wakes sleepers whose deadline has
 /// passed, and marks a reschedule when the running thread's slice has
 /// ended.
@@ -391,7 +475,7 @@ pub fn run() -> ! {
             Some((next, entity)) => {
                 let next = next.take();
                 *next.entity.lock() = entity;
-                next.extended.restore();
+                next.switch_in();
                 // SAFETY: `next` is not running.
                 let rsp = unsafe { *next.rsp.get() };
                 start_slice(&mut cpu, now, next, entity);

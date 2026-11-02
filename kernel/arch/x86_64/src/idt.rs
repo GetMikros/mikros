@@ -249,6 +249,9 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
         // Nothing handles other vectors yet.
         _ => crate::apic::eoi(),
     }
+    if frame.cs & 3 == 3 {
+        crate::sched::preempt_user();
+    }
 }
 
 #[cfg(test)]

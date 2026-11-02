@@ -2,6 +2,8 @@
 
 pub const KERNEL_CODE: u16 = 0x08;
 pub const KERNEL_DATA: u16 = 0x10;
+pub const USER_DATA: u16 = 0x20;
+pub const USER_CODE: u16 = 0x28;
 pub const TSS_SELECTOR: u16 = 0x30;
 
 /// The IST entries, numbered from 1 as in gate descriptors.
