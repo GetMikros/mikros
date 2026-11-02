@@ -168,6 +168,22 @@ impl<M: Clone> Regions<M> {
         removed
     }
 
+    /// Sets the inheritance of every page from `start` to `end`, splitting
+    /// regions that extend beyond the range. Fails with `NotFound`, and
+    /// changes nothing, when a page in the range is not mapped.
+    pub fn set_inheritance(&mut self, start: u64, end: u64, inheritance: u32) -> Result<(), Error> {
+        let mut at = start;
+        while at < end {
+            at = self.find(at).ok_or(Error::NotFound)?.end();
+        }
+        self.split_at(start);
+        self.split_at(end);
+        for r in self.map.range_mut(start..end).map(|(_, r)| r) {
+            r.inheritance = inheritance;
+        }
+        Ok(())
+    }
+
     /// The regions in address order.
     pub fn iter(&self) -> impl Iterator<Item = &Region<M>> {
         self.map.values()
@@ -294,6 +310,22 @@ mod tests {
         assert_eq!(starts(&r), [(2 * P, P, 10 * P), (9 * P, P, P)]);
         assert!(r.remove(20 * P, 30 * P).is_empty());
         assert_eq!(r.find(9 * P).unwrap().page(9 * P + 1), 1);
+    }
+
+    #[test]
+    fn sets_inheritance_only_on_mapped_ranges() {
+        let mut r = Regions::default();
+        r.insert(region(2 * P, 2 * P, 0)).unwrap();
+        r.insert(region(4 * P, 2 * P, 0)).unwrap();
+        assert_eq!(r.set_inheritance(P, 3 * P, 1), Err(Error::NotFound));
+        assert_eq!(r.set_inheritance(5 * P, 7 * P, 1), Err(Error::NotFound));
+        assert_eq!(starts(&r), [(2 * P, 2 * P, 0), (4 * P, 2 * P, 0)]);
+        r.set_inheritance(3 * P, 5 * P, 2).unwrap();
+        let got: Vec<_> = r.iter().map(|r| (r.start, r.len, r.inheritance)).collect();
+        assert_eq!(
+            got,
+            [(2 * P, P, 0), (3 * P, P, 2), (4 * P, P, 2), (5 * P, P, 0)]
+        );
     }
 
     #[test]

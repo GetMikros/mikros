@@ -240,3 +240,14 @@ syscalls:
       - {name: process, type: Handle, dir: in, object: Process, rights: [MAP]}
       - {name: addr, type: u64, dir: in}
       - {name: len, type: u64, dir: in}
+
+  - name: vm_set_inheritance
+    number: 22
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0071.R6]
+    args:
+      - {name: process, type: Handle, dir: in, object: Process, rights: [MAP]}
+      - {name: addr, type: u64, dir: in}
+      - {name: len, type: u64, dir: in}
+      - {name: inheritance, type: u32, dir: in}

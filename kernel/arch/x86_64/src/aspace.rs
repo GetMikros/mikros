@@ -317,6 +317,12 @@ impl AddressSpace {
         drop(removed);
     }
 
+    /// Sets the inheritance of every page from `start` to `end`, or fails
+    /// with `NotFound` when one is not mapped.
+    pub fn set_inheritance(&self, start: u64, end: u64, inheritance: u32) -> Result<(), Error> {
+        self.regions.lock().set_inheritance(start, end, inheritance)
+    }
+
     /// Removes the pages that map pages `first` to `end`, exclusive, of
     /// `mem`. The caller holds the object's pages lock.
     pub fn unmap_object(&self, mem: &MemoryObject, first: u64, end: u64) {

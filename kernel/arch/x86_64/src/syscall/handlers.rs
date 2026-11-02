@@ -300,13 +300,34 @@ pub fn vm_map(
     })
 }
 
-pub fn vm_unmap(process: Checked, addr: u64, len: u64) -> Result<(), Error> {
+/// The end of the `len` bytes from `addr`, rounded up to whole pages, or
+/// `InvalidArgs` when `len` is zero or `addr` is not page-aligned.
+fn page_range_end(addr: u64, len: u64) -> Result<u64, Error> {
     if len == 0 || !addr.is_multiple_of(PAGE_SIZE) {
         return Err(Error::InvalidArgs);
     }
-    let end = addr.saturating_add(len.saturating_add(PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE);
+    Ok(addr.saturating_add(len.saturating_add(PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE))
+}
+
+pub fn vm_unmap(process: Checked, addr: u64, len: u64) -> Result<(), Error> {
+    let end = page_range_end(addr, len)?;
     object::<Process>(process)
         .aspace()
         .remove_regions(addr, end);
     Ok(())
+}
+
+pub fn vm_set_inheritance(
+    process: Checked,
+    addr: u64,
+    len: u64,
+    inheritance: u32,
+) -> Result<(), Error> {
+    let end = page_range_end(addr, len)?;
+    if inheritance > 2 {
+        return Err(Error::InvalidArgs);
+    }
+    object::<Process>(process)
+        .aspace()
+        .set_inheritance(addr, end, inheritance)
 }
