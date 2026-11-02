@@ -196,6 +196,14 @@ pub struct Region<M, R = ()> {
     pub record: R,
 }
 
+impl<M, R: Record> Region<M, R> {
+    /// Sets the permissions, telling the record.
+    pub fn set_perms(&mut self, perms: u32) {
+        self.perms = perms;
+        self.record.set_writable(perms & PERM_WRITE != 0);
+    }
+}
+
 impl<M, R> Region<M, R> {
     pub fn end(&self) -> u64 {
         self.start + self.len
@@ -223,6 +231,21 @@ pub struct Regions<M, R = ()> {
     low: u64,
     line: u64,
     high: u64,
+    /// The ranges of the removals under way that refuse inserts.
+    removing: Vec<(u64, u64)>,
+}
+
+/// A removal of the parts of the regions in a range, begun by
+/// `Regions::begin_removal` and done in steps.
+#[derive(Debug)]
+pub struct Removal {
+    id: u64,
+    start: u64,
+    end: u64,
+    /// Where the next `mark_some` goes on.
+    cursor: u64,
+    /// Whether the removal refuses inserts into its range.
+    blocks: bool,
 }
 
 impl<M: Clone, R: Record> Regions<M, R> {
@@ -243,6 +266,7 @@ impl<M: Clone, R: Record> Regions<M, R> {
             low,
             line,
             high,
+            removing: Vec::new(),
         };
         regions.reserve_gaps(0)?;
         regions.relink(low, high, true);
@@ -361,12 +385,22 @@ impl<M: Clone, R: Record> Regions<M, R> {
     }
 
     /// Adds `region`, or fails with `OutOfRange` when it does not lie in
-    /// the range, with `AlreadyExists` when it overlaps one and with
-    /// `NoMemory` without room for it.
+    /// the range, with `ShouldWait` when it overlaps the range of a
+    /// removal under way, with `AlreadyExists` when it overlaps a region
+    /// and with `NoMemory` without room for it.
     pub fn insert(&mut self, region: Region<M, R>) -> Result<(), Error> {
-        let end = region.start.checked_add(region.len);
-        if region.start < self.low || end.is_none_or(|end| end > self.high) {
+        let Some(end) = region.start.checked_add(region.len) else {
             return Err(Error::OutOfRange);
+        };
+        if region.start < self.low || end > self.high {
+            return Err(Error::OutOfRange);
+        }
+        if self
+            .removing
+            .iter()
+            .any(|&(s, e)| s < end && region.start < e)
+        {
+            return Err(Error::ShouldWait);
         }
         if self.overlaps(region.start, region.len) {
             return Err(Error::AlreadyExists);
@@ -448,73 +482,106 @@ impl<M: Clone, R: Record> Regions<M, R> {
 
     /// Begins removal `id`, not 0, of every part of a region inside the
     /// range from `start` to `end`, splitting regions that extend beyond
-    /// it, and returns room for the parts. Regions that another removal
-    /// is taking are left to it. Regions the splits add are charged to
-    /// `budget`, if there is one. Fails with `NoMemory`, changing nothing,
-    /// without room for the splits or the parts, and with `NoResources`
-    /// when the budget refuses the charge.
+    /// it; `mark_some`, `next_marked` and `take_marked` do the rest in
+    /// steps, and `end_removal` ends it. Regions that another removal is
+    /// taking are left to it. Until it ends, inserts into the range fail
+    /// with `ShouldWait`. Regions the splits add are charged to `budget`,
+    /// if there is one. Fails with `NoMemory`, changing nothing, without
+    /// room for the splits or to record the removal, and with
+    /// `NoResources` when the budget refuses the charge.
     pub fn begin_removal(
         &mut self,
         start: u64,
         end: u64,
         id: u64,
         budget: Option<&Arc<Budget>>,
-    ) -> Result<Vec<Region<M, R>>, Error> {
+    ) -> Result<Removal, Error> {
         debug_assert!(id != 0);
-        let straddles = self.find(start).is_some_and(|r| r.start < start);
-        let live = self.map.range(start..end).filter(|(_, r)| r.removal == 0);
-        let count = live.count() + usize::from(straddles);
-        let mut parts = Vec::new();
-        parts
-            .try_reserve_exact(count)
-            .map_err(|_| Error::NoMemory)?;
-        let charges = self.charge_splits(start, end, budget)?;
-        let _claim = self.claim_splits()?;
-        self.split_ends(start, end, charges);
-        for r in self.map.range_mut(start..end).map(|(_, r)| r) {
+        self.removing.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        self.split_range(start, end, budget)?;
+        self.removing.push((start, end));
+        Ok(Removal {
+            id,
+            start,
+            end,
+            cursor: start,
+            blocks: true,
+        })
+    }
+
+    /// Begins removal `id` of every region, as `begin_removal` does for
+    /// the whole range, which needs no split. Without room to record the
+    /// removal, inserts meanwhile are not refused.
+    pub fn begin_removal_of_all(&mut self, id: u64) -> Removal {
+        debug_assert!(id != 0);
+        let blocks = self.removing.try_reserve(1).is_ok();
+        if blocks {
+            self.removing.push((self.low, self.high));
+        }
+        Removal {
+            id,
+            start: self.low,
+            end: self.high,
+            cursor: self.low,
+            blocks,
+        }
+    }
+
+    /// Marks the next regions of `removal` as being removed, looking at
+    /// up to `limit` regions. Returns the range from where it started to
+    /// where it stopped, or `None` once the whole range is done.
+    pub fn mark_some(&mut self, removal: &mut Removal, limit: usize) -> Option<(u64, u64)> {
+        let from = removal.cursor;
+        if from >= removal.end {
+            return None;
+        }
+        let mut to = removal.end;
+        for (seen, r) in self
+            .map
+            .range_mut(from..removal.end)
+            .map(|(_, r)| r)
+            .enumerate()
+        {
+            if seen == limit {
+                to = r.start;
+                break;
+            }
             if r.removal == 0 {
-                r.removal = id;
+                r.removal = removal.id;
             }
         }
-        Ok(parts)
+        removal.cursor = to;
+        Some((from, to))
     }
 
-    /// Ends removal `id` of the range from `start` to `end`, begun by
-    /// `begin_removal`, moving its parts to `parts`, the room it returned.
-    pub fn end_removal(&mut self, start: u64, end: u64, id: u64, parts: &mut Vec<Region<M, R>>) {
-        let (from, to) = self.window(start, end);
+    /// The start and length of the first region from `at` to `end` that
+    /// `removal` marked.
+    pub fn next_marked(&self, removal: &Removal, at: u64, end: u64) -> Option<(u64, u64)> {
+        let mut regions = self.map.range(at..end).map(|(_, r)| r);
+        let r = regions.find(|r| r.removal == removal.id)?;
+        Some((r.start, r.len))
+    }
+
+    /// Takes out the first region from `at` to `end` that `removal`
+    /// marked.
+    pub fn take_marked(&mut self, removal: &Removal, at: u64, end: u64) -> Option<Region<M, R>> {
+        let (start, len) = self.next_marked(removal, at, end)?;
+        let (from, to) = self.window(start, start + len);
         self.relink(from, to, false);
-        for (_, r) in self.map.extract_if(start..end, |_, r| r.removal == id) {
-            debug_assert!(parts.len() < parts.capacity());
-            parts.push(r);
-        }
+        let region = self.map.remove(&start);
         self.relink(from, to, true);
+        region
     }
 
-    /// Gives up removal `id` of the range from `start` to `end`, whose
-    /// parts stay as regions.
-    pub fn cancel_removal(&mut self, start: u64, end: u64, id: u64) {
-        for r in self.map.range_mut(start..end).map(|(_, r)| r) {
-            if r.removal == id {
-                r.removal = 0;
-            }
+    /// Ends `removal`, every region of which has been taken out.
+    pub fn end_removal(&mut self, removal: Removal) {
+        debug_assert!(removal.cursor >= removal.end);
+        if removal.blocks {
+            let range = (removal.start, removal.end);
+            let at = self.removing.iter().position(|&r| r == range);
+            self.removing
+                .swap_remove(at.expect("the removal was recorded"));
         }
-    }
-
-    /// Makes every region part of removal `id`, as when all of them go.
-    pub fn mark_all(&mut self, id: u64) {
-        for r in self.map.values_mut() {
-            r.removal = id;
-        }
-    }
-
-    /// Removes every region and returns them, by start.
-    pub fn take_all(&mut self) -> Map<u64, Region<M, R>> {
-        let all = core::mem::replace(&mut self.map, nodes::map());
-        self.below.clear();
-        self.above.clear();
-        self.relink(self.low, self.high, true);
-        all
     }
 
     /// Removes every part of a region inside the range from `start` to
@@ -526,16 +593,108 @@ impl<M: Clone, R: Record> Regions<M, R> {
         id: u64,
         budget: Option<&Arc<Budget>>,
     ) -> Result<Vec<Region<M, R>>, Error> {
-        let mut parts = self.begin_removal(start, end, id, budget)?;
-        self.end_removal(start, end, id, &mut parts);
+        let mut parts = Vec::new();
+        parts
+            .try_reserve(self.map.len() + 2)
+            .map_err(|_| Error::NoMemory)?;
+        let mut removal = self.begin_removal(start, end, id, budget)?;
+        while let Some((from, to)) = self.mark_some(&mut removal, usize::MAX) {
+            while let Some(part) = self.take_marked(&removal, from, to) {
+                parts.push(part);
+            }
+        }
+        self.end_removal(removal);
         Ok(parts)
     }
 
-    /// Sets the inheritance of every page from `start` to `end`, splitting
-    /// regions that extend beyond the range. Fails with `NotFound` when a
-    /// page in the range is not mapped, with `NoMemory` without room for
-    /// the splits and with `NoResources` when `budget` refuses the charge
-    /// for them, in each case changing nothing.
+    /// Checks the regions from `at` to `end`, looking at up to `limit` of
+    /// them: each page must be in a region that is not being removed, and
+    /// `refused` is set when `ok` refuses one. Returns where to go on, or
+    /// `None` once the range is checked. Fails with `NotFound` at a page
+    /// in no region.
+    pub fn check_range(
+        &self,
+        mut at: u64,
+        end: u64,
+        limit: usize,
+        ok: impl Fn(&Region<M, R>) -> bool,
+        refused: &mut bool,
+    ) -> Result<Option<u64>, Error> {
+        for _ in 0..limit {
+            if at >= end {
+                return Ok(None);
+            }
+            let r = self.find(at).ok_or(Error::NotFound)?;
+            *refused |= !ok(r);
+            at = r.end();
+        }
+        Ok((at < end).then_some(at))
+    }
+
+    /// Checks the whole range from `start` to `end` at once, as
+    /// `check_range` does, failing with `AccessDenied` when `ok` refuses
+    /// a region and every page is in one.
+    fn check_all(
+        &self,
+        start: u64,
+        end: u64,
+        ok: impl Fn(&Region<M, R>) -> bool,
+    ) -> Result<(), Error> {
+        let mut refused = false;
+        self.check_range(start, end, usize::MAX, ok, &mut refused)?;
+        if refused {
+            return Err(Error::AccessDenied);
+        }
+        Ok(())
+    }
+
+    /// Splits the regions that extend beyond either end of the range from
+    /// `start` to `end`, charging the regions that adds to `budget`, if
+    /// there is one. Fails with `NoMemory` without room for the splits and
+    /// with `NoResources` when the budget refuses the charge, in each case
+    /// changing nothing.
+    pub fn split_range(
+        &mut self,
+        start: u64,
+        end: u64,
+        budget: Option<&Arc<Budget>>,
+    ) -> Result<(), Error> {
+        let splits = self.charge_splits(start, end, budget)?;
+        if splits.iter().any(Option::is_some) {
+            let _claim = self.claim_splits()?;
+            self.split_ends(start, end, splits);
+        }
+        Ok(())
+    }
+
+    /// Calls `change` with each region from `at` to `end` that is not
+    /// being removed, looking at up to `limit` regions. Returns where to
+    /// go on, or `None` once the range is done. The regions that extend
+    /// beyond the range must have been split.
+    pub fn change_some(
+        &mut self,
+        at: u64,
+        end: u64,
+        limit: usize,
+        mut change: impl FnMut(&mut Region<M, R>),
+    ) -> Option<u64> {
+        if at >= end {
+            return None;
+        }
+        for (seen, r) in self.map.range_mut(at..end).map(|(_, r)| r).enumerate() {
+            if seen == limit {
+                return Some(r.start);
+            }
+            if r.removal == 0 {
+                change(r);
+            }
+        }
+        None
+    }
+
+    /// Sets the inheritance of every page from `start` to `end` at once,
+    /// splitting regions that extend beyond the range. Fails as
+    /// `check_range` and `split_range` do, in each case changing nothing.
     pub fn set_inheritance(
         &mut self,
         start: u64,
@@ -543,26 +702,17 @@ impl<M: Clone, R: Record> Regions<M, R> {
         inheritance: u32,
         budget: Option<&Arc<Budget>>,
     ) -> Result<(), Error> {
-        let mut at = start;
-        while at < end {
-            at = self.find(at).ok_or(Error::NotFound)?.end();
-        }
-        let charges = self.charge_splits(start, end, budget)?;
-        let _claim = self.claim_splits()?;
-        self.split_ends(start, end, charges);
-        for r in self.map.range_mut(start..end).map(|(_, r)| r) {
-            r.inheritance = inheritance;
-        }
+        self.check_all(start, end, |_| true)?;
+        self.split_range(start, end, budget)?;
+        self.change_some(start, end, usize::MAX, |r| r.inheritance = inheritance);
         Ok(())
     }
 
-    /// Sets the permissions of every page from `start` to `end`,
-    /// splitting regions that extend beyond the range. Fails with
-    /// `NotFound` when a page in the range is not mapped and with
-    /// `AccessDenied` when `perms` goes beyond a region's maximum or
-    /// `allowed` refuses a region, with `NoMemory` without room for the
-    /// splits and with `NoResources` when `budget` refuses the charge for
-    /// them, in each case changing nothing.
+    /// Sets the permissions of every page from `start` to `end` at once,
+    /// splitting regions that extend beyond the range. Fails as
+    /// `check_range` and `split_range` do, a region refusing when `perms`
+    /// goes beyond its maximum or `allowed` refuses it, in each case
+    /// changing nothing.
     pub fn set_perms(
         &mut self,
         start: u64,
@@ -571,25 +721,10 @@ impl<M: Clone, R: Record> Regions<M, R> {
         allowed: impl Fn(&Region<M, R>) -> bool,
         budget: Option<&Arc<Budget>>,
     ) -> Result<(), Error> {
-        let mut at = start;
-        while at < end {
-            at = self.find(at).ok_or(Error::NotFound)?.end();
-        }
-        let mut at = start;
-        while at < end {
-            let r = self.find(at).expect("checked above");
-            if perms & !r.max != 0 || !allowed(r) {
-                return Err(Error::AccessDenied);
-            }
-            at = r.end();
-        }
-        let charges = self.charge_splits(start, end, budget)?;
-        let _claim = self.claim_splits()?;
-        self.split_ends(start, end, charges);
-        for r in self.map.range_mut(start..end).map(|(_, r)| r) {
-            r.perms = perms;
-            r.record.set_writable(perms & PERM_WRITE != 0);
-        }
+        let ok = |r: &Region<M, R>| perms & !r.max == 0 && allowed(r);
+        self.check_all(start, end, ok)?;
+        self.split_range(start, end, budget)?;
+        self.change_some(start, end, usize::MAX, |r| r.set_perms(perms));
         Ok(())
     }
 
@@ -813,8 +948,9 @@ mod tests {
     fn hides_regions_being_removed() {
         let mut r = empty();
         r.insert(region(2 * P, 4 * P, 0)).unwrap();
-        let mut parts = r.begin_removal(3 * P, 5 * P, 1, None).unwrap();
-        assert_eq!(parts.capacity(), 1);
+        let mut first = r.begin_removal(3 * P, 5 * P, 1, None).unwrap();
+        assert_eq!(r.mark_some(&mut first, usize::MAX), Some((3 * P, 5 * P)));
+        assert_eq!(r.mark_some(&mut first, usize::MAX), None);
         // The part being removed keeps its range but cannot be found,
         // changed or mapped over; the rest of the region stays.
         assert!(r.find(3 * P).is_none() && r.find(2 * P).is_some());
@@ -827,15 +963,59 @@ mod tests {
             r.set_inheritance(3 * P, 4 * P, 1, None),
             Err(Error::NotFound)
         );
-        assert_eq!(r.insert(region(4 * P, P, 0)), Err(Error::AlreadyExists));
+        // Inserts into the range wait until the removal ends.
+        assert_eq!(r.insert(region(4 * P, P, 0)), Err(Error::ShouldWait));
         // Another removal leaves it to the first.
-        let mut other = r.begin_removal(2 * P, 6 * P, 2, None).unwrap();
-        r.end_removal(2 * P, 6 * P, 2, &mut other);
+        let other = r.remove(2 * P, 6 * P, 2, None).unwrap();
         assert_eq!(starts_of(&other), [(2 * P, P, 0), (5 * P, P, 3 * P)]);
         assert_eq!(starts(&r), [(3 * P, 2 * P, P)]);
-        r.end_removal(3 * P, 5 * P, 1, &mut parts);
-        assert_eq!(starts_of(&parts), [(3 * P, 2 * P, P)]);
+        assert_eq!(r.next_marked(&first, 3 * P, 5 * P), Some((3 * P, 2 * P)));
+        let part = r.take_marked(&first, 3 * P, 5 * P).unwrap();
+        assert_eq!(starts_of(&[part]), [(3 * P, 2 * P, P)]);
+        assert!(r.take_marked(&first, 3 * P, 5 * P).is_none());
+        r.end_removal(first);
         assert!(starts(&r).is_empty());
+        r.check_gaps();
+        r.insert(region(4 * P, P, 0)).unwrap();
+    }
+
+    #[test]
+    fn removes_and_changes_in_steps() {
+        let mut r = empty();
+        for i in 0..5 {
+            r.insert(region(2 * i * P, P, 0)).unwrap();
+        }
+        // Steps of two regions each stop at the start of the next one.
+        let mut refused = false;
+        assert_eq!(r.check_range(0, P, 2, |_| false, &mut refused), Ok(None));
+        assert!(refused);
+        assert_eq!(
+            r.check_range(0, 3 * P, 2, |_| true, &mut refused),
+            Err(Error::NotFound)
+        );
+        assert_eq!(
+            r.change_some(0, 10 * P, 2, |r| r.inheritance = 1),
+            Some(4 * P)
+        );
+        assert_eq!(
+            r.change_some(4 * P, 10 * P, 2, |r| r.inheritance = 1),
+            Some(8 * P)
+        );
+        assert_eq!(r.change_some(8 * P, 10 * P, 2, |r| r.inheritance = 1), None);
+        assert!(r.iter().all(|r| r.inheritance == 1));
+        let mut removal = r.begin_removal(P, 10 * P, 1, None).unwrap();
+        let mut steps = vec![];
+        while let Some((from, to)) = r.mark_some(&mut removal, 2) {
+            let mut taken = 0;
+            while r.take_marked(&removal, from, to).is_some() {
+                taken += 1;
+            }
+            steps.push((from, to, taken));
+            r.check_gaps();
+        }
+        r.end_removal(removal);
+        assert_eq!(steps, [(P, 6 * P, 2), (6 * P, 10 * P, 2)]);
+        assert_eq!(starts(&r), [(0, P, 0)]);
     }
 
     fn starts_of(parts: &[Region<u8>]) -> std::vec::Vec<(u64, u64, u64)> {
@@ -913,7 +1093,7 @@ mod tests {
         assert_eq!(removed.len(), 2);
         drop(removed);
         assert_eq!(counts.get(), (1, 0));
-        drop(r.take_all());
+        drop(r.remove(0, 1 << 40, 2, None).unwrap());
         assert_eq!(counts.get(), (0, 0));
     }
 
@@ -1002,7 +1182,7 @@ mod tests {
                 }
             }
         }
-        r.take_all();
+        r.remove(4 * P, 160 * P, 3, None).unwrap();
         r.check_gaps();
         assert_eq!(r.places(156, false), 1);
     }

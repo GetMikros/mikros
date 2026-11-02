@@ -9,11 +9,10 @@ use crate::percpu;
 use crate::publish::ITEM_STEP;
 use crate::space;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::object::budget::Budget;
 use kernel_core::regions::{
-    Charge, MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions,
+    Charge, MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions, Removal,
 };
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
@@ -334,6 +333,29 @@ impl AddressSpace {
         if size > USER_END - USER_START {
             return Err(Error::OutOfRange);
         }
+        loop {
+            let result = self.try_add_region(options, addr, size, mem, offset, max, budget);
+            // The range is being removed; the insert waits until it is.
+            if result != Err(Error::ShouldWait) {
+                return result;
+            }
+            crate::sched::yield_now();
+        }
+    }
+
+    /// Does what `add_region` does once, failing with `ShouldWait` when
+    /// the range is being removed.
+    #[allow(clippy::too_many_arguments)]
+    fn try_add_region(
+        self: &Arc<Self>,
+        options: MapOptions,
+        addr: u64,
+        size: u64,
+        mem: &Arc<MemoryObject>,
+        offset: u64,
+        max: u32,
+        budget: &Arc<Budget>,
+    ) -> Result<u64, Error> {
         let charge = Charge::new(Some(budget))?;
         let mut regions = self.regions.lock();
         let start = if options.specific {
@@ -366,55 +388,118 @@ impl AddressSpace {
     /// Removes the parts of regions from `start` to `end` and their pages.
     /// Regions the splits at the ends add are charged to `budget`. Fails
     /// with `NoMemory`, removing nothing, without room to split the
-    /// regions at the ends or to list the removed parts, and with
-    /// `NoResources` when the budget refuses the charge.
-    ///
-    /// The parts stay, hidden from faults and changes, while their
-    /// translations go in steps, so that an object that loses pages
-    /// meanwhile still finds them. No lock may be held.
+    /// regions at the ends or to record the removal, and with
+    /// `NoResources` when the budget refuses the charge. No lock may be
+    /// held.
     pub fn remove_regions(&self, start: u64, end: u64, budget: &Arc<Budget>) -> Result<(), Error> {
         let start = start.max(USER_START);
         let end = end.min(USER_END);
         if start >= end {
             return Ok(());
         }
-        let id = next_removal();
-        // The removed regions keep their charges until they are dropped,
-        // after this list and the parts go, so those cover both.
-        let mut ranges = Vec::new();
-        let mut parts = {
-            let mut regions = self.regions.lock();
-            let parts = regions.begin_removal(start, end, id, Some(budget))?;
-            if ranges.try_reserve_exact(parts.capacity()).is_err() {
-                regions.cancel_removal(start, end, id);
-                return Err(Error::NoMemory);
-            }
-            let ours = regions.iter().filter(|r| r.removal == id);
-            ranges.extend(ours.map(|r| (r.start, r.len)));
-            parts
-        };
-        for &(at, len) in &ranges {
-            self.unmap_in_steps(at, len)
-                .expect("regions are page-aligned and in the user range");
-        }
-        self.regions.lock().end_removal(start, end, id, &mut parts);
-        // Dropping the regions can destroy memory objects, which takes
-        // their locks, so it happens with the regions unlocked.
-        drop(parts);
+        let removal =
+            self.regions
+                .lock()
+                .begin_removal(start, end, next_removal(), Some(budget))?;
+        self.remove_in_steps(removal);
         Ok(())
     }
 
     /// Removes every region and its pages, as `remove_regions` does with
-    /// the whole user range, which cannot fail.
+    /// the whole user range, which cannot fail. This also removes the
+    /// translations made outside regions, whose frames belong to whoever
+    /// mapped them and are not freed.
     pub fn remove_all_regions(&self) {
-        let id = next_removal();
-        self.regions.lock().mark_all(id);
+        let removal = self.regions.lock().begin_removal_of_all(next_removal());
+        self.remove_in_steps(removal);
         self.unmap_in_steps(USER_START, USER_END - USER_START)
             .expect("the user range is page-aligned");
-        let parts = self.regions.lock().take_all();
-        // Dropping the regions can destroy memory objects, which takes
-        // their locks, so it happens with the regions unlocked.
-        drop(parts);
+    }
+
+    /// Does the steps of `removal`: marks up to `ITEM_STEP` regions at a
+    /// time, which then stay, hidden from faults and changes, while their
+    /// translations go, so that an object that loses pages meanwhile still
+    /// finds them, and then takes them out one at a time. Reschedule
+    /// checks come between the steps, with no lock held.
+    fn remove_in_steps(&self, mut removal: Removal) {
+        loop {
+            let step = self.regions.lock().mark_some(&mut removal, ITEM_STEP);
+            let Some((from, to)) = step else {
+                break;
+            };
+            let mut at = from;
+            loop {
+                let next = self.regions.lock().next_marked(&removal, at, to);
+                let Some((start, len)) = next else {
+                    break;
+                };
+                self.unmap_in_steps(start, len)
+                    .expect("regions are page-aligned and in the user range");
+                at = start + len;
+            }
+            loop {
+                let part = self.regions.lock().take_marked(&removal, from, to);
+                // Dropping a region can destroy its memory object, which
+                // takes the object's locks, so it happens with the regions
+                // unlocked.
+                if part.is_none() {
+                    break;
+                }
+            }
+            crate::sched::preempt_point();
+        }
+        self.regions.lock().end_removal(removal);
+    }
+
+    /// Checks the range from `start` to `end` in steps of `ITEM_STEP`
+    /// regions with reschedule checks between them, as `check_range`
+    /// does with `ok`. Fails with `NotFound` when a page is in no region,
+    /// and otherwise with `AccessDenied` when `ok` refuses a region.
+    fn check_in_steps(
+        &self,
+        start: u64,
+        end: u64,
+        ok: impl Fn(&RegionOf) -> bool,
+    ) -> Result<(), Error> {
+        let mut at = start;
+        let mut refused = false;
+        while let Some(next) =
+            self.regions
+                .lock()
+                .check_range(at, end, ITEM_STEP, &ok, &mut refused)?
+        {
+            at = next;
+            crate::sched::preempt_point();
+        }
+        if refused {
+            return Err(Error::AccessDenied);
+        }
+        Ok(())
+    }
+
+    /// Splits the regions at the ends of the range from `start` to `end`,
+    /// charging `budget`, and then calls `change` with every region in it
+    /// that is not being removed, in steps of `ITEM_STEP` regions with
+    /// reschedule checks between them. Regions that changed since the
+    /// range was checked are handed to `change` as they are now.
+    fn change_in_steps(
+        &self,
+        start: u64,
+        end: u64,
+        budget: &Arc<Budget>,
+        mut change: impl FnMut(&mut RegionOf),
+    ) -> Result<(), Error> {
+        self.regions.lock().split_range(start, end, Some(budget))?;
+        let mut at = start;
+        while let Some(next) = self
+            .regions
+            .lock()
+            .change_some(at, end, ITEM_STEP, &mut change)
+        {
+            at = next;
+            crate::sched::preempt_point();
+        }
+        Ok(())
     }
 
     /// Sets the inheritance of every page from `start` to `end`, or fails
@@ -427,16 +512,16 @@ impl AddressSpace {
         inheritance: u32,
         budget: &Arc<Budget>,
     ) -> Result<(), Error> {
-        self.regions
-            .lock()
-            .set_inheritance(start, end, inheritance, Some(budget))
+        self.check_in_steps(start, end, |_| true)?;
+        self.change_in_steps(start, end, budget, |r| r.inheritance = inheritance)
     }
 
     /// Sets `perms` on every page from `start` to `end`, as `vm_protect`
     /// does, and removes their translations, so that the next access
     /// enters them with the new permissions. `allowed` decides whether a
-    /// region's object accepts them. Regions that splitting adds are
-    /// charged to `budget`.
+    /// region's object accepts them; a region that no longer does when
+    /// its turn comes, having changed meanwhile, keeps its permissions.
+    /// Regions that splitting adds are charged to `budget`.
     pub fn protect(
         &self,
         start: u64,
@@ -445,9 +530,13 @@ impl AddressSpace {
         allowed: impl Fn(&RegionOf) -> bool,
         budget: &Arc<Budget>,
     ) -> Result<(), Error> {
-        self.regions
-            .lock()
-            .set_perms(start, end, perms, allowed, Some(budget))?;
+        let ok = |r: &RegionOf| perms & !r.max == 0 && allowed(r);
+        self.check_in_steps(start, end, ok)?;
+        self.change_in_steps(start, end, budget, |r| {
+            if ok(r) {
+                r.set_perms(perms);
+            }
+        })?;
         self.unmap_in_steps(start, end - start)
     }
 
