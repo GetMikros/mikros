@@ -601,8 +601,7 @@ pub fn yield_now() {
 }
 
 /// Lets pending interrupts in, and switches threads if the running
-/// thread's slice has ended.
-#[allow(dead_code, reason = "nothing starts kernel threads yet")]
+/// thread's slice has ended. No lock may be held.
 pub fn preempt_point() {
     // SAFETY: enabling interrupts for one instruction lets the processor
     // take pending ones; no lock is held here.

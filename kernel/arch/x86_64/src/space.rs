@@ -139,6 +139,33 @@ pub fn unmap_device(virt: u64, phys: u64, size: u64) {
     release_dynamic(start, len);
 }
 
+/// Maps the page of physical memory at `phys` writable with `policy`
+/// into the dynamic region and returns its address there, or `None`, with
+/// nothing left reserved, when address space or page tables run out.
+pub fn map_physical_page(phys: u64, policy: Policy) -> Option<u64> {
+    let virt = DYNAMIC.lock().alloc(2 * PAGE_SIZE, PAGE_SIZE)? + PAGE_SIZE;
+    let flags = Flags {
+        writable: true,
+        executable: false,
+        global: true,
+        user: false,
+        policy,
+    };
+    let mut tables = FrameTables;
+    let mut mapper = Mapper::existing(&mut tables, root(), gib_pages());
+    if mapper.map(virt, phys, PAGE_SIZE, flags).is_err() {
+        release_dynamic(virt, PAGE_SIZE);
+        return None;
+    }
+    Some(virt)
+}
+
+/// Removes a mapping made by `map_physical_page` at `virt`.
+pub fn unmap_physical_page(virt: u64) {
+    unmap(virt, PAGE_SIZE, |_, _| {});
+    release_dynamic(virt, PAGE_SIZE);
+}
+
 /// Maps `size` bytes of new memory, writable and not executable, with an
 /// unmapped page below it, into the dynamic region and returns its start.
 /// Returns `None`, with nothing left allocated, when memory or address

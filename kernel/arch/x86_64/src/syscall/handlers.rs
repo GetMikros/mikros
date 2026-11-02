@@ -5,6 +5,7 @@
 use super::{Checked, UserIn, UserOut, current_process};
 use crate::memory_object::MemoryObject;
 use crate::process::Process;
+use crate::publish::{Outputs, Work};
 use crate::sched::Thread;
 use crate::thread_state::{self, DEBUG_SIZE, GENERAL_SIZE, General};
 use alloc::sync::Arc;
@@ -436,17 +437,15 @@ pub fn channel_read(
     }
     let process = current_process()?;
     let budget = Some(process.budget());
+    let aspace = process.aspace();
     let mut table = process.handles().lock();
-    object::<Endpoint>(channel).read(|data, entries| {
+    // A message spans fewer pages than a check is due after, so nothing
+    // waits while the locks are held.
+    let mut work = Work::new(|| debug_assert!(false, "a check while locked"));
+    let taken = object::<Endpoint>(channel).take(|data, entries| {
         let (len, count) = (data.len() as u64, entries.len() as u64);
-        let sizes = || {
-            crate::output::channel_sizes(
-                process.aspace().as_ref(),
-                [out_len.0, out_count.0],
-                len,
-                count,
-            )
-        };
+        let sizes =
+            || crate::output::channel_sizes(aspace.as_ref(), [out_len.0, out_count.0], len, count);
         if len > bytes_cap || count > handles_cap {
             sizes()?;
             return Err(Error::BufferTooSmall);
@@ -454,15 +453,23 @@ pub fn channel_read(
         if !bytes.fits(len) || !handles.fits(count) {
             return Err(Error::InvalidArgs);
         }
-        crate::output::receive(
-            process.aspace().as_ref(),
-            [bytes.0, handles.0, out_len.0, out_count.0],
-            data,
-            entries,
-            &mut table,
-            budget,
-        )
-    })
+        let ranges = [
+            (bytes.0, len),
+            (handles.0, count * size_of::<Handle>() as u64),
+            (out_len.0, size_of::<u64>() as u64),
+            (out_count.0, size_of::<u64>() as u64),
+        ];
+        let prepare = |work: &mut Work<_>| {
+            Outputs::prepare(&ranges, budget, work, |page| aspace.hold_for_write(page))
+        };
+        crate::output::accept(entries, &mut table, budget, &mut work, prepare, sizes)
+            .map(|(outputs, values)| (outputs, values, entries.len()))
+    });
+    drop(table);
+    let ((outputs, values, count), message) = taken?;
+    let mut work = Work::new(crate::sched::preempt_point);
+    crate::output::deliver(outputs, &message.bytes, &values[..count], &mut work);
+    Ok(())
 }
 
 pub fn exception_channel_create(

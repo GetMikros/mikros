@@ -231,6 +231,48 @@ impl MemoryObject {
         }
     }
 
+    /// Holds the page at `virt` of `space`, which this object backs, as
+    /// the destination of a kernel write that cannot fail later: gives it
+    /// a frame if it has none and keeps that frame until the result is
+    /// dropped, or maps a physical page into the kernel with the object's
+    /// policy. Fails with `InvalidArgs` unless the region at `virt` maps
+    /// this object writable.
+    pub fn hold_for_write(
+        self: &Arc<Self>,
+        space: &AddressSpace,
+        virt: u64,
+    ) -> Result<Held, Error> {
+        let mut pages = self.pages.lock();
+        let mine = |r: Option<&aspace::RegionOf>| {
+            r.filter(|r| core::ptr::eq(&*r.mem, &**self))
+                .map(|r| (r.page(virt), r.perms))
+        };
+        let Some((index, perms)) = space.with_region(virt, mine) else {
+            return Err(Error::InvalidArgs);
+        };
+        if !aspace::allows(perms, true, false) || index >= pages.count() {
+            return Err(Error::InvalidArgs);
+        }
+        if let Some((base, policy)) = self.physical {
+            drop(pages);
+            let virt = space::map_physical_page(base + index * PAGE_SIZE, policy)
+                .ok_or(Error::NoMemory)?;
+            return Ok(Held {
+                mem: self.clone(),
+                backing: Backing::Mapped(virt),
+            });
+        }
+        let phys = match pages.frame(index) {
+            Some(phys) => phys,
+            None => self.alloc_mapped(&mut pages, index)?,
+        };
+        pages.pin();
+        Ok(Held {
+            mem: self.clone(),
+            backing: Backing::Frame(phys),
+        })
+    }
+
     /// Gives page `index` a zeroed frame, charging the frame to the
     /// budget, and returns it.
     fn alloc(&self, pages: &mut Pages, index: u64) -> Result<u64, Error> {
@@ -349,6 +391,41 @@ impl MemoryObject {
             KIND_ANONYMOUS
         };
         self.pages.lock().info(kind)
+    }
+}
+
+/// Where a held page's bytes are reached.
+enum Backing {
+    /// A frame of the object, through the direct map.
+    Frame(u64),
+    /// A physical page, mapped into the kernel at this address.
+    Mapped(u64),
+}
+
+/// A page of a memory object held for writing by `hold_for_write`.
+pub struct Held {
+    mem: Arc<MemoryObject>,
+    backing: Backing,
+}
+
+impl crate::publish::Page for Held {
+    fn base(&self) -> *mut u8 {
+        match self.backing {
+            Backing::Frame(phys) => space::direct(phys) as *mut u8,
+            Backing::Mapped(virt) => virt as *mut u8,
+        }
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        match self.backing {
+            Backing::Frame(_) => {
+                let orphans = self.mem.pages.lock().unpin();
+                self.mem.free(orphans);
+            }
+            Backing::Mapped(virt) => space::unmap_physical_page(virt),
+        }
     }
 }
 

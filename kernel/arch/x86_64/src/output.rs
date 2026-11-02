@@ -1,8 +1,10 @@
 //! Preparation and publication of bounded batches of syscall outputs.
 
+use crate::publish::{Outputs, Page, Work};
+use alloc::sync::Arc;
 use kernel_core::object::budget::Budget;
 use kernel_core::object::channel::HANDLES_MAX;
-use kernel_core::object::handles::{Entry, HandleTable};
+use kernel_core::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
 use kernel_core::status::Error;
 
 pub type Output<'a> = (u64, &'a [u8]);
@@ -101,52 +103,54 @@ pub fn channel_sizes(
     )
 }
 
-/// Publish a received message and its sizes in the original output order.
-pub fn channel_message(
-    memory: &impl Memory,
-    outputs: [u64; 4],
-    bytes: &[u8],
-    handles: &[u32],
-) -> Result<(), Error> {
-    // SAFETY: u32 has no padding and the slice covers exactly these handles.
-    let values = unsafe {
-        core::slice::from_raw_parts(
-            handles.as_ptr().cast::<u8>(),
-            core::mem::size_of_val(handles),
-        )
-    };
-    write(
-        memory,
-        &[
-            (outputs[0], bytes),
-            (outputs[1], values),
-            (outputs[2], &(bytes.len() as u64).to_ne_bytes()),
-            (outputs[3], &(handles.len() as u64).to_ne_bytes()),
-        ],
-    )
-}
-
-/// Install received handles, keeping them only after all outputs publish.
-pub fn receive(
-    memory: &impl Memory,
-    outputs: [u64; 4],
-    bytes: &[u8],
+/// Installs a received message's handles once `prepare` has prepared its
+/// outputs, keeping both only when both succeed. When the table cannot
+/// hold the handles, publishes the two sizes with `sizes`.
+pub fn accept<P: Page, F: FnMut()>(
     entries: &[Entry],
     table: &mut HandleTable,
-    budget: Option<&alloc::sync::Arc<Budget>>,
-) -> Result<(), Error> {
-    let result = table.insert_many_then::<HANDLES_MAX>(entries, budget, |values| {
-        channel_message(memory, outputs, bytes, values)
+    budget: Option<&Arc<Budget>>,
+    work: &mut Work<F>,
+    prepare: impl FnOnce(&mut Work<F>) -> Result<Outputs<P>, Error>,
+    sizes: impl FnOnce() -> Result<(), Error>,
+) -> Result<(Outputs<P>, [Handle; HANDLES_MAX]), Error> {
+    let outputs = prepare(work)?;
+    let mut values = [HANDLE_INVALID; HANDLES_MAX];
+    let installed = table.insert_many_then::<HANDLES_MAX>(entries, budget, |handles| {
+        values[..handles.len()].copy_from_slice(handles);
+        Ok(())
     });
-    if result == Err(Error::NoResources) {
-        channel_sizes(
-            memory,
-            [outputs[2], outputs[3]],
-            bytes.len() as u64,
-            entries.len() as u64,
-        )?;
+    match installed {
+        Ok(()) => Ok((outputs, values)),
+        Err(e) => {
+            outputs.release(work);
+            if e == Error::NoResources {
+                sizes()?;
+            }
+            Err(e)
+        }
     }
-    result
+}
+
+/// Writes a received message's bytes, its installed handles and their two
+/// sizes, in that order, to the outputs `accept` prepared, and releases
+/// them.
+pub fn deliver<P: Page, F: FnMut()>(
+    outputs: Outputs<P>,
+    bytes: &[u8],
+    handles: &[Handle],
+    work: &mut Work<F>,
+) {
+    let mut values = [0u8; HANDLES_MAX * size_of::<Handle>()];
+    let (slots, _) = values.as_chunks_mut::<{ size_of::<Handle>() }>();
+    for (value, handle) in slots.iter_mut().zip(handles) {
+        value.copy_from_slice(&handle.to_ne_bytes());
+    }
+    outputs.write(0, 0, bytes, work);
+    outputs.write(1, 0, &values[..size_of_val(handles)], work);
+    outputs.write(2, 0, &(bytes.len() as u64).to_ne_bytes(), work);
+    outputs.write(3, 0, &(handles.len() as u64).to_ne_bytes(), work);
+    outputs.release(work);
 }
 
 #[cfg(test)]
@@ -227,6 +231,189 @@ mod tests {
         ]
     }
 
+    /// User memory of `SIZE` bytes from address 0 whose pages below
+    /// `limit` can be prepared.
+    struct User {
+        bytes: Vec<u8>,
+        limit: u64,
+    }
+
+    const SIZE: usize = 0x30000;
+    const PAGE: u64 = kernel_core::object::memory::PAGE_SIZE;
+
+    struct UserPage(*mut u8);
+
+    impl Page for UserPage {
+        fn base(&self) -> *mut u8 {
+            self.0
+        }
+    }
+
+    impl User {
+        fn new(limit: u64) -> User {
+            User {
+                bytes: vec![0xa5; SIZE],
+                limit,
+            }
+        }
+
+        fn prepare<F: FnMut()>(
+            &mut self,
+            ranges: &[(u64, u64)],
+            work: &mut Work<F>,
+        ) -> Result<Outputs<UserPage>, Error> {
+            let (base, limit) = (self.bytes.as_mut_ptr(), self.limit);
+            Outputs::prepare(ranges, None, work, |page| {
+                if page + PAGE > limit {
+                    return Err(Error::InvalidArgs);
+                }
+                // SAFETY: the page lies inside the buffer.
+                Ok(UserPage(unsafe { base.add(page as usize) }))
+            })
+        }
+    }
+
+    fn ranges(outputs: [u64; 4], len: usize, count: usize) -> [(u64, u64); 4] {
+        [
+            (outputs[0], len as u64),
+            (outputs[1], (count * 4) as u64),
+            (outputs[2], 8),
+            (outputs[3], 8),
+        ]
+    }
+
+    /// Reads one message from `receiver` into `user` as channel_read does.
+    fn receive(
+        receiver: &Endpoint,
+        user: &mut User,
+        outputs: [u64; 4],
+        table: &mut HandleTable,
+        budget: Option<&Arc<Budget>>,
+        checks: &mut usize,
+    ) -> Result<(), Error> {
+        let sizes = RefCell::new(None);
+        let mut work = Work::new(|| panic!("no check while locked"));
+        let taken = receiver.take(|data, entries| {
+            let ranges = ranges(outputs, data.len(), entries.len());
+            let prepared = accept(
+                entries,
+                table,
+                budget,
+                &mut work,
+                |work| user.prepare(&ranges, work),
+                || {
+                    *sizes.borrow_mut() = Some((data.len(), entries.len()));
+                    Ok(())
+                },
+            );
+            prepared.map(|(prepared, values)| (prepared, values, entries.len()))
+        });
+        if let Some((len, count)) = sizes.take() {
+            user.bytes[outputs[2] as usize..][..8].copy_from_slice(&(len as u64).to_ne_bytes());
+            user.bytes[outputs[3] as usize..][..8].copy_from_slice(&(count as u64).to_ne_bytes());
+        }
+        let ((prepared, values, count), message) = taken?;
+        let mut work = Work::new(|| *checks += 1);
+        deliver(prepared, &message.bytes, &values[..count], &mut work);
+        Ok(())
+    }
+
+    #[test]
+    fn unprepared_message_output_leaves_message_and_table() {
+        for i in 0..4 {
+            let (sender, receiver) = Endpoint::pair(None).unwrap();
+            let entries = entries();
+            assert!(
+                sender
+                    .write(Message::new(vec![1, 2], entries.clone(), None).unwrap())
+                    .is_ok()
+            );
+            let mut table = HandleTable::new();
+            let mut user = User::new(0x2000);
+            let mut outputs = [0x10, 0x20, 0x30, 0x38];
+            outputs[i] = 0x1fff;
+            let mut checks = 0;
+            assert_eq!(
+                receive(&receiver, &mut user, outputs, &mut table, None, &mut checks),
+                Err(Error::InvalidArgs)
+            );
+            assert!(table.is_empty());
+            assert!(user.bytes.iter().all(|&b| b == 0xa5));
+            let outputs = [0x10, 0x20, 0x30, 0x38];
+            receive(&receiver, &mut user, outputs, &mut table, None, &mut checks).unwrap();
+            assert_eq!(table.len(), 2);
+            assert_eq!(&user.bytes[0x10..0x12], &[1, 2]);
+            for (i, original) in entries.iter().enumerate() {
+                let at = 0x20 + i * 4;
+                let handle = u32::from_ne_bytes(user.bytes[at..at + 4].try_into().unwrap());
+                assert!(Arc::ptr_eq(
+                    &table.get(handle).unwrap().object,
+                    &original.object
+                ));
+            }
+            assert_eq!(&user.bytes[0x30..0x38], &2u64.to_ne_bytes());
+            assert_eq!(&user.bytes[0x38..0x40], &2u64.to_ne_bytes());
+            assert_eq!(
+                receiver.read(|_, _| Ok::<(), Error>(())),
+                Err(Error::ShouldWait)
+            );
+        }
+    }
+
+    #[test]
+    fn full_table_only_publishes_sizes_and_keeps_message() {
+        let root = Budget::root();
+        let budget = Budget::child(&root, SLOT_COST, u64::MAX, None).unwrap();
+        let (sender, receiver) = Endpoint::pair(None).unwrap();
+        assert!(
+            sender
+                .write(Message::new(vec![1, 2, 3], entries(), None).unwrap())
+                .is_ok()
+        );
+        let mut table = HandleTable::new();
+        let mut user = User::new(0x2000);
+        let mut checks = 0;
+        assert_eq!(
+            receive(
+                &receiver,
+                &mut user,
+                [0x10, 0x20, 0x30, 0x38],
+                &mut table,
+                Some(&budget),
+                &mut checks
+            ),
+            Err(Error::NoResources)
+        );
+        assert!(table.is_empty());
+        let mut expected = vec![0xa5; SIZE];
+        expected[0x30..0x38].copy_from_slice(&3u64.to_ne_bytes());
+        expected[0x38..0x40].copy_from_slice(&2u64.to_ne_bytes());
+        assert!(user.bytes == expected);
+        assert!(receiver.read(|_, _| Ok::<(), Error>(())).is_ok());
+    }
+
+    #[test]
+    fn largest_message_is_delivered_with_one_check() {
+        let (sender, receiver) = Endpoint::pair(None).unwrap();
+        let payload: Vec<u8> = (0..65536u32).map(|i| i as u8).collect();
+        let handles: Vec<Entry> = (0..32).flat_map(|_| entries()).collect();
+        assert!(
+            sender
+                .write(Message::new(payload.clone(), handles, None).unwrap())
+                .is_ok()
+        );
+        let mut table = HandleTable::new();
+        let mut user = User::new(SIZE as u64);
+        let mut checks = 0;
+        let outputs = [0x123, 0x10200, 0x10300, 0x10308];
+        receive(&receiver, &mut user, outputs, &mut table, None, &mut checks).unwrap();
+        assert_eq!(checks, 1);
+        assert_eq!(table.len(), 64);
+        assert_eq!(&user.bytes[0x123..0x123 + 65536], payload.as_slice());
+        assert_eq!(&user.bytes[0x10300..0x10308], &65536u64.to_ne_bytes());
+        assert_eq!(&user.bytes[0x10308..0x10310], &64u64.to_ne_bytes());
+    }
+
     #[test]
     fn channel_pair_second_fault_is_atomic_and_success_publishes_both() {
         for (resolve_end, locked_end) in [(6, 16), (16, 6)] {
@@ -254,122 +441,6 @@ mod tests {
             );
             assert_eq!(*memory.bytes.borrow(), [0xa5; 16]);
         }
-    }
-
-    #[test]
-    fn channel_message_checks_each_output_before_publishing() {
-        for (resolve_end, locked_end) in [(32, 64), (64, 32)] {
-            for i in 0..4 {
-                let memory = model(resolve_end, locked_end);
-                let mut outputs = [0, 4, 16, 24];
-                outputs[i] = 31;
-                assert_eq!(
-                    channel_message(&memory, outputs, &[1, 2], &[7, 9]),
-                    Err(Error::InvalidArgs)
-                );
-                assert_eq!(*memory.bytes.borrow(), [0xa5; 64]);
-            }
-        }
-        let memory = model(32, 32);
-        channel_message(&memory, [0, 4, 16, 24], &[1, 2], &[7, 9]).unwrap();
-        let mut expected = vec![0xa5; 32];
-        expected[..2].copy_from_slice(&[1, 2]);
-        expected[4..8].copy_from_slice(&7u32.to_ne_bytes());
-        expected[8..12].copy_from_slice(&9u32.to_ne_bytes());
-        expected[16..24].copy_from_slice(&2u64.to_ne_bytes());
-        expected[24..32].copy_from_slice(&2u64.to_ne_bytes());
-        assert_eq!(*memory.bytes.borrow(), expected);
-    }
-
-    #[test]
-    fn receive_publication_fault_rolls_back_and_retry_consumes_message() {
-        for (resolve_end, locked_end) in [(32, 64), (64, 32)] {
-            for i in 0..4 {
-                let (sender, receiver) = Endpoint::pair(None).unwrap();
-                let entries = entries();
-                let message = Message::new(vec![1, 2], entries.clone(), None).unwrap();
-                assert!(sender.write(message).is_ok());
-                let mut table = HandleTable::new();
-                let memory = model(resolve_end, locked_end);
-                let mut outputs = [0, 4, 16, 24];
-                outputs[i] = 31;
-                assert_eq!(
-                    receiver.read(|bytes, entries| {
-                        receive(&memory, outputs, bytes, entries, &mut table, None)
-                    }),
-                    Err(Error::InvalidArgs)
-                );
-                assert!(table.is_empty());
-                assert_eq!(*memory.bytes.borrow(), [0xa5; 64]);
-                let memory = model(32, 32);
-                receiver
-                    .read(|bytes, queued| {
-                        assert_eq!(bytes, &[1, 2]);
-                        assert_eq!(queued.len(), entries.len());
-                        receive(&memory, [0, 4, 16, 24], bytes, queued, &mut table, None)
-                    })
-                    .unwrap();
-                assert_eq!(table.len(), 2);
-                let bytes = memory.bytes.borrow();
-                assert_eq!(&bytes[..2], &[1, 2]);
-                for (i, original) in entries.iter().enumerate() {
-                    let start = 4 + i * 4;
-                    let handle = u32::from_ne_bytes(bytes[start..start + 4].try_into().unwrap());
-                    let installed = table.get(handle).unwrap();
-                    assert!(Arc::ptr_eq(&installed.object, &original.object));
-                    assert_eq!(installed.rights, original.rights);
-                }
-                assert_eq!(&bytes[16..24], &2u64.to_ne_bytes());
-                assert_eq!(&bytes[24..32], &2u64.to_ne_bytes());
-                assert_eq!(
-                    receiver.read(|_, _| Ok::<(), Error>(())),
-                    Err(Error::ShouldWait)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn receive_partial_install_exhaustion_only_publishes_sizes_unless_faulted() {
-        for (resolve_end, locked_end) in [(32, 32), (28, 32), (32, 28)] {
-            let root = Budget::root();
-            let budget = Budget::child(&root, SLOT_COST, u64::MAX, None).unwrap();
-            let mut table = HandleTable::new();
-            let memory = model(resolve_end, locked_end);
-            let result = receive(
-                &memory,
-                [u64::MAX, u64::MAX, 16, 24],
-                &[1, 2, 3],
-                &entries(),
-                &mut table,
-                Some(&budget),
-            );
-            assert!(table.is_empty());
-            let mut expected = vec![0xa5; 32];
-            if resolve_end == 32 && locked_end == 32 {
-                assert_eq!(result, Err(Error::NoResources));
-                expected[16..24].copy_from_slice(&3u64.to_ne_bytes());
-                expected[24..32].copy_from_slice(&2u64.to_ne_bytes());
-            } else {
-                assert_eq!(result, Err(Error::InvalidArgs));
-            }
-            assert_eq!(*memory.bytes.borrow(), expected);
-        }
-    }
-
-    #[test]
-    fn channel_message_publishes_large_payload_and_handle_array() {
-        let memory = model(65808, 65808);
-        let payload = vec![0x5a; 65536];
-        let handles: Vec<u32> = (1..=64).collect();
-        channel_message(&memory, [0, 65536, 65792, 65800], &payload, &handles).unwrap();
-        let bytes = memory.bytes.borrow();
-        assert_eq!(&bytes[..65536], payload.as_slice());
-        for (chunk, handle) in bytes[65536..65792].chunks_exact(4).zip(handles) {
-            assert_eq!(chunk, &handle.to_ne_bytes());
-        }
-        assert_eq!(&bytes[65792..65800], &65536u64.to_ne_bytes());
-        assert_eq!(&bytes[65800..], &64u64.to_ne_bytes());
     }
 
     #[test]

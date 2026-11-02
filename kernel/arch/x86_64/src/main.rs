@@ -55,10 +55,6 @@ mod percpu;
 #[cfg(target_os = "none")]
 mod process;
 #[cfg(any(target_os = "none", test))]
-#[cfg_attr(
-    target_os = "none",
-    expect(dead_code, reason = "no system call uses it yet")
-)]
 mod publish;
 #[cfg(target_os = "none")]
 mod random;

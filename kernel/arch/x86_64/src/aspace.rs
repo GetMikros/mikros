@@ -482,6 +482,20 @@ impl crate::output::Locked for OutputGuard<'_> {
     }
 }
 
+impl AddressSpace {
+    /// Holds the page at `page` as the destination of a kernel write
+    /// (`MemoryObject::hold_for_write`).
+    pub fn hold_for_write(&self, page: u64) -> Result<crate::memory_object::Held, Error> {
+        if !in_user_range(page, PAGE_SIZE) {
+            return Err(Error::InvalidArgs);
+        }
+        let mem = self
+            .with_region(page, |r| r.map(|r| r.mem.clone()))
+            .ok_or(Error::InvalidArgs)?;
+        mem.hold_for_write(self, page)
+    }
+}
+
 const FAULT_WRITE: u64 = 1 << 1;
 const FAULT_RESERVED: u64 = 1 << 3;
 const FAULT_FETCH: u64 = 1 << 4;
