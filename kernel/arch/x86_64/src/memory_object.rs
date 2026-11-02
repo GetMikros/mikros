@@ -219,12 +219,14 @@ impl MemoryObject {
     /// Waits until page `index` of a paged object is present, requesting
     /// it when nobody has. Fails with `Io` when the page fails, its pager
     /// is gone or its request cannot be queued, and with `AccessDenied`
-    /// once the object is revoked. Anonymous objects return at once.
+    /// once the object is revoked, and with `NoResources` when the wait
+    /// cannot be charged. Anonymous objects return at once.
     pub fn obtain(&self, index: u64) -> Result<(), Error> {
         let Some(paged) = &self.paged else {
             return Ok(());
         };
         let koid = self.header.koid();
+        let mut charge = None;
         loop {
             let pages = self.pages.lock();
             if index >= pages.count() {
@@ -236,6 +238,9 @@ impl MemoryObject {
             }
             if pages.frame(index).is_some() {
                 return Ok(());
+            }
+            if charge.is_none() {
+                charge = Some(crate::pager::charge_wait()?);
             }
             let absent = state.absent(index)?;
             drop(state);

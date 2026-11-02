@@ -25,6 +25,10 @@ struct Waiter {
 
 static WAITERS: SpinLock<Vec<Waiter>> = SpinLock::new(Vec::new());
 
+/// The kernel memory charged to the waiting process for the length of a
+/// wait: its place in `WAITERS` and that place's share of the storage.
+const WAITER_COST: u64 = 2 * size_of::<Waiter>() as u64;
+
 impl Timeline {
     const COST: u64 = size_of::<Timeline>() as u64;
 
@@ -64,6 +68,7 @@ impl Timeline {
     pub fn wait(&self, process: &Process, value: u64, deadline: i64) -> Result<(), Error> {
         let thread = sched::current().ok_or(Error::BadState)?;
         let koid = self.header.koid();
+        let _charge = process.budget().hold_kernel(WAITER_COST)?;
         {
             let mut waiters = WAITERS.lock();
             waiters.try_reserve(1).map_err(|_| Error::NoMemory)?;

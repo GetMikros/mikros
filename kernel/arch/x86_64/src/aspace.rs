@@ -616,11 +616,11 @@ pub fn resolve_fault(frame: &crate::idt::Frame, addr: u64) -> Fault {
     // object's locks, and the access tried again.
     loop {
         match mem.fault(aspace, addr & !(PAGE_SIZE - 1), write, fetch) {
-            Fault::Absent(index) => {
-                if mem.obtain(index).is_err() {
-                    return Fault::Denied;
-                }
-            }
+            Fault::Absent(index) => match mem.obtain(index) {
+                Ok(()) => {}
+                Err(Error::NoResources) => return Fault::OutOfMemory,
+                Err(_) => return Fault::Denied,
+            },
             result => return result,
         }
     }

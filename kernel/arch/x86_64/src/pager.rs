@@ -5,7 +5,7 @@ use crate::memory_object::MemoryObject;
 use crate::sched::{self, Thread};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use kernel_core::object::budget::Budget;
+use kernel_core::object::budget::{Budget, Held};
 use kernel_core::object::{Header, Object, ObjectType};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
@@ -67,6 +67,21 @@ struct Waiter {
 /// The threads waiting for pages. The lock comes after an object's pages
 /// lock and before the scheduler's.
 static WAITERS: SpinLock<Vec<Waiter>> = SpinLock::new(Vec::new());
+
+/// The kernel memory charged to a process while one of its threads waits
+/// for a page: its place in `WAITERS` and that place's share of the
+/// storage.
+const WAITER_COST: u64 = 2 * size_of::<Waiter>() as u64;
+
+/// Charges the process of the running thread, if it has one, for a wait
+/// for a page, until the result is dropped.
+pub fn charge_wait() -> Result<Option<Held>, Error> {
+    let thread = sched::current().ok_or(Error::BadState)?;
+    thread
+        .process()
+        .map(|p| p.budget().hold_kernel(WAITER_COST))
+        .transpose()
+}
 
 /// Registers the running thread as waiting for page `index` of the
 /// object with ID `koid`.

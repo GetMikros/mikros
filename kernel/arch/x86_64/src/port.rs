@@ -29,6 +29,10 @@ const REGISTRATIONS_MAX: usize = 65536;
 const REGISTRATION_COST: u64 = (size_of::<Registration>() + size_of::<Queued>()) as u64;
 /// The kernel memory a queued user packet is charged.
 const USER_COST: u64 = size_of::<Queued>() as u64;
+/// The kernel memory charged to a thread's process for the length of
+/// its `port_wait`: its place in the port's waiters and that place's
+/// share of their storage.
+const WAITER_COST: u64 = 2 * size_of::<Arc<Thread>>() as u64;
 
 /// The bytes of a packet.
 pub fn packet(key: u64, kind: u32, status: i32, payload: &[u8]) -> [u8; PACKET_SIZE] {
@@ -159,6 +163,7 @@ impl Port {
     pub fn wait_queued(&self, deadline: i64) -> Result<(), Error> {
         let thread = sched::current().ok_or(Error::BadState)?;
         let process = thread.process().cloned().ok_or(Error::BadState)?;
+        let _charge = process.budget().hold_kernel(WAITER_COST)?;
         {
             let mut state = self.state.lock();
             state.waiters.try_reserve(1).map_err(|_| Error::NoMemory)?;
