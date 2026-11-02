@@ -270,10 +270,11 @@ pub(crate) mod tests {
         use crate::regions::Region;
         // A node of a map with the largest entries the kernel keeps:
         // leaf contents plus the child pointers of an internal node.
-        let entry = size_of::<u64>() + size_of::<Region<std::sync::Arc<()>>>();
+        // A region's record is one pointer.
+        let entry = size_of::<u64>() + size_of::<Region<std::sync::Arc<()>, usize>>();
         let node = 16 + 11 * entry + 12 * size_of::<usize>();
         assert!(node + HEADER <= BLOCK);
-        let mut map: Map<u64, Region<std::sync::Arc<()>>> = map();
+        let mut map: Map<u64, Region<std::sync::Arc<()>, usize>> = map();
         for i in 0..200 {
             let _claim = claim_insert().unwrap();
             heap_full(true);
@@ -289,6 +290,7 @@ pub(crate) mod tests {
                     mem: std::sync::Arc::new(()),
                     removal: 0,
                     charge: crate::regions::Charge::NONE,
+                    record: 0,
                 },
             );
             heap_full(false);

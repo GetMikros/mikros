@@ -51,6 +51,7 @@ fuzz_target!(|ops: Vec<Op>| {
                     mem: id,
                     removal: 0,
                     charge: Charge::NONE,
+                    record: (),
                 };
                 assert_eq!(regions.insert(region).is_ok(), free);
                 if free {

@@ -9,7 +9,7 @@ use crate::space;
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use kernel_core::nodes::{self, Map};
 use kernel_core::object::budget::{Budget, Scratch};
 use kernel_core::object::memory::{
@@ -18,7 +18,7 @@ use kernel_core::object::memory::{
 };
 use kernel_core::object::{Header, Object, ObjectType};
 use kernel_core::paging::{Absent, Paging};
-use kernel_core::regions::{PERM_EXECUTE, PERM_WRITE};
+use kernel_core::regions::{PERM_EXECUTE, PERM_WRITE, RECORD_ROOM, Record};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
@@ -40,13 +40,13 @@ pub struct MemoryObject {
     /// For a physical object, the start of its range and the cache policy
     /// of its mappings. Its pages then never hold frames.
     physical: Option<(u64, Policy)>,
-    /// The address spaces with regions that map the object, so that
-    /// pages can be unmapped when the object changes. Each region's
-    /// `REGION_COST` covers the entries here and in `scratch`.
-    spaces: SpinLock<Vec<Weak<AddressSpace>>>,
-    /// Room to hold every space in `spaces` while the pages are locked,
-    /// kept as large as `spaces` by `add_space`.
-    scratch: SpinLock<Vec<Arc<AddressSpace>>>,
+    /// The regions that map the object, by the ID of their record and
+    /// their start, with their address spaces, so that pages can be
+    /// unmapped when the object changes. A region's `Mapping` keeps its
+    /// entry, which its `REGION_COST` covers. Locked after the regions.
+    mappings: SpinLock<Map<(u64, u64), Weak<AddressSpace>>>,
+    /// The number of regions that map the object writable.
+    writable: AtomicU64,
     /// The seals of `mem_seal`, never removed. Checks and changes are
     /// serialized because system calls run one at a time on the one
     /// processor.
@@ -133,8 +133,8 @@ impl MemoryObject {
             charged,
             pages: SpinLock::new(pages),
             physical: None,
-            spaces: SpinLock::new(Vec::new()),
-            scratch: SpinLock::new(Vec::new()),
+            mappings: SpinLock::new(nodes::map()),
+            writable: AtomicU64::new(0),
             seals: AtomicU32::new(0),
             paged: None,
         })
@@ -166,8 +166,8 @@ impl MemoryObject {
             charged,
             pages: SpinLock::new(pages),
             physical: None,
-            spaces: SpinLock::new(Vec::new()),
-            scratch: SpinLock::new(Vec::new()),
+            mappings: SpinLock::new(nodes::map()),
+            writable: AtomicU64::new(0),
             seals: AtomicU32::new(0),
             paged: Some(Paged {
                 pager,
@@ -605,8 +605,8 @@ impl MemoryObject {
             charged,
             pages: SpinLock::new(pages),
             physical: Some((base, policy)),
-            spaces: SpinLock::new(Vec::new()),
-            scratch: SpinLock::new(Vec::new()),
+            mappings: SpinLock::new(nodes::map()),
+            writable: AtomicU64::new(0),
             seals: AtomicU32::new(0),
             paged: None,
         })
@@ -657,10 +657,7 @@ impl MemoryObject {
     /// Whether a region of some address space maps the object writable.
     /// The pages must be locked.
     fn mapped_writable(&self) -> bool {
-        let spaces = self.live_spaces();
-        let writable = spaces.iter().any(|space| space.maps_writable(self));
-        self.return_spaces(spaces);
-        writable
+        self.writable.load(Ordering::Relaxed) > 0
     }
 
     pub fn is_physical(&self) -> bool {
@@ -711,58 +708,40 @@ impl MemoryObject {
         self.pages.lock().check_range(offset, len)
     }
 
-    /// Records that `space` has regions that map the object, or fails
-    /// with `NoMemory` without room for it.
-    pub fn add_space(&self, space: &Arc<AddressSpace>) -> Result<(), Error> {
-        // The pages lock keeps `scratch` from being in use meanwhile.
-        let _pages = self.pages.lock();
-        let mut spaces = self.spaces.lock();
-        spaces.retain(|s| s.strong_count() > 0);
-        if !spaces.iter().any(|s| core::ptr::eq(s.as_ptr(), &**space)) {
-            spaces.try_reserve(1).map_err(|_| Error::NoMemory)?;
-            self.scratch
-                .lock()
-                .try_reserve(spaces.len() + 1)
-                .map_err(|_| Error::NoMemory)?;
-            spaces.push(Arc::downgrade(space));
-        }
-        Ok(())
-    }
-
-    /// Records that `space` has no regions left that map the object.
-    pub fn remove_space(&self, space: &AddressSpace) {
-        self.spaces
-            .lock()
-            .retain(|s| !core::ptr::eq(s.as_ptr(), space));
-    }
-
-    /// The live address spaces in `spaces`, in the room of `scratch`, to
-    /// be handed back to `return_spaces`. The pages must be locked, so
-    /// that no other caller holds the room.
-    fn live_spaces(&self) -> Vec<Arc<AddressSpace>> {
-        let mut list = core::mem::take(&mut *self.scratch.lock());
-        let spaces = self.spaces.lock();
-        debug_assert!(list.is_empty() && list.capacity() >= spaces.len());
-        list.extend(spaces.iter().filter_map(Weak::upgrade));
-        list
-    }
-
-    /// Hands back the room of `live_spaces`, dropping the spaces outside
-    /// the spaces and scratch locks, as dropping the last reference to
-    /// one ends it.
-    fn return_spaces(&self, mut list: Vec<Arc<AddressSpace>>) {
-        list.clear();
-        *self.scratch.lock() = list;
+    /// The record of a region of `space` from `start` that maps the
+    /// object, writable when `writable`, or `NoMemory` without room for
+    /// it.
+    pub fn record(
+        self: &Arc<Self>,
+        space: &Arc<AddressSpace>,
+        start: u64,
+        writable: bool,
+    ) -> Result<Mapping, Error> {
+        let id = NEXT_RECORD.fetch_add(1, Ordering::Relaxed);
+        Mapping::add(self, (id, start), Arc::downgrade(space), writable)
     }
 
     /// Removes the pages that map pages `first` to `end`, exclusive, of
-    /// the object from every address space. The pages must be locked.
+    /// the object from every region that maps it. The pages must be
+    /// locked.
     fn unmap_pages(&self, first: u64, end: u64) {
-        let spaces = self.live_spaces();
-        for space in &spaces {
-            space.unmap_object(self, first, end);
+        // The mappings are visited one at a time, none of them locked
+        // while a region is.
+        let mut next = (0, 0);
+        loop {
+            let entry = {
+                let mappings = self.mappings.lock();
+                let entry = mappings.range(next..).next();
+                entry.map(|(&key, space)| (key, space.clone()))
+            };
+            let Some(((id, start), space)) = entry else {
+                return;
+            };
+            next = (id, start + 1);
+            if let Some(space) = space.upgrade() {
+                space.unmap_mapping(self, start, first, end);
+            }
         }
-        self.return_spaces(spaces);
     }
 
     /// Gives page `index` a frame and removes the translations of the
@@ -1406,6 +1385,80 @@ impl Drop for Source {
         }
         if let Some((budget, bytes)) = self.charged.take() {
             budget.release_kernel(bytes);
+        }
+    }
+}
+
+/// The next record ID. IDs only need to differ within an object.
+static NEXT_RECORD: AtomicU64 = AtomicU64::new(1);
+
+/// The record of a region in the memory object it maps: its entry in the
+/// object's mappings, which goes when this is dropped. Boxed, so that the
+/// region stays small.
+pub struct Mapping(alloc::boxed::Box<Entry>);
+
+struct Entry {
+    mem: Arc<MemoryObject>,
+    key: (u64, u64),
+    writable: bool,
+}
+
+const _: () = assert!(
+    size_of::<Entry>() + size_of::<((u64, u64), Weak<AddressSpace>)>() <= RECORD_ROOM,
+    "a region's record exceeds the room its charge covers"
+);
+
+impl Mapping {
+    /// Adds the entry `key` for `space` to the mappings of `mem`.
+    fn add(
+        mem: &Arc<MemoryObject>,
+        key: (u64, u64),
+        space: Weak<AddressSpace>,
+        writable: bool,
+    ) -> Result<Mapping, Error> {
+        let entry = kernel_core::fallible::try_box(Entry {
+            mem: mem.clone(),
+            key,
+            writable,
+        })?;
+        let _claim = nodes::claim_insert()?;
+        mem.mappings.lock().insert(key, space);
+        if writable {
+            mem.writable.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(Mapping(entry))
+    }
+}
+
+impl Record for Mapping {
+    /// A record with this one's ID, so that a walk of the mappings that
+    /// has not passed this record yet reaches the new one too.
+    fn split(&self, start: u64) -> Result<Mapping, Error> {
+        let Entry { mem, key, writable } = &*self.0;
+        let space = mem.mappings.lock().get(key).cloned();
+        let space = space.expect("a live record has an entry");
+        Mapping::add(mem, (key.0, start), space, *writable)
+    }
+
+    fn set_writable(&mut self, writable: bool) {
+        let entry = &mut *self.0;
+        if entry.writable != writable {
+            entry.writable = writable;
+            if writable {
+                entry.mem.writable.fetch_add(1, Ordering::Relaxed);
+            } else {
+                entry.mem.writable.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        let Entry { mem, key, writable } = &*self.0;
+        mem.mappings.lock().remove(key);
+        if *writable {
+            mem.writable.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }

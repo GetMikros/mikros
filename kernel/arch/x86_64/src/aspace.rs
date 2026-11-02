@@ -3,7 +3,7 @@
 use crate::control::CR4_PCIDE;
 use crate::cpu;
 use crate::memory::FRAMES;
-use crate::memory_object::MemoryObject;
+use crate::memory_object::{Mapping, MemoryObject};
 use crate::paging::{self, Flags, Mapper, PAGE_SIZE, Policy, Tables};
 use crate::percpu;
 use crate::publish::ITEM_STEP;
@@ -96,12 +96,12 @@ pub struct AddressSpace {
     /// Bumped whenever a translation is removed, so that
     /// processors flush the space's PCID before using it again.
     generation: AtomicU64,
-    regions: SpinLock<Regions<Arc<MemoryObject>>>,
+    regions: SpinLock<Regions<Arc<MemoryObject>, Mapping>>,
     inner: SpinLock<Inner>,
 }
 
 /// The region type of a user address space.
-pub type RegionOf = Region<Arc<MemoryObject>>;
+pub type RegionOf = Region<Arc<MemoryObject>, Mapping>;
 
 /// A random value from the kernel's random number generator, which is
 /// seeded during boot.
@@ -335,7 +335,6 @@ impl AddressSpace {
             return Err(Error::OutOfRange);
         }
         let charge = Charge::new(Some(budget))?;
-        mem.add_space(self)?;
         let mut regions = self.regions.lock();
         let start = if options.specific {
             Ok(addr)
@@ -343,6 +342,7 @@ impl AddressSpace {
             regions.choose(size, options.below_4g, random)
         };
         let result = start.and_then(|start| {
+            let record = mem.record(self, start, options.perms & PERM_WRITE != 0)?;
             regions.insert(Region {
                 start,
                 len: size,
@@ -353,14 +353,13 @@ impl AddressSpace {
                 mem: mem.clone(),
                 removal: 0,
                 charge,
+                record,
             })?;
             Ok(start)
         });
-        let unused = !regions.iter().any(|r| Arc::ptr_eq(&r.mem, mem));
+        // A region that was not added goes, with its record, after the
+        // lock, as it may hold the last reference to the object.
         drop(regions);
-        if unused {
-            mem.remove_space(self);
-        }
         result
     }
 
@@ -398,9 +397,10 @@ impl AddressSpace {
             self.unmap_in_steps(at, len)
                 .expect("regions are page-aligned and in the user range");
         }
-        let mut regions = self.regions.lock();
-        regions.end_removal(start, end, id, &mut parts);
-        self.finish_removal(regions, parts);
+        self.regions.lock().end_removal(start, end, id, &mut parts);
+        // Dropping the regions can destroy memory objects, which takes
+        // their locks, so it happens with the regions unlocked.
+        drop(parts);
         Ok(())
     }
 
@@ -411,34 +411,9 @@ impl AddressSpace {
         self.regions.lock().mark_all(id);
         self.unmap_in_steps(USER_START, USER_END - USER_START)
             .expect("the user range is page-aligned");
-        let mut regions = self.regions.lock();
-        let parts = regions.take_all();
-        drop(regions);
-        for r in parts.values() {
-            r.mem.remove_space(self);
-        }
+        let parts = self.regions.lock().take_all();
         // Dropping the regions can destroy memory objects, which takes
-        // their locks, so it happens last.
-        drop(parts);
-    }
-
-    /// Tells the objects of the removed `parts` that no remaining region
-    /// maps them, releasing `regions` first, and drops the parts last.
-    fn finish_removal(
-        &self,
-        regions: kernel_core::sync::Guard<'_, Regions<Arc<MemoryObject>>>,
-        mut parts: Vec<RegionOf>,
-    ) {
-        // The parts whose object no remaining region maps come first.
-        let mapped = |part: &RegionOf| regions.iter().any(|r| Arc::ptr_eq(&r.mem, &part.mem));
-        parts.sort_unstable_by_key(|part| mapped(part));
-        let unused = parts.iter().take_while(|part| !mapped(part)).count();
-        drop(regions);
-        for part in &parts[..unused] {
-            part.mem.remove_space(self);
-        }
-        // Dropping the regions can destroy memory objects, which takes
-        // their locks, so it happens last.
+        // their locks, so it happens with the regions unlocked.
         drop(parts);
     }
 
@@ -455,14 +430,6 @@ impl AddressSpace {
         self.regions
             .lock()
             .set_inheritance(start, end, inheritance, Some(budget))
-    }
-
-    /// Whether a region maps `mem` writable.
-    pub fn maps_writable(&self, mem: &MemoryObject) -> bool {
-        self.regions
-            .lock()
-            .iter()
-            .any(|r| core::ptr::eq(&*r.mem, mem) && r.perms & PERM_WRITE != 0)
     }
 
     /// Sets `perms` on every page from `start` to `end`, as `vm_protect`
@@ -485,10 +452,12 @@ impl AddressSpace {
     }
 
     /// Removes the pages that map pages `first` to `end`, exclusive, of
-    /// `mem`. The caller holds the object's pages lock.
-    pub fn unmap_object(&self, mem: &MemoryObject, first: u64, end: u64) {
+    /// `mem` through the region from `start`, if it still maps `mem`. The
+    /// caller holds the object's pages lock.
+    pub fn unmap_mapping(&self, mem: &MemoryObject, start: u64, first: u64, end: u64) {
         let regions = self.regions.lock();
-        for r in regions.iter().filter(|r| core::ptr::eq(&*r.mem, mem)) {
+        let region = regions.starting_at(start);
+        if let Some(r) = region.filter(|r| core::ptr::eq(&*r.mem, mem)) {
             let base = r.offset / PAGE_SIZE;
             let pages = r.len / PAGE_SIZE;
             let from = first.saturating_sub(base).min(pages);

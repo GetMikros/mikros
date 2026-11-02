@@ -3,7 +3,7 @@
 
 use crate::gaps::{GAP_SIZE, Gaps};
 use crate::nodes::{self, INSERT, Map};
-use crate::object::budget::{Budget, Held};
+use crate::object::budget::Budget;
 use crate::object::rights;
 use crate::status::Error;
 use alloc::sync::Arc;
@@ -103,19 +103,20 @@ impl MapOptions {
     }
 }
 
+/// The bytes a region's record and its entry in the memory object may take.
+pub const RECORD_ROOM: usize = 64;
+
 /// The kernel memory charged for a region: its entry and that entry's
-/// share of the map storage, room for the two pointers a memory object
-/// keeps for each address space with a region that maps it, and room for
-/// a gap in each gap tree, each with its share of the storage that holds
-/// it.
+/// share of the map storage, its record in its memory object, and room
+/// for a gap in each gap tree, each with its share of the storage that
+/// holds it.
 pub const REGION_COST: u64 = 2
-    * (size_of::<u64>() + size_of::<Region<Arc<()>>>() + 2 * size_of::<usize>() + 2 * GAP_SIZE)
-        as u64;
+    * (size_of::<u64>() + size_of::<Region<Arc<()>, usize>>() + RECORD_ROOM + 2 * GAP_SIZE) as u64;
 
 /// A region's entry charged to a budget, which is released when the
 /// region goes.
 #[derive(Default)]
-pub struct Charge(Option<Held>);
+pub struct Charge(Option<Arc<Budget>>);
 
 impl Charge {
     /// No charge.
@@ -124,8 +125,21 @@ impl Charge {
     /// Charges one region to `budget`, if there is one.
     pub fn new(budget: Option<&Arc<Budget>>) -> Result<Charge, Error> {
         match budget {
-            Some(budget) => Ok(Charge(Some(budget.hold_kernel(REGION_COST)?))),
+            Some(budget) => {
+                budget.charge_kernel(REGION_COST)?;
+                Ok(Charge(Some(budget.clone())))
+            }
             None => Ok(Charge::NONE),
+        }
+    }
+}
+
+// Not a `Held`, which keeps the size too, so that a region's node of the
+// map still fits in a reserve block with the region's record.
+impl Drop for Charge {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.0 {
+            budget.release_kernel(REGION_COST);
         }
     }
 }
@@ -140,9 +154,29 @@ impl core::fmt::Debug for Charge {
     }
 }
 
-/// A mapped range. `M` is the memory object.
+/// What a region keeps in its memory object so that the object can find
+/// its mappings. It goes when the region does.
+pub trait Record: Sized {
+    /// The record of the part from `start` of the region, which a split
+    /// makes a region of its own, or an error, with no effect.
+    fn split(&self, start: u64) -> Result<Self, Error>;
+
+    /// Notes whether the region now maps the object writable.
+    fn set_writable(&mut self, writable: bool);
+}
+
+/// No record, for regions whose objects need none.
+impl Record for () {
+    fn split(&self, _: u64) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn set_writable(&mut self, _: bool) {}
+}
+
+/// A mapped range. `M` is the memory object and `R` its record there.
 #[derive(Debug)]
-pub struct Region<M> {
+pub struct Region<M, R = ()> {
     pub start: u64,
     pub len: u64,
     /// The offset in the object of the first byte.
@@ -159,9 +193,10 @@ pub struct Region<M> {
     /// page of it can be entered or changed.
     pub removal: u64,
     pub charge: Charge,
+    pub record: R,
 }
 
-impl<M> Region<M> {
+impl<M, R> Region<M, R> {
     pub fn end(&self) -> u64 {
         self.start + self.len
     }
@@ -175,8 +210,8 @@ impl<M> Region<M> {
 
 /// Non-overlapping regions, keyed by their start, inside a range, with
 /// the free gaps between them in pages.
-pub struct Regions<M> {
-    map: Map<u64, Region<M>>,
+pub struct Regions<M, R = ()> {
+    map: Map<u64, Region<M, R>>,
     /// The gaps below and above `line`; a gap across it is split there.
     /// Each tree has room for two more gaps than there are regions,
     /// which is as many as there can be, so that removing regions never
@@ -190,11 +225,11 @@ pub struct Regions<M> {
     high: u64,
 }
 
-impl<M: Clone> Regions<M> {
+impl<M: Clone, R: Record> Regions<M, R> {
     /// No regions in the range from `low` to `high`, with `line` between
     /// them, all page-aligned. Fails with `NoMemory` without room for the
     /// gaps.
-    pub fn new(low: u64, line: u64, high: u64) -> Result<Regions<M>, Error> {
+    pub fn new(low: u64, line: u64, high: u64) -> Result<Regions<M, R>, Error> {
         debug_assert!(low <= line && line <= high);
         debug_assert!(
             [low, line, high]
@@ -303,14 +338,19 @@ impl<M: Clone> Regions<M> {
     }
 
     /// The region containing `addr`, also one being removed.
-    fn find_any(&self, addr: u64) -> Option<&Region<M>> {
+    fn find_any(&self, addr: u64) -> Option<&Region<M, R>> {
         let (_, r) = self.map.range(..=addr).next_back()?;
         (addr < r.end()).then_some(r)
     }
 
     /// The region containing `addr`, unless it is being removed.
-    pub fn find(&self, addr: u64) -> Option<&Region<M>> {
+    pub fn find(&self, addr: u64) -> Option<&Region<M, R>> {
         self.find_any(addr).filter(|r| r.removal == 0)
+    }
+
+    /// The region that starts at `start`, also one being removed.
+    pub fn starting_at(&self, start: u64) -> Option<&Region<M, R>> {
+        self.map.get(&start)
     }
 
     /// Whether any region, also one being removed, overlaps the `len`
@@ -323,7 +363,7 @@ impl<M: Clone> Regions<M> {
     /// Adds `region`, or fails with `OutOfRange` when it does not lie in
     /// the range, with `AlreadyExists` when it overlaps one and with
     /// `NoMemory` without room for it.
-    pub fn insert(&mut self, region: Region<M>) -> Result<(), Error> {
+    pub fn insert(&mut self, region: Region<M, R>) -> Result<(), Error> {
         let end = region.start.checked_add(region.len);
         if region.start < self.low || end.is_none_or(|end| end > self.high) {
             return Err(Error::OutOfRange);
@@ -346,49 +386,48 @@ impl<M: Clone> Regions<M> {
         nodes::claim(2 * INSERT)
     }
 
-    /// Whether `split_at(addr)` would split a region.
-    fn splits(&self, addr: u64) -> bool {
-        self.find(addr).is_some_and(|r| r.start != addr)
-    }
-
     /// Charges `budget`, if there is one, for the regions that splitting
-    /// at `start` and then at `end` adds, which `split_ends` takes.
+    /// at `start` and then at `end` adds, and makes their records, which
+    /// `split_ends` takes.
     fn charge_splits(
         &self,
         start: u64,
         end: u64,
         budget: Option<&Arc<Budget>>,
-    ) -> Result<[Charge; 2], Error> {
-        let first = if self.splits(start) {
-            Charge::new(budget)?
-        } else {
-            Charge::NONE
+    ) -> Result<[Option<(Charge, R)>; 2], Error> {
+        let split = |at: u64| -> Result<Option<(Charge, R)>, Error> {
+            match self.find(at) {
+                Some(r) if r.start != at => {
+                    let charge = Charge::new(budget)?;
+                    Ok(Some((charge, r.record.split(at)?)))
+                }
+                _ => Ok(None),
+            }
         };
-        let second = if end != start && self.splits(end) {
-            Charge::new(budget)?
-        } else {
-            Charge::NONE
-        };
+        let first = split(start)?;
+        let second = if end != start { split(end)? } else { None };
         Ok([first, second])
     }
 
-    /// Splits the regions at `start` and `end` with the charges from
-    /// `charge_splits`. The caller holds a claim for the splits.
-    fn split_ends(&mut self, start: u64, end: u64, [first, second]: [Charge; 2]) {
-        self.split_at(start, first);
-        self.split_at(end, second);
+    /// Splits the regions at `start` and `end` with the charges and
+    /// records from `charge_splits`. The caller holds a claim for the
+    /// splits.
+    fn split_ends(&mut self, start: u64, end: u64, [first, second]: [Option<(Charge, R)>; 2]) {
+        if let Some(split) = first {
+            self.split_at(start, split);
+        }
+        if let Some(split) = second {
+            self.split_at(end, split);
+        }
     }
 
-    /// Splits the region containing `addr`, unless it is being removed,
-    /// so that one starts there, giving the new region `charge`. The
-    /// caller holds a claim for the split.
-    fn split_at(&mut self, addr: u64, charge: Charge) {
-        let Some(r) = self.find(addr) else {
-            return;
-        };
-        if r.start == addr {
-            return;
-        }
+    /// Splits the region containing `addr`, which is not being removed and
+    /// does not start there, so that one starts there, giving the new
+    /// region `charge` and `record`. The caller holds a claim for the
+    /// split.
+    fn split_at(&mut self, addr: u64, (charge, record): (Charge, R)) {
+        let r = self.find(addr).expect("a region to split");
+        debug_assert!(r.start != addr);
         let head_len = addr - r.start;
         let tail = Region {
             start: addr,
@@ -400,6 +439,7 @@ impl<M: Clone> Regions<M> {
             mem: r.mem.clone(),
             removal: r.removal,
             charge,
+            record,
         };
         let start = r.start;
         self.map.get_mut(&start).expect("found above").len = head_len;
@@ -419,7 +459,7 @@ impl<M: Clone> Regions<M> {
         end: u64,
         id: u64,
         budget: Option<&Arc<Budget>>,
-    ) -> Result<Vec<Region<M>>, Error> {
+    ) -> Result<Vec<Region<M, R>>, Error> {
         debug_assert!(id != 0);
         let straddles = self.find(start).is_some_and(|r| r.start < start);
         let live = self.map.range(start..end).filter(|(_, r)| r.removal == 0);
@@ -441,7 +481,7 @@ impl<M: Clone> Regions<M> {
 
     /// Ends removal `id` of the range from `start` to `end`, begun by
     /// `begin_removal`, moving its parts to `parts`, the room it returned.
-    pub fn end_removal(&mut self, start: u64, end: u64, id: u64, parts: &mut Vec<Region<M>>) {
+    pub fn end_removal(&mut self, start: u64, end: u64, id: u64, parts: &mut Vec<Region<M, R>>) {
         let (from, to) = self.window(start, end);
         self.relink(from, to, false);
         for (_, r) in self.map.extract_if(start..end, |_, r| r.removal == id) {
@@ -469,7 +509,7 @@ impl<M: Clone> Regions<M> {
     }
 
     /// Removes every region and returns them, by start.
-    pub fn take_all(&mut self) -> Map<u64, Region<M>> {
+    pub fn take_all(&mut self) -> Map<u64, Region<M, R>> {
         let all = core::mem::replace(&mut self.map, nodes::map());
         self.below.clear();
         self.above.clear();
@@ -485,7 +525,7 @@ impl<M: Clone> Regions<M> {
         end: u64,
         id: u64,
         budget: Option<&Arc<Budget>>,
-    ) -> Result<Vec<Region<M>>, Error> {
+    ) -> Result<Vec<Region<M, R>>, Error> {
         let mut parts = self.begin_removal(start, end, id, budget)?;
         self.end_removal(start, end, id, &mut parts);
         Ok(parts)
@@ -528,7 +568,7 @@ impl<M: Clone> Regions<M> {
         start: u64,
         end: u64,
         perms: u32,
-        allowed: impl Fn(&Region<M>) -> bool,
+        allowed: impl Fn(&Region<M, R>) -> bool,
         budget: Option<&Arc<Budget>>,
     ) -> Result<(), Error> {
         let mut at = start;
@@ -548,12 +588,13 @@ impl<M: Clone> Regions<M> {
         self.split_ends(start, end, charges);
         for r in self.map.range_mut(start..end).map(|(_, r)| r) {
             r.perms = perms;
+            r.record.set_writable(perms & PERM_WRITE != 0);
         }
         Ok(())
     }
 
     /// The regions in address order.
-    pub fn iter(&self) -> impl Iterator<Item = &Region<M>> {
+    pub fn iter(&self) -> impl Iterator<Item = &Region<M, R>> {
         self.map.values()
     }
 
@@ -646,6 +687,7 @@ mod tests {
             mem: 7,
             removal: 0,
             charge: Charge::NONE,
+            record: (),
         }
     }
 
@@ -817,6 +859,62 @@ mod tests {
             got,
             [(2 * P, P, 0), (3 * P, P, 2), (4 * P, P, 2), (5 * P, P, 0)]
         );
+    }
+
+    /// A record that counts the live records and the writable ones.
+    struct Counted(std::rc::Rc<std::cell::Cell<(i32, i32)>>, bool);
+
+    impl Record for Counted {
+        fn split(&self, _: u64) -> Result<Counted, Error> {
+            let (live, writable) = self.0.get();
+            self.0.set((live + 1, writable + i32::from(self.1)));
+            Ok(Counted(self.0.clone(), self.1))
+        }
+
+        fn set_writable(&mut self, writable: bool) {
+            let (live, count) = self.0.get();
+            self.0
+                .set((live, count + i32::from(writable) - i32::from(self.1)));
+            self.1 = writable;
+        }
+    }
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            let (live, writable) = self.0.get();
+            self.0.set((live - 1, writable - i32::from(self.1)));
+        }
+    }
+
+    #[test]
+    fn keeps_a_record_for_each_region() {
+        let counts = std::rc::Rc::new(std::cell::Cell::new((1, 0)));
+        let mut r: Regions<u8, Counted> = Regions::new(0, 64 * P, 1 << 40).unwrap();
+        let region = region(2 * P, 6 * P, 0);
+        r.insert(Region {
+            start: region.start,
+            len: region.len,
+            offset: region.offset,
+            perms: region.perms,
+            max: region.max,
+            inheritance: region.inheritance,
+            mem: region.mem,
+            removal: 0,
+            charge: Charge::NONE,
+            record: Counted(counts.clone(), false),
+        })
+        .unwrap();
+        // Splitting at both ends of the middle adds two records, and the
+        // middle becomes writable.
+        r.set_perms(4 * P, 6 * P, PERM_READ | PERM_WRITE, |_| true, None)
+            .unwrap();
+        assert_eq!(counts.get(), (3, 1));
+        let removed = r.remove(4 * P, 8 * P, 1, None).unwrap();
+        assert_eq!(removed.len(), 2);
+        drop(removed);
+        assert_eq!(counts.get(), (1, 0));
+        drop(r.take_all());
+        assert_eq!(counts.get(), (0, 0));
     }
 
     #[test]

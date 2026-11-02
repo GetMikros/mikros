@@ -16,3 +16,10 @@ pub fn try_arc<T>(value: T) -> Result<Arc<T>, Error> {
     // SAFETY: the value was just written.
     Ok(unsafe { arc.assume_init() })
 }
+
+/// `value` in a new `Box`, or `NoMemory` when there is no room for it, in
+/// which case `value` is dropped.
+pub fn try_box<T>(value: T) -> Result<alloc::boxed::Box<T>, Error> {
+    let boxed = alloc::boxed::Box::<T>::try_new_uninit().map_err(|_| Error::NoMemory)?;
+    Ok(alloc::boxed::Box::write(boxed, value))
+}
