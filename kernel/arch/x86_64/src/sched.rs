@@ -56,7 +56,21 @@ pub struct Thread {
     exception_frame: AtomicPtr<crate::idt::Frame>,
     /// `RESUMED` or `HANDLER_GONE` once the thread leaves `EXCEPTION`.
     woken: AtomicU32,
+    /// DR0 to DR3, DR6 and DR7 of a user thread, checked as
+    /// `thread_state::parse_debug` does.
+    debug: SpinLock<[u64; 6]>,
+    /// Set when one of the thread's breakpoints fired in kernel mode, so
+    /// that a `DEBUG` exception is reported before it returns to user
+    /// mode.
+    debug_pending: AtomicBool,
 }
+
+/// The value DR6 has when no debug condition is recorded.
+const DR6_CLEAR: u64 = 0xFFFF_0FF0;
+
+/// Whether DR7 may enable breakpoints on this processor: set when a
+/// thread with breakpoints was switched in.
+static BREAKPOINTS_LOADED: AtomicBool = AtomicBool::new(false);
 
 /// The user-mode state of a user thread that is not in its registers
 /// while the thread runs in the kernel.
@@ -103,6 +117,8 @@ impl Thread {
             user: SpinLock::new(UserState::default()),
             exception_frame: AtomicPtr::new(core::ptr::null_mut()),
             woken: AtomicU32::new(0),
+            debug: SpinLock::new([0; 6]),
+            debug_pending: AtomicBool::new(false),
         }))
     }
 
@@ -164,7 +180,66 @@ impl Thread {
                 user.fs_base = crate::cpu::read_msr(IA32_FS_BASE);
                 user.gs_base = crate::cpu::read_msr(percpu::IA32_KERNEL_GS_BASE);
             }
+            let mut debug = self.debug.lock();
+            if debug[5] != 0 {
+                debug[4] = crate::cpu::read_dr(6);
+            }
         }
+    }
+
+    /// Loads the thread's breakpoints, or disables those of the thread
+    /// that ran before.
+    fn load_breakpoints(&self) {
+        let debug = *self.debug.lock();
+        let dr7 = debug[5];
+        if dr7 == 0 {
+            if BREAKPOINTS_LOADED.swap(false, Ordering::Relaxed) {
+                // SAFETY: zero disables every breakpoint.
+                unsafe { crate::cpu::write_dr(7, 0) };
+            }
+            return;
+        }
+        // SAFETY: disabled breakpoints get address 0 and enabled ones were
+        // checked to be user addresses; DR6 keeps only its lower half; DR7
+        // was checked to enable only local, non-I/O breakpoints.
+        unsafe {
+            crate::cpu::write_dr(7, 0);
+            for (i, &addr) in debug[..4].iter().enumerate() {
+                let enabled = dr7 >> (2 * i) & 1 != 0;
+                crate::cpu::write_dr(i as u8, if enabled { addr } else { 0 });
+            }
+            crate::cpu::write_dr(6, debug[4] & 0xFFFF_FFFF);
+            crate::cpu::write_dr(7, dr7);
+        }
+        BREAKPOINTS_LOADED.store(true, Ordering::Relaxed);
+    }
+
+    /// Calls `f` with the debug registers of a thread in state
+    /// `EXCEPTION`, or returns `None` when it is in another state.
+    pub fn with_stopped_debug<R>(&self, f: impl FnOnce(&mut [u64; 6]) -> R) -> Option<R> {
+        if self.state() != EXCEPTION || self.exception_frame.load(Ordering::Acquire).is_null() {
+            return None;
+        }
+        Some(f(&mut self.debug.lock()))
+    }
+
+    /// Records a debug exception that the thread's breakpoints raised in
+    /// kernel mode, with DR6 `dr6`, and clears DR6.
+    pub fn defer_debug(&self, dr6: u64) {
+        self.debug.lock()[4] = dr6;
+        // SAFETY: this is DR6's value with no condition recorded.
+        unsafe { crate::cpu::write_dr(6, DR6_CLEAR) };
+        self.debug_pending.store(true, Ordering::Release);
+    }
+
+    /// Whether a debug exception was deferred, clearing the mark.
+    pub fn take_deferred_debug(&self) -> bool {
+        self.debug_pending.swap(false, Ordering::AcqRel)
+    }
+
+    /// Whether the thread has breakpoints enabled.
+    pub fn has_breakpoints(&self) -> bool {
+        self.debug.lock()[5] != 0
     }
 
     /// Loads the user state of the thread about to run: its extended
@@ -172,6 +247,7 @@ impl Thread {
     /// for entries from user mode, and its FS and GS bases.
     fn switch_in(&self) {
         self.extended.restore();
+        self.load_breakpoints();
         let Some(process) = &self.process else {
             return;
         };

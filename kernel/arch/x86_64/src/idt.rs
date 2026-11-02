@@ -11,6 +11,7 @@ use kernel_core::exception::kind;
 /// The distance between two entry stubs.
 const STUB_SIZE: u64 = 16;
 
+pub const DEBUG: u8 = 1;
 pub const NMI: u8 = 2;
 pub const BREAKPOINT: u8 = 3;
 pub const DOUBLE_FAULT: u8 = 8;
@@ -290,6 +291,9 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
             }
         }
         GENERAL_PROTECTION if crate::usercopy::recover(frame) => {}
+        // A user thread's breakpoint hit while the kernel touched user
+        // memory is reported when the thread returns to user mode.
+        DEBUG if frame.cs & 3 == 0 && defer_debug() => {}
         v @ 0..32 if frame.cs & 3 == 3 && !fatal(v) => {
             crate::exception::raise(frame, exception_type(v), frame.rip)
         }
@@ -304,7 +308,22 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
     }
     if frame.cs & 3 == 3 {
         crate::sched::preempt_user();
+        crate::exception::deferred_debug(frame);
         crate::sched::exit_if_dead();
+    }
+}
+
+/// Records a debug exception raised in kernel mode by a breakpoint of the
+/// running user thread. Returns whether it was one.
+#[cfg(target_os = "none")]
+fn defer_debug() -> bool {
+    let dr6 = crate::cpu::read_dr(6);
+    match crate::sched::current() {
+        Some(thread) if thread.has_breakpoints() && dr6 & 0xF != 0 => {
+            thread.defer_debug(dr6);
+            true
+        }
+        _ => false,
     }
 }
 

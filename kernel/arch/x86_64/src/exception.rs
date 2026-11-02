@@ -4,7 +4,7 @@
 use crate::idt::{self, Frame};
 use crate::sched;
 use alloc::vec::Vec;
-use kernel_core::exception::{EXIT_CODE, REPORT_SIZE, Report};
+use kernel_core::exception::{EXIT_CODE, REPORT_SIZE, Report, kind};
 use kernel_core::object::channel::Message;
 use kernel_core::object::handles::Entry;
 use kernel_core::object::rights::{DUPLICATE, INSPECT, MANAGE, TRANSFER, WAIT};
@@ -21,6 +21,22 @@ const _: () = assert!(REPORT_RIGHTS & !rights::ALL == 0);
 /// until the handler resumes the thread. Returns with the thread
 /// RUNNABLE or DEAD; the caller ends it if it is DEAD.
 pub fn raise(frame: &mut Frame, kind: u32, address: u64) {
+    raise_with_code(frame, kind, address, idt::arch_code(frame));
+}
+
+/// Reports a debug exception that the running user thread's breakpoints
+/// raised in kernel mode, if there is one, as it returns to user mode
+/// with its user registers in `frame`. Returns whether it reported one.
+pub fn deferred_debug(frame: &mut Frame) -> bool {
+    if !sched::current().is_some_and(|t| t.take_deferred_debug()) {
+        return false;
+    }
+    let rip = frame.rip;
+    raise_with_code(frame, kind::DEBUG, rip, u64::from(idt::DEBUG));
+    true
+}
+
+fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
     let Some(thread) = sched::current() else {
         crate::panic::exception(frame);
     };
@@ -37,7 +53,7 @@ pub fn raise(frame: &mut Frame, kind: u32, address: u64) {
         process_koid: process.header().koid(),
         thread_koid: thread.header().koid(),
         address,
-        arch_code: idt::arch_code(frame),
+        arch_code,
     };
     sched::enter_exception(&thread, frame);
     let (mut bytes, mut handles) = (Vec::new(), Vec::new());

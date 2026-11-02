@@ -6,7 +6,7 @@ use super::{Checked, UserIn, UserOut, current_process};
 use crate::memory_object::MemoryObject;
 use crate::process::Process;
 use crate::sched::Thread;
-use crate::thread_state::{self, GENERAL_SIZE, General};
+use crate::thread_state::{self, DEBUG_SIZE, GENERAL_SIZE, General};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use kernel_core::exception::{self, DEBUG_EVENTS};
@@ -516,8 +516,7 @@ fn state_size(kind: u32) -> Result<u64, Error> {
     match kind {
         STATE_GENERAL => Ok(GENERAL_SIZE as u64),
         STATE_EXTENDED => Ok(8 + crate::context::extended_state_size() as u64),
-        // Hardware breakpoint state comes later.
-        STATE_DEBUG => Err(Error::NotSupported),
+        STATE_DEBUG => Ok(DEBUG_SIZE as u64),
         _ => Err(Error::InvalidArgs),
     }
 }
@@ -535,6 +534,10 @@ pub fn thread_read_state(
     }
     if !buf.fits(size) {
         return Err(Error::InvalidArgs);
+    }
+    if kind == STATE_DEBUG {
+        let regs = thread.with_stopped_debug(|r| *r).ok_or(Error::BadState)?;
+        return buf.write_bytes(&thread_state::debug_bytes(&regs));
     }
     // The state is copied out after the thread is let go, as the copy can
     // fault.
@@ -575,6 +578,14 @@ pub fn thread_write_state(
         .map_err(|_| Error::NoMemory)?;
     bytes.resize(size as usize, 0);
     buf.read_bytes(&mut bytes)?;
+    if kind == STATE_DEBUG {
+        let state: &[u8; DEBUG_SIZE] = bytes[..].try_into().expect("the DEBUG size");
+        let user = |a| crate::aspace::in_user_range(a, 1);
+        let regs = thread_state::parse_debug(state, user).ok_or(Error::InvalidArgs)?;
+        return thread
+            .with_stopped_debug(|r| *r = regs)
+            .ok_or(Error::BadState);
+    }
     if kind == STATE_GENERAL {
         let state: &[u8; GENERAL_SIZE] = bytes[..].try_into().expect("the GENERAL size");
         let user = |a| crate::aspace::in_user_range(a, 1);

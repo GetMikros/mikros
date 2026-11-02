@@ -198,3 +198,41 @@ pub unsafe fn write_cr3(value: u64) {
     // SAFETY: the caller guarantees the kernel stays mapped.
     unsafe { asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags)) };
 }
+
+/// Reads debug register `n`, one of 0 to 3, 6 or 7.
+pub fn read_dr(n: u8) -> u64 {
+    let value;
+    // SAFETY: reading a debug register has no side effects, and CR4.DE is
+    // clear, so DR4 and DR5 are never named.
+    unsafe {
+        match n {
+            0 => asm!("mov {}, dr0", out(reg) value, options(nomem, nostack, preserves_flags)),
+            1 => asm!("mov {}, dr1", out(reg) value, options(nomem, nostack, preserves_flags)),
+            2 => asm!("mov {}, dr2", out(reg) value, options(nomem, nostack, preserves_flags)),
+            3 => asm!("mov {}, dr3", out(reg) value, options(nomem, nostack, preserves_flags)),
+            6 => asm!("mov {}, dr6", out(reg) value, options(nomem, nostack, preserves_flags)),
+            _ => asm!("mov {}, dr7", out(reg) value, options(nomem, nostack, preserves_flags)),
+        }
+    }
+    value
+}
+
+/// Writes debug register `n`, one of 0 to 3, 6 or 7.
+///
+/// # Safety
+///
+/// Addresses must be canonical, DR6 and DR7 must have their upper 32 bits
+/// clear, and DR7 must not enable I/O or kernel breakpoints.
+pub unsafe fn write_dr(n: u8, value: u64) {
+    // SAFETY: the caller guarantees the value is valid.
+    unsafe {
+        match n {
+            0 => asm!("mov dr0, {}", in(reg) value, options(nomem, nostack, preserves_flags)),
+            1 => asm!("mov dr1, {}", in(reg) value, options(nomem, nostack, preserves_flags)),
+            2 => asm!("mov dr2, {}", in(reg) value, options(nomem, nostack, preserves_flags)),
+            3 => asm!("mov dr3, {}", in(reg) value, options(nomem, nostack, preserves_flags)),
+            6 => asm!("mov dr6, {}", in(reg) value, options(nomem, nostack, preserves_flags)),
+            _ => asm!("mov dr7, {}", in(reg) value, options(nomem, nostack, preserves_flags)),
+        }
+    }
+}

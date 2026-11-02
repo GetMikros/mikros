@@ -126,9 +126,53 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     ];
     frame.rax = generated::dispatch(frame.rax, &args) as u64;
     crate::sched::preempt_user();
+    let reported = deferred_debug(frame);
     crate::sched::exit_if_dead();
-    // SYSRET to an address outside the user range would fault in ring 0.
-    u64::from(!(USER_START..USER_END).contains(&frame.rip))
+    // SYSRET to an address outside the user range would fault in ring 0,
+    // and after a report the handler may have changed RCX and R11, which
+    // SYSRET overwrites.
+    u64::from(reported || !(USER_START..USER_END).contains(&frame.rip))
+}
+
+/// Reports a deferred debug exception of the calling thread, with its
+/// registers in the layout of an interrupt frame while the handler may
+/// read and change them. Returns whether it reported one.
+fn deferred_debug(frame: &mut Frame) -> bool {
+    let f = frame;
+    let mut regs = crate::idt::Frame {
+        r15: f.r15,
+        r14: f.r14,
+        r13: f.r13,
+        r12: f.r12,
+        r11: f.r11,
+        r10: f.r10,
+        r9: f.r9,
+        r8: f.r8,
+        rbp: f.rbp,
+        rdi: f.rdi,
+        rsi: f.rsi,
+        rdx: f.rdx,
+        rcx: f.rcx,
+        rbx: f.rbx,
+        rax: f.rax,
+        vector: u64::from(crate::idt::DEBUG),
+        error: 0,
+        rip: f.rip,
+        cs: f.cs,
+        rflags: f.rflags,
+        rsp: f.rsp,
+        ss: f.ss,
+    };
+    if !crate::exception::deferred_debug(&mut regs) {
+        return false;
+    }
+    let r = regs;
+    [f.r15, f.r14, f.r13, f.r12, f.r11, f.r10, f.r9, f.r8] =
+        [r.r15, r.r14, r.r13, r.r12, r.r11, r.r10, r.r9, r.r8];
+    [f.rbp, f.rdi, f.rsi, f.rdx, f.rcx, f.rbx, f.rax] =
+        [r.rbp, r.rdi, r.rsi, r.rdx, r.rcx, r.rbx, r.rax];
+    [f.rip, f.rflags, f.rsp] = [r.rip, r.rflags, r.rsp];
+    true
 }
 
 /// The process of the running thread.

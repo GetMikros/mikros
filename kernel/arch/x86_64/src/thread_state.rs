@@ -77,6 +77,43 @@ impl General {
     }
 }
 
+/// The size of the `DEBUG` state: DR0 to DR3, DR6 and DR7.
+pub const DEBUG_SIZE: usize = 48;
+
+/// The DR7 bits a written state may set: the local enable bits L0 to L3
+/// and the condition and length fields.
+const DR7_ALLOWED: u64 = 0b0101_0101 | 0xFFFF_0000;
+
+/// The breakpoints of a `DEBUG` state that are enabled, by index.
+pub fn enabled(dr7: u64) -> impl Iterator<Item = usize> {
+    (0..4).filter(move |i| dr7 >> (2 * i) & 1 != 0)
+}
+
+/// The `DEBUG` state in `bytes`, or `None` when it sets a DR7 bit that is
+/// not allowed, selects I/O breakpoints, or enables a breakpoint at an
+/// address `user` refuses.
+pub fn parse_debug(bytes: &[u8; DEBUG_SIZE], user: impl Fn(u64) -> bool) -> Option<[u64; 6]> {
+    let mut regs = [0u64; 6];
+    for (r, chunk) in regs.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *r = u64::from_le_bytes(*chunk);
+    }
+    let dr7 = regs[5];
+    let io = (0..4).any(|i| dr7 >> (16 + 4 * i) & 0b11 == 0b10);
+    if dr7 & !DR7_ALLOWED != 0 || io || enabled(dr7).any(|i| !user(regs[i])) {
+        return None;
+    }
+    Some(regs)
+}
+
+/// The bytes of a `DEBUG` state.
+pub fn debug_bytes(regs: &[u64; 6]) -> [u8; DEBUG_SIZE] {
+    let mut out = [0u8; DEBUG_SIZE];
+    for (chunk, r) in out.as_chunks_mut::<8>().0.iter_mut().zip(regs) {
+        *chunk = r.to_le_bytes();
+    }
+    out
+}
+
 const MXCSR: usize = 24;
 const MXCSR_MASK: usize = 28;
 const XSTATE_BV: usize = 512;
@@ -155,6 +192,25 @@ mod tests {
         g.frame[16] = 0x40_0000;
         g.gs_base = 0x10;
         assert!(General::parse(&g.bytes(), user).is_none());
+    }
+
+    #[test]
+    fn checks_debug_state() {
+        let state = |r: [u64; 6]| debug_bytes(&r);
+        let ok = |r| parse_debug(&state(r), user);
+        assert_eq!(
+            ok([0x40_0000, 0, 0, 0, 0, 1 | 0b1101 << 16]),
+            Some([0x40_0000, 0, 0, 0, 0, 0xD0001])
+        );
+        // A disabled breakpoint may hold any address.
+        assert!(ok([u64::MAX, 0, 0, 0, 0, 0]).is_some());
+        assert!(ok([u64::MAX, 0, 0, 0, 0, 1]).is_none());
+        assert!(ok([0, 0, 0, 0x40_0000, 0, 1 << 6]).is_some());
+        assert!(ok([0x40_0000, 0, 0, 0, 0, 1 << 6]).is_none());
+        assert!(ok([0x40_0000, 0, 0, 0, 0, 1 | 1 << 1]).is_none());
+        assert!(ok([0x40_0000, 0, 0, 0, 0, 1 | 0b10 << 16]).is_none());
+        assert!(ok([0, 0, 0, 0, 0, 1 << 32]).is_none());
+        assert_eq!(enabled(0b0100_0001).collect::<std::vec::Vec<_>>(), [0, 3]);
     }
 
     #[test]
