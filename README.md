@@ -19,6 +19,7 @@ repository. Code and commits refer to them by ID, such as `MIKSPEC-0012.R3`.
 | `targets/` | Target specifications for Rust and Clang |
 | `boot/bootmenu/` | Boot manager |
 | `boot/mikrosboot/` | Bootloader |
+| `boot/protocol/` | Data passed from the bootloader to the kernel |
 | `kernel/core/` | Architecture-independent kernel |
 | `kernel/arch/x86_64/` | x86_64 support |
 | `kernel/fuzz/` | Host fuzz targets |
