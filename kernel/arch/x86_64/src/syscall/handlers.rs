@@ -337,6 +337,7 @@ pub fn vm_map(
     if mem.rights & needed != needed {
         return Err(Error::AccessDenied);
     }
+    let handle_rights = mem.rights;
     let mem = object::<MemoryObject>(mem);
     mem.check_range(offset, len)?;
     if !out_addr.fits(1) {
@@ -346,7 +347,8 @@ pub fn vm_map(
     // overflow.
     let size = len.next_multiple_of(PAGE_SIZE);
     let aspace = object::<Process>(process).aspace().clone();
-    let start = aspace.add_region(options, addr, size, &mem, offset)?;
+    let max = MapOptions::allowed_by(handle_rights);
+    let start = aspace.add_region(options, addr, size, &mem, offset, max)?;
     out_addr.write(start).inspect_err(|_| {
         aspace.remove_regions(start, start + size);
     })
@@ -1054,4 +1056,15 @@ pub fn system_get_memory_info(out: UserOut<u8>) -> Result<(), Error> {
     record[0..8].copy_from_slice(&total.to_le_bytes());
     record[8..16].copy_from_slice(&free.to_le_bytes());
     out.write_bytes(&record)
+}
+
+pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result<(), Error> {
+    let perms = MapOptions::parse_protection(options)?;
+    let end = page_range_end(addr, len)?;
+    if !crate::aspace::in_user_range(addr, end - addr) {
+        return Err(Error::NotFound);
+    }
+    object::<Process>(process)
+        .aspace()
+        .protect(addr, end, perms, |_| true)
 }

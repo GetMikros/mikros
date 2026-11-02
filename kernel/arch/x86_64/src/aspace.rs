@@ -264,6 +264,7 @@ impl AddressSpace {
         size: u64,
         mem: &Arc<MemoryObject>,
         offset: u64,
+        max: u32,
     ) -> Result<u64, Error> {
         if options.specific && !in_user_range(addr, size) {
             return Err(Error::OutOfRange);
@@ -285,6 +286,7 @@ impl AddressSpace {
                 len: size,
                 offset,
                 perms: options.perms,
+                max,
                 inheritance: options.inheritance,
                 mem: mem.clone(),
             })?;
@@ -329,6 +331,21 @@ impl AddressSpace {
     /// with `NotFound` when one is not mapped.
     pub fn set_inheritance(&self, start: u64, end: u64, inheritance: u32) -> Result<(), Error> {
         self.regions.lock().set_inheritance(start, end, inheritance)
+    }
+
+    /// Sets `perms` on every page from `start` to `end`, as `vm_protect`
+    /// does, and removes their translations, so that the next access
+    /// enters them with the new permissions. `allowed` decides whether a
+    /// region's object accepts them.
+    pub fn protect(
+        &self,
+        start: u64,
+        end: u64,
+        perms: u32,
+        allowed: impl Fn(&RegionOf) -> bool,
+    ) -> Result<(), Error> {
+        self.regions.lock().set_perms(start, end, perms, allowed)?;
+        self.unmap(start, end - start, |_| {})
     }
 
     /// Removes the pages that map pages `first` to `end`, exclusive, of

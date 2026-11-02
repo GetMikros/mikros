@@ -85,7 +85,14 @@ fn map(
     let options = MapOptions::parse(perms | SPECIFIC, addr).expect("valid map options");
     process
         .aspace()
-        .add_region(options, addr, len, &mem, 0)
+        .add_region(
+            options,
+            addr,
+            len,
+            &mem,
+            0,
+            PERM_READ | PERM_WRITE | PERM_EXECUTE,
+        )
         .unwrap_or_else(|e| panic!("mapping init at {addr:#x}: {e:?}"));
     mem
 }

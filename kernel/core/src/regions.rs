@@ -60,6 +60,30 @@ impl MapOptions {
         })
     }
 
+    /// The permissions of `vm_protect` `options`: only permission bits,
+    /// readable whenever writable or executable, and not both writable
+    /// and executable.
+    pub fn parse_protection(options: u32) -> Result<u32, Error> {
+        let unreadable = options & (PERM_WRITE | PERM_EXECUTE) != 0 && options & PERM_READ == 0;
+        let write_execute = options & PERM_WRITE != 0 && options & PERM_EXECUTE != 0;
+        if options & !PERMS != 0 || unreadable || write_execute {
+            return Err(Error::InvalidArgs);
+        }
+        Ok(options)
+    }
+
+    /// The permissions that a handle with `rights` allows.
+    pub fn allowed_by(rights: u32) -> u32 {
+        [
+            (PERM_READ, rights::READ),
+            (PERM_WRITE, rights::WRITE),
+            (PERM_EXECUTE, rights::EXECUTE),
+        ]
+        .iter()
+        .filter(|(_, right)| rights & right != 0)
+        .fold(0, |perms, (perm, _)| perms | perm)
+    }
+
     /// The rights the memory object's handle needs for the permissions.
     pub fn rights(&self) -> u32 {
         let mut needed = 0;
@@ -85,6 +109,9 @@ pub struct Region<M> {
     pub offset: u64,
     /// The permission bits of `vm_map`.
     pub perms: u32,
+    /// The permissions the rights of the handle that made the mapping
+    /// allow, which `vm_protect` may not go beyond.
+    pub max: u32,
     pub inheritance: u32,
     pub mem: M,
 }
@@ -184,6 +211,38 @@ impl<M: Clone> Regions<M> {
         Ok(())
     }
 
+    /// Sets the permissions of every page from `start` to `end`,
+    /// splitting regions that extend beyond the range. Fails with
+    /// `NotFound` when a page in the range is not mapped and with
+    /// `AccessDenied` when `perms` goes beyond a region's maximum or
+    /// `allowed` refuses a region, in both cases changing nothing.
+    pub fn set_perms(
+        &mut self,
+        start: u64,
+        end: u64,
+        perms: u32,
+        allowed: impl Fn(&Region<M>) -> bool,
+    ) -> Result<(), Error> {
+        let mut at = start;
+        while at < end {
+            at = self.find(at).ok_or(Error::NotFound)?.end();
+        }
+        let mut at = start;
+        while at < end {
+            let r = self.find(at).expect("checked above");
+            if perms & !r.max != 0 || !allowed(r) {
+                return Err(Error::AccessDenied);
+            }
+            at = r.end();
+        }
+        self.split_at(start);
+        self.split_at(end);
+        for r in self.map.range_mut(start..end).map(|(_, r)| r) {
+            r.perms = perms;
+        }
+        Ok(())
+    }
+
     /// The regions in address order.
     pub fn iter(&self) -> impl Iterator<Item = &Region<M>> {
         self.map.values()
@@ -255,6 +314,7 @@ mod tests {
             len,
             offset,
             perms: 1,
+            max: PERM_READ | PERM_WRITE,
             inheritance: 0,
             mem: 7,
         }
@@ -262,6 +322,35 @@ mod tests {
 
     fn starts(r: &Regions<u8>) -> std::vec::Vec<(u64, u64, u64)> {
         r.iter().map(|r| (r.start, r.len, r.offset)).collect()
+    }
+
+    #[test]
+    fn sets_permissions_within_the_maximum() {
+        let mut r = Regions::default();
+        r.insert(region(0, 4 * P, 0)).unwrap();
+        r.insert(region(6 * P, P, 0)).unwrap();
+        assert_eq!(r.set_perms(3 * P, 7 * P, 3, |_| true), Err(Error::NotFound));
+        assert_eq!(r.set_perms(P, 2 * P, 5, |_| true), Err(Error::AccessDenied));
+        assert_eq!(
+            r.set_perms(P, 2 * P, 3, |_| false),
+            Err(Error::AccessDenied)
+        );
+        assert_eq!(starts(&r).len(), 2);
+        r.set_perms(P, 2 * P, 3, |_| true).unwrap();
+        let perms: std::vec::Vec<u32> = r.iter().map(|r| r.perms).collect();
+        assert_eq!(perms, [1, 3, 1, 1]);
+        assert_eq!(starts(&r)[1], (P, P, P));
+    }
+
+    #[test]
+    fn parses_protection_and_allowed_permissions() {
+        assert_eq!(MapOptions::parse_protection(1), Ok(1));
+        assert_eq!(MapOptions::parse_protection(0), Ok(0));
+        for bad in [2, 4, 7, 1 << 8] {
+            assert_eq!(MapOptions::parse_protection(bad), Err(Error::InvalidArgs));
+        }
+        assert_eq!(MapOptions::allowed_by(rights::READ | rights::EXECUTE), 5);
+        assert_eq!(MapOptions::allowed_by(rights::MAP), 0);
     }
 
     #[test]
