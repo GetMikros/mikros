@@ -35,6 +35,13 @@ static EXTEND_24: Extender = Extender::new(24);
 static EXTEND_32: Extender = Extender::new(32);
 static EXTEND_64: Extender = Extender::new(64);
 static WIDTH: AtomicU8 = AtomicU8::new(64);
+/// The TSC frequency.
+static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+
+/// The TSC frequency, once the clock is set up.
+pub fn tsc_hz() -> u64 {
+    TSC_HZ.load(Ordering::Relaxed)
+}
 
 fn extender() -> &'static Extender {
     match WIDTH.load(Ordering::Relaxed) {
@@ -84,22 +91,23 @@ pub fn now() -> i64 {
     }
 }
 
-/// Counts TSC ticks while `reference`, running at `hz`, advances by about
-/// 10 ms, and returns the TSC frequency.
-fn measure(mut reference: impl FnMut() -> u64, hz: u64) -> u64 {
+/// Measures the frequency of `counter` while `reference`, running at
+/// `hz`, advances by about 10 ms.
+fn measure(counter: &dyn Fn() -> u64, mut reference: impl FnMut() -> u64, hz: u64) -> u64 {
     let wait = hz / 100;
     let start = reference();
-    let tsc_start = rdtsc();
+    let counter_start = counter();
     let mut now = start;
     while now - start < wait {
         now = reference();
     }
-    measured_hz(rdtsc() - tsc_start, now - start, hz)
+    measured_hz(counter() - counter_start, now - start, hz)
 }
 
-/// Measures the TSC against PIT channel 2, counting down from the count
-/// for 10 ms in mode 0 with the gate open and the speaker off.
-fn measure_with_pit() -> Option<u64> {
+/// Measures the frequency of `counter` against PIT channel 2, counting
+/// down from the count for 10 ms in mode 0 with the gate open and the
+/// speaker off.
+fn measure_with_pit(counter: &dyn Fn() -> u64) -> Option<u64> {
     let count = PIT_HZ / 100;
     // SAFETY: ports 0x61, 0x42 and 0x43 are the PIT channel 2 gate and
     // registers, which nothing else in the kernel uses.
@@ -109,12 +117,12 @@ fn measure_with_pit() -> Option<u64> {
         out8(0x43, 0xB0);
         out8(0x42, count as u8);
         out8(0x42, (count >> 8) as u8);
-        let start = rdtsc();
+        let start = counter();
         // The channel's output goes high when the count reaches zero. A
         // missing PIT never sets it, so the wait is bounded.
         for _ in 0..100_000_000u32 {
             if in8(0x61) & 0x20 != 0 {
-                return Some(measured_hz(rdtsc() - start, count, PIT_HZ));
+                return Some(measured_hz(counter() - start, count, PIT_HZ));
             }
         }
     }
@@ -132,8 +140,9 @@ fn use_pm_timer(pm: PmTimer) {
     WIDTH.store(if pm.wide { 32 } else { 24 }, Ordering::Relaxed);
 }
 
-/// Picks the clock source and starts the clock. Must run while the
-/// memory map is still in place.
+/// Finds the TSC and, when needed, the local APIC timer frequencies,
+/// picks the clock source and starts the clock. Must run while the memory
+/// map is still in place, after the local APIC is set up.
 pub fn init(info: &BootInfo) {
     let mem = DirectMem(info);
     let tables = Tables::new(&mem, info.firmware_table_phys);
@@ -164,30 +173,42 @@ pub fn init(info: &BootInfo) {
         (virt, capabilities >> 32, capabilities & HPET_64BIT != 0)
     });
 
+    if let Some(pm) = pm {
+        use_pm_timer(pm);
+    }
+    // The references, in order of preference.
+    let calibrate = |what: &str, counter: &dyn Fn() -> u64| -> u64 {
+        hpet.map(|(virt, period_fs, _)| {
+            let hz = 1_000_000_000_000_000 / period_fs.max(1);
+            measure(counter, || hpet_read(virt, HPET_COUNTER), hz)
+        })
+        .or_else(|| {
+            pm.map(|_| {
+                let ext = extender();
+                measure(counter, || ext.extend(pm_read()), PM_TIMER_HZ)
+            })
+        })
+        .or_else(|| measure_with_pit(counter))
+        .unwrap_or_else(|| panic!("the {what} frequency could not be measured"))
+    };
+
     let leaves = TscLeaves::read(|leaf| {
         let r = core::arch::x86_64::__cpuid(leaf);
         [r.eax, r.ebx, r.ecx, r.edx]
     });
+    let tsc_hz = leaves
+        .reported_hz()
+        .unwrap_or_else(|| calibrate("TSC", &rdtsc));
+    TSC_HZ.store(tsc_hz, Ordering::Relaxed);
+    if !crate::timer::tsc_deadline() {
+        crate::timer::start_count();
+        let apic_hz = calibrate("local APIC timer", &crate::timer::count);
+        crate::timer::set_hz(apic_hz);
+    }
+
     let name;
     if leaves.invariant() {
-        let hz = leaves
-            .reported_hz()
-            .or_else(|| {
-                hpet.map(|(virt, period_fs, _)| {
-                    let hz = 1_000_000_000_000_000 / period_fs.max(1);
-                    measure(|| hpet_read(virt, HPET_COUNTER), hz)
-                })
-            })
-            .or_else(|| {
-                pm.map(|pm| {
-                    use_pm_timer(pm);
-                    let ext = extender();
-                    measure(|| ext.extend(pm_read()), PM_TIMER_HZ)
-                })
-            })
-            .or_else(measure_with_pit)
-            .unwrap_or_else(|| panic!("the TSC frequency could not be measured"));
-        RATE.store(hz, Ordering::Relaxed);
+        RATE.store(tsc_hz, Ordering::Relaxed);
         SOURCE.store(TSC, Ordering::Relaxed);
         name = "the TSC";
     } else if let Some((virt, period_fs, wide)) = hpet {
@@ -196,8 +217,7 @@ pub fn init(info: &BootInfo) {
         WIDTH.store(if wide { 64 } else { 32 }, Ordering::Relaxed);
         SOURCE.store(HPET, Ordering::Relaxed);
         name = "the HPET";
-    } else if let Some(pm) = pm {
-        use_pm_timer(pm);
+    } else if pm.is_some() {
         RATE.store(PM_TIMER_HZ, Ordering::Relaxed);
         SOURCE.store(PM, Ordering::Relaxed);
         name = "the ACPI PM timer";

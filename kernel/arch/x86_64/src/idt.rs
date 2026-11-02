@@ -226,7 +226,7 @@ impl fmt::Display for Exception<'_> {
 #[cfg(target_os = "none")]
 extern "sysv64" fn interrupt(frame: &mut Frame) {
     let vector = frame.vector as u8;
-    use crate::apic::{PIC_BASE, SPURIOUS_VECTOR};
+    use crate::apic::{PIC_BASE, SPURIOUS_VECTOR, TIMER_VECTOR};
     match vector {
         // No exception is handled yet, and no user mode exists, so each
         // one stops the kernel.
@@ -235,6 +235,7 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
         // local APIC expects no end of interrupt for them or for its
         // spurious interrupt.
         v if (PIC_BASE..PIC_BASE + 16).contains(&v) || v == SPURIOUS_VECTOR => {}
+        TIMER_VECTOR => crate::timer::interrupt(),
         // Nothing handles other vectors yet.
         _ => crate::apic::eoi(),
     }

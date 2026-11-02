@@ -35,6 +35,8 @@ mod serial;
 mod space;
 #[cfg(target_os = "none")]
 mod time;
+#[cfg(target_os = "none")]
+mod timer;
 
 /// The kernel only runs on its own target. This lets the workspace build
 /// on the host.

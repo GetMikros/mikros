@@ -72,8 +72,9 @@ extern "sysv64" fn on_kernel_tables() -> ! {
     let ist = || space::new_stack(gdt::IST_STACK_SIZE);
     gdt::init(space::stack_top(), ist(), ist(), ist());
     crate::idt::init();
-    crate::time::init(&info);
     crate::apic::init(&info);
+    crate::time::init(&info);
+    crate::timer::init();
     let free = space::reclaim_boot_memory(&info);
     log!(
         Info,
