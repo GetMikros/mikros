@@ -22,6 +22,8 @@ mod context;
 #[cfg(any(target_os = "none", test))]
 #[cfg_attr(test, allow(dead_code))]
 mod control;
+#[cfg(all(target_os = "none", feature = "fuzz"))]
+mod coverage;
 #[cfg(target_os = "none")]
 mod cpu;
 #[cfg(target_os = "none")]

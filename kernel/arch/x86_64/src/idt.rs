@@ -123,8 +123,22 @@ global_asm!(
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
     "cld",
+    // In the fuzz build, the depth of hardware interrupt handling is
+    // counted, so that coverage leaves it out.
+    ".if {fuzz}",
+    "cmp qword ptr [rsp + 15*8], 32",
+    "jb 4f",
+    "inc qword ptr gs:[{interrupts}]",
+    "4:",
+    ".endif",
     "mov rdi, rsp",
     "call {interrupt}",
+    ".if {fuzz}",
+    "cmp qword ptr [rsp + 15*8], 32",
+    "jb 5f",
+    "dec qword ptr gs:[{interrupts}]",
+    "5:",
+    ".endif",
     "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10",
     "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
     "pop rcx", "pop rbx", "pop rax",
@@ -137,6 +151,8 @@ global_asm!(
     ".popsection",
     mask = const ERROR_CODE_VECTORS,
     interrupt = sym interrupt,
+    fuzz = const cfg!(feature = "fuzz") as u8,
+    interrupts = const crate::percpu::INTERRUPTS_OFFSET,
 );
 
 #[cfg(target_os = "none")]

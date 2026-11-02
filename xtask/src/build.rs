@@ -28,7 +28,8 @@ impl Kind {
     fn profile(self) -> &'static str {
         match self {
             Kind::Production => "release",
-            Kind::Debug | Kind::Fuzz => "dev",
+            Kind::Debug => "dev",
+            Kind::Fuzz => "fuzz",
         }
     }
 
@@ -36,7 +37,8 @@ impl Kind {
     fn profile_dir(self) -> &'static str {
         match self {
             Kind::Production => "release",
-            Kind::Debug | Kind::Fuzz => "debug",
+            Kind::Debug => "debug",
+            Kind::Fuzz => "fuzz",
         }
     }
 }
@@ -77,9 +79,6 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", bootmenu.display());
     let bootloader = cargo_build("mikrosboot", "mikrosboot", "x86_64-unknown-uefi", kind)?;
     println!("built    {}", bootloader.display());
-    if kind == Kind::Fuzz {
-        bail!("the fuzz build of the kernel is not implemented yet");
-    }
     let kernel = cargo_build("kernel-x86_64", "kernel", KERNEL_TARGET, kind)?;
     println!("built    {}", kernel.display());
     let debug_info = crate::debuginfo::split(&kernel)?;
@@ -168,6 +167,30 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
         .join(bin))
 }
 
+/// The LLVM options that make every basic block call
+/// `__sanitizer_cov_trace_pc`, as Linux's kcov expects.
+const COVERAGE_FLAGS: [&str; 3] = [
+    "-Cpasses=sancov-module",
+    "-Cllvm-args=-sanitizer-coverage-level=3",
+    "-Cllvm-args=-sanitizer-coverage-trace-pc",
+];
+
+/// The extra Cargo arguments for building `package` as `kind`: the fuzz
+/// build of the kernel gets its fuzz feature and coverage
+/// instrumentation, added to the kernel target's flags.
+fn kernel_fuzz_args(package: &str, kind: Kind) -> Vec<String> {
+    if package != "kernel-x86_64" || kind != Kind::Fuzz {
+        return Vec::new();
+    }
+    let flags: Vec<String> = COVERAGE_FLAGS.iter().map(|f| format!("\"{f}\"")).collect();
+    vec![
+        "--features".into(),
+        "fuzz".into(),
+        "--config".into(),
+        format!("target.{KERNEL_TARGET}.rustflags=[{}]", flags.join(", ")),
+    ]
+}
+
 /// Builds the binary `bin` of `package` for `target` and returns its path.
 fn cargo_build(package: &str, bin: &str, target: &str, kind: Kind) -> Result<PathBuf> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
@@ -183,6 +206,7 @@ fn cargo_build(package: &str, bin: &str, target: &str, kind: Kind) -> Result<Pat
             target,
         ])
         .args(["--profile", kind.profile()])
+        .args(kernel_fuzz_args(package, kind))
         .status()
         .context("failed to run cargo")?;
     if !status.success() {
@@ -201,6 +225,17 @@ fn cargo_build(package: &str, bin: &str, target: &str, kind: Kind) -> Result<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instruments_only_the_fuzz_kernel() {
+        assert!(kernel_fuzz_args("kernel-x86_64", Kind::Debug).is_empty());
+        assert!(kernel_fuzz_args("mikrosboot", Kind::Fuzz).is_empty());
+        let args = kernel_fuzz_args("kernel-x86_64", Kind::Fuzz);
+        assert_eq!(args[..3], ["--features", "fuzz", "--config"]);
+        assert!(
+            args[3].starts_with("target.x86_64-unknown-none.rustflags=[\"-Cpasses=sancov-module\"")
+        );
+    }
 
     #[test]
     fn builds_the_boot_archive() {

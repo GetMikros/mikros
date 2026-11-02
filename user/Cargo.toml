@@ -12,3 +12,6 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[profile.fuzz]
+inherits = "dev"

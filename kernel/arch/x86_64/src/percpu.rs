@@ -24,6 +24,13 @@ pub struct PerCpu {
     /// Where the system call entry keeps the user stack pointer until it
     /// is on the kernel stack.
     user_rsp: AtomicU64,
+    /// The coverage buffer of the running thread in kernel space, or 0
+    /// when it collects none, and the number of addresses it holds.
+    pub cov_area: AtomicU64,
+    pub cov_capacity: AtomicU64,
+    /// The depth of hardware interrupt handling, during which no
+    /// coverage is collected.
+    interrupts: AtomicU64,
     /// The scheduler state of the processor.
     pub sched: SpinLock<CpuSched>,
     /// The address spaces that have PCIDs on the processor.
@@ -42,12 +49,16 @@ static BOOT_CPU: PerCpu = PerCpu {
     index: 0,
     kernel_stack: AtomicU64::new(0),
     user_rsp: AtomicU64::new(0),
+    cov_area: AtomicU64::new(0),
+    cov_capacity: AtomicU64::new(0),
+    interrupts: AtomicU64::new(0),
     sched: SpinLock::new(CpuSched::new()),
     pcids: SpinLock::new(Pcids::new()),
     thread_stack: AtomicU64::new(0),
 };
 
-static READY: AtomicBool = AtomicBool::new(false);
+/// Set once the GS base points to the per-CPU data.
+pub static READY: AtomicBool = AtomicBool::new(false);
 
 /// Points the GS base at the boot processor's data, and the user GS base
 /// at zero.
@@ -104,7 +115,13 @@ pub fn user_rsp() -> u64 {
 /// The offsets that entry code uses.
 pub const KERNEL_STACK_OFFSET: usize = 16;
 pub const USER_RSP_OFFSET: usize = 24;
+pub const COV_AREA_OFFSET: usize = 32;
+pub const COV_CAPACITY_OFFSET: usize = 40;
+pub const INTERRUPTS_OFFSET: usize = 48;
 
 const _: () = assert!(core::mem::offset_of!(PerCpu, index) == 8);
 const _: () = assert!(core::mem::offset_of!(PerCpu, kernel_stack) == KERNEL_STACK_OFFSET);
 const _: () = assert!(core::mem::offset_of!(PerCpu, user_rsp) == USER_RSP_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpu, cov_area) == COV_AREA_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpu, cov_capacity) == COV_CAPACITY_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpu, interrupts) == INTERRUPTS_OFFSET);

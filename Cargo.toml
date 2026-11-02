@@ -10,3 +10,8 @@ edition = "2024"
 # into a file named by the kernel's build ID.
 [profile.release.package.kernel-x86_64]
 debug = true
+
+# The fuzz build kind: the dev profile, built apart from it because the
+# kernel is instrumented for coverage.
+[profile.fuzz]
+inherits = "dev"
