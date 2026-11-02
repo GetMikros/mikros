@@ -1016,14 +1016,15 @@ pub fn process_signal(process: Checked, signo: u32, value: u64) -> Result<(), Er
     if state != crate::process::RUNNING && state != crate::process::STOPPED {
         return Err(Error::BadState);
     }
+    let sender = current_process()?;
     let info = Info {
         signo,
         code: sig::CODE_PROCESS,
-        sender_koid: current_process()?.header().koid(),
+        sender_koid: sender.header().koid(),
         value,
         ..Info::default()
     };
-    crate::signal::send(&process, None, info)
+    crate::signal::send(&process, None, info, sender.budget())
 }
 
 pub fn thread_signal(thread: Checked, signo: u32, value: u64) -> Result<(), Error> {
@@ -1039,14 +1040,15 @@ pub fn thread_signal(thread: Checked, signo: u32, value: u64) -> Result<(), Erro
     ) else {
         return Err(Error::BadState);
     };
+    let sender = current_process()?;
     let info = Info {
         signo,
         code: sig::CODE_THREAD,
-        sender_koid: current_process()?.header().koid(),
+        sender_koid: sender.header().koid(),
         value,
         ..Info::default()
     };
-    crate::signal::send(&process, Some(&thread), info)
+    crate::signal::send(&process, Some(&thread), info, sender.budget())
 }
 
 pub fn signal_get_pending(out: UserOut<u64>) -> Result<(), Error> {

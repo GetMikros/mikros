@@ -2,8 +2,10 @@
 //! of pending signals.
 
 use crate::nodes::{self, Map};
+use crate::object::budget::Budget;
 use crate::status::Error;
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 
 /// The highest signal number.
 pub const SIG_MAX: u32 = 64;
@@ -167,12 +169,31 @@ impl Info {
     }
 }
 
+/// A queued real-time signal and the budget charged for it, if any,
+/// which it releases when it goes.
+struct Queued {
+    info: Info,
+    charged: Option<Arc<Budget>>,
+}
+
+/// The kernel memory charged for a queued real-time signal: its place in
+/// its queue and that place's share of the queue and map storage.
+pub const QUEUED_COST: u64 = 2 * size_of::<Queued>() as u64;
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.charged {
+            budget.release_kernel(QUEUED_COST);
+        }
+    }
+}
+
 /// The signals pending for a process or a thread.
 pub struct Pending {
     /// Signals 1 to 31, at index `signo - 1`.
     standard: [Option<Info>; (SIG_RT_MIN - 1) as usize],
     /// The queued real-time signals, by number. No queue is empty.
-    realtime: Map<u32, VecDeque<Info>>,
+    realtime: Map<u32, VecDeque<Queued>>,
 }
 
 impl core::default::Default for Pending {
@@ -198,8 +219,14 @@ impl Pending {
     /// Makes `info` pending. A standard signal that is pending already is
     /// not queued again. A real-time signal is counted in `queued`, the
     /// count of the whole process, and fails with `ShouldWait` when
-    /// `RT_QUEUE_MAX` are queued.
-    pub fn add(&mut self, info: Info, queued: &mut usize) -> Result<(), Error> {
+    /// `RT_QUEUE_MAX` are queued; it is charged to `budget`, if given,
+    /// until it is taken or discarded. Nothing changes on failure.
+    pub fn add(
+        &mut self,
+        info: Info,
+        queued: &mut usize,
+        budget: Option<&Arc<Budget>>,
+    ) -> Result<(), Error> {
         if info.signo < SIG_RT_MIN {
             let slot = &mut self.standard[info.signo as usize - 1];
             if slot.is_none() {
@@ -210,13 +237,21 @@ impl Pending {
         if *queued >= RT_QUEUE_MAX {
             return Err(Error::ShouldWait);
         }
+        if let Some(budget) = budget {
+            budget.charge_kernel(QUEUED_COST)?;
+        }
+        // From here on, dropping the entry releases the charge.
+        let entry = Queued {
+            info,
+            charged: budget.cloned(),
+        };
         if let Some(queue) = self.realtime.get_mut(&info.signo) {
             queue.try_reserve(1).map_err(|_| Error::NoMemory)?;
-            queue.push_back(info);
+            queue.push_back(entry);
         } else {
             let mut queue = VecDeque::new();
             queue.try_reserve(1).map_err(|_| Error::NoMemory)?;
-            queue.push_back(info);
+            queue.push_back(entry);
             let _claim = nodes::claim_insert()?;
             self.realtime.insert(info.signo, queue);
         }
@@ -235,12 +270,12 @@ impl Pending {
             return self.standard[signo as usize - 1].take();
         }
         let queue = self.realtime.get_mut(&signo)?;
-        let info = queue.pop_front();
+        let entry = queue.pop_front();
         if queue.is_empty() {
             self.realtime.remove(&signo);
         }
         *queued -= 1;
-        info
+        entry.map(|entry| entry.info)
     }
 
     /// Discards every pending signal in `signals`.
@@ -328,11 +363,11 @@ mod tests {
     fn queues_real_time_signals_and_merges_standard_ones() {
         let mut p = Pending::default();
         let mut queued = 0;
-        p.add(info(SEGV, 1), &mut queued).unwrap();
-        p.add(info(SEGV, 2), &mut queued).unwrap();
-        p.add(info(40, 1), &mut queued).unwrap();
-        p.add(info(33, 1), &mut queued).unwrap();
-        p.add(info(40, 2), &mut queued).unwrap();
+        p.add(info(SEGV, 1), &mut queued, None).unwrap();
+        p.add(info(SEGV, 2), &mut queued, None).unwrap();
+        p.add(info(40, 1), &mut queued, None).unwrap();
+        p.add(info(33, 1), &mut queued, None).unwrap();
+        p.add(info(40, 2), &mut queued, None).unwrap();
         assert_eq!(queued, 3);
         assert_eq!(p.mask(), bit(SEGV) | bit(33) | bit(40));
         assert_eq!(p.take(!0, &mut queued), Some(info(SEGV, 1)));
@@ -346,9 +381,12 @@ mod tests {
     fn limits_queued_real_time_signals() {
         let mut p = Pending::default();
         let mut queued = RT_QUEUE_MAX - 1;
-        p.add(info(50, 0), &mut queued).unwrap();
-        assert_eq!(p.add(info(50, 0), &mut queued), Err(Error::ShouldWait));
-        p.add(info(SEGV, 0), &mut queued).unwrap();
+        p.add(info(50, 0), &mut queued, None).unwrap();
+        assert_eq!(
+            p.add(info(50, 0), &mut queued, None),
+            Err(Error::ShouldWait)
+        );
+        p.add(info(SEGV, 0), &mut queued, None).unwrap();
         p.discard(!0, &mut queued);
         assert_eq!((p.mask(), queued), (0, RT_QUEUE_MAX - 1));
     }
@@ -357,10 +395,35 @@ mod tests {
     fn leaves_nothing_pending_without_room() {
         let mut p = Pending::default();
         let mut queued = 0;
-        let added = crate::nodes::tests::without_claims(|| p.add(info(40, 0), &mut queued));
+        let added = crate::nodes::tests::without_claims(|| p.add(info(40, 0), &mut queued, None));
         assert_eq!(added, Err(Error::NoMemory));
         assert_eq!((p.mask(), queued), (0, 0));
         assert_eq!(p.take(!0, &mut queued), None);
+    }
+
+    #[test]
+    fn charges_queued_signals_until_they_go() {
+        use crate::object::budget::UNLIMITED;
+        let root = Budget::root();
+        let small = Budget::child(&root, QUEUED_COST, UNLIMITED, None).unwrap();
+        let used = |b: &Budget| u64::from_le_bytes(b.info()[8..16].try_into().unwrap());
+        let mut p = Pending::default();
+        let mut queued = 0;
+        p.add(info(40, 1), &mut queued, Some(&small)).unwrap();
+        assert_eq!(used(&small), QUEUED_COST);
+        // Over the limit, nothing is queued.
+        assert_eq!(
+            p.add(info(41, 1), &mut queued, Some(&small)),
+            Err(Error::NoResources)
+        );
+        assert_eq!((p.mask(), queued), (bit(40), 1));
+        // Standard signals are not queued and not charged.
+        p.add(info(SEGV, 1), &mut queued, Some(&small)).unwrap();
+        assert_eq!(p.take(bit(40), &mut queued), Some(info(40, 1)));
+        assert_eq!(used(&small), 0);
+        p.add(info(42, 1), &mut queued, Some(&small)).unwrap();
+        p.discard(!0, &mut queued);
+        assert_eq!((used(&small), used(&root), queued), (0, 0, 0));
     }
 
     #[test]

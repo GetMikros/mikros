@@ -9,6 +9,7 @@ use crate::thread_state::{self, GENERAL_SIZE, General};
 use crate::usercopy::{copy_in, copy_out};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use kernel_core::object::budget::Budget;
 use kernel_core::signal::{
     Action, CODE_EXCEPTION, CONT, Default as DefaultAction, HANDLER_DEFAULT, HANDLER_IGNORE,
     INFO_SIZE, Info, KILL, NODEFER, ONSTACK, Pending, RESETHAND, RESTART, SEGV, SIG_MAX,
@@ -66,8 +67,14 @@ pub fn discard(state: &mut ProcessSignals, threads: &[Arc<Thread>], signals: u64
 }
 
 /// Makes `info` pending for `process`, or for `thread`, one of its
-/// threads, when given.
-pub fn send(process: &Process, thread: Option<&Arc<Thread>>, info: Info) -> Result<(), Error> {
+/// threads, when given. A queued real-time signal is charged to `budget`,
+/// the sender's.
+pub fn send(
+    process: &Process,
+    thread: Option<&Arc<Thread>>,
+    info: Info,
+    budget: &Arc<Budget>,
+) -> Result<(), Error> {
     let threads = process.live_threads()?;
     let mut state = process.signals().lock();
     discard(&mut state, &threads, discarded_by(info.signo));
@@ -75,8 +82,12 @@ pub fn send(process: &Process, thread: Option<&Arc<Thread>>, info: Info) -> Resu
         pending, queued, ..
     } = &mut *state;
     match thread {
-        Some(thread) => thread.signals().lock().pending.add(info, queued)?,
-        None => pending.add(info, queued)?,
+        Some(thread) => thread
+            .signals()
+            .lock()
+            .pending
+            .add(info, queued, Some(budget))?,
+        None => pending.add(info, queued, Some(budget))?,
     }
     drop(state);
     let waiting = threads.iter().filter(|t| t.waits_for_signals());
@@ -408,7 +419,8 @@ pub fn exception_signal(process: &Process, thread: &Arc<Thread>, kind: u32, addr
         let ProcessSignals { queued, .. } = &mut *state;
         let mut own = thread.signals().lock();
         let blocked = own.mask & bit(signo) != 0;
-        ignored || blocked || own.pending.add(info, queued).is_err()
+        // Exceptions raise standard signals, which are never charged.
+        ignored || blocked || own.pending.add(info, queued, None).is_err()
     };
     if refused {
         process.terminate_by_signal(signo);
