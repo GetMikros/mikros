@@ -5,7 +5,7 @@ use crate::aspace::{USER_END, USER_START};
 use crate::cpu::write_msr;
 use crate::gdt::{KERNEL_CODE, USER_CODE, USER_DATA};
 use crate::percpu::{KERNEL_STACK_OFFSET, USER_RSP_OFFSET};
-use crate::usercopy::{copy_in, copy_out};
+use crate::usercopy::copy_in;
 use alloc::sync::Arc;
 use core::arch::global_asm;
 use core::marker::PhantomData;
@@ -308,12 +308,6 @@ impl<T: Plain> UserOut<T> {
     pub fn fits(&self, len: u64) -> bool {
         let bytes = len.checked_mul(size_of::<T>() as u64);
         bytes.is_some_and(|b| b == 0 || crate::aspace::in_user_range(self.0, b))
-    }
-}
-
-impl UserOut<u8> {
-    pub fn write_bytes(&self, src: &[u8]) -> Result<(), Error> {
-        copy_out(self.0, src)
     }
 }
 

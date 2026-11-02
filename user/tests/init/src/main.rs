@@ -1152,7 +1152,30 @@ fn failed_outputs(s: &Startup) -> Result {
     // SAFETY: the word is mapped; the count lies on a read-only page.
     let status = unsafe { sys::futex_wake(addr as *const u32, 1, ro as *mut u32) };
     ensure("failing a wake", status == INVALID_ARGS)?;
-    ensure("leaving the waiter waiting", futex_wake(addr, 1)? == 1)
+    ensure("leaving the waiter waiting", futex_wake(addr, 1)? == 1)?;
+
+    // A blocked real-time signal stays pending through a failed wait.
+    let rt = 1u64 << (40 - 1);
+    // SAFETY: the calls take no pointers or a null one.
+    unsafe {
+        check(
+            "blocking a signal",
+            sys::signal_set_mask(0, rt, core::ptr::null_mut()),
+        )?;
+        check("sending a signal", sys::thread_signal(s.thread, 40, 77))?;
+    }
+    // SAFETY: the information output lies on a read-only page.
+    let status = unsafe { sys::signal_wait(rt, soon(), ro as *mut u8) };
+    ensure("failing a signal wait", status == INVALID_ARGS)?;
+    let mut info = [0u8; 64];
+    // SAFETY: the pointer describes `info`, which holds a record.
+    let status = unsafe { sys::signal_wait(rt, soon(), info.as_mut_ptr()) };
+    // SAFETY: the call takes a null pointer.
+    unsafe { sys::signal_set_mask(1, rt, core::ptr::null_mut()) };
+    ensure(
+        "keeping the signal",
+        status == 0 && u32_at(&info, 0) == 40 && u64_at(&info, 0x10) == 77,
+    )
 }
 
 fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {

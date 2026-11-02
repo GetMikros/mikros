@@ -1058,8 +1058,18 @@ pub fn signal_wait(mask: u64, deadline: i64, out: UserOut<u8>) -> Result<(), Err
     if !out.fits(sig::INFO_SIZE as u64) {
         return Err(Error::InvalidArgs);
     }
-    let info = crate::signal::wait(mask, deadline)?;
-    out.write_bytes(&info.bytes())
+    let process = current_process()?;
+    // The signal stays pending until its output is prepared; when another
+    // thread takes it meanwhile, this one waits again.
+    loop {
+        crate::signal::wait_pending(mask, deadline)?;
+        let outputs = prepare(&process, &[out.range(sig::INFO_SIZE as u64)])?;
+        if let Some(info) = crate::signal::take_pending(mask) {
+            publish(outputs, &[&info.bytes()]);
+            return Ok(());
+        }
+        drop(outputs);
+    }
 }
 
 pub fn log_write(_log: Checked, severity: u32, message: UserIn<u8>, len: u64) -> Result<(), Error> {
@@ -1314,11 +1324,11 @@ pub fn log_reader_read(reader: Checked, out: UserOut<u8>) -> Result<(), Error> {
     if !out.fits(RECORD_SIZE as u64) {
         return Err(Error::InvalidArgs);
     }
+    let outputs = prepare(&current_process()?, &[out.range(RECORD_SIZE as u64)])?;
     let reader = object::<crate::log::LogReader>(reader);
     let record = reader.next()?;
-    // The position moves only once the record has been copied out.
-    out.write_bytes(&record.bytes())?;
     reader.advance(record.sequence);
+    publish(outputs, &[&record.bytes()]);
     Ok(())
 }
 

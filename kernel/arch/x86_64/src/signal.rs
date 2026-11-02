@@ -300,27 +300,21 @@ pub fn sleep(deadline: i64) -> Result<(), Error> {
     }
 }
 
-pub fn wait(mask: u64, deadline: i64) -> Result<Info, Error> {
+/// Waits until `deadline` for a signal in `mask` to be pending for the
+/// running thread or its process, leaving it pending, so that the caller
+/// can prepare its output before `take_pending`.
+pub fn wait_pending(mask: u64, deadline: i64) -> Result<(), Error> {
     let thread = sched::current().ok_or(Error::BadHandle)?;
     let process = thread.process().cloned().ok_or(Error::BadHandle)?;
     let mask = mask & !UNBLOCKABLE;
     loop {
         {
-            let mut state = process.signals().lock();
-            let ProcessSignals {
-                actions,
-                pending,
-                queued,
-            } = &mut *state;
-            let mut own = thread.signals().lock();
-            let taken = own
-                .pending
-                .take(mask, queued)
-                .or_else(|| pending.take(mask, queued));
-            if let Some(info) = taken {
-                return Ok(info);
+            let state = process.signals().lock();
+            let own = thread.signals().lock();
+            if (own.pending.mask() | state.pending.mask()) & mask != 0 {
+                return Ok(());
             }
-            if interrupting(actions, pending, &own) {
+            if interrupting(&state.actions, &state.pending, &own) {
                 return Err(Error::Interrupted);
             }
         }
@@ -329,6 +323,22 @@ pub fn wait(mask: u64, deadline: i64) -> Result<Info, Error> {
         }
         sched::wait_for_signals(&thread, deadline)?;
     }
+}
+
+/// Removes the pending signal in `mask` that `signal_wait` returns, the
+/// running thread's before its process's, if any.
+pub fn take_pending(mask: u64) -> Option<Info> {
+    let thread = sched::current()?;
+    let process = thread.process().cloned()?;
+    let mask = mask & !UNBLOCKABLE;
+    let mut state = process.signals().lock();
+    let ProcessSignals {
+        pending, queued, ..
+    } = &mut *state;
+    let mut own = thread.signals().lock();
+    own.pending
+        .take(mask, queued)
+        .or_else(|| pending.take(mask, queued))
 }
 
 /// Restores the registers, the extended state and the mask of the
