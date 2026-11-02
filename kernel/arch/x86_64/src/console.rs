@@ -1,9 +1,11 @@
-//! The framebuffer console that shows the kernel log.
+//! The framebuffer console that shows the kernel log, and the panic
+//! screen.
 
 use crate::paging::Policy;
 use crate::space;
 use boot_protocol::{BootInfo, flags};
 use core::cell::UnsafeCell;
+use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 use kernel_core::console::{CELL_HEIGHT, CELL_WIDTH, Console, Layout, Surface};
 
@@ -26,7 +28,7 @@ struct State {
 struct Shared(UnsafeCell<Option<State>>);
 
 // SAFETY: the state is written once by `init` before `READY` is set, and
-// after that only by the holder of `BUSY`.
+// after that only by the holder of `BUSY` or by the panic screen.
 unsafe impl Sync for Shared {}
 
 static STATE: Shared = Shared(UnsafeCell::new(None));
@@ -34,6 +36,8 @@ static STATE: Shared = Shared(UnsafeCell::new(None));
 static READY: AtomicBool = AtomicBool::new(false);
 /// Set while a log line is drawn.
 static BUSY: AtomicBool = AtomicBool::new(false);
+/// Set when user space has taken over the framebuffer.
+static RELEASED: AtomicBool = AtomicBool::new(false);
 
 /// Maps the framebuffer, if there is one, clears it, and draws the log
 /// records written so far.
@@ -66,11 +70,11 @@ pub fn init(info: &BootInfo) {
     READY.store(true, Ordering::Release);
 }
 
-/// Draws `line`. A line that arrives
+/// Draws `line` unless the console was released. A line that arrives
 /// while another one is drawn, which only an interrupt handler can
 /// cause, is not drawn.
 pub fn write(line: &[u8]) {
-    if !READY.load(Ordering::Acquire) {
+    if !READY.load(Ordering::Acquire) || RELEASED.load(Ordering::Relaxed) {
         return;
     }
     if BUSY.swap(true, Ordering::Acquire) {
@@ -82,4 +86,37 @@ pub fn write(line: &[u8]) {
         state.console.write(line, &mut state.framebuffer);
     }
     BUSY.store(false, Ordering::Release);
+}
+
+/// Stops drawing log records for good.
+pub fn release() {
+    RELEASED.store(true, Ordering::Relaxed);
+}
+
+/// Writes formatted text to the console.
+struct Writer<'a>(&'a mut State);
+
+impl fmt::Write for Writer<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let state = &mut *self.0;
+        state.console.write(s.as_bytes(), &mut state.framebuffer);
+        Ok(())
+    }
+}
+
+/// Clears the framebuffer, also after a release, and passes a writer
+/// that draws on it to `report`. Must only be called by the panic
+/// handler, with interrupts disabled.
+pub fn panic_screen(report: impl FnOnce(&mut dyn fmt::Write)) {
+    if !READY.load(Ordering::Acquire) {
+        return;
+    }
+    // SAFETY: the processor runs nothing else once it panics. A panic
+    // while a line was being drawn leaves that drawing unfinished for
+    // good, so the state is not used from there again.
+    let Some(state) = (unsafe { (*STATE.0.get()).as_mut() }) else {
+        return;
+    };
+    state.console.clear(&mut state.framebuffer);
+    report(&mut Writer(state));
 }

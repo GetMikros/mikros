@@ -441,3 +441,11 @@ syscalls:
     spec: [MIKSPEC-0008.R23, MIKSPEC-0008.R22, MIKSPEC-0020.R21]
     args:
       - {name: deadline, type: i64, dir: in}
+
+  - name: log_console_release
+    number: 42
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0013.R10]
+    args:
+      - {name: log, type: Handle, dir: in, object: Log, rights: [MANAGE]}

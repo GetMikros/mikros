@@ -138,6 +138,19 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
             frames: backtrace::frames(rbp, stack, read),
         },
     );
+    crate::console::panic_screen(|mut screen| {
+        let _ = panic::write(
+            &mut screen,
+            "\n",
+            Report {
+                title,
+                build_id: build_id(),
+                cpu: crate::percpu::index(),
+                registers,
+                frames: backtrace::frames(rbp, stack, read),
+            },
+        );
+    });
     crate::cpu::halt()
 }
 

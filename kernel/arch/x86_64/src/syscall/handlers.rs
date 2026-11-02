@@ -805,6 +805,11 @@ pub fn log_read(_log: Checked, after: u64, out: UserOut<u8>) -> Result<(), Error
     out.write_bytes(&record.bytes())
 }
 
+pub fn log_console_release(_log: Checked) -> Result<(), Error> {
+    crate::console::release();
+    Ok(())
+}
+
 pub fn clock_get_monotonic(out: UserOut<i64>) -> Result<(), Error> {
     out.write(crate::time::now())
 }
