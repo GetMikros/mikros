@@ -1,5 +1,6 @@
 //! Handle tables.
 
+use super::budget::Budget;
 use super::{Object, ObjectType, rights};
 use crate::status::Error;
 use alloc::sync::Arc;
@@ -24,6 +25,20 @@ struct Slot {
     /// Incremented each time the slot is freed.
     generation: u32,
     entry: Option<Entry>,
+    /// The budget charged `SLOT_COST` when the slot was added.
+    charged: Option<Arc<Budget>>,
+}
+
+/// The kernel memory charged for adding a slot: the slot and its place in
+/// the free list.
+pub const SLOT_COST: u64 = (size_of::<Slot>() + size_of::<u32>()) as u64;
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.charged {
+            budget.release_kernel(SLOT_COST);
+        }
+    }
 }
 
 /// The handles of one process.
@@ -57,23 +72,41 @@ impl HandleTable {
         self.count == 0
     }
 
-    /// Adds a handle to `object` with `rights`.
-    pub fn insert(&mut self, object: Arc<dyn Object>, rights: u32) -> Result<Handle, Error> {
+    /// Adds a handle to `object` with `rights`. When no free slot is left
+    /// and a new one is added, `SLOT_COST` is charged to `budget`, if
+    /// given, and released to it when the table is dropped.
+    pub fn insert(
+        &mut self,
+        object: Arc<dyn Object>,
+        rights: u32,
+        budget: Option<&Arc<Budget>>,
+    ) -> Result<Handle, Error> {
         if self.count >= HANDLE_LIMIT {
             return Err(Error::NoResources);
         }
         let index = match self.free.pop() {
             Some(index) => index as usize,
             None => {
-                // The free list gets room for every slot now, so that
-                // closing a handle never needs memory.
-                self.slots.try_reserve(1).map_err(|_| Error::NoMemory)?;
-                self.free
-                    .try_reserve(self.slots.len() + 1 - self.free.len())
-                    .map_err(|_| Error::NoMemory)?;
+                if let Some(budget) = budget {
+                    budget.charge_kernel(SLOT_COST)?;
+                }
+                let reserved = self.slots.try_reserve(1).is_ok()
+                    // The free list gets room for every slot now, so that
+                    // closing a handle never needs memory.
+                    && self
+                        .free
+                        .try_reserve(self.slots.len() + 1 - self.free.len())
+                        .is_ok();
+                if !reserved {
+                    if let Some(budget) = budget {
+                        budget.release_kernel(SLOT_COST);
+                    }
+                    return Err(Error::NoMemory);
+                }
                 self.slots.push(Slot {
                     generation: 0,
                     entry: None,
+                    charged: budget.cloned(),
                 });
                 self.slots.len() - 1
             }
@@ -155,12 +188,17 @@ impl HandleTable {
     }
 
     /// A new handle to the object of `handle` with `rights`. Requires the
-    /// `DUPLICATE` right.
-    pub fn duplicate(&mut self, handle: Handle, rights: u32) -> Result<Handle, Error> {
+    /// `DUPLICATE` right. A new slot is charged to `budget` as in `insert`.
+    pub fn duplicate(
+        &mut self,
+        handle: Handle,
+        rights: u32,
+        budget: Option<&Arc<Budget>>,
+    ) -> Result<Handle, Error> {
         let entry = self.check(handle, &[], rights::DUPLICATE)?;
         let rights = Self::derived(entry.rights, rights)?;
         let object = entry.object.clone();
-        self.insert(object, rights)
+        self.insert(object, rights, budget)
     }
 
     /// Replaces `handle` with a new handle to its object with `rights`.
@@ -169,8 +207,8 @@ impl HandleTable {
         let rights = Self::derived(self.get(handle)?.rights, rights)?;
         let entry = self.take(handle)?;
         // The slot just freed makes room, and inserting into a free slot
-        // allocates nothing.
-        self.insert(entry.object, rights)
+        // allocates nothing and charges nothing.
+        self.insert(entry.object, rights, None)
     }
 
     /// Like `duplicate`, but passes the new handle to `publish` and keeps
@@ -180,9 +218,10 @@ impl HandleTable {
         &mut self,
         handle: Handle,
         rights: u32,
+        budget: Option<&Arc<Budget>>,
         publish: impl FnOnce(Handle) -> Result<(), Error>,
     ) -> Result<Handle, Error> {
-        let new = self.duplicate(handle, rights)?;
+        let new = self.duplicate(handle, rights, budget)?;
         if let Err(e) = publish(new) {
             self.take(new).map(drop)?;
             return Err(e);
@@ -205,7 +244,7 @@ impl HandleTable {
         let next = value(i, (self.slots[i].generation + 1) & GENERATION_MASK);
         publish(next)?;
         let entry = self.take(handle)?;
-        let new = self.insert(entry.object, rights)?;
+        let new = self.insert(entry.object, rights, None)?;
         debug_assert_eq!(new, next);
         Ok(new)
     }
@@ -214,6 +253,7 @@ impl HandleTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::budget::UNLIMITED;
     use crate::object::tests::Plain;
     use crate::object::{Header, default_rights};
 
@@ -224,15 +264,17 @@ mod tests {
     #[test]
     fn publishes_new_handles_before_keeping_them() {
         let mut t = HandleTable::new();
-        let a = t.insert(event(), rights::DUPLICATE | rights::READ).unwrap();
+        let a = t
+            .insert(event(), rights::DUPLICATE | rights::READ, None)
+            .unwrap();
         let fail = |_| Err(Error::InvalidArgs);
         assert_eq!(
-            t.duplicate_then(a, rights::READ, fail),
+            t.duplicate_then(a, rights::READ, None, fail),
             Err(Error::InvalidArgs)
         );
         assert_eq!(t.len(), 1);
         let mut seen = 0;
-        let d = t.duplicate_then(a, rights::READ, |h| {
+        let d = t.duplicate_then(a, rights::READ, None, |h| {
             seen = h;
             Ok(())
         });
@@ -261,11 +303,11 @@ mod tests {
     #[test]
     fn never_reissues_a_closed_value_at_once() {
         let mut t = HandleTable::new();
-        let a = t.insert(event(), 0).unwrap();
+        let a = t.insert(event(), 0, None).unwrap();
         assert_ne!(a, HANDLE_INVALID);
         t.close(a).unwrap();
         assert_eq!(t.get(a).err(), Some(Error::BadHandle));
-        let b = t.insert(event(), 0).unwrap();
+        let b = t.insert(event(), 0, None).unwrap();
         assert_eq!(b >> 8, a >> 8);
         assert_ne!(b, a);
         assert_eq!(t.close(a), Err(Error::BadHandle));
@@ -277,11 +319,11 @@ mod tests {
     #[test]
     fn generations_wrap_after_256_closes() {
         let mut t = HandleTable::new();
-        let first = t.insert(event(), 0).unwrap();
+        let first = t.insert(event(), 0, None).unwrap();
         let mut h = first;
         for _ in 0..256 {
             t.close(h).unwrap();
-            h = t.insert(event(), 0).unwrap();
+            h = t.insert(event(), 0, None).unwrap();
         }
         assert_eq!(h, first);
     }
@@ -289,7 +331,7 @@ mod tests {
     #[test]
     fn checks_validity_type_and_rights_in_order() {
         let mut t = HandleTable::new();
-        let h = t.insert(event(), rights::WAIT).unwrap();
+        let h = t.insert(event(), rights::WAIT, None).unwrap();
         let timer = [ObjectType::Timer];
         assert_eq!(
             t.check(h + 1, &timer, rights::SIGNAL).err(),
@@ -310,19 +352,19 @@ mod tests {
     fn duplicates_and_replaces_with_fewer_rights() {
         let mut t = HandleTable::new();
         let all = default_rights(ObjectType::Event);
-        let h = t.insert(event(), all).unwrap();
+        let h = t.insert(event(), all, None).unwrap();
         let koid = t.get(h).unwrap().object.header().koid();
 
-        let d = t.duplicate(h, rights::SAME_RIGHTS).unwrap();
+        let d = t.duplicate(h, rights::SAME_RIGHTS, None).unwrap();
         assert_eq!(t.get(d).unwrap().rights, all);
         assert_eq!(t.get(d).unwrap().object.header().koid(), koid);
-        assert_eq!(t.duplicate(h, rights::MAP), Err(Error::InvalidArgs));
+        assert_eq!(t.duplicate(h, rights::MAP, None), Err(Error::InvalidArgs));
 
         let r = t.replace(d, rights::WAIT).unwrap();
         assert_eq!(t.get(d).err(), Some(Error::BadHandle));
         assert_eq!(t.get(r).unwrap().rights, rights::WAIT);
         // Without DUPLICATE, duplicating is denied but replacing works.
-        assert_eq!(t.duplicate(r, rights::WAIT), Err(Error::AccessDenied));
+        assert_eq!(t.duplicate(r, rights::WAIT, None), Err(Error::AccessDenied));
         assert_eq!(t.replace(r, rights::SIGNAL), Err(Error::InvalidArgs));
         assert!(t.get(r).is_ok());
         assert_eq!(t.len(), 2);
@@ -333,11 +375,11 @@ mod tests {
         let mut t = HandleTable::new();
         let object = event();
         let handles: Vec<Handle> = (0..HANDLE_LIMIT)
-            .map(|_| t.insert(object.clone(), rights::DUPLICATE).unwrap())
+            .map(|_| t.insert(object.clone(), rights::DUPLICATE, None).unwrap())
             .collect();
-        assert_eq!(t.insert(object.clone(), 0), Err(Error::NoResources));
+        assert_eq!(t.insert(object.clone(), 0, None), Err(Error::NoResources));
         assert_eq!(
-            t.duplicate(handles[0], rights::SAME_RIGHTS),
+            t.duplicate(handles[0], rights::SAME_RIGHTS, None),
             Err(Error::NoResources)
         );
         // Replacing works on a full table.
@@ -349,5 +391,30 @@ mod tests {
         }
         assert!(t.is_empty());
         assert_eq!(Arc::strong_count(&object), 1);
+    }
+
+    #[test]
+    fn charges_new_slots_to_the_given_budget() {
+        let root = Budget::root();
+        let small = Budget::child(&root, SLOT_COST, UNLIMITED);
+        let other = Budget::child(&root, UNLIMITED, UNLIMITED);
+        let used = |b: &Budget| u64::from_le_bytes(b.info()[8..16].try_into().unwrap());
+        let mut t = HandleTable::new();
+        let a = t.insert(event(), rights::DUPLICATE, Some(&small)).unwrap();
+        assert_eq!(used(&small), SLOT_COST);
+        assert_eq!(
+            t.duplicate(a, rights::SAME_RIGHTS, Some(&small)),
+            Err(Error::NoResources)
+        );
+        assert_eq!(t.len(), 1);
+        let b = t.duplicate(a, rights::SAME_RIGHTS, Some(&other)).unwrap();
+        assert_eq!(used(&other), SLOT_COST);
+        // A freed slot is reused without a new charge.
+        t.close(b).unwrap();
+        t.insert(event(), 0, Some(&small)).unwrap();
+        t.replace(a, 0).unwrap();
+        assert_eq!((used(&small), used(&other)), (SLOT_COST, SLOT_COST));
+        drop(t);
+        assert_eq!((used(&small), used(&other), used(&root)), (0, 0, 0));
     }
 }

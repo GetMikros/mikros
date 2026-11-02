@@ -18,7 +18,9 @@ pub fn handle_duplicate(handle: Checked, rights: u32, out: UserOut<Handle>) -> R
     let process = current_process()?;
     let mut table = process.handles().lock();
     table
-        .duplicate_then(handle.value, rights, |new| out.write(new))
+        .duplicate_then(handle.value, rights, Some(process.budget()), |new| {
+            out.write(new)
+        })
         .map(drop)
 }
 

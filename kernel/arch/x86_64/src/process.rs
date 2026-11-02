@@ -110,7 +110,8 @@ impl Process {
     /// handle value (or `HANDLE_INVALID` without `arg`) and `arg2` as its
     /// arguments. Fails with `BadState` unless the process is `NEW` and
     /// `thread` is one of its threads and `NEW`. On failure `arg` is
-    /// returned with the error, so that the caller keeps it.
+    /// returned with the error, so that the caller keeps it. A new handle
+    /// table slot for `arg` is charged to `budget`, if given.
     pub fn start(
         process: &Arc<Process>,
         thread: &Arc<Thread>,
@@ -118,6 +119,7 @@ impl Process {
         stack: u64,
         arg: Option<Entry>,
         arg2: u64,
+        budget: Option<&Arc<Budget>>,
     ) -> Result<(), (Error, Option<Entry>)> {
         let threads = process.threads.lock();
         let ours = thread.process().is_some_and(|p| Arc::ptr_eq(p, process));
@@ -126,10 +128,11 @@ impl Process {
         }
         let handle: Handle = match arg {
             Some(entry) => {
-                let inserted = process
-                    .handles
-                    .lock()
-                    .insert(entry.object.clone(), entry.rights);
+                let inserted =
+                    process
+                        .handles
+                        .lock()
+                        .insert(entry.object.clone(), entry.rights, budget);
                 inserted.map_err(|e| (e, Some(entry)))?
             }
             None => HANDLE_INVALID,
