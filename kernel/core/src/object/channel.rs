@@ -98,6 +98,16 @@ pub struct Endpoint {
     header: Header,
     side: usize,
     shared: Arc<SpinLock<Shared>>,
+    /// Told when the peer is destroyed.
+    observer: SpinLock<Option<Weak<dyn PeerObserver>>>,
+}
+
+/// What the kernel does when the peer of an endpoint it holds is
+/// destroyed. It is called with no channel lock held, from wherever the
+/// peer's last reference is dropped, so it must not take locks that such
+/// a place may hold, such as a handle table's.
+pub trait PeerObserver: Send + Sync {
+    fn peer_closed(&self);
 }
 
 /// What `Endpoint::read` found when the first message did not fit.
@@ -126,11 +136,22 @@ impl Endpoint {
                 header,
                 side,
                 shared: shared.clone(),
+                observer: SpinLock::new(None),
             })
         };
         let (a, b) = (end(0), end(1));
         shared.lock().ends = [Arc::downgrade(&a), Arc::downgrade(&b)];
         Ok((a, b))
+    }
+
+    /// Makes `observer` be told when the peer is destroyed.
+    pub fn set_observer(&self, observer: Weak<dyn PeerObserver>) {
+        *self.observer.lock() = Some(observer);
+    }
+
+    /// Whether the peer has been destroyed.
+    pub fn peer_closed(&self) -> bool {
+        self.header.signals() & signals::PEER_CLOSED != 0
     }
 
     fn peer_side(&self) -> usize {
@@ -232,6 +253,10 @@ impl Drop for Endpoint {
         if let Some(peer) = peer.upgrade() {
             peer.header
                 .update_signals(signals::WRITABLE, signals::PEER_CLOSED);
+            let observer = peer.observer.lock().clone();
+            if let Some(observer) = observer.and_then(|o| o.upgrade()) {
+                observer.peer_closed();
+            }
         }
         // Discarded messages close their handles, which can destroy
         // further objects, so this happens with no lock held.
@@ -325,6 +350,24 @@ mod tests {
         assert_eq!(read(&b), Err(Error::PeerClosed));
         let (e, _) = b.write(message(b"", vec![])).err().unwrap();
         assert_eq!(e, Error::PeerClosed);
+    }
+
+    #[test]
+    fn tells_the_observer_when_the_peer_goes() {
+        struct Count(core::sync::atomic::AtomicU32);
+        impl PeerObserver for Count {
+            fn peer_closed(&self) {
+                self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let count = Arc::new(Count(Default::default()));
+        let (a, b) = Endpoint::pair(None).unwrap();
+        let weak: Weak<dyn PeerObserver> = Arc::downgrade(&count) as _;
+        a.set_observer(weak);
+        assert!(!a.peer_closed());
+        drop(b);
+        assert!(a.peer_closed());
+        assert_eq!(count.0.load(core::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
