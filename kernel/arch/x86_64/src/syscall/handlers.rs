@@ -51,15 +51,47 @@ fn object<T: Object>(handle: Checked) -> Arc<T> {
     downcast(handle.object).expect("the dispatch checked the object type")
 }
 
-/// Adds a handle with the default rights for `object` to the calling
-/// process's table, charged to its budget, and writes it to `out`.
-fn give(object: Arc<dyn Object>, kind: ObjectType, out: UserOut<Handle>) -> Result<(), Error> {
+/// Adds a handle with `rights` for `object` to the calling process's
+/// table, charged to its budget, and writes it to `out`, which is
+/// prepared first.
+fn give_with(object: Arc<dyn Object>, rights: u32, out: UserOut<Handle>) -> Result<(), Error> {
     let process = current_process()?;
-    let mut table = process.handles().lock();
-    let budget = Some(process.budget());
-    table
-        .insert_then(object, default_rights(kind), budget, |h| out.write(h))
-        .map(drop)
+    let outputs = prepare(&process, &[out.range(1)])?;
+    let h = process
+        .handles()
+        .lock()
+        .insert(object, rights, Some(process.budget()))?;
+    publish(outputs, &[bytes_of(&[h])]);
+    Ok(())
+}
+
+/// Like `give_with`, with the default rights for `kind`.
+fn give(object: Arc<dyn Object>, kind: ObjectType, out: UserOut<Handle>) -> Result<(), Error> {
+    give_with(object, default_rights(kind), out)
+}
+
+/// Adds handles for both `objects` with `rights` to the calling process's
+/// table, charged to its budget, keeping neither unless both fit, and
+/// writes them to `outs`, which are prepared first.
+fn give_pair(
+    objects: [Arc<dyn Object>; 2],
+    rights: u32,
+    outs: [UserOut<Handle>; 2],
+) -> Result<(), Error> {
+    let process = current_process()?;
+    let outputs = prepare(&process, &[outs[0].range(1), outs[1].range(1)])?;
+    let entries = objects.map(|object| kernel_core::object::handles::Entry { object, rights });
+    let mut values = [0; 2];
+    process.handles().lock().insert_many_then::<2>(
+        &entries,
+        Some(process.budget()),
+        |handles| {
+            values.copy_from_slice(handles);
+            Ok(())
+        },
+    )?;
+    publish(outputs, &[bytes_of(&values[..1]), bytes_of(&values[1..])]);
+    Ok(())
 }
 
 pub fn handle_close(handle: Option<Checked>) -> Result<(), Error> {
@@ -74,19 +106,21 @@ pub fn handle_close(handle: Option<Checked>) -> Result<(), Error> {
 
 pub fn handle_duplicate(handle: Checked, rights: u32, out: UserOut<Handle>) -> Result<(), Error> {
     let process = current_process()?;
-    let mut table = process.handles().lock();
-    table
-        .duplicate_then(handle.value, rights, Some(process.budget()), |new| {
-            out.write(new)
-        })
-        .map(drop)
+    let outputs = prepare(&process, &[out.range(1)])?;
+    let new = process
+        .handles()
+        .lock()
+        .duplicate(handle.value, rights, Some(process.budget()))?;
+    publish(outputs, &[bytes_of(&[new])]);
+    Ok(())
 }
 
 pub fn handle_replace(handle: Checked, rights: u32, out: UserOut<Handle>) -> Result<(), Error> {
     let process = current_process()?;
-    let mut table = process.handles().lock();
-    table.replace_then(handle.value, rights, |new| out.write(new))?;
+    let outputs = prepare(&process, &[out.range(1)])?;
+    let new = process.handles().lock().replace(handle.value, rights)?;
     crate::wait::handle_closed(&process, handle.value);
+    publish(outputs, &[bytes_of(&[new])]);
     Ok(())
 }
 
@@ -129,7 +163,15 @@ pub fn object_get_info(
         return Err(Error::InvalidArgs);
     }
     let process = current_process()?;
-    crate::output::information(process.aspace().as_ref(), buf.0, len, record, out_len.0)
+    // A short buffer gets only the size.
+    if len < size {
+        let outputs = prepare(&process, &[out_len.range(1)])?;
+        publish(outputs, &[bytes_of(&[size])]);
+        return Err(Error::BufferTooSmall);
+    }
+    let outputs = prepare(&process, &[buf.range(size), out_len.range(1)])?;
+    publish(outputs, &[record, bytes_of(&[size])]);
+    Ok(())
 }
 
 pub fn budget_create(
@@ -424,21 +466,8 @@ pub fn channel_create(
         return Err(Error::InvalidArgs);
     }
     let process = current_process()?;
-    let budget = Some(process.budget());
-    let (a, b) = Endpoint::pair(budget)?;
-    let rights = default_rights(ObjectType::Channel);
-    let mut table = process.handles().lock();
-    let entries = [
-        kernel_core::object::handles::Entry { object: a, rights },
-        kernel_core::object::handles::Entry { object: b, rights },
-    ];
-    table.insert_many_then::<2>(&entries, budget, |values| {
-        crate::output::channel_pair(
-            process.aspace().as_ref(),
-            [out0.0, out1.0],
-            [values[0], values[1]],
-        )
-    })
+    let (a, b) = Endpoint::pair(Some(process.budget()))?;
+    give_pair([a, b], default_rights(ObjectType::Channel), [out0, out1])
 }
 
 pub fn channel_write(
@@ -1285,24 +1314,8 @@ pub fn stream_create(
         return Err(Error::InvalidArgs);
     }
     let process = current_process()?;
-    let budget = Some(process.budget());
-    let (a, b) = StreamEnd::pair(budget)?;
-    let rights = default_rights(ObjectType::Stream);
-    let mut table = process.handles().lock();
-    let h0 = table.insert(a, rights, budget)?;
-    let written = table.insert(b, rights, budget).and_then(|h1| {
-        match out0.write(h0).and_then(|()| out1.write(h1)) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                table.close(h1).expect("just inserted");
-                Err(e)
-            }
-        }
-    });
-    if written.is_err() {
-        table.close(h0).expect("just inserted");
-    }
-    written
+    let (a, b) = StreamEnd::pair(Some(process.budget()))?;
+    give_pair([a, b], default_rights(ObjectType::Stream), [out0, out1])
 }
 
 /// A kernel buffer for up to one queue's worth of the `len` bytes of a
@@ -1398,10 +1411,7 @@ pub fn mem_clone(
     }
     held.release(&mut work);
     copied?;
-    let mut table = process.handles().lock();
-    table
-        .insert_then(clone, rights, Some(budget), |h| out.write(h))
-        .map(drop)
+    give_with(clone, rights, out)
 }
 
 pub fn pager_create(options: u32, out: UserOut<Handle>) -> Result<(), Error> {

@@ -55,38 +55,6 @@ pub fn write(memory: &impl Memory, outputs: &[Output<'_>]) -> Result<(), Error> 
     Ok(())
 }
 
-/// Publish an information record, or just its size when capacity is short.
-pub fn information(
-    memory: &impl Memory,
-    buffer: u64,
-    capacity: u64,
-    record: &[u8],
-    out_len: u64,
-) -> Result<(), Error> {
-    let size = record.len() as u64;
-    let size_bytes = size.to_ne_bytes();
-    if capacity < size {
-        write(memory, &[(out_len, &size_bytes)])?;
-        return Err(Error::BufferTooSmall);
-    }
-    write(memory, &[(buffer, record), (out_len, &size_bytes)])
-}
-
-/// Publish both new endpoint handles as one output batch.
-pub fn channel_pair(
-    memory: &impl Memory,
-    outputs: [u64; 2],
-    handles: [u32; 2],
-) -> Result<(), Error> {
-    write(
-        memory,
-        &[
-            (outputs[0], &handles[0].to_ne_bytes()),
-            (outputs[1], &handles[1].to_ne_bytes()),
-        ],
-    )
-}
-
 /// Publish the two message sizes together, including on size-reporting errors.
 pub fn channel_sizes(
     memory: &impl Memory,
@@ -415,59 +383,11 @@ mod tests {
     }
 
     #[test]
-    fn channel_pair_second_fault_is_atomic_and_success_publishes_both() {
-        for (resolve_end, locked_end) in [(6, 16), (16, 6)] {
-            let memory = model(resolve_end, locked_end);
-            assert_eq!(
-                channel_pair(&memory, [0, 4], [7, 9]),
-                Err(Error::InvalidArgs)
-            );
-            assert_eq!(*memory.bytes.borrow(), [0xa5; 16]);
-        }
-        let memory = model(16, 16);
-        channel_pair(&memory, [0, 4], [7, 9]).unwrap();
-        assert_eq!(&memory.bytes.borrow()[..4], &7u32.to_ne_bytes());
-        assert_eq!(&memory.bytes.borrow()[4..8], &9u32.to_ne_bytes());
-        assert_eq!(&memory.bytes.borrow()[8..], &[0xa5; 8]);
-    }
-
-    #[test]
     fn channel_sizes_second_crossing_fault_leaves_both_untouched() {
         for (resolve_end, locked_end) in [(12, 16), (16, 12)] {
             let memory = model(resolve_end, locked_end);
             assert_eq!(
                 channel_sizes(&memory, [0, 8], 3, 2),
-                Err(Error::InvalidArgs)
-            );
-            assert_eq!(*memory.bytes.borrow(), [0xa5; 16]);
-        }
-    }
-
-    #[test]
-    fn information_publishes_record_and_size() {
-        let memory = model(16, 16);
-        information(&memory, 0, 4, &[1, 2, 3, 4], 8).unwrap();
-        assert_eq!(&memory.bytes.borrow()[..4], &[1, 2, 3, 4]);
-        assert_eq!(&memory.bytes.borrow()[8..], &4u64.to_ne_bytes());
-    }
-
-    #[test]
-    fn short_information_only_publishes_size_and_ignores_buffer() {
-        let memory = model(16, 16);
-        assert_eq!(
-            information(&memory, u64::MAX, 0, &[1, 2], 8),
-            Err(Error::BufferTooSmall)
-        );
-        assert_eq!(&memory.bytes.borrow()[..8], &[0xa5; 8]);
-        assert_eq!(&memory.bytes.borrow()[8..], &2u64.to_ne_bytes());
-    }
-
-    #[test]
-    fn information_length_fault_does_not_publish_record_or_partial_size() {
-        for capacity in [0, 4] {
-            let memory = model(12, 16);
-            assert_eq!(
-                information(&memory, 0, capacity, &[1, 2, 3, 4], 8),
                 Err(Error::InvalidArgs)
             );
             assert_eq!(*memory.bytes.borrow(), [0xa5; 16]);

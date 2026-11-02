@@ -1113,7 +1113,10 @@ fn failed_outputs(s: &Startup) -> Result {
     let mut actual = 0;
     // SAFETY: the buffer lies on a read-only page; the count is valid.
     let status = unsafe { sys::stream_read(b, ro as *mut u8, 8, &mut actual) };
-    ensure("failing a read into read-only bytes", status == INVALID_ARGS)?;
+    ensure(
+        "failing a read into read-only bytes",
+        status == INVALID_ARGS,
+    )?;
     ensure(
         "keeping read bytes",
         stream_io(b, false, &mut buf) == (0, 4) && &buf[..4] == b"kept",
@@ -1306,6 +1309,32 @@ fn pagers(s: &Startup) -> Result {
     ensure("refusing a sealed source", sealed == -13)
 }
 
+/// Outputs on absent pages of a paged object wait for the pager instead
+/// of failing.
+fn paged_outputs(s: &Startup) -> Result {
+    let before = REQUESTS.load(Ordering::Acquire);
+    let (_pager, mem) = paged_object(s, 3, 0)?;
+    let at = map(s.process, mem, 3 * PAGE_SIZE)?;
+    let len = (at + PAGE_SIZE) as *mut u64;
+    // SAFETY: the record and its size lie in the writable mapping.
+    let status = unsafe { sys::object_get_info(mem, 1, at as *mut u8, 64, len) };
+    check("reading information into absent pages", status)?;
+    // SAFETY: the mapping is readable.
+    let size = unsafe { len.read_volatile() };
+    ensure("writing the size", size == 24)?;
+    let ends = (at + 2 * PAGE_SIZE) as *mut Handle;
+    // SAFETY: both handle outputs lie in the writable mapping.
+    let status = unsafe { sys::channel_create(0, ends, ends.add(1)) };
+    check("creating a channel into an absent page", status)?;
+    // SAFETY: the mapping is readable.
+    let (a, b) = unsafe { (ends.read_volatile(), ends.add(1).read_volatile()) };
+    ensure("writing both handles", a != 0 && b != 0 && a != b)?;
+    ensure(
+        "requesting each page",
+        REQUESTS.load(Ordering::Acquire) == before + 3,
+    )
+}
+
 const IO: i64 = -28;
 const BAD_STATE: i64 = -20;
 
@@ -1444,7 +1473,7 @@ fn pager_operations(s: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 19] = [
+const TESTS: [(&str, Test); 20] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1461,6 +1490,7 @@ const TESTS: [(&str, Test); 19] = [
     ("clones", clones),
     ("pagers", pagers),
     ("pager_operations", pager_operations),
+    ("paged_outputs", paged_outputs),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
