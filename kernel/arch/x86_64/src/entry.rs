@@ -1,6 +1,7 @@
 //! The kernel entry point.
 
 use crate::features::{Leaves, Missing};
+use crate::gdt;
 use crate::log::log;
 use crate::serial;
 use crate::space;
@@ -68,6 +69,8 @@ extern "sysv64" fn on_kernel_tables() -> ! {
     let Some(info) = *space::BOOT_INFO.lock() else {
         panic!("BootInfo was not kept");
     };
+    let ist = || space::new_stack(gdt::IST_STACK_SIZE);
+    gdt::init(space::stack_top(), ist(), ist(), ist());
     crate::time::init(&info);
     let free = space::reclaim_boot_memory(&info);
     log!(

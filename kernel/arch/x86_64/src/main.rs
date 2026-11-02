@@ -13,6 +13,9 @@ mod cpu;
 mod entry;
 #[cfg(any(target_os = "none", test))]
 mod features;
+#[cfg(any(target_os = "none", test))]
+#[cfg_attr(test, allow(dead_code))]
+mod gdt;
 #[cfg(target_os = "none")]
 mod log;
 #[cfg(target_os = "none")]

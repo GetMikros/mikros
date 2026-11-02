@@ -33,6 +33,13 @@ static DIRECT_MAP_BASE: AtomicU64 = AtomicU64::new(0);
 static DYNAMIC_NEXT: AtomicU64 = AtomicU64::new(DYNAMIC_START);
 /// The physical address of the kernel's top-level table.
 static ROOT: AtomicU64 = AtomicU64::new(0);
+/// The top of the stack the kernel moves to at boot.
+static STACK_TOP: AtomicU64 = AtomicU64::new(0);
+
+/// The top of the stack the kernel moved to at boot.
+pub fn stack_top() -> u64 {
+    STACK_TOP.load(Ordering::Relaxed)
+}
 
 /// The kernel's top-level table, once it runs on it.
 pub fn root() -> u64 {
@@ -90,6 +97,29 @@ pub fn map_device(phys: u64, size: u64) -> u64 {
         .map(virt, first, len, flags)
         .unwrap_or_else(|e| panic!("mapping device memory: {e}"));
     virt + (phys - first)
+}
+
+/// Maps a new stack of `size` bytes, with an unmapped page below it, into
+/// the dynamic region and returns its top.
+pub fn new_stack(size: u64) -> u64 {
+    let phys = FRAMES
+        .lock()
+        .as_mut()
+        .and_then(|f| f.alloc_contiguous(size / PAGE_SIZE, 1))
+        .unwrap_or_else(|| panic!("no memory for a stack of {size} bytes"));
+    let virt = reserve_dynamic(size);
+    let flags = Flags {
+        writable: true,
+        executable: false,
+        global: true,
+        policy: Policy::Cached,
+    };
+    let mut tables = FrameTables;
+    let mut mapper = Mapper::existing(&mut tables, root(), gib_pages());
+    mapper
+        .map(virt, phys, size, flags)
+        .unwrap_or_else(|e| panic!("mapping a stack: {e}"));
+    virt + size
 }
 
 fn gib_pages() -> bool {
@@ -239,6 +269,7 @@ pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
         .unwrap_or_else(|e| panic!("building the kernel page tables: {e}"));
     let root = mapper.root();
     ROOT.store(root, Ordering::Relaxed);
+    STACK_TOP.store(stack + STACK_SIZE, Ordering::Relaxed);
     crate::panic::set_stack(stack, stack + STACK_SIZE);
     *BOOT_INFO.lock() = Some(info);
     // SAFETY: the new tables map the kernel image at the same addresses,
