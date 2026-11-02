@@ -1,5 +1,7 @@
 //! Choosing the display mode.
 
+use boot_protocol::{Framebuffer, format};
+
 /// A graphics mode as reported by the firmware.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModeInfo {
@@ -47,6 +49,47 @@ pub fn choose(current: ModeInfo, modes: &[ModeInfo], requested: Option<(usize, u
 /// case when the highest bit of any mask is bit 31.
 pub fn bitmask_is_32bit(red: u32, green: u32, blue: u32, reserved: u32) -> bool {
     (red | green | blue | reserved) & 0x8000_0000 != 0
+}
+
+/// The pixel layout of a usable mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pixels {
+    Rgb,
+    Bgr,
+    /// Red, green, blue and reserved masks.
+    Bitmask([u32; 4]),
+}
+
+/// A usable mode's framebuffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mode {
+    pub phys_base: u64,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub pixels: Pixels,
+}
+
+/// The kernel's description of the framebuffer of `mode`.
+pub fn describe(mode: Mode) -> Framebuffer {
+    let (format, [red, green, blue, reserved]) = match mode.pixels {
+        Pixels::Rgb => (format::RGB, [0xff, 0xff00, 0xff_0000, 0xff00_0000]),
+        Pixels::Bgr => (format::BGR, [0xff_0000, 0xff00, 0xff, 0xff00_0000]),
+        Pixels::Bitmask(masks) => (format::BITMASK, masks),
+    };
+    Framebuffer {
+        phys_base: mode.phys_base,
+        size: mode.size,
+        width: mode.width,
+        height: mode.height,
+        stride: mode.stride,
+        format,
+        red_mask: red,
+        green_mask: green,
+        blue_mask: blue,
+        reserved_mask: reserved,
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +172,41 @@ mod tests {
     fn recognizes_32bit_masks() {
         assert!(bitmask_is_32bit(0xff, 0xff00, 0xff_0000, 0xff00_0000));
         assert!(!bitmask_is_32bit(0xf800, 0x07e0, 0x001f, 0));
+    }
+    #[test]
+    fn describes_the_pixel_layout() {
+        let mode = |pixels| Mode {
+            phys_base: 0x8000_0000,
+            size: 0x40_0000,
+            width: 1000,
+            height: 1000,
+            stride: 1024,
+            pixels,
+        };
+        let rgb = describe(mode(Pixels::Rgb));
+        assert_eq!(
+            (rgb.format, rgb.red_mask, rgb.blue_mask),
+            (1, 0xff, 0xff_0000)
+        );
+        assert_eq!((rgb.stride, rgb.phys_base), (1024, 0x8000_0000));
+        let bgr = describe(mode(Pixels::Bgr));
+        assert_eq!(
+            (bgr.format, bgr.red_mask, bgr.blue_mask),
+            (2, 0xff_0000, 0xff)
+        );
+        let masks = [0x3ff, 0xffc00, 0x3ff0_0000, 0xc000_0000];
+        let bits = describe(mode(Pixels::Bitmask(masks)));
+        assert_eq!(
+            (
+                bits.format,
+                [
+                    bits.red_mask,
+                    bits.green_mask,
+                    bits.blue_mask,
+                    bits.reserved_mask
+                ]
+            ),
+            (3, masks)
+        );
     }
 }
