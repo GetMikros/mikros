@@ -29,6 +29,15 @@ static PROTOCOL_NOTE: Note = Note {
     desc: [VERSION_MAJOR, VERSION_MINOR],
 };
 
+/// The name of the build kind this kernel was built as.
+const BUILD_KIND: &str = if cfg!(feature = "fuzz") {
+    "fuzz"
+} else if cfg!(debug_assertions) {
+    "debug"
+} else {
+    "production"
+};
+
 /// Reads the `BootInfo` at `info`.
 fn boot_info(info: *const u8) -> BootInfo {
     // SAFETY: the bootloader passes the address of BootInfo in the direct
@@ -45,6 +54,12 @@ fn boot_info(info: *const u8) -> BootInfo {
 #[unsafe(no_mangle)]
 extern "sysv64" fn _start(info: *const u8) -> ! {
     serial::init();
+    log!(
+        Info,
+        "Mikros kernel {} ({} build)",
+        env!("CARGO_PKG_VERSION"),
+        BUILD_KIND
+    );
     let leaves = Leaves::read(|leaf, subleaf| {
         let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
         [r.eax, r.ebx, r.ecx, r.edx]
