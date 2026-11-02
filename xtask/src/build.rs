@@ -67,6 +67,8 @@ pub fn build(kind: Kind) -> Result<Built> {
     }
     let kernel = cargo_build("kernel-x86_64", "kernel", KERNEL_TARGET, kind)?;
     println!("built    {}", kernel.display());
+    let debug_info = crate::debuginfo::split(&kernel)?;
+    println!("built    {}", debug_info.display());
     Ok(Built {
         bootmenu,
         bootloader: Some(bootloader),

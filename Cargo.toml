@@ -5,3 +5,8 @@ members = ["boot/bootmenu", "boot/mikrosboot", "boot/protocol", "kernel/arch/x86
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
+
+# The production kernel keeps debug information so that it can be split
+# into a file named by the kernel's build ID.
+[profile.release.package.kernel-x86_64]
+debug = true

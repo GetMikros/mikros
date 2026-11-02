@@ -2,6 +2,7 @@
 
 mod build;
 mod check;
+mod debuginfo;
 mod firmware;
 mod image;
 mod qemu;
