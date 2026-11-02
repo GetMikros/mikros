@@ -45,6 +45,9 @@ mod panic;
 #[cfg(target_os = "none")]
 mod percpu;
 #[cfg(target_os = "none")]
+#[expect(dead_code, reason = "nothing creates processes yet")]
+mod process;
+#[cfg(target_os = "none")]
 mod random;
 #[cfg(target_os = "none")]
 mod sched;

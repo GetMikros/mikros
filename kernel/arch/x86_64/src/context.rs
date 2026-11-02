@@ -96,6 +96,11 @@ pub fn init() {
     XSAVE_SIZE.store(size, Ordering::Relaxed);
 }
 
+/// The size of a thread's extended state area.
+pub fn extended_state_size() -> usize {
+    xsave_layout().size()
+}
+
 fn xsave_layout() -> Layout {
     let size = XSAVE_SIZE.load(Ordering::Relaxed).max(576);
     Layout::from_size_align(size, 64).unwrap_or_else(|_| panic!("bad XSAVE area size {size}"))

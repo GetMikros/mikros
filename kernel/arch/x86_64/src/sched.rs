@@ -7,10 +7,12 @@
 
 use crate::context::{self, ExtendedState};
 use crate::percpu;
+use crate::process::Process;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use kernel_core::deadline::{Deadlines, INFINITE};
+use kernel_core::object::{Header, Name, Object, ObjectType};
 use kernel_core::sched::{DEFAULT_PRIORITY, Entity, Fair};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
@@ -18,16 +20,25 @@ use kernel_core::sync::SpinLock;
 /// The size of a kernel thread's stack.
 pub const KERNEL_STACK_SIZE: u64 = 32 << 10;
 
+pub const NEW: u32 = 0;
 pub const RUNNABLE: u32 = 1;
 pub const BLOCKED: u32 = 2;
 pub const DEAD: u32 = 4;
 
 pub struct Thread {
+    header: Header,
+    #[allow(dead_code, reason = "nothing creates processes yet")]
+    name: Name,
+    /// The process of a user thread.
+    process: Option<Arc<Process>>,
+    /// Kernel memory charged to the process's budget for the thread.
+    charged: u64,
     state: AtomicU32,
     /// The stack pointer saved while the thread does not run.
     rsp: UnsafeCell<u64>,
     extended: ExtendedState,
-    stack_top: u64,
+    /// The top of the kernel stack, or 0 once it is freed.
+    stack_top: AtomicU64,
     entity: SpinLock<Entity>,
     /// Nanoseconds the thread has run.
     cpu_time: AtomicI64,
@@ -39,6 +50,63 @@ pub struct Thread {
 unsafe impl Sync for Thread {}
 
 impl Thread {
+    /// A thread with a new kernel stack, in `state`, not queued.
+    fn new(
+        process: Option<Arc<Process>>,
+        name: Name,
+        state: u32,
+        charged: u64,
+    ) -> Result<Arc<Thread>, Error> {
+        let extended = ExtendedState::new().ok_or(Error::NoMemory)?;
+        let stack = crate::space::alloc_pages(KERNEL_STACK_SIZE).ok_or(Error::NoMemory)?;
+        // Every thread that can run has room in the run queue from when
+        // it was created.
+        if this_cpu().lock().fair.try_reserve(1).is_err() {
+            crate::space::free_pages(stack, KERNEL_STACK_SIZE);
+            return Err(Error::NoMemory);
+        }
+        Ok(Arc::new(Thread {
+            header: Header::new(ObjectType::Thread),
+            name,
+            process,
+            charged,
+            state: AtomicU32::new(state),
+            rsp: UnsafeCell::new(0),
+            extended,
+            stack_top: AtomicU64::new(stack + KERNEL_STACK_SIZE),
+            entity: SpinLock::new(Entity::new(DEFAULT_PRIORITY)),
+            cpu_time: AtomicI64::new(0),
+        }))
+    }
+
+    /// A user thread of `process` in state `NEW`. Its memory is charged
+    /// to the process's budget when `charge` is set.
+    pub fn new_user(process: Arc<Process>, name: Name, charge: bool) -> Result<Arc<Thread>, Error> {
+        let charged = if charge {
+            let size = size_of::<Thread>() as u64
+                + KERNEL_STACK_SIZE
+                + context::extended_state_size() as u64;
+            process.budget().charge_kernel(size)?;
+            size
+        } else {
+            0
+        };
+        let budget = process.budget().clone();
+        Thread::new(Some(process), name, NEW, charged).inspect_err(|_| {
+            budget.release_kernel(charged);
+        })
+    }
+
+    #[allow(dead_code, reason = "nothing creates processes yet")]
+    pub fn name(&self) -> &Name {
+        &self.name
+    }
+
+    #[allow(dead_code, reason = "nothing creates processes yet")]
+    pub fn process(&self) -> Option<&Arc<Process>> {
+        self.process.as_ref()
+    }
+
     pub fn state(&self) -> u32 {
         self.state.load(Ordering::Acquire)
     }
@@ -46,6 +114,25 @@ impl Thread {
     #[allow(dead_code, reason = "nothing starts kernel threads yet")]
     pub fn cpu_time(&self) -> i64 {
         self.cpu_time.load(Ordering::Relaxed)
+    }
+}
+
+impl Object for Thread {
+    fn header(&self) -> &Header {
+        &self.header
+    }
+
+    fn related_koid(&self) -> u64 {
+        self.process.as_ref().map_or(0, |p| p.header().koid())
+    }
+}
+
+impl Drop for Thread {
+    fn drop(&mut self) {
+        free_stack(self);
+        if let Some(process) = &self.process {
+            process.budget().release_kernel(self.charged);
+        }
     }
 }
 
@@ -109,32 +196,24 @@ static RESCHEDULE: AtomicBool = AtomicBool::new(false);
 /// Creates a kernel thread that runs `entry(arg)` and queues it.
 #[allow(dead_code, reason = "nothing starts kernel threads yet")]
 pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
-    let extended = ExtendedState::new().ok_or(Error::NoMemory)?;
-    let stack = crate::space::alloc_pages(KERNEL_STACK_SIZE).ok_or(Error::NoMemory)?;
-    let top = stack + KERNEL_STACK_SIZE;
-    // SAFETY: the stack was just mapped and nothing uses it.
-    let rsp = unsafe { context::prepare(top, entry as usize as u64, arg as u64) };
-    let thread = Arc::new(Thread {
-        state: AtomicU32::new(RUNNABLE),
-        rsp: UnsafeCell::new(rsp),
-        extended,
-        stack_top: top,
-        entity: SpinLock::new(Entity::new(DEFAULT_PRIORITY)),
-        cpu_time: AtomicI64::new(0),
-    });
+    let thread = Thread::new(None, Name::EMPTY, RUNNABLE, 0)?;
+    let top = thread.stack_top.load(Ordering::Relaxed);
+    // SAFETY: the stack was just mapped and nothing uses it; the thread
+    // is not queued yet, so nothing reads its saved pointer.
+    unsafe { *thread.rsp.get() = context::prepare(top, entry as usize as u64, arg as u64) };
     let mut cpu = this_cpu().lock();
-    if cpu.fair.try_reserve(1).is_err() {
-        drop(cpu);
-        free_stack(&thread);
-        return Err(Error::NoMemory);
-    }
     let entity = *thread.entity.lock();
     cpu.fair.enqueue(Queued::new(thread.clone()), entity);
     Ok(thread)
 }
 
+/// Frees the thread's kernel stack, unless it is already freed. Nothing
+/// may run on it.
 fn free_stack(thread: &Thread) {
-    crate::space::free_pages(thread.stack_top - KERNEL_STACK_SIZE, KERNEL_STACK_SIZE);
+    let top = thread.stack_top.swap(0, Ordering::AcqRel);
+    if top != 0 {
+        crate::space::free_pages(top - KERNEL_STACK_SIZE, KERNEL_STACK_SIZE);
+    }
 }
 
 /// Frees what the thread that ran before left behind.

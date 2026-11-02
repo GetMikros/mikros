@@ -191,6 +191,48 @@ pub fn basic_info(object: &dyn Object, rights: u32) -> [u8; INFO_BASIC_SIZE] {
     record
 }
 
+/// The longest object name in bytes.
+pub const NAME_MAX: usize = 32;
+
+/// An object's name, used only for diagnostics: valid UTF-8 of at most
+/// `NAME_MAX` bytes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Name {
+    bytes: [u8; NAME_MAX],
+    len: u8,
+}
+
+impl Name {
+    /// The empty name.
+    pub const EMPTY: Name = Name {
+        bytes: [0; NAME_MAX],
+        len: 0,
+    };
+
+    /// The name made of `bytes`, which fails with `InvalidArgs` when they
+    /// are too long or not UTF-8.
+    pub fn new(bytes: &[u8]) -> Result<Name, crate::status::Error> {
+        if bytes.len() > NAME_MAX || core::str::from_utf8(bytes).is_err() {
+            return Err(crate::status::Error::InvalidArgs);
+        }
+        let mut name = Name::EMPTY;
+        name.bytes[..bytes.len()].copy_from_slice(bytes);
+        name.len = bytes.len() as u8;
+        Ok(name)
+    }
+
+    pub fn as_str(&self) -> &str {
+        // `new` accepts only UTF-8.
+        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Debug for Name {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_str(), f)
+    }
+}
+
 /// The signals user space may change with `object_signal`.
 pub const USER_SETTABLE: u32 = signals::SIGNALED | signals::USER_ALL;
 
@@ -262,6 +304,16 @@ pub(crate) mod tests {
         );
         assert_eq!(&r[8..16], &[0; 8]);
         assert_eq!(&r[16..24], &[5, 0, 0, 0, 0xC3, 2, 0, 0]);
+    }
+
+    #[test]
+    fn checks_names() {
+        assert_eq!(Name::new(b"init").unwrap().as_str(), "init");
+        assert_eq!(Name::new(&[b'a'; 32]).unwrap().as_str().len(), 32);
+        assert!(Name::new(&[b'a'; 33]).is_err());
+        assert!(Name::new(&[0xC3]).is_err());
+        assert_eq!(Name::new("ü".as_bytes()).unwrap().as_str(), "ü");
+        assert_eq!(Name::new(b"").unwrap(), Name::EMPTY);
     }
 
     #[test]
