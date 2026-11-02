@@ -50,3 +50,51 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "handles"
+path = "fuzz_targets/handles.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rights"
+path = "fuzz_targets/rights.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "regions"
+path = "fuzz_targets/regions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel"
+path = "fuzz_targets/channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sched"
+path = "fuzz_targets/sched.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "timers"
+path = "fuzz_targets/timers.rs"
+test = false
+doc = false
+bench = false
