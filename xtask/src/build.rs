@@ -58,14 +58,19 @@ pub struct Built {
 
 /// Builds every component of the build kind `kind`.
 pub fn build(kind: Kind) -> Result<Built> {
-    let bootmenu = cargo_build("bootmenu", "x86_64-unknown-uefi", kind)?;
+    let bootmenu = cargo_build("bootmenu", "bootmenu", "x86_64-unknown-uefi", kind)?;
     println!("built    {}", bootmenu.display());
-    let bootloader = cargo_build("mikrosboot", "x86_64-unknown-uefi", kind)?;
+    let bootloader = cargo_build("mikrosboot", "mikrosboot", "x86_64-unknown-uefi", kind)?;
     println!("built    {}", bootloader.display());
+    if kind == Kind::Fuzz {
+        bail!("the fuzz build of the kernel is not implemented yet");
+    }
+    let kernel = cargo_build("kernel-x86_64", "kernel", KERNEL_TARGET, kind)?;
+    println!("built    {}", kernel.display());
     Ok(Built {
         bootmenu,
         bootloader: Some(bootloader),
-        kernel: None,
+        kernel: Some(kernel),
         boot_image: None,
     })
 }
@@ -74,12 +79,23 @@ pub fn run(args: &Args) -> Result<()> {
     build(args.kind).map(drop)
 }
 
-/// Builds the binary of `package` for `target` and returns its path.
-fn cargo_build(package: &str, target: &str, kind: Kind) -> Result<PathBuf> {
+/// The target the kernel is built for.
+pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
+
+/// Builds the binary `bin` of `package` for `target` and returns its path.
+fn cargo_build(package: &str, bin: &str, target: &str, kind: Kind) -> Result<PathBuf> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let status = Command::new(cargo)
         .current_dir(crate::workspace_root())
-        .args(["build", "--package", package, "--target", target])
+        .args([
+            "build",
+            "--package",
+            package,
+            "--bin",
+            bin,
+            "--target",
+            target,
+        ])
         .args(["--profile", kind.profile()])
         .status()
         .context("failed to run cargo")?;
@@ -91,7 +107,7 @@ fn cargo_build(package: &str, target: &str, kind: Kind) -> Result<PathBuf> {
         .join("target")
         .join(target)
         .join(kind.profile_dir())
-        .join(package);
+        .join(bin);
     path.set_extension(extension);
     Ok(path)
 }

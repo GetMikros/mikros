@@ -168,8 +168,8 @@ pub fn run(args: &Args) -> Result<()> {
     }
 
     // The UEFI code of the boot manager and the bootloader is only compiled
-    // for the UEFI target.
-    let clippy_runs: [&[&str]; 2] = [
+    // for the UEFI target, and the kernel's for its own target.
+    let clippy_runs: [&[&str]; 3] = [
         &[
             "clippy",
             "--workspace",
@@ -186,6 +186,16 @@ pub fn run(args: &Args) -> Result<()> {
             "mikrosboot",
             "--target",
             "x86_64-unknown-uefi",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        &[
+            "clippy",
+            "--package",
+            "kernel-x86_64",
+            "--target",
+            crate::build::KERNEL_TARGET,
             "--",
             "-D",
             "warnings",
