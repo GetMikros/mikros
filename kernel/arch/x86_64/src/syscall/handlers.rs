@@ -366,15 +366,17 @@ pub fn channel_create(
     let rights = default_rights(ObjectType::Channel);
     let mut table = process.handles().lock();
     let h0 = table.insert(a, rights, budget)?;
-    let written = table.insert(b, rights, budget).and_then(|h1| {
-        match out0.write(h0).and_then(|()| out1.write(h1)) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                table.close(h1).expect("just inserted");
-                Err(e)
+    let written =
+        table.insert(b, rights, budget).and_then(|h1| {
+            match crate::output::channel_pair(process.aspace().as_ref(), [out0.0, out1.0], [h0, h1])
+            {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    table.close(h1).expect("just inserted");
+                    Err(e)
+                }
             }
-        }
-    });
+        });
     if written.is_err() {
         table.close(h0).expect("just inserted");
     }
@@ -442,7 +444,14 @@ pub fn channel_read(
     let mut table = process.handles().lock();
     object::<Endpoint>(channel).read(|data, entries| {
         let (len, count) = (data.len() as u64, entries.len() as u64);
-        let sizes = || out_len.write(len).and_then(|()| out_count.write(count));
+        let sizes = || {
+            crate::output::channel_sizes(
+                process.aspace().as_ref(),
+                [out_len.0, out_count.0],
+                len,
+                count,
+            )
+        };
         if len > bytes_cap || count > handles_cap {
             sizes()?;
             return Err(Error::BufferTooSmall);
@@ -450,37 +459,14 @@ pub fn channel_read(
         if !bytes.fits(len) || !handles.fits(count) {
             return Err(Error::InvalidArgs);
         }
-        let mut values = [0; HANDLES_MAX];
-        let mut installed = 0;
-        let mut result = Ok(());
-        for entry in entries {
-            match table.insert(entry.object.clone(), entry.rights, budget) {
-                Ok(h) => {
-                    values[installed] = h;
-                    installed += 1;
-                }
-                Err(e) => {
-                    result = Err(e);
-                    break;
-                }
-            }
-        }
-        let values = &values[..installed];
-        result = result.and_then(|()| {
-            bytes.write_bytes(data)?;
-            handles.write_all(values)?;
-            sizes()
-        });
-        if let Err(e) = result {
-            // The message stays queued, holding its own references.
-            for &h in values {
-                table.close(h).expect("just inserted");
-            }
-            if e == Error::NoResources {
-                sizes()?;
-            }
-        }
-        result
+        crate::output::receive(
+            process.aspace().as_ref(),
+            [bytes.0, handles.0, out_len.0, out_count.0],
+            data,
+            entries,
+            &mut table,
+            budget,
+        )
     })
 }
 
