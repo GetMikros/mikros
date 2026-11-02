@@ -105,3 +105,10 @@ path = "fuzz_targets/stream.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "paging"
+path = "fuzz_targets/paging.rs"
+test = false
+doc = false
+bench = false

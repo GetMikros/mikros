@@ -16,6 +16,7 @@ pub mod frames;
 pub mod heap;
 pub mod log;
 pub mod object;
+pub mod paging;
 pub mod panic;
 pub mod random;
 pub mod ranges;
