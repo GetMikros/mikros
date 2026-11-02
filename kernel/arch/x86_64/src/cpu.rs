@@ -173,3 +173,10 @@ pub fn init() {
         write_xcr(0, control::xcr0(features));
     }
 }
+
+/// Invalidates the translations of the page that contains `virt`,
+/// including a global one.
+pub fn invlpg(virt: u64) {
+    // SAFETY: INVLPG only drops cached translations.
+    unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
+}

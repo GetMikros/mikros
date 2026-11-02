@@ -10,4 +10,5 @@ pub mod frames;
 pub mod log;
 pub mod panic;
 pub mod random;
+pub mod ranges;
 pub mod sync;

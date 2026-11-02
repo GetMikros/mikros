@@ -85,6 +85,10 @@ pub enum Error {
     OutOfMemory,
     /// The page at this virtual address is already mapped.
     AlreadyMapped(u64),
+    /// The page at this virtual address is not mapped.
+    NotMapped(u64),
+    /// The range ends inside the large page at this virtual address.
+    PartOfLargePage(u64),
 }
 
 impl fmt::Display for Error {
@@ -92,6 +96,10 @@ impl fmt::Display for Error {
         match self {
             Error::OutOfMemory => write!(f, "no memory for page tables"),
             Error::AlreadyMapped(v) => write!(f, "the page at {v:#x} is already mapped"),
+            Error::NotMapped(v) => write!(f, "the page at {v:#x} is not mapped"),
+            Error::PartOfLargePage(v) => {
+                write!(f, "the range covers only part of the large page at {v:#x}")
+            }
         }
     }
 }
@@ -163,6 +171,54 @@ impl<'t, T: Tables> Mapper<'t, T> {
         }
         let huge = level > 0;
         *entry = phys | flags.bits(huge) | if huge { HUGE } else { 0 };
+        Ok(())
+    }
+
+    /// The table holding the leaf entry for `virt`, the entry's index and
+    /// its page size, or `None` when `virt` is not mapped.
+    fn find_leaf(&mut self, virt: u64) -> Option<(u64, usize, u64)> {
+        let mut table = self.root;
+        for level in (0..=3).rev() {
+            let i = index(virt, level);
+            let entry = self.tables.table(table)[i];
+            if entry & PRESENT == 0 {
+                return None;
+            }
+            if level == 0 || (level < 3 && entry & HUGE != 0) {
+                return Some((table, i, 1 << (12 + 9 * level)));
+            }
+            table = entry & ADDR_MASK;
+        }
+        None
+    }
+
+    /// Removes the mappings of the `size` bytes from `virt` and calls
+    /// `unmapped` with the virtual address, the physical address and the
+    /// size of each page removed. Every page in the range must be mapped,
+    /// and large pages must lie wholly inside it; otherwise nothing is
+    /// changed. The caller invalidates the translations. Page tables that
+    /// become empty are kept.
+    pub fn unmap(
+        &mut self,
+        virt: u64,
+        size: u64,
+        mut unmapped: impl FnMut(u64, u64, u64),
+    ) -> Result<(), Error> {
+        for apply in [false, true] {
+            let mut done = 0;
+            while done < size {
+                let v = virt.wrapping_add(done);
+                let (table, i, page) = self.find_leaf(v).ok_or(Error::NotMapped(v))?;
+                if v % page != 0 || size - done < page {
+                    return Err(Error::PartOfLargePage(v));
+                }
+                if apply {
+                    let entry = core::mem::take(&mut self.tables.table(table)[i]);
+                    unmapped(v, entry & ADDR_MASK & !(page - 1), page);
+                }
+                done += page;
+            }
+        }
         Ok(())
     }
 
@@ -308,5 +364,46 @@ mod tests {
             again.map(dm, 0, PAGE_SIZE, KERNEL_DATA),
             Err(Error::AlreadyMapped(dm))
         );
+    }
+
+    #[test]
+    fn unmaps_whole_pages_only() {
+        let mut pool = Pool(Vec::new());
+        let mut mapper = Mapper::new(&mut pool, true).unwrap();
+        let base = 0xffff_c000_0000_0000;
+        mapper
+            .map(base, 0x20_0000, MIB_2 + 2 * PAGE_SIZE, KERNEL_DATA)
+            .unwrap();
+        let mut seen = Vec::new();
+        assert_eq!(
+            mapper.unmap(base, PAGE_SIZE, |v, p, size| seen.push((v, p, size))),
+            Err(Error::PartOfLargePage(base))
+        );
+        let end = base + MIB_2 + 2 * PAGE_SIZE;
+        assert_eq!(
+            mapper.unmap(base, MIB_2 + 3 * PAGE_SIZE, |v, p, size| seen
+                .push((v, p, size))),
+            Err(Error::NotMapped(end))
+        );
+        assert!(seen.is_empty());
+        mapper
+            .unmap(base, MIB_2 + PAGE_SIZE, |v, p, size| {
+                seen.push((v, p, size))
+            })
+            .unwrap();
+        assert_eq!(
+            seen,
+            [
+                (base, 0x20_0000, MIB_2),
+                (base + MIB_2, 0x40_0000, PAGE_SIZE)
+            ]
+        );
+        let root = mapper.root();
+        assert_eq!(leaf(&mut pool, root, base), None);
+        assert_eq!(leaf(&mut pool, root, base + MIB_2), None);
+        assert!(leaf(&mut pool, root, base + MIB_2 + PAGE_SIZE).is_some());
+        // The range can be mapped again.
+        let mut mapper = Mapper::existing(&mut pool, root, true);
+        mapper.map(base, 0, PAGE_SIZE, KERNEL_DATA).unwrap();
     }
 }

@@ -1,11 +1,13 @@
 //! The kernel's own address space: building its page tables at boot and
 //! moving onto them, and the kernel dynamic region.
 
+use crate::log::log;
 use crate::memory::{self, FRAMES};
 use crate::paging::{Flags, Mapper, PAGE_SIZE, PAT_VALUE, Policy, Tables};
 use boot_protocol::{BootInfo, CMDLINE_MAX, Kind};
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
+use kernel_core::ranges::Ranges;
 use kernel_core::sync::SpinLock;
 
 /// The start of the kernel dynamic region.
@@ -28,8 +30,11 @@ unsafe extern "C" {
 
 /// The direct map base, from BootInfo.
 static DIRECT_MAP_BASE: AtomicU64 = AtomicU64::new(0);
-/// The next unused address of the kernel dynamic region.
-static DYNAMIC_NEXT: AtomicU64 = AtomicU64::new(DYNAMIC_START);
+/// The unused parts of the kernel dynamic region.
+static DYNAMIC: SpinLock<Ranges<DYNAMIC_RANGES>> =
+    SpinLock::new(Ranges::new(DYNAMIC_START, DYNAMIC_END));
+/// The most free ranges the dynamic region keeps track of.
+const DYNAMIC_RANGES: usize = 256;
 /// The physical address of the kernel's top-level table.
 static ROOT: AtomicU64 = AtomicU64::new(0);
 /// The top of the stack the kernel moves to at boot.
@@ -71,11 +76,35 @@ impl Tables for FrameTables {
 /// below them, and returns the start of the reserved range.
 pub fn reserve_dynamic(size: u64) -> u64 {
     let size = size.next_multiple_of(PAGE_SIZE) + PAGE_SIZE;
-    let start = DYNAMIC_NEXT.fetch_add(size, Ordering::Relaxed);
-    if start.checked_add(size).is_none_or(|end| end > DYNAMIC_END) {
-        panic!("the kernel dynamic region is full");
-    }
+    let start = DYNAMIC
+        .lock()
+        .alloc(size, PAGE_SIZE)
+        .unwrap_or_else(|| panic!("the kernel dynamic region is full"));
     start + PAGE_SIZE
+}
+
+/// Returns a range from `reserve_dynamic`, with its guard page, to the
+/// dynamic region. Its pages must be unmapped.
+pub fn release_dynamic(start: u64, size: u64) {
+    let size = size.next_multiple_of(PAGE_SIZE) + PAGE_SIZE;
+    if let Err(e) = DYNAMIC.lock().free(start - PAGE_SIZE, size) {
+        // The range stays reserved; only address space is lost.
+        log!(Warning, "releasing kernel address space: {e}");
+    }
+}
+
+/// Unmaps `size` bytes at `virt` in the kernel's tables, invalidates their
+/// translations, and calls `unmapped` with the physical address and size
+/// of each page.
+fn unmap(virt: u64, size: u64, mut unmapped: impl FnMut(u64, u64)) {
+    let mut tables = FrameTables;
+    let mut mapper = Mapper::existing(&mut tables, root(), gib_pages());
+    mapper
+        .unmap(virt, size, |v, phys, page| {
+            crate::cpu::invlpg(v);
+            unmapped(phys, page);
+        })
+        .unwrap_or_else(|e| panic!("unmapping kernel memory: {e}"));
 }
 
 /// Maps `size` bytes of device memory at `phys` uncached into the dynamic
@@ -96,6 +125,17 @@ pub fn map_device(phys: u64, size: u64) -> u64 {
         .map(virt, first, len, flags)
         .unwrap_or_else(|e| panic!("mapping device memory: {e}"));
     virt + (phys - first)
+}
+
+/// Removes a mapping made by `map_device` with the same `phys` and `size`
+/// and returns its address space.
+#[expect(dead_code, reason = "no driver releases device memory yet")]
+pub fn unmap_device(virt: u64, phys: u64, size: u64) {
+    let first = phys / PAGE_SIZE * PAGE_SIZE;
+    let len = (phys + size).next_multiple_of(PAGE_SIZE) - first;
+    let start = virt - (phys - first);
+    unmap(start, len, |_, _| {});
+    release_dynamic(start, len);
 }
 
 /// Maps a new stack of `size` bytes, with an unmapped page below it, into
@@ -119,6 +159,19 @@ pub fn new_stack(size: u64) -> u64 {
         .map(virt, phys, size, flags)
         .unwrap_or_else(|e| panic!("mapping a stack: {e}"));
     virt + size
+}
+
+/// Frees a stack made by `new_stack` with the same `size`, given its top.
+/// Nothing may run on it.
+#[expect(dead_code, reason = "no thread exits yet")]
+pub fn free_stack(top: u64, size: u64) {
+    let start = top - size;
+    unmap(start, size, |phys, page| {
+        if let Some(frames) = FRAMES.lock().as_mut() {
+            frames.free(phys, page / PAGE_SIZE);
+        }
+    });
+    release_dynamic(start, size);
 }
 
 fn gib_pages() -> bool {
