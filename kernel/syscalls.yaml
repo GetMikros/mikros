@@ -251,3 +251,39 @@ syscalls:
       - {name: addr, type: u64, dir: in}
       - {name: len, type: u64, dir: in}
       - {name: inheritance, type: u32, dir: in}
+
+  - name: channel_create
+    number: 23
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R1]
+    args:
+      - {name: options, type: u32, dir: in}
+      - {name: out0, type: "*mut Handle", dir: out}
+      - {name: out1, type: "*mut Handle", dir: out}
+
+  - name: channel_write
+    number: 24
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R2, MIKSPEC-0009.R3]
+    args:
+      - {name: channel, type: Handle, dir: in, object: Channel, rights: [WRITE]}
+      - {name: bytes, type: "*const u8", dir: in}
+      - {name: len, type: u64, dir: in}
+      - {name: handles, type: "*const Handle", dir: in}
+      - {name: count, type: u64, dir: in}
+
+  - name: channel_read
+    number: 25
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R4]
+    args:
+      - {name: channel, type: Handle, dir: in, object: Channel, rights: [READ]}
+      - {name: bytes, type: "*mut u8", dir: out}
+      - {name: bytes_cap, type: u64, dir: in}
+      - {name: handles, type: "*mut Handle", dir: out}
+      - {name: handles_cap, type: u64, dir: in}
+      - {name: out_len, type: "*mut u64", dir: out}
+      - {name: out_count, type: "*mut u64", dir: out}

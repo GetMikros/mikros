@@ -162,6 +162,11 @@ impl HandleTable {
         self.take(handle).map(drop)
     }
 
+    /// Removes `handle` and returns its entry.
+    pub fn remove(&mut self, handle: Handle) -> Result<Entry, Error> {
+        self.take(handle)
+    }
+
     fn take(&mut self, handle: Handle) -> Result<Entry, Error> {
         let i = self.index(handle)?;
         let slot = &mut self.slots[i];

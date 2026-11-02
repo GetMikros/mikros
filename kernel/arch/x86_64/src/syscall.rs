@@ -190,6 +190,15 @@ impl<T: Plain> UserIn<T> {
         bytes.is_some_and(|b| b == 0 || crate::aspace::in_user_range(self.0, b))
     }
 
+    /// Copies `dst.len()` values in once.
+    pub fn read_into(&self, dst: &mut [T]) -> Result<(), Error> {
+        // SAFETY: T is Plain, so its bytes may be written freely.
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), size_of_val(dst))
+        };
+        copy_in(bytes, self.0)
+    }
+
     /// Copies the value in once.
     pub fn read(&self) -> Result<T, Error> {
         let mut value = core::mem::MaybeUninit::<T>::zeroed();
@@ -228,6 +237,15 @@ impl<T: Plain> UserOut<T> {
     pub fn fits(&self, len: u64) -> bool {
         let bytes = len.checked_mul(size_of::<T>() as u64);
         bytes.is_some_and(|b| b == 0 || crate::aspace::in_user_range(self.0, b))
+    }
+
+    /// Copies `values` out.
+    pub fn write_all(&self, values: &[T]) -> Result<(), Error> {
+        // SAFETY: T is Plain, so it has no padding to leak.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), size_of_val(values))
+        };
+        copy_out(self.0, bytes)
     }
 
     pub fn write(&self, value: T) -> Result<(), Error> {

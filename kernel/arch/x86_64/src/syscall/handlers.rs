@@ -7,7 +7,9 @@ use crate::memory_object::MemoryObject;
 use crate::process::Process;
 use crate::sched::Thread;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use kernel_core::object::budget::{Budget, INFO_BUDGET};
+use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::{
@@ -330,4 +332,139 @@ pub fn vm_set_inheritance(
     object::<Process>(process)
         .aspace()
         .set_inheritance(addr, end, inheritance)
+}
+
+pub fn channel_create(
+    options: u32,
+    out0: UserOut<Handle>,
+    out1: UserOut<Handle>,
+) -> Result<(), Error> {
+    if options != 0 {
+        return Err(Error::InvalidArgs);
+    }
+    if !out0.fits(1) || !out1.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let process = current_process()?;
+    let budget = Some(process.budget());
+    let (a, b) = Endpoint::pair(budget)?;
+    let rights = default_rights(ObjectType::Channel);
+    let mut table = process.handles().lock();
+    let h0 = table.insert(a, rights, budget)?;
+    let written = table.insert(b, rights, budget).and_then(|h1| {
+        match out0.write(h0).and_then(|()| out1.write(h1)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                table.close(h1).expect("just inserted");
+                Err(e)
+            }
+        }
+    });
+    if written.is_err() {
+        table.close(h0).expect("just inserted");
+    }
+    written
+}
+
+pub fn channel_write(
+    channel: Checked,
+    bytes: UserIn<u8>,
+    len: u64,
+    handles: UserIn<Handle>,
+    count: u64,
+) -> Result<(), Error> {
+    if len > BYTES_MAX as u64 || count > HANDLES_MAX as u64 {
+        return Err(Error::OutOfRange);
+    }
+    let (len, count) = (len as usize, count as usize);
+    let mut data = Vec::new();
+    data.try_reserve_exact(len).map_err(|_| Error::NoMemory)?;
+    data.resize(len, 0);
+    bytes.read_bytes(&mut data)?;
+    let mut values = [0; HANDLES_MAX];
+    let values = &mut values[..count];
+    handles.read_into(values)?;
+    for (i, &h) in values.iter().enumerate() {
+        if h == channel.value || values[..i].contains(&h) {
+            return Err(Error::InvalidArgs);
+        }
+    }
+    let process = current_process()?;
+    let mut table = process.handles().lock();
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(count)
+        .map_err(|_| Error::NoMemory)?;
+    for &h in values.iter() {
+        entries.push(table.check(h, &[], rights::TRANSFER)?.clone());
+    }
+    let message = Message::new(data, entries, Some(process.budget()))?;
+    // A message that was not queued drops only its own references, as
+    // the handles are still in the table.
+    object::<Endpoint>(channel)
+        .write(message)
+        .map_err(|(e, _)| e)?;
+    for &h in values.iter() {
+        table.remove(h).expect("checked above");
+    }
+    Ok(())
+}
+
+pub fn channel_read(
+    channel: Checked,
+    bytes: UserOut<u8>,
+    bytes_cap: u64,
+    handles: UserOut<Handle>,
+    handles_cap: u64,
+    out_len: UserOut<u64>,
+    out_count: UserOut<u64>,
+) -> Result<(), Error> {
+    if !out_len.fits(1) || !out_count.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let process = current_process()?;
+    let budget = Some(process.budget());
+    let mut table = process.handles().lock();
+    object::<Endpoint>(channel).read(|data, entries| {
+        let (len, count) = (data.len() as u64, entries.len() as u64);
+        let sizes = || out_len.write(len).and_then(|()| out_count.write(count));
+        if len > bytes_cap || count > handles_cap {
+            sizes()?;
+            return Err(Error::BufferTooSmall);
+        }
+        if !bytes.fits(len) || !handles.fits(count) {
+            return Err(Error::InvalidArgs);
+        }
+        let mut values = [0; HANDLES_MAX];
+        let mut installed = 0;
+        let mut result = Ok(());
+        for entry in entries {
+            match table.insert(entry.object.clone(), entry.rights, budget) {
+                Ok(h) => {
+                    values[installed] = h;
+                    installed += 1;
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        let values = &values[..installed];
+        result = result.and_then(|()| {
+            bytes.write_bytes(data)?;
+            handles.write_all(values)?;
+            sizes()
+        });
+        if let Err(e) = result {
+            // The message stays queued, holding its own references.
+            for &h in values {
+                table.close(h).expect("just inserted");
+            }
+            if e == Error::NoResources {
+                sizes()?;
+            }
+        }
+        result
+    })
 }
