@@ -164,7 +164,9 @@ impl Thread {
             return;
         };
         process.aspace().activate();
-        crate::gdt::set_rsp0(self.stack_top.load(Ordering::Relaxed));
+        let top = self.stack_top.load(Ordering::Relaxed);
+        crate::gdt::set_rsp0(top);
+        percpu::this().kernel_stack.store(top, Ordering::Relaxed);
         let user = *self.user.lock();
         // SAFETY: the bases are user addresses or zero, and the kernel
         // uses neither FS nor the inactive GS base.
@@ -423,6 +425,11 @@ pub extern "sysv64" fn thread_start(entry: usize, arg: usize) -> ! {
     let entry: fn(usize) = unsafe { core::mem::transmute(entry) };
     entry(arg);
     exit()
+}
+
+/// The running thread.
+pub fn current() -> Option<Arc<Thread>> {
+    this_cpu().lock().current.clone()
 }
 
 /// The first code of a user thread, on its kernel stack.

@@ -4,7 +4,7 @@ use crate::aspace::Pcids;
 use crate::cpu::write_msr;
 use crate::sched::CpuSched;
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use kernel_core::sync::SpinLock;
 
 pub const IA32_GS_BASE: u32 = 0xC000_0101;
@@ -18,6 +18,12 @@ pub struct PerCpu {
     this: *const PerCpu,
     /// The processor's index, from 0.
     index: u32,
+    /// The top of the running user thread's kernel stack, which the
+    /// system call entry switches to.
+    pub kernel_stack: AtomicU64,
+    /// Where the system call entry keeps the user stack pointer until it
+    /// is on the kernel stack.
+    user_rsp: AtomicU64,
     /// The scheduler state of the processor.
     pub sched: SpinLock<CpuSched>,
     /// The address spaces that have PCIDs on the processor.
@@ -31,6 +37,8 @@ unsafe impl Sync for PerCpu {}
 static BOOT_CPU: PerCpu = PerCpu {
     this: &raw const BOOT_CPU,
     index: 0,
+    kernel_stack: AtomicU64::new(0),
+    user_rsp: AtomicU64::new(0),
     sched: SpinLock::new(CpuSched::new()),
     pcids: SpinLock::new(Pcids::new()),
 };
@@ -83,4 +91,10 @@ pub fn this() -> &'static PerCpu {
     unsafe { &*this }
 }
 
+/// The offsets that entry code uses.
+pub const KERNEL_STACK_OFFSET: usize = 16;
+pub const USER_RSP_OFFSET: usize = 24;
+
 const _: () = assert!(core::mem::offset_of!(PerCpu, index) == 8);
+const _: () = assert!(core::mem::offset_of!(PerCpu, kernel_stack) == KERNEL_STACK_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpu, user_rsp) == USER_RSP_OFFSET);

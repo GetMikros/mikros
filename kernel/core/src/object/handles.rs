@@ -172,6 +172,43 @@ impl HandleTable {
         // allocates nothing.
         self.insert(entry.object, rights)
     }
+
+    /// Like `duplicate`, but passes the new handle to `publish` and keeps
+    /// it only when `publish` succeeds; otherwise the table is left as it
+    /// was and the error is returned.
+    pub fn duplicate_then(
+        &mut self,
+        handle: Handle,
+        rights: u32,
+        publish: impl FnOnce(Handle) -> Result<(), Error>,
+    ) -> Result<Handle, Error> {
+        let new = self.duplicate(handle, rights)?;
+        if let Err(e) = publish(new) {
+            self.take(new).map(drop)?;
+            return Err(e);
+        }
+        Ok(new)
+    }
+
+    /// Like `replace`, but first passes the value the new handle will
+    /// have to `publish`, and changes nothing when it fails.
+    pub fn replace_then(
+        &mut self,
+        handle: Handle,
+        rights: u32,
+        publish: impl FnOnce(Handle) -> Result<(), Error>,
+    ) -> Result<Handle, Error> {
+        let rights = Self::derived(self.get(handle)?.rights, rights)?;
+        // `take` frees the slot and `insert` takes the slot freed last,
+        // so the new handle has the next generation of the same slot.
+        let i = self.index(handle)?;
+        let next = value(i, (self.slots[i].generation + 1) & GENERATION_MASK);
+        publish(next)?;
+        let entry = self.take(handle)?;
+        let new = self.insert(entry.object, rights)?;
+        debug_assert_eq!(new, next);
+        Ok(new)
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +219,43 @@ mod tests {
 
     fn event() -> Arc<dyn Object> {
         Arc::new(Plain(Header::new(ObjectType::Event)))
+    }
+
+    #[test]
+    fn publishes_new_handles_before_keeping_them() {
+        let mut t = HandleTable::new();
+        let a = t.insert(event(), rights::DUPLICATE | rights::READ).unwrap();
+        let fail = |_| Err(Error::InvalidArgs);
+        assert_eq!(
+            t.duplicate_then(a, rights::READ, fail),
+            Err(Error::InvalidArgs)
+        );
+        assert_eq!(t.len(), 1);
+        let mut seen = 0;
+        let d = t.duplicate_then(a, rights::READ, |h| {
+            seen = h;
+            Ok(())
+        });
+        assert_eq!(d, Ok(seen));
+        assert_eq!(t.get(seen).unwrap().rights, rights::READ);
+
+        assert_eq!(
+            t.replace_then(a, rights::READ, fail),
+            Err(Error::InvalidArgs)
+        );
+        assert!(t.get(a).is_ok());
+        assert_eq!(
+            t.replace_then(a, rights::WRITE, |_| Ok(())),
+            Err(Error::InvalidArgs)
+        );
+        let r = t.replace_then(a, rights::READ, |h| {
+            seen = h;
+            Ok(())
+        });
+        assert_eq!(r, Ok(seen));
+        assert!(t.get(a).is_err());
+        assert_eq!(t.get(seen).unwrap().rights, rights::READ);
+        assert_eq!(t.len(), 2);
     }
 
     #[test]

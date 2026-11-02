@@ -12,3 +12,10 @@ path = "src/main.rs"
 [target.'cfg(target_os = "none")'.dependencies]
 boot-protocol = { path = "../../../boot/protocol" }
 kernel-core = { path = "../../core" }
+
+[build-dependencies]
+syscall-table = { path = "../../syscalls" }
+
+[features]
+# Builds the system calls that exist only for fuzzing.
+fuzz = []

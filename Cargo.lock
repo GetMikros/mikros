@@ -638,6 +638,7 @@ version = "0.0.0"
 dependencies = [
  "boot-protocol",
  "kernel-core",
+ "syscall-table",
 ]
 
 [[package]]
