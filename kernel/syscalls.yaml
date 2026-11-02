@@ -653,3 +653,12 @@ syscalls:
       - {name: options, type: u32, dir: in}
       - {name: addr, type: u64, dir: in}
       - {name: len, type: u64, dir: in}
+
+  - name: mem_seal
+    number: 64
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R38]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [WRITE]}
+      - {name: seals, type: u32, dir: in}

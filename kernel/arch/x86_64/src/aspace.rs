@@ -333,6 +333,14 @@ impl AddressSpace {
         self.regions.lock().set_inheritance(start, end, inheritance)
     }
 
+    /// Whether a region maps `mem` writable.
+    pub fn maps_writable(&self, mem: &MemoryObject) -> bool {
+        self.regions
+            .lock()
+            .iter()
+            .any(|r| core::ptr::eq(&*r.mem, mem) && r.perms & PERM_WRITE != 0)
+    }
+
     /// Sets `perms` on every page from `start` to `end`, as `vm_protect`
     /// does, and removes their translations, so that the next access
     /// enters them with the new permissions. `allowed` decides whether a

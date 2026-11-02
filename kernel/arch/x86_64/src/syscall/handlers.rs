@@ -340,6 +340,9 @@ pub fn vm_map(
     let handle_rights = mem.rights;
     let mem = object::<MemoryObject>(mem);
     mem.check_range(offset, len)?;
+    if options.perms & kernel_core::regions::PERM_WRITE != 0 {
+        mem.check_writable()?;
+    }
     if !out_addr.fits(1) {
         return Err(Error::InvalidArgs);
     }
@@ -1064,7 +1067,14 @@ pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result
     if !crate::aspace::in_user_range(addr, end - addr) {
         return Err(Error::NotFound);
     }
+    let writes = perms & kernel_core::regions::PERM_WRITE != 0;
     object::<Process>(process)
         .aspace()
-        .protect(addr, end, perms, |_| true)
+        .protect(addr, end, perms, |r| {
+            !writes || r.mem.check_writable().is_ok()
+        })
+}
+
+pub fn mem_seal(mem: Checked, seals: u32) -> Result<(), Error> {
+    object::<MemoryObject>(mem).seal(seals)
 }

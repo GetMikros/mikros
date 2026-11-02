@@ -7,9 +7,11 @@ use crate::publish::{ITEM_STEP, Work};
 use crate::space;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::object::budget::Budget;
 use kernel_core::object::memory::{
-    INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_PHYSICAL, PAGE_ENTRY_COST, PAGE_SIZE, Pages,
+    INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_PHYSICAL, PAGE_ENTRY_COST, PAGE_SIZE, Pages, SEAL_GROW,
+    SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE, SEALS,
 };
 use kernel_core::object::{Header, Object, ObjectType};
 use kernel_core::regions::{PERM_EXECUTE, PERM_WRITE};
@@ -37,6 +39,10 @@ pub struct MemoryObject {
     /// The address spaces with regions that map the object, so that
     /// pages can be unmapped when the object changes.
     spaces: SpinLock<Vec<Weak<AddressSpace>>>,
+    /// The seals of `mem_seal`, never removed. Checks and changes are
+    /// serialized because system calls run one at a time on the one
+    /// processor.
+    seals: AtomicU32,
 }
 
 /// The bytes of the frame at `phys`.
@@ -90,6 +96,7 @@ impl MemoryObject {
             pages: SpinLock::new(pages),
             physical: None,
             spaces: SpinLock::new(Vec::new()),
+            seals: AtomicU32::new(0),
         }))
     }
 
@@ -112,7 +119,50 @@ impl MemoryObject {
             pages: SpinLock::new(pages),
             physical: Some((base, policy)),
             spaces: SpinLock::new(Vec::new()),
+            seals: AtomicU32::new(0),
         }))
+    }
+
+    pub fn seals(&self) -> u32 {
+        self.seals.load(Ordering::Acquire)
+    }
+
+    /// Fails with `AccessDenied` when the object has the `WRITE` seal.
+    pub fn check_writable(&self) -> Result<(), Error> {
+        if self.seals() & SEAL_WRITE != 0 {
+            return Err(Error::AccessDenied);
+        }
+        Ok(())
+    }
+
+    /// Adds `seals`, as `mem_seal` does.
+    pub fn seal(&self, seals: u32) -> Result<(), Error> {
+        if seals & !SEALS != 0 {
+            return Err(Error::InvalidArgs);
+        }
+        if self.is_physical() {
+            return Err(Error::NotSupported);
+        }
+        if self.seals() & SEAL_SEAL != 0 {
+            return Err(Error::AccessDenied);
+        }
+        let _pages = self.pages.lock();
+        if seals & SEAL_WRITE != 0 && self.mapped_writable() {
+            return Err(Error::BadState);
+        }
+        self.seals.fetch_or(seals, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Whether a region of some address space maps the object writable.
+    fn mapped_writable(&self) -> bool {
+        let spaces: Vec<_> = self
+            .spaces
+            .lock()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        spaces.iter().any(|space| space.maps_writable(self))
     }
 
     pub fn is_physical(&self) -> bool {
@@ -424,6 +474,7 @@ impl MemoryObject {
             let mut buf = [0u8; CHUNK];
             source(&mut buf[..n])?;
             let mut pages = self.pages.lock();
+            self.check_writable()?;
             let phys = match pages.frame(index) {
                 Some(phys) => phys,
                 None => self.alloc_mapped(&mut pages, index)?,
@@ -460,6 +511,7 @@ impl MemoryObject {
             return Err(Error::NotSupported);
         }
         let mut pages = self.pages.lock();
+        self.check_writable()?;
         pages.check_range(offset, len)?;
         let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
         self.unmap_pages(first, end);
@@ -472,6 +524,17 @@ impl MemoryObject {
     /// Changes the size to `size` bytes, freeing the frames past it.
     pub fn set_size(&self, size: u64) -> Result<(), Error> {
         let mut pages = self.pages.lock();
+        let seals = self.seals();
+        let refused = if size < pages.size() {
+            seals & SEAL_SHRINK
+        } else if size > pages.size() {
+            seals & SEAL_GROW
+        } else {
+            0
+        };
+        if refused != 0 {
+            return Err(Error::AccessDenied);
+        }
         let resized = pages.set_size(size, MAX_SIZE)?;
         if let Some((phys, from)) = resized.zero {
             // SAFETY: the pages are locked.
@@ -491,7 +554,7 @@ impl MemoryObject {
         } else {
             KIND_ANONYMOUS
         };
-        self.pages.lock().info(kind)
+        self.pages.lock().info(kind, self.seals())
     }
 }
 
