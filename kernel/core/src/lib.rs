@@ -9,6 +9,7 @@ pub mod acpi;
 pub mod bootinfo;
 pub mod clock;
 pub mod deadline;
+pub mod elf;
 pub mod exception;
 pub mod frames;
 pub mod heap;
