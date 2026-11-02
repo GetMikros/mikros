@@ -174,6 +174,7 @@ impl AddressSpace {
     /// An address space with no user mappings, belonging to `budget`. Its
     /// tables are charged to the budget when `charge` is set.
     pub fn new(budget: Arc<Budget>, charge: bool) -> Result<AddressSpace, Error> {
+        let regions = Regions::new(USER_START, END_4G, USER_END)?;
         let mut tables = Charged {
             budget: charge.then_some(&*budget),
             count: 0,
@@ -186,7 +187,7 @@ impl AddressSpace {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             budget,
             generation: AtomicU64::new(0),
-            regions: SpinLock::new(Regions::default()),
+            regions: SpinLock::new(regions),
             inner: SpinLock::new(Inner { root, charged }),
         })
     }
@@ -308,9 +309,7 @@ impl AddressSpace {
     /// Chooses a start for a mapping of `size` bytes, a multiple of the
     /// page size, as `add_region` does without `SPECIFIC`.
     pub fn choose(&self, size: u64) -> Result<u64, Error> {
-        self.regions
-            .lock()
-            .choose(size, USER_START, USER_END, random)
+        self.regions.lock().choose(size, false, random)
     }
 
     /// Maps the `size` bytes of `mem` from `offset`, a multiple of the
@@ -341,8 +340,7 @@ impl AddressSpace {
         let start = if options.specific {
             Ok(addr)
         } else {
-            let end = if options.below_4g { END_4G } else { USER_END };
-            regions.choose(size, USER_START, end, random)
+            regions.choose(size, options.below_4g, random)
         };
         let result = start.and_then(|start| {
             regions.insert(Region {

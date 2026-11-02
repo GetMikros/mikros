@@ -31,7 +31,9 @@ fn max(id: u32) -> u32 {
 }
 
 fuzz_target!(|ops: Vec<Op>| {
-    let mut regions: Regions<u32> = Regions::default();
+    // Regions may reach past PAGES; choices stay below the line there.
+    let mut regions: Regions<u32> =
+        Regions::new(0, PAGES * PAGE_SIZE, (PAGES + 16) * PAGE_SIZE).unwrap();
     let mut model: BTreeMap<u64, Page> = BTreeMap::new();
     for (id, op) in ops.iter().take(256).enumerate() {
         let id = id as u32;
@@ -107,7 +109,7 @@ fuzz_target!(|ops: Vec<Op>| {
                         Error::Internal
                     })
                 };
-                match regions.choose(pages * PAGE_SIZE, 0, PAGES * PAGE_SIZE, source) {
+                match regions.choose(pages * PAGE_SIZE, true, source) {
                     Ok(at) => {
                         let first = at / PAGE_SIZE;
                         assert_eq!(at % PAGE_SIZE, 0);
@@ -122,6 +124,7 @@ fuzz_target!(|ops: Vec<Op>| {
                 }
             }
         }
+        regions.check_gaps();
         // Every mapped page is found in a region that maps the same
         // object page, and every other page is free.
         let mut previous_end = 0;

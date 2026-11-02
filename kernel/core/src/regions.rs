@@ -1,6 +1,7 @@
 //! The regions of a user address space: which range maps which part of
 //! which memory object, and with what permissions.
 
+use crate::gaps::{GAP_SIZE, Gaps};
 use crate::nodes::{self, INSERT, Map};
 use crate::object::budget::{Budget, Held};
 use crate::object::rights;
@@ -103,11 +104,13 @@ impl MapOptions {
 }
 
 /// The kernel memory charged for a region: its entry and that entry's
-/// share of the map storage, and room for the two pointers a memory
-/// object keeps for each address space with a region that maps it, with
-/// their share of the lists that hold them.
-pub const REGION_COST: u64 =
-    2 * (size_of::<u64>() + size_of::<Region<Arc<()>>>() + 2 * size_of::<usize>()) as u64;
+/// share of the map storage, room for the two pointers a memory object
+/// keeps for each address space with a region that maps it, and room for
+/// a gap in each gap tree, each with its share of the storage that holds
+/// it.
+pub const REGION_COST: u64 = 2
+    * (size_of::<u64>() + size_of::<Region<Arc<()>>>() + 2 * size_of::<usize>() + 2 * GAP_SIZE)
+        as u64;
 
 /// A region's entry charged to a budget, which is released when the
 /// region goes.
@@ -170,18 +173,135 @@ impl<M> Region<M> {
     }
 }
 
-/// Non-overlapping regions, keyed by their start.
+/// Non-overlapping regions, keyed by their start, inside a range, with
+/// the free gaps between them in pages.
 pub struct Regions<M> {
     map: Map<u64, Region<M>>,
-}
-
-impl<M> Default for Regions<M> {
-    fn default() -> Self {
-        Regions { map: nodes::map() }
-    }
+    /// The gaps below and above `line`; a gap across it is split there.
+    /// Each tree has room for two more gaps than there are regions,
+    /// which is as many as there can be, so that removing regions never
+    /// allocates.
+    below: Gaps,
+    above: Gaps,
+    /// The range the regions lie in and the line that `choose` can keep
+    /// a range below, all page-aligned.
+    low: u64,
+    line: u64,
+    high: u64,
 }
 
 impl<M: Clone> Regions<M> {
+    /// No regions in the range from `low` to `high`, with `line` between
+    /// them, all page-aligned. Fails with `NoMemory` without room for the
+    /// gaps.
+    pub fn new(low: u64, line: u64, high: u64) -> Result<Regions<M>, Error> {
+        debug_assert!(low <= line && line <= high);
+        debug_assert!(
+            [low, line, high]
+                .iter()
+                .all(|v| v.is_multiple_of(PAGE_SIZE))
+        );
+        let mut regions = Regions {
+            map: nodes::map(),
+            below: Gaps::new(),
+            above: Gaps::new(),
+            low,
+            line,
+            high,
+        };
+        regions.reserve_gaps(0)?;
+        regions.relink(low, high, true);
+        Ok(regions)
+    }
+
+    /// Makes room in each gap tree for as many gaps as there can be once
+    /// `more` regions are added.
+    fn reserve_gaps(&mut self, more: usize) -> Result<(), Error> {
+        let most = self.map.len() + more + 2;
+        for gaps in [&mut self.below, &mut self.above] {
+            gaps.reserve(most.saturating_sub(gaps.len() as usize))?;
+        }
+        Ok(())
+    }
+
+    /// Adds the gaps from `from` to `to` to the trees, or with `add` false
+    /// removes them. No gap may cross `from` or `to`: each is the end of a
+    /// region or of the range, or the start of a region or of the range.
+    fn relink(&mut self, from: u64, to: u64, add: bool) {
+        let Regions {
+            map,
+            below,
+            above,
+            line,
+            ..
+        } = self;
+        let put = |gaps: &mut Gaps, start: u64, end: u64| {
+            if start < end {
+                let (at, len) = (start / PAGE_SIZE, (end - start) / PAGE_SIZE);
+                if add {
+                    gaps.insert(at, len);
+                } else {
+                    gaps.remove(at, len);
+                }
+            }
+        };
+        let mut gap = |start: u64, end: u64| {
+            put(below, start, end.min(*line));
+            put(above, start.max(*line), end);
+        };
+        let mut at = from;
+        for r in map.range(from..to).map(|(_, r)| r) {
+            gap(at, r.start);
+            at = r.end();
+        }
+        gap(at, to);
+    }
+
+    /// The end of the last region that starts before `start`, or the
+    /// start of the range, and the start of the first region that starts
+    /// at or after `end`, or the end of the range: bounds no gap crosses.
+    fn window(&self, start: u64, end: u64) -> (u64, u64) {
+        let from = self
+            .map
+            .range(..start)
+            .next_back()
+            .map_or(self.low, |(_, r)| r.end());
+        let to = self
+            .map
+            .range(end..)
+            .next()
+            .map_or(self.high, |(_, r)| r.start);
+        (from, to)
+    }
+
+    /// Checks that the gap trees hold exactly the gaps between the
+    /// regions, for tests and fuzzing.
+    pub fn check_gaps(&self) {
+        let mut expected = [Vec::new(), Vec::new()];
+        let mut gap = |start: u64, end: u64| {
+            for (i, (a, b)) in [(start, end.min(self.line)), (start.max(self.line), end)]
+                .into_iter()
+                .enumerate()
+            {
+                if a < b {
+                    expected[i].push((a / PAGE_SIZE, (b - a) / PAGE_SIZE));
+                }
+            }
+        };
+        let mut at = self.low;
+        for r in self.map.values() {
+            gap(at, r.start);
+            at = r.end();
+        }
+        gap(at, self.high);
+        for (gaps, mut expected) in [&self.below, &self.above].into_iter().zip(expected) {
+            let mut listed = gaps.check();
+            listed.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(listed, expected);
+        }
+    }
+
     /// The region containing `addr`, also one being removed.
     fn find_any(&self, addr: u64) -> Option<&Region<M>> {
         let (_, r) = self.map.range(..=addr).next_back()?;
@@ -200,19 +320,29 @@ impl<M: Clone> Regions<M> {
         self.find_any(start).is_some() || self.map.range(start..end).next().is_some()
     }
 
-    /// Adds `region`, or fails with `AlreadyExists` when it overlaps one
-    /// and with `NoMemory` without room for it.
+    /// Adds `region`, or fails with `OutOfRange` when it does not lie in
+    /// the range, with `AlreadyExists` when it overlaps one and with
+    /// `NoMemory` without room for it.
     pub fn insert(&mut self, region: Region<M>) -> Result<(), Error> {
+        let end = region.start.checked_add(region.len);
+        if region.start < self.low || end.is_none_or(|end| end > self.high) {
+            return Err(Error::OutOfRange);
+        }
         if self.overlaps(region.start, region.len) {
             return Err(Error::AlreadyExists);
         }
+        self.reserve_gaps(1)?;
         let _claim = nodes::claim_insert()?;
+        let (from, to) = self.window(region.start, region.end());
+        self.relink(from, to, false);
         self.map.insert(region.start, region);
+        self.relink(from, to, true);
         Ok(())
     }
 
     /// Claims room for splitting the regions at both ends of a range.
-    fn claim_splits() -> Result<nodes::Claim, Error> {
+    fn claim_splits(&mut self) -> Result<nodes::Claim, Error> {
+        self.reserve_gaps(2)?;
         nodes::claim(2 * INSERT)
     }
 
@@ -299,7 +429,7 @@ impl<M: Clone> Regions<M> {
             .try_reserve_exact(count)
             .map_err(|_| Error::NoMemory)?;
         let charges = self.charge_splits(start, end, budget)?;
-        let _claim = Self::claim_splits()?;
+        let _claim = self.claim_splits()?;
         self.split_ends(start, end, charges);
         for r in self.map.range_mut(start..end).map(|(_, r)| r) {
             if r.removal == 0 {
@@ -312,10 +442,13 @@ impl<M: Clone> Regions<M> {
     /// Ends removal `id` of the range from `start` to `end`, begun by
     /// `begin_removal`, moving its parts to `parts`, the room it returned.
     pub fn end_removal(&mut self, start: u64, end: u64, id: u64, parts: &mut Vec<Region<M>>) {
+        let (from, to) = self.window(start, end);
+        self.relink(from, to, false);
         for (_, r) in self.map.extract_if(start..end, |_, r| r.removal == id) {
             debug_assert!(parts.len() < parts.capacity());
             parts.push(r);
         }
+        self.relink(from, to, true);
     }
 
     /// Gives up removal `id` of the range from `start` to `end`, whose
@@ -337,7 +470,11 @@ impl<M: Clone> Regions<M> {
 
     /// Removes every region and returns them, by start.
     pub fn take_all(&mut self) -> Map<u64, Region<M>> {
-        core::mem::replace(&mut self.map, nodes::map())
+        let all = core::mem::replace(&mut self.map, nodes::map());
+        self.below.clear();
+        self.above.clear();
+        self.relink(self.low, self.high, true);
+        all
     }
 
     /// Removes every part of a region inside the range from `start` to
@@ -371,7 +508,7 @@ impl<M: Clone> Regions<M> {
             at = self.find(at).ok_or(Error::NotFound)?.end();
         }
         let charges = self.charge_splits(start, end, budget)?;
-        let _claim = Self::claim_splits()?;
+        let _claim = self.claim_splits()?;
         self.split_ends(start, end, charges);
         for r in self.map.range_mut(start..end).map(|(_, r)| r) {
             r.inheritance = inheritance;
@@ -407,7 +544,7 @@ impl<M: Clone> Regions<M> {
             at = r.end();
         }
         let charges = self.charge_splits(start, end, budget)?;
-        let _claim = Self::claim_splits()?;
+        let _claim = self.claim_splits()?;
         self.split_ends(start, end, charges);
         for r in self.map.range_mut(start..end).map(|(_, r)| r) {
             r.perms = perms;
@@ -421,62 +558,80 @@ impl<M: Clone> Regions<M> {
     }
 
     /// Chooses the start of a range of `len` bytes, a multiple of the page
-    /// size, uniformly from the page-aligned addresses from `low` to
-    /// `high` at which it fits into free space. `random` returns uniform
-    /// random 64-bit values. Fails with `NoMemory` when there are none.
+    /// size, uniformly from the page-aligned addresses at which it fits
+    /// into free space of the range, and with `below_line` lies entirely
+    /// below the line. `random` returns uniform random 64-bit values.
+    /// Fails with `NoMemory` when there are none.
     pub fn choose(
         &self,
         len: u64,
-        low: u64,
-        high: u64,
+        below_line: bool,
         mut random: impl FnMut() -> Result<u64, Error>,
     ) -> Result<u64, Error> {
-        let pages = len / PAGE_SIZE;
-        // The number of starts in each gap, lowest gap first.
-        let gaps = || {
-            let mut at = low;
-            let mut bounds = self.map.values().map(|r| (r.start, r.end()));
-            core::iter::from_fn(move || {
-                while at < high {
-                    let (next, after) = bounds
-                        .find(|&(_, end)| end > at)
-                        .map_or((high, high), |(s, e)| (s.clamp(at, high), e));
-                    let gap = (next - at) / PAGE_SIZE;
-                    let from = at;
-                    at = after.max(next);
-                    if gap >= pages {
-                        return Some((from, gap - pages + 1));
-                    }
-                }
-                None
-            })
-        };
-        let total: u64 = gaps().map(|(_, n)| n).sum();
+        if len == 0 || !len.is_multiple_of(PAGE_SIZE) {
+            return Err(Error::InvalidArgs);
+        }
+        let total = self.places(len / PAGE_SIZE, below_line);
         if total == 0 {
             return Err(Error::NoMemory);
         }
         // Rejection sampling keeps the choice uniform.
         let limit = u64::MAX - u64::MAX % total;
-        let mut pick = loop {
+        let r = loop {
             let r = random()?;
             if r < limit {
                 break r % total;
             }
         };
-        for (from, n) in gaps() {
-            if pick < n {
-                return Ok(from + pick * PAGE_SIZE);
-            }
-            pick -= n;
+        Ok(self.place(len / PAGE_SIZE, below_line, r) * PAGE_SIZE)
+    }
+
+    /// The number of starts at which `n` pages fit, as `choose` counts
+    /// them: those below the line, those above it, and those across it.
+    fn places(&self, n: u64, below_line: bool) -> u64 {
+        let below = self.below.places(n);
+        if below_line {
+            return below;
         }
-        unreachable!("the pick is below the total")
+        let across = self.across(n).map_or(0, |(from, to)| to - from);
+        below + self.above.places(n) + across
+    }
+
+    /// Start `r` of those `places` counts, in pages.
+    fn place(&self, n: u64, below_line: bool, mut r: u64) -> u64 {
+        let below = self.below.places(n);
+        if r < below || below_line {
+            return self.below.place(n, r);
+        }
+        r -= below;
+        let above = self.above.places(n);
+        if r < above {
+            return self.above.place(n, r);
+        }
+        r -= above;
+        let (from, _) = self.across(n).expect("a start across the line");
+        from + r
+    }
+
+    /// The starts, in pages, from the first to the second, exclusive, at
+    /// which `n` pages fit into the gap across the line and cross it.
+    fn across(&self, n: u64) -> Option<(u64, u64)> {
+        if self.line <= self.low || self.line >= self.high || self.find_any(self.line).is_some() {
+            return None;
+        }
+        let (a, b) = self.window(self.line, self.line);
+        let (a, b, line) = (a / PAGE_SIZE, b / PAGE_SIZE, self.line / PAGE_SIZE);
+        // A start `p` crosses when `p < line < p + n` and fits when
+        // `a <= p` and `p + n <= b`.
+        let from = a.max((line + 1).saturating_sub(n));
+        let to = line.min((b + 1).saturating_sub(n));
+        (from < to).then_some((from, to))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::vec;
 
     const P: u64 = PAGE_SIZE;
 
@@ -494,13 +649,18 @@ mod tests {
         }
     }
 
+    /// No regions from 0 to 2^40, with the line at 64 pages.
+    fn empty() -> Regions<u8> {
+        Regions::new(0, 64 * P, 1 << 40).unwrap()
+    }
+
     fn starts(r: &Regions<u8>) -> std::vec::Vec<(u64, u64, u64)> {
         r.iter().map(|r| (r.start, r.len, r.offset)).collect()
     }
 
     #[test]
     fn sets_permissions_within_the_maximum() {
-        let mut r = Regions::default();
+        let mut r = empty();
         r.insert(region(0, 4 * P, 0)).unwrap();
         r.insert(region(6 * P, P, 0)).unwrap();
         assert_eq!(
@@ -531,7 +691,7 @@ mod tests {
             charge: Charge::new(Some(&budget)).unwrap(),
             ..region(start, len, 0)
         };
-        let mut r = Regions::default();
+        let mut r = empty();
         r.insert(charged(0, 8 * P)).unwrap();
         // Two splits need two more charges, which the budget refuses.
         assert_eq!(
@@ -578,7 +738,7 @@ mod tests {
 
     #[test]
     fn rejects_overlaps() {
-        let mut r = Regions::default();
+        let mut r = empty();
         r.insert(region(4 * P, 2 * P, 0)).unwrap();
         assert_eq!(r.insert(region(5 * P, P, 0)), Err(Error::AlreadyExists));
         assert_eq!(r.insert(region(3 * P, 2 * P, 0)), Err(Error::AlreadyExists));
@@ -591,7 +751,7 @@ mod tests {
 
     #[test]
     fn splits_regions_it_removes_from() {
-        let mut r = Regions::default();
+        let mut r = empty();
         r.insert(region(2 * P, 4 * P, 10 * P)).unwrap();
         r.insert(region(8 * P, 2 * P, 0)).unwrap();
         let removed = r.remove(3 * P, 9 * P, 1, None).unwrap();
@@ -609,7 +769,7 @@ mod tests {
 
     #[test]
     fn hides_regions_being_removed() {
-        let mut r = Regions::default();
+        let mut r = empty();
         r.insert(region(2 * P, 4 * P, 0)).unwrap();
         let mut parts = r.begin_removal(3 * P, 5 * P, 1, None).unwrap();
         assert_eq!(parts.capacity(), 1);
@@ -642,7 +802,7 @@ mod tests {
 
     #[test]
     fn sets_inheritance_only_on_mapped_ranges() {
-        let mut r = Regions::default();
+        let mut r = empty();
         r.insert(region(2 * P, 2 * P, 0)).unwrap();
         r.insert(region(4 * P, 2 * P, 0)).unwrap();
         assert_eq!(r.set_inheritance(P, 3 * P, 1, None), Err(Error::NotFound));
@@ -661,27 +821,91 @@ mod tests {
 
     #[test]
     fn chooses_only_free_ranges_that_fit() {
-        let mut r = Regions::default();
+        // Gaps from P to 2P, 3P to 5P across the line at 4P, and 6P to 8P.
+        let mut r = Regions::new(P, 4 * P, 8 * P).unwrap();
         r.insert(region(2 * P, P, 0)).unwrap();
         r.insert(region(5 * P, P, 0)).unwrap();
-        // From P to 8P, two pages fit only at 3P and 6P.
-        let mut seen = vec![];
-        for i in 0..3 {
-            seen.push(r.choose(2 * P, P, 8 * P, || Ok(i)).unwrap());
-        }
-        assert_eq!(seen, [3 * P, 6 * P, 3 * P]);
-        assert_eq!(r.choose(3 * P, P, 8 * P, || Ok(0)), Err(Error::NoMemory));
-        assert_eq!(r.choose(P, P, 8 * P, || Ok(4)).unwrap(), 7 * P);
-        assert_eq!(r.choose(P, 0, 2 * P, || Ok(1)).unwrap(), P);
+        r.check_gaps();
+        let all = |r: &Regions<u8>, len: u64, below: bool| {
+            let total = r.places(len / P, below);
+            let mut got: std::vec::Vec<_> = (0..total)
+                .map(|i| r.choose(len, below, || Ok(i)).unwrap())
+                .collect();
+            got.sort_unstable();
+            got
+        };
+        assert_eq!(all(&r, 2 * P, false), [3 * P, 6 * P]);
+        assert_eq!(all(&r, P, false), [P, 3 * P, 4 * P, 6 * P, 7 * P]);
+        assert_eq!(all(&r, P, true), [P, 3 * P]);
+        assert_eq!(r.choose(2 * P, true, || Ok(0)), Err(Error::NoMemory));
+        assert_eq!(r.choose(3 * P, false, || Ok(0)), Err(Error::NoMemory));
+        assert_eq!(r.choose(0, false, || Ok(0)), Err(Error::InvalidArgs));
     }
 
     #[test]
     fn rejects_biased_random_values() {
-        let r: Regions<u8> = Regions::default();
+        let r: Regions<u8> = Regions::new(0, 3 * P, 3 * P).unwrap();
         let mut values = [u64::MAX, 5].into_iter();
-        let at = r
-            .choose(P, 0, 3 * P, || Ok(values.next().unwrap()))
-            .unwrap();
+        let at = r.choose(P, false, || Ok(values.next().unwrap())).unwrap();
         assert_eq!(at, 2 * P);
+    }
+
+    /// Every start at which `len` bytes fit between the regions of `r`,
+    /// below the line when `below`, found by trying each page.
+    fn brute_force(r: &Regions<u8>, len: u64, below: bool) -> std::vec::Vec<u64> {
+        let high = if below { r.line } else { r.high };
+        (r.low / P..)
+            .map(|p| p * P)
+            .take_while(|&at| at + len <= high)
+            .filter(|&at| !r.overlaps(at, len))
+            .collect()
+    }
+
+    #[test]
+    fn keeps_gaps_and_choices_exact_through_changes() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut r = Regions::new(4 * P, 100 * P, 160 * P).unwrap();
+        for step in 0..600 {
+            let at = (4 + next() % 156) * P;
+            let len = (1 + next() % 6) * P;
+            match next() % 4 {
+                0 | 1 => {
+                    let _ = r.insert(region(at, len, 0));
+                }
+                2 => {
+                    let _ = r.remove(at, at + len, 1, None);
+                }
+                _ => {
+                    let _ = r.set_inheritance(at, at + len, 1, None);
+                }
+            }
+            if step % 50 == 0 {
+                let parts = r.remove(30 * P, 130 * P, 2, None).unwrap();
+                assert!(
+                    parts
+                        .iter()
+                        .all(|p| p.start >= 30 * P && p.end() <= 130 * P)
+                );
+            }
+            r.check_gaps();
+            for pages in [1, 2, 5, 40] {
+                for below in [false, true] {
+                    let total = r.places(pages, below);
+                    let mut got: std::vec::Vec<_> =
+                        (0..total).map(|i| r.place(pages, below, i) * P).collect();
+                    got.sort_unstable();
+                    assert_eq!(got, brute_force(&r, pages * P, below), "{pages} pages");
+                }
+            }
+        }
+        r.take_all();
+        r.check_gaps();
+        assert_eq!(r.places(156, false), 1);
     }
 }
