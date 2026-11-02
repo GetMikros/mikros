@@ -146,7 +146,8 @@ pub fn deliver(frame: &mut Frame) -> bool {
             info.map(|info| (info, actions[info.signo as usize - 1]))
         };
         let Some((info, action)) = next else {
-            if stopped {
+            // A thread that is to end leaves the stop to report its exit.
+            if stopped && !thread.exit_requested() {
                 process.stop_here(&thread);
                 continue;
             }

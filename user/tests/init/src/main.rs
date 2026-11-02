@@ -1549,7 +1549,11 @@ fn pager_operations(s: &Startup) -> Result {
     )
 }
 
+const RESUME: u32 = 0;
+const DEBUG_EVENTS: u32 = 1 << 0;
 const UNDEFINED_INSTRUCTION: u32 = 3;
+const THREAD_STARTING: u32 = 11;
+const THREAD_EXITING: u32 = 12;
 
 /// Starts the debuggee with `arg2` and an exception channel created with
 /// `options`, and returns the process and the channel.
@@ -1572,6 +1576,32 @@ fn next_report(channel: Handle) -> Result<(u32, Handle)> {
     Ok((u32_at(&m.bytes, 0), m.handles[0]))
 }
 
+fn resume(thread: Handle) -> Result {
+    // SAFETY: the call takes no pointers.
+    check("resuming", unsafe {
+        sys::thread_resume_from_exception(thread, RESUME)
+    })
+}
+
+/// Killing a blocked thread whose process reports thread events reports
+/// its exit, and its end as the last thread terminates the process.
+fn kill_blocked_thread(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 1, DEBUG_EVENTS)?;
+    let (kind, thread) = next_report(channel)?;
+    ensure("reporting the start", kind == THREAD_STARTING)?;
+    resume(thread)?;
+    sleep_ms(20);
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(thread) })?;
+    let (kind, exiting) = next_report(channel)?;
+    ensure("reporting the exit", kind == THREAD_EXITING)?;
+    resume(exiting)?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, soon()).0 == 0,
+    )
+}
+
 /// Killing the last thread of a process while it is stopped in an
 /// exception terminates the process.
 fn kill_stopped_thread(s: &Startup) -> Result {
@@ -1588,7 +1618,7 @@ fn kill_stopped_thread(s: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 21] = [
+const TESTS: [(&str, Test); 22] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1606,6 +1636,7 @@ const TESTS: [(&str, Test); 21] = [
     ("pagers", pagers),
     ("pager_operations", pager_operations),
     ("paged_outputs", paged_outputs),
+    ("kill_blocked_thread", kill_blocked_thread),
     ("kill_stopped_thread", kill_stopped_thread),
     ("memory_objects", memory_objects),
     ("threads", threads),

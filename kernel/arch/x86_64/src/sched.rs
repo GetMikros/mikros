@@ -317,6 +317,11 @@ impl Thread {
         self.exit_requested.store(true, Ordering::Release);
     }
 
+    /// Whether the thread is to end, leaving the request.
+    pub fn exit_requested(&self) -> bool {
+        self.exit_requested.load(Ordering::Acquire)
+    }
+
     /// Whether the thread is to end, clearing the request.
     pub fn take_exit_request(&self) -> bool {
         self.exit_requested.swap(false, Ordering::AcqRel)
@@ -629,12 +634,20 @@ pub fn sleep_until(deadline: i64) -> Result<(), Error> {
 }
 
 /// Blocks the running thread in `signal_wait` until `deadline` or until
-/// `wake_waiter` wakes it.
+/// `wake_waiter` wakes it. Fails with `Interrupted` at once, or once
+/// woken, while the thread is to end, so that it leaves the wait and
+/// reports its exit on the way back to user mode.
 pub fn wait_for_signals(thread: &Thread, deadline: i64) -> Result<(), Error> {
+    if thread.exit_requested() {
+        return Err(Error::Interrupted);
+    }
     thread.waiting_for_signals.store(true, Ordering::Release);
     let result = sleep_until(deadline);
     thread.waiting_for_signals.store(false, Ordering::Release);
-    result
+    match thread.exit_requested() {
+        true => Err(Error::Interrupted),
+        false => result,
+    }
 }
 
 /// Wakes `thread` before its deadline if it sleeps.

@@ -292,10 +292,15 @@ fn current_thread() -> Result<Arc<Thread>, Error> {
 }
 
 /// Ends `thread`, after a `THREAD_EXITING` report on its way back to
-/// user mode when its process asks for thread events.
+/// user mode when its process asks for thread events. A thread asked to
+/// end is woken from a wait or a stop so that it gets there.
 fn end_thread(thread: &Arc<Thread>) {
     match thread.process() {
-        Some(process) if process.debug_events() => thread.request_exit(),
+        Some(process) if process.debug_events() => {
+            thread.request_exit();
+            crate::sched::wake_sleeper(thread);
+            process.wake_stopped();
+        }
         _ => Process::kill_thread(thread),
     }
 }

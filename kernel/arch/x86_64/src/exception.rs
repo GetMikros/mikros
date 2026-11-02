@@ -45,19 +45,30 @@ pub fn before_user_return(frame: &mut Frame) -> bool {
         raise_with_code(frame, kind::DEBUG, rip, u64::from(idt::DEBUG));
         reported = true;
     }
-    if thread.take_exit_request() {
-        let process = thread.process().cloned();
-        if process.is_some_and(|p| p.debug_events()) && thread.state() != sched::DEAD {
-            raise_with_code(frame, kind::THREAD_EXITING, 0, 0);
-            reported = true;
-        }
-        Process::kill_thread(&thread);
-    }
+    reported |= end_if_requested(frame, &thread);
     if let Some(context) = thread.take_sigreturn() {
         crate::signal::sigreturn(frame, context);
         reported = true;
     }
-    reported | crate::signal::deliver(frame)
+    reported |= crate::signal::deliver(frame);
+    // A stop may have held the thread when it was asked to end.
+    reported | end_if_requested(frame, &thread)
+}
+
+/// Ends the running `thread`, with its user registers in `frame`, when
+/// it is to end, after a `THREAD_EXITING` report when its process asks
+/// for thread events. Returns whether it reported.
+fn end_if_requested(frame: &mut Frame, thread: &alloc::sync::Arc<sched::Thread>) -> bool {
+    if !thread.take_exit_request() {
+        return false;
+    }
+    let process = thread.process().cloned();
+    let report = process.is_some_and(|p| p.debug_events()) && thread.state() != sched::DEAD;
+    if report {
+        raise_with_code(frame, kind::THREAD_EXITING, 0, 0);
+    }
+    Process::kill_thread(thread);
+    report
 }
 
 fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
