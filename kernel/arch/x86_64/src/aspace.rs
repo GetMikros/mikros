@@ -6,8 +6,10 @@ use crate::memory::FRAMES;
 use crate::memory_object::MemoryObject;
 use crate::paging::{self, Flags, Mapper, PAGE_SIZE, Policy, Tables};
 use crate::percpu;
+use crate::publish::ITEM_STEP;
 use crate::space;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::object::budget::Budget;
 use kernel_core::regions::{MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions};
@@ -154,6 +156,12 @@ impl Charged<'_> {
     }
 }
 
+/// A new removal ID, never 0.
+fn next_removal() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 fn free_frame(phys: u64) {
     if let Some(frames) = FRAMES.lock().as_mut() {
         frames.free(phys, 1);
@@ -244,6 +252,57 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Removes the translations from `virt` to `virt + size`, both
+    /// multiples of the page size inside the user range, in steps of at
+    /// most `ITEM_STEP` entries with a reschedule check between two. No
+    /// lock may be held.
+    pub fn unmap_in_steps(&self, virt: u64, size: u64) -> Result<(), Error> {
+        let end = virt + size;
+        let mut at = virt;
+        loop {
+            match self.unmap_some(at, end - at, ITEM_STEP)? {
+                Some(next) => at = next,
+                None => return Ok(()),
+            }
+            crate::sched::preempt_point();
+        }
+    }
+
+    /// Does what `unmap` does with no callback, but visits at most
+    /// `limit` entries and returns the address it stopped at when the
+    /// range goes on.
+    fn unmap_some(&self, virt: u64, size: u64, limit: usize) -> Result<Option<u64>, Error> {
+        if !virt.is_multiple_of(PAGE_SIZE)
+            || !size.is_multiple_of(PAGE_SIZE)
+            || !in_user_range(virt, size)
+        {
+            return Err(Error::OutOfRange);
+        }
+        let inner = self.inner.lock();
+        let mut tables = Charged {
+            budget: None,
+            count: 0,
+            refused: false,
+        };
+        // Interrupts are off, so the space stays loaded or not loaded on
+        // this processor while its pages are removed.
+        let loaded = percpu::this().pcids.lock().current == self.id;
+        let mut pages = Mapper::existing(&mut tables, inner.root, false);
+        let mut removed = false;
+        let next = pages
+            .unmap_present_some(virt, size, limit, |v, _| {
+                if loaded {
+                    cpu::invlpg(v);
+                }
+                removed = true;
+            })
+            .map_err(|_| Error::Internal)?;
+        if removed {
+            self.flush_elsewhere(loaded);
+        }
+        Ok(next)
+    }
+
     /// Chooses a start for a mapping of `size` bytes, a multiple of the
     /// page size, as `add_region` does without `SPECIFIC`.
     pub fn choose(&self, size: u64) -> Result<u64, Error> {
@@ -288,6 +347,7 @@ impl AddressSpace {
                 max,
                 inheritance: options.inheritance,
                 mem: mem.clone(),
+                removal: 0,
             })?;
             Ok(start)
         });
@@ -302,49 +362,75 @@ impl AddressSpace {
     /// Removes the parts of regions from `start` to `end` and their pages.
     /// Fails with `NoMemory`, removing nothing, without room to split the
     /// regions at the ends or to list the removed parts.
+    ///
+    /// The parts stay, hidden from faults and changes, while their
+    /// translations go in steps, so that an object that loses pages
+    /// meanwhile still finds them. No lock may be held.
     pub fn remove_regions(&self, start: u64, end: u64) -> Result<(), Error> {
         let start = start.max(USER_START);
         let end = end.min(USER_END);
         if start >= end {
             return Ok(());
         }
-        let mut regions = self.regions.lock();
-        let mut removed = regions.remove(start, end)?;
-        for r in &removed {
-            self.unmap(r.start, r.len, |_| {})
+        let id = next_removal();
+        let mut ranges = Vec::new();
+        let mut parts = {
+            let mut regions = self.regions.lock();
+            let parts = regions.begin_removal(start, end, id)?;
+            if ranges.try_reserve_exact(parts.capacity()).is_err() {
+                regions.cancel_removal(start, end, id);
+                return Err(Error::NoMemory);
+            }
+            let ours = regions.iter().filter(|r| r.removal == id);
+            ranges.extend(ours.map(|r| (r.start, r.len)));
+            parts
+        };
+        for &(at, len) in &ranges {
+            self.unmap_in_steps(at, len)
                 .expect("regions are page-aligned and in the user range");
         }
-        // The parts whose object no remaining region maps come first.
-        removed.sort_unstable_by_key(|part| regions.iter().any(|r| Arc::ptr_eq(&r.mem, &part.mem)));
-        let unused = removed
-            .iter()
-            .take_while(|part| !regions.iter().any(|r| Arc::ptr_eq(&r.mem, &part.mem)))
-            .count();
-        drop(regions);
-        for part in &removed[..unused] {
-            part.mem.remove_space(self);
-        }
-        // Dropping the regions can destroy memory objects, which takes
-        // their locks, so it happens last.
-        drop(removed);
+        let mut regions = self.regions.lock();
+        regions.end_removal(start, end, id, &mut parts);
+        self.finish_removal(regions, parts);
         Ok(())
     }
 
-    /// Removes every region and its pages.
+    /// Removes every region and its pages, as `remove_regions` does with
+    /// the whole user range, which cannot fail.
     pub fn remove_all_regions(&self) {
+        let id = next_removal();
+        self.regions.lock().mark_all(id);
+        self.unmap_in_steps(USER_START, USER_END - USER_START)
+            .expect("the user range is page-aligned");
         let mut regions = self.regions.lock();
-        let removed = regions.take_all();
-        for r in removed.values() {
-            self.unmap(r.start, r.len, |_| {})
-                .expect("regions are page-aligned and in the user range");
-        }
+        let parts = regions.take_all();
         drop(regions);
-        for r in removed.values() {
+        for r in parts.values() {
             r.mem.remove_space(self);
         }
         // Dropping the regions can destroy memory objects, which takes
         // their locks, so it happens last.
-        drop(removed);
+        drop(parts);
+    }
+
+    /// Tells the objects of the removed `parts` that no remaining region
+    /// maps them, releasing `regions` first, and drops the parts last.
+    fn finish_removal(
+        &self,
+        regions: kernel_core::sync::Guard<'_, Regions<Arc<MemoryObject>>>,
+        mut parts: Vec<RegionOf>,
+    ) {
+        // The parts whose object no remaining region maps come first.
+        let mapped = |part: &RegionOf| regions.iter().any(|r| Arc::ptr_eq(&r.mem, &part.mem));
+        parts.sort_unstable_by_key(|part| mapped(part));
+        let unused = parts.iter().take_while(|part| !mapped(part)).count();
+        drop(regions);
+        for part in &parts[..unused] {
+            part.mem.remove_space(self);
+        }
+        // Dropping the regions can destroy memory objects, which takes
+        // their locks, so it happens last.
+        drop(parts);
     }
 
     /// Sets the inheritance of every page from `start` to `end`, or fails
@@ -373,7 +459,7 @@ impl AddressSpace {
         allowed: impl Fn(&RegionOf) -> bool,
     ) -> Result<(), Error> {
         self.regions.lock().set_perms(start, end, perms, allowed)?;
-        self.unmap(start, end - start, |_| {})
+        self.unmap_in_steps(start, end - start)
     }
 
     /// Removes the pages that map pages `first` to `end`, exclusive, of

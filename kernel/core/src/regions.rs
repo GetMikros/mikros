@@ -114,6 +114,10 @@ pub struct Region<M> {
     pub max: u32,
     pub inheritance: u32,
     pub mem: M,
+    /// The removal under way that the region belongs to, or 0 while it
+    /// stays. A region being removed keeps its range and object, but no
+    /// page of it can be entered or changed.
+    pub removal: u64,
 }
 
 impl<M> Region<M> {
@@ -140,16 +144,22 @@ impl<M> Default for Regions<M> {
 }
 
 impl<M: Clone> Regions<M> {
-    /// The region containing `addr`.
-    pub fn find(&self, addr: u64) -> Option<&Region<M>> {
+    /// The region containing `addr`, also one being removed.
+    fn find_any(&self, addr: u64) -> Option<&Region<M>> {
         let (_, r) = self.map.range(..=addr).next_back()?;
         (addr < r.end()).then_some(r)
     }
 
-    /// Whether any region overlaps the `len` bytes from `start`.
+    /// The region containing `addr`, unless it is being removed.
+    pub fn find(&self, addr: u64) -> Option<&Region<M>> {
+        self.find_any(addr).filter(|r| r.removal == 0)
+    }
+
+    /// Whether any region, also one being removed, overlaps the `len`
+    /// bytes from `start`.
     pub fn overlaps(&self, start: u64, len: u64) -> bool {
         let end = start + len;
-        self.find(start).is_some() || self.map.range(start..end).next().is_some()
+        self.find_any(start).is_some() || self.map.range(start..end).next().is_some()
     }
 
     /// Adds `region`, or fails with `AlreadyExists` when it overlaps one
@@ -168,8 +178,8 @@ impl<M: Clone> Regions<M> {
         nodes::claim(2 * INSERT)
     }
 
-    /// Splits the region containing `addr` so that one starts there. The
-    /// caller holds a claim for the split.
+    /// Splits the region containing `addr`, unless it is being removed,
+    /// so that one starts there. The caller holds a claim for the split.
     fn split_at(&mut self, addr: u64) {
         let Some(r) = self.find(addr) else {
             return;
@@ -187,27 +197,73 @@ impl<M: Clone> Regions<M> {
         self.map.insert(addr, tail);
     }
 
-    /// Removes every part of a region inside the range from `start` to
-    /// `end` and returns the removed parts, splitting regions that extend
-    /// beyond it. Fails with `NoMemory`, changing nothing, without room
-    /// for the splits or the removed parts.
-    pub fn remove(&mut self, start: u64, end: u64) -> Result<Vec<Region<M>>, Error> {
+    /// Begins removal `id`, not 0, of every part of a region inside the
+    /// range from `start` to `end`, splitting regions that extend beyond
+    /// it, and returns room for the parts. Regions that another removal
+    /// is taking are left to it. Fails with `NoMemory`, changing nothing,
+    /// without room for the splits or the parts.
+    pub fn begin_removal(
+        &mut self,
+        start: u64,
+        end: u64,
+        id: u64,
+    ) -> Result<Vec<Region<M>>, Error> {
+        debug_assert!(id != 0);
         let straddles = self.find(start).is_some_and(|r| r.start < start);
-        let count = self.map.range(start..end).count() + usize::from(straddles);
-        let mut removed = Vec::new();
-        removed
+        let live = self.map.range(start..end).filter(|(_, r)| r.removal == 0);
+        let count = live.count() + usize::from(straddles);
+        let mut parts = Vec::new();
+        parts
             .try_reserve_exact(count)
             .map_err(|_| Error::NoMemory)?;
         let _claim = Self::claim_splits()?;
         self.split_at(start);
         self.split_at(end);
-        removed.extend(self.map.extract_if(start..end, |_, _| true).map(|(_, r)| r));
-        Ok(removed)
+        for r in self.map.range_mut(start..end).map(|(_, r)| r) {
+            if r.removal == 0 {
+                r.removal = id;
+            }
+        }
+        Ok(parts)
+    }
+
+    /// Ends removal `id` of the range from `start` to `end`, begun by
+    /// `begin_removal`, moving its parts to `parts`, the room it returned.
+    pub fn end_removal(&mut self, start: u64, end: u64, id: u64, parts: &mut Vec<Region<M>>) {
+        for (_, r) in self.map.extract_if(start..end, |_, r| r.removal == id) {
+            debug_assert!(parts.len() < parts.capacity());
+            parts.push(r);
+        }
+    }
+
+    /// Gives up removal `id` of the range from `start` to `end`, whose
+    /// parts stay as regions.
+    pub fn cancel_removal(&mut self, start: u64, end: u64, id: u64) {
+        for r in self.map.range_mut(start..end).map(|(_, r)| r) {
+            if r.removal == id {
+                r.removal = 0;
+            }
+        }
+    }
+
+    /// Makes every region part of removal `id`, as when all of them go.
+    pub fn mark_all(&mut self, id: u64) {
+        for r in self.map.values_mut() {
+            r.removal = id;
+        }
     }
 
     /// Removes every region and returns them, by start.
     pub fn take_all(&mut self) -> Map<u64, Region<M>> {
         core::mem::replace(&mut self.map, nodes::map())
+    }
+
+    /// Removes every part of a region inside the range from `start` to
+    /// `end` at once, as removal `id` would, and returns the parts.
+    pub fn remove(&mut self, start: u64, end: u64, id: u64) -> Result<Vec<Region<M>>, Error> {
+        let mut parts = self.begin_removal(start, end, id)?;
+        self.end_removal(start, end, id, &mut parts);
+        Ok(parts)
     }
 
     /// Sets the inheritance of every page from `start` to `end`, splitting
@@ -336,6 +392,7 @@ mod tests {
             max: PERM_READ | PERM_WRITE,
             inheritance: 0,
             mem: 7,
+            removal: 0,
         }
     }
 
@@ -407,7 +464,7 @@ mod tests {
         let mut r = Regions::default();
         r.insert(region(2 * P, 4 * P, 10 * P)).unwrap();
         r.insert(region(8 * P, 2 * P, 0)).unwrap();
-        let removed = r.remove(3 * P, 9 * P).unwrap();
+        let removed = r.remove(3 * P, 9 * P, 1).unwrap();
         assert_eq!(
             removed
                 .iter()
@@ -416,8 +473,35 @@ mod tests {
             [(3 * P, 3 * P, 11 * P), (8 * P, P, 0)]
         );
         assert_eq!(starts(&r), [(2 * P, P, 10 * P), (9 * P, P, P)]);
-        assert!(r.remove(20 * P, 30 * P).unwrap().is_empty());
+        assert!(r.remove(20 * P, 30 * P, 1).unwrap().is_empty());
         assert_eq!(r.find(9 * P).unwrap().page(9 * P + 1), 1);
+    }
+
+    #[test]
+    fn hides_regions_being_removed() {
+        let mut r = Regions::default();
+        r.insert(region(2 * P, 4 * P, 0)).unwrap();
+        let mut parts = r.begin_removal(3 * P, 5 * P, 1).unwrap();
+        assert_eq!(parts.capacity(), 1);
+        // The part being removed keeps its range but cannot be found,
+        // changed or mapped over; the rest of the region stays.
+        assert!(r.find(3 * P).is_none() && r.find(2 * P).is_some());
+        assert!(r.overlaps(4 * P, P));
+        assert_eq!(r.set_perms(3 * P, 4 * P, 0, |_| true), Err(Error::NotFound));
+        assert_eq!(r.set_inheritance(3 * P, 4 * P, 1), Err(Error::NotFound));
+        assert_eq!(r.insert(region(4 * P, P, 0)), Err(Error::AlreadyExists));
+        // Another removal leaves it to the first.
+        let mut other = r.begin_removal(2 * P, 6 * P, 2).unwrap();
+        r.end_removal(2 * P, 6 * P, 2, &mut other);
+        assert_eq!(starts_of(&other), [(2 * P, P, 0), (5 * P, P, 3 * P)]);
+        assert_eq!(starts(&r), [(3 * P, 2 * P, P)]);
+        r.end_removal(3 * P, 5 * P, 1, &mut parts);
+        assert_eq!(starts_of(&parts), [(3 * P, 2 * P, P)]);
+        assert!(starts(&r).is_empty());
+    }
+
+    fn starts_of(parts: &[Region<u8>]) -> std::vec::Vec<(u64, u64, u64)> {
+        parts.iter().map(|r| (r.start, r.len, r.offset)).collect()
     }
 
     #[test]

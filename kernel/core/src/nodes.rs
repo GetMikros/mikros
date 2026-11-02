@@ -287,6 +287,7 @@ pub(crate) mod tests {
                     max: 0,
                     inheritance: 0,
                     mem: std::sync::Arc::new(()),
+                    removal: 0,
                 },
             );
             heap_full(false);

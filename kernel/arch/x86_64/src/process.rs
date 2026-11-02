@@ -1,6 +1,6 @@
 //! Processes: an address space, a handle table and threads.
 
-use crate::aspace::{AddressSpace, USER_END, USER_START};
+use crate::aspace::AddressSpace;
 use crate::sched::{self, Thread};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -423,12 +423,9 @@ impl Process {
             self.state.store(TERMINATED, Ordering::Release);
         }
         crate::init::terminated(self, code);
+        // This also removes translations made outside regions, whose
+        // frames belong to whoever mapped them and are not freed.
         self.aspace.remove_all_regions();
-        // Frames mapped outside regions belong to whoever mapped them, so
-        // they are not freed.
-        self.aspace
-            .unmap(USER_START, USER_END - USER_START, |_| {})
-            .expect("user mappings are 4 KiB pages inside the user range");
         // Objects are dropped after the lock is released, as dropping one
         // can drop further objects.
         let handles = core::mem::take(&mut *self.handles.lock());

@@ -259,11 +259,30 @@ impl<'t, T: Tables> Mapper<'t, T> {
         &mut self,
         virt: u64,
         size: u64,
-        mut unmapped: impl FnMut(u64, u64),
+        unmapped: impl FnMut(u64, u64),
     ) -> Result<(), Error> {
+        self.unmap_present_some(virt, size, usize::MAX, unmapped)
+            .map(drop)
+    }
+
+    /// Does what `unmap_present` does, but visits at most `limit` entries,
+    /// each page removed or span skipped counting as one, and returns the
+    /// address it stopped at when the range goes on.
+    pub fn unmap_present_some(
+        &mut self,
+        virt: u64,
+        size: u64,
+        limit: usize,
+        mut unmapped: impl FnMut(u64, u64),
+    ) -> Result<Option<u64>, Error> {
         let end = virt.wrapping_add(size);
         let mut v = virt;
+        let mut visited = 0;
         while v != end {
+            if visited == limit {
+                return Ok(Some(v));
+            }
+            visited += 1;
             match self.walk(v) {
                 Ok((table, i, page)) => {
                     if page != PAGE_SIZE {
@@ -285,7 +304,7 @@ impl<'t, T: Tables> Mapper<'t, T> {
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Calls `free` with each table that top-level entries 0 to 255 lead
@@ -537,6 +556,22 @@ mod tests {
 
         let mut mapper = Mapper::existing(&mut pool, root, false);
         let mut seen = Vec::new();
+        // A limited walk stops after visiting that many entries, the
+        // missing page counting as one.
+        let next = mapper
+            .unmap_present_some(base, 3 * PAGE_SIZE, 2, |v, p| seen.push((v, p)))
+            .unwrap();
+        assert_eq!(next, Some(base + 2 * PAGE_SIZE));
+        let next = mapper
+            .unmap_present_some(base + 2 * PAGE_SIZE, PAGE_SIZE, 2, |v, p| seen.push((v, p)))
+            .unwrap();
+        assert_eq!(next, None);
+        assert_eq!(seen, [(base, 0x9000), (base + 2 * PAGE_SIZE, 0xA000)]);
+        mapper.map(base, 0x9000, PAGE_SIZE, USER_DATA).unwrap();
+        mapper
+            .map(base + 2 * PAGE_SIZE, 0xA000, PAGE_SIZE, USER_DATA)
+            .unwrap();
+        seen.clear();
         mapper
             .unmap_present(base, 3 * PAGE_SIZE, |v, p| seen.push((v, p)))
             .unwrap();
