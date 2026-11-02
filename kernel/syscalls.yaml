@@ -857,3 +857,12 @@ syscalls:
     args:
       - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
       - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: []}
+
+  - name: system_get_random
+    number: 83
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0005.R18]
+    args:
+      - {name: buf, type: "*mut u8", dir: out}
+      - {name: len, type: u64, dir: in}

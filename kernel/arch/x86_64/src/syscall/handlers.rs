@@ -1380,6 +1380,25 @@ pub fn system_get_memory_info(out: UserOut<u8>) -> Result<(), Error> {
     Ok(())
 }
 
+/// The most bytes one `system_get_random` call returns.
+const RANDOM_MAX: u64 = 4096;
+
+pub fn system_get_random(buf: UserOut<u8>, len: u64) -> Result<(), Error> {
+    if len > RANDOM_MAX {
+        return Err(Error::OutOfRange);
+    }
+    if !buf.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    let outputs = prepare(&current_process()?, &[buf.range(len)])?;
+    let mut bytes = [0u8; RANDOM_MAX as usize];
+    let bytes = &mut bytes[..len as usize];
+    crate::random::fill(bytes).map_err(|_| Error::Internal)?;
+    publish(outputs, &[bytes]);
+    bytes.fill(0);
+    Ok(())
+}
+
 pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result<(), Error> {
     let perms = MapOptions::parse_protection(options)?;
     page_aligned(&[len])?;

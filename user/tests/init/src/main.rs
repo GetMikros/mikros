@@ -98,6 +98,34 @@ fn shared_mappings(s: &Startup) -> Result {
     check("closing the object", unsafe { sys::handle_close(mem) })
 }
 
+/// `system_get_random` fills buffers up to 4096 bytes and refuses more.
+fn random_bytes(_: &Startup) -> Result {
+    let mut a = [0u8; 4096];
+    let mut b = [0u8; 64];
+    // SAFETY: the pointers and lengths describe the arrays.
+    unsafe {
+        check(
+            "filling 4096 bytes",
+            sys::system_get_random(a.as_mut_ptr(), 4096),
+        )?;
+        check(
+            "filling 64 bytes",
+            sys::system_get_random(b.as_mut_ptr(), 64),
+        )?;
+        ensure(
+            "refusing more than 4096 bytes",
+            sys::system_get_random(a.as_mut_ptr(), 4097) == -14,
+        )?;
+        ensure(
+            "filling nothing",
+            sys::system_get_random(b.as_mut_ptr(), 0) == 0,
+        )?;
+    }
+    // Two draws of 64 bytes, or a draw of all zeros, mean no generator.
+    ensure("drawing different bytes", a[..64] != b && b != [0; 64])?;
+    ensure("filling every byte", a[4032..] != [0; 64])
+}
+
 static THREAD_RAN: AtomicU64 = AtomicU64::new(0);
 
 extern "sysv64" fn thread_entry(value: u64, _arg2: u64) -> ! {
@@ -1917,7 +1945,7 @@ fn evict_waits_for_outputs(s: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 27] = [
+const TESTS: [(&str, Test); 28] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1943,6 +1971,7 @@ const TESTS: [(&str, Test); 27] = [
     ("evict_waits_for_outputs", evict_waits_for_outputs),
     ("memory_objects", memory_objects),
     ("shared_mappings", shared_mappings),
+    ("random_bytes", random_bytes),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
 ];
