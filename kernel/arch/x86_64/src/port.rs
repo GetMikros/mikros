@@ -18,6 +18,7 @@ pub const PACKET_SIZE: usize = 48;
 /// Packet types.
 pub const SIGNAL: u32 = 1;
 pub const USER: u32 = 2;
+pub const TIMELINE: u32 = 4;
 /// The `EDGE` option of `object_wait_async`.
 pub const EDGE: u32 = 1 << 0;
 /// The most `USER` packets queued on a port.
@@ -203,6 +204,9 @@ struct Registration {
     handle: Handle,
     /// The signals of `mask` last seen, for `EDGE`.
     last: AtomicU32,
+    /// For a timeline wait, the value it waits for; such a registration
+    /// does not watch signals.
+    threshold: Option<u64>,
     /// Whether a packet of the registration is queued and unread.
     queued: AtomicBool,
     /// Set once the registration has ended and its watch with it; it is
@@ -221,17 +225,23 @@ impl Registration {
     /// Queues a packet for `signals` on the port, unless one is queued.
     /// Returns whether the port still exists.
     fn fire(&self, signals: u32) -> bool {
+        let mut payload = [0u8; 8];
+        payload[0..4].copy_from_slice(&self.mask.to_le_bytes());
+        payload[4..8].copy_from_slice(&signals.to_le_bytes());
+        self.queue(SIGNAL, &payload)
+    }
+
+    /// Queues a packet of `kind` with `payload` on the port, unless one is
+    /// queued. Returns whether the port still exists.
+    fn queue(&self, kind: u32, payload: &[u8]) -> bool {
         let Some(port) = self.port.upgrade() else {
             return false;
         };
         if self.queued.swap(true, Ordering::AcqRel) {
             return true;
         }
-        let mut payload = [0u8; 8];
-        payload[0..4].copy_from_slice(&self.mask.to_le_bytes());
-        payload[4..8].copy_from_slice(&signals.to_le_bytes());
         let packet = Queued {
-            bytes: packet(self.key, SIGNAL, 0, &payload),
+            bytes: packet(self.key, kind, 0, payload),
             registration: Some(self.id),
             charged: None,
         };
@@ -244,8 +254,12 @@ impl Registration {
         true
     }
 
-    /// Ends the watch of the object, if it still exists.
+    /// Ends the watch of the object, if it still exists and the
+    /// registration watches signals.
     fn end_watch(&self) {
+        if self.threshold.is_some() {
+            return;
+        }
         // Upgraded only with no lock held, as dropping the reference may
         // destroy the object.
         if let Some(object) = self.object.upgrade() {
@@ -266,7 +280,7 @@ impl Registration {
 /// registrations whose signals are now set. Allocates and drops nothing.
 pub fn signals_changed(header: &Header, signals: u32) {
     for r in REGISTRATIONS.lock().iter() {
-        if r.koid != header.koid() || r.done.load(Ordering::Acquire) {
+        if r.koid != header.koid() || r.done.load(Ordering::Acquire) || r.threshold.is_some() {
             continue;
         }
         let now = signals & r.mask;
@@ -305,20 +319,17 @@ fn purge() {
     }
 }
 
-/// Registers an asynchronous wait on `object` through `handle` of
-/// `process`, as `object_wait_async` does.
-pub fn wait_async(
+/// A new registration on `object` through `handle` of `process`, with
+/// its room in the port's queue reserved and its charge made.
+fn reserve(
     object: &Arc<dyn Object>,
     process: &Arc<Process>,
     handle: Handle,
     port: &Arc<Port>,
     key: u64,
-    signals: u32,
-    options: u32,
-) -> Result<(), Error> {
-    if options & !EDGE != 0 {
-        return Err(Error::InvalidArgs);
-    }
+    mask: u32,
+    threshold: Option<u64>,
+) -> Result<Registration, Error> {
     purge();
     let budget = process.budget().clone();
     {
@@ -334,23 +345,85 @@ pub fn wait_async(
         budget.charge_kernel(REGISTRATION_COST)?;
         state.registrations += 1;
     }
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let header = object.header();
-    let registration = Arc::new(Registration {
-        id,
-        koid: header.koid(),
-        mask: signals,
-        edge: options & EDGE != 0,
+    Ok(Registration {
+        id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        koid: object.header().koid(),
+        mask,
+        edge: false,
         key,
         port: Arc::downgrade(port),
         object: Arc::downgrade(object),
         process: Arc::as_ptr(process) as usize,
         handle,
         last: AtomicU32::new(0),
+        threshold,
         queued: AtomicBool::new(false),
         done: AtomicBool::new(false),
         budget,
-    });
+    })
+}
+
+/// Registers a wait on the timeline `object`, whose value is `current`,
+/// for `value`, through `handle` of `process`, as `timeline_wait_async`
+/// does: its packet is queued at once when `current` reaches `value`.
+pub fn wait_timeline(
+    object: &Arc<dyn Object>,
+    current: u64,
+    process: &Arc<Process>,
+    handle: Handle,
+    port: &Arc<Port>,
+    key: u64,
+    value: u64,
+) -> Result<(), Error> {
+    let registration = reserve(object, process, handle, port, key, 0, Some(value))?;
+    if current >= value {
+        registration.queue(TIMELINE, &current.to_le_bytes());
+        registration.release();
+        return Ok(());
+    }
+    let mut registrations = REGISTRATIONS.lock();
+    if registrations.try_reserve(1).is_err() {
+        drop(registrations);
+        registration.release();
+        return Err(Error::NoMemory);
+    }
+    registrations.push(Arc::new(registration));
+    Ok(())
+}
+
+/// Queues the packets of the timeline waits on the timeline with object
+/// ID `koid` that its new value `value` reaches.
+pub fn timeline_raised(koid: u64, value: u64) {
+    for r in REGISTRATIONS.lock().iter() {
+        let reached = r.threshold.is_some_and(|t| t <= value);
+        if r.koid == koid && reached && !r.done.load(Ordering::Acquire) {
+            r.queue(TIMELINE, &value.to_le_bytes());
+            r.done.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Registers an asynchronous wait on `object` through `handle` of
+/// `process`, as `object_wait_async` does.
+pub fn wait_async(
+    object: &Arc<dyn Object>,
+    process: &Arc<Process>,
+    handle: Handle,
+    port: &Arc<Port>,
+    key: u64,
+    signals: u32,
+    options: u32,
+) -> Result<(), Error> {
+    if options & !EDGE != 0 {
+        return Err(Error::InvalidArgs);
+    }
+    let registration = reserve(object, process, handle, port, key, signals, None)?;
+    let header = object.header();
+    let registration = Registration {
+        edge: options & EDGE != 0,
+        ..registration
+    };
+    let registration = Arc::new(registration);
     let mut registrations = REGISTRATIONS.lock();
     if registrations.try_reserve(1).is_err() {
         drop(registrations);

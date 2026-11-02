@@ -83,6 +83,8 @@ mod thread_state;
 #[cfg(target_os = "none")]
 mod time;
 #[cfg(target_os = "none")]
+mod timeline;
+#[cfg(target_os = "none")]
 mod timer;
 #[cfg(target_os = "none")]
 mod usercopy;

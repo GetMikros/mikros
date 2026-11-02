@@ -1198,3 +1198,46 @@ pub fn futex_wake(addr: UserIn<u32>, count: u32, woken: UserOut<u32>) -> Result<
     let n = crate::wait::futex_wake(addr.0, count)?;
     woken.write(n)
 }
+
+pub fn timeline_create(initial: u64, options: u32, out: UserOut<Handle>) -> Result<(), Error> {
+    if options != 0 || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let timeline = crate::timeline::Timeline::new(current_process()?.budget(), initial)?;
+    give(timeline, ObjectType::Timeline, out)
+}
+
+pub fn timeline_signal(timeline: Checked, value: u64) -> Result<(), Error> {
+    object::<crate::timeline::Timeline>(timeline).signal(value)
+}
+
+pub fn timeline_get(timeline: Checked, out: UserOut<u64>) -> Result<(), Error> {
+    out.write(object::<crate::timeline::Timeline>(timeline).value())
+}
+
+pub fn timeline_wait(timeline: Checked, value: u64, deadline: i64) -> Result<(), Error> {
+    let process = current_process()?;
+    object::<crate::timeline::Timeline>(timeline).wait(&process, value, deadline)
+}
+
+pub fn timeline_wait_async(
+    timeline: Checked,
+    port: Checked,
+    key: u64,
+    value: u64,
+) -> Result<(), Error> {
+    let process = current_process()?;
+    let current = downcast::<crate::timeline::Timeline>(timeline.object.clone())
+        .expect("the dispatch checked the object type")
+        .value();
+    let port = object::<crate::port::Port>(port);
+    crate::port::wait_timeline(
+        &timeline.object,
+        current,
+        &process,
+        timeline.value,
+        &port,
+        key,
+        value,
+    )
+}
