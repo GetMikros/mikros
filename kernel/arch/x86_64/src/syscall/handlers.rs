@@ -18,6 +18,7 @@ use kernel_core::object::{
     INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
 };
 use kernel_core::regions::MapOptions;
+use kernel_core::signal::{self as sig, ACTION_SIZE, Action, Info, UNBLOCKABLE};
 use kernel_core::status::Error;
 
 /// The object of a handle the dispatch has checked to be a `T`.
@@ -627,4 +628,129 @@ pub fn thread_write_state(
             Ok(())
         })
         .ok_or(Error::BadState)?
+}
+
+pub fn signal_set_action(signo: u32, action: UserIn<u8>, old: UserOut<u8>) -> Result<(), Error> {
+    if !sig::valid(signo) {
+        return Err(Error::InvalidArgs);
+    }
+    let new = if action.is_null() {
+        None
+    } else {
+        if signo == sig::KILL || signo == sig::STOP {
+            return Err(Error::InvalidArgs);
+        }
+        let mut bytes = [0u8; ACTION_SIZE];
+        action.read_bytes(&mut bytes)?;
+        Some(Action::parse(&bytes, |a| {
+            crate::aspace::in_user_range(a, 1)
+        })?)
+    };
+    if !old.is_null() && !old.fits(ACTION_SIZE as u64) {
+        return Err(Error::InvalidArgs);
+    }
+    let process = current_process()?;
+    let threads = process.live_threads();
+    let mut state = process.signals().lock();
+    let slot = signo as usize - 1;
+    if !old.is_null() {
+        old.write_bytes(&state.actions[slot].bytes())?;
+    }
+    if let Some(new) = new {
+        state.actions[slot] = new;
+        if new.ignores(signo) {
+            crate::signal::discard(&mut state, &threads, sig::bit(signo));
+        }
+    }
+    Ok(())
+}
+
+pub fn signal_set_mask(how: u32, mask: u64, old: UserOut<u64>) -> Result<(), Error> {
+    if how > 2 {
+        return Err(Error::InvalidArgs);
+    }
+    let thread = current_thread()?;
+    let mut state = thread.signals().lock();
+    if !old.is_null() {
+        old.write(state.mask)?;
+    }
+    let mask = mask & !UNBLOCKABLE;
+    state.mask = match how {
+        0 => state.mask | mask,
+        1 => state.mask & !mask,
+        _ => mask,
+    };
+    Ok(())
+}
+
+/// The minimum size of an alternate signal stack.
+const ALTSTACK_MIN: u64 = 16384;
+
+pub fn signal_set_altstack(base: u64, size: u64, old: UserOut<u64>) -> Result<(), Error> {
+    let remove = base == 0 && size == 0;
+    if !remove && (size < ALTSTACK_MIN || !crate::aspace::in_user_range(base, size)) {
+        return Err(Error::InvalidArgs);
+    }
+    let thread = current_thread()?;
+    let mut state = thread.signals().lock();
+    if state.on_altstack(crate::percpu::user_rsp()) {
+        return Err(Error::BadState);
+    }
+    if !old.is_null() {
+        let (b, s) = state.altstack;
+        old.write_all(&[b, s])?;
+    }
+    state.altstack = (base, size);
+    Ok(())
+}
+
+pub fn process_signal(process: Checked, signo: u32, value: u64) -> Result<(), Error> {
+    if signo == 0 {
+        return Ok(());
+    }
+    if signo > sig::SIG_MAX {
+        return Err(Error::InvalidArgs);
+    }
+    let process = object::<Process>(process);
+    let state = process.state();
+    if state != crate::process::RUNNING && state != crate::process::STOPPED {
+        return Err(Error::BadState);
+    }
+    let info = Info {
+        signo,
+        code: sig::CODE_PROCESS,
+        sender_koid: current_process()?.header().koid(),
+        value,
+        ..Info::default()
+    };
+    crate::signal::send(&process, None, info)
+}
+
+pub fn thread_signal(thread: Checked, signo: u32, value: u64) -> Result<(), Error> {
+    if !sig::valid(signo) {
+        return Err(Error::InvalidArgs);
+    }
+    let thread = object::<Thread>(thread);
+    let state = thread.state();
+    let process = thread.process().cloned();
+    let (Some(process), false) = (
+        process,
+        state == crate::sched::NEW || state == crate::sched::DEAD,
+    ) else {
+        return Err(Error::BadState);
+    };
+    let info = Info {
+        signo,
+        code: sig::CODE_THREAD,
+        sender_koid: current_process()?.header().koid(),
+        value,
+        ..Info::default()
+    };
+    crate::signal::send(&process, Some(&thread), info)
+}
+
+pub fn signal_get_pending(out: UserOut<u64>) -> Result<(), Error> {
+    let thread = current_thread()?;
+    let process = current_process()?;
+    out.write(crate::signal::pending_mask(&process, &thread))
 }

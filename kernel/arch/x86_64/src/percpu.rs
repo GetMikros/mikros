@@ -91,6 +91,12 @@ pub fn this() -> &'static PerCpu {
     unsafe { &*this }
 }
 
+/// The user stack pointer saved by the last system call entry on this
+/// processor.
+pub fn user_rsp() -> u64 {
+    this().user_rsp.load(Ordering::Relaxed)
+}
+
 /// The offsets that entry code uses.
 pub const KERNEL_STACK_OFFSET: usize = 16;
 pub const USER_RSP_OFFSET: usize = 24;

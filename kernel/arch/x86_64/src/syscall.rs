@@ -234,6 +234,11 @@ impl<T: Plain> UserIn<T> {
         bytes.is_some_and(|b| b == 0 || crate::aspace::in_user_range(self.0, b))
     }
 
+    /// Whether the address is zero.
+    pub fn is_null(&self) -> bool {
+        self.0 == 0
+    }
+
     /// Copies `dst.len()` values in once.
     pub fn read_into(&self, dst: &mut [T]) -> Result<(), Error> {
         // SAFETY: T is Plain, so its bytes may be written freely.
@@ -275,6 +280,11 @@ pub struct UserOut<T>(u64, PhantomData<T>);
 impl<T: Plain> UserOut<T> {
     pub fn new(addr: u64) -> Self {
         UserOut(addr, PhantomData)
+    }
+
+    /// Whether the address is zero.
+    pub fn is_null(&self) -> bool {
+        self.0 == 0
     }
 
     /// Whether `len` values fit at the address inside the user range.

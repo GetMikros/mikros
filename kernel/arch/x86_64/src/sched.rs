@@ -68,6 +68,7 @@ pub struct Thread {
     /// Set when the thread is to end, after a `THREAD_EXITING` report,
     /// before it returns to user mode.
     exit_requested: AtomicBool,
+    signals: SpinLock<crate::signal::ThreadSignals>,
 }
 
 /// The value DR6 has when no debug condition is recorded.
@@ -126,6 +127,7 @@ impl Thread {
             debug_pending: AtomicBool::new(false),
             exception_kind: AtomicU32::new(0),
             exit_requested: AtomicBool::new(false),
+            signals: SpinLock::new(crate::signal::ThreadSignals::default()),
         }))
     }
 
@@ -242,6 +244,10 @@ impl Thread {
     /// Whether a debug exception was deferred, clearing the mark.
     pub fn take_deferred_debug(&self) -> bool {
         self.debug_pending.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn signals(&self) -> &SpinLock<crate::signal::ThreadSignals> {
+        &self.signals
     }
 
     /// The type of the exception the thread is in.

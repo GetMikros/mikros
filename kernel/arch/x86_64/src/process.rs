@@ -16,6 +16,7 @@ use kernel_core::sync::SpinLock;
 pub const NEW: u32 = 0;
 pub const RUNNING: u32 = 1;
 pub const TERMINATED: u32 = 2;
+pub const STOPPED: u32 = 3;
 
 pub struct Process {
     header: Header,
@@ -33,6 +34,7 @@ pub struct Process {
     /// The started threads that are not DEAD, changed under `threads`.
     started: AtomicU32,
     exception: SpinLock<Option<ExceptionChannel>>,
+    signals: SpinLock<crate::signal::ProcessSignals>,
 }
 
 /// The endpoint of a process's exception channel that the kernel keeps.
@@ -73,6 +75,7 @@ impl Process {
             threads: SpinLock::new(Vec::new()),
             started: AtomicU32::new(0),
             exception: SpinLock::new(None),
+            signals: SpinLock::new(crate::signal::ProcessSignals::default()),
         }))
     }
 
@@ -98,6 +101,26 @@ impl Process {
 
     pub fn exit_code(&self) -> i64 {
         self.exit_code.load(Ordering::Acquire)
+    }
+
+    pub fn signals(&self) -> &SpinLock<crate::signal::ProcessSignals> {
+        &self.signals
+    }
+
+    /// The threads of the process that still exist.
+    pub fn live_threads(&self) -> Vec<Arc<Thread>> {
+        self.threads
+            .lock()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect()
+    }
+
+    /// Lets the threads of a stopped process run again.
+    pub fn continue_threads(&self) {
+        let _ = self
+            .state
+            .compare_exchange(STOPPED, RUNNING, Ordering::AcqRel, Ordering::Acquire);
     }
 
     /// The kernel's endpoint of the exception channel, while the returned

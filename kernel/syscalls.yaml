@@ -328,3 +328,61 @@ syscalls:
       - {name: kind, type: u32, dir: in}
       - {name: buf, type: "*const u8", dir: in}
       - {name: len, type: u64, dir: in}
+
+  - name: signal_set_action
+    number: 30
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0020.R5, MIKSPEC-0020.R6]
+    args:
+      - {name: signo, type: u32, dir: in}
+      - {name: action, type: "*const u8", dir: in}
+      - {name: old, type: "*mut u8", dir: out}
+
+  - name: signal_set_mask
+    number: 31
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0020.R7]
+    args:
+      - {name: how, type: u32, dir: in}
+      - {name: mask, type: u64, dir: in}
+      - {name: old, type: "*mut u64", dir: out}
+
+  - name: signal_set_altstack
+    number: 32
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0020.R8, MIKSPEC-0016.R17]
+    args:
+      - {name: base, type: u64, dir: in}
+      - {name: size, type: u64, dir: in}
+      - {name: old, type: "*mut u64", dir: out}
+
+  - name: process_signal
+    number: 33
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0020.R9, MIKSPEC-0020.R11, MIKSPEC-0020.R12, MIKSPEC-0020.R17]
+    args:
+      - {name: process, type: Handle, dir: in, object: Process, rights: [SIGNAL]}
+      - {name: signo, type: u32, dir: in}
+      - {name: value, type: u64, dir: in}
+
+  - name: thread_signal
+    number: 34
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0020.R10, MIKSPEC-0020.R11, MIKSPEC-0020.R12]
+    args:
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [SIGNAL]}
+      - {name: signo, type: u32, dir: in}
+      - {name: value, type: u64, dir: in}
+
+  - name: signal_get_pending
+    number: 35
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0020.R24]
+    args:
+      - {name: out, type: "*mut u64", dir: out}

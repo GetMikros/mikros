@@ -58,6 +58,8 @@ mod sched;
 #[cfg(target_os = "none")]
 mod serial;
 #[cfg(target_os = "none")]
+mod signal;
+#[cfg(target_os = "none")]
 mod space;
 #[cfg(target_os = "none")]
 mod syscall;
