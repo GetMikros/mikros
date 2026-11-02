@@ -288,48 +288,44 @@ impl MemoryObject {
         if !(OP_FAIL..=OP_WRITEBACK_ABORT).contains(&op) {
             return Err(Error::InvalidArgs);
         }
-        // Writeback begins, and pages are evicted, only once no kernel copy
-        // holds the frames: a page being written must not go.
-        let waits = op == OP_WRITEBACK_BEGIN || op == OP_EVICT;
-        let mut pages = loop {
-            if waits {
-                self.wait_unpinned();
-            }
-            let pages = self.pages.lock();
-            if !waits || !pages.pinned() {
-                break pages;
-            }
-        };
-        pages.check_range(offset, len)?;
+        self.pages.lock().check_range(offset, len)?;
         let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
-        let mut state = paged.state.lock();
-        let mut freed = Vec::new();
-        let mut result = Ok(());
         match op {
-            // The waiting threads are woken also when not every page could
-            // be failed: those whose request was forgotten request again.
-            OP_FAIL => result = state.fail(first, end),
-            OP_EVICT => {
-                for index in first..end {
-                    if !state.evictable(index) || freed.try_reserve(1).is_err() {
-                        continue;
-                    }
-                    if let Ok(taken) = pages.decommit(index, index + 1) {
-                        self.unmap_pages(index, index + 1);
-                        freed.extend(taken);
-                        state.removed(index);
-                    }
-                }
-            }
+            OP_FAIL => in_pieces(first, end, |from, to| {
+                let result = paged.state.lock().fail(from, to);
+                // The waiting threads are woken also when not every page
+                // could be failed: those whose request was forgotten
+                // request again.
+                crate::pager::wake(self.header.koid(), from, to);
+                result
+            }),
+            OP_EVICT => in_pieces(first, end, |from, to| {
+                self.evict(paged, from, to);
+                Ok(())
+            }),
             OP_WRITEBACK_BEGIN => {
+                // Writeback begins only once no kernel copy holds the
+                // frames: a page being written must not go unrecorded.
+                let pages = loop {
+                    self.wait_unpinned();
+                    let pages = self.pages.lock();
+                    if !pages.pinned() {
+                        break pages;
+                    }
+                };
+                pages.check_range(offset, len)?;
+                let mut state = paged.state.lock();
                 let recorded = state.writeback_begin(first, end)?;
                 *paged.writeback.lock() = Some((offset, len));
                 // Writes through mappings fault again and are seen.
                 for index in recorded {
                     self.unmap_pages(index, index + 1);
                 }
+                Ok(())
             }
             _ => {
+                let _pages = self.pages.lock();
+                let mut state = paged.state.lock();
                 state.need_dirty_tracking()?;
                 let mut writeback = paged.writeback.lock();
                 if *writeback != Some((offset, len)) {
@@ -337,15 +333,39 @@ impl MemoryObject {
                 }
                 state.writeback_end(first, end, op == OP_WRITEBACK_END)?;
                 *writeback = None;
+                Ok(())
+            }
+        }
+    }
+
+    /// Evicts the evictable pages from `first` to `end`, exclusive, as
+    /// `pager_op` `EVICT` does, once no kernel copy holds the frames: a
+    /// page being written must not go. Pages without room to record
+    /// their frame stay.
+    fn evict(&self, paged: &Paged, first: u64, end: u64) {
+        let mut pages = loop {
+            self.wait_unpinned();
+            let pages = self.pages.lock();
+            if !pages.pinned() {
+                break pages;
+            }
+        };
+        let end = end.min(pages.count());
+        let mut state = paged.state.lock();
+        let mut freed = Vec::new();
+        for index in first..end {
+            if !state.evictable(index) || freed.try_reserve(1).is_err() {
+                continue;
+            }
+            if let Ok(taken) = pages.decommit(index, index + 1) {
+                self.unmap_pages(index, index + 1);
+                freed.extend(taken);
+                state.removed(index);
             }
         }
         drop(state);
         drop(pages);
         self.free(freed);
-        if op == OP_FAIL {
-            crate::pager::wake(self.header.koid(), first, end);
-        }
-        result
     }
 
     /// The dirty ranges of the `len` bytes from `offset`, as byte offsets
@@ -406,42 +426,51 @@ impl MemoryObject {
         }
         self.check_range(offset, len)?;
         source.check_range(source_offset, len)?;
-        // Frames move only once no kernel copy holds the source; nothing
-        // waits between the commit and the move.
-        let moved = loop {
-            source.wait_unpinned();
-            source.commit(source_offset, len)?;
-            match source.take_frames(source_offset, len) {
-                Err(Error::BadState) => continue,
-                taken => break taken?,
-            }
-        };
-        let first = offset / PAGE_SIZE;
-        let mut leftover = Vec::new();
-        {
-            let mut pages = self.pages.lock();
-            let mut state = paged.state.lock();
-            let mut charges = paged.charges.lock();
-            for (i, phys) in moved.into_iter().enumerate() {
-                let index = first + i as u64;
-                let fits = index < pages.count() && pages.frame(index).is_none();
-                let claims = fits
-                    .then(|| Some((nodes::claim_insert().ok()?, nodes::claim_insert().ok()?)))
-                    .flatten();
-                if let Some((charge, page)) = claims
-                    && state.supply(index) == Ok(true)
-                {
-                    charges.insert(phys, source.budget.clone());
-                    drop(charge);
-                    pages.insert(index, phys, page);
-                } else if leftover.try_reserve(1).is_ok() {
-                    leftover.push(phys);
+        let (first, source_first) = (offset / PAGE_SIZE, source_offset / PAGE_SIZE);
+        in_pieces(0, len / PAGE_SIZE, |from, to| {
+            let source_offset = (source_first + from) * PAGE_SIZE;
+            let len = (to - from) * PAGE_SIZE;
+            // Room for every frame of the piece that does not fit, before
+            // any frame is taken.
+            let mut leftover = Vec::new();
+            leftover
+                .try_reserve_exact((to - from) as usize)
+                .map_err(|_| Error::NoMemory)?;
+            // Frames move only once no kernel copy holds the source;
+            // nothing waits between the commit and the move.
+            let moved = loop {
+                source.wait_unpinned();
+                source.commit(source_offset, len)?;
+                match source.take_frames(source_offset, len) {
+                    Err(Error::BadState) => continue,
+                    taken => break taken?,
+                }
+            };
+            let (from, to) = (first + from, first + to);
+            {
+                let mut pages = self.pages.lock();
+                let mut state = paged.state.lock();
+                let mut charges = paged.charges.lock();
+                for (index, phys) in (from..).zip(moved) {
+                    let fits = index < pages.count() && pages.frame(index).is_none();
+                    let claims = fits
+                        .then(|| Some((nodes::claim_insert().ok()?, nodes::claim_insert().ok()?)))
+                        .flatten();
+                    if let Some((charge, page)) = claims
+                        && state.supply(index) == Ok(true)
+                    {
+                        charges.insert(phys, source.budget.clone());
+                        drop(charge);
+                        pages.insert(index, phys, page);
+                    } else {
+                        leftover.push(phys);
+                    }
                 }
             }
-        }
-        source.free(leftover);
-        crate::pager::wake(self.header.koid(), first, first + len / PAGE_SIZE);
-        Ok(())
+            source.free(leftover);
+            crate::pager::wake(self.header.koid(), from, to);
+            Ok(())
+        })
     }
 
     /// Takes the frames of the `len` bytes from `offset`, all present,
