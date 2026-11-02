@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+pub mod madt;
+
 /// Reads physical memory.
 pub trait PhysRead {
     /// The `len` bytes at `phys`, or `None` when they are not readable.
