@@ -1725,9 +1725,12 @@ extern "sysv64" fn straddling_reader(source: u64, at: u64) -> ! {
     unreachable!("thread_exit returned");
 }
 
-/// A write seal waits for a kernel write into the object that is under
-/// way, even after the object's mapping is gone.
-fn seal_waits_for_outputs(s: &Startup) -> Result {
+/// Maps `first` and, right after it, a page of a paged object whose
+/// pager answers after 50 ms, and starts a thread reading 16 bytes into
+/// the last 8 bytes of `first` and the first 8 of the paged page, which
+/// then holds `first` while it waits for the pager. Returns where
+/// `first` is mapped.
+fn start_straddling_read(s: &Startup, first: Handle) -> Result<u64> {
     let (mut pager, mut port, mut paged) = (0, 0, 0);
     // SAFETY: the pointers are valid for the calls.
     unsafe {
@@ -1738,8 +1741,7 @@ fn seal_waits_for_outputs(s: &Startup) -> Result {
     }
     PAGER.store(u64::from(pager), Ordering::Release);
     spawn2(s, slow_pager_thread, u64::from(port), u64::from(paged))?;
-    let plain = create_memory(PAGE_SIZE)?;
-    let at = map(s.process, plain, PAGE_SIZE)?;
+    let at = map(s.process, first, PAGE_SIZE)?;
     // SAFETY: the out pointer is valid; the range after `at` is free, as
     // the allocator places mappings upwards from the last one.
     let mut next = 0;
@@ -1760,6 +1762,14 @@ fn seal_waits_for_outputs(s: &Startup) -> Result {
     READ_DONE.store(0, Ordering::Release);
     spawn2(s, straddling_reader, u64::from(source), at + PAGE_SIZE - 8)?;
     sleep_ms(10);
+    Ok(at)
+}
+
+/// A write seal waits for a kernel write into the object that is under
+/// way, even after the object's mapping is gone.
+fn seal_waits_for_outputs(s: &Startup) -> Result {
+    let plain = create_memory(PAGE_SIZE)?;
+    let at = start_straddling_read(s, plain)?;
     // SAFETY: the call takes no pointers.
     check("unmapping", unsafe {
         sys::vm_unmap(s.process, at, PAGE_SIZE)
@@ -1775,9 +1785,33 @@ fn seal_waits_for_outputs(s: &Startup) -> Result {
     )
 }
 
+/// Eviction waits for a kernel write into the object that is under way,
+/// also without dirty tracking.
+fn evict_waits_for_outputs(s: &Startup) -> Result {
+    let (mut pager, mut port, mut mem) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 8, PAGE_SIZE, 0, &mut mem);
+        check("creating a paged object", status)?;
+    }
+    let source = create_memory(PAGE_SIZE)?;
+    // SAFETY: the call takes no pointers.
+    check("supplying its page", unsafe {
+        sys::pager_supply(pager, mem, 0, PAGE_SIZE, source, 0)
+    })?;
+    start_straddling_read(s, mem)?;
+    check("evicting", pager_op(pager, mem, 2, 0, PAGE_SIZE))?;
+    ensure(
+        "waiting for the write",
+        READ_DONE.load(Ordering::Acquire) == 1,
+    )
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 24] = [
+const TESTS: [(&str, Test); 25] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1799,6 +1833,7 @@ const TESTS: [(&str, Test); 24] = [
     ("kill_stopped_thread", kill_stopped_thread),
     ("coverage", coverage),
     ("seal_waits_for_outputs", seal_waits_for_outputs),
+    ("evict_waits_for_outputs", evict_waits_for_outputs),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),

@@ -278,10 +278,18 @@ impl MemoryObject {
         if !(OP_FAIL..=OP_WRITEBACK_ABORT).contains(&op) {
             return Err(Error::InvalidArgs);
         }
-        if op == OP_WRITEBACK_BEGIN {
-            self.wait_unpinned();
-        }
-        let mut pages = self.pages.lock();
+        // Writeback begins, and pages are evicted, only once no kernel copy
+        // holds the frames: a page being written must not go.
+        let waits = op == OP_WRITEBACK_BEGIN || op == OP_EVICT;
+        let mut pages = loop {
+            if waits {
+                self.wait_unpinned();
+            }
+            let pages = self.pages.lock();
+            if !waits || !pages.pinned() {
+                break pages;
+            }
+        };
         pages.check_range(offset, len)?;
         let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
         let mut state = paged.state.lock();
