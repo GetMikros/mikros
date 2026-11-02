@@ -1079,9 +1079,56 @@ fn streams(_: &Startup) -> Result {
     ensure("keeping queued bytes", status == 0 && got == 4096)
 }
 
+fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
+    // SAFETY: the pointer and length describe `bytes`.
+    check("writing", unsafe {
+        sys::mem_write(mem, offset, bytes.as_ptr(), bytes.len() as u64)
+    })
+}
+
+fn mem_read_at<const N: usize>(mem: Handle, offset: u64) -> Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    // SAFETY: the pointer and length describe `bytes`.
+    check("reading", unsafe {
+        sys::mem_read(mem, offset, bytes.as_mut_ptr(), N as u64)
+    })?;
+    Ok(bytes)
+}
+
+/// A clone starts with the source range's bytes and is separate from it
+/// afterwards.
+fn clones(_: &Startup) -> Result {
+    let source = create_memory(3 * PAGE_SIZE)?;
+    mem_write_at(source, PAGE_SIZE - 3, b"across pages")?;
+    let mut clone = 0;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::mem_clone(source, 0, PAGE_SIZE - 5, PAGE_SIZE + 100, &mut clone) };
+    check("cloning", status)?;
+    ensure(
+        "copying the range",
+        mem_read_at::<14>(clone, 0)? == *b"\0\0across pages",
+    )?;
+    ensure(
+        "reading zero elsewhere",
+        mem_read_at::<8>(clone, 200)? == [0; 8],
+    )?;
+    mem_write_at(source, PAGE_SIZE - 3, b"AC")?;
+    ensure("keeping the clone", mem_read_at::<4>(clone, 2)? == *b"acro")?;
+    mem_write_at(clone, 2, b"x")?;
+    ensure(
+        "keeping the source",
+        mem_read_at::<4>(source, PAGE_SIZE - 3)? == *b"ACro",
+    )?;
+    let record = info::<0x18>(clone, 4)?;
+    ensure("sizing the clone", u64_at(&record, 0) == PAGE_SIZE + 100)?;
+    // SAFETY: the pointer is valid for the call.
+    let bad = unsafe { sys::mem_clone(source, 2, 0, 1, &mut clone) };
+    ensure("refusing other options", bad == -10)
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 15] = [
+const TESTS: [(&str, Test); 16] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1094,6 +1141,7 @@ const TESTS: [(&str, Test); 15] = [
     ("futexes", futexes),
     ("timelines", timelines),
     ("streams", streams),
+    ("clones", clones),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
