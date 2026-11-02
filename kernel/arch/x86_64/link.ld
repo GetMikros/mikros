@@ -17,8 +17,10 @@ SECTIONS
 
     __kernel_start = .;
     .text : ALIGN(4096) { *(.text .text.*) } :text
+    __text_end = .;
 
     . = ALIGN(4096);
+    __rodata_start = .;
     .rodata : { *(.rodata .rodata.*) } :rodata
     .notes : ALIGN(4) {
         KEEP(*(.note.mikros))
@@ -27,10 +29,13 @@ SECTIONS
         KEEP(*(.note.gnu.build-id))
         __build_id_note_end = .;
     } :rodata :note
+    __rodata_end = .;
 
     . = ALIGN(4096);
+    __data_start = .;
     .data : { *(.data .data.*) } :data
     .bss : { *(.bss .bss.*) *(COMMON) } :data
+    __data_end = .;
 
     /DISCARD/ : { *(.eh_frame .eh_frame_hdr .comment .note.GNU-stack) }
 }

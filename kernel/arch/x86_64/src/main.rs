@@ -15,12 +15,14 @@ mod features;
 mod log;
 #[cfg(target_os = "none")]
 mod memory;
-#[cfg(test)]
+#[cfg(any(target_os = "none", test))]
 mod paging;
 #[cfg(target_os = "none")]
 mod panic;
 #[cfg(target_os = "none")]
 mod serial;
+#[cfg(target_os = "none")]
+mod space;
 
 /// The kernel only runs on its own target. This lets the workspace build
 /// on the host.

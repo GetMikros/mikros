@@ -34,3 +34,39 @@ pub unsafe fn in8(port: u16) -> u8 {
     unsafe { asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack)) };
     value
 }
+
+/// Writes `value` to the model-specific register `msr`.
+///
+/// # Safety
+///
+/// The register must exist, and the value must not break an invariant the
+/// kernel relies on.
+pub unsafe fn write_msr(msr: u32, value: u64) {
+    // SAFETY: the caller guarantees the write is valid and harmless.
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") value as u32,
+            in("edx") (value >> 32) as u32,
+            options(nostack, preserves_flags),
+        )
+    };
+}
+
+pub fn read_cr4() -> u64 {
+    let value;
+    // SAFETY: reading CR4 has no side effects.
+    unsafe { asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    value
+}
+
+/// Writes CR4.
+///
+/// # Safety
+///
+/// The value must keep the processor in the mode the kernel runs in.
+pub unsafe fn write_cr4(value: u64) {
+    // SAFETY: the caller guarantees the value is valid.
+    unsafe { asm!("mov cr4, {}", in(reg) value, options(nostack, preserves_flags)) };
+}

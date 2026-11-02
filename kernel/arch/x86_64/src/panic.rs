@@ -3,7 +3,7 @@
 use crate::backtrace;
 use crate::serial::Serial;
 use core::arch::asm;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use kernel_core::panic::{self, Report};
 
 unsafe extern "C" {
@@ -86,6 +86,17 @@ fn registers() -> [(&'static str, u64); 22] {
 
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
+/// The bounds of the stack the kernel runs on, once it has left the boot
+/// stack.
+static STACK_START: AtomicU64 = AtomicU64::new(0);
+static STACK_END: AtomicU64 = AtomicU64::new(0);
+
+/// Records the stack the kernel moves to, for backtraces.
+pub fn set_stack(start: u64, end: u64) {
+    STACK_START.store(start, Ordering::Relaxed);
+    STACK_END.store(end, Ordering::Relaxed);
+}
+
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     // SAFETY: disabling interrupts touches no memory.
@@ -96,9 +107,14 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
     let registers = registers();
     let rbp = registers[2].1;
-    let stack_top = (&raw const __kernel_start) as u64;
-    let stack = (stack_top - BOOT_STACK_SIZE, stack_top);
-    // SAFETY: `frames` only reads 8-byte aligned words inside the boot
+    let stack = match STACK_END.load(Ordering::Relaxed) {
+        0 => {
+            let top = (&raw const __kernel_start) as u64;
+            (top - BOOT_STACK_SIZE, top)
+        }
+        end => (STACK_START.load(Ordering::Relaxed), end),
+    };
+    // SAFETY: `frames` only reads 8-byte aligned words inside the current
     // stack, which is mapped.
     let read = |address: u64| unsafe { (address as *const u64).read() };
     let _ = panic::write(

@@ -1,0 +1,238 @@
+//! The kernel's own address space: building its page tables at boot and
+//! moving onto them, and the kernel dynamic region.
+
+use crate::memory::{self, FRAMES};
+use crate::paging::{Flags, Mapper, PAGE_SIZE, PAT_VALUE, Policy, Tables};
+use boot_protocol::{BootInfo, CMDLINE_MAX, Kind};
+use core::arch::global_asm;
+use core::sync::atomic::{AtomicU64, Ordering};
+use kernel_core::sync::SpinLock;
+
+/// The start of the kernel dynamic region.
+const DYNAMIC_START: u64 = 0xFFFF_C000_0000_0000;
+/// The end of the kernel dynamic region.
+const DYNAMIC_END: u64 = 0xFFFF_FF80_0000_0000;
+/// The size of the stack the kernel moves to.
+const STACK_SIZE: u64 = 64 << 10;
+
+const IA32_PAT: u32 = 0x277;
+const CR4_PGE: u64 = 1 << 7;
+
+unsafe extern "C" {
+    static __kernel_start: u8;
+    static __text_end: u8;
+    static __rodata_start: u8;
+    static __rodata_end: u8;
+    static __data_start: u8;
+    static __data_end: u8;
+}
+
+/// The direct map base, from BootInfo.
+static DIRECT_MAP_BASE: AtomicU64 = AtomicU64::new(0);
+/// The next unused address of the kernel dynamic region.
+static DYNAMIC_NEXT: AtomicU64 = AtomicU64::new(DYNAMIC_START);
+/// The physical address of the kernel's top-level table.
+static ROOT: AtomicU64 = AtomicU64::new(0);
+
+/// The virtual address of physical memory in the direct map.
+pub fn direct(phys: u64) -> u64 {
+    DIRECT_MAP_BASE.load(Ordering::Relaxed) + phys
+}
+
+/// Page table frames from the frame allocator, reached through the direct
+/// map, which both the bootloader's and the kernel's tables contain at the
+/// same base.
+struct FrameTables;
+
+impl Tables for FrameTables {
+    fn alloc(&mut self) -> Option<u64> {
+        FRAMES.lock().as_mut()?.alloc()
+    }
+
+    fn table(&mut self, phys: u64) -> &mut [u64; 512] {
+        // SAFETY: the frame came from the allocator for a page table, so
+        // nothing else uses it, and the direct map covers it.
+        unsafe { &mut *(direct(phys) as *mut [u64; 512]) }
+    }
+}
+
+/// Reserves `size` bytes of the dynamic region with an unmapped page
+/// below them, and returns the start of the reserved range.
+pub fn reserve_dynamic(size: u64) -> u64 {
+    let size = size.next_multiple_of(PAGE_SIZE) + PAGE_SIZE;
+    let start = DYNAMIC_NEXT.fetch_add(size, Ordering::Relaxed);
+    if start.checked_add(size).is_none_or(|end| end > DYNAMIC_END) {
+        panic!("the kernel dynamic region is full");
+    }
+    start + PAGE_SIZE
+}
+
+fn gib_pages() -> bool {
+    core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 26) != 0
+}
+
+fn symbol(s: *const u8) -> u64 {
+    s as u64
+}
+
+/// The kinds of memory the kernel's direct map covers.
+const DIRECT_KINDS: [Kind; 9] = [
+    Kind::Usable,
+    Kind::BootloaderReclaimable,
+    Kind::KernelStack,
+    Kind::BootImage,
+    Kind::PageTables,
+    Kind::AcpiReclaimable,
+    Kind::AcpiNvs,
+    Kind::FirmwareRuntime,
+    Kind::ApTrampoline,
+];
+
+fn build(info: &BootInfo, mapper: &mut Mapper<FrameTables>) -> Result<u64, crate::paging::Error> {
+    let data = Flags {
+        writable: true,
+        executable: false,
+        global: true,
+        policy: Policy::Cached,
+    };
+
+    // Adjacent ranges are mapped together so that large pages can span
+    // range boundaries.
+    let mut run: Option<(u64, u64)> = None;
+    let direct =
+        memory::memory_map(info).filter(|e| DIRECT_KINDS.iter().any(|&k| k as u32 == e.kind));
+    for e in direct {
+        let end = e.phys_start + e.page_count * PAGE_SIZE;
+        run = match run {
+            Some((start, run_end)) if run_end == e.phys_start => Some((start, end)),
+            Some((start, run_end)) => {
+                mapper.map(direct_of(info, start), start, run_end - start, data)?;
+                Some((e.phys_start, end))
+            }
+            None => Some((e.phys_start, end)),
+        };
+    }
+    if let Some((start, end)) = run {
+        mapper.map(direct_of(info, start), start, end - start, data)?;
+    }
+
+    let phys = |virt: u64| info.kernel_phys_base + (virt - info.kernel_virt_base);
+    let sections = [
+        (
+            &raw const __kernel_start,
+            &raw const __text_end,
+            false,
+            true,
+        ),
+        (
+            &raw const __rodata_start,
+            &raw const __rodata_end,
+            false,
+            false,
+        ),
+        (&raw const __data_start, &raw const __data_end, true, false),
+    ];
+    for (start, end, writable, executable) in sections {
+        let start = symbol(start) / PAGE_SIZE * PAGE_SIZE;
+        let end = symbol(end).next_multiple_of(PAGE_SIZE);
+        let flags = Flags {
+            writable,
+            executable,
+            ..data
+        };
+        mapper.map(start, phys(start), end - start, flags)?;
+    }
+
+    let stack_phys = FRAMES
+        .lock()
+        .as_mut()
+        .and_then(|f| f.alloc_contiguous(STACK_SIZE / PAGE_SIZE, 1))
+        .ok_or(crate::paging::Error::OutOfMemory)?;
+    let stack = reserve_dynamic(STACK_SIZE);
+    mapper.map(stack, stack_phys, STACK_SIZE, data)?;
+    Ok(stack)
+}
+
+fn direct_of(info: &BootInfo, phys: u64) -> u64 {
+    info.direct_map_base + phys
+}
+
+// Loads CR3 from RDI and RSP from RSI, then enters the function in RDX
+// with a zero return address, so that backtraces end there.
+global_asm!(
+    ".global kernel_switch",
+    "kernel_switch:",
+    "mov cr3, rdi",
+    "mov rsp, rsi",
+    "xor ebp, ebp",
+    "push 0",
+    "jmp rdx",
+);
+
+unsafe extern "sysv64" {
+    fn kernel_switch(cr3: u64, rsp: u64, next: extern "sysv64" fn() -> !) -> !;
+}
+
+/// The BootInfo values the kernel keeps, copied before boot memory is
+/// reclaimed.
+pub static BOOT_INFO: SpinLock<Option<BootInfo>> = SpinLock::new(None);
+
+/// The command line, copied before boot memory is reclaimed: its bytes and
+/// their number.
+pub static CMDLINE: SpinLock<([u8; CMDLINE_MAX], usize)> = SpinLock::new(([0; CMDLINE_MAX], 0));
+
+fn copy_cmdline(info: &BootInfo) {
+    let len = (info.cmdline_len as usize).min(CMDLINE_MAX);
+    if len == 0 {
+        return;
+    }
+    // SAFETY: the bootloader places the command line in BootloaderReclaimable
+    // memory in the direct map, which is not reclaimed before this copy.
+    let bytes = unsafe { core::slice::from_raw_parts(direct(info.cmdline_phys) as *const u8, len) };
+    let mut copy = CMDLINE.lock();
+    copy.0[..len].copy_from_slice(bytes);
+    copy.1 = len;
+}
+
+/// Builds the kernel's page tables, moves onto them and onto a new stack,
+/// and continues in `next`.
+pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
+    DIRECT_MAP_BASE.store(info.direct_map_base, Ordering::Relaxed);
+    copy_cmdline(&info);
+    // SAFETY: IA32_PAT exists on every processor with PAT, which the
+    // feature check requires. The new value keeps entries 0 to 3, which
+    // the bootloader's tables can select, at the memory types of their
+    // reset values.
+    unsafe { crate::cpu::write_msr(IA32_PAT, PAT_VALUE) };
+    // SAFETY: global pages are a required feature.
+    unsafe { crate::cpu::write_cr4(crate::cpu::read_cr4() | CR4_PGE) };
+
+    let mut tables = FrameTables;
+    let mut mapper = Mapper::new(&mut tables, gib_pages())
+        .unwrap_or_else(|e| panic!("building the kernel page tables: {e}"));
+    let stack = build(&info, &mut mapper)
+        .unwrap_or_else(|e| panic!("building the kernel page tables: {e}"));
+    let root = mapper.root();
+    ROOT.store(root, Ordering::Relaxed);
+    crate::panic::set_stack(stack, stack + STACK_SIZE);
+    *BOOT_INFO.lock() = Some(info);
+    // SAFETY: the new tables map the kernel image at the same addresses,
+    // the direct map at the same base, and the new stack; `next` never
+    // returns, so nothing uses the old stack again.
+    unsafe { kernel_switch(root, stack + STACK_SIZE, next) }
+}
+
+/// Adds the bootloader's memory to the frame allocator. Runs on the
+/// kernel's tables, after every BootInfo value the kernel needs is copied.
+pub fn reclaim_boot_memory(info: &BootInfo) -> u64 {
+    let map = memory::memory_map(info);
+    let mut frames = FRAMES.lock();
+    let Some(frames) = frames.as_mut() else {
+        return 0;
+    };
+    // The memory map lies in BootloaderReclaimable memory, which is freed
+    // here; nothing allocates until the walk is done.
+    frames.add_kind(map.clone(), Kind::BootloaderReclaimable);
+    frames.add_kind(map, Kind::PageTables);
+    frames.free_count()
+}

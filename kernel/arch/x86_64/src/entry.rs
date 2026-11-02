@@ -3,6 +3,7 @@
 use crate::features::{Leaves, Missing};
 use crate::log::log;
 use crate::serial;
+use crate::space;
 use boot_protocol::{BootInfo, NOTE_TYPE, VERSION_MAJOR, VERSION_MINOR};
 use kernel_core::bootinfo::{self, HEADER_SIZE};
 
@@ -58,7 +59,20 @@ extern "sysv64" fn _start(info: *const u8) -> ! {
         info.version_minor,
         info.memory_map_count
     );
-    let free = crate::memory::init(&info);
-    log!(Info, "{} MiB of memory free", (free * 4096) >> 20);
+    crate::memory::init(&info);
+    space::enter(info, on_kernel_tables)
+}
+
+/// Continues boot on the kernel's page tables and stack.
+extern "sysv64" fn on_kernel_tables() -> ! {
+    let Some(info) = *space::BOOT_INFO.lock() else {
+        panic!("BootInfo was not kept");
+    };
+    let free = space::reclaim_boot_memory(&info);
+    log!(
+        Info,
+        "kernel page tables active, {} MiB of memory free",
+        (free * 4096) >> 20
+    );
     crate::cpu::halt()
 }
