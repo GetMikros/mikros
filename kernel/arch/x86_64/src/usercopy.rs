@@ -86,12 +86,17 @@ pub fn copy_out(dst: u64, src: &[u8]) -> Result<(), Error> {
     copy(dst as *mut u8, src.as_ptr(), src.len())
 }
 
+/// Whether the exception in `frame` was raised inside the copy routine.
+pub fn in_copy(frame: &Frame) -> bool {
+    let start = user_copy as *const () as u64;
+    let end = (&raw const user_copy_end) as u64;
+    frame.cs & 3 == 0 && (start..end).contains(&frame.rip)
+}
+
 /// Makes a fault inside the copy routine resume at its recovery label.
 /// Returns whether the fault was one.
 pub fn recover(frame: &mut Frame) -> bool {
-    let start = user_copy as *const () as u64;
-    let end = (&raw const user_copy_end) as u64;
-    if frame.cs & 3 != 0 || !(start..end).contains(&frame.rip) {
+    if !in_copy(frame) {
         return false;
     }
     frame.rip = (&raw const user_copy_fault) as u64;

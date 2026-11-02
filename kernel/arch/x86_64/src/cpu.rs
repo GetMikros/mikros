@@ -112,6 +112,14 @@ pub fn rdtsc() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
+/// The address of the last page fault.
+pub fn read_cr2() -> u64 {
+    let value;
+    // SAFETY: reading CR2 has no side effects.
+    unsafe { asm!("mov {}, cr2", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    value
+}
+
 pub fn read_cr0() -> u64 {
     let value;
     // SAFETY: reading CR0 has no side effects.

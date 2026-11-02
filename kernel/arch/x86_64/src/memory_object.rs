@@ -1,13 +1,15 @@
 //! Anonymous memory objects: their frames and the copies to and from them.
 
-use crate::aspace::{AddressSpace, USER_END, USER_START};
+use crate::aspace::{self, Access, AddressSpace, USER_END, USER_START};
 use crate::memory::FRAMES;
+use crate::paging::Policy;
 use crate::space;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use kernel_core::object::budget::Budget;
 use kernel_core::object::memory::{INFO_MEMORY_SIZE, PAGE_ENTRY_COST, PAGE_SIZE, Pages};
 use kernel_core::object::{Header, Object, ObjectType};
+use kernel_core::regions::{PERM_EXECUTE, PERM_WRITE};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
@@ -41,6 +43,22 @@ unsafe fn frame_bytes<'a>(phys: u64) -> &'a mut [u8; PAGE_SIZE as usize] {
     // SAFETY: the direct map covers every frame, and the caller rules out
     // other references.
     unsafe { &mut *(space::direct(phys) as *mut [u8; PAGE_SIZE as usize]) }
+}
+
+/// The frame that pages of anonymous objects read before they are
+/// written map. Nothing ever writes to it.
+static ZERO_FRAME: SpinLock<Option<u64>> = SpinLock::new(None);
+
+/// The shared zero page, allocated on first use.
+fn zero_frame() -> Option<u64> {
+    let mut zero = ZERO_FRAME.lock();
+    if zero.is_none() {
+        let phys = FRAMES.lock().as_mut().and_then(|f| f.alloc())?;
+        // SAFETY: the frame was just allocated, so nothing references it.
+        unsafe { frame_bytes(phys) }.fill(0);
+        *zero = Some(phys);
+    }
+    *zero
 }
 
 /// The page index and the offset inside the page of byte `at`, and the
@@ -102,6 +120,51 @@ impl MemoryObject {
         for space in spaces {
             space.unmap_object(self, first, end);
         }
+    }
+
+    /// Gives page `index` a frame and removes the translations of the
+    /// shared zero page that stood in for it.
+    fn alloc_mapped(&self, pages: &mut Pages, index: u64) -> Result<u64, Error> {
+        let phys = self.alloc(pages, index)?;
+        self.unmap_pages(index, index + 1);
+        Ok(phys)
+    }
+
+    /// Enters the page at `virt` of `space` into its tables for a fault
+    /// that was a write or a fetch as given. Pages read before they were
+    /// written map the shared zero page read-only. Returns whether the
+    /// region at `virt`, which maps this object, allows the access.
+    pub fn fault(&self, space: &AddressSpace, virt: u64, write: bool, fetch: bool) -> bool {
+        let mut pages = self.pages.lock();
+        let mine = |r: Option<&aspace::RegionOf>| {
+            r.filter(|r| core::ptr::eq(&*r.mem, self))
+                .map(|r| (r.page(virt), r.perms))
+        };
+        let Some((index, perms)) = space.with_region(virt, mine) else {
+            return false;
+        };
+        if !aspace::allows(perms, write, fetch) || index >= pages.count() {
+            return false;
+        }
+        let (phys, writable) = match pages.frame(index) {
+            Some(phys) => (phys, perms & PERM_WRITE != 0),
+            None if write => match self.alloc_mapped(&mut pages, index) {
+                Ok(phys) => (phys, true),
+                Err(_) => return false,
+            },
+            None => match zero_frame() {
+                Some(phys) => (phys, false),
+                None => return false,
+            },
+        };
+        let access = Access {
+            writable,
+            executable: perms & PERM_EXECUTE != 0,
+            policy: Policy::Cached,
+        };
+        // The region may have gone while the zero page was being removed.
+        space.with_region(virt, |r| mine(r) == Some((index, perms)))
+            && space.replace(virt, phys, access).is_ok()
     }
 
     /// Gives page `index` a zeroed frame, charging the frame to the
@@ -183,7 +246,7 @@ impl MemoryObject {
             let mut pages = self.pages.lock();
             let phys = match pages.frame(index) {
                 Some(phys) => phys,
-                None => self.alloc(&mut pages, index)?,
+                None => self.alloc_mapped(&mut pages, index)?,
             };
             // SAFETY: the pages are locked.
             let frame = unsafe { frame_bytes(phys) };

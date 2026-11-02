@@ -11,7 +11,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::object::budget::Budget;
-use kernel_core::regions::{MapOptions, Region, Regions};
+use kernel_core::regions::{MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
@@ -96,6 +96,9 @@ pub struct AddressSpace {
     regions: SpinLock<Regions<Arc<MemoryObject>>>,
     inner: SpinLock<Inner>,
 }
+
+/// The region type of a user address space.
+pub type RegionOf = Region<Arc<MemoryObject>>;
 
 /// A random value from the kernel's random number generator, which is
 /// seeded during boot.
@@ -334,6 +337,18 @@ impl AddressSpace {
         }
     }
 
+    /// Calls `f` with the region containing `addr`, if any, while the
+    /// regions are locked.
+    pub fn with_region<R>(&self, addr: u64, f: impl FnOnce(Option<&RegionOf>) -> R) -> R {
+        f(self.regions.lock().find(addr))
+    }
+
+    /// Maps the page at `virt` to `phys`, replacing what it mapped.
+    pub fn replace(&self, virt: u64, phys: u64, access: Access) -> Result<(), Error> {
+        self.unmap(virt, PAGE_SIZE, |_| {})?;
+        self.map(virt, phys, access, true)
+    }
+
     /// Makes processors that do not have the space loaded flush its PCID
     /// before using it again. When it is loaded here, its translations
     /// have already been invalidated.
@@ -384,6 +399,40 @@ impl AddressSpace {
         unsafe { cpu::write_cr3(value) };
         pcids.current = self.id;
     }
+}
+
+const FAULT_WRITE: u64 = 1 << 1;
+const FAULT_RESERVED: u64 = 1 << 3;
+const FAULT_FETCH: u64 = 1 << 4;
+
+/// Resolves a page fault on a user page, raised by user code or by the
+/// user copy routine, when a region allows the access. Returns whether it
+/// was resolved.
+pub fn resolve_fault(frame: &crate::idt::Frame) -> bool {
+    let addr = cpu::read_cr2();
+    if frame.error & FAULT_RESERVED != 0
+        || !in_user_range(addr, 1)
+        || (frame.cs & 3 == 0 && !crate::usercopy::in_copy(frame))
+    {
+        return false;
+    }
+    let Some(process) = crate::sched::current().and_then(|t| t.process().cloned()) else {
+        return false;
+    };
+    let aspace = process.aspace();
+    let Some(mem) = aspace.with_region(addr, |r| r.map(|r| r.mem.clone())) else {
+        return false;
+    };
+    let write = frame.error & FAULT_WRITE != 0;
+    let fetch = frame.error & FAULT_FETCH != 0;
+    mem.fault(aspace, addr & !(PAGE_SIZE - 1), write, fetch)
+}
+
+/// Whether a region with `perms` allows a write or fetch as given.
+pub fn allows(perms: u32, write: bool, fetch: bool) -> bool {
+    perms & PERM_READ != 0
+        && (!write || perms & PERM_WRITE != 0)
+        && (!fetch || perms & PERM_EXECUTE != 0)
 }
 
 /// Loads the kernel's own tables on this processor.

@@ -240,8 +240,10 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
     let vector = frame.vector as u8;
     use crate::apic::{PIC_BASE, SPURIOUS_VECTOR, TIMER_VECTOR};
     match vector {
-        // A fault in the user copy routine makes the copy fail. No other
-        // exception is handled yet, so each one stops the kernel.
+        // A page fault on a user page that a region allows is resolved. A
+        // fault in the user copy routine otherwise makes the copy fail. No
+        // other exception is handled yet, so each one stops the kernel.
+        PAGE_FAULT if crate::aspace::resolve_fault(frame) => {}
         GENERAL_PROTECTION | PAGE_FAULT if crate::usercopy::recover(frame) => {}
         0..32 => crate::panic::exception(frame),
         // The PICs are masked; what arrives from them is ignored, and the
