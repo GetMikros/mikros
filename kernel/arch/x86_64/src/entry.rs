@@ -77,6 +77,7 @@ extern "sysv64" fn on_kernel_tables() -> ! {
     crate::apic::init(&info);
     crate::time::init(&info);
     crate::timer::init();
+    crate::random::init(&info);
     let free = space::reclaim_boot_memory(&info);
     log!(
         Info,
