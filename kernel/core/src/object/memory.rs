@@ -1,8 +1,8 @@
 //! The bookkeeping of a memory object's pages: its size, its options and
 //! the frames allocated for it so far.
 
+use crate::nodes::{self, Claim, Map};
 use crate::status::Error;
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 pub const PAGE_SIZE: u64 = 4096;
@@ -40,7 +40,7 @@ pub struct Pages {
     size: u64,
     options: u32,
     /// The frame of each page that has one, by page index.
-    frames: BTreeMap<u64, u64>,
+    frames: Map<u64, u64>,
     /// How many retained writers or readers may still use frames that
     /// were taken from the pages.
     pins: u64,
@@ -55,7 +55,7 @@ pub struct Resized {
     pub zero: Option<(u64, usize)>,
     /// The frames of the pages past the new size, by page index, which
     /// left the pages. The caller passes them to `discard`.
-    pub removed: BTreeMap<u64, u64>,
+    pub removed: Map<u64, u64>,
 }
 
 /// Fails with `OutOfRange` unless `size` is not zero and at most `max`.
@@ -77,7 +77,7 @@ impl Pages {
         Ok(Pages {
             size,
             options,
-            frames: BTreeMap::new(),
+            frames: nodes::map(),
             pins: 0,
             orphans: Vec::new(),
         })
@@ -116,17 +116,18 @@ impl Pages {
     }
 
     /// Records `phys` as the frame of page `index`, which is inside the
-    /// object and has none.
-    pub fn insert(&mut self, index: u64, phys: u64) {
+    /// object and has none, using the room of `claim`.
+    pub fn insert(&mut self, index: u64, phys: u64, claim: Claim) {
         debug_assert!(index < self.count());
         let old = self.frames.insert(index, phys);
         debug_assert!(old.is_none(), "page {index} already has a frame");
+        drop(claim);
     }
 
     /// Takes every frame, by page index. Nothing may be pinned.
-    pub fn take_all(&mut self) -> BTreeMap<u64, u64> {
+    pub fn take_all(&mut self) -> Map<u64, u64> {
         debug_assert!(self.pins == 0 && self.orphans.is_empty());
-        core::mem::take(&mut self.frames)
+        core::mem::replace(&mut self.frames, nodes::map())
     }
 
     /// Whether a `pin` is in effect.
@@ -152,12 +153,21 @@ impl Pages {
     }
 
     /// Changes the size to `size`, at most `max`. Fails with
-    /// `NotSupported` unless the object was created `RESIZABLE`.
+    /// `NotSupported` unless the object was created `RESIZABLE`, and with
+    /// `NoMemory`, changing nothing, without room to track the change.
     pub fn set_size(&mut self, size: u64, max: u64) -> Result<Resized, Error> {
         if self.options & RESIZABLE == 0 {
             return Err(Error::NotSupported);
         }
         check_size(size, max)?;
+        // Splitting the map allocates at most one insertion's nodes.
+        let _claim = nodes::claim_insert()?;
+        if self.pins > 0 {
+            let leaving = self.frames.range(size.div_ceil(PAGE_SIZE)..).count();
+            self.orphans
+                .try_reserve(leaving)
+                .map_err(|_| Error::NoMemory)?;
+        }
         let kept = self.size.min(size);
         let tail = (kept % PAGE_SIZE) as usize;
         let zero = if tail == 0 {
@@ -170,29 +180,37 @@ impl Pages {
         Ok(Resized { zero, removed })
     }
 
-    /// Returns those of `frames`, which left the pages, to free now: while
-    /// the pages are pinned they are kept until `unpin` instead.
-    pub fn discard(&mut self, frames: impl IntoIterator<Item = u64>) -> Vec<u64> {
+    /// Returns those of `removed`, the frames that left the pages in the
+    /// last `set_size`, to free now: while the pages are pinned they are
+    /// kept until `unpin` instead, in the room `set_size` reserved.
+    pub fn discard(&mut self, removed: Map<u64, u64>) -> Map<u64, u64> {
         if self.pins > 0 {
-            self.orphans.extend(frames);
-            return Vec::new();
+            debug_assert!(self.orphans.capacity() - self.orphans.len() >= removed.len());
+            self.orphans.extend(removed.into_values());
+            return nodes::map();
         }
-        frames.into_iter().collect()
+        removed
     }
 
     /// Takes the frames of pages `first` to `end`, exclusive, which then
     /// read as zero, and returns those to free now: while the pages are
-    /// pinned they are kept until `unpin` instead.
-    pub fn decommit(&mut self, first: u64, end: u64) -> Vec<u64> {
-        let mut tail = self.frames.split_off(&first);
-        let mut after = tail.split_off(&end);
-        self.frames.append(&mut after);
-        let taken: Vec<u64> = tail.into_values().collect();
-        if self.pins > 0 {
-            self.orphans.extend(taken);
-            return Vec::new();
-        }
-        taken
+    /// pinned they are kept until `unpin` instead. Fails with `NoMemory`,
+    /// taking nothing, without room for the frames.
+    pub fn decommit(&mut self, first: u64, end: u64) -> Result<Vec<u64>, Error> {
+        let count = self.frames.range(first..end).count();
+        let mut taken = Vec::new();
+        let list = if self.pins > 0 {
+            &mut self.orphans
+        } else {
+            &mut taken
+        };
+        list.try_reserve(count).map_err(|_| Error::NoMemory)?;
+        list.extend(
+            self.frames
+                .extract_if(first..end, |_, _| true)
+                .map(|(_, phys)| phys),
+        );
+        Ok(taken)
     }
 
     /// The memory information record of an object of `kind` with
@@ -232,19 +250,23 @@ mod tests {
         assert_eq!(pages.check_range(1, u64::MAX), Err(Error::OutOfRange));
     }
 
+    fn put(pages: &mut Pages, index: u64, phys: u64) {
+        pages.insert(index, phys, nodes::claim_insert().unwrap());
+    }
+
     #[test]
     fn decommits_ranges() {
         let mut pages = Pages::new(4 * PAGE_SIZE, 0, MAX).unwrap();
         for i in 0..4 {
-            pages.insert(i, 0x1000 * (i + 1));
+            put(&mut pages, i, 0x1000 * (i + 1));
         }
-        assert_eq!(pages.decommit(1, 3), [0x2000, 0x3000]);
+        assert_eq!(pages.decommit(1, 3).unwrap(), [0x2000, 0x3000]);
         assert_eq!(
             (pages.frame(0), pages.frame(1), pages.frame(3)),
             (Some(0x1000), None, Some(0x4000))
         );
         pages.pin();
-        assert!(pages.decommit(0, 4).is_empty());
+        assert!(pages.decommit(0, 4).unwrap().is_empty());
         assert_eq!(pages.allocated(), 0);
         assert_eq!(pages.unpin(), [0x1000, 0x4000]);
     }
@@ -262,7 +284,7 @@ mod tests {
     fn frees_pages_past_a_smaller_size() {
         let mut pages = Pages::new(4 * PAGE_SIZE, RESIZABLE, MAX).unwrap();
         for i in 0..4 {
-            pages.insert(i, 0x1000 * (i + 1));
+            put(&mut pages, i, 0x1000 * (i + 1));
         }
         let resized = pages.set_size(PAGE_SIZE + 10, MAX).unwrap();
         assert_eq!(resized.zero, Some((0x2000, 10)));
@@ -274,10 +296,8 @@ mod tests {
                 .collect::<std::vec::Vec<_>>(),
             [(2, 0x3000), (3, 0x4000)]
         );
-        assert_eq!(
-            pages.discard(resized.removed.into_values()),
-            [0x3000, 0x4000]
-        );
+        let freed = pages.discard(resized.removed);
+        assert_eq!(freed.into_values().collect::<Vec<_>>(), [0x3000, 0x4000]);
         assert_eq!((pages.count(), pages.allocated()), (2, 2));
     }
 
@@ -285,25 +305,26 @@ mod tests {
     fn keeps_frames_taken_while_pinned_until_the_last_unpin() {
         let mut pages = Pages::new(4 * PAGE_SIZE, RESIZABLE, MAX).unwrap();
         for i in 0..4 {
-            pages.insert(i, 0x1000 * (i + 1));
+            put(&mut pages, i, 0x1000 * (i + 1));
         }
         pages.pin();
         pages.pin();
         let shrink = |pages: &mut Pages, size| {
             let removed = pages.set_size(size, MAX).unwrap().removed;
             let indices: Vec<u64> = removed.keys().copied().collect();
-            (indices, pages.discard(removed.into_values()))
+            let freed: Vec<u64> = pages.discard(removed).into_values().collect();
+            (indices, freed)
         };
         // The pages that left are reported even while pinned.
         assert_eq!(shrink(&mut pages, 3 * PAGE_SIZE), (vec![3], vec![]));
         pages.set_size(4 * PAGE_SIZE, MAX).unwrap();
-        pages.insert(3, 0x9000);
+        put(&mut pages, 3, 0x9000);
         assert_eq!(shrink(&mut pages, PAGE_SIZE), (vec![1, 2, 3], vec![]));
         assert_eq!(pages.allocated(), 1);
         assert!(pages.unpin().is_empty());
         assert_eq!(pages.unpin(), [0x4000, 0x2000, 0x3000, 0x9000]);
         pages.set_size(2 * PAGE_SIZE, MAX).unwrap();
-        pages.insert(1, 0xa000);
+        put(&mut pages, 1, 0xa000);
         assert_eq!(shrink(&mut pages, PAGE_SIZE), (vec![1], vec![0xa000]));
         assert_eq!((pages.pins, pages.orphans.len()), (0, 0));
     }
@@ -313,7 +334,7 @@ mod tests {
         let mut pages = Pages::new(10, RESIZABLE, MAX).unwrap();
         let resized = pages.set_size(PAGE_SIZE * 3, MAX).unwrap();
         assert!(resized.zero.is_none() && resized.removed.is_empty());
-        pages.insert(0, 0x5000);
+        put(&mut pages, 0, 0x5000);
         pages.set_size(10, MAX).unwrap();
         let resized = pages.set_size(PAGE_SIZE, MAX).unwrap();
         assert_eq!(resized.zero, Some((0x5000, 10)));

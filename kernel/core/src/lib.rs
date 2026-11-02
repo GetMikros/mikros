@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(test), no_std)]
 #![feature(allocator_ext)]
+#![feature(btreemap_alloc)]
 
 extern crate alloc;
 
@@ -17,6 +18,7 @@ pub mod fallible;
 pub mod frames;
 pub mod heap;
 pub mod log;
+pub mod nodes;
 pub mod object;
 pub mod paging;
 pub mod panic;

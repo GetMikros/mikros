@@ -6,10 +6,11 @@ use crate::paging::Policy;
 use crate::port::Port;
 use crate::publish::{ITEM_STEP, Work};
 use crate::space;
-use alloc::collections::BTreeMap;
+
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
+use kernel_core::nodes::{self, Map};
 use kernel_core::object::budget::Budget;
 use kernel_core::object::memory::{
     INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_PAGED, KIND_PHYSICAL, PAGE_ENTRY_COST, PAGE_SIZE, Pages,
@@ -60,7 +61,7 @@ pub struct Paged {
     state: SpinLock<Paging>,
     /// The budgets that frames supplied to the object stay charged to, by
     /// frame address.
-    charges: SpinLock<BTreeMap<u64, Arc<Budget>>>,
+    charges: SpinLock<Map<u64, Arc<Budget>>>,
     /// The byte range of the outstanding writeback, which its end must
     /// name exactly. Locked after the pages.
     writeback: SpinLock<Option<(u64, u64)>>,
@@ -165,7 +166,7 @@ impl MemoryObject {
                 port: Arc::downgrade(port),
                 key,
                 state: SpinLock::new(Paging::new(options & TRACK_DIRTY != 0)),
-                charges: SpinLock::new(BTreeMap::new()),
+                charges: SpinLock::new(nodes::map()),
                 writeback: SpinLock::new(None),
             }),
         })
@@ -300,9 +301,12 @@ impl MemoryObject {
             OP_FAIL => state.fail(first, end),
             OP_EVICT => {
                 for index in first..end {
-                    if state.evictable(index) && freed.try_reserve(1).is_ok() {
+                    if !state.evictable(index) || freed.try_reserve(1).is_err() {
+                        continue;
+                    }
+                    if let Ok(taken) = pages.decommit(index, index + 1) {
                         self.unmap_pages(index, index + 1);
-                        freed.extend(pages.decommit(index, index + 1));
+                        freed.extend(taken);
                         state.removed(index);
                     }
                 }
@@ -411,9 +415,15 @@ impl MemoryObject {
             for (i, phys) in moved.into_iter().enumerate() {
                 let index = first + i as u64;
                 let fits = index < pages.count() && pages.frame(index).is_none();
-                if fits && state.supply(index) == Ok(true) {
+                let claims = fits
+                    .then(|| Some((nodes::claim_insert().ok()?, nodes::claim_insert().ok()?)))
+                    .flatten();
+                if let Some((charge, page)) = claims
+                    && state.supply(index) == Ok(true)
+                {
                     charges.insert(phys, source.budget.clone());
-                    pages.insert(index, phys);
+                    drop(charge);
+                    pages.insert(index, phys, page);
                 } else if leftover.try_reserve(1).is_ok() {
                     leftover.push(phys);
                 }
@@ -434,8 +444,9 @@ impl MemoryObject {
             return Err(Error::BadState);
         }
         let (first, end) = (offset / PAGE_SIZE, (offset + len) / PAGE_SIZE);
+        let taken = pages.decommit(first, end)?;
         self.unmap_pages(first, end);
-        Ok(pages.decommit(first, end))
+        Ok(taken)
     }
 
     /// A physical object of the `size` bytes from `base`, both multiples
@@ -543,7 +554,16 @@ impl MemoryObject {
         })?;
         let mut pages = object.pages.lock();
         for index in 0..count {
-            pages.insert(index, phys + index * PAGE_SIZE);
+            match nodes::claim_insert() {
+                Ok(claim) => pages.insert(index, phys + index * PAGE_SIZE, claim),
+                Err(e) => {
+                    // The object frees the frames it took, and the rest
+                    // go back here.
+                    drop(pages);
+                    object.free((index..count).map(|i| phys + i * PAGE_SIZE));
+                    return Err(e);
+                }
+            }
         }
         drop(pages);
         Ok(object)
@@ -861,6 +881,7 @@ impl MemoryObject {
     /// Gives page `index` a zeroed frame, charging the frame to the
     /// budget, and returns it.
     fn alloc(&self, pages: &mut Pages, index: u64) -> Result<u64, Error> {
+        let claim = nodes::claim_insert()?;
         self.budget.charge_pages(1)?;
         if let Err(e) = self.budget.charge_kernel(PAGE_ENTRY_COST) {
             self.budget.release_pages(1);
@@ -872,7 +893,7 @@ impl MemoryObject {
         };
         // SAFETY: the frame was just allocated, so nothing references it.
         unsafe { frame_bytes(phys) }.fill(0);
-        pages.insert(index, phys);
+        pages.insert(index, phys, claim);
         Ok(phys)
     }
 
@@ -985,8 +1006,8 @@ impl MemoryObject {
         self.check_writable()?;
         pages.check_range(offset, len)?;
         let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
+        let freed = pages.decommit(first, end)?;
         self.unmap_pages(first, end);
-        let freed = pages.decommit(first, end);
         drop(pages);
         self.free(freed);
         Ok(())
@@ -1022,9 +1043,9 @@ impl MemoryObject {
                 state.removed(index);
             }
         }
-        let freed = pages.discard(resized.removed.into_values());
+        let freed = pages.discard(resized.removed);
         drop(pages);
-        self.free(freed);
+        self.free(freed.into_values());
         Ok(())
     }
 
