@@ -94,7 +94,10 @@ fn threads(s: &Startup) -> Result {
 
 /// A second process started from the boot image answers a message and
 /// sends back the memory object handle that came with it.
-fn processes_and_channels(s: &Startup) -> Result {
+/// Starts the program `name` of the boot image, under `tests/`, as a new
+/// process with one end of a new channel, and returns the process and
+/// the other end.
+fn start_program(s: &Startup, name: &str) -> Result<(Handle, Handle)> {
     let image_size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
     let mut at = 0;
     // SAFETY: the out pointer is valid for the call.
@@ -112,11 +115,14 @@ fn processes_and_channels(s: &Startup) -> Result {
     check("mapping the boot image", status)?;
     // SAFETY: the boot image is mapped readable at `at`.
     let image = unsafe { core::slice::from_raw_parts(at as *const u8, s.boot_image_size as usize) };
-    let program = ustar::find(image, b"tests/channel-echo");
-    ensure("finding tests/channel-echo", program.is_some())?;
+    let mut path = [0u8; 64];
+    path[..6].copy_from_slice(b"tests/");
+    path[6..6 + name.len()].copy_from_slice(name.as_bytes());
+    let program = ustar::find(image, &path[..6 + name.len()]);
+    ensure("finding the program", program.is_some())?;
 
     let (mut process, mut thread) = (0, 0);
-    let name = b"channel-echo";
+    let name = name.as_bytes();
     // SAFETY: the pointers describe `name` and `process`.
     let status =
         unsafe { sys::process_create(s.budget, name.as_ptr(), name.len() as u64, &mut process) };
@@ -126,6 +132,10 @@ fn processes_and_channels(s: &Startup) -> Result {
         unsafe { sys::thread_create(process, name.as_ptr(), name.len() as u64, &mut thread) };
     check("creating its thread", status)?;
     let loaded = elf::load(process, program.unwrap_or_default())?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping the boot image", unsafe {
+        sys::vm_unmap(s.process, at, image_size)
+    })?;
     let (mut ours, mut theirs) = (0, 0);
     // SAFETY: the out pointers are valid for the call.
     check("creating a channel", unsafe {
@@ -135,6 +145,11 @@ fn processes_and_channels(s: &Startup) -> Result {
     let status =
         unsafe { sys::process_start(process, thread, loaded.entry, loaded.stack, theirs, 0) };
     check("starting the process", status)?;
+    Ok((process, ours))
+}
+
+fn processes_and_channels(s: &Startup) -> Result {
+    let (process, ours) = start_program(s, "channel-echo")?;
 
     let mem = create_memory(PAGE_SIZE)?;
     let text = b"shared bytes 123";
@@ -734,9 +749,113 @@ fn seals(s: &Startup) -> Result {
     ensure("refusing more seals", seal(mem, 0) == -13)
 }
 
+/// Makes a call with `request` after a 4-byte placeholder ID, room for
+/// `cap` reply bytes and `handle`, if any, and returns the status, the
+/// sizes stored, the reply and the handle received.
+fn call(
+    channel: Handle,
+    request: &[u8],
+    handle: Option<Handle>,
+    cap: u64,
+    deadline: i64,
+) -> (i64, [u64; 2], [u8; 64], Handle) {
+    let mut bytes = [0u8; 64];
+    bytes[4..4 + request.len()].copy_from_slice(request);
+    let handles = [handle.unwrap_or(0)];
+    let mut reply = [0u8; 64];
+    let mut reply_handles = [0 as Handle; 1];
+    let fields: [u64; 8] = [
+        bytes.as_ptr() as u64,
+        4 + request.len() as u64,
+        handles.as_ptr() as u64,
+        u64::from(handle.is_some()),
+        reply.as_mut_ptr() as u64,
+        cap,
+        reply_handles.as_mut_ptr() as u64,
+        1,
+    ];
+    let mut out = [0u64; 2];
+    // SAFETY: the structure and the buffers it points to are valid.
+    let status = unsafe {
+        sys::channel_call(
+            channel,
+            0,
+            deadline,
+            fields.as_ptr().cast(),
+            out.as_mut_ptr().cast(),
+        )
+    };
+    (status, out, reply, reply_handles[0])
+}
+
+/// Calls deliver replies to their callers, also with handles, and end
+/// on a too-small buffer, a deadline and a closed peer; a late reply is
+/// discarded.
+fn channel_calls(s: &Startup) -> Result {
+    let (_, server) = start_program(s, "call-server")?;
+    let mem = create_memory(PAGE_SIZE)?;
+    let text = b"call bytes";
+    // SAFETY: the pointer and length describe `text`.
+    check("filling", unsafe {
+        sys::mem_write(mem, 0, text.as_ptr(), text.len() as u64)
+    })?;
+    let (status, out, reply, handle) = call(server, b"hello", Some(mem), 64, now() + 2_000_000_000);
+    check("calling", status)?;
+    ensure("storing the sizes", out == [9, 1])?;
+    ensure("using a call ID", u32_at(&reply, 0) & 0x8000_0000 != 0)?;
+    ensure("returning the bytes", &reply[4..9] == b"hello")?;
+    let mut back = [0u8; 10];
+    // SAFETY: the pointer and length describe `back`.
+    check("reading the handle", unsafe {
+        sys::mem_read(handle, 0, back.as_mut_ptr(), 10)
+    })?;
+    ensure("returning the handle", back == *text)?;
+
+    let (status, out, _, _) = call(server, b"small", None, 64, now() + 2_000_000_000);
+    ensure("refusing a large reply", status == -15 && out == [200, 0])?;
+    let mut short = [0u8; 3];
+    let fields: [u64; 8] = [short.as_mut_ptr() as u64, 3, 0, 0, 0, 0, 0, 0];
+    let mut out = [0u64; 2];
+    // SAFETY: the structure and buffers are valid.
+    let status = unsafe {
+        sys::channel_call(
+            server,
+            0,
+            i64::MAX,
+            fields.as_ptr().cast(),
+            out.as_mut_ptr().cast(),
+        )
+    };
+    ensure("needing an ID", status == -10)?;
+
+    let (status, _, _, _) = call(server, b"late", None, 64, now() + 5_000_000);
+    ensure("timing out", status == TIMED_OUT)?;
+    sleep_ms(80);
+    let mut probe = [0u8; 64];
+    let (mut len, mut count) = (0u64, 0u64);
+    // SAFETY: the pointers describe `probe`, `len` and `count`.
+    let status = unsafe {
+        sys::channel_read(
+            server,
+            probe.as_mut_ptr(),
+            64,
+            core::ptr::null_mut(),
+            0,
+            &mut len,
+            &mut count,
+        )
+    };
+    ensure("discarding the late reply", status == SHOULD_WAIT)?;
+    let (status, _, reply, _) = call(server, b"again", None, 64, now() + 2_000_000_000);
+    ensure("calling again", status == 0 && &reply[4..9] == b"again")?;
+
+    let (status, _, _, _) = call(server, b"quit", None, 64, now() + 2_000_000_000);
+    ensure("ending on a closed peer", status == -24)
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 11] = [
+const TESTS: [(&str, Test); 12] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -745,6 +864,7 @@ const TESTS: [(&str, Test); 11] = [
     ("log_readers", log_readers),
     ("memory_operations", memory_operations),
     ("seals", seals),
+    ("channel_calls", channel_calls),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),

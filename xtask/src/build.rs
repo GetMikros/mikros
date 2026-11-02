@@ -98,9 +98,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", init.display());
             let echo = user_build("channel-echo", kind)?;
             println!("built    {}", echo.display());
+            let server = user_build("call-server", kind)?;
+            println!("built    {}", server.display());
             let members = [
                 ("init", init.as_path()),
                 ("tests/channel-echo", echo.as_path()),
+                ("tests/call-server", server.as_path()),
             ];
             boot_image(kind, "test-boot.img", &members)?
         }
