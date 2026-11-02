@@ -1034,15 +1034,19 @@ impl MemoryObject {
         if !self.is_anonymous() {
             return Err(Error::NotSupported);
         }
-        let mut pages = self.pages.lock();
-        pages.check_range(offset, len)?;
-        let end = (offset + len).div_ceil(PAGE_SIZE);
-        for index in offset / PAGE_SIZE..end {
-            if pages.frame(index).is_none() {
-                self.alloc_mapped(&mut pages, index)?;
+        self.pages.lock().check_range(offset, len)?;
+        let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
+        in_pieces(first, end, |from, to| {
+            let mut pages = self.pages.lock();
+            // The object may have shrunk since the last piece.
+            pages.check_range(from * PAGE_SIZE, (to - from) * PAGE_SIZE)?;
+            for index in from..to {
+                if pages.frame(index).is_none() {
+                    self.alloc_mapped(&mut pages, index)?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Frees the frames of every page of the `len` bytes from `offset`,
@@ -1051,15 +1055,26 @@ impl MemoryObject {
         if !self.is_anonymous() {
             return Err(Error::NotSupported);
         }
-        let mut pages = self.pages.lock();
-        self.check_writable()?;
-        pages.check_range(offset, len)?;
+        {
+            let pages = self.pages.lock();
+            self.check_writable()?;
+            pages.check_range(offset, len)?;
+        }
         let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
-        let freed = pages.decommit(first, end)?;
-        self.unmap_pages(first, end);
-        drop(pages);
-        self.free(freed);
-        Ok(())
+        in_pieces(first, end, |from, to| {
+            let mut pages = self.pages.lock();
+            self.check_writable()?;
+            // Pages the object lost since the last piece have no frames.
+            let end = to.min(pages.count());
+            if from >= end {
+                return Ok(());
+            }
+            let freed = pages.decommit(from, end)?;
+            self.unmap_pages(from, end);
+            drop(pages);
+            self.free(freed);
+            Ok(())
+        })
     }
 
     /// Changes the size to `size` bytes, freeing the frames past it.
@@ -1203,6 +1218,27 @@ impl Drop for Source {
             budget.release_kernel(bytes);
         }
     }
+}
+
+/// Runs `piece` on the pages from `first` to `end`, exclusive, in pieces
+/// of at most `ITEM_STEP` pages, with a reschedule check between two
+/// pieces. `piece` takes and releases the locks it needs, so that none is
+/// held at a check. Stops at the first error.
+fn in_pieces(
+    first: u64,
+    end: u64,
+    mut piece: impl FnMut(u64, u64) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let mut from = first;
+    while from < end {
+        let to = end.min(from.saturating_add(ITEM_STEP as u64));
+        piece(from, to)?;
+        from = to;
+        if from < end {
+            crate::sched::preempt_point();
+        }
+    }
+    Ok(())
 }
 
 impl Object for MemoryObject {
