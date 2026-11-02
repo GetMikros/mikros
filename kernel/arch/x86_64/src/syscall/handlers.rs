@@ -10,6 +10,7 @@ use crate::thread_state::{self, DEBUG_SIZE, GENERAL_SIZE, General};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use kernel_core::exception::{self, DEBUG_EVENTS};
+use kernel_core::log::{MESSAGE_MAX, RECORD_SIZE, Severity};
 use kernel_core::object::budget::{Budget, INFO_BUDGET};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use kernel_core::object::handles::Handle;
@@ -766,4 +767,27 @@ pub fn signal_wait(mask: u64, deadline: i64, out: UserOut<u8>) -> Result<(), Err
     }
     let info = crate::signal::wait(mask, deadline)?;
     out.write_bytes(&info.bytes())
+}
+
+pub fn log_write(_log: Checked, severity: u32, message: UserIn<u8>, len: u64) -> Result<(), Error> {
+    let severity = Severity::from_u32(severity).ok_or(Error::InvalidArgs)?;
+    if len > MESSAGE_MAX as u64 {
+        return Err(Error::InvalidArgs);
+    }
+    let mut bytes = [0u8; MESSAGE_MAX];
+    let bytes = &mut bytes[..len as usize];
+    message.read_bytes(bytes)?;
+    if core::str::from_utf8(bytes).is_err() {
+        return Err(Error::InvalidArgs);
+    }
+    crate::log::write_user(current_process()?.header().koid(), severity, bytes);
+    Ok(())
+}
+
+pub fn log_read(_log: Checked, after: u64, out: UserOut<u8>) -> Result<(), Error> {
+    if !out.fits(RECORD_SIZE as u64) {
+        return Err(Error::InvalidArgs);
+    }
+    let record = crate::log::next_after(after).ok_or(Error::ShouldWait)?;
+    out.write_bytes(&record.bytes())
 }

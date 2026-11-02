@@ -152,3 +152,26 @@ fn a_dropped_record_does_not_stop_the_drain() {
     log.drain(|r| seen.push(r.sequence));
     assert_eq!(seen, [2]);
 }
+
+#[test]
+fn copies_records_out_in_their_layout() {
+    let log: Log<4> = Log::new();
+    log.write(1_500, 42, Severity::Warning, Source::User, b"hi");
+    let Lookup::Found(record) = log.get(1) else {
+        panic!("record 1 is missing");
+    };
+    let bytes = record.bytes();
+    assert_eq!(bytes[0x00..0x08], 1u64.to_le_bytes());
+    assert_eq!(bytes[0x08..0x10], 1_500i64.to_le_bytes());
+    assert_eq!(bytes[0x10..0x18], 42u64.to_le_bytes());
+    assert_eq!(bytes[0x18..0x1C], [2, 1, 2, 0]);
+    assert_eq!(&bytes[0x20..0x23], b"hi\0");
+    assert!(bytes[0x23..].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn knows_the_severity_values() {
+    assert_eq!(Severity::from_u32(0), Some(Severity::Debug));
+    assert_eq!(Severity::from_u32(3), Some(Severity::Error));
+    assert_eq!(Severity::from_u32(4), None);
+}

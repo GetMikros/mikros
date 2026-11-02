@@ -19,6 +19,19 @@ pub enum Severity {
     Error = 3,
 }
 
+impl Severity {
+    /// The severity with value `value`, if there is one.
+    pub fn from_u32(value: u32) -> Option<Severity> {
+        Some(match value {
+            0 => Severity::Debug,
+            1 => Severity::Info,
+            2 => Severity::Warning,
+            3 => Severity::Error,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Source {
@@ -45,6 +58,15 @@ const _: () = assert!(size_of::<Record>() == RECORD_SIZE);
 impl Record {
     pub fn message(&self) -> &[u8] {
         &self.message[..usize::from(self.message_len).min(MESSAGE_MAX)]
+    }
+
+    /// The record as it is copied out.
+    pub fn bytes(&self) -> [u8; RECORD_SIZE] {
+        let mut out = [0; RECORD_SIZE];
+        for (bytes, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(self.to_words()) {
+            *bytes = word.to_le_bytes();
+        }
+        out
     }
 
     fn to_words(self) -> [u64; WORDS] {
