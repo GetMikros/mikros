@@ -178,9 +178,11 @@ pub fn init(info: &BootInfo) {
     }
     // The references, in order of preference.
     let calibrate = |what: &str, counter: &dyn Fn() -> u64| -> u64 {
-        hpet.map(|(virt, period_fs, _)| {
+        hpet.map(|(virt, period_fs, wide)| {
             let hz = 1_000_000_000_000_000 / period_fs.max(1);
-            measure(counter, || hpet_read(virt, HPET_COUNTER), hz)
+            // A 32-bit counter may wrap while it is measured.
+            let ext = Extender::new(if wide { 64 } else { 32 });
+            measure(counter, || ext.extend(hpet_read(virt, HPET_COUNTER)), hz)
         })
         .or_else(|| {
             pm.map(|_| {
