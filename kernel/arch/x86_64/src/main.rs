@@ -15,6 +15,8 @@ mod features;
 mod log;
 #[cfg(target_os = "none")]
 mod memory;
+#[cfg(test)]
+mod paging;
 #[cfg(target_os = "none")]
 mod panic;
 #[cfg(target_os = "none")]
