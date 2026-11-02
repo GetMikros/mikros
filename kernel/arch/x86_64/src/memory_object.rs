@@ -1081,9 +1081,19 @@ impl MemoryObject {
     }
 
     /// Changes the size to `size` bytes, freeing the frames past it.
+    ///
+    /// The frames past a smaller size are removed in pieces with the
+    /// pages unlocked in between. Meanwhile the object's size stays put.
     pub fn set_size(&self, size: u64) -> Result<(), Error> {
         self.check_revoked()?;
-        let mut pages = self.pages.lock();
+        let mut pages = loop {
+            let pages = self.pages.lock();
+            if !pages.trimming() {
+                break pages;
+            }
+            drop(pages);
+            crate::sched::yield_now();
+        };
         let seals = self.seals();
         let refused = if size < pages.size() {
             seals & SEAL_SHRINK
@@ -1095,24 +1105,64 @@ impl MemoryObject {
         if refused != 0 {
             return Err(Error::AccessDenied);
         }
+        let old = pages.count();
         let resized = pages.set_size(size, MAX_SIZE)?;
         if let Some((phys, from)) = resized.zero {
             // SAFETY: the pages are locked.
             let frame = unsafe { frame_bytes(phys) };
             frame[from..].fill(0);
         }
-        self.unmap_pages(pages.count(), u64::MAX);
-        // The pager state learns of every page that left, also while
-        // kernel copies hold the frames.
-        if let Some(paged) = &self.paged {
-            let mut state = paged.state.lock();
-            for &index in resized.removed.keys() {
-                state.removed(index);
-            }
+        let new = pages.count();
+        if new >= old {
+            return Ok(());
         }
-        let freed = pages.discard(resized.removed);
+        pages.set_trimming(true);
         drop(pages);
-        self.free(freed.into_values());
+        let mut removed = resized.removed;
+        // The pieces cannot fail: one waits until the frames it cannot
+        // keep for kernel copies are no longer used.
+        let _ = in_pieces(new, old, |from, to| {
+            loop {
+                let mut pages = self.pages.lock();
+                // The translations go before the frames.
+                self.unmap_pages(from, to);
+                if pages.pinned() {
+                    // Kernel copies may still use the frames, which stay
+                    // until the last of them ends.
+                    let kept = loop {
+                        match removed.first_key_value() {
+                            Some((&index, &phys)) if index < to => {
+                                if pages.orphan(phys).is_err() {
+                                    break false;
+                                }
+                                removed.pop_first();
+                            }
+                            _ => break true,
+                        }
+                    };
+                    if !kept {
+                        drop(pages);
+                        self.wait_unpinned();
+                        continue;
+                    }
+                }
+                // The pager state learns of every page that left, also
+                // while kernel copies hold the frames.
+                if let Some(paged) = &self.paged {
+                    let mut state = paged.state.lock();
+                    for index in from..to {
+                        state.removed(index);
+                    }
+                }
+                drop(pages);
+                self.free(core::iter::from_fn(|| match removed.first_key_value() {
+                    Some((&index, _)) if index < to => removed.pop_first().map(|(_, phys)| phys),
+                    _ => None,
+                }));
+                return Ok(());
+            }
+        });
+        self.pages.lock().set_trimming(false);
         Ok(())
     }
 

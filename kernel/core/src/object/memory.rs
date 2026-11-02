@@ -46,6 +46,9 @@ pub struct Pages {
     pins: u64,
     /// Frames taken from the pages while pinned, freed once unpinned.
     orphans: Vec<u64>,
+    /// Whether the frames of a shrink are still being removed, during
+    /// which the size does not change again.
+    trimming: bool,
 }
 
 /// What changing the size leaves to the caller.
@@ -54,7 +57,8 @@ pub struct Resized {
     /// so that bytes past the smaller of the two sizes read as zero.
     pub zero: Option<(u64, usize)>,
     /// The frames of the pages past the new size, by page index, which
-    /// left the pages. The caller passes them to `discard`.
+    /// left the pages. While the pages are pinned, the caller keeps them
+    /// with `orphan`; otherwise it frees them.
     pub removed: Map<u64, u64>,
 }
 
@@ -80,6 +84,7 @@ impl Pages {
             frames: nodes::map(),
             pins: 0,
             orphans: Vec::new(),
+            trimming: false,
         })
     }
 
@@ -130,6 +135,25 @@ impl Pages {
         core::mem::replace(&mut self.frames, nodes::map())
     }
 
+    /// Whether the frames of a shrink are still being removed.
+    pub fn trimming(&self) -> bool {
+        self.trimming
+    }
+
+    /// Marks the frames of a shrink as being removed, or as removed.
+    pub fn set_trimming(&mut self, trimming: bool) {
+        self.trimming = trimming;
+    }
+
+    /// Keeps `phys`, a frame that left the pages, until the last `unpin`,
+    /// or fails with `NoMemory` without room for it.
+    pub fn orphan(&mut self, phys: u64) -> Result<(), Error> {
+        debug_assert!(self.pins > 0);
+        self.orphans.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        self.orphans.push(phys);
+        Ok(())
+    }
+
     /// Whether a `pin` is in effect.
     pub fn pinned(&self) -> bool {
         self.pins > 0
@@ -162,12 +186,6 @@ impl Pages {
         check_size(size, max)?;
         // Splitting the map allocates at most one insertion's nodes.
         let _claim = nodes::claim_insert()?;
-        if self.pins > 0 {
-            let leaving = self.frames.range(size.div_ceil(PAGE_SIZE)..).count();
-            self.orphans
-                .try_reserve(leaving)
-                .map_err(|_| Error::NoMemory)?;
-        }
         let kept = self.size.min(size);
         let tail = (kept % PAGE_SIZE) as usize;
         let zero = if tail == 0 {
@@ -178,18 +196,6 @@ impl Pages {
         self.size = size;
         let removed = self.frames.split_off(&self.count());
         Ok(Resized { zero, removed })
-    }
-
-    /// Returns those of `removed`, the frames that left the pages in the
-    /// last `set_size`, to free now: while the pages are pinned they are
-    /// kept until `unpin` instead, in the room `set_size` reserved.
-    pub fn discard(&mut self, removed: Map<u64, u64>) -> Map<u64, u64> {
-        if self.pins > 0 {
-            debug_assert!(self.orphans.capacity() - self.orphans.len() >= removed.len());
-            self.orphans.extend(removed.into_values());
-            return nodes::map();
-        }
-        removed
     }
 
     /// Takes the frames of pages `first` to `end`, exclusive, which then
@@ -296,8 +302,6 @@ mod tests {
                 .collect::<std::vec::Vec<_>>(),
             [(2, 0x3000), (3, 0x4000)]
         );
-        let freed = pages.discard(resized.removed);
-        assert_eq!(freed.into_values().collect::<Vec<_>>(), [0x3000, 0x4000]);
         assert_eq!((pages.count(), pages.allocated()), (2, 2));
     }
 
@@ -312,7 +316,15 @@ mod tests {
         let shrink = |pages: &mut Pages, size| {
             let removed = pages.set_size(size, MAX).unwrap().removed;
             let indices: Vec<u64> = removed.keys().copied().collect();
-            let freed: Vec<u64> = pages.discard(removed).into_values().collect();
+            // As the object does: frames leaving while pinned are kept.
+            let freed: Vec<u64> = if pages.pinned() {
+                for &phys in removed.values() {
+                    pages.orphan(phys).unwrap();
+                }
+                Vec::new()
+            } else {
+                removed.into_values().collect()
+            };
             (indices, freed)
         };
         // The pages that left are reported even while pinned.
