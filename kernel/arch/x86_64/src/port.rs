@@ -87,7 +87,7 @@ impl Port {
     /// An empty port charged to `budget`.
     pub fn new(budget: &Arc<Budget>) -> Result<Arc<Port>, Error> {
         budget.charge_kernel(Self::COST)?;
-        Ok(Arc::new(Port {
+        kernel_core::fallible::try_arc(Port {
             header: Header::new(ObjectType::Port),
             budget: budget.clone(),
             state: SpinLock::new(State {
@@ -96,7 +96,7 @@ impl Port {
                 users: 0,
                 waiters: Vec::new(),
             }),
-        }))
+        })
     }
 
     /// Queues `bytes`, for which the queue has room, and wakes the
@@ -302,10 +302,16 @@ impl Registration {
 
     /// Ends the registration's hold on the port's queue and its charge.
     fn release(&self) {
-        if let Some(port) = self.port.upgrade() {
+        Self::release_parts(&self.port, &self.budget);
+    }
+
+    /// Ends the hold on the queue of `port` and the charge to `budget` of
+    /// a registration.
+    fn release_parts(port: &Weak<Port>, budget: &Budget) {
+        if let Some(port) = port.upgrade() {
             port.state.lock().registrations -= 1;
         }
-        self.budget.release_kernel(REGISTRATION_COST);
+        budget.release_kernel(REGISTRATION_COST);
     }
 }
 
@@ -420,7 +426,14 @@ pub fn wait_timeline(
         registration.release();
         return Err(Error::NoMemory);
     }
-    registrations.push(Arc::new(registration));
+    // A registration releases its charge only when told to.
+    let (port, budget) = (registration.port.clone(), registration.budget.clone());
+    let Ok(registration) = kernel_core::fallible::try_arc(registration) else {
+        drop(registrations);
+        Registration::release_parts(&port, &budget);
+        return Err(Error::NoMemory);
+    };
+    registrations.push(registration);
     Ok(())
 }
 
@@ -456,7 +469,11 @@ pub fn wait_async(
         edge: options & EDGE != 0,
         ..registration
     };
-    let registration = Arc::new(registration);
+    let (port, budget) = (registration.port.clone(), registration.budget.clone());
+    let Ok(registration) = kernel_core::fallible::try_arc(registration) else {
+        Registration::release_parts(&port, &budget);
+        return Err(Error::NoMemory);
+    };
     let mut registrations = REGISTRATIONS.lock();
     if registrations.try_reserve(1).is_err() {
         drop(registrations);

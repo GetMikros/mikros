@@ -31,11 +31,11 @@ impl Timeline {
     /// A timeline at `initial`, charged to `budget`.
     pub fn new(budget: &Arc<Budget>, initial: u64) -> Result<Arc<Timeline>, Error> {
         budget.charge_kernel(Self::COST)?;
-        Ok(Arc::new(Timeline {
+        kernel_core::fallible::try_arc(Timeline {
             header: Header::new(ObjectType::Timeline),
             budget: budget.clone(),
             value: AtomicU64::new(initial),
-        }))
+        })
     }
 
     pub fn value(&self) -> u64 {

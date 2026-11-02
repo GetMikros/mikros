@@ -2,6 +2,7 @@
 //! the development host, so that its code can be tested there.
 
 #![cfg_attr(not(test), no_std)]
+#![feature(allocator_ext)]
 
 extern crate alloc;
 
@@ -12,6 +13,7 @@ pub mod console;
 pub mod deadline;
 pub mod elf;
 pub mod exception;
+pub mod fallible;
 pub mod frames;
 pub mod heap;
 pub mod log;

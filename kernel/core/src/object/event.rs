@@ -17,10 +17,10 @@ impl Event {
     /// An event with every signal clear, charged to `budget`.
     pub fn new(budget: &Arc<Budget>) -> Result<Arc<Event>, Error> {
         budget.charge_kernel(Self::COST)?;
-        Ok(Arc::new(Event {
+        crate::fallible::try_arc(Event {
             header: Header::new(ObjectType::Event),
             budget: budget.clone(),
-        }))
+        })
     }
 }
 

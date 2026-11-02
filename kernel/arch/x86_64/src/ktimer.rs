@@ -16,10 +16,10 @@ impl Timer {
     /// A timer with no deadline, charged to `budget`.
     pub fn new(budget: &Arc<Budget>) -> Result<Arc<Timer>, Error> {
         budget.charge_kernel(Self::COST)?;
-        Ok(Arc::new(Timer {
+        kernel_core::fallible::try_arc(Timer {
             header: Header::new(ObjectType::Timer),
             budget: budget.clone(),
-        }))
+        })
     }
 
     /// Clears `SIGNALED` and sets it at `deadline`, replacing an earlier

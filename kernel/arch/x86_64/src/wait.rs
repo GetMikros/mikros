@@ -77,14 +77,14 @@ pub fn wait_one(
 ) -> Result<u32, Error> {
     let thread = sched::current().ok_or(Error::BadState)?;
     let header = object.header();
-    let waiter = Arc::new(Waiter {
+    let waiter = kernel_core::fallible::try_arc(Waiter {
         koid: header.koid(),
         mask,
         thread: thread.clone(),
         process: Arc::as_ptr(process) as usize,
         handle,
         canceled: AtomicBool::new(false),
-    });
+    })?;
     {
         let mut waiters = WAITERS.lock();
         waiters.try_reserve(1).map_err(|_| Error::NoMemory)?;
@@ -148,14 +148,14 @@ pub fn wait_call(
 ) -> Result<Message, Error> {
     let thread = sched::current().ok_or(Error::BadState)?;
     let header = endpoint.header();
-    let waiter = Arc::new(Waiter {
+    let waiter = kernel_core::fallible::try_arc(Waiter {
         koid: header.koid(),
         mask: signals::PEER_CLOSED,
         thread: thread.clone(),
         process: 0,
         handle: 0,
         canceled: AtomicBool::new(false),
-    });
+    })?;
     {
         let mut waiters = WAITERS.lock();
         waiters.try_reserve(1).map_err(|_| Error::NoMemory)?;
@@ -236,11 +236,11 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> 
     if value != expected {
         return Err(Error::BadState);
     }
-    let waiter = Arc::new(FutexWaiter {
+    let waiter = kernel_core::fallible::try_arc(FutexWaiter {
         key,
         thread: thread.clone(),
         woken: AtomicBool::new(false),
-    });
+    })?;
     {
         let mut futexes = FUTEXES.lock();
         futexes.try_reserve(1).map_err(|_| Error::NoMemory)?;

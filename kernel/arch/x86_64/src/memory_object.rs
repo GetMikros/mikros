@@ -121,7 +121,8 @@ impl MemoryObject {
         let pages = Pages::new(size, options, MAX_SIZE)?;
         let charged = size_of::<MemoryObject>() as u64;
         budget.charge_kernel(charged)?;
-        Ok(Arc::new(MemoryObject {
+        // The object releases the charge when it goes, also on failure.
+        kernel_core::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
             budget: budget.clone(),
             charged,
@@ -130,7 +131,7 @@ impl MemoryObject {
             spaces: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
             paged: None,
-        }))
+        })
     }
 
     /// A paged object of `size` bytes created with `options`, charged to
@@ -150,7 +151,8 @@ impl MemoryObject {
         let pages = Pages::new(size, options & RESIZABLE, MAX_SIZE)?;
         let charged = size_of::<MemoryObject>() as u64;
         budget.charge_kernel(charged)?;
-        Ok(Arc::new(MemoryObject {
+        // The object releases the charge when it goes, also on failure.
+        kernel_core::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
             budget: budget.clone(),
             charged,
@@ -166,7 +168,7 @@ impl MemoryObject {
                 charges: SpinLock::new(BTreeMap::new()),
                 writeback: SpinLock::new(None),
             }),
-        }))
+        })
     }
 
     pub fn is_paged(&self) -> bool {
@@ -448,7 +450,8 @@ impl MemoryObject {
         let pages = Pages::new(size, 0, MAX_SIZE)?;
         let charged = size_of::<MemoryObject>() as u64;
         budget.charge_kernel(charged)?;
-        Ok(Arc::new(MemoryObject {
+        // The object releases the charge when it goes, also on failure.
+        kernel_core::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
             budget: budget.clone(),
             charged,
@@ -457,7 +460,7 @@ impl MemoryObject {
             spaces: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
             paged: None,
-        }))
+        })
     }
 
     pub fn seals(&self) -> u32 {

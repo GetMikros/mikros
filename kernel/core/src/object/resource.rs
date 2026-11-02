@@ -133,7 +133,7 @@ impl Resource {
         }
         live.try_reserve(1).map_err(|_| Error::NoMemory)?;
         budget.charge_kernel(cost)?;
-        let resource = Arc::new(Resource {
+        let resource = crate::fallible::try_arc(Resource {
             header: Header::new(ObjectType::Resource),
             kind,
             base,
@@ -141,7 +141,7 @@ impl Resource {
             options,
             parent: Some(parent.clone()),
             charged: Some((budget.clone(), cost)),
-        });
+        })?;
         live.push(Arc::downgrade(&resource));
         Ok(resource)
     }

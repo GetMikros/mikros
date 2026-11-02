@@ -52,11 +52,11 @@ impl LogReader {
         readers.retain(|r| r.strong_count() > 0);
         readers.try_reserve(1).map_err(|_| Error::NoMemory)?;
         budget.charge_kernel(Self::COST)?;
-        let reader = Arc::new(LogReader {
+        let reader = kernel_core::fallible::try_arc(LogReader {
             header: Header::new(ObjectType::LogReader),
             budget: budget.clone(),
             position: AtomicU64::new(after),
-        });
+        })?;
         readers.push(Arc::downgrade(&reader));
         drop(readers);
         reader.update();

@@ -126,7 +126,9 @@ impl Thread {
             crate::space::free_pages(stack, KERNEL_STACK_SIZE);
             return Err(Error::NoMemory);
         }
-        Ok(Arc::new(Thread {
+        // The thread frees its stack and charge when it goes, also on
+        // failure.
+        kernel_core::fallible::try_arc(Thread {
             header: Header::new(ObjectType::Thread),
             name,
             process,
@@ -151,7 +153,7 @@ impl Thread {
             sigreturn: AtomicU64::new(0),
             waiting_for_signals: AtomicBool::new(false),
             interrupted: AtomicU64::new(0),
-        }))
+        })
     }
 
     /// A user thread of `process` in state `NEW`. Its memory is charged

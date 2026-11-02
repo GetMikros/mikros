@@ -4,6 +4,7 @@
 use super::budget::Budget;
 use super::handles::Entry;
 use super::{Header, Object, ObjectType, signals};
+use crate::fallible::try_arc;
 use crate::status::Error;
 use crate::sync::SpinLock;
 use alloc::collections::VecDeque;
@@ -140,22 +141,23 @@ impl Endpoint {
         if let Some(budget) = budget {
             budget.charge_kernel(CHANNEL_COST)?;
         }
-        let shared = Arc::new(SpinLock::new(Shared {
+        // Shared releases the charge when it goes, also on failure here.
+        let shared = try_arc(SpinLock::new(Shared {
             queues: [Queue::default(), Queue::default()],
             ends: [Weak::new(), Weak::new()],
             charged: budget.cloned(),
-        }));
+        }))?;
         let end = |side| {
             let header = Header::new(ObjectType::Channel);
             header.update_signals(0, signals::WRITABLE);
-            Arc::new(Endpoint {
+            try_arc(Endpoint {
                 header,
                 side,
                 shared: shared.clone(),
                 observer: SpinLock::new(None),
             })
         };
-        let (a, b) = (end(0), end(1));
+        let (a, b) = (end(0)?, end(1)?);
         shared.lock().ends = [Arc::downgrade(&a), Arc::downgrade(&b)];
         Ok((a, b))
     }

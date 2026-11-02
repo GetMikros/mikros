@@ -23,11 +23,11 @@ impl Pager {
     /// A pager charged to `budget`.
     pub fn new(budget: &Arc<Budget>) -> Result<Arc<Pager>, Error> {
         budget.charge_kernel(Self::COST)?;
-        Ok(Arc::new(Pager {
+        kernel_core::fallible::try_arc(Pager {
             header: Header::new(ObjectType::Pager),
             budget: budget.clone(),
             objects: SpinLock::new(Vec::new()),
-        }))
+        })
     }
 
     /// Records `mem` as one of the pager's objects.

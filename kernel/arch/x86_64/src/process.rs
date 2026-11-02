@@ -101,13 +101,21 @@ impl Process {
                 return Err(e);
             }
         };
+        let aspace = match kernel_core::fallible::try_arc(aspace) {
+            Ok(aspace) => aspace,
+            Err(e) => {
+                budget.release_kernel(charged);
+                return Err(e);
+            }
+        };
         budget.add_process();
-        Ok(Arc::new(Process {
+        // The process undoes both when it goes, also on failure.
+        kernel_core::fallible::try_arc(Process {
             header: Header::new(ObjectType::Process),
             name,
             budget: budget.clone(),
             charged,
-            aspace: Arc::new(aspace),
+            aspace,
             handles: SpinLock::new(HandleTable::new()),
             state: AtomicU32::new(NEW),
             exit_code: AtomicI64::new(0),
@@ -119,7 +127,7 @@ impl Process {
             stopped: SpinLock::new(Vec::new()),
             ioports: SpinLock::new(Vec::new()),
             cpu_time: AtomicI64::new(0),
-        }))
+        })
     }
 
     #[expect(dead_code, reason = "no call reads process names yet")]

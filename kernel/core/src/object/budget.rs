@@ -91,7 +91,7 @@ impl Budget {
         }
         let mut child = Budget::with(Some(parent.clone()), kernel_limit, page_limit);
         child.charged = charge.cloned();
-        Ok(Arc::new(child))
+        crate::fallible::try_arc(child)
     }
 
     fn with(parent: Option<Arc<Budget>>, kernel_limit: u64, page_limit: u64) -> Budget {
