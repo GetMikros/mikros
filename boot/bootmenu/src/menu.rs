@@ -4,6 +4,7 @@
 //! from its top or bottom edge, so the menu keeps the same size at every
 //! resolution.
 
+use crate::bmp::Image;
 use crate::canvas::{Canvas, Color};
 use crate::shape;
 use crate::text::{Style, Text, Weight};
@@ -89,7 +90,13 @@ pub struct Card {
     pub name: String,
     pub detail: Option<String>,
     pub color: Color,
+    /// The entry's icon, already scaled to fit the tile, shown in place of
+    /// the tile when present.
+    pub icon: Option<Image>,
 }
+
+/// The width and height of the tile, and the largest an icon is shown.
+pub const ICON_SIZE: usize = 72;
 
 /// Everything that the menu shows.
 pub struct Menu {
@@ -212,15 +219,23 @@ impl Menu {
             None => {}
         }
 
-        let tile = ((center - 36) as f32, (y + 22) as f32, 72.0, 72.0);
-        shape::fill_rounded_rect(canvas, tile, 15.0, card.color);
-        let mut letter = [0; 4];
-        let letter = card
-            .name
-            .chars()
-            .next()
-            .map_or("", |c| c.encode_utf8(&mut letter));
-        text.draw_centered(canvas, letter, TILE_LETTER, center, y + 68, TILE_TEXT);
+        let (tile_x, tile_y) = (center - ICON_SIZE as i32 / 2, y + 22);
+        if let Some(icon) = &card.icon {
+            let ix = tile_x + (ICON_SIZE - icon.width) as i32 / 2;
+            let iy = tile_y + (ICON_SIZE - icon.height) as i32 / 2;
+            shape::draw_rounded_image(canvas, icon, ix, iy, 15.0);
+        } else {
+            let size = ICON_SIZE as f32;
+            let tile = (tile_x as f32, tile_y as f32, size, size);
+            shape::fill_rounded_rect(canvas, tile, 15.0, card.color);
+            let mut letter = [0; 4];
+            let letter = card
+                .name
+                .chars()
+                .next()
+                .map_or("", |c| c.encode_utf8(&mut letter));
+            text.draw_centered(canvas, letter, TILE_LETTER, center, y + 68, TILE_TEXT);
+        }
 
         text.draw_centered(canvas, &card.name, NAME, center, y + 119, PRIMARY);
         if let Some(detail) = &card.detail {

@@ -10,6 +10,7 @@ fn card(name: &str, detail: Option<&str>, color: u32) -> Card {
         name: name.to_string(),
         detail: detail.map(str::to_string),
         color: Color(color),
+        icon: None,
     }
 }
 
@@ -168,4 +169,34 @@ fn draws_the_empty_card_with_the_notice() {
     assert_eq!(canvas.get(680, 500), BORDER, "card border");
     assert!(lit(&canvas, (800, 515, 320, 20)), "notice inside the card");
     assert!(!lit(&canvas, (0, 38, W, 20)), "no notice at the top");
+}
+
+#[test]
+fn draws_icons_in_place_of_the_tile() {
+    let mut m = menu();
+    m.cards[0].icon = Some(Image {
+        width: 72,
+        height: 36,
+        pixels: vec![0xffff0000; 72 * 36],
+    });
+    let canvas = render(&m);
+    let (x, y, w, _) = m.bounds(Item::Card(0), W, H);
+    let (left, top) = ((x + w / 2 - 36) as usize, (y + 22) as usize);
+    assert_eq!(
+        canvas.get(left + 36, top + 36),
+        Color(0xff0000),
+        "icon center"
+    );
+    assert_eq!(
+        canvas.get(left + 36, top + 30),
+        Color(0xff0000),
+        "no letter"
+    );
+    assert_eq!(
+        canvas.get(left + 36, top + 10),
+        BACKGROUND,
+        "above the icon"
+    );
+    assert_eq!(canvas.get(left, top + 18), BACKGROUND, "rounded corner");
+    assert_eq!(canvas.get(left + 1, top + 36), Color(0xff0000), "left edge");
 }

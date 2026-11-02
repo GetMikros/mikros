@@ -15,6 +15,7 @@ fn menu(cards: usize) -> Menu {
                 name: alloc::format!("Entry {i}"),
                 detail: None,
                 color: Color(0),
+                icon: None,
             })
             .collect(),
         buttons: vec![Power::Restart, Power::ShutDown],

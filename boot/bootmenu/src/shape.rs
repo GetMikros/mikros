@@ -5,6 +5,7 @@
 //! Most shapes are drawn from a signed distance: the coverage of a pixel is
 //! taken from the distance between its center and the edge.
 
+use crate::bmp::Image;
 use crate::canvas::{Canvas, Color};
 use libm::{atan2f, sqrtf};
 
@@ -54,6 +55,26 @@ pub fn fill_rounded_rect(canvas: &mut Canvas, rect: (f32, f32, f32, f32), r: f32
     fill_distance(canvas, (x, y, x + w, y + h), color, |px, py| {
         rounded_rect_distance(px, py, rect, r)
     });
+}
+
+/// Draws `image` with its top-left corner at (`x`, `y`), its corners
+/// rounded with radius `r`, and blended by its alpha channel.
+pub fn draw_rounded_image(canvas: &mut Canvas, image: &Image, x: i32, y: i32, r: f32) {
+    let rect = (x as f32, y as f32, image.width as f32, image.height as f32);
+    for row in 0..image.height {
+        for column in 0..image.width {
+            let (px, py) = (x + column as i32, y + row as i32);
+            let edge = coverage(rounded_rect_distance(
+                px as f32 + 0.5,
+                py as f32 + 0.5,
+                rect,
+                r,
+            ));
+            let pixel = image.pixels[row * image.width + column];
+            let alpha = (u32::from(edge) * (pixel >> 24) + 127) / 255;
+            canvas.blend(px, py, Color(pixel & 0x00ff_ffff), alpha as u8);
+        }
+    }
 }
 
 pub fn stroke_rounded_rect(
@@ -289,5 +310,29 @@ mod tests {
         let half = [(10.0, 10.0), (10.5, 10.0), (10.5, 11.0), (10.0, 11.0)];
         fill_polygon(&mut c, &half, WHITE);
         assert_eq!(c.get(10, 10), Color::rgb(127, 127, 127));
+    }
+
+    #[test]
+    fn draws_images_with_rounded_corners_and_alpha() {
+        let mut c = Canvas::new(20, 20);
+        let image = Image {
+            width: 10,
+            height: 10,
+            pixels: alloc::vec![0xffffffff; 100],
+        };
+        draw_rounded_image(&mut c, &image, 5, 5, 4.0);
+        assert_eq!(c.get(10, 10), WHITE);
+        assert_eq!(c.get(5, 10), WHITE, "straight edge");
+        assert_eq!(c.get(5, 5), Color(0), "rounded corner");
+        assert_eq!(c.get(4, 10), Color(0), "outside");
+
+        let mut c = Canvas::new(4, 4);
+        let half = Image {
+            width: 1,
+            height: 1,
+            pixels: alloc::vec![0x80ffffff],
+        };
+        draw_rounded_image(&mut c, &half, 1, 1, 0.0);
+        assert_eq!(c.get(1, 1), Color::rgb(128, 128, 128));
     }
 }

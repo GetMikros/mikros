@@ -9,10 +9,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use bootmenu::bmp;
 use bootmenu::canvas::{Canvas, Color};
 use bootmenu::entries::Config;
 use bootmenu::input::{Action, Event, Input};
-use bootmenu::menu::{Card, FocusSource, Item, Menu, Power};
+use bootmenu::menu::{Card, FocusSource, ICON_SIZE, Item, Menu, Power};
 use bootmenu::pointer;
 use bootmenu::text::Text;
 use core::time::Duration;
@@ -23,7 +24,7 @@ use uefi::fs::FileSystem;
 use uefi::proto::console::text::{InputEx, Key, ScanCode};
 use uefi::proto::device_path::DevicePath;
 use uefi::runtime::{self, VariableVendor};
-use uefi::{Status, boot, cstr16, system};
+use uefi::{CString16, Status, boot, cstr16, system};
 use uefi_raw::protocol::console::KeyToggleState;
 
 const ENTRIES_PATH: &str = "\\EFI\\Mikros\\entries.yaml";
@@ -34,7 +35,7 @@ const BOOT_TO_FW_UI: u64 = 1;
 
 /// Reads the entries file from the volume the boot manager was loaded from.
 /// Returns the configuration and a notice naming any problem with the file.
-fn load_config() -> (Config, Option<String>) {
+fn load_config(volume: Result<&mut FileSystem, Status>) -> (Config, Option<String>) {
     let unusable = |problem: String| {
         let config = Config {
             default: None,
@@ -47,11 +48,11 @@ fn load_config() -> (Config, Option<String>) {
             Some(format!("Couldn't use {ENTRIES_PATH}: {problem}")),
         )
     };
-    let volume = match boot::get_image_file_system(boot::image_handle()) {
+    let volume = match volume {
         Ok(volume) => volume,
-        Err(err) => return unusable(format!("{:?}", err.status())),
+        Err(status) => return unusable(format!("{status:?}")),
     };
-    match FileSystem::new(volume).read(cstr16!("\\EFI\\Mikros\\entries.yaml")) {
+    match volume.read(cstr16!("\\EFI\\Mikros\\entries.yaml")) {
         Ok(bytes) => match Config::parse(&bytes) {
             Ok(config) => (config, None),
             Err(err) => unusable(format!("{err}")),
@@ -73,16 +74,59 @@ fn firmware_ui_supported() -> bool {
     }
 }
 
-fn build_menu(config: &Config, notice: Option<String>) -> Menu {
+/// Reads the BMP image at `path` on the boot volume and scales it to fit
+/// the tile.
+fn load_icon(volume: Option<&mut FileSystem>, path: &str) -> Result<bmp::Image, String> {
+    let volume = volume.ok_or_else(|| String::from("the boot volume was not found"))?;
+    let name = CString16::try_from(path).map_err(|_| String::from("the path is not valid"))?;
+    let bytes = volume.read(name.as_ref()).map_err(|err| match err {
+        uefi::fs::Error::Io(err) if err.uefi_error.status() == Status::NOT_FOUND => {
+            String::from("the file was not found")
+        }
+        uefi::fs::Error::Io(err) => format!("{:?}", err.uefi_error.status()),
+        err => format!("{err}"),
+    })?;
+    let image = bmp::decode(&bytes).map_err(|err| match err {
+        bmp::Error::NotBmp => String::from("not a BMP image"),
+        bmp::Error::Truncated => String::from("the image is truncated"),
+        bmp::Error::Unsupported => String::from("unsupported BMP format"),
+    })?;
+    Ok(image.fit_within(ICON_SIZE))
+}
+
+/// Builds the menu for `config`. Notices about the entries file and about
+/// icons that could not be loaded are joined into the menu's notice.
+fn build_menu(
+    config: &Config,
+    mut volume: Option<&mut FileSystem>,
+    config_notice: Option<String>,
+) -> Menu {
+    let mut notices: Vec<String> = config_notice.into_iter().collect();
     let cards = config
         .entries
         .iter()
-        .map(|entry| Card {
-            name: entry.name.clone(),
-            detail: entry.detail.clone(),
-            color: Color::rgb(entry.color.r, entry.color.g, entry.color.b),
+        .map(|entry| {
+            let icon = entry.icon.as_deref().and_then(|path| {
+                match load_icon(volume.as_deref_mut(), path) {
+                    Ok(image) => Some(image),
+                    Err(reason) => {
+                        notices.push(format!(
+                            "Couldn't load the icon {path} of {}: {reason}",
+                            entry.name
+                        ));
+                        None
+                    }
+                }
+            });
+            Card {
+                name: entry.name.clone(),
+                detail: entry.detail.clone(),
+                color: Color::rgb(entry.color.r, entry.color.g, entry.color.b),
+                icon,
+            }
         })
         .collect::<Vec<_>>();
+    let notice = (!notices.is_empty()).then(|| notices.join("; "));
     let mut buttons = vec![Power::Restart, Power::ShutDown];
     if firmware_ui_supported() {
         buttons.push(Power::FirmwareSettings);
@@ -224,8 +268,13 @@ fn start(volume: Option<&DevicePath>, path: &str, args: Option<&str>) -> Result<
 }
 
 pub fn run() -> Status {
-    let (config, config_notice) = load_config();
-    let mut menu = build_menu(&config, config_notice.clone());
+    let mut file_system = boot::get_image_file_system(boot::image_handle())
+        .map(FileSystem::new)
+        .map_err(|err| err.status());
+    let (config, config_notice) = load_config(file_system.as_mut().map_err(|s| *s));
+    let mut menu = build_menu(&config, file_system.as_mut().ok(), config_notice);
+    drop(file_system);
+    let startup_notice = menu.notice.clone();
     let volume = launch::boot_volume();
     let default = config.default_index();
     let Some(mut text) = Text::new() else {
@@ -268,7 +317,7 @@ pub fn run() -> Status {
                 let entry = &config.entries[index];
                 let result = start(volume.as_deref(), &entry.path, entry.args.as_deref());
                 menu.notice = match result {
-                    Ok(()) => config_notice.clone(),
+                    Ok(()) => startup_notice.clone(),
                     Err(reason) => Some(format!("Couldn't start {}: {reason}", entry.name)),
                 };
                 menu.focus = Some((Item::Card(index), FocusSource::Keyboard));
