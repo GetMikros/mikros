@@ -126,6 +126,25 @@ impl Port {
         Ok(())
     }
 
+    /// Queues a packet that the kernel makes, such as a page request.
+    pub fn queue_kernel(&self, bytes: [u8; PACKET_SIZE]) -> Result<(), Error> {
+        let mut state = self.state.lock();
+        let room = state.registrations + 1;
+        state
+            .packets
+            .try_reserve(room)
+            .map_err(|_| Error::NoMemory)?;
+        let packet = Queued {
+            bytes,
+            registration: None,
+            charged: None,
+        };
+        // A kernel packet does not count as a user packet when read.
+        state.users += 1;
+        self.push(&mut state, packet);
+        Ok(())
+    }
+
     /// Removes the oldest packet, waiting until `deadline` for one.
     pub fn wait(&self, deadline: i64) -> Result<[u8; PACKET_SIZE], Error> {
         let thread = sched::current().ok_or(Error::BadState)?;

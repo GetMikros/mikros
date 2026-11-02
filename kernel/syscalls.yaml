@@ -787,3 +787,38 @@ syscalls:
       - {name: offset, type: u64, dir: in}
       - {name: len, type: u64, dir: in}
       - {name: out, type: "*mut Handle", dir: out, object: MemoryObject}
+
+  - name: pager_create
+    number: 77
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R28]
+    args:
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: Pager}
+
+  - name: pager_create_memory
+    number: 78
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R29]
+    args:
+      - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
+      - {name: port, type: Handle, dir: in, object: Port, rights: [WRITE]}
+      - {name: key, type: u64, dir: in}
+      - {name: size, type: u64, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: MemoryObject}
+
+  - name: pager_supply
+    number: 79
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R36, MIKSPEC-0006.R38]
+    args:
+      - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: []}
+      - {name: offset, type: u64, dir: in}
+      - {name: len, type: u64, dir: in}
+      - {name: source, type: Handle, dir: in, object: MemoryObject, rights: [READ, WRITE]}
+      - {name: source_offset, type: u64, dir: in}

@@ -16,6 +16,10 @@ pub const INFO_MEMORY_SIZE: usize = 0x18;
 pub const KIND_ANONYMOUS: u32 = 1;
 /// The kind of memory objects of a fixed physical range.
 pub const KIND_PHYSICAL: u32 = 2;
+/// The kind of memory objects whose pages a pager supplies.
+pub const KIND_PAGED: u32 = 5;
+/// The creation option of paged objects that enables dirty tracking.
+pub const TRACK_DIRTY: u32 = 1 << 1;
 
 /// The seals of `mem_seal`.
 pub const SEAL_SEAL: u32 = 1 << 0;
@@ -123,6 +127,11 @@ impl Pages {
     pub fn take_all(&mut self) -> BTreeMap<u64, u64> {
         debug_assert!(self.pins == 0 && self.orphans.is_empty());
         core::mem::take(&mut self.frames)
+    }
+
+    /// Whether a `pin` is in effect.
+    pub fn pinned(&self) -> bool {
+        self.pins > 0
     }
 
     /// Keeps frames that later leave the pages from being returned until

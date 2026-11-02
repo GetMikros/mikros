@@ -3,17 +3,20 @@
 use crate::aspace::{self, Access, AddressSpace, Fault, USER_END, USER_START};
 use crate::memory::FRAMES;
 use crate::paging::Policy;
+use crate::port::Port;
 use crate::publish::{ITEM_STEP, Work};
 use crate::space;
+use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use kernel_core::object::budget::Budget;
 use kernel_core::object::memory::{
-    INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_PHYSICAL, PAGE_ENTRY_COST, PAGE_SIZE, Pages, SEAL_GROW,
-    SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE, SEALS,
+    INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_PAGED, KIND_PHYSICAL, PAGE_ENTRY_COST, PAGE_SIZE, Pages,
+    RESIZABLE, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE, SEALS, TRACK_DIRTY,
 };
 use kernel_core::object::{Header, Object, ObjectType};
+use kernel_core::paging::{Absent, Paging};
 use kernel_core::regions::{PERM_EXECUTE, PERM_WRITE};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
@@ -43,7 +46,26 @@ pub struct MemoryObject {
     /// serialized because system calls run one at a time on the one
     /// processor.
     seals: AtomicU32,
+    /// For a paged object, what its pager needs.
+    paged: Option<Paged>,
 }
+
+/// The part of a paged memory object that its pager drives.
+pub struct Paged {
+    /// The object ID of the pager.
+    pager: u64,
+    port: Weak<Port>,
+    key: u64,
+    /// Locked after the pages.
+    state: SpinLock<Paging>,
+    /// The budgets that frames supplied to the object stay charged to, by
+    /// frame address.
+    charges: SpinLock<BTreeMap<u64, Arc<Budget>>>,
+}
+
+/// The `PAGER` packet type and its `READ` command.
+const PACKET_PAGER: u32 = 3;
+const PAGER_READ: u32 = 1;
 
 /// The bytes of the frame at `phys`.
 ///
@@ -97,7 +119,203 @@ impl MemoryObject {
             physical: None,
             spaces: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
+            paged: None,
         }))
+    }
+
+    /// A paged object of `size` bytes created with `options`, charged to
+    /// `budget`, that sends its page requests to `port` with `key` and is
+    /// supplied by the pager with object ID `pager`.
+    pub fn new_paged(
+        budget: &Arc<Budget>,
+        pager: u64,
+        port: &Arc<Port>,
+        key: u64,
+        size: u64,
+        options: u32,
+    ) -> Result<Arc<MemoryObject>, Error> {
+        if options & !(RESIZABLE | TRACK_DIRTY) != 0 {
+            return Err(Error::InvalidArgs);
+        }
+        let pages = Pages::new(size, options & RESIZABLE, MAX_SIZE)?;
+        let charged = size_of::<MemoryObject>() as u64;
+        budget.charge_kernel(charged)?;
+        Ok(Arc::new(MemoryObject {
+            header: Header::new(ObjectType::MemoryObject),
+            budget: budget.clone(),
+            charged,
+            pages: SpinLock::new(pages),
+            physical: None,
+            spaces: SpinLock::new(Vec::new()),
+            seals: AtomicU32::new(0),
+            paged: Some(Paged {
+                pager,
+                port: Arc::downgrade(port),
+                key,
+                state: SpinLock::new(Paging::new(options & TRACK_DIRTY != 0)),
+                charges: SpinLock::new(BTreeMap::new()),
+            }),
+        }))
+    }
+
+    pub fn is_paged(&self) -> bool {
+        self.paged.is_some()
+    }
+
+    /// Whether the object is neither physical nor paged.
+    pub fn is_anonymous(&self) -> bool {
+        self.physical.is_none() && self.paged.is_none()
+    }
+
+    /// Fails with `AccessDenied` when the object is revoked.
+    pub fn check_revoked(&self) -> Result<(), Error> {
+        match &self.paged {
+            Some(p) if p.state.lock().revoked() => Err(Error::AccessDenied),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether `pager` is the pager of this paged object.
+    pub fn paged_by(&self, pager: &dyn Object) -> bool {
+        self.paged
+            .as_ref()
+            .is_some_and(|p| p.pager == pager.header().koid())
+    }
+
+    /// Queues a request for page `index` on the object's port. Returns
+    /// whether it was queued.
+    fn request(&self, paged: &Paged, index: u64) -> bool {
+        let mut payload = [0u8; 24];
+        payload[0..4].copy_from_slice(&PAGER_READ.to_le_bytes());
+        payload[8..16].copy_from_slice(&(index * PAGE_SIZE).to_le_bytes());
+        payload[16..24].copy_from_slice(&PAGE_SIZE.to_le_bytes());
+        let packet = crate::port::packet(paged.key, PACKET_PAGER, 0, &payload);
+        paged
+            .port
+            .upgrade()
+            .is_some_and(|port| port.queue_kernel(packet).is_ok())
+    }
+
+    /// Waits until page `index` of a paged object is present, requesting
+    /// it when nobody has. Fails with `Io` when the page fails, its pager
+    /// is gone or its request cannot be queued, and with `AccessDenied`
+    /// once the object is revoked. Anonymous objects return at once.
+    pub fn obtain(&self, index: u64) -> Result<(), Error> {
+        let Some(paged) = &self.paged else {
+            return Ok(());
+        };
+        let koid = self.header.koid();
+        loop {
+            let pages = self.pages.lock();
+            if index >= pages.count() {
+                return Err(Error::OutOfRange);
+            }
+            let mut state = paged.state.lock();
+            if state.revoked() {
+                return Err(Error::AccessDenied);
+            }
+            if pages.frame(index).is_some() {
+                return Ok(());
+            }
+            let absent = state.absent(index);
+            drop(state);
+            drop(pages);
+            match absent {
+                Absent::Request if !self.request(paged, index) => {
+                    paged.state.lock().fail(index, index + 1);
+                    crate::pager::wake(koid, index, index + 1);
+                    return Err(Error::Io);
+                }
+                Absent::Request | Absent::Wait => {}
+                Absent::Failed => return Err(Error::Io),
+                Absent::Revoked => return Err(Error::AccessDenied),
+            }
+            // Nothing runs between the request and the registration, as
+            // the kernel runs one thread at a time on the one processor.
+            let thread = crate::pager::wait_for(koid, index)?;
+            let slept = crate::sched::wait_for_signals(&thread, i64::MAX);
+            crate::pager::stop_waiting(koid, &thread);
+            slept?;
+            if thread.state() == crate::sched::DEAD {
+                return Err(Error::Io);
+            }
+        }
+    }
+
+    /// Makes every unanswered and later page request fail, as the
+    /// object's pager is gone.
+    pub fn pager_gone(&self) {
+        if let Some(paged) = &self.paged {
+            let _pages = self.pages.lock();
+            paged.state.lock().pager_gone();
+        }
+        crate::pager::wake(self.header.koid(), 0, u64::MAX);
+    }
+
+    /// Moves the frames of the `len` bytes from `source_offset` of
+    /// `source` into the pages from `offset` that are not present, as
+    /// `pager_supply` does, and frees the rest, so that the source range
+    /// ends up decommitted. Moved frames stay charged to the source's
+    /// budget.
+    pub fn supply(
+        &self,
+        offset: u64,
+        len: u64,
+        source: &MemoryObject,
+        source_offset: u64,
+    ) -> Result<(), Error> {
+        let Some(paged) = &self.paged else {
+            return Err(Error::NotSupported);
+        };
+        if !source.is_anonymous() {
+            return Err(Error::NotSupported);
+        }
+        source.check_writable()?;
+        self.check_revoked()?;
+        let aligned = [offset, len, source_offset]
+            .iter()
+            .all(|v| v.is_multiple_of(PAGE_SIZE));
+        if !aligned {
+            return Err(Error::InvalidArgs);
+        }
+        self.check_range(offset, len)?;
+        source.check_range(source_offset, len)?;
+        source.commit(source_offset, len)?;
+        let moved = source.take_frames(source_offset, len)?;
+        let first = offset / PAGE_SIZE;
+        let mut leftover = Vec::new();
+        {
+            let mut pages = self.pages.lock();
+            let mut state = paged.state.lock();
+            let mut charges = paged.charges.lock();
+            for (i, phys) in moved.into_iter().enumerate() {
+                let index = first + i as u64;
+                let fits = index < pages.count() && pages.frame(index).is_none();
+                if fits && state.supply(index) == Ok(true) {
+                    charges.insert(phys, source.budget.clone());
+                    pages.insert(index, phys);
+                } else if leftover.try_reserve(1).is_ok() {
+                    leftover.push(phys);
+                }
+            }
+        }
+        source.free(leftover);
+        crate::pager::wake(self.header.koid(), first, first + len / PAGE_SIZE);
+        Ok(())
+    }
+
+    /// Takes the frames of the `len` bytes from `offset`, all present,
+    /// out of the object without freeing them or releasing their charges,
+    /// and removes their translations. Fails with `BadState` while a
+    /// reader or writer holds the object's frames.
+    fn take_frames(&self, offset: u64, len: u64) -> Result<Vec<u64>, Error> {
+        let mut pages = self.pages.lock();
+        if pages.pinned() {
+            return Err(Error::BadState);
+        }
+        let (first, end) = (offset / PAGE_SIZE, (offset + len) / PAGE_SIZE);
+        self.unmap_pages(first, end);
+        Ok(pages.decommit(first, end))
     }
 
     /// A physical object of the `size` bytes from `base`, both multiples
@@ -120,6 +338,7 @@ impl MemoryObject {
             physical: Some((base, policy)),
             spaces: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
+            paged: None,
         }))
     }
 
@@ -140,7 +359,7 @@ impl MemoryObject {
         if seals & !SEALS != 0 {
             return Err(Error::InvalidArgs);
         }
-        if self.is_physical() {
+        if !self.is_anonymous() {
             return Err(Error::NotSupported);
         }
         if self.seals() & SEAL_SEAL != 0 {
@@ -259,6 +478,32 @@ impl MemoryObject {
         if !aspace::allows(perms, write, fetch) || index >= pages.count() {
             return Fault::Denied;
         }
+        if let Some(paged) = &self.paged {
+            let mut state = paged.state.lock();
+            if state.revoked() {
+                return Fault::Denied;
+            }
+            let Some(phys) = pages.frame(index) else {
+                return Fault::Absent(index);
+            };
+            // With dirty tracking, a page becomes writable through a
+            // mapping only on a write, which marks it dirty.
+            let writable =
+                perms & PERM_WRITE != 0 && (write || state.writable_without_fault(index));
+            if write {
+                state.written(index);
+            }
+            drop(state);
+            let access = Access {
+                writable,
+                executable: perms & PERM_EXECUTE != 0,
+                policy: Policy::Cached,
+            };
+            return match space.replace(virt, phys, access) {
+                Ok(()) => Fault::Resolved,
+                Err(_) => Fault::OutOfMemory,
+            };
+        }
         let (phys, writable) = match (self.physical, pages.frame(index)) {
             (Some((base, _)), _) => (base + index * PAGE_SIZE, perms & PERM_WRITE != 0),
             (None, Some(phys)) => (phys, perms & PERM_WRITE != 0),
@@ -315,6 +560,25 @@ impl MemoryObject {
             return Ok(Held {
                 mem: self.clone(),
                 backing: Some(Backing::Mapped(virt)),
+            });
+        }
+        if let Some(paged) = &self.paged {
+            let mut state = paged.state.lock();
+            if state.revoked() {
+                return Err(Error::AccessDenied);
+            }
+            let Some(phys) = pages.frame(index) else {
+                drop(state);
+                drop(pages);
+                self.obtain(index)?;
+                return self.hold_for_write(space, virt);
+            };
+            state.written(index);
+            drop(state);
+            pages.pin();
+            return Ok(Held {
+                mem: self.clone(),
+                backing: Some(Backing::Frame(phys)),
             });
         }
         let phys = match pages.frame(index) {
@@ -391,6 +655,29 @@ impl MemoryObject {
         if source.frames.try_reserve_exact(count as usize).is_err() {
             return Err(Error::NoMemory);
         }
+        if let Some(paged) = &self.paged {
+            // Every page is obtained first, then all are recorded together
+            // with the pages locked, so that none goes in between.
+            loop {
+                for index in first..first + count {
+                    work.item();
+                    self.obtain(index)?;
+                }
+                let mut pages = self.pages.lock();
+                if paged.state.lock().revoked() {
+                    return Err(Error::AccessDenied);
+                }
+                pages.check_range(offset, len)?;
+                if (first..first + count).all(|i| pages.frame(i).is_some()) {
+                    source
+                        .frames
+                        .extend((first..first + count).map(|i| pages.frame(i)));
+                    pages.pin();
+                    source.pinned = true;
+                    return Ok(source);
+                }
+            }
+        }
         self.pages.lock().pin();
         source.pinned = true;
         for index in first..first + count {
@@ -448,13 +735,30 @@ impl MemoryObject {
     /// Frees frames taken from the pages and releases their charges.
     fn free(&self, frames: impl IntoIterator<Item = u64>) {
         let mut count = 0;
+        let mut supplied = Vec::new();
         if let Some(allocator) = FRAMES.lock().as_mut() {
             for phys in frames {
                 allocator.free(phys, 1);
-                count += 1;
+                // A supplied frame's charge goes back to its own budget.
+                match self
+                    .paged
+                    .as_ref()
+                    .and_then(|p| p.charges.lock().remove(&phys))
+                {
+                    Some(budget) if supplied.try_reserve(1).is_ok() => supplied.push(budget),
+                    Some(budget) => {
+                        budget.release_pages(1);
+                        budget.release_kernel(PAGE_ENTRY_COST);
+                    }
+                    None => count += 1,
+                }
             }
         }
         self.release(count);
+        for budget in supplied {
+            budget.release_pages(1);
+            budget.release_kernel(PAGE_ENTRY_COST);
+        }
     }
 
     /// Fills the `len` bytes from `offset` from `source`, in chunks.
@@ -473,15 +777,32 @@ impl MemoryObject {
             let (index, inside, n) = chunk(offset + done, len - done);
             let mut buf = [0u8; CHUNK];
             source(&mut buf[..n])?;
-            let mut pages = self.pages.lock();
-            self.check_writable()?;
-            let phys = match pages.frame(index) {
-                Some(phys) => phys,
-                None => self.alloc_mapped(&mut pages, index)?,
-            };
-            // SAFETY: the pages are locked.
-            let frame = unsafe { frame_bytes(phys) };
-            frame[inside..inside + n].copy_from_slice(&buf[..n]);
+            // The chunk is read from the source once; a page of a paged
+            // object that went meanwhile is obtained again.
+            loop {
+                self.obtain(index)?;
+                let mut pages = self.pages.lock();
+                self.check_writable()?;
+                let phys = match (&self.paged, pages.frame(index)) {
+                    (Some(paged), frame) => {
+                        let mut state = paged.state.lock();
+                        if state.revoked() {
+                            return Err(Error::AccessDenied);
+                        }
+                        let Some(phys) = frame else {
+                            continue;
+                        };
+                        state.written(index);
+                        phys
+                    }
+                    (None, Some(phys)) => phys,
+                    (None, None) => self.alloc_mapped(&mut pages, index)?,
+                };
+                // SAFETY: the pages are locked.
+                let frame = unsafe { frame_bytes(phys) };
+                frame[inside..inside + n].copy_from_slice(&buf[..n]);
+                break;
+            }
             done += n as u64;
         }
         Ok(())
@@ -490,7 +811,7 @@ impl MemoryObject {
     /// Gives every page of the `len` bytes from `offset` a frame, as
     /// `mem_op` `COMMIT` does.
     pub fn commit(&self, offset: u64, len: u64) -> Result<(), Error> {
-        if self.is_physical() {
+        if !self.is_anonymous() {
             return Err(Error::NotSupported);
         }
         let mut pages = self.pages.lock();
@@ -507,7 +828,7 @@ impl MemoryObject {
     /// Frees the frames of every page of the `len` bytes from `offset`,
     /// which then read as zero, as `mem_op` `DECOMMIT` does.
     pub fn decommit(&self, offset: u64, len: u64) -> Result<(), Error> {
-        if self.is_physical() {
+        if !self.is_anonymous() {
             return Err(Error::NotSupported);
         }
         let mut pages = self.pages.lock();
@@ -523,6 +844,7 @@ impl MemoryObject {
 
     /// Changes the size to `size` bytes, freeing the frames past it.
     pub fn set_size(&self, size: u64) -> Result<(), Error> {
+        self.check_revoked()?;
         let mut pages = self.pages.lock();
         let seals = self.seals();
         let refused = if size < pages.size() {
@@ -542,6 +864,12 @@ impl MemoryObject {
             frame[from..].fill(0);
         }
         self.unmap_pages(pages.count(), u64::MAX);
+        if let Some(paged) = &self.paged {
+            let mut state = paged.state.lock();
+            for &index in resized.freed.keys() {
+                state.removed(index);
+            }
+        }
         drop(pages);
         self.free(resized.freed.into_values());
         Ok(())
@@ -551,6 +879,8 @@ impl MemoryObject {
     pub fn info(&self) -> [u8; INFO_MEMORY_SIZE] {
         let kind = if self.is_physical() {
             KIND_PHYSICAL
+        } else if self.is_paged() {
+            KIND_PAGED
         } else {
             KIND_ANONYMOUS
         };

@@ -52,6 +52,8 @@ mod memory;
 mod memory_object;
 #[cfg(any(target_os = "none", test))]
 mod output;
+#[cfg(target_os = "none")]
+mod pager;
 #[cfg(any(target_os = "none", test))]
 mod paging;
 #[cfg(target_os = "none")]

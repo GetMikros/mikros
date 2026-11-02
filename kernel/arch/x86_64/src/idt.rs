@@ -300,7 +300,10 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
                 Fault::Resolved => {}
                 _ if frame.cs & 3 == 0 && crate::usercopy::recover(frame) => {}
                 _ if frame.cs & 3 == 0 => crate::panic::exception(frame),
-                Fault::Denied => crate::exception::raise(frame, kind::PAGE_FAULT, addr),
+                // `resolve_fault` waits for absent pages itself.
+                Fault::Denied | Fault::Absent(_) => {
+                    crate::exception::raise(frame, kind::PAGE_FAULT, addr)
+                }
                 Fault::OutOfMemory => {
                     crate::exception::raise(frame, kind::OUT_OF_MEMORY, frame.rip)
                 }

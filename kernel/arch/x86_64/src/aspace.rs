@@ -533,6 +533,8 @@ pub enum Fault {
     Denied,
     /// A region allows it, but no frame or page table could be had.
     OutOfMemory,
+    /// The page of a paged object is absent and must be obtained first.
+    Absent(u64),
 }
 
 /// Resolves a page fault at `addr`, raised by user code or by the user
@@ -553,7 +555,18 @@ pub fn resolve_fault(frame: &crate::idt::Frame, addr: u64) -> Fault {
     };
     let write = frame.error & FAULT_WRITE != 0;
     let fetch = frame.error & FAULT_FETCH != 0;
-    mem.fault(aspace, addr & !(PAGE_SIZE - 1), write, fetch)
+    // An absent page of a paged object is waited for, outside the
+    // object's locks, and the access tried again.
+    loop {
+        match mem.fault(aspace, addr & !(PAGE_SIZE - 1), write, fetch) {
+            Fault::Absent(index) => {
+                if mem.obtain(index).is_err() {
+                    return Fault::Denied;
+                }
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Whether a region with `perms` allows a write or fetch as given.

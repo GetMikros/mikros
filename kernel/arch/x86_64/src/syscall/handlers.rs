@@ -1365,3 +1365,56 @@ pub fn mem_clone(
         .insert_then(clone, rights, Some(budget), |h| out.write(h))
         .map(drop)
 }
+
+pub fn pager_create(options: u32, out: UserOut<Handle>) -> Result<(), Error> {
+    if options != 0 || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let pager = crate::pager::Pager::new(current_process()?.budget())?;
+    give(pager, ObjectType::Pager, out)
+}
+
+pub fn pager_create_memory(
+    pager: Checked,
+    port: Checked,
+    key: u64,
+    size: u64,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let pager = object::<crate::pager::Pager>(pager);
+    let port = object::<crate::port::Port>(port);
+    let budget = current_process()?.budget().clone();
+    let mem = MemoryObject::new_paged(&budget, pager.header().koid(), &port, key, size, options)?;
+    pager.add(&mem)?;
+    give(mem, ObjectType::MemoryObject, out)
+}
+
+/// The paged object `mem` of `pager`, or `AccessDenied` when `pager` is
+/// not its pager and `NotSupported` when it is not paged.
+fn paged_of(pager: Checked, mem: Checked) -> Result<Arc<MemoryObject>, Error> {
+    let mem = object::<MemoryObject>(mem);
+    if !mem.is_paged() {
+        return Err(Error::NotSupported);
+    }
+    if !mem.paged_by(&*pager.object) {
+        return Err(Error::AccessDenied);
+    }
+    Ok(mem)
+}
+
+pub fn pager_supply(
+    pager: Checked,
+    mem: Checked,
+    offset: u64,
+    len: u64,
+    source: Checked,
+    source_offset: u64,
+) -> Result<(), Error> {
+    let mem = paged_of(pager, mem)?;
+    let source = object::<MemoryObject>(source);
+    mem.supply(offset, len, &source, source_offset)
+}
