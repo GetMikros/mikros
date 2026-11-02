@@ -46,6 +46,7 @@ pub struct Optional {
     pub pcid: bool,
     pub fsgsbase: bool,
     pub avx512f: bool,
+    pub invpcid: bool,
 }
 
 impl Optional {
@@ -63,6 +64,7 @@ impl Optional {
             pcid: bit(ecx1, 17),
             fsgsbase: bit(ebx7, 0),
             avx512f: bit(ebx7, 16),
+            invpcid: bit(ebx7, 10),
         }
     }
 }
@@ -126,6 +128,7 @@ mod tests {
             pcid: true,
             fsgsbase: true,
             avx512f: true,
+            invpcid: true,
         };
         let optional = CR4_SMEP | CR4_SMAP | CR4_UMIP | CR4_PCIDE | CR4_FSGSBASE;
         assert_eq!(cr4(0, all), required | optional);
@@ -147,10 +150,10 @@ mod tests {
         let f = Optional::read(|leaf, _| match leaf {
             0 => [7, 0, 0, 0],
             1 => [0, 0, 1 << 17, 0],
-            7 => [0, 1 << 7 | 1 << 20 | 1 | 1 << 16, 1 << 2, 0],
+            7 => [0, 1 << 7 | 1 << 20 | 1 | 1 << 16 | 1 << 10, 1 << 2, 0],
             _ => [0; 4],
         });
-        assert!(f.smep && f.smap && f.umip && f.pcid && f.fsgsbase && f.avx512f);
+        assert!(f.smep && f.smap && f.umip && f.pcid && f.fsgsbase && f.avx512f && f.invpcid);
         let f = Optional::read(|leaf, _| {
             if leaf == 0 {
                 [1, 0, 0, 0]

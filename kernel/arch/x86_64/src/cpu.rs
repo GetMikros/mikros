@@ -1,6 +1,10 @@
 //! Processor control.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether INVPCID is used: reported, with PCIDs enabled.
+static INVPCID: AtomicBool = AtomicBool::new(false);
 
 /// Stops the processor with interrupts disabled.
 pub fn halt() -> ! {
@@ -180,6 +184,39 @@ pub fn init() {
         write_cr4(control::cr4(read_cr4(), features));
         write_xcr(0, control::xcr0(features));
     }
+    INVPCID.store(features.pcid && features.invpcid, Ordering::Relaxed);
+}
+
+/// Whether `invpcid_address` and `invpcid_context` may be used.
+pub fn has_invpcid() -> bool {
+    INVPCID.load(Ordering::Relaxed)
+}
+
+/// Runs INVPCID of `kind` for `pcid` and `virt`.
+fn invpcid(kind: u64, pcid: u64, virt: u64) {
+    let descriptor = [pcid, virt];
+    // SAFETY: `has_invpcid` holds; INVPCID only drops cached translations
+    // and reads the 16-byte descriptor.
+    unsafe {
+        asm!(
+            "invpcid {}, [{}]",
+            in(reg) kind,
+            in(reg) descriptor.as_ptr(),
+            options(nostack, preserves_flags, readonly),
+        )
+    };
+}
+
+/// Invalidates the translation of the page that contains `virt` under
+/// `pcid`, which need not be loaded. `has_invpcid` must hold.
+pub fn invpcid_address(pcid: u64, virt: u64) {
+    invpcid(0, pcid, virt);
+}
+
+/// Invalidates every translation under `pcid` other than global ones.
+/// `has_invpcid` must hold.
+pub fn invpcid_context(pcid: u64) {
+    invpcid(1, pcid, 0);
 }
 
 /// Invalidates the translations of the page that contains `virt`,

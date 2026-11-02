@@ -36,6 +36,29 @@ const SLOTS: usize = 6;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Where a change of an address space invalidates the translations it
+/// removes on this processor.
+#[derive(Clone, Copy)]
+enum Here {
+    /// The space is loaded: by address, in the loaded PCID.
+    Loaded,
+    /// The space has this PCID, with its translations valid, but is not
+    /// loaded: by address, with INVPCID.
+    Pcid(u64),
+    /// Nowhere: the space's PCID is flushed before its next load.
+    Elsewhere,
+}
+
+impl Here {
+    fn invalidate(self, virt: u64) {
+        match self {
+            Here::Loaded => cpu::invlpg(virt),
+            Here::Pcid(pcid) => cpu::invpcid_address(pcid, virt),
+            Here::Elsewhere => {}
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Slot {
     /// The address space that has the slot's PCID, or 0.
@@ -236,20 +259,18 @@ impl AddressSpace {
         };
         // Interrupts are off, so the space stays loaded or not loaded on
         // this processor while its pages are removed.
-        let loaded = percpu::this().pcids.lock().current == self.id;
+        let here = self.here();
         let mut pages = Mapper::existing(&mut tables, inner.root, false);
         let mut removed = false;
         pages
             .unmap_present(virt, size, |v, phys| {
-                if loaded {
-                    cpu::invlpg(v);
-                }
+                here.invalidate(v);
                 removed = true;
                 unmapped(phys);
             })
             .map_err(|_| Error::Internal)?;
         if removed {
-            self.flush_elsewhere(loaded);
+            self.flush_elsewhere(here);
         }
         Ok(())
     }
@@ -288,19 +309,17 @@ impl AddressSpace {
         };
         // Interrupts are off, so the space stays loaded or not loaded on
         // this processor while its pages are removed.
-        let loaded = percpu::this().pcids.lock().current == self.id;
+        let here = self.here();
         let mut pages = Mapper::existing(&mut tables, inner.root, false);
         let mut removed = false;
         let next = pages
             .unmap_present_some(virt, size, limit, |v, _| {
-                if loaded {
-                    cpu::invlpg(v);
-                }
+                here.invalidate(v);
                 removed = true;
             })
             .map_err(|_| Error::Internal)?;
         if removed {
-            self.flush_elsewhere(loaded);
+            self.flush_elsewhere(here);
         }
         Ok(next)
     }
@@ -577,16 +596,34 @@ impl AddressSpace {
         self.map(virt, phys, access, true)
     }
 
-    /// Makes processors that do not have the space loaded flush its PCID
-    /// before using it again. When it is loaded here, its translations
-    /// have already been invalidated.
-    fn flush_elsewhere(&self, loaded: bool) {
+    /// How translations of the space that a change removes are
+    /// invalidated on this processor.
+    fn here(&self) -> Here {
+        let pcids = percpu::this().pcids.lock();
+        if pcids.current == self.id {
+            return Here::Loaded;
+        }
+        // A PCID whose translations are all valid keeps them valid when
+        // the removed ones are invalidated in it by address.
+        let generation = self.generation.load(Ordering::Acquire);
+        let current = |s: &Slot| s.id == self.id && s.generation == generation;
+        match pcids.slots.iter().position(current) {
+            Some(i) if pcids_enabled() && cpu::has_invpcid() => Here::Pcid(i as u64 + 1),
+            _ => Here::Elsewhere,
+        }
+    }
+
+    /// Makes processors flush the space's PCID before using it again,
+    /// other than this one when `here` invalidated the removed
+    /// translations in it.
+    fn flush_elsewhere(&self, here: Here) {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        if !loaded {
+        if matches!(here, Here::Elsewhere) {
             return;
         }
         let mut pcids = percpu::this().pcids.lock();
-        if let Some(slot) = pcids.slots.iter_mut().find(|s| s.id == self.id) {
+        let current = |s: &&mut Slot| s.id == self.id && s.generation == generation - 1;
+        if let Some(slot) = pcids.slots.iter_mut().find(current) {
             slot.generation = generation;
         }
     }
@@ -621,10 +658,18 @@ impl AddressSpace {
             generation,
         };
         let pcid = index as u64 + 1;
-        let value = root | pcid | if flush { 0 } else { CR3_NO_FLUSH };
-        // SAFETY: the tables share the kernel half; loading without the
-        // no-flush bit drops the PCID's old translations.
-        unsafe { cpu::write_cr3(value) };
+        // The PCID's old translations go: with INVPCID before the load,
+        // otherwise by loading without the no-flush bit.
+        let no_flush = if !flush {
+            CR3_NO_FLUSH
+        } else if cpu::has_invpcid() {
+            cpu::invpcid_context(pcid);
+            CR3_NO_FLUSH
+        } else {
+            0
+        };
+        // SAFETY: the tables share the kernel half.
+        unsafe { cpu::write_cr3(root | pcid | no_flush) };
         pcids.current = self.id;
     }
 }
