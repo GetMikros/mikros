@@ -66,10 +66,6 @@ fn ticks(ns: u64, hz: u64) -> u64 {
 /// any earlier setting. A deadline that has passed interrupts at once. In
 /// one-shot mode, a deadline beyond the timer's range interrupts at the
 /// end of the range, before the deadline.
-#[expect(
-    dead_code,
-    reason = "nothing arms the timer before the scheduler exists"
-)]
 pub fn arm(deadline: i64) {
     let wait = u64::try_from(deadline.saturating_sub(crate::time::now())).unwrap_or(0);
     if DEADLINE_MODE.load(Ordering::Relaxed) {
@@ -86,4 +82,5 @@ pub fn arm(deadline: i64) {
 /// Handles the timer interrupt.
 pub fn interrupt() {
     apic::eoi();
+    crate::sched::timer_interrupt();
 }

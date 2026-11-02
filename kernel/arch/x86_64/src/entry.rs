@@ -54,6 +54,7 @@ extern "sysv64" fn _start(info: *const u8) -> ! {
     }
     crate::cpu::init();
     crate::percpu::init();
+    crate::context::init();
     let info = boot_info(info);
     log!(
         Info,
@@ -84,5 +85,5 @@ extern "sysv64" fn on_kernel_tables() -> ! {
         "kernel page tables active, {} MiB of memory free",
         (free * 4096) >> 20
     );
-    crate::cpu::halt()
+    crate::sched::run()
 }

@@ -1,8 +1,10 @@
 //! Per-processor data, reached through the GS base.
 
 use crate::cpu::write_msr;
+use crate::sched::CpuSched;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, Ordering};
+use kernel_core::sync::SpinLock;
 
 pub const IA32_GS_BASE: u32 = 0xC000_0101;
 pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
@@ -15,15 +17,18 @@ pub struct PerCpu {
     this: *const PerCpu,
     /// The processor's index, from 0.
     index: u32,
+    /// The scheduler state of the processor.
+    pub sched: SpinLock<CpuSched>,
 }
 
-// SAFETY: each processor only reads its own structure, and `this` is
-// never written after setup.
+// SAFETY: each processor only reads its own structure, `this` is never
+// written after setup, and the rest is behind locks.
 unsafe impl Sync for PerCpu {}
 
 static BOOT_CPU: PerCpu = PerCpu {
     this: &raw const BOOT_CPU,
     index: 0,
+    sched: SpinLock::new(CpuSched::new()),
 };
 
 static READY: AtomicBool = AtomicBool::new(false);
@@ -56,6 +61,22 @@ pub fn index() -> u32 {
         )
     };
     index
+}
+
+/// This processor's data. `init` must have run.
+pub fn this() -> &'static PerCpu {
+    let this: *const PerCpu;
+    // SAFETY: the GS base points at this processor's PerCpu, whose first
+    // field holds its address.
+    unsafe {
+        asm!(
+            "mov {}, gs:[0]",
+            out(reg) this,
+            options(readonly, nostack, preserves_flags),
+        )
+    };
+    // SAFETY: the address is that of a static PerCpu.
+    unsafe { &*this }
 }
 
 const _: () = assert!(core::mem::offset_of!(PerCpu, index) == 8);

@@ -12,6 +12,8 @@ mod apic;
 mod backtrace;
 #[cfg(any(target_os = "none", test))]
 mod clock;
+#[cfg(target_os = "none")]
+mod context;
 #[cfg(any(target_os = "none", test))]
 #[cfg_attr(test, allow(dead_code))]
 mod control;
@@ -41,6 +43,8 @@ mod panic;
 mod percpu;
 #[cfg(target_os = "none")]
 mod random;
+#[cfg(target_os = "none")]
+mod sched;
 #[cfg(target_os = "none")]
 mod serial;
 #[cfg(target_os = "none")]
