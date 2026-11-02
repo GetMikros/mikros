@@ -164,6 +164,58 @@ pub struct Placement<'a> {
     pub switch_code: (u64, u64),
 }
 
+/// The physical ranges the direct map covers, as start and end, with
+/// adjacent ranges joined so that large pages can span range boundaries.
+pub fn direct_runs(memory_map: &[MemoryMapEntry]) -> impl Iterator<Item = (u64, u64)> + '_ {
+    let mut entries = memory_map
+        .iter()
+        .filter(|e| Kind::from_u32(e.kind).is_some_and(Kind::in_direct_map))
+        .peekable();
+    core::iter::from_fn(move || {
+        let first = entries.next()?;
+        let start = first.phys_start;
+        let mut end = start + first.page_count * PAGE_SIZE;
+        while let Some(next) = entries.next_if(|e| e.phys_start == end) {
+            end += next.page_count * PAGE_SIZE;
+        }
+        Some((start, end))
+    })
+}
+
+/// The most tables needed to map `size` bytes above the last level.
+fn upper_tables(size: u64) -> u64 {
+    size.div_ceil(1 << 39) + 2 + size.div_ceil(GIB_1) + 2
+}
+
+/// The most tables needed to map `size` bytes with 4 KiB pages.
+fn small_page_tables(size: u64) -> u64 {
+    upper_tables(size) + size.div_ceil(MIB_2) + 2
+}
+
+/// An upper bound on the number of tables `build` uses for `kernel`,
+/// `switch_size` bytes of switch code, and a direct map of `runs`, the
+/// results of `direct_runs`. Direct-map runs need at most two last-level
+/// tables each, since the direct map preserves 1 GiB alignment.
+pub fn table_bound(
+    kernel: &Kernel,
+    switch_size: u64,
+    runs: impl IntoIterator<Item = (u64, u64)>,
+) -> u64 {
+    let segments: u64 = kernel
+        .segments
+        .iter()
+        .map(|s| {
+            let (start, end) = s.pages();
+            small_page_tables((end - start) as u64)
+        })
+        .sum();
+    let direct: u64 = runs
+        .into_iter()
+        .map(|(start, end)| upper_tables(end - start) + 2)
+        .sum();
+    1 + segments + small_page_tables(BOOT_STACK_SIZE) + small_page_tables(switch_size) + direct
+}
+
 /// The lowest virtual address of the boot stack.
 pub fn stack_virt(layout: Layout) -> u64 {
     layout.virt_base - BOOT_STACK_SIZE
@@ -196,27 +248,8 @@ pub fn build<F: Frames>(
         Access::DATA,
     )?;
 
-    // Runs of adjacent direct-mapped ranges are mapped together so that
-    // large pages can span range boundaries.
-    let mut run: Option<(u64, u64)> = None;
-    let direct = placement
-        .memory_map
-        .iter()
-        .filter(|e| Kind::from_u32(e.kind).is_some_and(Kind::in_direct_map));
-    for entry in direct {
-        let end = entry.phys_start + entry.page_count * PAGE_SIZE;
-        run = match run {
-            Some((start, run_end)) if run_end == entry.phys_start => Some((start, end)),
-            Some((start, run_end)) => {
-                let base = placement.direct_map_base;
-                mapper.map(base + start, start, run_end - start, Access::DATA)?;
-                Some((entry.phys_start, end))
-            }
-            None => Some((entry.phys_start, end)),
-        };
-    }
-    if let Some((start, end)) = run {
-        let base = placement.direct_map_base;
+    let base = placement.direct_map_base;
+    for (start, end) in direct_runs(placement.memory_map) {
         mapper.map(base + start, start, end - start, Access::DATA)?;
     }
 

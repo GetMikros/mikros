@@ -192,6 +192,21 @@ fn builds_the_entry_tables() {
     };
     let mut pool = Pool::new(64);
     let root = build(&mut pool, true, &placement).unwrap();
+    let runs: Vec<_> = direct_runs(&memory_map).collect();
+    assert_eq!(
+        runs,
+        [
+            (0, 0x9f_000),
+            (0x10_0000, 0x40_0000),
+            (0x40_1000, 0x60_0000)
+        ]
+    );
+    let bound = table_bound(&kernel, 0x2000, runs);
+    assert!(
+        pool.tables.len() as u64 <= bound,
+        "{} > {bound}",
+        pool.tables.len()
+    );
     let mut at = |virt| translate(&mut pool, root, virt);
 
     // Each segment with its own rights, nothing in the gaps.
