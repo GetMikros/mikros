@@ -115,14 +115,7 @@ pub fn run(args: &Args) -> Result<()> {
         bail!("live images are not supported yet: the boot image's contents are not defined");
     }
     let built = build::build(args.kind)?;
-    let (Some(bootloader), Some(kernel), Some(boot_image)) =
-        (&built.bootloader, &built.kernel, &built.boot_image)
-    else {
-        bail!(
-            "cannot create a disk image: `cargo xtask build` does not build the bootloader, \
-             kernel and boot image yet"
-        );
-    };
+
     let root_guid = Uuid::new_v4();
     let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
     let bootmenu = read(&built.bootmenu)?;
@@ -130,9 +123,9 @@ pub fn run(args: &Args) -> Result<()> {
     let contents = [
         ("EFI/Mikros/bootmenu.efi", bootmenu.clone()),
         ("EFI/BOOT/BOOTX64.EFI", bootmenu),
-        ("EFI/Mikros/mikrosboot.efi", read(bootloader)?),
-        ("EFI/Mikros/kernel", read(kernel)?),
-        ("EFI/Mikros/boot.img", read(boot_image)?),
+        ("EFI/Mikros/mikrosboot.efi", read(&built.bootloader)?),
+        ("EFI/Mikros/kernel", read(&built.kernel)?),
+        ("EFI/Mikros/boot.img", read(&built.boot_image)?),
         ("EFI/Mikros/boot.conf", command_line.into_bytes()),
     ];
     let files: Vec<(&str, &[u8])> = contents.iter().map(|(p, d)| (*p, d.as_slice())).collect();

@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
+use std::fs::{self, File};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -47,13 +48,12 @@ pub struct Args {
     pub kind: Kind,
 }
 
-/// The paths of the built components. Components that are not built yet
-/// are `None`.
+/// The paths of the built components.
 pub struct Built {
     pub bootmenu: PathBuf,
-    pub bootloader: Option<PathBuf>,
-    pub kernel: Option<PathBuf>,
-    pub boot_image: Option<PathBuf>,
+    pub bootloader: PathBuf,
+    pub kernel: PathBuf,
+    pub boot_image: PathBuf,
 }
 
 /// Builds every component of the build kind `kind`.
@@ -69,12 +69,27 @@ pub fn build(kind: Kind) -> Result<Built> {
     println!("built    {}", kernel.display());
     let debug_info = crate::debuginfo::split(&kernel)?;
     println!("built    {}", debug_info.display());
+    let boot_image = boot_image(kind)?;
+    println!("built    {}", boot_image.display());
     Ok(Built {
         bootmenu,
-        bootloader: Some(bootloader),
-        kernel: Some(kernel),
-        boot_image: None,
+        bootloader,
+        kernel,
+        boot_image,
     })
+}
+
+/// Writes the boot archive. There are no user-space components to include yet.
+fn boot_image(kind: Kind) -> Result<PathBuf> {
+    let dir = crate::workspace_root()
+        .join("target/boot")
+        .join(kind.name());
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("boot.img");
+    let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+    let mut archive = tar::Builder::new(file);
+    archive.finish().context("finishing the boot archive")?;
+    Ok(path)
 }
 
 pub fn run(args: &Args) -> Result<()> {
@@ -112,4 +127,19 @@ fn cargo_build(package: &str, bin: &str, target: &str, kind: Kind) -> Result<Pat
         .join(bin);
     path.set_extension(extension);
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_an_empty_boot_archive() {
+        let path = boot_image(Kind::Debug).unwrap();
+        assert!(path.ends_with("target/boot/debug/boot.img"));
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes, vec![0; 1024]);
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        assert_eq!(archive.entries().unwrap().count(), 0);
+    }
 }
