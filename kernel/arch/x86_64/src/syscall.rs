@@ -125,6 +125,7 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     ];
     frame.rax = generated::dispatch(frame.rax, &args) as u64;
     crate::sched::preempt_user();
+    crate::sched::exit_if_dead();
     // SYSRET to an address outside the user range would fault in ring 0.
     u64::from(!(USER_START..USER_END).contains(&frame.rip))
 }

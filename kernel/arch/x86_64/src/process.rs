@@ -1,13 +1,13 @@
 //! Processes: an address space, a handle table and threads.
 
-use crate::aspace::AddressSpace;
+use crate::aspace::{AddressSpace, USER_END, USER_START};
 use crate::sched::{self, Thread};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use kernel_core::object::budget::Budget;
 use kernel_core::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
-use kernel_core::object::{Header, Name, Object, ObjectType};
+use kernel_core::object::{Header, Name, Object, ObjectType, signals};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
@@ -28,6 +28,8 @@ pub struct Process {
     /// The threads created in the process. Threads keep their process
     /// alive, not the other way round.
     threads: SpinLock<Vec<Weak<Thread>>>,
+    /// The started threads that are not DEAD, changed under `threads`.
+    started: AtomicU32,
 }
 
 impl Process {
@@ -60,6 +62,7 @@ impl Process {
             state: AtomicU32::new(NEW),
             exit_code: AtomicI64::new(0),
             threads: SpinLock::new(Vec::new()),
+            started: AtomicU32::new(0),
         }))
     }
 
@@ -133,6 +136,7 @@ impl Process {
             None => HANDLE_INVALID,
         };
         process.state.store(RUNNING, Ordering::Release);
+        process.started.fetch_add(1, Ordering::Relaxed);
         Thread::start_user(thread, entry, stack, u64::from(handle), arg2);
         drop(threads);
         Ok(())
@@ -155,8 +159,58 @@ impl Process {
         if thread.state() != sched::NEW || process.state() != RUNNING {
             return Err(Error::BadState);
         }
+        process.started.fetch_add(1, Ordering::Relaxed);
         Thread::start_user(thread, entry, stack, arg1, arg2);
         Ok(())
+    }
+
+    /// Makes `thread` DEAD. When it was the last started thread of its
+    /// process that was not DEAD, the process terminates with exit code 0.
+    pub fn kill_thread(thread: &Arc<Thread>) {
+        let Some(process) = thread.process() else {
+            return;
+        };
+        let threads = process.threads.lock();
+        let was = sched::make_dead(thread);
+        let last = (was == sched::RUNNABLE || was == sched::BLOCKED)
+            && process.started.fetch_sub(1, Ordering::Relaxed) == 1;
+        drop(threads);
+        if last {
+            process.terminate(0);
+        }
+    }
+
+    /// Terminates the process with exit code `code`, unless it has
+    /// terminated already: makes every thread DEAD, removes every user
+    /// mapping, closes every handle, and sets the state `TERMINATED` and
+    /// the `TERMINATED` signal on the process and its threads.
+    pub fn terminate(&self, code: i64) {
+        let threads: Vec<Arc<Thread>> = {
+            let mut threads = self.threads.lock();
+            if self.state() == TERMINATED {
+                return;
+            }
+            threads.retain(|t| t.strong_count() > 0);
+            let threads: Vec<_> = threads.iter().filter_map(Weak::upgrade).collect();
+            for thread in &threads {
+                sched::make_dead(thread);
+            }
+            self.exit_code.store(code, Ordering::Release);
+            self.state.store(TERMINATED, Ordering::Release);
+            threads
+        };
+        // Frames belong to whoever mapped them, so they are not freed.
+        self.aspace
+            .unmap(USER_START, USER_END - USER_START, |_| {})
+            .expect("user mappings are 4 KiB pages inside the user range");
+        // Objects are dropped after the lock is released, as dropping one
+        // can drop further objects.
+        let handles = core::mem::take(&mut *self.handles.lock());
+        drop(handles);
+        self.header.update_signals(0, signals::TERMINATED);
+        for thread in &threads {
+            thread.header().update_signals(0, signals::TERMINATED);
+        }
     }
 }
 

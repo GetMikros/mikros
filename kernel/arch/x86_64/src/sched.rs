@@ -300,7 +300,9 @@ fn schedule(requeue: bool) {
     let ran = now - cpu.slice_start;
     current.cpu_time.fetch_add(ran, Ordering::Relaxed);
     cpu.fair.charge(ran);
-    if requeue && current.state() == RUNNABLE {
+    // A thread made DEAD by another goes on running until it reaches
+    // `exit_if_dead`, so it is queued again like a runnable one.
+    if requeue && current.state() != BLOCKED {
         let entity = *current.entity.lock();
         // Room for the running thread was reserved when it was queued.
         cpu.fair.enqueue(Queued::new(current.clone()), entity);
@@ -330,7 +332,7 @@ fn schedule(requeue: bool) {
         }
         None => cpu.idle_rsp,
     };
-    if current.state() == DEAD {
+    if !requeue && current.state() == DEAD {
         cpu.dead = Some(current.clone());
     }
     drop(cpu);
@@ -381,6 +383,9 @@ pub fn sleep_until(deadline: i64) -> Result<(), Error> {
         let Some(current) = cpu.current.clone() else {
             return Ok(());
         };
+        if current.state() == DEAD {
+            return Ok(());
+        }
         cpu.sleepers
             .insert(deadline, Queued::new(current.clone()))
             .map_err(|_| Error::NoMemory)?;
@@ -415,6 +420,31 @@ pub fn exit() -> ! {
     }
     schedule(false);
     unreachable!("a dead thread ran again");
+}
+
+/// Makes `thread` DEAD and returns the state it was in. A sleeping
+/// thread is queued again, so that it runs to `exit_if_dead`; a queued or
+/// running one gets there by itself, and a `NEW` one never runs.
+pub fn make_dead(thread: &Arc<Thread>) -> u32 {
+    let was = thread.state.swap(DEAD, Ordering::AcqRel);
+    if was == BLOCKED {
+        let mut cpu = this_cpu().lock();
+        let queued = Queued(Arc::as_ptr(thread));
+        // The reference the sleeper held moves to the run queue.
+        if cpu.sleepers.remove(&queued) {
+            let entity = *thread.entity.lock();
+            cpu.fair.enqueue(queued, entity);
+        }
+    }
+    was
+}
+
+/// Ends the running thread if it is DEAD. Called before every return
+/// to user mode.
+pub fn exit_if_dead() {
+    if current().is_some_and(|t| t.state() == DEAD) {
+        exit();
+    }
 }
 
 /// Runs on a new thread's stack after its first switch.
@@ -458,6 +488,7 @@ fn user_entry(_: usize) {
     };
     let [rip, rsp, arg1, arg2] = thread.user.lock().start;
     drop(thread);
+    exit_if_dead();
     // SAFETY: `switch_in` loaded the thread's address space, extended
     // state and user bases before switching to it.
     unsafe { context::enter_user(rip, rsp, arg1, arg2) }

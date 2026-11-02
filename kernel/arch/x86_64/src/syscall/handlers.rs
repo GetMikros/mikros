@@ -201,3 +201,26 @@ pub fn thread_set_user_base(which: u32, value: u64) -> Result<(), Error> {
     crate::sched::set_user_base(base, value);
     Ok(())
 }
+
+/// The calling thread. The return to user mode ends it once it is DEAD.
+fn current_thread() -> Result<Arc<Thread>, Error> {
+    crate::sched::current().ok_or(Error::BadHandle)
+}
+
+pub fn thread_exit() -> Result<(), Error> {
+    Process::kill_thread(&current_thread()?);
+    Ok(())
+}
+
+pub fn process_exit(code: i64) -> Result<(), Error> {
+    current_process()?.terminate(code);
+    Ok(())
+}
+
+pub fn task_kill(handle: Checked) -> Result<(), Error> {
+    match handle.object.header().kind() {
+        ObjectType::Process => object::<Process>(handle).terminate(-1),
+        _ => Process::kill_thread(&object(handle)),
+    }
+    Ok(())
+}
