@@ -584,15 +584,98 @@ fn log_readers(s: &Startup) -> Result {
     ensure("reading to the end", read_record(reader).0 == SHOULD_WAIT)
 }
 
+fn free_pages() -> Result<u64> {
+    let mut record = [0u8; 16];
+    // SAFETY: the pointer describes `record`.
+    let status = unsafe { sys::system_get_memory_info(record.as_mut_ptr()) };
+    check("reading memory information", status)?;
+    ensure("counting frames", u64_at(&record, 0) >= u64_at(&record, 8))?;
+    Ok(u64_at(&record, 8))
+}
+
+fn protect(s: &Startup, perms: u32, addr: u64, len: u64) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::vm_protect(s.process, perms, addr, len) }
+}
+
+/// Committing takes frames and decommitting frees them and zeroes the
+/// pages; protection changes stay within the mapping handle's rights.
+fn memory_operations(s: &Startup) -> Result {
+    let pages = 8;
+    let mem = create_memory(pages * PAGE_SIZE)?;
+    let before = free_pages()?;
+    // SAFETY: the call takes no pointers.
+    check("committing", unsafe {
+        sys::mem_op(mem, 1, 0, pages * PAGE_SIZE)
+    })?;
+    ensure("taking frames", free_pages()? <= before - pages)?;
+    let at = map(s.process, mem, pages * PAGE_SIZE)?;
+    // SAFETY: the mapping is readable and writable.
+    unsafe { (at as *mut u64).write_volatile(0x55) };
+    // Mapping may have taken page table frames, so the count is taken
+    // again just before decommitting.
+    let committed = free_pages()?;
+    // SAFETY: the call takes no pointers.
+    check("decommitting", unsafe {
+        sys::mem_op(mem, 2, 0, pages * PAGE_SIZE)
+    })?;
+    ensure("freeing frames", free_pages()? >= committed + pages)?;
+    // SAFETY: the mapping is readable.
+    ensure(
+        "reading zero",
+        unsafe { (at as *const u64).read_volatile() } == 0,
+    )?;
+    // SAFETY: the call takes no pointers.
+    ensure(
+        "refusing other ops",
+        unsafe { sys::mem_op(mem, 3, 0, PAGE_SIZE) } == -10,
+    )?;
+
+    check("making it read-only", protect(s, PERM_READ, at, PAGE_SIZE))?;
+    // SAFETY: the page is readable.
+    ensure(
+        "still reading",
+        unsafe { (at as *const u64).read_volatile() } == 0,
+    )?;
+    check(
+        "making it writable again",
+        protect(s, PERM_READ | PERM_WRITE, at, PAGE_SIZE),
+    )?;
+    // SAFETY: the page is writable again.
+    unsafe { (at as *mut u64).write_volatile(9) };
+    ensure(
+        "refusing write and execute",
+        protect(s, 7, at, PAGE_SIZE) == -10,
+    )?;
+    ensure(
+        "needing mapped pages",
+        protect(s, PERM_READ, at, (pages + 1) * PAGE_SIZE) == -25,
+    )?;
+
+    let mut read_only = 0;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::handle_duplicate(mem, (1 << 2) | (1 << 5), &mut read_only) };
+    check("making a read-only handle", status)?;
+    let mut ro = 0;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::vm_map(s.process, PERM_READ, 0, read_only, 0, PAGE_SIZE, &mut ro) };
+    check("mapping it", status)?;
+    ensure(
+        "staying within the rights",
+        protect(s, PERM_READ | PERM_WRITE, ro, PAGE_SIZE) == -13,
+    )
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 9] = [
+const TESTS: [(&str, Test); 10] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
     ("priorities", priorities),
     ("ports", ports),
     ("log_readers", log_readers),
+    ("memory_operations", memory_operations),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
