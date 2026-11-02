@@ -585,43 +585,94 @@ pub fn channel_call(
         UserOut::<u8>::new(field(0x20)),
         UserOut::<Handle>::new(field(0x30)),
     );
+    let sizes = [UserOut::new(out.0), UserOut::new(out.0 + 8)];
     let (len, count) = (reply.bytes.len() as u64, reply.handles.len() as u64);
-    let sizes_at = [out.0, out.0 + 8];
-    let budget = Some(process.budget());
-    let aspace = process.aspace();
-    let sizes = || crate::output::channel_sizes(aspace.as_ref(), sizes_at, len, count);
+    // The reply and its handles go when it is dropped on failure.
     if len > rd_cap || count > rd_handles_cap {
-        sizes()?;
-        // The reply and its handles go when it is dropped.
+        publish_sizes(&process, &sizes, len, count)?;
         return Err(Error::BufferTooSmall);
     }
     if !rd_bytes.fits(len) || !rd_handles.fits(count) {
         return Err(Error::InvalidArgs);
     }
-    let ranges = [
-        (rd_bytes.0, len),
-        (rd_handles.0, count * size_of::<Handle>() as u64),
-        (sizes_at[0], size_of::<u64>() as u64),
-        (sizes_at[1], size_of::<u64>() as u64),
-    ];
-    let mut table = process.handles().lock();
-    let mut work = Work::new(|| debug_assert!(false, "a check while locked"));
-    let prepare = |work: &mut Work<_>| {
-        Outputs::prepare(&ranges, budget, work, |page| aspace.hold_for_write(page))
-    };
-    let accepted = crate::output::accept(
+    let ranges = message_ranges(&rd_bytes, &rd_handles, &sizes, len, count);
+    let outputs = prepare(&process, &ranges)?;
+    let installed = crate::output::install(
         &reply.handles,
-        &mut table,
-        budget,
-        &mut work,
-        prepare,
-        sizes,
+        &mut process.handles().lock(),
+        Some(process.budget()),
     );
-    drop(table);
-    let (outputs, values) = accepted?;
     let mut work = Work::new(crate::sched::preempt_point);
-    crate::output::deliver(outputs, &reply.bytes, &values[..count as usize], &mut work);
+    match installed {
+        Ok(values) => {
+            let handles = &values[..count as usize];
+            crate::output::deliver(outputs, &reply.bytes, handles, &mut work);
+            Ok(())
+        }
+        Err(e) => {
+            end_undelivered(outputs, e, len, count, &mut work);
+            Err(e)
+        }
+    }
+}
+
+/// Ends a delivery that failed with `e` after its outputs were prepared:
+/// writes only the two sizes when the table could not hold the handles,
+/// and releases the outputs.
+fn end_undelivered<F: FnMut()>(
+    outputs: Outputs<Held>,
+    e: Error,
+    len: u64,
+    count: u64,
+    work: &mut Work<F>,
+) {
+    if e == Error::NoResources {
+        crate::output::deliver_sizes(outputs, len, count, work);
+    } else {
+        outputs.release(work);
+    }
+}
+
+/// The output ranges of a received message of `len` bytes and `count`
+/// handles: its bytes, its handles and the two sizes.
+fn message_ranges(
+    bytes: &UserOut<u8>,
+    handles: &UserOut<Handle>,
+    sizes: &[UserOut<u64>; 2],
+    len: u64,
+    count: u64,
+) -> [(u64, u64); 4] {
+    [
+        bytes.range(len),
+        handles.range(count),
+        sizes[0].range(1),
+        sizes[1].range(1),
+    ]
+}
+
+/// Prepares and writes only the two sizes of a received message.
+fn publish_sizes(
+    process: &Process,
+    sizes: &[UserOut<u64>; 2],
+    len: u64,
+    count: u64,
+) -> Result<(), Error> {
+    let outputs = prepare(process, &[sizes[0].range(1), sizes[1].range(1)])?;
+    publish(outputs, &[bytes_of(&[len]), bytes_of(&[count])]);
     Ok(())
+}
+
+/// Why `channel_read` did not take the message it prepared for.
+enum NotTaken {
+    /// The oldest message is no longer one of the sizes prepared for.
+    Changed,
+    Failed(Error),
+}
+
+impl From<Error> for NotTaken {
+    fn from(e: Error) -> NotTaken {
+        NotTaken::Failed(e)
+    }
 }
 
 pub fn channel_read(
@@ -637,40 +688,50 @@ pub fn channel_read(
         return Err(Error::InvalidArgs);
     }
     let process = current_process()?;
-    let budget = Some(process.budget());
-    let aspace = process.aspace();
-    let mut table = process.handles().lock();
-    // A message spans fewer pages than a check is due after, so nothing
-    // waits while the locks are held.
-    let mut work = Work::new(|| debug_assert!(false, "a check while locked"));
-    let taken = object::<Endpoint>(channel).take(|data, entries| {
-        let (len, count) = (data.len() as u64, entries.len() as u64);
-        let sizes =
-            || crate::output::channel_sizes(aspace.as_ref(), [out_len.0, out_count.0], len, count);
+    let endpoint = object::<Endpoint>(channel);
+    let sizes = [out_len, out_count];
+    // The outputs are prepared for the oldest message's sizes with no lock
+    // held; when another reader takes it meanwhile, this one starts again.
+    loop {
+        let (len, count) = endpoint.front_sizes()?;
         if len > bytes_cap || count > handles_cap {
-            sizes()?;
+            publish_sizes(&process, &sizes, len, count)?;
             return Err(Error::BufferTooSmall);
         }
         if !bytes.fits(len) || !handles.fits(count) {
             return Err(Error::InvalidArgs);
         }
-        let ranges = [
-            (bytes.0, len),
-            (handles.0, count * size_of::<Handle>() as u64),
-            (out_len.0, size_of::<u64>() as u64),
-            (out_count.0, size_of::<u64>() as u64),
-        ];
-        let prepare = |work: &mut Work<_>| {
-            Outputs::prepare(&ranges, budget, work, |page| aspace.hold_for_write(page))
-        };
-        crate::output::accept(entries, &mut table, budget, &mut work, prepare, sizes)
-            .map(|(outputs, values)| (outputs, values, entries.len()))
-    });
-    drop(table);
-    let ((outputs, values, count), message) = taken?;
-    let mut work = Work::new(crate::sched::preempt_point);
-    crate::output::deliver(outputs, &message.bytes, &values[..count], &mut work);
-    Ok(())
+        let outputs = prepare(
+            &process,
+            &message_ranges(&bytes, &handles, &sizes, len, count),
+        )?;
+        let mut table = process.handles().lock();
+        let taken = endpoint.take(|data, entries| {
+            if (data.len() as u64, entries.len() as u64) != (len, count) {
+                return Err(NotTaken::Changed);
+            }
+            Ok(crate::output::install(
+                entries,
+                &mut table,
+                Some(process.budget()),
+            )?)
+        });
+        drop(table);
+        let mut work = Work::new(crate::sched::preempt_point);
+        match taken {
+            Ok((values, message)) => {
+                let handles = &values[..count as usize];
+                crate::output::deliver(outputs, &message.bytes, handles, &mut work);
+                return Ok(());
+            }
+            Err(NotTaken::Changed) => outputs.release(&mut work),
+            Err(NotTaken::Failed(e)) => {
+                // The message stays queued.
+                end_undelivered(outputs, e, len, count, &mut work);
+                return Err(e);
+            }
+        }
+    }
 }
 
 pub fn exception_channel_create(

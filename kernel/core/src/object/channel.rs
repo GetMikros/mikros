@@ -280,6 +280,19 @@ impl Endpoint {
         call.reply
     }
 
+    /// The number of bytes and handles of the oldest message toward this
+    /// endpoint, which stays queued. Fails as `take` does when there is
+    /// none.
+    pub fn front_sizes(&self) -> Result<(u64, u64), Error> {
+        let shared = self.shared.lock();
+        let peer = &shared.ends[self.peer_side()];
+        match shared.queues[self.side].messages.front() {
+            Some(m) => Ok((m.bytes.len() as u64, m.handles.len() as u64)),
+            None if peer.strong_count() == 0 => Err(Error::PeerClosed),
+            None => Err(Error::ShouldWait),
+        }
+    }
+
     /// Passes the oldest message toward this endpoint to `accept`, which
     /// gets its bytes and handles. When `accept` succeeds, the message is
     /// removed. Fails with `ShouldWait` or `PeerClosed` when there is

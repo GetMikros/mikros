@@ -1,4 +1,5 @@
-//! Preparation and publication of bounded batches of syscall outputs.
+//! Installing the handles of received channel messages and publishing
+//! the messages to their prepared outputs.
 
 use crate::publish::{Outputs, Page, Work};
 use alloc::sync::Arc;
@@ -7,101 +8,37 @@ use kernel_core::object::channel::HANDLES_MAX;
 use kernel_core::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
 use kernel_core::status::Error;
 
-pub type Output<'a> = (u64, &'a [u8]);
-
-pub trait Memory {
-    type Locked<'a>: Locked
-    where
-        Self: 'a;
-
-    /// Resolve writable backing without modifying the destination bytes.
-    fn resolve(&self, addr: u64, len: usize) -> Result<(), Error>;
-    fn lock(&self) -> Self::Locked<'_>;
-}
-
-pub trait Locked {
-    /// Recheck after resolving all outputs, with their backing held stable.
-    fn writable(&mut self, addr: u64, len: usize) -> bool;
-    /// Publish a checked range without allocation, blocking or fault resolution.
-    ///
-    /// # Safety
-    ///
-    /// `writable` must have returned true for this entire range while this
-    /// guard held the backing stable; the active address space must not change.
-    unsafe fn write(&mut self, addr: u64, bytes: &[u8]);
-}
-
-/// The caller must bound the batch so publication needs no reschedule point.
-/// Outputs may overlap; writes occur in the supplied order.
-pub fn write(memory: &impl Memory, outputs: &[Output<'_>]) -> Result<(), Error> {
-    for &(addr, bytes) in outputs {
-        if !bytes.is_empty() {
-            memory.resolve(addr, bytes.len())?;
-        }
-    }
-    let mut locked = memory.lock();
-    for &(addr, bytes) in outputs {
-        if !bytes.is_empty() && !locked.writable(addr, bytes.len()) {
-            return Err(Error::InvalidArgs);
-        }
-    }
-    for &(addr, bytes) in outputs {
-        if !bytes.is_empty() {
-            // SAFETY: every range passed writable under this same guard.
-            // Publication neither blocks nor switches address spaces.
-            unsafe { locked.write(addr, bytes) };
-        }
-    }
-    Ok(())
-}
-
-/// Publish the two message sizes together, including on size-reporting errors.
-pub fn channel_sizes(
-    memory: &impl Memory,
-    outputs: [u64; 2],
-    len: u64,
-    count: u64,
-) -> Result<(), Error> {
-    write(
-        memory,
-        &[
-            (outputs[0], &len.to_ne_bytes()),
-            (outputs[1], &count.to_ne_bytes()),
-        ],
-    )
-}
-
-/// Installs a received message's handles once `prepare` has prepared its
-/// outputs, keeping both only when both succeed. When the table cannot
-/// hold the handles, publishes the two sizes with `sizes`.
-pub fn accept<P: Page, F: FnMut()>(
+/// Installs a received message's handles in `table`, charged to `budget`,
+/// keeping none unless all fit, and returns them.
+pub fn install(
     entries: &[Entry],
     table: &mut HandleTable,
     budget: Option<&Arc<Budget>>,
-    work: &mut Work<F>,
-    prepare: impl FnOnce(&mut Work<F>) -> Result<Outputs<P>, Error>,
-    sizes: impl FnOnce() -> Result<(), Error>,
-) -> Result<(Outputs<P>, [Handle; HANDLES_MAX]), Error> {
-    let outputs = prepare(work)?;
+) -> Result<[Handle; HANDLES_MAX], Error> {
     let mut values = [HANDLE_INVALID; HANDLES_MAX];
-    let installed = table.insert_many_then::<HANDLES_MAX>(entries, budget, |handles| {
+    table.insert_many_then::<HANDLES_MAX>(entries, budget, |handles| {
         values[..handles.len()].copy_from_slice(handles);
         Ok(())
-    });
-    match installed {
-        Ok(()) => Ok((outputs, values)),
-        Err(e) => {
-            outputs.release(work);
-            if e == Error::NoResources {
-                sizes()?;
-            }
-            Err(e)
-        }
-    }
+    })?;
+    Ok(values)
+}
+
+/// Writes only the two sizes of a message of `len` bytes and `count`
+/// handles to the outputs prepared for it, as when the table cannot hold
+/// its handles, and releases them.
+pub fn deliver_sizes<P: Page, F: FnMut()>(
+    outputs: Outputs<P>,
+    len: u64,
+    count: u64,
+    work: &mut Work<F>,
+) {
+    outputs.write(2, 0, &len.to_ne_bytes(), work);
+    outputs.write(3, 0, &count.to_ne_bytes(), work);
+    outputs.release(work);
 }
 
 /// Writes a received message's bytes, its installed handles and their two
-/// sizes, in that order, to the outputs `accept` prepared, and releases
+/// sizes, in that order, to the outputs prepared for it, and releases
 /// them.
 pub fn deliver<P: Page, F: FnMut()>(
     outputs: Outputs<P>,
@@ -127,63 +64,7 @@ mod tests {
     use kernel_core::object::channel::{Endpoint, Message};
     use kernel_core::object::handles::SLOT_COST;
     use kernel_core::object::rights;
-    use std::cell::{RefCell, RefMut};
     use std::sync::Arc;
-
-    struct Model {
-        bytes: RefCell<Vec<u8>>,
-        resolve_end: usize,
-        locked_end: usize,
-    }
-
-    struct Guard<'a> {
-        bytes: RefMut<'a, Vec<u8>>,
-        end: usize,
-    }
-
-    fn fits(addr: u64, len: usize, end: usize) -> bool {
-        addr.checked_add(len as u64)
-            .is_some_and(|n| n <= end as u64)
-    }
-
-    impl Memory for Model {
-        type Locked<'a> = Guard<'a>;
-
-        fn resolve(&self, addr: u64, len: usize) -> Result<(), Error> {
-            if fits(addr, len, self.resolve_end) {
-                Ok(())
-            } else {
-                Err(Error::InvalidArgs)
-            }
-        }
-
-        fn lock(&self) -> Guard<'_> {
-            Guard {
-                bytes: self.bytes.borrow_mut(),
-                end: self.locked_end,
-            }
-        }
-    }
-
-    impl Locked for Guard<'_> {
-        fn writable(&mut self, addr: u64, len: usize) -> bool {
-            fits(addr, len, self.end)
-        }
-
-        // SAFETY: the caller checked the full range under this guard.
-        unsafe fn write(&mut self, addr: u64, bytes: &[u8]) {
-            let start = addr as usize;
-            self.bytes[start..start + bytes.len()].copy_from_slice(bytes);
-        }
-    }
-
-    fn model(resolve_end: usize, locked_end: usize) -> Model {
-        Model {
-            bytes: RefCell::new(vec![0xa5; 16.max(resolve_end).max(locked_end)]),
-            resolve_end,
-            locked_end,
-        }
-    }
 
     fn entries() -> Vec<Entry> {
         let (a, b) = Endpoint::pair(None).unwrap();
@@ -250,7 +131,9 @@ mod tests {
         ]
     }
 
-    /// Reads one message from `receiver` into `user` as channel_read does.
+    /// Reads one message from `receiver` into `user` as channel_read does:
+    /// prepares the outputs for the oldest message's sizes, then installs
+    /// its handles and takes it.
     fn receive(
         receiver: &Endpoint,
         user: &mut User,
@@ -259,31 +142,30 @@ mod tests {
         budget: Option<&Arc<Budget>>,
         checks: &mut usize,
     ) -> Result<(), Error> {
-        let sizes = RefCell::new(None);
-        let mut work = Work::new(|| panic!("no check while locked"));
-        let taken = receiver.take(|data, entries| {
-            let ranges = ranges(outputs, data.len(), entries.len());
-            let prepared = accept(
-                entries,
-                table,
-                budget,
-                &mut work,
-                |work| user.prepare(&ranges, work),
-                || {
-                    *sizes.borrow_mut() = Some((data.len(), entries.len()));
-                    Ok(())
-                },
-            );
-            prepared.map(|(prepared, values)| (prepared, values, entries.len()))
-        });
-        if let Some((len, count)) = sizes.take() {
-            user.bytes[outputs[2] as usize..][..8].copy_from_slice(&(len as u64).to_ne_bytes());
-            user.bytes[outputs[3] as usize..][..8].copy_from_slice(&(count as u64).to_ne_bytes());
-        }
-        let ((prepared, values, count), message) = taken?;
+        let (len, count) = receiver.front_sizes()?;
+        let ranges = ranges(outputs, len as usize, count as usize);
+        let prepared = user.prepare(&ranges, &mut Work::new(|| {}))?;
+        let taken = receiver.take(|_, entries| install(entries, table, budget));
         let mut work = Work::new(|| *checks += 1);
-        deliver(prepared, &message.bytes, &values[..count], &mut work);
-        Ok(())
+        match taken {
+            Ok((values, message)) => {
+                deliver(
+                    prepared,
+                    &message.bytes,
+                    &values[..count as usize],
+                    &mut work,
+                );
+                Ok(())
+            }
+            Err(Error::NoResources) => {
+                deliver_sizes(prepared, len, count, &mut work);
+                Err(Error::NoResources)
+            }
+            Err(e) => {
+                prepared.release(&mut work);
+                Err(e)
+            }
+        }
     }
 
     #[test]
@@ -380,62 +262,5 @@ mod tests {
         assert_eq!(&user.bytes[0x123..0x123 + 65536], payload.as_slice());
         assert_eq!(&user.bytes[0x10300..0x10308], &65536u64.to_ne_bytes());
         assert_eq!(&user.bytes[0x10308..0x10310], &64u64.to_ne_bytes());
-    }
-
-    #[test]
-    fn channel_sizes_second_crossing_fault_leaves_both_untouched() {
-        for (resolve_end, locked_end) in [(12, 16), (16, 12)] {
-            let memory = model(resolve_end, locked_end);
-            assert_eq!(
-                channel_sizes(&memory, [0, 8], 3, 2),
-                Err(Error::InvalidArgs)
-            );
-            assert_eq!(*memory.bytes.borrow(), [0xa5; 16]);
-        }
-    }
-
-    #[test]
-    fn later_output_failure_leaves_every_output_untouched() {
-        let memory = model(8, 16);
-        assert_eq!(
-            write(&memory, &[(0, &[1, 2]), (8, &[3])]),
-            Err(Error::InvalidArgs)
-        );
-        assert_eq!(*memory.bytes.borrow(), [0xa5; 16]);
-    }
-
-    #[test]
-    fn crossing_inaccessible_backing_does_not_write_a_prefix() {
-        let memory = model(8, 16);
-        assert_eq!(
-            write(&memory, &[(6, &[1, 2, 3, 4])]),
-            Err(Error::InvalidArgs)
-        );
-        assert_eq!(*memory.bytes.borrow(), [0xa5; 16]);
-    }
-
-    #[test]
-    fn rechecks_all_outputs_under_the_lock() {
-        let memory = model(16, 8);
-        assert_eq!(
-            write(&memory, &[(0, &[1]), (8, &[2])]),
-            Err(Error::InvalidArgs)
-        );
-        assert_eq!(*memory.bytes.borrow(), [0xa5; 16]);
-    }
-
-    #[test]
-    fn writes_overlapping_outputs_in_order() {
-        let memory = model(16, 16);
-        write(&memory, &[(0, &[1, 2, 3]), (1, &[4, 5])]).unwrap();
-        assert_eq!(&memory.bytes.borrow()[..4], &[1, 4, 5, 0xa5]);
-    }
-
-    #[test]
-    fn ignores_empty_outputs_and_rejects_overflow() {
-        let memory = model(16, 16);
-        write(&memory, &[(u64::MAX, &[])]).unwrap();
-        assert_eq!(write(&memory, &[(u64::MAX, &[1])]), Err(Error::InvalidArgs));
-        assert_eq!(*memory.bytes.borrow(), [0xa5; 16]);
     }
 }

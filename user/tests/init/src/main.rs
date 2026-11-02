@@ -1313,8 +1313,8 @@ fn pagers(s: &Startup) -> Result {
 /// of failing.
 fn paged_outputs(s: &Startup) -> Result {
     let before = REQUESTS.load(Ordering::Acquire);
-    let (_pager, mem) = paged_object(s, 3, 0)?;
-    let at = map(s.process, mem, 3 * PAGE_SIZE)?;
+    let (_pager, mem) = paged_object(s, 5, 0)?;
+    let at = map(s.process, mem, 5 * PAGE_SIZE)?;
     let len = (at + PAGE_SIZE) as *mut u64;
     // SAFETY: the record and its size lie in the writable mapping.
     let status = unsafe { sys::object_get_info(mem, 1, at as *mut u8, 64, len) };
@@ -1329,9 +1329,33 @@ fn paged_outputs(s: &Startup) -> Result {
     // SAFETY: the mapping is readable.
     let (a, b) = unsafe { (ends.read_volatile(), ends.add(1).read_volatile()) };
     ensure("writing both handles", a != 0 && b != 0 && a != b)?;
+    // SAFETY: the pointer and length describe the message.
+    check("writing a message", unsafe {
+        sys::channel_write(a, b"paged".as_ptr(), 5, core::ptr::null(), 0)
+    })?;
+    let (got, sizes) = (
+        (at + 3 * PAGE_SIZE) as *mut u8,
+        (at + 4 * PAGE_SIZE) as *mut u64,
+    );
+    // SAFETY: the bytes and both sizes lie in the writable mapping.
+    let status =
+        unsafe { sys::channel_read(b, got, 16, core::ptr::null_mut(), 0, sizes, sizes.add(1)) };
+    check("reading a message into absent pages", status)?;
+    // SAFETY: the mapping is readable.
+    let (bytes, len, count) = unsafe {
+        (
+            (got as *const [u8; 5]).read_volatile(),
+            sizes.read_volatile(),
+            sizes.add(1).read_volatile(),
+        )
+    };
+    ensure(
+        "delivering the message",
+        &bytes == b"paged" && len == 5 && count == 0,
+    )?;
     ensure(
         "requesting each page",
-        REQUESTS.load(Ordering::Acquire) == before + 3,
+        REQUESTS.load(Ordering::Acquire) == before + 5,
     )
 }
 
