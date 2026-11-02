@@ -109,7 +109,7 @@ pub fn set_ports(start: u64, end: u64, allow: bool) {
 /// and loads them. Every segment register is reloaded.
 #[cfg(target_os = "none")]
 pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64) {
-    use crate::cpu::{read_msr, write_msr};
+    use crate::cpu::read_msr;
     use crate::percpu::{IA32_GS_BASE, IA32_KERNEL_GS_BASE};
     use core::arch::asm;
     let tss = &raw mut TSS;
@@ -136,7 +136,9 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64) {
             base: gdt as u64,
         };
         // Loading a null selector into GS may clear its base, so both GS
-        // bases are kept across the reload.
+        // bases are kept across the reload. They are written back in the
+        // same block, so that no other code, such as the coverage hook of
+        // the fuzz build, runs while the base is cleared.
         let gs = read_msr(IA32_GS_BASE);
         let kernel_gs = read_msr(IA32_KERNEL_GS_BASE);
         // The far return reloads CS; the other data segment registers
@@ -154,15 +156,30 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64) {
             "mov fs, {null:x}",
             "mov gs, {null:x}",
             "ltr {tss:x}",
+            "mov ecx, {gs_msr:e}",
+            "mov eax, {gs:e}",
+            "mov rdx, {gs}",
+            "shr rdx, 32",
+            "wrmsr",
+            "mov ecx, {kernel_gs_msr:e}",
+            "mov eax, {kernel_gs:e}",
+            "mov rdx, {kernel_gs}",
+            "shr rdx, 32",
+            "wrmsr",
             pointer = in(reg) &pointer,
             code = in(reg) u64::from(KERNEL_CODE),
             data = in(reg) u64::from(KERNEL_DATA),
             null = in(reg) 0u64,
             tss = in(reg) u64::from(TSS_SELECTOR),
+            gs = in(reg) gs,
+            kernel_gs = in(reg) kernel_gs,
+            gs_msr = in(reg) IA32_GS_BASE,
+            kernel_gs_msr = in(reg) IA32_KERNEL_GS_BASE,
             tmp = out(reg) _,
+            out("eax") _,
+            out("ecx") _,
+            out("edx") _,
         );
-        write_msr(IA32_GS_BASE, gs);
-        write_msr(IA32_KERNEL_GS_BASE, kernel_gs);
     }
 }
 
