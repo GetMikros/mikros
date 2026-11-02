@@ -9,8 +9,9 @@ use crate::percpu;
 use crate::publish::ITEM_STEP;
 use crate::space;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use kernel_core::object::budget::Budget;
+use kernel_core::object::budget::{Budget, Scratch};
 use kernel_core::regions::{
     Charge, MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions, Removal,
 };
@@ -124,6 +125,17 @@ pub struct AddressSpace {
 
 /// The region type of a user address space.
 pub type RegionOf = Region<Arc<MemoryObject>, Mapping>;
+
+/// A part of a range of an address space that one region maps.
+pub struct Piece {
+    pub mem: Arc<MemoryObject>,
+    /// The offset in the object of the part's first byte, and its length.
+    pub offset: u64,
+    pub len: u64,
+    /// The region's permissions and the most its handle allowed.
+    pub perms: u32,
+    pub max: u32,
+}
 
 /// A random value from the kernel's random number generator, which is
 /// seeded during boot.
@@ -588,6 +600,50 @@ impl AddressSpace {
     /// regions are locked.
     pub fn with_region<R>(&self, addr: u64, f: impl FnOnce(Option<&RegionOf>) -> R) -> R {
         f(self.regions.lock().find(addr))
+    }
+
+    /// The parts of the `len` bytes from `addr` that regions not being
+    /// removed map, in address order, listed in room charged to `scratch`
+    /// in steps of `ITEM_STEP` regions with reschedule checks between
+    /// them, and whether any byte of the range lies outside them.
+    pub fn pieces(
+        &self,
+        addr: u64,
+        len: u64,
+        scratch: &mut Scratch,
+    ) -> Result<(Vec<Piece>, bool), Error> {
+        let Some(end) = addr.checked_add(len) else {
+            return Ok((Vec::new(), true));
+        };
+        let mut pieces = Vec::new();
+        let mut gap = false;
+        let mut at = addr;
+        while at < end {
+            {
+                let regions = self.regions.lock();
+                for r in regions.overlapping(at, end).take(ITEM_STEP) {
+                    let (from, to) = (r.start.max(at), r.end().min(end));
+                    gap |= r.start > at || r.removal != 0;
+                    if r.removal == 0 {
+                        scratch.reserve(&mut pieces, 1)?;
+                        pieces.push(Piece {
+                            mem: r.mem.clone(),
+                            offset: r.offset + (from - r.start),
+                            len: to - from,
+                            perms: r.perms,
+                            max: r.max,
+                        });
+                    }
+                    at = to;
+                }
+                if regions.overlapping(at, end).next().is_none() {
+                    gap |= at < end;
+                    break;
+                }
+            }
+            crate::sched::preempt_point();
+        }
+        Ok((pieces, gap))
     }
 
     /// Maps the page at `virt` to `phys`, replacing what it mapped.

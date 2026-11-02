@@ -2355,7 +2355,92 @@ fn thread_lists(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 34] = [
+const ACCESS_DENIED: i64 = -13;
+
+fn read_memory(process: Handle, addr: u64, buf: &mut [u8]) -> i64 {
+    // SAFETY: the pointer and length describe `buf`.
+    unsafe { sys::process_read_memory(process, addr, buf.as_mut_ptr(), buf.len() as u64) }
+}
+
+/// A debugger reads the memory of a process across regions and from
+/// paged objects; ranges without permissions or mapping are not found,
+/// and a revoked object is refused before that.
+fn read_process_memory(s: &Startup) -> Result {
+    let mem = create_memory(2 * PAGE_SIZE)?;
+    mem_write_at(mem, PAGE_SIZE - 3, b"abcdef")?;
+    let at = map(s.process, mem, 2 * PAGE_SIZE)?;
+    check(
+        "splitting the mapping",
+        protect(s, PERM_READ, at + PAGE_SIZE, PAGE_SIZE),
+    )?;
+    let mut got = [0u8; 6];
+    check(
+        "reading across regions",
+        read_memory(s.process, at + PAGE_SIZE - 3, &mut got),
+    )?;
+    ensure("reading the bytes", got == *b"abcdef")?;
+    let mut zeros = [1u8; 8];
+    check(
+        "reading a page never written",
+        read_memory(s.process, at + 2 * PAGE_SIZE - 8, &mut zeros),
+    )?;
+    ensure("reading zeros", zeros == [0; 8])?;
+
+    let mut other = 0;
+    let name = b"target";
+    // SAFETY: the pointers describe `name` and `other`.
+    check("creating a process", unsafe {
+        sys::process_create(s.budget, name.as_ptr(), name.len() as u64, &mut other)
+    })?;
+    let there = map(other, mem, 2 * PAGE_SIZE)?;
+    check(
+        "reading another process",
+        read_memory(other, there + PAGE_SIZE - 3, &mut got),
+    )?;
+    ensure("reading its bytes", got == *b"abcdef")?;
+
+    let mut reserved = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("reserving a range", unsafe {
+        sys::vm_map(s.process, 0, 0, mem, 0, PAGE_SIZE, &mut reserved)
+    })?;
+    ensure(
+        "refusing a range without permissions",
+        read_memory(s.process, reserved, &mut got) == NOT_FOUND,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at + PAGE_SIZE, PAGE_SIZE)
+    })?;
+    ensure(
+        "refusing an unmapped byte",
+        read_memory(s.process, at + PAGE_SIZE - 3, &mut got) == NOT_FOUND,
+    )?;
+
+    let (pager, paged) = paged_object(s, 2, 0)?;
+    let pat = map(s.process, paged, 2 * PAGE_SIZE)?;
+    check(
+        "reading an absent page",
+        read_memory(s.process, pat + PAGE_SIZE, &mut got),
+    )?;
+    ensure("reading the supplied page", got == *b"page 1")?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, pat + PAGE_SIZE, PAGE_SIZE)
+    })?;
+    // SAFETY: the call takes no pointers.
+    check("revoking", unsafe { sys::pager_revoke(pager, paged) })?;
+    ensure(
+        "refusing a revoked object first",
+        read_memory(s.process, pat + PAGE_SIZE - 3, &mut got) == ACCESS_DENIED,
+    )?;
+    ensure(
+        "refusing only the hole",
+        read_memory(s.process, pat + PAGE_SIZE, &mut got) == NOT_FOUND,
+    )
+}
+
+const TESTS: [(&str, Test); 35] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2388,6 +2473,7 @@ const TESTS: [(&str, Test); 34] = [
     ("suspend_blocked_waits", suspend_blocked_waits),
     ("suspend_in_call", suspend_in_call),
     ("thread_lists", thread_lists),
+    ("read_process_memory", read_process_memory),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
 ];

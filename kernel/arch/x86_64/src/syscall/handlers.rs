@@ -3,6 +3,7 @@
 //! argument.
 
 use super::{Checked, UserIn, UserOut, bytes_of, current_process};
+use crate::aspace::Piece;
 use crate::memory_object::{Held, MemoryObject};
 use crate::process::Process;
 use crate::publish::{Outputs, Work};
@@ -814,6 +815,83 @@ pub fn process_get_thread(process: Checked, koid: u64, out: UserOut<Handle>) -> 
     let mut scratch = Scratch::new(Some(current_process()?.budget()));
     let thread = process.thread(koid, &mut scratch)?.ok_or(Error::NotFound)?;
     give(thread, ObjectType::Thread, out)
+}
+
+/// The parts of the `len` bytes from `addr` in the address space of
+/// `process` for a debug access, listed in room charged to `scratch`.
+/// Fails with `AccessDenied` when a part is backed by a revoked paged
+/// object, then with `NotFound` when a byte lies in no region or in one
+/// without permissions, then with `NotSupported` when a part is backed by
+/// a physical object.
+fn debug_pieces(
+    process: &Process,
+    addr: u64,
+    len: u64,
+    scratch: &mut Scratch,
+) -> Result<Vec<Piece>, Error> {
+    let (pieces, gap) = process.aspace().pieces(addr, len, scratch)?;
+    for piece in &pieces {
+        piece.mem.check_revoked()?;
+    }
+    if gap || pieces.iter().any(|p| p.perms == 0) {
+        return Err(Error::NotFound);
+    }
+    if pieces.iter().any(|p| p.mem.is_physical()) {
+        return Err(Error::NotSupported);
+    }
+    Ok(pieces)
+}
+
+pub fn process_read_memory(
+    process: Checked,
+    addr: u64,
+    buf: UserOut<u8>,
+    len: u64,
+) -> Result<(), Error> {
+    let target = object::<Process>(process);
+    let caller = current_process()?;
+    let budget = Some(caller.budget());
+    let mut scratch = Scratch::new(budget);
+    let pieces = debug_pieces(&target, addr, len, &mut scratch)?;
+    if !buf.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    // Every page is obtained and kept before any byte is written, so
+    // that revocation either fails the call here or waits for it.
+    let mut work = Work::new(crate::sched::preempt_point);
+    let mut sources = Vec::new();
+    scratch.reserve_exact(&mut sources, pieces.len())?;
+    for piece in &pieces {
+        sources.push(
+            piece
+                .mem
+                .hold_for_read(piece.offset, piece.len, false, budget, &mut work)?,
+        );
+    }
+    let aspace = caller.aspace();
+    let outputs = Outputs::prepare(&[(buf.0, len)], budget, &mut work, |page| {
+        aspace.hold_for_write(page)
+    })?;
+    // Bytes go through a kernel buffer, as `buf` may be backed by a
+    // source.
+    let mut chunk = [0u8; 256];
+    let mut done = 0;
+    for (piece, source) in pieces.iter().zip(&sources) {
+        let end = piece.offset + piece.len;
+        let mut at = piece.offset;
+        while at < end {
+            let n = ((PAGE_SIZE - at % PAGE_SIZE).min(end - at) as usize).min(chunk.len());
+            source.read(at, &mut chunk[..n]);
+            outputs.write(0, done, &chunk[..n], &mut work);
+            at += n as u64;
+            done += n as u64;
+        }
+    }
+    outputs.release(&mut work);
+    for source in sources {
+        source.release(&mut work);
+    }
+    Ok(())
 }
 
 pub fn thread_suspend(thread: Checked) -> Result<(), Error> {

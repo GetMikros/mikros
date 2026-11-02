@@ -728,6 +728,13 @@ impl<M: Clone, R: Record> Regions<M, R> {
         Ok(())
     }
 
+    /// The regions that overlap the range from `start` to `end`, also
+    /// those being removed, in address order.
+    pub fn overlapping(&self, start: u64, end: u64) -> impl Iterator<Item = &Region<M, R>> {
+        let from = self.find_any(start).map_or(start, |r| r.start);
+        self.map.range(from..end.max(from)).map(|(_, r)| r)
+    }
+
     /// The regions in address order.
     pub fn iter(&self) -> impl Iterator<Item = &Region<M, R>> {
         self.map.values()
@@ -833,6 +840,22 @@ mod tests {
 
     fn starts(r: &Regions<u8>) -> std::vec::Vec<(u64, u64, u64)> {
         r.iter().map(|r| (r.start, r.len, r.offset)).collect()
+    }
+
+    #[test]
+    fn lists_overlapping_regions() {
+        let mut r = empty();
+        r.insert(region(P, 2 * P, 0)).unwrap();
+        r.insert(region(4 * P, P, 0)).unwrap();
+        r.insert(region(6 * P, P, 0)).unwrap();
+        let at = |start, end| -> std::vec::Vec<u64> {
+            r.overlapping(start, end).map(|r| r.start).collect()
+        };
+        assert_eq!(at(2 * P, 5 * P), [P, 4 * P]);
+        assert_eq!(at(0, P), [0u64; 0]);
+        assert_eq!(at(3 * P, 4 * P), [0u64; 0]);
+        assert_eq!(at(4 * P + 1, 8 * P), [4 * P, 6 * P]);
+        assert_eq!(at(5 * P, 2 * P), [0u64; 0]);
     }
 
     #[test]

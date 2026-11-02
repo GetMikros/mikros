@@ -912,3 +912,14 @@ syscalls:
       - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
       - {name: koid, type: u64, dir: in}
       - {name: out, type: "*mut Handle", dir: out, object: Thread}
+
+  - name: process_read_memory
+    number: 89
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0022.R13]
+    args:
+      - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
+      - {name: addr, type: u64, dir: in}
+      - {name: buf, type: "*mut u8", dir: out}
+      - {name: len, type: u64, dir: in}
