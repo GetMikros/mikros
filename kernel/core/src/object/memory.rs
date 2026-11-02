@@ -13,6 +13,8 @@ pub const INFO_MEMORY_SIZE: usize = 0x18;
 
 /// The kind of anonymous memory objects.
 pub const KIND_ANONYMOUS: u32 = 1;
+/// The kind of memory objects of a fixed physical range.
+pub const KIND_PHYSICAL: u32 = 2;
 
 /// The creation option that allows changing the size.
 pub const RESIZABLE: u32 = 1 << 0;
@@ -125,11 +127,12 @@ impl Pages {
         Ok(Resized { zero, freed })
     }
 
-    /// The memory information record, for an object with no seals.
-    pub fn info(&self) -> [u8; INFO_MEMORY_SIZE] {
+    /// The memory information record of an object of `kind`, with no
+    /// seals.
+    pub fn info(&self, kind: u32) -> [u8; INFO_MEMORY_SIZE] {
         let mut record = [0u8; INFO_MEMORY_SIZE];
         record[0x00..0x08].copy_from_slice(&self.size.to_le_bytes());
-        record[0x08..0x0C].copy_from_slice(&KIND_ANONYMOUS.to_le_bytes());
+        record[0x08..0x0C].copy_from_slice(&kind.to_le_bytes());
         record[0x0C..0x10].copy_from_slice(&self.options.to_le_bytes());
         record
     }
@@ -199,7 +202,7 @@ mod tests {
     #[test]
     fn writes_the_information_record() {
         let pages = Pages::new(0x1234, RESIZABLE, MAX).unwrap();
-        let r = pages.info();
+        let r = pages.info(KIND_ANONYMOUS);
         assert_eq!(&r[0..8], &0x1234u64.to_le_bytes());
         assert_eq!(&r[8..24], &[1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     }

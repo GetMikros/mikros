@@ -253,6 +253,9 @@ pub fn mem_create(size: u64, options: u32, out: UserOut<Handle>) -> Result<(), E
 
 pub fn mem_read(mem: Checked, offset: u64, buf: UserOut<u8>, len: u64) -> Result<(), Error> {
     let mem = object::<MemoryObject>(mem);
+    if mem.is_physical() {
+        return Err(Error::NotSupported);
+    }
     mem.check_range(offset, len)?;
     if !buf.fits(len) {
         return Err(Error::InvalidArgs);
@@ -267,6 +270,9 @@ pub fn mem_read(mem: Checked, offset: u64, buf: UserOut<u8>, len: u64) -> Result
 
 pub fn mem_write(mem: Checked, offset: u64, buf: UserIn<u8>, len: u64) -> Result<(), Error> {
     let mem = object::<MemoryObject>(mem);
+    if mem.is_physical() {
+        return Err(Error::NotSupported);
+    }
     mem.check_range(offset, len)?;
     if !buf.fits(len) {
         return Err(Error::InvalidArgs);

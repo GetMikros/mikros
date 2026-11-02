@@ -7,7 +7,9 @@ use crate::space;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use kernel_core::object::budget::Budget;
-use kernel_core::object::memory::{INFO_MEMORY_SIZE, PAGE_ENTRY_COST, PAGE_SIZE, Pages};
+use kernel_core::object::memory::{
+    INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_PHYSICAL, PAGE_ENTRY_COST, PAGE_SIZE, Pages,
+};
 use kernel_core::object::{Header, Object, ObjectType};
 use kernel_core::regions::{PERM_EXECUTE, PERM_WRITE};
 use kernel_core::status::Error;
@@ -28,6 +30,9 @@ pub struct MemoryObject {
     /// Kernel memory charged to the budget for the object itself.
     charged: u64,
     pages: SpinLock<Pages>,
+    /// For a physical object, the start of its range and the cache policy
+    /// of its mappings. Its pages then never hold frames.
+    physical: Option<(u64, Policy)>,
     /// The address spaces with regions that map the object, so that
     /// pages can be unmapped when the object changes.
     spaces: SpinLock<Vec<Weak<AddressSpace>>>,
@@ -82,8 +87,36 @@ impl MemoryObject {
             budget: budget.clone(),
             charged,
             pages: SpinLock::new(pages),
+            physical: None,
             spaces: SpinLock::new(Vec::new()),
         }))
+    }
+
+    /// A physical object of the `size` bytes from `base`, both multiples
+    /// of the page size, mapped with `policy`, charged to `budget`.
+    #[expect(dead_code, reason = "init is not started yet")]
+    pub fn new_physical(
+        budget: &Arc<Budget>,
+        base: u64,
+        size: u64,
+        policy: Policy,
+    ) -> Result<Arc<MemoryObject>, Error> {
+        debug_assert!(base.is_multiple_of(PAGE_SIZE) && size.is_multiple_of(PAGE_SIZE));
+        let pages = Pages::new(size, 0, MAX_SIZE)?;
+        let charged = size_of::<MemoryObject>() as u64;
+        budget.charge_kernel(charged)?;
+        Ok(Arc::new(MemoryObject {
+            header: Header::new(ObjectType::MemoryObject),
+            budget: budget.clone(),
+            charged,
+            pages: SpinLock::new(pages),
+            physical: Some((base, policy)),
+            spaces: SpinLock::new(Vec::new()),
+        }))
+    }
+
+    pub fn is_physical(&self) -> bool {
+        self.physical.is_some()
     }
 
     /// An anonymous object of `count` pages that takes over the `count`
@@ -172,13 +205,14 @@ impl MemoryObject {
         if !aspace::allows(perms, write, fetch) || index >= pages.count() {
             return Fault::Denied;
         }
-        let (phys, writable) = match pages.frame(index) {
-            Some(phys) => (phys, perms & PERM_WRITE != 0),
-            None if write => match self.alloc_mapped(&mut pages, index) {
+        let (phys, writable) = match (self.physical, pages.frame(index)) {
+            (Some((base, _)), _) => (base + index * PAGE_SIZE, perms & PERM_WRITE != 0),
+            (None, Some(phys)) => (phys, perms & PERM_WRITE != 0),
+            (None, None) if write => match self.alloc_mapped(&mut pages, index) {
                 Ok(phys) => (phys, true),
                 Err(_) => return Fault::OutOfMemory,
             },
-            None => match zero_frame() {
+            (None, None) => match zero_frame() {
                 Some(phys) => (phys, false),
                 None => return Fault::OutOfMemory,
             },
@@ -186,7 +220,7 @@ impl MemoryObject {
         let access = Access {
             writable,
             executable: perms & PERM_EXECUTE != 0,
-            policy: Policy::Cached,
+            policy: self.physical.map_or(Policy::Cached, |(_, policy)| policy),
         };
         // The region may have gone while the zero page was being removed.
         if !space.with_region(virt, |r| mine(r) == Some((index, perms))) {
@@ -242,6 +276,9 @@ impl MemoryObject {
         len: u64,
         mut sink: impl FnMut(&[u8]) -> Result<(), Error>,
     ) -> Result<(), Error> {
+        if self.is_physical() {
+            return Err(Error::NotSupported);
+        }
         self.check_range(offset, len)?;
         let mut done = 0;
         while done < len {
@@ -268,6 +305,9 @@ impl MemoryObject {
         len: u64,
         mut source: impl FnMut(&mut [u8]) -> Result<(), Error>,
     ) -> Result<(), Error> {
+        if self.is_physical() {
+            return Err(Error::NotSupported);
+        }
         self.check_range(offset, len)?;
         let mut done = 0;
         while done < len {
@@ -304,7 +344,12 @@ impl MemoryObject {
 
     /// The memory information record.
     pub fn info(&self) -> [u8; INFO_MEMORY_SIZE] {
-        self.pages.lock().info()
+        let kind = if self.is_physical() {
+            KIND_PHYSICAL
+        } else {
+            KIND_ANONYMOUS
+        };
+        self.pages.lock().info(kind)
     }
 }
 
