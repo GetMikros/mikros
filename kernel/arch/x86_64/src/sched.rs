@@ -29,7 +29,7 @@ pub const DEAD: u32 = 4;
 
 pub struct Thread {
     header: Header,
-    #[allow(dead_code, reason = "nothing creates processes yet")]
+    #[allow(dead_code, reason = "names are only for diagnostics, which nothing prints yet")]
     name: Name,
     /// The process of a user thread.
     process: Option<Arc<Process>>,
@@ -111,12 +111,11 @@ impl Thread {
         })
     }
 
-    #[allow(dead_code, reason = "nothing creates processes yet")]
+    #[allow(dead_code, reason = "names are only for diagnostics, which nothing prints yet")]
     pub fn name(&self) -> &Name {
         &self.name
     }
 
-    #[allow(dead_code, reason = "nothing creates processes yet")]
     pub fn process(&self) -> Option<&Arc<Process>> {
         self.process.as_ref()
     }
@@ -430,6 +429,25 @@ pub extern "sysv64" fn thread_start(entry: usize, arg: usize) -> ! {
 /// The running thread.
 pub fn current() -> Option<Arc<Thread>> {
     this_cpu().lock().current.clone()
+}
+
+/// A user segment base of a thread.
+pub enum UserBase {
+    Fs,
+    Gs,
+}
+
+/// Sets a user segment base of the calling user thread. Its current
+/// values are in the MSRs until `switch_out` saves them.
+pub fn set_user_base(base: UserBase, value: u64) {
+    let msr = match base {
+        UserBase::Fs => IA32_FS_BASE,
+        // In the kernel the user GS base is in IA32_KERNEL_GS_BASE.
+        UserBase::Gs => percpu::IA32_KERNEL_GS_BASE,
+    };
+    // SAFETY: both MSRs exist in long mode, and the kernel uses neither
+    // for itself while it runs.
+    unsafe { crate::cpu::write_msr(msr, value) };
 }
 
 /// The first code of a user thread, on its kernel stack.

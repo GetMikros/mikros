@@ -96,3 +96,59 @@ syscalls:
       - {name: budget, type: Handle, dir: in, object: Budget, rights: [MANAGE]}
       - {name: kernel_threshold, type: u64, dir: in}
       - {name: page_threshold, type: u64, dir: in}
+
+  - name: process_create
+    number: 8
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R2]
+    args:
+      - {name: budget, type: Handle, dir: in, object: Budget, rights: [WRITE]}
+      - {name: name, type: "*const u8", dir: in}
+      - {name: name_len, type: u64, dir: in}
+      - {name: out, type: "*mut Handle", dir: out}
+
+  - name: thread_create
+    number: 9
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R3]
+    args:
+      - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
+      - {name: name, type: "*const u8", dir: in}
+      - {name: name_len, type: u64, dir: in}
+      - {name: out, type: "*mut Handle", dir: out}
+
+  - name: process_start
+    number: 10
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R4]
+    args:
+      - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
+      - {name: entry, type: u64, dir: in}
+      - {name: stack, type: u64, dir: in}
+      - {name: arg, type: Handle, dir: in, object: any, rights: [TRANSFER], allow_invalid: true}
+      - {name: arg2, type: u64, dir: in}
+
+  - name: thread_start
+    number: 11
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R5]
+    args:
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
+      - {name: entry, type: u64, dir: in}
+      - {name: stack, type: u64, dir: in}
+      - {name: arg1, type: u64, dir: in}
+      - {name: arg2, type: u64, dir: in}
+
+  - name: thread_set_user_base
+    number: 12
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0016.R15]
+    args:
+      - {name: which, type: u32, dir: in}
+      - {name: value, type: u64, dir: in}

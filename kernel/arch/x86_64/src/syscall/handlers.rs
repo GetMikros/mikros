@@ -2,11 +2,15 @@
 //! called by the generated dispatch after it has checked every handle
 //! argument.
 
-use super::{Checked, UserOut, current_process};
+use super::{Checked, UserIn, UserOut, current_process};
+use crate::process::Process;
+use crate::sched::Thread;
 use alloc::sync::Arc;
 use kernel_core::object::budget::{Budget, INFO_BUDGET};
 use kernel_core::object::handles::Handle;
-use kernel_core::object::{INFO_BASIC, Object, ObjectType, basic_info, default_rights, downcast};
+use kernel_core::object::{
+    INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
+};
 use kernel_core::status::Error;
 
 /// The object of a handle the dispatch has checked to be a `T`.
@@ -114,5 +118,86 @@ pub fn budget_set_thresholds(
     page_threshold: u64,
 ) -> Result<(), Error> {
     object::<Budget>(budget).set_thresholds(kernel_threshold, page_threshold);
+    Ok(())
+}
+
+/// Reads an object name of `len` bytes from `name`.
+fn read_name(name: UserIn<u8>, len: u64) -> Result<Name, Error> {
+    let len = usize::try_from(len)
+        .ok()
+        .filter(|&l| l <= NAME_MAX)
+        .ok_or(Error::InvalidArgs)?;
+    let mut bytes = [0u8; NAME_MAX];
+    name.read_bytes(&mut bytes[..len])?;
+    Name::new(&bytes[..len])
+}
+
+pub fn process_create(
+    budget: Checked,
+    name: UserIn<u8>,
+    name_len: u64,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    let name = read_name(name, name_len)?;
+    let process = Process::new(&object(budget), name, true)?;
+    give(process, ObjectType::Process, out)
+}
+
+pub fn thread_create(
+    process: Checked,
+    name: UserIn<u8>,
+    name_len: u64,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    let name = read_name(name, name_len)?;
+    let thread = Process::create_thread(&object(process), name, true)?;
+    give(thread, ObjectType::Thread, out)
+}
+
+pub fn process_start(
+    process: Checked,
+    thread: Checked,
+    entry: u64,
+    stack: u64,
+    arg: Option<Checked>,
+    arg2: u64,
+) -> Result<(), Error> {
+    let caller = current_process()?;
+    // The caller's table stays locked until `arg` is closed in it, so the
+    // handle cannot change in between.
+    let mut table = caller.handles().lock();
+    let moved = match &arg {
+        Some(arg) => Some(table.check(arg.value, &[], rights::TRANSFER)?.clone()),
+        None => None,
+    };
+    let (process, thread) = (object::<Process>(process), object::<Thread>(thread));
+    let budget = Some(caller.budget());
+    Process::start(&process, &thread, entry, stack, moved, arg2, budget)?;
+    match arg {
+        Some(arg) => table.close(arg.value),
+        None => Ok(()),
+    }
+}
+
+pub fn thread_start(
+    thread: Checked,
+    entry: u64,
+    stack: u64,
+    arg1: u64,
+    arg2: u64,
+) -> Result<(), Error> {
+    Process::start_thread(&object(thread), entry, stack, arg1, arg2)
+}
+
+pub fn thread_set_user_base(which: u32, value: u64) -> Result<(), Error> {
+    let base = match which {
+        0 => crate::sched::UserBase::Fs,
+        1 => crate::sched::UserBase::Gs,
+        _ => return Err(Error::InvalidArgs),
+    };
+    if value != 0 && !crate::aspace::in_user_range(value, 1) {
+        return Err(Error::InvalidArgs);
+    }
+    crate::sched::set_user_base(base, value);
     Ok(())
 }
