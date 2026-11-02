@@ -46,6 +46,12 @@ impl<T> SpinLock<T> {
         Guard { lock: self }
     }
 
+    /// The value, which no one else can reach through a unique reference,
+    /// without taking the lock.
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
     /// The lock, if it is free now.
     pub fn try_lock(&self) -> Option<Guard<'_, T>> {
         self.locked

@@ -666,7 +666,9 @@ impl Drop for AddressSpace {
                 activate_kernel();
             }
         }
-        let inner = self.inner.lock();
+        // Taken without the lock, so that the tables are freed with a
+        // reschedule check every `ITEM_STEP` when no other lock is held.
+        let inner = self.inner.get_mut();
         let mut tables = Charged {
             budget: None,
             count: 0,
@@ -676,6 +678,9 @@ impl Drop for AddressSpace {
         Mapper::existing(&mut tables, inner.root, false).free_lower_half(|table| {
             free_frame(table);
             count += 1;
+            if count % ITEM_STEP as u64 == 0 {
+                crate::sched::preempt_point_if_unlocked();
+            }
         });
         free_frame(inner.root);
         debug_assert!(inner.charged <= count);
