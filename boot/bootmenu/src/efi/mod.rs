@@ -283,10 +283,18 @@ fn start(volume: Option<&DevicePath>, path: &str, args: Option<&str>) -> Result<
 }
 
 pub fn run() -> Status {
-    let mut file_system = boot::get_image_file_system(boot::image_handle())
-        .map(FileSystem::new)
-        .map_err(|err| err.status());
+    let image_file_system = || {
+        boot::get_image_file_system(boot::image_handle())
+            .map(FileSystem::new)
+            .map_err(|err| err.status())
+    };
+    // The boot volume is closed while other systems are detected. Detection
+    // opens and closes the file system of every volume, and closing a
+    // protocol drops every open of it by the same image, which would leave
+    // this one closed underneath.
+    let mut file_system = image_file_system();
     let (mut config, config_notice, missing) = load_config(file_system.as_mut().map_err(|s| *s));
+    drop(file_system);
     let volume = launch::boot_volume();
     let detected = match &volume {
         Some(volume) if config.detect => others::find(&config, volume),
@@ -295,6 +303,7 @@ pub fn run() -> Status {
     if missing && !detected.is_empty() {
         config.timeout = Some(5);
     }
+    let mut file_system = image_file_system();
     let mut menu = build_menu(&config, &detected, file_system.as_mut().ok(), config_notice);
     drop(file_system);
     let startup_notice = menu.notice.clone();
