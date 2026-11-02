@@ -119,7 +119,13 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
     // The chain is followed on the stack that holds its first frame: the
     // running thread's, the kernel's own, or the boot stack.
     let boot = (&raw const __kernel_start) as u64;
-    let thread = crate::percpu::this().thread_stack.load(Ordering::Relaxed);
+    // A panic before the per-CPU data is set up, such as the one for
+    // missing CPU features, has no thread stack and must not reach it.
+    let thread = if crate::percpu::READY.load(Ordering::Acquire) {
+        crate::percpu::this().thread_stack.load(Ordering::Relaxed)
+    } else {
+        0
+    };
     let stacks = [
         (
             thread.saturating_sub(crate::sched::KERNEL_STACK_SIZE),
