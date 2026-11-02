@@ -25,14 +25,36 @@ pub const PANIC_EXIT_CODE: i64 = -1;
 macro_rules! main {
     ($function:path) => {
         #[unsafe(no_mangle)]
-        fn __mikros_main(startup: &$crate::Startup) -> i64 {
-            $function(startup)
+        fn __mikros_entry(bootstrap: $crate::sys::Handle, _arg2: u64) -> i64 {
+            $crate::run_main(bootstrap, $function)
+        }
+    };
+}
+
+/// Defines `function`, taking the bootstrap handle and the second start
+/// argument and returning an exit code, as the program's main function,
+/// for programs that read their bootstrap channel themselves.
+#[macro_export]
+macro_rules! raw_main {
+    ($function:path) => {
+        #[unsafe(no_mangle)]
+        fn __mikros_entry(bootstrap: $crate::sys::Handle, arg2: u64) -> i64 {
+            $function(bootstrap, arg2)
         }
     };
 }
 
 unsafe extern "Rust" {
-    fn __mikros_main(startup: &Startup) -> i64;
+    fn __mikros_entry(bootstrap: sys::Handle, arg2: u64) -> i64;
+}
+
+/// Receives the startup message on `bootstrap` and runs `main` with it.
+#[doc(hidden)]
+pub fn run_main(bootstrap: sys::Handle, main: fn(&Startup) -> i64) -> i64 {
+    match startup::receive(bootstrap) {
+        Some(startup) => main(startup),
+        None => PANIC_EXIT_CODE,
+    }
 }
 
 // The kernel starts the first thread with the stack pointer 16-byte
@@ -47,12 +69,10 @@ core::arch::global_asm!(
     start = sym start,
 );
 
-extern "sysv64" fn start(bootstrap: u64, _arg2: u64) -> ! {
-    let code = match startup::receive(bootstrap as sys::Handle) {
-        // SAFETY: the program defines `__mikros_main` with `main!`.
-        Some(startup) => unsafe { __mikros_main(startup) },
-        None => PANIC_EXIT_CODE,
-    };
+extern "sysv64" fn start(bootstrap: u64, arg2: u64) -> ! {
+    // SAFETY: the program defines `__mikros_entry` with `main!` or
+    // `raw_main!`.
+    let code = unsafe { __mikros_entry(bootstrap as sys::Handle, arg2) };
     exit(code)
 }
 
