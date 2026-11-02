@@ -4,6 +4,8 @@ use crate::cpu::rdtsc;
 use crate::log::log;
 use boot_protocol::{BootInfo, flags::RNG_SEED_VALID};
 use core::arch::asm;
+use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use kernel_core::deadline::INFINITE;
 use kernel_core::random::{Error, Rng};
 use kernel_core::sync::SpinLock;
 
@@ -13,6 +15,17 @@ static RNG: SpinLock<Rng> = SpinLock::new(Rng::new());
 const WORDS: usize = 4;
 /// How often a failed instruction is retried before the word is skipped.
 const TRIES: u32 = 10;
+
+/// How long after a successful hardware reseed the next is due: 300
+/// seconds less room for a late timer interrupt and the reseed itself.
+const RESEED_INTERVAL: i64 = 290_000_000_000;
+/// How long after a failed reseed it is tried again.
+const RESEED_RETRY: i64 = 1_000_000_000;
+
+/// Whether CPUID reports a hardware source.
+static HARDWARE: AtomicBool = AtomicBool::new(false);
+/// When the last successful hardware reseed, or the boot seeding, ended.
+static LAST_RESEED: AtomicI64 = AtomicI64::new(0);
 
 #[derive(Clone, Copy)]
 enum Source {
@@ -78,11 +91,29 @@ fn reseed_with(extra: &[u8]) -> bool {
     seed_len + rand_len > 0
 }
 
-/// Mixes new output of the hardware sources into the generator, and
-/// returns whether any gave output.
-#[expect(dead_code, reason = "nothing schedules the periodic reseed yet")]
-pub fn reseed() -> bool {
-    reseed_with(&[])
+/// When the next hardware reseed is due, or `INFINITE` without a
+/// hardware source.
+pub fn reseed_due() -> i64 {
+    if HARDWARE.load(Ordering::Relaxed) {
+        LAST_RESEED
+            .load(Ordering::Relaxed)
+            .saturating_add(RESEED_INTERVAL)
+    } else {
+        INFINITE
+    }
+}
+
+/// Mixes new output of the hardware sources into the generator for a
+/// reseed deadline reached at `now`, and returns when the next is due:
+/// after the interval once the reseed succeeds, soon when no source gave
+/// output.
+pub fn reseed(now: i64) -> i64 {
+    if reseed_with(&[]) {
+        LAST_RESEED.store(crate::time::now(), Ordering::Relaxed);
+        reseed_due()
+    } else {
+        now.saturating_add(RESEED_RETRY)
+    }
 }
 
 /// TSC differences across short busy loops, whose timing varies with
@@ -103,6 +134,11 @@ pub fn init(info: &BootInfo) {
     let firmware = info.flags & RNG_SEED_VALID != 0;
     let seed: &[u8] = if firmware { &info.rng_seed } else { &[] };
     let hardware = reseed_with(seed);
+    HARDWARE.store(
+        reported(Source::Rdseed) || reported(Source::Rdrand),
+        Ordering::Relaxed,
+    );
+    LAST_RESEED.store(crate::time::now(), Ordering::Relaxed);
     if !firmware && !hardware {
         let mut samples = [0u8; 2048];
         jitter(&mut samples);

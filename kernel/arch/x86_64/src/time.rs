@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use boot_protocol::BootInfo;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use kernel_core::acpi::{self, Address, PmTimer, Tables};
-use kernel_core::clock::{Extender, ticks_to_ns};
+use kernel_core::clock::{Extender, quarter_wrap_ns, ticks_to_ns};
 use kernel_core::object::budget::Budget;
 use kernel_core::object::memory::PAGE_SIZE;
 use kernel_core::object::resource::KIND_IOPORT;
@@ -84,6 +84,26 @@ fn counter() -> u64 {
         PM => extender().extend(pm_read()),
         _ => 0,
     }
+}
+
+/// How long the clock may go between samples of a counter that wraps: a
+/// quarter of the counter's wrap period, which keeps samples less than
+/// half a period apart even when the timer interrupt comes late. `None`
+/// for a counter that does not wrap.
+pub fn maintenance_interval() -> Option<i64> {
+    let width = u32::from(WIDTH.load(Ordering::Relaxed));
+    let rate = RATE.load(Ordering::Relaxed);
+    match SOURCE.load(Ordering::Relaxed) {
+        // The HPET's rate is its period in femtoseconds.
+        HPET if width < 64 => Some(quarter_wrap_ns(width, 1_000_000_000_000_000 / rate.max(1))),
+        PM => Some(quarter_wrap_ns(width, rate)),
+        _ => None,
+    }
+}
+
+/// Samples the counter, so that its extension sees every wrap.
+pub fn maintain() {
+    counter();
 }
 
 /// The monotonic clock in nanoseconds, 0 before it is set up.

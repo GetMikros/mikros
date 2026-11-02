@@ -49,6 +49,13 @@ impl Extender {
     }
 }
 
+/// A quarter of the wrap period, in nanoseconds, of a counter of `width`
+/// bits, below 64, that counts at `hz`.
+pub fn quarter_wrap_ns(width: u32, hz: u64) -> i64 {
+    let wrap_ns = (1u128 << width) * 1_000_000_000 / u128::from(hz.max(1));
+    i64::try_from(wrap_ns / 4).unwrap_or(i64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,6 +63,10 @@ mod tests {
     #[test]
     fn converts_ticks() {
         assert_eq!(ticks_to_ns(3_579_545, 3_579_545), 1_000_000_000);
+        // A 24-bit PM timer wraps every 4.69 s, a 32-bit HPET at 14.3 MHz
+        // every 300 s.
+        assert_eq!(quarter_wrap_ns(24, 3_579_545), 1_171_742_218);
+        assert_eq!(quarter_wrap_ns(32, 14_318_180) / 1_000_000_000, 74);
         assert_eq!(ticks_to_ns(1, 1_000_000), 1000);
         assert_eq!(ticks_to_ns(u64::MAX, 1), i64::MAX);
     }

@@ -472,6 +472,10 @@ pub struct CpuSched {
     sleepers: Deadlines<Queued>,
     /// Armed `Timer` objects.
     timers: Deadlines<crate::ktimer::Armed>,
+    /// The kernel's own deadlines: sampling a clock counter that wraps,
+    /// and reseeding the random number generator, or `INFINITE`.
+    clock_due: i64,
+    reseed_due: i64,
 }
 
 // SAFETY: queued pointers are references to threads, which are Sync; the
@@ -489,6 +493,8 @@ impl CpuSched {
             dead: None,
             sleepers: Deadlines::new(),
             timers: Deadlines::new(),
+            clock_due: INFINITE,
+            reseed_due: INFINITE,
         }
     }
 }
@@ -612,6 +618,7 @@ fn arm(cpu: &CpuSched) {
     let at = [cpu.sleepers.next_finite(), cpu.timers.next_finite()]
         .into_iter()
         .flatten()
+        .chain([cpu.clock_due, cpu.reseed_due])
         .fold(slice_end, i64::min);
     if at == INFINITE {
         crate::timer::disarm();
@@ -931,11 +938,41 @@ pub fn preempt_user() {
     }
 }
 
-/// Handles the timer interrupt: wakes sleepers whose deadline has
-/// passed, and marks a reschedule when the running thread's slice has
-/// ended.
+/// Starts the kernel's maintenance deadlines, once the clock and the
+/// random number generator are set up. The timer serves them whether or
+/// not any thread runs.
+pub fn start_maintenance() {
+    let now = crate::time::now();
+    let mut cpu = this_cpu().lock();
+    cpu.clock_due = crate::time::maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
+    cpu.reseed_due = crate::random::reseed_due();
+    arm(&cpu);
+}
+
+/// Serves the maintenance deadlines that `now` has reached and sets the
+/// next ones, which the caller arms.
+fn maintain(now: i64) {
+    let (clock, reseed) = {
+        let cpu = this_cpu().lock();
+        (now >= cpu.clock_due, now >= cpu.reseed_due)
+    };
+    if clock {
+        crate::time::maintain();
+        let next = crate::time::maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
+        this_cpu().lock().clock_due = next;
+    }
+    if reseed {
+        let next = crate::random::reseed(now);
+        this_cpu().lock().reseed_due = next;
+    }
+}
+
+/// Handles the timer interrupt: serves the maintenance deadlines, wakes
+/// sleepers whose deadline has passed, and marks a reschedule when the
+/// running thread's slice has ended.
 pub fn timer_interrupt() {
     let now = crate::time::now();
+    maintain(now);
     let mut cpu = this_cpu().lock();
     while let Some(sleeper) = cpu.sleepers.pop_expired(now) {
         let thread = sleeper.take();
