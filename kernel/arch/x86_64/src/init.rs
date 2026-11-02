@@ -82,7 +82,7 @@ fn map(
 ) -> Arc<MemoryObject> {
     let mem =
         MemoryObject::new(budget, len, 0).unwrap_or_else(|e| panic!("no memory for init: {e:?}"));
-    let options = MapOptions::parse(perms | SPECIFIC, addr).expect("valid map options");
+    let options = MapOptions::parse(perms | SPECIFIC, addr, false).expect("valid map options");
     process
         .aspace()
         .add_region(

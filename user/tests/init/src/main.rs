@@ -126,6 +126,56 @@ fn random_bytes(_: &Startup) -> Result {
     ensure("filling every byte", a[4032..] != [0; 64])
 }
 
+/// Writable and executable mappings are refused unless the process has
+/// the `ALLOW_WRITE_EXECUTE` policy, which only a `NEW` process can get.
+fn write_execute_policy(s: &Startup) -> Result {
+    const RWX: u32 = PERM_READ | PERM_WRITE | 4;
+    let name = b"policy";
+    let mut process = 0;
+    // SAFETY: the pointers describe `name` and `process`.
+    check("creating a process", unsafe {
+        sys::process_create(s.budget, name.as_ptr(), name.len() as u64, &mut process)
+    })?;
+    let mem = create_memory(PAGE_SIZE)?;
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for each call; the others take no
+    // pointers.
+    unsafe {
+        let map = |p: Handle, at: &mut u64| sys::vm_map(p, RWX, 0, mem, 0, PAGE_SIZE, at);
+        ensure(
+            "refusing a policy bit 2",
+            sys::process_set_policy(process, s.root_resource, 4) == -10,
+        )?;
+        ensure(
+            "refusing 32-bit code",
+            sys::process_set_policy(process, s.root_resource, 2) == -2,
+        )?;
+        ensure(
+            "refusing W+X without the policy",
+            map(process, &mut at) == -10,
+        )?;
+        check(
+            "setting the policy",
+            sys::process_set_policy(process, s.root_resource, 1),
+        )?;
+        check("mapping W+X with the policy", map(process, &mut at))?;
+        check(
+            "protecting W+X with the policy",
+            sys::vm_protect(process, RWX, at, PAGE_SIZE),
+        )?;
+        ensure(
+            "refusing W+X in this process",
+            map(s.process, &mut at) == -10,
+        )?;
+        ensure(
+            "refusing a policy once started",
+            sys::process_set_policy(s.process, s.root_resource, 1) == -20,
+        )?;
+        check("closing the process", sys::handle_close(process))?;
+        check("closing the object", sys::handle_close(mem))
+    }
+}
+
 static THREAD_RAN: AtomicU64 = AtomicU64::new(0);
 
 extern "sysv64" fn thread_entry(value: u64, _arg2: u64) -> ! {
@@ -1962,7 +2012,7 @@ fn evict_waits_for_outputs(s: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 28] = [
+const TESTS: [(&str, Test); 29] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1989,6 +2039,7 @@ const TESTS: [(&str, Test); 28] = [
     ("memory_objects", memory_objects),
     ("shared_mappings", shared_mappings),
     ("random_bytes", random_bytes),
+    ("write_execute_policy", write_execute_policy),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
 ];

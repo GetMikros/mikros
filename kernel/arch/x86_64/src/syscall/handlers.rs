@@ -16,7 +16,9 @@ use kernel_core::object::budget::{Budget, INFO_BUDGET, Scratch};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
-use kernel_core::object::resource::{KIND_IOPORT, KIND_PRIORITY, KIND_ROOT, Request, Resource};
+use kernel_core::object::resource::{
+    KIND_IOPORT, KIND_POLICY, KIND_PRIORITY, KIND_ROOT, Request, Resource,
+};
 use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
     INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
@@ -410,7 +412,8 @@ pub fn vm_map(
     len: u64,
     out_addr: UserOut<u64>,
 ) -> Result<(), Error> {
-    let options = MapOptions::parse(options, addr)?;
+    let target = object::<Process>(process);
+    let options = MapOptions::parse(options, addr, target.allows_write_execute())?;
     page_aligned(&[addr, offset, len])?;
     if len == 0 {
         return Err(Error::InvalidArgs);
@@ -432,7 +435,7 @@ pub fn vm_map(
     let size = len;
     let caller = current_process()?;
     let outputs = prepare(&caller, &[out_addr.range(1)])?;
-    let aspace = object::<Process>(process).aspace().clone();
+    let aspace = target.aspace().clone();
     let max = MapOptions::allowed_by(handle_rights);
     let start = aspace.add_region(options, addr, size, &mem, offset, max, caller.budget())?;
     publish(outputs, &[bytes_of(&[start])]);
@@ -1380,6 +1383,13 @@ pub fn system_get_memory_info(out: UserOut<u8>) -> Result<(), Error> {
     Ok(())
 }
 
+pub fn process_set_policy(process: Checked, resource: Checked, policy: u32) -> Result<(), Error> {
+    if !matches!(object::<Resource>(resource).kind(), KIND_ROOT | KIND_POLICY) {
+        return Err(Error::WrongType);
+    }
+    object::<Process>(process).set_policy(policy)
+}
+
 /// The most bytes one `system_get_random` call returns.
 const RANDOM_MAX: u64 = 4096;
 
@@ -1400,7 +1410,8 @@ pub fn system_get_random(buf: UserOut<u8>, len: u64) -> Result<(), Error> {
 }
 
 pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result<(), Error> {
-    let perms = MapOptions::parse_protection(options)?;
+    let target = object::<Process>(process);
+    let perms = MapOptions::parse_protection(options, target.allows_write_execute())?;
     page_aligned(&[len])?;
     let end = page_range_end(addr, len)?;
     if !crate::aspace::in_user_range(addr, end - addr) {
@@ -1411,7 +1422,7 @@ pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result
     let allowed = |r: &crate::aspace::RegionOf| {
         r.mem.check_revoked().is_ok() && (!writes || r.mem.check_writable().is_ok())
     };
-    object::<Process>(process)
+    target
         .aspace()
         .protect(addr, end, perms, allowed, caller.budget())
 }

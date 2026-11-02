@@ -48,7 +48,13 @@ pub struct Process {
     ioports: SpinLock<Ioports>,
     /// The nanoseconds its threads have run, up to their last switch.
     cpu_time: AtomicI64,
+    /// The policies of `process_set_policy`.
+    policy: AtomicU32,
 }
+
+/// The policy bits of `process_set_policy`.
+pub const ALLOW_WRITE_EXECUTE: u32 = 1 << 0;
+pub const CODE_32BIT: u32 = 1 << 1;
 
 /// Fails with `InvalidArgs` unless `entry` lies in the user address range
 /// and `stack` lies in it or is its end, the top of a stack that ends
@@ -150,6 +156,7 @@ impl Process {
             stopped: SpinLock::new(Vec::new()),
             ioports: SpinLock::new(Ioports::default()),
             cpu_time: AtomicI64::new(0),
+            policy: AtomicU32::new(0),
         })
     }
 
@@ -176,6 +183,31 @@ impl Process {
             switch_ports(Some(self));
         }
         Ok(())
+    }
+
+    /// Replaces the process's policies with `policy`, as
+    /// `process_set_policy` does. Fails with `InvalidArgs` for undefined
+    /// bits, with `NotSupported` for `CODE_32BIT`, which nothing runs yet,
+    /// and with `BadState` unless the process is `NEW`.
+    pub fn set_policy(&self, policy: u32) -> Result<(), Error> {
+        if policy & !(ALLOW_WRITE_EXECUTE | CODE_32BIT) != 0 {
+            return Err(Error::InvalidArgs);
+        }
+        if policy & CODE_32BIT != 0 {
+            return Err(Error::NotSupported);
+        }
+        // The state cannot change meanwhile: starting takes this lock.
+        let _threads = self.threads.lock();
+        if self.state() != NEW {
+            return Err(Error::BadState);
+        }
+        self.policy.store(policy, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Whether mappings of the process may be writable and executable.
+    pub fn allows_write_execute(&self) -> bool {
+        self.policy.load(Ordering::Relaxed) & ALLOW_WRITE_EXECUTE != 0
     }
 
     pub fn budget(&self) -> &Arc<Budget> {

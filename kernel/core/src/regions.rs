@@ -32,15 +32,15 @@ pub struct MapOptions {
 
 impl MapOptions {
     /// Checks `options` together with the `addr` they come with. Mappings
-    /// that are writable and executable are refused, as no process can
-    /// have a policy that allows them yet.
-    pub fn parse(options: u32, addr: u64) -> Result<MapOptions, Error> {
+    /// that are writable and executable are refused unless
+    /// `write_execute` allows them.
+    pub fn parse(options: u32, addr: u64, write_execute: bool) -> Result<MapOptions, Error> {
         let perms = options & PERMS;
         let inheritance = (options & INHERITANCE_MASK) >> INHERITANCE_SHIFT;
         let specific = options & SPECIFIC != 0;
         let below_4g = options & BELOW_4G != 0;
         let unreadable = perms & (PERM_WRITE | PERM_EXECUTE) != 0 && perms & PERM_READ == 0;
-        let write_execute = perms & PERM_WRITE != 0 && perms & PERM_EXECUTE != 0;
+        let refused = !write_execute && perms & PERM_WRITE != 0 && perms & PERM_EXECUTE != 0;
         let bad_addr = if specific {
             !addr.is_multiple_of(PAGE_SIZE)
         } else {
@@ -48,7 +48,7 @@ impl MapOptions {
         };
         if options & !DEFINED != 0
             || unreadable
-            || write_execute
+            || refused
             || inheritance == 3
             || (specific && below_4g)
             || bad_addr
@@ -65,11 +65,11 @@ impl MapOptions {
 
     /// The permissions of `vm_protect` `options`: only permission bits,
     /// readable whenever writable or executable, and not both writable
-    /// and executable.
-    pub fn parse_protection(options: u32) -> Result<u32, Error> {
+    /// and executable unless `write_execute` allows it.
+    pub fn parse_protection(options: u32, write_execute: bool) -> Result<u32, Error> {
         let unreadable = options & (PERM_WRITE | PERM_EXECUTE) != 0 && options & PERM_READ == 0;
-        let write_execute = options & PERM_WRITE != 0 && options & PERM_EXECUTE != 0;
-        if options & !PERMS != 0 || unreadable || write_execute {
+        let refused = !write_execute && options & PERM_WRITE != 0 && options & PERM_EXECUTE != 0;
+        if options & !PERMS != 0 || unreadable || refused {
             return Err(Error::InvalidArgs);
         }
         Ok(options)
@@ -887,19 +887,27 @@ mod tests {
 
     #[test]
     fn parses_protection_and_allowed_permissions() {
-        assert_eq!(MapOptions::parse_protection(1), Ok(1));
-        assert_eq!(MapOptions::parse_protection(0), Ok(0));
+        assert_eq!(MapOptions::parse_protection(1, false), Ok(1));
+        assert_eq!(MapOptions::parse_protection(0, false), Ok(0));
         for bad in [2, 4, 7, 1 << 8] {
-            assert_eq!(MapOptions::parse_protection(bad), Err(Error::InvalidArgs));
+            assert_eq!(
+                MapOptions::parse_protection(bad, false),
+                Err(Error::InvalidArgs)
+            );
         }
+        assert_eq!(MapOptions::parse_protection(7, true), Ok(7));
+        assert_eq!(
+            MapOptions::parse_protection(6, true),
+            Err(Error::InvalidArgs)
+        );
         assert_eq!(MapOptions::allowed_by(rights::READ | rights::EXECUTE), 5);
         assert_eq!(MapOptions::allowed_by(rights::MAP), 0);
     }
 
     #[test]
     fn checks_map_options() {
-        let ok = |o, a| MapOptions::parse(o, a).unwrap();
-        let bad = |o, a| MapOptions::parse(o, a) == Err(Error::InvalidArgs);
+        let ok = |o, a| MapOptions::parse(o, a, false).unwrap();
+        let bad = |o, a| MapOptions::parse(o, a, false) == Err(Error::InvalidArgs);
         assert_eq!(ok(0, 0).perms, 0);
         assert_eq!(
             ok(PERM_READ | PERM_EXECUTE, 0).rights(),
@@ -911,6 +919,7 @@ mod tests {
         assert!(ok(SPECIFIC, P).specific && ok(BELOW_4G, 0).below_4g);
         assert_eq!(ok(2 << 9, 0).inheritance, 2);
         assert!(bad(3 << 9, 0));
+        assert_eq!(MapOptions::parse(PERMS, 0, true).unwrap().perms, PERMS);
     }
 
     #[test]
