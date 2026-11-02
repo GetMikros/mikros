@@ -19,5 +19,6 @@ pub mod random;
 pub mod ranges;
 pub mod regions;
 pub mod sched;
+pub mod signal;
 pub mod status;
 pub mod sync;
