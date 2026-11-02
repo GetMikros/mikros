@@ -175,3 +175,12 @@ fn knows_the_severity_values() {
     assert_eq!(Severity::from_u32(3), Some(Severity::Error));
     assert_eq!(Severity::from_u32(4), None);
 }
+
+#[test]
+fn finds_nothing_after_the_largest_sequence_number() {
+    let log = Log::<4>::new();
+    log.write(0, 0, Severity::Info, Source::Kernel, b"a");
+    assert!(log.next_after(u64::MAX).is_none());
+    assert_eq!(log.next_after(u64::MAX - 1), None);
+    assert!(log.next_after(0).is_some());
+}

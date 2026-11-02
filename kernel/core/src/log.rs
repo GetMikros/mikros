@@ -248,7 +248,9 @@ impl<const SLOTS: usize> Log<SLOTS> {
     pub fn next_after(&self, after: u64) -> Option<Record> {
         let head = self.head();
         let oldest = head.saturating_sub(SLOTS as u64) + 1;
-        for sequence in (after + 1).max(oldest)..=head {
+        // No record follows the largest sequence number.
+        let first = after.checked_add(1)?;
+        for sequence in first.max(oldest)..=head {
             match self.get(sequence) {
                 Lookup::Found(record) => return Some(record),
                 Lookup::Gone => continue,
