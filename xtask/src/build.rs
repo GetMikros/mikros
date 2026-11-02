@@ -56,8 +56,23 @@ pub struct Built {
     pub boot_image: PathBuf,
 }
 
+/// The boot images that can be built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootImage {
+    /// The system's boot image.
+    System,
+    /// The boot image of the integration tests, whose init runs them.
+    Test,
+}
+
 /// Builds every component of the build kind `kind`.
 pub fn build(kind: Kind) -> Result<Built> {
+    build_for(kind, BootImage::System)
+}
+
+/// Builds every component of the build kind `kind`, with `boot` as the
+/// boot image.
+pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     let bootmenu = cargo_build("bootmenu", "bootmenu", "x86_64-unknown-uefi", kind)?;
     println!("built    {}", bootmenu.display());
     let bootloader = cargo_build("mikrosboot", "mikrosboot", "x86_64-unknown-uefi", kind)?;
@@ -69,9 +84,24 @@ pub fn build(kind: Kind) -> Result<Built> {
     println!("built    {}", kernel.display());
     let debug_info = crate::debuginfo::split(&kernel)?;
     println!("built    {}", debug_info.display());
-    let init = user_build("init", kind)?;
-    println!("built    {}", init.display());
-    let boot_image = boot_image(kind, &[("init", &init)])?;
+    let boot_image = match boot {
+        BootImage::System => {
+            let init = user_build("init", kind)?;
+            println!("built    {}", init.display());
+            boot_image(kind, "boot.img", &[("init", &init)])?
+        }
+        BootImage::Test => {
+            let init = user_build("test-init", kind)?;
+            println!("built    {}", init.display());
+            let echo = user_build("channel-echo", kind)?;
+            println!("built    {}", echo.display());
+            let members = [
+                ("init", init.as_path()),
+                ("tests/channel-echo", echo.as_path()),
+            ];
+            boot_image(kind, "test-boot.img", &members)?
+        }
+    };
     println!("built    {}", boot_image.display());
     Ok(Built {
         bootmenu,
@@ -81,14 +111,14 @@ pub fn build(kind: Kind) -> Result<Built> {
     })
 }
 
-/// Writes the boot archive with each of `members`, given by name and the
-/// path of its contents, as a regular file.
-fn boot_image(kind: Kind, members: &[(&str, &Path)]) -> Result<PathBuf> {
+/// Writes the boot archive `file` with each of `members`, given by name
+/// and the path of its contents, as a regular file.
+fn boot_image(kind: Kind, file: &str, members: &[(&str, &Path)]) -> Result<PathBuf> {
     let dir = crate::workspace_root()
         .join("target/boot")
         .join(kind.name());
     fs::create_dir_all(&dir)?;
-    let path = dir.join("boot.img");
+    let path = dir.join(file);
     let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
     let mut archive = tar::Builder::new(file);
     for &(name, source) in members {
@@ -178,7 +208,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let source = dir.join("init");
         fs::write(&source, b"\x7fELF test").unwrap();
-        let path = boot_image(Kind::Fuzz, &[("init", &source)]).unwrap();
+        let path = boot_image(Kind::Fuzz, "boot.img", &[("init", &source)]).unwrap();
         assert!(path.ends_with("target/boot/fuzz/boot.img"));
         let bytes = fs::read(&path).unwrap();
         let mut archive = tar::Archive::new(bytes.as_slice());

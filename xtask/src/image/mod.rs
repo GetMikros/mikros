@@ -115,7 +115,12 @@ pub fn run(args: &Args) -> Result<()> {
         bail!("live images are not supported yet: the boot image's contents are not defined");
     }
     let built = build::build(args.kind)?;
+    create(args.kind, &built, &path(args.kind, false))
+}
 
+/// Writes the disk image of the components `built` for the build kind
+/// `kind` to `out`.
+pub fn create(kind: Kind, built: &build::Built, out: &Path) -> Result<()> {
     let root_guid = Uuid::new_v4();
     let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
     let bootmenu = read(&built.bootmenu)?;
@@ -131,11 +136,10 @@ pub fn run(args: &Args) -> Result<()> {
     let files: Vec<(&str, &[u8])> = contents.iter().map(|(p, d)| (*p, d.as_slice())).collect();
     let total = files.iter().map(|(_, d)| d.len() as u64).sum();
     let esp = esp::build(esp::size_for(total), &files)?;
-    let root = root::create(args.kind)?;
+    let root = root::create(kind)?;
 
-    let out = path(args.kind, false);
     write_image(
-        &out,
+        out,
         &[
             Part {
                 type_guid: ESP_TYPE,
