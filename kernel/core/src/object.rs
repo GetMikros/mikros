@@ -3,6 +3,8 @@
 use core::any::Any;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+pub mod handles;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ObjectType {
