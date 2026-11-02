@@ -4,7 +4,7 @@ use crate::aspace::AddressSpace;
 use crate::sched::{self, Thread};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use kernel_core::exception::DEBUG_EVENTS;
 use kernel_core::object::budget::{Budget, Held, Scratch};
 use kernel_core::object::channel::{Endpoint, PeerObserver};
@@ -50,6 +50,10 @@ pub struct Process {
     cpu_time: AtomicI64,
     /// The policies of `process_set_policy`.
     policy: AtomicU32,
+    /// The range of `process_set_syscall_gate`, start and exclusive end;
+    /// an end of 0 means no gate.
+    gate_start: AtomicU64,
+    gate_end: AtomicU64,
 }
 
 /// The policy bits of `process_set_policy`.
@@ -157,6 +161,8 @@ impl Process {
             ioports: SpinLock::new(Ioports::default()),
             cpu_time: AtomicI64::new(0),
             policy: AtomicU32::new(0),
+            gate_start: AtomicU64::new(0),
+            gate_end: AtomicU64::new(0),
         })
     }
 
@@ -203,6 +209,29 @@ impl Process {
         }
         self.policy.store(policy, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Restricts system calls of the process to the `len` bytes of code
+    /// from `start`, as `process_set_syscall_gate` does. Fails with
+    /// `InvalidArgs` when the range is empty or does not fit in 64 bits,
+    /// and with `BadState` unless the process is `NEW` without a gate.
+    pub fn set_syscall_gate(&self, start: u64, len: u64) -> Result<(), Error> {
+        let end = start.checked_add(len).filter(|_| len != 0);
+        let end = end.ok_or(Error::InvalidArgs)?;
+        // The state cannot change meanwhile: starting takes this lock.
+        let _threads = self.threads.lock();
+        if self.state() != NEW || self.gate_end.load(Ordering::Relaxed) != 0 {
+            return Err(Error::BadState);
+        }
+        self.gate_start.store(start, Ordering::Relaxed);
+        self.gate_end.store(end, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Whether a system call instruction at `at` is handled as one.
+    pub fn syscall_allowed(&self, at: u64) -> bool {
+        let end = self.gate_end.load(Ordering::Relaxed);
+        end == 0 || (self.gate_start.load(Ordering::Relaxed)..end).contains(&at)
     }
 
     /// Whether mappings of the process may be writable and executable.

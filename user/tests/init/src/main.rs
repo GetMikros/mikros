@@ -1837,6 +1837,64 @@ fn resume(thread: Handle) -> Result {
     })
 }
 
+/// A system call from outside a process's gate is refused with a
+/// `PROTECTION` exception at the instruction; a gate is set once, before
+/// the process starts.
+fn syscall_gate(s: &Startup) -> Result {
+    const PROTECTION: u32 = 8;
+    let mut channel = 0;
+    let (process, _) = start_program_with(s, "debuggee", 1, |process| {
+        // SAFETY: the out pointer is valid; the other calls take none.
+        unsafe {
+            check(
+                "creating an exception channel",
+                sys::exception_channel_create(process, 0, &mut channel),
+            )?;
+            ensure(
+                "refusing an empty gate",
+                sys::process_set_syscall_gate(process, 0x1000, 0) == INVALID_ARGS,
+            )?;
+            ensure(
+                "refusing a gate past the top",
+                sys::process_set_syscall_gate(process, u64::MAX, 2) == INVALID_ARGS,
+            )?;
+            // No code of the program lies in the first page.
+            check(
+                "setting the gate",
+                sys::process_set_syscall_gate(process, 0, 0x1000),
+            )?;
+            ensure(
+                "refusing a second gate",
+                sys::process_set_syscall_gate(process, 0, 0x2000) == BAD_STATE,
+            )
+        }
+    })?;
+    let m = read_message(channel, 2000)?;
+    ensure("receiving a report", m.len == 0x28 && m.count == 1)?;
+    ensure(
+        "reporting a protection fault",
+        u32_at(&m.bytes, 0) == PROTECTION,
+    )?;
+    let address = u64_at(&m.bytes, 0x18);
+    ensure(
+        "naming the instruction",
+        (0x1000..0x7FFF_FFFF_F000).contains(&address),
+    )?;
+    ensure("giving the #GP vector", u64_at(&m.bytes, 0x20) == 13)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        ensure(
+            "refusing a gate once started",
+            sys::process_set_syscall_gate(process, 0, 0x1000) == BAD_STATE,
+        )?;
+        check("killing", sys::task_kill(process))?;
+    }
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, soon()).0 == 0,
+    )
+}
+
 /// Killing a blocked thread whose process reports thread events reports
 /// its exit, and its end as the last thread terminates the process.
 fn kill_blocked_thread(s: &Startup) -> Result {
@@ -2012,7 +2070,7 @@ fn evict_waits_for_outputs(s: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 29] = [
+const TESTS: [(&str, Test); 30] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2040,6 +2098,7 @@ const TESTS: [(&str, Test); 29] = [
     ("shared_mappings", shared_mappings),
     ("random_bytes", random_bytes),
     ("write_execute_policy", write_execute_policy),
+    ("syscall_gate", syscall_gate),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
 ];

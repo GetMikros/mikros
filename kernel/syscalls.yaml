@@ -876,3 +876,13 @@ syscalls:
       - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
       - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
       - {name: policy, type: u32, dir: in}
+
+  - name: process_set_syscall_gate
+    number: 85
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0010.R19]
+    args:
+      - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
+      - {name: code_start, type: u64, dir: in}
+      - {name: code_len, type: u64, dir: in}

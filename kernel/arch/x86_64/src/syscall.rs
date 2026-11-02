@@ -120,7 +120,19 @@ pub fn init() {
     }
 }
 
+/// The length of the `SYSCALL` instruction.
+const SYSCALL_LEN: u64 = 2;
+
 extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
+    let at = frame.rip.wrapping_sub(SYSCALL_LEN);
+    if current_process().is_ok_and(|p| !p.syscall_allowed(at)) {
+        refuse(frame, at);
+        crate::sched::preempt_user();
+        before_user_return(frame);
+        crate::sched::exit_if_dead();
+        // The instruction pointer changed.
+        return 1;
+    }
     let args = [
         frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9, frame.r12, frame.r13,
     ];
@@ -140,10 +152,33 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     u64::from(reported || !(USER_START..USER_END).contains(&frame.rip))
 }
 
+/// Puts the calling thread, whose `SYSCALL` instruction at `at` lies
+/// outside its process's gate, into the `EXCEPTION` state with the type
+/// `PROTECTION`, as if the instruction had raised a general-protection
+/// fault with error code 0: the report and the saved instruction pointer
+/// name the instruction.
+fn refuse(frame: &mut Frame, at: u64) {
+    with_interrupt_frame(frame, |regs| {
+        regs.rip = at;
+        regs.vector = u64::from(crate::idt::GENERAL_PROTECTION);
+        crate::exception::raise(regs, kernel_core::exception::kind::PROTECTION, at);
+        true
+    });
+}
+
 /// Makes the reports that wait for the calling thread to return to user
 /// mode, with its registers in the layout of an interrupt frame while the
 /// handler may read and change them. Returns whether it reported any.
 fn before_user_return(frame: &mut Frame) -> bool {
+    with_interrupt_frame(frame, crate::exception::before_user_return)
+}
+
+/// Calls `f` with the registers of `frame` in the layout of an interrupt
+/// frame of a debug exception, and takes them back when it returns true.
+fn with_interrupt_frame(
+    frame: &mut Frame,
+    change: impl FnOnce(&mut crate::idt::Frame) -> bool,
+) -> bool {
     let f = frame;
     let mut regs = crate::idt::Frame {
         r15: f.r15,
@@ -169,7 +204,7 @@ fn before_user_return(frame: &mut Frame) -> bool {
         rsp: f.rsp,
         ss: f.ss,
     };
-    if !crate::exception::before_user_return(&mut regs) {
+    if !change(&mut regs) {
         return false;
     }
     let r = regs;

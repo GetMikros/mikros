@@ -1390,6 +1390,14 @@ pub fn process_set_policy(process: Checked, resource: Checked, policy: u32) -> R
     object::<Process>(process).set_policy(policy)
 }
 
+pub fn process_set_syscall_gate(
+    process: Checked,
+    code_start: u64,
+    code_len: u64,
+) -> Result<(), Error> {
+    object::<Process>(process).set_syscall_gate(code_start, code_len)
+}
+
 /// The most bytes one `system_get_random` call returns.
 const RANDOM_MAX: u64 = 4096;
 
