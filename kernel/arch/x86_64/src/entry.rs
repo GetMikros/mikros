@@ -1,5 +1,6 @@
 //! The kernel entry point.
 
+use crate::features::{Leaves, Missing};
 use crate::serial;
 use boot_protocol::{BootInfo, NOTE_TYPE, VERSION_MAJOR, VERSION_MINOR};
 use kernel_core::bootinfo::{self, HEADER_SIZE};
@@ -41,6 +42,13 @@ fn boot_info(info: *const u8) -> BootInfo {
 #[unsafe(no_mangle)]
 extern "sysv64" fn _start(info: *const u8) -> ! {
     serial::init();
+    let leaves = Leaves::read(|leaf, subleaf| {
+        let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+        [r.eax, r.ebx, r.ecx, r.edx]
+    });
+    if leaves.missing().next().is_some() {
+        panic!("missing CPU features: {}", Missing(&leaves));
+    }
     let _info = boot_info(info);
     crate::cpu::halt()
 }
