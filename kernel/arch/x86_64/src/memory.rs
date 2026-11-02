@@ -39,7 +39,7 @@ pub fn init(info: &BootInfo) -> u64 {
     // are reserved below, so the allocator never hands them out.
     let bits = unsafe { core::slice::from_raw_parts_mut(address as *mut u64, words) };
     let mut allocator = Frames::new(bits);
-    allocator.add_usable(map);
+    allocator.add_kind(map, Kind::Usable);
     allocator.reserve(home.phys_start / PAGE_SIZE, pages);
     let free = allocator.free_count();
     *FRAMES.lock() = Some(allocator);

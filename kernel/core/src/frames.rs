@@ -6,12 +6,20 @@ use boot_protocol::{Kind, MemoryMapEntry, PAGE_SIZE};
 /// The largest alignment of a contiguous run, in frames (2 MiB).
 pub const MAX_ALIGN: u64 = 512;
 
-/// The number of bitmap words needed to cover every `Usable` range of
-/// `memory_map`.
+/// The kinds of memory the allocator can hand out: `Usable` from the
+/// start, and the boot memory the kernel reclaims later.
+fn allocatable(kind: u32) -> bool {
+    [Kind::Usable, Kind::BootloaderReclaimable, Kind::PageTables]
+        .iter()
+        .any(|&k| k as u32 == kind)
+}
+
+/// The number of bitmap words needed to cover every range of `memory_map`
+/// that the allocator can come to hand out.
 pub fn bitmap_words(memory_map: impl IntoIterator<Item = MemoryMapEntry>) -> usize {
     let end = memory_map
         .into_iter()
-        .filter(|e| e.kind == Kind::Usable as u32)
+        .filter(|e| allocatable(e.kind))
         .map(|e| e.phys_start / PAGE_SIZE + e.page_count)
         .max()
         .unwrap_or(0);
@@ -59,12 +67,9 @@ impl<'a> Frames<'a> {
         }
     }
 
-    /// Makes free every frame of the `Usable` ranges of `memory_map`.
-    pub fn add_usable(&mut self, memory_map: impl IntoIterator<Item = MemoryMapEntry>) {
-        for e in memory_map
-            .into_iter()
-            .filter(|e| e.kind == Kind::Usable as u32)
-        {
+    /// Makes free every frame of the ranges of `kind` in `memory_map`.
+    pub fn add_kind(&mut self, memory_map: impl IntoIterator<Item = MemoryMapEntry>, kind: Kind) {
+        for e in memory_map.into_iter().filter(|e| e.kind == kind as u32) {
             self.add(e.phys_start / PAGE_SIZE, e.page_count);
         }
     }
@@ -147,6 +152,7 @@ mod tests {
             entry(2, 6, Kind::Usable),
             entry(8, 4, Kind::KernelImage),
             entry(12, 1100, Kind::Usable),
+            entry(1112, 4, Kind::Mmio),
         ]
     }
 
@@ -156,7 +162,7 @@ mod tests {
         assert_eq!(bitmap_words(map.iter().copied()), 1112usize.div_ceil(64));
         let mut bits = vec![0xffff; bitmap_words(map.iter().copied())];
         let mut frames = Frames::new(&mut bits);
-        frames.add_usable(map.iter().copied());
+        frames.add_kind(map.iter().copied(), Kind::Usable);
         assert_eq!(frames.free_count(), 1106);
         let mut got = Vec::new();
         while let Some(phys) = frames.alloc() {
@@ -171,11 +177,22 @@ mod tests {
     }
 
     #[test]
+    fn covers_boot_memory_reclaimed_later() {
+        let mut map = map();
+        map.push(entry(2000, 10, Kind::BootloaderReclaimable));
+        let mut bits = vec![0; bitmap_words(map.iter().copied())];
+        let mut frames = Frames::new(&mut bits);
+        frames.add_kind(map.iter().copied(), Kind::Usable);
+        frames.add_kind(map.iter().copied(), Kind::BootloaderReclaimable);
+        assert_eq!(frames.free_count(), 1116);
+    }
+
+    #[test]
     fn aligns_contiguous_runs() {
         let map = map();
         let mut bits = vec![0; bitmap_words(map.iter().copied())];
         let mut frames = Frames::new(&mut bits);
-        frames.add_usable(map.iter().copied());
+        frames.add_kind(map.iter().copied(), Kind::Usable);
         assert_eq!(frames.alloc_contiguous(4, 4), Some(4 * PAGE_SIZE));
         assert_eq!(frames.alloc_contiguous(10, 8), Some(16 * PAGE_SIZE));
         assert_eq!(frames.alloc_contiguous(512, 512), Some(512 * PAGE_SIZE));
@@ -190,7 +207,7 @@ mod tests {
         let map = [entry(0, 64, Kind::Usable)];
         let mut bits = vec![0; 1];
         let mut frames = Frames::new(&mut bits);
-        frames.add_usable(map.iter().copied());
+        frames.add_kind(map.iter().copied(), Kind::Usable);
         frames.reserve(0, 3);
         assert_eq!(frames.alloc(), Some(3 * PAGE_SIZE));
         let run = frames.alloc_contiguous(8, 8).unwrap();
