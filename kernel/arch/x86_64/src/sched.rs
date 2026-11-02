@@ -248,8 +248,7 @@ fn schedule(requeue: bool) {
         // The running thread goes on.
         *current.entity.lock() = entity;
         drop(next.take());
-        start_slice(&mut cpu, now, entity);
-        cpu.current = Some(current);
+        start_slice(&mut cpu, now, current, entity);
         return;
     }
     let save = current.rsp.get();
@@ -262,8 +261,7 @@ fn schedule(requeue: bool) {
             // SAFETY: `next` is not running, so its saved pointer is
             // stable.
             let rsp = unsafe { *next.rsp.get() };
-            start_slice(&mut cpu, now, *next.entity.lock());
-            cpu.current = Some(next);
+            start_slice(&mut cpu, now, next, entity);
             rsp
         }
         None => cpu.idle_rsp,
@@ -279,7 +277,10 @@ fn schedule(requeue: bool) {
     finish_switch();
 }
 
-fn start_slice(cpu: &mut CpuSched, now: i64, entity: Entity) {
+/// Makes `thread` the running thread, starting its slice, and arms the
+/// timer for it.
+fn start_slice(cpu: &mut CpuSched, now: i64, thread: Arc<Thread>, entity: Entity) {
+    cpu.current = Some(thread);
     cpu.slice_start = now;
     cpu.slice_end = now.saturating_add(cpu.fair.slice(entity.weight));
     arm(cpu);
@@ -393,8 +394,7 @@ pub fn run() -> ! {
                 next.extended.restore();
                 // SAFETY: `next` is not running.
                 let rsp = unsafe { *next.rsp.get() };
-                start_slice(&mut cpu, now, entity);
-                cpu.current = Some(next);
+                start_slice(&mut cpu, now, next, entity);
                 let save = &raw mut cpu.idle_rsp;
                 drop(cpu);
                 // SAFETY: the idle loop's stack stays mapped, and the
