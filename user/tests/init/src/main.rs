@@ -523,6 +523,23 @@ fn ports(_: &Startup) -> Result {
     )?;
     signal(event, USER1, 0)?;
 
+    // A one-shot registration that fired has ended, but its unread packet
+    // is still cancelled.
+    wait_async(event, port, 5, USER0, 0)?;
+    signal(event, 0, USER0)?;
+    // A new registration removes the ended one from the kernel's list.
+    wait_async(event, port, 6, USER1, 0)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("cancelling a fired wait", sys::port_cancel(port, event, 5))?;
+        check("cancelling the other", sys::port_cancel(port, event, 6))?;
+    }
+    ensure(
+        "dropping its packet",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    signal(event, USER0, 0)?;
+
     let mut copy = 0;
     // SAFETY: the pointer is valid for the call.
     check("duplicating", unsafe {

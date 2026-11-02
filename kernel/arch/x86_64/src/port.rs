@@ -44,8 +44,17 @@ pub fn packet(key: u64, kind: u32, status: i32, payload: &[u8]) -> [u8; PACKET_S
 /// packet the budget it is charged to.
 struct Queued {
     bytes: [u8; PACKET_SIZE],
-    registration: Option<u64>,
+    registration: Option<Origin>,
     charged: Option<Arc<Budget>>,
+}
+
+/// The registration that queued a packet, and the process and handle it
+/// was made through, which outlive it for a one-shot registration.
+#[derive(Clone, Copy)]
+struct Origin {
+    id: u64,
+    process: usize,
+    handle: Handle,
 }
 
 impl Drop for Queued {
@@ -184,7 +193,7 @@ impl Port {
             state.users -= 1;
         }
         drop(state);
-        if let Some(id) = p.registration {
+        if let Some(Origin { id, .. }) = p.registration {
             // Its registration may queue again.
             for r in REGISTRATIONS.lock().iter() {
                 if r.id == id {
@@ -262,7 +271,11 @@ impl Registration {
         }
         let packet = Queued {
             bytes: packet(self.key, kind, 0, payload),
-            registration: Some(self.id),
+            registration: Some(Origin {
+                id: self.id,
+                process: self.process,
+                handle: self.handle,
+            }),
             charged: None,
         };
         let mut state = port.state.lock();
@@ -519,9 +532,11 @@ pub fn cancel(port: &Arc<Port>, process: usize, handle: Handle, key: u64) {
             }
         }
     }
+    // Packets of one-shot registrations that already ended go too.
     port.state.lock().packets.retain(|p| {
+        let packet_key = u64::from_le_bytes(p.bytes[0x00..0x08].try_into().expect("8 bytes"));
         p.registration
-            .is_none_or(|id| !removed.iter().any(|r| r.id == id))
+            .is_none_or(|o| !(o.process == process && o.handle == handle && packet_key == key))
     });
     for r in removed {
         if !r.done.load(Ordering::Acquire) {
