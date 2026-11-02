@@ -207,10 +207,126 @@ fn info_topics(s: &Startup) -> Result {
     )
 }
 
+const SIGNALED: u32 = 1 << 3;
+const TERMINATED: u32 = 1 << 4;
+const USER0: u32 = 1 << 24;
+const USER1: u32 = 1 << 25;
+const TIMED_OUT: i64 = -21;
+const CANCELED: i64 = -23;
+
+fn now() -> i64 {
+    let mut now = 0;
+    // SAFETY: the pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    now
+}
+
+/// Waits on `handle` for `signals` until `deadline`, returning the
+/// status and the observed state.
+fn wait(handle: Handle, signals: u32, deadline: i64) -> (i64, u32) {
+    let mut observed = 0;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::object_wait_one(handle, signals, deadline, &mut observed) };
+    (status, observed)
+}
+
+/// The result a helper thread leaves for the test.
+static HELPER: AtomicU64 = AtomicU64::new(0);
+
+extern "sysv64" fn signal_later(event: u64, _: u64) -> ! {
+    sleep_ms(20);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::object_signal(event as Handle, 0, USER1) };
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+extern "sysv64" fn wait_forever(event: u64, _: u64) -> ! {
+    let (status, _) = wait(event as Handle, USER0, i64::MAX);
+    HELPER.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Starts a thread of this process at `entry` with `arg`.
+fn spawn(s: &Startup, entry: extern "sysv64" fn(u64, u64) -> !, arg: u64) -> Result<Handle> {
+    let stack_size = 16 * 1024;
+    let stack = create_memory(stack_size)?;
+    let at = map(s.process, stack, stack_size)?;
+    let mut thread = 0;
+    let name = b"helper";
+    // SAFETY: the pointers describe `name` and `thread`.
+    let status =
+        unsafe { sys::thread_create(s.process, name.as_ptr(), name.len() as u64, &mut thread) };
+    check("creating a thread", status)?;
+    let entry = entry as *const () as u64;
+    // SAFETY: the call takes no pointers; the stack is mapped and unused.
+    let status = unsafe { sys::thread_start(thread, entry, at + stack_size - 8, arg, 0) };
+    check("starting the thread", status)?;
+    Ok(thread)
+}
+
+/// Events, waits on them and on threads, and cancelled waits.
+fn events_and_waits(s: &Startup) -> Result {
+    let mut event = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let (status, observed) = wait(event, SIGNALED, now() + 5_000_000);
+    ensure("timing out", status == TIMED_OUT && observed == 0)?;
+    // SAFETY: the call takes no pointers.
+    check("signalling", unsafe {
+        sys::object_signal(event, 0, SIGNALED | USER0)
+    })?;
+    let (status, observed) = wait(event, SIGNALED, i64::MAX);
+    ensure(
+        "seeing the signal",
+        status == 0 && observed == SIGNALED | USER0,
+    )?;
+    // SAFETY: the call takes no pointers.
+    let bad = unsafe { sys::object_signal(event, 0, 1) };
+    ensure("refusing other bits", bad == -10)?;
+    // SAFETY: the call takes no pointers.
+    let wrong = unsafe { sys::object_signal(s.process, 0, USER0) };
+    ensure("refusing other types", wrong == -12)?;
+    // SAFETY: the call takes no pointers.
+    check("clearing", unsafe {
+        sys::object_signal(event, SIGNALED | USER0, 0)
+    })?;
+
+    let helper = spawn(s, signal_later, u64::from(event))?;
+    let (status, observed) = wait(event, USER1, now() + 2_000_000_000);
+    ensure(
+        "being woken by another thread",
+        status == 0 && observed == USER1,
+    )?;
+    let (status, _) = wait(helper, TERMINATED, now() + 2_000_000_000);
+    ensure("seeing the thread end", status == 0)?;
+
+    let mut copy = 0;
+    // SAFETY: the pointer is valid for the call.
+    let status = unsafe { sys::handle_duplicate(event, 0x8000_0000, &mut copy) };
+    check("duplicating the event", status)?;
+    let waiter = spawn(s, wait_forever, u64::from(copy))?;
+    sleep_ms(20);
+    // SAFETY: the call takes no pointers.
+    check("closing the handle", unsafe { sys::handle_close(copy) })?;
+    let (status, _) = wait(waiter, TERMINATED, now() + 2_000_000_000);
+    ensure("seeing the waiter end", status == 0)?;
+    ensure(
+        "cancelling the wait",
+        HELPER.load(Ordering::Acquire) as i64 == CANCELED,
+    )
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 4] = [
+const TESTS: [(&str, Test); 5] = [
     ("info_topics", info_topics),
+    ("events_and_waits", events_and_waits),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
