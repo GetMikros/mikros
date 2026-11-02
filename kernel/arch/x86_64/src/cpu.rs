@@ -54,6 +54,27 @@ pub unsafe fn write_msr(msr: u32, value: u64) {
     };
 }
 
+/// Reads the model-specific register `msr`.
+///
+/// # Safety
+///
+/// The register must exist, and reading it must have no side effect the
+/// kernel relies on not happening.
+pub unsafe fn read_msr(msr: u32) -> u64 {
+    let (low, high): (u32, u32);
+    // SAFETY: the caller guarantees the read is valid and harmless.
+    unsafe {
+        asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") low,
+            out("edx") high,
+            options(nomem, nostack, preserves_flags),
+        )
+    };
+    u64::from(high) << 32 | u64::from(low)
+}
+
 pub fn read_cr4() -> u64 {
     let value;
     // SAFETY: reading CR4 has no side effects.

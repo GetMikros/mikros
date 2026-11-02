@@ -3,6 +3,8 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
+#[cfg(target_os = "none")]
+mod apic;
 #[cfg(any(target_os = "none", test))]
 mod backtrace;
 #[cfg(any(target_os = "none", test))]
