@@ -268,7 +268,7 @@ impl HandleTable {
         })();
         if let Err(e) = result {
             for &handle in handles[..inserted].iter().rev() {
-                let entry = self.take(handle)?;
+                let entry = self.take(handle).expect("just inserted");
                 if self.slots.len() > added {
                     // Reverse insertion order puts the appended slot last in both lists.
                     self.free.pop();
