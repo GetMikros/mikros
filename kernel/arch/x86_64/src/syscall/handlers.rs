@@ -89,6 +89,12 @@ pub fn object_get_info(
         INFO_MEMORY if kind == ObjectType::MemoryObject => {
             copy(&mut record, &object::<MemoryObject>(handle).info())
         }
+        crate::process::INFO_PROCESS if kind == ObjectType::Process => {
+            copy(&mut record, &object::<Process>(handle).info())
+        }
+        crate::sched::INFO_THREAD if kind == ObjectType::Thread => {
+            copy(&mut record, &object::<Thread>(handle).info())
+        }
         _ => return Err(Error::WrongType),
     };
     let record = &record[..size];

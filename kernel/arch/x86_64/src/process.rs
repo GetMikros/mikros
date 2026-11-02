@@ -18,6 +18,10 @@ pub const RUNNING: u32 = 1;
 pub const TERMINATED: u32 = 2;
 pub const STOPPED: u32 = 3;
 
+/// The topic and size of the process information record.
+pub const INFO_PROCESS: u32 = 2;
+pub const INFO_PROCESS_SIZE: usize = 0x20;
+
 pub struct Process {
     header: Header,
     name: Name,
@@ -42,6 +46,8 @@ pub struct Process {
     /// The I/O port ranges, start and exclusive end, that the process's
     /// threads may access.
     ioports: SpinLock<Vec<(u64, u64)>>,
+    /// The nanoseconds its threads have run, up to their last switch.
+    cpu_time: AtomicI64,
 }
 
 /// The I/O port ranges the bitmap allows now.
@@ -112,6 +118,7 @@ impl Process {
             term_signal: AtomicU32::new(0),
             stopped: SpinLock::new(Vec::new()),
             ioports: SpinLock::new(Vec::new()),
+            cpu_time: AtomicI64::new(0),
         }))
     }
 
@@ -152,7 +159,6 @@ impl Process {
         self.state.load(Ordering::Acquire)
     }
 
-    #[expect(dead_code, reason = "no call reads exit codes yet")]
     pub fn exit_code(&self) -> i64 {
         self.exit_code.load(Ordering::Acquire)
     }
@@ -172,6 +178,31 @@ impl Process {
 
     /// The signal that terminated the process, or 0.
     #[allow(dead_code, reason = "the PROCESS information topic comes later")]
+    /// Adds `ns` nanoseconds that one of its threads ran.
+    pub fn add_cpu_time(&self, ns: i64) {
+        self.cpu_time.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    /// The `PROCESS` information record. `thread_count` counts the
+    /// threads that are not `DEAD`.
+    pub fn info(&self) -> [u8; INFO_PROCESS_SIZE] {
+        let threads = self
+            .live_threads()
+            .iter()
+            .filter(|t| t.state() != sched::DEAD)
+            .count() as u32;
+        let running =
+            sched::running_slice(|t| t.process().is_some_and(|p| core::ptr::eq(&**p, self)));
+        let cpu_time = self.cpu_time.load(Ordering::Relaxed) + running;
+        let mut record = [0u8; INFO_PROCESS_SIZE];
+        record[0x00..0x08].copy_from_slice(&self.exit_code().to_le_bytes());
+        record[0x08..0x0C].copy_from_slice(&self.state().to_le_bytes());
+        record[0x0C..0x10].copy_from_slice(&threads.to_le_bytes());
+        record[0x10..0x14].copy_from_slice(&self.term_signal().to_le_bytes());
+        record[0x18..0x20].copy_from_slice(&cpu_time.to_le_bytes());
+        record
+    }
+
     pub fn term_signal(&self) -> u32 {
         self.term_signal.load(Ordering::Acquire)
     }

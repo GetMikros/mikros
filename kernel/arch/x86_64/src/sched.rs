@@ -56,6 +56,8 @@ pub struct Thread {
     #[cfg(feature = "fuzz")]
     coverage: SpinLock<Option<crate::coverage::Buffer>>,
     entity: SpinLock<Entity>,
+    /// The thread's priority, from 0 to `MAX_PRIORITY`.
+    priority: AtomicU32,
     /// Nanoseconds the thread has run.
     cpu_time: AtomicI64,
     user: SpinLock<UserState>,
@@ -136,6 +138,7 @@ impl Thread {
             #[cfg(feature = "fuzz")]
             coverage: SpinLock::new(None),
             entity: SpinLock::new(Entity::new(DEFAULT_PRIORITY)),
+            priority: AtomicU32::new(DEFAULT_PRIORITY),
             cpu_time: AtomicI64::new(0),
             user: SpinLock::new(UserState::default()),
             exception_frame: AtomicPtr::new(core::ptr::null_mut()),
@@ -376,9 +379,30 @@ impl Thread {
         Some(result)
     }
 
-    #[allow(dead_code, reason = "nothing starts kernel threads yet")]
+    /// The nanoseconds the thread has run, including the slice it is
+    /// running now.
     pub fn cpu_time(&self) -> i64 {
-        self.cpu_time.load(Ordering::Relaxed)
+        self.cpu_time.load(Ordering::Relaxed) + running_slice(|t| core::ptr::eq(t, self))
+    }
+
+    pub fn priority(&self) -> u32 {
+        self.priority.load(Ordering::Relaxed)
+    }
+
+    /// The `THREAD` information record.
+    pub fn info(&self) -> [u8; INFO_THREAD_SIZE] {
+        let state = self.state();
+        let exception = if state == EXCEPTION {
+            self.exception_kind()
+        } else {
+            0
+        };
+        let mut record = [0u8; INFO_THREAD_SIZE];
+        record[0x00..0x04].copy_from_slice(&state.to_le_bytes());
+        record[0x04..0x08].copy_from_slice(&self.priority().to_le_bytes());
+        record[0x08..0x0C].copy_from_slice(&exception.to_le_bytes());
+        record[0x10..0x18].copy_from_slice(&self.cpu_time().to_le_bytes());
+        record
     }
 }
 
@@ -500,6 +524,9 @@ fn schedule(requeue: bool) {
     };
     let ran = now - cpu.slice_start;
     current.cpu_time.fetch_add(ran, Ordering::Relaxed);
+    if let Some(process) = &current.process {
+        process.add_cpu_time(ran);
+    }
     cpu.fair.charge(ran);
     // A thread made DEAD by another goes on running until it reaches
     // `exit_if_dead`, so it is queued again like a runnable one.
@@ -789,6 +816,20 @@ pub extern "sysv64" fn thread_start(entry: usize, arg: usize) -> ! {
 }
 
 /// The running thread.
+/// The topic and size of the thread information record.
+pub const INFO_THREAD: u32 = 3;
+pub const INFO_THREAD_SIZE: usize = 0x18;
+
+/// The nanoseconds the running thread has run in its current slice, when
+/// `matches` accepts it, and 0 otherwise.
+pub fn running_slice(matches: impl Fn(&Thread) -> bool) -> i64 {
+    let cpu = this_cpu().lock();
+    match &cpu.current {
+        Some(t) if matches(t) => crate::time::now() - cpu.slice_start,
+        _ => 0,
+    }
+}
+
 pub fn current() -> Option<Arc<Thread>> {
     this_cpu().lock().current.clone()
 }
