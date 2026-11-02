@@ -35,6 +35,10 @@ pub struct Process {
     started: AtomicU32,
     exception: SpinLock<Option<ExceptionChannel>>,
     signals: SpinLock<crate::signal::ProcessSignals>,
+    /// The signal that terminated the process, or 0.
+    term_signal: AtomicU32,
+    /// The threads waiting while the process is stopped.
+    stopped: SpinLock<Vec<Arc<Thread>>>,
 }
 
 /// The endpoint of a process's exception channel that the kernel keeps.
@@ -76,6 +80,8 @@ impl Process {
             started: AtomicU32::new(0),
             exception: SpinLock::new(None),
             signals: SpinLock::new(crate::signal::ProcessSignals::default()),
+            term_signal: AtomicU32::new(0),
+            stopped: SpinLock::new(Vec::new()),
         }))
     }
 
@@ -116,11 +122,62 @@ impl Process {
             .collect()
     }
 
+    /// The signal that terminated the process, or 0.
+    #[allow(dead_code, reason = "the PROCESS information topic comes later")]
+    pub fn term_signal(&self) -> u32 {
+        self.term_signal.load(Ordering::Acquire)
+    }
+
+    /// Terminates the process because of signal `signo`.
+    pub fn terminate_by_signal(&self, signo: u32) {
+        let _ = self
+            .term_signal
+            .compare_exchange(0, signo, Ordering::AcqRel, Ordering::Acquire);
+        self.terminate(kernel_core::signal::EXIT_CODE);
+    }
+
+    /// Stops a running process: its threads wait at their next return to
+    /// user mode.
+    pub fn stop(&self) {
+        if self
+            .state
+            .compare_exchange(RUNNING, STOPPED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.header.update_signals(0, signals::SUSPENDED);
+        }
+    }
+
+    /// Makes the running `thread` of this process wait until the process
+    /// runs again, is terminated, or is sent KILL.
+    pub fn stop_here(&self, thread: &Arc<Thread>) {
+        let mut stopped = self.stopped.lock();
+        if self.state() != STOPPED || stopped.try_reserve(1).is_err() {
+            return;
+        }
+        stopped.push(thread.clone());
+        sched::block(thread, move || drop(stopped));
+    }
+
+    /// Wakes the threads waiting in a stopped process, so that they look
+    /// at its signals again.
+    pub fn wake_stopped(&self) {
+        let threads = core::mem::take(&mut *self.stopped.lock());
+        for thread in &threads {
+            sched::wake(thread);
+        }
+    }
+
     /// Lets the threads of a stopped process run again.
     pub fn continue_threads(&self) {
-        let _ = self
+        if self
             .state
-            .compare_exchange(STOPPED, RUNNING, Ordering::AcqRel, Ordering::Acquire);
+            .compare_exchange(STOPPED, RUNNING, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.header.update_signals(signals::SUSPENDED, 0);
+        }
+        self.wake_stopped();
     }
 
     /// The kernel's endpoint of the exception channel, while the returned
@@ -281,7 +338,9 @@ impl Process {
         // can drop further objects.
         let handles = core::mem::take(&mut *self.handles.lock());
         drop(handles);
-        self.header.update_signals(0, signals::TERMINATED);
+        drop(core::mem::take(&mut *self.stopped.lock()));
+        self.header
+            .update_signals(signals::SUSPENDED, signals::TERMINATED);
         for thread in &threads {
             thread.header().update_signals(0, signals::TERMINATED);
         }

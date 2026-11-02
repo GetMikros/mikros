@@ -514,9 +514,7 @@ pub fn thread_resume_from_exception(thread: Checked, action: u32) -> Result<(), 
             {
                 return Err(Error::BadState);
             }
-            // Delivering the exception as a process signal comes with
-            // process signals.
-            return Err(Error::NotSupported);
+            crate::sched::resume_exception(&thread, crate::sched::DELIVER_SIGNAL);
         }
         _ => return Err(Error::InvalidArgs),
     }
@@ -753,4 +751,11 @@ pub fn signal_get_pending(out: UserOut<u64>) -> Result<(), Error> {
     let thread = current_thread()?;
     let process = current_process()?;
     out.write(crate::signal::pending_mask(&process, &thread))
+}
+
+pub fn signal_return(context: u64) -> Result<(), Error> {
+    // The context replaces every register on the way back to user mode,
+    // so the status this returns is never seen.
+    current_thread()?.request_sigreturn(context.max(1));
+    Ok(())
 }

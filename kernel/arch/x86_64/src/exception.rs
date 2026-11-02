@@ -53,7 +53,11 @@ pub fn before_user_return(frame: &mut Frame) -> bool {
         }
         Process::kill_thread(&thread);
     }
-    reported
+    if let Some(context) = thread.take_sigreturn() {
+        crate::signal::sigreturn(frame, context);
+        reported = true;
+    }
+    reported | crate::signal::deliver(frame)
 }
 
 fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
@@ -68,9 +72,8 @@ fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
         if kind == kind::THREAD_STARTING || kind == kind::THREAD_EXITING {
             return;
         }
-        // Process signals take exceptions that no channel handles;
-        // until they exist, such an exception stops the kernel as before.
-        crate::panic::exception(frame);
+        crate::signal::exception_signal(&process, &thread, kind, address);
+        return;
     };
     let report = Report {
         kind,
@@ -102,7 +105,9 @@ fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
         process.terminate(EXIT_CODE);
         return;
     }
-    if sched::wait_exception(&thread) == sched::HANDLER_GONE {
-        process.terminate(EXIT_CODE);
+    match sched::wait_exception(&thread) {
+        sched::HANDLER_GONE => process.terminate(EXIT_CODE),
+        sched::DELIVER_SIGNAL => crate::signal::exception_signal(&process, &thread, kind, address),
+        _ => {}
     }
 }

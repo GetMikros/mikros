@@ -386,3 +386,11 @@ syscalls:
     spec: [MIKSPEC-0020.R24]
     args:
       - {name: out, type: "*mut u64", dir: out}
+
+  - name: signal_return
+    number: 36
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0020.R20, MIKSPEC-0016.R16]
+    args:
+      - {name: context, type: u64, dir: in}

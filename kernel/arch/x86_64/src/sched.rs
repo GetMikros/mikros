@@ -32,6 +32,8 @@ pub const DEAD: u32 = 4;
 /// because the handler's endpoint was closed.
 pub const RESUMED: u32 = 1;
 pub const HANDLER_GONE: u32 = 2;
+/// Resumed with `DELIVER_SIGNAL`.
+pub const DELIVER_SIGNAL: u32 = 3;
 
 pub struct Thread {
     header: Header,
@@ -69,6 +71,8 @@ pub struct Thread {
     /// before it returns to user mode.
     exit_requested: AtomicBool,
     signals: SpinLock<crate::signal::ThreadSignals>,
+    /// The context address `signal_return` was called with, or 0.
+    sigreturn: AtomicU64,
 }
 
 /// The value DR6 has when no debug condition is recorded.
@@ -128,6 +132,7 @@ impl Thread {
             exception_kind: AtomicU32::new(0),
             exit_requested: AtomicBool::new(false),
             signals: SpinLock::new(crate::signal::ThreadSignals::default()),
+            sigreturn: AtomicU64::new(0),
         }))
     }
 
@@ -244,6 +249,21 @@ impl Thread {
     /// Whether a debug exception was deferred, clearing the mark.
     pub fn take_deferred_debug(&self) -> bool {
         self.debug_pending.swap(false, Ordering::AcqRel)
+    }
+
+    /// Makes the thread restore the signal context at `context` before
+    /// it returns to user mode.
+    pub fn request_sigreturn(&self, context: u64) {
+        self.sigreturn.store(context, Ordering::Release);
+    }
+
+    /// The context `request_sigreturn` stored, clearing it.
+    pub fn take_sigreturn(&self) -> Option<u64> {
+        Some(self.sigreturn.swap(0, Ordering::AcqRel)).filter(|&c| c != 0)
+    }
+
+    pub fn extended_state(&self) -> &context::ExtendedState {
+        &self.extended
     }
 
     pub fn signals(&self) -> &SpinLock<crate::signal::ThreadSignals> {
@@ -568,15 +588,55 @@ pub fn make_dead(thread: &Arc<Thread>) -> u32 {
     if was == BLOCKED {
         let mut cpu = this_cpu().lock();
         let queued = Queued(Arc::as_ptr(thread));
-        // The reference the sleeper held moves to the run queue.
+        // The reference the sleeper held moves to the run queue. A thread
+        // blocked by `block` is not a sleeper and is queued afresh.
+        let entity = *thread.entity.lock();
         if cpu.sleepers.remove(&queued) {
-            let entity = *thread.entity.lock();
             cpu.fair.enqueue(queued, entity);
+        } else {
+            cpu.fair.enqueue(Queued::new(thread.clone()), entity);
         }
     } else if was == EXCEPTION {
         queue(thread);
     }
     was
+}
+
+/// Blocks the running `thread` until `wake` or `make_dead`, calling
+/// `release` once it is marked BLOCKED, so that whoever wakes it can
+/// only see it blocked. Returns at once when it is not RUNNABLE.
+pub fn block(thread: &Arc<Thread>, release: impl FnOnce()) {
+    let blocked = thread
+        .state
+        .compare_exchange(RUNNABLE, BLOCKED, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    release();
+    if blocked {
+        schedule(false);
+    }
+}
+
+/// Makes a thread that `block` blocked RUNNABLE and queues it.
+pub fn wake(thread: &Arc<Thread>) {
+    if thread
+        .state
+        .compare_exchange(BLOCKED, RUNNABLE, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        queue(thread);
+    }
+}
+
+/// The user FS and GS bases of the running thread.
+pub fn user_bases() -> (u64, u64) {
+    // SAFETY: both MSRs exist in long mode; in the kernel the user GS
+    // base is in IA32_KERNEL_GS_BASE.
+    unsafe {
+        (
+            crate::cpu::read_msr(IA32_FS_BASE),
+            crate::cpu::read_msr(percpu::IA32_KERNEL_GS_BASE),
+        )
+    }
 }
 
 /// Queues `thread`, which is not running and not queued.
