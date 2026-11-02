@@ -382,8 +382,16 @@ impl MemoryObject {
         }
         self.check_range(offset, len)?;
         source.check_range(source_offset, len)?;
-        source.commit(source_offset, len)?;
-        let moved = source.take_frames(source_offset, len)?;
+        // Frames move only once no kernel copy holds the source; nothing
+        // waits between the commit and the move.
+        let moved = loop {
+            source.wait_unpinned();
+            source.commit(source_offset, len)?;
+            match source.take_frames(source_offset, len) {
+                Err(Error::BadState) => continue,
+                taken => break taken?,
+            }
+        };
         let first = offset / PAGE_SIZE;
         let mut leftover = Vec::new();
         {
@@ -467,8 +475,19 @@ impl MemoryObject {
         if self.seals() & SEAL_SEAL != 0 {
             return Err(Error::AccessDenied);
         }
-        let _pages = self.pages.lock();
-        if seals & SEAL_WRITE != 0 && self.mapped_writable() {
+        let write = seals & SEAL_WRITE != 0;
+        // A write seal waits until no kernel copy holds the frames, so
+        // that no output prepared before it is written after it.
+        let _pages = loop {
+            if write {
+                self.wait_unpinned();
+            }
+            let pages = self.pages.lock();
+            if !write || !pages.pinned() {
+                break pages;
+            }
+        };
+        if write && self.mapped_writable() {
             return Err(Error::BadState);
         }
         self.seals.fetch_or(seals, Ordering::AcqRel);
@@ -729,11 +748,14 @@ impl MemoryObject {
     /// keeping each until the result is released, so that they can be read
     /// without the pages locked. Pages without a frame read as zeros and
     /// get none. The record is charged to `budget`. Fails with `OutOfRange`
-    /// when the range stops lying inside the object meanwhile.
+    /// when the range stops lying inside the object meanwhile. When
+    /// `exclusive`, the frames are recorded only once no other kernel copy
+    /// holds them, so that no write prepared before is still to come.
     pub fn hold_for_read<F: FnMut()>(
         self: &Arc<Self>,
         offset: u64,
         len: u64,
+        exclusive: bool,
         budget: Option<&Arc<Budget>>,
         work: &mut Work<F>,
     ) -> Result<Source, Error> {
@@ -765,7 +787,13 @@ impl MemoryObject {
                     work.item();
                     self.obtain(index)?;
                 }
+                if exclusive {
+                    self.wait_unpinned();
+                }
                 let mut pages = self.pages.lock();
+                if exclusive && pages.pinned() {
+                    continue;
+                }
                 if paged.state.lock().revoked() {
                     return Err(Error::AccessDenied);
                 }
@@ -780,7 +808,16 @@ impl MemoryObject {
                 }
             }
         }
-        self.pages.lock().pin();
+        loop {
+            if exclusive {
+                self.wait_unpinned();
+            }
+            let mut pages = self.pages.lock();
+            if !exclusive || !pages.pinned() {
+                pages.pin();
+                break;
+            }
+        }
         source.pinned = true;
         for index in first..first + count {
             work.item();

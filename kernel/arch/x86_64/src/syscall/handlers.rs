@@ -351,7 +351,7 @@ pub fn mem_read(mem: Checked, offset: u64, buf: UserOut<u8>, len: u64) -> Result
     let budget = Some(process.budget());
     let aspace = process.aspace();
     let mut work = Work::new(crate::sched::preempt_point);
-    let source = mem.hold_for_read(offset, len, budget, &mut work)?;
+    let source = mem.hold_for_read(offset, len, false, budget, &mut work)?;
     let outputs = Outputs::prepare(&[(buf.0, len)], budget, &mut work, |page| {
         aspace.hold_for_write(page)
     });
@@ -1536,7 +1536,9 @@ pub fn mem_clone(
     let budget = process.budget();
     let clone = MemoryObject::new(budget, len, options)?;
     let mut work = Work::new(crate::sched::preempt_point);
-    let held = source.hold_for_read(offset, len, Some(budget), &mut work)?;
+    // The clone is taken once no output into the source is still to be
+    // written.
+    let held = source.hold_for_read(offset, len, true, Some(budget), &mut work)?;
     // The bytes are copied at once, in pieces that stay within one page
     // of each object; pieces that read as zero are left without a frame.
     let mut piece = [0u8; PAGE_SIZE as usize];
