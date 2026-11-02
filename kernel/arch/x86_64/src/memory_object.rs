@@ -1003,14 +1003,17 @@ impl MemoryObject {
             frame[from..].fill(0);
         }
         self.unmap_pages(pages.count(), u64::MAX);
+        // The pager state learns of every page that left, also while
+        // kernel copies hold the frames.
         if let Some(paged) = &self.paged {
             let mut state = paged.state.lock();
-            for &index in resized.freed.keys() {
+            for &index in resized.removed.keys() {
                 state.removed(index);
             }
         }
+        let freed = pages.discard(resized.removed.into_values());
         drop(pages);
-        self.free(resized.freed.into_values());
+        self.free(freed);
         Ok(())
     }
 

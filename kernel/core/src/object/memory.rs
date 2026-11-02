@@ -53,9 +53,9 @@ pub struct Resized {
     /// The frame whose bytes from this offset to its end must be zeroed,
     /// so that bytes past the smaller of the two sizes read as zero.
     pub zero: Option<(u64, usize)>,
-    /// The frames of the pages past the new size, by page index. Frames
-    /// taken while the pages are pinned are kept until `unpin` instead.
-    pub freed: BTreeMap<u64, u64>,
+    /// The frames of the pages past the new size, by page index, which
+    /// left the pages. The caller passes them to `discard`.
+    pub removed: BTreeMap<u64, u64>,
 }
 
 /// Fails with `OutOfRange` unless `size` is not zero and at most `max`.
@@ -166,12 +166,18 @@ impl Pages {
             self.frame(kept / PAGE_SIZE).map(|phys| (phys, tail))
         };
         self.size = size;
-        let mut freed = self.frames.split_off(&self.count());
+        let removed = self.frames.split_off(&self.count());
+        Ok(Resized { zero, removed })
+    }
+
+    /// Returns those of `frames`, which left the pages, to free now: while
+    /// the pages are pinned they are kept until `unpin` instead.
+    pub fn discard(&mut self, frames: impl IntoIterator<Item = u64>) -> Vec<u64> {
         if self.pins > 0 {
-            self.orphans
-                .extend(core::mem::take(&mut freed).into_values());
+            self.orphans.extend(frames);
+            return Vec::new();
         }
-        Ok(Resized { zero, freed })
+        frames.into_iter().collect()
     }
 
     /// Takes the frames of pages `first` to `end`, exclusive, which then
@@ -261,8 +267,16 @@ mod tests {
         let resized = pages.set_size(PAGE_SIZE + 10, MAX).unwrap();
         assert_eq!(resized.zero, Some((0x2000, 10)));
         assert_eq!(
-            resized.freed.into_iter().collect::<std::vec::Vec<_>>(),
+            resized
+                .removed
+                .clone()
+                .into_iter()
+                .collect::<std::vec::Vec<_>>(),
             [(2, 0x3000), (3, 0x4000)]
+        );
+        assert_eq!(
+            pages.discard(resized.removed.into_values()),
+            [0x3000, 0x4000]
         );
         assert_eq!((pages.count(), pages.allocated()), (2, 2));
     }
@@ -275,17 +289,22 @@ mod tests {
         }
         pages.pin();
         pages.pin();
-        assert!(pages.set_size(3 * PAGE_SIZE, MAX).unwrap().freed.is_empty());
+        let shrink = |pages: &mut Pages, size| {
+            let removed = pages.set_size(size, MAX).unwrap().removed;
+            let indices: Vec<u64> = removed.keys().copied().collect();
+            (indices, pages.discard(removed.into_values()))
+        };
+        // The pages that left are reported even while pinned.
+        assert_eq!(shrink(&mut pages, 3 * PAGE_SIZE), (vec![3], vec![]));
         pages.set_size(4 * PAGE_SIZE, MAX).unwrap();
         pages.insert(3, 0x9000);
-        assert!(pages.set_size(PAGE_SIZE, MAX).unwrap().freed.is_empty());
+        assert_eq!(shrink(&mut pages, PAGE_SIZE), (vec![1, 2, 3], vec![]));
         assert_eq!(pages.allocated(), 1);
         assert!(pages.unpin().is_empty());
         assert_eq!(pages.unpin(), [0x4000, 0x2000, 0x3000, 0x9000]);
         pages.set_size(2 * PAGE_SIZE, MAX).unwrap();
         pages.insert(1, 0xa000);
-        let freed = pages.set_size(PAGE_SIZE, MAX).unwrap().freed;
-        assert_eq!(freed.into_values().collect::<Vec<_>>(), [0xa000]);
+        assert_eq!(shrink(&mut pages, PAGE_SIZE), (vec![1], vec![0xa000]));
         assert_eq!((pages.pins, pages.orphans.len()), (0, 0));
     }
 
@@ -293,7 +312,7 @@ mod tests {
     fn zeroes_the_old_tail_when_growing() {
         let mut pages = Pages::new(10, RESIZABLE, MAX).unwrap();
         let resized = pages.set_size(PAGE_SIZE * 3, MAX).unwrap();
-        assert!(resized.zero.is_none() && resized.freed.is_empty());
+        assert!(resized.zero.is_none() && resized.removed.is_empty());
         pages.insert(0, 0x5000);
         pages.set_size(10, MAX).unwrap();
         let resized = pages.set_size(PAGE_SIZE, MAX).unwrap();
