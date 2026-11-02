@@ -1,0 +1,43 @@
+# Checks, builds and tests every change with the xtask commands only.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    # Debian trixie has the btrfs-progs and QEMU versions the tools need.
+    container: debian:trixie
+    steps:
+      - name: Install the host tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git \
+            qemu-system-x86 gdb btrfs-progs
+      - uses: actions/checkout@v4
+        with:
+          # The commit checks look at every commit since the base branch.
+          fetch-depth: 0
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install cargo-fuzz and fetch the firmware
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cargo install cargo-fuzz --locked
+          cargo xtask setup
+      - name: Check
+        run: cargo xtask check --base "origin/${{ github.base_ref || 'main' }}"
+      - name: Build
+        run: |
+          for kind in production debug fuzz; do
+            cargo xtask build --kind "$kind"
+          done
+      - name: Test
+        run: cargo xtask test
