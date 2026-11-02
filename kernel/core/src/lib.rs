@@ -16,6 +16,7 @@ pub mod object;
 pub mod panic;
 pub mod random;
 pub mod ranges;
+pub mod regions;
 pub mod sched;
 pub mod status;
 pub mod sync;
