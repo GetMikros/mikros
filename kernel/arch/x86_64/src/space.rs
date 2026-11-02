@@ -117,6 +117,7 @@ pub fn map_device(phys: u64, size: u64) -> u64 {
         writable: true,
         executable: false,
         global: true,
+        user: false,
         policy: Policy::UncachedDevice,
     };
     let mut tables = FrameTables;
@@ -149,6 +150,7 @@ pub fn alloc_pages(size: u64) -> Option<u64> {
         writable: true,
         executable: false,
         global: true,
+        user: false,
         policy: Policy::Cached,
     };
     let mut tables = FrameTables;
@@ -228,6 +230,7 @@ fn build(info: &BootInfo, mapper: &mut Mapper<FrameTables>) -> Result<u64, crate
         writable: true,
         executable: false,
         global: true,
+        user: false,
         policy: Policy::Cached,
     };
 

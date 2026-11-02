@@ -1,5 +1,6 @@
 //! Per-processor data, reached through the GS base.
 
+use crate::aspace::Pcids;
 use crate::cpu::write_msr;
 use crate::sched::CpuSched;
 use core::arch::asm;
@@ -19,6 +20,8 @@ pub struct PerCpu {
     index: u32,
     /// The scheduler state of the processor.
     pub sched: SpinLock<CpuSched>,
+    /// The address spaces that have PCIDs on the processor.
+    pub pcids: SpinLock<Pcids>,
 }
 
 // SAFETY: each processor only reads its own structure, `this` is never
@@ -29,6 +32,7 @@ static BOOT_CPU: PerCpu = PerCpu {
     this: &raw const BOOT_CPU,
     index: 0,
     sched: SpinLock::new(CpuSched::new()),
+    pcids: SpinLock::new(Pcids::new()),
 };
 
 static READY: AtomicBool = AtomicBool::new(false);

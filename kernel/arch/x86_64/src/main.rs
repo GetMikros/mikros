@@ -8,6 +8,9 @@ extern crate alloc;
 
 #[cfg(target_os = "none")]
 mod apic;
+#[cfg(target_os = "none")]
+#[expect(dead_code, reason = "nothing creates processes yet")]
+mod aspace;
 #[cfg(any(target_os = "none", test))]
 mod backtrace;
 #[cfg(any(target_os = "none", test))]

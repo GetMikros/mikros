@@ -180,3 +180,13 @@ pub fn invlpg(virt: u64) {
     // SAFETY: INVLPG only drops cached translations.
     unsafe { asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags)) };
 }
+
+/// Loads CR3.
+///
+/// # Safety
+///
+/// The table must map the kernel half like the kernel's own tables.
+pub unsafe fn write_cr3(value: u64) {
+    // SAFETY: the caller guarantees the kernel stays mapped.
+    unsafe { asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags)) };
+}

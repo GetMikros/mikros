@@ -8,6 +8,7 @@ const GIB_1: u64 = 1 << 30;
 
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
+const USER: u64 = 1 << 2;
 const PWT: u64 = 1 << 3;
 const PCD: u64 = 1 << 4;
 const HUGE: u64 = 1 << 7;
@@ -42,6 +43,8 @@ pub struct Flags {
     pub executable: bool,
     /// Set for mappings in the kernel half.
     pub global: bool,
+    /// Set for mappings in the user address range.
+    pub user: bool,
     pub policy: Policy,
 }
 
@@ -57,6 +60,9 @@ impl Flags {
         }
         if self.global {
             bits |= GLOBAL;
+        }
+        if self.user {
+            bits |= USER;
         }
         let pat = self.policy as u64;
         if pat & 1 != 0 {
@@ -137,6 +143,19 @@ impl<'t, T: Tables> Mapper<'t, T> {
         })
     }
 
+    /// A hierarchy for a user address space: an empty lower half, and the
+    /// top-level entries 256 to 511 of the hierarchy at `kernel_root`.
+    pub fn user(tables: &'t mut T, kernel_root: u64) -> Result<Self, Error> {
+        let root = Self::new_table(tables)?;
+        let kernel = *tables.table(kernel_root);
+        tables.table(root)[256..].copy_from_slice(&kernel[256..]);
+        Ok(Mapper {
+            tables,
+            root,
+            gib_pages: false,
+        })
+    }
+
     /// The hierarchy whose top-level table is at `root`.
     pub fn existing(tables: &'t mut T, root: u64, gib_pages: bool) -> Self {
         Mapper {
@@ -157,7 +176,8 @@ impl<'t, T: Tables> Mapper<'t, T> {
             let entry = self.tables.table(table)[i];
             table = if entry & PRESENT == 0 {
                 let next = Self::new_table(self.tables)?;
-                self.tables.table(table)[i] = next | PRESENT | WRITABLE;
+                let user = if flags.user { USER } else { 0 };
+                self.tables.table(table)[i] = next | PRESENT | WRITABLE | user;
                 next
             } else if entry & HUGE != 0 {
                 return Err(Error::AlreadyMapped(virt));
@@ -175,21 +195,29 @@ impl<'t, T: Tables> Mapper<'t, T> {
     }
 
     /// The table holding the leaf entry for `virt`, the entry's index and
-    /// its page size, or `None` when `virt` is not mapped.
-    fn find_leaf(&mut self, virt: u64) -> Option<(u64, usize, u64)> {
+    /// its page size, or, when `virt` is not mapped, the size of the range
+    /// that the missing entry would cover.
+    fn walk(&mut self, virt: u64) -> Result<(u64, usize, u64), u64> {
         let mut table = self.root;
         for level in (0..=3).rev() {
             let i = index(virt, level);
             let entry = self.tables.table(table)[i];
+            let span = 1 << (12 + 9 * level);
             if entry & PRESENT == 0 {
-                return None;
+                return Err(span);
             }
             if level == 0 || (level < 3 && entry & HUGE != 0) {
-                return Some((table, i, 1 << (12 + 9 * level)));
+                return Ok((table, i, span));
             }
             table = entry & ADDR_MASK;
         }
-        None
+        unreachable!()
+    }
+
+    /// The table holding the leaf entry for `virt`, the entry's index and
+    /// its page size, or `None` when `virt` is not mapped.
+    fn find_leaf(&mut self, virt: u64) -> Option<(u64, usize, u64)> {
+        self.walk(virt).ok()
     }
 
     /// Removes the mappings of the `size` bytes from `virt` and calls
@@ -220,6 +248,68 @@ impl<'t, T: Tables> Mapper<'t, T> {
             }
         }
         Ok(())
+    }
+
+    /// Removes the mappings of the 4 KiB pages in the `size` bytes from
+    /// `virt` that are mapped, skipping the others, and calls `unmapped`
+    /// with the virtual and physical address of each page removed. The
+    /// range must not contain large pages. The caller invalidates the
+    /// translations.
+    pub fn unmap_present(
+        &mut self,
+        virt: u64,
+        size: u64,
+        mut unmapped: impl FnMut(u64, u64),
+    ) -> Result<(), Error> {
+        let end = virt.wrapping_add(size);
+        let mut v = virt;
+        while v != end {
+            match self.walk(v) {
+                Ok((table, i, page)) => {
+                    if page != PAGE_SIZE {
+                        return Err(Error::PartOfLargePage(v));
+                    }
+                    let entry = core::mem::take(&mut self.tables.table(table)[i]);
+                    unmapped(v, entry & ADDR_MASK);
+                    v = v.wrapping_add(PAGE_SIZE);
+                }
+                // Skip the rest of the range the missing entry covers.
+                Err(span) => {
+                    let next = (v | (span - 1)).wrapping_add(1);
+                    let left = end.wrapping_sub(v);
+                    v = if next.wrapping_sub(v) >= left {
+                        end
+                    } else {
+                        next
+                    };
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Calls `free` with each table that top-level entries 0 to 255 lead
+    /// to, lowest level first, and clears those entries. The lower half
+    /// must map nothing, or only 4 KiB pages whose frames the caller
+    /// otherwise keeps track of. The top-level table itself is kept.
+    pub fn free_lower_half(&mut self, mut free: impl FnMut(u64)) {
+        fn walk<T: Tables>(tables: &mut T, table: u64, level: u32, free: &mut impl FnMut(u64)) {
+            if level > 0 {
+                for i in 0..512 {
+                    let entry = tables.table(table)[i];
+                    if entry & PRESENT != 0 && entry & HUGE == 0 {
+                        walk(tables, entry & ADDR_MASK, level - 1, free);
+                    }
+                }
+            }
+            free(table);
+        }
+        for i in 0..256 {
+            let entry = core::mem::take(&mut self.tables.table(self.root)[i]);
+            if entry & PRESENT != 0 {
+                walk(self.tables, entry & ADDR_MASK, 2, &mut free);
+            }
+        }
     }
 
     /// Maps `size` bytes from `virt` to `phys` with the largest pages their
@@ -277,6 +367,7 @@ mod tests {
                 return Some((entry, 1 << (12 + 9 * level)));
             }
             assert_eq!(entry & (NO_EXECUTE | GLOBAL), 0);
+            assert_eq!(entry & USER != 0, virt < 1 << 47);
             table = entry & ADDR_MASK;
         }
         unreachable!()
@@ -286,6 +377,15 @@ mod tests {
         writable: true,
         executable: false,
         global: true,
+        user: false,
+        policy: Policy::Cached,
+    };
+
+    const USER_DATA: Flags = Flags {
+        writable: true,
+        executable: false,
+        global: false,
+        user: true,
         policy: Policy::Cached,
     };
 
@@ -405,5 +505,58 @@ mod tests {
         // The range can be mapped again.
         let mut mapper = Mapper::existing(&mut pool, root, true);
         mapper.map(base, 0, PAGE_SIZE, KERNEL_DATA).unwrap();
+    }
+
+    #[test]
+    fn shares_the_kernel_half_with_user_spaces() {
+        let mut pool = Pool(Vec::new());
+        let kernel = Mapper::new(&mut pool, false).unwrap().root();
+        let user = Mapper::user(&mut pool, kernel).unwrap().root();
+        let k = *pool.table(kernel);
+        let u = *pool.table(user);
+        assert_eq!(k[256..], u[256..]);
+        assert!(u[..256].iter().all(|&e| e == 0));
+    }
+
+    #[test]
+    fn maps_and_frees_user_pages() {
+        let mut pool = Pool(Vec::new());
+        let kernel = Mapper::new(&mut pool, false).unwrap().root();
+        let mut mapper = Mapper::user(&mut pool, kernel).unwrap();
+        let base = 0x40_0000;
+        mapper.map(base, 0x9000, PAGE_SIZE, USER_DATA).unwrap();
+        mapper
+            .map(base + 2 * PAGE_SIZE, 0xA000, PAGE_SIZE, USER_DATA)
+            .unwrap();
+        mapper
+            .map(0x7FFF_FFFF_E000, 0xB000, PAGE_SIZE, USER_DATA)
+            .unwrap();
+        let root = mapper.root();
+        let (entry, size) = leaf(&mut pool, root, base).unwrap();
+        assert_eq!((entry & (USER | GLOBAL), size), (USER, PAGE_SIZE));
+
+        let mut mapper = Mapper::existing(&mut pool, root, false);
+        let mut seen = Vec::new();
+        mapper
+            .unmap_present(base, 3 * PAGE_SIZE, |v, p| seen.push((v, p)))
+            .unwrap();
+        assert_eq!(seen, [(base, 0x9000), (base + 2 * PAGE_SIZE, 0xA000)]);
+        // A range as large as the user half is walked by its tables.
+        seen.clear();
+        mapper
+            .unmap_present(0x1_0000, 0x7FFF_FFFF_F000 - 0x1_0000, |v, p| {
+                seen.push((v, p))
+            })
+            .unwrap();
+        assert_eq!(seen, [(0x7FFF_FFFF_E000, 0xB000)]);
+        let mut freed = Vec::new();
+        mapper.free_lower_half(|t| freed.push(t));
+        // Two hierarchies of a PDPT, a directory and a page table each.
+        assert_eq!(freed.len(), 6);
+        freed.sort();
+        freed.dedup();
+        assert_eq!(freed.len(), 6);
+        assert!(!freed.contains(&root) && !freed.contains(&kernel));
+        assert!(pool.table(root)[..256].iter().all(|&e| e == 0));
     }
 }
