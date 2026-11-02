@@ -138,7 +138,7 @@ pub fn memory_map_size(count: u64, entry_size: u64) -> Result<Option<usize>, Err
 pub fn memory_map(
     data: &[u8],
     entry_size: u64,
-) -> Result<impl Iterator<Item = MemoryMapEntry> + '_, Error> {
+) -> Result<impl Iterator<Item = MemoryMapEntry> + Clone + '_, Error> {
     if entry_size < MIN_ENTRY_SIZE {
         return Err(Error::BadEntrySize(entry_size));
     }

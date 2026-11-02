@@ -5,5 +5,7 @@
 
 pub mod acpi;
 pub mod bootinfo;
+pub mod frames;
 pub mod log;
 pub mod panic;
+pub mod sync;
