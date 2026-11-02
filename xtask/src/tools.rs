@@ -104,35 +104,49 @@ impl Distro {
     }
 }
 
-/// A host tool, the version of it the repository needs, and the package that
-/// provides it.
+/// How a tool is installed.
+pub enum Source {
+    /// From the distribution package of this name.
+    Package(&'static str),
+    /// With `cargo install` of this crate, which needs no privileges.
+    Crate(&'static str),
+}
+
+/// A host tool, the version of it the repository needs, and where it
+/// comes from.
 pub struct Tool {
     pub name: &'static str,
     pub program: &'static str,
     pub min_version: Version,
-    package: &'static str,
+    source: Source,
 }
 
 /// The host tools the development environment needs, with the minimum version
 /// of each.
-pub const TOOLS: [Tool; 3] = [
+pub const TOOLS: [Tool; 4] = [
     Tool {
         name: "QEMU",
         program: "qemu-system-x86_64",
         min_version: Version(8, 2, 0),
-        package: "qemu-system-x86",
+        source: Source::Package("qemu-system-x86"),
     },
     Tool {
         name: "GDB",
         program: "gdb",
         min_version: Version(12, 1, 0),
-        package: "gdb",
+        source: Source::Package("gdb"),
     },
     Tool {
         name: "mkfs.btrfs",
         program: "mkfs.btrfs",
         min_version: Version(6, 12, 0),
-        package: "btrfs-progs",
+        source: Source::Package("btrfs-progs"),
+    },
+    Tool {
+        name: "cargo-fuzz",
+        program: "cargo-fuzz",
+        min_version: Version(0, 13, 0),
+        source: Source::Crate("cargo-fuzz"),
     },
 ];
 
@@ -161,7 +175,12 @@ impl Tool {
 
     /// The command that installs or upgrades the tool on `distro`.
     pub fn install_command(&self, distro: Distro) -> Vec<String> {
-        distro.install_command(self.package)
+        match self.source {
+            Source::Package(package) => distro.install_command(package),
+            Source::Crate(name) => ["cargo", "install", name, "--locked"]
+                .map(String::from)
+                .to_vec(),
+        }
     }
 }
 

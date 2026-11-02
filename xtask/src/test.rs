@@ -1,5 +1,5 @@
-//! `cargo xtask test`: runs the host unit tests and the integration
-//! tests in QEMU.
+//! `cargo xtask test`: runs the host unit tests, replays the host fuzz
+//! corpora and runs the integration tests in QEMU.
 
 use crate::build::{self, BootImage, Kind};
 use crate::qemu::{self, MachineArgs};
@@ -18,7 +18,7 @@ pub struct Args {
     /// Seconds an integration test may run before it fails.
     #[arg(long, default_value_t = 120)]
     pub timeout: u64,
-    /// Skip the host unit tests.
+    /// Skip the host unit tests and the replay of the fuzz corpora.
     #[arg(long)]
     pub no_host: bool,
     #[command(flatten)]
@@ -112,6 +112,7 @@ pub fn run(args: &Args) -> Result<()> {
         if !status.success() {
             bail!("the host unit tests failed");
         }
+        crate::fuzz::replay_corpora()?;
     }
 
     let built = build::build_for(args.kind, BootImage::Test)?;
