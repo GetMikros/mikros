@@ -312,7 +312,8 @@ impl Paging {
 
     /// Records up to `limit` more dirty pages of the opening writeback.
     /// Returns the pages recorded, whose mappings must stop being
-    /// writable without a fault, and whether every page is recorded.
+    /// writable without a fault, and whether every page is recorded. The
+    /// charges of their records cover the list.
     /// Fails with `NoMemory` without room to record them, which ends the
     /// writeback.
     pub fn writeback_record(&mut self, limit: usize) -> Result<(Vec<u64>, bool), Error> {

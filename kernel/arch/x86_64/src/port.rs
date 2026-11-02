@@ -350,7 +350,8 @@ pub fn signals_changed(header: &Header, signals: u32) {
     }
 }
 
-/// Removes the registrations that ended, releasing their charges.
+/// Removes the registrations that ended, releasing their charges. They
+/// keep the charges until the list of them goes, so those cover it.
 fn purge() {
     let mut ended = Vec::new();
     {
@@ -509,7 +510,8 @@ pub fn wait_async(
 
 /// Removes the registrations made through `handle` of the process at
 /// `process` without packets, as the handle leaves the table. With
-/// `handle` `None`, removes every registration of the process.
+/// `handle` `None`, removes every registration of the process. The
+/// charges of the removed registrations cover the list of them.
 pub fn handle_closed(process: usize, handle: Option<Handle>) {
     let mut removed = Vec::new();
     {
@@ -539,7 +541,8 @@ pub fn handle_closed(process: usize, handle: Option<Handle>) {
 }
 
 /// Removes the registrations made on `port` through `handle` with `key`,
-/// with their unread packets, as `port_cancel` does.
+/// with their unread packets, as `port_cancel` does. The charges of the
+/// removed registrations cover the list of them.
 pub fn cancel(port: &Arc<Port>, process: usize, handle: Handle, key: u64) {
     let mut removed = Vec::new();
     {

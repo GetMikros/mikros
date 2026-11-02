@@ -382,6 +382,8 @@ impl AddressSpace {
             return Ok(());
         }
         let id = next_removal();
+        // The removed regions keep their charges until they are dropped,
+        // after this list and the parts go, so those cover both.
         let mut ranges = Vec::new();
         let mut parts = {
             let mut regions = self.regions.lock();

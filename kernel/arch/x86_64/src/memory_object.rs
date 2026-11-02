@@ -396,6 +396,8 @@ impl MemoryObject {
         };
         let end = end.min(pages.count());
         let mut state = paged.state.lock();
+        // The frames listed keep their charges until they are freed, after
+        // the list goes, so those cover it.
         let mut freed = Vec::new();
         for index in first..end {
             if !state.evictable(index) || freed.try_reserve(1).is_err() {
@@ -514,7 +516,8 @@ impl MemoryObject {
             let source_offset = (source_first + from) * PAGE_SIZE;
             let len = (to - from) * PAGE_SIZE;
             // Room for every frame of the piece that does not fit, before
-            // any frame is taken.
+            // any frame is taken. The frames keep their charges until they
+            // are freed, after the list goes, so those cover it.
             let mut leftover = Vec::new();
             leftover
                 .try_reserve_exact((to - from) as usize)

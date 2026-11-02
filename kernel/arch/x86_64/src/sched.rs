@@ -160,9 +160,11 @@ impl Thread {
     /// to the process's budget when `charge` is set.
     pub fn new_user(process: Arc<Process>, name: Name, charge: bool) -> Result<Arc<Thread>, Error> {
         let charged = if charge {
-            // Its entries in the process's thread list, the run queue
-            // and the sleepers count twice, for their share of storage.
+            // Its entries in the process's thread list and stop list,
+            // the run queue and the sleepers count twice, for their share
+            // of storage.
             let entries = size_of::<alloc::sync::Weak<Thread>>()
+                + size_of::<Arc<Thread>>()
                 + Fair::<Queued>::ENTRY_SIZE
                 + Deadlines::<Queued>::ENTRY_SIZE;
             let size = size_of::<Thread>() as u64

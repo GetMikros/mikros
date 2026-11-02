@@ -201,7 +201,8 @@ impl Pages {
     /// Takes the frames of pages `first` to `end`, exclusive, which then
     /// read as zero, and returns those to free now: while the pages are
     /// pinned they are kept until `unpin` instead. Fails with `NoMemory`,
-    /// taking nothing, without room for the frames.
+    /// taking nothing, without room for the frames. The frames keep their
+    /// charges until they are freed, so those cover the room.
     pub fn decommit(&mut self, first: u64, end: u64) -> Result<Vec<u64>, Error> {
         let count = self.frames.range(first..end).count();
         let mut taken = Vec::new();
