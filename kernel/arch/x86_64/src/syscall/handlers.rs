@@ -1015,3 +1015,23 @@ pub fn port_cancel(port: Checked, object: Checked, key: u64) -> Result<(), Error
     crate::port::cancel(&port, Arc::as_ptr(&process) as usize, value, key);
     Ok(())
 }
+
+pub fn log_reader_create(_log: Checked, after: u64, out: UserOut<Handle>) -> Result<(), Error> {
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let reader = crate::log::LogReader::new(current_process()?.budget(), after)?;
+    give(reader, ObjectType::LogReader, out)
+}
+
+pub fn log_reader_read(reader: Checked, out: UserOut<u8>) -> Result<(), Error> {
+    if !out.fits(RECORD_SIZE as u64) {
+        return Err(Error::InvalidArgs);
+    }
+    let reader = object::<crate::log::LogReader>(reader);
+    let record = reader.next()?;
+    // The position moves only once the record has been copied out.
+    out.write_bytes(&record.bytes())?;
+    reader.advance(record.sequence);
+    Ok(())
+}

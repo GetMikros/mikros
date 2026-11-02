@@ -604,3 +604,22 @@ syscalls:
       - {name: port, type: Handle, dir: in, object: Port, rights: [WRITE]}
       - {name: object, type: Handle, dir: in, object: any, rights: []}
       - {name: key, type: u64, dir: in}
+
+  - name: log_reader_create
+    number: 59
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0013.R13, MIKSPEC-0013.R15]
+    args:
+      - {name: log, type: Handle, dir: in, object: Log, rights: [READ]}
+      - {name: after, type: u64, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: LogReader}
+
+  - name: log_reader_read
+    number: 60
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0013.R14, MIKSPEC-0013.R15]
+    args:
+      - {name: reader, type: Handle, dir: in, object: LogReader, rights: [READ]}
+      - {name: out, type: "*mut u8", dir: out}

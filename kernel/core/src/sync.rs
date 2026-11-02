@@ -34,6 +34,14 @@ impl<T> SpinLock<T> {
         }
         Guard { lock: self }
     }
+
+    /// The lock, if it is free now.
+    pub fn try_lock(&self) -> Option<Guard<'_, T>> {
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Guard { lock: self })
+    }
 }
 
 pub struct Guard<'a, T> {
