@@ -10,6 +10,7 @@ use crate::percpu;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use kernel_core::deadline::{Deadlines, INFINITE};
 use kernel_core::sched::{DEFAULT_PRIORITY, Entity, Fair};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
@@ -18,6 +19,7 @@ use kernel_core::sync::SpinLock;
 pub const KERNEL_STACK_SIZE: u64 = 32 << 10;
 
 pub const RUNNABLE: u32 = 1;
+pub const BLOCKED: u32 = 2;
 pub const DEAD: u32 = 4;
 
 pub struct Thread {
@@ -75,6 +77,8 @@ pub struct CpuSched {
     slice_end: i64,
     /// A thread that exited, whose stack is freed after switching away.
     dead: Option<Arc<Thread>>,
+    /// Threads sleeping until a deadline.
+    sleepers: Deadlines<Queued>,
 }
 
 // SAFETY: queued pointers are references to threads, which are Sync; the
@@ -90,6 +94,7 @@ impl CpuSched {
             slice_start: 0,
             slice_end: 0,
             dead: None,
+            sleepers: Deadlines::new(),
         }
     }
 }
@@ -198,7 +203,47 @@ fn schedule(requeue: bool) {
 fn start_slice(cpu: &mut CpuSched, now: i64, entity: Entity) {
     cpu.slice_start = now;
     cpu.slice_end = now.saturating_add(cpu.fair.slice(entity.weight));
-    crate::timer::arm(cpu.slice_end);
+    arm(cpu);
+}
+
+/// Arms the timer for the earlier of the running thread's slice end and
+/// the nearest deadline, or stops it when there is neither.
+fn arm(cpu: &CpuSched) {
+    let slice_end = if cpu.current.is_some() {
+        cpu.slice_end
+    } else {
+        INFINITE
+    };
+    let at = cpu
+        .sleepers
+        .next_finite()
+        .map_or(slice_end, |d| d.min(slice_end));
+    if at == INFINITE {
+        crate::timer::disarm();
+    } else {
+        crate::timer::arm(at);
+    }
+}
+
+#[allow(dead_code, reason = "nothing starts kernel threads yet")]
+/// Blocks the running thread until the monotonic clock reaches
+/// `deadline`. Returns at once when it already has.
+pub fn sleep_until(deadline: i64) -> Result<(), Error> {
+    if deadline <= crate::time::now() {
+        return Ok(());
+    }
+    {
+        let mut cpu = this_cpu().lock();
+        let Some(current) = cpu.current.clone() else {
+            return Ok(());
+        };
+        cpu.sleepers
+            .insert(deadline, Queued::new(current.clone()))
+            .map_err(|_| Error::NoMemory)?;
+        current.state.store(BLOCKED, Ordering::Release);
+    }
+    schedule(false);
+    Ok(())
 }
 
 /// Gives up the processor to the next queued thread, if any.
@@ -237,12 +282,23 @@ pub extern "sysv64" fn thread_start(entry: usize, arg: usize) -> ! {
     exit()
 }
 
-/// Handles the timer interrupt.
+/// Handles the timer interrupt: wakes sleepers whose deadline has
+/// passed, and marks a reschedule when the running thread's slice has
+/// ended.
 pub fn timer_interrupt() {
-    let cpu = this_cpu().lock();
-    if cpu.current.is_some() && crate::time::now() >= cpu.slice_end {
+    let now = crate::time::now();
+    let mut cpu = this_cpu().lock();
+    while let Some(sleeper) = cpu.sleepers.pop_expired(now) {
+        let thread = sleeper.take();
+        thread.state.store(RUNNABLE, Ordering::Release);
+        let entity = *thread.entity.lock();
+        // Every thread has room in the queue from when it was created.
+        cpu.fair.enqueue(Queued::new(thread), entity);
+    }
+    if cpu.current.is_some() && now >= cpu.slice_end {
         RESCHEDULE.store(true, Ordering::Relaxed);
     }
+    arm(&cpu);
 }
 
 /// Runs queued threads, and halts until an interrupt when there are none.
@@ -268,6 +324,7 @@ pub fn run() -> ! {
                 finish_switch();
             }
             None => {
+                arm(&cpu);
                 drop(cpu);
                 // SAFETY: interrupts are enabled until the next one
                 // arrives; HLT then returns and they are disabled again.

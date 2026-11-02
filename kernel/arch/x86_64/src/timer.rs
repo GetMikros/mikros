@@ -79,6 +79,16 @@ pub fn arm(deadline: i64) {
     }
 }
 
+/// Stops the timer, removing any deadline.
+pub fn disarm() {
+    if DEADLINE_MODE.load(Ordering::Relaxed) {
+        // SAFETY: the MSR exists in TSC-deadline mode; zero disarms it.
+        unsafe { write_msr(IA32_TSC_DEADLINE, 0) };
+    } else {
+        apic::write(INITIAL_COUNT, 0);
+    }
+}
+
 /// Handles the timer interrupt.
 pub fn interrupt() {
     apic::eoi();
