@@ -2,10 +2,11 @@
 
 use alloc::sync::Arc;
 use core::any::Any;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub mod budget;
 pub mod channel;
+pub mod event;
 pub mod handles;
 pub mod memory;
 pub mod resource;
@@ -118,12 +119,28 @@ fn new_koid() -> u64 {
     koid
 }
 
+/// Called with an object's header and its new signal state whenever the
+/// signals of an object with waiters change. It may run with other
+/// kernel locks held, so it must not allocate, charge budgets or drop
+/// objects.
+pub type SignalHook = fn(&Header, u32);
+
+/// The installed `SignalHook`, as an address, or 0 before one is set.
+static SIGNAL_HOOK: AtomicUsize = AtomicUsize::new(0);
+
+/// Installs `hook` as the signal hook.
+pub fn set_signal_hook(hook: SignalHook) {
+    SIGNAL_HOOK.store(hook as usize, Ordering::Release);
+}
+
 /// The state every object has.
 #[derive(Debug)]
 pub struct Header {
     koid: u64,
     kind: ObjectType,
     signals: AtomicU32,
+    /// The number of waits registered on the object.
+    watchers: AtomicU32,
 }
 
 impl Header {
@@ -133,7 +150,18 @@ impl Header {
             koid: new_koid(),
             kind,
             signals: AtomicU32::new(0),
+            watchers: AtomicU32::new(0),
         }
+    }
+
+    /// Registers a wait, so that signal changes reach the signal hook.
+    pub fn watch(&self) {
+        self.watchers.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Ends a wait registered with `watch`.
+    pub fn unwatch(&self) {
+        self.watchers.fetch_sub(1, Ordering::AcqRel);
     }
 
     pub fn koid(&self) -> u64 {
@@ -160,7 +188,18 @@ impl Header {
                 .signals
                 .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => return new,
+                Ok(_) => {
+                    if new != old && self.watchers.load(Ordering::Acquire) != 0 {
+                        let hook = SIGNAL_HOOK.load(Ordering::Acquire);
+                        if hook != 0 {
+                            // SAFETY: only `set_signal_hook` stores a
+                            // value, which is a `SignalHook`.
+                            let hook: SignalHook = unsafe { core::mem::transmute(hook) };
+                            hook(self, new);
+                        }
+                    }
+                    return new;
+                }
                 Err(current) => old = current,
             }
         }

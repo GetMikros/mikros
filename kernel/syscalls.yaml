@@ -488,3 +488,33 @@ syscalls:
     fuzz_only: true
     spec: [MIKSPEC-0017.R10]
     args: []
+
+  - name: object_wait_one
+    number: 47
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0007.R15, MIKSPEC-0008.R22, MIKSPEC-0020.R21]
+    args:
+      - {name: handle, type: Handle, dir: in, object: any, rights: [WAIT]}
+      - {name: signals, type: u32, dir: in}
+      - {name: deadline, type: i64, dir: in}
+      - {name: observed, type: "*mut u32", dir: out}
+
+  - name: object_signal
+    number: 48
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0007.R16]
+    args:
+      - {name: handle, type: Handle, dir: in, object: any, rights: [SIGNAL]}
+      - {name: clear, type: u32, dir: in}
+      - {name: set, type: u32, dir: in}
+
+  - name: event_create
+    number: 49
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R10]
+    args:
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: Event}

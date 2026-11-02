@@ -385,6 +385,8 @@ impl Process {
         drop(threads);
         if last {
             process.terminate(0);
+        } else {
+            thread.header().update_signals(0, signals::TERMINATED);
         }
     }
 

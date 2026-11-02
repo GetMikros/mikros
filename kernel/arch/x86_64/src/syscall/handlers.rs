@@ -41,10 +41,13 @@ fn give(object: Arc<dyn Object>, kind: ObjectType, out: UserOut<Handle>) -> Resu
 }
 
 pub fn handle_close(handle: Option<Checked>) -> Result<(), Error> {
-    match handle {
-        Some(h) => current_process()?.handles().lock().close(h.value),
-        None => Ok(()),
-    }
+    let Some(h) = handle else {
+        return Ok(());
+    };
+    let process = current_process()?;
+    process.handles().lock().close(h.value)?;
+    crate::wait::handle_closed(&process, h.value);
+    Ok(())
 }
 
 pub fn handle_duplicate(handle: Checked, rights: u32, out: UserOut<Handle>) -> Result<(), Error> {
@@ -60,9 +63,9 @@ pub fn handle_duplicate(handle: Checked, rights: u32, out: UserOut<Handle>) -> R
 pub fn handle_replace(handle: Checked, rights: u32, out: UserOut<Handle>) -> Result<(), Error> {
     let process = current_process()?;
     let mut table = process.handles().lock();
-    table
-        .replace_then(handle.value, rights, |new| out.write(new))
-        .map(drop)
+    table.replace_then(handle.value, rights, |new| out.write(new))?;
+    crate::wait::handle_closed(&process, handle.value);
+    Ok(())
 }
 
 /// The size of the largest information record.
@@ -189,10 +192,11 @@ pub fn process_start(
     let (process, thread) = (object::<Process>(process), object::<Thread>(thread));
     let budget = Some(caller.budget());
     Process::start(&process, &thread, entry, stack, moved, arg2, budget)?;
-    match arg {
-        Some(arg) => table.close(arg.value),
-        None => Ok(()),
+    if let Some(arg) = arg {
+        table.close(arg.value)?;
+        crate::wait::handle_closed(&caller, arg.value);
     }
+    Ok(())
 }
 
 pub fn thread_start(
@@ -447,8 +451,10 @@ pub fn channel_write(
     object::<Endpoint>(channel)
         .write(message)
         .map_err(|(e, _)| e)?;
+    let process = current_process()?;
     for &h in values.iter() {
         table.remove(h).expect("checked above");
+        crate::wait::handle_closed(&process, h);
     }
     Ok(())
 }
@@ -883,4 +889,36 @@ pub fn fuzz_cov_disable() -> Result<(), Error> {
     let thread = crate::sched::current().ok_or(Error::BadState)?;
     crate::coverage::disable(&thread);
     Ok(())
+}
+
+pub fn object_wait_one(
+    handle: Checked,
+    signals: u32,
+    deadline: i64,
+    observed: UserOut<u32>,
+) -> Result<(), Error> {
+    if !observed.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let process = current_process()?;
+    let state = crate::wait::wait_one(&handle.object, &process, handle.value, signals, deadline);
+    // The deadline passing also reports the state.
+    let current = handle.object.header().signals();
+    observed.write(state.unwrap_or(current))?;
+    state.map(drop)
+}
+
+pub fn object_signal(handle: Checked, clear: u32, set: u32) -> Result<(), Error> {
+    kernel_core::object::signal_user(&*handle.object, clear, set)
+}
+
+pub fn event_create(options: u32, out: UserOut<Handle>) -> Result<(), Error> {
+    if options != 0 {
+        return Err(Error::InvalidArgs);
+    }
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let event = kernel_core::object::event::Event::new(current_process()?.budget())?;
+    give(event, ObjectType::Event, out)
 }

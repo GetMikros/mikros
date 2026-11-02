@@ -82,6 +82,8 @@ mod time;
 mod timer;
 #[cfg(target_os = "none")]
 mod usercopy;
+#[cfg(target_os = "none")]
+mod wait;
 
 /// The kernel only runs on its own target. This lets the workspace build
 /// on the host.

@@ -256,18 +256,22 @@ fn interrupting(actions: &[Action], pending: &Pending, own: &ThreadSignals) -> b
         .any(|s| !actions[s as usize - 1].ignores(s))
 }
 
+/// Whether a signal that would run an action is pending for `thread` of
+/// `process`, so that a blocking call must end with `Interrupted`.
+pub fn interrupted(thread: &Thread, process: &Process) -> bool {
+    let state = process.signals().lock();
+    let own = thread.signals().lock();
+    interrupting(&state.actions, &state.pending, &own)
+}
+
 /// Blocks the running thread until `deadline`, or fails with
 /// `Interrupted` once a signal that would run an action is pending for it.
 pub fn sleep(deadline: i64) -> Result<(), Error> {
     let thread = sched::current().ok_or(Error::BadHandle)?;
     let process = thread.process().cloned().ok_or(Error::BadHandle)?;
     loop {
-        {
-            let state = process.signals().lock();
-            let own = thread.signals().lock();
-            if interrupting(&state.actions, &state.pending, &own) {
-                return Err(Error::Interrupted);
-            }
+        if interrupted(&thread, &process) {
+            return Err(Error::Interrupted);
         }
         if thread.state() == sched::DEAD || deadline <= crate::time::now() {
             return Ok(());
