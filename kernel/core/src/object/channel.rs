@@ -61,10 +61,26 @@ impl Drop for Message {
     }
 }
 
+/// The bit that marks transaction IDs of `channel_call`.
+pub const CALL_ID: u32 = 1 << 31;
+
+/// An outstanding `channel_call`, with its reply once it arrives.
+struct Call {
+    id: u32,
+    reply: Option<Message>,
+}
+
 #[derive(Default)]
 struct Queue {
     messages: VecDeque<Message>,
     bytes: usize,
+    /// The calls made through the endpoint the queue leads to.
+    calls: Vec<Call>,
+    /// The IDs of calls that ended without their reply, whose late
+    /// replies are discarded.
+    abandoned: Vec<u32>,
+    /// The next transaction ID to try, without `CALL_ID`.
+    next_id: u32,
 }
 
 impl Queue {
@@ -161,13 +177,44 @@ impl Endpoint {
     /// Queues `message` toward the peer. Fails with `PeerClosed` when the
     /// peer is gone and `ShouldWait` when its queue is full, giving the
     /// message back.
-    pub fn write(&self, message: Message) -> Result<(), (Error, Message)> {
+    ///
+    /// A message whose transaction ID belongs to an outstanding call of
+    /// the peer goes to that call instead of the queue, and the peer's
+    /// object ID and the ID are returned so that the caller can be woken.
+    /// One whose ID belongs to a call that ended without its reply is
+    /// discarded.
+    pub fn write(&self, message: Message) -> Result<Option<(u64, u32)>, (Error, Message)> {
         let mut shared = self.shared.lock();
         let peer = shared.ends[self.peer_side()].clone();
         if peer.strong_count() == 0 {
             return Err((Error::PeerClosed, message));
         }
         let queue = &mut shared.queues[self.peer_side()];
+        let id = message
+            .bytes
+            .get(..4)
+            .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
+            .filter(|id| id & CALL_ID != 0);
+        if let Some(id) = id {
+            if let Some(call) = queue
+                .calls
+                .iter_mut()
+                .find(|c| c.id == id && c.reply.is_none())
+            {
+                call.reply = Some(message);
+                drop(shared);
+                let koid = peer.upgrade().map_or(0, |p| p.header.koid());
+                return Ok(Some((koid, id)));
+            }
+            if let Some(i) = queue.abandoned.iter().position(|&a| a == id) {
+                queue.abandoned.swap_remove(i);
+                // The message and its handles are dropped with no lock
+                // held, as that may destroy objects.
+                drop(shared);
+                drop(message);
+                return Ok(None);
+            }
+        }
         if queue.full() {
             return Err((Error::ShouldWait, message));
         }
@@ -188,7 +235,49 @@ impl Endpoint {
         }
         drop(shared);
         drop(peer);
-        Ok(())
+        Ok(None)
+    }
+
+    /// Starts a call through this endpoint and returns its transaction
+    /// ID: one with `CALL_ID` set that no outstanding call and no call
+    /// ended without its reply uses.
+    pub fn begin_call(&self) -> Result<u32, Error> {
+        let mut shared = self.shared.lock();
+        let queue = &mut shared.queues[self.side];
+        queue.calls.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let id = loop {
+            let id = CALL_ID | (queue.next_id & !CALL_ID);
+            queue.next_id = queue.next_id.wrapping_add(1);
+            let used = queue.calls.iter().any(|c| c.id == id) || queue.abandoned.contains(&id);
+            if !used {
+                break id;
+            }
+        };
+        queue.calls.push(Call { id, reply: None });
+        Ok(id)
+    }
+
+    /// Ends call `id` and returns its reply, if it has arrived; otherwise
+    /// the call stays outstanding and `None` is returned.
+    pub fn take_reply(&self, id: u32) -> Option<Message> {
+        let mut shared = self.shared.lock();
+        let calls = &mut shared.queues[self.side].calls;
+        let i = calls.iter().position(|c| c.id == id && c.reply.is_some())?;
+        calls.swap_remove(i).reply
+    }
+
+    /// Ends call `id` without its reply: a reply arriving later is
+    /// discarded. Returns a reply that arrived meanwhile, which the
+    /// caller drops with no lock held.
+    pub fn abandon_call(&self, id: u32) -> Option<Message> {
+        let mut shared = self.shared.lock();
+        let queue = &mut shared.queues[self.side];
+        let i = queue.calls.iter().position(|c| c.id == id)?;
+        let call = queue.calls.swap_remove(i);
+        if call.reply.is_none() && queue.abandoned.try_reserve(1).is_ok() {
+            queue.abandoned.push(id);
+        }
+        call.reply
     }
 
     /// Passes the oldest message toward this endpoint to `accept`, which
@@ -289,6 +378,45 @@ mod tests {
             Ok(())
         })?;
         Ok(got.unwrap())
+    }
+
+    #[test]
+    fn delivers_replies_to_their_calls() {
+        let (a, b) = Endpoint::pair(None).unwrap();
+        let (one, two) = (a.begin_call().unwrap(), a.begin_call().unwrap());
+        assert!(one & CALL_ID != 0 && two & CALL_ID != 0 && one != two);
+        let mut reply = two.to_le_bytes().to_vec();
+        reply.push(9);
+        assert_eq!(
+            b.write(message(&reply, vec![])).ok(),
+            Some(Some((a.header().koid(), two)))
+        );
+        // A reply is not queued and does not make the caller readable.
+        assert_eq!(read(&a), Err(Error::ShouldWait));
+        assert_eq!(a.header().signals() & signals::READABLE, 0);
+        assert!(a.take_reply(one).is_none());
+        assert_eq!(a.take_reply(two).unwrap().bytes, reply);
+        // Other IDs with the bit set are ordinary messages.
+        let other = (CALL_ID | 77).to_le_bytes();
+        assert_eq!(b.write(message(&other, vec![])).ok(), Some(None));
+        assert_eq!(read(&a).unwrap().0, other);
+    }
+
+    #[test]
+    fn discards_replies_to_abandoned_calls() {
+        let (a, b) = Endpoint::pair(None).unwrap();
+        let id = a.begin_call().unwrap();
+        assert!(a.abandon_call(id).is_none());
+        let next = a.begin_call().unwrap();
+        assert_ne!(next, id);
+        assert_eq!(b.write(message(&id.to_le_bytes(), vec![])).ok(), Some(None));
+        assert_eq!(read(&a), Err(Error::ShouldWait));
+        // Only the first late reply is discarded.
+        assert_eq!(b.write(message(&id.to_le_bytes(), vec![])).ok(), Some(None));
+        assert_eq!(read(&a).unwrap().0, id.to_le_bytes());
+        // A reply that came before the call ended is handed back.
+        assert!(b.write(message(&next.to_le_bytes(), vec![])).is_ok());
+        assert!(a.abandon_call(next).is_some());
     }
 
     #[test]

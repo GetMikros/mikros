@@ -264,6 +264,26 @@ pub fn interrupted(thread: &Thread, process: &Process) -> bool {
     interrupting(&state.actions, &state.pending, &own)
 }
 
+/// Whether a signal pending for `thread` of `process` ends a
+/// `channel_call` it waits in: one that terminates the process, or a
+/// handler without `RESTART`. A handler with `RESTART` lets the call go
+/// on, and runs once it returns.
+pub fn call_interrupted(thread: &Thread, process: &Process) -> bool {
+    let state = process.signals().lock();
+    let own = thread.signals().lock();
+    let deliverable = (own.pending.mask() | state.pending.mask()) & !own.mask;
+    (1..=SIG_MAX)
+        .filter(|&s| deliverable & bit(s) != 0)
+        .any(|s| {
+            let action = &state.actions[s as usize - 1];
+            match action.handler {
+                HANDLER_IGNORE => false,
+                HANDLER_DEFAULT => default_action(s) == DefaultAction::Terminate,
+                _ => action.flags & RESTART == 0,
+            }
+        })
+}
+
 /// Blocks the running thread until `deadline`, or fails with
 /// `Interrupted` once a signal that would run an action is pending for it.
 pub fn sleep(deadline: i64) -> Result<(), Error> {

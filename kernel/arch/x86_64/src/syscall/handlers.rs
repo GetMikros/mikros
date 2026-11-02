@@ -425,6 +425,25 @@ pub fn channel_write(
     handles: UserIn<Handle>,
     count: u64,
 ) -> Result<(), Error> {
+    let value = channel.value;
+    let endpoint = object::<Endpoint>(channel);
+    send(&endpoint, value, bytes, len, handles, count, None)
+}
+
+/// Writes the message of `len` bytes from `bytes` and `count` handles
+/// from `handles` to `endpoint`, reached through `value`, and moves the
+/// handles out of the caller's table once it is written. With `id`, the
+/// message's transaction ID is replaced by it first. Wakes the caller of
+/// a call that the message replies to.
+fn send(
+    endpoint: &Endpoint,
+    value: Handle,
+    bytes: UserIn<u8>,
+    len: u64,
+    handles: UserIn<Handle>,
+    count: u64,
+    id: Option<u32>,
+) -> Result<(), Error> {
     if len > BYTES_MAX as u64 || count > HANDLES_MAX as u64 {
         return Err(Error::OutOfRange);
     }
@@ -433,11 +452,14 @@ pub fn channel_write(
     data.try_reserve_exact(len).map_err(|_| Error::NoMemory)?;
     data.resize(len, 0);
     bytes.read_bytes(&mut data)?;
+    if let Some(id) = id {
+        data[..4].copy_from_slice(&id.to_le_bytes());
+    }
     let mut values = [0; HANDLES_MAX];
     let values = &mut values[..count];
     handles.read_into(values)?;
     for (i, &h) in values.iter().enumerate() {
-        if h == channel.value || values[..i].contains(&h) {
+        if h == value || values[..i].contains(&h) {
             return Err(Error::InvalidArgs);
         }
     }
@@ -453,14 +475,100 @@ pub fn channel_write(
     let message = Message::new(data, entries, Some(process.budget()))?;
     // A message that was not queued drops only its own references, as
     // the handles are still in the table.
-    object::<Endpoint>(channel)
-        .write(message)
-        .map_err(|(e, _)| e)?;
-    let process = current_process()?;
+    let delivered = endpoint.write(message).map_err(|(e, _)| e)?;
     for &h in values.iter() {
         table.remove(h).expect("checked above");
         crate::wait::handle_closed(&process, h);
     }
+    if let Some((koid, id)) = delivered {
+        crate::wait::reply_delivered(koid, id);
+    }
+    Ok(())
+}
+
+/// The size of the `channel_call` argument structure.
+const CALL_ARGS_SIZE: usize = 0x40;
+
+pub fn channel_call(
+    channel: Checked,
+    options: u32,
+    deadline: i64,
+    call_args: UserIn<u8>,
+    out: UserOut<u8>,
+) -> Result<(), Error> {
+    if options != 0 || !out.fits(16) {
+        return Err(Error::InvalidArgs);
+    }
+    let mut raw = [0u8; CALL_ARGS_SIZE];
+    call_args.read_bytes(&mut raw)?;
+    let field = |at: usize| u64::from_le_bytes(raw[at..at + 8].try_into().expect("8 bytes"));
+    let (wr_len, wr_count) = (field(0x08), field(0x18));
+    let (rd_cap, rd_handles_cap) = (field(0x28), field(0x38));
+    if wr_len < 4 {
+        return Err(Error::InvalidArgs);
+    }
+    let value = channel.value;
+    let endpoint: Arc<Endpoint> = object(channel);
+    let id = endpoint.begin_call()?;
+    let request = send(
+        &endpoint,
+        value,
+        UserIn::new(field(0x00)),
+        wr_len,
+        UserIn::new(field(0x10)),
+        wr_count,
+        Some(id),
+    );
+    let process = current_process()?;
+    let reply = request.and_then(|()| crate::wait::wait_call(&endpoint, &process, id, deadline));
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(e) => {
+            // A reply that came meanwhile is dropped with no lock held.
+            drop(endpoint.abandon_call(id));
+            return Err(e);
+        }
+    };
+    let (rd_bytes, rd_handles) = (
+        UserOut::<u8>::new(field(0x20)),
+        UserOut::<Handle>::new(field(0x30)),
+    );
+    let (len, count) = (reply.bytes.len() as u64, reply.handles.len() as u64);
+    let sizes_at = [out.0, out.0 + 8];
+    let budget = Some(process.budget());
+    let aspace = process.aspace();
+    let sizes = || crate::output::channel_sizes(aspace.as_ref(), sizes_at, len, count);
+    if len > rd_cap || count > rd_handles_cap {
+        sizes()?;
+        // The reply and its handles go when it is dropped.
+        return Err(Error::BufferTooSmall);
+    }
+    if !rd_bytes.fits(len) || !rd_handles.fits(count) {
+        return Err(Error::InvalidArgs);
+    }
+    let ranges = [
+        (rd_bytes.0, len),
+        (rd_handles.0, count * size_of::<Handle>() as u64),
+        (sizes_at[0], size_of::<u64>() as u64),
+        (sizes_at[1], size_of::<u64>() as u64),
+    ];
+    let mut table = process.handles().lock();
+    let mut work = Work::new(|| debug_assert!(false, "a check while locked"));
+    let prepare = |work: &mut Work<_>| {
+        Outputs::prepare(&ranges, budget, work, |page| aspace.hold_for_write(page))
+    };
+    let accepted = crate::output::accept(
+        &reply.handles,
+        &mut table,
+        budget,
+        &mut work,
+        prepare,
+        sizes,
+    );
+    drop(table);
+    let (outputs, values) = accepted?;
+    let mut work = Work::new(crate::sched::preempt_point);
+    crate::output::deliver(outputs, &reply.bytes, &values[..count as usize], &mut work);
     Ok(())
 }
 

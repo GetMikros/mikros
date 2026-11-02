@@ -5,8 +5,9 @@ use crate::sched::{self, Thread};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
+use kernel_core::object::channel::{Endpoint, Message};
 use kernel_core::object::handles::Handle;
-use kernel_core::object::{Header, Object};
+use kernel_core::object::{Header, Object, signals};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
@@ -110,5 +111,85 @@ pub fn wait_one(
     };
     header.unwatch();
     WAITERS.lock().retain(|w| !Arc::ptr_eq(w, &waiter));
+    result
+}
+
+/// A thread in `channel_call`, woken when its reply arrives.
+struct Caller {
+    /// The object ID of the calling endpoint and the transaction ID.
+    koid: u64,
+    id: u32,
+    thread: Arc<Thread>,
+}
+
+/// The threads waiting for replies; the lock comes after a handle
+/// table's and before the scheduler's.
+static CALLERS: SpinLock<Vec<Caller>> = SpinLock::new(Vec::new());
+
+/// Wakes the caller of call `id` on the endpoint with object ID `koid`,
+/// whose reply has been delivered.
+pub fn reply_delivered(koid: u64, id: u32) {
+    for c in CALLERS.lock().iter() {
+        if c.koid == koid && c.id == id {
+            sched::wake_sleeper(&c.thread);
+        }
+    }
+}
+
+/// Blocks the running thread until the reply of call `id` on `endpoint`
+/// arrives, and returns it. Fails with `TimedOut` at `deadline`,
+/// `PeerClosed` when the peer goes, and `Interrupted` when a signal ends
+/// the call; the call then stays outstanding for the caller to abandon.
+pub fn wait_call(
+    endpoint: &Arc<Endpoint>,
+    process: &Arc<Process>,
+    id: u32,
+    deadline: i64,
+) -> Result<Message, Error> {
+    let thread = sched::current().ok_or(Error::BadState)?;
+    let header = endpoint.header();
+    let waiter = Arc::new(Waiter {
+        koid: header.koid(),
+        mask: signals::PEER_CLOSED,
+        thread: thread.clone(),
+        process: 0,
+        handle: 0,
+        canceled: AtomicBool::new(false),
+    });
+    {
+        let mut waiters = WAITERS.lock();
+        waiters.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let mut callers = CALLERS.lock();
+        callers.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        waiters.push(waiter.clone());
+        callers.push(Caller {
+            koid: header.koid(),
+            id,
+            thread: thread.clone(),
+        });
+    }
+    header.watch();
+    let result = loop {
+        if let Some(reply) = endpoint.take_reply(id) {
+            break Ok(reply);
+        }
+        if endpoint.peer_closed() {
+            break Err(Error::PeerClosed);
+        }
+        if crate::signal::call_interrupted(&thread, process) {
+            break Err(Error::Interrupted);
+        }
+        if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+            break Err(Error::TimedOut);
+        }
+        if let Err(e) = sched::wait_for_signals(&thread, deadline) {
+            break Err(e);
+        }
+    };
+    header.unwatch();
+    WAITERS.lock().retain(|w| !Arc::ptr_eq(w, &waiter));
+    CALLERS
+        .lock()
+        .retain(|c| !(c.koid == header.koid() && c.id == id));
     result
 }
