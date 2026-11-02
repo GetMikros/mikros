@@ -420,6 +420,7 @@ impl Process {
         // can drop further objects.
         let handles = core::mem::take(&mut *self.handles.lock());
         drop(handles);
+        crate::wait::process_ended(self);
         drop(core::mem::take(&mut *self.stopped.lock()));
         self.header
             .update_signals(signals::SUSPENDED, signals::TERMINATED);

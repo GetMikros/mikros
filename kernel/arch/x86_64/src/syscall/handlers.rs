@@ -964,3 +964,54 @@ pub fn thread_set_priority(
     crate::sched::set_priority(&object::<Thread>(thread), priority);
     Ok(())
 }
+
+pub fn port_create(options: u32, out: UserOut<Handle>) -> Result<(), Error> {
+    if options != 0 || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let port = crate::port::Port::new(current_process()?.budget())?;
+    give(port, ObjectType::Port, out)
+}
+
+pub fn object_wait_async(
+    object: Checked,
+    port: Checked,
+    key: u64,
+    signals: u32,
+    options: u32,
+) -> Result<(), Error> {
+    let process = current_process()?;
+    let port = self::object::<crate::port::Port>(port);
+    crate::port::wait_async(
+        &object.object,
+        &process,
+        object.value,
+        &port,
+        key,
+        signals,
+        options,
+    )
+}
+
+pub fn port_wait(port: Checked, deadline: i64, out: UserOut<u8>) -> Result<(), Error> {
+    if !out.fits(crate::port::PACKET_SIZE as u64) {
+        return Err(Error::InvalidArgs);
+    }
+    let packet = object::<crate::port::Port>(port).wait(deadline)?;
+    out.write_bytes(&packet)
+}
+
+pub fn port_queue(port: Checked, packet: UserIn<u8>) -> Result<(), Error> {
+    let mut bytes = [0u8; crate::port::PACKET_SIZE];
+    packet.read_bytes(&mut bytes)?;
+    let process = current_process()?;
+    object::<crate::port::Port>(port).queue_user(&bytes, process.budget())
+}
+
+pub fn port_cancel(port: Checked, object: Checked, key: u64) -> Result<(), Error> {
+    let process = current_process()?;
+    let value = object.value;
+    let port = self::object::<crate::port::Port>(port);
+    crate::port::cancel(&port, Arc::as_ptr(&process) as usize, value, key);
+    Ok(())
+}

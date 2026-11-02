@@ -59,6 +59,8 @@ mod panic;
 #[cfg(target_os = "none")]
 mod percpu;
 #[cfg(target_os = "none")]
+mod port;
+#[cfg(target_os = "none")]
 mod process;
 #[cfg(any(target_os = "none", test))]
 mod publish;

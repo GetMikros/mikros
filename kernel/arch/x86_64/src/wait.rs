@@ -35,6 +35,7 @@ fn signals_changed(header: &Header, signals: u32) {
             sched::wake_sleeper(&w.thread);
         }
     }
+    crate::port::signals_changed(header, signals);
 }
 
 /// Installs the signal hook.
@@ -52,6 +53,13 @@ pub fn handle_closed(process: &Process, handle: Handle) {
             sched::wake_sleeper(&w.thread);
         }
     }
+    crate::port::handle_closed(address, Some(handle));
+}
+
+/// Removes the asynchronous waits made through the handles of `process`,
+/// which has terminated.
+pub fn process_ended(process: &Process) {
+    crate::port::handle_closed(process as *const Process as usize, None);
 }
 
 /// Blocks the running thread, which waits through `handle` of `process`,

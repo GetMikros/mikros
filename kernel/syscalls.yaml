@@ -554,3 +554,53 @@ syscalls:
       - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
       - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE], allow_invalid: true}
       - {name: priority, type: u32, dir: in}
+
+  - name: port_create
+    number: 54
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R11]
+    args:
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: Port}
+
+  - name: object_wait_async
+    number: 55
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R12, MIKSPEC-0009.R13, MIKSPEC-0009.R17]
+    args:
+      - {name: object, type: Handle, dir: in, object: any, rights: [WAIT]}
+      - {name: port, type: Handle, dir: in, object: Port, rights: [WRITE]}
+      - {name: key, type: u64, dir: in}
+      - {name: signals, type: u32, dir: in}
+      - {name: options, type: u32, dir: in}
+
+  - name: port_wait
+    number: 56
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R14, MIKSPEC-0008.R22, MIKSPEC-0020.R21]
+    args:
+      - {name: port, type: Handle, dir: in, object: Port, rights: [READ]}
+      - {name: deadline, type: i64, dir: in}
+      - {name: out, type: "*mut u8", dir: out}
+
+  - name: port_queue
+    number: 57
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R15]
+    args:
+      - {name: port, type: Handle, dir: in, object: Port, rights: [WRITE]}
+      - {name: packet, type: "*const u8", dir: in}
+
+  - name: port_cancel
+    number: 58
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0009.R16]
+    args:
+      - {name: port, type: Handle, dir: in, object: Port, rights: [WRITE]}
+      - {name: object, type: Handle, dir: in, object: any, rights: []}
+      - {name: key, type: u64, dir: in}
