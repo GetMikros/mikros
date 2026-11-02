@@ -242,7 +242,6 @@ pub fn init(info: &BootInfo) {
 
 /// Creates the clock page, charged to `budget`. Its contents never change
 /// after boot, so `sequence` stays 0.
-#[expect(dead_code, reason = "init is not started yet")]
 pub fn create_clock_page(budget: &Arc<Budget>) -> Result<Arc<MemoryObject>, Error> {
     let tsc = (SOURCE.load(Ordering::Acquire) == TSC).then(|| {
         let rate = RATE.load(Ordering::Relaxed);

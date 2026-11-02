@@ -37,7 +37,6 @@ mod heap;
 #[cfg_attr(test, allow(dead_code))]
 mod idt;
 #[cfg(target_os = "none")]
-#[expect(dead_code, reason = "init is not started yet")]
 mod init;
 #[cfg(target_os = "none")]
 mod log;
@@ -52,7 +51,6 @@ mod panic;
 #[cfg(target_os = "none")]
 mod percpu;
 #[cfg(target_os = "none")]
-#[expect(dead_code, reason = "nothing creates processes yet")]
 mod process;
 #[cfg(target_os = "none")]
 mod random;

@@ -94,7 +94,6 @@ impl MemoryObject {
 
     /// A physical object of the `size` bytes from `base`, both multiples
     /// of the page size, mapped with `policy`, charged to `budget`.
-    #[expect(dead_code, reason = "init is not started yet")]
     pub fn new_physical(
         budget: &Arc<Budget>,
         base: u64,

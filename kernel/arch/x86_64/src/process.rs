@@ -85,6 +85,7 @@ impl Process {
         }))
     }
 
+    #[expect(dead_code, reason = "no call reads process names yet")]
     pub fn name(&self) -> &Name {
         &self.name
     }
@@ -105,6 +106,7 @@ impl Process {
         self.state.load(Ordering::Acquire)
     }
 
+    #[expect(dead_code, reason = "no call reads exit codes yet")]
     pub fn exit_code(&self) -> i64 {
         self.exit_code.load(Ordering::Acquire)
     }

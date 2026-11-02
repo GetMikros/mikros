@@ -2,16 +2,24 @@
 
 use crate::aspace::{USER_END, USER_START};
 use crate::memory_object::MemoryObject;
+use crate::paging::Policy;
 use crate::process::Process;
 use crate::sched::Thread;
 use crate::space;
 use alloc::sync::{Arc, Weak};
-use boot_protocol::BootInfo;
+use alloc::vec;
+use alloc::vec::Vec;
+use boot_protocol::{BootInfo, flags};
 use kernel_core::elf::{self, EM_X86_64, PF_W, PF_X, Segment};
-use kernel_core::object::Name;
 use kernel_core::object::budget::Budget;
+use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
+use kernel_core::object::handles::Entry;
 use kernel_core::object::memory::PAGE_SIZE;
+use kernel_core::object::resource::Resource;
+use kernel_core::object::rights::{DUPLICATE, INSPECT, MANAGE, MAP, READ, TRANSFER, WRITE};
+use kernel_core::object::{Name, Object, ObjectType, default_rights};
 use kernel_core::regions::{MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, SPECIFIC};
+use kernel_core::startup;
 use kernel_core::sync::SpinLock;
 use kernel_core::ustar;
 
@@ -29,13 +37,19 @@ pub fn terminated(process: &Process, code: i64) {
     }
 }
 
+/// The rights of the startup handles to the boot image and the clock
+/// page.
+const READ_ONLY: u32 = DUPLICATE | TRANSFER | READ | MAP | INSPECT;
+/// The default rights of physical memory objects.
+const PHYSICAL: u32 = DUPLICATE | TRANSFER | READ | WRITE | MAP | MANAGE | INSPECT;
+
 /// The initial process, loaded and ready to start.
-pub struct Loaded {
-    pub process: Arc<Process>,
-    pub thread: Arc<Thread>,
-    pub entry: u64,
-    pub stack: u64,
-    pub boot_image: Arc<MemoryObject>,
+struct Loaded {
+    process: Arc<Process>,
+    thread: Arc<Thread>,
+    entry: u64,
+    stack: u64,
+    boot_image: Arc<MemoryObject>,
 }
 
 /// The boot image as a memory object that owns its frames, with the bytes
@@ -101,7 +115,7 @@ fn load_segment(process: &Process, budget: &Arc<Budget>, file: &[u8], segment: &
 /// Creates the initial process and its thread from the `init` member of
 /// the boot image, with its segments and stack mapped, charged to
 /// `budget`.
-pub fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
+fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
     let boot_image = boot_image(info, budget);
     // SAFETY: the boot image object owns these frames and nothing writes
     // to them while the kernel reads the image.
@@ -138,4 +152,89 @@ pub fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
         stack: stack + STACK_SIZE,
         boot_image,
     }
+}
+
+/// The framebuffer as a physical memory object covering its pages.
+fn framebuffer(info: &BootInfo, budget: &Arc<Budget>) -> Option<Arc<MemoryObject>> {
+    if info.flags & flags::FRAMEBUFFER_PRESENT == 0 {
+        return None;
+    }
+    let fb = &info.framebuffer;
+    let base = fb.phys_base & !(PAGE_SIZE - 1);
+    let end = (fb.phys_base + fb.size).next_multiple_of(PAGE_SIZE);
+    let object = MemoryObject::new_physical(budget, base, end - base, Policy::WriteCombining)
+        .unwrap_or_else(|e| panic!("no memory for the framebuffer object: {e:?}"));
+    Some(object)
+}
+
+/// Starts the initial process with the startup message on its bootstrap
+/// channel. Must run while the memory map and the command line are still
+/// in place.
+pub fn start(info: &BootInfo) {
+    let budget = Budget::root();
+    let loaded = load(info, &budget);
+    // SAFETY: the bootloader leaves the command line in the direct map
+    // until the kernel reclaims boot memory, which happens later.
+    let cmdline = unsafe {
+        core::slice::from_raw_parts(
+            space::direct(info.cmdline_phys) as *const u8,
+            info.cmdline_len as usize,
+        )
+    };
+    let bytes = startup::message(info, cmdline, crate::memory::memory_map(info));
+    let clock_page = crate::time::create_clock_page(&budget)
+        .unwrap_or_else(|e| panic!("no memory for the clock page: {e:?}"));
+    let entry = |object: Arc<dyn Object>, kind| Entry {
+        object,
+        rights: default_rights(kind),
+    };
+    let mut handles: Vec<Entry> = vec![
+        entry(loaded.process.clone(), ObjectType::Process),
+        entry(loaded.thread.clone(), ObjectType::Thread),
+        entry(Resource::root(), ObjectType::Resource),
+        Entry {
+            object: loaded.boot_image,
+            rights: READ_ONLY,
+        },
+        entry(crate::log::object(), ObjectType::Log),
+        entry(budget.clone(), ObjectType::Budget),
+        Entry {
+            object: clock_page,
+            rights: READ_ONLY,
+        },
+    ];
+    if let Some(fb) = framebuffer(info, &budget) {
+        handles.push(Entry {
+            object: fb,
+            rights: PHYSICAL,
+        });
+    }
+    if bytes.len() > BYTES_MAX || handles.len() > HANDLES_MAX {
+        panic!(
+            "the startup message of {} bytes does not fit a message",
+            bytes.len()
+        );
+    }
+    let (theirs, ours) = Endpoint::pair(Some(&budget))
+        .unwrap_or_else(|e| panic!("no memory for the bootstrap channel: {e:?}"));
+    let message = Message::new(bytes, handles, Some(&budget))
+        .unwrap_or_else(|e| panic!("no memory for the startup message: {e:?}"));
+    if let Err((e, _)) = ours.write(message) {
+        panic!("writing the startup message: {e:?}");
+    }
+    drop(ours);
+    let bootstrap = Entry {
+        object: theirs,
+        rights: default_rights(ObjectType::Channel),
+    };
+    Process::start(
+        &loaded.process,
+        &loaded.thread,
+        loaded.entry,
+        loaded.stack,
+        Some(bootstrap),
+        0,
+        Some(&budget),
+    )
+    .unwrap_or_else(|e| panic!("starting init: {e:?}"));
 }

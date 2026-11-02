@@ -46,7 +46,6 @@ impl Object for LogObject {
 static OBJECT: SpinLock<Option<Arc<LogObject>>> = SpinLock::new(None);
 
 /// The `Log` object, created on the first call. No other is created.
-#[expect(dead_code, reason = "init is not started yet")]
 pub fn object() -> Arc<LogObject> {
     OBJECT
         .lock()
