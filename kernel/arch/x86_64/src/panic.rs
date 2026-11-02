@@ -116,13 +116,22 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
     if PANICKING.swap(true, Ordering::Relaxed) {
         crate::cpu::halt();
     }
-    let stack = match STACK_END.load(Ordering::Relaxed) {
-        0 => {
-            let top = (&raw const __kernel_start) as u64;
-            (top - BOOT_STACK_SIZE, top)
-        }
-        end => (STACK_START.load(Ordering::Relaxed), end),
-    };
+    // The chain is followed on the stack that holds its first frame: the
+    // running thread's, the kernel's own, or the boot stack.
+    let boot = (&raw const __kernel_start) as u64;
+    let thread = crate::percpu::this().thread_stack.load(Ordering::Relaxed);
+    let stacks = [
+        (
+            thread.saturating_sub(crate::sched::KERNEL_STACK_SIZE),
+            thread,
+        ),
+        (
+            STACK_START.load(Ordering::Relaxed),
+            STACK_END.load(Ordering::Relaxed),
+        ),
+        (boot - BOOT_STACK_SIZE, boot),
+    ];
+    let stack = backtrace::stack_of(rbp, &stacks).unwrap_or((0, 0));
     // SAFETY: `frames` only reads 8-byte aligned words inside the current
     // stack, which is mapped.
     let read = |address: u64| unsafe { (address as *const u64).read() };

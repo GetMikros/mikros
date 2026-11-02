@@ -28,6 +28,9 @@ pub struct PerCpu {
     pub sched: SpinLock<CpuSched>,
     /// The address spaces that have PCIDs on the processor.
     pub pcids: SpinLock<Pcids>,
+    /// The top of the kernel stack of the thread that last ran, user or
+    /// kernel, for backtraces.
+    pub thread_stack: AtomicU64,
 }
 
 // SAFETY: each processor only reads its own structure, `this` is never
@@ -41,6 +44,7 @@ static BOOT_CPU: PerCpu = PerCpu {
     user_rsp: AtomicU64::new(0),
     sched: SpinLock::new(CpuSched::new()),
     pcids: SpinLock::new(Pcids::new()),
+    thread_stack: AtomicU64::new(0),
 };
 
 static READY: AtomicBool = AtomicBool::new(false);

@@ -323,13 +323,14 @@ impl Thread {
     /// state, and for a user thread its address space, its kernel stack
     /// for entries from user mode, and its FS and GS bases.
     fn switch_in(&self) {
+        let top = self.stack_top.load(Ordering::Relaxed);
+        percpu::this().thread_stack.store(top, Ordering::Relaxed);
         self.extended.restore();
         self.load_breakpoints();
         let Some(process) = &self.process else {
             return;
         };
         process.aspace().activate();
-        let top = self.stack_top.load(Ordering::Relaxed);
         crate::gdt::set_rsp0(top);
         percpu::this().kernel_stack.store(top, Ordering::Relaxed);
         let user = *self.user.lock();

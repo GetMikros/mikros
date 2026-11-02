@@ -27,6 +27,15 @@ pub fn frames(rbp: u64, stack: (u64, u64), read: impl Fn(u64) -> u64) -> impl It
     .take(MAX_FRAMES)
 }
 
+/// The first of `stacks`, given by start and end address, that holds
+/// `rbp`.
+pub fn stack_of(rbp: u64, stacks: &[(u64, u64)]) -> Option<(u64, u64)> {
+    stacks
+        .iter()
+        .copied()
+        .find(|&(start, end)| (start..end).contains(&rbp))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -36,6 +45,17 @@ mod tests {
     fn walk(memory: &[(u64, u64)], rbp: u64) -> Vec<u64> {
         let memory: HashMap<u64, u64> = memory.iter().copied().collect();
         frames(rbp, (0x1000, 0x2000), |a| memory[&a]).collect()
+    }
+
+    #[test]
+    fn finds_the_stack_of_a_frame() {
+        let stacks = [(0x1000, 0x2000), (0x8000, 0x9000)];
+        assert_eq!(stack_of(0x8ff0, &stacks), Some((0x8000, 0x9000)));
+        assert_eq!(stack_of(0x2000, &stacks), None);
+        assert_eq!(
+            stack_of(0x1000, &[(0, 0), (0x1000, 0x2000)]),
+            Some((0x1000, 0x2000))
+        );
     }
 
     #[test]
