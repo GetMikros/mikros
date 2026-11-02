@@ -1237,9 +1237,145 @@ fn pagers(s: &Startup) -> Result {
     ensure("refusing a sealed source", sealed == -13)
 }
 
+const IO: i64 = -28;
+const BAD_STATE: i64 = -20;
+
+fn pager_op(pager: Handle, mem: Handle, op: u32, offset: u64, len: u64) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::pager_op(pager, mem, op, offset, len) }
+}
+
+/// The dirty ranges of `mem` as byte offsets and lengths.
+fn dirty(pager: Handle, mem: Handle, len: u64) -> Result<([u64; 8], u64)> {
+    let mut out = [0u64; 8];
+    let mut count = 0;
+    // SAFETY: the pointers describe `out` and `count`.
+    let status = unsafe {
+        sys::pager_query_dirty(pager, mem, 0, len, out.as_mut_ptr().cast(), 4, &mut count)
+    };
+    check("querying dirty pages", status)?;
+    Ok((out, count))
+}
+
+/// A new paged object of `pages` pages with `options`, answered by a
+/// pager thread, and its pager.
+fn paged_object(s: &Startup, pages: u64, options: u32) -> Result<(Handle, Handle)> {
+    let (mut pager, mut port, mut mem) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 6, pages * PAGE_SIZE, options, &mut mem);
+        check("creating a paged object", status)?;
+    }
+    PAGER.store(u64::from(pager), Ordering::Release);
+    spawn2(s, pager_thread, u64::from(port), u64::from(mem))?;
+    Ok((pager, mem))
+}
+
+/// Dirty tracking, writeback, eviction, failing, a pager's end and
+/// revocation of paged objects.
+fn pager_operations(s: &Startup) -> Result {
+    let size = 3 * PAGE_SIZE;
+    let (pager, mem) = paged_object(s, 3, 2)?;
+    for page in 0..3 {
+        mem_read_at::<1>(mem, page * PAGE_SIZE)?;
+    }
+    ensure("supplying clean pages", dirty(pager, mem, size)?.1 == 0)?;
+    mem_write_at(mem, PAGE_SIZE, b"w")?;
+    let at = map(s.process, mem, size)?;
+    // SAFETY: the mapping is writable.
+    unsafe { ((at + 2 * PAGE_SIZE) as *mut u8).write_volatile(b'm') };
+    let (ranges, count) = dirty(pager, mem, size)?;
+    ensure(
+        "tracking writes",
+        count == 1 && ranges[..2] == [PAGE_SIZE, 2 * PAGE_SIZE],
+    )?;
+
+    check("beginning writeback", pager_op(pager, mem, 3, 0, size))?;
+    ensure(
+        "allowing one writeback",
+        pager_op(pager, mem, 3, 0, size) == BAD_STATE,
+    )?;
+    ensure(
+        "naming the range",
+        pager_op(pager, mem, 4, 0, PAGE_SIZE) == BAD_STATE,
+    )?;
+    // SAFETY: the mapping is writable.
+    unsafe { ((at + PAGE_SIZE) as *mut u8).write_volatile(b'n') };
+    check("ending writeback", pager_op(pager, mem, 4, 0, size))?;
+    let (ranges, count) = dirty(pager, mem, size)?;
+    ensure(
+        "keeping pages written meanwhile",
+        count == 1 && ranges[..2] == [PAGE_SIZE, PAGE_SIZE],
+    )?;
+    check("beginning again", pager_op(pager, mem, 3, 0, size))?;
+    check("aborting", pager_op(pager, mem, 5, 0, size))?;
+    ensure("staying dirty", dirty(pager, mem, size)?.1 == 1)?;
+
+    let before = REQUESTS.load(Ordering::Acquire);
+    check("evicting", pager_op(pager, mem, 2, 0, size))?;
+    ensure(
+        "keeping dirty pages",
+        mem_read_at::<1>(mem, PAGE_SIZE)? == *b"n",
+    )?;
+    ensure(
+        "requesting evicted pages again",
+        mem_read_at::<6>(mem, 0)? == *b"page 0",
+    )?;
+    ensure(
+        "counting the request",
+        REQUESTS.load(Ordering::Acquire) == before + 1,
+    )?;
+    ensure(
+        "refusing other ops",
+        pager_op(pager, mem, 6, 0, size) == -10,
+    )?;
+
+    // SAFETY: the call takes no pointers.
+    check("revoking", unsafe { sys::pager_revoke(pager, mem) })?;
+    // SAFETY: the call takes no pointers.
+    check("revoking again", unsafe { sys::pager_revoke(pager, mem) })?;
+    let mut byte = [0u8; 1];
+    // SAFETY: the pointers describe `byte`.
+    unsafe {
+        ensure(
+            "refusing reads",
+            sys::mem_read(mem, 0, byte.as_mut_ptr(), 1) == -13,
+        )?;
+        ensure(
+            "refusing writes",
+            sys::mem_write(mem, 0, byte.as_ptr(), 1) == -13,
+        )?;
+        let mut out = 0;
+        let status = sys::vm_map(s.process, PERM_READ, 0, mem, 0, PAGE_SIZE, &mut out);
+        ensure("refusing mappings", status == -13)?;
+    }
+
+    let (pager, mem) = paged_object(s, 2, 0)?;
+    check("failing a page", pager_op(pager, mem, 1, 0, PAGE_SIZE))?;
+    // SAFETY: the pointers describe `byte`.
+    ensure(
+        "failing reads",
+        unsafe { sys::mem_read(mem, 0, byte.as_mut_ptr(), 1) } == IO,
+    )?;
+    ensure(
+        "needing dirty tracking",
+        unsafe { sys::pager_query_dirty(pager, mem, 0, PAGE_SIZE, byte.as_mut_ptr(), 0, &mut 0) }
+            == -2,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the pager", unsafe { sys::handle_close(pager) })?;
+    // SAFETY: the pointers describe `byte`.
+    ensure(
+        "failing without a pager",
+        unsafe { sys::mem_read(mem, PAGE_SIZE, byte.as_mut_ptr(), 1) } == IO,
+    )
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 17] = [
+const TESTS: [(&str, Test); 18] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1254,6 +1390,7 @@ const TESTS: [(&str, Test); 17] = [
     ("streams", streams),
     ("clones", clones),
     ("pagers", pagers),
+    ("pager_operations", pager_operations),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
