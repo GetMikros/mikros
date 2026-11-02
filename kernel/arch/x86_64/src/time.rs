@@ -1,13 +1,18 @@
 //! Setting up and reading the monotonic clock.
 
-use crate::clock::{PIT_HZ, PM_TIMER_HZ, TscLeaves, measured_hz};
+use crate::clock::{PIT_HZ, PM_TIMER_HZ, TscLeaves, clock_page, measured_hz, scaled_ns, tsc_scale};
 use crate::cpu::{in8, in32, out8, rdtsc};
 use crate::log::log;
 use crate::memory::DirectMem;
+use crate::memory_object::MemoryObject;
+use alloc::sync::Arc;
 use boot_protocol::BootInfo;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use kernel_core::acpi::{self, Address, PmTimer, Tables};
 use kernel_core::clock::{Extender, ticks_to_ns};
+use kernel_core::object::budget::Budget;
+use kernel_core::object::memory::PAGE_SIZE;
+use kernel_core::status::Error;
 
 const NONE: u8 = 0;
 const TSC: u8 = 1;
@@ -24,6 +29,7 @@ const HPET_64BIT: u64 = 1 << 13;
 
 static SOURCE: AtomicU8 = AtomicU8::new(NONE);
 /// The counter frequency, or for the HPET its period in femtoseconds.
+/// For the TSC, the factor and shift of `tsc_scale` instead.
 static RATE: AtomicU64 = AtomicU64::new(0);
 /// The extended counter value at setup, subtracted from later values.
 static BASE: AtomicU64 = AtomicU64::new(0);
@@ -85,6 +91,7 @@ pub fn now() -> i64 {
     let ticks = counter().saturating_sub(BASE.load(Ordering::Relaxed));
     let rate = RATE.load(Ordering::Relaxed);
     match source {
+        TSC => scaled_ns(ticks, rate as u32, (rate >> 32) as u32),
         HPET => i64::try_from(u128::from(ticks) * u128::from(rate) / 1_000_000).unwrap_or(i64::MAX),
         NONE => 0,
         _ => ticks_to_ns(ticks, rate),
@@ -210,7 +217,10 @@ pub fn init(info: &BootInfo) {
 
     let name;
     if leaves.invariant() {
-        RATE.store(tsc_hz, Ordering::Relaxed);
+        // The clock page gives user space the same factor and shift, so
+        // that it computes exactly the values `now` returns.
+        let (mult, shift) = tsc_scale(tsc_hz);
+        RATE.store(u64::from(shift) << 32 | u64::from(mult), Ordering::Relaxed);
         SOURCE.store(TSC, Ordering::Relaxed);
         name = "the TSC";
     } else if let Some((virt, period_fs, wide)) = hpet {
@@ -228,4 +238,22 @@ pub fn init(info: &BootInfo) {
     }
     BASE.store(counter(), Ordering::Release);
     log!(Info, "monotonic clock from {name}");
+}
+
+/// Creates the clock page, charged to `budget`. Its contents never change
+/// after boot, so `sequence` stays 0.
+#[expect(dead_code, reason = "init is not started yet")]
+pub fn create_clock_page(budget: &Arc<Budget>) -> Result<Arc<MemoryObject>, Error> {
+    let tsc = (SOURCE.load(Ordering::Acquire) == TSC).then(|| {
+        let rate = RATE.load(Ordering::Relaxed);
+        let base = BASE.load(Ordering::Relaxed);
+        (rate as u32, (rate >> 32) as u32, base, 0)
+    });
+    let header = clock_page(tsc);
+    let page = MemoryObject::new(budget, PAGE_SIZE, 0)?;
+    page.write(0, header.len() as u64, |chunk| {
+        chunk.copy_from_slice(&header[..chunk.len()]);
+        Ok(())
+    })?;
+    Ok(page)
 }

@@ -66,9 +66,75 @@ pub fn measured_hz(ticks: u64, reference_ticks: u64, reference_hz: u64) -> u64 {
     (u128::from(ticks) * u128::from(reference_hz) / u128::from(reference_ticks.max(1))) as u64
 }
 
+/// The factor and shift that turn TSC ticks at `hz` into nanoseconds as
+/// `ticks * mult >> shift`: the largest shift whose factor still fits in
+/// 32 bits.
+pub fn tsc_scale(hz: u64) -> (u32, u32) {
+    let hz = u128::from(hz.max(1));
+    let mut shift = 63;
+    loop {
+        let mult = ((1_000_000_000u128 << shift) + hz / 2) / hz;
+        if mult <= u128::from(u32::MAX) || shift == 0 {
+            return (mult.min(u128::from(u32::MAX)) as u32, shift);
+        }
+        shift -= 1;
+    }
+}
+
+/// Nanoseconds for `ticks` with the scale of `tsc_scale`.
+pub fn scaled_ns(ticks: u64, mult: u32, shift: u32) -> i64 {
+    i64::try_from((u128::from(ticks) * u128::from(mult)) >> shift).unwrap_or(i64::MAX)
+}
+
+/// The size of the clock page header and the fields of `source` 1.
+pub const CLOCK_PAGE_SIZE: usize = 0x28;
+
+/// The start of the clock page. `tsc` gives `mult`, `shift`, `tsc_base`
+/// and `ns_base` when the clock comes from the TSC.
+pub fn clock_page(tsc: Option<(u32, u32, u64, i64)>) -> [u8; CLOCK_PAGE_SIZE] {
+    let mut page = [0u8; CLOCK_PAGE_SIZE];
+    page[0x04..0x08].copy_from_slice(&1u32.to_le_bytes());
+    if let Some((mult, shift, tsc_base, ns_base)) = tsc {
+        page[0x08..0x0C].copy_from_slice(&1u32.to_le_bytes());
+        page[0x10..0x14].copy_from_slice(&mult.to_le_bytes());
+        page[0x14..0x18].copy_from_slice(&shift.to_le_bytes());
+        page[0x18..0x20].copy_from_slice(&tsc_base.to_le_bytes());
+        page[0x20..0x28].copy_from_slice(&ns_base.to_le_bytes());
+    }
+    page
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scales_tsc_ticks() {
+        for hz in [1_000_000, 2_400_000_000, 3_000_000_000, 5_200_000_000] {
+            let (mult, shift) = tsc_scale(hz);
+            assert!(mult > u32::MAX / 2, "{hz}: {mult}");
+            // One hour of ticks lands within a microsecond.
+            let hour = scaled_ns(hz * 3600, mult, shift);
+            assert!((hour - 3_600_000_000_000).abs() < 1000, "{hz}: {hour}");
+        }
+        assert_eq!(tsc_scale(1_000_000_000), (1 << 31, 31));
+        assert_eq!(scaled_ns(u64::MAX, u32::MAX, 0), i64::MAX);
+    }
+
+    #[test]
+    fn lays_out_the_clock_page() {
+        let page = clock_page(None);
+        assert_eq!(
+            page[..0x10],
+            [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert!(page[0x10..].iter().all(|&b| b == 0));
+        let page = clock_page(Some((7, 3, 0x1122, -5)));
+        assert_eq!(page[0x08..0x0C], 1u32.to_le_bytes());
+        assert_eq!(page[0x10..0x18], [7, 0, 0, 0, 3, 0, 0, 0]);
+        assert_eq!(page[0x18..0x20], 0x1122u64.to_le_bytes());
+        assert_eq!(page[0x20..0x28], (-5i64).to_le_bytes());
+    }
 
     fn leaves(leaf15: [u32; 3], leaf16_eax: u32, invariant: bool) -> TscLeaves {
         TscLeaves {
