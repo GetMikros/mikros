@@ -1,7 +1,7 @@
 # Mikros
 
 The Mikros operating system: boot manager, bootloader, kernel and user space
-in one repository.
+in one repository. Mikros is a microkernel-based OS.
 
 ## Getting the source
 
