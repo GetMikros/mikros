@@ -648,6 +648,42 @@ fn protect(s: &Startup, perms: u32, addr: u64, len: u64) -> i64 {
     unsafe { sys::vm_protect(s.process, perms, addr, len) }
 }
 
+/// Committing and decommitting a range of many pages reaches every page
+/// and frees every frame.
+fn large_memory_operations(s: &Startup) -> Result {
+    let pages = 1300;
+    let mem = create_memory(pages * PAGE_SIZE)?;
+    let before = budget_pages(s)?;
+    let at = map(s.process, mem, pages * PAGE_SIZE)?;
+    let last = at + (pages - 1) * PAGE_SIZE;
+    // SAFETY: the mapping is readable and writable.
+    unsafe { (last as *mut u64).write_volatile(0x77) };
+    // SAFETY: the call takes no pointers.
+    check("committing", unsafe {
+        sys::mem_op(mem, 1, 0, pages * PAGE_SIZE)
+    })?;
+    ensure("taking every frame", budget_pages(s)? == before + pages)?;
+    // SAFETY: the mapping is readable.
+    ensure("keeping the data", unsafe {
+        (last as *const u64).read_volatile() == 0x77
+    })?;
+    // SAFETY: the call takes no pointers.
+    check("decommitting", unsafe {
+        sys::mem_op(mem, 2, 0, pages * PAGE_SIZE)
+    })?;
+    ensure("freeing every frame", budget_pages(s)? == before)?;
+    // SAFETY: the mapping is readable.
+    ensure("reading zero", unsafe {
+        (last as *const u64).read_volatile() == 0
+    })?;
+    // SAFETY: the calls take no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, pages * PAGE_SIZE)
+    })?;
+    // SAFETY: as above.
+    check("closing", unsafe { sys::handle_close(mem) })
+}
+
 /// Committing takes frames and decommitting frees them and zeroes the
 /// pages; protection changes stay within the mapping handle's rights.
 fn memory_operations(s: &Startup) -> Result {
@@ -1811,7 +1847,7 @@ fn evict_waits_for_outputs(s: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 25] = [
+const TESTS: [(&str, Test); 26] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1819,6 +1855,7 @@ const TESTS: [(&str, Test); 25] = [
     ("ports", ports),
     ("log_readers", log_readers),
     ("memory_operations", memory_operations),
+    ("large_memory_operations", large_memory_operations),
     ("seals", seals),
     ("channel_calls", channel_calls),
     ("futexes", futexes),

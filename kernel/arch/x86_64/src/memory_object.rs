@@ -937,19 +937,38 @@ impl MemoryObject {
     }
 
     /// Frees frames taken from the pages and releases their charges.
+    ///
+    /// Nothing that can free heap memory runs while the frame allocator
+    /// is locked, as the heap gives pages back to it: frames are taken
+    /// from `frames`, whose iterator may free memory, in batches with the
+    /// allocator unlocked, and charges are released after each batch.
     fn free(&self, frames: impl IntoIterator<Item = u64>) {
+        const BATCH: usize = 64;
+        let mut frames = frames.into_iter();
         let mut count = 0;
-        let mut supplied = Vec::new();
-        if let Some(allocator) = FRAMES.lock().as_mut() {
-            for phys in frames {
-                allocator.free(phys, 1);
+        loop {
+            let mut batch = [0u64; BATCH];
+            let mut len = 0;
+            for (slot, phys) in batch.iter_mut().zip(frames.by_ref()) {
+                *slot = phys;
+                len += 1;
+            }
+            if len == 0 {
+                break;
+            }
+            let batch = &batch[..len];
+            if let Some(allocator) = FRAMES.lock().as_mut() {
+                for &phys in batch {
+                    allocator.free(phys, 1);
+                }
+            }
+            for &phys in batch {
                 // A supplied frame's charge goes back to its own budget.
                 match self
                     .paged
                     .as_ref()
                     .and_then(|p| p.charges.lock().remove(&phys))
                 {
-                    Some(budget) if supplied.try_reserve(1).is_ok() => supplied.push(budget),
                     Some(budget) => {
                         budget.release_pages(1);
                         budget.release_kernel(PAGE_ENTRY_COST);
@@ -958,11 +977,8 @@ impl MemoryObject {
                 }
             }
         }
+        drop(frames);
         self.release(count);
-        for budget in supplied {
-            budget.release_pages(1);
-            budget.release_kernel(PAGE_ENTRY_COST);
-        }
     }
 
     /// Fills the `len` bytes from `offset` from `source`, in chunks.
