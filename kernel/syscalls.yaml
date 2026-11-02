@@ -473,3 +473,18 @@ syscalls:
       - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
       - {name: base, type: u64, dir: in}
       - {name: size, type: u64, dir: in}
+
+  - name: fuzz_cov_enable
+    number: 45
+    arch: [x86_64]
+    fuzz_only: true
+    spec: [MIKSPEC-0017.R10, MIKSPEC-0017.R11]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [WRITE]}
+
+  - name: fuzz_cov_disable
+    number: 46
+    arch: [x86_64]
+    fuzz_only: true
+    spec: [MIKSPEC-0017.R10]
+    args: []

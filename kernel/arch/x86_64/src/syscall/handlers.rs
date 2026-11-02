@@ -865,3 +865,16 @@ pub fn process_ioports_enable(
     }
     object::<Process>(process).enable_ioports(base, base + size)
 }
+
+#[cfg(feature = "fuzz")]
+pub fn fuzz_cov_enable(mem: Checked) -> Result<(), Error> {
+    let thread = crate::sched::current().ok_or(Error::BadState)?;
+    crate::coverage::enable(&thread, object::<MemoryObject>(mem))
+}
+
+#[cfg(feature = "fuzz")]
+pub fn fuzz_cov_disable() -> Result<(), Error> {
+    let thread = crate::sched::current().ok_or(Error::BadState)?;
+    crate::coverage::disable(&thread);
+    Ok(())
+}

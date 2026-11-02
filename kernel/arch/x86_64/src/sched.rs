@@ -52,6 +52,9 @@ pub struct Thread {
     extended: ExtendedState,
     /// The top of the kernel stack, or 0 once it is freed.
     stack_top: AtomicU64,
+    /// The coverage buffer of the thread in the fuzz build.
+    #[cfg(feature = "fuzz")]
+    coverage: SpinLock<Option<crate::coverage::Buffer>>,
     entity: SpinLock<Entity>,
     /// Nanoseconds the thread has run.
     cpu_time: AtomicI64,
@@ -130,6 +133,8 @@ impl Thread {
             rsp: UnsafeCell::new(0),
             extended,
             stack_top: AtomicU64::new(stack + KERNEL_STACK_SIZE),
+            #[cfg(feature = "fuzz")]
+            coverage: SpinLock::new(None),
             entity: SpinLock::new(Entity::new(DEFAULT_PRIORITY)),
             cpu_time: AtomicI64::new(0),
             user: SpinLock::new(UserState::default()),
@@ -322,12 +327,20 @@ impl Thread {
     /// Loads the user state of the thread about to run: its extended
     /// state, and for a user thread its address space, its kernel stack
     /// for entries from user mode, and its FS and GS bases.
+    /// The thread's coverage buffer.
+    #[cfg(feature = "fuzz")]
+    pub fn coverage(&self) -> &SpinLock<Option<crate::coverage::Buffer>> {
+        &self.coverage
+    }
+
     fn switch_in(&self) {
         let top = self.stack_top.load(Ordering::Relaxed);
         percpu::this().thread_stack.store(top, Ordering::Relaxed);
         self.extended.restore();
         self.load_breakpoints();
         crate::process::switch_ports(self.process.as_deref());
+        #[cfg(feature = "fuzz")]
+        crate::coverage::switch_in(self);
         let Some(process) = &self.process else {
             return;
         };

@@ -274,6 +274,37 @@ impl MemoryObject {
         })
     }
 
+    /// Gives every page a frame and keeps the frames until `unpin_all`,
+    /// even when the object shrinks meanwhile, and returns them in page
+    /// order with the object's size. Fails with `WrongType` for a
+    /// physical object.
+    #[cfg(feature = "fuzz")]
+    pub fn pin_all(&self) -> Result<(Vec<u64>, u64), Error> {
+        if self.is_physical() {
+            return Err(Error::WrongType);
+        }
+        let mut pages = self.pages.lock();
+        let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(pages.count() as usize)
+            .map_err(|_| Error::NoMemory)?;
+        for index in 0..pages.count() {
+            let phys = match pages.frame(index) {
+                Some(phys) => phys,
+                None => self.alloc_mapped(&mut pages, index)?,
+            };
+            frames.push(phys);
+        }
+        pages.pin();
+        Ok((frames, pages.size()))
+    }
+
+    /// Ends a pin of `pin_all`.
+    #[cfg(feature = "fuzz")]
+    pub fn unpin_all(&self) {
+        self.unpin(&mut Work::new(|| {}));
+    }
+
     /// Records the frame of every page of the `len` bytes from `offset`,
     /// keeping each until the result is released, so that they can be read
     /// without the pages locked. Pages without a frame read as zeros and
