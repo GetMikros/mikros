@@ -91,18 +91,25 @@ impl fmt::Display for Error {
     }
 }
 
+/// `a + b`, or `Truncated` when it overflows, as an offset that large is
+/// past the end of any file.
+fn add(a: u64, b: u64) -> Result<u64, Error> {
+    a.checked_add(b).ok_or(Error::Truncated)
+}
+
 fn u16_at(data: &[u8], offset: u64) -> Result<u16, Error> {
     let offset = usize::try_from(offset).map_err(|_| Error::Truncated)?;
-    let bytes = data.get(offset..offset + 2).ok_or(Error::Truncated)?;
+    let end = offset.checked_add(2).ok_or(Error::Truncated)?;
+    let bytes = data.get(offset..end).ok_or(Error::Truncated)?;
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
 fn u32_at(data: &[u8], offset: u64) -> Result<u32, Error> {
-    Ok(u32::from(u16_at(data, offset)?) | u32::from(u16_at(data, offset + 2)?) << 16)
+    Ok(u32::from(u16_at(data, offset)?) | u32::from(u16_at(data, add(offset, 2)?)?) << 16)
 }
 
 fn u64_at(data: &[u8], offset: u64) -> Result<u64, Error> {
-    Ok(u64::from(u32_at(data, offset)?) | u64::from(u32_at(data, offset + 4)?) << 32)
+    Ok(u64::from(u32_at(data, offset)?) | u64::from(u32_at(data, add(offset, 4)?)?) << 32)
 }
 
 /// The Mikros notes in the note segment at `offset` of `size` bytes, as the
@@ -117,20 +124,20 @@ fn notes(
     let end = offset.checked_add(size).ok_or(Error::Truncated)?;
     let mut found = Vec::new();
     let mut at = offset;
-    while at + 12 <= end {
+    while add(at, 12)? <= end {
         let name_size = u64::from(u32_at(file, at)?);
-        let desc_size = u64::from(u32_at(file, at + 4)?);
-        let kind = u32_at(file, at + 8)?;
-        let name_at = at + 12;
-        let desc_at = name_at + name_size.next_multiple_of(align);
-        let next = desc_at + desc_size.next_multiple_of(align);
+        let desc_size = u64::from(u32_at(file, add(at, 4)?)?);
+        let kind = u32_at(file, add(at, 8)?)?;
+        let name_at = add(at, 12)?;
+        let desc_at = add(name_at, name_size.next_multiple_of(align))?;
+        let next = add(desc_at, desc_size.next_multiple_of(align))?;
         if next > end || next as usize > file.len() {
             return Err(Error::Truncated);
         }
         let name = &file[name_at as usize..(name_at + name_size) as usize];
         if kind == NOTE_TYPE && name.strip_suffix(b"\0").unwrap_or(name) == NOTE_NAME {
             found.push(if desc_size >= 4 {
-                Some((u16_at(file, desc_at)?, u16_at(file, desc_at + 2)?))
+                Some((u16_at(file, desc_at)?, u16_at(file, add(desc_at, 2)?)?))
             } else {
                 None
             });
@@ -163,14 +170,14 @@ pub fn check(file: &[u8], range_start: u64) -> Result<Kernel, Error> {
     let mut segments: Vec<Segment> = Vec::new();
     let mut versions = Vec::new();
     for i in 0..ph_count {
-        let ph = ph_offset + i * ph_size;
+        let ph = add(ph_offset, i * ph_size)?;
         let kind = u32_at(file, ph)?;
-        let flags = u32_at(file, ph + 4)?;
-        let offset = u64_at(file, ph + 8)?;
-        let vaddr = u64_at(file, ph + 16)?;
-        let file_size = u64_at(file, ph + 32)?;
-        let mem_size = u64_at(file, ph + 40)?;
-        let align = u64_at(file, ph + 48)?;
+        let flags = u32_at(file, add(ph, 4)?)?;
+        let offset = u64_at(file, add(ph, 8)?)?;
+        let vaddr = u64_at(file, add(ph, 16)?)?;
+        let file_size = u64_at(file, add(ph, 32)?)?;
+        let mem_size = u64_at(file, add(ph, 40)?)?;
+        let align = u64_at(file, add(ph, 48)?)?;
         match kind {
             PT_INTERP | PT_DYNAMIC | PT_TLS => return Err(Error::ForbiddenSegment(kind)),
             PT_NOTE => versions.extend(notes(file, offset, file_size, align)?),

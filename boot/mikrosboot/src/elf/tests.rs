@@ -195,3 +195,16 @@ fn checks_the_version_note() {
     let twice = elf(START, &[text(), note_ph(two.len())], &two);
     assert_eq!(check(&twice, START), Err(Error::SeveralVersionNotes));
 }
+
+#[test]
+fn refuses_offsets_that_overflow() {
+    let mut file = kernel(&[text(), data()]);
+    file[32..40].copy_from_slice(&(u64::MAX - 1).to_le_bytes());
+    assert_eq!(check(&file, START).err(), Some(Error::Truncated));
+    assert_eq!(u16_at(&file, u64::MAX).err(), Some(Error::Truncated));
+    assert_eq!(u64_at(&file, u64::MAX - 5).err(), Some(Error::Truncated));
+    assert_eq!(
+        notes(&file, u64::MAX - 12, 12, 4).err(),
+        Some(Error::Truncated)
+    );
+}
