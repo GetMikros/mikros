@@ -356,8 +356,9 @@ pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
     unsafe { kernel_switch(root, stack + STACK_SIZE, next) }
 }
 
-/// Adds the bootloader's memory to the frame allocator. Runs on the
-/// kernel's tables, after every BootInfo value the kernel needs is copied.
+/// Adds the bootloader's memory and the boot stack to the frame allocator.
+/// Runs on the kernel's tables and stack, after every BootInfo value the
+/// kernel needs is copied.
 pub fn reclaim_boot_memory(info: &BootInfo) -> u64 {
     let map = memory::memory_map(info);
     let mut frames = FRAMES.lock();
@@ -367,6 +368,8 @@ pub fn reclaim_boot_memory(info: &BootInfo) -> u64 {
     // The memory map lies in BootloaderReclaimable memory, which is freed
     // here; nothing allocates until the walk is done.
     frames.add_kind(map.clone(), Kind::BootloaderReclaimable);
-    frames.add_kind(map, Kind::PageTables);
+    frames.add_kind(map.clone(), Kind::PageTables);
+    // The kernel left the boot stack in `enter` and never returns to it.
+    frames.add_kind(map, Kind::KernelStack);
     frames.free_count()
 }

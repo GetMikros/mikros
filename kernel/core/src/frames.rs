@@ -9,9 +9,14 @@ pub const MAX_ALIGN: u64 = 512;
 /// The kinds of memory the allocator can hand out: `Usable` from the
 /// start, and the boot memory the kernel reclaims later.
 fn allocatable(kind: u32) -> bool {
-    [Kind::Usable, Kind::BootloaderReclaimable, Kind::PageTables]
-        .iter()
-        .any(|&k| k as u32 == kind)
+    [
+        Kind::Usable,
+        Kind::BootloaderReclaimable,
+        Kind::PageTables,
+        Kind::KernelStack,
+    ]
+    .iter()
+    .any(|&k| k as u32 == kind)
 }
 
 /// The number of bitmap words needed to cover every range of `memory_map`
