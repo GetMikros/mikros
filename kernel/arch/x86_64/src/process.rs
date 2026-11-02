@@ -380,8 +380,10 @@ impl Process {
         };
         let threads = process.threads.lock();
         let was = sched::make_dead(thread);
-        let last = (was == sched::RUNNABLE || was == sched::BLOCKED)
-            && process.started.fetch_sub(1, Ordering::Relaxed) == 1;
+        // Every started state counts, a thread stopped in an exception
+        // included.
+        let started = was != sched::NEW && was != sched::DEAD;
+        let last = started && process.started.fetch_sub(1, Ordering::Relaxed) == 1;
         drop(threads);
         if last {
             process.terminate(0);

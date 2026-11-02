@@ -98,6 +98,17 @@ fn threads(s: &Startup) -> Result {
 /// process with one end of a new channel, and returns the process and
 /// the other end.
 fn start_program(s: &Startup, name: &str) -> Result<(Handle, Handle)> {
+    start_program_with(s, name, 0, |_| Ok(()))
+}
+
+/// Like `start_program`, passing `arg2` to the program and calling
+/// `setup` with the process handle before the process starts.
+fn start_program_with(
+    s: &Startup,
+    name: &str,
+    arg2: u64,
+    setup: impl FnOnce(Handle) -> Result,
+) -> Result<(Handle, Handle)> {
     let image_size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
     let mut at = 0;
     // SAFETY: the out pointer is valid for the call.
@@ -141,9 +152,10 @@ fn start_program(s: &Startup, name: &str) -> Result<(Handle, Handle)> {
     check("creating a channel", unsafe {
         sys::channel_create(0, &mut ours, &mut theirs)
     })?;
+    setup(process)?;
     // SAFETY: the call takes no pointers.
     let status =
-        unsafe { sys::process_start(process, thread, loaded.entry, loaded.stack, theirs, 0) };
+        unsafe { sys::process_start(process, thread, loaded.entry, loaded.stack, theirs, arg2) };
     check("starting the process", status)?;
     Ok((process, ours))
 }
@@ -1537,9 +1549,46 @@ fn pager_operations(s: &Startup) -> Result {
     )
 }
 
+const UNDEFINED_INSTRUCTION: u32 = 3;
+
+/// Starts the debuggee with `arg2` and an exception channel created with
+/// `options`, and returns the process and the channel.
+fn start_debuggee(s: &Startup, arg2: u64, options: u32) -> Result<(Handle, Handle)> {
+    let mut channel = 0;
+    let (process, _) = start_program_with(s, "debuggee", arg2, |process| {
+        // SAFETY: the out pointer is valid for the call.
+        check("creating an exception channel", unsafe {
+            sys::exception_channel_create(process, options, &mut channel)
+        })
+    })?;
+    Ok((process, channel))
+}
+
+/// The type of the next report on exception channel `channel` and the
+/// handle of its thread.
+fn next_report(channel: Handle) -> Result<(u32, Handle)> {
+    let m = read_message(channel, 2000)?;
+    ensure("receiving a report", m.len == 0x28 && m.count == 1)?;
+    Ok((u32_at(&m.bytes, 0), m.handles[0]))
+}
+
+/// Killing the last thread of a process while it is stopped in an
+/// exception terminates the process.
+fn kill_stopped_thread(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 0, 0)?;
+    let (kind, thread) = next_report(channel)?;
+    ensure("reporting the fault", kind == UNDEFINED_INSTRUCTION)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(thread) })?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, soon()).0 == 0,
+    )
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 20] = [
+const TESTS: [(&str, Test); 21] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1557,6 +1606,7 @@ const TESTS: [(&str, Test); 20] = [
     ("pagers", pagers),
     ("pager_operations", pager_operations),
     ("paged_outputs", paged_outputs),
+    ("kill_stopped_thread", kill_stopped_thread),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),

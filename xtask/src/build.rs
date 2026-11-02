@@ -100,10 +100,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", echo.display());
             let server = user_build("call-server", kind)?;
             println!("built    {}", server.display());
+            let debuggee = user_build("debuggee", kind)?;
+            println!("built    {}", debuggee.display());
             let members = [
                 ("init", init.as_path()),
                 ("tests/channel-echo", echo.as_path()),
                 ("tests/call-server", server.as_path()),
+                ("tests/debuggee", debuggee.as_path()),
             ];
             boot_image(kind, "test-boot.img", &members)?
         }
