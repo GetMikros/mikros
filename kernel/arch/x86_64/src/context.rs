@@ -152,6 +152,17 @@ fn xsave_layout() -> Layout {
     Layout::from_size_align(size, 64).unwrap_or_else(|_| panic!("bad XSAVE area size {size}"))
 }
 
+/// The state components enabled in XCR0.
+pub fn xcr0() -> u64 {
+    let (low, high): (u32, u32);
+    // SAFETY: XSAVE is a required feature, so XGETBV with ECX 0 reads
+    // XCR0.
+    unsafe {
+        asm!("xgetbv", in("ecx") 0, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags))
+    };
+    u64::from(high) << 32 | u64::from(low)
+}
+
 /// A thread's extended state, in XSAVE format.
 pub struct ExtendedState(NonNull<u8>);
 
@@ -172,6 +183,25 @@ impl ExtendedState {
         // area and aligned.
         unsafe { area.add(MXCSR_OFFSET).cast::<u32>().write(MXCSR_RESET) };
         Some(ExtendedState(area))
+    }
+
+    /// The saved XSAVE image.
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY: the area is allocated with this size, and the thread it
+        // belongs to does not run while it is read.
+        unsafe { core::slice::from_raw_parts(self.0.as_ptr(), extended_state_size()) }
+    }
+
+    /// The saved XSAVE image, to be replaced while its thread does not
+    /// run. What is written must be loadable with XRSTOR.
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "the area is owned by one thread that does not run"
+    )]
+    pub fn bytes_mut(&self) -> &mut [u8] {
+        // SAFETY: as for `bytes`; the caller has nothing else referencing
+        // the area.
+        unsafe { core::slice::from_raw_parts_mut(self.0.as_ptr(), extended_state_size()) }
     }
 
     /// Saves the processor's extended state here.

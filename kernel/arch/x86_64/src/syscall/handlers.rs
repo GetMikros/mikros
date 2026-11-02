@@ -6,6 +6,7 @@ use super::{Checked, UserIn, UserOut, current_process};
 use crate::memory_object::MemoryObject;
 use crate::process::Process;
 use crate::sched::Thread;
+use crate::thread_state::{self, GENERAL_SIZE, General};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use kernel_core::exception::{self, DEBUG_EVENTS};
@@ -503,4 +504,100 @@ pub fn thread_resume_from_exception(thread: Checked, action: u32) -> Result<(), 
         _ => return Err(Error::InvalidArgs),
     }
     Ok(())
+}
+
+/// The kinds of thread state.
+const STATE_GENERAL: u32 = 0;
+const STATE_EXTENDED: u32 = 1;
+const STATE_DEBUG: u32 = 2;
+
+/// The size of the layout of state `kind`.
+fn state_size(kind: u32) -> Result<u64, Error> {
+    match kind {
+        STATE_GENERAL => Ok(GENERAL_SIZE as u64),
+        STATE_EXTENDED => Ok(8 + crate::context::extended_state_size() as u64),
+        // Hardware breakpoint state comes later.
+        STATE_DEBUG => Err(Error::NotSupported),
+        _ => Err(Error::InvalidArgs),
+    }
+}
+
+pub fn thread_read_state(
+    thread: Checked,
+    kind: u32,
+    buf: UserOut<u8>,
+    len: u64,
+) -> Result<(), Error> {
+    let thread = object::<Thread>(thread);
+    let size = state_size(kind)?;
+    if len < size {
+        return Err(Error::BufferTooSmall);
+    }
+    if !buf.fits(size) {
+        return Err(Error::InvalidArgs);
+    }
+    // The state is copied out after the thread is let go, as the copy can
+    // fault.
+    let mut general = [0u8; GENERAL_SIZE];
+    let mut extended = Vec::new();
+    extended
+        .try_reserve_exact(size as usize)
+        .map_err(|_| Error::NoMemory)?;
+    thread
+        .with_stopped_state(|frame, bases, ext| match kind {
+            STATE_GENERAL => general = General::from_frame(frame, bases[0], bases[1]).bytes(),
+            _ => {
+                extended.extend_from_slice(&(ext.bytes().len() as u64).to_le_bytes());
+                extended.extend_from_slice(ext.bytes());
+            }
+        })
+        .ok_or(Error::BadState)?;
+    match kind {
+        STATE_GENERAL => buf.write_bytes(&general),
+        _ => buf.write_bytes(&extended),
+    }
+}
+
+pub fn thread_write_state(
+    thread: Checked,
+    kind: u32,
+    buf: UserIn<u8>,
+    len: u64,
+) -> Result<(), Error> {
+    let thread = object::<Thread>(thread);
+    let size = state_size(kind)?;
+    if len < size {
+        return Err(Error::BufferTooSmall);
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size as usize)
+        .map_err(|_| Error::NoMemory)?;
+    bytes.resize(size as usize, 0);
+    buf.read_bytes(&mut bytes)?;
+    if kind == STATE_GENERAL {
+        let state: &[u8; GENERAL_SIZE] = bytes[..].try_into().expect("the GENERAL size");
+        let user = |a| crate::aspace::in_user_range(a, 1);
+        let general = General::parse(state, user).ok_or(Error::InvalidArgs)?;
+        return thread
+            .with_stopped_state(|frame, bases, _| {
+                general.apply(frame);
+                *bases = [general.fs_base, general.gs_base];
+            })
+            .ok_or(Error::BadState);
+    }
+    let (count, area) = bytes.split_at(8);
+    let count = u64::from_le_bytes(count.try_into().expect("8 bytes"));
+    thread
+        .with_stopped_state(|_, _, ext| {
+            let mask = thread_state::mxcsr_mask(ext.bytes());
+            if count != area.len() as u64
+                || !thread_state::xsave_loadable(area, crate::context::xcr0(), mask)
+            {
+                return Err(Error::InvalidArgs);
+            }
+            ext.bytes_mut().copy_from_slice(area);
+            Ok(())
+        })
+        .ok_or(Error::BadState)?
 }

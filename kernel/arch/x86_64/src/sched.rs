@@ -188,6 +188,26 @@ impl Thread {
         }
     }
 
+    /// Calls `f` with the user registers, the user FS and GS bases and the
+    /// extended state of a thread in state `EXCEPTION`, or returns `None`
+    /// when it is in another state. The thread does not run meanwhile.
+    pub fn with_stopped_state<R>(
+        &self,
+        f: impl FnOnce(&mut crate::idt::Frame, &mut [u64; 2], &context::ExtendedState) -> R,
+    ) -> Option<R> {
+        let frame = self.exception_frame.load(Ordering::Acquire);
+        if self.state() != EXCEPTION || frame.is_null() {
+            return None;
+        }
+        let mut user = self.user.lock();
+        let mut bases = [user.fs_base, user.gs_base];
+        // SAFETY: the frame is on the thread's kernel stack, which stays
+        // until the thread runs again, and the thread is not running.
+        let result = f(unsafe { &mut *frame }, &mut bases, &self.extended);
+        [user.fs_base, user.gs_base] = bases;
+        Some(result)
+    }
+
     #[allow(dead_code, reason = "nothing starts kernel threads yet")]
     pub fn cpu_time(&self) -> i64 {
         self.cpu_time.load(Ordering::Relaxed)

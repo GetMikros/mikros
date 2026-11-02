@@ -306,3 +306,25 @@ syscalls:
     args:
       - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
       - {name: action, type: u32, dir: in}
+
+  - name: thread_read_state
+    number: 28
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R28, MIKSPEC-0016.R11, MIKSPEC-0016.R19]
+    args:
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
+      - {name: kind, type: u32, dir: in}
+      - {name: buf, type: "*mut u8", dir: out}
+      - {name: len, type: u64, dir: in}
+
+  - name: thread_write_state
+    number: 29
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R28, MIKSPEC-0016.R11, MIKSPEC-0016.R12, MIKSPEC-0016.R19]
+    args:
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
+      - {name: kind, type: u32, dir: in}
+      - {name: buf, type: "*const u8", dir: in}
+      - {name: len, type: u64, dir: in}

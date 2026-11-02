@@ -61,6 +61,8 @@ mod serial;
 mod space;
 #[cfg(target_os = "none")]
 mod syscall;
+#[cfg(any(target_os = "none", test))]
+mod thread_state;
 #[cfg(target_os = "none")]
 mod time;
 #[cfg(target_os = "none")]
