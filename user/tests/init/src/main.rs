@@ -322,11 +322,89 @@ fn events_and_waits(s: &Startup) -> Result {
     )
 }
 
+/// Timers set SIGNALED at their deadline, at once for a past one, and
+/// not after being cancelled.
+fn timers(_: &Startup) -> Result {
+    let mut timer = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating a timer", unsafe {
+        sys::timer_create(0, &mut timer)
+    })?;
+    let start = now();
+    // SAFETY: the call takes no pointers.
+    check("setting the timer", unsafe {
+        sys::timer_set(timer, start + 10_000_000)
+    })?;
+    let (status, _) = wait(timer, SIGNALED, start + 2_000_000_000);
+    ensure("firing", status == 0 && now() - start >= 10_000_000)?;
+    // SAFETY: the call takes no pointers.
+    check("setting a past deadline", unsafe {
+        sys::timer_set(timer, 0)
+    })?;
+    let (status, _) = wait(timer, SIGNALED, 0);
+    ensure("firing at once", status == 0)?;
+    // SAFETY: the call takes no pointers.
+    check("setting again", unsafe {
+        sys::timer_set(timer, now() + 5_000_000)
+    })?;
+    // SAFETY: the call takes no pointers.
+    check("cancelling", unsafe { sys::timer_cancel(timer) })?;
+    let (status, observed) = wait(timer, SIGNALED, now() + 30_000_000);
+    ensure(
+        "staying clear after cancel",
+        status == TIMED_OUT && observed == 0,
+    )
+}
+
+const KIND_PRIORITY: u32 = 5;
+const INVALID: Handle = 0;
+
+fn set_priority(thread: Handle, resource: Handle, priority: u32) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_set_priority(thread, resource, priority) }
+}
+
+/// Priorities up to 16 need no resource, higher ones a resource that
+/// covers them.
+fn priorities(s: &Startup) -> Result {
+    check("lowering", set_priority(s.thread, INVALID, 10))?;
+    let thread = info::<0x18>(s.thread, 3)?;
+    ensure("reading the priority", u32_at(&thread, 0x04) == 10)?;
+    ensure(
+        "needing a resource",
+        set_priority(s.thread, INVALID, 20) == -13,
+    )?;
+    ensure(
+        "refusing 32",
+        set_priority(s.thread, s.root_resource, 32) == -10,
+    )?;
+    check(
+        "raising with the root resource",
+        set_priority(s.thread, s.root_resource, 31),
+    )?;
+    let mut range = 0;
+    // SAFETY: the pointer is valid for the call.
+    let status =
+        unsafe { sys::resource_create(s.root_resource, KIND_PRIORITY, 0, 19, 0, &mut range) };
+    check("creating a priority resource", status)?;
+    check(
+        "raising within the range",
+        set_priority(s.thread, range, 18),
+    )?;
+    ensure(
+        "refusing above the range",
+        set_priority(s.thread, range, 19) == -13,
+    )?;
+    check("going back to 16", set_priority(s.thread, INVALID, 16))
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 5] = [
+const TESTS: [(&str, Test); 7] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
+    ("timers", timers),
+    ("priorities", priorities),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
