@@ -224,6 +224,12 @@ unsafe impl Plain for u64 {}
 unsafe impl Plain for i32 {}
 unsafe impl Plain for i64 {}
 
+/// The bytes of `values`.
+pub fn bytes_of<T: Plain>(values: &[T]) -> &[u8] {
+    // SAFETY: T is Plain, so it has no padding to leak.
+    unsafe { core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), size_of_val(values)) }
+}
+
 /// A user address the kernel reads a `T` or an array of them from.
 #[allow(dead_code, reason = "no call in the table reads user memory yet")]
 pub struct UserIn<T>(u64, PhantomData<T>);
@@ -286,6 +292,11 @@ pub struct UserOut<T>(u64, PhantomData<T>);
 impl<T: Plain> UserOut<T> {
     pub fn new(addr: u64) -> Self {
         UserOut(addr, PhantomData)
+    }
+
+    /// The output range of `len` values at the address, which must fit.
+    pub fn range(&self, len: u64) -> (u64, u64) {
+        (self.0, len * size_of::<T>() as u64)
     }
 
     /// Whether the address is zero.

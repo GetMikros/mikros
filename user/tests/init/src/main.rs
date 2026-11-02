@@ -1079,6 +1079,60 @@ fn streams(_: &Startup) -> Result {
     ensure("keeping queued bytes", status == 0 && got == 4096)
 }
 
+const INVALID_ARGS: i64 = -10;
+
+/// A call whose output lies on a read-only page fails before changing
+/// any state: written bytes are not queued, and read bytes and packets
+/// stay queued.
+fn failed_outputs(s: &Startup) -> Result {
+    let page = create_memory(PAGE_SIZE)?;
+    let mut ro = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("mapping read-only", unsafe {
+        sys::vm_map(s.process, PERM_READ, 0, page, 0, PAGE_SIZE, &mut ro)
+    })?;
+    let ro_u64 = ro as *mut u64;
+
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the pointers are valid for the call.
+    check("creating a stream", unsafe {
+        sys::stream_create(0, &mut a, &mut b)
+    })?;
+    // SAFETY: the pointers are valid; the count lies on a read-only page.
+    let status = unsafe { sys::stream_write(a, b"lost".as_ptr(), 4, ro_u64) };
+    ensure("failing a write", status == INVALID_ARGS)?;
+    let mut buf = [0u8; 8];
+    ensure(
+        "queueing nothing",
+        stream_io(b, false, &mut buf).0 == SHOULD_WAIT,
+    )?;
+    ensure("writing", stream_io(a, true, &mut { *b"kept" }) == (0, 4))?;
+    // SAFETY: the buffer is valid; the count lies on a read-only page.
+    let status = unsafe { sys::stream_read(b, buf.as_mut_ptr(), 8, ro_u64) };
+    ensure("failing a read", status == INVALID_ARGS)?;
+    let mut actual = 0;
+    // SAFETY: the buffer lies on a read-only page; the count is valid.
+    let status = unsafe { sys::stream_read(b, ro as *mut u8, 8, &mut actual) };
+    ensure("failing a read into read-only bytes", status == INVALID_ARGS)?;
+    ensure(
+        "keeping read bytes",
+        stream_io(b, false, &mut buf) == (0, 4) && &buf[..4] == b"kept",
+    )?;
+
+    let mut port = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating a port", unsafe { sys::port_create(0, &mut port) })?;
+    let mut user = [0u8; 48];
+    user[..8].copy_from_slice(&5u64.to_le_bytes());
+    // SAFETY: the pointer describes `user`.
+    check("queueing", unsafe { sys::port_queue(port, user.as_ptr()) })?;
+    // SAFETY: the packet output lies on a read-only page.
+    let status = unsafe { sys::port_wait(port, soon(), ro as *mut u8) };
+    ensure("failing a wait", status == INVALID_ARGS)?;
+    let (status, p) = take_packet(port, soon());
+    ensure("keeping the packet", status == 0 && u64_at(&p, 0) == 5)
+}
+
 fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
     // SAFETY: the pointer and length describe `bytes`.
     check("writing", unsafe {
@@ -1390,7 +1444,7 @@ fn pager_operations(s: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 18] = [
+const TESTS: [(&str, Test); 19] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -1403,6 +1457,7 @@ const TESTS: [(&str, Test); 18] = [
     ("futexes", futexes),
     ("timelines", timelines),
     ("streams", streams),
+    ("failed_outputs", failed_outputs),
     ("clones", clones),
     ("pagers", pagers),
     ("pager_operations", pager_operations),

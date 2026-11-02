@@ -53,7 +53,8 @@ fuzz_target!(|ops: Vec<Op>| {
                 let at = usize::from(at);
                 let Some(end) = &ends[at] else { continue };
                 let mut buf = vec![0u8; usize::from(max)];
-                let result = end.peek(&mut buf);
+                // A consuming read copies and removes under one lock.
+                let result = if consume { end.read(&mut buf) } else { end.peek(&mut buf) };
                 if queued[at].is_empty() {
                     let closed = ends[1 - at].is_none();
                     assert_eq!(result, Err(if closed { Error::PeerClosed } else { Error::ShouldWait }));
@@ -63,7 +64,6 @@ fuzz_target!(|ops: Vec<Op>| {
                 assert_eq!(n, buf.len().min(queued[at].len()));
                 assert!(buf[..n].iter().eq(queued[at].iter().take(n)));
                 if consume {
-                    end.consume(n);
                     queued[at].drain(..n);
                 }
             }

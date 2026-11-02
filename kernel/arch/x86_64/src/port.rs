@@ -145,8 +145,9 @@ impl Port {
         Ok(())
     }
 
-    /// Removes the oldest packet, waiting until `deadline` for one.
-    pub fn wait(&self, deadline: i64) -> Result<[u8; PACKET_SIZE], Error> {
+    /// Waits until `deadline` for a packet to be queued, leaving it
+    /// queued, so that the caller can prepare its output before `take`.
+    pub fn wait_queued(&self, deadline: i64) -> Result<(), Error> {
         let thread = sched::current().ok_or(Error::BadState)?;
         let process = thread.process().cloned().ok_or(Error::BadState)?;
         {
@@ -155,8 +156,8 @@ impl Port {
             state.waiters.push(thread.clone());
         }
         let result = loop {
-            if let Some(p) = self.take() {
-                break Ok(p);
+            if !self.state.lock().packets.is_empty() {
+                break Ok(());
             }
             if crate::signal::interrupted(&thread, &process) {
                 break Err(Error::Interrupted);
@@ -175,8 +176,8 @@ impl Port {
         result
     }
 
-    /// Removes the oldest packet.
-    fn take(&self) -> Option<[u8; PACKET_SIZE]> {
+    /// Removes the oldest packet, if any.
+    pub fn take(&self) -> Option<[u8; PACKET_SIZE]> {
         let mut state = self.state.lock();
         let p = state.packets.pop_front()?;
         if p.registration.is_none() {

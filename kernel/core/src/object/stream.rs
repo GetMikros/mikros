@@ -113,6 +113,20 @@ impl StreamEnd {
     /// peer is gone, and `ShouldWait` when it is empty otherwise.
     pub fn peek(&self, buf: &mut [u8]) -> Result<usize, Error> {
         let shared = self.shared.lock();
+        self.copy_front(&shared, buf)
+    }
+
+    /// Copies up to `buf.len()` bytes from the start of the queue toward
+    /// this endpoint into `buf` and removes them, under one lock, and
+    /// returns their number. Fails as `peek` does.
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, Error> {
+        let shared = self.shared.lock();
+        let n = self.copy_front(&shared, buf)?;
+        self.remove_front(shared, n);
+        Ok(n)
+    }
+
+    fn copy_front(&self, shared: &Shared, buf: &mut [u8]) -> Result<usize, Error> {
         let queue = &shared.queues[self.side];
         if queue.is_empty() {
             return Err(match shared.ends[self.peer_side()].strong_count() {
@@ -127,10 +141,9 @@ impl StreamEnd {
         Ok(n)
     }
 
-    /// Removes `n` bytes, at most those `peek` returned, from the start of
-    /// the queue toward this endpoint.
-    pub fn consume(&self, n: usize) {
-        let mut shared = self.shared.lock();
+    /// Removes `n` bytes, at most those just copied, from the start of the
+    /// queue toward this endpoint.
+    fn remove_front(&self, mut shared: crate::sync::Guard<'_, Shared>, n: usize) {
         let peer = shared.ends[self.peer_side()].clone();
         let queue = &mut shared.queues[self.side];
         let n = n.min(queue.len());
@@ -172,10 +185,20 @@ mod tests {
 
     fn read(end: &StreamEnd, max: usize) -> Result<std::vec::Vec<u8>, Error> {
         let mut buf = vec![0; max];
-        let n = end.peek(&mut buf)?;
-        end.consume(n);
+        let n = end.read(&mut buf)?;
         buf.truncate(n);
         Ok(buf)
+    }
+
+    #[test]
+    fn peeks_without_removing() {
+        let (a, b) = StreamEnd::pair(None).unwrap();
+        assert_eq!(a.write(b"abcd"), Ok(4));
+        let mut buf = [0; 3];
+        assert_eq!(b.peek(&mut buf), Ok(3));
+        assert_eq!(&buf, b"abc");
+        assert_eq!(read(&b, 8).unwrap(), b"abcd");
+        assert_eq!(b.header().signals() & signals::READABLE, 0);
     }
 
     #[test]

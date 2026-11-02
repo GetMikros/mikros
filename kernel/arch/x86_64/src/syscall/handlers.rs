@@ -2,8 +2,8 @@
 //! called by the generated dispatch after it has checked every handle
 //! argument.
 
-use super::{Checked, UserIn, UserOut, current_process};
-use crate::memory_object::MemoryObject;
+use super::{Checked, UserIn, UserOut, bytes_of, current_process};
+use crate::memory_object::{Held, MemoryObject};
 use crate::process::Process;
 use crate::publish::{Outputs, Work};
 use crate::sched::Thread;
@@ -24,6 +24,27 @@ use kernel_core::object::{
 use kernel_core::regions::MapOptions;
 use kernel_core::signal::{self as sig, ACTION_SIZE, Action, Info, UNBLOCKABLE};
 use kernel_core::status::Error;
+
+/// Prepares the output `ranges` of `process`, which have been checked to
+/// fit, by obtaining writable backing for every page, waiting for page
+/// requests as needed. No lock may be held.
+fn prepare(process: &Process, ranges: &[(u64, u64)]) -> Result<Outputs<Held>, Error> {
+    let aspace = process.aspace();
+    let mut work = Work::new(crate::sched::preempt_point);
+    Outputs::prepare(ranges, Some(process.budget()), &mut work, |page| {
+        aspace.hold_for_write(page)
+    })
+}
+
+/// Writes each of `values` from the start of the prepared output with
+/// its index, then releases the outputs. Cannot fail.
+fn publish(outputs: Outputs<Held>, values: &[&[u8]]) {
+    let mut work = Work::new(crate::sched::preempt_point);
+    for (output, bytes) in values.iter().enumerate() {
+        outputs.write(output, 0, bytes, &mut work);
+    }
+    outputs.release(&mut work);
+}
 
 /// The object of a handle the dispatch has checked to be a `T`.
 fn object<T: Object>(handle: Checked) -> Arc<T> {
@@ -1112,8 +1133,19 @@ pub fn port_wait(port: Checked, deadline: i64, out: UserOut<u8>) -> Result<(), E
     if !out.fits(crate::port::PACKET_SIZE as u64) {
         return Err(Error::InvalidArgs);
     }
-    let packet = object::<crate::port::Port>(port).wait(deadline)?;
-    out.write_bytes(&packet)
+    let process = current_process()?;
+    let port = object::<crate::port::Port>(port);
+    // The packet leaves the queue only once its output is prepared; when
+    // another waiter takes it meanwhile, this one waits again.
+    loop {
+        port.wait_queued(deadline)?;
+        let outputs = prepare(&process, &[out.range(crate::port::PACKET_SIZE as u64)])?;
+        if let Some(packet) = port.take() {
+            publish(outputs, &[&packet]);
+            return Ok(());
+        }
+        drop(outputs);
+    }
 }
 
 pub fn port_queue(port: Checked, packet: UserIn<u8>) -> Result<(), Error> {
@@ -1294,8 +1326,10 @@ pub fn stream_write(
     }
     let mut buf = stream_buffer(len)?;
     bytes.read_bytes(&mut buf)?;
-    let written = object::<StreamEnd>(stream).write(&buf)?;
-    actual.write(written as u64)
+    let outputs = prepare(&*current_process()?, &[actual.range(1)])?;
+    let written = object::<StreamEnd>(stream).write(&buf)? as u64;
+    publish(outputs, &[bytes_of(&[written])]);
+    Ok(())
 }
 
 pub fn stream_read(
@@ -1308,12 +1342,12 @@ pub fn stream_read(
         return Err(Error::InvalidArgs);
     }
     let mut buf = stream_buffer(len)?;
-    let end = object::<StreamEnd>(stream);
-    let n = end.peek(&mut buf)?;
-    // The bytes leave the queue only once they have been copied out.
-    bytes.write_bytes(&buf[..n])?;
-    actual.write(n as u64)?;
-    end.consume(n);
+    // Every byte the read could return has backing before any leaves the
+    // queue.
+    let ranges = [bytes.range(buf.len() as u64), actual.range(1)];
+    let outputs = prepare(&*current_process()?, &ranges)?;
+    let n = object::<StreamEnd>(stream).read(&mut buf)?;
+    publish(outputs, &[&buf[..n], bytes_of(&[n as u64])]);
     Ok(())
 }
 
