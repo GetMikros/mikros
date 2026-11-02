@@ -37,7 +37,7 @@ The host needs these tools, which `cargo xtask setup` checks:
 |---|---|
 | QEMU (`qemu-system-x86_64`) | 8.2.0 |
 | GDB | 12.1.0 |
-| `mkfs.btrfs` (btrfs-progs) | 6.6.0 |
+| `mkfs.btrfs` (btrfs-progs) | 6.12.0 |
 
 ## Contributing
 

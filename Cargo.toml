@@ -3,4 +3,5 @@ resolver = "3"
 members = ["boot/bootmenu", "xtask"]
 
 [workspace.package]
+version = "0.0.0"
 edition = "2024"

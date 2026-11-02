@@ -2,11 +2,12 @@
 
 mod esp;
 mod gpt;
+mod root;
 
 use crate::build::{self, Kind};
 use anyhow::{Context, Result, bail};
 use std::fs::{self, File};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -56,6 +57,24 @@ struct Part<'a> {
     data: Data<'a>,
 }
 
+/// Copies `from` to the current position of `to`, seeking over chunks of
+/// zeros instead of writing them, so that the image stays sparse. `to` must
+/// already be zero there.
+fn copy_sparse(from: &mut File, to: &mut File) -> io::Result<()> {
+    let mut chunk = vec![0u8; 1 << 16];
+    loop {
+        let n = from.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(());
+        }
+        if chunk[..n].iter().all(|&b| b == 0) {
+            to.seek(SeekFrom::Current(n as i64))?;
+        } else {
+            to.write_all(&chunk[..n])?;
+        }
+    }
+}
+
 /// Writes a disk image at `path` holding `parts` in order.
 fn write_image(path: &Path, parts: &[Part]) -> Result<()> {
     let sizes = parts
@@ -84,19 +103,11 @@ fn write_image(path: &Path, parts: &[Part]) -> Result<()> {
         disk.seek(SeekFrom::Start(first_lba * gpt::SECTOR))?;
         match &part.data {
             Data::Bytes(bytes) => disk.write_all(bytes)?,
-            Data::File(file) => {
-                io::copy(&mut File::open(file)?, &mut disk)?;
-            }
+            Data::File(file) => copy_sparse(&mut File::open(file)?, &mut disk)?,
         }
     }
     disk.sync_all()?;
     Ok(())
-}
-
-/// Creates the btrfs file system of the root partition and returns the
-/// path of its image.
-fn root_partition(_kind: Kind) -> Result<PathBuf> {
-    bail!("the contents of the root partition are not defined yet (MIKSPEC-0052)")
 }
 
 pub fn run(args: &Args) -> Result<()> {
@@ -127,7 +138,7 @@ pub fn run(args: &Args) -> Result<()> {
     let files: Vec<(&str, &[u8])> = contents.iter().map(|(p, d)| (*p, d.as_slice())).collect();
     let total = files.iter().map(|(_, d)| d.len() as u64).sum();
     let esp = esp::build(esp::size_for(total), &files)?;
-    let root = root_partition(args.kind)?;
+    let root = root::create(args.kind)?;
 
     let out = path(args.kind, false);
     write_image(
@@ -160,7 +171,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("xtask-image-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let second = dir.join("second.bin");
-        fs::write(&second, b"root").unwrap();
+        // A chunk of zeros, which is skipped, followed by data.
+        let mut contents = vec![0u8; 1 << 16];
+        contents.extend_from_slice(b"root");
+        fs::write(&second, &contents).unwrap();
         let image = dir.join("disk.img");
         let parts = [
             Part {
@@ -182,6 +196,7 @@ mod tests {
         assert_eq!(bytes.len() as u64, (6144 + 33) * gpt::SECTOR);
         assert_eq!(&bytes[512..520], b"EFI PART");
         assert_eq!(&bytes[2048 * 512..][..3], b"esp");
-        assert_eq!(&bytes[4096 * 512..][..4], b"root");
+        assert!(bytes[4096 * 512..][..1 << 16].iter().all(|&b| b == 0));
+        assert_eq!(&bytes[4096 * 512 + (1 << 16)..][..4], b"root");
     }
 }

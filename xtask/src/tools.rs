@@ -131,7 +131,7 @@ pub const TOOLS: [Tool; 3] = [
     Tool {
         name: "mkfs.btrfs",
         program: "mkfs.btrfs",
-        min_version: Version(6, 6, 0),
+        min_version: Version(6, 12, 0),
         package: "btrfs-progs",
     },
 ];
