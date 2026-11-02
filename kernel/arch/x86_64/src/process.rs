@@ -175,13 +175,16 @@ impl Process {
         &self.signals
     }
 
-    /// The threads of the process that still exist.
-    pub fn live_threads(&self) -> Vec<Arc<Thread>> {
-        self.threads
-            .lock()
-            .iter()
-            .filter_map(Weak::upgrade)
-            .collect()
+    /// The threads of the process that still exist, or `NoMemory`
+    /// without room to list them.
+    pub fn live_threads(&self) -> Result<Vec<Arc<Thread>>, Error> {
+        let threads = self.threads.lock();
+        let mut live = Vec::new();
+        live.try_reserve_exact(threads.len())
+            .map_err(|_| Error::NoMemory)?;
+        live.extend(threads.iter().filter_map(Weak::upgrade));
+        drop(threads);
+        Ok(live)
     }
 
     /// The signal that terminated the process, or 0.
@@ -195,8 +198,10 @@ impl Process {
     /// threads that are not `DEAD`.
     pub fn info(&self) -> [u8; INFO_PROCESS_SIZE] {
         let threads = self
-            .live_threads()
+            .threads
+            .lock()
             .iter()
+            .filter_map(Weak::upgrade)
             .filter(|t| t.state() != sched::DEAD)
             .count() as u32;
         let running =
@@ -405,20 +410,18 @@ impl Process {
     /// mapping, closes every handle, and sets the state `TERMINATED` and
     /// the `TERMINATED` signal on the process and its threads.
     pub fn terminate(&self, code: i64) {
-        let threads: Vec<Arc<Thread>> = {
+        {
             let mut threads = self.threads.lock();
             if self.state() == TERMINATED {
                 return;
             }
             threads.retain(|t| t.strong_count() > 0);
-            let threads: Vec<_> = threads.iter().filter_map(Weak::upgrade).collect();
-            for thread in &threads {
-                sched::make_dead(thread);
+            for thread in threads.iter().filter_map(Weak::upgrade) {
+                sched::make_dead(&thread);
             }
             self.exit_code.store(code, Ordering::Release);
             self.state.store(TERMINATED, Ordering::Release);
-            threads
-        };
+        }
         crate::init::terminated(self, code);
         self.aspace.remove_all_regions();
         // Frames mapped outside regions belong to whoever mapped them, so
@@ -434,7 +437,8 @@ impl Process {
         drop(core::mem::take(&mut *self.stopped.lock()));
         self.header
             .update_signals(signals::SUSPENDED, signals::TERMINATED);
-        for thread in &threads {
+        // Once TERMINATED, the process gains no threads.
+        for thread in self.threads.lock().iter().filter_map(Weak::upgrade) {
             thread.header().update_signals(0, signals::TERMINATED);
         }
     }

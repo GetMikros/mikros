@@ -919,8 +919,8 @@ pub fn signal_set_action(signo: u32, action: UserIn<u8>, old: UserOut<u8>) -> Re
         return Err(Error::InvalidArgs);
     }
     let process = current_process()?;
+    let threads = process.live_threads()?;
     let outputs = prepare_optional(&process, &old, ACTION_SIZE as u64)?;
-    let threads = process.live_threads();
     let mut state = process.signals().lock();
     let slot = signo as usize - 1;
     let previous = state.actions[slot].bytes();

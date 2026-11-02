@@ -68,7 +68,7 @@ pub fn discard(state: &mut ProcessSignals, threads: &[Arc<Thread>], signals: u64
 /// Makes `info` pending for `process`, or for `thread`, one of its
 /// threads, when given.
 pub fn send(process: &Process, thread: Option<&Arc<Thread>>, info: Info) -> Result<(), Error> {
-    let threads = process.live_threads();
+    let threads = process.live_threads()?;
     let mut state = process.signals().lock();
     discard(&mut state, &threads, discarded_by(info.signo));
     let ProcessSignals {
