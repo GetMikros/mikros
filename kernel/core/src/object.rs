@@ -5,6 +5,7 @@ use core::any::Any;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub mod budget;
+pub mod channel;
 pub mod handles;
 pub mod memory;
 
