@@ -61,7 +61,17 @@ pub struct Paged {
     /// The budgets that frames supplied to the object stay charged to, by
     /// frame address.
     charges: SpinLock<BTreeMap<u64, Arc<Budget>>>,
+    /// The byte range of the outstanding writeback, which its end must
+    /// name exactly. Locked after the pages.
+    writeback: SpinLock<Option<(u64, u64)>>,
 }
+
+/// The ops of `pager_op`.
+pub const OP_FAIL: u32 = 1;
+pub const OP_EVICT: u32 = 2;
+pub const OP_WRITEBACK_BEGIN: u32 = 3;
+pub const OP_WRITEBACK_END: u32 = 4;
+pub const OP_WRITEBACK_ABORT: u32 = 5;
 
 /// The `PAGER` packet type and its `READ` command.
 const PACKET_PAGER: u32 = 3;
@@ -154,6 +164,7 @@ impl MemoryObject {
                 key,
                 state: SpinLock::new(Paging::new(options & TRACK_DIRTY != 0)),
                 charges: SpinLock::new(BTreeMap::new()),
+                writeback: SpinLock::new(None),
             }),
         }))
     }
@@ -250,6 +261,97 @@ impl MemoryObject {
             paged.state.lock().pager_gone();
         }
         crate::pager::wake(self.header.koid(), 0, u64::MAX);
+    }
+
+    /// Waits until no kernel copy holds the object's frames, so that
+    /// nothing prepared before can still read or write them.
+    fn wait_unpinned(&self) {
+        while self.pages.lock().pinned() {
+            let _ = crate::sched::sleep_until(crate::time::now() + 1_000_000);
+        }
+    }
+
+    /// Runs `op` of `pager_op` on the pages of the `len` bytes from
+    /// `offset` of a paged object.
+    pub fn pager_op(&self, op: u32, offset: u64, len: u64) -> Result<(), Error> {
+        let paged = self.paged.as_ref().ok_or(Error::NotSupported)?;
+        if !(OP_FAIL..=OP_WRITEBACK_ABORT).contains(&op) {
+            return Err(Error::InvalidArgs);
+        }
+        if op == OP_WRITEBACK_BEGIN {
+            self.wait_unpinned();
+        }
+        let mut pages = self.pages.lock();
+        pages.check_range(offset, len)?;
+        let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
+        let mut state = paged.state.lock();
+        let mut freed = Vec::new();
+        match op {
+            OP_FAIL => state.fail(first, end),
+            OP_EVICT => {
+                for index in first..end {
+                    if state.evictable(index) && freed.try_reserve(1).is_ok() {
+                        self.unmap_pages(index, index + 1);
+                        freed.extend(pages.decommit(index, index + 1));
+                        state.removed(index);
+                    }
+                }
+            }
+            OP_WRITEBACK_BEGIN => {
+                let recorded = state.writeback_begin(first, end)?;
+                *paged.writeback.lock() = Some((offset, len));
+                // Writes through mappings fault again and are seen.
+                for index in recorded {
+                    self.unmap_pages(index, index + 1);
+                }
+            }
+            _ => {
+                state.need_dirty_tracking()?;
+                let mut writeback = paged.writeback.lock();
+                if *writeback != Some((offset, len)) {
+                    return Err(Error::BadState);
+                }
+                state.writeback_end(first, end, op == OP_WRITEBACK_END)?;
+                *writeback = None;
+            }
+        }
+        drop(state);
+        drop(pages);
+        self.free(freed);
+        if op == OP_FAIL {
+            crate::pager::wake(self.header.koid(), first, end);
+        }
+        Ok(())
+    }
+
+    /// The dirty ranges of the `len` bytes from `offset`, as byte offsets
+    /// and lengths of whole pages, as `pager_query_dirty` finds them.
+    pub fn dirty_ranges(&self, offset: u64, len: u64) -> Result<Vec<(u64, u64)>, Error> {
+        let paged = self.paged.as_ref().ok_or(Error::NotSupported)?;
+        let pages = self.pages.lock();
+        pages.check_range(offset, len)?;
+        let state = paged.state.lock();
+        state.need_dirty_tracking()?;
+        let (first, end) = (offset / PAGE_SIZE, (offset + len).div_ceil(PAGE_SIZE));
+        Ok(state
+            .dirty_ranges(first, end)
+            .into_iter()
+            .map(|(a, b)| (a * PAGE_SIZE, (b - a) * PAGE_SIZE))
+            .collect())
+    }
+
+    /// Revokes the whole paged object for good, as `pager_revoke` does:
+    /// waits for kernel copies that hold its frames, removes every
+    /// translation of it, and wakes the threads waiting for its pages.
+    pub fn revoke(&self) -> Result<(), Error> {
+        let paged = self.paged.as_ref().ok_or(Error::NotSupported)?;
+        self.wait_unpinned();
+        let pages = self.pages.lock();
+        paged.state.lock().revoke();
+        self.unmap_pages(0, u64::MAX);
+        drop(pages);
+        crate::pager::wake(self.header.koid(), 0, u64::MAX);
+        Ok(())
     }
 
     /// Moves the frames of the `len` bytes from `source_offset` of

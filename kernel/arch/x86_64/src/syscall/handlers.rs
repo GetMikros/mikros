@@ -341,6 +341,7 @@ pub fn vm_map(
     let handle_rights = mem.rights;
     let mem = object::<MemoryObject>(mem);
     mem.check_range(offset, len)?;
+    mem.check_revoked()?;
     if options.perms & kernel_core::regions::PERM_WRITE != 0 {
         mem.check_writable()?;
     }
@@ -1180,7 +1181,7 @@ pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result
     object::<Process>(process)
         .aspace()
         .protect(addr, end, perms, |r| {
-            !writes || r.mem.check_writable().is_ok()
+            r.mem.check_revoked().is_ok() && (!writes || r.mem.check_writable().is_ok())
         })
 }
 
@@ -1417,4 +1418,41 @@ pub fn pager_supply(
     let mem = paged_of(pager, mem)?;
     let source = object::<MemoryObject>(source);
     mem.supply(offset, len, &source, source_offset)
+}
+
+pub fn pager_op(pager: Checked, mem: Checked, op: u32, offset: u64, len: u64) -> Result<(), Error> {
+    paged_of(pager, mem)?.pager_op(op, offset, len)
+}
+
+pub fn pager_query_dirty(
+    pager: Checked,
+    mem: Checked,
+    offset: u64,
+    len: u64,
+    out: UserOut<u8>,
+    cap: u64,
+    count: UserOut<u64>,
+) -> Result<(), Error> {
+    if !count.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let ranges = paged_of(pager, mem)?.dirty_ranges(offset, len)?;
+    let n = (ranges.len() as u64).min(cap);
+    if !out.fits(n * 16) {
+        return Err(Error::InvalidArgs);
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(n as usize * 16)
+        .map_err(|_| Error::NoMemory)?;
+    for &(at, length) in ranges.iter().take(n as usize) {
+        bytes.extend_from_slice(&at.to_le_bytes());
+        bytes.extend_from_slice(&length.to_le_bytes());
+    }
+    out.write_bytes(&bytes)?;
+    count.write(n)
+}
+
+pub fn pager_revoke(pager: Checked, mem: Checked) -> Result<(), Error> {
+    paged_of(pager, mem)?.revoke()
 }

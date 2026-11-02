@@ -822,3 +822,38 @@ syscalls:
       - {name: len, type: u64, dir: in}
       - {name: source, type: Handle, dir: in, object: MemoryObject, rights: [READ, WRITE]}
       - {name: source_offset, type: u64, dir: in}
+
+  - name: pager_op
+    number: 80
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R36, MIKSPEC-0006.R37]
+    args:
+      - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: []}
+      - {name: op, type: u32, dir: in}
+      - {name: offset, type: u64, dir: in}
+      - {name: len, type: u64, dir: in}
+
+  - name: pager_query_dirty
+    number: 81
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R37]
+    args:
+      - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: []}
+      - {name: offset, type: u64, dir: in}
+      - {name: len, type: u64, dir: in}
+      - {name: out, type: "*mut u8", dir: out}
+      - {name: cap, type: u64, dir: in}
+      - {name: count, type: "*mut u64", dir: out}
+
+  - name: pager_revoke
+    number: 82
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0006.R39, MIKSPEC-0006.R40]
+    args:
+      - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: []}
