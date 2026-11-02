@@ -1277,6 +1277,7 @@ dependencies = [
  "fatfs",
  "lzma-rs",
  "sha2",
+ "syscall-table",
  "tar",
  "ureq",
  "uuid",

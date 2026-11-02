@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+syscall-table = { path = "../kernel/syscalls" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1.5.4"

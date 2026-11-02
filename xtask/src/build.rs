@@ -83,6 +83,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", kernel.display());
     let debug_info = crate::debuginfo::split(&kernel)?;
     println!("built    {}", debug_info.display());
+    if kind == Kind::Fuzz {
+        let dir = syzkaller_descriptions()?;
+        println!("built    {}", dir.display());
+    }
     let boot_image = match boot {
         BootImage::System => {
             let init = user_build("init", kind)?;
@@ -165,6 +169,29 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
         .join("user/target/x86_64-unknown-mikros")
         .join(kind.profile_dir())
         .join(bin))
+}
+
+/// Writes the syzkaller descriptions and constants generated from the
+/// system call table to `target/syzkaller/mikros`, and returns that
+/// directory.
+fn syzkaller_descriptions() -> Result<PathBuf> {
+    let root = crate::workspace_root();
+    let path = root.join("kernel/syscalls.yaml");
+    let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let read = syscall_table::table::read(&bytes)
+        .map_err(|e| anyhow::anyhow!("kernel/syscalls.yaml:{e}"))?;
+    let dir = root.join("target/syzkaller/mikros");
+    fs::create_dir_all(&dir)?;
+    let table = &read.table;
+    fs::write(
+        dir.join("sys.txt"),
+        syscall_table::syzkaller::descriptions(table, "x86_64"),
+    )?;
+    fs::write(
+        dir.join("sys_amd64.const"),
+        syscall_table::syzkaller::constants(table, "x86_64"),
+    )?;
+    Ok(dir)
 }
 
 /// The LLVM options that make every basic block call
