@@ -455,6 +455,8 @@ pub struct CpuSched {
     dead: Option<Arc<Thread>>,
     /// Threads sleeping until a deadline.
     sleepers: Deadlines<Queued>,
+    /// Armed `Timer` objects.
+    timers: Deadlines<crate::ktimer::Armed>,
 }
 
 // SAFETY: queued pointers are references to threads, which are Sync; the
@@ -471,6 +473,7 @@ impl CpuSched {
             slice_end: 0,
             dead: None,
             sleepers: Deadlines::new(),
+            timers: Deadlines::new(),
         }
     }
 }
@@ -591,10 +594,10 @@ fn arm(cpu: &CpuSched) {
     } else {
         INFINITE
     };
-    let at = cpu
-        .sleepers
-        .next_finite()
-        .map_or(slice_end, |d| d.min(slice_end));
+    let at = [cpu.sleepers.next_finite(), cpu.timers.next_finite()]
+        .into_iter()
+        .flatten()
+        .fold(slice_end, i64::min);
     if at == INFINITE {
         crate::timer::disarm();
     } else {
@@ -913,6 +916,59 @@ pub fn timer_interrupt() {
     if cpu.current.is_some() && now >= cpu.slice_end {
         RESCHEDULE.store(true, Ordering::Relaxed);
     }
+    arm(&cpu);
+    // Expired timers are signalled with the lock released, as setting a
+    // signal can wake threads, a few at a time so that nothing allocates.
+    loop {
+        let mut expired: [Option<crate::ktimer::Armed>; 8] = Default::default();
+        for slot in &mut expired {
+            *slot = cpu.timers.pop_expired(now);
+        }
+        drop(cpu);
+        let more = expired[7].is_some();
+        for timer in expired.into_iter().flatten() {
+            timer.fire();
+        }
+        if !more {
+            return;
+        }
+        cpu = this_cpu().lock();
+    }
+}
+
+/// Gives `thread` `priority`, which changes its weight from its next
+/// slice on; a queued thread is queued again with the new weight.
+pub fn set_priority(thread: &Arc<Thread>, priority: u32) {
+    let mut cpu = this_cpu().lock();
+    thread.priority.store(priority, Ordering::Relaxed);
+    let weight = kernel_core::sched::weight(priority);
+    let queued = Queued(Arc::as_ptr(thread));
+    match cpu.fair.remove(queued) {
+        Some(mut entity) => {
+            // The queue's reference to the thread moves to the new entry.
+            entity.weight = weight;
+            *thread.entity.lock() = entity;
+            cpu.fair.enqueue(queued, entity);
+        }
+        None => thread.entity.lock().weight = weight,
+    }
+}
+
+/// Arms `timer` for `deadline`, replacing an earlier deadline of it.
+pub fn arm_timer(timer: crate::ktimer::Armed, deadline: i64) -> Result<(), Error> {
+    let mut cpu = this_cpu().lock();
+    cpu.timers.remove(&timer);
+    cpu.timers
+        .insert(deadline, timer)
+        .map_err(|_| Error::NoMemory)?;
+    arm(&cpu);
+    Ok(())
+}
+
+/// Removes the deadline of `timer`, if it has one.
+pub fn disarm_timer(timer: &crate::ktimer::Armed) {
+    let mut cpu = this_cpu().lock();
+    cpu.timers.remove(timer);
     arm(&cpu);
 }
 

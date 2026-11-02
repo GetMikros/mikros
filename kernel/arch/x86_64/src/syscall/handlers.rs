@@ -16,7 +16,7 @@ use kernel_core::object::budget::{Budget, INFO_BUDGET};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
-use kernel_core::object::resource::{KIND_IOPORT, Request, Resource};
+use kernel_core::object::resource::{KIND_IOPORT, KIND_PRIORITY, KIND_ROOT, Request, Resource};
 use kernel_core::object::{
     INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
 };
@@ -921,4 +921,46 @@ pub fn event_create(options: u32, out: UserOut<Handle>) -> Result<(), Error> {
     }
     let event = kernel_core::object::event::Event::new(current_process()?.budget())?;
     give(event, ObjectType::Event, out)
+}
+
+pub fn timer_create(options: u32, out: UserOut<Handle>) -> Result<(), Error> {
+    if options != 0 || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let timer = crate::ktimer::Timer::new(current_process()?.budget())?;
+    give(timer, ObjectType::Timer, out)
+}
+
+pub fn timer_set(timer: Checked, deadline: i64) -> Result<(), Error> {
+    object::<crate::ktimer::Timer>(timer).set(deadline)
+}
+
+pub fn timer_cancel(timer: Checked) -> Result<(), Error> {
+    object::<crate::ktimer::Timer>(timer).cancel();
+    Ok(())
+}
+
+pub fn thread_set_priority(
+    thread: Checked,
+    resource: Option<Checked>,
+    priority: u32,
+) -> Result<(), Error> {
+    if priority > kernel_core::sched::MAX_PRIORITY {
+        return Err(Error::InvalidArgs);
+    }
+    if priority > kernel_core::sched::DEFAULT_PRIORITY {
+        let allowed = resource.is_some_and(|r| {
+            let r = object::<Resource>(r);
+            match r.kind() {
+                KIND_ROOT => true,
+                KIND_PRIORITY => r.covers(u64::from(priority), 1),
+                _ => false,
+            }
+        });
+        if !allowed {
+            return Err(Error::AccessDenied);
+        }
+    }
+    crate::sched::set_priority(&object::<Thread>(thread), priority);
+    Ok(())
 }

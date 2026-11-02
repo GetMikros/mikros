@@ -518,3 +518,39 @@ syscalls:
     args:
       - {name: options, type: u32, dir: in}
       - {name: out, type: "*mut Handle", dir: out, object: Event}
+
+  - name: timer_create
+    number: 50
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R24]
+    args:
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: Timer}
+
+  - name: timer_set
+    number: 51
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R24, MIKSPEC-0008.R22]
+    args:
+      - {name: timer, type: Handle, dir: in, object: Timer, rights: [WRITE]}
+      - {name: deadline, type: i64, dir: in}
+
+  - name: timer_cancel
+    number: 52
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R24]
+    args:
+      - {name: timer, type: Handle, dir: in, object: Timer, rights: [WRITE]}
+
+  - name: thread_set_priority
+    number: 53
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R16]
+    args:
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE], allow_invalid: true}
+      - {name: priority, type: u32, dir: in}

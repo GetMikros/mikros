@@ -43,6 +43,8 @@ mod idt;
 #[cfg(target_os = "none")]
 mod init;
 #[cfg(target_os = "none")]
+mod ktimer;
+#[cfg(target_os = "none")]
 mod log;
 #[cfg(target_os = "none")]
 mod memory;
