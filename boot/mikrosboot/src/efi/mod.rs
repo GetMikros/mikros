@@ -1,5 +1,6 @@
 //! The bootloader's use of UEFI.
 
+mod enter;
 mod gather;
 
 use alloc::string::{String, ToString};
@@ -53,10 +54,7 @@ fn fail(failure: &Failure) -> Status {
 
 pub fn run() -> Status {
     match gather::gather() {
-        Ok(_gathered) => fail(&Failure::new(
-            "entering the kernel",
-            "this bootloader cannot start a kernel yet",
-        )),
+        Ok(gathered) => fail(&enter::boot(gathered)),
         Err(failure) => fail(&failure),
     }
 }

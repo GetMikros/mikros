@@ -24,7 +24,6 @@ const BOOT_CONF_PATH: &str = "\\EFI\\Mikros\\boot.conf";
 const RSDP_MAX: usize = 4096;
 
 /// Everything collected before memory is allocated for the kernel.
-#[expect(dead_code, reason = "the kernel is not entered yet")]
 pub struct Gathered {
     pub kernel_file: Vec<u8>,
     pub kernel: Kernel,
