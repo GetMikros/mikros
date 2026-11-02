@@ -535,7 +535,10 @@ fn start_slice(cpu: &mut CpuSched, now: i64, thread: Arc<Thread>, entity: Entity
 /// Arms the timer for the earlier of the running thread's slice end and
 /// the nearest deadline, or stops it when there is neither.
 fn arm(cpu: &CpuSched) {
-    let slice_end = if cpu.current.is_some() {
+    // Once a reschedule is pending, the ended slice must not interrupt
+    // again: in a preempt point that would interrupt at once, forever,
+    // before interrupts are disabled again. The next slice arms anew.
+    let slice_end = if cpu.current.is_some() && !RESCHEDULE.load(Ordering::Relaxed) {
         cpu.slice_end
     } else {
         INFINITE
