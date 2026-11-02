@@ -155,7 +155,9 @@ impl MemoryObject {
             return Err(Error::InvalidArgs);
         }
         let pages = Pages::new(size, options & RESIZABLE, MAX_SIZE)?;
-        let charged = size_of::<MemoryObject>() as u64;
+        // With its entry in the pager's list of objects and that entry's
+        // share of storage.
+        let charged = (size_of::<MemoryObject>() + 2 * size_of::<Weak<MemoryObject>>()) as u64;
         budget.charge_kernel(charged)?;
         // The object releases the charge when it goes, also on failure.
         kernel_core::fallible::try_arc(MemoryObject {

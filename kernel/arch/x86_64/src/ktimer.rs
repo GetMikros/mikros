@@ -11,7 +11,9 @@ pub struct Timer {
 }
 
 impl Timer {
-    const COST: u64 = size_of::<Timer>() as u64;
+    /// The timer and its armed entry with that entry's share of storage.
+    const COST: u64 =
+        (size_of::<Timer>() + 2 * kernel_core::deadline::Deadlines::<Armed>::ENTRY_SIZE) as u64;
 
     /// A timer with no deadline, charged to `budget`.
     pub fn new(budget: &Arc<Budget>) -> Result<Arc<Timer>, Error> {

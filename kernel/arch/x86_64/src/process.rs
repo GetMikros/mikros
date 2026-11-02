@@ -6,7 +6,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use kernel_core::exception::DEBUG_EVENTS;
-use kernel_core::object::budget::Budget;
+use kernel_core::object::budget::{Budget, Held};
 use kernel_core::object::channel::{Endpoint, PeerObserver};
 use kernel_core::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
 use kernel_core::object::{Header, Name, Object, ObjectType, signals};
@@ -45,10 +45,22 @@ pub struct Process {
     stopped: SpinLock<Vec<Arc<Thread>>>,
     /// The I/O port ranges, start and exclusive end, that the process's
     /// threads may access.
-    ioports: SpinLock<Vec<(u64, u64)>>,
+    ioports: SpinLock<Ioports>,
     /// The nanoseconds its threads have run, up to their last switch.
     cpu_time: AtomicI64,
 }
+
+/// The I/O port ranges of a process, start and exclusive end, and the
+/// charge for each.
+#[derive(Default)]
+struct Ioports {
+    ranges: Vec<(u64, u64)>,
+    charges: Vec<Held>,
+}
+
+/// The kernel memory charged for an I/O port range of a process: its
+/// entries and their share of storage.
+const IOPORT_COST: u64 = 2 * (size_of::<(u64, u64)>() + size_of::<Held>()) as u64;
 
 /// The I/O port ranges the bitmap allows now.
 static OPEN_PORTS: SpinLock<Vec<(u64, u64)>> = SpinLock::new(Vec::new());
@@ -58,7 +70,7 @@ static OPEN_PORTS: SpinLock<Vec<(u64, u64)>> = SpinLock::new(Vec::new());
 pub fn switch_ports(process: Option<&Process>) {
     let mut open = OPEN_PORTS.lock();
     let ports = process.map(|p| p.ioports.lock());
-    let wanted: &[(u64, u64)] = ports.as_deref().map_or(&[], Vec::as_slice);
+    let wanted: &[(u64, u64)] = ports.as_deref().map_or(&[], |p| p.ranges.as_slice());
     if *open == wanted {
         return;
     }
@@ -125,7 +137,7 @@ impl Process {
             signals: SpinLock::new(crate::signal::ProcessSignals::default()),
             term_signal: AtomicU32::new(0),
             stopped: SpinLock::new(Vec::new()),
-            ioports: SpinLock::new(Vec::new()),
+            ioports: SpinLock::new(Ioports::default()),
             cpu_time: AtomicI64::new(0),
         })
     }
@@ -136,11 +148,15 @@ impl Process {
     }
 
     /// Lets the threads of the process access the ports from `start` to
-    /// `end`, exclusive, until it terminates.
-    pub fn enable_ioports(&self, start: u64, end: u64) -> Result<(), Error> {
+    /// `end`, exclusive, until it terminates. `IOPORT_COST` is charged to
+    /// `budget` until then.
+    pub fn enable_ioports(&self, start: u64, end: u64, budget: &Arc<Budget>) -> Result<(), Error> {
+        let charge = budget.hold_kernel(IOPORT_COST)?;
         let mut ports = self.ioports.lock();
-        ports.try_reserve(1).map_err(|_| Error::NoMemory)?;
-        ports.push((start, end));
+        ports.ranges.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        ports.charges.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        ports.ranges.push((start, end));
+        ports.charges.push(charge);
         drop(ports);
         let running_here = sched::current()
             .and_then(|t| t.process().cloned())

@@ -20,6 +20,9 @@ impl<T: PartialEq> Default for Deadlines<T> {
 }
 
 impl<T: PartialEq> Deadlines<T> {
+    /// The size of the entry of one item.
+    pub const ENTRY_SIZE: usize = size_of::<(i64, T)>();
+
     pub const fn new() -> Self {
         Deadlines { items: Vec::new() }
     }

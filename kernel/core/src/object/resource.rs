@@ -116,7 +116,9 @@ impl Resource {
         if !rangeless(kind) && denied(kind, base, end) {
             return Err(Error::AccessDenied);
         }
-        let cost = size_of::<Resource>() as u64;
+        // The resource and its entry in `LIVE`, with that entry's share
+        // of storage.
+        let cost = (size_of::<Resource>() + 2 * size_of::<Weak<Resource>>()) as u64;
         let mut live = LIVE.lock();
         live.retain(|r| r.strong_count() > 0);
         let shared = options & SHARED != 0;

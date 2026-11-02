@@ -1,7 +1,7 @@
 //! Channels: two endpoints, each with a queue of messages written to the
 //! other.
 
-use super::budget::Budget;
+use super::budget::{Budget, Held};
 use super::handles::Entry;
 use super::{Header, Object, ObjectType, signals};
 use crate::fallible::try_arc;
@@ -69,7 +69,14 @@ pub const CALL_ID: u32 = 1 << 31;
 struct Call {
     id: u32,
     reply: Option<Message>,
+    /// The charge for the call, kept while its ID is recorded as
+    /// abandoned.
+    charge: Option<Held>,
 }
+
+/// The kernel memory charged for a call: its entry, its entry in the
+/// abandoned calls, and those entries' share of storage.
+pub const CALL_COST: u64 = 2 * (size_of::<Call>() + size_of::<(u32, Option<Held>)>()) as u64;
 
 #[derive(Default)]
 struct Queue {
@@ -78,8 +85,8 @@ struct Queue {
     /// The calls made through the endpoint the queue leads to.
     calls: Vec<Call>,
     /// The IDs of calls that ended without their reply, whose late
-    /// replies are discarded.
-    abandoned: Vec<u32>,
+    /// replies are discarded, with their charges.
+    abandoned: Vec<(u32, Option<Held>)>,
     /// The next transaction ID to try, without `CALL_ID`.
     next_id: u32,
 }
@@ -208,12 +215,13 @@ impl Endpoint {
                 let koid = peer.upgrade().map_or(0, |p| p.header.koid());
                 return Ok(Some((koid, id)));
             }
-            if let Some(i) = queue.abandoned.iter().position(|&a| a == id) {
-                queue.abandoned.swap_remove(i);
+            if let Some(i) = queue.abandoned.iter().position(|a| a.0 == id) {
+                let abandoned = queue.abandoned.swap_remove(i);
                 // The message and its handles are dropped with no lock
                 // held, as that may destroy objects.
                 drop(shared);
                 drop(message);
+                drop(abandoned);
                 return Ok(None);
             }
         }
@@ -242,8 +250,10 @@ impl Endpoint {
 
     /// Starts a call through this endpoint and returns its transaction
     /// ID: one with `CALL_ID` set that no outstanding call and no call
-    /// ended without its reply uses.
-    pub fn begin_call(&self) -> Result<u32, Error> {
+    /// ended without its reply uses. `CALL_COST` is charged to `budget`,
+    /// if given, until the call ends and its reply is read or discarded.
+    pub fn begin_call(&self, budget: Option<&Arc<Budget>>) -> Result<u32, Error> {
+        let charge = budget.map(|b| b.hold_kernel(CALL_COST)).transpose()?;
         let mut shared = self.shared.lock();
         let queue = &mut shared.queues[self.side];
         queue.calls.try_reserve(1).map_err(|_| Error::NoMemory)?;
@@ -256,12 +266,17 @@ impl Endpoint {
         let id = loop {
             let id = CALL_ID | (queue.next_id & !CALL_ID);
             queue.next_id = queue.next_id.wrapping_add(1);
-            let used = queue.calls.iter().any(|c| c.id == id) || queue.abandoned.contains(&id);
+            let used =
+                queue.calls.iter().any(|c| c.id == id) || queue.abandoned.iter().any(|a| a.0 == id);
             if !used {
                 break id;
             }
         };
-        queue.calls.push(Call { id, reply: None });
+        queue.calls.push(Call {
+            id,
+            reply: None,
+            charge,
+        });
         Ok(id)
     }
 
@@ -281,12 +296,12 @@ impl Endpoint {
         let mut shared = self.shared.lock();
         let queue = &mut shared.queues[self.side];
         let i = queue.calls.iter().position(|c| c.id == id)?;
-        let call = queue.calls.swap_remove(i);
-        if call.reply.is_none() {
+        let Call { reply, charge, .. } = queue.calls.swap_remove(i);
+        if reply.is_none() {
             debug_assert!(queue.abandoned.len() < queue.abandoned.capacity());
-            queue.abandoned.push(id);
+            queue.abandoned.push((id, charge));
         }
-        call.reply
+        reply
     }
 
     /// The number of bytes and handles of the oldest message toward this
@@ -405,7 +420,7 @@ mod tests {
     #[test]
     fn delivers_replies_to_their_calls() {
         let (a, b) = Endpoint::pair(None).unwrap();
-        let (one, two) = (a.begin_call().unwrap(), a.begin_call().unwrap());
+        let (one, two) = (a.begin_call(None).unwrap(), a.begin_call(None).unwrap());
         assert!(one & CALL_ID != 0 && two & CALL_ID != 0 && one != two);
         let mut reply = two.to_le_bytes().to_vec();
         reply.push(9);
@@ -425,11 +440,31 @@ mod tests {
     }
 
     #[test]
+    fn charges_calls_until_their_replies_go() {
+        use crate::object::budget::UNLIMITED;
+        let root = Budget::root();
+        let small = Budget::child(&root, CALL_COST, UNLIMITED, None).unwrap();
+        let used = |b: &Budget| u64::from_le_bytes(b.info()[8..16].try_into().unwrap());
+        let (a, b) = Endpoint::pair(None).unwrap();
+        let id = a.begin_call(Some(&small)).unwrap();
+        assert_eq!(a.begin_call(Some(&small)), Err(Error::NoResources));
+        // An abandoned call stays charged until its late reply comes.
+        assert!(a.abandon_call(id).is_none());
+        assert_eq!(used(&small), CALL_COST);
+        assert_eq!(b.write(message(&id.to_le_bytes(), vec![])).ok(), Some(None));
+        assert_eq!(used(&small), 0);
+        let id = a.begin_call(Some(&small)).unwrap();
+        b.write(message(&id.to_le_bytes(), vec![])).ok().unwrap();
+        assert!(a.take_reply(id).is_some());
+        assert_eq!((used(&small), used(&root)), (0, 0));
+    }
+
+    #[test]
     fn discards_replies_to_abandoned_calls() {
         let (a, b) = Endpoint::pair(None).unwrap();
-        let id = a.begin_call().unwrap();
+        let id = a.begin_call(None).unwrap();
         assert!(a.abandon_call(id).is_none());
-        let next = a.begin_call().unwrap();
+        let next = a.begin_call(None).unwrap();
         assert_ne!(next, id);
         assert_eq!(b.write(message(&id.to_le_bytes(), vec![])).ok(), Some(None));
         assert_eq!(read(&a), Err(Error::ShouldWait));
@@ -444,7 +479,7 @@ mod tests {
     #[test]
     fn abandons_calls_without_allocating() {
         let (a, b) = Endpoint::pair(None).unwrap();
-        let ids: std::vec::Vec<u32> = (0..5).map(|_| a.begin_call().unwrap()).collect();
+        let ids: std::vec::Vec<u32> = (0..5).map(|_| a.begin_call(None).unwrap()).collect();
         let capacity = {
             let shared = a.shared.lock();
             let queue = &shared.queues[a.side];

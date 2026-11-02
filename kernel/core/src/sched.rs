@@ -99,6 +99,9 @@ impl<T: Copy + PartialEq> Default for Fair<T> {
 }
 
 impl<T: Copy + PartialEq> Fair<T> {
+    /// The size of the entry of one queued thread.
+    pub const ENTRY_SIZE: usize = size_of::<Queued<T>>();
+
     pub const fn new() -> Self {
         Fair {
             queue: VecDeque::new(),

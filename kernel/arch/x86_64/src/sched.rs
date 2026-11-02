@@ -160,9 +160,15 @@ impl Thread {
     /// to the process's budget when `charge` is set.
     pub fn new_user(process: Arc<Process>, name: Name, charge: bool) -> Result<Arc<Thread>, Error> {
         let charged = if charge {
+            // Its entries in the process's thread list, the run queue
+            // and the sleepers count twice, for their share of storage.
+            let entries = size_of::<alloc::sync::Weak<Thread>>()
+                + Fair::<Queued>::ENTRY_SIZE
+                + Deadlines::<Queued>::ENTRY_SIZE;
             let size = size_of::<Thread>() as u64
                 + KERNEL_STACK_SIZE
-                + context::extended_state_size() as u64;
+                + context::extended_state_size() as u64
+                + 2 * entries as u64;
             process.budget().charge_kernel(size)?;
             size
         } else {

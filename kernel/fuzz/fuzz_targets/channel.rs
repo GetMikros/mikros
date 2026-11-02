@@ -88,7 +88,7 @@ fuzz_target!(|ops: Vec<Op>| {
             }
             Op::Call => {
                 let Some(end) = &ends[0] else { continue };
-                let id = end.begin_call().unwrap();
+                let id = end.begin_call(None).unwrap();
                 assert!(id & CALL_ID != 0);
                 assert!(!calls.iter().any(|c| c.0 == id) && !abandoned.contains(&id));
                 calls.push((id, false));

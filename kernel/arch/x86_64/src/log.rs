@@ -44,7 +44,9 @@ pub struct LogReader {
 }
 
 impl LogReader {
-    const COST: u64 = size_of::<LogReader>() as u64;
+    /// The reader and its entry in `READERS` with that entry's share of
+    /// storage.
+    const COST: u64 = (size_of::<LogReader>() + 2 * size_of::<Weak<LogReader>>()) as u64;
 
     /// A reader at `after`, charged to `budget`.
     pub fn new(budget: &Arc<Budget>, after: u64) -> Result<Arc<LogReader>, Error> {

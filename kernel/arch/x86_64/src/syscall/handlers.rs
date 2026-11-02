@@ -581,7 +581,8 @@ pub fn channel_call(
     }
     let value = channel.value;
     let endpoint: Arc<Endpoint> = object(channel);
-    let id = endpoint.begin_call()?;
+    let process = current_process()?;
+    let id = endpoint.begin_call(Some(process.budget()))?;
     let request = send(
         &endpoint,
         value,
@@ -591,7 +592,6 @@ pub fn channel_call(
         wr_count,
         Some(id),
     );
-    let process = current_process()?;
     let reply = request.and_then(|()| crate::wait::wait_call(&endpoint, &process, id, deadline));
     let reply = match reply {
         Ok(reply) => reply,
@@ -1181,7 +1181,7 @@ pub fn process_ioports_enable(
     if !resource.covers(base, size) {
         return Err(Error::OutOfRange);
     }
-    object::<Process>(process).enable_ioports(base, base + size)
+    object::<Process>(process).enable_ioports(base, base + size, current_process()?.budget())
 }
 
 #[cfg(feature = "fuzz")]
