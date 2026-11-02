@@ -156,12 +156,61 @@ fn processes_and_channels(s: &Startup) -> Result {
     // SAFETY: the pointer and length describe `back`.
     let status = unsafe { sys::mem_read(reply.handles[0], 0, back.as_mut_ptr(), 16) };
     check("reading the returned object", status)?;
-    ensure("checking the returned object", back == *text)
+    ensure("checking the returned object", back == *text)?;
+    // The process ends once it has answered.
+    for _ in 0..1000 {
+        let info = info::<0x20>(process, 2)?;
+        if u32_at(&info, 0x08) == 2 {
+            ensure(
+                "checking the exit code",
+                i64::from_le_bytes(info[..8].try_into().unwrap()) == 0,
+            )?;
+            return ensure("checking that no thread is left", u32_at(&info, 0x0C) == 0);
+        }
+        sleep_ms(1);
+    }
+    ensure("waiting for the process to end", false)
+}
+
+/// The information record of `topic` for `handle`.
+fn info<const N: usize>(handle: Handle, topic: u32) -> Result<[u8; N]> {
+    let mut record = [0u8; N];
+    let mut len = 0u64;
+    // SAFETY: the pointers and length describe `record` and `len`.
+    let status =
+        unsafe { sys::object_get_info(handle, topic, record.as_mut_ptr(), N as u64, &mut len) };
+    check("reading information", status)?;
+    ensure("checking the record size", len == N as u64)?;
+    Ok(record)
+}
+
+fn u32_at(record: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(record[at..at + 4].try_into().unwrap())
+}
+
+/// The process and thread records describe the running test.
+fn info_topics(s: &Startup) -> Result {
+    let process = info::<0x20>(s.process, 2)?;
+    ensure("checking the process state", u32_at(&process, 0x08) == 1)?;
+    ensure("checking the thread count", u32_at(&process, 0x0C) >= 1)?;
+    ensure(
+        "checking the process CPU time",
+        i64::from_le_bytes(process[0x18..0x20].try_into().unwrap()) > 0,
+    )?;
+    let thread = info::<0x18>(s.thread, 3)?;
+    ensure("checking the thread state", u32_at(&thread, 0x00) == 1)?;
+    ensure("checking the priority", u32_at(&thread, 0x04) == 16)?;
+    ensure("checking the exception type", u32_at(&thread, 0x08) == 0)?;
+    ensure(
+        "checking the thread CPU time",
+        i64::from_le_bytes(thread[0x10..0x18].try_into().unwrap()) > 0,
+    )
 }
 
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 3] = [
+const TESTS: [(&str, Test); 4] = [
+    ("info_topics", info_topics),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
