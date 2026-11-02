@@ -608,6 +608,12 @@ fn free_pages() -> Result<u64> {
     Ok(u64_at(&record, 8))
 }
 
+/// The pages charged to the test's budget.
+fn budget_pages(s: &Startup) -> Result<u64> {
+    let record = info::<0x38>(s.budget, 6)?;
+    Ok(u64_at(&record, 0x18))
+}
+
 fn protect(s: &Startup, perms: u32, addr: u64, len: u64) -> i64 {
     // SAFETY: the call takes no pointers.
     unsafe { sys::vm_protect(s.process, perms, addr, len) }
@@ -618,23 +624,23 @@ fn protect(s: &Startup, perms: u32, addr: u64, len: u64) -> i64 {
 fn memory_operations(s: &Startup) -> Result {
     let pages = 8;
     let mem = create_memory(pages * PAGE_SIZE)?;
-    let before = free_pages()?;
+    // The budget's page count moves by exactly the object's frames; the
+    // free count also moves with page tables and kernel memory.
+    let before = budget_pages(s)?;
+    free_pages()?;
     // SAFETY: the call takes no pointers.
     check("committing", unsafe {
         sys::mem_op(mem, 1, 0, pages * PAGE_SIZE)
     })?;
-    ensure("taking frames", free_pages()? <= before - pages)?;
+    ensure("taking frames", budget_pages(s)? == before + pages)?;
     let at = map(s.process, mem, pages * PAGE_SIZE)?;
     // SAFETY: the mapping is readable and writable.
     unsafe { (at as *mut u64).write_volatile(0x55) };
-    // Mapping may have taken page table frames, so the count is taken
-    // again just before decommitting.
-    let committed = free_pages()?;
     // SAFETY: the call takes no pointers.
     check("decommitting", unsafe {
         sys::mem_op(mem, 2, 0, pages * PAGE_SIZE)
     })?;
-    ensure("freeing frames", free_pages()? >= committed + pages)?;
+    ensure("freeing frames", budget_pages(s)? == before)?;
     // SAFETY: the mapping is readable.
     ensure(
         "reading zero",
@@ -942,9 +948,140 @@ fn futexes(s: &Startup) -> Result {
     ensure("waking nobody", futex_wake(word, 1)? == 0)
 }
 
+extern "sysv64" fn raise_later(timeline: u64, _: u64) -> ! {
+    sleep_ms(20);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::timeline_signal(timeline as Handle, 10) };
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Timelines only grow, wake waiters that their value reaches and queue
+/// TIMELINE packets.
+fn timelines(s: &Startup) -> Result {
+    let (mut timeline, mut port) = (0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating", sys::timeline_create(3, 0, &mut timeline))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+    }
+    let mut value = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("reading", unsafe {
+        sys::timeline_get(timeline, &mut value)
+    })?;
+    ensure("starting at the initial value", value == 3)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        ensure(
+            "refusing to go back",
+            sys::timeline_signal(timeline, 2) == -10,
+        )?;
+        check("raising", sys::timeline_signal(timeline, 5))?;
+        check("reached already", sys::timeline_wait(timeline, 4, 0))?;
+        ensure(
+            "timing out",
+            sys::timeline_wait(timeline, 6, soon()) == TIMED_OUT,
+        )?;
+        check(
+            "waiting asynchronously",
+            sys::timeline_wait_async(timeline, port, 21, 8),
+        )?;
+        check(
+            "waiting for a reached value",
+            sys::timeline_wait_async(timeline, port, 22, 1),
+        )?;
+    }
+    let (status, p) = take_packet(port, soon());
+    ensure(
+        "queueing at once",
+        status == 0 && u64_at(&p, 0) == 22 && u32_at(&p, 8) == 4,
+    )?;
+    ensure("carrying the value", u64_at(&p, 16) == 5)?;
+    spawn(s, raise_later, u64::from(timeline))?;
+    // SAFETY: the call takes no pointers.
+    check("waiting for 9", unsafe {
+        sys::timeline_wait(timeline, 9, now() + 2_000_000_000)
+    })?;
+    let (status, p) = take_packet(port, soon());
+    ensure(
+        "queueing when reached",
+        status == 0 && u64_at(&p, 0) == 21 && u64_at(&p, 16) == 10,
+    )
+}
+
+fn stream_io(stream: Handle, write: bool, buf: &mut [u8]) -> (i64, u64) {
+    let mut actual = 0;
+    // SAFETY: the pointers describe `buf` and `actual`.
+    let status = unsafe {
+        if write {
+            sys::stream_write(stream, buf.as_ptr(), buf.len() as u64, &mut actual)
+        } else {
+            sys::stream_read(stream, buf.as_mut_ptr(), buf.len() as u64, &mut actual)
+        }
+    };
+    (status, actual)
+}
+
+/// Streams carry bytes without boundaries, fill up, keep small writes
+/// whole and keep queued bytes after the peer closes.
+fn streams(_: &Startup) -> Result {
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the pointers are valid for the call.
+    check("creating", unsafe { sys::stream_create(0, &mut a, &mut b) })?;
+    ensure("writing", stream_io(a, true, &mut { *b"hello " }) == (0, 6))?;
+    ensure(
+        "writing more",
+        stream_io(a, true, &mut { *b"world" }) == (0, 5),
+    )?;
+    let mut buf = [0u8; 8];
+    ensure(
+        "reading across writes",
+        stream_io(b, false, &mut buf) == (0, 8) && &buf == b"hello wo",
+    )?;
+    ensure("being readable", wait(b, READABLE, 0).0 == 0)?;
+    let mut rest = [0u8; 8];
+    ensure(
+        "reading the rest",
+        stream_io(b, false, &mut rest) == (0, 3) && &rest[..3] == b"rld",
+    )?;
+    ensure(
+        "being empty",
+        stream_io(b, false, &mut rest).0 == SHOULD_WAIT,
+    )?;
+
+    let mut chunk = [7u8; 4096];
+    for _ in 0..15 {
+        ensure("filling", stream_io(a, true, &mut chunk) == (0, 4096))?;
+    }
+    let mut big = [1u8; 4097];
+    let (status, written) = stream_io(a, true, &mut big[..4000]);
+    ensure(
+        "keeping a small write whole",
+        status == 0 && written == 4000,
+    )?;
+    let (status, written) = stream_io(a, true, &mut big);
+    ensure(
+        "taking what fits of a large write",
+        status == 0 && written == 96,
+    )?;
+    ensure(
+        "being full",
+        stream_io(a, true, &mut chunk[..1]).0 == SHOULD_WAIT,
+    )?;
+    ensure("clearing WRITABLE", wait(a, 1 << 1, 0).0 == TIMED_OUT)?;
+
+    // SAFETY: the call takes no pointers.
+    check("closing the writer", unsafe { sys::handle_close(a) })?;
+    ensure("setting PEER_CLOSED", wait(b, 1 << 2, 0).0 == 0)?;
+    let (status, got) = stream_io(b, false, &mut chunk);
+    ensure("keeping queued bytes", status == 0 && got == 4096)
+}
+
 type Test = fn(&Startup) -> Result;
 
-const TESTS: [(&str, Test); 13] = [
+const TESTS: [(&str, Test); 15] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -955,6 +1092,8 @@ const TESTS: [(&str, Test); 13] = [
     ("seals", seals),
     ("channel_calls", channel_calls),
     ("futexes", futexes),
+    ("timelines", timelines),
+    ("streams", streams),
     ("memory_objects", memory_objects),
     ("threads", threads),
     ("processes_and_channels", processes_and_channels),
