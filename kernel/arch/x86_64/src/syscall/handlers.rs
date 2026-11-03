@@ -1415,15 +1415,11 @@ pub fn process_ioports_enable(
     base: u64,
     size: u64,
 ) -> Result<(), Error> {
-    let resource = object::<Resource>(resource);
-    if resource.kind() != KIND_IOPORT {
-        return Err(Error::WrongType);
-    }
     if size == 0 {
         return Err(Error::InvalidArgs);
     }
-    if !resource.covers(base, size) {
-        return Err(Error::OutOfRange);
+    if !object::<Resource>(resource).grants(KIND_IOPORT, base, size) {
+        return Err(Error::AccessDenied);
     }
     object::<Process>(process).enable_ioports(base, base + size, current_process()?.budget())
 }

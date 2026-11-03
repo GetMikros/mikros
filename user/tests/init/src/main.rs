@@ -2907,6 +2907,33 @@ fn interrupt_create_checks(s: &Startup) -> Result {
     Ok(())
 }
 
+/// `process_ioports_enable` takes an `IOPORT` resource that covers the
+/// ports, or the root, and refuses any other resource.
+fn ioports_resource_checks(s: &Startup) -> Result {
+    // A port no other test or device uses.
+    const FREE_PORT: u64 = 0x2E0;
+    let irq = grant(s, KIND_IRQ, u64::from(RTC_GSI), 1)?;
+    let port = grant(s, mikros_test::KIND_IOPORT, FREE_PORT, 1)?;
+    for (resource, base, size) in [
+        (irq, FREE_PORT, 1),
+        (port, FREE_PORT, 2),
+        (port, FREE_PORT - 1, 1),
+    ] {
+        ensure(
+            "refusing the resource",
+            // SAFETY: the call takes no pointers.
+            unsafe { sys::process_ioports_enable(s.process, resource, base, size) }
+                == ACCESS_DENIED,
+        )?;
+    }
+    // SAFETY: the call takes no pointers.
+    check("granting from the root", unsafe {
+        sys::process_ioports_enable(s.process, s.root_resource, FREE_PORT, 1)
+    })?;
+    close(irq)?;
+    close(port)
+}
+
 /// The real-time clock's periodic interrupt sets `SIGNALED` on the
 /// line's object, which stays set until `interrupt_ack` clears it, and
 /// the next interrupt sets it again.
@@ -2919,7 +2946,10 @@ fn interrupt_delivered_and_acked(s: &Startup) -> Result {
     })?;
     let (status, interrupt) = interrupt_create(irq, RTC_GSI, 0);
     check("creating an interrupt", status)?;
-    ensure("starting clear", wait(interrupt, SIGNALED, 0).0 == TIMED_OUT)?;
+    ensure(
+        "starting clear",
+        wait(interrupt, SIGNALED, 0).0 == TIMED_OUT,
+    )?;
 
     // Periodic interrupts at 8 Hz; reading register C ends each one.
     rtc_write(0x0A, rtc_read(0x0A) & 0xF0 | 13);
@@ -6120,7 +6150,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 93] = [
+const TESTS: [(&str, Test); 94] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6198,8 +6228,12 @@ const TESTS: [(&str, Test); 93] = [
     ("write_execute_policy", write_execute_policy),
     ("syscall_gate", syscall_gate),
     ("ioports_as_granted", ioports_as_granted),
+    ("ioports_resource_checks", ioports_resource_checks),
     ("interrupt_create_checks", interrupt_create_checks),
-    ("interrupt_delivered_and_acked", interrupt_delivered_and_acked),
+    (
+        "interrupt_delivered_and_acked",
+        interrupt_delivered_and_acked,
+    ),
     ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),
     ("suspend_threads", suspend_threads),
     ("suspend_blocked_waits", suspend_blocked_waits),
