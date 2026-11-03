@@ -8,6 +8,7 @@ extern crate alloc;
 pub mod cmdline;
 pub mod display;
 pub mod elf;
+pub mod exit;
 pub mod firmware;
 pub mod info;
 pub mod load;

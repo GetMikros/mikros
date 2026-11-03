@@ -14,6 +14,7 @@ use boot_protocol::{
 use core::arch::{asm, global_asm};
 use core::ptr::NonNull;
 use mikrosboot::elf::Kernel;
+use mikrosboot::exit::{self, FinalMap};
 use mikrosboot::load::{self, PHYS_ALIGN};
 use mikrosboot::memmap::{Map, Region};
 use mikrosboot::paging::{self, BOOT_STACK_SIZE, Frames, Placement};
@@ -22,8 +23,6 @@ use uefi::mem::memory_map::MemoryMap;
 use uefi::{Status, table};
 use uefi_raw::table::boot::{BootServices, MemoryDescriptor};
 
-/// The most times `ExitBootServices` is tried.
-const EXIT_ATTEMPTS: usize = 8;
 /// Room for firmware memory map descriptors beyond those of the map read
 /// while allocating.
 const DESCRIPTOR_SLACK: usize = 64;
@@ -266,11 +265,44 @@ fn prepare(g: Gathered) -> Result<Prepared, Failure> {
     })
 }
 
-/// The final firmware memory map, as the number of bytes written and the
-/// descriptor size.
-struct FinalMap {
-    size: usize,
-    descriptor_size: usize,
+/// The boot services used to exit them, with the buffer for the memory map.
+struct Exit<'a> {
+    bt: &'a BootServices,
+    image: *mut core::ffi::c_void,
+    buffer: u64,
+    capacity: usize,
+}
+
+impl exit::BootServices for Exit<'_> {
+    type Error = Status;
+
+    fn memory_map(&mut self) -> Result<(FinalMap, usize), Status> {
+        let mut size = self.capacity;
+        let (mut key, mut descriptor_size, mut version) = (0, 0, 0);
+        // SAFETY: the buffer is `capacity` bytes and ours.
+        let status = unsafe {
+            (self.bt.get_memory_map)(
+                &mut size,
+                self.buffer as *mut MemoryDescriptor,
+                &mut key,
+                &mut descriptor_size,
+                &mut version,
+            )
+        };
+        if status != Status::SUCCESS {
+            return Err(status);
+        }
+        let map = FinalMap {
+            size,
+            descriptor_size,
+        };
+        Ok((map, key))
+    }
+
+    fn exit(&mut self, key: usize) -> bool {
+        // SAFETY: the image handle and key are the firmware's own values.
+        unsafe { (self.bt.exit_boot_services)(self.image, key) == Status::SUCCESS }
+    }
 }
 
 /// Reads the memory map and exits boot services, retrying when the map key
@@ -281,37 +313,14 @@ fn exit_boot_services(p: &Prepared) -> Result<FinalMap, Option<Failure>> {
     // SAFETY: the system table is valid until boot services end, and its
     // boot services pointer stays valid until ExitBootServices succeeds.
     let bt: &BootServices = unsafe { &*st.as_ref().boot_services };
-    let image = boot::image_handle().as_ptr();
-    for attempt in 0..EXIT_ATTEMPTS {
-        let mut size = p.firmware_map_size;
-        let (mut key, mut descriptor_size, mut version) = (0, 0, 0);
-        // SAFETY: the buffer is `firmware_map_size` bytes and ours.
-        let status = unsafe {
-            (bt.get_memory_map)(
-                &mut size,
-                p.firmware_map_phys as *mut MemoryDescriptor,
-                &mut key,
-                &mut descriptor_size,
-                &mut version,
-            )
-        };
-        if status != Status::SUCCESS {
-            // After a failed ExitBootServices, nothing but the memory map
-            // and ExitBootServices itself may be used.
-            if attempt == 0 {
-                return Err(Some(Failure::new("reading the final memory map", status)));
-            }
-            return Err(None);
-        }
-        // SAFETY: the image handle and key are the firmware's own values.
-        if unsafe { (bt.exit_boot_services)(image, key) } == Status::SUCCESS {
-            return Ok(FinalMap {
-                size,
-                descriptor_size,
-            });
-        }
-    }
-    Err(None)
+    let mut services = Exit {
+        bt,
+        image: boot::image_handle().as_ptr(),
+        buffer: p.firmware_map_phys,
+        capacity: p.firmware_map_size,
+    };
+    exit::exit(&mut services)
+        .map_err(|e| e.map(|status| Failure::new("reading the final memory map", status)))
 }
 
 struct Pool {
