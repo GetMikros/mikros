@@ -38,11 +38,8 @@ fn open_gop() -> Option<ScopedProtocol<GraphicsOutput>> {
         }
         .ok()
     };
-    console.and_then(open).or_else(|| {
-        boot::get_handle_for_protocol::<GraphicsOutput>()
-            .ok()
-            .and_then(open)
-    })
+    let first = || boot::get_handle_for_protocol::<GraphicsOutput>().ok();
+    display::open_output(console, first, open)
 }
 
 fn mode_info(index: u32, info: &uefi::proto::console::gop::ModeInfo) -> ModeInfo {

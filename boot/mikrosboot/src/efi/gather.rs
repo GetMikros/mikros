@@ -4,7 +4,7 @@ use super::Failure;
 use alloc::string::String;
 use alloc::vec::Vec;
 use boot_protocol::Framebuffer;
-use mikrosboot::display::{self, Choice, ModeInfo, Pixels};
+use mikrosboot::display::{self, ModeInfo, Output, Pixels};
 use mikrosboot::elf::{self, Kernel};
 use mikrosboot::firmware::{self, RSDP_SIZE};
 use mikrosboot::{cmdline, load};
@@ -87,10 +87,8 @@ fn open_gop() -> Option<ScopedProtocol<GraphicsOutput>> {
         }
         .ok()
     };
-    console.and_then(open).or_else(|| {
-        boot::get_handle_for_protocol::<GraphicsOutput>()
-            .ok()
-            .and_then(open)
+    display::find(console, open, || {
+        boot::get_handle_for_protocol::<GraphicsOutput>().ok()
     })
 }
 
@@ -106,74 +104,72 @@ fn pixels(info: &uefi::proto::console::gop::ModeInfo) -> Option<Pixels> {
     }
 }
 
-fn mode_info(
-    index: u32,
-    info: &uefi::proto::console::gop::ModeInfo,
-    size: Option<u64>,
-) -> ModeInfo {
+fn mode_info(index: u32, info: &uefi::proto::console::gop::ModeInfo) -> ModeInfo {
     let (width, height) = info.resolution();
     ModeInfo {
         index,
         width,
         height,
         stride: info.stride(),
-        size,
+        size: None,
         linear_32bit: pixels(info).is_some(),
     }
 }
 
-/// The framebuffer size of the current mode, `mode`, if it has a linear
-/// framebuffer; the firmware has none for other modes.
-fn framebuffer_size(gop: &mut GraphicsOutput, mode: &ModeInfo) -> Option<u64> {
-    mode.linear_32bit.then(|| gop.frame_buffer().size() as u64)
+/// A graphics output protocol and its modes.
+struct Gop {
+    gop: ScopedProtocol<GraphicsOutput>,
+    modes: Vec<Mode>,
+}
+
+impl Output for Gop {
+    type Error = uefi::Error;
+
+    fn current_mode(&mut self) -> ModeInfo {
+        mode_info(u32::MAX, &self.gop.current_mode_info())
+    }
+
+    fn modes(&mut self) -> Vec<ModeInfo> {
+        (0..)
+            .zip(&self.modes)
+            .map(|(i, m)| mode_info(i, m.info()))
+            .collect()
+    }
+
+    fn set_mode(&mut self, index: u32) -> uefi::Result {
+        self.gop.set_mode(&self.modes[index as usize])
+    }
+
+    fn framebuffer_size(&mut self) -> u64 {
+        self.gop.frame_buffer().size() as u64
+    }
+
+    fn framebuffer(&mut self) -> Option<display::Mode> {
+        let info = self.gop.current_mode_info();
+        let pixels = pixels(&info)?;
+        let (width, height) = info.resolution();
+        let mut buffer = self.gop.frame_buffer();
+        let as_u32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Some(display::Mode {
+            phys_base: buffer.as_mut_ptr() as u64,
+            size: buffer.size() as u64,
+            width: as_u32(width),
+            height: as_u32(height),
+            stride: as_u32(info.stride()),
+            pixels,
+        })
+    }
 }
 
 /// Picks the display mode and describes its framebuffer, or gives `None`
 /// when there is no usable one.
 fn framebuffer(cmdline: &str) -> Result<Option<Framebuffer>, Failure> {
-    let Some(mut gop) = open_gop() else {
+    let Some(gop) = open_gop() else {
         return Ok(None);
     };
-    let mut current = mode_info(u32::MAX, &gop.current_mode_info(), None);
-    current.size = framebuffer_size(&mut gop, &current);
-    let modes: Vec<Mode> = gop.modes().collect();
-    let mut infos: Vec<ModeInfo> = (0..)
-        .zip(&modes)
-        .map(|(i, m)| mode_info(i, m.info(), None))
-        .collect();
-    // The firmware reports a mode's framebuffer size only once it is
-    // current, so a mode whose framebuffer turns out too small is left
-    // out and the choice is made again.
-    loop {
-        match display::choose(current, &infos, cmdline::video_mode(cmdline)) {
-            Choice::Keep => break,
-            Choice::Switch(index) if index == current.index => break,
-            Choice::Switch(index) => {
-                let i = index as usize;
-                gop.set_mode(&modes[i]).map_err(|e| {
-                    Failure::new("switching the display mode", alloc::format!("{e}"))
-                })?;
-                infos[i].size = framebuffer_size(&mut gop, &infos[i]);
-                current = infos[i];
-            }
-            Choice::Unusable => return Ok(None),
-        }
-    }
-    let info = gop.current_mode_info();
-    let Some(pixels) = pixels(&info) else {
-        return Ok(None);
-    };
-    let (width, height) = info.resolution();
-    let mut buffer = gop.frame_buffer();
-    let as_u32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    Ok(Some(display::describe(display::Mode {
-        phys_base: buffer.as_mut_ptr() as u64,
-        size: buffer.size() as u64,
-        width: as_u32(width),
-        height: as_u32(height),
-        stride: as_u32(info.stride()),
-        pixels,
-    })))
+    let modes = gop.modes().collect();
+    display::framebuffer(&mut Gop { gop, modes }, cmdline::video_mode(cmdline))
+        .map_err(|e| Failure::new("switching the display mode", alloc::format!("{e}")))
 }
 
 fn rsdp() -> Result<u64, Failure> {
@@ -201,12 +197,20 @@ fn rsdp() -> Result<u64, Failure> {
     Ok(address)
 }
 
+/// The firmware's random number generator.
+struct UefiRng(ScopedProtocol<Rng>);
+
+impl firmware::Rng for UefiRng {
+    fn fill(&mut self, bytes: &mut [u8]) -> bool {
+        self.0.get_rng(None, bytes).is_ok()
+    }
+}
+
 fn rng_seed() -> Option<[u8; 32]> {
-    let handle = boot::get_handle_for_protocol::<Rng>().ok()?;
-    let mut rng = boot::open_protocol_exclusive::<Rng>(handle).ok()?;
-    let mut seed = [0; 32];
-    rng.get_rng(None, &mut seed).ok()?;
-    Some(seed)
+    let rng = boot::get_handle_for_protocol::<Rng>()
+        .ok()
+        .and_then(|handle| boot::open_protocol_exclusive::<Rng>(handle).ok());
+    firmware::rng_seed(rng.map(UefiRng).as_mut())
 }
 
 fn boot_time() -> Option<u64> {

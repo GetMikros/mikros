@@ -8,6 +8,15 @@ use kernel_core::sync::SpinLock;
 /// The frame allocator, set up by `init`.
 pub static FRAMES: SpinLock<Option<Frames<'static>>> = SpinLock::new(None);
 
+/// A frame from the frame allocator, or `None` when none is free.
+pub fn alloc_frame() -> Option<u64> {
+    #[cfg(feature = "fuzz")]
+    if crate::fuzz::alloc_fails(crate::fuzz::FRAMES) {
+        return None;
+    }
+    FRAMES.lock().as_mut()?.alloc()
+}
+
 /// The memory map entries of `info`, read through the direct map.
 pub fn memory_map(info: &BootInfo) -> impl Iterator<Item = MemoryMapEntry> + Clone {
     let size = bootinfo::memory_map_size(info.memory_map_count, info.memory_map_entry_size)

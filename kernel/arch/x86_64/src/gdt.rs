@@ -20,8 +20,9 @@ const IO_BITMAP_SIZE: usize = 65536 / 8;
 /// The offset of the I/O permission bitmap from the start of the TSS.
 const IO_BITMAP_OFFSET: usize = 104;
 
+/// A processor's task state segment, kept in its per-CPU data.
 #[repr(C, packed(4))]
-struct Tss {
+pub struct Tss {
     reserved0: u32,
     rsp: [u64; 3],
     reserved1: u64,
@@ -36,16 +37,21 @@ struct Tss {
 
 const _: () = assert!(core::mem::offset_of!(Tss, io_bitmap) == IO_BITMAP_OFFSET);
 
-static mut TSS: Tss = Tss {
-    reserved0: 0,
-    rsp: [0; 3],
-    reserved1: 0,
-    ist: [0; 7],
-    reserved2: 0,
-    reserved3: 0,
-    io_bitmap_offset: IO_BITMAP_OFFSET as u16,
-    io_bitmap: [0xFF; IO_BITMAP_SIZE + 1],
-};
+impl Tss {
+    /// A TSS with no stacks and every I/O port denied.
+    pub const fn new() -> Tss {
+        Tss {
+            reserved0: 0,
+            rsp: [0; 3],
+            reserved1: 0,
+            ist: [0; 7],
+            reserved2: 0,
+            reserved3: 0,
+            io_bitmap_offset: IO_BITMAP_OFFSET as u16,
+            io_bitmap: [0xFF; IO_BITMAP_SIZE + 1],
+        }
+    }
+}
 
 /// The descriptors before the TSS, indexed by selector / 8.
 const SEGMENTS: [u64; 6] = [
@@ -62,7 +68,9 @@ const SEGMENTS: [u64; 6] = [
     0x00AF_FB00_0000_FFFF,
 ];
 
-static mut GDT: [u64; 8] = [0; 8];
+/// A processor's GDT, kept in its per-CPU data: the segments, then the
+/// descriptor of its TSS.
+pub type Gdt = [u64; 8];
 
 /// The two descriptor words of an available 64-bit TSS at `base` whose
 /// last byte is at `base + limit`.
@@ -83,37 +91,43 @@ pub struct Pointer {
     pub base: u64,
 }
 
-/// Sets the stack the processor switches to on an interrupt from user
+/// Sets the stack this processor switches to on an interrupt from user
 /// mode.
+#[cfg(target_os = "none")]
 pub fn set_rsp0(top: u64) {
-    // SAFETY: only this processor uses its TSS, and an interrupt that
-    // reads RSP0 cannot arrive in the middle of an aligned 8-byte store.
-    unsafe { (&raw mut TSS.rsp[0]).write_unaligned(top) };
+    let tss = crate::percpu::this().tss.get();
+    // SAFETY: only this processor uses its TSS, and an interrupt, which
+    // reads RSP0, arrives between instructions, never during the store.
+    unsafe { (&raw mut (*tss).rsp[0]).write_unaligned(top) };
 }
 
 /// Allows or denies user-mode access to the I/O ports from `start` to
-/// `end`, exclusive, which must not exceed 0x10000.
+/// `end`, exclusive, which must not exceed 0x10000, on this processor.
+#[cfg(target_os = "none")]
 pub fn set_ports(start: u64, end: u64, allow: bool) {
+    let tss = crate::percpu::this().tss.get();
     for port in start..end {
         let (byte, bit) = ((port / 8) as usize, 1u8 << (port % 8));
         // SAFETY: only this processor uses its TSS, `byte` lies inside
         // the bitmap, and the processor reads the bitmap only on I/O
         // instructions in user mode, which cannot run while this does.
         unsafe {
-            let at = &raw mut TSS.io_bitmap[byte];
+            let at = &raw mut (*tss).io_bitmap[byte];
             *at = if allow { *at & !bit } else { *at | bit };
         }
     }
 }
 
-/// Builds the GDT and the TSS, with the IST stacks whose tops are given,
-/// and loads them. Every segment register is reloaded.
+/// Builds this processor's GDT and TSS, with the IST stacks whose tops
+/// are given, and loads them. Every segment register is reloaded. The
+/// per-CPU data must be set up.
 #[cfg(target_os = "none")]
 pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64, debug: u64) {
     use crate::cpu::read_msr;
     use crate::percpu::{IA32_GS_BASE, IA32_KERNEL_GS_BASE};
     use core::arch::asm;
-    let tss = &raw mut TSS;
+    let cpu = crate::percpu::this();
+    let tss = cpu.tss.get();
     // SAFETY: nothing else uses the TSS or the GDT before they are loaded
     // here, on the only running processor.
     unsafe {
@@ -127,14 +141,14 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64, debug: u
             (&raw mut (*tss).ist[usize::from(entry) - 1]).write_unaligned(top);
         }
         set_rsp0(rsp0);
-        let gdt = (&raw mut GDT).cast::<u64>();
+        let gdt = cpu.gdt.get().cast::<u64>();
         let limit = (IO_BITMAP_OFFSET + IO_BITMAP_SIZE) as u32;
         let tss_words = tss_descriptor(tss as u64, limit);
         for (i, &word) in SEGMENTS.iter().chain(&tss_words).enumerate() {
             gdt.add(i).write(word);
         }
         let pointer = Pointer {
-            limit: (size_of::<[u64; 8]>() - 1) as u16,
+            limit: (size_of::<Gdt>() - 1) as u16,
             base: gdt as u64,
         };
         // Loading a null selector into GS may clear its base, so both GS
@@ -188,6 +202,29 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64, debug: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether a segment descriptor is present, its DPL, whether it is
+    /// code, and whether it is a 64-bit code segment.
+    fn decode(descriptor: u64) -> (bool, u64, bool, bool) {
+        let present = descriptor >> 47 & 1 == 1;
+        let dpl = descriptor >> 45 & 3;
+        let code = descriptor >> 43 & 1 == 1 && descriptor >> 44 & 1 == 1;
+        let long = descriptor >> 53 & 1 == 1;
+        (present, dpl, code, long)
+    }
+
+    #[test]
+    fn lays_out_the_segments() {
+        assert_eq!(SEGMENTS[0], 0);
+        let at = |selector: u16| decode(SEGMENTS[usize::from(selector) / 8]);
+        assert_eq!(at(KERNEL_CODE), (true, 0, true, true));
+        assert_eq!(at(KERNEL_DATA), (true, 0, false, false));
+        assert!(!at(0x18).0, "the 32-bit user code segment is not present");
+        assert_eq!(at(USER_DATA), (true, 3, false, false));
+        assert_eq!(at(USER_CODE), (true, 3, true, true));
+        assert_eq!(TSS_SELECTOR, 0x30);
+        assert_eq!((USER_CODE | 3, USER_DATA | 3), (0x2B, 0x23));
+    }
 
     #[test]
     fn encodes_the_tss_descriptor() {

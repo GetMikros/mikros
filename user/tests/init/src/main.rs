@@ -15,6 +15,9 @@ use mikros_test::{
 
 mikros_rt::main!(main);
 
+#[cfg(feature = "fuzz")]
+mod hooks;
+
 /// Maps `len` bytes of `mem` read-write into `process` and returns the
 /// address.
 fn map(process: Handle, mem: Handle, len: u64) -> Result<u64> {
@@ -245,6 +248,17 @@ fn start_program_with(
     arg2: u64,
     setup: impl FnOnce(Handle) -> Result,
 ) -> Result<(Handle, Handle)> {
+    start_program_in(s, s.budget, name, arg2, setup)
+}
+
+/// Like `start_program_with`, with the process belonging to `budget`.
+fn start_program_in(
+    s: &Startup,
+    budget: Handle,
+    name: &str,
+    arg2: u64,
+    setup: impl FnOnce(Handle) -> Result,
+) -> Result<(Handle, Handle)> {
     let image_size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
     let mut at = 0;
     // SAFETY: the out pointer is valid for the call.
@@ -272,7 +286,7 @@ fn start_program_with(
     let name = name.as_bytes();
     // SAFETY: the pointers describe `name` and `process`.
     let status =
-        unsafe { sys::process_create(s.budget, name.as_ptr(), name.len() as u64, &mut process) };
+        unsafe { sys::process_create(budget, name.as_ptr(), name.len() as u64, &mut process) };
     check("creating a process", status)?;
     // SAFETY: the pointers describe `name` and `thread`.
     let status =
@@ -294,6 +308,159 @@ fn start_program_with(
         unsafe { sys::process_start(process, thread, loaded.entry, loaded.stack, theirs, arg2) };
     check("starting the process", status)?;
     Ok((process, ours))
+}
+
+/// How many faults `skip_fault` skipped.
+static SKIPPED_FAULTS: AtomicU64 = AtomicU64::new(0);
+/// A return instruction in read-only data and in writable data.
+static RET_RODATA: [u8; 1] = [0xC3];
+static RET_DATA: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xC3);
+
+// `write_probe` adds zero to the byte at RDI, which writes it unchanged,
+// with an instruction of three bytes: `add byte ptr [rdi], 0`.
+core::arch::global_asm!(
+    ".global write_probe",
+    "write_probe:",
+    ".byte 0x80, 0x07, 0x00",
+    "ret",
+);
+
+unsafe extern "sysv64" {
+    fn write_probe(addr: u64);
+}
+
+/// A `SEGV` handler that goes on past the fault: after `write_probe`'s
+/// write, or, for a call to a page that may not run, back in the caller.
+extern "sysv64" fn skip_fault(_: u64, _: u64, context: u64) {
+    let registers = context as *mut u64;
+    // SAFETY: the context lies on this thread's stack, with RSP and RIP
+    // at 0x38 and 0x80, and the interrupted stack holds the return
+    // address of a call when RIP is not in `write_probe`.
+    unsafe {
+        let (rsp, rip) = (registers.add(7), registers.add(16));
+        let at = rip.read_volatile();
+        if at == write_probe as *const () as u64 {
+            rip.write_volatile(at + 3);
+        } else {
+            let sp = rsp.read_volatile();
+            rip.write_volatile((sp as *const u64).read_volatile());
+            rsp.write_volatile(sp + 8);
+        }
+    }
+    SKIPPED_FAULTS.fetch_add(1, Ordering::AcqRel);
+}
+
+extern "sysv64" fn just_return() {}
+
+/// Whether writing the byte at `addr` faults.
+fn write_faults(addr: u64) -> bool {
+    let before = SKIPPED_FAULTS.load(Ordering::Acquire);
+    // SAFETY: the probe writes the byte unchanged, or faults.
+    unsafe { write_probe(addr) };
+    SKIPPED_FAULTS.load(Ordering::Acquire) != before
+}
+
+/// Whether calling `addr`, which holds a return instruction, faults.
+fn call_faults(addr: u64) -> bool {
+    let before = SKIPPED_FAULTS.load(Ordering::Acquire);
+    // SAFETY: the address holds a return instruction, or the call faults
+    // and `skip_fault` returns to here.
+    let function = unsafe { core::mem::transmute::<u64, extern "sysv64" fn()>(addr) };
+    function();
+    SKIPPED_FAULTS.load(Ordering::Acquire) != before
+}
+
+/// The kernel loads init's segments from its ELF file: each mapping is
+/// writable and executable exactly as the segment's flags say, holds the
+/// file's data, and is zero around the segment within its pages.
+fn init_segments_as_loaded(s: &Startup) -> Result {
+    const SEGV: u32 = 11;
+    const PT_LOAD: u32 = 1;
+    let image_size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("mapping the boot image", unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ,
+            0,
+            s.boot_image,
+            0,
+            image_size,
+            &mut at,
+        )
+    })?;
+    // SAFETY: the boot image is mapped readable at `at`.
+    let image = unsafe { core::slice::from_raw_parts(at as *const u8, s.boot_image_size as usize) };
+    let file = ustar::find(image, b"init").unwrap_or_default();
+    ensure("finding init", file.len() >= 64)?;
+    let mut action = [0u8; 32];
+    action[0x00..0x08].copy_from_slice(&(skip_fault as *const () as u64).to_le_bytes());
+    action[0x10..0x18].copy_from_slice(&(signal_restorer as *const () as u64).to_le_bytes());
+    let mut old = [0u8; 32];
+    // SAFETY: the pointers describe `action` and `old`.
+    check("catching SEGV", unsafe {
+        sys::signal_set_action(SEGV, action.as_ptr(), old.as_mut_ptr())
+    })?;
+    let probes = [
+        just_return as *const () as u64,
+        RET_RODATA.as_ptr() as u64,
+        RET_DATA.as_ptr() as u64,
+    ];
+    let mut found = 0;
+    let (phoff, phnum) = (
+        u64_at(file, 32) as usize,
+        u16::from_le_bytes([file[56], file[57]]),
+    );
+    let phentsize = usize::from(u16::from_le_bytes([file[54], file[55]]));
+    let mut result = Ok(());
+    for i in 0..usize::from(phnum) {
+        let p = &file[phoff + i * phentsize..][..56];
+        if u32_at(p, 0) != PT_LOAD {
+            continue;
+        }
+        let (flags, offset, vaddr) = (u32_at(p, 4), u64_at(p, 8) as usize, u64_at(p, 16));
+        let (filesz, memsz) = (u64_at(p, 32), u64_at(p, 40));
+        let start = vaddr & !(PAGE_SIZE - 1);
+        let end = (vaddr + memsz).next_multiple_of(PAGE_SIZE);
+        // SAFETY: the segment's pages are mapped readable.
+        let pages =
+            unsafe { core::slice::from_raw_parts(start as *const u8, (end - start) as usize) };
+        let (before, after) = ((vaddr - start) as usize, (vaddr + memsz - start) as usize);
+        result = result.and_then(|()| {
+            ensure(
+                "zeroing the pages around the segment",
+                pages[..before]
+                    .iter()
+                    .chain(&pages[after..])
+                    .all(|&b| b == 0),
+            )
+        });
+        if flags & 2 == 0 {
+            let data = &file[offset..offset + filesz as usize];
+            result = result.and_then(|()| {
+                ensure(
+                    "copying the file's data",
+                    pages[before..before + data.len()] == *data,
+                )
+            });
+        }
+        for &probe in probes.iter().filter(|&&a| (start..end).contains(&a)) {
+            found += 1;
+            let writable = flags & 2 != 0;
+            let executable = flags & 1 != 0;
+            result = result
+                .and_then(|()| ensure("writing as PF_W says", write_faults(probe) != writable))
+                .and_then(|()| ensure("running as PF_X says", call_faults(probe) != executable));
+        }
+    }
+    // SAFETY: the pointer describes `old`; the call takes no other.
+    unsafe {
+        sys::signal_set_action(SEGV, old.as_ptr(), core::ptr::null_mut());
+        sys::vm_unmap(s.process, at, image_size);
+    }
+    result?;
+    ensure("finding every probe in a segment", found == probes.len())
 }
 
 fn processes_and_channels(s: &Startup) -> Result {
@@ -413,6 +580,30 @@ extern "sysv64" fn wait_forever(event: u64, _: u64) -> ! {
     unreachable!("thread_exit returned");
 }
 
+/// `process_get_thread` gives a handle to a thread by its object ID, here
+/// a helper blocked in a wait. The kernel debugger script check stops in
+/// this call, the first of its kind that init makes, so that a thread
+/// switched out with saved registers is there to list.
+fn thread_by_koid(s: &Startup) -> Result {
+    let mut event = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let helper = spawn(s, wait_forever, u64::from(event))?;
+    wait_until_blocked(helper)?;
+    let mut got = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::process_get_thread(s.process, koid(helper)?, &mut got) };
+    check("getting the thread", status)?;
+    ensure("getting the helper", koid(got)? == koid(helper)?)?;
+    signal(event, 0, USER0)?;
+    ensure(
+        "ending the helper",
+        wait(helper, TERMINATED, in_time()).0 == 0,
+    )
+}
+
 /// Starts a thread of this process at `entry` with `arg`.
 fn spawn(s: &Startup, entry: extern "sysv64" fn(u64, u64) -> !, arg: u64) -> Result<Handle> {
     let stack_size = 16 * 1024;
@@ -527,9 +718,11 @@ fn set_priority(thread: Handle, resource: Handle, priority: u32) -> i64 {
     unsafe { sys::thread_set_priority(thread, resource, priority) }
 }
 
-/// Priorities up to 16 need no resource, higher ones a resource that
-/// covers them.
+/// Init starts at priority 16. Priorities up to 16 need no resource,
+/// higher ones a resource that covers them.
 fn priorities(s: &Startup) -> Result {
+    let thread = info::<0x18>(s.thread, 3)?;
+    ensure("starting init at 16", u32_at(&thread, 0x04) == 16)?;
     check("lowering", set_priority(s.thread, INVALID, 10))?;
     let thread = info::<0x18>(s.thread, 3)?;
     ensure("reading the priority", u32_at(&thread, 0x04) == 10)?;
@@ -561,9 +754,50 @@ fn priorities(s: &Startup) -> Result {
     check("going back to 16", set_priority(s.thread, INVALID, 16))
 }
 
-/// Waits for a packet on `port` until `deadline`.
+/// Set by `mark_started` when it runs.
+static STARTED: AtomicU64 = AtomicU64::new(0);
+
+extern "sysv64" fn mark_started(_: u64, _: u64) -> ! {
+    STARTED.store(1, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread that the queue would pick before the running one runs
+/// before the running one goes on: a new thread of priority 31, started
+/// by this one at 16, has run by the time `thread_start` returns.
+fn queued_thread_preempts(s: &Startup) -> Result {
+    let stack_size = 16 * 1024;
+    let stack = create_memory(stack_size)?;
+    let at = map(s.process, stack, stack_size)?;
+    let mut thread = 0;
+    let name = b"urgent";
+    // SAFETY: the pointers describe `name` and `thread`.
+    let status =
+        unsafe { sys::thread_create(s.process, name.as_ptr(), name.len() as u64, &mut thread) };
+    check("creating a thread", status)?;
+    check(
+        "raising its priority",
+        set_priority(thread, s.root_resource, 31),
+    )?;
+    STARTED.store(0, Ordering::Release);
+    // This thread may have waited while others ran, which gives it an
+    // early virtual deadline. After a sleep it starts again with a full
+    // request and a deadline far beyond the new thread's.
+    sleep_ms(1);
+    let entry = mark_started as *const () as u64;
+    // SAFETY: the call takes no pointers; the stack is mapped and unused.
+    let status = unsafe { sys::thread_start(thread, entry, at + stack_size - 8, 0, 0) };
+    check("starting it", status)?;
+    ensure("running it first", STARTED.load(Ordering::Acquire) == 1)?;
+    ensure("ending it", wait(thread, TERMINATED, in_time()).0 == 0)
+}
+
+/// Waits for a packet on `port` until `deadline`. The buffer starts
+/// filled with 0xAA, so that bytes the kernel leaves alone show.
 fn take_packet(port: Handle, deadline: i64) -> (i64, [u8; 48]) {
-    let mut packet = [0u8; 48];
+    let mut packet = [0xAAu8; 48];
     // SAFETY: the pointer describes `packet`.
     let status = unsafe { sys::port_wait(port, deadline, packet.as_mut_ptr()) };
     (status, packet)
@@ -605,6 +839,38 @@ fn wait_async(object: Handle, port: Handle, key: u64, signals: u32, options: u32
     // SAFETY: the call takes no pointers.
     let status = unsafe { sys::object_wait_async(object, port, key, signals, options) };
     check("registering a wait", status)
+}
+
+/// A port takes 65536 registrations and refuses the next with
+/// `ERR_NO_RESOURCES`; closing the handle they were made through removes
+/// them.
+fn port_registration_limit(_: &Startup) -> Result {
+    const NO_RESOURCES: i64 = -3;
+    const LIMIT: u64 = 65536;
+    let (mut port, mut event) = (0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a port", sys::port_create(0, &mut port))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    for key in 0..LIMIT {
+        wait_async(event, port, key, USER0, 0)?;
+    }
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::object_wait_async(event, port, LIMIT, USER0, 0) };
+    ensure("refusing one more", status == NO_RESOURCES)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the event", unsafe { sys::handle_close(event) })?;
+    // SAFETY: the pointer is valid for the call.
+    check("creating another event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    wait_async(event, port, 0, USER0, 0)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("closing the event", sys::handle_close(event))?;
+        check("closing the port", sys::handle_close(port))
+    }
 }
 
 /// Ports with user packets, one-shot and edge waits, cancelling and
@@ -650,6 +916,7 @@ fn ports(_: &Startup) -> Result {
         "reporting the signals",
         u32_at(&p, 16) == USER0 && u32_at(&p, 20) == USER0,
     )?;
+    ensure("zeroing the rest", p[24..].iter().all(|&b| b == 0))?;
     signal(event, USER0, 0)?;
     signal(event, 0, USER0)?;
     ensure("firing only once", take_packet(port, soon()).0 == TIMED_OUT)?;
@@ -785,6 +1052,75 @@ fn log_readers(s: &Startup) -> Result {
     ensure("reading to the end", read_record(reader).0 == SHOULD_WAIT)
 }
 
+/// The frame allocator manages the `Usable`, `BootloaderReclaimable` and
+/// `PageTables` ranges of the boot memory map and the `BootImage` frames,
+/// which the boot image object holds, the `KernelStack` range once the
+/// kernel has taken it, and nothing else.
+fn boot_memory_reclaimed(s: &Startup) -> Result {
+    const USABLE: u32 = 1;
+    const BOOTLOADER_RECLAIMABLE: u32 = 2;
+    const KERNEL_STACK: u32 = 4;
+    const BOOT_IMAGE: u32 = 5;
+    const PAGE_TABLES: u32 = 6;
+    let pages = |kinds: &[u32]| -> u64 {
+        s.memory_map()
+            .filter(|r| kinds.contains(&r.kind))
+            .map(|r| r.page_count)
+            .sum()
+    };
+    let reclaimed = pages(&[USABLE, BOOTLOADER_RECLAIMABLE, PAGE_TABLES, BOOT_IMAGE]);
+    let stack = pages(&[KERNEL_STACK]);
+    let mut record = [0u8; 16];
+    // SAFETY: the pointer describes `record`.
+    check("reading memory information", unsafe {
+        sys::system_get_memory_info(record.as_mut_ptr())
+    })?;
+    let total = u64_at(&record, 0);
+    ensure(
+        "managing exactly the reclaimed ranges",
+        total == reclaimed || total == reclaimed + stack,
+    )
+}
+
+/// The boot image object is anonymous, as large as the image rounded up
+/// to whole pages, holds zeros after the image, and gives its frames back
+/// to the frame allocator once the last handle to it is closed. Nothing
+/// can start a program after this, so it runs last.
+fn boot_image_object(s: &Startup) -> Result {
+    const ANONYMOUS: u32 = 1;
+    let size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
+    let record = info::<0x18>(s.boot_image, 4)?;
+    ensure(
+        "sizing it in whole pages",
+        u64_at(&record, 0) == size && u32_at(&record, 8) == ANONYMOUS,
+    )?;
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("mapping it", unsafe {
+        sys::vm_map(s.process, PERM_READ, 0, s.boot_image, 0, size, &mut at)
+    })?;
+    // SAFETY: the object is mapped readable at `at`.
+    let tail = unsafe {
+        core::slice::from_raw_parts(
+            (at + s.boot_image_size) as *const u8,
+            (size - s.boot_image_size) as usize,
+        )
+    };
+    let zeroed = tail.iter().all(|&b| b == 0);
+    // SAFETY: the call takes no pointers.
+    check("unmapping it", unsafe {
+        sys::vm_unmap(s.process, at, size)
+    })?;
+    ensure("zeroing what follows the image", zeroed)?;
+    let before = free_pages()?;
+    // SAFETY: the call takes no pointers.
+    check("closing it", unsafe { sys::handle_close(s.boot_image) })?;
+    ensure(
+        "freeing its frames",
+        free_pages()? >= before + size / PAGE_SIZE,
+    )
+}
+
 fn free_pages() -> Result<u64> {
     let mut record = [0u8; 16];
     // SAFETY: the pointer describes `record`.
@@ -806,11 +1142,28 @@ fn budget_kernel(s: &Startup) -> Result<u64> {
     Ok(u64_at(&record, 0x08))
 }
 
+/// The kernel charges nothing it made at boot, such as the boot image,
+/// init's segments and stack, and the clock page, to the root budget that
+/// init belongs to: no page is charged before init creates a memory
+/// object. This test runs first, before any test creates one.
+fn boot_memory_uncharged(s: &Startup) -> Result {
+    ensure("charging no page", budget_pages(s)? == 0)
+}
+
 fn set_kernel_limit(s: &Startup, limit: u64) -> Result {
     // SAFETY: the call takes no pointers.
     check("setting the limits", unsafe {
         sys::budget_set_limits(s.budget, limit, u64::MAX)
     })
+}
+
+/// Writes to the 64 KiB of this thread's stack below the caller's frame,
+/// so that the calls it makes next find those pages and their page tables
+/// in place.
+#[inline(never)]
+fn touch_stack() {
+    let mut area = [0u8; 64 * 1024];
+    core::hint::black_box(&mut area);
 }
 
 /// Mapping and splitting regions is charged to the caller's budget, and
@@ -820,11 +1173,14 @@ fn region_charges_reach_the_limit(s: &Startup) -> Result {
     let len = 3 * PAGE_SIZE;
     let mem = create_memory(len)?;
     let mut mapped = [0u64; 1000];
-    // The first mapping's middle page is touched before the limit is
-    // set, as a fault that needs kernel memory above it would fail.
+    // The first mapping's middle page, and the stack below this frame,
+    // are touched before the limit is set: a fault that needs kernel
+    // memory above it, such as for a page table where the stack crosses
+    // a 2 MiB boundary, would fail and end the process.
     mapped[0] = map(s.process, mem, len)?;
     // SAFETY: the mapping is writable.
     unsafe { ((mapped[0] + PAGE_SIZE) as *mut u64).write_volatile(1) };
+    touch_stack();
     let mut count = 1;
     set_kernel_limit(s, budget_kernel(s)? + 4096)?;
     let refused = loop {
@@ -948,7 +1304,9 @@ fn large_memory_operations(s: &Startup) -> Result {
 }
 
 /// Committing takes frames and decommitting frees them and zeroes the
-/// pages; protection changes stay within the mapping handle's rights.
+/// pages; mapping, unmapping and protection lengths are rounded up to
+/// whole pages; protection changes stay within the mapping handle's
+/// rights.
 fn memory_operations(s: &Startup) -> Result {
     let pages = 8;
     let mem = create_memory(pages * PAGE_SIZE)?;
@@ -979,9 +1337,8 @@ fn memory_operations(s: &Startup) -> Result {
         "refusing other ops",
         unsafe { sys::mem_op(mem, 3, 0, PAGE_SIZE) } == -10,
     )?;
-    // Every address, offset and size of these calls is a whole number of
-    // pages.
-    // SAFETY: the calls take no pointers or a valid one.
+    // The sizes of operations and objects are whole numbers of pages.
+    // SAFETY: the calls take no pointers.
     unsafe {
         ensure(
             "refusing an unaligned op",
@@ -991,20 +1348,50 @@ fn memory_operations(s: &Startup) -> Result {
             "refusing an unaligned size",
             sys::mem_set_size(mem, PAGE_SIZE + 1) == -10,
         )?;
-        let mut unused = 0;
-        ensure(
-            "refusing an unaligned mapping",
-            sys::vm_map(s.process, PERM_READ, 0, mem, 0, 100, &mut unused) == -10,
-        )?;
-        ensure(
-            "refusing an unaligned unmapping",
-            sys::vm_unmap(s.process, at, 100) == -10,
-        )?;
     }
-    ensure(
-        "refusing an unaligned protection",
-        protect(s, PERM_READ, at, 100) == -10,
+    // The lengths of mappings, unmappings and protection changes are
+    // rounded up to whole pages, after a mapping's length as given is
+    // checked against the object's size.
+    let mut small = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::vm_map(s.process, PERM_READ, 0, mem, 0, 100, &mut small) };
+    check("mapping part of a page", status)?;
+    let end = small + PAGE_SIZE - 8;
+    check(
+        "mapping the whole page",
+        read_memory(s.process, end, &mut [0u8; 8]),
     )?;
+    check("protecting part of a page", protect(s, 0, small, 100))?;
+    ensure(
+        "protecting the whole page",
+        read_memory(s.process, end, &mut [0u8; 8]) == NOT_FOUND,
+    )?;
+    check(
+        "making it readable again",
+        protect(s, PERM_READ, small, PAGE_SIZE - 1),
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping part of a page", unsafe {
+        sys::vm_unmap(s.process, small, 1)
+    })?;
+    ensure(
+        "unmapping the whole page",
+        read_memory(s.process, small, &mut [0u8; 1]) == NOT_FOUND
+            && read_memory(s.process, end, &mut [0u8; 8]) == NOT_FOUND,
+    )?;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ,
+            0,
+            mem,
+            PAGE_SIZE,
+            (pages - 1) * PAGE_SIZE + 1,
+            &mut small,
+        )
+    };
+    ensure("checking the length as given", status == OUT_OF_RANGE)?;
 
     check("making it read-only", protect(s, PERM_READ, at, PAGE_SIZE))?;
     // SAFETY: the page is readable.
@@ -1256,6 +1643,38 @@ fn futex_wake(addr: u64, count: u32) -> Result<u32> {
     Ok(woken)
 }
 
+/// Threads of two processes that map the same memory object share its
+/// futexes: waking through this process's mapping ends the debuggee's
+/// wait through its own, at another address.
+fn futexes_across_processes(s: &Startup) -> Result {
+    const SHARED: u64 = 0x10_0000_0000;
+    const SPECIFIC: u32 = 1 << 8;
+    let mem = create_memory(PAGE_SIZE)?;
+    let here = map(s.process, mem, PAGE_SIZE)?;
+    ensure("mapping elsewhere here", here != SHARED)?;
+    let (process, _) = start_program_with(s, "debuggee", 8, |process| {
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("mapping into the debuggee", unsafe {
+            sys::vm_map(
+                process,
+                PERM_READ | SPECIFIC,
+                SHARED,
+                mem,
+                0,
+                PAGE_SIZE,
+                &mut at,
+            )
+        })
+    })?;
+    let deadline = in_time();
+    while futex_wake(here, 1)? == 0 {
+        ensure("waking the debuggee", now() < deadline)?;
+        sleep_ms(1);
+    }
+    ensure("ending its wait", exit_code(process)? == 0)
+}
+
 /// Futexes compare before blocking, time out, wake in arrival order and
 /// are keyed by memory object and offset.
 fn futexes(s: &Startup) -> Result {
@@ -1360,6 +1779,10 @@ fn timelines(s: &Startup) -> Result {
         status == 0 && u64_at(&p, 0) == 22 && u32_at(&p, 8) == 4,
     )?;
     ensure("carrying the value", u64_at(&p, 16) == 5)?;
+    ensure(
+        "zeroing the status and the rest",
+        u32_at(&p, 12) == 0 && p[24..].iter().all(|&b| b == 0),
+    )?;
     spawn(s, raise_later, u64::from(timeline))?;
     // SAFETY: the call takes no pointers.
     check("waiting for 9", unsafe {
@@ -1537,6 +1960,220 @@ fn failed_outputs(s: &Startup) -> Result {
         "keeping the signal",
         status == 0 && u32_at(&info, 0) == 40 && u64_at(&info, 0x10) == 77,
     )
+}
+
+/// Calls that return a handle refuse an output outside the user address
+/// range, also one that wraps around the end of the address space, and
+/// a refused `handle_replace` keeps the handle it was given.
+fn outputs_outside_user_range(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let name = b"refused";
+    let thread = koid(s.thread)?;
+    for out in [u64::MAX - 3, 0xFFFF_8000_0000_0000, 0x7FFF_FFFF_EFFE] {
+        let out = out as *mut Handle;
+        let len = name.len() as u64;
+        // SAFETY: `name` is valid; every call refuses `out` before
+        // writing to it.
+        let statuses = unsafe {
+            [
+                ("duplicating", sys::handle_duplicate(mem, 0x8000_0000, out)),
+                ("replacing", sys::handle_replace(mem, 0x8000_0000, out)),
+                (
+                    "creating a memory object",
+                    sys::mem_create(PAGE_SIZE, 0, out),
+                ),
+                (
+                    "creating a budget",
+                    sys::budget_create(s.budget, u64::MAX, u64::MAX, out),
+                ),
+                (
+                    "creating a process",
+                    sys::process_create(s.budget, name.as_ptr(), len, out),
+                ),
+                (
+                    "creating a thread",
+                    sys::thread_create(s.process, name.as_ptr(), len, out),
+                ),
+                (
+                    "getting a thread",
+                    sys::process_get_thread(s.process, thread, out),
+                ),
+            ]
+        };
+        for (what, status) in statuses {
+            ensure(what, status == INVALID_ARGS)?;
+        }
+    }
+    mem_read_at::<1>(mem, 0)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the object", unsafe { sys::handle_close(mem) })
+}
+
+/// Calls refuse an input that does not lie in readable user memory: one
+/// that wraps around the end of the address space, one in the kernel
+/// half, one on a page that is no longer mapped and one on a page mapped
+/// without access. They change nothing.
+fn inputs_outside_user_memory(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let (mut reserved, mut a, mut b, mut port, mut thread) = (0, 0, 0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check(
+            "reserving a page",
+            sys::vm_map(s.process, 0, 0, mem, 0, PAGE_SIZE, &mut reserved),
+        )?;
+        check("creating a channel", sys::channel_create(0, &mut a, &mut b))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+    }
+    let gone = map(s.process, create_memory(PAGE_SIZE)?, PAGE_SIZE)?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping a page", unsafe {
+        sys::vm_unmap(s.process, gone, PAGE_SIZE)
+    })?;
+    for addr in [u64::MAX - 3, 0xFFFF_8000_0000_0000, gone, reserved] {
+        let p = addr as *const u8;
+        // SAFETY: every call refuses `p` before it reads from it; the
+        // other pointers are valid.
+        let statuses = unsafe {
+            [
+                ("writing an object", sys::mem_write(mem, 0, p, 8)),
+                (
+                    "writing a message",
+                    sys::channel_write(a, p, 8, core::ptr::null(), 0),
+                ),
+                (
+                    "sending handles",
+                    sys::channel_write(a, b"x".as_ptr(), 1, p.cast(), 1),
+                ),
+                ("logging", sys::log_write(s.log, 1, p, 8)),
+                (
+                    "naming a thread",
+                    sys::thread_create(s.process, p, 8, &mut thread),
+                ),
+                ("queueing a packet", sys::port_queue(port, p)),
+            ]
+        };
+        for (what, status) in statuses {
+            ensure(what, status == INVALID_ARGS)?;
+        }
+    }
+    ensure("queueing no message", read_sizes(b, 16, 2).0 == SHOULD_WAIT)?;
+    ensure(
+        "queueing no packet",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    ensure("writing nothing", mem_read_at::<8>(mem, 0)? == [0; 8])?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("unmapping", sys::vm_unmap(s.process, reserved, PAGE_SIZE))?;
+        for h in [mem, a, b, port] {
+            check("closing", sys::handle_close(h))?;
+        }
+    }
+    Ok(())
+}
+
+/// Calls refuse `options` with a bit they do not define, and write no
+/// output.
+fn undefined_options_refused(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let (mut pager, mut port) = (0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+    }
+    let mut outs = [Handle::MAX; 2];
+    let mut addr = u64::MAX;
+    let (out, out1) = (outs.as_mut_ptr(), outs[1..].as_mut_ptr());
+    let undefined = 1 << 31;
+    // SAFETY: the out pointers are valid for the calls.
+    let statuses = unsafe {
+        [
+            ("creating an event", sys::event_create(1, out)),
+            ("creating a timer", sys::timer_create(1, out)),
+            ("creating a port", sys::port_create(1, out)),
+            ("creating a pager", sys::pager_create(1, out)),
+            ("creating a timeline", sys::timeline_create(0, 1, out)),
+            ("creating a channel", sys::channel_create(1, out, out1)),
+            ("creating a stream", sys::stream_create(1, out, out1)),
+            (
+                "creating a memory object",
+                sys::mem_create(PAGE_SIZE, undefined, out),
+            ),
+            ("cloning", sys::mem_clone(mem, undefined, 0, PAGE_SIZE, out)),
+            (
+                "creating a paged object",
+                sys::pager_create_memory(pager, port, 0, PAGE_SIZE, undefined, out),
+            ),
+            (
+                "creating an exception channel",
+                sys::exception_channel_create(s.process, undefined, out),
+            ),
+            (
+                "mapping",
+                sys::vm_map(
+                    s.process,
+                    PERM_READ | 1 << 3,
+                    0,
+                    mem,
+                    0,
+                    PAGE_SIZE,
+                    &mut addr,
+                ),
+            ),
+        ]
+    };
+    for (what, status) in statuses {
+        ensure(what, status == INVALID_ARGS)?;
+    }
+    ensure(
+        "writing no output",
+        outs == [Handle::MAX; 2] && addr == u64::MAX,
+    )?;
+    for h in [mem, pager, port] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// `resource_create` refuses ranges that overlap hardware the kernel
+/// keeps: the ports of the PICs, the PIT, its gate and the serial port,
+/// the register page of the I/O APIC and, as the kernel uses it under
+/// QEMU, the HPET, both at QEMU's addresses. A port next to them is
+/// granted.
+fn reserved_hardware_refused(s: &Startup) -> Result {
+    const KIND_MMIO: u32 = 1;
+    let io = mikros_test::KIND_IOPORT;
+    let reserved = [
+        (io, 0x20, 2),
+        (io, 0x1F, 2),
+        (io, 0xA1, 1),
+        (io, 0x40, 4),
+        (io, 0x43, 1),
+        (io, 0x61, 1),
+        (io, 0x3F8, 8),
+        (io, 0x3FF, 4),
+        (KIND_MMIO, 0xFEC0_0000, PAGE_SIZE),
+        (KIND_MMIO, 0xFED0_0000, PAGE_SIZE),
+    ];
+    let mut resource = 0;
+    for (kind, base, size) in reserved {
+        // SAFETY: the out pointer is valid for the call.
+        let status =
+            unsafe { sys::resource_create(s.root_resource, kind, base, size, 0, &mut resource) };
+        ensure(
+            "refusing hardware the kernel keeps",
+            status == ACCESS_DENIED,
+        )?;
+    }
+    // SAFETY: the out pointer is valid for the call.
+    check("granting a free port", unsafe {
+        sys::resource_create(s.root_resource, io, 0x80, 1, 0, &mut resource)
+    })?;
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(resource) })
 }
 
 fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
@@ -1810,6 +2447,42 @@ fn paged_object(s: &Startup, pages: u64, options: u32) -> Result<(Handle, Handle
     Ok((pager, mem))
 }
 
+/// Faults that wait for a pager, in the copy routine of a system call
+/// and in user code that set RFLAGS.AC, leave AC clear in the kernel,
+/// which the debug kernel checks whenever it switches threads.
+fn access_flag_cleared_on_entry(s: &Startup) -> Result {
+    let (_pager, mem) = paged_object(s, 2, 0)?;
+    let at = map(s.process, mem, 2 * PAGE_SIZE)?;
+    let copy = create_memory(PAGE_SIZE)?;
+    // SAFETY: the source lies in the mapping; reading it waits for the
+    // pager.
+    check("writing from an absent page", unsafe {
+        sys::mem_write(copy, 0, at as *const u8, 6)
+    })?;
+    ensure(
+        "copying the supplied page",
+        mem_read_at::<6>(copy, 0)? == *b"page 0",
+    )?;
+    let byte: u8;
+    // SAFETY: the second page is mapped readable. With AC set, only the
+    // aligned stack words and one byte are accessed, so alignment checks
+    // cannot fault.
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "bts qword ptr [rsp], 18",
+            "popfq",
+            "mov {byte}, byte ptr [{addr}]",
+            "pushfq",
+            "btr qword ptr [rsp], 18",
+            "popfq",
+            addr = in(reg) at + PAGE_SIZE,
+            byte = out(reg_byte) byte,
+        );
+    }
+    ensure("reading with AC set", byte == b'p')
+}
+
 /// Supplying, writing back and evicting a paged object of more pages
 /// than the kernel handles in one piece reaches every page.
 fn large_pager_operations(s: &Startup) -> Result {
@@ -1911,6 +2584,10 @@ fn large_pager_operations(s: &Startup) -> Result {
 fn pager_operations(s: &Startup) -> Result {
     let size = 3 * PAGE_SIZE;
     let (pager, mem) = paged_object(s, 3, 2)?;
+    ensure(
+        "reporting dirty tracking",
+        u32_at(&info::<0x18>(mem, 4)?, 0x0C) == 2,
+    )?;
     for page in 0..3 {
         mem_read_at::<1>(mem, page * PAGE_SIZE)?;
     }
@@ -2098,6 +2775,55 @@ fn syscall_gate(s: &Startup) -> Result {
     )
 }
 
+/// Starts the debuggee reading I/O port 0x80, after granting it that port
+/// when `granted`, and returns the type of the exception it reports.
+fn read_port_0x80(s: &Startup, granted: bool) -> Result<u32> {
+    let mut channel = 0;
+    let (process, _) = start_program_with(s, "debuggee", 3, |process| {
+        // SAFETY: the out pointers are valid; the other call takes none.
+        unsafe {
+            check(
+                "creating an exception channel",
+                sys::exception_channel_create(process, 0, &mut channel),
+            )?;
+            if !granted {
+                return Ok(());
+            }
+            let mut port = 0;
+            let kind = mikros_test::KIND_IOPORT;
+            let status = sys::resource_create(s.root_resource, kind, 0x80, 1, 0, &mut port);
+            check("creating the port resource", status)?;
+            check(
+                "granting the port",
+                sys::process_ioports_enable(process, port, 0x80, 1),
+            )
+        }
+    })?;
+    let (kind, _) = next_report(channel)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(process) })?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )?;
+    Ok(kind)
+}
+
+/// A process may use only the I/O ports granted to it: reading another
+/// one raises a `PROTECTION` exception, and reading a granted one goes on
+/// to the next instruction.
+fn ioports_as_granted(s: &Startup) -> Result {
+    const PROTECTION: u32 = 8;
+    ensure(
+        "refusing an ungranted port",
+        read_port_0x80(s, false)? == PROTECTION,
+    )?;
+    ensure(
+        "allowing a granted port",
+        read_port_0x80(s, true)? == UNDEFINED_INSTRUCTION,
+    )
+}
+
 /// Killing a blocked thread whose process reports thread events reports
 /// its exit, and its end as the last thread terminates the process.
 fn kill_blocked_thread(s: &Startup) -> Result {
@@ -2115,6 +2841,234 @@ fn kill_blocked_thread(s: &Startup) -> Result {
         "terminating the process",
         wait(process, TERMINATED, in_time()).0 == 0,
     )
+}
+
+const PAGE_FAULT: u32 = 2;
+const ARITHMETIC: u32 = 4;
+const TERMINATE: u32 = 1;
+const DELIVER_SIGNAL: u32 = 2;
+const ALREADY_EXISTS: i64 = -26;
+
+/// The bytes of the next report on exception channel `channel` and the
+/// handle of its thread.
+fn report_bytes(channel: Handle) -> Result<([u8; 0x28], Handle)> {
+    let m = read_message(channel, 2000)?;
+    ensure("receiving a report", m.len == 0x28 && m.count == 1)?;
+    let mut bytes = [0; 0x28];
+    bytes.copy_from_slice(&m.bytes[..0x28]);
+    Ok((bytes, m.handles[0]))
+}
+
+fn act(thread: Handle, action: u32) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_resume_from_exception(thread, action) }
+}
+
+/// The exit code of `process` once it has terminated.
+fn exit_code(process: Handle) -> Result<i64> {
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )?;
+    Ok(u64_at(&info::<0x20>(process, 2)?, 0) as i64)
+}
+
+/// A read of an unmapped address is reported as a `PAGE_FAULT` at that
+/// address, and a division by zero as `ARITHMETIC` at the instruction,
+/// with the IDs of the process and the thread and the vector and error
+/// code. An undefined action is refused, `TERMINATE` ends the process with
+/// exit code -2, a thread no longer in an exception refuses actions, a
+/// second exception channel is refused while the first is open, and a
+/// killed process ends with exit code -1.
+fn exception_reports_and_actions(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 4, 0)?;
+    let (r, thread) = report_bytes(channel)?;
+    ensure("reporting a page fault", u32_at(&r, 0) == PAGE_FAULT)?;
+    ensure(
+        "naming the process and the thread",
+        u64_at(&r, 0x08) == koid(process)? && u64_at(&r, 0x10) == koid(thread)?,
+    )?;
+    ensure("giving the faulting address", u64_at(&r, 0x18) == 0x1000)?;
+    // A user read of a page that is not present: vector 14, error code 4.
+    ensure(
+        "giving the vector and error code",
+        u64_at(&r, 0x20) == 14 | 4 << 32,
+    )?;
+    ensure(
+        "refusing an undefined action",
+        act(thread, 3) == INVALID_ARGS,
+    )?;
+    check("terminating", act(thread, TERMINATE))?;
+    ensure("ending with exit code -2", exit_code(process)? == -2)?;
+    ensure(
+        "refusing a thread not in an exception",
+        act(thread, RESUME) == BAD_STATE,
+    )?;
+
+    let (process, channel) = start_debuggee(s, 5, 0)?;
+    let (r, _) = report_bytes(channel)?;
+    ensure("reporting a division error", u32_at(&r, 0) == ARITHMETIC)?;
+    ensure(
+        "giving the instruction address",
+        (0x1_0000..0x7FFF_FFFF_F000).contains(&u64_at(&r, 0x18)),
+    )?;
+    ensure("giving the vector", u64_at(&r, 0x20) == 0)?;
+    let mut second = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::exception_channel_create(process, 0, &mut second) };
+    ensure("refusing a second channel", status == ALREADY_EXISTS)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(process) })?;
+    ensure("ending with exit code -1", exit_code(process)? == -1)
+}
+
+/// A page fault whose frame the process's budget cannot pay for is
+/// reported as `OUT_OF_MEMORY` at the faulting instruction: the debuggee
+/// writes to 64 pages of its own object under a budget of 16 pages.
+fn out_of_memory_report(s: &Startup) -> Result {
+    const OUT_OF_MEMORY: u32 = 10;
+    const SAME_RIGHTS: u32 = 1 << 31;
+    let mut budget = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a budget", unsafe {
+        sys::budget_create(s.budget, 1 << 20, 16, &mut budget)
+    })?;
+    let mut channel = 0;
+    let (process, bootstrap) = start_program_in(s, budget, "debuggee", 9, |process| {
+        // SAFETY: the out pointer is valid for the call.
+        check("creating an exception channel", unsafe {
+            sys::exception_channel_create(process, 0, &mut channel)
+        })
+    })?;
+    let mut copy = 0;
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check(
+            "duplicating the process handle",
+            sys::handle_duplicate(process, SAME_RIGHTS, &mut copy),
+        )?;
+        check(
+            "sending it",
+            sys::channel_write(bootstrap, core::ptr::null(), 0, &copy, 1),
+        )?;
+    }
+    let (r, thread) = report_bytes(channel)?;
+    ensure("reporting OUT_OF_MEMORY", u32_at(&r, 0) == OUT_OF_MEMORY)?;
+    ensure(
+        "giving the instruction address",
+        (0x1_0000..0x7FFF_FFFF_F000).contains(&u64_at(&r, 0x18)),
+    )?;
+    check("terminating", act(thread, TERMINATE))?;
+    ensure("ending with exit code -2", exit_code(process)? == -2)
+}
+
+/// A thread reports its start with its entry point, where it starts, and
+/// its end through `thread_exit` with address 0; neither report takes
+/// `DELIVER_SIGNAL`; and the process, whose last thread it was, ends with
+/// exit code 0. The threads of a killed process report no exit.
+fn thread_events(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 6, DEBUG_EVENTS)?;
+    let (r, thread) = report_bytes(channel)?;
+    ensure("reporting the start", u32_at(&r, 0) == THREAD_STARTING)?;
+    let (status, regs) = general_registers(thread);
+    check("reading the registers", status)?;
+    ensure(
+        "giving the entry point",
+        u64_at(&r, 0x18) == u64_at(&regs, 16 * 8),
+    )?;
+    ensure(
+        "refusing a signal for the start",
+        act(thread, DELIVER_SIGNAL) == BAD_STATE,
+    )?;
+    resume(thread)?;
+    let (r, exiting) = report_bytes(channel)?;
+    ensure(
+        "reporting the exit at address 0",
+        u32_at(&r, 0) == THREAD_EXITING && u64_at(&r, 0x18) == 0,
+    )?;
+    ensure(
+        "refusing a signal for the exit",
+        act(exiting, DELIVER_SIGNAL) == BAD_STATE,
+    )?;
+    resume(exiting)?;
+    ensure("ending with exit code 0", exit_code(process)? == 0)?;
+
+    let (process, channel) = start_debuggee(s, 1, DEBUG_EVENTS)?;
+    let (r, thread) = report_bytes(channel)?;
+    ensure("reporting the start", u32_at(&r, 0) == THREAD_STARTING)?;
+    resume(thread)?;
+    wait_until_blocked(thread)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(process) })?;
+    ensure("ending with exit code -1", exit_code(process)? == -1)?;
+    ensure("reporting no exit", read_message(channel, 50).is_err())
+}
+
+/// A thread of a new process cannot be started on its own, a start with
+/// an entry or a stack outside the user range is refused and keeps the
+/// argument handle and the states, and a terminated process takes no new
+/// thread and no start.
+fn start_refusals(s: &Startup) -> Result {
+    let name = b"refused";
+    let len = name.len() as u64;
+    let (mut process, mut thread, mut event) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check(
+            "creating a process",
+            sys::process_create(s.budget, name.as_ptr(), len, &mut process),
+        )?;
+        check(
+            "creating a thread",
+            sys::thread_create(process, name.as_ptr(), len, &mut thread),
+        )?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    let (user, kernel) = (0x10_0000, 0xFFFF_8000_0000_0000);
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        ensure(
+            "refusing a thread of a new process",
+            sys::thread_start(thread, user, user, 0, 0) == BAD_STATE,
+        )?;
+        ensure(
+            "refusing an entry in the kernel half",
+            sys::process_start(process, thread, kernel, user, event, 0) == INVALID_ARGS,
+        )?;
+        ensure(
+            "refusing a stack in the kernel half",
+            sys::process_start(process, thread, user, kernel, event, 0) == INVALID_ARGS,
+        )?;
+    }
+    ensure("keeping the argument handle", koid(event).is_ok())?;
+    ensure(
+        "keeping the process new",
+        u32_at(&info::<0x20>(process, 2)?, 0x08) == 0,
+    )?;
+    ensure("keeping the thread new", thread_state(thread)? == 0)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(process) })?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )?;
+    let mut other = 0;
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        ensure(
+            "refusing a thread of a terminated process",
+            sys::thread_create(process, name.as_ptr(), len, &mut other) == BAD_STATE,
+        )?;
+        ensure(
+            "refusing to start a terminated process",
+            sys::process_start(process, thread, user, user, 0, 0) == BAD_STATE,
+        )?;
+    }
+    for h in [process, thread, event] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
 }
 
 /// Killing the last thread of a process while it is stopped in an
@@ -2157,6 +3111,211 @@ fn own_endpoints_not_sent(_: &Startup) -> Result {
         check("closing", unsafe { sys::handle_close(h) })?;
     }
     Ok(())
+}
+
+const BAD_HANDLE: i64 = -11;
+const OUT_OF_RANGE: i64 = -14;
+const BUFFER_TOO_SMALL: i64 = -15;
+const PEER_CLOSED: i64 = -24;
+
+/// Reads the next message of `channel` into buffers of `cap` bytes and
+/// `handles_cap` handles, and returns the status and the two sizes.
+fn read_sizes(channel: Handle, cap: usize, handles_cap: usize) -> (i64, u64, u64) {
+    let (mut bytes, mut handles) = ([0u8; 16], [0 as Handle; 2]);
+    let (mut len, mut count) = (0, 0);
+    // SAFETY: the capacities are at most the sizes of the buffers.
+    let status = unsafe {
+        sys::channel_read(
+            channel,
+            bytes.as_mut_ptr(),
+            cap.min(bytes.len()) as u64,
+            handles.as_mut_ptr(),
+            handles_cap.min(handles.len()) as u64,
+            &mut len,
+            &mut count,
+        )
+    };
+    (status, len, count)
+}
+
+/// A read whose handles the caller's table cannot hold fails with
+/// `ERR_NO_RESOURCES`, stores the sizes and leaves the message queued; it
+/// succeeds once the table has room.
+fn channel_read_into_a_full_table(s: &Startup) -> Result {
+    const NO_RESOURCES: i64 = -3;
+    const SAME_RIGHTS: u32 = 1 << 31;
+    const LIMIT: u64 = 65536;
+    let (mut a, mut b, mut event) = (0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check("creating a channel", sys::channel_create(0, &mut a, &mut b))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    let mut sent = [0; 2];
+    for copy in &mut sent {
+        // SAFETY: the out pointer is valid for the call.
+        check("duplicating", unsafe {
+            sys::handle_duplicate(event, SAME_RIGHTS, copy)
+        })?;
+    }
+    // SAFETY: the pointers describe the byte and `sent`.
+    check("writing two handles", unsafe {
+        sys::channel_write(a, b"x".as_ptr(), 1, sent.as_ptr(), 2)
+    })?;
+    // The duplicates that fill the table are kept in a mapped object.
+    let size = LIMIT * 4;
+    let store = create_memory(size)?;
+    let at = map(s.process, store, size)?;
+    let kept = at as *mut Handle;
+    let mut count = 0;
+    loop {
+        let mut copy = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status = unsafe { sys::handle_duplicate(event, SAME_RIGHTS, &mut copy) };
+        if status == NO_RESOURCES {
+            break;
+        }
+        check("filling the table", status)?;
+        ensure("staying within the store", count < LIMIT)?;
+        // SAFETY: the store holds `LIMIT` handles.
+        unsafe { kept.add(count as usize).write(copy) };
+        count += 1;
+    }
+    let close_last = |count: &mut u64| {
+        *count -= 1;
+        // SAFETY: the store holds the handle; the call takes no pointers.
+        unsafe { sys::handle_close(kept.add(*count as usize).read()) };
+    };
+    close_last(&mut count);
+    let refused = read_sizes(b, 16, 2);
+    close_last(&mut count);
+    let read = read_sizes(b, 16, 2);
+    while count > 0 {
+        close_last(&mut count);
+    }
+    ensure(
+        "refusing a read without room for its handles",
+        refused == (NO_RESOURCES, 1, 2),
+    )?;
+    ensure("reading it once there is room", read == (0, 1, 2))?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        sys::vm_unmap(s.process, at, size);
+        for handle in [store, event, a, b] {
+            sys::handle_close(handle);
+        }
+    }
+    Ok(())
+}
+
+/// A refused `channel_write` queues nothing and keeps the caller's
+/// handles; a written handle leaves the caller's table and arrives with
+/// the rights it had; a read into buffers that are too small stores the
+/// sizes and leaves the message queued; and a closed peer is reported.
+fn channel_errors(s: &Startup) -> Result {
+    let (mut a, mut b, mut event) = (0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check("creating a channel", sys::channel_create(0, &mut a, &mut b))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    // 65 handles, one more than a message holds, each transferable.
+    let mut many = [0 as Handle; 65];
+    for h in &mut many {
+        // SAFETY: the out pointer is valid for the call.
+        check("duplicating", unsafe {
+            sys::handle_duplicate(event, 0x8000_0000, h)
+        })?;
+    }
+    let big = 17 * PAGE_SIZE;
+    let at = map(s.process, create_memory(big)?, big)?;
+    // SAFETY: the bytes and handles lie in mapped memory.
+    let refused = unsafe {
+        [
+            (
+                "refusing 65537 bytes",
+                sys::channel_write(a, at as *const u8, 65537, core::ptr::null(), 0),
+                OUT_OF_RANGE,
+            ),
+            (
+                "refusing 65 handles",
+                sys::channel_write(a, at as *const u8, 1, many.as_ptr(), 65),
+                OUT_OF_RANGE,
+            ),
+            (
+                "refusing a handle twice",
+                sys::channel_write(a, at as *const u8, 1, [event, event].as_ptr(), 2),
+                INVALID_ARGS,
+            ),
+            (
+                "refusing the channel's own handle",
+                sys::channel_write(a, at as *const u8, 1, &a, 1),
+                INVALID_ARGS,
+            ),
+        ]
+    };
+    for (what, status, expected) in refused {
+        ensure(what, status == expected)?;
+    }
+    ensure("queueing nothing", read_sizes(b, 16, 2).0 == SHOULD_WAIT)?;
+    for h in many.into_iter().chain([event]) {
+        // SAFETY: the call takes no pointers.
+        check("keeping the handles", unsafe { sys::handle_close(h) })?;
+    }
+
+    let mut sent = 0;
+    let rights = (1 << 0) | (1 << 1) | (1 << 9);
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a handle to send", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    // SAFETY: the out pointer is valid for the call.
+    check("restricting its rights", unsafe {
+        sys::handle_replace(event, rights, &mut sent)
+    })?;
+    // SAFETY: the pointers describe the message and the handle.
+    check("writing", unsafe {
+        sys::channel_write(a, b"eight by".as_ptr(), 8, &sent, 1)
+    })?;
+    ensure(
+        "moving the handle out of the table",
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::handle_close(sent) } == BAD_HANDLE,
+    )?;
+    for (cap, handles_cap) in [(4, 1), (8, 0)] {
+        ensure(
+            "storing the sizes of a message too large",
+            read_sizes(b, cap, handles_cap) == (BUFFER_TOO_SMALL, 8, 1),
+        )?;
+    }
+    let m = read_message(b, 1)?;
+    ensure(
+        "keeping the message",
+        &m.bytes[..m.len] == b"eight by" && m.count == 1,
+    )?;
+    ensure(
+        "keeping the rights",
+        u32_at(&info::<0x18>(m.handles[0], 1)?, 20) == rights,
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check(
+            "closing the received handle",
+            sys::handle_close(m.handles[0]),
+        )?;
+        check("closing one end", sys::handle_close(a))?;
+    }
+    ensure(
+        "reporting the closed peer",
+        read_sizes(b, 16, 2).0 == PEER_CLOSED,
+    )?;
+    ensure(
+        "refusing to write to a closed peer",
+        // SAFETY: the pointer describes one byte.
+        unsafe { sys::channel_write(b, b"x".as_ptr(), 1, core::ptr::null(), 0) } == PEER_CLOSED,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the other end", unsafe { sys::handle_close(b) })
 }
 
 /// Two channels whose endpoints are only carried by messages queued
@@ -2324,10 +3483,43 @@ fn debug_at_syscall_entry(s: &Startup) -> Result {
     )
 }
 
+/// The ranges of kernel code, start and end, that the command line names
+/// with `key`, such as `interrupt_code=`, as `start-end` in hexadecimal
+/// separated by commas, and their number.
+#[cfg(feature = "fuzz")]
+fn code_ranges(s: &Startup, key: &str) -> ([(u64, u64); 16], usize) {
+    let mut ranges = [(0, 0); 16];
+    let mut count = 0;
+    let cmdline = core::str::from_utf8(s.cmdline).unwrap_or("");
+    let list = cmdline
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix(key))
+        .unwrap_or("");
+    for range in list.split(',') {
+        let hex = |text: &str| u64::from_str_radix(text, 16).ok();
+        let Some((start, end)) = range.split_once('-') else {
+            continue;
+        };
+        if let (Some(start), Some(end)) = (hex(start), hex(end))
+            && count < ranges.len()
+        {
+            ranges[count] = (start, end);
+            count += 1;
+        }
+    }
+    (ranges, count)
+}
+
 /// In a fuzz build, coverage goes only into an anonymous object and
-/// records the kernel's blocks while it is on.
+/// records the kernel's blocks while it is on, as kcov does: a `u64`
+/// count and then the addresses, all in the kernel's code, up to as many
+/// as the object holds. It leaves out the code that handles interrupts,
+/// whose ranges the command line gives: none of its addresses is
+/// recorded while the thread polls a timer that fires in an interrupt.
+/// Nor does it record the idle loop's code while the thread sleeps.
 #[cfg(feature = "fuzz")]
 fn coverage(s: &Startup) -> Result {
+    const KERNEL_START: u64 = 0xFFFF_FFFF_8000_0000;
     let (_pager, paged) = paged_object(s, 1, 0)?;
     // SAFETY: the call takes no pointers.
     let status = unsafe { sys::fuzz_cov_enable(paged) };
@@ -2339,19 +3531,133 @@ fn coverage(s: &Startup) -> Result {
         now();
         check("disabling coverage", sys::fuzz_cov_disable())?;
     }
-    let count = u64::from_le_bytes(mem_read_at::<8>(mem, 0)?);
-    ensure("recording blocks", count > 0)
+    let at = map(s.process, mem, 4 * PAGE_SIZE)?;
+    // SAFETY: the object is mapped readable, and nothing writes it now.
+    let words = unsafe { core::slice::from_raw_parts(at as *const u64, 4 * 512) };
+    let count = words[0] as usize;
+    ensure("recording blocks", count > 0 && count < words.len())?;
+    ensure(
+        "recording addresses in the kernel's code",
+        words[1..=count].iter().all(|&pc| pc >= KERNEL_START),
+    )?;
+
+    // One page holds the count and 511 addresses.
+    let small = create_memory(PAGE_SIZE)?;
+    // SAFETY: the calls take no pointers or a valid one.
+    unsafe {
+        check("enabling coverage", sys::fuzz_cov_enable(small))?;
+        for _ in 0..100 {
+            now();
+        }
+        check("disabling coverage", sys::fuzz_cov_disable())?;
+    }
+    let count = u64::from_le_bytes(mem_read_at::<8>(small, 0)?);
+    ensure("stopping once the object is full", count == 511)?;
+
+    let (ranges, n) = code_ranges(s, "interrupt_code=");
+    ensure("naming the interrupt code", n > 0)?;
+    let mut timer = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a timer", unsafe {
+        sys::timer_create(0, &mut timer)
+    })?;
+    let pages = 256;
+    let large = create_memory(pages * PAGE_SIZE)?;
+    // No page may fault in while coverage is on, as the kernel's handling
+    // of the fault is recorded.
+    touch_stack();
+    let fired = || wait(timer, SIGNALED, 0).1 & SIGNALED != 0;
+    ensure("waiting for the timer", !fired())?;
+    // SAFETY: the calls take no pointers or a valid one.
+    unsafe {
+        check(
+            "setting the timer",
+            sys::timer_set(timer, now() + 3_000_000),
+        )?;
+        check("enabling coverage", sys::fuzz_cov_enable(large))?;
+    }
+    // Polls about once per million TSC ticks, so that the object holds
+    // what the polls record until the timer fires.
+    for _ in 0..10_000 {
+        if fired() {
+            break;
+        }
+        // SAFETY: RDTSC only reads the time stamp counter.
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        // SAFETY: as above.
+        while unsafe { core::arch::x86_64::_rdtsc() } - start < 1_000_000 {
+            core::hint::spin_loop();
+        }
+    }
+    // SAFETY: the call takes no pointers.
+    check("disabling coverage", unsafe { sys::fuzz_cov_disable() })?;
+    ensure("firing the timer", fired())?;
+    let at = map(s.process, large, pages * PAGE_SIZE)?;
+    // SAFETY: the object is mapped readable, and nothing writes it now.
+    let words = unsafe { core::slice::from_raw_parts(at as *const u64, pages as usize * 512) };
+    let count = words[0] as usize;
+    ensure(
+        "recording without filling the object",
+        count < words.len() - 1,
+    )?;
+    let inside = |pc: u64| {
+        ranges[..n]
+            .iter()
+            .any(|&(start, end)| (start..end).contains(&pc))
+    };
+    ensure(
+        "leaving out the interrupt code",
+        !words[1..=count].iter().any(|&pc| inside(pc)),
+    )?;
+    // SAFETY: the call takes no pointers.
+    unsafe {
+        check("unmapping", sys::vm_unmap(s.process, at, pages * PAGE_SIZE))?;
+        check("closing the timer", sys::handle_close(timer))?;
+        check("closing the object", sys::handle_close(large))?;
+    }
+
+    // While the thread sleeps, the processor idles on behalf of no
+    // thread: none of the code only the idle loop runs is recorded.
+    let (idle, m) = code_ranges(s, "idle_code=");
+    ensure("naming the idle code", m > 0)?;
+    let pages = 16;
+    let asleep = create_memory(pages * PAGE_SIZE)?;
+    touch_stack();
+    // SAFETY: the call takes a valid handle.
+    check("enabling coverage", unsafe { sys::fuzz_cov_enable(asleep) })?;
+    sleep_ms(20);
+    // SAFETY: the call takes no pointers.
+    check("disabling coverage", unsafe { sys::fuzz_cov_disable() })?;
+    let at = map(s.process, asleep, pages * PAGE_SIZE)?;
+    // SAFETY: the object is mapped readable, and nothing writes it now.
+    let words = unsafe { core::slice::from_raw_parts(at as *const u64, pages as usize * 512) };
+    let count = (words[0] as usize).min(words.len() - 1);
+    let idling = |pc: u64| {
+        idle[..m]
+            .iter()
+            .any(|&(start, end)| (start..end).contains(&pc))
+    };
+    ensure(
+        "recording the sleep",
+        count > 0 && !words[1..=count].iter().any(|&pc| idling(pc)),
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("unmapping", sys::vm_unmap(s.process, at, pages * PAGE_SIZE))?;
+        check("closing the object", sys::handle_close(asleep))
+    }
 }
 
-/// Outside fuzz builds the numbers of `fuzz_cov_enable` and
-/// `fuzz_cov_disable`, 45 and 46, are not assigned, so the bindings leave
-/// the calls out and the test makes them by number.
+/// Outside fuzz builds the numbers of the calls that exist only in fuzz
+/// builds, from `fuzz_cov_enable` at 45 and `fuzz_cov_disable` at 46 to
+/// the test hooks from 91 on, are not assigned, so the bindings leave the
+/// calls out and the test makes them by number.
 #[cfg(not(feature = "fuzz"))]
 fn coverage(_: &Startup) -> Result {
     /// The status of an unassigned number.
     const BAD_SYSCALL: i64 = -5;
     let mem = create_memory(PAGE_SIZE)?;
-    for number in [45u64, 46] {
+    for number in [45u64, 46, 91, 92, 93, 94] {
         let status: i64;
         // SAFETY: SYSCALL changes only RAX, RCX and R11, and an
         // unassigned number reads no argument.
@@ -2370,8 +3676,16 @@ fn coverage(_: &Startup) -> Result {
     check("closing the object", unsafe { sys::handle_close(mem) })
 }
 
-/// Set by `straddling_reader` once its read returned.
-static READ_DONE: AtomicU64 = AtomicU64::new(0);
+/// The handle of the last `straddling_reader`.
+static READER: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the last `straddling_reader` is past its read, which blocks
+/// until the pager answers. Its own report of that would come only once
+/// it is back in user mode, which a woken thread may run before.
+fn read_done() -> bool {
+    let reader = READER.load(Ordering::Acquire) as Handle;
+    thread_state(reader).is_ok_and(|state| state != STATE_BLOCKED)
+}
 
 /// Answers one page request on `port` for `mem` after 50 ms.
 extern "sysv64" fn slow_pager_thread(port: u64, mem: u64) -> ! {
@@ -2391,11 +3705,10 @@ extern "sysv64" fn slow_pager_thread(port: u64, mem: u64) -> ! {
     unreachable!("thread_exit returned");
 }
 
-/// Reads 16 bytes of `source` to `at`, then sets `READ_DONE`.
+/// Reads 16 bytes of `source` to `at`, then exits.
 extern "sysv64" fn straddling_reader(source: u64, at: u64) -> ! {
     // SAFETY: the destination lies in two writable mappings.
     unsafe { sys::mem_read(source as Handle, 0, at as *mut u8, 16) };
-    READ_DONE.store(1, Ordering::Release);
     // SAFETY: the call takes no pointers.
     unsafe { sys::thread_exit() };
     unreachable!("thread_exit returned");
@@ -2452,8 +3765,8 @@ fn start_straddling_read(s: &Startup, first: Handle) -> Result<u64> {
     check("mapping the paged object next to it", status)?;
     let source = create_memory(PAGE_SIZE)?;
     mem_write_at(source, 0, b"0123456789abcdef")?;
-    READ_DONE.store(0, Ordering::Release);
     let reader = spawn2(s, straddling_reader, u64::from(source), at + PAGE_SIZE - 8)?;
+    READER.store(u64::from(reader), Ordering::Release);
     wait_until_blocked(reader)?;
     Ok(at)
 }
@@ -2468,10 +3781,7 @@ fn seal_waits_for_outputs(s: &Startup) -> Result {
         sys::vm_unmap(s.process, at, PAGE_SIZE)
     })?;
     check("sealing", seal(plain, 1 << 3))?;
-    ensure(
-        "waiting for the write",
-        READ_DONE.load(Ordering::Acquire) == 1,
-    )?;
+    ensure("waiting for the write", read_done())?;
     ensure(
         "keeping the written bytes",
         mem_read_at::<8>(plain, PAGE_SIZE - 8)? == *b"01234567",
@@ -2496,10 +3806,7 @@ fn evict_waits_for_outputs(s: &Startup) -> Result {
     })?;
     start_straddling_read(s, mem)?;
     check("evicting", pager_op(pager, mem, 2, 0, PAGE_SIZE))?;
-    ensure(
-        "waiting for the write",
-        READ_DONE.load(Ordering::Acquire) == 1,
-    )
+    ensure("waiting for the write", read_done())
 }
 
 /// Supplying pages from an object waits for a kernel write into it that
@@ -2523,10 +3830,7 @@ fn supply_waits_for_outputs(s: &Startup) -> Result {
     check("supplying", unsafe {
         sys::pager_supply(pager, mem, 0, PAGE_SIZE, plain, 0)
     })?;
-    ensure(
-        "waiting for the write",
-        READ_DONE.load(Ordering::Acquire) == 1,
-    )?;
+    ensure("waiting for the write", read_done())?;
     ensure(
         "moving the written bytes",
         mem_read_at::<8>(mem, PAGE_SIZE - 8)? == *b"01234567",
@@ -2543,14 +3847,197 @@ fn clone_waits_for_outputs(s: &Startup) -> Result {
     check("cloning", unsafe {
         sys::mem_clone(plain, 0, 0, PAGE_SIZE, &mut clone)
     })?;
-    ensure(
-        "waiting for the write",
-        READ_DONE.load(Ordering::Acquire) == 1,
-    )?;
+    ensure("waiting for the write", read_done())?;
     ensure(
         "cloning the written bytes",
         mem_read_at::<8>(clone, PAGE_SIZE - 8)? == *b"01234567",
     )
+}
+
+/// The process and the permissions `waiting_mapper` maps with, and the
+/// status its `vm_map` returned.
+static MAPPER: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+/// Maps a page of `mem` as `MAPPER` says, with its output at `out`,
+/// stores the status in `MAPPER` and exits.
+extern "sysv64" fn waiting_mapper(mem: u64, out: u64) -> ! {
+    let process = MAPPER[0].load(Ordering::Acquire) as Handle;
+    let perms = MAPPER[1].load(Ordering::Acquire) as u32;
+    // SAFETY: `out` lies in a writable mapping.
+    let status = unsafe {
+        sys::vm_map(
+            process,
+            perms,
+            0,
+            mem as Handle,
+            0,
+            PAGE_SIZE,
+            out as *mut u64,
+        )
+    };
+    MAPPER[2].store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Starts a thread mapping a page of `mem` with `perms`, whose output
+/// lies on a page of a paged object that its pager supplies after 50 ms,
+/// and returns the thread once it waits for that page.
+fn start_waiting_map(s: &Startup, mem: Handle, perms: u32, key: u64) -> Result<Handle> {
+    let (mut pager, mut port, mut paged) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, key, PAGE_SIZE, 0, &mut paged);
+        check("creating a paged object", status)?;
+    }
+    PAGER.store(u64::from(pager), Ordering::Release);
+    spawn2(s, slow_pager_thread, u64::from(port), u64::from(paged))?;
+    let out = map(s.process, paged, PAGE_SIZE)?;
+    MAPPER[0].store(u64::from(s.process), Ordering::Release);
+    MAPPER[1].store(u64::from(perms), Ordering::Release);
+    let mapper = spawn2(s, waiting_mapper, u64::from(mem), out)?;
+    wait_until_blocked(mapper)?;
+    Ok(mapper)
+}
+
+/// A seal or a revocation that comes while `vm_map` waits to prepare its
+/// output makes the call fail when it goes on.
+fn map_checks_again_after_waiting(s: &Startup) -> Result {
+    let plain = create_memory(PAGE_SIZE)?;
+    let mapper = start_waiting_map(s, plain, PERM_READ | PERM_WRITE, 10)?;
+    check("sealing meanwhile", seal(plain, 1 << 3))?;
+    ensure(
+        "ending the mapping",
+        wait(mapper, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "refusing a writable mapping of a sealed object",
+        MAPPER[2].load(Ordering::Acquire) as i64 == ACCESS_DENIED,
+    )?;
+
+    let (mut pager, mut port, mut paged) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 11, PAGE_SIZE, 0, &mut paged);
+        check("creating a paged object", status)?;
+    }
+    let mapper = start_waiting_map(s, paged, PERM_READ, 12)?;
+    // SAFETY: the call takes no pointers.
+    check("revoking meanwhile", unsafe {
+        sys::pager_revoke(pager, paged)
+    })?;
+    ensure(
+        "ending the mapping",
+        wait(mapper, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "refusing a mapping of a revoked object",
+        MAPPER[2].load(Ordering::Acquire) as i64 == ACCESS_DENIED,
+    )
+}
+
+/// The pages of the source of `supply_beside`: more than the kernel
+/// supplies in one piece, so that other threads run in between.
+const SUPPLIED_PAGES: u64 = 4 * 512 + 1;
+
+/// Set when the supply of `supply_beside` is about to begin, and the
+/// first 8 bytes of the last page of its source as `sealer` or
+/// `revoker` read them right after their call returned.
+static SUPPLY_BEGUN: AtomicU64 = AtomicU64::new(0);
+static SEEN_AFTER: AtomicU64 = AtomicU64::new(0);
+
+/// Records the start of the last page of the supply's `source`.
+fn see_last_page(source: Handle) {
+    let seen = mem_read_at::<8>(source, (SUPPLIED_PAGES - 1) * PAGE_SIZE);
+    SEEN_AFTER.store(seen.map_or(u64::MAX, u64::from_le_bytes), Ordering::Release);
+}
+
+/// Seals `source` with `WRITE` once the supply has begun, then records
+/// its last page.
+extern "sysv64" fn sealer(source: u64, _: u64) -> ! {
+    while SUPPLY_BEGUN.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    if seal(source as Handle, 1 << 3) == 0 {
+        see_last_page(source as Handle);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Revokes `paged` of the pager in `PAGER` once the supply has begun,
+/// then records the last page of `source`.
+extern "sysv64" fn revoker(paged: u64, source: u64) -> ! {
+    while SUPPLY_BEGUN.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    let pager = PAGER.load(Ordering::Acquire) as Handle;
+    // SAFETY: the call takes no pointers.
+    if unsafe { sys::pager_revoke(pager, paged as Handle) } == 0 {
+        see_last_page(source as Handle);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Supplies a new paged object from a source of `SUPPLIED_PAGES` pages
+/// while another thread seals the source, when `sealing`, or revokes the
+/// object, and checks that the supply did not change the source after
+/// that call returned: it ended first, or it was refused.
+fn supply_beside(s: &Startup, sealing: bool) -> Result {
+    let len = SUPPLIED_PAGES * PAGE_SIZE;
+    let source = create_memory(len)?;
+    mem_write_at(source, len - PAGE_SIZE, b"lastpage")?;
+    let (mut pager, mut port, mut paged) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 13, len, 0, &mut paged);
+        check("creating a paged object", status)?;
+    }
+    PAGER.store(u64::from(pager), Ordering::Release);
+    SUPPLY_BEGUN.store(0, Ordering::Release);
+    SEEN_AFTER.store(u64::MAX - 1, Ordering::Release);
+    let helper = match sealing {
+        true => spawn2(s, sealer, u64::from(source), 0)?,
+        false => spawn2(s, revoker, u64::from(paged), u64::from(source))?,
+    };
+    SUPPLY_BEGUN.store(1, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::pager_supply(pager, paged, 0, len, source, 0) };
+    ensure(
+        "supplying or refusing the whole call",
+        status == 0 || status == ACCESS_DENIED,
+    )?;
+    ensure(
+        "ending the helper",
+        wait(helper, TERMINATED, in_time()).0 == 0,
+    )?;
+    let last = u64::from_le_bytes(mem_read_at::<8>(source, len - PAGE_SIZE)?);
+    ensure(
+        "leaving the source as it was when the call returned",
+        SEEN_AFTER.load(Ordering::Acquire) == last,
+    )?;
+    for handle in [source, paged, port, pager] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(handle) })?;
+    }
+    Ok(())
+}
+
+/// A `WRITE` seal of a source and a revocation of the paged object wait
+/// for a supply that is under way.
+fn seal_and_revoke_wait_for_supply(s: &Startup) -> Result {
+    supply_beside(s, true)?;
+    supply_beside(s, false)
 }
 
 type Test = fn(&Startup) -> Result;
@@ -2940,6 +4427,66 @@ fn read_process_memory(s: &Startup) -> Result {
     )
 }
 
+/// Init's stack is 256 KiB, and init started with the stack pointer at
+/// its top: the return address of the runtime's first call, from
+/// `_start`, lies right below it. The page below the stack stays
+/// reserved: nothing there can be read, a mapping placed there is
+/// refused, and access to it cannot be granted.
+fn stack_guard_page_kept(s: &Startup) -> Result {
+    const STACK_SIZE: u64 = 256 << 10;
+    /// The bytes of `xor ebp, ebp` and `call`, which `_start` begins with.
+    const FIRST_CALL_END: u64 = 7;
+    unsafe extern "C" {
+        static _start: u8;
+    }
+    let rsp: u64;
+    // SAFETY: the instruction only reads the stack pointer.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
+    let mut guard = rsp & !(PAGE_SIZE - 1);
+    while read_memory(s.process, guard, &mut [0u8; 1]) >= 0 {
+        guard -= PAGE_SIZE;
+    }
+    ensure(
+        "finding nothing below the stack",
+        read_memory(s.process, guard, &mut [0u8; 1]) == NOT_FOUND,
+    )?;
+    let top = guard + PAGE_SIZE + STACK_SIZE;
+    let mut word = [0u8; 8];
+    check(
+        "reading the top of the stack",
+        read_memory(s.process, top - 8, &mut word),
+    )?;
+    ensure(
+        "starting at the top of the stack",
+        u64::from_le_bytes(word) == (&raw const _start) as u64 + FIRST_CALL_END,
+    )?;
+    let mem = create_memory(PAGE_SIZE)?;
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ | mikros_test::SPECIFIC,
+            guard,
+            mem,
+            0,
+            PAGE_SIZE,
+            &mut at,
+        )
+    };
+    if status == 0 {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::vm_unmap(s.process, at, PAGE_SIZE) };
+    }
+    ensure("refusing a mapping there", status == ALREADY_EXISTS)?;
+    ensure(
+        "refusing access to it",
+        protect(s, PERM_READ, guard, PAGE_SIZE) == ACCESS_DENIED,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(mem) })
+}
+
 fn write_memory(process: Handle, addr: u64, bytes: &[u8]) -> i64 {
     // SAFETY: the pointer and length describe `bytes`.
     unsafe { sys::process_write_memory(process, addr, bytes.as_ptr(), bytes.len() as u64) }
@@ -2957,7 +4504,8 @@ fn map_with(s: &Startup, options: u32, addr: u64, mem: Handle, len: u64) -> Resu
 
 /// A debugger writes the memory of a process whatever the permissions
 /// of its mappings, and new code runs; mappings from handles without
-/// `WRITE`, sealed objects and revoked objects refuse the whole write.
+/// `WRITE`, sealed objects, revoked objects and a source buffer that
+/// cannot be read to its end refuse the whole write.
 fn write_process_memory(s: &Startup) -> Result {
     const EXECUTE: u32 = 4;
     const SPECIFIC: u32 = 1 << 8;
@@ -3018,6 +4566,30 @@ fn write_process_memory(s: &Startup) -> Result {
         mem_read_at::<6>(mem, PAGE_SIZE - 3)? == *b"ABCDEF",
     )?;
 
+    // The source's first 256 bytes are readable and the rest is not.
+    let source = create_memory(2 * PAGE_SIZE)?;
+    let src = map(s.process, source, 2 * PAGE_SIZE)?;
+    let readable = src + PAGE_SIZE - 256;
+    for i in 0..256 {
+        // SAFETY: the first page of the mapping is writable.
+        unsafe { ((readable + i) as *mut u8).write_volatile(0xAB) };
+    }
+    check(
+        "making the source's end unreadable",
+        protect(s, 0, src + PAGE_SIZE, PAGE_SIZE),
+    )?;
+    ensure(
+        "refusing a source that cannot be read",
+        // SAFETY: the kernel only reads the 512 bytes from the pointer.
+        unsafe { sys::process_write_memory(s.process, at, readable as *const u8, 512) }
+            == INVALID_ARGS,
+    )?;
+    ensure("writing none of it", mem_read_at::<8>(mem, 0)? == [0; 8])?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping the source", unsafe {
+        sys::vm_unmap(s.process, src, 2 * PAGE_SIZE)
+    })?;
+
     let sealed = create_memory(PAGE_SIZE)?;
     let sat = map_with(s, PERM_READ, 0, sealed, PAGE_SIZE)?;
     ensure("sealing", seal(sealed, 1 << 3) == 0)?;
@@ -3051,12 +4623,1386 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 47] = [
+/// What `start_probe` finds at its first instruction: RAX to R15 in the
+/// order of the `GENERAL` layout, RFLAGS, the FS and GS bases, the x87
+/// control word and MXCSR, and the 16 YMM registers.
+static mut START_STATE: [u64; 21] = [0; 21];
+static mut START_YMM: [[u64; 4]; 16] = [[0; 4]; 16];
+
+/// The values `register_keeper` holds in RAX to R15, without RSP, in
+/// that order, and in the YMM registers.
+const GENERAL_PATTERN: [u64; 15] = {
+    let mut p = [0; 15];
+    let mut k = 0;
+    while k < 15 {
+        p[k] = (k as u64 + 1) * 0x0101_0101_0101_0101;
+        k += 1;
+    }
+    p
+};
+static YMM_PATTERN: [[u64; 4]; 16] = {
+    let mut p = [[0; 4]; 16];
+    let mut n = 0;
+    while n < 16 {
+        let mut lane = 0;
+        while lane < 4 {
+            p[n][lane] = 0xA5A5_0000_0000_0000 | (n as u64) << 16 | lane as u64;
+            lane += 1;
+        }
+        n += 1;
+    }
+    p
+};
+
+/// Set by `register_keeper` once its registers hold the patterns, and by
+/// `register_clobberer` once it ran; and what `register_keeper` found in
+/// its registers afterwards.
+static KEEPER_READY: AtomicU64 = AtomicU64::new(0);
+static CLOBBERER_RAN: AtomicU64 = AtomicU64::new(0);
+static mut KEPT: [u64; 15] = [0; 15];
+static mut KEPT_YMM: [[u64; 4]; 16] = [[0; 4]; 16];
+
+// `start_probe` records the state a thread starts with before any
+// instruction changes it. `register_keeper` fills every general and
+// vector register with patterns, spins until `register_clobberer` has
+// run with other values in them, and records what it finds. All three
+// then end their thread.
+core::arch::global_asm!(
+    ".global start_probe",
+    "start_probe:",
+    "mov [rip + {state}], rax",
+    "mov [rip + {state} + 8], rbx",
+    "mov [rip + {state} + 16], rcx",
+    "mov [rip + {state} + 24], rdx",
+    "mov [rip + {state} + 32], rsi",
+    "mov [rip + {state} + 40], rdi",
+    "mov [rip + {state} + 48], rbp",
+    "mov [rip + {state} + 56], rsp",
+    "mov [rip + {state} + 64], r8",
+    "mov [rip + {state} + 72], r9",
+    "mov [rip + {state} + 80], r10",
+    "mov [rip + {state} + 88], r11",
+    "mov [rip + {state} + 96], r12",
+    "mov [rip + {state} + 104], r13",
+    "mov [rip + {state} + 112], r14",
+    "mov [rip + {state} + 120], r15",
+    "pushfq",
+    "pop qword ptr [rip + {state} + 128]",
+    "rdfsbase rax",
+    "mov [rip + {state} + 136], rax",
+    "rdgsbase rax",
+    "mov [rip + {state} + 144], rax",
+    "fnstcw word ptr [rip + {state} + 152]",
+    "stmxcsr dword ptr [rip + {state} + 160]",
+    "vmovdqu [rip + {start_ymm}], ymm0",
+    "vmovdqu [rip + {start_ymm} + 32], ymm1",
+    "vmovdqu [rip + {start_ymm} + 64], ymm2",
+    "vmovdqu [rip + {start_ymm} + 96], ymm3",
+    "vmovdqu [rip + {start_ymm} + 128], ymm4",
+    "vmovdqu [rip + {start_ymm} + 160], ymm5",
+    "vmovdqu [rip + {start_ymm} + 192], ymm6",
+    "vmovdqu [rip + {start_ymm} + 224], ymm7",
+    "vmovdqu [rip + {start_ymm} + 256], ymm8",
+    "vmovdqu [rip + {start_ymm} + 288], ymm9",
+    "vmovdqu [rip + {start_ymm} + 320], ymm10",
+    "vmovdqu [rip + {start_ymm} + 352], ymm11",
+    "vmovdqu [rip + {start_ymm} + 384], ymm12",
+    "vmovdqu [rip + {start_ymm} + 416], ymm13",
+    "vmovdqu [rip + {start_ymm} + 448], ymm14",
+    "vmovdqu [rip + {start_ymm} + 480], ymm15",
+    "jmp {done}",
+    ".global register_keeper",
+    "register_keeper:",
+    "mov rax, {g0}",
+    "mov rbx, {g1}",
+    "mov rcx, {g2}",
+    "mov rdx, {g3}",
+    "mov rsi, {g4}",
+    "mov rdi, {g5}",
+    "mov rbp, {g6}",
+    "mov r8, {g7}",
+    "mov r9, {g8}",
+    "mov r10, {g9}",
+    "mov r11, {g10}",
+    "mov r12, {g11}",
+    "mov r13, {g12}",
+    "mov r14, {g13}",
+    "mov r15, {g14}",
+    "vmovdqu ymm0, [rip + {pattern}]",
+    "vmovdqu ymm1, [rip + {pattern} + 32]",
+    "vmovdqu ymm2, [rip + {pattern} + 64]",
+    "vmovdqu ymm3, [rip + {pattern} + 96]",
+    "vmovdqu ymm4, [rip + {pattern} + 128]",
+    "vmovdqu ymm5, [rip + {pattern} + 160]",
+    "vmovdqu ymm6, [rip + {pattern} + 192]",
+    "vmovdqu ymm7, [rip + {pattern} + 224]",
+    "vmovdqu ymm8, [rip + {pattern} + 256]",
+    "vmovdqu ymm9, [rip + {pattern} + 288]",
+    "vmovdqu ymm10, [rip + {pattern} + 320]",
+    "vmovdqu ymm11, [rip + {pattern} + 352]",
+    "vmovdqu ymm12, [rip + {pattern} + 384]",
+    "vmovdqu ymm13, [rip + {pattern} + 416]",
+    "vmovdqu ymm14, [rip + {pattern} + 448]",
+    "vmovdqu ymm15, [rip + {pattern} + 480]",
+    "mov qword ptr [rip + {ready}], 1",
+    "2:",
+    "pause",
+    "cmp qword ptr [rip + {ran}], 0",
+    "je 2b",
+    "mov [rip + {kept}], rax",
+    "mov [rip + {kept} + 8], rbx",
+    "mov [rip + {kept} + 16], rcx",
+    "mov [rip + {kept} + 24], rdx",
+    "mov [rip + {kept} + 32], rsi",
+    "mov [rip + {kept} + 40], rdi",
+    "mov [rip + {kept} + 48], rbp",
+    "mov [rip + {kept} + 56], r8",
+    "mov [rip + {kept} + 64], r9",
+    "mov [rip + {kept} + 72], r10",
+    "mov [rip + {kept} + 80], r11",
+    "mov [rip + {kept} + 88], r12",
+    "mov [rip + {kept} + 96], r13",
+    "mov [rip + {kept} + 104], r14",
+    "mov [rip + {kept} + 112], r15",
+    "vmovdqu [rip + {kept_ymm}], ymm0",
+    "vmovdqu [rip + {kept_ymm} + 32], ymm1",
+    "vmovdqu [rip + {kept_ymm} + 64], ymm2",
+    "vmovdqu [rip + {kept_ymm} + 96], ymm3",
+    "vmovdqu [rip + {kept_ymm} + 128], ymm4",
+    "vmovdqu [rip + {kept_ymm} + 160], ymm5",
+    "vmovdqu [rip + {kept_ymm} + 192], ymm6",
+    "vmovdqu [rip + {kept_ymm} + 224], ymm7",
+    "vmovdqu [rip + {kept_ymm} + 256], ymm8",
+    "vmovdqu [rip + {kept_ymm} + 288], ymm9",
+    "vmovdqu [rip + {kept_ymm} + 320], ymm10",
+    "vmovdqu [rip + {kept_ymm} + 352], ymm11",
+    "vmovdqu [rip + {kept_ymm} + 384], ymm12",
+    "vmovdqu [rip + {kept_ymm} + 416], ymm13",
+    "vmovdqu [rip + {kept_ymm} + 448], ymm14",
+    "vmovdqu [rip + {kept_ymm} + 480], ymm15",
+    "jmp {done}",
+    ".global register_clobberer",
+    "register_clobberer:",
+    "mov rax, -1",
+    "mov rbx, rax",
+    "mov rcx, rax",
+    "mov rdx, rax",
+    "mov rsi, rax",
+    "mov rdi, rax",
+    "mov rbp, rax",
+    "mov r8, rax",
+    "mov r9, rax",
+    "mov r10, rax",
+    "mov r11, rax",
+    "mov r12, rax",
+    "mov r13, rax",
+    "mov r14, rax",
+    "mov r15, rax",
+    "vpcmpeqd ymm0, ymm0, ymm0",
+    "vmovdqa ymm1, ymm0",
+    "vmovdqa ymm2, ymm0",
+    "vmovdqa ymm3, ymm0",
+    "vmovdqa ymm4, ymm0",
+    "vmovdqa ymm5, ymm0",
+    "vmovdqa ymm6, ymm0",
+    "vmovdqa ymm7, ymm0",
+    "vmovdqa ymm8, ymm0",
+    "vmovdqa ymm9, ymm0",
+    "vmovdqa ymm10, ymm0",
+    "vmovdqa ymm11, ymm0",
+    "vmovdqa ymm12, ymm0",
+    "vmovdqa ymm13, ymm0",
+    "vmovdqa ymm14, ymm0",
+    "vmovdqa ymm15, ymm0",
+    "mov qword ptr [rip + {ran}], 1",
+    "jmp {done}",
+    state = sym START_STATE,
+    start_ymm = sym START_YMM,
+    pattern = sym YMM_PATTERN,
+    ready = sym KEEPER_READY,
+    ran = sym CLOBBERER_RAN,
+    kept = sym KEPT,
+    kept_ymm = sym KEPT_YMM,
+    done = sym end_asm_thread,
+    g0 = const GENERAL_PATTERN[0],
+    g1 = const GENERAL_PATTERN[1],
+    g2 = const GENERAL_PATTERN[2],
+    g3 = const GENERAL_PATTERN[3],
+    g4 = const GENERAL_PATTERN[4],
+    g5 = const GENERAL_PATTERN[5],
+    g6 = const GENERAL_PATTERN[6],
+    g7 = const GENERAL_PATTERN[7],
+    g8 = const GENERAL_PATTERN[8],
+    g9 = const GENERAL_PATTERN[9],
+    g10 = const GENERAL_PATTERN[10],
+    g11 = const GENERAL_PATTERN[11],
+    g12 = const GENERAL_PATTERN[12],
+    g13 = const GENERAL_PATTERN[13],
+    g14 = const GENERAL_PATTERN[14],
+);
+
+unsafe extern "sysv64" {
+    safe fn start_probe(a: u64, b: u64) -> !;
+    safe fn register_keeper(a: u64, b: u64) -> !;
+    safe fn register_clobberer(a: u64, b: u64) -> !;
+}
+
+/// Ends a thread whose entry is written in assembly.
+extern "sysv64" fn end_asm_thread() -> ! {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A new thread starts with its arguments in RDI and RSI, its stack in
+/// RSP, every other general-purpose register, the FS and GS bases and
+/// every vector register zero, RFLAGS 0x202, the x87 control word 0x037F
+/// and MXCSR 0x1F80.
+fn new_thread_starts_clean(s: &Startup) -> Result {
+    let (a, b) = (0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
+    let thread = spawn2(s, start_probe, a, b)?;
+    ensure(
+        "ending the probe",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    // SAFETY: the probe wrote the state and ended.
+    let (state, ymm) = unsafe {
+        (
+            core::ptr::read_volatile(&raw const START_STATE),
+            core::ptr::read_volatile(&raw const START_YMM),
+        )
+    };
+    let (rsi, rdi, rsp) = (state[4], state[5], state[7]);
+    ensure("passing the arguments", rdi == a && rsi == b)?;
+    ensure("aligning the stack as after a call", rsp % 16 == 8)?;
+    let others = state[..16]
+        .iter()
+        .enumerate()
+        .all(|(i, &v)| matches!(i, 4 | 5 | 7) || v == 0);
+    ensure("clearing the other registers", others)?;
+    ensure("starting with RFLAGS 0x202", state[16] == 0x202)?;
+    ensure("clearing the bases", state[17] == 0 && state[18] == 0)?;
+    ensure(
+        "starting the x87 unit and SSE in their initial state",
+        state[19] == 0x037F && state[20] == 0x1F80,
+    )?;
+    ensure("clearing the vector registers", ymm == [[0; 4]; 16])
+}
+
+/// A thread switched out by preemption gets every general-purpose and
+/// vector register back as it was, although another thread changed them
+/// all meanwhile.
+fn registers_survive_preemption(s: &Startup) -> Result {
+    KEEPER_READY.store(0, Ordering::Release);
+    CLOBBERER_RAN.store(0, Ordering::Release);
+    let keeper = spawn2(s, register_keeper, 0, 0)?;
+    // This thread runs again only once the keeper, holding its patterns,
+    // has been switched out.
+    let deadline = in_time();
+    while KEEPER_READY.load(Ordering::Acquire) == 0 {
+        ensure("starting the keeper", now() < deadline)?;
+        sleep_ms(1);
+    }
+    let clobberer = spawn2(s, register_clobberer, 0, 0)?;
+    for thread in [keeper, clobberer] {
+        ensure(
+            "ending the threads",
+            wait(thread, TERMINATED, in_time()).0 == 0,
+        )?;
+    }
+    // SAFETY: the keeper wrote what it found and ended.
+    let (kept, kept_ymm) = unsafe {
+        (
+            core::ptr::read_volatile(&raw const KEPT),
+            core::ptr::read_volatile(&raw const KEPT_YMM),
+        )
+    };
+    ensure("keeping the general registers", kept == GENERAL_PATTERN)?;
+    ensure("keeping the vector registers", kept_ymm == YMM_PATTERN)
+}
+
+/// The calling thread's FS and GS bases.
+fn user_bases() -> (u64, u64) {
+    let (fs, gs);
+    // SAFETY: the kernel enables FSGSBASE, which QEMU reports, so the
+    // instructions only read the bases.
+    unsafe {
+        core::arch::asm!(
+            "rdfsbase {fs}",
+            "rdgsbase {gs}",
+            fs = out(reg) fs,
+            gs = out(reg) gs,
+            options(nomem, nostack, preserves_flags),
+        )
+    };
+    (fs, gs)
+}
+
+/// `thread_set_user_base` sets the FS and GS bases, which keep their
+/// values while the thread is switched out, and refuses another register
+/// or a base outside the user address range.
+fn user_bases_set_and_kept(_: &Startup) -> Result {
+    let before = user_bases();
+    let set = |which, value| {
+        // SAFETY: the call takes no pointers.
+        check("setting a base", unsafe {
+            sys::thread_set_user_base(which, value)
+        })
+    };
+    let wanted = (0x1234_5000, 0x2345_6000);
+    set(0, wanted.0)?;
+    set(1, wanted.1)?;
+    ensure("setting the bases", user_bases() == wanted)?;
+    sleep_ms(2);
+    ensure("keeping the bases", user_bases() == wanted)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        ensure(
+            "refusing another register",
+            sys::thread_set_user_base(2, 0) == INVALID_ARGS,
+        )?;
+        ensure(
+            "refusing a kernel address",
+            sys::thread_set_user_base(1, 0xFFFF_8000_0000_0000) == INVALID_ARGS,
+        )?;
+    }
+    ensure("keeping the bases when refusing", user_bases() == wanted)?;
+    set(0, before.0)?;
+    set(1, before.1)
+}
+
+/// The stack pointer and RFLAGS at the first instruction of the signal
+/// handler `signal_probe`, the arguments `signal_handler` got, the mask
+/// while it ran and how often it ran.
+static SIGNAL_ENTRY: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static SIGNAL_ARGS: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static SIGNAL_MASK: AtomicU64 = AtomicU64::new(0);
+static HANDLED: AtomicU64 = AtomicU64::new(0);
+/// The signal frame `signal_handler` found, from 72 bytes below the
+/// context to its extended state: the restorer, the information record,
+/// the register state, the mask, the extended state size and 16 bytes.
+static mut SIGNAL_FRAME: [u64; 33] = [0; 33];
+
+// `signal_probe` records the stack pointer and the flags the handler
+// starts with and goes on in `signal_handler`, which returns to
+// `signal_restorer`; that finds the context 64 bytes above the stack
+// pointer, where the return left it, and returns from the signal.
+core::arch::global_asm!(
+    ".global signal_probe",
+    "signal_probe:",
+    "mov [rip + {entry}], rsp",
+    "pushfq",
+    "pop qword ptr [rip + {entry} + 8]",
+    "jmp {handler}",
+    ".global signal_restorer",
+    "signal_restorer:",
+    "lea rdi, [rsp + 64]",
+    "call {back}",
+    entry = sym SIGNAL_ENTRY,
+    handler = sym signal_handler,
+    back = sym signal_back,
+);
+
+unsafe extern "sysv64" {
+    safe fn signal_probe();
+    safe fn signal_restorer();
+}
+
+extern "sysv64" fn signal_handler(signo: u64, info: u64, context: u64) {
+    let mut mask = 0;
+    // SAFETY: the pointer is valid; adding no signal only reads the mask.
+    unsafe { sys::signal_set_mask(0, 0, &mut mask) };
+    SIGNAL_MASK.store(mask, Ordering::Release);
+    for (slot, value) in SIGNAL_ARGS.iter().zip([signo, info, context]) {
+        slot.store(value, Ordering::Release);
+    }
+    let from = (context - 72) as *const u64;
+    for i in 0..33 {
+        // SAFETY: the frame lies on this thread's stack from 72 bytes
+        // below the context, and only this handler writes the copy.
+        unsafe {
+            let word = from.add(i).read_volatile();
+            (&raw mut SIGNAL_FRAME)
+                .cast::<u64>()
+                .add(i)
+                .write_volatile(word);
+        }
+    }
+    HANDLED.fetch_add(1, Ordering::AcqRel);
+}
+
+extern "sysv64" fn signal_back(context: u64) -> ! {
+    // SAFETY: `context` is the context of the frame the handler got.
+    unsafe { sys::signal_return(context) };
+    unreachable!("signal_return returned");
+}
+
+const USR1: u32 = 10;
+const INTERRUPTED: i64 = -27;
+
+/// Makes `signal_probe` the handler of `USR1` with `flags`, blocking
+/// `USR2` while it runs, and returns the action it replaced.
+fn catch_usr1(flags: u32) -> Result<[u8; 32]> {
+    let mut action = [0u8; 32];
+    action[0x00..0x08].copy_from_slice(&(signal_probe as *const () as u64).to_le_bytes());
+    action[0x08..0x10].copy_from_slice(&(1u64 << 11).to_le_bytes());
+    action[0x10..0x18].copy_from_slice(&(signal_restorer as *const () as u64).to_le_bytes());
+    action[0x18..0x1C].copy_from_slice(&flags.to_le_bytes());
+    let mut old = [0u8; 32];
+    // SAFETY: the pointers describe `action` and `old`.
+    check("setting the action", unsafe {
+        sys::signal_set_action(USR1, action.as_ptr(), old.as_mut_ptr())
+    })?;
+    HANDLED.store(0, Ordering::Release);
+    Ok(old)
+}
+
+fn restore_usr1(old: &[u8; 32]) -> Result {
+    // SAFETY: the pointer describes `old`.
+    check("restoring the action", unsafe {
+        sys::signal_set_action(USR1, old.as_ptr(), core::ptr::null_mut())
+    })
+}
+
+/// The calling thread's mask.
+fn signal_mask() -> u64 {
+    let mut mask = 0;
+    // SAFETY: the pointer is valid; adding no signal only reads the mask.
+    unsafe { sys::signal_set_mask(0, 0, &mut mask) };
+    mask
+}
+
+/// The copy of the last signal frame.
+fn signal_frame_copy() -> [u64; 33] {
+    // SAFETY: the handler that wrote the copy has returned.
+    unsafe { core::ptr::read_volatile(&raw const SIGNAL_FRAME) }
+}
+
+/// A handler starts with its arguments and the stack and frame in their
+/// layout: the context 64-byte aligned, as high as it fits 128 bytes
+/// below the interrupted stack pointer, the restorer below the
+/// information record below it, the mask before the handler and the
+/// extended state size above the register state. DF is clear, and the
+/// signal and the action's mask are blocked while the handler runs and
+/// not afterwards.
+fn signal_frame(s: &Startup) -> Result {
+    let old = catch_usr1(0)?;
+    let before = signal_mask();
+    // SAFETY: the call takes no pointers.
+    check("sending the signal", unsafe {
+        sys::thread_signal(s.thread, USR1, 77)
+    })?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    let [signo, info, context] = SIGNAL_ARGS.each_ref().map(|a| a.load(Ordering::Acquire));
+    let [rsp, rflags] = SIGNAL_ENTRY.each_ref().map(|a| a.load(Ordering::Acquire));
+    ensure("passing the signal number", signo == u64::from(USR1))?;
+    ensure("aligning the context", context % 64 == 0)?;
+    ensure(
+        "starting below the restorer",
+        rsp == context - 72 && info == context - 64,
+    )?;
+    ensure("clearing DF", rflags & 1 << 10 == 0)?;
+    let frame = signal_frame_copy();
+    ensure(
+        "returning to the restorer",
+        frame[0] == signal_restorer as *const () as u64,
+    )?;
+    ensure(
+        "recording the signal",
+        frame[1] as u32 == USR1 && (frame[1] >> 32) == 1,
+    )?;
+    ensure(
+        "recording the sender and the value",
+        frame[2] == koid(s.process)? && frame[3] == 77 && frame[4] == 0 && frame[5] == 0,
+    )?;
+    let (saved_rsp, mask, size) = (frame[9 + 7], frame[29], frame[30]);
+    ensure("saving the mask", mask == before)?;
+    ensure("giving the extended state size", size >= 576)?;
+    ensure(
+        "zeroing the reserved bytes",
+        frame[31] == 0 && frame[32] == 0,
+    )?;
+    let end = context + 0xC0 + size;
+    ensure(
+        "placing the frame as high as it fits",
+        end + 128 <= saved_rsp && end + 128 + 64 > saved_rsp,
+    )?;
+    ensure(
+        "blocking the signal and the action's mask in the handler",
+        SIGNAL_MASK.load(Ordering::Acquire) == before | 1 << 9 | 1 << 11,
+    )?;
+    ensure("restoring the mask", signal_mask() == before)?;
+    restore_usr1(&old)
+}
+
+/// `signal_return` refuses a context with a reserved byte set, which the
+/// debuggee's handler sets before it returns past the instruction that
+/// raised the signal, and the process ends as `SEGV` ends it.
+fn signal_frame_reserved_bytes(s: &Startup) -> Result {
+    const SEGV: u32 = 11;
+    let (process, _) = start_program_with(s, "debuggee", 7, |_| Ok(()))?;
+    ensure("refusing the context", exit_code(process)? == -3)?;
+    ensure(
+        "ending the process as SEGV",
+        u32_at(&info::<0x20>(process, 2)?, 0x10) == SEGV,
+    )
+}
+
+/// The stack pointer `on_alternate_stack` ran with, and what removing the
+/// alternate stack from there returned.
+static ALTERNATE: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+extern "sysv64" fn on_alternate_stack(_: u64, _: u64, _: u64) {
+    let rsp: u64;
+    // SAFETY: the instruction only reads the stack pointer.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::signal_set_altstack(0, 0, core::ptr::null_mut()) };
+    ALTERNATE[0].store(rsp, Ordering::Release);
+    ALTERNATE[1].store(status as u64, Ordering::Release);
+}
+
+/// An alternate signal stack must be at least 16384 bytes in the user
+/// range; setting one reports the one before; a handler with `ONSTACK`
+/// runs on it and cannot change it there; and two zeros remove it.
+fn alternate_signal_stacks(s: &Startup) -> Result {
+    const ONSTACK: u32 = 1 << 1;
+    let size = 16384;
+    let base = map(s.process, create_memory(size)?, size)?;
+    let set = |base: u64, size: u64, old: &mut [u64; 2]| {
+        // SAFETY: `old` holds the two values the call stores.
+        unsafe { sys::signal_set_altstack(base, size, old.as_mut_ptr().cast()) }
+    };
+    let mut old = [u64::MAX; 2];
+    ensure(
+        "refusing less than 16384 bytes",
+        set(base, size - 1, &mut old) == INVALID_ARGS,
+    )?;
+    ensure(
+        "refusing the kernel half",
+        set(0xFFFF_8000_0000_0000, size, &mut old) == INVALID_ARGS,
+    )?;
+    check("setting it", set(base, size, &mut old))?;
+    ensure("having had none", old == [0, 0])?;
+
+    let mut action = [0u8; 32];
+    action[0x00..0x08].copy_from_slice(&(on_alternate_stack as *const () as u64).to_le_bytes());
+    action[0x10..0x18].copy_from_slice(&(signal_restorer as *const () as u64).to_le_bytes());
+    action[0x18..0x1C].copy_from_slice(&ONSTACK.to_le_bytes());
+    let mut previous = [0u8; 32];
+    // SAFETY: the pointers describe `action` and `previous`.
+    check("setting the action", unsafe {
+        sys::signal_set_action(USR1, action.as_ptr(), previous.as_mut_ptr())
+    })?;
+    // SAFETY: the call takes no pointers.
+    let sent = unsafe { sys::thread_signal(s.thread, USR1, 0) };
+    restore_usr1(&previous)?;
+    check("sending the signal", sent)?;
+    let [rsp, status] = ALTERNATE.each_ref().map(|a| a.load(Ordering::Acquire));
+    ensure("running on it", (base..base + size).contains(&rsp))?;
+    ensure("keeping it there", status as i64 == BAD_STATE)?;
+    check("removing it", set(0, 0, &mut old))?;
+    ensure("reporting it", old == [base, size])
+}
+
+/// `SYSCALL` clears DF, AC and NT, which the debug kernel checks as each
+/// system call enters it: this makes one with all three set.
+fn syscall_clears_flags(_: &Startup) -> Result {
+    const FLAGS: u64 = (1 << 10) | (1 << 14) | (1 << 18);
+    const HANDLE_CLOSE: i64 = 1;
+    let status: i64;
+    // SAFETY: closing handle 0 only fails. The block steps over the red
+    // zone before it pushes, and clears the flags again before it ends.
+    unsafe {
+        core::arch::asm!(
+            "sub rsp, 128",
+            "pushfq",
+            "or qword ptr [rsp], {set}",
+            "popfq",
+            "syscall",
+            "pushfq",
+            "and qword ptr [rsp], {clear}",
+            "popfq",
+            "add rsp, 128",
+            set = in(reg) FLAGS,
+            clear = in(reg) !FLAGS,
+            inlateout("rax") HANDLE_CLOSE => status,
+            in("rdi") 0u64,
+            out("rcx") _,
+            out("r11") _,
+        )
+    };
+    // SAFETY: the call takes no pointers.
+    let plain = unsafe { sys::handle_close(0) };
+    ensure("making the call", status == plain)
+}
+
+/// Set by `signal_sleeper` with what its sleep returned and when.
+static SLEEP_RESULT: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+/// Sleeps until `deadline`, records the status and the time, and exits.
+extern "sysv64" fn signal_sleeper(deadline: u64, _: u64) -> ! {
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::thread_sleep(deadline as i64) };
+    SLEEP_RESULT[0].store(status as u64, Ordering::Release);
+    SLEEP_RESULT[1].store(now() as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Signals a thread sleeping for 100 ms with `USR1` handled with `flags`,
+/// and returns the status of its sleep, its deadline and when it ended.
+fn signal_sleeping_thread(s: &Startup, flags: u32) -> Result<(i64, i64, i64)> {
+    let old = catch_usr1(flags)?;
+    let deadline = now() + 100_000_000;
+    let thread = spawn2(s, signal_sleeper, deadline as u64, 0)?;
+    wait_until_blocked(thread)?;
+    // SAFETY: the call takes no pointers.
+    check("signalling the sleeper", unsafe {
+        sys::thread_signal(thread, USR1, 1)
+    })?;
+    ensure(
+        "ending the sleeper",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    restore_usr1(&old)?;
+    let [status, ended] = SLEEP_RESULT
+        .each_ref()
+        .map(|a| a.load(Ordering::Acquire) as i64);
+    Ok((status, deadline, ended))
+}
+
+/// A handler for a thread sleeping in `thread_sleep` ends the sleep with
+/// `ERR_INTERRUPTED`, unless its action has `RESTART`: then the frame
+/// resumes the thread at its `SYSCALL` instruction with the arguments in
+/// place, and the sleep goes on until its deadline.
+fn signal_interrupts_and_restarts(s: &Startup) -> Result {
+    const RESTART: u32 = 1 << 0;
+    let (status, deadline, ended) = signal_sleeping_thread(s, 0)?;
+    ensure(
+        "interrupting the sleep",
+        status == INTERRUPTED && ended < deadline,
+    )?;
+    let (status, deadline, ended) = signal_sleeping_thread(s, RESTART)?;
+    ensure("restarting the sleep", status == 0 && ended >= deadline)?;
+    let frame = signal_frame_copy();
+    let (rdi, rip) = (frame[9 + 5], frame[9 + 16]);
+    ensure(
+        "keeping the deadline as the argument",
+        rdi == deadline as u64,
+    )?;
+    // SAFETY: the instruction lies in this program's code, which is
+    // mapped readable.
+    let instruction = unsafe { (rip as *const [u8; 2]).read_volatile() };
+    ensure(
+        "resuming at the SYSCALL instruction",
+        instruction == [0x0F, 0x05],
+    )
+}
+
+/// The values `extended_keeper` loads into XMM0 and XMM1; set by it once
+/// they are loaded, and by the test to let it go on; and what it then
+/// finds in XMM0 and XMM1.
+static EXTENDED_PATTERN: [[u64; 2]; 2] = [
+    [0x0011_2233_4455_6677, 0x8899_AABB_CCDD_EEFF],
+    [0x0F0E_0D0C_0B0A_0908, 0x0706_0504_0302_0100],
+];
+static EXTENDED_READY: AtomicU64 = AtomicU64::new(0);
+static EXTENDED_GO: AtomicU64 = AtomicU64::new(0);
+static mut EXTENDED_FOUND: [u64; 4] = [0; 4];
+
+core::arch::global_asm!(
+    ".global extended_keeper",
+    "extended_keeper:",
+    "movdqu xmm0, [rip + {pattern}]",
+    "movdqu xmm1, [rip + {pattern} + 16]",
+    "mov qword ptr [rip + {ready}], 1",
+    "2:",
+    "pause",
+    "cmp qword ptr [rip + {go}], 0",
+    "je 2b",
+    "movdqu [rip + {found}], xmm0",
+    "movdqu [rip + {found} + 16], xmm1",
+    "jmp {done}",
+    pattern = sym EXTENDED_PATTERN,
+    ready = sym EXTENDED_READY,
+    go = sym EXTENDED_GO,
+    found = sym EXTENDED_FOUND,
+    done = sym end_asm_thread,
+);
+
+unsafe extern "sysv64" {
+    safe fn extended_keeper(a: u64, b: u64) -> !;
+}
+
+/// A suspended thread's `EXTENDED` state is an 8-byte size and its
+/// registers in `XSAVE` format, and a changed state written back is what
+/// the thread finds when it resumes. A state whose MXCSR would make
+/// `XRSTOR` fault, a buffer too short, a kind that does not exist and a
+/// thread that is not suspended are refused.
+fn extended_state_round_trip(s: &Startup) -> Result {
+    EXTENDED_READY.store(0, Ordering::Release);
+    EXTENDED_GO.store(0, Ordering::Release);
+    let thread = spawn2(s, extended_keeper, 0, 0)?;
+    let deadline = in_time();
+    while EXTENDED_READY.load(Ordering::Acquire) == 0 {
+        ensure("starting the keeper", now() < deadline)?;
+        sleep_ms(1);
+    }
+    let read = |buf: &mut [u8], kind| {
+        // SAFETY: the pointer and length describe `buf`.
+        unsafe { sys::thread_read_state(thread, kind, buf.as_mut_ptr(), buf.len() as u64) }
+    };
+    let mut state = [0u8; 4096];
+    ensure(
+        "refusing a thread that is not suspended",
+        read(&mut state, 1) == BAD_STATE,
+    )?;
+    suspend_and_wait(thread)?;
+    ensure(
+        "refusing a buffer too short",
+        read(&mut state[..8], 1) == BUFFER_TOO_SMALL,
+    )?;
+    ensure("refusing another kind", read(&mut state, 3) == INVALID_ARGS)?;
+    check("reading the extended state", read(&mut state, 1))?;
+    let size = u64_at(&state, 0) as usize;
+    ensure("giving the size", (576..=state.len() - 8).contains(&size))?;
+    // The XSAVE image follows the size; its legacy region keeps MXCSR at
+    // offset 24 and XMM0 and XMM1 at 160 and 176.
+    let (mxcsr, xmm0, xmm1) = (8 + 24, 8 + 160, 8 + 176);
+    ensure(
+        "holding XMM0",
+        [u64_at(&state, xmm0), u64_at(&state, xmm0 + 8)] == EXTENDED_PATTERN[0],
+    )?;
+    state.copy_within(xmm0..xmm0 + 16, xmm1);
+    let write = |buf: &[u8]| {
+        // SAFETY: the pointer and length lie in `buf`.
+        unsafe { sys::thread_write_state(thread, 1, buf.as_ptr(), 8 + size as u64) }
+    };
+    let mut bad = state;
+    bad[mxcsr..mxcsr + 4].copy_from_slice(&(0x1F80u32 | 1 << 31).to_le_bytes());
+    ensure("refusing a reserved MXCSR bit", write(&bad) == INVALID_ARGS)?;
+    check("writing the extended state", write(&state))?;
+    check("resuming", resume_thread(thread))?;
+    EXTENDED_GO.store(1, Ordering::Release);
+    ensure(
+        "ending the keeper",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    // SAFETY: the keeper wrote what it found and ended.
+    let found = unsafe { core::ptr::read_volatile(&raw const EXTENDED_FOUND) };
+    ensure("keeping XMM0", found[..2] == EXTENDED_PATTERN[0])?;
+    ensure(
+        "loading the XMM1 written",
+        found[2..] == EXTENDED_PATTERN[0],
+    )
+}
+
+const NOT_SUPPORTED: i64 = -2;
+
+/// The rights by name, for the tests below.
+mod right {
+    pub const DUPLICATE: u32 = 1 << 0;
+    pub const TRANSFER: u32 = 1 << 1;
+    pub const READ: u32 = 1 << 2;
+    pub const WRITE: u32 = 1 << 3;
+    pub const MAP: u32 = 1 << 5;
+    pub const WAIT: u32 = 1 << 6;
+    pub const SIGNAL: u32 = 1 << 7;
+    pub const MANAGE: u32 = 1 << 8;
+    pub const INSPECT: u32 = 1 << 9;
+}
+
+/// The handles of the startup message refer to objects of the right types
+/// and have the rights they are given: the default rights, and read-only
+/// rights for the boot image and the clock page.
+fn startup_handle_rights(s: &Startup) -> Result {
+    use right::*;
+    let base = DUPLICATE | TRANSFER;
+    let read_only = base | READ | MAP | INSPECT;
+    let mut expected = [
+        (s.process, 1, base | MAP | WAIT | SIGNAL | MANAGE | INSPECT),
+        (s.thread, 2, base | WAIT | SIGNAL | MANAGE | INSPECT),
+        (s.root_resource, 9, base | MANAGE | INSPECT),
+        (s.boot_image, 3, read_only),
+        (s.log, 10, base | READ | WRITE | MANAGE | INSPECT),
+        (s.budget, 11, base | WRITE | WAIT | MANAGE | INSPECT),
+        (s.clock_page, 3, read_only),
+        (0, 3, base | READ | WRITE | MAP | MANAGE | INSPECT),
+    ];
+    let count = match s.framebuffer {
+        Some(fb) => {
+            expected[7].0 = fb.memory;
+            8
+        }
+        None => 7,
+    };
+    for (handle, kind, rights) in &expected[..count] {
+        let record = info::<0x18>(*handle, 1)?;
+        ensure(
+            "giving a startup handle its type and rights",
+            u32_at(&record, 16) == *kind && u32_at(&record, 20) == *rights,
+        )?;
+    }
+    Ok(())
+}
+
+/// Suspending, resuming and inspecting threads and processes needs the
+/// `MANAGE` right.
+fn debugging_needs_manage(s: &Startup) -> Result {
+    use right::*;
+    let (mut thread, mut process, mut out) = (0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check(
+            "duplicating the thread",
+            sys::handle_duplicate(s.thread, DUPLICATE | WAIT | INSPECT, &mut thread),
+        )?;
+        check(
+            "duplicating the process",
+            sys::handle_duplicate(s.process, DUPLICATE | WAIT | INSPECT, &mut process),
+        )?;
+    }
+    ensure("refusing to suspend", suspend(thread) == ACCESS_DENIED)?;
+    ensure("refusing to resume", resume_thread(thread) == ACCESS_DENIED)?;
+    let koid = koid(s.thread)?;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::process_get_thread(process, koid, &mut out) };
+    ensure("refusing to get a thread", status == ACCESS_DENIED)?;
+    let at = &raw const HANDLED as u64;
+    ensure(
+        "refusing to read memory",
+        read_memory(process, at, &mut [0u8; 8]) == ACCESS_DENIED,
+    )?;
+    ensure(
+        "refusing to write memory",
+        write_memory(process, at, &[0u8; 8]) == ACCESS_DENIED,
+    )?;
+    for h in [thread, process] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// Closing the exception channel while a thread waits in an exception
+/// ends its process with exit code -2.
+fn closed_exception_channel(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 0, 0)?;
+    let (r, _) = report_bytes(channel)?;
+    ensure(
+        "reporting the exception",
+        u32_at(&r, 0) == UNDEFINED_INSTRUCTION,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the channel", unsafe { sys::handle_close(channel) })?;
+    ensure("ending with exit code -2", exit_code(process)? == -2)
+}
+
+/// The status of the call `interrupted_caller` made.
+static INTERRUPTED_STATUS: AtomicU64 = AtomicU64::new(0);
+
+/// Calls through `channel` with no deadline, records the status and exits.
+extern "sysv64" fn interrupted_caller(channel: u64, _: u64) -> ! {
+    let (status, ..) = call(channel as Handle, b"wait", None, 64, i64::MAX);
+    INTERRUPTED_STATUS.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A handler without `RESTART` ends a `channel_call` waiting for its reply
+/// with `ERR_INTERRUPTED`, and a reply that comes later is discarded.
+fn call_interrupted_by_signal(s: &Startup) -> Result {
+    let old = catch_usr1(0)?;
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    check("creating a channel", unsafe {
+        sys::channel_create(0, &mut a, &mut b)
+    })?;
+    let caller = spawn2(s, interrupted_caller, u64::from(a), 0)?;
+    let request = read_message(b, 2000)?;
+    wait_until_blocked(caller)?;
+    // SAFETY: the call takes no pointers.
+    check("signalling the caller", unsafe {
+        sys::thread_signal(caller, USR1, 0)
+    })?;
+    ensure(
+        "ending the caller",
+        wait(caller, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "interrupting the call",
+        INTERRUPTED_STATUS.load(Ordering::Acquire) as i64 == INTERRUPTED,
+    )?;
+    ensure("running the handler", HANDLED.load(Ordering::Acquire) == 1)?;
+    let mut reply = *b"....late";
+    reply[..4].copy_from_slice(&request.bytes[..4]);
+    // SAFETY: the pointer and length describe `reply`.
+    check("replying late", unsafe {
+        sys::channel_write(b, reply.as_ptr(), 8, core::ptr::null(), 0)
+    })?;
+    ensure(
+        "discarding the late reply",
+        read_sizes(a, 16, 2).0 == SHOULD_WAIT,
+    )?;
+    restore_usr1(&old)?;
+    for h in [a, b] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// A thread suspended while it sleeps in `thread_sleep` goes on sleeping
+/// once resumed, until its deadline, and sees no interruption.
+fn suspended_sleep_goes_on(s: &Startup) -> Result {
+    let deadline = now() + 100_000_000;
+    let thread = spawn2(s, signal_sleeper, deadline as u64, 0)?;
+    wait_until_blocked(thread)?;
+    suspend_and_wait(thread)?;
+    check("resuming", resume_thread(thread))?;
+    ensure(
+        "ending the sleeper",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    let [status, ended] = SLEEP_RESULT
+        .each_ref()
+        .map(|a| a.load(Ordering::Acquire) as i64);
+    ensure(
+        "sleeping until the deadline",
+        status == 0 && ended >= deadline,
+    )
+}
+
+/// A `timeline_wait_async` registration that `port_cancel` removed or
+/// whose timeline was closed queues no packet, while one that is met
+/// queues a `TIMELINE` packet with its key.
+fn timeline_registrations_removed(_: &Startup) -> Result {
+    let (mut timeline, mut port) = (0, 0);
+    // SAFETY: the out pointers are valid for the calls; the others take
+    // no pointers.
+    unsafe {
+        check(
+            "creating a timeline",
+            sys::timeline_create(0, 0, &mut timeline),
+        )?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        check(
+            "registering",
+            sys::timeline_wait_async(timeline, port, 7, 5),
+        )?;
+        check("canceling", sys::port_cancel(port, timeline, 7))?;
+        check("signalling", sys::timeline_signal(timeline, 10))?;
+    }
+    ensure(
+        "queueing nothing once canceled",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check(
+            "registering again",
+            sys::timeline_wait_async(timeline, port, 8, 20),
+        )?;
+        check("closing the timeline", sys::handle_close(timeline))?;
+    }
+    ensure(
+        "queueing nothing once closed",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    // SAFETY: the out pointer is valid for the call; the others take no
+    // pointers.
+    unsafe {
+        check(
+            "creating another timeline",
+            sys::timeline_create(0, 0, &mut timeline),
+        )?;
+        check(
+            "registering on it",
+            sys::timeline_wait_async(timeline, port, 9, 1),
+        )?;
+        check("meeting the value", sys::timeline_signal(timeline, 1))?;
+    }
+    let (status, packet) = take_packet(port, soon());
+    ensure(
+        "queueing the packet of the registration met",
+        status == 0 && u64_at(&packet, 0) == 9 && u32_at(&packet, 8) == 4,
+    )?;
+    for h in [timeline, port] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// The debugger calls refuse a range that a physical memory object backs,
+/// here the framebuffer's, when there is one.
+fn physical_memory_not_debugged(s: &Startup) -> Result {
+    let Some(fb) = s.framebuffer else {
+        return Ok(());
+    };
+    let at = map_read_only(s, fb.memory)?;
+    ensure(
+        "refusing to read it",
+        read_memory(s.process, at, &mut [0u8; 8]) == NOT_SUPPORTED,
+    )?;
+    ensure(
+        "refusing to write it",
+        write_memory(s.process, at, &[0u8; 8]) == NOT_SUPPORTED,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })
+}
+
+/// Reads the byte at `addr`, which the test expects to fault, and exits.
+extern "sysv64" fn fault_reader(addr: u64, _: u64) -> ! {
+    // SAFETY: `addr` lies in a mapping; a fault is reported, and the test
+    // kills the thread.
+    unsafe { (addr as *const u8).read_volatile() };
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Starts a thread reading `addr` and checks that it reports a
+/// `PAGE_FAULT` at that address on `channel`; then kills the thread.
+fn expect_page_fault(s: &Startup, channel: Handle, addr: u64) -> Result {
+    let thread = spawn2(s, fault_reader, addr, 0)?;
+    let (r, reported) = report_bytes(channel)?;
+    ensure(
+        "reporting a page fault at the address",
+        u32_at(&r, 0) == PAGE_FAULT
+            && u64_at(&r, 0x18) == addr
+            && u64_at(&r, 0x10) == koid(thread)?,
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("killing the thread", sys::task_kill(thread))?;
+        check("closing the reported thread", sys::handle_close(reported))?;
+    }
+    ensure(
+        "ending the thread",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )
+}
+
+/// A user access faults with a `PAGE_FAULT` report on a page its pager
+/// failed, on a page that was present when its object was revoked, and on
+/// a page that a shrink cut off. The test gives this process an exception
+/// channel, so that the faults are reported instead of ending it.
+fn faults_on_failed_revoked_and_cut_pages(s: &Startup) -> Result {
+    const FAIL: u32 = 1;
+    let mut channel = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating an exception channel", unsafe {
+        sys::exception_channel_create(s.process, 0, &mut channel)
+    })?;
+    let paged_object = || -> Result<(Handle, Handle)> {
+        let (mut pager, mut port, mut mem) = (0, 0, 0);
+        // SAFETY: the pointers are valid for the calls.
+        unsafe {
+            check("creating a pager", sys::pager_create(0, &mut pager))?;
+            check("creating a port", sys::port_create(0, &mut port))?;
+            let status = sys::pager_create_memory(pager, port, 14, PAGE_SIZE, 0, &mut mem);
+            check("creating a paged object", status)?;
+        }
+        Ok((pager, mem))
+    };
+
+    let (pager, failed) = paged_object()?;
+    check(
+        "failing the page",
+        pager_op(pager, failed, FAIL, 0, PAGE_SIZE),
+    )?;
+    expect_page_fault(s, channel, map(s.process, failed, PAGE_SIZE)?)?;
+
+    let (pager, revoked) = paged_object()?;
+    // SAFETY: the call takes no pointers.
+    check("supplying the page", unsafe {
+        sys::pager_supply(pager, revoked, 0, PAGE_SIZE, create_memory(PAGE_SIZE)?, 0)
+    })?;
+    let at = map(s.process, revoked, PAGE_SIZE)?;
+    // SAFETY: the page is mapped and present.
+    unsafe { (at as *const u8).read_volatile() };
+    // SAFETY: the call takes no pointers.
+    check("revoking", unsafe { sys::pager_revoke(pager, revoked) })?;
+    expect_page_fault(s, channel, at)?;
+
+    let mut cut = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a resizable object", unsafe {
+        sys::mem_create(2 * PAGE_SIZE, 1, &mut cut)
+    })?;
+    let at = map(s.process, cut, 2 * PAGE_SIZE)?;
+    // SAFETY: both pages are mapped writable.
+    unsafe { ((at + PAGE_SIZE) as *mut u8).write_volatile(1) };
+    // SAFETY: the call takes no pointers.
+    check("shrinking", unsafe { sys::mem_set_size(cut, PAGE_SIZE) })?;
+    expect_page_fault(s, channel, at + PAGE_SIZE)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the exception channel", unsafe {
+        sys::handle_close(channel)
+    })
+}
+
+/// Whether `needle` occurs in `haystack`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// `log_write` refuses a severity above 3, a message longer than 256
+/// bytes and one that is not UTF-8; `log_read` returns the first record
+/// after a sequence, the first one the kernel wrote naming its build
+/// kind, and fails with `ERR_SHOULD_WAIT` past the newest. This test runs
+/// early, while the first record is still in the log.
+fn log_writes_and_reads(s: &Startup) -> Result {
+    let long = [b'x'; 257];
+    // SAFETY: the pointers and lengths describe the messages.
+    unsafe {
+        ensure(
+            "refusing severity 4",
+            sys::log_write(s.log, 4, b"x".as_ptr(), 1) == INVALID_ARGS,
+        )?;
+        ensure(
+            "refusing 257 bytes",
+            sys::log_write(s.log, 1, long.as_ptr(), 257) == INVALID_ARGS,
+        )?;
+        ensure(
+            "refusing bytes that are not UTF-8",
+            sys::log_write(s.log, 1, [0xFFu8, 0xFE].as_ptr(), 2) == INVALID_ARGS,
+        )?;
+    }
+    let read = |after: u64| {
+        let mut record = [0u8; 288];
+        // SAFETY: the pointer describes `record`.
+        let status = unsafe { sys::log_read(s.log, after, record.as_mut_ptr()) };
+        (status, record)
+    };
+    let (status, first) = read(0);
+    check("reading the first record", status)?;
+    let len = usize::from(u16::from_le_bytes([first[0x1A], first[0x1B]]));
+    let message = &first[0x20..0x20 + len.min(256)];
+    ensure(
+        "starting with the kernel's own record",
+        u64_at(&first, 0) == 1 && first[0x19] == 0 && contains(message, b"Mikros kernel"),
+    )?;
+    ensure(
+        "naming the build kind",
+        [&b"production"[..], b"debug", b"fuzz"]
+            .iter()
+            .any(|kind| contains(message, kind)),
+    )?;
+    let (status, second) = read(1);
+    check("reading the next record", status)?;
+    ensure("returning the next sequence", u64_at(&second, 0) == 2)?;
+    ensure(
+        "finding none past the newest",
+        read(u64::MAX - 1).0 == SHOULD_WAIT,
+    )
+}
+
+/// A child budget starts with the limits given, no usage and both
+/// thresholds disabled. Its thresholds can be set, and `OVER_THRESHOLD`
+/// follows its usage as a process charged to it comes and goes.
+fn budget_creation_and_thresholds(s: &Startup) -> Result {
+    const OVER_THRESHOLD: u32 = 1 << 6;
+    let mut child = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a budget", unsafe {
+        sys::budget_create(s.budget, 1 << 20, 64, &mut child)
+    })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure(
+        "taking the limits",
+        u64_at(&r, 0x00) == 1 << 20 && u64_at(&r, 0x10) == 64,
+    )?;
+    ensure(
+        "starting with no usage",
+        u64_at(&r, 0x08) == 0 && u64_at(&r, 0x18) == 0 && u32_at(&r, 0x20) == 0,
+    )?;
+    ensure(
+        "disabling the thresholds",
+        u64_at(&r, 0x28) == u64::MAX && u64_at(&r, 0x30) == u64::MAX,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("setting the thresholds", unsafe {
+        sys::budget_set_thresholds(child, 1, 32)
+    })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure(
+        "keeping the thresholds",
+        u64_at(&r, 0x28) == 1 && u64_at(&r, 0x30) == 32,
+    )?;
+    ensure(
+        "staying below the thresholds",
+        wait(child, OVER_THRESHOLD, now()).0 == TIMED_OUT,
+    )?;
+    let (name, mut process) = (b"charged", 0);
+    // SAFETY: the pointers describe `name` and `process`.
+    check("creating a process in the budget", unsafe {
+        sys::process_create(child, name.as_ptr(), name.len() as u64, &mut process)
+    })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure(
+        "charging the process",
+        u64_at(&r, 0x08) > 0 && u32_at(&r, 0x20) == 1,
+    )?;
+    ensure(
+        "crossing the kernel threshold",
+        wait(child, OVER_THRESHOLD, now()).0 == 0,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the process", unsafe { sys::handle_close(process) })?;
+    ensure(
+        "releasing the charge",
+        u64_at(&info::<0x38>(child, 6)?, 0x08) == 0,
+    )?;
+    ensure(
+        "falling below the threshold",
+        wait(child, OVER_THRESHOLD, now()).0 == TIMED_OUT,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the budget", unsafe { sys::handle_close(child) })
+}
+
+/// The monotonic clock never goes back and resolves less than a
+/// microsecond, and the clock page that init gets
+/// has its rights and header: version 1, an even sequence, and the
+/// counter as source only with the time stamp counter, whose values then
+/// lie between those of the clock before and after.
+fn monotonic_clock_and_page(s: &Startup) -> Result {
+    let mut last = now();
+    let mut finer = false;
+    for _ in 0..1000 {
+        let t = now();
+        ensure("never going back", t >= last)?;
+        // A clock counting whole microseconds or coarser never shows a
+        // value between them.
+        finer |= t % 1000 != 0;
+        last = t;
+    }
+    ensure("resolving under a microsecond", finer)?;
+    let rights = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 5) | (1 << 9);
+    ensure(
+        "giving the clock page its rights",
+        u32_at(&info::<0x18>(s.clock_page, 1)?, 20) == rights,
+    )?;
+    let at = map_read_only(s, s.clock_page)?;
+    // SAFETY: the page is mapped readable, and only the kernel writes it.
+    let page = unsafe { (at as *const [u8; 0x28]).read_volatile() };
+    ensure(
+        "starting the header",
+        u32_at(&page, 0x00) % 2 == 0 && u32_at(&page, 0x04) == 1,
+    )?;
+    match u32_at(&page, 0x08) {
+        0 => {}
+        1 => {
+            let before = now();
+            let tsc: u64;
+            // SAFETY: RDTSC only reads the counter.
+            unsafe {
+                core::arch::asm!(
+                    "rdtsc",
+                    "shl rdx, 32",
+                    "or rax, rdx",
+                    out("rax") tsc,
+                    out("rdx") _,
+                    options(nomem, nostack),
+                )
+            };
+            let after = now();
+            let (mult, shift) = (u32_at(&page, 0x10), u32_at(&page, 0x14));
+            let (tsc_base, ns_base) = (u64_at(&page, 0x18), u64_at(&page, 0x20) as i64);
+            let delta = (u128::from(tsc - tsc_base) * u128::from(mult)) >> shift;
+            let computed = ns_base + delta as i64;
+            ensure(
+                "computing the clock from the page",
+                (before..=after).contains(&computed),
+            )?;
+        }
+        _ => ensure("naming a defined source", false)?,
+    }
+    // SAFETY: the call takes no pointers.
+    check("unmapping the clock page", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })
+}
+
+/// Maps the page of `mem` read-only into this process.
+fn map_read_only(s: &Startup, mem: Handle) -> Result<u64> {
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::vm_map(s.process, PERM_READ, 0, mem, 0, PAGE_SIZE, &mut at) };
+    check("mapping read-only", status)?;
+    Ok(at)
+}
+
+/// A mapping keeps its object after the last handle to it is closed, and
+/// nothing is or can be mapped in the low 64 KiB.
+fn mappings_outlive_handles(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let at = map(s.process, mem, PAGE_SIZE)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the handle", unsafe { sys::handle_close(mem) })?;
+    // SAFETY: the mapping is readable and writable.
+    let back = unsafe {
+        (at as *mut u64).write_volatile(0x5A5A_A5A5);
+        (at as *const u64).read_volatile()
+    };
+    ensure("using the mapping", back == 0x5A5A_A5A5)?;
+    ensure(
+        "reading the object through the mapping",
+        read_memory(s.process, at, &mut [0u8; 8]) == 0,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })?;
+    let mem = create_memory(PAGE_SIZE)?;
+    let mut addr = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ | mikros_test::SPECIFIC,
+            0x1000,
+            mem,
+            0,
+            PAGE_SIZE,
+            &mut addr,
+        )
+    };
+    ensure("refusing the low 64 KiB", status == OUT_OF_RANGE)?;
+    ensure(
+        "mapping nothing there",
+        read_memory(s.process, 0x1000, &mut [0u8; 1]) == NOT_FOUND,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(mem) })
+}
+
+const TESTS: [(&str, Test); 91] = [
+    ("boot_memory_uncharged", boot_memory_uncharged),
+    ("log_writes_and_reads", log_writes_and_reads),
+    ("thread_by_koid", thread_by_koid),
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
     ("priorities", priorities),
+    ("queued_thread_preempts", queued_thread_preempts),
     ("ports", ports),
+    ("port_registration_limit", port_registration_limit),
     ("log_readers", log_readers),
     ("memory_operations", memory_operations),
     ("large_memory_operations", large_memory_operations),
@@ -3067,15 +6013,29 @@ const TESTS: [(&str, Test); 47] = [
     ("seals", seals),
     ("channel_calls", channel_calls),
     ("futexes", futexes),
+    ("futexes_across_processes", futexes_across_processes),
     ("timelines", timelines),
     ("streams", streams),
     ("failed_outputs", failed_outputs),
+    ("outputs_outside_user_range", outputs_outside_user_range),
+    ("inputs_outside_user_memory", inputs_outside_user_memory),
+    ("undefined_options_refused", undefined_options_refused),
+    ("syscall_clears_flags", syscall_clears_flags),
+    ("reserved_hardware_refused", reserved_hardware_refused),
     ("clones", clones),
     ("pagers", pagers),
     ("pager_operations", pager_operations),
     ("large_pager_operations", large_pager_operations),
     ("paged_outputs", paged_outputs),
+    ("access_flag_cleared_on_entry", access_flag_cleared_on_entry),
     ("kill_blocked_thread", kill_blocked_thread),
+    (
+        "exception_reports_and_actions",
+        exception_reports_and_actions,
+    ),
+    ("out_of_memory_report", out_of_memory_report),
+    ("thread_events", thread_events),
+    ("start_refusals", start_refusals),
     ("kill_stopped_thread", kill_stopped_thread),
     ("debug_at_syscall_entry", debug_at_syscall_entry),
     ("kill_new_thread", kill_new_thread),
@@ -3085,35 +6045,165 @@ const TESTS: [(&str, Test); 47] = [
     ),
     ("kill_thread_after_report", kill_thread_after_report),
     ("own_endpoints_not_sent", own_endpoints_not_sent),
+    ("channel_errors", channel_errors),
+    (
+        "channel_read_into_a_full_table",
+        channel_read_into_a_full_table,
+    ),
     ("endpoint_cycles_reclaimed", endpoint_cycles_reclaimed),
     ("coverage", coverage),
     ("seal_waits_for_outputs", seal_waits_for_outputs),
     ("evict_waits_for_outputs", evict_waits_for_outputs),
     ("supply_waits_for_outputs", supply_waits_for_outputs),
     ("clone_waits_for_outputs", clone_waits_for_outputs),
+    (
+        "map_checks_again_after_waiting",
+        map_checks_again_after_waiting,
+    ),
+    (
+        "seal_and_revoke_wait_for_supply",
+        seal_and_revoke_wait_for_supply,
+    ),
     ("memory_objects", memory_objects),
     ("shared_mappings", shared_mappings),
     ("random_bytes", random_bytes),
     ("write_execute_policy", write_execute_policy),
     ("syscall_gate", syscall_gate),
+    ("ioports_as_granted", ioports_as_granted),
     ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),
     ("suspend_threads", suspend_threads),
     ("suspend_blocked_waits", suspend_blocked_waits),
     ("suspend_in_call", suspend_in_call),
     ("thread_lists", thread_lists),
     ("read_process_memory", read_process_memory),
+    ("stack_guard_page_kept", stack_guard_page_kept),
     ("write_process_memory", write_process_memory),
     ("threads", threads),
+    ("new_thread_starts_clean", new_thread_starts_clean),
+    ("registers_survive_preemption", registers_survive_preemption),
+    ("user_bases_set_and_kept", user_bases_set_and_kept),
+    (
+        "budget_creation_and_thresholds",
+        budget_creation_and_thresholds,
+    ),
+    ("monotonic_clock_and_page", monotonic_clock_and_page),
+    ("mappings_outlive_handles", mappings_outlive_handles),
+    ("signal_frame", signal_frame),
+    ("alternate_signal_stacks", alternate_signal_stacks),
+    ("signal_frame_reserved_bytes", signal_frame_reserved_bytes),
+    (
+        "signal_interrupts_and_restarts",
+        signal_interrupts_and_restarts,
+    ),
+    ("extended_state_round_trip", extended_state_round_trip),
+    ("startup_handle_rights", startup_handle_rights),
+    ("debugging_needs_manage", debugging_needs_manage),
+    ("closed_exception_channel", closed_exception_channel),
+    ("call_interrupted_by_signal", call_interrupted_by_signal),
+    ("suspended_sleep_goes_on", suspended_sleep_goes_on),
+    (
+        "timeline_registrations_removed",
+        timeline_registrations_removed,
+    ),
+    ("physical_memory_not_debugged", physical_memory_not_debugged),
+    (
+        "faults_on_failed_revoked_and_cut_pages",
+        faults_on_failed_revoked_and_cut_pages,
+    ),
     ("processes_and_channels", processes_and_channels),
+    ("init_segments_as_loaded", init_segments_as_loaded),
+    ("boot_memory_reclaimed", boot_memory_reclaimed),
+    // Runs last: it closes the boot image.
+    ("boot_image_object", boot_image_object),
 ];
 
+/// The tests of the fuzz build's test hooks, which run before the last
+/// test, as they start programs from the boot image.
+#[cfg(feature = "fuzz")]
+const HOOK_TESTS: &[(&str, Test)] = &hooks::TESTS;
+#[cfg(not(feature = "fuzz"))]
+const HOOK_TESTS: &[(&str, Test)] = &[];
+
+/// The colour `exit_after_painting` paints the framebuffer, as red,
+/// green and blue.
+const PAINT: [u32; 3] = [0x12, 0x34, 0x56];
+
+/// Releases the console, paints the whole framebuffer in `PAINT` when
+/// there is one, and returns exit code 7, ending init, which the kernel
+/// panics on.
+fn exit_after_painting(s: &Startup) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::log_console_release(s.log) };
+    let Some(fb) = s.framebuffer else {
+        log!(Info, "SCENARIO no framebuffer");
+        return 7;
+    };
+    let len = fb.size.next_multiple_of(PAGE_SIZE);
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ | PERM_WRITE,
+            0,
+            fb.memory,
+            0,
+            len,
+            &mut at,
+        )
+    };
+    if status != 0 {
+        log!(Error, "SCENARIO mapping the framebuffer failed ({status})");
+        return 7;
+    }
+    let pixel = [fb.red_mask, fb.green_mask, fb.blue_mask]
+        .iter()
+        .zip(PAINT)
+        .fold(0u32, |p, (&mask, c)| p | (c << mask.trailing_zeros()));
+    let pixels = (u64::from(fb.stride) * u64::from(fb.height)) as usize;
+    for i in 0..pixels {
+        // SAFETY: the framebuffer holds `stride` × `height` pixels of 4
+        // bytes, and is mapped writable at `at`.
+        unsafe { (at as *mut u32).add(i).write_volatile(pixel) };
+    }
+    log!(Info, "SCENARIO framebuffer painted");
+    7
+}
+
+/// Runs the scenario that the command line names with `test=`, which
+/// ends in a kernel panic, or returns `None` when it names none.
+fn scenario(s: &Startup) -> Option<i64> {
+    let cmdline = core::str::from_utf8(s.cmdline).unwrap_or("");
+    let name = cmdline
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("test="))?;
+    Some(match name {
+        "init-exit" => exit_after_painting(s),
+        // The runner raises an NMI or a machine check once this is logged.
+        "wait" => {
+            log!(Info, "SCENARIO waiting");
+            loop {
+                sleep_ms(1000);
+            }
+        }
+        _ => {
+            log!(Error, "SCENARIO {name} unknown");
+            1
+        }
+    })
+}
+
 fn main(s: &Startup) -> i64 {
+    if let Some(code) = scenario(s) {
+        return code;
+    }
     if let Err(f) = open_exit_port(s.root_resource, s.process) {
         log!(Error, "TEST setup FAILED: {} ({})", f.what, f.status);
         return 1;
     }
     let mut failed = 0;
-    for (name, test) in TESTS {
+    let (last, first) = TESTS.split_last().expect("there are tests");
+    for (name, test) in first.iter().chain(HOOK_TESTS).chain([last]) {
         match test(s) {
             Ok(()) => log!(Info, "TEST {name} PASSED"),
             Err(f) => {
@@ -3125,7 +6215,7 @@ fn main(s: &Startup) -> i64 {
     log!(
         Info,
         "TESTS DONE: {} passed, {failed} failed",
-        TESTS.len() - failed
+        TESTS.len() + HOOK_TESTS.len() - failed
     );
     exit_qemu(if failed == 0 { PASSED } else { FAILED })
 }

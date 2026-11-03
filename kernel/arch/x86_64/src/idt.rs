@@ -97,6 +97,10 @@ pub struct Frame {
 // the stack to 16 bytes before it pushes, so the 22 words of the frame
 // leave it aligned for the call.
 //
+// Both paths first clear RFLAGS.AC when SMAP is reported: neither an
+// interrupt gate nor the processor clears it, and user code or the user
+// copy routine may have set it. IRETQ restores the interrupted value.
+//
 // Vectors with an IST entry go through `ist_common` instead. Such an
 // entry can interrupt kernel code that has not yet swapped GS, such as
 // the first instruction of the system call entry, so neither the saved
@@ -107,6 +111,14 @@ pub struct Frame {
 // stack and continues in `interrupt_common`, with the kept user base in
 // IA32_KERNEL_GS_BASE as SWAPGS would have left it, so that the thread
 // may block or switch there as on any other entry from user mode.
+//
+// `interrupt` neither blocks nor switches threads nor enables
+// interrupts. When it leaves work to the interrupted thread, which may
+// do all three, it returns true, and the handling ends with an IRETQ to
+// `interrupt_resume` in kernel mode, on the same stack with the frame
+// left above it and interrupts still disabled. That calls
+// `after_interrupt` with the frame and returns through it as the
+// handler would have.
 #[cfg(target_os = "none")]
 global_asm!(
     ".pushsection .text.interrupt_stubs, \"ax\"",
@@ -128,6 +140,10 @@ global_asm!(
     ".set vector, vector + 1",
     ".endr",
     "interrupt_common:",
+    "cmp byte ptr [rip + {smap}], 0",
+    "je 7f",
+    "clac",
+    "7:",
     // Swap to the kernel GS base when the interrupted code ran in user
     // mode, as its saved CS shows, and back before returning to it.
     "test byte ptr [rsp + 24], 3",
@@ -155,6 +171,9 @@ global_asm!(
     "dec qword ptr gs:[{interrupts}]",
     "5:",
     ".endif",
+    "test al, al",
+    "jnz interrupt_left",
+    "interrupt_restore:",
     "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10",
     "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
     "pop rcx", "pop rbx", "pop rax",
@@ -164,7 +183,24 @@ global_asm!(
     "swapgs",
     "3:",
     "iretq",
+    "interrupt_left:",
+    "mov rax, rsp",
+    "push {kernel_data}",
+    "push rax",
+    "push {rflags}",
+    "push {kernel_code}",
+    "lea rax, [rip + interrupt_resume]",
+    "push rax",
+    "iretq",
+    "interrupt_resume:",
+    "mov rdi, rsp",
+    "call {after_interrupt}",
+    "jmp interrupt_restore",
     "ist_common:",
+    "cmp byte ptr [rip + {smap}], 0",
+    "je 8f",
+    "clac",
+    "8:",
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
@@ -218,8 +254,14 @@ global_asm!(
     kernel_stack = const crate::percpu::KERNEL_STACK_OFFSET,
     mask = const ERROR_CODE_VECTORS,
     interrupt = sym interrupt,
+    after_interrupt = sym after_interrupt,
+    kernel_code = const KERNEL_CODE,
+    kernel_data = const crate::gdt::KERNEL_DATA,
+    // Reserved bit 1 only: interrupts stay disabled.
+    rflags = const 2,
     fuzz = const cfg!(feature = "fuzz") as u8,
     interrupts = const crate::percpu::INTERRUPTS_OFFSET,
+    smap = sym crate::cpu::SMAP,
 );
 
 #[cfg(target_os = "none")]
@@ -352,39 +394,31 @@ impl fmt::Display for Exception<'_> {
     }
 }
 
+/// Handles the interrupt or exception in `frame`, and returns whether it
+/// leaves work to the interrupted thread, for `after_interrupt`: an
+/// exception from user mode or a page fault in the user copy routine,
+/// whose handling may wait, and whatever a thread does on its way back to
+/// user mode.
 #[cfg(target_os = "none")]
-extern "sysv64" fn interrupt(frame: &mut Frame) {
-    use crate::aspace::Fault;
-    let vector = frame.vector as u8;
+extern "sysv64" fn interrupt(frame: &mut Frame) -> bool {
     use crate::apic::{PIC_BASE, SPURIOUS_VECTOR, TIMER_VECTOR};
+    use core::sync::atomic::Ordering;
+    let handling = &crate::percpu::this().handling;
+    handling.fetch_add(1, Ordering::Relaxed);
+    let vector = frame.vector as u8;
+    let user = frame.cs & 3 == 3;
     match vector {
-        // A page fault on a user page that a region allows is resolved.
-        // Other exceptions from user mode are reported; a fault in the
-        // user copy routine makes the copy fail, and anything else stops
-        // the kernel.
-        PAGE_FAULT => {
-            let addr = crate::cpu::read_cr2();
-            match crate::aspace::resolve_fault(frame, addr) {
-                Fault::Resolved => {}
-                _ if frame.cs & 3 == 0 && crate::usercopy::recover(frame) => {}
-                _ if frame.cs & 3 == 0 => crate::panic::exception(frame),
-                // `resolve_fault` waits for absent and changing pages
-                // itself.
-                Fault::Denied | Fault::Absent(_) | Fault::Changed(_) | Fault::Busy(_) => {
-                    crate::exception::raise(frame, kind::PAGE_FAULT, addr)
-                }
-                Fault::OutOfMemory => {
-                    crate::exception::raise(frame, kind::OUT_OF_MEMORY, frame.rip)
-                }
-            }
+        PAGE_FAULT if user || crate::usercopy::in_copy(frame) => {
+            let address = crate::cpu::read_cr2();
+            crate::percpu::this()
+                .fault_address
+                .store(address, Ordering::Relaxed);
         }
         GENERAL_PROTECTION if crate::usercopy::recover(frame) => {}
         // A user thread's breakpoint hit while the kernel touched user
         // memory is reported when the thread returns to user mode.
-        DEBUG if frame.cs & 3 == 0 && defer_debug() => {}
-        v @ 0..32 if frame.cs & 3 == 3 && !fatal(v) => {
-            crate::exception::raise(frame, exception_type(v), frame.rip)
-        }
+        DEBUG if !user && defer_debug() => {}
+        v @ 0..32 if user && !fatal(v) => {}
         0..32 => crate::panic::exception(frame),
         // The PICs are masked; what arrives from them is ignored, and the
         // local APIC expects no end of interrupt for them or for its
@@ -394,11 +428,58 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
         // Nothing handles other vectors yet.
         _ => crate::apic::eoi(),
     }
-    if frame.cs & 3 == 3 {
+    handling.fetch_sub(1, Ordering::Relaxed);
+    user || vector == PAGE_FAULT
+}
+
+/// Does the work that `interrupt` left to the thread it interrupted,
+/// once the handling has ended. A page fault on a user page that a region
+/// allows is resolved, waiting for the page if need be. Other exceptions
+/// from user mode are reported, and a fault in the user copy routine that
+/// cannot be resolved makes the copy fail. A thread going back to user
+/// mode then gives way if it is to, makes its reports, takes its signals,
+/// and ends if it is to.
+#[cfg(target_os = "none")]
+extern "sysv64" fn after_interrupt(frame: &mut Frame) {
+    use crate::aspace::Fault;
+    use core::sync::atomic::Ordering;
+    let vector = frame.vector as u8;
+    let user = frame.cs & 3 == 3;
+    match vector {
+        PAGE_FAULT => {
+            let address = crate::percpu::this().fault_address.load(Ordering::Relaxed);
+            match crate::aspace::resolve_fault(frame, address) {
+                Fault::Resolved => {}
+                _ if !user && crate::usercopy::recover(frame) => {}
+                _ if !user => crate::panic::exception(frame),
+                // `resolve_fault` waits for absent and changing pages
+                // itself.
+                Fault::Denied | Fault::Absent(_) | Fault::Changed(_) | Fault::Busy(_) => {
+                    crate::exception::raise(frame, kind::PAGE_FAULT, address)
+                }
+                Fault::OutOfMemory => {
+                    crate::exception::raise(frame, kind::OUT_OF_MEMORY, frame.rip)
+                }
+            }
+        }
+        v @ 0..32 if user => crate::exception::raise(frame, exception_type(v), frame.rip),
+        _ => {}
+    }
+    if user {
         crate::sched::preempt_user();
         crate::exception::before_user_return(frame);
         crate::sched::exit_if_dead();
     }
+}
+
+/// Whether the processor is handling an interrupt or an exception.
+#[cfg(target_os = "none")]
+pub fn handling() -> bool {
+    crate::percpu::READY.load(core::sync::atomic::Ordering::Acquire)
+        && crate::percpu::this()
+            .handling
+            .load(core::sync::atomic::Ordering::Relaxed)
+            != 0
 }
 
 /// Records a debug exception raised in kernel mode by a breakpoint of the

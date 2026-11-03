@@ -29,10 +29,15 @@ use kernel_core::regions::{MapOptions, PERM_WRITE};
 use kernel_core::signal::{self as sig, ACTION_SIZE, Action, Info, UNBLOCKABLE};
 use kernel_core::status::Error;
 
-/// Prepares the output `ranges` of `process`, which have been checked to
-/// fit, by obtaining writable backing for every page, waiting for page
-/// requests as needed. No lock may be held.
+/// Prepares the output `ranges` of `process` by obtaining writable
+/// backing for every page, waiting for page requests as needed. Fails
+/// with `InvalidArgs`, preparing nothing, when a range that is not empty
+/// does not lie in the user address range. No lock may be held.
 fn prepare(process: &Arc<Process>, ranges: &[(u64, u64)]) -> Result<Outputs<Held>, Error> {
+    let fits = |&(addr, len): &(u64, u64)| len == 0 || crate::aspace::in_user_range(addr, len);
+    if !ranges.iter().all(fits) {
+        return Err(Error::InvalidArgs);
+    }
     let aspace = process.aspace();
     let mut work = Work::new(crate::sched::preempt_point);
     Outputs::prepare(ranges, Some(process.budget()), &mut work, |page| {
@@ -103,8 +108,12 @@ pub fn handle_close(handle: Option<Checked>) -> Result<(), Error> {
         return Ok(());
     };
     let process = current_process()?;
-    process.handles().lock().close(h.value)?;
+    let entry = process.handles().lock().remove(h.value)?;
     crate::wait::handle_closed(&process, h.value);
+    // The object may go with the entry, and destroying it, as freeing the
+    // frames of a large memory object, checks for reschedules only while
+    // no lock is held.
+    drop(entry);
     Ok(())
 }
 
@@ -360,7 +369,7 @@ fn page_aligned(values: &[u64]) -> Result<(), Error> {
 
 pub fn mem_create(size: u64, options: u32, out: UserOut<Handle>) -> Result<(), Error> {
     page_aligned(&[size])?;
-    let mem = MemoryObject::new(current_process()?.budget(), size, options)?;
+    let mem = MemoryObject::new(Some(current_process()?.budget()), size, options)?;
     give(mem, ObjectType::MemoryObject, out)
 }
 
@@ -438,7 +447,7 @@ pub fn vm_map(
 ) -> Result<(), Error> {
     let target = object::<Process>(process);
     let options = MapOptions::parse(options, addr, target.allows_write_execute())?;
-    page_aligned(&[addr, offset, len])?;
+    page_aligned(&[addr, offset])?;
     if len == 0 {
         return Err(Error::InvalidArgs);
     }
@@ -456,12 +465,17 @@ pub fn vm_map(
     if !out_addr.fits(1) {
         return Err(Error::InvalidArgs);
     }
-    let size = len;
+    // The object's size is a whole number of pages, so the rounded length
+    // fits it whenever `len` does.
+    let size = len
+        .checked_next_multiple_of(PAGE_SIZE)
+        .ok_or(Error::InvalidArgs)?;
     let caller = current_process()?;
     let outputs = prepare(&caller, &[out_addr.range(1)])?;
     let aspace = target.aspace().clone();
     let max = MapOptions::allowed_by(handle_rights);
-    let start = aspace.add_region(options, addr, size, &mem, offset, max, caller.budget())?;
+    let budget = Some(caller.budget());
+    let start = aspace.add_region(options, addr, size, &mem, offset, max, budget)?;
     publish(outputs, &[bytes_of(&[start])]);
     Ok(())
 }
@@ -476,7 +490,6 @@ fn page_range_end(addr: u64, len: u64) -> Result<u64, Error> {
 }
 
 pub fn vm_unmap(process: Checked, addr: u64, len: u64) -> Result<(), Error> {
-    page_aligned(&[len])?;
     let end = page_range_end(addr, len)?;
     object::<Process>(process)
         .aspace()
@@ -579,6 +592,8 @@ fn send(
             return Err(Error::InvalidArgs);
         }
     }
+    #[cfg(feature = "fuzz")]
+    crate::fuzz::pass(crate::fuzz::MESSAGE_HANDLES);
     let mut table = process.handles().lock();
     let mut entries = Vec::new();
     entries
@@ -930,7 +945,8 @@ pub fn process_write_memory(
     len: u64,
 ) -> Result<(), Error> {
     let target = object::<Process>(process);
-    let mut scratch = Scratch::new(Some(current_process()?.budget()));
+    let caller = current_process()?;
+    let mut scratch = Scratch::new(Some(caller.budget()));
     let pieces = debug_pieces(&target, addr, len, &mut scratch)?;
     let refused = |p: &Piece| p.max & PERM_WRITE == 0 || p.mem.check_writable().is_err();
     if pieces.iter().any(refused) {
@@ -939,6 +955,21 @@ pub fn process_write_memory(
     if !buf.fits(len) {
         return Err(Error::InvalidArgs);
     }
+    let mut work = Work::new(crate::sched::preempt_point);
+    // The caller's buffer is held whole first, so that reading it cannot
+    // fail once a byte has been written.
+    let first_source = buf.0 / PAGE_SIZE * PAGE_SIZE;
+    let source_count = match len {
+        0 => 0,
+        _ => (buf.0 + len).div_ceil(PAGE_SIZE) - buf.0 / PAGE_SIZE,
+    };
+    let mut sources = Vec::new();
+    scratch.reserve_exact(&mut sources, source_count as usize)?;
+    let aspace = caller.aspace();
+    for page in 0..source_count {
+        work.item();
+        sources.push(aspace.hold_for_read(first_source + page * PAGE_SIZE)?);
+    }
     // Every page is held before any byte is written: holding checks the
     // seal and revocation again, marks the page written, and keeps both
     // off until the pages are let go.
@@ -946,7 +977,6 @@ pub fn process_write_memory(
     let count: u64 = pieces.iter().map(|p| page_range(p).count() as u64).sum();
     let mut held = Vec::new();
     scratch.reserve_exact(&mut held, count as usize)?;
-    let mut work = Work::new(crate::sched::preempt_point);
     for piece in &pieces {
         for index in page_range(piece) {
             work.item();
@@ -956,7 +986,8 @@ pub fn process_write_memory(
     // The bytes reach the frames through the direct map. The processor
     // invalidates cached instructions that a write changes by physical
     // address, so the target runs the new bytes once it returns to user
-    // mode on this, the only, processor.
+    // mode on this, the only, processor. Bytes go through a kernel buffer,
+    // as a source page may be a destination page too.
     let mut pages = held.iter();
     let mut chunk = [0u8; 256];
     let mut done = 0;
@@ -967,12 +998,15 @@ pub fn process_write_memory(
             let page = pages.next().expect("a held page for every page");
             let to = end.min((at / PAGE_SIZE + 1) * PAGE_SIZE);
             while at < to {
-                let n = ((to - at) as usize).min(chunk.len());
+                let from = buf.0 + done;
+                let source = &sources[((from - first_source) / PAGE_SIZE) as usize];
+                let n = ((to - at).min(PAGE_SIZE - from % PAGE_SIZE) as usize).min(chunk.len());
                 work.copy(n);
-                buf.at(done).read_bytes(&mut chunk[..n])?;
-                // SAFETY: the page is held, so its frame stays the
-                // object's, and `n` bytes from the offset lie inside it.
+                // SAFETY: both pages are held, so their frames stay their
+                // objects', and `n` bytes from each offset lie inside them.
                 unsafe {
+                    let out = source.base().add((from % PAGE_SIZE) as usize);
+                    core::ptr::copy_nonoverlapping(out, chunk.as_mut_ptr(), n);
                     let into = page.base().add((at % PAGE_SIZE) as usize);
                     core::ptr::copy_nonoverlapping(chunk.as_ptr(), into, n);
                 }
@@ -981,7 +1015,7 @@ pub fn process_write_memory(
             }
         }
     }
-    for page in held {
+    for page in held.into_iter().chain(sources) {
         page.release(&mut work);
     }
     Ok(())
@@ -1627,7 +1661,6 @@ pub fn system_get_random(buf: UserOut<u8>, len: u64) -> Result<(), Error> {
 pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result<(), Error> {
     let target = object::<Process>(process);
     let perms = MapOptions::parse_protection(options, target.allows_write_execute())?;
-    page_aligned(&[len])?;
     let end = page_range_end(addr, len)?;
     if !crate::aspace::in_user_range(addr, end - addr) {
         return Err(Error::NotFound);
@@ -1791,7 +1824,7 @@ pub fn mem_clone(
     source.check_range(offset, len)?;
     let process = current_process()?;
     let budget = process.budget();
-    let clone = MemoryObject::new(budget, len, options)?;
+    let clone = MemoryObject::new(Some(budget), len, options)?;
     let mut work = Work::new(crate::sched::preempt_point);
     // The clone is taken once no output into the source is still to be
     // written.
@@ -1917,4 +1950,46 @@ pub fn pager_query_dirty(
 
 pub fn pager_revoke(pager: Checked, mem: Checked) -> Result<(), Error> {
     paged_of(pager, mem)?.revoke()
+}
+
+/// Writes the remaining count of the failure set for `kind` to `left`,
+/// and then sets the new one, so that the call's own allocations count
+/// for neither.
+#[cfg(feature = "fuzz")]
+pub fn fuzz_fail_alloc(
+    thread: Checked,
+    kind: u32,
+    after: u64,
+    left: UserOut<u64>,
+) -> Result<(), Error> {
+    let before = crate::fuzz::take_alloc_failure(kind)?;
+    let outputs = prepare(&current_process()?, &[left.range(1)])?;
+    publish(outputs, &[bytes_of(&[before])]);
+    crate::fuzz::fail_alloc(&object::<Thread>(thread), kind, after);
+    Ok(())
+}
+
+#[cfg(feature = "fuzz")]
+pub fn fuzz_set_interval(which: u32, ns: i64, out: UserOut<i64>) -> Result<(), Error> {
+    let outputs = prepare(&current_process()?, &[out.range(3)])?;
+    let report = crate::fuzz::set_interval(which, ns)?;
+    publish(outputs, &[bytes_of(&report)]);
+    Ok(())
+}
+
+#[cfg(feature = "fuzz")]
+pub fn fuzz_fail_random(sources: u32) -> Result<(), Error> {
+    crate::fuzz::fail_random(sources)
+}
+
+#[cfg(feature = "fuzz")]
+pub fn fuzz_preempt_at(
+    point: u32,
+    count: u64,
+    event: Option<Checked>,
+    deadline: i64,
+) -> Result<(), Error> {
+    let thread = crate::sched::current().ok_or(Error::BadState)?;
+    let event = event.map(|e| (e.object, e.value));
+    crate::fuzz::preempt_at(&thread, point, count, event, deadline)
 }

@@ -1,16 +1,18 @@
 //! Setting up and reading the monotonic clock.
 
-use crate::clock::{PIT_HZ, PM_TIMER_HZ, TscLeaves, clock_page, measured_hz, scaled_ns, tsc_scale};
+use crate::clock::{
+    PIT_HZ, PM_TIMER_HZ, Source, TscLeaves, clock_page, clock_source, measured_hz, scaled_ns,
+    tsc_scale,
+};
 use crate::cpu::{in8, in32, out8, rdtsc};
 use crate::log::log;
 use crate::memory::DirectMem;
 use crate::memory_object::MemoryObject;
 use alloc::sync::Arc;
 use boot_protocol::BootInfo;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use kernel_core::acpi::{self, Address, PmTimer, Tables};
 use kernel_core::clock::{Extender, quarter_wrap_ns, ticks_to_ns};
-use kernel_core::object::budget::Budget;
 use kernel_core::object::memory::PAGE_SIZE;
 use kernel_core::object::resource::KIND_IOPORT;
 use kernel_core::status::Error;
@@ -89,8 +91,13 @@ fn counter() -> u64 {
 /// How long the clock may go between samples of a counter that wraps: a
 /// quarter of the counter's wrap period, which keeps samples less than
 /// half a period apart even when the timer interrupt comes late. `None`
-/// for a counter that does not wrap.
+/// for a counter that does not wrap. The fuzz build's
+/// `fuzz_set_interval` can set an interval for any counter.
 pub fn maintenance_interval() -> Option<i64> {
+    #[cfg(feature = "fuzz")]
+    if let Some(ns) = crate::fuzz::interval(crate::fuzz::CLOCK) {
+        return Some(ns);
+    }
     let width = u32::from(WIDTH.load(Ordering::Relaxed));
     let rate = RATE.load(Ordering::Relaxed);
     match SOURCE.load(Ordering::Relaxed) {
@@ -157,7 +164,13 @@ fn measure_with_pit(counter: &dyn Fn() -> u64) -> Option<u64> {
     None
 }
 
+/// Reserves the ACPI PM timer and sets up reading it, the first time the
+/// kernel reads it: to calibrate against it or as the clock source.
 fn use_pm_timer(pm: PmTimer) {
+    static SET_UP: AtomicBool = AtomicBool::new(false);
+    if SET_UP.swap(true, Ordering::Relaxed) {
+        return;
+    }
     match pm.address {
         Address::Io(port) => {
             let port = u64::from(port);
@@ -207,9 +220,6 @@ pub fn init(info: &BootInfo) {
         (virt, capabilities >> 32, capabilities & HPET_64BIT != 0)
     });
 
-    if let Some(pm) = pm {
-        use_pm_timer(pm);
-    }
     // The references, in order of preference.
     let calibrate = |what: &str, counter: &dyn Fn() -> u64| -> u64 {
         hpet.map(|(virt, period_fs, wide)| {
@@ -219,7 +229,8 @@ pub fn init(info: &BootInfo) {
             measure(counter, || ext.extend(hpet_read(virt, HPET_COUNTER)), hz)
         })
         .or_else(|| {
-            pm.map(|_| {
+            pm.map(|pm| {
+                use_pm_timer(pm);
                 let ext = extender();
                 measure(counter, || ext.extend(pm_read()), PM_TIMER_HZ)
             })
@@ -242,41 +253,48 @@ pub fn init(info: &BootInfo) {
         crate::timer::set_hz(apic_hz);
     }
 
-    let name;
-    if leaves.invariant() {
-        // The clock page gives user space the same factor and shift, so
-        // that it computes exactly the values `now` returns.
-        let (mult, shift) = tsc_scale(tsc_hz);
-        RATE.store(u64::from(shift) << 32 | u64::from(mult), Ordering::Relaxed);
-        SOURCE.store(TSC, Ordering::Relaxed);
-        name = "the TSC";
-    } else if let Some((virt, period_fs, wide)) = hpet {
-        ADDRESS.store(virt, Ordering::Relaxed);
-        RATE.store(period_fs, Ordering::Relaxed);
-        WIDTH.store(if wide { 64 } else { 32 }, Ordering::Relaxed);
-        SOURCE.store(HPET, Ordering::Relaxed);
-        name = "the HPET";
-    } else if pm.is_some() {
-        RATE.store(PM_TIMER_HZ, Ordering::Relaxed);
-        SOURCE.store(PM, Ordering::Relaxed);
-        name = "the ACPI PM timer";
-    } else {
-        panic!("no clock source: no invariant TSC, HPET or ACPI PM timer");
-    }
+    let name = match (
+        clock_source(leaves.invariant(), hpet.is_some(), pm.is_some()),
+        hpet,
+        pm,
+    ) {
+        (Some(Source::Tsc), ..) => {
+            // The clock page gives user space the same factor and shift,
+            // so that it computes exactly the values `now` returns.
+            let (mult, shift) = tsc_scale(tsc_hz);
+            RATE.store(u64::from(shift) << 32 | u64::from(mult), Ordering::Relaxed);
+            SOURCE.store(TSC, Ordering::Relaxed);
+            "the TSC"
+        }
+        (Some(Source::Hpet), Some((virt, period_fs, wide)), _) => {
+            ADDRESS.store(virt, Ordering::Relaxed);
+            RATE.store(period_fs, Ordering::Relaxed);
+            WIDTH.store(if wide { 64 } else { 32 }, Ordering::Relaxed);
+            SOURCE.store(HPET, Ordering::Relaxed);
+            "the HPET"
+        }
+        (Some(Source::PmTimer), _, Some(pm)) => {
+            use_pm_timer(pm);
+            RATE.store(PM_TIMER_HZ, Ordering::Relaxed);
+            SOURCE.store(PM, Ordering::Relaxed);
+            "the ACPI PM timer"
+        }
+        _ => panic!("no clock source: no invariant TSC, HPET or ACPI PM timer"),
+    };
     BASE.store(counter(), Ordering::Release);
     log!(Info, "monotonic clock from {name}");
 }
 
-/// Creates the clock page, charged to `budget`. Its contents never change
-/// after boot, so `sequence` stays 0.
-pub fn create_clock_page(budget: &Arc<Budget>) -> Result<Arc<MemoryObject>, Error> {
+/// Creates the clock page at boot, charged to no budget. Its contents
+/// never change after boot, so `sequence` stays 0.
+pub fn create_clock_page() -> Result<Arc<MemoryObject>, Error> {
     let tsc = (SOURCE.load(Ordering::Acquire) == TSC).then(|| {
         let rate = RATE.load(Ordering::Relaxed);
         let base = BASE.load(Ordering::Relaxed);
         (rate as u32, (rate >> 32) as u32, base, 0)
     });
     let header = clock_page(tsc);
-    let page = MemoryObject::new(budget, PAGE_SIZE, 0)?;
+    let page = MemoryObject::new(None, PAGE_SIZE, 0)?;
     // This runs during boot, where no other thread could run.
     let mut work = crate::publish::Work::new(|| {});
     page.write(0, header.len() as u64, &mut work, |chunk| {

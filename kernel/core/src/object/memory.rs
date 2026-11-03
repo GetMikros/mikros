@@ -220,13 +220,14 @@ impl Pages {
         Ok(taken)
     }
 
-    /// The memory information record of an object of `kind` with
-    /// `seals`.
-    pub fn info(&self, kind: u32, seals: u32) -> [u8; INFO_MEMORY_SIZE] {
+    /// The memory information record of an object of `kind` created with
+    /// `options`, which include those of the pages, with `seals`.
+    pub fn info(&self, kind: u32, options: u32, seals: u32) -> [u8; INFO_MEMORY_SIZE] {
+        debug_assert_eq!(options & self.options, self.options);
         let mut record = [0u8; INFO_MEMORY_SIZE];
         record[0x00..0x08].copy_from_slice(&self.size.to_le_bytes());
         record[0x08..0x0C].copy_from_slice(&kind.to_le_bytes());
-        record[0x0C..0x10].copy_from_slice(&self.options.to_le_bytes());
+        record[0x0C..0x10].copy_from_slice(&options.to_le_bytes());
         record[0x10..0x14].copy_from_slice(&seals.to_le_bytes());
         record
     }
@@ -357,8 +358,10 @@ mod tests {
     #[test]
     fn writes_the_information_record() {
         let pages = Pages::new(0x1234, RESIZABLE, MAX).unwrap();
-        let r = pages.info(KIND_ANONYMOUS, SEAL_GROW);
+        let r = pages.info(KIND_ANONYMOUS, pages.options(), SEAL_GROW);
         assert_eq!(&r[0..8], &0x1234u64.to_le_bytes());
         assert_eq!(&r[8..24], &[1, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]);
+        let r = pages.info(KIND_PAGED, RESIZABLE | TRACK_DIRTY, 0);
+        assert_eq!(&r[8..16], &[5, 0, 0, 0, 3, 0, 0, 0]);
     }
 }

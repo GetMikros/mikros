@@ -2,9 +2,8 @@
 
 use crate::serial;
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use kernel_core::log::{Log, Message, Record, Severity, Source, line};
+use kernel_core::log::{Log, Message, Readers, Record, Severity, Source, line};
 use kernel_core::object::budget::Budget;
 use kernel_core::object::{Header, Object, ObjectType, signals};
 use kernel_core::status::Error;
@@ -32,7 +31,16 @@ fn append(koid: u64, severity: Severity, source: Source, message: &[u8]) {
         serial::write(line(record, b"\r\n").as_bytes());
         crate::console::write(line(record, b"\n").as_bytes());
     });
-    notify_readers();
+    // Notifying a reader takes the locks of the signal hook, which the
+    // code that logs, or the code an interrupt that logs interrupted, may
+    // hold. With any lock held, the readers are notified later.
+    READERS.notify(kernel_core::sync::none_held(), notify);
+}
+
+/// Notifies the log readers of the records written since a notification
+/// was left pending. No lock may be held.
+pub fn notify_pending() {
+    READERS.run_pending(notify);
 }
 
 /// A `LogReader`: a read position in the log.
@@ -48,19 +56,23 @@ impl LogReader {
     /// storage.
     const COST: u64 = (size_of::<LogReader>() + 2 * size_of::<Weak<LogReader>>()) as u64;
 
-    /// A reader at `after`, charged to `budget`.
+    /// A reader at `after`, charged to `budget`. No lock may be held.
     pub fn new(budget: &Arc<Budget>, after: u64) -> Result<Arc<LogReader>, Error> {
-        let mut readers = READERS.lock();
-        readers.retain(|r| r.strong_count() > 0);
-        readers.try_reserve(1).map_err(|_| Error::NoMemory)?;
-        budget.charge_kernel(Self::COST)?;
-        let reader = kernel_core::fallible::try_arc(LogReader {
-            header: Header::new(ObjectType::LogReader),
-            budget: budget.clone(),
-            position: AtomicU64::new(after),
-        })?;
-        readers.push(Arc::downgrade(&reader));
-        drop(readers);
+        let reader = READERS.with(
+            |readers| {
+                readers.retain(|r| r.strong_count() > 0);
+                readers.try_reserve(1).map_err(|_| Error::NoMemory)?;
+                budget.charge_kernel(Self::COST)?;
+                let reader = kernel_core::fallible::try_arc(LogReader {
+                    header: Header::new(ObjectType::LogReader),
+                    budget: budget.clone(),
+                    position: AtomicU64::new(after),
+                })?;
+                readers.push(Arc::downgrade(&reader));
+                Ok(reader)
+            },
+            notify,
+        )?;
         reader.update();
         Ok(reader)
     }
@@ -103,23 +115,15 @@ impl Object for LogReader {
 }
 
 /// Every log reader.
-static READERS: SpinLock<Vec<Weak<LogReader>>> = SpinLock::new(Vec::new());
+static READERS: Readers<Weak<LogReader>> = Readers::new();
 
-/// Sets READABLE on the readers behind the newest record. Logging never
-/// waits, so readers are skipped while the list is in use; the record is
-/// then found by the next read or the next notification.
-fn notify_readers() {
-    let Some(readers) = READERS.try_lock() else {
-        return;
-    };
-    for reader in readers.iter() {
-        // A reader that upgrades is held by a handle that nothing here
-        // closes, so dropping this reference never destroys it.
-        if let Some(reader) = reader.upgrade()
-            && LOG.head() > reader.position.load(Ordering::Acquire)
-        {
-            reader.header.update_signals(0, signals::READABLE);
-        }
+/// Sets READABLE on `reader` exactly while a record after its position is
+/// written, as a record still being written cannot be read yet.
+fn notify(reader: &Weak<LogReader>) {
+    // A reader that upgrades is held by a handle that nothing here
+    // closes, so dropping this reference never destroys it.
+    if let Some(reader) = reader.upgrade() {
+        reader.update();
     }
 }
 

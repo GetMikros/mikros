@@ -59,6 +59,20 @@ fn choose_kind(
     best.map(|m| Choice::Switch(m.index))
 }
 
+/// Opens the graphics output of the console output handle `console`, or
+/// else of the handle that `first` finds with one, which is only looked for
+/// when the console has none. `open` opens the graphics output of a handle,
+/// or returns `None` when it has none.
+pub fn open_output<H, O>(
+    console: Option<H>,
+    first: impl FnOnce() -> Option<H>,
+    mut open: impl FnMut(H) -> Option<O>,
+) -> Option<O> {
+    console
+        .and_then(&mut open)
+        .or_else(|| first().and_then(open))
+}
+
 /// Whether pixels with these channel masks are 32 bits wide, which is the
 /// case when the highest bit of any mask is bit 31.
 pub fn bitmask_is_32bit(red: u32, green: u32, blue: u32, reserved: u32) -> bool {
@@ -128,6 +142,24 @@ mod tests {
             mode(3, 1280, 800, Kind::BltOnly),
         ];
         assert_eq!(choose(current, modes), Choice::Switch(3));
+    }
+
+    #[test]
+    fn opens_the_consoles_output_first() {
+        let outputs = [(1, "console"), (2, "first")];
+        let open = |handle| outputs.iter().find(|o| o.0 == handle).map(|o| o.1);
+        let first = || -> Option<i32> { panic!("looked for another output") };
+        assert_eq!(open_output(Some(1), first, open), Some("console"));
+    }
+
+    #[test]
+    fn opens_the_first_output_without_one_on_the_console() {
+        let outputs = [(2, "first")];
+        let open = |handle| outputs.iter().find(|o| o.0 == handle).map(|o| o.1);
+        assert_eq!(open_output(Some(1), || Some(2), open), Some("first"));
+        assert_eq!(open_output(None, || Some(2), open), Some("first"));
+        assert_eq!(open_output(None, || None, open), None);
+        assert_eq!(open_output(Some(1), || Some(3), open), None);
     }
 
     #[test]

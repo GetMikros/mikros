@@ -1,14 +1,21 @@
 //! Development tasks for the Mikros repository, run with `cargo xtask`.
 
+mod boot_menu;
 mod build;
 mod check;
 mod debug;
+mod debug_build;
 mod debuginfo;
+mod entry_state;
+mod extended;
 mod firmware;
 mod fuzz;
 mod image;
+mod loader_check;
+mod machine_state;
 mod qemu;
 mod run;
+mod scenario;
 mod setup;
 mod symbolize;
 mod test;

@@ -79,28 +79,33 @@ pub struct Outputs<P: Page> {
     charged: Option<(Arc<Budget>, u64)>,
 }
 
-/// The first page and the number of pages of `len` bytes from `addr`.
-fn span(addr: u64, len: u64) -> (u64, usize) {
+/// The first page and the number of pages of `len` bytes from `addr`, or
+/// `None` when the range passes the end of the address space.
+fn span(addr: u64, len: u64) -> Option<(u64, usize)> {
     if len == 0 {
-        return (0, 0);
+        return Some((0, 0));
     }
     let first = addr & !(PAGE_SIZE - 1);
-    let end = (addr + len).next_multiple_of(PAGE_SIZE);
-    (first, ((end - first) / PAGE_SIZE) as usize)
+    let end = addr.checked_add(len)?.checked_next_multiple_of(PAGE_SIZE)?;
+    Some((first, ((end - first) / PAGE_SIZE) as usize))
 }
 
 impl<P: Page> Outputs<P> {
     /// Prepares the outputs `ranges`, whose addresses and lengths have been
     /// validated, by calling `page` for each page of each of them. The
     /// kernel memory recording the pages is charged to `budget`. On failure,
-    /// the pages prepared so far are released.
+    /// the pages prepared so far are released. Fails with `InvalidArgs`,
+    /// preparing nothing, when a range passes the end of the address space.
     pub fn prepare<F: FnMut()>(
         ranges: &[(u64, u64)],
         budget: Option<&Arc<Budget>>,
         work: &mut Work<F>,
         mut page: impl FnMut(u64) -> Result<P, Error>,
     ) -> Result<Outputs<P>, Error> {
-        let count: usize = ranges.iter().map(|&(addr, len)| span(addr, len).1).sum();
+        let mut count = 0;
+        for &(addr, len) in ranges {
+            count += span(addr, len).ok_or(Error::InvalidArgs)?.1;
+        }
         let bytes = (count * size_of::<P>() + ranges.len() * size_of::<(u64, u64, usize)>()) as u64;
         if let Some(budget) = budget {
             budget.charge_kernel(bytes)?;
@@ -118,7 +123,7 @@ impl<P: Page> Outputs<P> {
         }
         for &(addr, len) in ranges {
             outputs.ranges.push((addr, len, outputs.pages.len()));
-            let (first, pages) = span(addr, len);
+            let (first, pages) = span(addr, len).expect("every range was spanned above");
             for i in 0..pages as u64 {
                 work.item();
                 match page(first + i * PAGE_SIZE) {
@@ -264,6 +269,24 @@ mod tests {
             }
         });
         assert_eq!(result.err(), Some(Error::InvalidArgs));
+        assert_eq!((live.get(), used(&root)), (0, 0));
+    }
+
+    #[test]
+    fn refuses_ranges_past_the_end_of_the_address_space() {
+        let live = Rc::new(Cell::new(0));
+        let root = Budget::root();
+        let mut work = Work::new(|| {});
+        for range in [
+            (u64::MAX - 3, 8),
+            (u64::MAX - 0x800, 0x400),
+            (0x1000, u64::MAX),
+        ] {
+            let result = Outputs::prepare(&[(0x1000, 8), range], Some(&root), &mut work, |a| {
+                Ok(fake(&live, a))
+            });
+            assert_eq!(result.err(), Some(Error::InvalidArgs), "{range:x?}");
+        }
         assert_eq!((live.get(), used(&root)), (0, 0));
     }
 

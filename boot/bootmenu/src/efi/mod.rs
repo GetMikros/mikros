@@ -6,187 +6,112 @@ mod pointers;
 mod power;
 mod screen;
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bootmenu::bmp;
-use bootmenu::canvas::{Canvas, Color};
-use bootmenu::entries::{self, Config};
-use bootmenu::input::{Action, Event, Input};
-use bootmenu::menu::{Card, FocusSource, ICON_SIZE, Item, Menu, Power};
+use bootmenu::canvas::Canvas;
+use bootmenu::entries::Config;
+use bootmenu::input::{self, Action, Event, Input};
+use bootmenu::load::{self, ENTRIES_PATH, Loaded, ReadError};
+use bootmenu::menu::{Item, Menu};
 use bootmenu::pointer;
+use bootmenu::session::{self, Exit, KeyStroke};
 use bootmenu::text::Text;
 use core::time::Duration;
 use others::Detected;
 use pointers::Pointers;
 use screen::Screen;
-use uefi::boot::{EventType, TimerTrigger, Tpl};
+use uefi::boot::{EventType, ScopedProtocol, TimerTrigger, Tpl};
 use uefi::fs::FileSystem;
 use uefi::proto::console::text::{InputEx, Key, ScanCode};
 use uefi::proto::device_path::DevicePath;
-use uefi::runtime::{self, VariableVendor};
-use uefi::{CString16, Status, boot, cstr16, system};
+use uefi::{CString16, Status, boot, system};
 use uefi_raw::protocol::console::KeyToggleState;
 
-const ENTRIES_PATH: &str = "\\EFI\\Mikros\\entries.yaml";
-
-/// Bit of `OsIndicationsSupported` and `OsIndications` that asks the
-/// firmware to show its setup screen on the next boot.
-const BOOT_TO_FW_UI: u64 = 1;
-
-/// Reads the entries file from the volume the boot manager was loaded from.
-/// Returns the configuration, a notice naming any problem with the file, and
-/// whether the file is missing.
-fn load_config(volume: Result<&mut FileSystem, Status>) -> (Config, Option<String>, bool) {
-    let unusable = |problem: String| {
-        let config = Config {
-            default: None,
-            timeout: None,
-            entries: Vec::new(),
-            detect: false,
-        };
-        (
-            config,
-            Some(format!("Couldn't use {ENTRIES_PATH}: {problem}")),
-            false,
-        )
-    };
-    let volume = match volume {
-        Ok(volume) => volume,
-        Err(status) => return unusable(format!("{status:?}")),
-    };
-    match volume.read(cstr16!("\\EFI\\Mikros\\entries.yaml")) {
-        Ok(bytes) => match Config::parse(&bytes) {
-            Ok(config) => (config, None, false),
-            Err(err) => unusable(format!("{err}")),
+/// Reads the file at `path` on `volume`. A failure of the firmware other
+/// than a missing file is described by the name of its status, such as
+/// `DEVICE_ERROR`.
+fn read_file(volume: Result<&mut FileSystem, String>, path: &str) -> Result<Vec<u8>, ReadError> {
+    let volume = volume.map_err(ReadError::Other)?;
+    let name = CString16::try_from(path)
+        .map_err(|_| ReadError::Other(String::from("the path is not valid")))?;
+    volume.read(name.as_ref()).map_err(|err| match err {
+        uefi::fs::Error::Io(err) => match err.uefi_error.status() {
+            Status::NOT_FOUND => ReadError::NotFound,
+            status => ReadError::Other(format!("{status:?}")),
         },
-        Err(uefi::fs::Error::Io(err)) if err.uefi_error.status() == Status::NOT_FOUND => {
-            (Config::for_missing_file(), None, true)
-        }
-        Err(err) => unusable(format!("{err}")),
-    }
+        err => ReadError::Other(format!("{err}")),
+    })
 }
 
-/// Whether the firmware can be asked to show its setup screen.
-fn firmware_ui_supported() -> bool {
-    let mut buf = [0u8; 8];
-    let name = cstr16!("OsIndicationsSupported");
-    match runtime::get_variable(name, &VariableVendor::GLOBAL_VARIABLE, &mut buf) {
-        Ok((value, _)) if value.len() == 8 => u64::from_le_bytes(buf) & BOOT_TO_FW_UI != 0,
-        _ => false,
-    }
+/// Reads the entries file from the volume the boot manager was loaded from.
+fn load_config(volume: Result<&mut FileSystem, Status>) -> Loaded {
+    let volume = volume.map_err(|status| format!("{status:?}"));
+    load::load_config(read_file(volume, ENTRIES_PATH))
 }
 
 /// Reads the BMP image at `path` on the boot volume and scales it to fit
 /// the tile.
 fn load_icon(volume: Option<&mut FileSystem>, path: &str) -> Result<bmp::Image, String> {
-    let volume = volume.ok_or_else(|| String::from("the boot volume was not found"))?;
-    let name = CString16::try_from(path).map_err(|_| String::from("the path is not valid"))?;
-    let bytes = volume.read(name.as_ref()).map_err(|err| match err {
-        uefi::fs::Error::Io(err) if err.uefi_error.status() == Status::NOT_FOUND => {
-            String::from("the file was not found")
-        }
-        uefi::fs::Error::Io(err) => format!("{:?}", err.uefi_error.status()),
-        err => format!("{err}"),
-    })?;
-    let image = bmp::decode(&bytes).map_err(|err| match err {
-        bmp::Error::NotBmp => String::from("not a BMP image"),
-        bmp::Error::Truncated => String::from("the image is truncated"),
-        bmp::Error::Unsupported => String::from("unsupported BMP format"),
-    })?;
-    Ok(image.fit_within(ICON_SIZE))
+    let volume = volume.ok_or_else(|| String::from("the boot volume was not found"));
+    load::icon(read_file(volume, path))
 }
 
-/// Builds the menu for `config`, followed by the `detected` systems. Notices about the entries file and about
-/// icons that could not be loaded are joined into the menu's notice.
+/// Builds the menu for `config`, followed by the `detected` systems, with
+/// the icons on `volume`.
 fn build_menu(
     config: &Config,
     detected: &[Detected],
     mut volume: Option<&mut FileSystem>,
     config_notice: Option<String>,
 ) -> Menu {
-    let mut notices: Vec<String> = config_notice.into_iter().collect();
-    let cards = config
-        .entries
-        .iter()
-        .map(|entry| {
-            let icon = entry.icon.as_deref().and_then(|path| {
-                match load_icon(volume.as_deref_mut(), path) {
-                    Ok(image) => Some(image),
-                    Err(reason) => {
-                        notices.push(format!(
-                            "Couldn't load the icon {path} of {}: {reason}",
-                            entry.name
-                        ));
-                        None
-                    }
-                }
-            });
-            Card {
-                name: entry.name.clone(),
-                detail: entry.detail.clone(),
-                color: Color::rgb(entry.color.r, entry.color.g, entry.color.b),
-                icon,
-            }
-        })
-        .chain(detected.iter().map(|system| Card {
-            name: system.name.clone(),
-            detail: system.other_disk.then(|| String::from("Other disk")),
-            color: Color::rgb(
-                entries::Color::DEFAULT_TILE.r,
-                entries::Color::DEFAULT_TILE.g,
-                entries::Color::DEFAULT_TILE.b,
-            ),
-            icon: None,
-        }))
-        .collect::<Vec<_>>();
-    let notice = (!notices.is_empty()).then(|| notices.join("; "));
-    let mut buttons = vec![Power::Restart, Power::ShutDown];
-    if firmware_ui_supported() {
-        buttons.push(Power::FirmwareSettings);
-    }
-    let focus =
-        (!cards.is_empty()).then(|| (Item::Card(config.default_index()), FocusSource::Keyboard));
-    Menu {
-        cards,
-        buttons,
-        notice,
-        focus,
-        countdown: None,
-    }
+    load::build_menu(
+        config,
+        detected,
+        |path| load_icon(volume.as_deref_mut(), path),
+        config_notice,
+        power::firmware_ui_supported(),
+    )
 }
-
-/// The bootloader, started when there is no entry to start instead.
-const MIKROSBOOT_PATH: &str = "\\EFI\\Mikros\\mikrosboot.efi";
 
 /// Translates a key from the console into a menu event.
 fn translate(key: Key) -> Event {
-    match key {
-        Key::Special(ScanCode::RIGHT | ScanCode::DOWN) => Event::Next,
-        Key::Special(ScanCode::LEFT | ScanCode::UP) => Event::Previous,
-        Key::Printable(c) => match char::from(c) {
-            '\t' => Event::Next,
-            '\r' | '\n' | ' ' => Event::Activate,
-            _ => Event::OtherKey,
-        },
-        Key::Special(_) => Event::OtherKey,
-    }
+    let key = match key {
+        Key::Special(ScanCode::RIGHT) => input::Key::Right,
+        Key::Special(ScanCode::DOWN) => input::Key::Down,
+        Key::Special(ScanCode::LEFT) => input::Key::Left,
+        Key::Special(ScanCode::UP) => input::Key::Up,
+        Key::Printable(c) => input::Key::Char(char::from(c)),
+        Key::Special(_) => input::Key::OtherSpecial,
+    };
+    input::translate(key)
 }
 
-/// Whether a key is held while the boot manager starts. Reads, and so
-/// discards, every pending key stroke, including Shift on its own where the
-/// console reports it.
-fn key_held() -> bool {
-    let Some(mut input) = pointers::open_on_console::<InputEx>() else {
-        return false;
-    };
-    let _ = input.set_state(KeyToggleState::VALID | KeyToggleState::EXPOSED);
-    let mut held = false;
-    while let Ok(Some(_)) = input.read_key() {
-        held = true;
+/// The console's extended text input, read by `session::key_held`.
+struct Keyboard(ScopedProtocol<InputEx>);
+
+impl session::Keyboard for Keyboard {
+    fn expose_key_state(&mut self) {
+        let _ = self
+            .0
+            .set_state(KeyToggleState::VALID | KeyToggleState::EXPOSED);
     }
-    held
+
+    fn read_key_stroke(&mut self) -> Option<KeyStroke> {
+        let data = self.0.read_key().ok()??;
+        let (scan_code, unicode_char) = match data.key {
+            Key::Special(scan) => (scan.0, 0),
+            Key::Printable(c) => (0, u16::from(c)),
+        };
+        Some(KeyStroke {
+            scan_code,
+            unicode_char,
+            shift_state: data.key_state.key_shift_state.map_or(0, |s| s.bits()),
+        })
+    }
 }
 
 /// Creates an event that is signaled every second.
@@ -245,7 +170,6 @@ fn redraw(menu: &Menu, input: &Input, text: &mut Text, canvas: &mut Canvas, scre
 /// Shows `menu` on `screen` until an item is activated, and returns it. The
 /// screen and the pointers are released when this returns.
 fn show(menu: &mut Menu, mut screen: Screen, text: &mut Text, default: usize) -> Item {
-    let _ = boot::set_watchdog_timer(0, 0x10000, None);
     let (width, height) = screen.size();
     let mut canvas = Canvas::new(width, height);
     let mut input = Input::new(width as i32, height as i32, default);
@@ -276,10 +200,45 @@ fn show(menu: &mut Menu, mut screen: Screen, text: &mut Text, default: usize) ->
     item
 }
 
-/// Starts `path` on the boot volume with `args`.
-fn start(volume: Option<&DevicePath>, path: &str, args: Option<&str>) -> Result<(), String> {
-    let volume = volume.ok_or_else(|| String::from("the boot volume was not found"))?;
-    launch::start(volume, path, args)
+/// The firmware services of `session::run`.
+struct Firmware<'a> {
+    text: &'a mut Text,
+    volume: Option<Box<DevicePath>>,
+    detected: &'a [Detected],
+}
+
+impl session::Firmware for Firmware<'_> {
+    type Screen = Screen;
+
+    fn key_held(&mut self) -> bool {
+        let mut keyboard = pointers::open_on_console::<InputEx>().map(Keyboard);
+        session::key_held(keyboard.as_mut())
+    }
+
+    fn open_screen(&mut self) -> Option<Screen> {
+        Screen::open()
+    }
+
+    fn disable_watchdog(&mut self) {
+        let _ = boot::set_watchdog_timer(0, 0x10000, None);
+    }
+
+    fn show(&mut self, menu: &mut Menu, screen: Screen, default: usize) -> Item {
+        show(menu, screen, self.text, default)
+    }
+
+    fn start_file(&mut self, path: &str, args: Option<&str>) -> Result<(), String> {
+        let volume = self
+            .volume
+            .as_deref()
+            .ok_or_else(|| String::from("the boot volume was not found"))?;
+        launch::start(volume, path, args)
+    }
+
+    fn start_detected(&mut self, index: usize) -> Result<(), String> {
+        let system = &self.detected[index];
+        launch::start_image(&system.device_path, &system.path, None)
+    }
 }
 
 pub fn run() -> Status {
@@ -293,76 +252,29 @@ pub fn run() -> Status {
     // protocol drops every open of it by the same image, which would leave
     // this one closed underneath.
     let mut file_system = image_file_system();
-    let (mut config, config_notice, missing) = load_config(file_system.as_mut().map_err(|s| *s));
+    let mut loaded = load_config(file_system.as_mut().map_err(|s| *s));
     drop(file_system);
     let volume = launch::boot_volume();
     let detected = match &volume {
-        Some(volume) if config.detect => others::find(&config, volume),
+        Some(volume) if loaded.config.detect => others::find(&loaded.config, volume),
         _ => Vec::new(),
     };
-    if missing && !detected.is_empty() {
-        config.timeout = Some(5);
-    }
+    load::apply_detection(&mut loaded, detected.len());
+    let Loaded { config, notice, .. } = loaded;
     let mut file_system = image_file_system();
-    let mut menu = build_menu(&config, &detected, file_system.as_mut().ok(), config_notice);
+    let menu = build_menu(&config, &detected, file_system.as_mut().ok(), notice);
     drop(file_system);
-    let startup_notice = menu.notice.clone();
-    let default = config.default_index();
     let Some(mut text) = Text::new() else {
         return Status::LOAD_ERROR;
     };
-
-    // Decide what happens at start-up: start the default entry at once, show
-    // the menu with a countdown, or show it without one.
-    let mut start_now = None;
-    if let Some(entry) = config.entries.get(default)
-        && !key_held()
-    {
-        match config.timeout {
-            Some(0) => start_now = Some(Item::Card(default)),
-            Some(seconds) => menu.countdown = Some((entry.name.clone(), seconds)),
-            None => {}
-        }
-    }
-
-    loop {
-        let item = match start_now.take() {
-            Some(item) => item,
-            None => {
-                let Some(screen) = Screen::open() else {
-                    let (path, args) = match config.entries.get(default) {
-                        Some(entry) => (entry.path.as_str(), entry.args.as_deref()),
-                        None => (MIKROSBOOT_PATH, None),
-                    };
-                    return match start(volume.as_deref(), path, args) {
-                        Ok(()) => Status::SUCCESS,
-                        Err(_) => Status::LOAD_ERROR,
-                    };
-                };
-                show(&mut menu, screen, &mut text, default)
-            }
-        };
-        match item {
-            Item::Button(power) => power::act(power),
-            Item::Card(index) => {
-                let (name, result) = match config.entries.get(index) {
-                    Some(entry) => (
-                        &entry.name,
-                        start(volume.as_deref(), &entry.path, entry.args.as_deref()),
-                    ),
-                    None => {
-                        let system = &detected[index - config.entries.len()];
-                        let result = launch::start_image(&system.device_path, &system.path, None);
-                        (&system.name, result)
-                    }
-                };
-                menu.notice = match result {
-                    Ok(()) => startup_notice.clone(),
-                    Err(reason) => Some(format!("Couldn't start {name}: {reason}")),
-                };
-                menu.focus = Some((Item::Card(index), FocusSource::Keyboard));
-                menu.countdown = None;
-            }
-        }
+    let mut firmware = Firmware {
+        text: &mut text,
+        volume,
+        detected: &detected,
+    };
+    match session::run(&mut firmware, &config, menu) {
+        Exit::Power(power) => power::act(power),
+        Exit::NoScreen(Ok(())) => Status::SUCCESS,
+        Exit::NoScreen(Err(_)) => Status::LOAD_ERROR,
     }
 }

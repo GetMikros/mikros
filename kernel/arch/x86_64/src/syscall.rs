@@ -2,7 +2,7 @@
 //! dispatch generated from `kernel/syscalls.yaml` and the handlers.
 
 use crate::aspace::{USER_END, USER_START};
-use crate::cpu::write_msr;
+use crate::cpu::{RFLAGS_AC, write_msr};
 use crate::gdt::{KERNEL_CODE, USER_CODE, USER_DATA};
 use crate::percpu::{KERNEL_STACK_OFFSET, USER_RSP_OFFSET};
 use crate::usercopy::copy_in;
@@ -28,7 +28,6 @@ const RFLAGS_TF: u64 = 1 << 8;
 const RFLAGS_IF: u64 = 1 << 9;
 const RFLAGS_DF: u64 = 1 << 10;
 const RFLAGS_NT: u64 = 1 << 14;
-const RFLAGS_AC: u64 = 1 << 18;
 
 /// The registers of a thread that entered with `SYSCALL`, saved on its
 /// kernel stack in the layout of an interrupt frame without the vector
@@ -124,6 +123,11 @@ pub fn init() {
 const SYSCALL_LEN: u64 = 2;
 
 extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
+    // The entry code leaves RFLAGS as SYSCALL set it through IA32_FMASK.
+    debug_assert!(
+        crate::cpu::rflags() & (RFLAGS_IF | RFLAGS_TF | RFLAGS_DF | RFLAGS_AC | RFLAGS_NT) == 0,
+        "a system call entered with flags that IA32_FMASK should clear"
+    );
     let at = frame.rip.wrapping_sub(SYSCALL_LEN);
     let Some(thread) = crate::sched::current() else {
         unreachable!("a system call without a running thread");
@@ -296,9 +300,13 @@ pub unsafe trait Plain: Copy {}
 
 // SAFETY: integers have no padding and no invalid bit patterns.
 unsafe impl Plain for u8 {}
+// SAFETY: as for `u8`.
 unsafe impl Plain for u32 {}
+// SAFETY: as for `u8`.
 unsafe impl Plain for u64 {}
+// SAFETY: as for `u8`.
 unsafe impl Plain for i32 {}
+// SAFETY: as for `u8`.
 unsafe impl Plain for i64 {}
 
 /// The bytes of `values`.
@@ -371,9 +379,10 @@ impl<T: Plain> UserOut<T> {
         UserOut(addr, PhantomData)
     }
 
-    /// The output range of `len` values at the address, which must fit.
+    /// The output range of `len` values at the address. A length that
+    /// does not fit in a `u64` saturates, so that the range never fits.
     pub fn range(&self, len: u64) -> (u64, u64) {
-        (self.0, len * size_of::<T>() as u64)
+        (self.0, len.saturating_mul(size_of::<T>() as u64))
     }
 
     /// Whether the address is zero.

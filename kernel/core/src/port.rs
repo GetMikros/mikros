@@ -288,6 +288,8 @@ impl<X: Target> Registration<X> {
 /// The registrations of the waits that have not been removed.
 pub struct Registrations<X> {
     list: Vec<Registration<X>>,
+    /// How many of them have ended.
+    ended: usize,
 }
 
 impl<X> Default for Registrations<X> {
@@ -298,13 +300,22 @@ impl<X> Default for Registrations<X> {
 
 impl<X> Registrations<X> {
     pub const fn new() -> Registrations<X> {
-        Registrations { list: Vec::new() }
+        Registrations {
+            list: Vec::new(),
+            ended: 0,
+        }
     }
 }
 
 impl<X: Target> Registrations<X> {
     pub fn iter(&self) -> impl Iterator<Item = &Registration<X>> {
         self.list.iter()
+    }
+
+    /// Whether any of them has ended, so that removing the ended ones
+    /// finds some.
+    pub fn any_ended(&self) -> bool {
+        self.ended > 0
     }
 
     /// Makes room for one more registration.
@@ -368,6 +379,7 @@ impl<X: Target> Registrations<X> {
                 ended += 1;
             }
         }
+        self.ended += ended;
         ended
     }
 
@@ -379,6 +391,7 @@ impl<X: Target> Registrations<X> {
             if r.wait.koid == koid && reached && !r.done {
                 r.queue(TIMELINE, &value.to_le_bytes());
                 r.done = true;
+                self.ended += 1;
             }
         }
     }
@@ -409,6 +422,9 @@ impl<X: Target> Registrations<X> {
                 continue;
             }
             let r = self.list.swap_remove(i);
+            if r.done {
+                self.ended -= 1;
+            }
             if out.len() < out.capacity() {
                 out.push(r);
             } else {
@@ -504,6 +520,20 @@ mod tests {
         list.take(|r| r.is_done(), &mut out, |_| panic!("no room"));
         assert_eq!(out.len(), 1);
         assert_eq!(list.iter().count(), 0);
+    }
+
+    #[test]
+    fn counts_the_ended_registrations_until_they_are_taken() {
+        let (mut list, port) = (Registrations::new(), port());
+        assert!(register(&mut list, &port, wait(1, 1, false), 0));
+        assert!(register(&mut list, &port, wait(2, 2, false), 0));
+        assert!(!list.any_ended());
+        list.signals_changed(7, 1);
+        assert!(list.any_ended());
+        let mut out = vec::Vec::with_capacity(1);
+        list.take(|r| r.is_done(), &mut out, |_| panic!("no room"));
+        assert!(!list.any_ended());
+        assert_eq!(list.iter().count(), 1);
     }
 
     #[test]

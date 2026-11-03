@@ -18,7 +18,7 @@ repository. Code and commits refer to them by ID, such as `MIKSPEC-0012.R3`.
 |---|---|
 | `spec/` | The Mikros specifications (submodule) |
 | `xtask/` | Development tasks, run with `cargo xtask` |
-| `targets/` | Target specifications for Rust and Clang |
+| `targets/` | Target specification for Rust |
 | `boot/bootmenu/` | Boot manager |
 | `boot/mikrosboot/` | Bootloader |
 | `boot/protocol/` | Data passed from the bootloader to the kernel |

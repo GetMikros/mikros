@@ -14,6 +14,7 @@ pub const CR4_VME: u64 = 1 << 0;
 pub const CR4_PVI: u64 = 1 << 1;
 pub const CR4_TSD: u64 = 1 << 2;
 pub const CR4_PAE: u64 = 1 << 5;
+pub const CR4_MCE: u64 = 1 << 6;
 pub const CR4_PGE: u64 = 1 << 7;
 pub const CR4_OSFXSR: u64 = 1 << 9;
 pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
@@ -47,6 +48,7 @@ pub struct Optional {
     pub fsgsbase: bool,
     pub avx512f: bool,
     pub invpcid: bool,
+    pub mce: bool,
 }
 
 impl Optional {
@@ -54,7 +56,7 @@ impl Optional {
     /// for a leaf and subleaf.
     pub fn read(cpuid: impl Fn(u32, u32) -> [u32; 4]) -> Optional {
         let basic_max = cpuid(0, 0)[0];
-        let [_, _, ecx1, _] = cpuid(1, 0);
+        let [_, _, ecx1, edx1] = cpuid(1, 0);
         let [_, ebx7, ecx7, _] = if basic_max >= 7 { cpuid(7, 0) } else { [0; 4] };
         let bit = |r: u32, n: u32| r & (1 << n) != 0;
         Optional {
@@ -65,6 +67,7 @@ impl Optional {
             fsgsbase: bit(ebx7, 0),
             avx512f: bit(ebx7, 16),
             invpcid: bit(ebx7, 10),
+            mce: bit(edx1, 7),
         }
     }
 }
@@ -83,6 +86,7 @@ pub fn cr4(current: u64, f: Optional) -> u64 {
         (f.umip, CR4_UMIP),
         (f.pcid, CR4_PCIDE),
         (f.fsgsbase, CR4_FSGSBASE),
+        (f.mce, CR4_MCE),
     ] {
         if reported {
             cr4 |= bit;
@@ -129,8 +133,9 @@ mod tests {
             fsgsbase: true,
             avx512f: true,
             invpcid: true,
+            mce: true,
         };
-        let optional = CR4_SMEP | CR4_SMAP | CR4_UMIP | CR4_PCIDE | CR4_FSGSBASE;
+        let optional = CR4_SMEP | CR4_SMAP | CR4_UMIP | CR4_PCIDE | CR4_FSGSBASE | CR4_MCE;
         assert_eq!(cr4(0, all), required | optional);
     }
 
@@ -149,11 +154,12 @@ mod tests {
     fn reads_the_features() {
         let f = Optional::read(|leaf, _| match leaf {
             0 => [7, 0, 0, 0],
-            1 => [0, 0, 1 << 17, 0],
+            1 => [0, 0, 1 << 17, 1 << 7],
             7 => [0, 1 << 7 | 1 << 20 | 1 | 1 << 16 | 1 << 10, 1 << 2, 0],
             _ => [0; 4],
         });
         assert!(f.smep && f.smap && f.umip && f.pcid && f.fsgsbase && f.avx512f && f.invpcid);
+        assert!(f.mce);
         let f = Optional::read(|leaf, _| {
             if leaf == 0 {
                 [1, 0, 0, 0]
@@ -165,6 +171,7 @@ mod tests {
             f,
             Optional {
                 pcid: true,
+                mce: true,
                 ..Optional::default()
             }
         );

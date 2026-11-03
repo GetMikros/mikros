@@ -9,3 +9,8 @@ publish = false
 boot-protocol = { path = "../../boot/protocol" }
 blake2 = { version = "=0.10.6", default-features = false }
 chacha20 = { version = "=0.9.1", default-features = false }
+
+# Every unsafe block, impl and function says why it is sound.
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+missing_safety_doc = "warn"

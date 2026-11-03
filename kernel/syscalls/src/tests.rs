@@ -1,5 +1,16 @@
 use crate::generate::{fuzz_harness, kernel_dispatch, user_bindings_x86_64};
-use crate::table::{Dir, HandleCheck, Type, read};
+use crate::table::{Dir, HandleCheck, OBJECT_TYPES, Type, read};
+
+/// The table names every object type of the kernel, in order of value,
+/// so that the syzkaller descriptions have a resource for each.
+#[test]
+fn names_every_kernel_object_type() {
+    let kernel: Vec<String> = kernel_core::object::ObjectType::ALL
+        .iter()
+        .map(|t| format!("{t:?}"))
+        .collect();
+    assert_eq!(kernel, OBJECT_TYPES);
+}
 
 const ENTRY: &str = "  - name: obj_op\n    number: 7\n    arch: [x86_64]\n    fuzz_only: false\n    spec: [MIKSPEC-0007.R12]\n";
 

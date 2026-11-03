@@ -31,9 +31,10 @@ const CHUNK: usize = 256;
 
 pub struct MemoryObject {
     header: Header,
-    /// The budget of the creating process, which its frames are charged
-    /// to.
-    budget: Arc<Budget>,
+    /// The budget of the creating process, which the object and its
+    /// frames are charged to, or `None` for an object the kernel made at
+    /// boot, which charges nothing. A paged object always has one.
+    budget: Option<Arc<Budget>>,
     /// Kernel memory charged to the budget for the object itself.
     charged: u64,
     pages: SpinLock<Pages>,
@@ -56,6 +57,11 @@ pub struct MemoryObject {
     /// serialized because system calls run one at a time on the one
     /// processor.
     seals: AtomicU32,
+    /// The `pager_supply` calls under way that move frames out of the
+    /// object or into it, counted by `Supplying`. A `WRITE` seal and a
+    /// revocation wait until none is left. Raised with the pages locked,
+    /// right after the check that the seal or the revocation would fail.
+    supplies: AtomicU32,
     /// For a paged object, what its pager needs.
     paged: Option<Paged>,
 }
@@ -69,8 +75,9 @@ pub struct Paged {
     /// Locked after the pages.
     state: SpinLock<Paging>,
     /// The budgets that frames supplied to the object stay charged to, by
-    /// frame address.
-    charges: SpinLock<Map<u64, Arc<Budget>>>,
+    /// frame address: `None` for a frame of an object without a budget,
+    /// which stays uncharged.
+    charges: SpinLock<Map<u64, Option<Arc<Budget>>>>,
     /// The byte range of the outstanding writeback, which its end must
     /// name exactly. Locked after the pages.
     writeback: SpinLock<Option<(u64, u64)>>,
@@ -107,7 +114,7 @@ static ZERO_FRAME: SpinLock<Option<u64>> = SpinLock::new(None);
 fn zero_frame() -> Option<u64> {
     let mut zero = ZERO_FRAME.lock();
     if zero.is_none() {
-        let phys = FRAMES.lock().as_mut().and_then(|f| f.alloc())?;
+        let phys = crate::memory::alloc_frame()?;
         // SAFETY: the frame was just allocated, so nothing references it.
         unsafe { frame_bytes(phys) }.fill(0);
         *zero = Some(phys);
@@ -126,15 +133,25 @@ fn chunk(at: u64, left: u64) -> (u64, usize, usize) {
 
 impl MemoryObject {
     /// An anonymous memory object of `size` bytes created with `options`,
-    /// charged to `budget`.
-    pub fn new(budget: &Arc<Budget>, size: u64, options: u32) -> Result<Arc<MemoryObject>, Error> {
+    /// charged to `budget` if given.
+    pub fn new(
+        budget: Option<&Arc<Budget>>,
+        size: u64,
+        options: u32,
+    ) -> Result<Arc<MemoryObject>, Error> {
         let pages = Pages::new(size, options, MAX_SIZE)?;
-        let charged = size_of::<MemoryObject>() as u64;
-        budget.charge_kernel(charged)?;
+        let charged = match budget {
+            Some(budget) => {
+                let size = size_of::<MemoryObject>() as u64;
+                budget.charge_kernel(size)?;
+                size
+            }
+            None => 0,
+        };
         // The object releases the charge when it goes, also on failure.
         kernel_core::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
-            budget: budget.clone(),
+            budget: budget.cloned(),
             charged,
             pages: SpinLock::new(pages),
             physical: None,
@@ -142,6 +159,7 @@ impl MemoryObject {
             writable: AtomicU64::new(0),
             changing: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
+            supplies: AtomicU32::new(0),
             paged: None,
         })
     }
@@ -168,7 +186,7 @@ impl MemoryObject {
         // The object releases the charge when it goes, also on failure.
         kernel_core::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
-            budget: budget.clone(),
+            budget: Some(budget.clone()),
             charged,
             pages: SpinLock::new(pages),
             physical: None,
@@ -176,6 +194,7 @@ impl MemoryObject {
             writable: AtomicU64::new(0),
             changing: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
+            supplies: AtomicU32::new(0),
             paged: Some(Paged {
                 pager,
                 port: Arc::downgrade(port),
@@ -222,7 +241,8 @@ impl MemoryObject {
         payload[16..24].copy_from_slice(&PAGE_SIZE.to_le_bytes());
         let packet = crate::port::packet(paged.key, PACKET_PAGER, 0, &payload);
         let port = paged.port.upgrade().ok_or(Error::PeerClosed)?;
-        port.queue_kernel(packet, &self.budget)
+        let budget = self.budget.as_ref().expect("a paged object has a budget");
+        port.queue_kernel(packet, budget)
     }
 
     /// Waits until page `index` of a paged object is present, requesting
@@ -302,6 +322,14 @@ impl MemoryObject {
     /// nothing prepared before can still read or write them.
     fn wait_unpinned(&self) {
         while self.pages.lock().pinned() {
+            let _ = crate::sched::sleep_until(crate::time::now() + 1_000_000);
+        }
+    }
+
+    /// Waits until no `pager_supply` call moves frames out of the object
+    /// or into it.
+    fn wait_supplies(&self) {
+        while self.supplies.load(Ordering::Relaxed) > 0 {
             let _ = crate::sched::sleep_until(crate::time::now() + 1_000_000);
         }
     }
@@ -472,15 +500,20 @@ impl MemoryObject {
     }
 
     /// Revokes the whole paged object for good, as `pager_revoke` does:
-    /// waits for kernel copies that hold its frames, removes every
-    /// translation of it, and wakes the threads waiting for its pages.
+    /// waits for kernel copies that hold its frames and for supplies into
+    /// it, removes every translation of it, and wakes the threads waiting
+    /// for its pages.
     pub fn revoke(&self) -> Result<(), Error> {
         let paged = self.paged.as_ref().ok_or(Error::NotSupported)?;
-        self.wait_unpinned();
-        let count = {
+        let count = loop {
+            self.wait_unpinned();
+            self.wait_supplies();
             let pages = self.pages.lock();
+            if pages.pinned() || self.supplies.load(Ordering::Relaxed) > 0 {
+                continue;
+            }
             paged.state.lock().revoke();
-            pages.count()
+            break pages.count();
         };
         // No page can be entered once revoked, and the size stays, so the
         // translations go in pieces.
@@ -496,7 +529,8 @@ impl MemoryObject {
     /// `source` into the pages from `offset` that are not present, as
     /// `pager_supply` does, and frees the rest, so that the source range
     /// ends up decommitted. Moved frames stay charged to the source's
-    /// budget.
+    /// budget. A `WRITE` seal of the source and a revocation of this
+    /// object that come meanwhile wait until the call ends.
     pub fn supply(
         &self,
         offset: u64,
@@ -510,8 +544,8 @@ impl MemoryObject {
         if !source.is_anonymous() {
             return Err(Error::NotSupported);
         }
-        source.check_writable()?;
-        self.check_revoked()?;
+        let _out_of = Supplying::begin(source, || source.check_writable())?;
+        let _into = Supplying::begin(self, || self.check_revoked())?;
         let aligned = [offset, len, source_offset]
             .iter()
             .all(|v| v.is_multiple_of(PAGE_SIZE));
@@ -598,21 +632,28 @@ impl MemoryObject {
     }
 
     /// A physical object of the `size` bytes from `base`, both multiples
-    /// of the page size, mapped with `policy`, charged to `budget`.
+    /// of the page size, mapped with `policy`, charged to `budget` if
+    /// given.
     pub fn new_physical(
-        budget: &Arc<Budget>,
+        budget: Option<&Arc<Budget>>,
         base: u64,
         size: u64,
         policy: Policy,
     ) -> Result<Arc<MemoryObject>, Error> {
         debug_assert!(base.is_multiple_of(PAGE_SIZE) && size.is_multiple_of(PAGE_SIZE));
         let pages = Pages::new(size, 0, MAX_SIZE)?;
-        let charged = size_of::<MemoryObject>() as u64;
-        budget.charge_kernel(charged)?;
+        let charged = match budget {
+            Some(budget) => {
+                let size = size_of::<MemoryObject>() as u64;
+                budget.charge_kernel(size)?;
+                size
+            }
+            None => 0,
+        };
         // The object releases the charge when it goes, also on failure.
         kernel_core::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
-            budget: budget.clone(),
+            budget: budget.cloned(),
             charged,
             pages: SpinLock::new(pages),
             physical: Some((base, policy)),
@@ -620,6 +661,7 @@ impl MemoryObject {
             writable: AtomicU64::new(0),
             changing: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
+            supplies: AtomicU32::new(0),
             paged: None,
         })
     }
@@ -649,13 +691,15 @@ impl MemoryObject {
         }
         let write = seals & SEAL_WRITE != 0;
         // A write seal waits until no kernel copy holds the frames, so
-        // that no output prepared before it is written after it.
+        // that no output prepared before it is written after it, and
+        // until no supply moves frames out of the object.
         let _pages = loop {
             if write {
                 self.wait_unpinned();
+                self.wait_supplies();
             }
             let pages = self.pages.lock();
-            if !write || !pages.pinned() {
+            if !write || (!pages.pinned() && self.supplies.load(Ordering::Relaxed) == 0) {
                 break pages;
             }
         };
@@ -677,26 +721,15 @@ impl MemoryObject {
     }
 
     /// An anonymous object of `count` pages that takes over the `count`
-    /// frames from `phys`, charging them to `budget`. The frames return
-    /// to the frame allocator when the object is destroyed.
-    pub fn from_frames(
-        budget: &Arc<Budget>,
-        phys: u64,
-        count: u64,
-    ) -> Result<Arc<MemoryObject>, Error> {
-        budget.charge_pages(count)?;
+    /// frames from `phys`, charging them to no budget, as the kernel does
+    /// this at boot. The frames return to the frame allocator when the
+    /// object is destroyed.
+    pub fn from_frames(phys: u64, count: u64) -> Result<Arc<MemoryObject>, Error> {
         // The frames come back to the allocator with the object.
         if let Some(frames) = FRAMES.lock().as_mut() {
             frames.adopt(count);
         }
-        if let Err(e) = budget.charge_kernel(count * PAGE_ENTRY_COST) {
-            budget.release_pages(count);
-            return Err(e);
-        }
-        let object = MemoryObject::new(budget, count * PAGE_SIZE, 0).inspect_err(|_| {
-            budget.release_pages(count);
-            budget.release_kernel(count * PAGE_ENTRY_COST);
-        })?;
+        let object = MemoryObject::new(None, count * PAGE_SIZE, 0)?;
         let mut pages = object.pages.lock();
         for index in 0..count {
             match nodes::claim_insert() {
@@ -923,6 +956,26 @@ impl MemoryObject {
         space: &AddressSpace,
         virt: u64,
     ) -> Result<Held, Error> {
+        self.hold_mapped(space, virt, true)
+    }
+
+    /// Holds the page at `virt` of `space` as `hold_for_write` does, as
+    /// the source of a kernel read that cannot fail later. Fails with
+    /// `InvalidArgs` unless the region at `virt` maps this object readable.
+    pub fn hold_for_read_at(
+        self: &Arc<Self>,
+        space: &AddressSpace,
+        virt: u64,
+    ) -> Result<Held, Error> {
+        self.hold_mapped(space, virt, false)
+    }
+
+    fn hold_mapped(
+        self: &Arc<Self>,
+        space: &AddressSpace,
+        virt: u64,
+        write: bool,
+    ) -> Result<Held, Error> {
         loop {
             let pages = self.pages.lock();
             let mine = |r: Option<&aspace::RegionOf>| {
@@ -932,10 +985,10 @@ impl MemoryObject {
             let Some((index, perms)) = space.with_region(virt, mine) else {
                 return Err(Error::InvalidArgs);
             };
-            if !aspace::allows(perms, true, false) || index >= pages.count() {
+            if !aspace::allows(perms, write, false) || index >= pages.count() {
                 return Err(Error::InvalidArgs);
             }
-            if let Some(held) = self.hold_page(pages, index)? {
+            if let Some(held) = self.hold_page(pages, index, write)? {
                 return Ok(held);
             }
         }
@@ -956,7 +1009,7 @@ impl MemoryObject {
             if index >= pages.count() {
                 return Err(Error::OutOfRange);
             }
-            if let Some(held) = self.hold_page(pages, index)? {
+            if let Some(held) = self.hold_page(pages, index, true)? {
                 return Ok(held);
             }
         }
@@ -964,11 +1017,13 @@ impl MemoryObject {
 
     /// Holds page `index` with the pages locked, or waits for what it
     /// needs with them unlocked and returns `None`, so that the caller
-    /// looks again.
+    /// looks again. A page of a paged object held to `write` is marked
+    /// written.
     fn hold_page(
         self: &Arc<Self>,
         mut pages: kernel_core::sync::Guard<'_, Pages>,
         index: u64,
+        write: bool,
     ) -> Result<Option<Held>, Error> {
         if let Some((base, policy)) = self.physical {
             drop(pages);
@@ -990,7 +1045,9 @@ impl MemoryObject {
                 self.obtain(index)?;
                 return Ok(None);
             };
-            state.written(index)?;
+            if write {
+                state.written(index)?;
+            }
             drop(state);
             pages.pin();
             return Ok(Some(Held {
@@ -1165,15 +1222,17 @@ impl MemoryObject {
     }
 
     /// Gives page `index` a zeroed frame, charging the frame to the
-    /// budget, and returns it.
+    /// budget, if the object has one, and returns it.
     fn alloc(&self, pages: &mut Pages, index: u64) -> Result<u64, Error> {
         let claim = nodes::claim_insert()?;
-        self.budget.charge_pages(1)?;
-        if let Err(e) = self.budget.charge_kernel(PAGE_ENTRY_COST) {
-            self.budget.release_pages(1);
-            return Err(e);
+        if let Some(budget) = &self.budget {
+            budget.charge_pages(1)?;
+            if let Err(e) = budget.charge_kernel(PAGE_ENTRY_COST) {
+                budget.release_pages(1);
+                return Err(e);
+            }
         }
-        let Some(phys) = FRAMES.lock().as_mut().and_then(|f| f.alloc()) else {
+        let Some(phys) = crate::memory::alloc_frame() else {
             self.release(1);
             return Err(Error::NoMemory);
         };
@@ -1183,10 +1242,12 @@ impl MemoryObject {
         Ok(phys)
     }
 
-    /// Releases the charges of `count` frames.
+    /// Releases the charges of `count` frames, if the object has a budget.
     fn release(&self, count: u64) {
-        self.budget.release_pages(count);
-        self.budget.release_kernel(count * PAGE_ENTRY_COST);
+        if let Some(budget) = &self.budget {
+            budget.release_pages(count);
+            budget.release_kernel(count * PAGE_ENTRY_COST);
+        }
     }
 
     /// Frees frames taken from the pages and releases their charges.
@@ -1232,10 +1293,11 @@ impl MemoryObject {
                     .as_ref()
                     .and_then(|p| p.charges.lock().remove(&phys))
                 {
-                    Some(budget) => {
+                    Some(Some(budget)) => {
                         budget.release_pages(1);
                         budget.release_kernel(PAGE_ENTRY_COST);
                     }
+                    Some(None) => {}
                     None => count += 1,
                 }
             }
@@ -1456,7 +1518,15 @@ impl MemoryObject {
         } else {
             KIND_ANONYMOUS
         };
-        self.pages.lock().info(kind, self.seals())
+        // The pages keep only `RESIZABLE`; a paged object's paging state
+        // keeps whether it was created with `TRACK_DIRTY`.
+        let tracked = self
+            .paged
+            .as_ref()
+            .is_some_and(|p| p.state.lock().track_dirty());
+        let pages = self.pages.lock();
+        let options = pages.options() | if tracked { TRACK_DIRTY } else { 0 };
+        pages.info(kind, options, self.seals())
     }
 }
 
@@ -1628,6 +1698,30 @@ impl Drop for Mapping {
     }
 }
 
+/// A `pager_supply` call under way that moves frames out of an object or
+/// into it, counted in the object's `supplies` until dropped.
+struct Supplying<'a>(&'a MemoryObject);
+
+impl<'a> Supplying<'a> {
+    /// Counts a supply for `mem` if `allowed` passes with the pages locked,
+    /// where a seal or a revocation also looks at the count.
+    fn begin(
+        mem: &'a MemoryObject,
+        allowed: impl FnOnce() -> Result<(), Error>,
+    ) -> Result<Supplying<'a>, Error> {
+        let _pages = mem.pages.lock();
+        allowed()?;
+        mem.supplies.fetch_add(1, Ordering::Relaxed);
+        Ok(Supplying(mem))
+    }
+}
+
+impl Drop for Supplying<'_> {
+    fn drop(&mut self) {
+        self.0.supplies.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Runs `piece` on the pages from `first` to `end`, exclusive, in pieces
 /// of at most `ITEM_STEP` pages, with a reschedule check between two
 /// pieces. `piece` takes and releases the locks it needs, so that none is
@@ -1659,6 +1753,8 @@ impl Drop for MemoryObject {
     fn drop(&mut self) {
         let frames = self.pages.lock().take_all();
         self.free(frames.into_values());
-        self.budget.release_kernel(self.charged);
+        if let Some(budget) = &self.budget {
+            budget.release_kernel(self.charged);
+        }
     }
 }

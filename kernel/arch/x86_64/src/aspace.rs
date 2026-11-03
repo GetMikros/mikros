@@ -162,7 +162,7 @@ impl Tables for Charged<'_> {
             self.refused = true;
             return None;
         }
-        let frame = FRAMES.lock().as_mut().and_then(|f| f.alloc());
+        let frame = crate::memory::alloc_frame();
         match frame {
             Some(_) => self.count += 1,
             None => {
@@ -346,7 +346,8 @@ impl AddressSpace {
     /// page size, with `options`: at `addr` when they are `SPECIFIC`,
     /// otherwise at a random free address. Returns the start. Pages are
     /// entered into the tables only when they are accessed. The region is
-    /// charged to `budget`.
+    /// charged to `budget` if given. Fails with `AccessDenied` when `mem`
+    /// is revoked, or has the `WRITE` seal and the mapping is writable.
     #[allow(clippy::too_many_arguments)]
     pub fn add_region(
         self: &Arc<Self>,
@@ -356,7 +357,7 @@ impl AddressSpace {
         mem: &Arc<MemoryObject>,
         offset: u64,
         max: u32,
-        budget: &Arc<Budget>,
+        budget: Option<&Arc<Budget>>,
     ) -> Result<u64, Error> {
         if options.specific && !in_user_range(addr, size) {
             return Err(Error::OutOfRange);
@@ -375,7 +376,8 @@ impl AddressSpace {
     }
 
     /// Does what `add_region` does once, failing with `ShouldWait` when
-    /// the range is being removed.
+    /// the range is being removed, and with `AccessDenied` when `mem` is
+    /// revoked or the mapping is writable and `mem` has the `WRITE` seal.
     #[allow(clippy::too_many_arguments)]
     fn try_add_region(
         self: &Arc<Self>,
@@ -385,9 +387,16 @@ impl AddressSpace {
         mem: &Arc<MemoryObject>,
         offset: u64,
         max: u32,
-        budget: &Arc<Budget>,
+        budget: Option<&Arc<Budget>>,
     ) -> Result<u64, Error> {
-        let charge = Charge::new(Some(budget))?;
+        let charge = Charge::new(budget)?;
+        // `vm_map` checked both before it waited to prepare its output, and
+        // a seal or a revocation may have come meanwhile. Nothing between
+        // here and the insert waits, so none can come in between.
+        mem.check_revoked()?;
+        if options.perms & PERM_WRITE != 0 {
+            mem.check_writable()?;
+        }
         let mut regions = self.regions.lock();
         let start = if options.specific {
             Ok(addr)
@@ -494,12 +503,19 @@ impl AddressSpace {
     ) -> Result<(), Error> {
         let mut at = start;
         let mut refused = false;
-        while let Some(next) =
-            self.regions
+        loop {
+            // The regions are unlocked at the end of the statement, before
+            // the reschedule check.
+            let step = self
+                .regions
                 .lock()
-                .check_range(at, end, ITEM_STEP, &ok, &mut refused)?
-        {
+                .check_range(at, end, ITEM_STEP, &ok, &mut refused)?;
+            let Some(next) = step else {
+                break;
+            };
             at = next;
+            #[cfg(feature = "fuzz")]
+            crate::fuzz::pass(crate::fuzz::REGION_CHECK);
             crate::sched::preempt_point();
         }
         if refused {
@@ -522,12 +538,19 @@ impl AddressSpace {
     ) -> Result<(), Error> {
         self.regions.lock().split_range(start, end, Some(budget))?;
         let mut at = start;
-        while let Some(next) = self
-            .regions
-            .lock()
-            .change_some(at, end, ITEM_STEP, &mut change)
-        {
+        loop {
+            // As in `check_in_steps`, the regions are unlocked before the
+            // reschedule check.
+            let step = self
+                .regions
+                .lock()
+                .change_some(at, end, ITEM_STEP, &mut change);
+            let Some(next) = step else {
+                break;
+            };
             at = next;
+            #[cfg(feature = "fuzz")]
+            crate::fuzz::pass(crate::fuzz::REGION_CHANGE);
             crate::sched::preempt_point();
         }
         Ok(())
@@ -551,8 +574,9 @@ impl AddressSpace {
     /// does, and removes their translations, so that the next access
     /// enters them with the new permissions. `allowed` decides whether a
     /// region's object accepts them; a region that no longer does when
-    /// its turn comes, having changed meanwhile, keeps its permissions.
-    /// Regions that splitting adds are charged to `budget`.
+    /// its turn comes, having changed meanwhile, keeps its permissions,
+    /// and the call then fails with `AccessDenied` once the other regions
+    /// have changed. Regions that splitting adds are charged to `budget`.
     pub fn protect(
         &self,
         start: u64,
@@ -563,12 +587,19 @@ impl AddressSpace {
     ) -> Result<(), Error> {
         let ok = |r: &RegionOf| perms & !r.max == 0 && allowed(r);
         self.check_in_steps(start, end, ok)?;
+        let mut refused = false;
         self.change_in_steps(start, end, budget, |r| {
             if ok(r) {
                 r.set_perms(perms);
+            } else {
+                refused = true;
             }
         })?;
-        self.unmap_in_steps(start, end - start)
+        self.unmap_in_steps(start, end - start)?;
+        match refused {
+            true => Err(Error::AccessDenied),
+            false => Ok(()),
+        }
     }
 
     /// Removes the translations of pages `first` to `end`, exclusive, of
@@ -734,13 +765,22 @@ impl AddressSpace {
     /// Holds the page at `page` as the destination of a kernel write
     /// (`MemoryObject::hold_for_write`).
     pub fn hold_for_write(&self, page: u64) -> Result<crate::memory_object::Held, Error> {
+        self.region_object(page)?.hold_for_write(self, page)
+    }
+
+    /// Holds the page at `page` as the source of a kernel read
+    /// (`MemoryObject::hold_for_read_at`).
+    pub fn hold_for_read(&self, page: u64) -> Result<crate::memory_object::Held, Error> {
+        self.region_object(page)?.hold_for_read_at(self, page)
+    }
+
+    /// The object of the region at user page `page`, or `InvalidArgs`.
+    fn region_object(&self, page: u64) -> Result<Arc<MemoryObject>, Error> {
         if !in_user_range(page, PAGE_SIZE) {
             return Err(Error::InvalidArgs);
         }
-        let mem = self
-            .with_region(page, |r| r.map(|r| r.mem.clone()))
-            .ok_or(Error::InvalidArgs)?;
-        mem.hold_for_write(self, page)
+        self.with_region(page, |r| r.map(|r| r.mem.clone()))
+            .ok_or(Error::InvalidArgs)
     }
 }
 

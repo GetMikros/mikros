@@ -75,6 +75,14 @@ pub struct BootInfo {
     pub arch_data1: u64,
 }
 
+impl BootInfo {
+    /// The firmware's random seed, when `RNG_SEED_VALID` says there is
+    /// one; otherwise the field holds no secret, whatever its bytes.
+    pub fn firmware_seed(&self) -> Option<&[u8; 32]> {
+        (self.flags & flags::RNG_SEED_VALID != 0).then_some(&self.rng_seed)
+    }
+}
+
 /// The value of `BootInfo::size` for this version.
 pub const BOOT_INFO_SIZE: u32 = 0xE8;
 
@@ -164,12 +172,36 @@ pub mod x86_64 {
     /// trampoline page.
     pub const AP_TRAMPOLINE_MIN: u64 = 0x1000;
     pub const AP_TRAMPOLINE_END: u64 = 0xA0000;
+
+    /// Whether the page at `phys` lies between `AP_TRAMPOLINE_MIN` and
+    /// `AP_TRAMPOLINE_END`, so that it may hold the AP trampoline.
+    pub const fn fits_ap_trampoline(phys: u64) -> bool {
+        phys >= AP_TRAMPOLINE_MIN
+            && phys.is_multiple_of(super::PAGE_SIZE)
+            && phys <= AP_TRAMPOLINE_END - super::PAGE_SIZE
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn gives_the_seed_only_with_its_flag() {
+        let mut info = BootInfo {
+            rng_seed: [9; 32],
+            ..BootInfo::default()
+        };
+        assert_eq!(info.firmware_seed(), None);
+        info.flags = flags::RNG_SEED_VALID;
+        assert_eq!(info.firmware_seed(), Some(&[9; 32]));
+    }
+
+    #[test]
+    fn numbers_x86_64_as_1() {
+        assert_eq!(arch::X86_64, 1);
+    }
 
     #[test]
     fn boot_info_has_the_version_1_0_layout() {
@@ -228,6 +260,15 @@ mod tests {
         assert!(Kind::ApTrampoline.in_direct_map());
         for kind in [Kind::Mmio, Kind::Framebuffer, Kind::Reserved, Kind::Bad] {
             assert!(!kind.in_direct_map(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn bounds_the_ap_trampoline_page() {
+        use x86_64::fits_ap_trampoline;
+        assert!(fits_ap_trampoline(0x1000) && fits_ap_trampoline(0x9F000));
+        for phys in [0, 0xA0000, 0x1800, 0xFFFF_FFFF_FFFF_F000] {
+            assert!(!fits_ap_trampoline(phys), "{phys:#x}");
         }
     }
 }

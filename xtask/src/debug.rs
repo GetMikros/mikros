@@ -31,7 +31,7 @@ fn scripts() -> PathBuf {
 }
 
 /// A free TCP port on the loopback interface for QEMU's GDB stub.
-fn free_port() -> Result<u16> {
+pub fn free_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").context("finding a free port")?;
     Ok(listener.local_addr()?.port())
 }
@@ -64,7 +64,7 @@ fn gdb_args(kernel: &Path, port: u16) -> Vec<String> {
 
 /// Starts QEMU halted on `disk` with the GDB stub on `port` and the
 /// serial output in `log`, and waits until the stub accepts connections.
-fn start_halted(
+pub fn start_halted(
     machine: &MachineArgs,
     disk: &Path,
     log: &Path,
@@ -144,23 +144,57 @@ pub fn run(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// The function the scripts check stops in: the test init calls it
-/// while it has threads, handles and mappings of every kind.
+/// The function the scripts check stops in: the test init first calls
+/// it in `thread_by_koid`, while a helper thread of it is switched out
+/// and it has handles and mappings of every kind.
 const CHECK_BREAKPOINT: &str = "kernel::syscall::handlers::process_get_thread";
 
-/// The commands the check runs, each with text its output must contain.
-const CHECKS: [(&str, &str); 5] = [
-    ("mikros ps", "RUNNING"),
-    ("mikros threads init", "running; its registers are GDB's"),
-    ("mikros handles init", "Process"),
-    ("mikros mappings init", "r-x"),
-    ("mikros log 20", "TEST "),
+/// The commands the check runs, each with the texts its output must
+/// contain.
+const CHECKS: [(&str, &[&str]); 5] = [
+    ("mikros ps", &["RUNNING"]),
+    (
+        "mikros threads init",
+        &[
+            "running; its registers are GDB's",
+            "kernel rsp=0x",
+            " rip=0x",
+        ],
+    ),
+    ("mikros handles init", &["Process"]),
+    ("mikros mappings init", &["r-x"]),
+    ("mikros log 20", &["TEST "]),
 ];
+
+/// Waits until `child` exits, or kills it and fails once `timeout` has
+/// passed.
+pub fn wait_for(child: &mut Child, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("timed out after {} s", timeout.as_secs());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
 
 /// Boots the test image `disk` halted, runs every kernel debugger script
 /// command in GDB once the test init calls `CHECK_BREAKPOINT`, and fails
-/// unless each prints what it should. The serial output goes to `log`.
-pub fn check_scripts(machine: &MachineArgs, kernel: &Path, disk: &Path, log: &Path) -> Result<()> {
+/// unless each prints what it should, or when GDB has not finished after
+/// `timeout`. The serial output goes to `log`, and GDB's output to
+/// `gdb-output.log` next to it.
+pub fn check_scripts(
+    machine: &MachineArgs,
+    kernel: &Path,
+    disk: &Path,
+    log: &Path,
+    timeout: Duration,
+) -> Result<()> {
     let port = free_port()?;
     let mut qemu = start_halted(machine, disk, log, port, &["-display", "none"])?;
     let mut args = vec!["-nx".to_string(), "-batch".to_string()];
@@ -172,16 +206,33 @@ pub fn check_scripts(machine: &MachineArgs, kernel: &Path, disk: &Path, log: &Pa
         args.extend(["-ex".into(), command.into()]);
     }
     args.extend(["-ex".into(), "kill".into()]);
-    let output = Command::new(GDB).args(args).stdin(Stdio::null()).output();
+    // The output goes to a file, so that waiting never blocks on a pipe.
+    let output_path = log.with_file_name("gdb-output.log");
+    let output = fs::File::create(&output_path)
+        .with_context(|| format!("creating {}", output_path.display()))?;
+    let errors = output.try_clone()?;
+    let finished = Command::new(GDB)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(output)
+        .stderr(errors)
+        .spawn()
+        .with_context(|| format!("failed to start {GDB}"))
+        .and_then(|mut gdb| wait_for(&mut gdb, timeout));
     let _ = qemu.kill();
     let _ = qemu.wait();
-    let output = output.with_context(|| format!("failed to start {GDB}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let failed = missing(&stdout);
+    finished.with_context(|| {
+        format!(
+            "the kernel debugger scripts did not finish; serial output in {}",
+            log.display()
+        )
+    })?;
+    let output = fs::read_to_string(&output_path)
+        .with_context(|| format!("reading {}", output_path.display()))?;
+    let failed = missing(&output);
     if !failed.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "the kernel debugger scripts failed: {}\n{stdout}{stderr}",
+            "the kernel debugger scripts failed: {}\n{output}",
             failed.join(", ")
         );
     }
@@ -197,7 +248,7 @@ fn missing(stdout: &str) -> Vec<&'static str> {
             let marker = format!("@@ {command}\n");
             let output = stdout.split_once(&marker).map(|(_, rest)| rest);
             let output = output.map(|rest| rest.split("@@ ").next().unwrap_or(""));
-            !output.is_some_and(|o| o.contains(expected))
+            !output.is_some_and(|o| expected.iter().all(|e| o.contains(e)))
         })
         .map(|(command, _)| *command)
         .collect()
@@ -227,10 +278,12 @@ mod tests {
     fn finds_each_command_output() {
         let good: String = CHECKS
             .iter()
-            .map(|(c, e)| format!("@@ {c}\n{e}\n"))
+            .map(|(c, e)| format!("@@ {c}\n{}\n", e.join("\n")))
             .collect();
         assert!(missing(&good).is_empty());
         let bad = good.replace("Process", "Thread");
         assert_eq!(missing(&bad), ["mikros handles init"]);
+        let bad = good.replace("kernel rsp=", "kernel sp=");
+        assert_eq!(missing(&bad), ["mikros threads init"]);
     }
 }

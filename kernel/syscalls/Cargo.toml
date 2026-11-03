@@ -7,3 +7,6 @@ publish = false
 
 [dependencies]
 yaml-rust2 = { version = "0.13.0", default-features = false }
+
+[dev-dependencies]
+kernel-core = { path = "../core" }

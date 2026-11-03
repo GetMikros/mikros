@@ -32,6 +32,86 @@ const PASSED: i32 = 0x10 * 2 + 1;
 /// The line that marks a kernel panic in the serial output.
 const PANIC_LINE: &str = "KERNEL PANIC:";
 
+/// The kernel functions that dispatch interrupts and handle the timer
+/// interrupt, by their demangled names. The fuzz build's coverage must
+/// record none of their code while it handles a hardware interrupt.
+const INTERRUPT_FUNCTIONS: [&str; 6] = [
+    "kernel::idt::interrupt",
+    "kernel::timer::interrupt",
+    "kernel::sched::timer_interrupt",
+    "kernel::sched::maintain",
+    "kernel::time::maintain",
+    "<kernel::ktimer::Armed>::fire",
+];
+
+/// The kernel function that only the idle loop runs. The fuzz build's
+/// coverage must record none of its code, as the idle loop runs on behalf
+/// of no thread.
+const IDLE_FUNCTIONS: [&str; 1] = ["kernel::sched::halt_until_interrupt"];
+
+/// The address ranges, start and end, of the functions `names` and
+/// their closures in `symbols`, which `llvm-nm -S -C` printed, or the
+/// first function it lacks.
+fn code_ranges(symbols: &str, names: &[&'static str]) -> Result<Vec<(u64, u64)>, &'static str> {
+    let mut ranges = Vec::new();
+    for &name in names {
+        let closure = format!("{name}::{{closure");
+        let found = ranges.len();
+        for line in symbols.lines() {
+            let mut fields = line.splitn(4, ' ');
+            let (Some(value), Some(size), Some(_), Some(symbol)) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if symbol != name && !symbol.starts_with(&closure) {
+                continue;
+            }
+            let hex = |text: &str| u64::from_str_radix(text, 16).ok();
+            if let (Some(start), Some(size)) = (hex(value), hex(size)) {
+                ranges.push((start, start + size));
+            }
+        }
+        if ranges.len() == found {
+            return Err(name);
+        }
+    }
+    Ok(ranges)
+}
+
+/// The kernel command line argument that gives the test init `ranges`:
+/// `key=` and each range as `start-end` in hexadecimal, separated by
+/// commas.
+fn code_arg(key: &str, ranges: &[(u64, u64)]) -> String {
+    let list: Vec<String> = ranges.iter().map(|(s, e)| format!("{s:x}-{e:x}")).collect();
+    format!("{key}={}", list.join(","))
+}
+
+/// What the integration tests of `kind` add to the kernel command line:
+/// for the fuzz build, the interrupt code and the idle code of `kernel`.
+fn test_cmdline(kind: Kind, kernel: &Path) -> Result<String> {
+    if kind != Kind::Fuzz {
+        return Ok(String::new());
+    }
+    let symbols = Command::new(crate::debuginfo::llvm_tool("llvm-nm")?)
+        .args(["-S", "-C", "--defined-only"])
+        .arg(kernel)
+        .output()
+        .context("failed to run llvm-nm")?;
+    let symbols = String::from_utf8_lossy(&symbols.stdout);
+    let mut args = Vec::new();
+    for (key, names) in [
+        ("interrupt_code", &INTERRUPT_FUNCTIONS[..]),
+        ("idle_code", &IDLE_FUNCTIONS[..]),
+    ] {
+        match code_ranges(&symbols, names) {
+            Ok(ranges) => args.push(code_arg(key, &ranges)),
+            Err(name) => bail!("{} has no function {name}", kernel.display()),
+        }
+    }
+    Ok(args.join(" "))
+}
+
 /// Where the disk image and the serial output of a test run go.
 fn test_dir(kind: Kind) -> PathBuf {
     crate::workspace_root()
@@ -54,7 +134,7 @@ fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
 
 /// The arguments of `qemu::args` with the serial port written to `log`,
 /// no display, the debug exit device, and no reboot.
-fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
+pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
     if let Some(i) = args.iter().position(|a| a == "-serial") {
         args[i + 1] = format!("file:{}", log.display());
     }
@@ -119,7 +199,8 @@ pub fn run(args: &Args) -> Result<()> {
     let dir = test_dir(args.kind);
     fs::create_dir_all(&dir)?;
     let disk = dir.join("disk.img");
-    image::create(args.kind, &built, &disk)?;
+    let cmdline = test_cmdline(args.kind, &built.kernel)?;
+    image::create_with(args.kind, &built, &disk, &cmdline, &[])?;
     let log = dir.join("serial.log");
     let code = boot(args, &disk, &log)?;
     let serial = fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
@@ -138,8 +219,26 @@ pub fn run(args: &Args) -> Result<()> {
         log.display()
     );
     let gdb_log = dir.join("gdb-serial.log");
-    crate::debug::check_scripts(&args.machine, &built.kernel, &disk, &gdb_log)?;
+    let timeout = Duration::from_secs(args.timeout);
+    crate::debug::check_scripts(&args.machine, &built.kernel, &disk, &gdb_log, timeout)?;
     println!("kernel debugger scripts passed");
+    let entry_log = dir.join("entry-serial.log");
+    crate::entry_state::check(&args.machine, &built.kernel, &disk, &entry_log, timeout)?;
+    println!("kernel entry state checked");
+    crate::machine_state::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("machine"),
+        timeout,
+    )?;
+    println!("machine state checked");
+    let scenarios = dir.join("scenarios");
+    crate::scenario::run(&args.machine, args.kind, &built, &scenarios, timeout)?;
+    println!("panic scenarios passed");
+    let boot_menu = dir.join("boot-menu");
+    crate::boot_menu::run(&args.machine, args.kind, &built, &boot_menu, timeout)?;
+    println!("boot menu runs passed");
     Ok(())
 }
 
@@ -153,6 +252,38 @@ mod tests {
         assert!(verdict(Some(35), "").is_err());
         assert!(verdict(None, "").is_err());
         assert!(verdict(Some(PASSED), "x\nKERNEL PANIC: oops\n").is_err());
+    }
+
+    #[test]
+    fn finds_the_interrupt_code_and_its_closures() {
+        let symbols = "\
+ffffffff8006b040 0000000000000219 t kernel::idt::interrupt
+ffffffff8006aa30 00000000000001c3 t kernel::idt::after_interrupt
+ffffffff800929f0 0000000000000015 t kernel::timer::interrupt
+ffffffff8006fc40 00000000000003fb t kernel::sched::timer_interrupt
+ffffffff80070a30 0000000000000140 t kernel::sched::maintain
+ffffffff800cc860 0000000000000054 t kernel::sched::maintain::{closure#0}
+ffffffff800f9690 000000000000007a t <core::option::Option<i64>>::map_or::<i64, kernel::sched::maintain::{closure#0}>
+ffffffff8005be30 0000000000000010 t kernel::time::maintain
+ffffffff800ccff0 000000000000008b t <kernel::ktimer::Armed>::fire
+";
+        let ranges = code_ranges(symbols, &INTERRUPT_FUNCTIONS).unwrap();
+        assert_eq!(ranges.len(), 7);
+        assert_eq!(ranges[0], (0xffffffff8006b040, 0xffffffff8006b259));
+        assert_eq!(ranges[4], (0xffffffff800cc860, 0xffffffff800cc8b4));
+        assert_eq!(
+            code_arg("interrupt_code", &ranges[..2]),
+            "interrupt_code=ffffffff8006b040-ffffffff8006b259,ffffffff800929f0-ffffffff80092a05"
+        );
+        let without = symbols.replace("kernel::time::maintain", "kernel::time::other");
+        assert_eq!(
+            code_ranges(&without, &INTERRUPT_FUNCTIONS),
+            Err("kernel::time::maintain")
+        );
+        assert_eq!(
+            code_ranges(symbols, &IDLE_FUNCTIONS),
+            Err("kernel::sched::halt_until_interrupt")
+        );
     }
 
     #[test]

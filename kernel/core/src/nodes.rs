@@ -196,6 +196,8 @@ unsafe impl Allocator for Nodes {
         Ok(NonNull::slice_from_raw_parts(node, layout.size()))
     }
 
+    // SAFETY: the caller passes a node that `allocate` returned and the
+    // layout it was allocated with, as `Allocator` requires.
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         // SAFETY: the node came from `allocate`, which put the header in
         // front of it.

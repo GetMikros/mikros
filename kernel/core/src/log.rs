@@ -1,6 +1,8 @@
 //! The kernel log: a ring buffer of fixed-size records that writers never
 //! wait on, and the text lines records are written out as.
 
+use crate::sync::SpinLock;
+use alloc::vec::Vec;
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 
@@ -290,6 +292,67 @@ impl<const SLOTS: usize> Log<SLOTS> {
                 return;
             }
         }
+    }
+}
+
+/// The readers of a log, which writers notify without waiting.
+///
+/// A notification runs only where the caller may take the locks that
+/// notifying a reader takes, and only while the list is free. Otherwise
+/// it stays pending: the user of the list runs it once done with the
+/// list, and `run_pending` runs it where locks may be taken.
+pub struct Readers<T> {
+    list: SpinLock<Vec<T>>,
+    pending: AtomicBool,
+}
+
+impl<T> Default for Readers<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Readers<T> {
+    pub const fn new() -> Self {
+        Readers {
+            list: SpinLock::new(Vec::new()),
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    /// Calls `each` with every reader: now when `may_lock` holds and the
+    /// list is free, and otherwise later, as described above.
+    pub fn notify(&self, may_lock: bool, each: impl Fn(&T)) {
+        self.pending.store(true, Ordering::Release);
+        if may_lock {
+            self.run_pending(each);
+        }
+    }
+
+    /// Runs a pending notification with `each`, unless the list is in
+    /// use. Must be called only where the locks `each` takes may be
+    /// taken.
+    pub fn run_pending(&self, each: impl Fn(&T)) {
+        // A notification that comes while this one runs, and finds the
+        // list in use, is run by another round.
+        while self.pending.load(Ordering::Acquire) {
+            let Some(list) = self.list.try_lock() else {
+                return;
+            };
+            self.pending.store(false, Ordering::Release);
+            for reader in list.iter() {
+                each(reader);
+            }
+        }
+    }
+
+    /// Calls `f` with the list, then runs with `each` a notification that
+    /// came meanwhile. Must be called only where the locks `each` takes
+    /// may be taken.
+    pub fn with<R>(&self, f: impl FnOnce(&mut Vec<T>) -> R, each: impl Fn(&T)) -> R {
+        let result = f(&mut self.list.lock());
+        self.run_pending(each);
+        result
     }
 }
 

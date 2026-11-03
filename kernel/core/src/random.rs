@@ -12,6 +12,12 @@ use chacha20::cipher::{KeyIvInit, StreamCipher};
 /// The largest request `fill` serves in one call.
 pub const FILL_MAX: usize = 4096;
 
+/// How long after a successful hardware reseed the next is due: 300
+/// seconds less room for a late timer interrupt and the reseed itself.
+pub const RESEED_INTERVAL: i64 = 290_000_000_000;
+/// How long after a failed hardware reseed it is tried again.
+pub const RESEED_RETRY: i64 = 1_000_000_000;
+
 /// Separates the generator's hashes from other uses of BLAKE2s.
 const DOMAIN: &[u8] = b"Mikros kernel RNG v1";
 
@@ -110,6 +116,11 @@ mod tests {
             digest[..8],
             [0x50, 0x8c, 0x5e, 0x8c, 0x32, 0x7c, 0x14, 0xe2]
         );
+    }
+
+    #[test]
+    fn reseeds_290_seconds_after_a_successful_reseed() {
+        assert_eq!(RESEED_INTERVAL, 290 * 1_000_000_000);
     }
 
     #[test]

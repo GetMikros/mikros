@@ -4,6 +4,7 @@
 #![cfg_attr(not(test), no_std)]
 #![feature(allocator_ext)]
 #![feature(btreemap_alloc)]
+#![cfg_attr(test, feature(variant_count))]
 
 extern crate alloc;
 

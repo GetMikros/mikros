@@ -30,6 +30,22 @@ fn focus(menu: &Menu) -> Option<Item> {
 }
 
 #[test]
+fn translates_the_keys_of_the_focus_order() {
+    for key in [Key::Right, Key::Down, Key::Char('\t')] {
+        assert_eq!(translate(key), Event::Next, "{key:?}");
+    }
+    for key in [Key::Left, Key::Up] {
+        assert_eq!(translate(key), Event::Previous, "{key:?}");
+    }
+    for key in [Key::Char('\r'), Key::Char('\n'), Key::Char(' ')] {
+        assert_eq!(translate(key), Event::Activate, "{key:?}");
+    }
+    for key in [Key::Char('a'), Key::Char('\u{1b}'), Key::OtherSpecial] {
+        assert_eq!(translate(key), Event::OtherKey, "{key:?}");
+    }
+}
+
+#[test]
 fn moves_focus_forward_and_wraps() {
     let mut m = menu(2);
     let mut input = Input::new(W, H, 0);

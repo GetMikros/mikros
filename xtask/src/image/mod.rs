@@ -121,10 +121,26 @@ pub fn run(args: &Args) -> Result<()> {
 /// Writes the disk image of the components `built` for the build kind
 /// `kind` to `out`.
 pub fn create(kind: Kind, built: &build::Built, out: &Path) -> Result<()> {
+    create_with(kind, built, out, "", &[])
+}
+
+/// Like `create`, with `extra` added to the kernel command line and
+/// `more` files, given as paths and contents, on the EFI system
+/// partition.
+pub fn create_with(
+    kind: Kind,
+    built: &build::Built,
+    out: &Path,
+    extra: &str,
+    more: &[(&str, &[u8])],
+) -> Result<()> {
     let root_guid = Uuid::new_v4();
     let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
     let bootmenu = read(&built.bootmenu)?;
-    let command_line = format!("root=PARTUUID={root_guid}");
+    let mut command_line = format!("root=PARTUUID={root_guid}");
+    if !extra.is_empty() {
+        command_line = format!("{command_line} {extra}");
+    }
     let contents = [
         ("EFI/Mikros/bootmenu.efi", bootmenu.clone()),
         ("EFI/BOOT/BOOTX64.EFI", bootmenu),
@@ -133,7 +149,11 @@ pub fn create(kind: Kind, built: &build::Built, out: &Path) -> Result<()> {
         ("EFI/Mikros/boot.img", read(&built.boot_image)?),
         ("EFI/Mikros/boot.conf", command_line.into_bytes()),
     ];
-    let files: Vec<(&str, &[u8])> = contents.iter().map(|(p, d)| (*p, d.as_slice())).collect();
+    let files: Vec<(&str, &[u8])> = contents
+        .iter()
+        .map(|(p, d)| (*p, d.as_slice()))
+        .chain(more.iter().copied())
+        .collect();
     let total = files.iter().map(|(_, d)| d.len() as u64).sum();
     let esp = esp::build(esp::size_for(total), &files)?;
     let root = root::create(kind)?;

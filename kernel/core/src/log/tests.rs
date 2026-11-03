@@ -184,3 +184,43 @@ fn finds_nothing_after_the_largest_sequence_number() {
     assert_eq!(log.next_after(u64::MAX - 1), None);
     assert!(log.next_after(0).is_some());
 }
+
+/// A notification that comes while the reader list is in use, as one
+/// from a record written while a reader is being added, runs once the
+/// list is free, and reaches the reader added meanwhile.
+#[test]
+fn notifies_readers_once_the_list_is_free() {
+    let readers = Readers::<u32>::new();
+    let seen = core::cell::RefCell::new(Vec::new());
+    let each = |r: &u32| seen.borrow_mut().push(*r);
+    readers.with(|list| list.extend([1, 2]), each);
+    assert!(seen.borrow().is_empty());
+    readers.with(
+        |list| {
+            list.push(3);
+            readers.notify(true, each);
+            assert!(seen.borrow().is_empty());
+        },
+        each,
+    );
+    assert_eq!(*seen.borrow(), [1, 2, 3]);
+    readers.notify(true, each);
+    assert_eq!(*seen.borrow(), [1, 2, 3, 1, 2, 3]);
+}
+
+/// A notification made where locks may not be taken runs at the next
+/// `run_pending`, once.
+#[test]
+fn leaves_notifications_pending_where_locks_may_not_be_taken() {
+    let readers = Readers::<u32>::new();
+    let count = core::cell::Cell::new(0);
+    let each = |_: &u32| count.set(count.get() + 1);
+    readers.with(|list| list.push(7), each);
+    readers.notify(false, each);
+    readers.notify(false, each);
+    assert_eq!(count.get(), 0);
+    readers.run_pending(each);
+    assert_eq!(count.get(), 1);
+    readers.run_pending(each);
+    assert_eq!(count.get(), 1);
+}

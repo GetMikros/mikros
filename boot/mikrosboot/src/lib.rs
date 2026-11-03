@@ -6,9 +6,17 @@
 extern crate alloc;
 
 pub mod cmdline;
+pub mod cpu;
 pub mod display;
 pub mod elf;
+pub mod exit;
 pub mod firmware;
+pub mod handoff;
+pub mod info;
 pub mod load;
 pub mod memmap;
 pub mod paging;
+pub mod report;
+
+#[cfg(test)]
+mod absent;

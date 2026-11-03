@@ -166,25 +166,7 @@ mod env {
 
 use env::{ArgModel, CALLED, CALLS, TABLE, Value};
 
-const TYPES: [ObjectType; 17] = [
-    ObjectType::Process,
-    ObjectType::Thread,
-    ObjectType::MemoryObject,
-    ObjectType::Channel,
-    ObjectType::Event,
-    ObjectType::Port,
-    ObjectType::Timer,
-    ObjectType::Interrupt,
-    ObjectType::Resource,
-    ObjectType::Log,
-    ObjectType::Budget,
-    ObjectType::LogReader,
-    ObjectType::Pager,
-    ObjectType::Timeline,
-    ObjectType::Stream,
-    ObjectType::Bti,
-    ObjectType::Pmt,
-];
+const TYPES: &[ObjectType] = &ObjectType::ALL;
 
 struct Plain(Header);
 

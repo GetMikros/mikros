@@ -105,7 +105,9 @@ const DR6_CLEAR: u64 = 0xFFFF_0FF0;
 
 /// Whether DR7 may enable breakpoints on this processor: set when a
 /// thread with breakpoints was switched in.
-static BREAKPOINTS_LOADED: AtomicBool = AtomicBool::new(false);
+fn breakpoints_loaded() -> &'static AtomicBool {
+    &percpu::this().breakpoints_loaded
+}
 
 /// The user-mode state of a user thread that is not in its registers
 /// while the thread runs in the kernel.
@@ -227,7 +229,7 @@ impl Thread {
         thread.state.store(RUNNABLE, Ordering::Release);
         let mut cpu = this_cpu().lock();
         let entity = *thread.entity.lock();
-        cpu.fair.enqueue(Queued::new(thread.clone()), entity);
+        cpu.enqueue(Queued::new(thread.clone()), entity);
     }
 
     /// Saves the user state that the next thread replaces.
@@ -254,7 +256,7 @@ impl Thread {
         let debug = *self.debug.lock();
         let dr7 = debug[5];
         if dr7 == 0 {
-            if BREAKPOINTS_LOADED.swap(false, Ordering::Relaxed) {
+            if breakpoints_loaded().swap(false, Ordering::Relaxed) {
                 // SAFETY: zero disables every breakpoint.
                 unsafe { crate::cpu::write_dr(7, 0) };
             }
@@ -272,7 +274,7 @@ impl Thread {
             crate::cpu::write_dr(6, debug[4] & 0xFFFF_FFFF);
             crate::cpu::write_dr(7, dr7);
         }
-        BREAKPOINTS_LOADED.store(true, Ordering::Relaxed);
+        breakpoints_loaded().store(true, Ordering::Relaxed);
     }
 
     /// Whether the thread is in state `EXCEPTION` or `SUSPENDED` with its
@@ -375,11 +377,15 @@ impl Thread {
     /// Fails with `BadState` when the thread is `NEW` or `DEAD` or the
     /// count is zero.
     pub fn resume(&self) -> Result<bool, Error> {
-        let count = self.suspend_count.load(Ordering::Acquire);
-        if matches!(self.state(), NEW | DEAD) || count == 0 {
+        if matches!(self.state(), NEW | DEAD) {
             return Err(Error::BadState);
         }
-        self.suspend_count.store(count - 1, Ordering::Release);
+        // The count is decreased in one step, so that two resumes never
+        // take the same count.
+        let count = self
+            .suspend_count
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1))
+            .map_err(|_| Error::BadState)?;
         Ok(count == 1)
     }
 
@@ -448,6 +454,8 @@ impl Thread {
         crate::process::switch_ports(self.process.as_deref());
         #[cfg(feature = "fuzz")]
         crate::coverage::switch_in(self);
+        #[cfg(feature = "fuzz")]
+        crate::fuzz::switch_in(self.header.koid());
         let Some(process) = &self.process else {
             return;
         };
@@ -587,14 +595,26 @@ impl CpuSched {
             reseed_due: INFINITE,
         }
     }
+
+    /// Queues `thread` with `entity`, and marks a reschedule when the
+    /// queue would pick it before the running thread.
+    fn enqueue(&mut self, thread: Queued, entity: Entity) {
+        if self.fair.enqueue(thread, entity) {
+            reschedule().store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn this_cpu() -> &'static SpinLock<CpuSched> {
     &percpu::this().sched
 }
 
-/// Set by the timer interrupt when the running thread's slice has ended.
-static RESCHEDULE: AtomicBool = AtomicBool::new(false);
+/// Set when the thread running on this processor is to give way: by the
+/// timer interrupt when its slice has ended, and when a thread is queued
+/// that the queue would pick before it.
+fn reschedule() -> &'static AtomicBool {
+    &percpu::this().reschedule
+}
 
 /// Creates a kernel thread that runs `entry(arg)` and queues it.
 #[allow(dead_code, reason = "nothing starts kernel threads yet")]
@@ -606,7 +626,7 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
     unsafe { *thread.rsp.get() = context::prepare(top, entry as usize as u64, arg as u64) };
     let mut cpu = this_cpu().lock();
     let entity = *thread.entity.lock();
-    cpu.fair.enqueue(Queued::new(thread.clone()), entity);
+    cpu.enqueue(Queued::new(thread.clone()), entity);
     Ok(thread)
 }
 
@@ -631,6 +651,16 @@ fn finish_switch() {
 /// next thread, or idles. Returns when the thread runs again, unless it
 /// is not queued and nothing wakes it.
 fn schedule(requeue: bool) {
+    // RFLAGS.AC is not switched, so a thread that kept it would let the
+    // next one reach user pages past SMAP.
+    debug_assert!(
+        crate::cpu::rflags() & crate::cpu::RFLAGS_AC == 0,
+        "scheduling with RFLAGS.AC set"
+    );
+    debug_assert!(
+        !crate::idt::handling(),
+        "scheduling while handling an interrupt"
+    );
     let now = crate::time::now();
     let mut cpu = this_cpu().lock();
     let Some(current) = cpu.current.take() else {
@@ -675,7 +705,15 @@ fn schedule(requeue: bool) {
             start_slice(&mut cpu, now, next);
             rsp
         }
-        None => cpu.idle_rsp,
+        None => {
+            #[cfg(feature = "fuzz")]
+            {
+                crate::fuzz::switch_in(0);
+                // The idle loop runs on behalf of no thread.
+                crate::coverage::idle();
+            }
+            cpu.idle_rsp
+        }
     };
     if !requeue && current.state() == DEAD {
         cpu.dead = Some(current.clone());
@@ -689,8 +727,10 @@ fn schedule(requeue: bool) {
 }
 
 /// Makes `thread` the running thread, starting its slice, and arms the
-/// timer for it.
+/// timer for it. A reschedule marked for the thread that ran before is
+/// dropped.
 fn start_slice(cpu: &mut CpuSched, now: i64, thread: Arc<Thread>) {
+    reschedule().store(false, Ordering::Relaxed);
     cpu.current = Some(thread);
     cpu.slice_start = now;
     cpu.slice_end = now.saturating_add(cpu.fair.slice());
@@ -703,7 +743,7 @@ fn arm(cpu: &CpuSched) {
     // Once a reschedule is pending, the ended slice must not interrupt
     // again: in a preempt point that would interrupt at once, forever,
     // before interrupts are disabled again. The next slice arms anew.
-    let slice_end = if cpu.current.is_some() && !RESCHEDULE.load(Ordering::Relaxed) {
+    let slice_end = if cpu.current.is_some() && !reschedule().load(Ordering::Relaxed) {
         cpu.slice_end
     } else {
         INFINITE
@@ -767,7 +807,7 @@ pub fn wake_sleeper(thread: &Arc<Thread>) {
     if thread.state() == BLOCKED && cpu.sleepers.remove(&queued) {
         thread.state.store(RUNNABLE, Ordering::Release);
         let entity = *thread.entity.lock();
-        cpu.fair.enqueue(queued, entity);
+        cpu.enqueue(queued, entity);
     }
 }
 
@@ -780,18 +820,27 @@ pub fn yield_now() {
 /// Lets pending interrupts in, and switches threads if the running
 /// thread's slice has ended. No lock may be held.
 pub fn preempt_point() {
+    debug_assert!(
+        !crate::idt::handling(),
+        "a preemption point while handling an interrupt"
+    );
+    debug_assert!(
+        kernel_core::sync::none_held(),
+        "a preemption point with a lock held"
+    );
     // SAFETY: enabling interrupts for one instruction lets the processor
     // take pending ones; no lock is held here.
     unsafe { core::arch::asm!("sti", "nop", "cli", options(nomem, nostack)) };
-    if RESCHEDULE.swap(false, Ordering::Relaxed) {
+    if reschedule().swap(false, Ordering::Relaxed) {
         schedule(true);
     }
 }
 
-/// Calls `preempt_point` when no lock is held, for work that may run
-/// either way, such as destroying an object.
+/// Calls `preempt_point` when no lock is held and no interrupt or
+/// exception is being handled, for work that may run either way, such as
+/// destroying an object.
 pub fn preempt_point_if_unlocked() {
-    if kernel_core::sync::none_held() {
+    if kernel_core::sync::none_held() && !crate::idt::handling() {
         preempt_point();
     }
 }
@@ -817,9 +866,9 @@ pub fn make_dead(thread: &Arc<Thread>) -> u32 {
         // blocked by `block` is not a sleeper and is queued afresh.
         let entity = *thread.entity.lock();
         if cpu.sleepers.remove(&queued) {
-            cpu.fair.enqueue(queued, entity);
+            cpu.enqueue(queued, entity);
         } else {
-            cpu.fair.enqueue(Queued::new(thread.clone()), entity);
+            cpu.enqueue(Queued::new(thread.clone()), entity);
         }
     } else if was == EXCEPTION || was == SUSPENDED {
         queue(thread);
@@ -906,7 +955,6 @@ fn queue(thread: &Arc<Thread>) {
     let entity = *thread.entity.lock();
     this_cpu()
         .lock()
-        .fair
         .enqueue(Queued::new(thread.clone()), entity);
 }
 
@@ -1068,9 +1116,11 @@ fn user_entry(_: usize) {
 }
 
 /// Switches threads, before an interrupt returns to user mode, if the
-/// running thread's slice has ended.
+/// running thread's slice has ended. Log readers whose notification was
+/// left pending are notified first.
 pub fn preempt_user() {
-    if RESCHEDULE.swap(false, Ordering::Relaxed) {
+    crate::log::notify_pending();
+    if reschedule().swap(false, Ordering::Relaxed) {
         schedule(true);
     }
 }
@@ -1095,11 +1145,15 @@ fn maintain(now: i64) {
     };
     if clock {
         crate::time::maintain();
+        #[cfg(feature = "fuzz")]
+        crate::fuzz::served(crate::fuzz::CLOCK, now);
         let next = crate::time::maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
         this_cpu().lock().clock_due = next;
     }
     if reseed {
         let next = crate::random::reseed(now);
+        #[cfg(feature = "fuzz")]
+        crate::fuzz::served(crate::fuzz::RESEED, now);
         this_cpu().lock().reseed_due = next;
     }
 }
@@ -1116,10 +1170,10 @@ pub fn timer_interrupt() {
         thread.state.store(RUNNABLE, Ordering::Release);
         let entity = *thread.entity.lock();
         // Every thread has room in the queue from when it was created.
-        cpu.fair.enqueue(Queued::new(thread), entity);
+        cpu.enqueue(Queued::new(thread), entity);
     }
     if cpu.current.is_some() && now >= cpu.slice_end {
-        RESCHEDULE.store(true, Ordering::Relaxed);
+        reschedule().store(true, Ordering::Relaxed);
     }
     arm(&cpu);
     // Expired timers are signalled with the lock released, as setting a
@@ -1177,6 +1231,10 @@ pub fn disarm_timer(timer: &crate::ktimer::Armed) {
 /// The boot processor calls this at the end of boot.
 pub fn run() -> ! {
     loop {
+        // A pending notification, as of a record that an interrupt
+        // wrote, may wake threads, so it comes before the queue is
+        // looked at.
+        crate::log::notify_pending();
         let now = crate::time::now();
         let mut cpu = this_cpu().lock();
         match cpu.fair.pick() {
@@ -1204,10 +1262,17 @@ pub fn run() -> ! {
             None => {
                 arm(&cpu);
                 drop(cpu);
-                // SAFETY: interrupts are enabled until the next one
-                // arrives; HLT then returns and they are disabled again.
-                unsafe { core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+                halt_until_interrupt();
             }
         }
     }
+}
+
+/// Halts the idle processor until an interrupt arrives. It is a function
+/// of its own so that the fuzz build's coverage test can find its code.
+#[inline(never)]
+fn halt_until_interrupt() {
+    // SAFETY: interrupts are enabled until the next one arrives; HLT then
+    // returns and they are disabled again.
+    unsafe { core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack)) };
 }

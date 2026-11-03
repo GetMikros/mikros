@@ -34,6 +34,29 @@ pub enum ObjectType {
     Pmt = 17,
 }
 
+impl ObjectType {
+    /// Every object type, in the order of their values, which run from 1.
+    pub const ALL: [ObjectType; 17] = [
+        ObjectType::Process,
+        ObjectType::Thread,
+        ObjectType::MemoryObject,
+        ObjectType::Channel,
+        ObjectType::Event,
+        ObjectType::Port,
+        ObjectType::Timer,
+        ObjectType::Interrupt,
+        ObjectType::Resource,
+        ObjectType::Log,
+        ObjectType::Budget,
+        ObjectType::LogReader,
+        ObjectType::Pager,
+        ObjectType::Timeline,
+        ObjectType::Stream,
+        ObjectType::Bti,
+        ObjectType::Pmt,
+    ];
+}
+
 /// Handle rights.
 pub mod rights {
     pub const DUPLICATE: u32 = 1 << 0;
@@ -322,10 +345,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn lists_every_object_type_by_value() {
+        assert_eq!(
+            ObjectType::ALL.len(),
+            core::mem::variant_count::<ObjectType>()
+        );
+        for (i, t) in ObjectType::ALL.into_iter().enumerate() {
+            assert_eq!(t as usize, i + 1, "{t:?}");
+        }
+    }
+
+    #[test]
     fn default_rights_stay_within_the_defined_bits() {
-        for t in 1..=17u32 {
-            // SAFETY: ObjectType is repr(u32) with values 1 to 17.
-            let t: ObjectType = unsafe { core::mem::transmute(t) };
+        for t in ObjectType::ALL {
             assert_eq!(default_rights(t) & !ALL, 0);
         }
         assert_eq!(default_rights(ObjectType::Pmt), MANAGE | INSPECT);
