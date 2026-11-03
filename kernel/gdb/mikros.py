@@ -60,6 +60,26 @@ def static(name):
     return symbol.value()
 
 
+def needs_kernel(invoke):
+    """Wraps a command's `invoke` so that it fails with a short message
+    when the kernel's memory cannot be read yet, as before the boot loader
+    has started the kernel."""
+
+    def wrapped(self, arg, from_tty):
+        try:
+            address = int(static("kernel::process::FIRST_PROCESS").address)
+            gdb.selected_inferior().read_memory(address, 8)
+            return invoke(self, arg, from_tty)
+        except gdb.MemoryError as e:
+            raise gdb.GdbError(
+                f"{e}\nThe kernel is not running yet. Let it boot first, "
+                "for example with `hbreak _start` and `continue`, then "
+                "interrupt it with Ctrl-C."
+            )
+
+    return wrapped
+
+
 def scalar(value):
     """The number or pointer inside atomics and other wrappers."""
     return rust.unwrap_scalar_wrappers(value)
@@ -191,6 +211,7 @@ class Ps(gdb.Command):
     def __init__(self):
         super().__init__("mikros ps", gdb.COMMAND_USER)
 
+    @needs_kernel
     def invoke(self, arg, from_tty):
         print(f"{'KOID':>6}  {'STATE':<10}  {'THREADS':>7}  NAME")
         for p in processes():
@@ -206,6 +227,7 @@ class Threads(gdb.Command):
     def __init__(self):
         super().__init__("mikros threads", gdb.COMMAND_USER)
 
+    @needs_kernel
     def invoke(self, arg, from_tty):
         running = running_thread()
         for inner, t in threads(process(arg)):
@@ -241,6 +263,7 @@ class Handles(gdb.Command):
     def __init__(self):
         super().__init__("mikros handles", gdb.COMMAND_USER)
 
+    @needs_kernel
     def invoke(self, arg, from_tty):
         table = locked(process(arg)["handles"])
         entry_type = gdb.lookup_type("kernel_core::object::handles::Entry")
@@ -263,6 +286,7 @@ class Mappings(gdb.Command):
     def __init__(self):
         super().__init__("mikros mappings", gdb.COMMAND_USER)
 
+    @needs_kernel
     def invoke(self, arg, from_tty):
         space = arc_inner(process(arg)["aspace"])["data"]
         regions = locked(space["regions"])
@@ -283,6 +307,7 @@ class Log(gdb.Command):
     def __init__(self):
         super().__init__("mikros log", gdb.COMMAND_USER)
 
+    @needs_kernel
     def invoke(self, arg, from_tty):
         log = static("kernel::log::LOG")
         slots = log["slots"]
