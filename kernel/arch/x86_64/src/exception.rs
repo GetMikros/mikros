@@ -54,8 +54,8 @@ pub fn before_user_return(frame: &mut Frame) -> bool {
         reported = true;
     }
     reported |= crate::signal::deliver(frame);
-    // A stop may have held the thread when it was asked to end.
-    reported |= end_if_requested(frame, &thread);
+    // A stop may have held the thread when it was asked to end;
+    // `stay_suspended` ends it first if so.
     reported | stay_suspended(frame, &thread)
 }
 
