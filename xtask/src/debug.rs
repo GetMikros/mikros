@@ -133,10 +133,35 @@ const CHECKS: [(&str, &str); 5] = [
     ("mikros log 20", "TEST "),
 ];
 
+/// Waits until `child` exits, or kills it and fails once `timeout` has
+/// passed.
+fn wait_for(child: &mut Child, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("timed out after {} s", timeout.as_secs());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Boots the test image `disk` halted, runs every kernel debugger script
 /// command in GDB once the test init calls `CHECK_BREAKPOINT`, and fails
-/// unless each prints what it should. The serial output goes to `log`.
-pub fn check_scripts(machine: &MachineArgs, kernel: &Path, disk: &Path, log: &Path) -> Result<()> {
+/// unless each prints what it should, or when GDB has not finished after
+/// `timeout`. The serial output goes to `log`, and GDB's output to
+/// `gdb-output.log` next to it.
+pub fn check_scripts(
+    machine: &MachineArgs,
+    kernel: &Path,
+    disk: &Path,
+    log: &Path,
+    timeout: Duration,
+) -> Result<()> {
     let port = free_port()?;
     let mut qemu = start_halted(machine, disk, log, port, &["-display", "none"])?;
     let mut args = vec!["-nx".to_string(), "-batch".to_string()];
@@ -148,16 +173,33 @@ pub fn check_scripts(machine: &MachineArgs, kernel: &Path, disk: &Path, log: &Pa
         args.extend(["-ex".into(), command.into()]);
     }
     args.extend(["-ex".into(), "kill".into()]);
-    let output = Command::new(GDB).args(args).stdin(Stdio::null()).output();
+    // The output goes to a file, so that waiting never blocks on a pipe.
+    let output_path = log.with_file_name("gdb-output.log");
+    let output = fs::File::create(&output_path)
+        .with_context(|| format!("creating {}", output_path.display()))?;
+    let errors = output.try_clone()?;
+    let finished = Command::new(GDB)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(output)
+        .stderr(errors)
+        .spawn()
+        .with_context(|| format!("failed to start {GDB}"))
+        .and_then(|mut gdb| wait_for(&mut gdb, timeout));
     let _ = qemu.kill();
     let _ = qemu.wait();
-    let output = output.with_context(|| format!("failed to start {GDB}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let failed = missing(&stdout);
+    finished.with_context(|| {
+        format!(
+            "the kernel debugger scripts did not finish; serial output in {}",
+            log.display()
+        )
+    })?;
+    let output = fs::read_to_string(&output_path)
+        .with_context(|| format!("reading {}", output_path.display()))?;
+    let failed = missing(&output);
     if !failed.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "the kernel debugger scripts failed: {}\n{stdout}{stderr}",
+            "the kernel debugger scripts failed: {}\n{output}",
             failed.join(", ")
         );
     }

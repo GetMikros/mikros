@@ -138,7 +138,8 @@ pub fn run(args: &Args) -> Result<()> {
         log.display()
     );
     let gdb_log = dir.join("gdb-serial.log");
-    crate::debug::check_scripts(&args.machine, &built.kernel, &disk, &gdb_log)?;
+    let timeout = Duration::from_secs(args.timeout);
+    crate::debug::check_scripts(&args.machine, &built.kernel, &disk, &gdb_log, timeout)?;
     println!("kernel debugger scripts passed");
     Ok(())
 }
