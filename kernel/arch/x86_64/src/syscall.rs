@@ -295,9 +295,13 @@ pub unsafe trait Plain: Copy {}
 
 // SAFETY: integers have no padding and no invalid bit patterns.
 unsafe impl Plain for u8 {}
+// SAFETY: as for `u8`.
 unsafe impl Plain for u32 {}
+// SAFETY: as for `u8`.
 unsafe impl Plain for u64 {}
+// SAFETY: as for `u8`.
 unsafe impl Plain for i32 {}
+// SAFETY: as for `u8`.
 unsafe impl Plain for i64 {}
 
 /// The bytes of `values`.

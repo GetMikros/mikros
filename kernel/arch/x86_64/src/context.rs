@@ -208,6 +208,7 @@ pub struct ExtendedState(NonNull<u8>);
 // SAFETY: the area is owned by one thread's state and only touched while
 // switching to or from that thread.
 unsafe impl Send for ExtendedState {}
+// SAFETY: as for `Send`; no two threads touch the area at once.
 unsafe impl Sync for ExtendedState {}
 
 impl ExtendedState {

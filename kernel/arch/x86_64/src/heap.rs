@@ -30,6 +30,8 @@ static HEAP: KernelHeap = KernelHeap(SpinLock::new(Heap::new(DynamicPages)));
 // freed, with the size and alignment of the layout, and `dealloc` passes
 // back the layout the block was allocated with.
 unsafe impl GlobalAlloc for KernelHeap {
+    // SAFETY: the caller passes a layout of nonzero size, as `GlobalAlloc`
+    // requires, and the heap hands out each block once until it is freed.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.0
             .lock()
@@ -37,6 +39,8 @@ unsafe impl GlobalAlloc for KernelHeap {
             .map_or(core::ptr::null_mut(), NonNull::as_ptr)
     }
 
+    // SAFETY: the caller passes a block that `alloc` returned and the
+    // layout it was allocated with, as `GlobalAlloc` requires.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if let Some(block) = NonNull::new(ptr) {
             // SAFETY: the caller passes a block from `alloc` with its layout.
