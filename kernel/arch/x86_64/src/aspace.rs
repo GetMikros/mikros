@@ -560,8 +560,9 @@ impl AddressSpace {
     /// does, and removes their translations, so that the next access
     /// enters them with the new permissions. `allowed` decides whether a
     /// region's object accepts them; a region that no longer does when
-    /// its turn comes, having changed meanwhile, keeps its permissions.
-    /// Regions that splitting adds are charged to `budget`.
+    /// its turn comes, having changed meanwhile, keeps its permissions,
+    /// and the call then fails with `AccessDenied` once the other regions
+    /// have changed. Regions that splitting adds are charged to `budget`.
     pub fn protect(
         &self,
         start: u64,
@@ -572,12 +573,19 @@ impl AddressSpace {
     ) -> Result<(), Error> {
         let ok = |r: &RegionOf| perms & !r.max == 0 && allowed(r);
         self.check_in_steps(start, end, ok)?;
+        let mut refused = false;
         self.change_in_steps(start, end, budget, |r| {
             if ok(r) {
                 r.set_perms(perms);
+            } else {
+                refused = true;
             }
         })?;
-        self.unmap_in_steps(start, end - start)
+        self.unmap_in_steps(start, end - start)?;
+        match refused {
+            true => Err(Error::AccessDenied),
+            false => Ok(()),
+        }
     }
 
     /// Removes the translations of pages `first` to `end`, exclusive, of
