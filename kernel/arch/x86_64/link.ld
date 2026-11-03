@@ -22,9 +22,8 @@ SECTIONS
     . = ALIGN(4096);
     __rodata_start = .;
     .rodata : { *(.rodata .rodata.*) } :rodata
-    .notes : ALIGN(4) {
-        KEEP(*(.note.mikros))
-        . = ALIGN(4);
+    .note.mikros : ALIGN(4) { KEEP(*(.note.mikros)) } :rodata :note
+    .note.gnu.build-id : ALIGN(4) {
         __build_id_note = .;
         KEEP(*(.note.gnu.build-id))
         __build_id_note_end = .;
