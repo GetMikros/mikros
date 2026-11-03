@@ -10,6 +10,7 @@ pub mod display;
 pub mod elf;
 pub mod exit;
 pub mod firmware;
+pub mod handoff;
 pub mod info;
 pub mod load;
 pub mod memmap;

@@ -4,17 +4,12 @@
 use super::Failure;
 use super::gather::Gathered;
 use alloc::vec;
-use boot_protocol::x86_64::{
-    AP_TRAMPOLINE_END, DIRECT_MAP_BASE, DIRECT_MAP_LIMIT, fits_ap_trampoline,
-};
-use boot_protocol::{
-    BOOT_INFO_SIZE, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, PAGE_SIZE, VERSION_MAJOR,
-    VERSION_MINOR, arch,
-};
+use boot_protocol::x86_64::{AP_TRAMPOLINE_END, DIRECT_MAP_BASE, fits_ap_trampoline};
+use boot_protocol::{BootInfo, Kind, MemoryMapEntry, PAGE_SIZE};
 use core::arch::{asm, global_asm};
 use core::ptr::NonNull;
-use mikrosboot::elf::Kernel;
 use mikrosboot::exit::{self, FinalMap};
+use mikrosboot::handoff::{CMDLINE_OFFSET, INFO_PAGES, Prepared};
 use mikrosboot::load::{self, PHYS_ALIGN};
 use mikrosboot::memmap::{Map, Region};
 use mikrosboot::paging::{self, BOOT_STACK_SIZE, Frames, Placement};
@@ -32,8 +27,6 @@ const TABLE_SLACK: u64 = 16;
 /// Kernel memory map entries beyond the firmware's: each of the ranges
 /// overlaid on the firmware map can split one range in three.
 const ENTRY_SLACK: usize = 32;
-/// Where the command line is placed in the `BootInfo` allocation.
-const CMDLINE_OFFSET: u64 = 0x100;
 
 // Switches to the kernel's page tables and stack and jumps to the kernel.
 // Arguments: RDI = CR3, RSI = RSP, RDX = BootInfo address, RCX = entry.
@@ -126,30 +119,6 @@ fn allocate_aligned(pages: u64, step: &'static str) -> Result<u64, Failure> {
     Ok(aligned)
 }
 
-/// Memory allocated for the kernel, and what is passed to it.
-struct Prepared {
-    kernel: Kernel,
-    layout: load::Layout,
-    kernel_phys: u64,
-    boot_image_phys: u64,
-    boot_image_size: u64,
-    stack_phys: u64,
-    trampoline: Option<u64>,
-    info_phys: u64,
-    cmdline_len: u64,
-    entries_phys: u64,
-    entries_capacity: usize,
-    firmware_map_phys: u64,
-    firmware_map_size: usize,
-    tables_phys: u64,
-    tables: u64,
-    framebuffer: Option<Framebuffer>,
-    rsdp: u64,
-    system_table: u64,
-    rng_seed: Option<[u8; 32]>,
-    boot_time: Option<u64>,
-}
-
 /// The direct-mapped runs of the current firmware memory map, and the size
 /// of that map in descriptors.
 fn current_runs(step: &'static str) -> Result<(alloc::vec::Vec<(u64, u64)>, usize), Failure> {
@@ -210,10 +179,10 @@ fn prepare(g: Gathered) -> Result<Prepared, Failure> {
     };
 
     let step = "allocating memory for the boot information";
-    let info_phys = allocate(AllocateType::AnyPages, 2, step)?;
+    let info_phys = allocate(AllocateType::AnyPages, INFO_PAGES, step)?;
     let cmdline_len = g.cmdline.len() as u64;
     // SAFETY: the command line is at most CMDLINE_MAX bytes, which fit after
-    // CMDLINE_OFFSET in the two pages.
+    // CMDLINE_OFFSET in the INFO_PAGES pages.
     unsafe {
         core::ptr::copy_nonoverlapping(
             g.cmdline.as_ptr(),
@@ -351,47 +320,13 @@ fn enter(p: &Prepared, fw: &FinalMap) -> Option<core::convert::Infallible> {
         core::slice::from_raw_parts_mut(p.entries_phys as *mut MemoryMapEntry, p.entries_capacity)
     };
     let mut map = Map::new(buf);
-    for i in 0..fw.size / fw.descriptor_size {
+    let firmware = (0..fw.size / fw.descriptor_size).map(|i| {
         let at = p.firmware_map_phys as usize + i * fw.descriptor_size;
         // SAFETY: the firmware wrote `size` bytes of descriptors here.
         let d = unsafe { (at as *const MemoryDescriptor).read_unaligned() };
-        map.push_firmware(d.phys_start, d.page_count, d.ty.0).ok()?;
-    }
-    map.sort().ok()?;
-    let mut overlays = [
-        Some(Region {
-            start: p.kernel_phys,
-            pages: load::pages(p.layout.size),
-            kind: Kind::KernelImage,
-        }),
-        Some(Region {
-            start: p.boot_image_phys,
-            pages: load::pages(p.boot_image_size).max(1),
-            kind: Kind::BootImage,
-        }),
-        Some(Region {
-            start: p.stack_phys,
-            pages: BOOT_STACK_SIZE / PAGE_SIZE,
-            kind: Kind::KernelStack,
-        }),
-        p.trampoline.map(|start| Region {
-            start,
-            pages: 1,
-            kind: Kind::ApTrampoline,
-        }),
-        Some(Region {
-            start: p.tables_phys,
-            pages: p.tables,
-            kind: Kind::PageTables,
-        }),
-        p.framebuffer
-            .map(|fb| Region::covering(fb.phys_base, fb.size, Kind::Framebuffer)),
-    ];
-    for region in overlays.iter_mut().filter_map(Option::take) {
-        map.overlay(region).ok()?;
-    }
-    map.merge();
-    map.check_direct_map_limit(DIRECT_MAP_LIMIT).ok()?;
+        (d.phys_start, d.page_count, d.ty.0)
+    });
+    p.memory_map(&mut map, firmware).ok()?;
 
     let tables_end = p.tables_phys + p.tables * PAGE_SIZE;
     let mut pool = Pool {
@@ -419,39 +354,9 @@ fn enter(p: &Prepared, fw: &FinalMap) -> Option<core::convert::Infallible> {
         map.merge();
     }
 
-    let optional = mikrosboot::info::optional(p.framebuffer, p.rng_seed, p.boot_time);
-    let entries = map.entries();
-    let info = BootInfo {
-        magic: MAGIC,
-        version_major: VERSION_MAJOR,
-        version_minor: VERSION_MINOR,
-        size: BOOT_INFO_SIZE,
-        arch: arch::X86_64,
-        flags: optional.flags,
-        memory_map_phys: entries.as_ptr() as u64,
-        memory_map_count: entries.len() as u64,
-        memory_map_entry_size: size_of::<MemoryMapEntry>() as u64,
-        kernel_phys_base: p.kernel_phys,
-        kernel_virt_base: p.layout.virt_base,
-        kernel_size: p.layout.size,
-        direct_map_base: DIRECT_MAP_BASE,
-        boot_image_phys: p.boot_image_phys,
-        boot_image_size: p.boot_image_size,
-        cmdline_phys: if p.cmdline_len == 0 {
-            0
-        } else {
-            p.info_phys + CMDLINE_OFFSET
-        },
-        cmdline_len: p.cmdline_len,
-        firmware_table_phys: p.rsdp,
-        uefi_system_table_phys: p.system_table,
-        framebuffer: optional.framebuffer,
-        rng_seed: optional.rng_seed,
-        boot_time: optional.boot_time,
-        arch_data0: p.trampoline.unwrap_or(0),
-        arch_data1: 0,
-    };
-    // SAFETY: the BootInfo allocation is ours, page-aligned and two pages.
+    let info = p.boot_info(map.entries());
+    // SAFETY: the BootInfo allocation is ours, page-aligned and INFO_PAGES
+    // pages.
     unsafe { (p.info_phys as *mut BootInfo).write(info) };
 
     // The stack was zeroed when it was allocated, so the top 8 bytes are
