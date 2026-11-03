@@ -381,6 +381,10 @@ impl<T: Copy + PartialEq> Fair<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec::Vec;
+
+    /// The bound on lags.
+    const LAG_MAX: i64 = 10_000_000;
 
     #[test]
     fn weights_follow_the_formula() {
@@ -388,5 +392,209 @@ mod tests {
             let expected = (1024.0 * 1.25f64.powi(p as i32 - 16)).round() as u64;
             assert_eq!(weight(p), expected, "priority {p}");
         }
+    }
+
+    /// Checks that every runnable thread's lag is within the bound.
+    fn check_lags(fair: &Fair<u32>, ids: impl IntoIterator<Item = u32>) {
+        for id in ids {
+            if let Some(lag) = fair.lag(id) {
+                assert!(lag.abs() <= LAG_MAX, "thread {id} has lag {lag}");
+            }
+        }
+    }
+
+    /// Runs `priorities` for `duration` ns, all always runnable, and
+    /// checks each thread's lag, its time against its share and the gaps
+    /// between its runs.
+    fn simulate(priorities: &[u32], duration: i64) {
+        let n = priorities.len();
+        let mut fair = Fair::new();
+        let mut ran = vec![0i64; n];
+        let mut last_end = vec![0i64; n];
+        let mut max_gap = vec![0i64; n];
+        for (i, &p) in priorities.iter().enumerate() {
+            fair.enqueue(i as u32, Entity::new(p));
+        }
+        let total: u64 = priorities.iter().map(|&p| weight(p)).sum();
+        let interval = wait_limit(n);
+        let mut now = 0i64;
+        while now < duration {
+            let (id, _) = fair.pick().unwrap();
+            let id = id as usize;
+            let slice = fair.slice();
+            max_gap[id] = max_gap[id].max(now - last_end[id]);
+            now += slice;
+            ran[id] += slice;
+            last_end[id] = now;
+            fair.charge(slice);
+            check_lags(&fair, 0..n as u32);
+            fair.requeue(id as u32);
+            for (j, &p) in priorities.iter().enumerate() {
+                let share = (i128::from(now) * i128::from(weight(p)) / i128::from(total)) as i64;
+                assert!(
+                    (ran[j] - share).abs() <= LAG_MAX,
+                    "thread {j} at {now}: ran {} for a share of {share}",
+                    ran[j]
+                );
+            }
+        }
+        // Threads whose deadlines come together start 1 ns apart.
+        for (j, &gap) in max_gap.iter().enumerate() {
+            assert!(gap <= interval + n as i64, "thread {j} waited {gap} ns");
+        }
+    }
+
+    #[test]
+    fn shares_by_weight() {
+        simulate(&[16, 16], 1_000_000_000);
+        simulate(&[16, 17, 20], 1_000_000_000);
+        simulate(&[0, 31], 1_000_000_000);
+    }
+
+    #[test]
+    fn holds_for_many_mixes_of_priorities() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..50 {
+            let n = 1 + (next() % 24) as usize;
+            let priorities: Vec<u32> = (0..n).map(|_| (next() % 32) as u32).collect();
+            simulate(&priorities, 300_000_000);
+        }
+    }
+
+    /// Runs the next thread for its slice, or for `ran` if that is
+    /// shorter, then queues it again, or stops it when `block` is set and
+    /// returns its state.
+    fn run(fair: &mut Fair<u32>, ran: Option<i64>, block: bool) -> (u32, i64, Option<Entity>) {
+        let (id, _) = fair.pick().unwrap();
+        let slice = fair.slice();
+        let ran = ran.map_or(slice, |r| r.min(slice));
+        fair.charge(ran);
+        if block {
+            (id, ran, fair.stop())
+        } else {
+            fair.requeue(id);
+            (id, ran, None)
+        }
+    }
+
+    #[test]
+    fn keeps_lags_bounded_while_a_thread_keeps_blocking() {
+        // Threads 0 to 2 are always runnable; thread 3 runs, blocks and
+        // is woken again after the next run, over and over.
+        let mut fair = Fair::new();
+        for (id, p) in [(0, 16), (1, 25), (2, 10), (3, 16)] {
+            fair.enqueue(id, Entity::new(p));
+        }
+        let mut sleeping = None;
+        for _ in 0..20_000 {
+            let (id, _) = fair.pick().unwrap();
+            fair.charge(fair.slice());
+            let stopped = if id == 3 {
+                fair.stop()
+            } else {
+                fair.requeue(id);
+                None
+            };
+            if let Some(e) = sleeping.take() {
+                fair.enqueue(3, e);
+            }
+            sleeping = stopped;
+            check_lags(&fair, 0..4);
+        }
+    }
+
+    #[test]
+    fn gives_no_credit_for_blocked_time() {
+        let mut fair = Fair::new();
+        fair.enqueue(1, Entity::new(16));
+        fair.enqueue(2, Entity::new(16));
+        // Thread 1 runs a little and blocks, then thread 2 runs alone for
+        // a second.
+        let (first, _, _) = run(&mut fair, Some(1_000), true);
+        let blocked = if first == 1 { 1 } else { 2 };
+        let stopped = fair.lag(blocked);
+        assert!(stopped.is_none());
+        let other = 3 - blocked;
+        for _ in 0..300 {
+            run(&mut fair, None, false);
+        }
+        // A blocked thread that was ahead keeps that; one that was behind
+        // starts again at zero.
+        let mut ahead = Entity::new(16);
+        ahead.ran = true;
+        ahead.lag = -2_000_000 << SHIFT;
+        fair.enqueue(blocked, ahead);
+        let lag = fair.lag(blocked).unwrap();
+        assert!((-2_000_000..-900_000).contains(&lag), "lag {lag}");
+        let _ = fair.remove(blocked);
+        let mut behind = ahead;
+        behind.lag = 5_000_000 << SHIFT;
+        fair.enqueue(blocked, behind);
+        assert_eq!(fair.lag(blocked), Some(0));
+        check_lags(&fair, [other]);
+    }
+
+    #[test]
+    fn bounds_the_wait_when_the_queue_shrinks() {
+        let mut fair = Fair::new();
+        for id in [1, 2, 3, 4] {
+            fair.enqueue(id, Entity::new(16));
+        }
+        // Three threads run whole slices and block; the fourth waits no
+        // more than one period.
+        let mut waited = 0;
+        let mut ran_ids = Vec::new();
+        for _ in 0..3 {
+            let (id, ran, _) = run(&mut fair, None, true);
+            ran_ids.push(id);
+            waited += ran;
+        }
+        assert!(waited <= wait_limit(4), "waited {waited} ns");
+        check_lags(&fair, 1..=4);
+    }
+
+    #[test]
+    fn handles_a_weight_change_as_a_stop_and_a_start() {
+        let mut fair = Fair::new();
+        for id in [1, 2, 3] {
+            fair.enqueue(id, Entity::new(16));
+        }
+        for _ in 0..10 {
+            run(&mut fair, None, false);
+        }
+        let queued = (1..=3).find(|&id| fair.lag(id).is_some()).unwrap();
+        let before = fair.lag(queued).unwrap();
+        assert!(fair.reweigh(queued, weight(25)));
+        // The thread keeps its lag up to the share of it that the moved
+        // virtual time takes back.
+        let after = fair.lag(queued).unwrap();
+        assert!(
+            (after - before).abs() <= before.abs(),
+            "{before} -> {after}"
+        );
+        for _ in 0..1000 {
+            run(&mut fair, None, false);
+            check_lags(&fair, 1..=3);
+        }
+    }
+
+    #[test]
+    fn queues_the_running_thread_woken_before_it_stops() {
+        let mut fair = Fair::new();
+        fair.enqueue(1, Entity::new(16));
+        let (id, _) = fair.pick().unwrap();
+        fair.charge(1_000);
+        // Woken while it still runs, as by an interrupt before it
+        // switched out.
+        fair.enqueue(id, Entity::new(16));
+        assert!(fair.stop().is_none());
+        assert_eq!(fair.len(), 1);
+        assert_eq!(fair.pick().map(|(id, _)| id), Some(1));
     }
 }
