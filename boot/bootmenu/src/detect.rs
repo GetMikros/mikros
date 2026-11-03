@@ -170,6 +170,21 @@ pub fn has_pe_section(image: &[u8], name: &[u8; 8]) -> bool {
     check().unwrap_or(false)
 }
 
+/// A system found outside the entries file, with the firmware's device
+/// path type `P`.
+pub struct Detected<P> {
+    /// Not shown, but kept unique among all entries like the IDs of the
+    /// entries file.
+    pub id: String,
+    pub name: String,
+    /// The path of the image on its volume, used to name it in notices.
+    pub path: String,
+    /// Whether the image is on a volume other than the boot volume.
+    pub other_disk: bool,
+    /// The full device path of the image.
+    pub device_path: P,
+}
+
 /// The files started by the entries so far, by volume.
 pub struct Started<V> {
     files: Vec<(V, String)>,

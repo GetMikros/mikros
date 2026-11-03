@@ -18,19 +18,7 @@ use uefi::runtime::{self, VariableVendor};
 use uefi::{CString16, Handle, cstr16};
 
 /// A system found outside the entries file.
-pub struct Detected {
-    /// Not shown, but kept unique among all entries like the IDs of the
-    /// entries file.
-    #[allow(dead_code)]
-    pub id: String,
-    pub name: String,
-    /// The path of the image on its volume, used to name it in notices.
-    pub path: String,
-    /// Whether the image is on a volume other than the boot volume.
-    pub other_disk: bool,
-    /// The full device path of the image.
-    pub device_path: Box<DevicePath>,
-}
+pub type Detected = detect::Detected<Box<DevicePath>>;
 
 /// Opens protocol `P` on `handle` without taking it over from its users.
 fn open_shared<P: ProtocolPointer + ?Sized>(handle: Handle) -> Option<ScopedProtocol<P>> {
