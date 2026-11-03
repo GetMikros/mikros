@@ -6,6 +6,7 @@
 extern crate alloc;
 
 pub mod cmdline;
+pub mod cpu;
 pub mod display;
 pub mod elf;
 pub mod exit;

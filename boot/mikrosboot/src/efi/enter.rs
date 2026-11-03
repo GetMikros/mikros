@@ -8,6 +8,7 @@ use boot_protocol::x86_64::{AP_TRAMPOLINE_END, DIRECT_MAP_BASE, fits_ap_trampoli
 use boot_protocol::{BootInfo, Kind, MemoryMapEntry, PAGE_SIZE};
 use core::arch::{asm, global_asm};
 use core::ptr::NonNull;
+use mikrosboot::cpu;
 use mikrosboot::exit::{self, FinalMap};
 use mikrosboot::handoff::{CMDLINE_OFFSET, INFO_PAGES, Prepared};
 use mikrosboot::load::{self, PHYS_ALIGN};
@@ -40,13 +41,13 @@ global_asm!(
     "mov r8, rdx",
     "mov r9, rcx",
     // Set IA32_EFER.NXE before loading tables that use the NX bit.
-    "mov ecx, 0xC0000080",
+    "mov ecx, {efer}",
     "rdmsr",
-    "or eax, 0x800",
+    "or eax, {nxe}",
     "wrmsr",
     // Set CR0.WP.
     "mov rax, cr0",
-    "or rax, 0x10000",
+    "or rax, {wp}",
     "mov cr0, rax",
     "mov cr3, rdi",
     "mov rsp, rsi",
@@ -54,6 +55,9 @@ global_asm!(
     "mov rdi, r8",
     "jmp r9",
     "mikros_enter_end:",
+    efer = const cpu::IA32_EFER,
+    nxe = const cpu::EFER_NXE,
+    wp = const cpu::CR0_WP,
 );
 
 unsafe extern "sysv64" {
@@ -84,7 +88,7 @@ fn five_level_paging() -> bool {
     let cr4: u64;
     // SAFETY: reading CR4 has no side effects at the bootloader's privilege.
     unsafe { asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack)) };
-    cr4 & (1 << 12) != 0
+    cpu::five_level_paging(cr4)
 }
 
 fn gib_pages_supported() -> bool {
