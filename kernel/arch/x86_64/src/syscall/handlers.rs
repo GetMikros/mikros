@@ -588,7 +588,8 @@ fn send(
         entries.push(table.check(h, &[], rights::TRANSFER)?.clone());
     }
     reject_own_channel(endpoint, &entries)?;
-    let message = Message::charged(data, entries, Some(charge));
+    let mut message = Message::charged(data, entries, Some(charge));
+    message.charge_transit(process.budget())?;
     // A message that was not queued drops only its own references, as
     // the handles are still in the table.
     let delivered = endpoint.write(message).map_err(|(e, _)| e)?;

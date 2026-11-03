@@ -969,6 +969,9 @@ pub fn resume_exception(thread: &Arc<Thread>, why: u32) -> bool {
 /// Ends the running thread if it is DEAD. Called before every return
 /// to user mode.
 pub fn exit_if_dead() {
+    // Endpoints that the call or interrupt left reachable only through
+    // queued messages are destroyed before it returns.
+    kernel_core::object::channel::collect_if_needed();
     if current().is_some_and(|t| t.state() == DEAD) {
         exit();
     }

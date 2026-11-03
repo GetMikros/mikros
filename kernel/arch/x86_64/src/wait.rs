@@ -181,8 +181,10 @@ pub fn wait_call(
     }
     header.watch();
     let result = loop {
-        if let Some(reply) = endpoint.take_reply(id) {
-            break Ok(reply);
+        match endpoint.take_reply(id) {
+            Ok(Some(reply)) => break Ok(reply),
+            Err(e) => break Err(e),
+            Ok(None) => {}
         }
         if endpoint.peer_closed() {
             break Err(Error::PeerClosed);

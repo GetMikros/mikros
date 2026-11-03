@@ -2152,6 +2152,42 @@ fn own_endpoints_not_sent(_: &Startup) -> Result {
     Ok(())
 }
 
+/// Two channels whose endpoints are only carried by messages queued
+/// toward each other are destroyed once their other handles are closed,
+/// and give back their kernel memory.
+fn endpoint_cycles_reclaimed(s: &Startup) -> Result {
+    let (mut a, mut b, mut c, mut d) = (0, 0, 0, 0);
+    // Handle table slots stay charged once made, so the four that the
+    // test uses are made first.
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check("creating a channel", sys::channel_create(0, &mut a, &mut b))?;
+        check("creating a channel", sys::channel_create(0, &mut c, &mut d))?;
+    }
+    for h in [a, b, c, d] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    let before = budget_kernel(s)?;
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check("creating a channel", sys::channel_create(0, &mut a, &mut b))?;
+        check("creating a channel", sys::channel_create(0, &mut c, &mut d))?;
+    }
+    let byte = [1u8];
+    // SAFETY: the pointers describe `byte` and the handles.
+    unsafe {
+        check("sending d", sys::channel_write(a, byte.as_ptr(), 1, &d, 1))?;
+        check("sending b", sys::channel_write(c, byte.as_ptr(), 1, &b, 1))?;
+    }
+    ensure("charging the channels", budget_kernel(s)? > before)?;
+    for h in [a, c] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    ensure("reclaiming the channels", budget_kernel(s)? == before)
+}
+
 /// The thread state of a thread stopped in an exception.
 const STATE_EXCEPTION: u32 = 3;
 
@@ -3008,7 +3044,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 46] = [
+const TESTS: [(&str, Test); 47] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -3042,6 +3078,7 @@ const TESTS: [(&str, Test); 46] = [
     ),
     ("kill_thread_after_report", kill_thread_after_report),
     ("own_endpoints_not_sent", own_endpoints_not_sent),
+    ("endpoint_cycles_reclaimed", endpoint_cycles_reclaimed),
     ("coverage", coverage),
     ("seal_waits_for_outputs", seal_waits_for_outputs),
     ("evict_waits_for_outputs", evict_waits_for_outputs),

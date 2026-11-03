@@ -122,7 +122,7 @@ fuzz_target!(|ops: Vec<Op>| {
                 }
                 let i = usize::from(i) % calls.len();
                 let (id, arrived) = calls[i];
-                let reply = end.take_reply(id);
+                let reply = end.take_reply(id).expect("replies carry no endpoints");
                 assert_eq!(reply.is_some(), arrived);
                 if let Some(reply) = reply {
                     assert_eq!(reply.bytes, id.to_le_bytes());
