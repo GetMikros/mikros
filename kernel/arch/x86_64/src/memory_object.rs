@@ -956,6 +956,26 @@ impl MemoryObject {
         space: &AddressSpace,
         virt: u64,
     ) -> Result<Held, Error> {
+        self.hold_mapped(space, virt, true)
+    }
+
+    /// Holds the page at `virt` of `space` as `hold_for_write` does, as
+    /// the source of a kernel read that cannot fail later. Fails with
+    /// `InvalidArgs` unless the region at `virt` maps this object readable.
+    pub fn hold_for_read_at(
+        self: &Arc<Self>,
+        space: &AddressSpace,
+        virt: u64,
+    ) -> Result<Held, Error> {
+        self.hold_mapped(space, virt, false)
+    }
+
+    fn hold_mapped(
+        self: &Arc<Self>,
+        space: &AddressSpace,
+        virt: u64,
+        write: bool,
+    ) -> Result<Held, Error> {
         loop {
             let pages = self.pages.lock();
             let mine = |r: Option<&aspace::RegionOf>| {
@@ -965,10 +985,10 @@ impl MemoryObject {
             let Some((index, perms)) = space.with_region(virt, mine) else {
                 return Err(Error::InvalidArgs);
             };
-            if !aspace::allows(perms, true, false) || index >= pages.count() {
+            if !aspace::allows(perms, write, false) || index >= pages.count() {
                 return Err(Error::InvalidArgs);
             }
-            if let Some(held) = self.hold_page(pages, index)? {
+            if let Some(held) = self.hold_page(pages, index, write)? {
                 return Ok(held);
             }
         }
@@ -989,7 +1009,7 @@ impl MemoryObject {
             if index >= pages.count() {
                 return Err(Error::OutOfRange);
             }
-            if let Some(held) = self.hold_page(pages, index)? {
+            if let Some(held) = self.hold_page(pages, index, true)? {
                 return Ok(held);
             }
         }
@@ -997,11 +1017,13 @@ impl MemoryObject {
 
     /// Holds page `index` with the pages locked, or waits for what it
     /// needs with them unlocked and returns `None`, so that the caller
-    /// looks again.
+    /// looks again. A page of a paged object held to `write` is marked
+    /// written.
     fn hold_page(
         self: &Arc<Self>,
         mut pages: kernel_core::sync::Guard<'_, Pages>,
         index: u64,
+        write: bool,
     ) -> Result<Option<Held>, Error> {
         if let Some((base, policy)) = self.physical {
             drop(pages);
@@ -1023,7 +1045,9 @@ impl MemoryObject {
                 self.obtain(index)?;
                 return Ok(None);
             };
-            state.written(index)?;
+            if write {
+                state.written(index)?;
+            }
             drop(state);
             pages.pin();
             return Ok(Some(Held {

@@ -751,13 +751,22 @@ impl AddressSpace {
     /// Holds the page at `page` as the destination of a kernel write
     /// (`MemoryObject::hold_for_write`).
     pub fn hold_for_write(&self, page: u64) -> Result<crate::memory_object::Held, Error> {
+        self.region_object(page)?.hold_for_write(self, page)
+    }
+
+    /// Holds the page at `page` as the source of a kernel read
+    /// (`MemoryObject::hold_for_read_at`).
+    pub fn hold_for_read(&self, page: u64) -> Result<crate::memory_object::Held, Error> {
+        self.region_object(page)?.hold_for_read_at(self, page)
+    }
+
+    /// The object of the region at user page `page`, or `InvalidArgs`.
+    fn region_object(&self, page: u64) -> Result<Arc<MemoryObject>, Error> {
         if !in_user_range(page, PAGE_SIZE) {
             return Err(Error::InvalidArgs);
         }
-        let mem = self
-            .with_region(page, |r| r.map(|r| r.mem.clone()))
-            .ok_or(Error::InvalidArgs)?;
-        mem.hold_for_write(self, page)
+        self.with_region(page, |r| r.map(|r| r.mem.clone()))
+            .ok_or(Error::InvalidArgs)
     }
 }
 

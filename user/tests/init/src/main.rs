@@ -3861,7 +3861,8 @@ fn map_with(s: &Startup, options: u32, addr: u64, mem: Handle, len: u64) -> Resu
 
 /// A debugger writes the memory of a process whatever the permissions
 /// of its mappings, and new code runs; mappings from handles without
-/// `WRITE`, sealed objects and revoked objects refuse the whole write.
+/// `WRITE`, sealed objects, revoked objects and a source buffer that
+/// cannot be read to its end refuse the whole write.
 fn write_process_memory(s: &Startup) -> Result {
     const EXECUTE: u32 = 4;
     const SPECIFIC: u32 = 1 << 8;
@@ -3921,6 +3922,30 @@ fn write_process_memory(s: &Startup) -> Result {
         "writing nothing",
         mem_read_at::<6>(mem, PAGE_SIZE - 3)? == *b"ABCDEF",
     )?;
+
+    // The source's first 256 bytes are readable and the rest is not.
+    let source = create_memory(2 * PAGE_SIZE)?;
+    let src = map(s.process, source, 2 * PAGE_SIZE)?;
+    let readable = src + PAGE_SIZE - 256;
+    for i in 0..256 {
+        // SAFETY: the first page of the mapping is writable.
+        unsafe { ((readable + i) as *mut u8).write_volatile(0xAB) };
+    }
+    check(
+        "making the source's end unreadable",
+        protect(s, 0, src + PAGE_SIZE, PAGE_SIZE),
+    )?;
+    ensure(
+        "refusing a source that cannot be read",
+        // SAFETY: the kernel only reads the 512 bytes from the pointer.
+        unsafe { sys::process_write_memory(s.process, at, readable as *const u8, 512) }
+            == INVALID_ARGS,
+    )?;
+    ensure("writing none of it", mem_read_at::<8>(mem, 0)? == [0; 8])?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping the source", unsafe {
+        sys::vm_unmap(s.process, src, 2 * PAGE_SIZE)
+    })?;
 
     let sealed = create_memory(PAGE_SIZE)?;
     let sat = map_with(s, PERM_READ, 0, sealed, PAGE_SIZE)?;

@@ -943,7 +943,8 @@ pub fn process_write_memory(
     len: u64,
 ) -> Result<(), Error> {
     let target = object::<Process>(process);
-    let mut scratch = Scratch::new(Some(current_process()?.budget()));
+    let caller = current_process()?;
+    let mut scratch = Scratch::new(Some(caller.budget()));
     let pieces = debug_pieces(&target, addr, len, &mut scratch)?;
     let refused = |p: &Piece| p.max & PERM_WRITE == 0 || p.mem.check_writable().is_err();
     if pieces.iter().any(refused) {
@@ -952,6 +953,21 @@ pub fn process_write_memory(
     if !buf.fits(len) {
         return Err(Error::InvalidArgs);
     }
+    let mut work = Work::new(crate::sched::preempt_point);
+    // The caller's buffer is held whole first, so that reading it cannot
+    // fail once a byte has been written.
+    let first_source = buf.0 / PAGE_SIZE * PAGE_SIZE;
+    let source_count = match len {
+        0 => 0,
+        _ => (buf.0 + len).div_ceil(PAGE_SIZE) - buf.0 / PAGE_SIZE,
+    };
+    let mut sources = Vec::new();
+    scratch.reserve_exact(&mut sources, source_count as usize)?;
+    let aspace = caller.aspace();
+    for page in 0..source_count {
+        work.item();
+        sources.push(aspace.hold_for_read(first_source + page * PAGE_SIZE)?);
+    }
     // Every page is held before any byte is written: holding checks the
     // seal and revocation again, marks the page written, and keeps both
     // off until the pages are let go.
@@ -959,7 +975,6 @@ pub fn process_write_memory(
     let count: u64 = pieces.iter().map(|p| page_range(p).count() as u64).sum();
     let mut held = Vec::new();
     scratch.reserve_exact(&mut held, count as usize)?;
-    let mut work = Work::new(crate::sched::preempt_point);
     for piece in &pieces {
         for index in page_range(piece) {
             work.item();
@@ -969,7 +984,8 @@ pub fn process_write_memory(
     // The bytes reach the frames through the direct map. The processor
     // invalidates cached instructions that a write changes by physical
     // address, so the target runs the new bytes once it returns to user
-    // mode on this, the only, processor.
+    // mode on this, the only, processor. Bytes go through a kernel buffer,
+    // as a source page may be a destination page too.
     let mut pages = held.iter();
     let mut chunk = [0u8; 256];
     let mut done = 0;
@@ -980,12 +996,15 @@ pub fn process_write_memory(
             let page = pages.next().expect("a held page for every page");
             let to = end.min((at / PAGE_SIZE + 1) * PAGE_SIZE);
             while at < to {
-                let n = ((to - at) as usize).min(chunk.len());
+                let from = buf.0 + done;
+                let source = &sources[((from - first_source) / PAGE_SIZE) as usize];
+                let n = ((to - at).min(PAGE_SIZE - from % PAGE_SIZE) as usize).min(chunk.len());
                 work.copy(n);
-                buf.at(done).read_bytes(&mut chunk[..n])?;
-                // SAFETY: the page is held, so its frame stays the
-                // object's, and `n` bytes from the offset lie inside it.
+                // SAFETY: both pages are held, so their frames stay their
+                // objects', and `n` bytes from each offset lie inside them.
                 unsafe {
+                    let out = source.base().add((from % PAGE_SIZE) as usize);
+                    core::ptr::copy_nonoverlapping(out, chunk.as_mut_ptr(), n);
                     let into = page.base().add((at % PAGE_SIZE) as usize);
                     core::ptr::copy_nonoverlapping(chunk.as_ptr(), into, n);
                 }
@@ -994,7 +1013,7 @@ pub fn process_write_memory(
             }
         }
     }
-    for page in held {
+    for page in held.into_iter().chain(sources) {
         page.release(&mut work);
     }
     Ok(())
