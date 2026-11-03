@@ -87,11 +87,36 @@ impl Drop for Message {
     }
 }
 
-/// Accounts for a queued message that carried `core` going away.
+/// The endpoint state that `entry` refers to when it is queued in a
+/// message, where endpoints are held by their `Core`.
+fn queued_core(entry: &Entry) -> Option<&Core> {
+    (&*entry.object as &dyn Any).downcast_ref::<Core>()
+}
+
+/// The endpoint that `entry` refers to when it is not queued.
+fn endpoint_in(entry: &Entry) -> Option<&Endpoint> {
+    (&*entry.object as &dyn Any).downcast_ref::<Endpoint>()
+}
+
+/// Accounts for one queued message fewer carrying `core`, and returns
+/// how many still do.
+fn leave(core: &Core) -> usize {
+    let left = core.queued.fetch_sub(1, Ordering::Relaxed) - 1;
+    match left {
+        0 => TRANSIT.lock().remove(core),
+        // The one left may not be the one `holder` names.
+        1 => *core.holder.lock() = Weak::new(),
+        _ => {}
+    }
+    touch(core);
+    left
+}
+
+/// Accounts for a queued message that carried `core` going away. When
+/// other queued messages still carry it and no `Endpoint` refers to it,
+/// only they may keep it alive, so the collector is told.
 fn left_queue(core: &Core) {
-    core.queued.fetch_sub(1, Ordering::Relaxed);
-    changed();
-    if core.outer.lock().strong_count() == 0 {
+    if leave(core) > 0 && core.outer.lock().strong_count() == 0 {
         need_collection();
     }
 }
@@ -115,46 +140,43 @@ fn take_last(message: &mut Message, list: &mut Option<Arc<Core>>) {
     }
 }
 
-/// The endpoint state that `entry` refers to when it is queued in a
-/// message, where endpoints are held by their `Core`.
-fn queued_core(entry: &Entry) -> Option<&Core> {
-    (&*entry.object as &dyn Any).downcast_ref::<Core>()
-}
-
-/// Turns the endpoints among `entries`, which are about to be queued,
-/// into references to their `Core`, so that a queued message does not
-/// keep an `Endpoint` alive. Each must be in `TRANSIT` already.
-fn to_queued(entries: &mut [Entry]) {
+/// Turns the endpoints among `entries`, about to be queued toward
+/// `holder`, into references to their `Core`, so that a queued message
+/// does not keep an `Endpoint` alive. `reserve` must have made room in
+/// `TRANSIT` for them.
+fn to_queued(entries: &mut [Entry], holder: &Weak<Core>) {
     for entry in entries {
-        let Some(core) = (&*entry.object as &dyn Any)
-            .downcast_ref::<Endpoint>()
-            .map(|e| e.core.clone())
-        else {
+        let Some(core) = endpoint_in(entry).map(|e| e.core.clone()) else {
             continue;
         };
-        core.queued.fetch_add(1, Ordering::Relaxed);
+        if core.queued.fetch_add(1, Ordering::Relaxed) == 0 {
+            TRANSIT.lock().add(&core);
+            *core.holder.lock() = holder.clone();
+        } else {
+            *core.holder.lock() = Weak::new();
+        }
+        touch(&core);
+        // This may drop the last `Endpoint`, which looks at the counts.
         entry.object = core;
-        changed();
     }
 }
 
-/// Turns the endpoints among `entries`, about to leave a queue, back into
-/// `Endpoint`s. Fails with `NoMemory`, changing nothing, when one cannot
-/// be made.
-fn to_handles(entries: &mut [Entry]) -> Result<(), Error> {
+/// Turns the endpoints among `entries`, about to leave a queue toward
+/// `holder`, back into `Endpoint`s. Fails with `NoMemory`, changing
+/// nothing, when one cannot be made.
+fn to_handles(entries: &mut [Entry], holder: &Weak<Core>) -> Result<(), Error> {
     for i in 0..entries.len() {
         if queued_core(&entries[i]).is_none() {
             continue;
         }
         let core = super::downcast::<Core>(entries[i].object.clone()).expect("a queued endpoint");
-        match core.endpoint() {
+        match core.endpoint_of() {
             Ok(endpoint) => {
-                core.queued.fetch_sub(1, Ordering::Relaxed);
+                leave(&core);
                 entries[i].object = endpoint;
-                changed();
             }
             Err(e) => {
-                to_queued(&mut entries[..i]);
+                to_queued(&mut entries[..i], holder);
                 return Err(e);
             }
         }
@@ -162,43 +184,24 @@ fn to_handles(entries: &mut [Entry]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Adds the endpoints among `entries` that are not yet in `TRANSIT` to
-/// it. Fails with `NoMemory`, adding none, when there is no room.
-fn register(entries: &[Entry]) -> Result<(), Error> {
-    let cores = || {
-        entries.iter().filter_map(|e| {
-            (&*e.object as &dyn Any)
-                .downcast_ref::<Endpoint>()
-                .map(|e| &e.core)
-        })
-    };
-    let new = cores()
-        .filter(|c| !c.registered.load(Ordering::Relaxed))
+/// Makes room in `TRANSIT` for the endpoints among `entries` that are not
+/// in it yet, so that queueing them cannot fail. Fails with `NoMemory`.
+fn reserve(entries: &[Entry]) -> Result<(), Error> {
+    let new = entries
+        .iter()
+        .filter_map(endpoint_in)
+        .filter(|e| e.core.queued.load(Ordering::Relaxed) == 0)
         .count();
-    if new == 0 {
-        return Ok(());
-    }
-    let mut transit = TRANSIT.lock();
-    transit.try_reserve(new).map_err(|_| Error::NoMemory)?;
-    for core in cores() {
-        if !core.registered.swap(true, Ordering::Relaxed) {
-            transit.push(Arc::downgrade(core));
-        }
-    }
-    changed();
-    Ok(())
+    TRANSIT.lock().reserve(new)
 }
 
 /// The kernel memory charged with a message for each endpoint it carries,
 /// for its place in `TRANSIT`.
-pub const TRANSIT_COST: u64 = size_of::<Weak<Core>>() as u64;
+pub const TRANSIT_COST: u64 = size_of::<Slot>() as u64;
 
 /// The number of endpoints among `entries`.
 pub fn endpoints_in(entries: &[Entry]) -> usize {
-    entries
-        .iter()
-        .filter(|e| (&*e.object as &dyn Any).is::<Endpoint>())
-        .count()
+    entries.iter().filter(|e| endpoint_in(e).is_some()).count()
 }
 
 /// The bit that marks transaction IDs of `channel_call`.
@@ -275,12 +278,27 @@ impl Deref for Endpoint {
 }
 
 impl Drop for Endpoint {
+    /// When queued messages carry the endpoint, only they keep it alive
+    /// now. It is reachable without a collection when one message carries
+    /// it toward an endpoint that an `Endpoint` refers to.
     fn drop(&mut self) {
         if self.core.queued.load(Ordering::Relaxed) > 0 {
-            changed();
-            need_collection();
+            touch(&self.core);
+            if !held_by_endpoint(&self.core) {
+                need_collection();
+            }
         }
     }
+}
+
+/// Whether exactly one queued message carries `core`, toward an endpoint
+/// that an `Endpoint` refers to, which makes `core` reachable.
+fn held_by_endpoint(core: &Core) -> bool {
+    if core.queued.load(Ordering::Relaxed) != 1 {
+        return false;
+    }
+    let holder = core.holder.lock().upgrade();
+    holder.is_some_and(|h| h.outer.lock().strong_count() > 0)
 }
 
 /// The state of a channel endpoint, alive while an `Endpoint` or a
@@ -295,8 +313,12 @@ pub struct Core {
     outer: SpinLock<Weak<Endpoint>>,
     /// The number of queued messages that carry this endpoint.
     queued: AtomicUsize,
-    /// Whether this is in `TRANSIT`.
-    registered: AtomicBool,
+    /// The index of this in `TRANSIT`, or `usize::MAX`. Changed only with
+    /// `TRANSIT` locked.
+    slot: AtomicUsize,
+    /// The endpoint that the one queued message carrying this is queued
+    /// toward, when exactly one is and it is known.
+    holder: SpinLock<Weak<Core>>,
     /// The collector's marks: the collection whose set of examined
     /// endpoints this is in,
     /// how many of the references counted come from that set, whether it
@@ -355,7 +377,8 @@ impl Core {
                 observer: SpinLock::new(None),
                 outer: SpinLock::new(Weak::new()),
                 queued: AtomicUsize::new(0),
-                registered: AtomicBool::new(false),
+                slot: AtomicUsize::new(usize::MAX),
+                holder: SpinLock::new(Weak::new()),
                 member: AtomicU64::new(0),
                 internal: AtomicUsize::new(0),
                 live: AtomicBool::new(false),
@@ -369,11 +392,6 @@ impl Core {
     }
 
     /// The `Endpoint` that refers to this, made if none does.
-    fn endpoint(self: &Arc<Core>) -> Result<Arc<dyn Object>, Error> {
-        let endpoint: Arc<dyn Object> = self.endpoint_of()?;
-        Ok(endpoint)
-    }
-
     fn endpoint_of(self: &Arc<Core>) -> Result<Arc<Endpoint>, Error> {
         let mut outer = self.outer.lock();
         if let Some(endpoint) = outer.upgrade() {
@@ -381,7 +399,7 @@ impl Core {
         }
         let endpoint = try_arc(Endpoint { core: self.clone() })?;
         *outer = Arc::downgrade(&endpoint);
-        changed();
+        touch(self);
         Ok(endpoint)
     }
 
@@ -423,7 +441,7 @@ impl Core {
         // Room in `TRANSIT` for the endpoints the message carries is
         // made first, as only that can fail once the message is placed.
         let mut message = message;
-        if let Err(e) = register(&message.handles) {
+        if let Err(e) = reserve(&message.handles) {
             return Err((e, message));
         }
         if let Some(id) = id {
@@ -432,7 +450,7 @@ impl Core {
                 .iter_mut()
                 .find(|c| c.id == id && c.reply.is_none())
             {
-                to_queued(&mut message.handles);
+                to_queued(&mut message.handles, &peer);
                 call.reply = Some(message);
                 drop(shared);
                 let koid = peer.upgrade().map_or(0, |p| p.header.koid());
@@ -455,7 +473,7 @@ impl Core {
             return Err((Error::NoMemory, message));
         }
         queue.bytes += message.bytes.len();
-        to_queued(&mut message.handles);
+        to_queued(&mut message.handles, &peer);
         queue.messages.push_back(message);
         if queue.full() {
             self.header.update_signals(signals::WRITABLE, 0);
@@ -536,11 +554,13 @@ impl Core {
     /// carries cannot be given back as handles.
     pub fn take_reply(&self, id: u32) -> Result<Option<Message>, Error> {
         let mut shared = self.shared.lock();
+        let holder = shared.ends[self.side].clone();
         let calls = &mut shared.queues[self.side].calls;
         let Some(i) = calls.iter().position(|c| c.id == id && c.reply.is_some()) else {
             return Ok(None);
         };
-        to_handles(&mut calls[i].reply.as_mut().expect("checked above").handles)?;
+        let reply = calls[i].reply.as_mut().expect("checked above");
+        to_handles(&mut reply.handles, &holder)?;
         Ok(calls.swap_remove(i).reply)
     }
 
@@ -594,6 +614,7 @@ impl Core {
     ) -> Result<(T, Message), E> {
         let mut shared = self.shared.lock();
         let peer = shared.ends[self.peer_side()].clone();
+        let holder = shared.ends[self.side].clone();
         let queue = &mut shared.queues[self.side];
         let Some(message) = queue.messages.front_mut() else {
             return Err(match peer.strong_count() {
@@ -602,11 +623,13 @@ impl Core {
             }
             .into());
         };
-        to_handles(&mut message.handles)?;
+        to_handles(&mut message.handles, &holder)?;
         let accepted = match accept(&message.bytes, &message.handles) {
             Ok(accepted) => accepted,
             Err(e) => {
-                to_queued(&mut message.handles);
+                // The places in `TRANSIT` that `to_handles` gave up are
+                // still free, so this cannot fail.
+                to_queued(&mut message.handles, &holder);
                 return Err(e);
             }
         };
@@ -664,17 +687,21 @@ impl Drop for Core {
                 observer.peer_closed();
             }
         }
-        let mut list = None;
-        discard(discarded, &mut list);
-        // Endpoints that only the discarded messages kept alive are
-        // destroyed here one after another, each with its queue emptied
-        // first, rather than each inside the drop of the one before.
-        while let Some(core) = list.take() {
-            list = core.dying.lock().take();
-            let queue = core::mem::take(&mut core.shared.lock().queues[core.side]);
-            discard(queue, &mut list);
-            drop(core);
-        }
+        destroy_queue(discarded);
+    }
+}
+
+/// Drops the messages of `queue`. Endpoints that only they kept alive are
+/// destroyed here one after another, each with its queue emptied first,
+/// rather than each inside the drop of the one before.
+fn destroy_queue(queue: Queue) {
+    let mut list = None;
+    discard(queue, &mut list);
+    while let Some(core) = list.take() {
+        list = core.dying.lock().take();
+        let queue = mem::take(&mut core.shared.lock().queues[core.side]);
+        discard(queue, &mut list);
+        drop(core);
     }
 }
 
@@ -695,23 +722,93 @@ fn discard(queue: Queue, list: &mut Option<Arc<Core>>) {
     }
 }
 
-/// Every endpoint that a queued message may carry. The collector removes
-/// those that no queued message carries any more.
-static TRANSIT: SpinLock<Vec<Weak<Core>>> = SpinLock::new(Vec::new());
-/// Counts changes to which endpoints queued messages carry and to the
-/// `Endpoint`s that refer to them, so that a collection can tell whether
-/// what it counted still holds.
-static CHANGES: AtomicU64 = AtomicU64::new(0);
+/// A place in `TRANSIT`.
+enum Slot {
+    Used(Weak<Core>),
+    /// A free place, with the next free one.
+    Free(Option<usize>),
+}
+
+/// Every endpoint that queued messages carry, each in the place its
+/// `Core::slot` names. Freed places are reused, so it holds no more
+/// places than were ever in use at once.
+struct Transit {
+    slots: Vec<Slot>,
+    free: Option<usize>,
+    free_count: usize,
+}
+
+impl Transit {
+    /// Makes room to add `count` endpoints without allocating.
+    fn reserve(&mut self, count: usize) -> Result<(), Error> {
+        let more = count.saturating_sub(self.free_count);
+        self.slots.try_reserve(more).map_err(|_| Error::NoMemory)
+    }
+
+    fn add(&mut self, core: &Arc<Core>) {
+        let used = Slot::Used(Arc::downgrade(core));
+        let index = match self.free {
+            Some(index) => {
+                let Slot::Free(next) = mem::replace(&mut self.slots[index], used) else {
+                    unreachable!("a free place is in use");
+                };
+                self.free = next;
+                self.free_count -= 1;
+                index
+            }
+            None => {
+                self.slots.push(used);
+                self.slots.len() - 1
+            }
+        };
+        core.slot.store(index, Ordering::Relaxed);
+    }
+
+    fn remove(&mut self, core: &Core) {
+        let index = core.slot.swap(usize::MAX, Ordering::Relaxed);
+        if index != usize::MAX {
+            self.slots[index] = Slot::Free(self.free);
+            self.free = Some(index);
+            self.free_count += 1;
+        }
+    }
+
+    /// The endpoint in place `index`, if one is there.
+    fn get(&self, index: usize) -> Option<Option<Arc<Core>>> {
+        match self.slots.get(index)? {
+            Slot::Used(core) => Some(core.upgrade()),
+            Slot::Free(_) => Some(None),
+        }
+    }
+}
+
+static TRANSIT: SpinLock<Transit> = SpinLock::new(Transit {
+    slots: Vec::new(),
+    free: None,
+    free_count: 0,
+});
 /// Numbers collections, so that marks of an earlier one do not count.
 static COLLECTION: AtomicU64 = AtomicU64::new(0);
+/// Set when an endpoint that the running collection has not found
+/// reachable changes while it counts, which makes what it counted wrong.
+static DISTURBED: AtomicBool = AtomicBool::new(false);
 /// Set when an endpoint may have become reachable only through queued
 /// messages.
 static NEEDED: AtomicBool = AtomicBool::new(false);
 /// Set while a collection runs.
 static COLLECTING: AtomicBool = AtomicBool::new(false);
+/// The collections tried in a row before the rest is left to the next
+/// call of `collect_if_needed`.
+const ATTEMPTS: usize = 4;
 
-fn changed() {
-    CHANGES.fetch_add(1, Ordering::AcqRel);
+/// Notes that the queued messages carrying `core`, or the `Endpoint`
+/// referring to it, changed.
+fn touch(core: &Core) {
+    if core.member.load(Ordering::Relaxed) == COLLECTION.load(Ordering::Relaxed)
+        && !core.live.load(Ordering::Relaxed)
+    {
+        DISTURBED.store(true, Ordering::Release);
+    }
 }
 
 fn need_collection() {
@@ -720,54 +817,52 @@ fn need_collection() {
 
 /// Destroys the endpoints that only queued messages toward other such
 /// endpoints keep alive, while a collection is needed, unless another
-/// thread is collecting already. It must be called with no lock held:
-/// it counts each endpoint and message it examines with
-/// `sync::destroyed`, which may let other threads run.
+/// thread is collecting already. A collection that the endpoints it has
+/// not found reachable keep changing under is tried `ATTEMPTS` times and
+/// then left needed. It must be called with no lock held: it counts each
+/// endpoint and message it examines with `sync::destroyed`, which may let
+/// other threads run.
 pub fn collect_if_needed() {
     if !NEEDED.load(Ordering::Acquire) || COLLECTING.swap(true, Ordering::AcqRel) {
         return;
     }
-    while NEEDED.swap(false, Ordering::AcqRel) {
-        // A change while it counted makes the collection start again.
-        while !collect() {}
+    'needed: while NEEDED.swap(false, Ordering::AcqRel) {
+        for _ in 0..ATTEMPTS {
+            if collect() {
+                continue 'needed;
+            }
+        }
+        need_collection();
+        break;
     }
     COLLECTING.store(false, Ordering::Release);
 }
 
-/// The endpoint at `index` in `TRANSIT` or a later one, moving `index` to
-/// it. With `prune`, endpoints that are gone or that no queued message
-/// carries are removed on the way.
-fn transit_at(index: &mut usize, prune: bool) -> Option<Arc<Core>> {
-    loop {
-        let mut transit = TRANSIT.lock();
-        let core = transit.get(*index)?.upgrade();
-        match core {
-            Some(core) if !prune || core.queued.load(Ordering::Relaxed) > 0 => return Some(core),
-            _ => {
-                transit.swap_remove(*index);
-                drop(transit);
-                if let Some(core) = core {
-                    core.registered.store(false, Ordering::Relaxed);
-                    // The last reference may go here, with no lock held.
-                    drop(core);
-                }
-            }
-        }
-    }
-}
-
-/// Calls `f` with each endpoint in `TRANSIT` that this collection
-/// examines.
-fn members(collection: u64, mut f: impl FnMut(&Arc<Core>)) {
+/// Calls `f` with each endpoint in `TRANSIT`, holding a reference to it.
+fn each_in_transit(mut f: impl FnMut(&Arc<Core>)) {
     let mut i = 0;
-    while let Some(core) = transit_at(&mut i, false) {
-        if core.member.load(Ordering::Relaxed) == collection {
+    loop {
+        let Some(core) = TRANSIT.lock().get(i) else {
+            break;
+        };
+        if let Some(core) = core {
             f(&core);
+            // The last reference may go here, with no lock held.
+            drop(core);
         }
-        drop(core);
         crate::sync::destroyed(1);
         i += 1;
     }
+}
+
+/// Calls `f` with each endpoint in `TRANSIT` that collection `collection`
+/// examines.
+fn members(collection: u64, mut f: impl FnMut(&Arc<Core>)) {
+    each_in_transit(|core| {
+        if core.member.load(Ordering::Relaxed) == collection {
+            f(core);
+        }
+    });
 }
 
 /// Calls `f` with each endpoint that the messages queued toward `core`
@@ -788,21 +883,20 @@ fn carried(core: &Core, mut f: impl FnMut(&Entry, &Core)) -> usize {
     count
 }
 
-/// One collection. Returns false, destroying nothing, when what it
-/// counted changed meanwhile.
+/// One collection. Returns false, destroying nothing, when an endpoint it
+/// had not found reachable changed while it counted.
 fn collect() -> bool {
-    let start = CHANGES.load(Ordering::Acquire);
     let collection = COLLECTION.fetch_add(1, Ordering::Relaxed) + 1;
     // The examined set: every endpoint that a queued message carries.
-    let mut i = 0;
-    while let Some(core) = transit_at(&mut i, true) {
+    each_in_transit(|core| {
         core.member.store(collection, Ordering::Relaxed);
         core.internal.store(0, Ordering::Relaxed);
         core.live.store(false, Ordering::Relaxed);
-        drop(core);
-        crate::sync::destroyed(1);
-        i += 1;
-    }
+    });
+    // Endpoints added from here on are not examined. Any that queued
+    // messages carry are carried by a message written since, so the
+    // endpoints it is queued toward are touched as well.
+    DISTURBED.store(false, Ordering::Release);
     // The references to each that come from messages queued toward the
     // examined endpoints.
     members(collection, |core| {
@@ -839,25 +933,15 @@ fn collect() -> bool {
         drop(core);
         crate::sync::destroyed(1 + count);
     }
-    if CHANGES.load(Ordering::Acquire) != start {
+    if DISTURBED.load(Ordering::Acquire) {
         return false;
     }
     // Nothing reaches the rest, so nothing can change them: their queues
     // are discarded, which destroys them once the last message carrying
     // each is gone.
     members(collection, |core| {
-        if core.live.load(Ordering::Relaxed) {
-            return;
-        }
-        let discarded = mem::take(&mut core.shared.lock().queues[core.side]);
-        let Queue {
-            messages, calls, ..
-        } = discarded;
-        let replies = calls.into_iter().filter_map(|c| c.reply);
-        for message in messages.into_iter().chain(replies) {
-            let count = 1 + message.handles.len();
-            drop(message);
-            crate::sync::destroyed(count);
+        if !core.live.load(Ordering::Relaxed) {
+            destroy_queue(mem::take(&mut core.shared.lock().queues[core.side]));
         }
     });
     true
@@ -959,6 +1043,70 @@ mod tests {
                     last = end;
                 }
                 drop(last);
+                assert_eq!(used(&budget), 0);
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn needs_no_collection_for_a_plain_transfer() {
+        let (a, b) = Endpoint::pair(None).unwrap();
+        let (c, d) = Endpoint::pair(None).unwrap();
+        a.write(carrying(&c)).ok().unwrap();
+        assert!(held_by_endpoint(&c.core));
+        // A read that is not accepted leaves it as it was.
+        assert_eq!(b.read(|_, _| Err(Error::NoMemory)), Err(Error::NoMemory));
+        assert!(held_by_endpoint(&c.core));
+        // Carried twice, or toward an endpoint nothing refers to, it is not.
+        a.write(carrying(&c)).ok().unwrap();
+        assert!(!held_by_endpoint(&c.core));
+        read(&b).unwrap();
+        assert!(!held_by_endpoint(&c.core));
+        let core = c.core.clone();
+        drop(c);
+        drop(b);
+        assert!(!held_by_endpoint(&core));
+        drop((a, d));
+    }
+
+    #[test]
+    fn frees_places_in_transit() {
+        let (a, b) = Endpoint::pair(None).unwrap();
+        let (c, d) = Endpoint::pair(None).unwrap();
+        a.write(carrying(&c)).ok().unwrap();
+        assert_ne!(c.core.slot.load(Ordering::Relaxed), usize::MAX);
+        read(&b).unwrap();
+        assert_eq!(c.core.slot.load(Ordering::Relaxed), usize::MAX);
+        // A message that is dropped unread frees its place too.
+        a.write(carrying(&d)).ok().unwrap();
+        assert_ne!(d.core.slot.load(Ordering::Relaxed), usize::MAX);
+        drop(b);
+        assert_eq!(d.core.slot.load(Ordering::Relaxed), usize::MAX);
+        drop((a, c, d));
+    }
+
+    #[test]
+    fn collects_a_cycle_holding_a_chain_without_recursing() {
+        let _one = COLLECTOR.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = std::thread::Builder::new().stack_size(32 * 1024);
+        let handle = worker
+            .spawn(|| {
+                let budget = Budget::child(&Budget::root(), u64::MAX, u64::MAX, None).unwrap();
+                let (_, mut last) = Endpoint::pair(Some(&budget)).unwrap();
+                for _ in 0..100_000 {
+                    let (writer, end) = Endpoint::pair(Some(&budget)).unwrap();
+                    writer.write(carrying(&last)).ok().unwrap();
+                    last = end;
+                }
+                // b and d carry each other, and b also carries the chain.
+                let (a, b) = Endpoint::pair(Some(&budget)).unwrap();
+                let (c, d) = Endpoint::pair(Some(&budget)).unwrap();
+                a.write(carrying(&last)).ok().unwrap();
+                a.write(carrying(&d)).ok().unwrap();
+                c.write(carrying(&b)).ok().unwrap();
+                drop((a, b, c, d, last));
+                while !collect() {}
                 assert_eq!(used(&budget), 0);
             })
             .unwrap();
