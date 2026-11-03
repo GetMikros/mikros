@@ -1594,6 +1594,173 @@ fn outputs_outside_user_range(s: &Startup) -> Result {
     check("closing the object", unsafe { sys::handle_close(mem) })
 }
 
+/// Calls refuse an input that does not lie in readable user memory: one
+/// that wraps around the end of the address space, one in the kernel
+/// half, one on a page that is no longer mapped and one on a page mapped
+/// without access. They change nothing.
+fn inputs_outside_user_memory(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let (mut reserved, mut a, mut b, mut port, mut thread) = (0, 0, 0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check(
+            "reserving a page",
+            sys::vm_map(s.process, 0, 0, mem, 0, PAGE_SIZE, &mut reserved),
+        )?;
+        check("creating a channel", sys::channel_create(0, &mut a, &mut b))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+    }
+    let gone = map(s.process, create_memory(PAGE_SIZE)?, PAGE_SIZE)?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping a page", unsafe {
+        sys::vm_unmap(s.process, gone, PAGE_SIZE)
+    })?;
+    for addr in [u64::MAX - 3, 0xFFFF_8000_0000_0000, gone, reserved] {
+        let p = addr as *const u8;
+        // SAFETY: every call refuses `p` before it reads from it; the
+        // other pointers are valid.
+        let statuses = unsafe {
+            [
+                ("writing an object", sys::mem_write(mem, 0, p, 8)),
+                (
+                    "writing a message",
+                    sys::channel_write(a, p, 8, core::ptr::null(), 0),
+                ),
+                (
+                    "sending handles",
+                    sys::channel_write(a, b"x".as_ptr(), 1, p.cast(), 1),
+                ),
+                ("logging", sys::log_write(s.log, 1, p, 8)),
+                (
+                    "naming a thread",
+                    sys::thread_create(s.process, p, 8, &mut thread),
+                ),
+                ("queueing a packet", sys::port_queue(port, p)),
+            ]
+        };
+        for (what, status) in statuses {
+            ensure(what, status == INVALID_ARGS)?;
+        }
+    }
+    ensure("queueing no message", read_sizes(b, 16, 2).0 == SHOULD_WAIT)?;
+    ensure(
+        "queueing no packet",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    ensure("writing nothing", mem_read_at::<8>(mem, 0)? == [0; 8])?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("unmapping", sys::vm_unmap(s.process, reserved, PAGE_SIZE))?;
+        for h in [mem, a, b, port] {
+            check("closing", sys::handle_close(h))?;
+        }
+    }
+    Ok(())
+}
+
+/// Calls refuse `options` with a bit they do not define, and write no
+/// output.
+fn undefined_options_refused(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let (mut pager, mut port) = (0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+    }
+    let mut outs = [Handle::MAX; 2];
+    let mut addr = u64::MAX;
+    let (out, out1) = (outs.as_mut_ptr(), outs[1..].as_mut_ptr());
+    let undefined = 1 << 31;
+    // SAFETY: the out pointers are valid for the calls.
+    let statuses = unsafe {
+        [
+            ("creating an event", sys::event_create(1, out)),
+            ("creating a timer", sys::timer_create(1, out)),
+            ("creating a port", sys::port_create(1, out)),
+            ("creating a pager", sys::pager_create(1, out)),
+            ("creating a timeline", sys::timeline_create(0, 1, out)),
+            ("creating a channel", sys::channel_create(1, out, out1)),
+            ("creating a stream", sys::stream_create(1, out, out1)),
+            (
+                "creating a memory object",
+                sys::mem_create(PAGE_SIZE, undefined, out),
+            ),
+            ("cloning", sys::mem_clone(mem, undefined, 0, PAGE_SIZE, out)),
+            (
+                "creating a paged object",
+                sys::pager_create_memory(pager, port, 0, PAGE_SIZE, undefined, out),
+            ),
+            (
+                "creating an exception channel",
+                sys::exception_channel_create(s.process, undefined, out),
+            ),
+            (
+                "mapping",
+                sys::vm_map(
+                    s.process,
+                    PERM_READ | 1 << 3,
+                    0,
+                    mem,
+                    0,
+                    PAGE_SIZE,
+                    &mut addr,
+                ),
+            ),
+        ]
+    };
+    for (what, status) in statuses {
+        ensure(what, status == INVALID_ARGS)?;
+    }
+    ensure(
+        "writing no output",
+        outs == [Handle::MAX; 2] && addr == u64::MAX,
+    )?;
+    for h in [mem, pager, port] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// `resource_create` refuses ranges that overlap hardware the kernel
+/// keeps: the ports of the PICs, the PIT, its gate and the serial port,
+/// the register page of the I/O APIC and, as the kernel uses it under
+/// QEMU, the HPET, both at QEMU's addresses. A port next to them is
+/// granted.
+fn reserved_hardware_refused(s: &Startup) -> Result {
+    const KIND_MMIO: u32 = 1;
+    let io = mikros_test::KIND_IOPORT;
+    let reserved = [
+        (io, 0x20, 2),
+        (io, 0x1F, 2),
+        (io, 0xA1, 1),
+        (io, 0x40, 4),
+        (io, 0x43, 1),
+        (io, 0x61, 1),
+        (io, 0x3F8, 8),
+        (io, 0x3FF, 4),
+        (KIND_MMIO, 0xFEC0_0000, PAGE_SIZE),
+        (KIND_MMIO, 0xFED0_0000, PAGE_SIZE),
+    ];
+    let mut resource = 0;
+    for (kind, base, size) in reserved {
+        // SAFETY: the out pointer is valid for the call.
+        let status =
+            unsafe { sys::resource_create(s.root_resource, kind, base, size, 0, &mut resource) };
+        ensure(
+            "refusing hardware the kernel keeps",
+            status == ACCESS_DENIED,
+        )?;
+    }
+    // SAFETY: the out pointer is valid for the call.
+    check("granting a free port", unsafe {
+        sys::resource_create(s.root_resource, io, 0x80, 1, 0, &mut resource)
+    })?;
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(resource) })
+}
+
 fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
     // SAFETY: the pointer and length describe `bytes`.
     check("writing", unsafe {
@@ -3516,7 +3683,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 54] = [
+const TESTS: [(&str, Test); 57] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
@@ -3537,6 +3704,9 @@ const TESTS: [(&str, Test); 54] = [
     ("streams", streams),
     ("failed_outputs", failed_outputs),
     ("outputs_outside_user_range", outputs_outside_user_range),
+    ("inputs_outside_user_memory", inputs_outside_user_memory),
+    ("undefined_options_refused", undefined_options_refused),
+    ("reserved_hardware_refused", reserved_hardware_refused),
     ("clones", clones),
     ("pagers", pagers),
     ("pager_operations", pager_operations),
