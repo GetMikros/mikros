@@ -2987,6 +2987,76 @@ fn read_sizes(channel: Handle, cap: usize, handles_cap: usize) -> (i64, u64, u64
     (status, len, count)
 }
 
+/// A read whose handles the caller's table cannot hold fails with
+/// `ERR_NO_RESOURCES`, stores the sizes and leaves the message queued; it
+/// succeeds once the table has room.
+fn channel_read_into_a_full_table(s: &Startup) -> Result {
+    const NO_RESOURCES: i64 = -3;
+    const SAME_RIGHTS: u32 = 1 << 31;
+    const LIMIT: u64 = 65536;
+    let (mut a, mut b, mut event) = (0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check("creating a channel", sys::channel_create(0, &mut a, &mut b))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    let mut sent = [0; 2];
+    for copy in &mut sent {
+        // SAFETY: the out pointer is valid for the call.
+        check("duplicating", unsafe {
+            sys::handle_duplicate(event, SAME_RIGHTS, copy)
+        })?;
+    }
+    // SAFETY: the pointers describe the byte and `sent`.
+    check("writing two handles", unsafe {
+        sys::channel_write(a, b"x".as_ptr(), 1, sent.as_ptr(), 2)
+    })?;
+    // The duplicates that fill the table are kept in a mapped object.
+    let size = LIMIT * 4;
+    let store = create_memory(size)?;
+    let at = map(s.process, store, size)?;
+    let kept = at as *mut Handle;
+    let mut count = 0;
+    loop {
+        let mut copy = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status = unsafe { sys::handle_duplicate(event, SAME_RIGHTS, &mut copy) };
+        if status == NO_RESOURCES {
+            break;
+        }
+        check("filling the table", status)?;
+        ensure("staying within the store", count < LIMIT)?;
+        // SAFETY: the store holds `LIMIT` handles.
+        unsafe { kept.add(count as usize).write(copy) };
+        count += 1;
+    }
+    let close_last = |count: &mut u64| {
+        *count -= 1;
+        // SAFETY: the store holds the handle; the call takes no pointers.
+        unsafe { sys::handle_close(kept.add(*count as usize).read()) };
+    };
+    close_last(&mut count);
+    let refused = read_sizes(b, 16, 2);
+    close_last(&mut count);
+    let read = read_sizes(b, 16, 2);
+    while count > 0 {
+        close_last(&mut count);
+    }
+    ensure(
+        "refusing a read without room for its handles",
+        refused == (NO_RESOURCES, 1, 2),
+    )?;
+    ensure("reading it once there is room", read == (0, 1, 2))?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        sys::vm_unmap(s.process, at, size);
+        for handle in [store, event, a, b] {
+            sys::handle_close(handle);
+        }
+    }
+    Ok(())
+}
+
 /// A refused `channel_write` queues nothing and keeps the caller's
 /// handles; a written handle leaves the caller's table and arrives with
 /// the rights it had; a read into buffers that are too small stores the
@@ -5521,7 +5591,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 84] = [
+const TESTS: [(&str, Test); 85] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
@@ -5572,6 +5642,10 @@ const TESTS: [(&str, Test); 84] = [
     ("kill_thread_after_report", kill_thread_after_report),
     ("own_endpoints_not_sent", own_endpoints_not_sent),
     ("channel_errors", channel_errors),
+    (
+        "channel_read_into_a_full_table",
+        channel_read_into_a_full_table,
+    ),
     ("endpoint_cycles_reclaimed", endpoint_cycles_reclaimed),
     ("coverage", coverage),
     ("seal_waits_for_outputs", seal_waits_for_outputs),
