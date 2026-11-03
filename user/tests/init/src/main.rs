@@ -5405,17 +5405,23 @@ fn budget_creation_and_thresholds(s: &Startup) -> Result {
     check("closing the budget", unsafe { sys::handle_close(child) })
 }
 
-/// The monotonic clock never goes back, and the clock page that init gets
+/// The monotonic clock never goes back and resolves less than a
+/// microsecond, and the clock page that init gets
 /// has its rights and header: version 1, an even sequence, and the
 /// counter as source only with the time stamp counter, whose values then
 /// lie between those of the clock before and after.
 fn monotonic_clock_and_page(s: &Startup) -> Result {
     let mut last = now();
+    let mut finer = false;
     for _ in 0..1000 {
         let t = now();
         ensure("never going back", t >= last)?;
+        // A clock counting whole microseconds or coarser never shows a
+        // value between them.
+        finer |= t % 1000 != 0;
         last = t;
     }
+    ensure("resolving under a microsecond", finer)?;
     let rights = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 5) | (1 << 9);
     ensure(
         "giving the clock page its rights",
