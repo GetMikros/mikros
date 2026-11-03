@@ -25,15 +25,10 @@ use uefi::boot::{EventType, TimerTrigger, Tpl};
 use uefi::fs::FileSystem;
 use uefi::proto::console::text::{InputEx, Key, ScanCode};
 use uefi::proto::device_path::DevicePath;
-use uefi::runtime::{self, VariableVendor};
 use uefi::{CString16, Status, boot, cstr16, system};
 use uefi_raw::protocol::console::KeyToggleState;
 
 const ENTRIES_PATH: &str = "\\EFI\\Mikros\\entries.yaml";
-
-/// Bit of `OsIndicationsSupported` and `OsIndications` that asks the
-/// firmware to show its setup screen on the next boot.
-const BOOT_TO_FW_UI: u64 = 1;
 
 /// Reads the entries file from the volume the boot manager was loaded from.
 /// Returns the configuration, a notice naming any problem with the file, and
@@ -65,16 +60,6 @@ fn load_config(volume: Result<&mut FileSystem, Status>) -> (Config, Option<Strin
             (Config::for_missing_file(), None, true)
         }
         Err(err) => unusable(format!("{err}")),
-    }
-}
-
-/// Whether the firmware can be asked to show its setup screen.
-fn firmware_ui_supported() -> bool {
-    let mut buf = [0u8; 8];
-    let name = cstr16!("OsIndicationsSupported");
-    match runtime::get_variable(name, &VariableVendor::GLOBAL_VARIABLE, &mut buf) {
-        Ok((value, _)) if value.len() == 8 => u64::from_le_bytes(buf) & BOOT_TO_FW_UI != 0,
-        _ => false,
     }
 }
 
@@ -143,7 +128,7 @@ fn build_menu(
         .collect::<Vec<_>>();
     let notice = (!notices.is_empty()).then(|| notices.join("; "));
     let mut buttons = vec![Power::Restart, Power::ShutDown];
-    if firmware_ui_supported() {
+    if power::firmware_ui_supported() {
         buttons.push(Power::FirmwareSettings);
     }
     let focus =
