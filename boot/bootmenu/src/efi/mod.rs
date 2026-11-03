@@ -17,12 +17,13 @@ use bootmenu::input::{self, Action, Event, Input};
 use bootmenu::load::{self, ENTRIES_PATH, Loaded, ReadError};
 use bootmenu::menu::{FocusSource, Item, Menu};
 use bootmenu::pointer;
+use bootmenu::session::{self, KeyStroke};
 use bootmenu::text::Text;
 use core::time::Duration;
 use others::Detected;
 use pointers::Pointers;
 use screen::Screen;
-use uefi::boot::{EventType, TimerTrigger, Tpl};
+use uefi::boot::{EventType, ScopedProtocol, TimerTrigger, Tpl};
 use uefi::fs::FileSystem;
 use uefi::proto::console::text::{InputEx, Key, ScanCode};
 use uefi::proto::device_path::DevicePath;
@@ -96,19 +97,34 @@ fn translate(key: Key) -> Event {
     input::translate(key)
 }
 
-/// Whether a key is held while the boot manager starts. Reads, and so
-/// discards, every pending key stroke, including Shift on its own where the
-/// console reports it.
-fn key_held() -> bool {
-    let Some(mut input) = pointers::open_on_console::<InputEx>() else {
-        return false;
-    };
-    let _ = input.set_state(KeyToggleState::VALID | KeyToggleState::EXPOSED);
-    let mut held = false;
-    while let Ok(Some(_)) = input.read_key() {
-        held = true;
+/// The console's extended text input, read by `session::key_held`.
+struct Keyboard(ScopedProtocol<InputEx>);
+
+impl session::Keyboard for Keyboard {
+    fn expose_key_state(&mut self) {
+        let _ = self
+            .0
+            .set_state(KeyToggleState::VALID | KeyToggleState::EXPOSED);
     }
-    held
+
+    fn read_key_stroke(&mut self) -> Option<KeyStroke> {
+        let data = self.0.read_key().ok()??;
+        let (scan_code, unicode_char) = match data.key {
+            Key::Special(scan) => (scan.0, 0),
+            Key::Printable(c) => (0, u16::from(c)),
+        };
+        Some(KeyStroke {
+            scan_code,
+            unicode_char,
+            shift_state: data.key_state.key_shift_state.map_or(0, |s| s.bits()),
+        })
+    }
+}
+
+/// Whether a key is held while the boot manager starts.
+fn key_held() -> bool {
+    let mut keyboard = pointers::open_on_console::<InputEx>().map(Keyboard);
+    session::key_held(keyboard.as_mut())
 }
 
 /// Creates an event that is signaled every second.
