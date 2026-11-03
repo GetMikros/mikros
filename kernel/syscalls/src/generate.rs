@@ -1,6 +1,6 @@
 //! Rust code generated from the system call table.
 
-use crate::table::{Call, Dir, Table, Type};
+use crate::table::{Arg, Call, Dir, HandleCheck, Table, Type};
 use std::fmt::Write;
 
 const HEADER: &str = "// @generated from kernel/syscalls.yaml by the syscall-table crate.\n\
@@ -35,6 +35,121 @@ fn kernel_value(t: &str) -> &str {
     } else {
         t
     }
+}
+
+/// The accepted object types of a handle check, as an expression of type
+/// `Option<&[ObjectType]>`.
+fn types_expr(check: &HandleCheck) -> String {
+    match &check.types {
+        None => "None".to_owned(),
+        Some(types) => format!(
+            "Some(&[{}])",
+            types
+                .iter()
+                .map(|t| format!("ObjectType::{t}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// The required rights of a handle check, as a `u32` expression.
+fn rights_expr(check: &HandleCheck) -> String {
+    if check.rights.is_empty() {
+        return "0".to_owned();
+    }
+    check
+        .rights
+        .iter()
+        .map(|r| format!("rights::{r}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// The type a handler of the kernel's dispatch takes `arg` as.
+fn kernel_param(arg: &Arg) -> String {
+    match (&arg.ty, &arg.handle) {
+        (Type::Int(t), _) => t.clone(),
+        (Type::Handle, Some(check)) if check.allow_invalid => "Option<Checked>".to_owned(),
+        (Type::Handle, Some(_)) => "Checked".to_owned(),
+        (Type::Handle, None) => kernel_value("Handle").to_owned(),
+        (Type::Const(t), _) => format!("UserIn<{}>", kernel_value(t)),
+        (Type::Mut(t), _) if arg.dir == Dir::InOut => format!("UserInOut<{}>", kernel_value(t)),
+        (Type::Mut(t), _) => format!("UserOut<{}>", kernel_value(t)),
+    }
+}
+
+/// The model of an argument for the fuzz harness, an `ArgModel`.
+fn arg_model(arg: &Arg) -> String {
+    match (&arg.ty, &arg.handle) {
+        (Type::Int(t), _) => format!("ArgModel::{}", t.to_ascii_uppercase()),
+        (Type::Handle, Some(check)) => format!(
+            "ArgModel::Checked {{ types: {}, rights: {}, allow_invalid: {} }}",
+            types_expr(check),
+            rights_expr(check),
+            check.allow_invalid
+        ),
+        (Type::Handle, None) => "ArgModel::Handle".to_owned(),
+        (Type::Const(_) | Type::Mut(_), _) => "ArgModel::Pointer".to_owned(),
+    }
+}
+
+/// A harness for fuzzing the decoding of `kernel_dispatch` on the host,
+/// included into the same module as the dispatch. Besides what the
+/// dispatch needs, the module provides:
+///
+/// - a `Record` trait, implemented by every handler parameter type,
+///   whose `record(&self)` returns a `Value`;
+/// - `record(number: u64, args: &[Value])`, which the handlers call;
+/// - `CallModel { number: u64, fuzz_only: bool, args: &'static
+///   [ArgModel] }` and an `ArgModel` enum with the variants `U32`, `U64`,
+///   `I32`, `I64`, `Handle`, `Pointer` and `Checked { types:
+///   Option<&'static [ObjectType]>, rights: u32, allow_invalid: bool }`.
+///
+/// It defines `handlers`, whose functions record their call and succeed,
+/// and `CALLS`, the model of every call.
+pub fn fuzz_harness(table: &Table, arch: &str) -> String {
+    let mut out = String::from(HEADER);
+    out.push_str("pub mod handlers {\n    #[allow(unused_imports)]\n    use super::*;\n");
+    for call in calls_for(table, arch) {
+        let params = call
+            .args
+            .iter()
+            .map(|a| format!("{}: {}", a.name, kernel_param(a)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = call
+            .args
+            .iter()
+            .map(|a| format!("{}.record()", a.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cfg = fuzz_cfg(call).replace('\n', "\n    ");
+        let _ = writeln!(
+            out,
+            "\n    {cfg}pub fn {}({params}) -> Result<(), kernel_core::status::Error> {{\n        \
+             record({}, &[{values}]);\n        \
+             Ok(())\n    \
+             }}",
+            call.name, call.number
+        );
+    }
+    out.push_str("}\n\n/// The model of every call.\npub static CALLS: &[CallModel] = &[\n");
+    for call in calls_for(table, arch) {
+        let args = call
+            .args
+            .iter()
+            .map(arg_model)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "    CallModel {{ number: {}, fuzz_only: {}, args: &[{args}] }},",
+            call.number, call.fuzz_only
+        );
+    }
+    out.push_str("];\n");
+    out
 }
 
 /// The kernel's dispatch for `arch`. It is included into a module that
@@ -86,27 +201,7 @@ pub fn kernel_dispatch(table: &Table, arch: &str) -> String {
                     _ => raw,
                 },
                 (Type::Handle, Some(check)) => {
-                    let types = match &check.types {
-                        None => "None".to_owned(),
-                        Some(types) => format!(
-                            "Some(&[{}])",
-                            types
-                                .iter()
-                                .map(|t| format!("ObjectType::{t}"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    };
-                    let rights = if check.rights.is_empty() {
-                        "0".to_owned()
-                    } else {
-                        check
-                            .rights
-                            .iter()
-                            .map(|r| format!("rights::{r}"))
-                            .collect::<Vec<_>>()
-                            .join(" | ")
-                    };
+                    let (types, rights) = (types_expr(check), rights_expr(check));
                     let checked = format!("handle({raw} as u32, {types}, {rights})");
                     if check.allow_invalid {
                         format!(

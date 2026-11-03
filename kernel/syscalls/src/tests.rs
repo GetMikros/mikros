@@ -1,4 +1,4 @@
-use crate::generate::{kernel_dispatch, user_bindings_x86_64};
+use crate::generate::{fuzz_harness, kernel_dispatch, user_bindings_x86_64};
 use crate::table::{Dir, HandleCheck, Type, read};
 
 const ENTRY: &str = "  - name: obj_op\n    number: 7\n    arch: [x86_64]\n    fuzz_only: false\n    spec: [MIKSPEC-0007.R12]\n";
@@ -30,6 +30,7 @@ fn reads_the_kernel_table() {
     for code in [
         kernel_dispatch(&read.table, "x86_64"),
         user_bindings_x86_64(&read.table),
+        fuzz_harness(&read.table, "x86_64"),
     ] {
         let depth = code.chars().fold(0i32, |d, c| match c {
             '{' | '(' | '[' => d + 1,
@@ -38,6 +39,26 @@ fn reads_the_kernel_table() {
         });
         assert_eq!(depth, 0);
     }
+}
+
+#[test]
+fn generates_a_fuzz_harness() {
+    let text = table(
+        "      - {name: h, type: Handle, dir: in, object: Process, rights: [MANAGE], allow_invalid: true}\n\
+         \x20     - {name: p, type: '*mut u64', dir: inout}\n\
+         \x20     - {name: n, type: i32, dir: in}\n",
+    );
+    let code = fuzz_harness(&read(text.as_bytes()).unwrap().table, "x86_64");
+    assert!(code.contains(
+        "pub fn obj_op(h: Option<Checked>, p: UserInOut<u64>, n: i32) -> \
+         Result<(), kernel_core::status::Error> {\n        \
+         record(7, &[h.record(), p.record(), n.record()]);"
+    ));
+    assert!(code.contains(
+        "CallModel { number: 7, fuzz_only: false, args: &[ArgModel::Checked { \
+         types: Some(&[ObjectType::Process]), rights: rights::MANAGE, allow_invalid: true }, \
+         ArgModel::Pointer, ArgModel::I32] },"
+    ));
 }
 
 #[test]
