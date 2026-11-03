@@ -13,6 +13,8 @@ mod apic;
 mod aspace;
 #[cfg(any(target_os = "none", test))]
 mod backtrace;
+#[cfg(target_os = "none")]
+mod bti;
 #[cfg(any(target_os = "none", test))]
 mod clock;
 #[cfg(target_os = "none")]

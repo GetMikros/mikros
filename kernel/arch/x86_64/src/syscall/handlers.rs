@@ -20,8 +20,8 @@ use kernel_core::object::handles::Entry;
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{
-    KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_POLICY, KIND_PRIORITY, KIND_ROOT, Request,
-    Resource,
+    KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_POLICY, KIND_PRIORITY, KIND_ROOT,
+    Request, Resource,
 };
 use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
@@ -1540,6 +1540,50 @@ pub fn interrupt_create(
 pub fn interrupt_ack(interrupt: Checked) -> Result<(), Error> {
     object::<crate::interrupt::Interrupt>(interrupt).ack();
     Ok(())
+}
+
+pub fn bti_create(
+    resource: Checked,
+    requester_id: u64,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if !object::<Resource>(resource).grants(KIND_BTI, requester_id, 1) {
+        return Err(Error::AccessDenied);
+    }
+    if options != 0 || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let bti = crate::bti::Bti::new(current_process()?.budget(), requester_id)?;
+    give(bti, ObjectType::Bti, out)
+}
+
+pub fn bti_pin(
+    bti: Checked,
+    mem: Checked,
+    offset: u64,
+    size: u64,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let budget = current_process()?.budget().clone();
+    let mem = object::<MemoryObject>(mem);
+    let pmt = object::<crate::bti::Bti>(bti).pin(&budget, mem, offset, size, options)?;
+    give(pmt, ObjectType::Pmt, out)
+}
+
+pub fn pmt_unpin(pmt: Checked) -> Result<(), Error> {
+    downcast::<crate::bti::Pmt>(pmt.object.clone())
+        .expect("the dispatch checked the object type")
+        .unpin()?;
+    handle_close(Some(pmt))
+}
+
+pub fn bti_release_quarantine(bti: Checked) -> Result<(), Error> {
+    object::<crate::bti::Bti>(bti).release_quarantine()
 }
 
 #[cfg(feature = "fuzz")]
