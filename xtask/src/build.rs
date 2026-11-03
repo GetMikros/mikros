@@ -79,6 +79,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", bootmenu.display());
     let bootloader = cargo_build("mikrosboot", "mikrosboot", "x86_64-unknown-uefi", kind)?;
     println!("built    {}", bootloader.display());
+    crate::loader_check::check(&bootloader)?;
+    println!(
+        "checked  {} holds no MP services protocol GUID",
+        bootloader.display()
+    );
     let kernel = cargo_build("kernel-x86_64", "kernel", KERNEL_TARGET, kind)?;
     println!("built    {}", kernel.display());
     crate::extended::check(&kernel)?;
