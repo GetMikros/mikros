@@ -3261,6 +3261,131 @@ fn dma_isolation_reported(s: &Startup) -> Result {
     )
 }
 
+const KIND_BTI: u32 = 8;
+const WRONG_TYPE: i64 = -12;
+const DEVICE_READ: u32 = 1 << 0;
+const DEVICE_WRITE: u32 = 1 << 1;
+
+fn bti_create(resource: Handle, rid: u64, options: u32) -> (i64, Handle) {
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::bti_create(resource, rid, options, &mut out) };
+    (status, out)
+}
+
+fn bti_pin(bti: Handle, mem: Handle, offset: u64, size: u64, options: u32) -> (i64, Handle) {
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::bti_pin(bti, mem, offset, size, options, &mut out) };
+    (status, out)
+}
+
+/// `bti_create` takes a `BTI` resource covering the requester ID or the
+/// root, and with an IOMMU refuses a device behind none of its units.
+fn bti_create_checks(s: &Startup) -> Result {
+    // A function of QEMU's PCI root bus, which its one VT-d unit covers,
+    // and one of a segment that does not exist.
+    const RID: u64 = 0x18;
+    const NOWHERE: u64 = 0x5_0000;
+    let range = grant(s, KIND_BTI, RID, 2)?;
+    let irq = grant(s, KIND_IRQ, u64::from(RTC_GSI), 1)?;
+    let refused = [
+        bti_create(irq, RID, 0).0,
+        bti_create(range, RID + 2, 0).0,
+        bti_create(range, RID, 1).0,
+    ];
+    ensure(
+        "refusing resources and options",
+        refused == [ACCESS_DENIED, ACCESS_DENIED, INVALID_ARGS],
+    )?;
+    let (status, first) = bti_create(range, RID, 0);
+    check("creating a Bti", status)?;
+    let (status, second) = bti_create(range, RID, 0);
+    check("creating a second for the same device", status)?;
+    let isolated = kernel_logged(s, b"DMA isolated")?;
+    let (status, nowhere) = bti_create(s.root_resource, NOWHERE, 0);
+    if isolated {
+        ensure("refusing a device no IOMMU covers", status == OUT_OF_RANGE)?;
+    } else {
+        check("accepting any device without an IOMMU", status)?;
+        close(nowhere)?;
+    }
+    for handle in [first, second, range, irq] {
+        close(handle)?;
+    }
+    Ok(())
+}
+
+/// `bti_pin` pins ranges of contiguous and pinned objects and checks its
+/// arguments; `pmt_unpin` closes the `Pmt` handle; a `Pmt` closed without
+/// it keeps its pages, and their charge, until the quarantine of its
+/// device is released.
+fn pins_and_quarantine(s: &Startup) -> Result {
+    let dma = grant(s, KIND_DMA, 0, 0)?;
+    let (status, bti) = bti_create(s.root_resource, 0x18, 0);
+    check("creating a Bti", status)?;
+    let mut pinned = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a pinned object", unsafe {
+        sys::mem_create_pinned(dma, 4 * PAGE_SIZE, 0, &mut pinned)
+    })?;
+    let mut physical = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a physical object", unsafe {
+        sys::mem_create_physical(s.root_resource, 0xFE00_0000, PAGE_SIZE, 1, &mut physical)
+    })?;
+    let both = DEVICE_READ | DEVICE_WRITE;
+    let refused = [
+        bti_pin(bti, physical, 0, PAGE_SIZE, both).0,
+        bti_pin(bti, pinned, 8, PAGE_SIZE, both).0,
+        bti_pin(bti, pinned, 0, 100, both).0,
+        bti_pin(bti, pinned, 0, 0, both).0,
+        bti_pin(bti, pinned, 3 * PAGE_SIZE, 2 * PAGE_SIZE, both).0,
+        bti_pin(bti, pinned, 0, PAGE_SIZE, 0).0,
+        bti_pin(bti, pinned, 0, PAGE_SIZE, 4).0,
+    ];
+    ensure(
+        "checking the arguments",
+        refused
+            == [
+                WRONG_TYPE,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+            ],
+    )?;
+
+    let (status, pmt) = bti_pin(bti, pinned, PAGE_SIZE, 2 * PAGE_SIZE, DEVICE_READ);
+    check("pinning", status)?;
+    // SAFETY: the call takes no pointers.
+    check("unpinning", unsafe { sys::pmt_unpin(pmt) })?;
+    ensure(
+        "closing the handle",
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::handle_close(pmt) } == BAD_HANDLE,
+    )?;
+
+    // A Pmt closed without pmt_unpin keeps the object and its pages.
+    let pages = budget_pages(s)?;
+    let (status, pmt) = bti_pin(bti, pinned, 0, 4 * PAGE_SIZE, both);
+    check("pinning again", status)?;
+    close(pmt)?;
+    close(pinned)?;
+    ensure("keeping the pages charged", budget_pages(s)? == pages)?;
+    // SAFETY: the call takes no pointers.
+    check("releasing the quarantine", unsafe {
+        sys::bti_release_quarantine(bti)
+    })?;
+    ensure("freeing the pages", budget_pages(s)? == pages - 4)?;
+    for handle in [physical, bti, dma] {
+        close(handle)?;
+    }
+    Ok(())
+}
+
 /// Killing a blocked thread whose process reports thread events reports
 /// its exit, and its end as the last thread terminates the process.
 fn kill_blocked_thread(s: &Startup) -> Result {
@@ -6429,7 +6554,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 97] = [
+const TESTS: [(&str, Test); 99] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6514,6 +6639,8 @@ const TESTS: [(&str, Test); 97] = [
         interrupt_delivered_and_acked,
     ),
     ("dma_isolation_reported", dma_isolation_reported),
+    ("bti_create_checks", bti_create_checks),
+    ("pins_and_quarantine", pins_and_quarantine),
     ("contiguous_and_pinned_memory", contiguous_and_pinned_memory),
     ("physical_memory_objects", physical_memory_objects),
     ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),
