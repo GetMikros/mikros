@@ -56,6 +56,8 @@ pub struct Thread {
     /// The coverage buffer of the thread in the fuzz build.
     #[cfg(feature = "fuzz")]
     coverage: SpinLock<Option<crate::coverage::Buffer>>,
+    #[cfg(feature = "fuzz")]
+    alloc_failures: crate::fuzz::AllocFailures,
     entity: SpinLock<Entity>,
     /// The thread's priority, from 0 to `MAX_PRIORITY`.
     priority: AtomicU32,
@@ -153,6 +155,8 @@ impl Thread {
             stack_top: AtomicU64::new(stack + KERNEL_STACK_SIZE),
             #[cfg(feature = "fuzz")]
             coverage: SpinLock::new(None),
+            #[cfg(feature = "fuzz")]
+            alloc_failures: Default::default(),
             entity: SpinLock::new(Entity::new(DEFAULT_PRIORITY)),
             priority: AtomicU32::new(DEFAULT_PRIORITY),
             cpu_time: AtomicI64::new(0),
@@ -446,6 +450,12 @@ impl Thread {
         &self.coverage
     }
 
+    /// The thread's allocations that are to fail.
+    #[cfg(feature = "fuzz")]
+    pub fn alloc_failures(&self) -> &crate::fuzz::AllocFailures {
+        &self.alloc_failures
+    }
+
     fn switch_in(&self) {
         let top = self.stack_top.load(Ordering::Relaxed);
         percpu::this().thread_stack.store(top, Ordering::Relaxed);
@@ -455,7 +465,7 @@ impl Thread {
         #[cfg(feature = "fuzz")]
         crate::coverage::switch_in(self);
         #[cfg(feature = "fuzz")]
-        crate::fuzz::switch_in(self.header.koid());
+        crate::fuzz::switch_in(Some((self.header.koid(), &self.alloc_failures)));
         let Some(process) = &self.process else {
             return;
         };
@@ -708,7 +718,7 @@ fn schedule(requeue: bool) {
         None => {
             #[cfg(feature = "fuzz")]
             {
-                crate::fuzz::switch_in(0);
+                crate::fuzz::switch_in(None);
                 // The idle loop runs on behalf of no thread.
                 crate::coverage::idle();
             }

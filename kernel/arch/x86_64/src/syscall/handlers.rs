@@ -1952,9 +1952,9 @@ pub fn pager_revoke(pager: Checked, mem: Checked) -> Result<(), Error> {
     paged_of(pager, mem)?.revoke()
 }
 
-/// Writes the remaining count of the failure set for `kind` to `left`,
-/// and then sets the new one, so that the call's own allocations count
-/// for neither.
+/// Writes the remaining count of the failure set for `kind` on `thread`
+/// to `left`, and then sets the new one, so that the call's own
+/// allocations count for neither.
 #[cfg(feature = "fuzz")]
 pub fn fuzz_fail_alloc(
     thread: Checked,
@@ -1962,10 +1962,12 @@ pub fn fuzz_fail_alloc(
     after: u64,
     left: UserOut<u64>,
 ) -> Result<(), Error> {
-    let before = crate::fuzz::take_alloc_failure(kind)?;
+    crate::fuzz::check_kind(kind)?;
+    let thread = object::<Thread>(thread);
+    let before = crate::fuzz::take_alloc_failure(&thread, kind);
     let outputs = prepare(&current_process()?, &[left.range(1)])?;
     publish(outputs, &[bytes_of(&[before])]);
-    crate::fuzz::fail_alloc(&object::<Thread>(thread), kind, after);
+    crate::fuzz::fail_alloc(&thread, kind, after);
     Ok(())
 }
 

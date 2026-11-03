@@ -16,8 +16,12 @@ use mikros_test::{
 };
 
 /// The tests, which `main` runs before the last of its own.
-pub const TESTS: [(&str, Test); 6] = [
+pub const TESTS: [(&str, Test); 7] = [
     ("failed_allocations", failed_allocations),
+    (
+        "allocation_failures_per_thread",
+        allocation_failures_per_thread,
+    ),
     ("unqueued_exception_report", unqueued_exception_report),
     ("maintenance_deadlines", maintenance_deadlines),
     ("failed_random_sources", failed_random_sources),
@@ -214,6 +218,41 @@ fn failed_allocations(s: &Startup) -> Result {
         close(process)?;
     }
     Ok(())
+}
+
+/// Each thread keeps its own failure of each kind: setting one leaves the
+/// others as they were, and reports only what was set on that thread for
+/// that kind.
+fn allocation_failures_per_thread(s: &Startup) -> Result {
+    const FAR: u64 = 1 << 40;
+    let name = b"other";
+    let mut other = 0;
+    // SAFETY: the pointers describe `name` and `other`.
+    check("creating a thread", unsafe {
+        sys::thread_create(s.process, name.as_ptr(), 5, &mut other)
+    })?;
+    // The test's own failure is far enough away that its calls below
+    // cannot reach it.
+    ensure(
+        "starting without a failure",
+        fail_alloc(s.thread, HEAP, FAR)? == 0,
+    )?;
+    ensure("keeping threads apart", fail_alloc(other, HEAP, 5)? == 0)?;
+    ensure("keeping kinds apart", fail_alloc(other, FRAMES, 3)? == 0)?;
+    ensure(
+        "reporting the thread's heap failure",
+        fail_alloc(other, HEAP, 0)? == 5,
+    )?;
+    ensure(
+        "reporting the thread's frame failure",
+        fail_alloc(other, FRAMES, 0)? == 3,
+    )?;
+    let left = fail_alloc(s.thread, HEAP, 0)?;
+    ensure(
+        "keeping the test's own failure",
+        left > FAR - 1000 && left <= FAR,
+    )?;
+    close(other)
 }
 
 /// Waits until `process` has terminated or a message is on `channel`,
