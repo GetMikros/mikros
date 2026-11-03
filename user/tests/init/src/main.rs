@@ -4219,6 +4219,241 @@ fn user_bases_set_and_kept(_: &Startup) -> Result {
     set(1, before.1)
 }
 
+/// The stack pointer and RFLAGS at the first instruction of the signal
+/// handler `signal_probe`, the arguments `signal_handler` got, the mask
+/// while it ran and how often it ran.
+static SIGNAL_ENTRY: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static SIGNAL_ARGS: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static SIGNAL_MASK: AtomicU64 = AtomicU64::new(0);
+static HANDLED: AtomicU64 = AtomicU64::new(0);
+/// The signal frame `signal_handler` found, from 72 bytes below the
+/// context to its extended state: the restorer, the information record,
+/// the register state, the mask, the extended state size and 16 bytes.
+static mut SIGNAL_FRAME: [u64; 33] = [0; 33];
+
+// `signal_probe` records the stack pointer and the flags the handler
+// starts with and goes on in `signal_handler`, which returns to
+// `signal_restorer`; that finds the context 64 bytes above the stack
+// pointer, where the return left it, and returns from the signal.
+core::arch::global_asm!(
+    ".global signal_probe",
+    "signal_probe:",
+    "mov [rip + {entry}], rsp",
+    "pushfq",
+    "pop qword ptr [rip + {entry} + 8]",
+    "jmp {handler}",
+    ".global signal_restorer",
+    "signal_restorer:",
+    "lea rdi, [rsp + 64]",
+    "call {back}",
+    entry = sym SIGNAL_ENTRY,
+    handler = sym signal_handler,
+    back = sym signal_back,
+);
+
+unsafe extern "sysv64" {
+    safe fn signal_probe();
+    safe fn signal_restorer();
+}
+
+extern "sysv64" fn signal_handler(signo: u64, info: u64, context: u64) {
+    let mut mask = 0;
+    // SAFETY: the pointer is valid; adding no signal only reads the mask.
+    unsafe { sys::signal_set_mask(0, 0, &mut mask) };
+    SIGNAL_MASK.store(mask, Ordering::Release);
+    for (slot, value) in SIGNAL_ARGS.iter().zip([signo, info, context]) {
+        slot.store(value, Ordering::Release);
+    }
+    let from = (context - 72) as *const u64;
+    for i in 0..33 {
+        // SAFETY: the frame lies on this thread's stack from 72 bytes
+        // below the context, and only this handler writes the copy.
+        unsafe {
+            let word = from.add(i).read_volatile();
+            (&raw mut SIGNAL_FRAME)
+                .cast::<u64>()
+                .add(i)
+                .write_volatile(word);
+        }
+    }
+    HANDLED.fetch_add(1, Ordering::AcqRel);
+}
+
+extern "sysv64" fn signal_back(context: u64) -> ! {
+    // SAFETY: `context` is the context of the frame the handler got.
+    unsafe { sys::signal_return(context) };
+    unreachable!("signal_return returned");
+}
+
+const USR1: u32 = 10;
+const INTERRUPTED: i64 = -27;
+
+/// Makes `signal_probe` the handler of `USR1` with `flags`, blocking
+/// `USR2` while it runs, and returns the action it replaced.
+fn catch_usr1(flags: u32) -> Result<[u8; 32]> {
+    let mut action = [0u8; 32];
+    action[0x00..0x08].copy_from_slice(&(signal_probe as *const () as u64).to_le_bytes());
+    action[0x08..0x10].copy_from_slice(&(1u64 << 11).to_le_bytes());
+    action[0x10..0x18].copy_from_slice(&(signal_restorer as *const () as u64).to_le_bytes());
+    action[0x18..0x1C].copy_from_slice(&flags.to_le_bytes());
+    let mut old = [0u8; 32];
+    // SAFETY: the pointers describe `action` and `old`.
+    check("setting the action", unsafe {
+        sys::signal_set_action(USR1, action.as_ptr(), old.as_mut_ptr())
+    })?;
+    HANDLED.store(0, Ordering::Release);
+    Ok(old)
+}
+
+fn restore_usr1(old: &[u8; 32]) -> Result {
+    // SAFETY: the pointer describes `old`.
+    check("restoring the action", unsafe {
+        sys::signal_set_action(USR1, old.as_ptr(), core::ptr::null_mut())
+    })
+}
+
+/// The calling thread's mask.
+fn signal_mask() -> u64 {
+    let mut mask = 0;
+    // SAFETY: the pointer is valid; adding no signal only reads the mask.
+    unsafe { sys::signal_set_mask(0, 0, &mut mask) };
+    mask
+}
+
+/// The copy of the last signal frame.
+fn signal_frame_copy() -> [u64; 33] {
+    // SAFETY: the handler that wrote the copy has returned.
+    unsafe { core::ptr::read_volatile(&raw const SIGNAL_FRAME) }
+}
+
+/// A handler starts with its arguments and the stack and frame in their
+/// layout: the context 64-byte aligned, as high as it fits 128 bytes
+/// below the interrupted stack pointer, the restorer below the
+/// information record below it, the mask before the handler and the
+/// extended state size above the register state. DF is clear, and the
+/// signal and the action's mask are blocked while the handler runs and
+/// not afterwards.
+fn signal_frame(s: &Startup) -> Result {
+    let old = catch_usr1(0)?;
+    let before = signal_mask();
+    // SAFETY: the call takes no pointers.
+    check("sending the signal", unsafe {
+        sys::thread_signal(s.thread, USR1, 77)
+    })?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    let [signo, info, context] = SIGNAL_ARGS.each_ref().map(|a| a.load(Ordering::Acquire));
+    let [rsp, rflags] = SIGNAL_ENTRY.each_ref().map(|a| a.load(Ordering::Acquire));
+    ensure("passing the signal number", signo == u64::from(USR1))?;
+    ensure("aligning the context", context % 64 == 0)?;
+    ensure(
+        "starting below the restorer",
+        rsp == context - 72 && info == context - 64,
+    )?;
+    ensure("clearing DF", rflags & 1 << 10 == 0)?;
+    let frame = signal_frame_copy();
+    ensure(
+        "returning to the restorer",
+        frame[0] == signal_restorer as *const () as u64,
+    )?;
+    ensure(
+        "recording the signal",
+        frame[1] as u32 == USR1 && (frame[1] >> 32) == 1,
+    )?;
+    ensure(
+        "recording the sender and the value",
+        frame[2] == koid(s.process)? && frame[3] == 77 && frame[4] == 0 && frame[5] == 0,
+    )?;
+    let (saved_rsp, mask, size) = (frame[9 + 7], frame[29], frame[30]);
+    ensure("saving the mask", mask == before)?;
+    ensure("giving the extended state size", size >= 576)?;
+    ensure(
+        "zeroing the reserved bytes",
+        frame[31] == 0 && frame[32] == 0,
+    )?;
+    let end = context + 0xC0 + size;
+    ensure(
+        "placing the frame as high as it fits",
+        end + 128 <= saved_rsp && end + 128 + 64 > saved_rsp,
+    )?;
+    ensure(
+        "blocking the signal and the action's mask in the handler",
+        SIGNAL_MASK.load(Ordering::Acquire) == before | 1 << 9 | 1 << 11,
+    )?;
+    ensure("restoring the mask", signal_mask() == before)?;
+    restore_usr1(&old)
+}
+
+/// Set by `signal_sleeper` with what its sleep returned and when.
+static SLEEP_RESULT: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+/// Sleeps until `deadline`, records the status and the time, and exits.
+extern "sysv64" fn signal_sleeper(deadline: u64, _: u64) -> ! {
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::thread_sleep(deadline as i64) };
+    SLEEP_RESULT[0].store(status as u64, Ordering::Release);
+    SLEEP_RESULT[1].store(now() as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Signals a thread sleeping for 100 ms with `USR1` handled with `flags`,
+/// and returns the status of its sleep, its deadline and when it ended.
+fn signal_sleeping_thread(s: &Startup, flags: u32) -> Result<(i64, i64, i64)> {
+    let old = catch_usr1(flags)?;
+    let deadline = now() + 100_000_000;
+    let thread = spawn2(s, signal_sleeper, deadline as u64, 0)?;
+    wait_until_blocked(thread)?;
+    // SAFETY: the call takes no pointers.
+    check("signalling the sleeper", unsafe {
+        sys::thread_signal(thread, USR1, 1)
+    })?;
+    ensure(
+        "ending the sleeper",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    restore_usr1(&old)?;
+    let [status, ended] = SLEEP_RESULT
+        .each_ref()
+        .map(|a| a.load(Ordering::Acquire) as i64);
+    Ok((status, deadline, ended))
+}
+
+/// A handler for a thread sleeping in `thread_sleep` ends the sleep with
+/// `ERR_INTERRUPTED`, unless its action has `RESTART`: then the frame
+/// resumes the thread at its `SYSCALL` instruction with the arguments in
+/// place, and the sleep goes on until its deadline.
+fn signal_interrupts_and_restarts(s: &Startup) -> Result {
+    const RESTART: u32 = 1 << 0;
+    let (status, deadline, ended) = signal_sleeping_thread(s, 0)?;
+    ensure(
+        "interrupting the sleep",
+        status == INTERRUPTED && ended < deadline,
+    )?;
+    let (status, deadline, ended) = signal_sleeping_thread(s, RESTART)?;
+    ensure("restarting the sleep", status == 0 && ended >= deadline)?;
+    let frame = signal_frame_copy();
+    let (rdi, rip) = (frame[9 + 5], frame[9 + 16]);
+    ensure(
+        "keeping the deadline as the argument",
+        rdi == deadline as u64,
+    )?;
+    // SAFETY: the instruction lies in this program's code, which is
+    // mapped readable.
+    let instruction = unsafe { (rip as *const [u8; 2]).read_volatile() };
+    ensure(
+        "resuming at the SYSCALL instruction",
+        instruction == [0x0F, 0x05],
+    )
+}
+
 /// Whether `needle` occurs in `haystack`.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
@@ -4449,7 +4684,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 67] = [
+const TESTS: [(&str, Test); 69] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
@@ -4534,6 +4769,11 @@ const TESTS: [(&str, Test); 67] = [
     ),
     ("monotonic_clock_and_page", monotonic_clock_and_page),
     ("mappings_outlive_handles", mappings_outlive_handles),
+    ("signal_frame", signal_frame),
+    (
+        "signal_interrupts_and_restarts",
+        signal_interrupts_and_restarts,
+    ),
     ("processes_and_channels", processes_and_channels),
 ];
 
