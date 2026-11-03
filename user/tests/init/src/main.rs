@@ -573,6 +573,22 @@ fn soon() -> i64 {
     now() + 5_000_000
 }
 
+/// A deadline for something that must happen, far enough off that a
+/// slow or loaded machine still meets it.
+fn in_time() -> i64 {
+    now() + 1_000_000_000
+}
+
+/// Waits until `thread` is blocked, or fails after `in_time`.
+fn wait_until_blocked(thread: Handle) -> Result {
+    let deadline = in_time();
+    while thread_state(thread)? != STATE_BLOCKED {
+        ensure("blocking", now() < deadline)?;
+        sleep_ms(1);
+    }
+    Ok(())
+}
+
 fn signal(event: Handle, clear: u32, set: u32) -> Result {
     // SAFETY: the call takes no pointers.
     check("signalling", unsafe {
@@ -1892,7 +1908,7 @@ fn syscall_gate(s: &Startup) -> Result {
     }
     ensure(
         "terminating the process",
-        wait(process, TERMINATED, soon()).0 == 0,
+        wait(process, TERMINATED, in_time()).0 == 0,
     )
 }
 
@@ -1903,7 +1919,7 @@ fn kill_blocked_thread(s: &Startup) -> Result {
     let (kind, thread) = next_report(channel)?;
     ensure("reporting the start", kind == THREAD_STARTING)?;
     resume(thread)?;
-    sleep_ms(20);
+    wait_until_blocked(thread)?;
     // SAFETY: the call takes no pointers.
     check("killing", unsafe { sys::task_kill(thread) })?;
     let (kind, exiting) = next_report(channel)?;
@@ -1911,7 +1927,7 @@ fn kill_blocked_thread(s: &Startup) -> Result {
     resume(exiting)?;
     ensure(
         "terminating the process",
-        wait(process, TERMINATED, soon()).0 == 0,
+        wait(process, TERMINATED, in_time()).0 == 0,
     )
 }
 
@@ -1925,7 +1941,7 @@ fn kill_stopped_thread(s: &Startup) -> Result {
     check("killing", unsafe { sys::task_kill(thread) })?;
     ensure(
         "terminating the process",
-        wait(process, TERMINATED, soon()).0 == 0,
+        wait(process, TERMINATED, in_time()).0 == 0,
     )
 }
 
@@ -2183,7 +2199,7 @@ fn suspend_threads(s: &Startup) -> Result {
     suspend_and_wait(thread)?;
     // SAFETY: the call takes no pointers.
     check("killing", unsafe { sys::task_kill(thread) })?;
-    ensure("ending", wait(thread, TERMINATED, soon()).0 == 0)?;
+    ensure("ending", wait(thread, TERMINATED, in_time()).0 == 0)?;
     ensure("refusing a dead thread", suspend(thread) == BAD_STATE)
 }
 
@@ -2207,14 +2223,13 @@ fn suspend_blocked_waits(s: &Startup) -> Result {
         sys::event_create(0, &mut event)
     })?;
     let thread = spawn(s, wait_for_user0, u64::from(event))?;
-    sleep_ms(5);
-    ensure("blocking", thread_state(thread)? == STATE_BLOCKED)?;
+    wait_until_blocked(thread)?;
     suspend_and_wait(thread)?;
     check("resuming", resume_thread(thread))?;
-    sleep_ms(5);
+    wait_until_blocked(thread)?;
     ensure(
         "waiting again",
-        thread_state(thread)? == STATE_BLOCKED && WAIT_STATUS.load(Ordering::Acquire) == u64::MAX,
+        WAIT_STATUS.load(Ordering::Acquire) == u64::MAX,
     )?;
     suspend_and_wait(thread)?;
     signal(event, 0, USER0)?;
@@ -2224,7 +2239,7 @@ fn suspend_blocked_waits(s: &Startup) -> Result {
         WAIT_STATUS.load(Ordering::Acquire) == u64::MAX,
     )?;
     check("resuming", resume_thread(thread))?;
-    ensure("ending", wait(thread, TERMINATED, soon()).0 == 0)?;
+    ensure("ending", wait(thread, TERMINATED, in_time()).0 == 0)?;
     ensure(
         "completing the wait",
         WAIT_STATUS.load(Ordering::Acquire) == 0,
@@ -2261,7 +2276,7 @@ fn suspend_in_call(s: &Startup) -> Result {
         "receiving the request",
         &request.bytes[4..request.len] == b"ping",
     )?;
-    ensure("blocking", thread_state(thread)? == STATE_BLOCKED)?;
+    wait_until_blocked(thread)?;
     suspend_and_wait(thread)?;
     let (status, regs) = general_registers(thread);
     check("reading the registers", status)?;
@@ -2279,7 +2294,7 @@ fn suspend_in_call(s: &Startup) -> Result {
         CALL_STATUS.load(Ordering::Acquire) == u64::MAX,
     )?;
     check("resuming", resume_thread(thread))?;
-    ensure("ending", wait(thread, TERMINATED, soon()).0 == 0)?;
+    ensure("ending", wait(thread, TERMINATED, in_time()).0 == 0)?;
     ensure("taking the reply", CALL_STATUS.load(Ordering::Acquire) == 0)?;
     let mut probe = [0u8; 64];
     let (mut len, mut count) = (0u64, 0u64);
@@ -2363,7 +2378,7 @@ fn thread_lists(s: &Startup) -> Result {
     ensure("listing only for processes", status == -12)?;
     // SAFETY: the call takes no pointers.
     check("killing", unsafe { sys::task_kill(thread) })?;
-    ensure("ending", wait(thread, TERMINATED, soon()).0 == 0)?;
+    ensure("ending", wait(thread, TERMINATED, in_time()).0 == 0)?;
     let (koids, count) = thread_list(s.process)?;
     ensure("leaving out dead threads", !koids[..count].contains(&id))?;
     ensure(
