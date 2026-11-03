@@ -3772,6 +3772,47 @@ fn read_process_memory(s: &Startup) -> Result {
     )
 }
 
+/// The page below init's stack stays reserved: nothing there can be read,
+/// a mapping placed there is refused, and access to it cannot be granted.
+fn stack_guard_page_kept(s: &Startup) -> Result {
+    let rsp: u64;
+    // SAFETY: the instruction only reads the stack pointer.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
+    let mut guard = rsp & !(PAGE_SIZE - 1);
+    while read_memory(s.process, guard, &mut [0u8; 1]) >= 0 {
+        guard -= PAGE_SIZE;
+    }
+    ensure(
+        "finding nothing below the stack",
+        read_memory(s.process, guard, &mut [0u8; 1]) == NOT_FOUND,
+    )?;
+    let mem = create_memory(PAGE_SIZE)?;
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ | mikros_test::SPECIFIC,
+            guard,
+            mem,
+            0,
+            PAGE_SIZE,
+            &mut at,
+        )
+    };
+    if status == 0 {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::vm_unmap(s.process, at, PAGE_SIZE) };
+    }
+    ensure("refusing a mapping there", status == ALREADY_EXISTS)?;
+    ensure(
+        "refusing access to it",
+        protect(s, PERM_READ, guard, PAGE_SIZE) == ACCESS_DENIED,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(mem) })
+}
+
 fn write_memory(process: Handle, addr: u64, bytes: &[u8]) -> i64 {
     // SAFETY: the pointer and length describe `bytes`.
     unsafe { sys::process_write_memory(process, addr, bytes.as_ptr(), bytes.len() as u64) }
@@ -5157,7 +5198,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 79] = [
+const TESTS: [(&str, Test); 80] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
@@ -5231,6 +5272,7 @@ const TESTS: [(&str, Test); 79] = [
     ("suspend_in_call", suspend_in_call),
     ("thread_lists", thread_lists),
     ("read_process_memory", read_process_memory),
+    ("stack_guard_page_kept", stack_guard_page_kept),
     ("write_process_memory", write_process_memory),
     ("threads", threads),
     ("new_thread_starts_clean", new_thread_starts_clean),

@@ -75,20 +75,24 @@ fn boot_image(info: &BootInfo) -> Arc<MemoryObject> {
 /// at `addr` with `perms` into `process`, and returns it. Neither is
 /// charged to a budget.
 fn map(process: &Process, addr: u64, len: u64, perms: u32) -> Arc<MemoryObject> {
+    map_up_to(
+        process,
+        addr,
+        len,
+        perms,
+        PERM_READ | PERM_WRITE | PERM_EXECUTE,
+    )
+}
+
+/// Like `map`, with `max` as the most the region's permissions can be
+/// raised to.
+fn map_up_to(process: &Process, addr: u64, len: u64, perms: u32, max: u32) -> Arc<MemoryObject> {
     let mem =
         MemoryObject::new(None, len, 0).unwrap_or_else(|e| panic!("no memory for init: {e:?}"));
     let options = MapOptions::parse(perms | SPECIFIC, addr, false).expect("valid map options");
     process
         .aspace()
-        .add_region(
-            options,
-            addr,
-            len,
-            &mem,
-            0,
-            PERM_READ | PERM_WRITE | PERM_EXECUTE,
-            None,
-        )
+        .add_region(options, addr, len, &mem, 0, max, None)
         .unwrap_or_else(|e| panic!("mapping init at {addr:#x}: {e:?}"));
     mem
 }
@@ -146,11 +150,14 @@ fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
     for segment in &elf.segments {
         load_segment(&process, file, segment);
     }
-    // The stack is placed with the page below it, which stays unmapped.
+    // The stack is placed with the page below it, which is mapped without
+    // access, and without a way to grant any, so that nothing else is
+    // placed there.
     let guard = process
         .aspace()
         .choose(STACK_SIZE + PAGE_SIZE)
         .unwrap_or_else(|e| panic!("no room for the init stack: {e:?}"));
+    map_up_to(&process, guard, PAGE_SIZE, 0, 0);
     let stack = guard + PAGE_SIZE;
     map(&process, stack, STACK_SIZE, PERM_READ | PERM_WRITE);
     let thread = Process::create_thread(&process, name(), false)
