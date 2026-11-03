@@ -34,10 +34,10 @@ const MIKROS_DIR: &str = "\\EFI\\Mikros\\";
 pub const MIKROS_SECTION: &[u8; 8] = b".mikros\0";
 
 /// Device path node types and subtypes used here.
-const MEDIA: u8 = 4;
-const MEDIA_FILE_PATH: u8 = 4;
+pub(crate) const MEDIA: u8 = 4;
+pub(crate) const MEDIA_FILE_PATH: u8 = 4;
 const END: u8 = 0x7f;
-const END_ENTIRE: [u8; 4] = [0x7f, 0xff, 4, 0];
+pub(crate) const END_ENTIRE: [u8; 4] = [0x7f, 0xff, 4, 0];
 
 /// A firmware load option (`Boot####` variable).
 #[derive(Debug, PartialEq, Eq)]
@@ -73,7 +73,7 @@ fn ucs2(data: &[u8]) -> String {
 /// The nodes of the first instance of `device_path`, as (type, subtype,
 /// data) up to its first end node. Returns `None` when a node is malformed
 /// or the path has no end node.
-fn nodes(device_path: &[u8]) -> Option<Vec<(u8, u8, &[u8])>> {
+pub(crate) fn nodes(device_path: &[u8]) -> Option<Vec<(u8, u8, &[u8])>> {
     let mut out = Vec::new();
     let mut offset = 0;
     loop {

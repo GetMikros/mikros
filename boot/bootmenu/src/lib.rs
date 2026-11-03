@@ -11,6 +11,7 @@ pub mod detect;
 pub mod display;
 pub mod entries;
 pub mod input;
+pub mod launch;
 pub mod menu;
 pub mod pointer;
 pub mod power;
