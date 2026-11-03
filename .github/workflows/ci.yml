@@ -41,3 +41,7 @@ jobs:
           done
       - name: Test
         run: cargo xtask test
+      # Some integration tests, such as the coverage test, exist only in
+      # fuzz builds. The host tests ran in the step above.
+      - name: Test the fuzz build
+        run: cargo xtask test --kind fuzz --no-host
