@@ -15,6 +15,7 @@ use mikros_test::{
 
 mikros_rt::main!(main);
 
+mod edu;
 #[cfg(feature = "fuzz")]
 mod hooks;
 
@@ -6554,7 +6555,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 99] = [
+const TESTS: [(&str, Test); 101] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6641,6 +6642,8 @@ const TESTS: [(&str, Test); 99] = [
     ("dma_isolation_reported", dma_isolation_reported),
     ("bti_create_checks", bti_create_checks),
     ("pins_and_quarantine", pins_and_quarantine),
+    ("dma_through_pins", edu::dma_through_pins),
+    ("msi_from_device", edu::msi_from_device),
     ("contiguous_and_pinned_memory", contiguous_and_pinned_memory),
     ("physical_memory_objects", physical_memory_objects),
     ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),
