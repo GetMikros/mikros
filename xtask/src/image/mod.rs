@@ -121,10 +121,18 @@ pub fn run(args: &Args) -> Result<()> {
 /// Writes the disk image of the components `built` for the build kind
 /// `kind` to `out`.
 pub fn create(kind: Kind, built: &build::Built, out: &Path) -> Result<()> {
+    create_with(kind, built, out, "")
+}
+
+/// Like `create`, with `extra` added to the kernel command line.
+pub fn create_with(kind: Kind, built: &build::Built, out: &Path, extra: &str) -> Result<()> {
     let root_guid = Uuid::new_v4();
     let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
     let bootmenu = read(&built.bootmenu)?;
-    let command_line = format!("root=PARTUUID={root_guid}");
+    let mut command_line = format!("root=PARTUUID={root_guid}");
+    if !extra.is_empty() {
+        command_line = format!("{command_line} {extra}");
+    }
     let contents = [
         ("EFI/Mikros/bootmenu.efi", bootmenu.clone()),
         ("EFI/BOOT/BOOTX64.EFI", bootmenu),

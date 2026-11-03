@@ -5797,7 +5797,79 @@ const TESTS: [(&str, Test); 87] = [
     ("boot_image_object", boot_image_object),
 ];
 
+/// The colour `exit_after_painting` paints the framebuffer, as red,
+/// green and blue.
+const PAINT: [u32; 3] = [0x12, 0x34, 0x56];
+
+/// Releases the console, paints the whole framebuffer in `PAINT` when
+/// there is one, and returns exit code 7, ending init, which the kernel
+/// panics on.
+fn exit_after_painting(s: &Startup) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::log_console_release(s.log) };
+    let Some(fb) = s.framebuffer else {
+        log!(Info, "SCENARIO no framebuffer");
+        return 7;
+    };
+    let len = fb.size.next_multiple_of(PAGE_SIZE);
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ | PERM_WRITE,
+            0,
+            fb.memory,
+            0,
+            len,
+            &mut at,
+        )
+    };
+    if status != 0 {
+        log!(Error, "SCENARIO mapping the framebuffer failed ({status})");
+        return 7;
+    }
+    let pixel = [fb.red_mask, fb.green_mask, fb.blue_mask]
+        .iter()
+        .zip(PAINT)
+        .fold(0u32, |p, (&mask, c)| p | (c << mask.trailing_zeros()));
+    let pixels = (u64::from(fb.stride) * u64::from(fb.height)) as usize;
+    for i in 0..pixels {
+        // SAFETY: the framebuffer holds `stride` × `height` pixels of 4
+        // bytes, and is mapped writable at `at`.
+        unsafe { (at as *mut u32).add(i).write_volatile(pixel) };
+    }
+    log!(Info, "SCENARIO framebuffer painted");
+    7
+}
+
+/// Runs the scenario that the command line names with `test=`, which
+/// ends in a kernel panic, or returns `None` when it names none.
+fn scenario(s: &Startup) -> Option<i64> {
+    let cmdline = core::str::from_utf8(s.cmdline).unwrap_or("");
+    let name = cmdline
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("test="))?;
+    Some(match name {
+        "init-exit" => exit_after_painting(s),
+        // The runner raises an NMI or a machine check once this is logged.
+        "wait" => {
+            log!(Info, "SCENARIO waiting");
+            loop {
+                sleep_ms(1000);
+            }
+        }
+        _ => {
+            log!(Error, "SCENARIO {name} unknown");
+            1
+        }
+    })
+}
+
 fn main(s: &Startup) -> i64 {
+    if let Some(code) = scenario(s) {
+        return code;
+    }
     if let Err(f) = open_exit_port(s.root_resource, s.process) {
         log!(Error, "TEST setup FAILED: {} ({})", f.what, f.status);
         return 1;

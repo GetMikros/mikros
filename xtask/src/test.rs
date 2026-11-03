@@ -54,7 +54,7 @@ fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
 
 /// The arguments of `qemu::args` with the serial port written to `log`,
 /// no display, the debug exit device, and no reboot.
-fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
+pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
     if let Some(i) = args.iter().position(|a| a == "-serial") {
         args[i + 1] = format!("file:{}", log.display());
     }
@@ -141,6 +141,9 @@ pub fn run(args: &Args) -> Result<()> {
     let timeout = Duration::from_secs(args.timeout);
     crate::debug::check_scripts(&args.machine, &built.kernel, &disk, &gdb_log, timeout)?;
     println!("kernel debugger scripts passed");
+    let scenarios = dir.join("scenarios");
+    crate::scenario::run(&args.machine, args.kind, &built, &scenarios, timeout)?;
+    println!("panic scenarios passed");
     Ok(())
 }
 

@@ -11,6 +11,7 @@ mod fuzz;
 mod image;
 mod qemu;
 mod run;
+mod scenario;
 mod setup;
 mod symbolize;
 mod test;
