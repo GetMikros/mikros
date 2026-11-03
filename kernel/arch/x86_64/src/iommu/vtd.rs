@@ -16,6 +16,17 @@ const RTADDR: u64 = 0x20;
 const IQT: u64 = 0x88;
 const IQA: u64 = 0x90;
 const IRTA: u64 = 0xB8;
+const FSTS: u64 = 0x34;
+const FECTL: u64 = 0x38;
+const FEDATA: u64 = 0x3C;
+const FEADDR: u64 = 0x40;
+const FEUADDR: u64 = 0x44;
+
+/// FSTS: a fault record overflowed.
+const PFO: u32 = 1 << 0;
+/// The high half of a fault record: the fault bit and the read bit.
+const FAULT: u64 = 1 << 63;
+const FAULT_READ: u64 = 1 << 62;
 
 /// GCMD and GSTS bits.
 const TE: u32 = 1 << 31;
@@ -103,6 +114,9 @@ pub struct Unit {
     ecap: u64,
     /// The interrupt remapping table, once remapping is on.
     irt: Option<u64>,
+    /// The offset of the fault recording registers, and their number.
+    faults: u64,
+    records: u64,
 }
 
 impl Unit {
@@ -112,16 +126,22 @@ impl Unit {
     /// or second-level tables of 3 or 4 levels, and `TimedOut` when it
     /// does not complete a command.
     pub fn new(phys: u64) -> Result<Unit, Error> {
-        crate::reserved::reserve_mmio(phys, PAGE_SIZE);
-        let regs = map_device(phys, PAGE_SIZE);
+        let first = map_device(phys, PAGE_SIZE);
         // SAFETY: the registers are mapped uncached, and only this code
         // uses them.
         let (cap, ecap) = unsafe {
             (
-                ((regs + CAP) as *const u64).read_volatile(),
-                ((regs + ECAP) as *const u64).read_volatile(),
+                ((first + CAP) as *const u64).read_volatile(),
+                ((first + ECAP) as *const u64).read_volatile(),
             )
         };
+        space::unmap_device(first, phys, PAGE_SIZE);
+        // The fault recording registers may lie beyond the first page.
+        let faults = (cap >> 24 & 0x3FF) * 16;
+        let records = (cap >> 40 & 0xFF) + 1;
+        let size = (faults + records * 16).max(PAGE_SIZE);
+        crate::reserved::reserve_mmio(phys, size);
+        let regs = map_device(phys, size);
         let sagaw = cap >> 8 & 0x1F;
         let (levels, width) = match () {
             () if sagaw & 0b100 != 0 => (4, 2),
@@ -146,6 +166,8 @@ impl Unit {
             status: table_frame()?,
             ecap,
             irt: None,
+            faults,
+            records,
         };
         // Queued invalidation is set up anew, as firmware may have used
         // it with its own queue; translation may stay on meanwhile.
@@ -166,6 +188,11 @@ impl Unit {
     fn read32(&self, offset: u64) -> u32 {
         // SAFETY: the registers are mapped uncached.
         unsafe { ((self.regs + offset) as *const u32).read_volatile() }
+    }
+
+    fn write32(&self, offset: u64, value: u32) {
+        // SAFETY: as in `write64`.
+        unsafe { ((self.regs + offset) as *mut u32).write_volatile(value) };
     }
 
     fn write64(&self, offset: u64, value: u64) {
@@ -240,6 +267,36 @@ impl Unit {
         }
         self.flush(low);
         self.submit(&[[IEC_GLOBAL, 0]])
+    }
+
+    /// Sends the unit's fault events to `vector` on the processor with
+    /// local APIC ID `id`, with the upper bits of the ID when `wide`.
+    pub fn report_faults(&self, vector: u8, id: u32, wide: bool) {
+        self.write32(FEDATA, u32::from(vector));
+        self.write32(FEADDR, 0xFEE0_0000 | (id & 0xFF) << 12);
+        self.write32(FEUADDR, if wide { id & !0xFF } else { 0 });
+        // Clearing the mask bit lets the events through.
+        self.write32(FECTL, 0);
+    }
+
+    /// Passes each recorded fault, as the requester ID, the page address
+    /// and whether it was a write, to `report`, and clears it.
+    pub fn take_faults(&self, mut report: impl FnMut(u64, u64, bool)) {
+        for n in 0..self.records {
+            let at = self.regs + self.faults + n * 16;
+            // SAFETY: the record lies in the mapped registers; writing
+            // the fault bit back clears it.
+            unsafe {
+                let high = ((at + 8) as *const u64).read_volatile();
+                if high & FAULT == 0 {
+                    continue;
+                }
+                let low = (at as *const u64).read_volatile();
+                report(high & 0xFFFF, low & !0xFFF, high & FAULT_READ == 0);
+                ((at + 8) as *mut u64).write_volatile(FAULT);
+            }
+        }
+        self.write32(FSTS, PFO);
     }
 
     /// Turns translation off, as when DMA is to go unrestricted.

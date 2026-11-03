@@ -159,6 +159,13 @@ fn enable(dmar: &[u8], config: &Config) -> Result<Iommu, Error> {
             iommu.remapping = true;
             iommu.wide = wide;
         }
+        for unit in &iommu.units {
+            unit.report_faults(
+                crate::apic::IOMMU_FAULT_VECTOR,
+                crate::apic::boot_id(),
+                iommu.wide,
+            );
+        }
         Ok(())
     })();
     if let Err(e) = result {
@@ -274,4 +281,47 @@ pub fn remap(index: u16, vector: Option<(u8, bool, u64)>) -> Result<(), Error> {
         .units
         .iter_mut()
         .try_for_each(|u| u.set_remap(index, entry))
+}
+
+/// How often blocked DMA of one device is logged at most, in
+/// nanoseconds.
+const FAULT_LOG_INTERVAL: i64 = 1_000_000_000;
+
+/// The devices whose blocked DMA was logged last, with when. The oldest
+/// entry makes room for a new device.
+static LOGGED: SpinLock<[(u64, i64); 16]> = SpinLock::new([(u64::MAX, i64::MIN); 16]);
+
+/// Handles a fault event: logs each fault the units recorded, at most
+/// once per second for each requester ID, and clears it.
+pub fn fault_interrupt() {
+    crate::apic::eoi();
+    let iommu = IOMMU.lock();
+    let Some(iommu) = iommu.as_ref() else {
+        return;
+    };
+    let now = crate::time::now();
+    for (unit, covers) in iommu.units.iter().zip(&iommu.covers) {
+        unit.take_faults(|sid, addr, write| {
+            let source = u64::from(covers.segment) << 16 | sid;
+            let mut logged = LOGGED.lock();
+            let slot = match logged.iter().position(|&(rid, _)| rid == source) {
+                Some(i) => i,
+                None => {
+                    let oldest = logged.iter().enumerate().min_by_key(|(_, e)| e.1);
+                    oldest.map_or(0, |(i, _)| i)
+                }
+            };
+            let (rid, last) = logged[slot];
+            if rid == source && now.saturating_sub(last) < FAULT_LOG_INTERVAL {
+                return;
+            }
+            logged[slot] = (source, now);
+            drop(logged);
+            let direction = if write { "write" } else { "read" };
+            log!(
+                Warning,
+                "blocked DMA {direction} from requester {source:#x} at {addr:#x}"
+            );
+        });
+    }
 }

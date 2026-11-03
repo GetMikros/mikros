@@ -163,7 +163,7 @@ fn dma_page(dma: Handle) -> Result<(Handle, u64)> {
 
 /// The device reaches pinned pages with the access they were pinned
 /// with, and none once they are unpinned: a copy into an unpinned page
-/// leaves it as it was.
+/// leaves it as it was, and the kernel logs it.
 pub fn dma_through_pins(s: &Startup) -> Result {
     let edu = Edu::open(s)?;
     let dma = grant(s, KIND_DMA, 0, 0)?;
@@ -192,6 +192,13 @@ pub fn dma_through_pins(s: &Startup) -> Result {
     let isolated = crate::kernel_logged(s, b"DMA isolated")?;
     let copied = mem_read_at::<8>(dst, 0)? == [0xA5; 8];
     ensure("blocking an unpinned page", copied != isolated)?;
+    if isolated {
+        let deadline = in_time();
+        while !crate::kernel_logged(s, b"blocked DMA write")? {
+            ensure("logging the blocked DMA", now() < deadline)?;
+            sleep_ms(5);
+        }
+    }
     // SAFETY: the call takes no pointers.
     check("unpinning the source", unsafe { sys::pmt_unpin(read) })?;
     for handle in [src, dst, bti, dma] {
