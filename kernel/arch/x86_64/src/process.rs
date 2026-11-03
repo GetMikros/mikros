@@ -132,15 +132,11 @@ struct Ioports {
 /// entries and their share of storage.
 const IOPORT_COST: u64 = 2 * (size_of::<(u64, u64)>() + size_of::<Held>()) as u64;
 
-/// The I/O port ranges the bitmap allows now. Its capacity, which never
-/// shrinks, covers the ranges of every process, so that switching them
-/// in needs no allocation. Locked before a process's ports.
-static OPEN_PORTS: SpinLock<Vec<(u64, u64)>> = SpinLock::new(Vec::new());
-
-/// Makes the I/O permission bitmap allow exactly the ports of `process`,
-/// or none for a kernel thread. Called as a thread is switched in.
+/// Makes this processor's I/O permission bitmap allow exactly the ports
+/// of `process`, or none for a kernel thread. Called as a thread is
+/// switched in.
 pub fn switch_ports(process: Option<&Process>) {
-    let mut open = OPEN_PORTS.lock();
+    let mut open = crate::percpu::this().open_ports.lock();
     let ports = process.map(|p| p.ioports.lock());
     let wanted: &[(u64, u64)] = ports.as_deref().map_or(&[], |p| p.ranges.as_slice());
     if *open == wanted {
@@ -231,7 +227,8 @@ impl Process {
     /// threads switch in.
     pub fn enable_ioports(&self, start: u64, end: u64, budget: &Arc<Budget>) -> Result<(), Error> {
         let charge = budget.hold_kernel(IOPORT_COST)?;
-        let mut open = OPEN_PORTS.lock();
+        // The boot processor, whose list this is, is the only one.
+        let mut open = crate::percpu::this().open_ports.lock();
         let mut ports = self.ioports.lock();
         let missing = (ports.ranges.len() + 1).saturating_sub(open.len());
         ports.ranges.try_reserve(1).map_err(|_| Error::NoMemory)?;

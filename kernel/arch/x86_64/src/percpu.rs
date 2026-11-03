@@ -2,8 +2,11 @@
 
 use crate::aspace::Pcids;
 use crate::cpu::write_msr;
+use crate::gdt::{Gdt, Tss};
 use crate::sched::CpuSched;
+use alloc::vec::Vec;
 use core::arch::asm;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use kernel_core::sync::SpinLock;
 
@@ -38,10 +41,25 @@ pub struct PerCpu {
     /// The top of the kernel stack of the thread that last ran, user or
     /// kernel, for backtraces.
     pub thread_stack: AtomicU64,
+    /// Set by the timer interrupt when the running thread's slice has
+    /// ended.
+    pub reschedule: AtomicBool,
+    /// Whether the debug registers hold the breakpoints of a user thread.
+    pub breakpoints_loaded: AtomicBool,
+    /// The I/O port ranges the bitmap of `tss` allows now. Its capacity,
+    /// which never shrinks, covers the ranges of every process, so that
+    /// switching them in needs no allocation. Locked before a process's
+    /// ports.
+    pub open_ports: SpinLock<Vec<(u64, u64)>>,
+    /// The processor's task state segment and GDT, which the processor
+    /// reads as it runs and `gdt` changes.
+    pub tss: UnsafeCell<Tss>,
+    pub gdt: UnsafeCell<Gdt>,
 }
 
 // SAFETY: each processor only reads its own structure, `this` is never
-// written after setup, and the rest is behind locks.
+// written after setup, and the rest is behind locks or atomic, except
+// for the TSS and the GDT, which only their own processor uses.
 unsafe impl Sync for PerCpu {}
 
 /// The boot processor's data. Entry code that cannot trust the GS base
@@ -57,6 +75,11 @@ pub(crate) static BOOT_CPU: PerCpu = PerCpu {
     sched: SpinLock::new(CpuSched::new()),
     pcids: SpinLock::new(Pcids::new()),
     thread_stack: AtomicU64::new(0),
+    reschedule: AtomicBool::new(false),
+    breakpoints_loaded: AtomicBool::new(false),
+    open_ports: SpinLock::new(Vec::new()),
+    tss: UnsafeCell::new(Tss::new()),
+    gdt: UnsafeCell::new([0; 8]),
 };
 
 /// Set once the GS base points to the per-CPU data.

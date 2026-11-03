@@ -105,7 +105,9 @@ const DR6_CLEAR: u64 = 0xFFFF_0FF0;
 
 /// Whether DR7 may enable breakpoints on this processor: set when a
 /// thread with breakpoints was switched in.
-static BREAKPOINTS_LOADED: AtomicBool = AtomicBool::new(false);
+fn breakpoints_loaded() -> &'static AtomicBool {
+    &percpu::this().breakpoints_loaded
+}
 
 /// The user-mode state of a user thread that is not in its registers
 /// while the thread runs in the kernel.
@@ -254,7 +256,7 @@ impl Thread {
         let debug = *self.debug.lock();
         let dr7 = debug[5];
         if dr7 == 0 {
-            if BREAKPOINTS_LOADED.swap(false, Ordering::Relaxed) {
+            if breakpoints_loaded().swap(false, Ordering::Relaxed) {
                 // SAFETY: zero disables every breakpoint.
                 unsafe { crate::cpu::write_dr(7, 0) };
             }
@@ -272,7 +274,7 @@ impl Thread {
             crate::cpu::write_dr(6, debug[4] & 0xFFFF_FFFF);
             crate::cpu::write_dr(7, dr7);
         }
-        BREAKPOINTS_LOADED.store(true, Ordering::Relaxed);
+        breakpoints_loaded().store(true, Ordering::Relaxed);
     }
 
     /// Whether the thread is in state `EXCEPTION` or `SUSPENDED` with its
@@ -597,8 +599,11 @@ fn this_cpu() -> &'static SpinLock<CpuSched> {
     &percpu::this().sched
 }
 
-/// Set by the timer interrupt when the running thread's slice has ended.
-static RESCHEDULE: AtomicBool = AtomicBool::new(false);
+/// Set by the timer interrupt when the slice of the thread running on
+/// this processor has ended.
+fn reschedule() -> &'static AtomicBool {
+    &percpu::this().reschedule
+}
 
 /// Creates a kernel thread that runs `entry(arg)` and queues it.
 #[allow(dead_code, reason = "nothing starts kernel threads yet")]
@@ -713,7 +718,7 @@ fn arm(cpu: &CpuSched) {
     // Once a reschedule is pending, the ended slice must not interrupt
     // again: in a preempt point that would interrupt at once, forever,
     // before interrupts are disabled again. The next slice arms anew.
-    let slice_end = if cpu.current.is_some() && !RESCHEDULE.load(Ordering::Relaxed) {
+    let slice_end = if cpu.current.is_some() && !reschedule().load(Ordering::Relaxed) {
         cpu.slice_end
     } else {
         INFINITE
@@ -793,7 +798,7 @@ pub fn preempt_point() {
     // SAFETY: enabling interrupts for one instruction lets the processor
     // take pending ones; no lock is held here.
     unsafe { core::arch::asm!("sti", "nop", "cli", options(nomem, nostack)) };
-    if RESCHEDULE.swap(false, Ordering::Relaxed) {
+    if reschedule().swap(false, Ordering::Relaxed) {
         schedule(true);
     }
 }
@@ -1082,7 +1087,7 @@ fn user_entry(_: usize) {
 /// left pending are notified first.
 pub fn preempt_user() {
     crate::log::notify_pending();
-    if RESCHEDULE.swap(false, Ordering::Relaxed) {
+    if reschedule().swap(false, Ordering::Relaxed) {
         schedule(true);
     }
 }
@@ -1131,7 +1136,7 @@ pub fn timer_interrupt() {
         cpu.fair.enqueue(Queued::new(thread), entity);
     }
     if cpu.current.is_some() && now >= cpu.slice_end {
-        RESCHEDULE.store(true, Ordering::Relaxed);
+        reschedule().store(true, Ordering::Relaxed);
     }
     arm(&cpu);
     // Expired timers are signalled with the lock released, as setting a
