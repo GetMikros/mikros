@@ -5,7 +5,7 @@ use crate::gdt;
 use crate::log::log;
 use crate::serial;
 use crate::space;
-use boot_protocol::{BootInfo, NOTE_TYPE, VERSION_MAJOR, VERSION_MINOR};
+use boot_protocol::{BootInfo, NOTE_TYPE, VERSION_MAJOR, VERSION_MINOR, flags};
 use kernel_core::bootinfo::{self, HEADER_SIZE};
 
 /// An ELF note: a header, a name padded to 4 bytes, and a descriptor.
@@ -84,12 +84,21 @@ extern "sysv64" fn _start(info: *const u8) -> ! {
 
 /// Continues boot on the kernel's page tables and stack.
 extern "sysv64" fn on_kernel_tables() -> ! {
-    let Some(info) = *space::BOOT_INFO.lock() else {
+    let Some(mut info) = *space::BOOT_INFO.lock() else {
         panic!("BootInfo was not kept");
     };
     let ist = || space::new_stack(gdt::IST_STACK_SIZE);
     gdt::init(space::stack_top(), ist(), ist(), ist());
     crate::idt::init();
+    // A framebuffer that fails the checks is treated as absent from here
+    // on: no console, no panic screen and nothing for init.
+    if info.flags & flags::FRAMEBUFFER_PRESENT != 0
+        && let Err(e) =
+            bootinfo::check_framebuffer(&info.framebuffer, crate::memory::memory_map(&info))
+    {
+        log!(Warning, "not using the framebuffer: {e}");
+        info.flags &= !flags::FRAMEBUFFER_PRESENT;
+    }
     crate::console::init(&info);
     crate::reserved::init(&info);
     crate::syscall::init();

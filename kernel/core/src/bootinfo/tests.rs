@@ -118,3 +118,61 @@ fn decodes_memory_map_entries() {
     assert_eq!(memory_map_size(1, 8), Err(Error::BadEntrySize(8)));
     assert_eq!(memory_map_size(u64::MAX, 24), Ok(None));
 }
+
+fn entry(phys_start: u64, page_count: u64, kind: Kind) -> MemoryMapEntry {
+    MemoryMapEntry {
+        phys_start,
+        page_count,
+        kind: kind as u32,
+        reserved: 0,
+    }
+}
+
+#[test]
+fn checks_framebuffer_geometry() {
+    // 800 by 600 pixels with 32 pixels of padding per line, in two
+    // Framebuffer ranges listed out of order.
+    let fb = Framebuffer {
+        phys_base: 0x8000_0000,
+        size: 832 * 600 * 4,
+        width: 800,
+        height: 600,
+        stride: 832,
+        ..Framebuffer::default()
+    };
+    let pages = fb.size.div_ceil(4096);
+    let map = [
+        entry(0x8000_0000 + 4096 * 100, pages - 100, Kind::Framebuffer),
+        entry(0, 16, Kind::Usable),
+        entry(0x8000_0000, 100, Kind::Framebuffer),
+    ];
+    let check =
+        |fb: &Framebuffer, map: &[MemoryMapEntry]| check_framebuffer(fb, map.iter().copied());
+    assert_eq!(check(&fb, &map), Ok(()));
+    let with = |change: fn(&mut Framebuffer)| {
+        let mut f = fb;
+        change(&mut f);
+        check(&f, &map)
+    };
+    assert_eq!(with(|f| f.width = 0), Err(FramebufferError::Empty));
+    assert_eq!(with(|f| f.height = 0), Err(FramebufferError::Empty));
+    assert_eq!(
+        with(|f| f.stride = 799),
+        Err(FramebufferError::NarrowStride)
+    );
+    assert_eq!(with(|f| f.size -= 1), Err(FramebufferError::TooSmall));
+    assert_eq!(
+        with(|f| (f.stride, f.height) = (u32::MAX, u32::MAX)),
+        Err(FramebufferError::TooSmall)
+    );
+    assert_eq!(
+        with(|f| f.phys_base = u64::MAX - 4096),
+        Err(FramebufferError::RangeOverflow)
+    );
+    // A range of another kind, or a gap, does not cover it.
+    let mut other = map;
+    other[2].kind = Kind::Mmio as u32;
+    assert_eq!(check(&fb, &other), Err(FramebufferError::NotInMemoryMap));
+    assert_eq!(check(&fb, &map[..2]), Err(FramebufferError::NotInMemoryMap));
+    assert_eq!(check(&fb, &[]), Err(FramebufferError::NotInMemoryMap));
+}

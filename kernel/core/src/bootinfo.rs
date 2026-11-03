@@ -1,7 +1,9 @@
 //! Decoding the `BootInfo` structure and the memory map the bootloader
 //! passes to the kernel.
 
-use boot_protocol::{BOOT_INFO_SIZE, BootInfo, Framebuffer, MAGIC, MemoryMapEntry, VERSION_MAJOR};
+use boot_protocol::{
+    BOOT_INFO_SIZE, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, VERSION_MAJOR,
+};
 use core::fmt;
 
 /// The bytes needed to find the size of `BootInfo`.
@@ -149,6 +151,75 @@ pub fn memory_map(
         kind: u32::from_le_bytes(e[16..20].try_into().unwrap_or_default()),
         reserved: u32::from_le_bytes(e[20..24].try_into().unwrap_or_default()),
     }))
+}
+
+/// Why a framebuffer is not used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FramebufferError {
+    /// Its width or height is zero.
+    Empty,
+    /// Its stride is less than its width.
+    NarrowStride,
+    /// Its size is less than its stride times its height times 4 bytes.
+    TooSmall,
+    /// Its range runs past the end of the physical address space.
+    RangeOverflow,
+    /// Part of its range is not in a `Framebuffer` range of the memory map.
+    NotInMemoryMap,
+}
+
+impl fmt::Display for FramebufferError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            FramebufferError::Empty => "the framebuffer has no pixels",
+            FramebufferError::NarrowStride => "the framebuffer stride is less than its width",
+            FramebufferError::TooSmall => "the framebuffer is smaller than its lines",
+            FramebufferError::RangeOverflow => "the framebuffer range overflows",
+            FramebufferError::NotInMemoryMap => {
+                "the framebuffer is not in Framebuffer memory map ranges"
+            }
+        })
+    }
+}
+
+/// Checks the geometry of `fb`, and that its range is covered by the
+/// `Framebuffer` ranges of `map`.
+pub fn check_framebuffer(
+    fb: &Framebuffer,
+    map: impl Iterator<Item = MemoryMapEntry> + Clone,
+) -> Result<(), FramebufferError> {
+    if fb.width == 0 || fb.height == 0 {
+        return Err(FramebufferError::Empty);
+    }
+    if fb.stride < fb.width {
+        return Err(FramebufferError::NarrowStride);
+    }
+    let lines = u64::from(fb.stride)
+        .checked_mul(u64::from(fb.height))
+        .and_then(|n| n.checked_mul(4));
+    if lines.is_none_or(|n| n > fb.size) {
+        return Err(FramebufferError::TooSmall);
+    }
+    let end = fb
+        .phys_base
+        .checked_add(fb.size)
+        .ok_or(FramebufferError::RangeOverflow)?;
+    // Moves through the range from range to range of the map, which may
+    // be in any order.
+    let mut at = fb.phys_base;
+    while at < end {
+        at = map
+            .clone()
+            .filter(|e| e.kind == Kind::Framebuffer as u32)
+            .filter_map(|e| {
+                let len = e.page_count.checked_mul(4096)?;
+                let range_end = e.phys_start.checked_add(len)?;
+                (e.phys_start <= at && at < range_end).then_some(range_end)
+            })
+            .max()
+            .ok_or(FramebufferError::NotInMemoryMap)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
