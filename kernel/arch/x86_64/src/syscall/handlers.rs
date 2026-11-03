@@ -1974,3 +1974,8 @@ pub fn fuzz_set_interval(which: u32, ns: i64, out: UserOut<i64>) -> Result<(), E
     publish(outputs, &[bytes_of(&report)]);
     Ok(())
 }
+
+#[cfg(feature = "fuzz")]
+pub fn fuzz_fail_random(sources: u32) -> Result<(), Error> {
+    crate::fuzz::fail_random(sources)
+}

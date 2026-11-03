@@ -11,10 +11,11 @@ use mikros_rt::{Startup, log};
 use mikros_test::{Failure, PAGE_SIZE, PERM_READ, Result, check, ensure, sleep_ms};
 
 /// The tests, which `main` runs before the last of its own.
-pub const TESTS: [(&str, Test); 3] = [
+pub const TESTS: [(&str, Test); 4] = [
     ("failed_allocations", failed_allocations),
     ("unqueued_exception_report", unqueued_exception_report),
     ("maintenance_deadlines", maintenance_deadlines),
+    ("failed_random_sources", failed_random_sources),
 ];
 
 /// The kinds of allocation `fuzz_fail_alloc` makes fail.
@@ -333,4 +334,71 @@ fn maintenance_deadlines(_: &Startup) -> Result {
         "going back to the kernel's interval",
         kept[0] == reseed_after[0] && set_interval(RESEED, 1).is_err(),
     )
+}
+
+/// The hardware random sources `fuzz_fail_random` makes fail.
+const RDSEED: u32 = 1 << 0;
+const RDRAND: u32 = 1 << 1;
+
+/// Makes the instructions of `sources` report failure, and the others
+/// succeed.
+fn fail_random(sources: u32) -> Result {
+    // SAFETY: the call takes no pointers.
+    check("making random sources fail", unsafe {
+        sys::fuzz_fail_random(sources)
+    })
+}
+
+/// The hardware random sources CPUID reports.
+fn random_sources() -> u32 {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+    let rdseed = __cpuid(0).eax >= 7 && __cpuid_count(7, 0).ebx & (1 << 18) != 0;
+    let rdrand = __cpuid(1).ecx & (1 << 30) != 0;
+    let mut sources = 0;
+    if rdseed {
+        sources |= RDSEED;
+    }
+    if rdrand {
+        sources |= RDRAND;
+    }
+    sources
+}
+
+/// Whether a reseed succeeds within 50 ms, at an interval of 5 ms, and
+/// how many were tried meanwhile.
+fn reseeded() -> Result<(bool, i64)> {
+    let before = set_interval(RESEED, 0)?;
+    sleep_ms(50);
+    let after = set_interval(RESEED, 0)?;
+    Ok((after[2] != before[2], after[0] - before[0]))
+}
+
+/// A failed RDSEED or RDRAND gives no output: while both fail, the
+/// kernel's reseeds are tried and none succeeds, yet `system_get_random`
+/// goes on returning new bytes; while one fails, a reseed succeeds with
+/// the other alone, when CPUID reports it.
+fn failed_random_sources(_: &Startup) -> Result {
+    let sources = random_sources();
+    ensure("finding a hardware random source", sources != 0)?;
+    set_interval(RESEED, 5 * MS)?;
+    fail_random(RDSEED | RDRAND)?;
+    let (succeeded, tried) = reseeded()?;
+    ensure("trying to reseed", tried >= 2)?;
+    ensure("reseeding without output", !succeeded)?;
+    let (mut a, mut b) = ([0u8; 64], [0u8; 64]);
+    // SAFETY: the pointers and lengths describe the arrays.
+    unsafe {
+        check("drawing", sys::system_get_random(a.as_mut_ptr(), 64))?;
+        check("drawing again", sys::system_get_random(b.as_mut_ptr(), 64))?;
+    }
+    ensure("drawing new bytes", a != b && a != [0; 64] && b != [0; 64])?;
+    for (failing, other) in [(RDSEED, RDRAND), (RDRAND, RDSEED), (0, sources)] {
+        if sources & other == 0 {
+            continue;
+        }
+        fail_random(failing)?;
+        ensure("reseeding from the other source", reseeded()?.0)?;
+    }
+    fail_random(0)?;
+    set_interval(RESEED, -1).map(drop)
 }

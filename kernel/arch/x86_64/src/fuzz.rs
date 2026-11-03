@@ -3,7 +3,7 @@
 
 use crate::percpu;
 use crate::sched::Thread;
-use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use kernel_core::object::Object;
 use kernel_core::status::Error;
 
@@ -113,4 +113,28 @@ pub fn set_interval(which: u32, ns: i64) -> Result<[i64; 3], Error> {
     };
     let served = SERVED[which as usize].load(Ordering::Relaxed) as i64;
     Ok([served, last, succeeded])
+}
+
+/// The hardware random sources whose instructions `fuzz_fail_random`
+/// makes report failure.
+pub const RDSEED: u32 = 1 << 0;
+pub const RDRAND: u32 = 1 << 1;
+
+/// The sources that report failure.
+static RANDOM_FAILS: AtomicU32 = AtomicU32::new(0);
+
+/// Makes the instructions of `sources` report failure from now on, and
+/// those of the others succeed again. Fails with `InvalidArgs` for an
+/// unknown source.
+pub fn fail_random(sources: u32) -> Result<(), Error> {
+    if sources & !(RDSEED | RDRAND) != 0 {
+        return Err(Error::InvalidArgs);
+    }
+    RANDOM_FAILS.store(sources, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Whether the instruction of `source` is to report failure.
+pub fn random_fails(source: u32) -> bool {
+    RANDOM_FAILS.load(Ordering::Relaxed) & source != 0
 }

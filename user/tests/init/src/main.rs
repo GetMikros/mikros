@@ -3534,7 +3534,7 @@ fn coverage(_: &Startup) -> Result {
     /// The status of an unassigned number.
     const BAD_SYSCALL: i64 = -5;
     let mem = create_memory(PAGE_SIZE)?;
-    for number in [45u64, 46, 91, 92] {
+    for number in [45u64, 46, 91, 92, 93] {
         let status: i64;
         // SAFETY: SYSCALL changes only RAX, RCX and R11, and an
         // unassigned number reads no argument.

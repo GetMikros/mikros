@@ -52,6 +52,14 @@ fn word(source: Source) -> Option<u64> {
             }
         }
     }
+    // The fuzz build's `fuzz_fail_random` makes an instruction report
+    // failure, leaving its result as it is.
+    #[cfg(feature = "fuzz")]
+    let ok = match source {
+        Source::Rdseed if crate::fuzz::random_fails(crate::fuzz::RDSEED) => 0,
+        Source::Rdrand if crate::fuzz::random_fails(crate::fuzz::RDRAND) => 0,
+        _ => ok,
+    };
     (ok != 0).then_some(value)
 }
 
