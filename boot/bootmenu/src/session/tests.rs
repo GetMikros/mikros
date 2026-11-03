@@ -224,6 +224,53 @@ fn starts_at_once_with_timeout_0_and_shows_the_menu_when_the_entry_returns() {
 }
 
 #[test]
+fn starts_the_entry_started_at_once_only_once_without_a_usable_screen() {
+    let text = TWO_ENTRIES.replace("timeout: 3", "timeout: 0");
+    for result in [Ok(()), Err(String::from("x"))] {
+        let (config, menu) = setup(&text, 0);
+        let mut firmware = FakeFirmware::new(&[]);
+        firmware.screens.push_back(false);
+        firmware.results.push_back(result.clone());
+        let exit = run(&mut firmware, &config, menu);
+        assert_eq!(exit, Exit::NoScreen(result));
+        assert_eq!(
+            firmware.calls,
+            [
+                Call::KeyHeld,
+                start("\\EFI\\b.efi", Some("fast quiet")),
+                Call::OpenScreen,
+            ]
+        );
+    }
+}
+
+#[test]
+fn starts_the_default_entry_when_the_screen_is_lost_after_the_menu() {
+    let text = TWO_ENTRIES.replace("timeout: 3", "timeout: 0");
+    let (config, menu) = setup(&text, 0);
+    let mut firmware = FakeFirmware::new(&[Item::Card(0)]);
+    firmware.screens = [true, false].into_iter().collect();
+    firmware.results = [Err(String::from("x")), Ok(()), Err(String::from("y"))]
+        .into_iter()
+        .collect();
+    let exit = run(&mut firmware, &config, menu);
+    assert_eq!(exit, Exit::NoScreen(Err(String::from("y"))));
+    assert_eq!(
+        firmware.calls,
+        [
+            Call::KeyHeld,
+            start("\\EFI\\b.efi", Some("fast quiet")),
+            Call::OpenScreen,
+            Call::DisableWatchdog,
+            show(None, Some("Couldn't start B: x"), 1),
+            start("\\EFI\\a.efi", None),
+            Call::OpenScreen,
+            start("\\EFI\\b.efi", Some("fast quiet")),
+        ]
+    );
+}
+
+#[test]
 fn returns_to_the_menu_with_the_reason_an_entry_failed() {
     let (config, mut menu) = setup(TWO_ENTRIES, 2);
     menu.notice = Some(String::from("startup"));

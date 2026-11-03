@@ -38,8 +38,10 @@ pub trait Firmware {
 pub enum Exit {
     /// A power button was activated.
     Power(Power),
-    /// No display mode was usable, so an image was started without showing
-    /// the menu, and it returned with this result.
+    /// No display mode was usable, and this is the result of the image
+    /// started without showing the menu: the default entry when it was
+    /// started at once, and otherwise the image started because no display
+    /// mode was usable.
     NoScreen(Result<(), String>),
 }
 
@@ -50,52 +52,82 @@ pub fn run<F: Firmware>(firmware: &mut F, config: &Config, mut menu: Menu) -> Ex
     let default = config.default_index();
 
     // Decide what happens at start-up: start the default entry at once, show
-    // the menu with a countdown, or show it without one.
-    let mut start_now = None;
+    // the menu with a countdown, or show it without one. The result of the
+    // entry started at once is kept until the menu is shown.
+    let mut started_at_once = None;
     if let Some(entry) = config.entries.get(default)
         && !firmware.key_held()
     {
         match config.timeout {
-            Some(0) => start_now = Some(Item::Card(default)),
+            Some(0) => {
+                started_at_once = Some(start(
+                    firmware,
+                    config,
+                    &mut menu,
+                    default,
+                    startup_notice.as_deref(),
+                ));
+            }
             Some(seconds) => menu.countdown = Some((entry.name.clone(), seconds)),
             None => {}
         }
     }
 
     loop {
-        let item = match start_now.take() {
-            Some(item) => item,
-            None => {
-                let Some(screen) = firmware.open_screen() else {
-                    let (path, args) = match config.entries.get(default) {
-                        Some(entry) => (entry.path.as_str(), entry.args.as_deref()),
-                        None => (MIKROSBOOT_PATH, None),
-                    };
-                    return Exit::NoScreen(firmware.start_file(path, args));
+        let Some(screen) = firmware.open_screen() else {
+            // An entry started at once is not started a second time.
+            let result = started_at_once.unwrap_or_else(|| {
+                let (path, args) = match config.entries.get(default) {
+                    Some(entry) => (entry.path.as_str(), entry.args.as_deref()),
+                    None => (MIKROSBOOT_PATH, None),
                 };
-                firmware.disable_watchdog();
-                firmware.show(&mut menu, screen, default)
-            }
+                firmware.start_file(path, args)
+            });
+            return Exit::NoScreen(result);
         };
-        match item {
+        started_at_once = None;
+        firmware.disable_watchdog();
+        match firmware.show(&mut menu, screen, default) {
             Item::Button(power) => return Exit::Power(power),
             Item::Card(index) => {
-                let result = match config.entries.get(index) {
-                    Some(entry) => firmware.start_file(&entry.path, entry.args.as_deref()),
-                    None => firmware.start_detected(index - config.entries.len()),
-                };
-                menu.notice = match result {
-                    Ok(()) => startup_notice.clone(),
-                    Err(reason) => Some(format!(
-                        "Couldn't start {}: {reason}",
-                        menu.cards[index].name
-                    )),
-                };
-                menu.focus = Some((Item::Card(index), FocusSource::Keyboard));
-                menu.countdown = None;
+                // The menu shows the reason when it could not be started.
+                let _ = start(
+                    firmware,
+                    config,
+                    &mut menu,
+                    index,
+                    startup_notice.as_deref(),
+                );
             }
         }
     }
+}
+
+/// Starts the entry or detected system of card `index`, and prepares `menu`
+/// to be shown again once it returns: focused on that card, without the
+/// countdown, and with `startup_notice` or the reason it could not be
+/// started. Returns the result of starting it.
+fn start<F: Firmware>(
+    firmware: &mut F,
+    config: &Config,
+    menu: &mut Menu,
+    index: usize,
+    startup_notice: Option<&str>,
+) -> Result<(), String> {
+    let result = match config.entries.get(index) {
+        Some(entry) => firmware.start_file(&entry.path, entry.args.as_deref()),
+        None => firmware.start_detected(index - config.entries.len()),
+    };
+    menu.notice = match &result {
+        Ok(()) => startup_notice.map(String::from),
+        Err(reason) => Some(format!(
+            "Couldn't start {}: {reason}",
+            menu.cards[index].name
+        )),
+    };
+    menu.focus = Some((Item::Card(index), FocusSource::Keyboard));
+    menu.countdown = None;
+    result
 }
 
 /// A key stroke read from the console.
