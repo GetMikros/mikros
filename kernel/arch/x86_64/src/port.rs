@@ -226,6 +226,9 @@ fn remove(matches: impl Fn(&Registration<Kernel>) -> bool) -> Vec<Registration<K
 /// Removes the registrations that ended, releasing their charges. They
 /// keep the charges until the list of them goes, so those cover it.
 fn purge() {
+    if !REGISTRATIONS.lock().any_ended() {
+        return;
+    }
     for r in remove(|r| r.is_done()) {
         r.extra.release();
     }
