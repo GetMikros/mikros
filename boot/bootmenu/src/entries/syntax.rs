@@ -69,20 +69,34 @@ pub fn pair(text: &str, line: usize) -> Result<Pair<'_>, Error> {
     if key.is_empty() || key.ends_with(' ') || "-?:,[]{}#&*!|>'\"%@`".contains(first) {
         return Err(syntax("invalid key"));
     }
-    let rest = text[colon + 1..].trim_start_matches(' ');
+    let rest = text[colon + 1..].trim_start_matches(is_blank);
     let value = (!rest.is_empty() && !rest.starts_with('#')).then_some(rest);
     Ok(Pair { key, value, line })
 }
 
-/// Parses a value that starts at the beginning of `text`.
+/// Whether `c` is a space or a tab, which a comment may follow.
+fn is_blank(c: char) -> bool {
+    c == ' ' || c == '\t'
+}
+
+/// `text` up to its comment, which starts at a `#` after a space or a
+/// tab.
+fn before_comment(text: &str) -> &str {
+    let start = text
+        .char_indices()
+        .find(|&(i, c)| c == '#' && text[..i].ends_with(is_blank));
+    start.map_or(text, |(i, _)| &text[..i])
+}
+
+/// Parses a value that starts at the beginning of `text`, which is
+/// neither blank nor a comment.
 pub fn value(text: &str, line: usize) -> Result<String, Error> {
     let syntax = |what| error(line, ErrorKind::Syntax(what));
     let (value, rest) = match text.as_bytes()[0] {
         b'"' => double_quoted(&text[1..]).ok_or_else(|| syntax("invalid double-quoted string"))?,
         b'\'' => single_quoted(&text[1..]).ok_or_else(|| syntax("unterminated quoted string"))?,
         _ => {
-            let end = text.find(" #").unwrap_or(text.len());
-            let plain = text[..end].trim_end_matches(' ');
+            let plain = before_comment(text).trim_end_matches(is_blank);
             let first = plain.as_bytes()[0];
             let indicator = b"[]{},&*!|>%@`".contains(&first)
                 || (b"-?:".contains(&first) && plain[1..].starts_with(' '));
@@ -92,8 +106,7 @@ pub fn value(text: &str, line: usize) -> Result<String, Error> {
             return Ok(plain.to_string());
         }
     };
-    let rest = rest.trim_start_matches(' ');
-    if !(rest.is_empty() || rest.starts_with('#')) {
+    if !before_comment(rest).trim_start_matches(is_blank).is_empty() {
         return Err(syntax("unexpected text after quoted string"));
     }
     Ok(value)

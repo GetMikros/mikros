@@ -30,6 +30,7 @@ fn splits_pairs() {
     assert_eq!((p.key, p.value, p.line), ("key", Some("value # note"), 3));
     assert_eq!(pair("key:", 1).unwrap().value, None);
     assert_eq!(pair("key:   # only a comment", 1).unwrap().value, None);
+    assert_eq!(pair("key: \t# after a tab", 1).unwrap().value, None);
     assert_eq!(pair("path: C:\\x: y", 1).unwrap().value, Some("C:\\x: y"));
     assert_eq!(syntax_error(pair("no colon here", 4)), 4);
     assert_eq!(syntax_error(pair("key:value", 1)), 1);
@@ -41,7 +42,10 @@ fn splits_pairs() {
 fn reads_plain_values() {
     assert_eq!(value("one two", 1).unwrap(), "one two");
     assert_eq!(value("one   # comment", 1).unwrap(), "one");
+    assert_eq!(value("one\t# comment", 1).unwrap(), "one");
+    assert_eq!(value("one \t # comment", 1).unwrap(), "one");
     assert_eq!(value("C# and x#1", 1).unwrap(), "C# and x#1");
+    assert_eq!(value("a\tb\t", 1).unwrap(), "a\tb");
     assert_eq!(value("-5", 1).unwrap(), "-5");
     for bad in [
         "[1]", "{a: 1}", "*ref", "&anchor", "!tag", "|", ">", "- x", "a: b", "a:",
@@ -55,15 +59,20 @@ fn reads_double_quoted_values() {
     let text = r#""a\nb\tc\"d\\e\/f#g" # comment"#;
     assert_eq!(value(text, 1).unwrap(), "a\nb\tc\"d\\e/f#g");
     assert_eq!(value("\"\"", 1).unwrap(), "");
+    assert_eq!(value("\"a\"\t# comment", 1).unwrap(), "a");
     assert_eq!(syntax_error(value("\"open", 1)), 1);
     assert_eq!(syntax_error(value(r#""\x""#, 1)), 1);
     assert_eq!(syntax_error(value("\"a\" b", 1)), 1);
+    // A comment starts only after a space or a tab.
+    assert_eq!(syntax_error(value("\"a\"# comment", 1)), 1);
+    assert_eq!(syntax_error(value("\"a\" b # comment", 1)), 1);
 }
 
 #[test]
 fn reads_single_quoted_values() {
     assert_eq!(value("'it''s # here'", 1).unwrap(), "it's # here");
     assert_eq!(value("'a\\n'", 1).unwrap(), "a\\n");
+    assert_eq!(value("'a'\t# comment", 1).unwrap(), "a");
     assert_eq!(syntax_error(value("'open", 1)), 1);
     assert_eq!(syntax_error(value("'a' b", 1)), 1);
 }
