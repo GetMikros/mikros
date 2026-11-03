@@ -119,6 +119,10 @@ fn page_table_problems(tlb: &str, image: &Image) -> Vec<String> {
         {
             problems.push(format!("{virt:#x} lies outside the layout"));
         }
+        // The bootloader's mappings there were supervisor ones.
+        if virt < DIRECT_MAP && t.flags.chars().nth(7) != Some('U') {
+            problems.push(format!("{virt:#x} is a kernel mapping in the lower half"));
+        }
         if virt >= DIRECT_MAP && t.writable() && !t.no_execute() {
             problems.push(format!("{virt:#x} is writable and executable"));
         }
@@ -359,10 +363,15 @@ ffffffff80002000: 0000000000402000 XG-DA---W
             page_table_problems(&tlb, &IMAGE).is_empty(),
             "inside the direct map"
         );
-        let tlb = format!("{TLB}0000800000000000: 0000000000400000 XG-DA---W\n");
+        let tlb = format!("{TLB}0000800000000000: 0000000000400000 XG-DA--UW\n");
         assert_eq!(
             page_table_problems(&tlb, &IMAGE),
             ["0x800000000000 lies outside the layout"]
+        );
+        let tlb = format!("{TLB}0000000000100000: 0000000000100000 XG-DA---W\n");
+        assert_eq!(
+            page_table_problems(&tlb, &IMAGE),
+            ["0x100000 is a kernel mapping in the lower half"]
         );
         // The large page maps the image's frames writable.
         let tlb = TLB.replace("0000000000400000 -G", "0000000000200000 -G");
