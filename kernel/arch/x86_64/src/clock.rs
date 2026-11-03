@@ -86,6 +86,29 @@ pub fn scaled_ns(ticks: u64, mult: u32, shift: u32) -> i64 {
     i64::try_from((u128::from(ticks) * u128::from(mult)) >> shift).unwrap_or(i64::MAX)
 }
 
+/// The counters the monotonic clock can come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Tsc,
+    Hpet,
+    PmTimer,
+}
+
+/// The source of the monotonic clock: the TSC when it is invariant,
+/// otherwise the HPET when there is one, otherwise the ACPI PM timer when
+/// the FADT describes one.
+pub fn clock_source(invariant_tsc: bool, hpet: bool, pm_timer: bool) -> Option<Source> {
+    if invariant_tsc {
+        Some(Source::Tsc)
+    } else if hpet {
+        Some(Source::Hpet)
+    } else if pm_timer {
+        Some(Source::PmTimer)
+    } else {
+        None
+    }
+}
+
 /// The size of the clock page header and the fields of `source` 1.
 pub const CLOCK_PAGE_SIZE: usize = 0x28;
 
@@ -107,6 +130,22 @@ pub fn clock_page(tsc: Option<(u32, u32, u64, i64)>) -> [u8; CLOCK_PAGE_SIZE] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefers_the_invariant_tsc_then_the_hpet_then_the_pm_timer() {
+        use Source::*;
+        let cases = [
+            ((true, true, true), Some(Tsc)),
+            ((true, false, false), Some(Tsc)),
+            ((false, true, true), Some(Hpet)),
+            ((false, true, false), Some(Hpet)),
+            ((false, false, true), Some(PmTimer)),
+            ((false, false, false), None),
+        ];
+        for ((tsc, hpet, pm), expected) in cases {
+            assert_eq!(clock_source(tsc, hpet, pm), expected, "{tsc} {hpet} {pm}");
+        }
+    }
 
     #[test]
     fn scales_tsc_ticks() {

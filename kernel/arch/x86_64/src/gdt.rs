@@ -203,6 +203,29 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64, debug: u
 mod tests {
     use super::*;
 
+    /// Whether a segment descriptor is present, its DPL, whether it is
+    /// code, and whether it is a 64-bit code segment.
+    fn decode(descriptor: u64) -> (bool, u64, bool, bool) {
+        let present = descriptor >> 47 & 1 == 1;
+        let dpl = descriptor >> 45 & 3;
+        let code = descriptor >> 43 & 1 == 1 && descriptor >> 44 & 1 == 1;
+        let long = descriptor >> 53 & 1 == 1;
+        (present, dpl, code, long)
+    }
+
+    #[test]
+    fn lays_out_the_segments() {
+        assert_eq!(SEGMENTS[0], 0);
+        let at = |selector: u16| decode(SEGMENTS[usize::from(selector) / 8]);
+        assert_eq!(at(KERNEL_CODE), (true, 0, true, true));
+        assert_eq!(at(KERNEL_DATA), (true, 0, false, false));
+        assert!(!at(0x18).0, "the 32-bit user code segment is not present");
+        assert_eq!(at(USER_DATA), (true, 3, false, false));
+        assert_eq!(at(USER_CODE), (true, 3, true, true));
+        assert_eq!(TSS_SELECTOR, 0x30);
+        assert_eq!((USER_CODE | 3, USER_DATA | 3), (0x2B, 0x23));
+    }
+
     #[test]
     fn encodes_the_tss_descriptor() {
         let [low, high] = tss_descriptor(0xFFFF_FFFF_8012_3456, 0x2068);

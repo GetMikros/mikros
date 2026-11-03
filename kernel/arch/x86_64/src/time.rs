@@ -1,6 +1,9 @@
 //! Setting up and reading the monotonic clock.
 
-use crate::clock::{PIT_HZ, PM_TIMER_HZ, TscLeaves, clock_page, measured_hz, scaled_ns, tsc_scale};
+use crate::clock::{
+    PIT_HZ, PM_TIMER_HZ, Source, TscLeaves, clock_page, clock_source, measured_hz, scaled_ns,
+    tsc_scale,
+};
 use crate::cpu::{in8, in32, out8, rdtsc};
 use crate::log::log;
 use crate::memory::DirectMem;
@@ -241,27 +244,32 @@ pub fn init(info: &BootInfo) {
         crate::timer::set_hz(apic_hz);
     }
 
-    let name;
-    if leaves.invariant() {
-        // The clock page gives user space the same factor and shift, so
-        // that it computes exactly the values `now` returns.
-        let (mult, shift) = tsc_scale(tsc_hz);
-        RATE.store(u64::from(shift) << 32 | u64::from(mult), Ordering::Relaxed);
-        SOURCE.store(TSC, Ordering::Relaxed);
-        name = "the TSC";
-    } else if let Some((virt, period_fs, wide)) = hpet {
-        ADDRESS.store(virt, Ordering::Relaxed);
-        RATE.store(period_fs, Ordering::Relaxed);
-        WIDTH.store(if wide { 64 } else { 32 }, Ordering::Relaxed);
-        SOURCE.store(HPET, Ordering::Relaxed);
-        name = "the HPET";
-    } else if pm.is_some() {
-        RATE.store(PM_TIMER_HZ, Ordering::Relaxed);
-        SOURCE.store(PM, Ordering::Relaxed);
-        name = "the ACPI PM timer";
-    } else {
-        panic!("no clock source: no invariant TSC, HPET or ACPI PM timer");
-    }
+    let name = match (
+        clock_source(leaves.invariant(), hpet.is_some(), pm.is_some()),
+        hpet,
+    ) {
+        (Some(Source::Tsc), _) => {
+            // The clock page gives user space the same factor and shift,
+            // so that it computes exactly the values `now` returns.
+            let (mult, shift) = tsc_scale(tsc_hz);
+            RATE.store(u64::from(shift) << 32 | u64::from(mult), Ordering::Relaxed);
+            SOURCE.store(TSC, Ordering::Relaxed);
+            "the TSC"
+        }
+        (Some(Source::Hpet), Some((virt, period_fs, wide))) => {
+            ADDRESS.store(virt, Ordering::Relaxed);
+            RATE.store(period_fs, Ordering::Relaxed);
+            WIDTH.store(if wide { 64 } else { 32 }, Ordering::Relaxed);
+            SOURCE.store(HPET, Ordering::Relaxed);
+            "the HPET"
+        }
+        (Some(Source::PmTimer), _) => {
+            RATE.store(PM_TIMER_HZ, Ordering::Relaxed);
+            SOURCE.store(PM, Ordering::Relaxed);
+            "the ACPI PM timer"
+        }
+        _ => panic!("no clock source: no invariant TSC, HPET or ACPI PM timer"),
+    };
     BASE.store(counter(), Ordering::Release);
     log!(Info, "monotonic clock from {name}");
 }
