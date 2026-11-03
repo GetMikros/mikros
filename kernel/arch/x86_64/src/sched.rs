@@ -631,6 +631,12 @@ fn finish_switch() {
 /// next thread, or idles. Returns when the thread runs again, unless it
 /// is not queued and nothing wakes it.
 fn schedule(requeue: bool) {
+    // RFLAGS.AC is not switched, so a thread that kept it would let the
+    // next one reach user pages past SMAP.
+    debug_assert!(
+        crate::cpu::rflags() & crate::cpu::RFLAGS_AC == 0,
+        "scheduling with RFLAGS.AC set"
+    );
     let now = crate::time::now();
     let mut cpu = this_cpu().lock();
     let Some(current) = cpu.current.take() else {

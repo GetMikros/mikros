@@ -1857,6 +1857,42 @@ fn paged_object(s: &Startup, pages: u64, options: u32) -> Result<(Handle, Handle
     Ok((pager, mem))
 }
 
+/// Faults that wait for a pager, in the copy routine of a system call
+/// and in user code that set RFLAGS.AC, leave AC clear in the kernel,
+/// which the debug kernel checks whenever it switches threads.
+fn access_flag_cleared_on_entry(s: &Startup) -> Result {
+    let (_pager, mem) = paged_object(s, 2, 0)?;
+    let at = map(s.process, mem, 2 * PAGE_SIZE)?;
+    let copy = create_memory(PAGE_SIZE)?;
+    // SAFETY: the source lies in the mapping; reading it waits for the
+    // pager.
+    check("writing from an absent page", unsafe {
+        sys::mem_write(copy, 0, at as *const u8, 6)
+    })?;
+    ensure(
+        "copying the supplied page",
+        mem_read_at::<6>(copy, 0)? == *b"page 0",
+    )?;
+    let byte: u8;
+    // SAFETY: the second page is mapped readable. With AC set, only the
+    // aligned stack words and one byte are accessed, so alignment checks
+    // cannot fault.
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "bts qword ptr [rsp], 18",
+            "popfq",
+            "mov {byte}, byte ptr [{addr}]",
+            "pushfq",
+            "btr qword ptr [rsp], 18",
+            "popfq",
+            addr = in(reg) at + PAGE_SIZE,
+            byte = out(reg_byte) byte,
+        );
+    }
+    ensure("reading with AC set", byte == b'p')
+}
+
 /// Supplying, writing back and evicting a paged object of more pages
 /// than the kernel handles in one piece reaches every page.
 fn large_pager_operations(s: &Startup) -> Result {
@@ -3098,7 +3134,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 48] = [
+const TESTS: [(&str, Test); 49] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -3123,6 +3159,7 @@ const TESTS: [(&str, Test); 48] = [
     ("pager_operations", pager_operations),
     ("large_pager_operations", large_pager_operations),
     ("paged_outputs", paged_outputs),
+    ("access_flag_cleared_on_entry", access_flag_cleared_on_entry),
     ("kill_blocked_thread", kill_blocked_thread),
     ("kill_stopped_thread", kill_stopped_thread),
     ("debug_at_syscall_entry", debug_at_syscall_entry),

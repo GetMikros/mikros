@@ -6,6 +6,21 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// Whether INVPCID is used: reported, with PCIDs enabled.
 static INVPCID: AtomicBool = AtomicBool::new(false);
 
+/// Whether SMAP is reported, so that STAC and CLAC may be used. The
+/// interrupt entry reads it as a byte.
+pub static SMAP: AtomicBool = AtomicBool::new(false);
+
+/// RFLAGS.AC, which lets the kernel reach user pages while SMAP is on.
+pub const RFLAGS_AC: u64 = 1 << 18;
+
+/// The current RFLAGS.
+pub fn rflags() -> u64 {
+    let value;
+    // SAFETY: PUSHFQ and POP only move RFLAGS through the stack.
+    unsafe { asm!("pushfq", "pop {}", out(reg) value, options(nomem, preserves_flags)) };
+    value
+}
+
 /// Stops the processor with interrupts disabled.
 pub fn halt() -> ! {
     loop {
@@ -185,6 +200,7 @@ pub fn init() {
         write_xcr(0, control::xcr0(features));
     }
     INVPCID.store(features.pcid && features.invpcid, Ordering::Relaxed);
+    SMAP.store(features.smap, Ordering::Relaxed);
 }
 
 /// Whether `invpcid_address` and `invpcid_context` may be used.

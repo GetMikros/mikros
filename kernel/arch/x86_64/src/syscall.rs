@@ -2,7 +2,7 @@
 //! dispatch generated from `kernel/syscalls.yaml` and the handlers.
 
 use crate::aspace::{USER_END, USER_START};
-use crate::cpu::write_msr;
+use crate::cpu::{RFLAGS_AC, write_msr};
 use crate::gdt::{KERNEL_CODE, USER_CODE, USER_DATA};
 use crate::percpu::{KERNEL_STACK_OFFSET, USER_RSP_OFFSET};
 use crate::usercopy::copy_in;
@@ -28,7 +28,6 @@ const RFLAGS_TF: u64 = 1 << 8;
 const RFLAGS_IF: u64 = 1 << 9;
 const RFLAGS_DF: u64 = 1 << 10;
 const RFLAGS_NT: u64 = 1 << 14;
-const RFLAGS_AC: u64 = 1 << 18;
 
 /// The registers of a thread that entered with `SYSCALL`, saved on its
 /// kernel stack in the layout of an interrupt frame without the vector

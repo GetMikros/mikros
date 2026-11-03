@@ -97,6 +97,10 @@ pub struct Frame {
 // the stack to 16 bytes before it pushes, so the 22 words of the frame
 // leave it aligned for the call.
 //
+// Both paths first clear RFLAGS.AC when SMAP is reported: neither an
+// interrupt gate nor the processor clears it, and user code or the user
+// copy routine may have set it. IRETQ restores the interrupted value.
+//
 // Vectors with an IST entry go through `ist_common` instead. Such an
 // entry can interrupt kernel code that has not yet swapped GS, such as
 // the first instruction of the system call entry, so neither the saved
@@ -128,6 +132,10 @@ global_asm!(
     ".set vector, vector + 1",
     ".endr",
     "interrupt_common:",
+    "cmp byte ptr [rip + {smap}], 0",
+    "je 7f",
+    "clac",
+    "7:",
     // Swap to the kernel GS base when the interrupted code ran in user
     // mode, as its saved CS shows, and back before returning to it.
     "test byte ptr [rsp + 24], 3",
@@ -165,6 +173,10 @@ global_asm!(
     "3:",
     "iretq",
     "ist_common:",
+    "cmp byte ptr [rip + {smap}], 0",
+    "je 8f",
+    "clac",
+    "8:",
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
@@ -220,6 +232,7 @@ global_asm!(
     interrupt = sym interrupt,
     fuzz = const cfg!(feature = "fuzz") as u8,
     interrupts = const crate::percpu::INTERRUPTS_OFFSET,
+    smap = sym crate::cpu::SMAP,
 );
 
 #[cfg(target_os = "none")]
