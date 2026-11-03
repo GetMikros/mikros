@@ -8,8 +8,9 @@
 //! `thread_exit`. With 7 it executes an undefined instruction with
 //! `skip_with_reserved_byte` as the handler of `ILL`, and returns 7 if
 //! that returns. With 8 it waits on the futex at `SHARED`, which its
-//! starter maps, and returns the status of the wait. Otherwise it waits
-//! on its bootstrap channel until it is killed.
+//! starter maps, and returns the status of the wait. With 9 it writes to
+//! the pages of a memory object it creates, in `touch_own_pages`.
+//! Otherwise it waits on its bootstrap channel until it is killed.
 
 #![no_std]
 #![no_main]
@@ -83,10 +84,47 @@ fn main(bootstrap: Handle, arg2: u64) -> i64 {
         // SAFETY: the starter maps the page at `SHARED` readable.
         return unsafe { sys::futex_wait(SHARED as *const u32, 0, i64::MAX) };
     }
+    if arg2 == 9 {
+        return touch_own_pages(bootstrap);
+    }
     let mut observed = 0;
     // SAFETY: the out pointer is valid for the call.
     unsafe { sys::object_wait_one(bootstrap, 1 << 0, i64::MAX, &mut observed) };
     0
+}
+
+/// The pages mode 9 creates and touches.
+const OWN_PAGES: u64 = 64;
+
+/// Reads a handle to this process from `bootstrap`, creates a memory
+/// object of `OWN_PAGES` pages, which this process's budget pays for,
+/// maps it and writes to each page. Returns 9 if all writes succeed.
+fn touch_own_pages(bootstrap: Handle) -> i64 {
+    const READABLE: u32 = 1 << 0;
+    let size = OWN_PAGES * 4096;
+    let (mut observed, mut process, mut len, mut count) = (0, 0, 0, 0);
+    let (mut mem, mut at) = (0, 0);
+    // SAFETY: the pointers are valid for the calls, and the capacities
+    // describe them.
+    unsafe {
+        sys::object_wait_one(bootstrap, READABLE, i64::MAX, &mut observed);
+        sys::channel_read(
+            bootstrap,
+            core::ptr::null_mut(),
+            0,
+            &mut process,
+            1,
+            &mut len,
+            &mut count,
+        );
+        sys::mem_create(size, 0, &mut mem);
+        sys::vm_map(process, 3, 0, mem, 0, size, &mut at);
+    }
+    for page in 0..OWN_PAGES {
+        // SAFETY: the object is mapped readable and writable at `at`.
+        unsafe { ((at + page * 4096) as *mut u8).write_volatile(1) };
+    }
+    9
 }
 
 /// A signal handler that sets the first reserved byte of the context,

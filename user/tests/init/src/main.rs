@@ -245,6 +245,17 @@ fn start_program_with(
     arg2: u64,
     setup: impl FnOnce(Handle) -> Result,
 ) -> Result<(Handle, Handle)> {
+    start_program_in(s, s.budget, name, arg2, setup)
+}
+
+/// Like `start_program_with`, with the process belonging to `budget`.
+fn start_program_in(
+    s: &Startup,
+    budget: Handle,
+    name: &str,
+    arg2: u64,
+    setup: impl FnOnce(Handle) -> Result,
+) -> Result<(Handle, Handle)> {
     let image_size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
     let mut at = 0;
     // SAFETY: the out pointer is valid for the call.
@@ -272,7 +283,7 @@ fn start_program_with(
     let name = name.as_bytes();
     // SAFETY: the pointers describe `name` and `process`.
     let status =
-        unsafe { sys::process_create(s.budget, name.as_ptr(), name.len() as u64, &mut process) };
+        unsafe { sys::process_create(budget, name.as_ptr(), name.len() as u64, &mut process) };
     check("creating a process", status)?;
     // SAFETY: the pointers describe `name` and `thread`.
     let status =
@@ -2906,6 +2917,46 @@ fn exception_reports_and_actions(s: &Startup) -> Result {
     // SAFETY: the call takes no pointers.
     check("killing", unsafe { sys::task_kill(process) })?;
     ensure("ending with exit code -1", exit_code(process)? == -1)
+}
+
+/// A page fault whose frame the process's budget cannot pay for is
+/// reported as `OUT_OF_MEMORY` at the faulting instruction: the debuggee
+/// writes to 64 pages of its own object under a budget of 16 pages.
+fn out_of_memory_report(s: &Startup) -> Result {
+    const OUT_OF_MEMORY: u32 = 10;
+    const SAME_RIGHTS: u32 = 1 << 31;
+    let mut budget = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a budget", unsafe {
+        sys::budget_create(s.budget, 1 << 20, 16, &mut budget)
+    })?;
+    let mut channel = 0;
+    let (process, bootstrap) = start_program_in(s, budget, "debuggee", 9, |process| {
+        // SAFETY: the out pointer is valid for the call.
+        check("creating an exception channel", unsafe {
+            sys::exception_channel_create(process, 0, &mut channel)
+        })
+    })?;
+    let mut copy = 0;
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check(
+            "duplicating the process handle",
+            sys::handle_duplicate(process, SAME_RIGHTS, &mut copy),
+        )?;
+        check(
+            "sending it",
+            sys::channel_write(bootstrap, core::ptr::null(), 0, &copy, 1),
+        )?;
+    }
+    let (r, thread) = report_bytes(channel)?;
+    ensure("reporting OUT_OF_MEMORY", u32_at(&r, 0) == OUT_OF_MEMORY)?;
+    ensure(
+        "giving the instruction address",
+        (0x1_0000..0x7FFF_FFFF_F000).contains(&u64_at(&r, 0x18)),
+    )?;
+    check("terminating", act(thread, TERMINATE))?;
+    ensure("ending with exit code -2", exit_code(process)? == -2)
 }
 
 /// A thread reports its start with its entry point, where it starts, and
@@ -5814,7 +5865,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 90] = [
+const TESTS: [(&str, Test); 91] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -5855,6 +5906,7 @@ const TESTS: [(&str, Test); 90] = [
         "exception_reports_and_actions",
         exception_reports_and_actions,
     ),
+    ("out_of_memory_report", out_of_memory_report),
     ("thread_events", thread_events),
     ("start_refusals", start_refusals),
     ("kill_stopped_thread", kill_stopped_thread),
