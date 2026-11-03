@@ -143,8 +143,7 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
     let read = |address: u64| unsafe { (address as *const u64).read() };
     let _ = panic::write(
         &mut Serial,
-        "
-",
+        "\r\n",
         Report {
             title,
             build_id: build_id(),
