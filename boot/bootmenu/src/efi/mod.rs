@@ -31,38 +31,33 @@ use uefi::proto::device_path::DevicePath;
 use uefi::{CString16, Status, boot, system};
 use uefi_raw::protocol::console::KeyToggleState;
 
-/// Reads the file at `path` on `volume`. `describe` describes a failure
-/// other than a missing file.
-fn read_file(
-    volume: Result<&mut FileSystem, String>,
-    path: &str,
-    describe: impl FnOnce(uefi::fs::Error) -> String,
-) -> Result<Vec<u8>, ReadError> {
+/// Reads the file at `path` on `volume`. A failure of the firmware other
+/// than a missing file is described by the name of its status, such as
+/// `DEVICE_ERROR`.
+fn read_file(volume: Result<&mut FileSystem, String>, path: &str) -> Result<Vec<u8>, ReadError> {
     let volume = volume.map_err(ReadError::Other)?;
     let name = CString16::try_from(path)
         .map_err(|_| ReadError::Other(String::from("the path is not valid")))?;
     volume.read(name.as_ref()).map_err(|err| match err {
-        uefi::fs::Error::Io(err) if err.uefi_error.status() == Status::NOT_FOUND => {
-            ReadError::NotFound
-        }
-        err => ReadError::Other(describe(err)),
+        uefi::fs::Error::Io(err) => match err.uefi_error.status() {
+            Status::NOT_FOUND => ReadError::NotFound,
+            status => ReadError::Other(format!("{status:?}")),
+        },
+        err => ReadError::Other(format!("{err}")),
     })
 }
 
 /// Reads the entries file from the volume the boot manager was loaded from.
 fn load_config(volume: Result<&mut FileSystem, Status>) -> Loaded {
     let volume = volume.map_err(|status| format!("{status:?}"));
-    load::load_config(read_file(volume, ENTRIES_PATH, |err| format!("{err}")))
+    load::load_config(read_file(volume, ENTRIES_PATH))
 }
 
 /// Reads the BMP image at `path` on the boot volume and scales it to fit
 /// the tile.
 fn load_icon(volume: Option<&mut FileSystem>, path: &str) -> Result<bmp::Image, String> {
     let volume = volume.ok_or_else(|| String::from("the boot volume was not found"));
-    load::icon(read_file(volume, path, |err| match err {
-        uefi::fs::Error::Io(err) => format!("{:?}", err.uefi_error.status()),
-        err => format!("{err}"),
-    }))
+    load::icon(read_file(volume, path))
 }
 
 /// Builds the menu for `config`, followed by the `detected` systems, with
