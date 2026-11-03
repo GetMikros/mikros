@@ -939,7 +939,7 @@ syscalls:
     number: 91
     arch: [x86_64]
     fuzz_only: true
-    spec: [MIKSPEC-0017.R10]
+    spec: [MIKSPEC-0017.R16, MIKSPEC-0017.R21]
     args:
       - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
       - {name: kind, type: u32, dir: in}
@@ -950,7 +950,7 @@ syscalls:
     number: 92
     arch: [x86_64]
     fuzz_only: true
-    spec: [MIKSPEC-0017.R10]
+    spec: [MIKSPEC-0017.R16, MIKSPEC-0017.R18]
     args:
       - {name: which, type: u32, dir: in}
       - {name: ns, type: i64, dir: in}
@@ -960,7 +960,7 @@ syscalls:
     number: 93
     arch: [x86_64]
     fuzz_only: true
-    spec: [MIKSPEC-0017.R10]
+    spec: [MIKSPEC-0017.R16, MIKSPEC-0017.R19]
     args:
       - {name: sources, type: u32, dir: in}
 
@@ -968,7 +968,7 @@ syscalls:
     number: 94
     arch: [x86_64]
     fuzz_only: true
-    spec: [MIKSPEC-0017.R10]
+    spec: [MIKSPEC-0017.R16, MIKSPEC-0017.R22]
     args:
       - {name: point, type: u32, dir: in}
       - {name: count, type: u64, dir: in}
