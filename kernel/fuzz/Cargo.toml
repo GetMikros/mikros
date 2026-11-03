@@ -134,3 +134,10 @@ path = "fuzz_targets/ports.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "thread_state"
+path = "fuzz_targets/thread_state.rs"
+test = false
+doc = false
+bench = false
