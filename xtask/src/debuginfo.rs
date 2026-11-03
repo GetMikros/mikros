@@ -52,7 +52,7 @@ pub fn build_id(elf: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The path of an LLVM tool that comes with the Rust toolchain.
-fn llvm_tool(name: &str) -> Result<PathBuf> {
+pub fn llvm_tool(name: &str) -> Result<PathBuf> {
     let rustc = |arg: &str| -> Result<String> {
         let out = Command::new("rustc")
             .current_dir(crate::workspace_root())

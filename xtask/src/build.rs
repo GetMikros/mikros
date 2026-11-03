@@ -81,6 +81,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", bootloader.display());
     let kernel = cargo_build("kernel-x86_64", "kernel", KERNEL_TARGET, kind)?;
     println!("built    {}", kernel.display());
+    crate::extended::check(&kernel)?;
+    println!("checked  {} uses no x87 or vector state", kernel.display());
     let debug_info = crate::debuginfo::split(&kernel)?;
     println!("built    {}", debug_info.display());
     if kind == Kind::Fuzz {

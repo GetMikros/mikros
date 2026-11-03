@@ -4,6 +4,7 @@ mod build;
 mod check;
 mod debug;
 mod debuginfo;
+mod extended;
 mod firmware;
 mod fuzz;
 mod image;
