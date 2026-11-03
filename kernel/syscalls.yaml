@@ -974,3 +974,22 @@ syscalls:
       - {name: count, type: u64, dir: in}
       - {name: event, type: Handle, dir: in, object: Event, rights: [SIGNAL, WAIT], allow_invalid: true}
       - {name: deadline, type: i64, dir: in}
+
+  - name: interrupt_create
+    number: 95
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R20, MIKSPEC-0015.R13, MIKSPEC-0015.R24]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: irq, type: u32, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: Interrupt}
+
+  - name: interrupt_ack
+    number: 96
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R13, MIKSPEC-0015.R15]
+    args:
+      - {name: interrupt, type: Handle, dir: in, object: Interrupt, rights: [WRITE]}

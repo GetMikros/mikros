@@ -19,7 +19,7 @@ use kernel_core::object::handles::Entry;
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{
-    KIND_IOPORT, KIND_POLICY, KIND_PRIORITY, KIND_ROOT, Request, Resource,
+    KIND_IOPORT, KIND_IRQ, KIND_POLICY, KIND_PRIORITY, KIND_ROOT, Request, Resource,
 };
 use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
@@ -1426,6 +1426,27 @@ pub fn process_ioports_enable(
         return Err(Error::OutOfRange);
     }
     object::<Process>(process).enable_ioports(base, base + size, current_process()?.budget())
+}
+
+pub fn interrupt_create(
+    resource: Checked,
+    irq: u32,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if !object::<Resource>(resource).grants(KIND_IRQ, u64::from(irq), 1) {
+        return Err(Error::AccessDenied);
+    }
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let interrupt = crate::interrupt::Interrupt::new(current_process()?.budget(), irq, options)?;
+    give(interrupt, ObjectType::Interrupt, out)
+}
+
+pub fn interrupt_ack(interrupt: Checked) -> Result<(), Error> {
+    object::<crate::interrupt::Interrupt>(interrupt).ack();
+    Ok(())
 }
 
 #[cfg(feature = "fuzz")]

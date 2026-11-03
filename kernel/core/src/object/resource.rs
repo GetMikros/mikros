@@ -179,6 +179,11 @@ impl Resource {
         base.checked_add(size)
             .is_some_and(|end| base >= self.base && end <= self.base + self.size)
     }
+    /// Whether this resource grants the `size` units of `kind` from
+    /// `base`: it is the root, or of that kind and covers them.
+    pub fn grants(&self, kind: u32, base: u64, size: u64) -> bool {
+        self.kind == KIND_ROOT || (self.kind == kind && self.covers(base, size))
+    }
 }
 
 impl Drop for Resource {
@@ -320,5 +325,16 @@ mod tests {
         let _p = make(&root, KIND_PRIORITY, 0, 8, 0).unwrap();
         assert!(make(&root, KIND_PRIORITY, 4, 8, 0).is_ok());
         drop(s);
+    }
+
+    #[test]
+    fn grants_its_own_kind_in_range_and_the_root_everything() {
+        let root = Resource::root();
+        assert!(root.grants(KIND_IRQ, 0x1234, 1));
+        assert!(root.grants(KIND_IOPORT, 0xFFFF, 1));
+        let irq = make(&root, KIND_IRQ, 8, 2, 0).unwrap();
+        assert!(irq.grants(KIND_IRQ, 8, 2));
+        assert!(!irq.grants(KIND_IRQ, 9, 2));
+        assert!(!irq.grants(KIND_IOPORT, 8, 1));
     }
 }
