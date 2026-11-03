@@ -2303,6 +2303,141 @@ fn own_endpoints_not_sent(_: &Startup) -> Result {
     Ok(())
 }
 
+const BAD_HANDLE: i64 = -11;
+const OUT_OF_RANGE: i64 = -14;
+const BUFFER_TOO_SMALL: i64 = -15;
+const PEER_CLOSED: i64 = -24;
+
+/// Reads the next message of `channel` into buffers of `cap` bytes and
+/// `handles_cap` handles, and returns the status and the two sizes.
+fn read_sizes(channel: Handle, cap: usize, handles_cap: usize) -> (i64, u64, u64) {
+    let (mut bytes, mut handles) = ([0u8; 16], [0 as Handle; 2]);
+    let (mut len, mut count) = (0, 0);
+    // SAFETY: the capacities are at most the sizes of the buffers.
+    let status = unsafe {
+        sys::channel_read(
+            channel,
+            bytes.as_mut_ptr(),
+            cap.min(bytes.len()) as u64,
+            handles.as_mut_ptr(),
+            handles_cap.min(handles.len()) as u64,
+            &mut len,
+            &mut count,
+        )
+    };
+    (status, len, count)
+}
+
+/// A refused `channel_write` queues nothing and keeps the caller's
+/// handles; a written handle leaves the caller's table and arrives with
+/// the rights it had; a read into buffers that are too small stores the
+/// sizes and leaves the message queued; and a closed peer is reported.
+fn channel_errors(s: &Startup) -> Result {
+    let (mut a, mut b, mut event) = (0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check("creating a channel", sys::channel_create(0, &mut a, &mut b))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    // 65 handles, one more than a message holds, each transferable.
+    let mut many = [0 as Handle; 65];
+    for h in &mut many {
+        // SAFETY: the out pointer is valid for the call.
+        check("duplicating", unsafe {
+            sys::handle_duplicate(event, 0x8000_0000, h)
+        })?;
+    }
+    let big = 17 * PAGE_SIZE;
+    let at = map(s.process, create_memory(big)?, big)?;
+    // SAFETY: the bytes and handles lie in mapped memory.
+    let refused = unsafe {
+        [
+            (
+                "refusing 65537 bytes",
+                sys::channel_write(a, at as *const u8, 65537, core::ptr::null(), 0),
+                OUT_OF_RANGE,
+            ),
+            (
+                "refusing 65 handles",
+                sys::channel_write(a, at as *const u8, 1, many.as_ptr(), 65),
+                OUT_OF_RANGE,
+            ),
+            (
+                "refusing a handle twice",
+                sys::channel_write(a, at as *const u8, 1, [event, event].as_ptr(), 2),
+                INVALID_ARGS,
+            ),
+            (
+                "refusing the channel's own handle",
+                sys::channel_write(a, at as *const u8, 1, &a, 1),
+                INVALID_ARGS,
+            ),
+        ]
+    };
+    for (what, status, expected) in refused {
+        ensure(what, status == expected)?;
+    }
+    ensure("queueing nothing", read_sizes(b, 16, 2).0 == SHOULD_WAIT)?;
+    for h in many.into_iter().chain([event]) {
+        // SAFETY: the call takes no pointers.
+        check("keeping the handles", unsafe { sys::handle_close(h) })?;
+    }
+
+    let mut sent = 0;
+    let rights = (1 << 0) | (1 << 1) | (1 << 9);
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a handle to send", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    // SAFETY: the out pointer is valid for the call.
+    check("restricting its rights", unsafe {
+        sys::handle_replace(event, rights, &mut sent)
+    })?;
+    // SAFETY: the pointers describe the message and the handle.
+    check("writing", unsafe {
+        sys::channel_write(a, b"eight by".as_ptr(), 8, &sent, 1)
+    })?;
+    ensure(
+        "moving the handle out of the table",
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::handle_close(sent) } == BAD_HANDLE,
+    )?;
+    for (cap, handles_cap) in [(4, 1), (8, 0)] {
+        ensure(
+            "storing the sizes of a message too large",
+            read_sizes(b, cap, handles_cap) == (BUFFER_TOO_SMALL, 8, 1),
+        )?;
+    }
+    let m = read_message(b, 1)?;
+    ensure(
+        "keeping the message",
+        &m.bytes[..m.len] == b"eight by" && m.count == 1,
+    )?;
+    ensure(
+        "keeping the rights",
+        u32_at(&info::<0x18>(m.handles[0], 1)?, 20) == rights,
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check(
+            "closing the received handle",
+            sys::handle_close(m.handles[0]),
+        )?;
+        check("closing one end", sys::handle_close(a))?;
+    }
+    ensure(
+        "reporting the closed peer",
+        read_sizes(b, 16, 2).0 == PEER_CLOSED,
+    )?;
+    ensure(
+        "refusing to write to a closed peer",
+        // SAFETY: the pointer describes one byte.
+        unsafe { sys::channel_write(b, b"x".as_ptr(), 1, core::ptr::null(), 0) } == PEER_CLOSED,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the other end", unsafe { sys::handle_close(b) })
+}
+
 /// Two channels whose endpoints are only carried by messages queued
 /// toward each other are destroyed once their other handles are closed,
 /// and give back their kernel memory.
@@ -3381,7 +3516,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 53] = [
+const TESTS: [(&str, Test); 54] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
@@ -3418,6 +3553,7 @@ const TESTS: [(&str, Test); 53] = [
     ),
     ("kill_thread_after_report", kill_thread_after_report),
     ("own_endpoints_not_sent", own_endpoints_not_sent),
+    ("channel_errors", channel_errors),
     ("endpoint_cycles_reclaimed", endpoint_cycles_reclaimed),
     ("coverage", coverage),
     ("seal_waits_for_outputs", seal_waits_for_outputs),
