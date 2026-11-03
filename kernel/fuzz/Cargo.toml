@@ -141,3 +141,10 @@ path = "fuzz_targets/thread_state.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "log"
+path = "fuzz_targets/log.rs"
+test = false
+doc = false
+bench = false
