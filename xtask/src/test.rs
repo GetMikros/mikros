@@ -141,6 +141,14 @@ pub fn run(args: &Args) -> Result<()> {
     let timeout = Duration::from_secs(args.timeout);
     crate::debug::check_scripts(&args.machine, &built.kernel, &disk, &gdb_log, timeout)?;
     println!("kernel debugger scripts passed");
+    crate::machine_state::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("machine"),
+        timeout,
+    )?;
+    println!("machine state checked");
     let scenarios = dir.join("scenarios");
     crate::scenario::run(&args.machine, args.kind, &built, &scenarios, timeout)?;
     println!("panic scenarios passed");

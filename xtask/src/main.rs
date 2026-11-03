@@ -10,6 +10,7 @@ mod extended;
 mod firmware;
 mod fuzz;
 mod image;
+mod machine_state;
 mod qemu;
 mod run;
 mod scenario;

@@ -8,7 +8,7 @@ use crate::qemu::{self, MachineArgs};
 use crate::{firmware, image};
 use anyhow::{Context, Result, bail};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command};
@@ -78,6 +78,65 @@ pub fn monitor(socket: &Path, command: &str) -> Result<()> {
     // The monitor reads the command before the connection closes.
     std::thread::sleep(Duration::from_millis(200));
     Ok(())
+}
+
+/// Reads from `stream` until what it read ends with the monitor's
+/// prompt, and returns it.
+fn read_to_prompt(stream: &mut UnixStream, deadline: Instant) -> Result<String> {
+    let mut read = Vec::new();
+    let mut buf = [0u8; 65536];
+    while !read.ends_with(b"(qemu) ") {
+        if Instant::now() > deadline {
+            bail!("the monitor did not answer");
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => bail!("the monitor closed the connection"),
+            Ok(n) => read.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(String::from_utf8_lossy(&read).into_owned())
+}
+
+/// The lines the monitor on `socket` answers `command` with, without its
+/// prompts, its echo of the command and terminal control sequences.
+pub fn monitor_output(socket: &Path, command: &str) -> Result<String> {
+    let mut stream = UnixStream::connect(socket)
+        .with_context(|| format!("connecting to the monitor at {}", socket.display()))?;
+    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    read_to_prompt(&mut stream, deadline)?;
+    stream.write_all(format!("{command}\n").as_bytes())?;
+    let answer = read_to_prompt(&mut stream, deadline)?;
+    Ok(answer
+        .lines()
+        .map(|line| strip_escapes(line).replace('\r', ""))
+        .filter(|line| !line.contains("(qemu)") && !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// `line` without ANSI escape sequences.
+fn strip_escapes(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        // CSI sequences end with a letter.
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Dumps the screen through the monitor on `socket` to `path` and reads
