@@ -795,6 +795,83 @@ fn budget_pages(s: &Startup) -> Result<u64> {
     Ok(u64_at(&record, 0x18))
 }
 
+/// The kernel memory charged to this process's budget.
+fn budget_kernel(s: &Startup) -> Result<u64> {
+    let record = info::<0x38>(s.budget, 6)?;
+    Ok(u64_at(&record, 0x08))
+}
+
+fn set_kernel_limit(s: &Startup, limit: u64) -> Result {
+    // SAFETY: the call takes no pointers.
+    check("setting the limits", unsafe {
+        sys::budget_set_limits(s.budget, limit, u64::MAX)
+    })
+}
+
+/// Mapping and splitting regions is charged to the caller's budget, and
+/// a call refused at the limit changes nothing.
+fn region_charges_reach_the_limit(s: &Startup) -> Result {
+    const NO_RESOURCES: i64 = -3;
+    let len = 3 * PAGE_SIZE;
+    let mem = create_memory(len)?;
+    let mut mapped = [0u64; 1000];
+    // The first mapping's middle page is touched before the limit is
+    // set, as a fault that needs kernel memory above it would fail.
+    mapped[0] = map(s.process, mem, len)?;
+    // SAFETY: the mapping is writable.
+    unsafe { ((mapped[0] + PAGE_SIZE) as *mut u64).write_volatile(1) };
+    let mut count = 1;
+    set_kernel_limit(s, budget_kernel(s)? + 4096)?;
+    let refused = loop {
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status =
+            unsafe { sys::vm_map(s.process, PERM_READ | PERM_WRITE, 0, mem, 0, len, &mut at) };
+        if status != 0 || count == mapped.len() {
+            break status;
+        }
+        mapped[count] = at;
+        count += 1;
+    };
+    let result = (|| {
+        ensure(
+            "mapping until the limit",
+            count > 1 && refused == NO_RESOURCES,
+        )?;
+        let used = budget_kernel(s)?;
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status =
+            unsafe { sys::vm_map(s.process, PERM_READ | PERM_WRITE, 0, mem, 0, len, &mut at) };
+        ensure("refusing another mapping", status == NO_RESOURCES)?;
+        ensure("charging nothing for it", budget_kernel(s)? == used)?;
+        // Protecting the middle page splits the region in three.
+        let first = mapped[0];
+        ensure(
+            "refusing a split",
+            protect(s, PERM_READ, first + PAGE_SIZE, PAGE_SIZE) == NO_RESOURCES,
+        )?;
+        ensure("charging nothing for the split", budget_kernel(s)? == used)?;
+        // SAFETY: the page is still mapped writable, and present.
+        unsafe { ((first + PAGE_SIZE) as *mut u64).write_volatile(2) };
+        for &at in &mapped[count - 2..count] {
+            // SAFETY: the call takes no pointers.
+            check("unmapping", unsafe { sys::vm_unmap(s.process, at, len) })?;
+        }
+        count -= 2;
+        check(
+            "splitting with room",
+            protect(s, PERM_READ, first + PAGE_SIZE, PAGE_SIZE),
+        )
+    })();
+    set_kernel_limit(s, u64::MAX)?;
+    for &at in &mapped[..count] {
+        // SAFETY: the call takes no pointers.
+        check("unmapping", unsafe { sys::vm_unmap(s.process, at, len) })?;
+    }
+    result
+}
+
 fn protect(s: &Startup, perms: u32, addr: u64, len: u64) -> i64 {
     // SAFETY: the call takes no pointers.
     unsafe { sys::vm_protect(s.process, perms, addr, len) }
@@ -2769,7 +2846,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 40] = [
+const TESTS: [(&str, Test); 41] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2778,6 +2855,10 @@ const TESTS: [(&str, Test); 40] = [
     ("log_readers", log_readers),
     ("memory_operations", memory_operations),
     ("large_memory_operations", large_memory_operations),
+    (
+        "region_charges_reach_the_limit",
+        region_charges_reach_the_limit,
+    ),
     ("seals", seals),
     ("channel_calls", channel_calls),
     ("futexes", futexes),
