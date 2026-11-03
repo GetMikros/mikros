@@ -41,6 +41,11 @@ impl Bti {
         })
     }
 
+    /// The requester ID of the device.
+    pub fn requester_id(&self) -> u64 {
+        self.rid
+    }
+
     /// Lets the device reach the `size` bytes from `offset` of `mem`, a
     /// contiguous or pinned object, as `options` says, and returns the
     /// `Pmt` that keeps them pinned, charged to `budget`. Fails with

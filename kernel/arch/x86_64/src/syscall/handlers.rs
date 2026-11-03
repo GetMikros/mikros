@@ -20,8 +20,8 @@ use kernel_core::object::handles::Entry;
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{
-    KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_POLICY, KIND_PRIORITY, KIND_ROOT,
-    Request, Resource,
+    KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_MSI, KIND_POLICY, KIND_PRIORITY,
+    KIND_ROOT, Request, Resource,
 };
 use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
@@ -1535,6 +1535,57 @@ pub fn interrupt_create(
     }
     let interrupt = crate::interrupt::Interrupt::new(current_process()?.budget(), irq, options)?;
     give(interrupt, ObjectType::Interrupt, out)
+}
+
+pub fn interrupt_create_msi(
+    resource: Checked,
+    bti: Checked,
+    count: u32,
+    options: u32,
+    out: UserOut<Handle>,
+    messages: UserOut<u8>,
+) -> Result<(), Error> {
+    use crate::interrupt::{Interrupt, MSI_MAX};
+    if !object::<Resource>(resource).grants(KIND_MSI, 0, 0) {
+        return Err(Error::AccessDenied);
+    }
+    let n = count as usize;
+    if options != 0 || !(1..=MSI_MAX).contains(&n) {
+        return Err(Error::InvalidArgs);
+    }
+    let len = 16 * u64::from(count);
+    if !out.fits(u64::from(count)) || !messages.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    let process = current_process()?;
+    let outputs = prepare(
+        &process,
+        &[out.range(u64::from(count)), messages.range(len)],
+    )?;
+    let source = object::<crate::bti::Bti>(bti).requester_id();
+    let made = Interrupt::new_msi(process.budget(), source, n)?;
+    let mut entries = Vec::new();
+    entries.try_reserve(n).map_err(|_| Error::NoMemory)?;
+    let mut bytes = [0u8; 16 * MSI_MAX];
+    for (i, (interrupt, message)) in made.iter().enumerate() {
+        entries.push(Entry {
+            object: interrupt.clone(),
+            rights: default_rights(ObjectType::Interrupt),
+        });
+        bytes[16 * i..16 * i + 8].copy_from_slice(&message.address.to_le_bytes());
+        bytes[16 * i + 8..16 * i + 12].copy_from_slice(&message.data.to_le_bytes());
+    }
+    let mut values = [0; MSI_MAX];
+    process.handles().lock().insert_many_then::<MSI_MAX>(
+        &entries,
+        Some(process.budget()),
+        |handles| {
+            values[..n].copy_from_slice(handles);
+            Ok(())
+        },
+    )?;
+    publish(outputs, &[bytes_of(&values[..n]), &bytes[..16 * n]]);
+    Ok(())
 }
 
 pub fn interrupt_ack(interrupt: Checked) -> Result<(), Error> {
