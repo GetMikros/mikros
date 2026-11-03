@@ -108,8 +108,12 @@ pub fn handle_close(handle: Option<Checked>) -> Result<(), Error> {
         return Ok(());
     };
     let process = current_process()?;
-    process.handles().lock().close(h.value)?;
+    let entry = process.handles().lock().remove(h.value)?;
     crate::wait::handle_closed(&process, h.value);
+    // The object may go with the entry, and destroying it, as freeing the
+    // frames of a large memory object, checks for reschedules only while
+    // no lock is held.
+    drop(entry);
     Ok(())
 }
 
