@@ -2,7 +2,7 @@
 //! recognizing Mikros boot files, and skipping files that an earlier entry
 //! already starts.
 
-use crate::entries::normalize_path;
+use crate::entries::{Config, normalize_path};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -224,6 +224,106 @@ pub fn ids(used: impl Fn(&str) -> bool) -> impl Iterator<Item = String> {
     (1..)
         .map(|n| format!("detected-{n}"))
         .filter(move |id| !used(id))
+}
+
+/// The firmware's load options and volumes, as detection reads them.
+pub trait Disks {
+    /// Identifies a volume.
+    type Volume: Copy + PartialEq;
+    /// A full device path.
+    type DevicePath;
+
+    /// The load option numbers in `BootOrder`.
+    fn boot_order(&mut self) -> Vec<u16>;
+    /// The load option `Boot####` with the given number, or `None` when it
+    /// cannot be read.
+    fn load_option(&mut self, number: u16) -> Option<LoadOption>;
+    /// The full device path that `device_path` leads to, with the volume
+    /// the file it ends in is on when that volume is present. Returns
+    /// `None` when `device_path` is not a valid device path.
+    fn locate(&mut self, device_path: &[u8]) -> Option<(Self::DevicePath, Option<Self::Volume>)>;
+    /// The contents of the file at `path` on `volume`.
+    fn read(&mut self, volume: Self::Volume, path: &str) -> Option<Vec<u8>>;
+    /// Whether the file at `path` on `volume` exists.
+    fn exists(&mut self, volume: Self::Volume, path: &str) -> bool;
+    /// The device path of the file at `path` on the boot volume.
+    fn file_device_path(&mut self, path: &str) -> Option<Self::DevicePath>;
+}
+
+/// Whether the file at `path` on `volume` is a Mikros boot file.
+fn is_mikros_boot_file<D: Disks>(disks: &mut D, volume: Option<D::Volume>, path: &str) -> bool {
+    in_mikros_dir(path)
+        || (same_file(path, FALLBACK_PATH)
+            && volume
+                .and_then(|v| disks.read(v, path))
+                .is_some_and(|image| has_pe_section(&image, MIKROS_SECTION)))
+}
+
+/// Finds the systems to add after the entries of `config`, which are on
+/// `boot_volume`: the load options in `BootOrder` that end in a file path,
+/// then the `KNOWN_IMAGES` on the boot volume, skipping Mikros boot files
+/// and files that an earlier entry starts.
+pub fn find<D: Disks>(
+    disks: &mut D,
+    config: &Config,
+    boot_volume: D::Volume,
+) -> Vec<Detected<D::DevicePath>> {
+    let mut started = Started::new();
+    for entry in &config.entries {
+        started.insert(boot_volume, &entry.path);
+    }
+
+    let mut found = Vec::new();
+    for number in disks.boot_order() {
+        let Some(option) = disks.load_option(number) else {
+            continue;
+        };
+        let Some(path) = file_path(&option.device_path) else {
+            continue;
+        };
+        let Some((full, volume)) = disks.locate(&option.device_path) else {
+            continue;
+        };
+        if is_mikros_boot_file(disks, volume, &path) {
+            continue;
+        }
+        // An option whose volume is not present cannot be compared with
+        // other entries, so it is always added.
+        if let Some(volume) = volume
+            && !started.insert(volume, &path)
+        {
+            continue;
+        }
+        found.push((option.description, path, volume, full));
+    }
+
+    for (path, name) in KNOWN_IMAGES {
+        if started.contains(&boot_volume, path) || !disks.exists(boot_volume, path) {
+            continue;
+        }
+        let Some(full) = disks.file_device_path(path) else {
+            continue;
+        };
+        started.insert(boot_volume, path);
+        found.push((
+            String::from(name),
+            String::from(path),
+            Some(boot_volume),
+            full,
+        ));
+    }
+
+    let mut ids = ids(|id| config.entries.iter().any(|e| e.id == id));
+    found
+        .into_iter()
+        .map(|(name, path, volume, device_path)| Detected {
+            id: ids.next().unwrap_or_default(),
+            name,
+            path,
+            other_disk: volume != Some(boot_volume),
+            device_path,
+        })
+        .collect()
 }
 
 #[cfg(test)]
