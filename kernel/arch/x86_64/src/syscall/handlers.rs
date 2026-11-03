@@ -592,6 +592,8 @@ fn send(
             return Err(Error::InvalidArgs);
         }
     }
+    #[cfg(feature = "fuzz")]
+    crate::fuzz::pass(crate::fuzz::MESSAGE_HANDLES);
     let mut table = process.handles().lock();
     let mut entries = Vec::new();
     entries
@@ -1978,4 +1980,16 @@ pub fn fuzz_set_interval(which: u32, ns: i64, out: UserOut<i64>) -> Result<(), E
 #[cfg(feature = "fuzz")]
 pub fn fuzz_fail_random(sources: u32) -> Result<(), Error> {
     crate::fuzz::fail_random(sources)
+}
+
+#[cfg(feature = "fuzz")]
+pub fn fuzz_preempt_at(
+    point: u32,
+    count: u64,
+    event: Option<Checked>,
+    deadline: i64,
+) -> Result<(), Error> {
+    let thread = crate::sched::current().ok_or(Error::BadState)?;
+    let event = event.map(|e| (e.object, e.value));
+    crate::fuzz::preempt_at(&thread, point, count, event, deadline)
 }

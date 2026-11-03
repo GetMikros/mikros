@@ -1,21 +1,31 @@
 //! The tests that use the test hooks of the fuzz build.
 
 use crate::{
-    READABLE, TERMINATE, TERMINATED, Test, act, budget_kernel, budget_pages, create_memory,
-    exit_code, get_thread, in_time, koid, mem_read_at, now, report_bytes, start_program_with,
-    thread_list, touch_stack, u32_at, wait,
+    ACCESS_DENIED, INVALID, PAGER, READABLE, TERMINATE, TERMINATED, Test, USER0, USER1, act,
+    budget_kernel, budget_pages, create_memory, exit_code, get_thread, in_time, koid, map,
+    mem_read_at, now, paged_object, report_bytes, seal, signal, signal_restorer, skip_fault,
+    spawn2, start_program_with, thread_list, touch_stack, u32_at, wait, wait_until_blocked,
+    write_faults,
 };
 use core::cell::Cell;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
-use mikros_test::{Failure, PAGE_SIZE, PERM_READ, Result, check, ensure, sleep_ms};
+use mikros_test::{
+    Failure, PAGE_SIZE, PERM_READ, PERM_WRITE, Result, SPECIFIC, check, ensure, sleep_ms,
+};
 
 /// The tests, which `main` runs before the last of its own.
-pub const TESTS: [(&str, Test); 4] = [
+pub const TESTS: [(&str, Test); 6] = [
     ("failed_allocations", failed_allocations),
     ("unqueued_exception_report", unqueued_exception_report),
     ("maintenance_deadlines", maintenance_deadlines),
     ("failed_random_sources", failed_random_sources),
+    (
+        "protect_meets_seal_and_revocation",
+        protect_meets_seal_and_revocation,
+    ),
+    ("message_handles_read_once", message_handles_read_once),
 ];
 
 /// The kinds of allocation `fuzz_fail_alloc` makes fail.
@@ -401,4 +411,232 @@ fn failed_random_sources(_: &Startup) -> Result {
     }
     fail_random(0)?;
     set_interval(RESEED, -1).map(drop)
+}
+
+/// The points at which `fuzz_preempt_at` stops a thread.
+const REGION_CHECK: u32 = 1;
+const REGION_CHANGE: u32 = 2;
+const MESSAGE_HANDLES: u32 = 3;
+
+/// Makes this thread stop at its `count`-th next pass of `point`, where
+/// it sets `USER0` on `event` and waits until `USER1` is set on it, or at
+/// none when `count` is 0.
+fn preempt_at(point: u32, count: u64, event: Handle) -> Result {
+    // SAFETY: the call takes no pointers.
+    check("choosing a point to stop at", unsafe {
+        sys::fuzz_preempt_at(point, count, event, in_time())
+    })
+}
+
+/// What the helper of `protect_beside` does once it runs: seal its object
+/// against writes, or revoke it through the pager in `PAGER`; and the
+/// status of that call.
+static REVOKING: AtomicBool = AtomicBool::new(false);
+static ACTED: AtomicU64 = AtomicU64::new(0);
+
+/// Waits for `USER0` on `event`, seals or revokes `mem`, and sets `USER1`.
+extern "sysv64" fn act_at_stop(event: u64, mem: u64) -> ! {
+    let (event, mem) = (event as Handle, mem as Handle);
+    let mut status = wait(event, USER0, in_time()).0;
+    if status == 0 {
+        status = match REVOKING.load(Ordering::Acquire) {
+            // SAFETY: the call takes no pointers.
+            true => unsafe { sys::pager_revoke(PAGER.load(Ordering::Acquire) as Handle, mem) },
+            false => seal(mem, 1 << 3),
+        };
+    }
+    ACTED.store(status as u64, Ordering::Release);
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        sys::object_signal(event, 0, USER1);
+        sys::thread_exit();
+    }
+    unreachable!("thread_exit returned");
+}
+
+/// The regions `protect_beside` makes, one page each.
+const REGIONS: u64 = 513;
+
+/// Maps `first` at the start of `REGIONS` read-only pages, `last` at
+/// their end and one other object in between, and makes them writable
+/// with `vm_protect` while a helper thread seals `first`, or revokes
+/// `last`, when this thread passes `point` for the first time. Returns
+/// the status of `vm_protect`, and the address of the pages.
+fn protect_beside(s: &Startup, point: u32, first: Handle, last: Handle) -> Result<(i64, u64)> {
+    let len = REGIONS * PAGE_SIZE;
+    let range = create_memory(len)?;
+    let base = map(s.process, range, len)?;
+    // SAFETY: the call takes no pointers.
+    check("freeing the range", unsafe {
+        sys::vm_unmap(s.process, base, len)
+    })?;
+    let middle = create_memory(PAGE_SIZE)?;
+    for page in 0..REGIONS {
+        let mem = match page {
+            0 => first,
+            p if p == REGIONS - 1 => last,
+            _ => middle,
+        };
+        let mut at = 0;
+        let options = PERM_READ | SPECIFIC;
+        let addr = base + page * PAGE_SIZE;
+        // SAFETY: the out pointer is valid for the call.
+        check("mapping a page", unsafe {
+            sys::vm_map(s.process, options, addr, mem, 0, PAGE_SIZE, &mut at)
+        })?;
+    }
+    let mut event = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let acted_on = if REVOKING.load(Ordering::Acquire) {
+        last
+    } else {
+        first
+    };
+    let helper = spawn2(s, act_at_stop, u64::from(event), u64::from(acted_on))?;
+    wait_until_blocked(helper)?;
+    preempt_at(point, 1, event)?;
+    let status = crate::protect(s, PERM_READ | PERM_WRITE, base, len);
+    preempt_at(point, 0, INVALID)?;
+    ensure(
+        "ending the helper",
+        wait(helper, TERMINATED, in_time()).0 == 0,
+    )?;
+    check("sealing or revoking", ACTED.load(Ordering::Acquire) as i64)?;
+    ensure(
+        "stopping at the point",
+        wait(event, USER0 | USER1, 0).1 == USER0 | USER1,
+    )?;
+    for handle in [helper, event, middle, range] {
+        close(handle)?;
+    }
+    Ok((status, base))
+}
+
+/// `vm_protect` fails with `ERR_ACCESS_DENIED` when a region's object is
+/// sealed or revoked after the call checked the region, between two of
+/// its steps, and still changes the other regions: a region sealed
+/// between the steps that check the regions keeps its permissions, and
+/// so does one revoked between the steps that change them.
+fn protect_meets_seal_and_revocation(s: &Startup) -> Result {
+    const SEGV: u32 = 11;
+    let mut action = [0u8; 32];
+    action[0x00..0x08].copy_from_slice(&(skip_fault as *const () as u64).to_le_bytes());
+    action[0x10..0x18].copy_from_slice(&(signal_restorer as *const () as u64).to_le_bytes());
+    let mut old = [0u8; 32];
+    // SAFETY: the pointers describe `action` and `old`.
+    check("catching SEGV", unsafe {
+        sys::signal_set_action(SEGV, action.as_ptr(), old.as_mut_ptr())
+    })?;
+    let len = REGIONS * PAGE_SIZE;
+    let result = (|| {
+        let (first, last) = (create_memory(PAGE_SIZE)?, create_memory(PAGE_SIZE)?);
+        REVOKING.store(false, Ordering::Release);
+        let (status, base) = protect_beside(s, REGION_CHECK, first, last)?;
+        ensure("refusing the sealed region", status == ACCESS_DENIED)?;
+        ensure("keeping the sealed region", write_faults(base))?;
+        ensure("changing the next region", !write_faults(base + PAGE_SIZE))?;
+        ensure(
+            "changing the last region",
+            !write_faults(base + len - PAGE_SIZE),
+        )?;
+        // SAFETY: the call takes no pointers.
+        check("unmapping", unsafe { sys::vm_unmap(s.process, base, len) })?;
+
+        // The first object is sealed now; a new one takes its place.
+        let unsealed = create_memory(PAGE_SIZE)?;
+        let (pager, paged) = paged_object(s, 1, 0)?;
+        REVOKING.store(true, Ordering::Release);
+        let (status, base) = protect_beside(s, REGION_CHANGE, unsealed, paged)?;
+        ensure("refusing the revoked region", status == ACCESS_DENIED)?;
+        ensure("changing the first region", !write_faults(base))?;
+        ensure("changing the next region", !write_faults(base + PAGE_SIZE))?;
+        // SAFETY: the call takes no pointers.
+        check("unmapping", unsafe { sys::vm_unmap(s.process, base, len) })?;
+        for handle in [first, last, unsealed, paged, pager] {
+            close(handle)?;
+        }
+        Ok(())
+    })();
+    // SAFETY: the pointer describes `old`.
+    unsafe { sys::signal_set_action(SEGV, old.as_ptr(), core::ptr::null_mut()) };
+    result
+}
+
+/// The handle value that `message_handles_read_once` writes from, and
+/// that its helper changes.
+static HANDLE_VALUE: AtomicU32 = AtomicU32::new(0);
+
+/// Waits for `USER0` on `event`, puts `value` in `HANDLE_VALUE`, and sets
+/// `USER1`.
+extern "sysv64" fn change_handle_value(event: u64, value: u64) -> ! {
+    if wait(event as Handle, USER0, in_time()).0 == 0 {
+        HANDLE_VALUE.store(value as Handle, Ordering::Release);
+    }
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        sys::object_signal(event as Handle, 0, USER1);
+        sys::thread_exit();
+    }
+    unreachable!("thread_exit returned");
+}
+
+/// A channel write reads the handle values once: another thread changes
+/// the value in user memory after the kernel read and checked it and
+/// before it takes the handle, and the handle the caller named first is
+/// the one that is moved.
+fn message_handles_read_once(s: &Startup) -> Result {
+    let (mut a, mut b, mut named, mut other, mut event) = (0, 0, 0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check("creating a channel", sys::channel_create(0, &mut a, &mut b))?;
+        check("creating an event", sys::event_create(0, &mut named))?;
+        check("creating an event", sys::event_create(0, &mut other))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    let named_koid = koid(named)?;
+    HANDLE_VALUE.store(named, Ordering::Release);
+    let helper = spawn2(s, change_handle_value, u64::from(event), u64::from(other))?;
+    wait_until_blocked(helper)?;
+    preempt_at(MESSAGE_HANDLES, 1, event)?;
+    let values = HANDLE_VALUE.as_ptr();
+    // SAFETY: the handle array is the one value in `HANDLE_VALUE`.
+    let status = unsafe { sys::channel_write(a, core::ptr::null(), 0, values, 1) };
+    preempt_at(MESSAGE_HANDLES, 0, INVALID)?;
+    check("writing the message", status)?;
+    ensure(
+        "ending the helper",
+        wait(helper, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "changing the value meanwhile",
+        HANDLE_VALUE.load(Ordering::Acquire) == other,
+    )?;
+    ensure("moving the named handle", koid(named).is_err())?;
+    ensure("keeping the other handle", koid(other).is_ok())?;
+    let mut received = 0;
+    let (mut len, mut count) = (0, 0);
+    // SAFETY: the pointers describe one handle and the sizes.
+    check("reading the message", unsafe {
+        sys::channel_read(
+            b,
+            core::ptr::null_mut(),
+            0,
+            &mut received,
+            1,
+            &mut len,
+            &mut count,
+        )
+    })?;
+    ensure(
+        "sending the named object",
+        count == 1 && koid(received)? == named_koid,
+    )?;
+    signal(event, USER0 | USER1, 0)?;
+    for handle in [helper, a, b, other, event, received] {
+        close(handle)?;
+    }
+    Ok(())
 }

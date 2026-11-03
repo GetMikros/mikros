@@ -514,6 +514,8 @@ impl AddressSpace {
                 break;
             };
             at = next;
+            #[cfg(feature = "fuzz")]
+            crate::fuzz::pass(crate::fuzz::REGION_CHECK);
             crate::sched::preempt_point();
         }
         if refused {
@@ -547,6 +549,8 @@ impl AddressSpace {
                 break;
             };
             at = next;
+            #[cfg(feature = "fuzz")]
+            crate::fuzz::pass(crate::fuzz::REGION_CHANGE);
             crate::sched::preempt_point();
         }
         Ok(())

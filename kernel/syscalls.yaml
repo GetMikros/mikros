@@ -963,3 +963,14 @@ syscalls:
     spec: [MIKSPEC-0017.R10]
     args:
       - {name: sources, type: u32, dir: in}
+
+  - name: fuzz_preempt_at
+    number: 94
+    arch: [x86_64]
+    fuzz_only: true
+    spec: [MIKSPEC-0017.R10]
+    args:
+      - {name: point, type: u32, dir: in}
+      - {name: count, type: u64, dir: in}
+      - {name: event, type: Handle, dir: in, object: Event, rights: [SIGNAL, WAIT], allow_invalid: true}
+      - {name: deadline, type: i64, dir: in}
