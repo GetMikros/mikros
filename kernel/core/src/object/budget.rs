@@ -67,6 +67,9 @@ pub struct Budget {
     process_count: AtomicU32,
     /// The budget charged `BUDGET_COST` for this one.
     charged: Option<Arc<Budget>>,
+    /// The next budget waiting to be destroyed, while this one waits in
+    /// the list kept by `Drop`.
+    pending: Option<Arc<Budget>>,
 }
 
 /// The kernel memory charged for a budget created by a system call.
@@ -98,6 +101,7 @@ impl Budget {
     fn with(parent: Option<Arc<Budget>>, kernel_limit: u64, page_limit: u64) -> Budget {
         Budget {
             charged: None,
+            pending: None,
             header: Header::new(ObjectType::Budget),
             parent,
             kernel: Account::new(kernel_limit),
@@ -257,10 +261,42 @@ impl Object for Budget {
     }
 }
 
-impl Drop for Budget {
-    fn drop(&mut self) {
-        if let Some(charged) = &self.charged {
+impl Budget {
+    /// Releases the charge for this budget and moves the budgets it holds
+    /// onto `list`, leaving it nothing that its drop would release.
+    fn unlink(&mut self, list: &mut Option<Arc<Budget>>) {
+        if let Some(charged) = self.charged.take() {
             charged.release_kernel(BUDGET_COST);
+            push(list, charged);
+        }
+        if let Some(parent) = self.parent.take() {
+            push(list, parent);
+        }
+    }
+}
+
+/// Puts `budget` on `list` when this is its last reference, so that it is
+/// destroyed by the loop in `Drop` rather than by a nested drop.
+fn push(list: &mut Option<Arc<Budget>>, mut budget: Arc<Budget>) {
+    if let Some(b) = Arc::get_mut(&mut budget) {
+        b.pending = list.take();
+        *list = Some(budget);
+    }
+}
+
+impl Drop for Budget {
+    /// Destroys the chain of budgets that this one kept alive in a loop,
+    /// so the stack used does not grow with the length of the chain.
+    fn drop(&mut self) {
+        let mut list = self.pending.take();
+        self.unlink(&mut list);
+        while let Some(mut budget) = list {
+            // Only `push` adds to the list, and only the last reference.
+            let b = Arc::get_mut(&mut budget).expect("a pending budget is shared");
+            list = b.pending.take();
+            b.unlink(&mut list);
+            drop(budget);
+            crate::sync::destroyed(1);
         }
     }
 }
@@ -339,6 +375,37 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a chain of `depth` budgets below the root, each kept alive
+    /// only by the next, linked by parent or by the budget charged for
+    /// it, and drops it on a thread with a kernel-sized stack. The parent
+    /// chain charges nothing, as each charge walks every ancestor.
+    fn drop_deep_chain(by_charge: bool) {
+        let worker = std::thread::Builder::new().stack_size(32 * 1024);
+        let handle = worker
+            .spawn(move || {
+                let root = Budget::root();
+                let mut leaf = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
+                for _ in 0..100_000 {
+                    leaf = if by_charge {
+                        Budget::child(&root, UNLIMITED, UNLIMITED, Some(&leaf)).unwrap()
+                    } else {
+                        Budget::child(&leaf, UNLIMITED, UNLIMITED, None).unwrap()
+                    };
+                }
+                drop(leaf);
+                let used = u64::from_le_bytes(root.info()[0x08..0x10].try_into().unwrap());
+                assert_eq!(used, 0);
+            })
+            .unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn drops_deep_chains_without_recursing() {
+        drop_deep_chain(false);
+        drop_deep_chain(true);
+    }
 
     fn word(record: &[u8], at: usize) -> u64 {
         u64::from_le_bytes(record[at..at + 8].try_into().unwrap())
