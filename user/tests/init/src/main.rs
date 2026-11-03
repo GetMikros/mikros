@@ -597,9 +597,10 @@ fn queued_thread_preempts(s: &Startup) -> Result {
     ensure("ending it", wait(thread, TERMINATED, in_time()).0 == 0)
 }
 
-/// Waits for a packet on `port` until `deadline`.
+/// Waits for a packet on `port` until `deadline`. The buffer starts
+/// filled with 0xAA, so that bytes the kernel leaves alone show.
 fn take_packet(port: Handle, deadline: i64) -> (i64, [u8; 48]) {
-    let mut packet = [0u8; 48];
+    let mut packet = [0xAAu8; 48];
     // SAFETY: the pointer describes `packet`.
     let status = unsafe { sys::port_wait(port, deadline, packet.as_mut_ptr()) };
     (status, packet)
@@ -641,6 +642,38 @@ fn wait_async(object: Handle, port: Handle, key: u64, signals: u32, options: u32
     // SAFETY: the call takes no pointers.
     let status = unsafe { sys::object_wait_async(object, port, key, signals, options) };
     check("registering a wait", status)
+}
+
+/// A port takes 65536 registrations and refuses the next with
+/// `ERR_NO_RESOURCES`; closing the handle they were made through removes
+/// them.
+fn port_registration_limit(_: &Startup) -> Result {
+    const NO_RESOURCES: i64 = -3;
+    const LIMIT: u64 = 65536;
+    let (mut port, mut event) = (0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a port", sys::port_create(0, &mut port))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    for key in 0..LIMIT {
+        wait_async(event, port, key, USER0, 0)?;
+    }
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::object_wait_async(event, port, LIMIT, USER0, 0) };
+    ensure("refusing one more", status == NO_RESOURCES)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the event", unsafe { sys::handle_close(event) })?;
+    // SAFETY: the pointer is valid for the call.
+    check("creating another event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    wait_async(event, port, 0, USER0, 0)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("closing the event", sys::handle_close(event))?;
+        check("closing the port", sys::handle_close(port))
+    }
 }
 
 /// Ports with user packets, one-shot and edge waits, cancelling and
@@ -686,6 +719,7 @@ fn ports(_: &Startup) -> Result {
         "reporting the signals",
         u32_at(&p, 16) == USER0 && u32_at(&p, 20) == USER0,
     )?;
+    ensure("zeroing the rest", p[24..].iter().all(|&b| b == 0))?;
     signal(event, USER0, 0)?;
     signal(event, 0, USER0)?;
     ensure("firing only once", take_packet(port, soon()).0 == TIMED_OUT)?;
@@ -1343,6 +1377,38 @@ fn futex_wake(addr: u64, count: u32) -> Result<u32> {
     Ok(woken)
 }
 
+/// Threads of two processes that map the same memory object share its
+/// futexes: waking through this process's mapping ends the debuggee's
+/// wait through its own, at another address.
+fn futexes_across_processes(s: &Startup) -> Result {
+    const SHARED: u64 = 0x10_0000_0000;
+    const SPECIFIC: u32 = 1 << 8;
+    let mem = create_memory(PAGE_SIZE)?;
+    let here = map(s.process, mem, PAGE_SIZE)?;
+    ensure("mapping elsewhere here", here != SHARED)?;
+    let (process, _) = start_program_with(s, "debuggee", 8, |process| {
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("mapping into the debuggee", unsafe {
+            sys::vm_map(
+                process,
+                PERM_READ | SPECIFIC,
+                SHARED,
+                mem,
+                0,
+                PAGE_SIZE,
+                &mut at,
+            )
+        })
+    })?;
+    let deadline = in_time();
+    while futex_wake(here, 1)? == 0 {
+        ensure("waking the debuggee", now() < deadline)?;
+        sleep_ms(1);
+    }
+    ensure("ending its wait", exit_code(process)? == 0)
+}
+
 /// Futexes compare before blocking, time out, wake in arrival order and
 /// are keyed by memory object and offset.
 fn futexes(s: &Startup) -> Result {
@@ -1447,6 +1513,10 @@ fn timelines(s: &Startup) -> Result {
         status == 0 && u64_at(&p, 0) == 22 && u32_at(&p, 8) == 4,
     )?;
     ensure("carrying the value", u64_at(&p, 16) == 5)?;
+    ensure(
+        "zeroing the status and the rest",
+        u32_at(&p, 12) == 0 && p[24..].iter().all(|&b| b == 0),
+    )?;
     spawn(s, raise_later, u64::from(timeline))?;
     // SAFETY: the call takes no pointers.
     check("waiting for 9", unsafe {
@@ -5290,7 +5360,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 81] = [
+const TESTS: [(&str, Test); 83] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
@@ -5299,6 +5369,7 @@ const TESTS: [(&str, Test); 81] = [
     ("priorities", priorities),
     ("queued_thread_preempts", queued_thread_preempts),
     ("ports", ports),
+    ("port_registration_limit", port_registration_limit),
     ("log_readers", log_readers),
     ("memory_operations", memory_operations),
     ("large_memory_operations", large_memory_operations),
@@ -5309,6 +5380,7 @@ const TESTS: [(&str, Test); 81] = [
     ("seals", seals),
     ("channel_calls", channel_calls),
     ("futexes", futexes),
+    ("futexes_across_processes", futexes_across_processes),
     ("timelines", timelines),
     ("streams", streams),
     ("failed_outputs", failed_outputs),

@@ -7,8 +7,9 @@
 //! address `UNMAPPED`, with 5 it divides by zero, and with 6 it calls
 //! `thread_exit`. With 7 it executes an undefined instruction with
 //! `skip_with_reserved_byte` as the handler of `ILL`, and returns 7 if
-//! that returns. Otherwise it waits on its bootstrap channel until it is
-//! killed.
+//! that returns. With 8 it waits on the futex at `SHARED`, which its
+//! starter maps, and returns the status of the wait. Otherwise it waits
+//! on its bootstrap channel until it is killed.
 
 #![no_std]
 #![no_main]
@@ -19,6 +20,8 @@ mikros_rt::raw_main!(main);
 
 /// An address in the low 64 KiB, which nothing is ever mapped at.
 const UNMAPPED: u64 = 0x1000;
+/// Where the starter maps a page shared with it for mode 8.
+const SHARED: u64 = 0x10_0000_0000;
 
 fn main(bootstrap: Handle, arg2: u64) -> i64 {
     if arg2 == 0 {
@@ -75,6 +78,10 @@ fn main(bootstrap: Handle, arg2: u64) -> i64 {
         // returns past it.
         unsafe { core::arch::asm!("ud2") };
         return 7;
+    }
+    if arg2 == 8 {
+        // SAFETY: the starter maps the page at `SHARED` readable.
+        return unsafe { sys::futex_wait(SHARED as *const u32, 0, i64::MAX) };
     }
     let mut observed = 0;
     // SAFETY: the out pointer is valid for the call.
