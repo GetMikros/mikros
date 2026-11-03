@@ -2026,7 +2026,7 @@ extern "sysv64" fn straddling_reader(source: u64, at: u64) -> ! {
 /// pager answers after 50 ms, and starts a thread reading 16 bytes into
 /// the last 8 bytes of `first` and the first 8 of the paged page, which
 /// then holds `first` while it waits for the pager. Returns where
-/// `first` is mapped.
+/// `first` is mapped once the thread waits.
 fn start_straddling_read(s: &Startup, first: Handle) -> Result<u64> {
     let (mut pager, mut port, mut paged) = (0, 0, 0);
     // SAFETY: the pointers are valid for the calls.
@@ -2038,10 +2038,27 @@ fn start_straddling_read(s: &Startup, first: Handle) -> Result<u64> {
     }
     PAGER.store(u64::from(pager), Ordering::Release);
     spawn2(s, slow_pager_thread, u64::from(port), u64::from(paged))?;
-    let at = map(s.process, first, PAGE_SIZE)?;
-    // SAFETY: the out pointer is valid; the range after `at` is free, as
-    // the allocator places mappings upwards from the last one.
-    let mut next = 0;
+    // Find two free pages, then map `first` and the paged object there.
+    let at = map(s.process, create_memory(2 * PAGE_SIZE)?, 2 * PAGE_SIZE)?;
+    // SAFETY: the call takes no pointers.
+    check("freeing the two pages", unsafe {
+        sys::vm_unmap(s.process, at, 2 * PAGE_SIZE)
+    })?;
+    let mut mapped = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ | PERM_WRITE | mikros_test::SPECIFIC,
+            at,
+            first,
+            0,
+            PAGE_SIZE,
+            &mut mapped,
+        )
+    };
+    check("mapping the object", status)?;
+    // SAFETY: the out pointer is valid for the call.
     let status = unsafe {
         sys::vm_map(
             s.process,
@@ -2050,15 +2067,15 @@ fn start_straddling_read(s: &Startup, first: Handle) -> Result<u64> {
             paged,
             0,
             PAGE_SIZE,
-            &mut next,
+            &mut mapped,
         )
     };
     check("mapping the paged object next to it", status)?;
     let source = create_memory(PAGE_SIZE)?;
     mem_write_at(source, 0, b"0123456789abcdef")?;
     READ_DONE.store(0, Ordering::Release);
-    spawn2(s, straddling_reader, u64::from(source), at + PAGE_SIZE - 8)?;
-    sleep_ms(10);
+    let reader = spawn2(s, straddling_reader, u64::from(source), at + PAGE_SIZE - 8)?;
+    wait_until_blocked(reader)?;
     Ok(at)
 }
 
