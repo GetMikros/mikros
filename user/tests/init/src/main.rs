@@ -1547,7 +1547,8 @@ extern "sysv64" fn pager_thread(port: u64, mem: u64) -> ! {
             b'g',
             b'e',
             b' ',
-            b'0' + (offset / PAGE_SIZE) as u8,
+            // Tests check the label of the first pages only.
+            b'0'.wrapping_add((offset / PAGE_SIZE) as u8),
         ];
         let _ = mem_write_at(source, 0, &text);
         // SAFETY: the call takes no pointers.
@@ -1718,6 +1719,102 @@ fn paged_object(s: &Startup, pages: u64, options: u32) -> Result<(Handle, Handle
     PAGER.store(u64::from(pager), Ordering::Release);
     spawn2(s, pager_thread, u64::from(port), u64::from(mem))?;
     Ok((pager, mem))
+}
+
+/// Supplying, writing back and evicting a paged object of more pages
+/// than the kernel handles in one piece reaches every page.
+fn large_pager_operations(s: &Startup) -> Result {
+    let pages = 1300;
+    let size = pages * PAGE_SIZE;
+    let (mut pager, mut port, mut mem) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 10, size, 2, &mut mem);
+        check("creating a paged object", status)?;
+    }
+    // Every page of the source holds its number.
+    let source = create_memory(size)?;
+    let at = map(s.process, source, size)?;
+    for page in 0..pages {
+        // SAFETY: the mapping is writable.
+        unsafe { ((at + page * PAGE_SIZE) as *mut u64).write_volatile(page) };
+    }
+    // SAFETY: the call takes no pointers.
+    check("unmapping the source", unsafe {
+        sys::vm_unmap(s.process, at, size)
+    })?;
+    // SAFETY: the call takes no pointers.
+    check("supplying", unsafe {
+        sys::pager_supply(pager, mem, 0, size, source, 0)
+    })?;
+    let at = map(s.process, mem, size)?;
+    for page in 0..pages {
+        let page_at = (at + page * PAGE_SIZE) as *const u64;
+        // SAFETY: the mapping is readable.
+        ensure(
+            "supplying every page",
+            unsafe { page_at.read_volatile() } == page,
+        )?;
+        let left = u64::from_le_bytes(mem_read_at::<8>(source, page * PAGE_SIZE)?);
+        ensure("taking every page from the source", left == 0)?;
+    }
+    ensure("supplying clean pages", dirty(pager, mem, size)?.1 == 0)?;
+    for page in 0..pages {
+        // SAFETY: the mapping is writable.
+        unsafe { ((at + page * PAGE_SIZE + 8) as *mut u8).write_volatile(1) };
+    }
+    let (ranges, count) = dirty(pager, mem, size)?;
+    ensure(
+        "tracking every write",
+        count == 1 && ranges[..2] == [0, size],
+    )?;
+
+    check("beginning writeback", pager_op(pager, mem, 3, 0, size))?;
+    let written = [0, 700, pages - 1];
+    for page in written {
+        // SAFETY: the mapping is writable.
+        unsafe { ((at + page * PAGE_SIZE + 8) as *mut u8).write_volatile(2) };
+    }
+    check("ending writeback", pager_op(pager, mem, 4, 0, size))?;
+    let (ranges, count) = dirty(pager, mem, size)?;
+    let want = written.map(|p| [p * PAGE_SIZE, PAGE_SIZE]);
+    ensure(
+        "keeping only pages written meanwhile",
+        count == 3 && ranges[..6] == *want.as_flattened(),
+    )?;
+
+    // Every clean page is gone after the eviction, so reading it asks
+    // the pager for it; the dirty pages stay.
+    check("evicting", pager_op(pager, mem, 2, 0, size))?;
+    PAGER.store(u64::from(pager), Ordering::Release);
+    spawn2(s, pager_thread, u64::from(port), u64::from(mem))?;
+    let before = REQUESTS.load(Ordering::Acquire);
+    for page in written {
+        let page_at = (at + page * PAGE_SIZE) as *const u64;
+        // SAFETY: the mapping is readable.
+        ensure(
+            "keeping dirty pages",
+            unsafe { page_at.read_volatile() } == page,
+        )?;
+    }
+    for page in 0..pages {
+        mem_read_at::<1>(mem, page * PAGE_SIZE)?;
+    }
+    ensure(
+        "evicting every clean page",
+        REQUESTS.load(Ordering::Acquire) == before + pages - 3,
+    )?;
+    // SAFETY: the calls take no pointers. Closing the port ends the
+    // pager thread.
+    unsafe {
+        check("unmapping", sys::vm_unmap(s.process, at, size))?;
+        for handle in [mem, source, port, pager] {
+            check("closing", sys::handle_close(handle))?;
+        }
+    }
+    Ok(())
 }
 
 /// Dirty tracking, writeback, eviction, failing, a pager's end and
@@ -2655,7 +2752,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 38] = [
+const TESTS: [(&str, Test); 39] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2673,6 +2770,7 @@ const TESTS: [(&str, Test); 38] = [
     ("clones", clones),
     ("pagers", pagers),
     ("pager_operations", pager_operations),
+    ("large_pager_operations", large_pager_operations),
     ("paged_outputs", paged_outputs),
     ("kill_blocked_thread", kill_blocked_thread),
     ("kill_stopped_thread", kill_stopped_thread),
