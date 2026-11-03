@@ -77,6 +77,16 @@ pub fn write(register: u32, value: u32) {
     }
 }
 
+/// Whether the local APIC is in x2APIC mode.
+pub fn x2apic() -> bool {
+    X2APIC.load(Ordering::Relaxed)
+}
+
+/// The local APIC ID of the boot processor.
+pub fn boot_id() -> u32 {
+    BOOT_ID.load(Ordering::Relaxed)
+}
+
 /// Signals end of interrupt to the local APIC.
 pub fn eoi() {
     write(EOI, 0);
@@ -120,17 +130,19 @@ fn mask_pics() {
 /// it handles, and its select register in the dynamic region, with the
 /// window register 16 bytes above it.
 struct IoApic {
+    id: u8,
     gsi_base: u32,
     entries: u32,
     base: u64,
 }
 
 impl IoApic {
-    /// Maps the I/O APIC at `phys`, which handles the global system
-    /// interrupts from `gsi_base` on.
-    fn map(phys: u64, gsi_base: u32) -> IoApic {
+    /// Maps the I/O APIC with ID `id` at `phys`, which handles the global
+    /// system interrupts from `gsi_base` on.
+    fn map(id: u8, phys: u64, gsi_base: u32) -> IoApic {
         crate::reserved::reserve_mmio(phys, 0x20);
         let mut apic = IoApic {
+            id,
             gsi_base,
             entries: 0,
             base: map_device(phys, 0x20),
@@ -171,11 +183,27 @@ static IO_APICS: SpinLock<Vec<IoApic>> = SpinLock::new(Vec::new());
 
 /// Points the redirection entry of global system interrupt `gsi` at
 /// `vector` on the boot processor with fixed delivery, level or edge
-/// triggered and active low or high, and unmasks it. Fails with
-/// `NotFound` when no I/O APIC handles `gsi`.
-pub fn route(gsi: u32, vector: u8, level: bool, active_low: bool) -> Result<(), Error> {
+/// triggered and active low or high, and unmasks it. When interrupts are
+/// remapped, the entry instead refers to remapping entry `index`, which
+/// gets the vector, destination and trigger mode and accepts the
+/// interrupt only from the I/O APIC's source. Fails with `NotFound` when
+/// no I/O APIC handles `gsi`, and when remapping, with `NotSupported` when
+/// the DMAR table gives no source for that I/O APIC.
+pub fn route(gsi: u32, vector: u8, index: u16, level: bool, active_low: bool) -> Result<(), Error> {
+    let (id, remapped) = {
+        let apics = IO_APICS.lock();
+        let apic = apics
+            .iter()
+            .find(|a| a.entry(gsi).is_some())
+            .ok_or(Error::NotFound)?;
+        (apic.id, crate::iommu::remapping())
+    };
+    if remapped {
+        let source = crate::iommu::io_apic_source(id).ok_or(Error::NotSupported)?;
+        crate::iommu::remap(index, Some((vector, level, source)))?;
+    }
     let apics = IO_APICS.lock();
-    let (apic, index) = apics
+    let (apic, entry) = apics
         .iter()
         .find_map(|a| Some((a, a.entry(gsi)?)))
         .ok_or(Error::NotFound)?;
@@ -186,11 +214,20 @@ pub fn route(gsi: u32, vector: u8, level: bool, active_low: bool) -> Result<(), 
     if active_low {
         low |= LVT_ACTIVE_LOW;
     }
-    // Physical destination mode, with the boot processor's ID in the top
-    // byte. The entry stays masked until its destination is set.
-    apic.write(index, LVT_MASKED);
-    apic.write(index + 1, BOOT_ID.load(Ordering::Relaxed) << 24);
-    apic.write(index, low);
+    let high = if remapped {
+        // The remappable format: the index, with its top bit in the low
+        // half, and the format bit.
+        low |= u32::from(index >> 15) << 11;
+        u32::from(index & 0x7FFF) << 17 | 1 << 16
+    } else {
+        // Physical destination mode, with the boot processor's ID in the
+        // top byte.
+        boot_id() << 24
+    };
+    // The entry stays masked until its destination is set.
+    apic.write(entry, LVT_MASKED);
+    apic.write(entry + 1, high);
+    apic.write(entry, low);
     Ok(())
 }
 
@@ -277,10 +314,12 @@ pub fn init(info: &BootInfo) {
     let mut apics = IO_APICS.lock();
     for e in madt::entries(madt) {
         if let Entry::IoApic {
-            address, gsi_base, ..
+            id,
+            address,
+            gsi_base,
         } = e
         {
-            let apic = IoApic::map(u64::from(address), gsi_base);
+            let apic = IoApic::map(id, u64::from(address), gsi_base);
             for n in 0..apic.entries {
                 let index = 0x10 + 2 * n;
                 apic.write(index, apic.read(index) | LVT_MASKED);

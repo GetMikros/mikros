@@ -14,10 +14,14 @@ use kernel_core::object::memory::PAGE_SIZE;
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
-/// The units that translate DMA, with the devices each covers.
+/// The units that translate DMA, with the devices each covers, and
+/// whether they remap interrupts.
 struct Iommu {
     units: Vec<vtd::Unit>,
     covers: Vec<dmar::Unit>,
+    remapping: bool,
+    /// Whether remapping entries hold 32-bit destination IDs.
+    wide: bool,
 }
 
 /// The IOMMUs when DMA is isolated, or `None` when it is not.
@@ -62,7 +66,12 @@ pub fn init(info: &BootInfo) {
         Config(found(*b"MCFG").map_or(Vec::new(), |m| kernel_core::acpi::ecams(m).collect()));
     match enable(dmar, &config) {
         Ok(iommu) => {
-            log!(Info, "DMA isolated by {} VT-d units", iommu.units.len());
+            log!(
+                Info,
+                "DMA isolated by {} VT-d units, interrupts {}remapped",
+                iommu.units.len(),
+                if iommu.remapping { "" } else { "not " }
+            );
             *IOMMU.lock() = Some(iommu);
         }
         Err(e) => {
@@ -91,6 +100,8 @@ fn enable(dmar: &[u8], config: &Config) -> Result<Iommu, Error> {
     let mut iommu = Iommu {
         units: Vec::new(),
         covers: Vec::new(),
+        remapping: false,
+        wide: false,
     };
     for s in &structures {
         if let Structure::Unit {
@@ -131,7 +142,24 @@ fn enable(dmar: &[u8], config: &Config) -> Result<Iommu, Error> {
                 }
             }
         }
-        iommu.units.iter().try_for_each(vtd::Unit::enable)
+        iommu.units.iter().try_for_each(vtd::Unit::enable)?;
+        // Interrupts are remapped only when every unit can, as each
+        // remaps those of the devices it covers. Entries carry 32-bit
+        // destination IDs when the local APIC is in x2APIC mode and every
+        // unit supports them, and otherwise 8-bit ones, which reach a
+        // boot processor whose ID fits.
+        let wide = crate::apic::x2apic() && iommu.units.iter().all(vtd::Unit::wide_ids);
+        let can = dmar::flags(dmar) & dmar::INTR_REMAP != 0
+            && iommu.units.iter().all(vtd::Unit::can_remap)
+            && (wide || crate::apic::boot_id() <= 0xFF);
+        if can {
+            for unit in &mut iommu.units {
+                unit.enable_remapping(wide)?;
+            }
+            iommu.remapping = true;
+            iommu.wide = wide;
+        }
+        Ok(())
     })();
     if let Err(e) = result {
         iommu.disable();
@@ -203,4 +231,47 @@ pub fn sync(rid: u64) -> Result<(), Error> {
         Some(unit) => unit.sync(rid),
         None => Ok(()),
     }
+}
+
+/// Whether interrupts are remapped, so that they reach the processor only
+/// through entries that `remap` writes.
+pub fn remapping() -> bool {
+    IOMMU.lock().as_ref().is_some_and(|i| i.remapping)
+}
+
+/// The requester ID that the interrupts of the I/O APIC with ID `id`
+/// carry, from the DMAR table.
+pub fn io_apic_source(id: u8) -> Option<u64> {
+    let iommu = IOMMU.lock();
+    iommu.as_ref()?.covers.iter().find_map(|u| {
+        u.targets.iter().find_map(|t| match t {
+            Target::IoApic(i, rid) if *i == id => Some(*rid),
+            _ => None,
+        })
+    })
+}
+
+/// Makes remapping entry `index` deliver `vector` to the boot processor
+/// with fixed delivery, level triggered when `level`, accepting it only
+/// from the requester ID `source`, or blocks it when `vector` is `None`.
+/// Does nothing unless interrupts are remapped.
+pub fn remap(index: u16, vector: Option<(u8, bool, u64)>) -> Result<(), Error> {
+    let mut iommu = IOMMU.lock();
+    let Some(iommu) = iommu.as_mut().filter(|i| i.remapping) else {
+        return Ok(());
+    };
+    let entry = match vector {
+        Some((vector, level, source)) => {
+            let id = u64::from(crate::apic::boot_id());
+            let destination = if iommu.wide { id } else { id << 8 };
+            let low = 1 | u64::from(level) << 4 | u64::from(vector) << 16 | destination << 32;
+            // Verify the full 16-bit source ID.
+            [low, source & 0xFFFF | 1 << 18]
+        }
+        None => [0, 0],
+    };
+    iommu
+        .units
+        .iter_mut()
+        .try_for_each(|u| u.set_remap(index, entry))
 }

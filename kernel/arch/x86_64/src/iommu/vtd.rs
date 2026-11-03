@@ -15,19 +15,31 @@ const GSTS: u64 = 0x1C;
 const RTADDR: u64 = 0x20;
 const IQT: u64 = 0x88;
 const IQA: u64 = 0x90;
+const IRTA: u64 = 0xB8;
 
 /// GCMD and GSTS bits.
 const TE: u32 = 1 << 31;
 const SRTP: u32 = 1 << 30;
 const QIE: u32 = 1 << 26;
+const IRE: u32 = 1 << 25;
+const SIRTP: u32 = 1 << 24;
+const CFI: u32 = 1 << 23;
 /// The GSTS bits that stay set until cleared, which a GCMD write must
 /// repeat: translation, queued invalidation, interrupt remapping and
 /// compatibility format interrupts.
-const PERSISTENT: u32 = TE | QIE | 1 << 25 | 1 << 23;
+const PERSISTENT: u32 = TE | QIE | IRE | CFI;
 
-/// ECAP bits: coherent table walks and queued invalidation.
+/// ECAP bits: coherent table walks, queued invalidation, interrupt
+/// remapping and 32-bit destination IDs in its entries.
 const ECAP_C: u64 = 1 << 0;
 const ECAP_QI: u64 = 1 << 1;
+const ECAP_IR: u64 = 1 << 3;
+const ECAP_EIM: u64 = 1 << 4;
+
+/// The interrupt remapping table's entries, as a power of two minus one
+/// for IRTA, and the IRTA bit for 32-bit destination IDs.
+const IRT_SIZE: u64 = 7;
+const IRTA_EIME: u64 = 1 << 11;
 
 /// Second-level entry bits.
 const READ: u64 = 1 << 0;
@@ -40,6 +52,7 @@ const CONTEXT_GLOBAL: u64 = 0x1 | 1 << 4;
 const IOTLB_DOMAIN: u64 = 0x2 | 2 << 4 | 1 << 6 | 1 << 7;
 const IOTLB_GLOBAL: u64 = 0x2 | 1 << 4 | 1 << 6 | 1 << 7;
 const WAIT: u64 = 0x5 | 1 << 5;
+const IEC_GLOBAL: u64 = 0x4;
 
 /// The descriptors the queue, one page of 16-byte entries, holds.
 const QUEUE_ENTRIES: u64 = PAGE_SIZE / 16;
@@ -87,6 +100,9 @@ pub struct Unit {
     tail: u64,
     /// The word that invalidation waits write.
     status: u64,
+    ecap: u64,
+    /// The interrupt remapping table, once remapping is on.
+    irt: Option<u64>,
 }
 
 impl Unit {
@@ -128,6 +144,8 @@ impl Unit {
             queue: table_frame()?,
             tail: 0,
             status: table_frame()?,
+            ecap,
+            irt: None,
         };
         // Queued invalidation is set up anew, as firmware may have used
         // it with its own queue; translation may stay on meanwhile.
@@ -177,6 +195,51 @@ impl Unit {
     /// Turns translation on.
     pub fn enable(&self) -> Result<(), Error> {
         self.command(TE, true)
+    }
+
+    /// Whether the unit can remap interrupts.
+    pub fn can_remap(&self) -> bool {
+        self.ecap & ECAP_IR != 0
+    }
+
+    /// Whether the unit's remapping entries can hold 32-bit destination
+    /// IDs.
+    pub fn wide_ids(&self) -> bool {
+        self.ecap & ECAP_EIM != 0
+    }
+
+    /// Turns interrupt remapping on with an empty table whose entries
+    /// hold 32-bit destination IDs when `wide`, so that every interrupt
+    /// without an entry and every one in compatibility format is blocked.
+    pub fn enable_remapping(&mut self, wide: bool) -> Result<(), Error> {
+        let irt = table_frame()?;
+        self.write64(IRTA, irt | if wide { IRTA_EIME } else { 0 } | IRT_SIZE);
+        self.command(SIRTP, true)?;
+        self.submit(&[[IEC_GLOBAL, 0]])?;
+        if self.read32(GSTS) & CFI != 0 {
+            self.command(CFI, false)?;
+        }
+        self.command(IRE, true)?;
+        self.irt = Some(irt);
+        Ok(())
+    }
+
+    /// Writes entry `index` of the remapping table and waits until the
+    /// unit no longer uses what it held before.
+    pub fn set_remap(&mut self, index: u16, entry: [u64; 2]) -> Result<(), Error> {
+        let Some(irt) = self.irt else {
+            return Ok(());
+        };
+        let low = (space::direct(irt) + u64::from(index) * 16) as *mut u64;
+        // SAFETY: the entry lies in the unit's table, and the present bit
+        // in the low half is written last, or cleared first.
+        unsafe {
+            low.write_volatile(0);
+            low.add(1).write_volatile(entry[1]);
+            low.write_volatile(entry[0]);
+        }
+        self.flush(low);
+        self.submit(&[[IEC_GLOBAL, 0]])
     }
 
     /// Turns translation off, as when DMA is to go unrestricted.

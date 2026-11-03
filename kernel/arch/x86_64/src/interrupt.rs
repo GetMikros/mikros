@@ -53,6 +53,7 @@ impl Interrupt {
         apic::route(
             gsi,
             interrupt.vector,
+            interrupt.index(),
             options & LEVEL != 0,
             options & ACTIVE_LOW != 0,
         )?;
@@ -82,6 +83,11 @@ impl Interrupt {
         Ok(interrupt)
     }
 
+    /// The remapping entry of the object, which follows its vector.
+    fn index(&self) -> u16 {
+        u16::from(self.vector - DEVICE_VECTORS.start)
+    }
+
     /// Clears `SIGNALED` and unmasks the line.
     pub fn ack(&self) {
         self.header.update_signals(signals::SIGNALED, 0);
@@ -92,6 +98,9 @@ impl Interrupt {
 impl Drop for Interrupt {
     fn drop(&mut self) {
         apic::mask_line(self.gsi, true);
+        // When the unit does not confirm, the entry stays, but its vector
+        // reaches no object until it is given out again.
+        let _ = crate::iommu::remap(self.index(), None);
         SLOTS.lock()[usize::from(self.vector - DEVICE_VECTORS.start)] = None;
         self.budget.release_kernel(Self::COST);
     }
