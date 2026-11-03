@@ -4,7 +4,9 @@
 use super::Failure;
 use super::gather::Gathered;
 use alloc::vec;
-use boot_protocol::x86_64::{AP_TRAMPOLINE_END, DIRECT_MAP_BASE, DIRECT_MAP_LIMIT};
+use boot_protocol::x86_64::{
+    AP_TRAMPOLINE_END, DIRECT_MAP_BASE, DIRECT_MAP_LIMIT, fits_ap_trampoline,
+};
 use boot_protocol::{
     BOOT_INFO_SIZE, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, PAGE_SIZE, VERSION_MAJOR,
     VERSION_MINOR, arch, flags,
@@ -192,12 +194,21 @@ fn prepare(g: Gathered) -> Result<Prepared, Failure> {
 
     let step = "allocating memory for the boot stack";
     let stack_phys = allocate(AllocateType::AnyPages, BOOT_STACK_SIZE / PAGE_SIZE, step)?;
-    let trampoline = allocate(
+    // The allocation has no lower bound, but the uefi crate never returns
+    // page 0, the only page below the trampoline's; a page outside its
+    // bounds is not used all the same.
+    let trampoline = match allocate(
         AllocateType::MaxAddress(AP_TRAMPOLINE_END - 1),
         1,
         "allocating the AP trampoline page",
-    )
-    .ok();
+    ) {
+        Ok(page) if fits_ap_trampoline(page) => Some(page),
+        Ok(page) => {
+            free(page, 1);
+            None
+        }
+        Err(_) => None,
+    };
 
     let step = "allocating memory for the boot information";
     let info_phys = allocate(AllocateType::AnyPages, 2, step)?;

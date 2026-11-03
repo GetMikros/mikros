@@ -164,6 +164,14 @@ pub mod x86_64 {
     /// trampoline page.
     pub const AP_TRAMPOLINE_MIN: u64 = 0x1000;
     pub const AP_TRAMPOLINE_END: u64 = 0xA0000;
+
+    /// Whether the page at `phys` lies between `AP_TRAMPOLINE_MIN` and
+    /// `AP_TRAMPOLINE_END`, so that it may hold the AP trampoline.
+    pub const fn fits_ap_trampoline(phys: u64) -> bool {
+        phys >= AP_TRAMPOLINE_MIN
+            && phys.is_multiple_of(super::PAGE_SIZE)
+            && phys <= AP_TRAMPOLINE_END - super::PAGE_SIZE
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +236,15 @@ mod tests {
         assert!(Kind::ApTrampoline.in_direct_map());
         for kind in [Kind::Mmio, Kind::Framebuffer, Kind::Reserved, Kind::Bad] {
             assert!(!kind.in_direct_map(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn bounds_the_ap_trampoline_page() {
+        use x86_64::fits_ap_trampoline;
+        assert!(fits_ap_trampoline(0x1000) && fits_ap_trampoline(0x9F000));
+        for phys in [0, 0xA0000, 0x1800, 0xFFFF_FFFF_FFFF_F000] {
+            assert!(!fits_ap_trampoline(phys), "{phys:#x}");
         }
     }
 }
