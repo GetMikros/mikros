@@ -15,3 +15,9 @@ debug = true
 # kernel is instrumented for coverage.
 [profile.fuzz]
 inherits = "dev"
+
+# Unoptimized, BLAKE2s's compression function takes 44 KiB of stack,
+# more than a kernel thread has, and the timer interrupt reseeds the
+# kernel's random number generator on the stack it interrupts.
+[profile.dev.package.blake2]
+opt-level = 3
