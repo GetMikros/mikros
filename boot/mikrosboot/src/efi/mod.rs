@@ -3,52 +3,41 @@
 mod enter;
 mod gather;
 
-use alloc::string::{String, ToString};
-use core::fmt::{Display, Write};
+use core::fmt::{Arguments, Write};
 use core::time::Duration;
+pub use mikrosboot::report::Failure;
+use mikrosboot::report::{self, Console};
 use uefi::{Status, boot, system};
 
-/// A step that failed while boot services run.
-pub struct Failure {
-    step: &'static str,
-    reason: String,
-}
+/// The UEFI console.
+struct Uefi;
 
-impl Failure {
-    pub fn new(step: &'static str, reason: impl Display) -> Failure {
-        Failure {
-            step,
-            reason: reason.to_string(),
-        }
+impl Console for Uefi {
+    fn write_line(&mut self, line: Arguments) {
+        system::with_stdout(|out| {
+            let _ = writeln!(out, "{line}\r");
+        });
+    }
+
+    fn reset_input(&mut self) {
+        system::with_stdin(|input| {
+            let _ = input.reset(false);
+        });
+    }
+
+    fn key_pressed(&mut self) -> bool {
+        system::with_stdin(|input| matches!(input.read_key(), Ok(Some(_))))
+    }
+
+    fn stall(&mut self, time: Duration) {
+        boot::stall(time);
     }
 }
 
-/// How long a failure stays on the screen without a key press.
-const FAILURE_WAIT: Duration = Duration::from_secs(30);
-const POLL: Duration = Duration::from_millis(100);
-
-/// Shows `failure`, waits for a key press or `FAILURE_WAIT`, and gives the
-/// status to return to the boot manager or firmware.
+/// Shows `failure`, waits for a key press or `report::FAILURE_WAIT`, and
+/// gives the status to return to the boot manager or firmware.
 fn fail(failure: &Failure) -> Status {
-    system::with_stdout(|out| {
-        let _ = writeln!(
-            out,
-            "mikrosboot: {} failed: {}\r",
-            failure.step, failure.reason
-        );
-        let _ = writeln!(out, "Press a key to continue.\r");
-    });
-    system::with_stdin(|input| {
-        let _ = input.reset(false);
-        let mut waited = Duration::ZERO;
-        while waited < FAILURE_WAIT {
-            if let Ok(Some(_)) = input.read_key() {
-                break;
-            }
-            boot::stall(POLL);
-            waited += POLL;
-        }
-    });
+    report::report(&mut Uefi, failure);
     Status::LOAD_ERROR
 }
 

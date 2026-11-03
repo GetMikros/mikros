@@ -13,3 +13,4 @@ pub mod info;
 pub mod load;
 pub mod memmap;
 pub mod paging;
+pub mod report;
