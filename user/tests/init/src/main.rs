@@ -1038,6 +1038,45 @@ fn log_readers(s: &Startup) -> Result {
     ensure("reading to the end", read_record(reader).0 == SHOULD_WAIT)
 }
 
+/// The boot image object is anonymous, as large as the image rounded up
+/// to whole pages, holds zeros after the image, and gives its frames back
+/// to the frame allocator once the last handle to it is closed. Nothing
+/// can start a program after this, so it runs last.
+fn boot_image_object(s: &Startup) -> Result {
+    const ANONYMOUS: u32 = 1;
+    let size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
+    let record = info::<0x18>(s.boot_image, 4)?;
+    ensure(
+        "sizing it in whole pages",
+        u64_at(&record, 0) == size && u32_at(&record, 8) == ANONYMOUS,
+    )?;
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("mapping it", unsafe {
+        sys::vm_map(s.process, PERM_READ, 0, s.boot_image, 0, size, &mut at)
+    })?;
+    // SAFETY: the object is mapped readable at `at`.
+    let tail = unsafe {
+        core::slice::from_raw_parts(
+            (at + s.boot_image_size) as *const u8,
+            (size - s.boot_image_size) as usize,
+        )
+    };
+    let zeroed = tail.iter().all(|&b| b == 0);
+    // SAFETY: the call takes no pointers.
+    check("unmapping it", unsafe {
+        sys::vm_unmap(s.process, at, size)
+    })?;
+    ensure("zeroing what follows the image", zeroed)?;
+    let before = free_pages()?;
+    // SAFETY: the call takes no pointers.
+    check("closing it", unsafe { sys::handle_close(s.boot_image) })?;
+    ensure(
+        "freeing its frames",
+        free_pages()? >= before + size / PAGE_SIZE,
+    )
+}
+
 fn free_pages() -> Result<u64> {
     let mut record = [0u8; 16];
     // SAFETY: the pointer describes `record`.
@@ -5637,7 +5676,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 86] = [
+const TESTS: [(&str, Test); 87] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -5754,6 +5793,8 @@ const TESTS: [(&str, Test); 86] = [
     ),
     ("processes_and_channels", processes_and_channels),
     ("init_segments_as_loaded", init_segments_as_loaded),
+    // Runs last: it closes the boot image.
+    ("boot_image_object", boot_image_object),
 ];
 
 fn main(s: &Startup) -> i64 {
