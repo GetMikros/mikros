@@ -27,6 +27,8 @@ struct Scenario {
     title: &'static str,
     /// Whether the panic report must replace the framebuffer's contents.
     screen: bool,
+    /// Whether the console must show text while the test init waits.
+    console: bool,
 }
 
 const SCENARIOS: [Scenario; 3] = [
@@ -36,6 +38,7 @@ const SCENARIOS: [Scenario; 3] = [
         raise: None,
         title: "init terminated with exit code 7",
         screen: true,
+        console: false,
     },
     Scenario {
         name: "nmi",
@@ -43,6 +46,7 @@ const SCENARIOS: [Scenario; 3] = [
         raise: Some("nmi"),
         title: "NMI (vector 2)",
         screen: false,
+        console: true,
     },
     Scenario {
         name: "machine-check",
@@ -53,6 +57,7 @@ const SCENARIOS: [Scenario; 3] = [
         raise: Some("mce 0 0 0xb200000000000000 0x5 0 0"),
         title: "machine check (vector 18)",
         screen: false,
+        console: false,
     },
 ];
 
@@ -73,6 +78,23 @@ fn monitor(socket: &Path, command: &str) -> Result<()> {
     // The monitor reads the command before the connection closes.
     std::thread::sleep(Duration::from_millis(200));
     Ok(())
+}
+
+/// Dumps the screen through the monitor on `socket` to `path` and reads
+/// the dump.
+fn screen_dump(socket: &Path, path: &Path) -> Result<Vec<u8>> {
+    monitor(socket, &format!("screendump {}", path.display()))?;
+    std::thread::sleep(Duration::from_millis(500));
+    fs::read(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// Why the screen `ppm` does not show the console's text, if it does not.
+fn console_problem(ppm: &[u8]) -> Option<&'static str> {
+    match ppm_pixels(ppm) {
+        None => Some("the screen dump is not a PPM image"),
+        Some(pixels) if pixels.iter().all(|&p| p == pixels[0]) => Some("the console shows nothing"),
+        Some(_) => None,
+    }
 }
 
 /// The pixels of a binary PPM image, or `None` when `ppm` is not one.
@@ -97,7 +119,7 @@ fn ppm_pixels(ppm: &[u8]) -> Option<Vec<[u8; 3]>> {
         return None;
     }
     let data = ppm.get(at + 1..at + 1 + width * height * 3)?;
-    Some(data.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect())
+    Some(data.as_chunks::<3>().0.to_vec())
 }
 
 /// Why the screen `ppm` does not show a panic report drawn over a
@@ -173,7 +195,7 @@ fn boot(
     // The firmware gives a linear framebuffer only on the standard VGA
     // device.
     let mut machine = machine.clone();
-    if scenario.screen {
+    if scenario.screen || scenario.console {
         machine.gpu = qemu::Gpu::Basic;
     }
     let mut args = crate::test::test_args(
@@ -190,20 +212,19 @@ fn boot(
         .with_context(|| format!("failed to start {}", qemu::QEMU))?;
     let deadline = Instant::now() + timeout;
     let result = (|| {
+        let mut problem = None;
         if let Some(command) = scenario.raise {
             wait_for_line(&log, WAITING, &mut qemu, deadline)?;
+            if scenario.console {
+                problem = console_problem(&screen_dump(&socket, &dir.join("console.ppm"))?);
+            }
             monitor(&socket, command)?;
         }
         let serial = wait_for_line(&log, PANIC_END, &mut qemu, deadline)?;
-        let mut problem = None;
         if scenario.screen && serial.contains(PAINTED) {
             // The report goes to the serial port before the screen.
             std::thread::sleep(Duration::from_millis(500));
-            monitor(&socket, &format!("screendump {}", screen.display()))?;
-            std::thread::sleep(Duration::from_millis(500));
-            let dump =
-                fs::read(&screen).with_context(|| format!("reading {}", screen.display()))?;
-            problem = screen_problem(&dump);
+            problem = screen_problem(&screen_dump(&socket, &screen)?);
         } else if scenario.screen {
             println!(
                 "scenario {}: no framebuffer, screen not checked",
@@ -271,6 +292,11 @@ mod tests {
             Some("the screen is blank")
         );
         assert!(screen_problem(b"P3\n1 1\n255\n0 0 0").is_some());
+        assert_eq!(console_problem(&ppm(&[[0; 3], PAINT])), None);
+        assert_eq!(
+            console_problem(&ppm(&[[0; 3], [0; 3]])),
+            Some("the console shows nothing")
+        );
     }
 
     #[test]
