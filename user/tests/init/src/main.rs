@@ -1948,10 +1948,31 @@ fn coverage(s: &Startup) -> Result {
     ensure("recording blocks", count > 0)
 }
 
-/// Outside fuzz builds there is nothing to test.
+/// Outside fuzz builds the numbers of `fuzz_cov_enable` and
+/// `fuzz_cov_disable`, 45 and 46, are not assigned, so the bindings leave
+/// the calls out and the test makes them by number.
 #[cfg(not(feature = "fuzz"))]
 fn coverage(_: &Startup) -> Result {
-    Ok(())
+    /// The status of an unassigned number.
+    const BAD_SYSCALL: i64 = -5;
+    let mem = create_memory(PAGE_SIZE)?;
+    for number in [45u64, 46] {
+        let status: i64;
+        // SAFETY: SYSCALL changes only RAX, RCX and R11, and an
+        // unassigned number reads no argument.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") number => status,
+                in("rdi") u64::from(mem),
+                out("rcx") _,
+                out("r11") _,
+                options(nostack),
+            )
+        };
+        ensure("refusing a fuzz-only call", status == BAD_SYSCALL)?;
+    }
+    check("closing the object", unsafe { sys::handle_close(mem) })
 }
 
 /// Set by `straddling_reader` once its read returned.
