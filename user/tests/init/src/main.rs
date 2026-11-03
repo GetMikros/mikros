@@ -4219,9 +4219,18 @@ fn read_process_memory(s: &Startup) -> Result {
     )
 }
 
-/// The page below init's stack stays reserved: nothing there can be read,
-/// a mapping placed there is refused, and access to it cannot be granted.
+/// Init's stack is 256 KiB, and init started with the stack pointer at
+/// its top: the return address of the runtime's first call, from
+/// `_start`, lies right below it. The page below the stack stays
+/// reserved: nothing there can be read, a mapping placed there is
+/// refused, and access to it cannot be granted.
 fn stack_guard_page_kept(s: &Startup) -> Result {
+    const STACK_SIZE: u64 = 256 << 10;
+    /// The bytes of `xor ebp, ebp` and `call`, which `_start` begins with.
+    const FIRST_CALL_END: u64 = 7;
+    unsafe extern "C" {
+        static _start: u8;
+    }
     let rsp: u64;
     // SAFETY: the instruction only reads the stack pointer.
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
@@ -4232,6 +4241,16 @@ fn stack_guard_page_kept(s: &Startup) -> Result {
     ensure(
         "finding nothing below the stack",
         read_memory(s.process, guard, &mut [0u8; 1]) == NOT_FOUND,
+    )?;
+    let top = guard + PAGE_SIZE + STACK_SIZE;
+    let mut word = [0u8; 8];
+    check(
+        "reading the top of the stack",
+        read_memory(s.process, top - 8, &mut word),
+    )?;
+    ensure(
+        "starting at the top of the stack",
+        u64::from_le_bytes(word) == (&raw const _start) as u64 + FIRST_CALL_END,
     )?;
     let mem = create_memory(PAGE_SIZE)?;
     let mut at = 0;
