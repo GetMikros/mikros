@@ -806,6 +806,14 @@ fn budget_kernel(s: &Startup) -> Result<u64> {
     Ok(u64_at(&record, 0x08))
 }
 
+/// The kernel charges nothing it made at boot, such as the boot image,
+/// init's segments and stack, and the clock page, to the root budget that
+/// init belongs to: no page is charged before init creates a memory
+/// object. This test runs first, before any test creates one.
+fn boot_memory_uncharged(s: &Startup) -> Result {
+    ensure("charging no page", budget_pages(s)? == 0)
+}
+
 fn set_kernel_limit(s: &Startup, limit: u64) -> Result {
     // SAFETY: the call takes no pointers.
     check("setting the limits", unsafe {
@@ -3324,7 +3332,8 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 51] = [
+const TESTS: [(&str, Test); 52] = [
+    ("boot_memory_uncharged", boot_memory_uncharged),
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),

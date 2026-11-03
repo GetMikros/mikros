@@ -31,9 +31,10 @@ const CHUNK: usize = 256;
 
 pub struct MemoryObject {
     header: Header,
-    /// The budget of the creating process, which its frames are charged
-    /// to.
-    budget: Arc<Budget>,
+    /// The budget of the creating process, which the object and its
+    /// frames are charged to, or `None` for an object the kernel made at
+    /// boot, which charges nothing. A paged object always has one.
+    budget: Option<Arc<Budget>>,
     /// Kernel memory charged to the budget for the object itself.
     charged: u64,
     pages: SpinLock<Pages>,
@@ -74,8 +75,9 @@ pub struct Paged {
     /// Locked after the pages.
     state: SpinLock<Paging>,
     /// The budgets that frames supplied to the object stay charged to, by
-    /// frame address.
-    charges: SpinLock<Map<u64, Arc<Budget>>>,
+    /// frame address: `None` for a frame of an object without a budget,
+    /// which stays uncharged.
+    charges: SpinLock<Map<u64, Option<Arc<Budget>>>>,
     /// The byte range of the outstanding writeback, which its end must
     /// name exactly. Locked after the pages.
     writeback: SpinLock<Option<(u64, u64)>>,
@@ -131,15 +133,25 @@ fn chunk(at: u64, left: u64) -> (u64, usize, usize) {
 
 impl MemoryObject {
     /// An anonymous memory object of `size` bytes created with `options`,
-    /// charged to `budget`.
-    pub fn new(budget: &Arc<Budget>, size: u64, options: u32) -> Result<Arc<MemoryObject>, Error> {
+    /// charged to `budget` if given.
+    pub fn new(
+        budget: Option<&Arc<Budget>>,
+        size: u64,
+        options: u32,
+    ) -> Result<Arc<MemoryObject>, Error> {
         let pages = Pages::new(size, options, MAX_SIZE)?;
-        let charged = size_of::<MemoryObject>() as u64;
-        budget.charge_kernel(charged)?;
+        let charged = match budget {
+            Some(budget) => {
+                let size = size_of::<MemoryObject>() as u64;
+                budget.charge_kernel(size)?;
+                size
+            }
+            None => 0,
+        };
         // The object releases the charge when it goes, also on failure.
         kernel_core::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
-            budget: budget.clone(),
+            budget: budget.cloned(),
             charged,
             pages: SpinLock::new(pages),
             physical: None,
@@ -174,7 +186,7 @@ impl MemoryObject {
         // The object releases the charge when it goes, also on failure.
         kernel_core::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
-            budget: budget.clone(),
+            budget: Some(budget.clone()),
             charged,
             pages: SpinLock::new(pages),
             physical: None,
@@ -229,7 +241,8 @@ impl MemoryObject {
         payload[16..24].copy_from_slice(&PAGE_SIZE.to_le_bytes());
         let packet = crate::port::packet(paged.key, PACKET_PAGER, 0, &payload);
         let port = paged.port.upgrade().ok_or(Error::PeerClosed)?;
-        port.queue_kernel(packet, &self.budget)
+        let budget = self.budget.as_ref().expect("a paged object has a budget");
+        port.queue_kernel(packet, budget)
     }
 
     /// Waits until page `index` of a paged object is present, requesting
@@ -619,21 +632,28 @@ impl MemoryObject {
     }
 
     /// A physical object of the `size` bytes from `base`, both multiples
-    /// of the page size, mapped with `policy`, charged to `budget`.
+    /// of the page size, mapped with `policy`, charged to `budget` if
+    /// given.
     pub fn new_physical(
-        budget: &Arc<Budget>,
+        budget: Option<&Arc<Budget>>,
         base: u64,
         size: u64,
         policy: Policy,
     ) -> Result<Arc<MemoryObject>, Error> {
         debug_assert!(base.is_multiple_of(PAGE_SIZE) && size.is_multiple_of(PAGE_SIZE));
         let pages = Pages::new(size, 0, MAX_SIZE)?;
-        let charged = size_of::<MemoryObject>() as u64;
-        budget.charge_kernel(charged)?;
+        let charged = match budget {
+            Some(budget) => {
+                let size = size_of::<MemoryObject>() as u64;
+                budget.charge_kernel(size)?;
+                size
+            }
+            None => 0,
+        };
         // The object releases the charge when it goes, also on failure.
         kernel_core::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
-            budget: budget.clone(),
+            budget: budget.cloned(),
             charged,
             pages: SpinLock::new(pages),
             physical: Some((base, policy)),
@@ -701,26 +721,15 @@ impl MemoryObject {
     }
 
     /// An anonymous object of `count` pages that takes over the `count`
-    /// frames from `phys`, charging them to `budget`. The frames return
-    /// to the frame allocator when the object is destroyed.
-    pub fn from_frames(
-        budget: &Arc<Budget>,
-        phys: u64,
-        count: u64,
-    ) -> Result<Arc<MemoryObject>, Error> {
-        budget.charge_pages(count)?;
+    /// frames from `phys`, charging them to no budget, as the kernel does
+    /// this at boot. The frames return to the frame allocator when the
+    /// object is destroyed.
+    pub fn from_frames(phys: u64, count: u64) -> Result<Arc<MemoryObject>, Error> {
         // The frames come back to the allocator with the object.
         if let Some(frames) = FRAMES.lock().as_mut() {
             frames.adopt(count);
         }
-        if let Err(e) = budget.charge_kernel(count * PAGE_ENTRY_COST) {
-            budget.release_pages(count);
-            return Err(e);
-        }
-        let object = MemoryObject::new(budget, count * PAGE_SIZE, 0).inspect_err(|_| {
-            budget.release_pages(count);
-            budget.release_kernel(count * PAGE_ENTRY_COST);
-        })?;
+        let object = MemoryObject::new(None, count * PAGE_SIZE, 0)?;
         let mut pages = object.pages.lock();
         for index in 0..count {
             match nodes::claim_insert() {
@@ -1189,13 +1198,15 @@ impl MemoryObject {
     }
 
     /// Gives page `index` a zeroed frame, charging the frame to the
-    /// budget, and returns it.
+    /// budget, if the object has one, and returns it.
     fn alloc(&self, pages: &mut Pages, index: u64) -> Result<u64, Error> {
         let claim = nodes::claim_insert()?;
-        self.budget.charge_pages(1)?;
-        if let Err(e) = self.budget.charge_kernel(PAGE_ENTRY_COST) {
-            self.budget.release_pages(1);
-            return Err(e);
+        if let Some(budget) = &self.budget {
+            budget.charge_pages(1)?;
+            if let Err(e) = budget.charge_kernel(PAGE_ENTRY_COST) {
+                budget.release_pages(1);
+                return Err(e);
+            }
         }
         let Some(phys) = FRAMES.lock().as_mut().and_then(|f| f.alloc()) else {
             self.release(1);
@@ -1207,10 +1218,12 @@ impl MemoryObject {
         Ok(phys)
     }
 
-    /// Releases the charges of `count` frames.
+    /// Releases the charges of `count` frames, if the object has a budget.
     fn release(&self, count: u64) {
-        self.budget.release_pages(count);
-        self.budget.release_kernel(count * PAGE_ENTRY_COST);
+        if let Some(budget) = &self.budget {
+            budget.release_pages(count);
+            budget.release_kernel(count * PAGE_ENTRY_COST);
+        }
     }
 
     /// Frees frames taken from the pages and releases their charges.
@@ -1256,10 +1269,11 @@ impl MemoryObject {
                     .as_ref()
                     .and_then(|p| p.charges.lock().remove(&phys))
                 {
-                    Some(budget) => {
+                    Some(Some(budget)) => {
                         budget.release_pages(1);
                         budget.release_kernel(PAGE_ENTRY_COST);
                     }
+                    Some(None) => {}
                     None => count += 1,
                 }
             }
@@ -1715,6 +1729,8 @@ impl Drop for MemoryObject {
     fn drop(&mut self) {
         let frames = self.pages.lock().take_all();
         self.free(frames.into_values());
-        self.budget.release_kernel(self.charged);
+        if let Some(budget) = &self.budget {
+            budget.release_kernel(self.charged);
+        }
     }
 }

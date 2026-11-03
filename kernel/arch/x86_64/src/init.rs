@@ -54,7 +54,7 @@ struct Loaded {
 
 /// The boot image as a memory object that owns its frames, with the bytes
 /// after the image zeroed.
-fn boot_image(info: &BootInfo, budget: &Arc<Budget>) -> Arc<MemoryObject> {
+fn boot_image(info: &BootInfo) -> Arc<MemoryObject> {
     let size = info.boot_image_size;
     let pages = size.div_ceil(PAGE_SIZE);
     let tail = pages * PAGE_SIZE - size;
@@ -67,21 +67,16 @@ fn boot_image(info: &BootInfo, budget: &Arc<Budget>) -> Arc<MemoryObject> {
         )
     };
     after.fill(0);
-    MemoryObject::from_frames(budget, info.boot_image_phys, pages)
+    MemoryObject::from_frames(info.boot_image_phys, pages)
         .unwrap_or_else(|e| panic!("no memory for the boot image object: {e:?}"))
 }
 
 /// Maps a new memory object of `len` bytes, a multiple of the page size,
-/// at `addr` with `perms` into `process`, and returns it.
-fn map(
-    process: &Process,
-    budget: &Arc<Budget>,
-    addr: u64,
-    len: u64,
-    perms: u32,
-) -> Arc<MemoryObject> {
+/// at `addr` with `perms` into `process`, and returns it. Neither is
+/// charged to a budget.
+fn map(process: &Process, addr: u64, len: u64, perms: u32) -> Arc<MemoryObject> {
     let mem =
-        MemoryObject::new(budget, len, 0).unwrap_or_else(|e| panic!("no memory for init: {e:?}"));
+        MemoryObject::new(None, len, 0).unwrap_or_else(|e| panic!("no memory for init: {e:?}"));
     let options = MapOptions::parse(perms | SPECIFIC, addr, false).expect("valid map options");
     process
         .aspace()
@@ -92,14 +87,14 @@ fn map(
             &mem,
             0,
             PERM_READ | PERM_WRITE | PERM_EXECUTE,
-            budget,
+            None,
         )
         .unwrap_or_else(|e| panic!("mapping init at {addr:#x}: {e:?}"));
     mem
 }
 
 /// Loads `segment` of `file` into `process`.
-fn load_segment(process: &Process, budget: &Arc<Budget>, file: &[u8], segment: &Segment) {
+fn load_segment(process: &Process, file: &[u8], segment: &Segment) {
     let pages = segment.pages();
     let mut perms = PERM_READ;
     if segment.flags & PF_W != 0 {
@@ -108,7 +103,7 @@ fn load_segment(process: &Process, budget: &Arc<Budget>, file: &[u8], segment: &
     if segment.flags & PF_X != 0 {
         perms |= PERM_EXECUTE;
     }
-    let mem = map(process, budget, pages.start, pages.end - pages.start, perms);
+    let mem = map(process, pages.start, pages.end - pages.start, perms);
     let data = &file[segment.offset as usize..][..segment.filesz as usize];
     let mut rest = data;
     // This runs during boot, where no other thread could run.
@@ -127,11 +122,11 @@ fn load_segment(process: &Process, budget: &Arc<Budget>, file: &[u8], segment: &
     .unwrap_or_else(|e| panic!("no memory for init: {e:?}"));
 }
 
-/// Creates the initial process and its thread from the `init` member of
-/// the boot image, with its segments and stack mapped, charged to
-/// `budget`.
+/// Creates the initial process, belonging to `budget`, and its thread
+/// from the `init` member of the boot image, with its segments and stack
+/// mapped. Nothing made here is charged to a budget.
 fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
-    let boot_image = boot_image(info, budget);
+    let boot_image = boot_image(info);
     // SAFETY: the boot image object owns these frames and nothing writes
     // to them while the kernel reads the image.
     let image = unsafe {
@@ -146,10 +141,10 @@ fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
 
     let name = || Name::new(b"init").expect("a valid name");
     let process =
-        Process::new(budget, name(), true).unwrap_or_else(|e| panic!("creating init: {e:?}"));
+        Process::new(budget, name(), false).unwrap_or_else(|e| panic!("creating init: {e:?}"));
     *INIT.lock() = Arc::downgrade(&process);
     for segment in &elf.segments {
-        load_segment(&process, budget, file, segment);
+        load_segment(&process, file, segment);
     }
     // The stack is placed with the page below it, which stays unmapped.
     let guard = process
@@ -157,8 +152,8 @@ fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
         .choose(STACK_SIZE + PAGE_SIZE)
         .unwrap_or_else(|e| panic!("no room for the init stack: {e:?}"));
     let stack = guard + PAGE_SIZE;
-    map(&process, budget, stack, STACK_SIZE, PERM_READ | PERM_WRITE);
-    let thread = Process::create_thread(&process, name(), true)
+    map(&process, stack, STACK_SIZE, PERM_READ | PERM_WRITE);
+    let thread = Process::create_thread(&process, name(), false)
         .unwrap_or_else(|e| panic!("creating the init thread: {e:?}"));
     Loaded {
         process,
@@ -170,21 +165,23 @@ fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
 }
 
 /// The framebuffer as a physical memory object covering its pages.
-fn framebuffer(info: &BootInfo, budget: &Arc<Budget>) -> Option<Arc<MemoryObject>> {
+fn framebuffer(info: &BootInfo) -> Option<Arc<MemoryObject>> {
     if info.flags & flags::FRAMEBUFFER_PRESENT == 0 {
         return None;
     }
     let fb = &info.framebuffer;
     let base = fb.phys_base & !(PAGE_SIZE - 1);
     let end = (fb.phys_base + fb.size).next_multiple_of(PAGE_SIZE);
-    let object = MemoryObject::new_physical(budget, base, end - base, Policy::WriteCombining)
+    let object = MemoryObject::new_physical(None, base, end - base, Policy::WriteCombining)
         .unwrap_or_else(|e| panic!("no memory for the framebuffer object: {e:?}"));
     Some(object)
 }
 
 /// Starts the initial process with the startup message on its bootstrap
 /// channel. Must run while the memory map and the command line are still
-/// in place.
+/// in place. The process belongs to the root budget, which its own
+/// system calls and faults are charged to from then on, but nothing made
+/// here is charged to it.
 pub fn start(info: &BootInfo) {
     let budget = Budget::root();
     let loaded = load(info, &budget);
@@ -197,7 +194,7 @@ pub fn start(info: &BootInfo) {
         )
     };
     let bytes = startup::message(info, cmdline, crate::memory::memory_map(info));
-    let clock_page = crate::time::create_clock_page(&budget)
+    let clock_page = crate::time::create_clock_page()
         .unwrap_or_else(|e| panic!("no memory for the clock page: {e:?}"));
     let entry = |object: Arc<dyn Object>, kind| Entry {
         object,
@@ -218,7 +215,7 @@ pub fn start(info: &BootInfo) {
             rights: READ_ONLY,
         },
     ];
-    if let Some(fb) = framebuffer(info, &budget) {
+    if let Some(fb) = framebuffer(info) {
         handles.push(Entry {
             object: fb,
             rights: PHYSICAL,
@@ -230,9 +227,9 @@ pub fn start(info: &BootInfo) {
             bytes.len()
         );
     }
-    let (theirs, ours) = Endpoint::pair(Some(&budget))
+    let (theirs, ours) = Endpoint::pair(None)
         .unwrap_or_else(|e| panic!("no memory for the bootstrap channel: {e:?}"));
-    let message = Message::new(bytes, handles, Some(&budget))
+    let message = Message::new(bytes, handles, None)
         .unwrap_or_else(|e| panic!("no memory for the startup message: {e:?}"));
     if let Err((e, _)) = ours.write(message) {
         panic!("writing the startup message: {e:?}");
@@ -249,7 +246,7 @@ pub fn start(info: &BootInfo) {
         loaded.stack,
         Some(bootstrap),
         0,
-        Some(&budget),
+        None,
     )
     .unwrap_or_else(|e| panic!("starting init: {e:?}"));
 }

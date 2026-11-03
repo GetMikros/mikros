@@ -365,7 +365,7 @@ fn page_aligned(values: &[u64]) -> Result<(), Error> {
 
 pub fn mem_create(size: u64, options: u32, out: UserOut<Handle>) -> Result<(), Error> {
     page_aligned(&[size])?;
-    let mem = MemoryObject::new(current_process()?.budget(), size, options)?;
+    let mem = MemoryObject::new(Some(current_process()?.budget()), size, options)?;
     give(mem, ObjectType::MemoryObject, out)
 }
 
@@ -466,7 +466,8 @@ pub fn vm_map(
     let outputs = prepare(&caller, &[out_addr.range(1)])?;
     let aspace = target.aspace().clone();
     let max = MapOptions::allowed_by(handle_rights);
-    let start = aspace.add_region(options, addr, size, &mem, offset, max, caller.budget())?;
+    let budget = Some(caller.budget());
+    let start = aspace.add_region(options, addr, size, &mem, offset, max, budget)?;
     publish(outputs, &[bytes_of(&[start])]);
     Ok(())
 }
@@ -1796,7 +1797,7 @@ pub fn mem_clone(
     source.check_range(offset, len)?;
     let process = current_process()?;
     let budget = process.budget();
-    let clone = MemoryObject::new(budget, len, options)?;
+    let clone = MemoryObject::new(Some(budget), len, options)?;
     let mut work = Work::new(crate::sched::preempt_point);
     // The clone is taken once no output into the source is still to be
     // written.

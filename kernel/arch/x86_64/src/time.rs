@@ -10,7 +10,6 @@ use boot_protocol::BootInfo;
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use kernel_core::acpi::{self, Address, PmTimer, Tables};
 use kernel_core::clock::{Extender, quarter_wrap_ns, ticks_to_ns};
-use kernel_core::object::budget::Budget;
 use kernel_core::object::memory::PAGE_SIZE;
 use kernel_core::object::resource::KIND_IOPORT;
 use kernel_core::status::Error;
@@ -267,16 +266,16 @@ pub fn init(info: &BootInfo) {
     log!(Info, "monotonic clock from {name}");
 }
 
-/// Creates the clock page, charged to `budget`. Its contents never change
-/// after boot, so `sequence` stays 0.
-pub fn create_clock_page(budget: &Arc<Budget>) -> Result<Arc<MemoryObject>, Error> {
+/// Creates the clock page at boot, charged to no budget. Its contents
+/// never change after boot, so `sequence` stays 0.
+pub fn create_clock_page() -> Result<Arc<MemoryObject>, Error> {
     let tsc = (SOURCE.load(Ordering::Acquire) == TSC).then(|| {
         let rate = RATE.load(Ordering::Relaxed);
         let base = BASE.load(Ordering::Relaxed);
         (rate as u32, (rate >> 32) as u32, base, 0)
     });
     let header = clock_page(tsc);
-    let page = MemoryObject::new(budget, PAGE_SIZE, 0)?;
+    let page = MemoryObject::new(None, PAGE_SIZE, 0)?;
     // This runs during boot, where no other thread could run.
     let mut work = crate::publish::Work::new(|| {});
     page.write(0, header.len() as u64, &mut work, |chunk| {

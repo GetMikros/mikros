@@ -346,8 +346,8 @@ impl AddressSpace {
     /// page size, with `options`: at `addr` when they are `SPECIFIC`,
     /// otherwise at a random free address. Returns the start. Pages are
     /// entered into the tables only when they are accessed. The region is
-    /// charged to `budget`. Fails with `AccessDenied` when `mem` is
-    /// revoked, or has the `WRITE` seal and the mapping is writable.
+    /// charged to `budget` if given. Fails with `AccessDenied` when `mem`
+    /// is revoked, or has the `WRITE` seal and the mapping is writable.
     #[allow(clippy::too_many_arguments)]
     pub fn add_region(
         self: &Arc<Self>,
@@ -357,7 +357,7 @@ impl AddressSpace {
         mem: &Arc<MemoryObject>,
         offset: u64,
         max: u32,
-        budget: &Arc<Budget>,
+        budget: Option<&Arc<Budget>>,
     ) -> Result<u64, Error> {
         if options.specific && !in_user_range(addr, size) {
             return Err(Error::OutOfRange);
@@ -387,9 +387,9 @@ impl AddressSpace {
         mem: &Arc<MemoryObject>,
         offset: u64,
         max: u32,
-        budget: &Arc<Budget>,
+        budget: Option<&Arc<Budget>>,
     ) -> Result<u64, Error> {
-        let charge = Charge::new(Some(budget))?;
+        let charge = Charge::new(budget)?;
         // `vm_map` checked both before it waited to prepare its output, and
         // a seal or a revocation may have come meanwhile. Nothing between
         // here and the insert waits, so none can come in between.
