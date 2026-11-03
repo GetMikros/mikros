@@ -10,7 +10,7 @@ use crate::memory::DirectMem;
 use crate::memory_object::MemoryObject;
 use alloc::sync::Arc;
 use boot_protocol::BootInfo;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use kernel_core::acpi::{self, Address, PmTimer, Tables};
 use kernel_core::clock::{Extender, quarter_wrap_ns, ticks_to_ns};
 use kernel_core::object::memory::PAGE_SIZE;
@@ -159,7 +159,13 @@ fn measure_with_pit(counter: &dyn Fn() -> u64) -> Option<u64> {
     None
 }
 
+/// Reserves the ACPI PM timer and sets up reading it, the first time the
+/// kernel reads it: to calibrate against it or as the clock source.
 fn use_pm_timer(pm: PmTimer) {
+    static SET_UP: AtomicBool = AtomicBool::new(false);
+    if SET_UP.swap(true, Ordering::Relaxed) {
+        return;
+    }
     match pm.address {
         Address::Io(port) => {
             let port = u64::from(port);
@@ -209,9 +215,6 @@ pub fn init(info: &BootInfo) {
         (virt, capabilities >> 32, capabilities & HPET_64BIT != 0)
     });
 
-    if let Some(pm) = pm {
-        use_pm_timer(pm);
-    }
     // The references, in order of preference.
     let calibrate = |what: &str, counter: &dyn Fn() -> u64| -> u64 {
         hpet.map(|(virt, period_fs, wide)| {
@@ -221,7 +224,8 @@ pub fn init(info: &BootInfo) {
             measure(counter, || ext.extend(hpet_read(virt, HPET_COUNTER)), hz)
         })
         .or_else(|| {
-            pm.map(|_| {
+            pm.map(|pm| {
+                use_pm_timer(pm);
                 let ext = extender();
                 measure(counter, || ext.extend(pm_read()), PM_TIMER_HZ)
             })
@@ -247,8 +251,9 @@ pub fn init(info: &BootInfo) {
     let name = match (
         clock_source(leaves.invariant(), hpet.is_some(), pm.is_some()),
         hpet,
+        pm,
     ) {
-        (Some(Source::Tsc), _) => {
+        (Some(Source::Tsc), ..) => {
             // The clock page gives user space the same factor and shift,
             // so that it computes exactly the values `now` returns.
             let (mult, shift) = tsc_scale(tsc_hz);
@@ -256,14 +261,15 @@ pub fn init(info: &BootInfo) {
             SOURCE.store(TSC, Ordering::Relaxed);
             "the TSC"
         }
-        (Some(Source::Hpet), Some((virt, period_fs, wide))) => {
+        (Some(Source::Hpet), Some((virt, period_fs, wide)), _) => {
             ADDRESS.store(virt, Ordering::Relaxed);
             RATE.store(period_fs, Ordering::Relaxed);
             WIDTH.store(if wide { 64 } else { 32 }, Ordering::Relaxed);
             SOURCE.store(HPET, Ordering::Relaxed);
             "the HPET"
         }
-        (Some(Source::PmTimer), _) => {
+        (Some(Source::PmTimer), _, Some(pm)) => {
+            use_pm_timer(pm);
             RATE.store(PM_TIMER_HZ, Ordering::Relaxed);
             SOURCE.store(PM, Ordering::Relaxed);
             "the ACPI PM timer"
