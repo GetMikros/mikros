@@ -975,6 +975,7 @@ dependencies = [
 name = "syscall-table"
 version = "0.0.0"
 dependencies = [
+ "kernel-core",
  "yaml-rust2",
 ]
 
