@@ -8,8 +8,27 @@ pub struct ModeInfo {
     pub index: u32,
     pub width: usize,
     pub height: usize,
+    /// Pixels per line in memory.
+    pub stride: usize,
+    /// The framebuffer's size in bytes, which the firmware reports only
+    /// for the current mode; `None` until the mode has been current.
+    pub size: Option<u64>,
     /// Whether the mode has a linear framebuffer with 32-bit pixels.
     pub linear_32bit: bool,
+}
+
+impl ModeInfo {
+    /// Whether the mode can be used: a linear 32-bit mode with pixels,
+    /// lines at least as long as its width, and, once its size is known,
+    /// a framebuffer that holds all its lines.
+    pub fn usable(&self) -> bool {
+        let lines = (self.stride as u128) * (self.height as u128) * 4;
+        self.linear_32bit
+            && self.width > 0
+            && self.height > 0
+            && self.stride >= self.width
+            && self.size.is_none_or(|size| u128::from(size) >= lines)
+    }
 }
 
 /// What to do about the display mode.
@@ -25,15 +44,16 @@ pub enum Choice {
 
 /// Picks the usable mode of the `requested` size when there is one. Otherwise
 /// keeps the current mode when it is usable, and otherwise picks the usable
-/// mode with the most pixels, the first of equally large ones.
+/// mode with the most pixels, the first of equally large ones. A mode whose
+/// size is not known yet counts as usable until it is.
 pub fn choose(current: ModeInfo, modes: &[ModeInfo], requested: Option<(usize, usize)>) -> Choice {
-    let usable = || modes.iter().filter(|m| m.linear_32bit);
+    let usable = || modes.iter().filter(|m| m.usable());
     if let Some((width, height)) = requested
         && let Some(mode) = usable().find(|m| (m.width, m.height) == (width, height))
     {
         return Choice::Switch(mode.index);
     }
-    if current.linear_32bit {
+    if current.usable() {
         return Choice::Keep;
     }
     let mut best: Option<&ModeInfo> = None;
@@ -101,6 +121,8 @@ mod tests {
             index,
             width,
             height,
+            stride: width,
+            size: None,
             linear_32bit,
         }
     }
@@ -110,24 +132,32 @@ mod tests {
             index: 0,
             width: 800,
             height: 600,
+            stride: 800,
+            size: None,
             linear_32bit: true,
         },
         ModeInfo {
             index: 1,
             width: 1920,
             height: 1080,
+            stride: 1920,
+            size: None,
             linear_32bit: true,
         },
         ModeInfo {
             index: 2,
             width: 2560,
             height: 1440,
+            stride: 2560,
+            size: None,
             linear_32bit: false,
         },
         ModeInfo {
             index: 3,
             width: 1280,
             height: 1024,
+            stride: 1280,
+            size: None,
             linear_32bit: true,
         },
     ];
@@ -166,6 +196,43 @@ mod tests {
             choose(mode(u32::MAX, 1, 1, false), &none, None),
             Choice::Unusable
         );
+    }
+
+    #[test]
+    fn refuses_modes_whose_lines_do_not_fit() {
+        let good = ModeInfo {
+            stride: 832,
+            size: Some(832 * 600 * 4),
+            ..mode(0, 800, 600, true)
+        };
+        assert!(good.usable());
+        assert!(!ModeInfo { width: 0, ..good }.usable());
+        assert!(!ModeInfo { height: 0, ..good }.usable());
+        assert!(
+            !ModeInfo {
+                stride: 799,
+                ..good
+            }
+            .usable()
+        );
+        let small = ModeInfo {
+            size: Some(832 * 600 * 4 - 1),
+            ..good
+        };
+        assert!(!small.usable());
+        assert!(
+            ModeInfo {
+                size: None,
+                ..small
+            }
+            .usable()
+        );
+        // A too small current mode is not kept; a requested mode whose
+        // framebuffer turned out too small is not chosen again.
+        assert_eq!(choose(small, &MODES, None), Choice::Switch(1));
+        let mut modes = MODES;
+        modes[3].size = Some(0);
+        assert_eq!(choose(small, &modes, Some((1280, 1024))), Choice::Switch(1));
     }
 
     #[test]

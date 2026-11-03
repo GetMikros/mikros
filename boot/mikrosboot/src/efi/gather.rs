@@ -106,14 +106,26 @@ fn pixels(info: &uefi::proto::console::gop::ModeInfo) -> Option<Pixels> {
     }
 }
 
-fn mode_info(index: u32, info: &uefi::proto::console::gop::ModeInfo) -> ModeInfo {
+fn mode_info(
+    index: u32,
+    info: &uefi::proto::console::gop::ModeInfo,
+    size: Option<u64>,
+) -> ModeInfo {
     let (width, height) = info.resolution();
     ModeInfo {
         index,
         width,
         height,
+        stride: info.stride(),
+        size,
         linear_32bit: pixels(info).is_some(),
     }
+}
+
+/// The framebuffer size of the current mode, `mode`, if it has a linear
+/// framebuffer; the firmware has none for other modes.
+fn framebuffer_size(gop: &mut GraphicsOutput, mode: &ModeInfo) -> Option<u64> {
+    mode.linear_32bit.then(|| gop.frame_buffer().size() as u64)
 }
 
 /// Picks the display mode and describes its framebuffer, or gives `None`
@@ -122,18 +134,30 @@ fn framebuffer(cmdline: &str) -> Result<Option<Framebuffer>, Failure> {
     let Some(mut gop) = open_gop() else {
         return Ok(None);
     };
-    let current = mode_info(u32::MAX, &gop.current_mode_info());
+    let mut current = mode_info(u32::MAX, &gop.current_mode_info(), None);
+    current.size = framebuffer_size(&mut gop, &current);
     let modes: Vec<Mode> = gop.modes().collect();
-    let infos: Vec<ModeInfo> = (0..)
+    let mut infos: Vec<ModeInfo> = (0..)
         .zip(&modes)
-        .map(|(i, m)| mode_info(i, m.info()))
+        .map(|(i, m)| mode_info(i, m.info(), None))
         .collect();
-    match display::choose(current, &infos, cmdline::video_mode(cmdline)) {
-        Choice::Keep => {}
-        Choice::Switch(index) => gop
-            .set_mode(&modes[index as usize])
-            .map_err(|e| Failure::new("switching the display mode", alloc::format!("{e}")))?,
-        Choice::Unusable => return Ok(None),
+    // The firmware reports a mode's framebuffer size only once it is
+    // current, so a mode whose framebuffer turns out too small is left
+    // out and the choice is made again.
+    loop {
+        match display::choose(current, &infos, cmdline::video_mode(cmdline)) {
+            Choice::Keep => break,
+            Choice::Switch(index) if index == current.index => break,
+            Choice::Switch(index) => {
+                let i = index as usize;
+                gop.set_mode(&modes[i]).map_err(|e| {
+                    Failure::new("switching the display mode", alloc::format!("{e}"))
+                })?;
+                infos[i].size = framebuffer_size(&mut gop, &infos[i]);
+                current = infos[i];
+            }
+            Choice::Unusable => return Ok(None),
+        }
     }
     let info = gop.current_mode_info();
     let Some(pixels) = pixels(&info) else {
