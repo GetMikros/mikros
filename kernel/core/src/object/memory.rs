@@ -16,6 +16,10 @@ pub const INFO_MEMORY_SIZE: usize = 0x18;
 pub const KIND_ANONYMOUS: u32 = 1;
 /// The kind of memory objects of a fixed physical range.
 pub const KIND_PHYSICAL: u32 = 2;
+/// Physically contiguous RAM, allocated at creation.
+pub const KIND_CONTIGUOUS: u32 = 3;
+/// RAM allocated at creation and kept at the same physical addresses.
+pub const KIND_PINNED: u32 = 4;
 /// The kind of memory objects whose pages a pager supplies.
 pub const KIND_PAGED: u32 = 5;
 /// The creation option of paged objects that enables dirty tracking.

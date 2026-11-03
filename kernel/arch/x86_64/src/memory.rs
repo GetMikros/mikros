@@ -17,6 +17,20 @@ pub fn alloc_frame() -> Option<u64> {
     FRAMES.lock().as_mut()?.alloc()
 }
 
+/// `count` contiguous frames, aligned to `align` frames and ending at or
+/// below the physical address `limit`, as `Frames::alloc_contiguous`
+/// takes them, or `None` when there is no such run.
+pub fn alloc_contiguous(count: u64, align: u64, limit: u64) -> Option<u64> {
+    #[cfg(feature = "fuzz")]
+    if crate::fuzz::alloc_fails(crate::fuzz::FRAMES) {
+        return None;
+    }
+    FRAMES
+        .lock()
+        .as_mut()?
+        .alloc_contiguous(count, align, limit)
+}
+
 /// The memory map entries of `info`, read through the direct map.
 pub fn memory_map(info: &BootInfo) -> impl Iterator<Item = MemoryMapEntry> + Clone {
     let size = bootinfo::memory_map_size(info.memory_map_count, info.memory_map_entry_size)

@@ -352,7 +352,7 @@ fn build(info: &BootInfo, mapper: &mut Mapper<FrameTables>) -> Result<u64, crate
     let stack_phys = FRAMES
         .lock()
         .as_mut()
-        .and_then(|f| f.alloc_contiguous(STACK_SIZE / PAGE_SIZE, 1))
+        .and_then(|f| f.alloc_contiguous(STACK_SIZE / PAGE_SIZE, 1, u64::MAX))
         .ok_or(crate::paging::Error::OutOfMemory)?;
     let stack = reserve_dynamic(STACK_SIZE);
     mapper.map(stack, stack_phys, STACK_SIZE, data)?;

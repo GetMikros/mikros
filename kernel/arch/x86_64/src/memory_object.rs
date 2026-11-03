@@ -13,8 +13,9 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use kernel_core::nodes::{self, Map};
 use kernel_core::object::budget::{Budget, Scratch};
 use kernel_core::object::memory::{
-    INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_PAGED, KIND_PHYSICAL, PAGE_ENTRY_COST, PAGE_SIZE, Pages,
-    RESIZABLE, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE, SEALS, TRACK_DIRTY,
+    INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_CONTIGUOUS, KIND_PAGED, KIND_PHYSICAL, KIND_PINNED,
+    PAGE_ENTRY_COST, PAGE_SIZE, Pages, RESIZABLE, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE,
+    SEALS, TRACK_DIRTY,
 };
 use kernel_core::object::{Header, Object, ObjectType};
 use kernel_core::paging::{Absent, Paging};
@@ -64,6 +65,17 @@ pub struct MemoryObject {
     supplies: AtomicU32,
     /// For a paged object, what its pager needs.
     paged: Option<Paged>,
+    /// For a contiguous or pinned object, which all its frames were given
+    /// at creation and keep until it is destroyed, its kind.
+    fixed: Option<Fixed>,
+}
+
+/// The kinds of objects whose frames are allocated at creation and never
+/// change: contiguous, with the address of the first frame, and pinned.
+#[derive(Clone, Copy)]
+pub enum Fixed {
+    Contiguous(u64),
+    Pinned,
 }
 
 /// The part of a paged memory object that its pager drives.
@@ -161,6 +173,7 @@ impl MemoryObject {
             seals: AtomicU32::new(0),
             supplies: AtomicU32::new(0),
             paged: None,
+            fixed: None,
         })
     }
 
@@ -205,6 +218,7 @@ impl MemoryObject {
                 charges: SpinLock::new(nodes::map()),
                 writeback: SpinLock::new(None),
             }),
+            fixed: None,
         })
     }
 
@@ -212,9 +226,15 @@ impl MemoryObject {
         self.paged.is_some()
     }
 
-    /// Whether the object is neither physical nor paged.
+    /// Whether the object is neither physical, paged, contiguous nor
+    /// pinned.
     pub fn is_anonymous(&self) -> bool {
-        self.physical.is_none() && self.paged.is_none()
+        self.physical.is_none() && self.paged.is_none() && self.fixed.is_none()
+    }
+
+    /// Whether the object is contiguous or pinned.
+    pub fn is_fixed(&self) -> bool {
+        self.fixed.is_some()
     }
 
     /// Fails with `AccessDenied` when the object is revoked.
@@ -663,7 +683,136 @@ impl MemoryObject {
             seals: AtomicU32::new(0),
             supplies: AtomicU32::new(0),
             paged: None,
+            fixed: None,
         })
+    }
+
+    /// A contiguous object of `size` bytes, a multiple of the page size,
+    /// whose zeroed frames start at a multiple of 2 to the power of
+    /// `align_log2` and, with `below_4g`, end below 4 GiB, charged to
+    /// `budget`. Fails with `NoMemory` when no such run is free.
+    pub fn new_contiguous(
+        budget: &Arc<Budget>,
+        size: u64,
+        align_log2: u32,
+        below_4g: bool,
+    ) -> Result<Arc<MemoryObject>, Error> {
+        let count = size / PAGE_SIZE;
+        let limit = if below_4g { 1 << 32 } else { u64::MAX };
+        Self::new_fixed(budget, size, |object| {
+            object.charge(count)?;
+            let align = 1 << (align_log2 - PAGE_SIZE.trailing_zeros());
+            let Some(first) = crate::memory::alloc_contiguous(count, align, limit) else {
+                object.release(count);
+                return Err(Error::NoMemory);
+            };
+            let frames = (0..count).map(|i| first + i * PAGE_SIZE);
+            let mut work = Work::new(crate::sched::preempt_point);
+            for phys in frames.clone() {
+                work.item();
+                // SAFETY: the frame was just allocated, so nothing else
+                // references it.
+                unsafe { frame_bytes(phys) }.fill(0);
+            }
+            // Once inserted, the object frees the frames it holds and
+            // releases their charges; the others are freed here.
+            let mut pages = object.pages.lock();
+            for (index, phys) in frames.enumerate() {
+                match nodes::claim_insert() {
+                    Ok(claim) => pages.insert(index as u64, phys, claim),
+                    Err(e) => {
+                        drop(pages);
+                        object.free((index as u64..count).map(|i| first + i * PAGE_SIZE));
+                        return Err(e);
+                    }
+                }
+            }
+            Ok(Fixed::Contiguous(first))
+        })
+    }
+
+    /// A pinned object of `size` bytes, a multiple of the page size, whose
+    /// zeroed frames are allocated now and, with `below_4g`, lie below
+    /// 4 GiB, charged to `budget`.
+    pub fn new_pinned(
+        budget: &Arc<Budget>,
+        size: u64,
+        below_4g: bool,
+    ) -> Result<Arc<MemoryObject>, Error> {
+        Self::new_fixed(budget, size, |object| {
+            let mut work = Work::new(crate::sched::preempt_point);
+            for index in 0..size / PAGE_SIZE {
+                work.item();
+                let phys = object.alloc(&mut object.pages.lock(), index)?;
+                // The allocator gives the lowest free frame, so none is
+                // left below 4 GiB once one lies above.
+                if below_4g && phys >= 1 << 32 {
+                    return Err(Error::NoMemory);
+                }
+            }
+            Ok(Fixed::Pinned)
+        })
+    }
+
+    /// An object of `size` bytes charged to `budget` whose pages `fill`
+    /// gives frames, returning its kind. When `fill` fails, the object is
+    /// destroyed with the frames it was given.
+    fn new_fixed(
+        budget: &Arc<Budget>,
+        size: u64,
+        fill: impl FnOnce(&MemoryObject) -> Result<Fixed, Error>,
+    ) -> Result<Arc<MemoryObject>, Error> {
+        let mut object = Self::new(Some(budget), size, 0)?;
+        let fixed = fill(&object)?;
+        // Nothing else holds the object yet.
+        Arc::get_mut(&mut object).expect("a new object").fixed = Some(fixed);
+        Ok(object)
+    }
+
+    /// Charges `count` frames and their page entries to the budget, if
+    /// the object has one.
+    fn charge(&self, count: u64) -> Result<(), Error> {
+        if let Some(budget) = &self.budget {
+            budget.charge_pages(count)?;
+            if let Err(e) = budget.charge_kernel(count * PAGE_ENTRY_COST) {
+                budget.release_pages(count);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// The physical address of the start of a physical or contiguous
+    /// object, or `NotSupported` for other kinds.
+    pub fn physical_start(&self) -> Result<u64, Error> {
+        match (self.physical, self.fixed) {
+            (Some((base, _)), _) => Ok(base),
+            (_, Some(Fixed::Contiguous(first))) => Ok(first),
+            _ => Err(Error::NotSupported),
+        }
+    }
+
+    /// The physical addresses of the `count` pages from page `first` of a
+    /// contiguous or pinned object, none when `count` is 0. Fails with
+    /// `NotSupported` for other kinds and `OutOfRange` when the pages lie
+    /// beyond the object.
+    pub fn physical_pages(&self, first: u64, count: u64) -> Result<Vec<u64>, Error> {
+        if self.fixed.is_none() {
+            return Err(Error::NotSupported);
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let pages = self.pages.lock();
+        let end = first.checked_add(count).ok_or(Error::OutOfRange)?;
+        if end > pages.count() {
+            return Err(Error::OutOfRange);
+        }
+        let mut out = Vec::new();
+        out.try_reserve(count as usize)
+            .map_err(|_| Error::NoMemory)?;
+        out.extend((first..end).map(|i| pages.frame(i).expect("fixed pages have frames")));
+        Ok(out)
     }
 
     pub fn seals(&self) -> u32 {
@@ -1511,12 +1660,12 @@ impl MemoryObject {
 
     /// The memory information record.
     pub fn info(&self) -> [u8; INFO_MEMORY_SIZE] {
-        let kind = if self.is_physical() {
-            KIND_PHYSICAL
-        } else if self.is_paged() {
-            KIND_PAGED
-        } else {
-            KIND_ANONYMOUS
+        let kind = match (self.physical, &self.paged, self.fixed) {
+            (Some(_), _, _) => KIND_PHYSICAL,
+            (_, Some(_), _) => KIND_PAGED,
+            (_, _, Some(Fixed::Contiguous(_))) => KIND_CONTIGUOUS,
+            (_, _, Some(Fixed::Pinned)) => KIND_PINNED,
+            _ => KIND_ANONYMOUS,
         };
         // The pages keep only `RESIZABLE`; a paged object's paging state
         // keeps whether it was created with `TRACK_DIRTY`.

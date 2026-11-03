@@ -25,10 +25,6 @@ pub const PAT_VALUE: u64 = u64::from_le_bytes([6, 1, 7, 0, 6, 5, 7, 4]);
 
 /// A cache policy and the PAT entry that gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "framebuffer and uncached mappings come later")
-)]
 pub enum Policy {
     Cached = 0,
     WriteCombining = 1,

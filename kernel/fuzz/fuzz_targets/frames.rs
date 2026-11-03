@@ -17,7 +17,7 @@ enum Op {
     Add { first: u16, count: u16 },
     Reserve { first: u16, count: u16 },
     Alloc,
-    AllocContiguous { count: u16, align_log: u8 },
+    AllocContiguous { count: u16, align_log: u8, limit: u8 },
     /// Frees an earlier allocation, picked by index.
     Free(u8),
 }
@@ -53,20 +53,26 @@ fuzz_target!(|ops: Vec<Op>| {
                 }
                 None => assert!(free.is_empty()),
             },
-            Op::AllocContiguous { count, align_log } => {
+            Op::AllocContiguous { count, align_log, limit } => {
                 let count = u64::from(count) % 64 + 1;
                 let align = 1u64 << (u32::from(align_log) % (MAX_ALIGN.trailing_zeros() + 1));
-                match frames.alloc_contiguous(count, align) {
+                // The run must end at or below this frame; 255 stands for no limit.
+                let end = if limit == u8::MAX { FRAMES } else { FRAMES * u64::from(limit) / 255 };
+                let bound = if limit == u8::MAX { u64::MAX } else { end * PAGE };
+                match frames.alloc_contiguous(count, align, bound) {
                     Some(phys) => {
                         let first = phys / PAGE;
                         assert_eq!(first % align, 0);
+                        assert!(first + count <= end);
                         for f in first..first + count {
                             assert!(free.remove(&f));
                         }
                         allocations.push((first, count));
                     }
                     None => {
-                        let fits = (0..FRAMES).step_by(align as usize).any(|s| (s..s + count).all(|f| free.contains(&f)));
+                        let fits = (0..end)
+                            .step_by(align as usize)
+                            .any(|s| s + count <= end && (s..s + count).all(|f| free.contains(&f)));
                         assert!(!fits);
                     }
                 }

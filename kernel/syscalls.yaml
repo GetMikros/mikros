@@ -993,3 +993,58 @@ syscalls:
     spec: [MIKSPEC-0011.R13, MIKSPEC-0015.R15]
     args:
       - {name: interrupt, type: Handle, dir: in, object: Interrupt, rights: [WRITE]}
+
+  - name: mem_create_physical
+    number: 98
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R21, MIKSPEC-0006.R11]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: base, type: u64, dir: in}
+      - {name: size, type: u64, dir: in}
+      - {name: cache, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: MemoryObject}
+
+  - name: mem_create_contiguous
+    number: 99
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R22, MIKSPEC-0006.R11]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: size, type: u64, dir: in}
+      - {name: align_log2, type: u32, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: MemoryObject}
+
+  - name: mem_create_pinned
+    number: 100
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R24, MIKSPEC-0006.R11]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: size, type: u64, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: MemoryObject}
+
+  - name: mem_get_physical
+    number: 101
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R23]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [MANAGE]}
+      - {name: out, type: "*mut u64", dir: out}
+
+  - name: mem_get_physical_pages
+    number: 102
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R25]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [MANAGE]}
+      - {name: first, type: u64, dir: in}
+      - {name: count, type: u64, dir: in}
+      - {name: out, type: "*mut u64", dir: out}

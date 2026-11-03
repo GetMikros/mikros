@@ -127,13 +127,15 @@ impl<'a> Frames<'a> {
 
     /// Allocates `count` contiguous frames whose first frame number is a
     /// multiple of `align`, a power of two of at most `MAX_ALIGN`, and
-    /// returns the physical address of the first.
-    pub fn alloc_contiguous(&mut self, count: u64, align: u64) -> Option<u64> {
+    /// that end at or below the physical address `limit`, and returns the
+    /// physical address of the first. The lowest such run is taken.
+    pub fn alloc_contiguous(&mut self, count: u64, align: u64, limit: u64) -> Option<u64> {
         if count == 0 || !align.is_power_of_two() || align > MAX_ALIGN || count > self.free {
             return None;
         }
+        let end = self.frames().min(limit / PAGE_SIZE);
         let mut start = 0;
-        while start + count <= self.frames() {
+        while start + count <= end {
             match (start..start + count).find(|&f| !self.is_free(f)) {
                 None => {
                     self.reserve(start, count);
@@ -223,13 +225,25 @@ mod tests {
         let mut bits = vec![0; bitmap_words(map.iter().copied())];
         let mut frames = Frames::new(&mut bits);
         frames.add_kind(map.iter().copied(), Kind::Usable);
-        assert_eq!(frames.alloc_contiguous(4, 4), Some(4 * PAGE_SIZE));
-        assert_eq!(frames.alloc_contiguous(10, 8), Some(16 * PAGE_SIZE));
-        assert_eq!(frames.alloc_contiguous(512, 512), Some(512 * PAGE_SIZE));
-        assert_eq!(frames.alloc_contiguous(512, 512), None);
-        assert_eq!(frames.alloc_contiguous(1, 3), None);
-        assert_eq!(frames.alloc_contiguous(1, 1024), None);
-        assert_eq!(frames.alloc_contiguous(0, 1), None);
+        assert_eq!(frames.alloc_contiguous(4, 4, u64::MAX), Some(4 * PAGE_SIZE));
+        assert_eq!(
+            frames.alloc_contiguous(10, 8, u64::MAX),
+            Some(16 * PAGE_SIZE)
+        );
+        assert_eq!(
+            frames.alloc_contiguous(512, 512, u64::MAX),
+            Some(512 * PAGE_SIZE)
+        );
+        assert_eq!(frames.alloc_contiguous(512, 512, u64::MAX), None);
+        assert_eq!(frames.alloc_contiguous(1, 3, u64::MAX), None);
+        assert_eq!(frames.alloc_contiguous(1, 1024, u64::MAX), None);
+        assert_eq!(frames.alloc_contiguous(0, 1, u64::MAX), None);
+        // Frames 2 and 3 are still free, below every other free run.
+        assert_eq!(frames.alloc_contiguous(4, 1, 8 * PAGE_SIZE), None);
+        assert_eq!(
+            frames.alloc_contiguous(2, 1, 4 * PAGE_SIZE),
+            Some(2 * PAGE_SIZE)
+        );
     }
 
     #[test]
@@ -240,10 +254,10 @@ mod tests {
         frames.add_kind(map.iter().copied(), Kind::Usable);
         frames.reserve(0, 3);
         assert_eq!(frames.alloc(), Some(3 * PAGE_SIZE));
-        let run = frames.alloc_contiguous(8, 8).unwrap();
+        let run = frames.alloc_contiguous(8, 8, u64::MAX).unwrap();
         assert_eq!(run, 8 * PAGE_SIZE);
         frames.free(run, 8);
         assert_eq!(frames.free_count(), 60);
-        assert_eq!(frames.alloc_contiguous(8, 8), Some(8 * PAGE_SIZE));
+        assert_eq!(frames.alloc_contiguous(8, 8, u64::MAX), Some(8 * PAGE_SIZE));
     }
 }
