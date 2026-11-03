@@ -1074,8 +1074,10 @@ fn user_entry(_: usize) {
 }
 
 /// Switches threads, before an interrupt returns to user mode, if the
-/// running thread's slice has ended.
+/// running thread's slice has ended. Log readers whose notification was
+/// left pending are notified first.
 pub fn preempt_user() {
+    crate::log::notify_pending();
     if RESCHEDULE.swap(false, Ordering::Relaxed) {
         schedule(true);
     }
@@ -1183,6 +1185,10 @@ pub fn disarm_timer(timer: &crate::ktimer::Armed) {
 /// The boot processor calls this at the end of boot.
 pub fn run() -> ! {
     loop {
+        // A pending notification, as of a record that an interrupt
+        // wrote, may wake threads, so it comes before the queue is
+        // looked at.
+        crate::log::notify_pending();
         let now = crate::time::now();
         let mut cpu = this_cpu().lock();
         match cpu.fair.pick() {
