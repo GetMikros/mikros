@@ -581,9 +581,14 @@ fn in_time() -> i64 {
 
 /// Waits until `thread` is blocked, or fails after `in_time`.
 fn wait_until_blocked(thread: Handle) -> Result {
+    wait_for_state(thread, STATE_BLOCKED)
+}
+
+/// Waits until `thread` is in state `state`, or fails after `in_time`.
+fn wait_for_state(thread: Handle, state: u32) -> Result {
     let deadline = in_time();
-    while thread_state(thread)? != STATE_BLOCKED {
-        ensure("blocking", now() < deadline)?;
+    while thread_state(thread)? != state {
+        ensure("reaching the thread state", now() < deadline)?;
         sleep_ms(1);
     }
     Ok(())
@@ -2119,6 +2124,103 @@ fn kill_stopped_thread(s: &Startup) -> Result {
     )
 }
 
+/// The thread state of a thread stopped in an exception.
+const STATE_EXCEPTION: u32 = 3;
+
+/// Fails unless nothing arrives on `channel` for a moment.
+fn no_report(channel: Handle) -> Result {
+    ensure("sending no report", read_message(channel, 20).is_err())
+}
+
+/// Killing a thread that was never started ends it at once, without a
+/// report, even when its process asks for thread events.
+fn kill_new_thread(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 1, DEBUG_EVENTS)?;
+    let (kind, first) = next_report(channel)?;
+    ensure("reporting the start", kind == THREAD_STARTING)?;
+    resume(first)?;
+    let mut thread = 0;
+    let name = b"unstarted";
+    // SAFETY: the pointers describe `name` and `thread`.
+    check("creating a thread", unsafe {
+        sys::thread_create(process, name.as_ptr(), name.len() as u64, &mut thread)
+    })?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(thread) })?;
+    ensure("ending the thread", wait(thread, TERMINATED, soon()).0 == 0)?;
+    no_report(channel)?;
+    // SAFETY: the call takes no pointers.
+    check("killing the process", unsafe { sys::task_kill(process) })?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )
+}
+
+/// Killing a thread whose exception report is still queued removes the
+/// report; with thread events the exit is reported next, and a kill
+/// while the exit report waits changes nothing.
+fn kill_thread_with_queued_report(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 0, DEBUG_EVENTS)?;
+    let (kind, thread) = next_report(channel)?;
+    ensure("reporting the start", kind == THREAD_STARTING)?;
+    resume(thread)?;
+    wait_for_state(thread, STATE_EXCEPTION)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(thread) })?;
+    let (kind, exiting) = next_report(channel)?;
+    ensure("reporting the exit", kind == THREAD_EXITING)?;
+    // SAFETY: the call takes no pointers.
+    check("killing again", unsafe { sys::task_kill(exiting) })?;
+    ensure(
+        "staying in the exit report",
+        thread_state(exiting)? == STATE_EXCEPTION,
+    )?;
+    resume(exiting)?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )?;
+    no_report(channel)?;
+    // Without thread events, the thread is found through its process.
+    let (process, channel) = start_debuggee(s, 0, 0)?;
+    let (koids, count) = thread_list(process)?;
+    ensure("listing the thread", count == 1)?;
+    let mut thread = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("getting the thread", unsafe {
+        sys::process_get_thread(process, koids[0], &mut thread)
+    })?;
+    wait_for_state(thread, STATE_EXCEPTION)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(thread) })?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )?;
+    no_report(channel)
+}
+
+/// Killing a thread with thread events while it is stopped in an
+/// exception whose report was read reports its exit next.
+fn kill_thread_after_report(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 0, DEBUG_EVENTS)?;
+    let (kind, thread) = next_report(channel)?;
+    ensure("reporting the start", kind == THREAD_STARTING)?;
+    resume(thread)?;
+    let (kind, faulting) = next_report(channel)?;
+    ensure("reporting the fault", kind == UNDEFINED_INSTRUCTION)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(faulting) })?;
+    let (kind, exiting) = next_report(channel)?;
+    ensure("reporting the exit", kind == THREAD_EXITING)?;
+    resume(exiting)?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )
+}
+
 /// A data breakpoint hit by loading SS just before `SYSCALL` raises its
 /// debug exception at the first instruction of the kernel's entry, and is
 /// reported as a `DEBUG` exception of the thread.
@@ -2878,7 +2980,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 42] = [
+const TESTS: [(&str, Test); 45] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2905,6 +3007,12 @@ const TESTS: [(&str, Test); 42] = [
     ("kill_blocked_thread", kill_blocked_thread),
     ("kill_stopped_thread", kill_stopped_thread),
     ("debug_at_syscall_entry", debug_at_syscall_entry),
+    ("kill_new_thread", kill_new_thread),
+    (
+        "kill_thread_with_queued_report",
+        kill_thread_with_queued_report,
+    ),
+    ("kill_thread_after_report", kill_thread_after_report),
     ("coverage", coverage),
     ("seal_waits_for_outputs", seal_waits_for_outputs),
     ("evict_waits_for_outputs", evict_waits_for_outputs),

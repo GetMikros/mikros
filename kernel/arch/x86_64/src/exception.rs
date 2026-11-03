@@ -41,7 +41,9 @@ pub fn before_user_return(frame: &mut Frame) -> bool {
         return false;
     };
     let mut reported = false;
-    if thread.take_deferred_debug() && thread.state() != sched::DEAD {
+    // A thread that is to end exits without reporting what its
+    // breakpoints recorded.
+    if thread.take_deferred_debug() && thread.state() != sched::DEAD && !thread.exit_requested() {
         let rip = frame.rip;
         raise_with_code(frame, kind::DEBUG, rip, u64::from(idt::DEBUG));
         reported = true;
@@ -57,12 +59,13 @@ pub fn before_user_return(frame: &mut Frame) -> bool {
     reported | stay_suspended(frame, &thread)
 }
 
-/// Keeps the running user `thread`, about to return to user mode with
-/// its registers in `frame`, in state `SUSPENDED` while it is to be
-/// suspended, and then delivers what arrived meanwhile. Returns whether
-/// it was suspended, so that `frame` may have changed.
+/// Ends the running user `thread`, about to return to user mode with its
+/// registers in `frame`, if it is to end. Otherwise keeps it in state
+/// `SUSPENDED` while it is to be suspended, and then delivers what
+/// arrived meanwhile. Returns whether it reported or was suspended, so
+/// that `frame` may have changed.
 pub fn stay_suspended(frame: &mut Frame, thread: &alloc::sync::Arc<sched::Thread>) -> bool {
-    let mut suspended = false;
+    let mut suspended = end_if_requested(frame, thread);
     while sched::suspend(thread, frame) {
         suspended = true;
         crate::signal::deliver(frame);
@@ -85,6 +88,22 @@ fn end_if_requested(frame: &mut Frame, thread: &alloc::sync::Arc<sched::Thread>)
     }
     Process::kill_thread(thread);
     report
+}
+
+/// Removes the report of `thread`, stopped in an exception, from its
+/// process's exception channel if the handler has not read it yet.
+pub fn withdraw_report(thread: &sched::Thread) {
+    let Some(channel) = thread.process().and_then(|p| p.exception_channel()) else {
+        return;
+    };
+    let koid = thread.header().koid();
+    let report = channel.unwrite(|m| {
+        m.handles
+            .first()
+            .is_some_and(|e| e.object.header().koid() == koid)
+    });
+    drop(channel);
+    drop(report);
 }
 
 fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {

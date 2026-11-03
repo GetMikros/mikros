@@ -305,14 +305,26 @@ fn current_thread() -> Result<Arc<Thread>, Error> {
 
 /// Ends `thread`, after a `THREAD_EXITING` report on its way back to
 /// user mode when its process asks for thread events. A thread asked to
-/// end is woken from a wait, a stop or a suspension so that it gets there.
+/// end is woken from a wait, a stop, a suspension or an exception so that
+/// it gets there; a `NEW` one is made DEAD at once. A thread stopped in an
+/// exception loses its report if it is still queued, and the exception is
+/// not acted on. Nothing changes for one stopped in its exit report.
 fn end_thread(thread: &Arc<Thread>) {
+    use crate::sched::{EXCEPTION, NEW};
+    let state = thread.state();
+    if state == EXCEPTION {
+        if thread.exception_kind() == exception::kind::THREAD_EXITING {
+            return;
+        }
+        crate::exception::withdraw_report(thread);
+    }
     match thread.process() {
-        Some(process) if process.debug_events() => {
+        Some(process) if process.debug_events() && state != NEW => {
             thread.request_exit();
             crate::sched::wake_sleeper(thread);
             crate::sched::wake_suspended(thread);
             process.wake_stopped();
+            crate::sched::resume_exception(thread, crate::sched::RESUMED);
         }
         _ => Process::kill_thread(thread),
     }

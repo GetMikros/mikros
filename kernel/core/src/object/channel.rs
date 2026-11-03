@@ -244,6 +244,32 @@ impl Endpoint {
         Ok(None)
     }
 
+    /// Removes the first message that this endpoint wrote, still queued
+    /// for the peer, for which `matches` holds, and returns it so that
+    /// the caller drops it with no lock held.
+    pub fn unwrite(&self, matches: impl Fn(&Message) -> bool) -> Option<Message> {
+        let mut shared = self.shared.lock();
+        let peer = shared.ends[self.peer_side()].clone();
+        let queue = &mut shared.queues[self.peer_side()];
+        let i = queue.messages.iter().position(matches)?;
+        let message = queue.messages.remove(i).expect("found above");
+        queue.bytes -= message.bytes.len();
+        if !queue.full() {
+            self.header.update_signals(0, signals::WRITABLE);
+        }
+        let peer = if queue.messages.is_empty() {
+            peer.upgrade()
+        } else {
+            None
+        };
+        if let Some(peer) = &peer {
+            peer.header.update_signals(signals::READABLE, 0);
+        }
+        drop(shared);
+        drop(peer);
+        Some(message)
+    }
+
     /// Starts a call through this endpoint and returns its transaction
     /// ID: one with `CALL_ID` set that no outstanding call and no call
     /// ended without its reply uses. `CALL_COST` is charged to `budget`,
@@ -420,6 +446,24 @@ mod tests {
             Ok(())
         })?;
         Ok(got.unwrap())
+    }
+
+    #[test]
+    fn removes_a_written_message() {
+        let (a, b) = Endpoint::pair(None).unwrap();
+        for byte in [1, 2, 1] {
+            a.write(message(&[byte], vec![])).ok().unwrap();
+        }
+        assert!(a.unwrite(|m| m.bytes == [3]).is_none());
+        // Messages written toward `a` are not this endpoint's to remove.
+        b.write(message(&[2], vec![])).ok().unwrap();
+        assert_eq!(a.unwrite(|m| m.bytes == [2]).unwrap().bytes, [2]);
+        assert!(a.unwrite(|m| m.bytes == [2]).is_none());
+        assert_eq!(read(&b).unwrap().0, [1]);
+        assert_eq!(a.unwrite(|m| m.bytes == [1]).unwrap().bytes, [1]);
+        assert_eq!(b.header().signals() & signals::READABLE, 0);
+        assert_ne!(a.header().signals() & signals::WRITABLE, 0);
+        assert_eq!(read(&a).unwrap().0, [2]);
     }
 
     #[test]
