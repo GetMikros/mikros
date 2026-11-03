@@ -120,17 +120,26 @@ pub fn run(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// The function the scripts check stops in: the test init calls it
-/// while it has threads, handles and mappings of every kind.
+/// The function the scripts check stops in: the test init first calls
+/// it in `thread_by_koid`, while a helper thread of it is switched out
+/// and it has handles and mappings of every kind.
 const CHECK_BREAKPOINT: &str = "kernel::syscall::handlers::process_get_thread";
 
-/// The commands the check runs, each with text its output must contain.
-const CHECKS: [(&str, &str); 5] = [
-    ("mikros ps", "RUNNING"),
-    ("mikros threads init", "running; its registers are GDB's"),
-    ("mikros handles init", "Process"),
-    ("mikros mappings init", "r-x"),
-    ("mikros log 20", "TEST "),
+/// The commands the check runs, each with the texts its output must
+/// contain.
+const CHECKS: [(&str, &[&str]); 5] = [
+    ("mikros ps", &["RUNNING"]),
+    (
+        "mikros threads init",
+        &[
+            "running; its registers are GDB's",
+            "kernel rsp=0x",
+            " rip=0x",
+        ],
+    ),
+    ("mikros handles init", &["Process"]),
+    ("mikros mappings init", &["r-x"]),
+    ("mikros log 20", &["TEST "]),
 ];
 
 /// Waits until `child` exits, or kills it and fails once `timeout` has
@@ -215,7 +224,7 @@ fn missing(stdout: &str) -> Vec<&'static str> {
             let marker = format!("@@ {command}\n");
             let output = stdout.split_once(&marker).map(|(_, rest)| rest);
             let output = output.map(|rest| rest.split("@@ ").next().unwrap_or(""));
-            !output.is_some_and(|o| o.contains(expected))
+            !output.is_some_and(|o| expected.iter().all(|e| o.contains(e)))
         })
         .map(|(command, _)| *command)
         .collect()
@@ -245,10 +254,12 @@ mod tests {
     fn finds_each_command_output() {
         let good: String = CHECKS
             .iter()
-            .map(|(c, e)| format!("@@ {c}\n{e}\n"))
+            .map(|(c, e)| format!("@@ {c}\n{}\n", e.join("\n")))
             .collect();
         assert!(missing(&good).is_empty());
         let bad = good.replace("Process", "Thread");
         assert_eq!(missing(&bad), ["mikros handles init"]);
+        let bad = good.replace("kernel rsp=", "kernel sp=");
+        assert_eq!(missing(&bad), ["mikros threads init"]);
     }
 }

@@ -566,6 +566,30 @@ extern "sysv64" fn wait_forever(event: u64, _: u64) -> ! {
     unreachable!("thread_exit returned");
 }
 
+/// `process_get_thread` gives a handle to a thread by its object ID, here
+/// a helper blocked in a wait. The kernel debugger script check stops in
+/// this call, the first of its kind that init makes, so that a thread
+/// switched out with saved registers is there to list.
+fn thread_by_koid(s: &Startup) -> Result {
+    let mut event = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let helper = spawn(s, wait_forever, u64::from(event))?;
+    wait_until_blocked(helper)?;
+    let mut got = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::process_get_thread(s.process, koid(helper)?, &mut got) };
+    check("getting the thread", status)?;
+    ensure("getting the helper", koid(got)? == koid(helper)?)?;
+    signal(event, 0, USER0)?;
+    ensure(
+        "ending the helper",
+        wait(helper, TERMINATED, in_time()).0 == 0,
+    )
+}
+
 /// Starts a thread of this process at `entry` with `arg`.
 fn spawn(s: &Startup, entry: extern "sysv64" fn(u64, u64) -> !, arg: u64) -> Result<Handle> {
     let stack_size = 16 * 1024;
@@ -5613,9 +5637,10 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 85] = [
+const TESTS: [(&str, Test); 86] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
+    ("thread_by_koid", thread_by_koid),
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
