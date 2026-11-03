@@ -83,6 +83,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", kernel.display());
     crate::extended::check(&kernel)?;
     println!("checked  {} uses no x87 or vector state", kernel.display());
+    if kind == Kind::Debug {
+        crate::debug_build::check(&kernel)?;
+        println!(
+            "checked  {} has the debug build's settings",
+            kernel.display()
+        );
+    }
     let debug_info = crate::debuginfo::split(&kernel)?;
     println!("built    {}", debug_info.display());
     if kind == Kind::Fuzz {

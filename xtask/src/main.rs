@@ -3,6 +3,7 @@
 mod build;
 mod check;
 mod debug;
+mod debug_build;
 mod debuginfo;
 mod extended;
 mod firmware;
