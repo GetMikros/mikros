@@ -380,6 +380,10 @@ fn restore(frame: &mut Frame, thread: &Thread, context: u64) -> Result<(), Error
     let general = General::parse(general, |a| in_user_range(a, 1)).ok_or(Error::InvalidArgs)?;
     let mask = u64::from_le_bytes(head[0xA0..0xA8].try_into().expect("8 bytes"));
     let size = u64::from_le_bytes(head[0xA8..0xB0].try_into().expect("8 bytes"));
+    // The bytes between the size and the extended state are reserved.
+    if head[0xB0..].iter().any(|&b| b != 0) {
+        return Err(Error::InvalidArgs);
+    }
     let extended = thread.extended_state();
     if size != extended.bytes().len() as u64 {
         return Err(Error::InvalidArgs);

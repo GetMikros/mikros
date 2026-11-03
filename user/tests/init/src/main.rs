@@ -4398,6 +4398,19 @@ fn signal_frame(s: &Startup) -> Result {
     restore_usr1(&old)
 }
 
+/// `signal_return` refuses a context with a reserved byte set, which the
+/// debuggee's handler sets before it returns past the instruction that
+/// raised the signal, and the process ends as `SEGV` ends it.
+fn signal_frame_reserved_bytes(s: &Startup) -> Result {
+    const SEGV: u32 = 11;
+    let (process, _) = start_program_with(s, "debuggee", 7, |_| Ok(()))?;
+    ensure("refusing the context", exit_code(process)? == -3)?;
+    ensure(
+        "ending the process as SEGV",
+        u32_at(&info::<0x20>(process, 2)?, 0x10) == SEGV,
+    )
+}
+
 /// Set by `signal_sleeper` with what its sleep returned and when.
 static SLEEP_RESULT: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
@@ -5144,7 +5157,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 78] = [
+const TESTS: [(&str, Test); 79] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
@@ -5230,6 +5243,7 @@ const TESTS: [(&str, Test); 78] = [
     ("monotonic_clock_and_page", monotonic_clock_and_page),
     ("mappings_outlive_handles", mappings_outlive_handles),
     ("signal_frame", signal_frame),
+    ("signal_frame_reserved_bytes", signal_frame_reserved_bytes),
     (
         "signal_interrupts_and_restarts",
         signal_interrupts_and_restarts,
