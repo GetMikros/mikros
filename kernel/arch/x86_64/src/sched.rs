@@ -229,7 +229,7 @@ impl Thread {
         thread.state.store(RUNNABLE, Ordering::Release);
         let mut cpu = this_cpu().lock();
         let entity = *thread.entity.lock();
-        cpu.fair.enqueue(Queued::new(thread.clone()), entity);
+        cpu.enqueue(Queued::new(thread.clone()), entity);
     }
 
     /// Saves the user state that the next thread replaces.
@@ -593,14 +593,23 @@ impl CpuSched {
             reseed_due: INFINITE,
         }
     }
+
+    /// Queues `thread` with `entity`, and marks a reschedule when the
+    /// queue would pick it before the running thread.
+    fn enqueue(&mut self, thread: Queued, entity: Entity) {
+        if self.fair.enqueue(thread, entity) {
+            reschedule().store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn this_cpu() -> &'static SpinLock<CpuSched> {
     &percpu::this().sched
 }
 
-/// Set by the timer interrupt when the slice of the thread running on
-/// this processor has ended.
+/// Set when the thread running on this processor is to give way: by the
+/// timer interrupt when its slice has ended, and when a thread is queued
+/// that the queue would pick before it.
 fn reschedule() -> &'static AtomicBool {
     &percpu::this().reschedule
 }
@@ -615,7 +624,7 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
     unsafe { *thread.rsp.get() = context::prepare(top, entry as usize as u64, arg as u64) };
     let mut cpu = this_cpu().lock();
     let entity = *thread.entity.lock();
-    cpu.fair.enqueue(Queued::new(thread.clone()), entity);
+    cpu.enqueue(Queued::new(thread.clone()), entity);
     Ok(thread)
 }
 
@@ -704,8 +713,10 @@ fn schedule(requeue: bool) {
 }
 
 /// Makes `thread` the running thread, starting its slice, and arms the
-/// timer for it.
+/// timer for it. A reschedule marked for the thread that ran before is
+/// dropped.
 fn start_slice(cpu: &mut CpuSched, now: i64, thread: Arc<Thread>) {
+    reschedule().store(false, Ordering::Relaxed);
     cpu.current = Some(thread);
     cpu.slice_start = now;
     cpu.slice_end = now.saturating_add(cpu.fair.slice());
@@ -782,7 +793,7 @@ pub fn wake_sleeper(thread: &Arc<Thread>) {
     if thread.state() == BLOCKED && cpu.sleepers.remove(&queued) {
         thread.state.store(RUNNABLE, Ordering::Release);
         let entity = *thread.entity.lock();
-        cpu.fair.enqueue(queued, entity);
+        cpu.enqueue(queued, entity);
     }
 }
 
@@ -832,9 +843,9 @@ pub fn make_dead(thread: &Arc<Thread>) -> u32 {
         // blocked by `block` is not a sleeper and is queued afresh.
         let entity = *thread.entity.lock();
         if cpu.sleepers.remove(&queued) {
-            cpu.fair.enqueue(queued, entity);
+            cpu.enqueue(queued, entity);
         } else {
-            cpu.fair.enqueue(Queued::new(thread.clone()), entity);
+            cpu.enqueue(Queued::new(thread.clone()), entity);
         }
     } else if was == EXCEPTION || was == SUSPENDED {
         queue(thread);
@@ -921,7 +932,6 @@ fn queue(thread: &Arc<Thread>) {
     let entity = *thread.entity.lock();
     this_cpu()
         .lock()
-        .fair
         .enqueue(Queued::new(thread.clone()), entity);
 }
 
@@ -1133,7 +1143,7 @@ pub fn timer_interrupt() {
         thread.state.store(RUNNABLE, Ordering::Release);
         let entity = *thread.entity.lock();
         // Every thread has room in the queue from when it was created.
-        cpu.fair.enqueue(Queued::new(thread), entity);
+        cpu.enqueue(Queued::new(thread), entity);
     }
     if cpu.current.is_some() && now >= cpu.slice_end {
         reschedule().store(true, Ordering::Relaxed);

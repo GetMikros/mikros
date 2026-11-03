@@ -561,6 +561,42 @@ fn priorities(s: &Startup) -> Result {
     check("going back to 16", set_priority(s.thread, INVALID, 16))
 }
 
+/// Set by `mark_started` when it runs.
+static STARTED: AtomicU64 = AtomicU64::new(0);
+
+extern "sysv64" fn mark_started(_: u64, _: u64) -> ! {
+    STARTED.store(1, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread that the queue would pick before the running one runs
+/// before the running one goes on: a new thread of priority 31, started
+/// by this one at 16, has run by the time `thread_start` returns.
+fn queued_thread_preempts(s: &Startup) -> Result {
+    let stack_size = 16 * 1024;
+    let stack = create_memory(stack_size)?;
+    let at = map(s.process, stack, stack_size)?;
+    let mut thread = 0;
+    let name = b"urgent";
+    // SAFETY: the pointers describe `name` and `thread`.
+    let status =
+        unsafe { sys::thread_create(s.process, name.as_ptr(), name.len() as u64, &mut thread) };
+    check("creating a thread", status)?;
+    check(
+        "raising its priority",
+        set_priority(thread, s.root_resource, 31),
+    )?;
+    STARTED.store(0, Ordering::Release);
+    let entry = mark_started as *const () as u64;
+    // SAFETY: the call takes no pointers; the stack is mapped and unused.
+    let status = unsafe { sys::thread_start(thread, entry, at + stack_size - 8, 0, 0) };
+    check("starting it", status)?;
+    ensure("running it first", STARTED.load(Ordering::Acquire) == 1)?;
+    ensure("ending it", wait(thread, TERMINATED, in_time()).0 == 0)
+}
+
 /// Waits for a packet on `port` until `deadline`.
 fn take_packet(port: Handle, deadline: i64) -> (i64, [u8; 48]) {
     let mut packet = [0u8; 48];
@@ -5254,13 +5290,14 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 80] = [
+const TESTS: [(&str, Test); 81] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
     ("priorities", priorities),
+    ("queued_thread_preempts", queued_thread_preempts),
     ("ports", ports),
     ("log_readers", log_readers),
     ("memory_operations", memory_operations),

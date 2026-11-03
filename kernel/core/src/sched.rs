@@ -192,8 +192,8 @@ impl<T: Copy + PartialEq> Fair<T> {
     }
 
     /// Gives `entity`, about to be queued, its request and virtual
-    /// deadline, and queues it under `id`.
-    fn insert(&mut self, id: T, mut entity: Entity) {
+    /// deadline, queues it under `id` and returns it as queued.
+    fn insert(&mut self, id: T, mut entity: Entity) -> Entity {
         let n = self.runnable() + 1;
         let period = SLICE_MAX.max(n as i64 * PERIOD_PER_THREAD);
         let total = self.runnable_weight() + entity.weight;
@@ -207,16 +207,19 @@ impl<T: Copy + PartialEq> Fair<T> {
             deadline,
         });
         self.total += entity.weight;
+        entity
     }
 
     /// Makes a thread that is new or stopped runnable and queues it. It
     /// starts with the lag it stopped with when that was not positive.
     /// When it is the running thread, which was made runnable again
-    /// before it stopped, it is queued when it stops instead.
-    pub fn enqueue(&mut self, id: T, entity: Entity) {
+    /// before it stopped, it is queued when it stops instead. Returns
+    /// whether a thread is running that the queue would now pick it
+    /// before: it is eligible, with an earlier virtual deadline.
+    pub fn enqueue(&mut self, id: T, entity: Entity) -> bool {
         if self.running.is_some_and(|(r, _)| r == id) {
             self.rewoken = Some(id);
-            return;
+            return false;
         }
         let mut entity = entity;
         let lag = if entity.ran && entity.lag <= 0 {
@@ -226,7 +229,9 @@ impl<T: Copy + PartialEq> Fair<T> {
         };
         let others = self.runnable_weight();
         self.on_start(&mut entity, lag, others);
-        self.insert(id, entity);
+        let entity = self.insert(id, entity);
+        self.running
+            .is_some_and(|(_, r)| entity.v <= self.vtime && entity.vd < r.vd)
     }
 
     /// Queues the running thread again, under `id`, as it stays runnable.
@@ -596,5 +601,26 @@ mod tests {
         assert!(fair.stop().is_none());
         assert_eq!(fair.len(), 1);
         assert_eq!(fair.pick().map(|(id, _)| id), Some(1));
+    }
+
+    #[test]
+    fn tells_when_a_queued_thread_comes_before_the_running_one() {
+        let mut fair = Fair::new();
+        // No thread runs yet.
+        assert!(!fair.enqueue(1, Entity::new(16)));
+        let (running, _) = fair.pick().unwrap();
+        fair.charge(1_000);
+        // One of the same weight gets the same request from a later
+        // virtual time, so a later virtual deadline.
+        assert!(!fair.enqueue(2, Entity::new(16)));
+        // A heavier one gets an earlier one.
+        assert!(fair.enqueue(3, Entity::new(31)));
+        // One that stopped ahead of its share is not eligible.
+        let mut ahead = Entity::new(31);
+        ahead.ran = true;
+        ahead.lag = -1_000_000 << SHIFT;
+        assert!(!fair.enqueue(4, ahead));
+        // The running thread itself is queued only when it stops.
+        assert!(!fair.enqueue(running, Entity::new(31)));
     }
 }
