@@ -6,6 +6,7 @@ mod pointers;
 mod power;
 mod screen;
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -15,9 +16,9 @@ use bootmenu::canvas::Canvas;
 use bootmenu::entries::Config;
 use bootmenu::input::{self, Action, Event, Input};
 use bootmenu::load::{self, ENTRIES_PATH, Loaded, ReadError};
-use bootmenu::menu::{FocusSource, Item, Menu};
+use bootmenu::menu::{Item, Menu};
 use bootmenu::pointer;
-use bootmenu::session::{self, KeyStroke};
+use bootmenu::session::{self, Exit, KeyStroke};
 use bootmenu::text::Text;
 use core::time::Duration;
 use others::Detected;
@@ -81,9 +82,6 @@ fn build_menu(
     )
 }
 
-/// The bootloader, started when there is no entry to start instead.
-const MIKROSBOOT_PATH: &str = "\\EFI\\Mikros\\mikrosboot.efi";
-
 /// Translates a key from the console into a menu event.
 fn translate(key: Key) -> Event {
     let key = match key {
@@ -119,12 +117,6 @@ impl session::Keyboard for Keyboard {
             shift_state: data.key_state.key_shift_state.map_or(0, |s| s.bits()),
         })
     }
-}
-
-/// Whether a key is held while the boot manager starts.
-fn key_held() -> bool {
-    let mut keyboard = pointers::open_on_console::<InputEx>().map(Keyboard);
-    session::key_held(keyboard.as_mut())
 }
 
 /// Creates an event that is signaled every second.
@@ -183,7 +175,6 @@ fn redraw(menu: &Menu, input: &Input, text: &mut Text, canvas: &mut Canvas, scre
 /// Shows `menu` on `screen` until an item is activated, and returns it. The
 /// screen and the pointers are released when this returns.
 fn show(menu: &mut Menu, mut screen: Screen, text: &mut Text, default: usize) -> Item {
-    let _ = boot::set_watchdog_timer(0, 0x10000, None);
     let (width, height) = screen.size();
     let mut canvas = Canvas::new(width, height);
     let mut input = Input::new(width as i32, height as i32, default);
@@ -214,10 +205,45 @@ fn show(menu: &mut Menu, mut screen: Screen, text: &mut Text, default: usize) ->
     item
 }
 
-/// Starts `path` on the boot volume with `args`.
-fn start(volume: Option<&DevicePath>, path: &str, args: Option<&str>) -> Result<(), String> {
-    let volume = volume.ok_or_else(|| String::from("the boot volume was not found"))?;
-    launch::start(volume, path, args)
+/// The firmware services of `session::run`.
+struct Firmware<'a> {
+    text: &'a mut Text,
+    volume: Option<Box<DevicePath>>,
+    detected: &'a [Detected],
+}
+
+impl session::Firmware for Firmware<'_> {
+    type Screen = Screen;
+
+    fn key_held(&mut self) -> bool {
+        let mut keyboard = pointers::open_on_console::<InputEx>().map(Keyboard);
+        session::key_held(keyboard.as_mut())
+    }
+
+    fn open_screen(&mut self) -> Option<Screen> {
+        Screen::open()
+    }
+
+    fn disable_watchdog(&mut self) {
+        let _ = boot::set_watchdog_timer(0, 0x10000, None);
+    }
+
+    fn show(&mut self, menu: &mut Menu, screen: Screen, default: usize) -> Item {
+        show(menu, screen, self.text, default)
+    }
+
+    fn start_file(&mut self, path: &str, args: Option<&str>) -> Result<(), String> {
+        let volume = self
+            .volume
+            .as_deref()
+            .ok_or_else(|| String::from("the boot volume was not found"))?;
+        launch::start(volume, path, args)
+    }
+
+    fn start_detected(&mut self, index: usize) -> Result<(), String> {
+        let system = &self.detected[index];
+        launch::start_image(&system.device_path, &system.path, None)
+    }
 }
 
 pub fn run() -> Status {
@@ -241,65 +267,19 @@ pub fn run() -> Status {
     load::apply_detection(&mut loaded, detected.len());
     let Loaded { config, notice, .. } = loaded;
     let mut file_system = image_file_system();
-    let mut menu = build_menu(&config, &detected, file_system.as_mut().ok(), notice);
+    let menu = build_menu(&config, &detected, file_system.as_mut().ok(), notice);
     drop(file_system);
-    let startup_notice = menu.notice.clone();
-    let default = config.default_index();
     let Some(mut text) = Text::new() else {
         return Status::LOAD_ERROR;
     };
-
-    // Decide what happens at start-up: start the default entry at once, show
-    // the menu with a countdown, or show it without one.
-    let mut start_now = None;
-    if let Some(entry) = config.entries.get(default)
-        && !key_held()
-    {
-        match config.timeout {
-            Some(0) => start_now = Some(Item::Card(default)),
-            Some(seconds) => menu.countdown = Some((entry.name.clone(), seconds)),
-            None => {}
-        }
-    }
-
-    loop {
-        let item = match start_now.take() {
-            Some(item) => item,
-            None => {
-                let Some(screen) = Screen::open() else {
-                    let (path, args) = match config.entries.get(default) {
-                        Some(entry) => (entry.path.as_str(), entry.args.as_deref()),
-                        None => (MIKROSBOOT_PATH, None),
-                    };
-                    return match start(volume.as_deref(), path, args) {
-                        Ok(()) => Status::SUCCESS,
-                        Err(_) => Status::LOAD_ERROR,
-                    };
-                };
-                show(&mut menu, screen, &mut text, default)
-            }
-        };
-        match item {
-            Item::Button(power) => power::act(power),
-            Item::Card(index) => {
-                let (name, result) = match config.entries.get(index) {
-                    Some(entry) => (
-                        &entry.name,
-                        start(volume.as_deref(), &entry.path, entry.args.as_deref()),
-                    ),
-                    None => {
-                        let system = &detected[index - config.entries.len()];
-                        let result = launch::start_image(&system.device_path, &system.path, None);
-                        (&system.name, result)
-                    }
-                };
-                menu.notice = match result {
-                    Ok(()) => startup_notice.clone(),
-                    Err(reason) => Some(format!("Couldn't start {name}: {reason}")),
-                };
-                menu.focus = Some((Item::Card(index), FocusSource::Keyboard));
-                menu.countdown = None;
-            }
-        }
+    let mut firmware = Firmware {
+        text: &mut text,
+        volume,
+        detected: &detected,
+    };
+    match session::run(&mut firmware, &config, menu) {
+        Exit::Power(power) => power::act(power),
+        Exit::NoScreen(Ok(())) => Status::SUCCESS,
+        Exit::NoScreen(Err(_)) => Status::LOAD_ERROR,
     }
 }
