@@ -109,6 +109,7 @@ extern "sysv64" fn on_kernel_tables() -> ! {
     crate::timer::init();
     crate::random::init(&info);
     crate::sched::start_maintenance();
+    crate::iommu::init(&info);
     crate::init::start(&info);
     let free = space::reclaim_boot_memory(&info);
     log!(

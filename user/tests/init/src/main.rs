@@ -3215,6 +3215,52 @@ fn physical_memory_objects(s: &Startup) -> Result {
     close(mmio)
 }
 
+/// Whether a kernel log record holds `needle`.
+fn kernel_logged(s: &Startup, needle: &[u8]) -> Result<bool> {
+    let mut after = 0;
+    loop {
+        let mut record = [0u8; 288];
+        // SAFETY: the pointer describes `record`.
+        let status = unsafe { sys::log_read(s.log, after, record.as_mut_ptr()) };
+        if status == SHOULD_WAIT {
+            return Ok(false);
+        }
+        check("reading the log", status)?;
+        let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+        if record[0x19] == 0 && contains(&record[0x20..0x20 + len.min(256)], needle) {
+            return Ok(true);
+        }
+        after = u64_at(&record, 0);
+    }
+}
+
+/// The kernel says at boot whether DMA is isolated. When it is, the
+/// register page of QEMU's VT-d unit cannot be granted.
+fn dma_isolation_reported(s: &Startup) -> Result {
+    const VTD_REGISTERS: u64 = 0xFED9_0000;
+    if !kernel_logged(s, b"DMA isolated")? {
+        return ensure(
+            "reporting that DMA is not isolated",
+            kernel_logged(s, b"DMA is not isolated")?,
+        );
+    }
+    let mut resource = 0;
+    ensure(
+        "refusing the IOMMU's registers",
+        // SAFETY: the out pointer is valid for the call.
+        unsafe {
+            sys::resource_create(
+                s.root_resource,
+                1,
+                VTD_REGISTERS,
+                PAGE_SIZE,
+                0,
+                &mut resource,
+            )
+        } == ACCESS_DENIED,
+    )
+}
+
 /// Killing a blocked thread whose process reports thread events reports
 /// its exit, and its end as the last thread terminates the process.
 fn kill_blocked_thread(s: &Startup) -> Result {
@@ -6383,7 +6429,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 96] = [
+const TESTS: [(&str, Test); 97] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6467,6 +6513,7 @@ const TESTS: [(&str, Test); 96] = [
         "interrupt_delivered_and_acked",
         interrupt_delivered_and_acked,
     ),
+    ("dma_isolation_reported", dma_isolation_reported),
     ("contiguous_and_pinned_memory", contiguous_and_pinned_memory),
     ("physical_memory_objects", physical_memory_objects),
     ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),

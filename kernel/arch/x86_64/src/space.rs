@@ -136,7 +136,6 @@ pub fn map_physical(phys: u64, size: u64, policy: Policy) -> u64 {
 
 /// Removes a mapping made by `map_device` with the same `phys` and `size`
 /// and returns its address space.
-#[expect(dead_code, reason = "no driver releases device memory yet")]
 pub fn unmap_device(virt: u64, phys: u64, size: u64) {
     let first = phys / PAGE_SIZE * PAGE_SIZE;
     let len = (phys + size).next_multiple_of(PAGE_SIZE) - first;

@@ -47,6 +47,8 @@ mod init;
 #[cfg(target_os = "none")]
 mod interrupt;
 #[cfg(target_os = "none")]
+mod iommu;
+#[cfg(target_os = "none")]
 mod ktimer;
 #[cfg(target_os = "none")]
 mod log;
