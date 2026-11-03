@@ -75,6 +75,14 @@ pub struct BootInfo {
     pub arch_data1: u64,
 }
 
+impl BootInfo {
+    /// The firmware's random seed, when `RNG_SEED_VALID` says there is
+    /// one; otherwise the field holds no secret, whatever its bytes.
+    pub fn firmware_seed(&self) -> Option<&[u8; 32]> {
+        (self.flags & flags::RNG_SEED_VALID != 0).then_some(&self.rng_seed)
+    }
+}
+
 /// The value of `BootInfo::size` for this version.
 pub const BOOT_INFO_SIZE: u32 = 0xE8;
 
@@ -178,6 +186,22 @@ pub mod x86_64 {
 mod tests {
     use super::*;
     use core::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn gives_the_seed_only_with_its_flag() {
+        let mut info = BootInfo {
+            rng_seed: [9; 32],
+            ..BootInfo::default()
+        };
+        assert_eq!(info.firmware_seed(), None);
+        info.flags = flags::RNG_SEED_VALID;
+        assert_eq!(info.firmware_seed(), Some(&[9; 32]));
+    }
+
+    #[test]
+    fn numbers_x86_64_as_1() {
+        assert_eq!(arch::X86_64, 1);
+    }
 
     #[test]
     fn boot_info_has_the_version_1_0_layout() {

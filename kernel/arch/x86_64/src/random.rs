@@ -2,7 +2,7 @@
 
 use crate::cpu::rdtsc;
 use crate::log::log;
-use boot_protocol::{BootInfo, flags::RNG_SEED_VALID};
+use boot_protocol::BootInfo;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use kernel_core::deadline::INFINITE;
@@ -131,15 +131,15 @@ fn jitter(out: &mut [u8; 2048]) {
 /// Seeds the generator from the firmware seed and the hardware sources,
 /// or from timer measurements when there are neither.
 pub fn init(info: &BootInfo) {
-    let firmware = info.flags & RNG_SEED_VALID != 0;
-    let seed: &[u8] = if firmware { &info.rng_seed } else { &[] };
+    let firmware = info.firmware_seed();
+    let seed: &[u8] = firmware.map_or(&[], |s| s.as_slice());
     let hardware = reseed_with(seed);
     HARDWARE.store(
         reported(Source::Rdseed) || reported(Source::Rdrand),
         Ordering::Relaxed,
     );
     LAST_RESEED.store(crate::time::now(), Ordering::Relaxed);
-    if !firmware && !hardware {
+    if firmware.is_none() && !hardware {
         let mut samples = [0u8; 2048];
         jitter(&mut samples);
         RNG.lock().reseed(&[&samples]);
