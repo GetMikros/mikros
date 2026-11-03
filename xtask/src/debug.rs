@@ -9,6 +9,7 @@ use crate::{firmware, image};
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -80,9 +81,23 @@ fn start_halted(
     let kvm = qemu::kvm_available();
     let mut args = halted_args(qemu::args(machine, kvm, &firmware, &vars, disk), log, port);
     args.extend(extra.iter().map(|a| a.to_string()));
-    let mut child = Command::new(qemu::QEMU)
-        .args(args)
-        .stdin(Stdio::null())
+    // In a process group of its own, QEMU does not get the SIGINT that
+    // Ctrl-C sends to the terminal's foreground group, which GDB uses to
+    // stop the kernel. It then no longer goes with this process on the
+    // terminal's signals, so it is killed when this process exits.
+    let mut command = Command::new(qemu::QEMU);
+    command.args(args).stdin(Stdio::null()).process_group(0);
+    // SAFETY: the closure only makes a system call, which is safe
+    // between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    };
+    let mut child = command
         .spawn()
         .with_context(|| format!("failed to start {}", qemu::QEMU))?;
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -109,7 +124,16 @@ pub fn run(args: &Args) -> Result<()> {
     println!("serial output goes to {}", log.display());
     let status = Command::new(GDB)
         .args(gdb_args(&built.kernel, port))
-        .status()
+        .spawn()
+        .and_then(|mut gdb| {
+            // Ctrl-C is meant for GDB, which shares the terminal's
+            // foreground group with this process. GDB was started before
+            // the signal is ignored here, so it keeps the default action.
+            // SAFETY: SIG_IGN installs no handler; nothing else here uses
+            // SIGINT.
+            unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+            gdb.wait()
+        })
         .with_context(|| format!("failed to start {GDB}"));
     let _ = qemu.kill();
     let _ = qemu.wait();

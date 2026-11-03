@@ -1357,6 +1357,7 @@ dependencies = [
  "clap",
  "crc32fast",
  "fatfs",
+ "libc",
  "lzma-rs",
  "sha2",
  "syscall-table",

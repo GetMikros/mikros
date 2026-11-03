@@ -10,6 +10,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1.5.4"
 fatfs = "0.3.6"
+libc = "0.2.191"
 lzma-rs = "0.3.0"
 sha2 = "0.11.1"
 tar = "0.4.46"
