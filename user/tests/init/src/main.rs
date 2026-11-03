@@ -744,6 +744,10 @@ fn queued_thread_preempts(s: &Startup) -> Result {
         set_priority(thread, s.root_resource, 31),
     )?;
     STARTED.store(0, Ordering::Release);
+    // This thread may have waited while others ran, which gives it an
+    // early virtual deadline. After a sleep it starts again with a full
+    // request and a deadline far beyond the new thread's.
+    sleep_ms(1);
     let entry = mark_started as *const () as u64;
     // SAFETY: the call takes no pointers; the stack is mapped and unused.
     let status = unsafe { sys::thread_start(thread, entry, at + stack_size - 8, 0, 0) };
@@ -3378,8 +3382,16 @@ fn coverage(_: &Startup) -> Result {
     check("closing the object", unsafe { sys::handle_close(mem) })
 }
 
-/// Set by `straddling_reader` once its read returned.
-static READ_DONE: AtomicU64 = AtomicU64::new(0);
+/// The handle of the last `straddling_reader`.
+static READER: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the last `straddling_reader` is past its read, which blocks
+/// until the pager answers. Its own report of that would come only once
+/// it is back in user mode, which a woken thread may run before.
+fn read_done() -> bool {
+    let reader = READER.load(Ordering::Acquire) as Handle;
+    thread_state(reader).is_ok_and(|state| state != STATE_BLOCKED)
+}
 
 /// Answers one page request on `port` for `mem` after 50 ms.
 extern "sysv64" fn slow_pager_thread(port: u64, mem: u64) -> ! {
@@ -3399,11 +3411,10 @@ extern "sysv64" fn slow_pager_thread(port: u64, mem: u64) -> ! {
     unreachable!("thread_exit returned");
 }
 
-/// Reads 16 bytes of `source` to `at`, then sets `READ_DONE`.
+/// Reads 16 bytes of `source` to `at`, then exits.
 extern "sysv64" fn straddling_reader(source: u64, at: u64) -> ! {
     // SAFETY: the destination lies in two writable mappings.
     unsafe { sys::mem_read(source as Handle, 0, at as *mut u8, 16) };
-    READ_DONE.store(1, Ordering::Release);
     // SAFETY: the call takes no pointers.
     unsafe { sys::thread_exit() };
     unreachable!("thread_exit returned");
@@ -3460,8 +3471,8 @@ fn start_straddling_read(s: &Startup, first: Handle) -> Result<u64> {
     check("mapping the paged object next to it", status)?;
     let source = create_memory(PAGE_SIZE)?;
     mem_write_at(source, 0, b"0123456789abcdef")?;
-    READ_DONE.store(0, Ordering::Release);
     let reader = spawn2(s, straddling_reader, u64::from(source), at + PAGE_SIZE - 8)?;
+    READER.store(u64::from(reader), Ordering::Release);
     wait_until_blocked(reader)?;
     Ok(at)
 }
@@ -3476,10 +3487,7 @@ fn seal_waits_for_outputs(s: &Startup) -> Result {
         sys::vm_unmap(s.process, at, PAGE_SIZE)
     })?;
     check("sealing", seal(plain, 1 << 3))?;
-    ensure(
-        "waiting for the write",
-        READ_DONE.load(Ordering::Acquire) == 1,
-    )?;
+    ensure("waiting for the write", read_done())?;
     ensure(
         "keeping the written bytes",
         mem_read_at::<8>(plain, PAGE_SIZE - 8)? == *b"01234567",
@@ -3504,10 +3512,7 @@ fn evict_waits_for_outputs(s: &Startup) -> Result {
     })?;
     start_straddling_read(s, mem)?;
     check("evicting", pager_op(pager, mem, 2, 0, PAGE_SIZE))?;
-    ensure(
-        "waiting for the write",
-        READ_DONE.load(Ordering::Acquire) == 1,
-    )
+    ensure("waiting for the write", read_done())
 }
 
 /// Supplying pages from an object waits for a kernel write into it that
@@ -3531,10 +3536,7 @@ fn supply_waits_for_outputs(s: &Startup) -> Result {
     check("supplying", unsafe {
         sys::pager_supply(pager, mem, 0, PAGE_SIZE, plain, 0)
     })?;
-    ensure(
-        "waiting for the write",
-        READ_DONE.load(Ordering::Acquire) == 1,
-    )?;
+    ensure("waiting for the write", read_done())?;
     ensure(
         "moving the written bytes",
         mem_read_at::<8>(mem, PAGE_SIZE - 8)? == *b"01234567",
@@ -3551,10 +3553,7 @@ fn clone_waits_for_outputs(s: &Startup) -> Result {
     check("cloning", unsafe {
         sys::mem_clone(plain, 0, 0, PAGE_SIZE, &mut clone)
     })?;
-    ensure(
-        "waiting for the write",
-        READ_DONE.load(Ordering::Acquire) == 1,
-    )?;
+    ensure("waiting for the write", read_done())?;
     ensure(
         "cloning the written bytes",
         mem_read_at::<8>(clone, PAGE_SIZE - 8)? == *b"01234567",
