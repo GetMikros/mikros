@@ -6,6 +6,7 @@ mod check;
 mod debug;
 mod debug_build;
 mod debuginfo;
+mod entry_state;
 mod extended;
 mod firmware;
 mod fuzz;

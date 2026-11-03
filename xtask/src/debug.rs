@@ -30,7 +30,7 @@ fn scripts() -> PathBuf {
 }
 
 /// A free TCP port on the loopback interface for QEMU's GDB stub.
-fn free_port() -> Result<u16> {
+pub fn free_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").context("finding a free port")?;
     Ok(listener.local_addr()?.port())
 }
@@ -63,7 +63,7 @@ fn gdb_args(kernel: &Path, port: u16) -> Vec<String> {
 
 /// Starts QEMU halted on `disk` with the GDB stub on `port` and the
 /// serial output in `log`, and waits until the stub accepts connections.
-fn start_halted(
+pub fn start_halted(
     machine: &MachineArgs,
     disk: &Path,
     log: &Path,
@@ -144,7 +144,7 @@ const CHECKS: [(&str, &[&str]); 5] = [
 
 /// Waits until `child` exits, or kills it and fails once `timeout` has
 /// passed.
-fn wait_for(child: &mut Child, timeout: Duration) -> Result<()> {
+pub fn wait_for(child: &mut Child, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
         if child.try_wait()?.is_some() {

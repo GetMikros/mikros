@@ -141,6 +141,9 @@ pub fn run(args: &Args) -> Result<()> {
     let timeout = Duration::from_secs(args.timeout);
     crate::debug::check_scripts(&args.machine, &built.kernel, &disk, &gdb_log, timeout)?;
     println!("kernel debugger scripts passed");
+    let entry_log = dir.join("entry-serial.log");
+    crate::entry_state::check(&args.machine, &built.kernel, &disk, &entry_log, timeout)?;
+    println!("kernel entry state checked");
     crate::machine_state::run(
         &args.machine,
         args.kind,
