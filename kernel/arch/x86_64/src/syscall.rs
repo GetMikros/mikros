@@ -123,6 +123,11 @@ pub fn init() {
 const SYSCALL_LEN: u64 = 2;
 
 extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
+    // The entry code leaves RFLAGS as SYSCALL set it through IA32_FMASK.
+    debug_assert!(
+        crate::cpu::rflags() & (RFLAGS_IF | RFLAGS_TF | RFLAGS_DF | RFLAGS_AC | RFLAGS_NT) == 0,
+        "a system call entered with flags that IA32_FMASK should clear"
+    );
     let at = frame.rip.wrapping_sub(SYSCALL_LEN);
     let Some(thread) = crate::sched::current() else {
         unreachable!("a system call without a running thread");

@@ -4981,6 +4981,38 @@ fn alternate_signal_stacks(s: &Startup) -> Result {
     ensure("reporting it", old == [base, size])
 }
 
+/// `SYSCALL` clears DF, AC and NT, which the debug kernel checks as each
+/// system call enters it: this makes one with all three set.
+fn syscall_clears_flags(_: &Startup) -> Result {
+    const FLAGS: u64 = (1 << 10) | (1 << 14) | (1 << 18);
+    const HANDLE_CLOSE: i64 = 1;
+    let status: i64;
+    // SAFETY: closing handle 0 only fails. The block steps over the red
+    // zone before it pushes, and clears the flags again before it ends.
+    unsafe {
+        core::arch::asm!(
+            "sub rsp, 128",
+            "pushfq",
+            "or qword ptr [rsp], {set}",
+            "popfq",
+            "syscall",
+            "pushfq",
+            "and qword ptr [rsp], {clear}",
+            "popfq",
+            "add rsp, 128",
+            set = in(reg) FLAGS,
+            clear = in(reg) !FLAGS,
+            inlateout("rax") HANDLE_CLOSE => status,
+            in("rdi") 0u64,
+            out("rcx") _,
+            out("r11") _,
+        )
+    };
+    // SAFETY: the call takes no pointers.
+    let plain = unsafe { sys::handle_close(0) };
+    ensure("making the call", status == plain)
+}
+
 /// Set by `signal_sleeper` with what its sleep returned and when.
 static SLEEP_RESULT: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
@@ -5733,7 +5765,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 88] = [
+const TESTS: [(&str, Test); 89] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -5761,6 +5793,7 @@ const TESTS: [(&str, Test); 88] = [
     ("outputs_outside_user_range", outputs_outside_user_range),
     ("inputs_outside_user_memory", inputs_outside_user_memory),
     ("undefined_options_refused", undefined_options_refused),
+    ("syscall_clears_flags", syscall_clears_flags),
     ("reserved_hardware_refused", reserved_hardware_refused),
     ("clones", clones),
     ("pagers", pagers),
