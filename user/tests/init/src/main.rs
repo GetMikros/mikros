@@ -2193,6 +2193,55 @@ fn syscall_gate(s: &Startup) -> Result {
     )
 }
 
+/// Starts the debuggee reading I/O port 0x80, after granting it that port
+/// when `granted`, and returns the type of the exception it reports.
+fn read_port_0x80(s: &Startup, granted: bool) -> Result<u32> {
+    let mut channel = 0;
+    let (process, _) = start_program_with(s, "debuggee", 3, |process| {
+        // SAFETY: the out pointers are valid; the other call takes none.
+        unsafe {
+            check(
+                "creating an exception channel",
+                sys::exception_channel_create(process, 0, &mut channel),
+            )?;
+            if !granted {
+                return Ok(());
+            }
+            let mut port = 0;
+            let kind = mikros_test::KIND_IOPORT;
+            let status = sys::resource_create(s.root_resource, kind, 0x80, 1, 0, &mut port);
+            check("creating the port resource", status)?;
+            check(
+                "granting the port",
+                sys::process_ioports_enable(process, port, 0x80, 1),
+            )
+        }
+    })?;
+    let (kind, _) = next_report(channel)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(process) })?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )?;
+    Ok(kind)
+}
+
+/// A process may use only the I/O ports granted to it: reading another
+/// one raises a `PROTECTION` exception, and reading a granted one goes on
+/// to the next instruction.
+fn ioports_as_granted(s: &Startup) -> Result {
+    const PROTECTION: u32 = 8;
+    ensure(
+        "refusing an ungranted port",
+        read_port_0x80(s, false)? == PROTECTION,
+    )?;
+    ensure(
+        "allowing a granted port",
+        read_port_0x80(s, true)? == UNDEFINED_INSTRUCTION,
+    )
+}
+
 /// Killing a blocked thread whose process reports thread events reports
 /// its exit, and its end as the last thread terminates the process.
 fn kill_blocked_thread(s: &Startup) -> Result {
@@ -3332,7 +3381,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 52] = [
+const TESTS: [(&str, Test); 53] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
@@ -3388,6 +3437,7 @@ const TESTS: [(&str, Test); 52] = [
     ("random_bytes", random_bytes),
     ("write_execute_policy", write_execute_policy),
     ("syscall_gate", syscall_gate),
+    ("ioports_as_granted", ioports_as_granted),
     ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),
     ("suspend_threads", suspend_threads),
     ("suspend_blocked_waits", suspend_blocked_waits),

@@ -132,7 +132,9 @@ struct Ioports {
 /// entries and their share of storage.
 const IOPORT_COST: u64 = 2 * (size_of::<(u64, u64)>() + size_of::<Held>()) as u64;
 
-/// The I/O port ranges the bitmap allows now.
+/// The I/O port ranges the bitmap allows now. Its capacity, which never
+/// shrinks, covers the ranges of every process, so that switching them
+/// in needs no allocation. Locked before a process's ports.
 static OPEN_PORTS: SpinLock<Vec<(u64, u64)>> = SpinLock::new(Vec::new());
 
 /// Makes the I/O permission bitmap allow exactly the ports of `process`,
@@ -148,10 +150,9 @@ pub fn switch_ports(process: Option<&Process>) {
         crate::gdt::set_ports(start, end, false);
     }
     open.clear();
-    // Without room to record them, no ports are opened.
-    if open.try_reserve(wanted.len()).is_err() {
-        return;
-    }
+    // `enable_ioports` made room for every range when it was granted, so
+    // pushing them does not allocate.
+    debug_assert!(open.capacity() >= wanted.len());
     for &(start, end) in wanted {
         crate::gdt::set_ports(start, end, true);
         open.push((start, end));
@@ -225,15 +226,21 @@ impl Process {
 
     /// Lets the threads of the process access the ports from `start` to
     /// `end`, exclusive, until it terminates. `IOPORT_COST` is charged to
-    /// `budget` until then.
+    /// `budget` until then. Fails with `NoMemory`, granting nothing,
+    /// without room to record the range or to open it when the process's
+    /// threads switch in.
     pub fn enable_ioports(&self, start: u64, end: u64, budget: &Arc<Budget>) -> Result<(), Error> {
         let charge = budget.hold_kernel(IOPORT_COST)?;
+        let mut open = OPEN_PORTS.lock();
         let mut ports = self.ioports.lock();
+        let missing = (ports.ranges.len() + 1).saturating_sub(open.len());
         ports.ranges.try_reserve(1).map_err(|_| Error::NoMemory)?;
         ports.charges.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        open.try_reserve(missing).map_err(|_| Error::NoMemory)?;
         ports.ranges.push((start, end));
         ports.charges.push(charge);
         drop(ports);
+        drop(open);
         let running_here = sched::current()
             .and_then(|t| t.process().cloned())
             .is_some_and(|p| core::ptr::eq(&*p, self));

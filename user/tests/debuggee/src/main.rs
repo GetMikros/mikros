@@ -2,8 +2,9 @@
 //! second argument of 0 it executes an undefined instruction at once.
 //! With 2 it stops at a breakpoint with the address of a user data
 //! selector in R12, then loads SS from that address and executes
-//! `SYSCALL` as the next instruction. Otherwise it waits on its bootstrap
-//! channel until it is killed.
+//! `SYSCALL` as the next instruction. With 3 it reads I/O port 0x80 and
+//! then executes an undefined instruction. Otherwise it waits on its
+//! bootstrap channel until it is killed.
 
 #![no_std]
 #![no_main]
@@ -33,6 +34,12 @@ fn main(bootstrap: Handle, arg2: u64) -> i64 {
                 out("r11") _,
             )
         };
+    }
+    if arg2 == 3 {
+        // SAFETY: reading the port has no effect on the machine; without
+        // access to it, the read only raises an exception, as the
+        // undefined instruction does.
+        unsafe { core::arch::asm!("in al, 0x80", "ud2", out("al") _) };
     }
     let mut observed = 0;
     // SAFETY: the out pointer is valid for the call.
