@@ -5,6 +5,30 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// The high bit of an EFI status, set for errors.
+const ERROR_BIT: usize = 1 << (usize::BITS - 1);
+
+/// `EFI_SECURITY_VIOLATION`.
+pub const SECURITY_VIOLATION: usize = ERROR_BIT | 26;
+
+/// Whether `StartImage` returning `status` means that it did not start the
+/// image. Only `SECURITY_VIOLATION` does; any other status, success
+/// included, is taken as the exit status of an image that ran.
+///
+/// `StartImage` returns the status of a refusal to start the image and the
+/// exit status of an image that ran in the same way, and an image may exit
+/// with any status, including `SECURITY_VIOLATION`, `INVALID_PARAMETER` and
+/// `UNSUPPORTED`. UEFI has no call that tells whether an image was started.
+/// Checking whether the image handle is still valid after `StartImage`
+/// returns would rely on the firmware recognizing the handle of an unloaded
+/// image, whose value it may give to a new handle. So the two cannot be
+/// told apart, and only `SECURITY_VIOLATION` counts as a refusal.
+/// `INVALID_PARAMETER` for the handle itself is not expected, as the handle
+/// comes straight from `LoadImage` and was never started.
+pub fn start_refused(status: usize) -> bool {
+    status == SECURITY_VIOLATION
+}
+
 /// Encodes `text` as a null-terminated UCS-2 string. Returns `None` when it
 /// holds a null character or one that UCS-2 cannot represent.
 pub fn ucs2(text: &str) -> Option<Vec<u16>> {
@@ -74,6 +98,20 @@ mod tests {
             "outside UCS-2"
         );
         assert_eq!(ucs2("a\0b"), None, "null character");
+    }
+
+    #[test]
+    fn counts_only_a_security_violation_as_refusing_to_start() {
+        assert!(start_refused(SECURITY_VIOLATION));
+        // Success and a warning, then LOAD_ERROR, INVALID_PARAMETER,
+        // UNSUPPORTED, NOT_FOUND and ABORTED, which an image may exit with.
+        let exits = [0, 1]
+            .into_iter()
+            .chain([1, 2, 3, 14, 21].map(|code| ERROR_BIT | code));
+        for status in exits {
+            assert!(!start_refused(status), "{status:#x}");
+        }
+        assert!(!start_refused(26), "a warning with the same code");
     }
 
     #[test]

@@ -27,7 +27,8 @@ pub trait Firmware {
     /// `default` is the entry the countdown starts.
     fn show(&mut self, menu: &mut Menu, screen: Self::Screen, default: usize) -> Item;
     /// Starts the image at `path` on the boot volume with `args`. Returns
-    /// when the image exits, or with the reason it could not be started.
+    /// when the image exits, whatever its exit status, or with the reason it
+    /// could not be loaded or started.
     fn start_file(&mut self, path: &str, args: Option<&str>) -> Result<(), String>;
     /// Starts the detected system with the given index, as `start_file`.
     fn start_detected(&mut self, index: usize) -> Result<(), String>;

@@ -35,14 +35,16 @@ pub fn file_device_path(volume: &DevicePath, path: &str) -> Result<Box<DevicePat
 }
 
 /// Loads the image at `path` on `volume` and starts it with `args` as its
-/// load options. Returns when the image exits, or with the reason it could
-/// not be loaded or started.
+/// load options. Returns when the image exits, whatever its exit status, or
+/// with the reason it could not be loaded or started.
 pub fn start(volume: &DevicePath, path: &str, args: Option<&str>) -> Result<(), String> {
     start_image(&file_device_path(volume, path)?, path, args)
 }
 
 /// Loads the image at the full device path `full_path` and starts it with
-/// `args` as its load options. `path` names the image in reasons.
+/// `args` as its load options, as `start` does. `path` names the image in
+/// reasons. A status from `StartImage` counts as a failure to start only
+/// when `launch::start_refused` says so.
 pub fn start_image(full_path: &DevicePath, path: &str, args: Option<&str>) -> Result<(), String> {
     let source = LoadImageSource::FromDevicePath {
         device_path: full_path,
@@ -65,5 +67,9 @@ pub fn start_image(full_path: &DevicePath, path: &str, args: Option<&str>) -> Re
         unsafe { loaded.set_load_options(options.as_ptr().cast(), size as u32) };
     }
 
-    boot::start_image(image).map_err(|e| reason(path, e.status()))
+    match boot::start_image(image) {
+        Err(err) if launch::start_refused(err.status().0) => Err(reason(path, err.status())),
+        // The image ran and exited, whatever its exit status.
+        _ => Ok(()),
+    }
 }
