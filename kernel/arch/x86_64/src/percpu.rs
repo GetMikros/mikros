@@ -55,6 +55,12 @@ pub struct PerCpu {
     /// reads as it runs and `gdt` changes.
     pub tss: UnsafeCell<Tss>,
     pub gdt: UnsafeCell<Gdt>,
+    /// The depth of interrupt and exception handling, which nothing may
+    /// enable interrupts or switch threads within.
+    pub handling: AtomicU64,
+    /// The address of a page fault that its handler left to the thread
+    /// it interrupted.
+    pub fault_address: AtomicU64,
 }
 
 // SAFETY: each processor only reads its own structure, `this` is never
@@ -80,6 +86,8 @@ pub(crate) static BOOT_CPU: PerCpu = PerCpu {
     open_ports: SpinLock::new(Vec::new()),
     tss: UnsafeCell::new(Tss::new()),
     gdt: UnsafeCell::new([0; 8]),
+    handling: AtomicU64::new(0),
+    fault_address: AtomicU64::new(0),
 };
 
 /// Set once the GS base points to the per-CPU data.

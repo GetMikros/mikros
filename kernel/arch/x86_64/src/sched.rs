@@ -655,6 +655,10 @@ fn schedule(requeue: bool) {
         crate::cpu::rflags() & crate::cpu::RFLAGS_AC == 0,
         "scheduling with RFLAGS.AC set"
     );
+    debug_assert!(
+        !crate::idt::handling(),
+        "scheduling while handling an interrupt"
+    );
     let now = crate::time::now();
     let mut cpu = this_cpu().lock();
     let Some(current) = cpu.current.take() else {
@@ -806,6 +810,10 @@ pub fn yield_now() {
 /// Lets pending interrupts in, and switches threads if the running
 /// thread's slice has ended. No lock may be held.
 pub fn preempt_point() {
+    debug_assert!(
+        !crate::idt::handling(),
+        "a preemption point while handling an interrupt"
+    );
     // SAFETY: enabling interrupts for one instruction lets the processor
     // take pending ones; no lock is held here.
     unsafe { core::arch::asm!("sti", "nop", "cli", options(nomem, nostack)) };
@@ -814,10 +822,11 @@ pub fn preempt_point() {
     }
 }
 
-/// Calls `preempt_point` when no lock is held, for work that may run
-/// either way, such as destroying an object.
+/// Calls `preempt_point` when no lock is held and no interrupt or
+/// exception is being handled, for work that may run either way, such as
+/// destroying an object.
 pub fn preempt_point_if_unlocked() {
-    if kernel_core::sync::none_held() {
+    if kernel_core::sync::none_held() && !crate::idt::handling() {
         preempt_point();
     }
 }
