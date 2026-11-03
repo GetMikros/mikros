@@ -176,3 +176,10 @@ path = "fuzz_targets/clock.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "resource"
+path = "fuzz_targets/resource.rs"
+test = false
+doc = false
+bench = false
