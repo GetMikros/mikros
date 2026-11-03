@@ -296,6 +296,29 @@ fn adds_each_file_on_a_volume_once() {
 }
 
 #[test]
+fn adds_options_with_the_same_device_path_once_when_the_volume_is_absent() {
+    let mut disks = FakeDisks {
+        present: vec![BOOT],
+        ..FakeDisks::default()
+    };
+    let shim = "\\EFI\\fedora\\shimx64.efi";
+    disks.option(0, "Fedora", 3, Some(shim));
+    disks.option(1, "Fedora again", 3, Some(shim));
+    disks.option(2, "Other disk", 4, Some(shim));
+    disks.option(3, "Grub", 3, Some("\\EFI\\fedora\\grubx64.efi"));
+    disks.option(4, "Other disk again", 4, Some(shim));
+    disks.order.push(0);
+    assert_eq!(
+        found(&mut disks, &config("")),
+        [
+            system("Fedora", shim, 3, true),
+            system("Other disk", shim, 4, true),
+            system("Grub", "\\EFI\\fedora\\grubx64.efi", 3, true),
+        ]
+    );
+}
+
+#[test]
 fn adds_known_images_on_the_boot_volume_after_load_options() {
     let mut disks = FakeDisks {
         present: vec![BOOT, 2],

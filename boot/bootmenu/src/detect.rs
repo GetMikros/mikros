@@ -262,7 +262,9 @@ fn is_mikros_boot_file<D: Disks>(disks: &mut D, volume: Option<D::Volume>, path:
 /// Finds the systems to add after the entries of `config`, which are on
 /// `boot_volume`: the load options in `BootOrder` that end in a file path,
 /// then the `KNOWN_IMAGES` on the boot volume, skipping Mikros boot files
-/// and files that an earlier entry starts.
+/// and files that an earlier entry starts. An option with the same device
+/// path as an earlier one starts the same file, also when its volume is not
+/// present.
 pub fn find<D: Disks>(
     disks: &mut D,
     config: &Config,
@@ -274,6 +276,8 @@ pub fn find<D: Disks>(
     }
 
     let mut found = Vec::new();
+    // The device paths of the options added whose volume is not present.
+    let mut absent: Vec<Vec<u8>> = Vec::new();
     for number in disks.boot_order() {
         let Some(option) = disks.load_option(number) else {
             continue;
@@ -287,11 +291,18 @@ pub fn find<D: Disks>(
         if is_mikros_boot_file(disks, volume, &path) {
             continue;
         }
-        // An option whose volume is not present cannot be compared with
-        // other entries, so it is always added.
-        if let Some(volume) = volume
-            && !started.insert(volume, &path)
-        {
+        // An option whose volume is not present is compared with the
+        // earlier such options by its device path, as its volume cannot be
+        // compared.
+        let duplicate = match volume {
+            Some(volume) => !started.insert(volume, &path),
+            None if absent.contains(&option.device_path) => true,
+            None => {
+                absent.push(option.device_path);
+                false
+            }
+        };
+        if duplicate {
             continue;
         }
         found.push((option.description, path, volume, full));
