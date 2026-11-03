@@ -183,3 +183,10 @@ path = "fuzz_targets/resource.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "console"
+path = "fuzz_targets/console.rs"
+test = false
+doc = false
+bench = false
