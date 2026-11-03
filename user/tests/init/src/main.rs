@@ -2124,8 +2124,8 @@ fn kill_stopped_thread(s: &Startup) -> Result {
     )
 }
 
-/// A channel's own endpoints cannot be sent through it, under any
-/// handle value.
+/// A channel's own endpoints cannot be sent through it, by a write or a
+/// call, under any handle value.
 fn own_endpoints_not_sent(_: &Startup) -> Result {
     let (mut a, mut b) = (0, 0);
     // SAFETY: the out pointers are valid for the call.
@@ -2142,6 +2142,7 @@ fn own_endpoints_not_sent(_: &Startup) -> Result {
         // SAFETY: the pointers describe `byte` and `h`.
         let status = unsafe { sys::channel_write(a, byte.as_ptr(), 1, &h, 1) };
         ensure(what, status == INVALID_ARGS)?;
+        ensure(what, call(a, &byte, Some(h), 64, soon()).0 == INVALID_ARGS)?;
     }
     ensure("keeping the handles", read_message(b, 1).is_err())?;
     for h in [a, b, copy] {
