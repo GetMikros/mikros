@@ -65,13 +65,21 @@ pub fn open_exit_port(root: Handle, process: Handle) -> Result {
 }
 
 /// Stops QEMU with `value`, after `open_exit_port` succeeded.
+///
+/// QEMU may run the machine on for a while after the write, so the
+/// calling thread waits for the stop instead of ending its process: when
+/// the process is init, the kernel panics as it ends, and the panic would
+/// reach the serial output before the stop.
 pub fn exit_qemu(value: u8) -> ! {
     // SAFETY: the process may access the port, and writing it stops the
     // virtual machine.
     unsafe {
         core::arch::asm!("out dx, al", in("dx") DEBUG_EXIT_PORT, in("al") value, options(nomem, nostack));
     }
-    mikros_rt::exit(i64::from(value))
+    loop {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::thread_sleep(i64::MAX) };
+    }
 }
 
 /// Sleeps for `ms` milliseconds.
