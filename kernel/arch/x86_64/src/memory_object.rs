@@ -56,6 +56,11 @@ pub struct MemoryObject {
     /// serialized because system calls run one at a time on the one
     /// processor.
     seals: AtomicU32,
+    /// The `pager_supply` calls under way that move frames out of the
+    /// object or into it, counted by `Supplying`. A `WRITE` seal and a
+    /// revocation wait until none is left. Raised with the pages locked,
+    /// right after the check that the seal or the revocation would fail.
+    supplies: AtomicU32,
     /// For a paged object, what its pager needs.
     paged: Option<Paged>,
 }
@@ -142,6 +147,7 @@ impl MemoryObject {
             writable: AtomicU64::new(0),
             changing: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
+            supplies: AtomicU32::new(0),
             paged: None,
         })
     }
@@ -176,6 +182,7 @@ impl MemoryObject {
             writable: AtomicU64::new(0),
             changing: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
+            supplies: AtomicU32::new(0),
             paged: Some(Paged {
                 pager,
                 port: Arc::downgrade(port),
@@ -302,6 +309,14 @@ impl MemoryObject {
     /// nothing prepared before can still read or write them.
     fn wait_unpinned(&self) {
         while self.pages.lock().pinned() {
+            let _ = crate::sched::sleep_until(crate::time::now() + 1_000_000);
+        }
+    }
+
+    /// Waits until no `pager_supply` call moves frames out of the object
+    /// or into it.
+    fn wait_supplies(&self) {
+        while self.supplies.load(Ordering::Relaxed) > 0 {
             let _ = crate::sched::sleep_until(crate::time::now() + 1_000_000);
         }
     }
@@ -472,15 +487,20 @@ impl MemoryObject {
     }
 
     /// Revokes the whole paged object for good, as `pager_revoke` does:
-    /// waits for kernel copies that hold its frames, removes every
-    /// translation of it, and wakes the threads waiting for its pages.
+    /// waits for kernel copies that hold its frames and for supplies into
+    /// it, removes every translation of it, and wakes the threads waiting
+    /// for its pages.
     pub fn revoke(&self) -> Result<(), Error> {
         let paged = self.paged.as_ref().ok_or(Error::NotSupported)?;
-        self.wait_unpinned();
-        let count = {
+        let count = loop {
+            self.wait_unpinned();
+            self.wait_supplies();
             let pages = self.pages.lock();
+            if pages.pinned() || self.supplies.load(Ordering::Relaxed) > 0 {
+                continue;
+            }
             paged.state.lock().revoke();
-            pages.count()
+            break pages.count();
         };
         // No page can be entered once revoked, and the size stays, so the
         // translations go in pieces.
@@ -496,7 +516,8 @@ impl MemoryObject {
     /// `source` into the pages from `offset` that are not present, as
     /// `pager_supply` does, and frees the rest, so that the source range
     /// ends up decommitted. Moved frames stay charged to the source's
-    /// budget.
+    /// budget. A `WRITE` seal of the source and a revocation of this
+    /// object that come meanwhile wait until the call ends.
     pub fn supply(
         &self,
         offset: u64,
@@ -510,8 +531,8 @@ impl MemoryObject {
         if !source.is_anonymous() {
             return Err(Error::NotSupported);
         }
-        source.check_writable()?;
-        self.check_revoked()?;
+        let _out_of = Supplying::begin(source, || source.check_writable())?;
+        let _into = Supplying::begin(self, || self.check_revoked())?;
         let aligned = [offset, len, source_offset]
             .iter()
             .all(|v| v.is_multiple_of(PAGE_SIZE));
@@ -620,6 +641,7 @@ impl MemoryObject {
             writable: AtomicU64::new(0),
             changing: SpinLock::new(Vec::new()),
             seals: AtomicU32::new(0),
+            supplies: AtomicU32::new(0),
             paged: None,
         })
     }
@@ -649,13 +671,15 @@ impl MemoryObject {
         }
         let write = seals & SEAL_WRITE != 0;
         // A write seal waits until no kernel copy holds the frames, so
-        // that no output prepared before it is written after it.
+        // that no output prepared before it is written after it, and
+        // until no supply moves frames out of the object.
         let _pages = loop {
             if write {
                 self.wait_unpinned();
+                self.wait_supplies();
             }
             let pages = self.pages.lock();
-            if !write || !pages.pinned() {
+            if !write || (!pages.pinned() && self.supplies.load(Ordering::Relaxed) == 0) {
                 break pages;
             }
         };
@@ -1625,6 +1649,30 @@ impl Drop for Mapping {
         if *writable {
             mem.writable.fetch_sub(1, Ordering::Relaxed);
         }
+    }
+}
+
+/// A `pager_supply` call under way that moves frames out of an object or
+/// into it, counted in the object's `supplies` until dropped.
+struct Supplying<'a>(&'a MemoryObject);
+
+impl<'a> Supplying<'a> {
+    /// Counts a supply for `mem` if `allowed` passes with the pages locked,
+    /// where a seal or a revocation also looks at the count.
+    fn begin(
+        mem: &'a MemoryObject,
+        allowed: impl FnOnce() -> Result<(), Error>,
+    ) -> Result<Supplying<'a>, Error> {
+        let _pages = mem.pages.lock();
+        allowed()?;
+        mem.supplies.fetch_add(1, Ordering::Relaxed);
+        Ok(Supplying(mem))
+    }
+}
+
+impl Drop for Supplying<'_> {
+    fn drop(&mut self) {
+        self.0.supplies.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

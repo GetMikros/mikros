@@ -2723,6 +2723,105 @@ fn map_checks_again_after_waiting(s: &Startup) -> Result {
     )
 }
 
+/// The pages of the source of `supply_beside`: more than the kernel
+/// supplies in one piece, so that other threads run in between.
+const SUPPLIED_PAGES: u64 = 4 * 512 + 1;
+
+/// Set when the supply of `supply_beside` is about to begin, and the
+/// first 8 bytes of the last page of its source as `sealer` or
+/// `revoker` read them right after their call returned.
+static SUPPLY_BEGUN: AtomicU64 = AtomicU64::new(0);
+static SEEN_AFTER: AtomicU64 = AtomicU64::new(0);
+
+/// Records the start of the last page of the supply's `source`.
+fn see_last_page(source: Handle) {
+    let seen = mem_read_at::<8>(source, (SUPPLIED_PAGES - 1) * PAGE_SIZE);
+    SEEN_AFTER.store(seen.map_or(u64::MAX, u64::from_le_bytes), Ordering::Release);
+}
+
+/// Seals `source` with `WRITE` once the supply has begun, then records
+/// its last page.
+extern "sysv64" fn sealer(source: u64, _: u64) -> ! {
+    while SUPPLY_BEGUN.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    if seal(source as Handle, 1 << 3) == 0 {
+        see_last_page(source as Handle);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Revokes `paged` of the pager in `PAGER` once the supply has begun,
+/// then records the last page of `source`.
+extern "sysv64" fn revoker(paged: u64, source: u64) -> ! {
+    while SUPPLY_BEGUN.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    let pager = PAGER.load(Ordering::Acquire) as Handle;
+    // SAFETY: the call takes no pointers.
+    if unsafe { sys::pager_revoke(pager, paged as Handle) } == 0 {
+        see_last_page(source as Handle);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Supplies a new paged object from a source of `SUPPLIED_PAGES` pages
+/// while another thread seals the source, when `sealing`, or revokes the
+/// object, and checks that the supply did not change the source after
+/// that call returned: it ended first, or it was refused.
+fn supply_beside(s: &Startup, sealing: bool) -> Result {
+    let len = SUPPLIED_PAGES * PAGE_SIZE;
+    let source = create_memory(len)?;
+    mem_write_at(source, len - PAGE_SIZE, b"lastpage")?;
+    let (mut pager, mut port, mut paged) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 13, len, 0, &mut paged);
+        check("creating a paged object", status)?;
+    }
+    PAGER.store(u64::from(pager), Ordering::Release);
+    SUPPLY_BEGUN.store(0, Ordering::Release);
+    SEEN_AFTER.store(u64::MAX - 1, Ordering::Release);
+    let helper = match sealing {
+        true => spawn2(s, sealer, u64::from(source), 0)?,
+        false => spawn2(s, revoker, u64::from(paged), u64::from(source))?,
+    };
+    SUPPLY_BEGUN.store(1, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::pager_supply(pager, paged, 0, len, source, 0) };
+    ensure(
+        "supplying or refusing the whole call",
+        status == 0 || status == ACCESS_DENIED,
+    )?;
+    ensure(
+        "ending the helper",
+        wait(helper, TERMINATED, in_time()).0 == 0,
+    )?;
+    let last = u64::from_le_bytes(mem_read_at::<8>(source, len - PAGE_SIZE)?);
+    ensure(
+        "leaving the source as it was when the call returned",
+        SEEN_AFTER.load(Ordering::Acquire) == last,
+    )?;
+    for handle in [source, paged, port, pager] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(handle) })?;
+    }
+    Ok(())
+}
+
+/// A `WRITE` seal of a source and a revocation of the paged object wait
+/// for a supply that is under way.
+fn seal_and_revoke_wait_for_supply(s: &Startup) -> Result {
+    supply_beside(s, true)?;
+    supply_beside(s, false)
+}
+
 type Test = fn(&Startup) -> Result;
 
 const SUSPENDED: u32 = 1 << 5;
@@ -3221,7 +3320,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 50] = [
+const TESTS: [(&str, Test); 51] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -3266,6 +3365,10 @@ const TESTS: [(&str, Test); 50] = [
     (
         "map_checks_again_after_waiting",
         map_checks_again_after_waiting,
+    ),
+    (
+        "seal_and_revoke_wait_for_supply",
+        seal_and_revoke_wait_for_supply,
     ),
     ("memory_objects", memory_objects),
     ("shared_mappings", shared_mappings),
