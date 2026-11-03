@@ -23,6 +23,29 @@ pub enum Event {
     Second,
 }
 
+/// A key stroke as the console reports it, without the firmware's types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    Up,
+    Down,
+    Right,
+    Left,
+    /// A key with a character.
+    Char(char),
+    /// Any other key without one.
+    OtherSpecial,
+}
+
+/// The menu event of `key`.
+pub fn translate(key: Key) -> Event {
+    match key {
+        Key::Right | Key::Down | Key::Char('\t') => Event::Next,
+        Key::Left | Key::Up => Event::Previous,
+        Key::Char('\r' | '\n' | ' ') => Event::Activate,
+        Key::Char(_) | Key::OtherSpecial => Event::OtherKey,
+    }
+}
+
 /// What the caller has to do after an event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {

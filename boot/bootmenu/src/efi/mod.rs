@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use bootmenu::bmp;
 use bootmenu::canvas::{Canvas, Color};
 use bootmenu::entries::{self, Config};
-use bootmenu::input::{Action, Event, Input};
+use bootmenu::input::{self, Action, Event, Input};
 use bootmenu::menu::{Card, FocusSource, ICON_SIZE, Item, Menu, Power};
 use bootmenu::pointer;
 use bootmenu::text::Text;
@@ -162,16 +162,15 @@ const MIKROSBOOT_PATH: &str = "\\EFI\\Mikros\\mikrosboot.efi";
 
 /// Translates a key from the console into a menu event.
 fn translate(key: Key) -> Event {
-    match key {
-        Key::Special(ScanCode::RIGHT | ScanCode::DOWN) => Event::Next,
-        Key::Special(ScanCode::LEFT | ScanCode::UP) => Event::Previous,
-        Key::Printable(c) => match char::from(c) {
-            '\t' => Event::Next,
-            '\r' | '\n' | ' ' => Event::Activate,
-            _ => Event::OtherKey,
-        },
-        Key::Special(_) => Event::OtherKey,
-    }
+    let key = match key {
+        Key::Special(ScanCode::RIGHT) => input::Key::Right,
+        Key::Special(ScanCode::DOWN) => input::Key::Down,
+        Key::Special(ScanCode::LEFT) => input::Key::Left,
+        Key::Special(ScanCode::UP) => input::Key::Up,
+        Key::Printable(c) => input::Key::Char(char::from(c)),
+        Key::Special(_) => input::Key::OtherSpecial,
+    };
+    input::translate(key)
 }
 
 /// Whether a key is held while the boot manager starts. Reads, and so
