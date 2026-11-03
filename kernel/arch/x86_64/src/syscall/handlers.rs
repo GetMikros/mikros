@@ -447,7 +447,7 @@ pub fn vm_map(
 ) -> Result<(), Error> {
     let target = object::<Process>(process);
     let options = MapOptions::parse(options, addr, target.allows_write_execute())?;
-    page_aligned(&[addr, offset, len])?;
+    page_aligned(&[addr, offset])?;
     if len == 0 {
         return Err(Error::InvalidArgs);
     }
@@ -465,7 +465,11 @@ pub fn vm_map(
     if !out_addr.fits(1) {
         return Err(Error::InvalidArgs);
     }
-    let size = len;
+    // The object's size is a whole number of pages, so the rounded length
+    // fits it whenever `len` does.
+    let size = len
+        .checked_next_multiple_of(PAGE_SIZE)
+        .ok_or(Error::InvalidArgs)?;
     let caller = current_process()?;
     let outputs = prepare(&caller, &[out_addr.range(1)])?;
     let aspace = target.aspace().clone();
@@ -486,7 +490,6 @@ fn page_range_end(addr: u64, len: u64) -> Result<u64, Error> {
 }
 
 pub fn vm_unmap(process: Checked, addr: u64, len: u64) -> Result<(), Error> {
-    page_aligned(&[len])?;
     let end = page_range_end(addr, len)?;
     object::<Process>(process)
         .aspace()
@@ -1637,7 +1640,6 @@ pub fn system_get_random(buf: UserOut<u8>, len: u64) -> Result<(), Error> {
 pub fn vm_protect(process: Checked, options: u32, addr: u64, len: u64) -> Result<(), Error> {
     let target = object::<Process>(process);
     let perms = MapOptions::parse_protection(options, target.allows_write_execute())?;
-    page_aligned(&[len])?;
     let end = page_range_end(addr, len)?;
     if !crate::aspace::in_user_range(addr, end - addr) {
         return Err(Error::NotFound);

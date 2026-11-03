@@ -968,7 +968,9 @@ fn large_memory_operations(s: &Startup) -> Result {
 }
 
 /// Committing takes frames and decommitting frees them and zeroes the
-/// pages; protection changes stay within the mapping handle's rights.
+/// pages; mapping, unmapping and protection lengths are rounded up to
+/// whole pages; protection changes stay within the mapping handle's
+/// rights.
 fn memory_operations(s: &Startup) -> Result {
     let pages = 8;
     let mem = create_memory(pages * PAGE_SIZE)?;
@@ -999,9 +1001,8 @@ fn memory_operations(s: &Startup) -> Result {
         "refusing other ops",
         unsafe { sys::mem_op(mem, 3, 0, PAGE_SIZE) } == -10,
     )?;
-    // Every address, offset and size of these calls is a whole number of
-    // pages.
-    // SAFETY: the calls take no pointers or a valid one.
+    // The sizes of operations and objects are whole numbers of pages.
+    // SAFETY: the calls take no pointers.
     unsafe {
         ensure(
             "refusing an unaligned op",
@@ -1011,20 +1012,50 @@ fn memory_operations(s: &Startup) -> Result {
             "refusing an unaligned size",
             sys::mem_set_size(mem, PAGE_SIZE + 1) == -10,
         )?;
-        let mut unused = 0;
-        ensure(
-            "refusing an unaligned mapping",
-            sys::vm_map(s.process, PERM_READ, 0, mem, 0, 100, &mut unused) == -10,
-        )?;
-        ensure(
-            "refusing an unaligned unmapping",
-            sys::vm_unmap(s.process, at, 100) == -10,
-        )?;
     }
-    ensure(
-        "refusing an unaligned protection",
-        protect(s, PERM_READ, at, 100) == -10,
+    // The lengths of mappings, unmappings and protection changes are
+    // rounded up to whole pages, after a mapping's length as given is
+    // checked against the object's size.
+    let mut small = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::vm_map(s.process, PERM_READ, 0, mem, 0, 100, &mut small) };
+    check("mapping part of a page", status)?;
+    let end = small + PAGE_SIZE - 8;
+    check(
+        "mapping the whole page",
+        read_memory(s.process, end, &mut [0u8; 8]),
     )?;
+    check("protecting part of a page", protect(s, 0, small, 100))?;
+    ensure(
+        "protecting the whole page",
+        read_memory(s.process, end, &mut [0u8; 8]) == NOT_FOUND,
+    )?;
+    check(
+        "making it readable again",
+        protect(s, PERM_READ, small, PAGE_SIZE - 1),
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping part of a page", unsafe {
+        sys::vm_unmap(s.process, small, 1)
+    })?;
+    ensure(
+        "unmapping the whole page",
+        read_memory(s.process, small, &mut [0u8; 1]) == NOT_FOUND
+            && read_memory(s.process, end, &mut [0u8; 8]) == NOT_FOUND,
+    )?;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ,
+            0,
+            mem,
+            PAGE_SIZE,
+            (pages - 1) * PAGE_SIZE + 1,
+            &mut small,
+        )
+    };
+    ensure("checking the length as given", status == OUT_OF_RANGE)?;
 
     check("making it read-only", protect(s, PERM_READ, at, PAGE_SIZE))?;
     // SAFETY: the page is readable.
