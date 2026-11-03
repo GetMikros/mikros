@@ -1,31 +1,26 @@
 //! The weighted fair scheduling of ordinary threads on one processor.
 //!
-//! In each scheduling period every runnable thread gets its weight's
-//! share of the period: one slice when the share is at most `SLICE_MAX`,
-//! otherwise equal slices of at most `SLICE_MAX`. Virtual time advances
-//! by `ROUND` for each period of run time. A queued thread's slice starts
-//! at the later of its own position and the virtual time, and its
-//! position moves to the end of the slice, its part of `ROUND`. Threads
-//! run in order of position, in queuing order when positions are equal,
-//! but a thread whose slice has not started yet waits while another can
-//! run. So a thread with one slice comes back about one period later, and
-//! a thread with several comes back after the matching part of a period,
-//! without drifting from its share.
+//! The processor keeps a virtual time that advances by the run time of
+//! these threads divided by the total weight of the runnable ones. Each
+//! runnable thread has a virtual point `v`, which advances by its own run
+//! time divided by its weight, and its lag, the time it should have had
+//! minus the time it had, is its weight times how far `v` is behind the
+//! virtual time. A thread that stops takes its lag with it, and the
+//! virtual time moves so that the others' lags still add up to zero; a
+//! thread that starts again brings its lag back if it was not positive.
 //!
-//! A queued thread also gets a deadline, in run time: the period it is
+//! A thread is eligible while its lag is not negative. It asks for a
+//! request, its part of the scheduling period, and its virtual deadline
+//! is `v` plus its request over its weight. The eligible thread with the
+//! earliest virtual deadline runs next, for its request.
+//!
+//! A queued thread also gets a deadline in run time, the period it is
 //! queued for, as `wait_limit` gives it. No slice runs past the earliest
-//! deadline of the queued threads, and a thread whose deadline has come
-//! runs before the others; threads whose deadlines come together start
-//! up to 1 ns apart, as every slice lasts at least 1 ns. Slices are sized
-//! when their threads are
-//! picked, so without this a queue that shrank or changed weights could
-//! add up a longer wait than one period. A slice cut short moves its
-//! thread's position on only by the part it got, so it keeps its share.
+//! of those deadlines, and a thread whose deadline has come runs before
+//! the others, for no more than `MIN_SLICE` when it is not eligible.
+//! Threads whose deadlines come together start up to `MIN_SLICE` apart.
 
 use alloc::collections::{TryReserveError, VecDeque};
-
-/// The virtual time of one whole share.
-const ROUND: u64 = 1 << 40;
 
 /// The weights of priorities 0 to 32: `round(1024 × 1.25^(p − 16))`.
 const WEIGHTS: [u64; 33] = [
@@ -38,33 +33,50 @@ pub const DEFAULT_PRIORITY: u32 = 16;
 /// The highest priority a thread can be given.
 pub const MAX_PRIORITY: u32 = 31;
 
-/// The longest slice, and the shortest scheduling period.
+/// The shortest scheduling period, and the longest wait.
 pub const SLICE_MAX: i64 = 10_000_000;
 /// The scheduling period grows by this much per runnable thread.
 pub const PERIOD_PER_THREAD: i64 = 1_000_000;
+/// The longest request, which bounds how far a thread's lag moves in
+/// one run.
+pub const REQUEST_MAX: i64 = 4_000_000;
+/// The shortest request.
+pub const MIN_SLICE: i64 = 50_000;
+
+/// The fraction bits of virtual times.
+const SHIFT: u32 = 32;
 
 /// The weight of priority `priority`, which is at most 32.
 pub fn weight(priority: u32) -> u64 {
     WEIGHTS[priority.min(32) as usize]
 }
 
-/// A thread's slice and how many slices its share is split into.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Share {
-    slice: i64,
-    pieces: usize,
+/// The longest a thread queued among `n` runnable threads, itself
+/// included, may wait for its next run.
+pub fn wait_limit(n: usize) -> i64 {
+    SLICE_MAX.max(n as i64 * PERIOD_PER_THREAD)
 }
 
-/// A thread's scheduling state, kept while it is not queued.
+/// `time` in virtual time units for `weight`.
+fn virt(time: i64, weight: u64) -> i128 {
+    (i128::from(time) << SHIFT) / i128::from(weight.max(1))
+}
+
+/// A thread's scheduling state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entity {
     pub weight: u64,
-    /// The virtual time at which its next slice may start.
-    start: u64,
-    /// The virtual time at which its next slice ends.
-    position: u64,
-    /// The remainder of splitting `ROUND` into slices.
-    carry: u64,
+    /// Its virtual point while it is runnable.
+    v: i128,
+    /// Its virtual deadline while it is runnable.
+    vd: i128,
+    /// What it asked for its current run.
+    request: i64,
+    /// Its lag when it last stopped, in nanoseconds with `SHIFT`
+    /// fraction bits.
+    lag: i128,
+    /// Whether it was picked to run since it was made.
+    ran: bool,
 }
 
 impl Entity {
@@ -72,16 +84,19 @@ impl Entity {
     pub fn new(priority: u32) -> Entity {
         Entity {
             weight: weight(priority),
-            start: 0,
-            position: 0,
-            carry: 0,
+            v: 0,
+            vd: 0,
+            request: 0,
+            lag: 0,
+            ran: false,
         }
     }
-}
 
-/// Whether position `a` is before `b`, allowing for wrap-around.
-fn before(a: u64, b: u64) -> bool {
-    (a.wrapping_sub(b) as i64) < 0
+    /// Its lag when it last stopped, which it starts with again when it
+    /// is not positive.
+    pub fn saved_lag(&self) -> i64 {
+        (self.lag >> SHIFT) as i64
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -92,22 +107,20 @@ struct Queued<T> {
     deadline: i64,
 }
 
-/// The longest a thread queued among `n` queued threads, itself
-/// included, may wait for its next run.
-pub fn wait_limit(n: usize) -> i64 {
-    SLICE_MAX.max(n as i64 * PERIOD_PER_THREAD)
-}
-
-/// The runnable ordinary threads of one processor, other than the one
-/// running. Queuing a thread does not allocate as long as room was
-/// reserved for it.
+/// The runnable ordinary threads of one processor: the queued ones, and
+/// the running one, if any. Queuing a thread does not allocate as long
+/// as room was reserved for it.
 pub struct Fair<T: Copy + PartialEq> {
-    /// Sorted by position, in queuing order among equal positions.
     queue: VecDeque<Queued<T>>,
     /// The total weight of the queued threads.
     total: u64,
+    /// The running thread, which `pick` took.
+    running: Option<(T, Entity)>,
+    /// The running thread again, when it was made runnable again before
+    /// it stopped, to be queued instead of stopping.
+    rewoken: Option<T>,
     /// The virtual time.
-    now: u64,
+    vtime: i128,
     /// The run time charged so far.
     elapsed: i64,
 }
@@ -126,7 +139,9 @@ impl<T: Copy + PartialEq> Fair<T> {
         Fair {
             queue: VecDeque::new(),
             total: 0,
-            now: 0,
+            running: None,
+            rewoken: None,
+            vtime: 0,
             elapsed: 0,
         }
     }
@@ -145,24 +160,143 @@ impl<T: Copy + PartialEq> Fair<T> {
         self.queue.is_empty()
     }
 
-    /// The share of a thread of `weight` that is not queued, among the
-    /// queued threads.
-    fn share(&self, weight: u64) -> Share {
-        let n = self.queue.len() as i64 + 1;
-        let period = SLICE_MAX.max(n * PERIOD_PER_THREAD);
-        let total = self.total + weight;
-        let share = (i128::from(period) * i128::from(weight) / i128::from(total.max(1))) as i64;
-        let pieces = ((share + SLICE_MAX - 1) / SLICE_MAX).max(1);
-        Share {
-            slice: (share / pieces).max(1),
-            pieces: pieces as usize,
+    /// The total weight of the runnable threads.
+    fn runnable_weight(&self) -> u64 {
+        self.total + self.running.map_or(0, |(_, e)| e.weight)
+    }
+
+    /// The number of runnable threads.
+    fn runnable(&self) -> usize {
+        self.queue.len() + usize::from(self.running.is_some())
+    }
+
+    /// The lag of `entity`, which is runnable, with `SHIFT` fraction
+    /// bits, so that stopping and starting again loses nothing.
+    fn lag_of(&self, entity: &Entity) -> i128 {
+        (self.vtime - entity.v) * i128::from(entity.weight)
+    }
+
+    /// Moves the virtual time for a thread with lag `lag` stopping, when
+    /// `rest` is the weight of the runnable threads left.
+    fn on_stop(&mut self, lag: i128, rest: u64) {
+        if rest > 0 {
+            self.vtime += lag / i128::from(rest);
         }
     }
 
-    /// How long a thread of `weight` that is not queued may run before
-    /// the next thread's turn.
-    pub fn slice(&self, weight: u64) -> i64 {
-        self.share(weight).slice.min(self.until_due())
+    /// Makes `entity` runnable with lag `lag`, moving the virtual time
+    /// back; `others` is the weight of the other runnable threads.
+    fn on_start(&mut self, entity: &mut Entity, lag: i128, others: u64) {
+        entity.v = self.vtime - lag / i128::from(entity.weight.max(1));
+        self.vtime -= lag / i128::from((others + entity.weight).max(1));
+    }
+
+    /// Gives `entity`, about to be queued, its request and virtual
+    /// deadline, and queues it under `id`.
+    fn insert(&mut self, id: T, mut entity: Entity) {
+        let n = self.runnable() + 1;
+        let period = SLICE_MAX.max(n as i64 * PERIOD_PER_THREAD);
+        let total = self.runnable_weight() + entity.weight;
+        let share = (i128::from(period) * i128::from(entity.weight) / i128::from(total)) as i64;
+        entity.request = share.clamp(MIN_SLICE, REQUEST_MAX);
+        entity.vd = entity.v + virt(entity.request, entity.weight);
+        let deadline = self.elapsed + wait_limit(n);
+        self.queue.push_back(Queued {
+            id,
+            entity,
+            deadline,
+        });
+        self.total += entity.weight;
+    }
+
+    /// Makes a thread that is new or stopped runnable and queues it. It
+    /// starts with the lag it stopped with when that was not positive.
+    /// When it is the running thread, which was made runnable again
+    /// before it stopped, it is queued when it stops instead.
+    pub fn enqueue(&mut self, id: T, entity: Entity) {
+        if self.running.is_some_and(|(r, _)| r == id) {
+            self.rewoken = Some(id);
+            return;
+        }
+        let mut entity = entity;
+        let lag = if entity.ran && entity.lag <= 0 {
+            entity.lag
+        } else {
+            0
+        };
+        let others = self.runnable_weight();
+        self.on_start(&mut entity, lag, others);
+        self.insert(id, entity);
+    }
+
+    /// Queues the running thread again, under `id`, as it stays runnable.
+    pub fn requeue(&mut self, id: T) {
+        if let Some((_, entity)) = self.running.take() {
+            self.insert(id, entity);
+        }
+    }
+
+    /// Takes the running thread out, as it stopped being runnable, and
+    /// returns its state with its lag kept. When it was made runnable
+    /// again meanwhile, it is queued instead and `None` is returned.
+    pub fn stop(&mut self) -> Option<Entity> {
+        if let Some(id) = self.rewoken.take() {
+            self.requeue(id);
+            return None;
+        }
+        let (_, mut entity) = self.running.take()?;
+        entity.lag = self.lag_of(&entity);
+        let rest = self.runnable_weight();
+        self.on_stop(entity.lag, rest);
+        Some(entity)
+    }
+
+    /// Removes queued thread `id`, as it stopped being runnable, and
+    /// returns its state with its lag kept.
+    pub fn remove(&mut self, id: T) -> Option<Entity> {
+        let i = self.queue.iter().position(|q| q.id == id)?;
+        let q = self.queue.remove(i)?;
+        self.total -= q.entity.weight;
+        let mut entity = q.entity;
+        entity.lag = self.lag_of(&entity);
+        let rest = self.runnable_weight();
+        self.on_stop(entity.lag, rest);
+        Some(entity)
+    }
+
+    /// Gives queued thread `id` `weight`, as if it stopped and started
+    /// again with the same lag, and returns whether it is queued.
+    pub fn reweigh(&mut self, id: T, weight: u64) -> bool {
+        let Some(i) = self.queue.iter().position(|q| q.id == id) else {
+            return false;
+        };
+        let q = self.queue.remove(i).expect("found above");
+        self.total -= q.entity.weight;
+        let mut entity = q.entity;
+        let lag = self.lag_of(&entity);
+        let rest = self.runnable_weight();
+        self.on_stop(lag, rest);
+        entity.weight = weight;
+        self.on_start(&mut entity, lag, rest);
+        entity.vd = entity.v + virt(entity.request, weight);
+        self.queue.push_back(Queued { entity, ..q });
+        self.total += weight;
+        true
+    }
+
+    /// Gives the running thread `weight` in the same way, and returns
+    /// whether there is one.
+    pub fn reweigh_running(&mut self, weight: u64) -> bool {
+        let Some((id, mut entity)) = self.running.take() else {
+            return false;
+        };
+        let lag = self.lag_of(&entity);
+        let rest = self.runnable_weight();
+        self.on_stop(lag, rest);
+        entity.weight = weight;
+        self.on_start(&mut entity, lag, rest);
+        self.running = Some((id, entity));
+        true
     }
 
     /// The run time left until the earliest deadline of the queued
@@ -175,63 +309,12 @@ impl<T: Copy + PartialEq> Fair<T> {
             .unwrap_or(i64::MAX)
     }
 
-    /// Queues a thread that is new, was blocked, or used up its slice.
-    pub fn enqueue(&mut self, id: T, mut entity: Entity) {
-        let pieces = self.share(entity.weight).pieces as u64;
-        let step = ROUND + entity.carry;
-        entity.carry = step % pieces;
-        // A thread that ran little before it blocked has moved its
-        // position on by whole steps; its slice starts no later than one
-        // round ahead, so that it waits no more than about one period.
-        let latest = self.now.wrapping_add(ROUND);
-        entity.start = if before(entity.position, self.now) {
-            self.now
-        } else if before(latest, entity.position) {
-            latest
-        } else {
-            entity.position
-        };
-        entity.position = entity.start.wrapping_add(step / pieces);
-        let at = self
-            .queue
-            .partition_point(|q| !before(entity.position, q.entity.position));
-        let deadline = self.elapsed + wait_limit(self.queue.len() + 1);
-        self.queue.insert(
-            at,
-            Queued {
-                id,
-                entity,
-                deadline,
-            },
-        );
-        self.total += entity.weight;
-    }
-
-    /// Removes `id` from the queue, returning its state.
-    pub fn remove(&mut self, id: T) -> Option<Entity> {
-        let i = self.queue.iter().position(|q| q.id == id)?;
-        let q = self.queue.remove(i)?;
-        self.total -= q.entity.weight;
-        Some(q.entity)
-    }
-
-    /// Gives queued thread `id` `weight`, keeping its place, and returns
-    /// whether it is queued.
-    pub fn reweigh(&mut self, id: T, weight: u64) -> bool {
-        let Some(q) = self.queue.iter_mut().find(|q| q.id == id) else {
-            return false;
-        };
-        self.total = self.total - q.entity.weight + weight;
-        q.entity.weight = weight;
-        true
-    }
-
-    /// Takes the thread to run next, with its state: the one whose
-    /// deadline came first if any has come, otherwise the first in order
-    /// whose slice may start, or the first if none may. When `slice` will
-    /// cut its slice short for the next deadline, its position moves on
-    /// only by the part of the slice it gets.
+    /// Takes the thread to run next and makes it the running one: the
+    /// one whose deadline came first if any has come, otherwise the
+    /// eligible one with the earliest virtual deadline. The running
+    /// thread must have been queued again or stopped first.
     pub fn pick(&mut self) -> Option<(T, Entity)> {
+        debug_assert!(self.running.is_none());
         let due = self
             .queue
             .iter()
@@ -239,33 +322,59 @@ impl<T: Copy + PartialEq> Fair<T> {
             .filter(|(_, q)| q.deadline <= self.elapsed)
             .min_by_key(|(_, q)| q.deadline)
             .map(|(i, _)| i);
-        let i = due.unwrap_or_else(|| {
+        let i = due.or_else(|| {
             self.queue
                 .iter()
-                .position(|q| !before(self.now, q.entity.start))
-                .unwrap_or(0)
+                .enumerate()
+                .filter(|(_, q)| q.entity.v <= self.vtime)
+                .min_by_key(|(_, q)| q.entity.vd)
+                .map(|(i, _)| i)
         });
-        let q = self.queue.remove(i)?;
+        // Some thread is eligible, as the lags add up to zero; the one
+        // furthest behind is taken should rounding hide it.
+        let i = i.or_else(|| {
+            self.queue
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, q)| q.entity.v)
+                .map(|(i, _)| i)
+        })?;
+        let q = self.queue.remove(i).expect("found above");
         self.total -= q.entity.weight;
         let mut entity = q.entity;
-        let full = self.share(entity.weight).slice;
-        let slice = full.min(self.until_due());
-        if slice < full {
-            let step = entity.position.wrapping_sub(entity.start);
-            let part = u128::from(step) * slice as u128 / full as u128;
-            entity.position = entity.start.wrapping_add(part as u64);
+        entity.ran = true;
+        if due.is_some() && entity.v > self.vtime {
+            entity.request = MIN_SLICE;
         }
+        self.running = Some((q.id, entity));
         Some((q.id, entity))
     }
 
-    /// Advances virtual time for `ran` nanoseconds that the running
-    /// thread ran.
+    /// How long the running thread may run before the next thread's
+    /// turn.
+    pub fn slice(&self) -> i64 {
+        let request = self.running.map_or(REQUEST_MAX, |(_, e)| e.request);
+        request.min(self.until_due())
+    }
+
+    /// Accounts for `ran` nanoseconds that the running thread ran.
     pub fn charge(&mut self, ran: i64) {
-        let n = self.queue.len() as i64 + 1;
-        let period = SLICE_MAX.max(n * PERIOD_PER_THREAD);
-        let step = u128::from(ran.max(0) as u64) * u128::from(ROUND) / period as u128;
-        self.now = self.now.wrapping_add(step as u64);
-        self.elapsed += ran.max(0);
+        let ran = ran.max(0);
+        let total = self.runnable_weight();
+        if let Some((_, entity)) = &mut self.running {
+            entity.v += virt(ran, entity.weight);
+            self.vtime += virt(ran, total);
+            self.elapsed += ran;
+        }
+    }
+
+    /// The lag of runnable thread `id`, for tests.
+    pub fn lag(&self, id: T) -> Option<i64> {
+        let entity = match self.running {
+            Some((r, e)) if r == id => e,
+            _ => self.queue.iter().find(|q| q.id == id)?.entity,
+        };
+        Some((self.lag_of(&entity) >> SHIFT) as i64)
     }
 }
 

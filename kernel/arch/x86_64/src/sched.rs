@@ -645,9 +645,12 @@ fn schedule(requeue: bool) {
     // A thread made DEAD by another goes on running until it reaches
     // `exit_if_dead`, so it is queued again like a runnable one.
     if requeue && current.state() != BLOCKED {
-        let entity = *current.entity.lock();
         // Room for the running thread was reserved when it was queued.
-        cpu.fair.enqueue(Queued::new(current.clone()), entity);
+        cpu.fair.requeue(Queued::new(current.clone()));
+    } else if let Some(stopped) = cpu.fair.stop() {
+        // It keeps its lag for when it is runnable again. One woken
+        // before it got here was queued again instead.
+        *current.entity.lock() = stopped;
     }
     let picked = cpu.fair.pick();
     if let Some((next, entity)) = picked
@@ -656,7 +659,7 @@ fn schedule(requeue: bool) {
         // The running thread goes on.
         *current.entity.lock() = entity;
         drop(next.take());
-        start_slice(&mut cpu, now, current, entity);
+        start_slice(&mut cpu, now, current);
         return;
     }
     let save = current.rsp.get();
@@ -669,7 +672,7 @@ fn schedule(requeue: bool) {
             // SAFETY: `next` is not running, so its saved pointer is
             // stable.
             let rsp = unsafe { *next.rsp.get() };
-            start_slice(&mut cpu, now, next, entity);
+            start_slice(&mut cpu, now, next);
             rsp
         }
         None => cpu.idle_rsp,
@@ -687,10 +690,10 @@ fn schedule(requeue: bool) {
 
 /// Makes `thread` the running thread, starting its slice, and arms the
 /// timer for it.
-fn start_slice(cpu: &mut CpuSched, now: i64, thread: Arc<Thread>, entity: Entity) {
+fn start_slice(cpu: &mut CpuSched, now: i64, thread: Arc<Thread>) {
     cpu.current = Some(thread);
     cpu.slice_start = now;
-    cpu.slice_end = now.saturating_add(cpu.fair.slice(entity.weight));
+    cpu.slice_end = now.saturating_add(cpu.fair.slice());
     arm(cpu);
 }
 
@@ -1144,9 +1147,12 @@ pub fn set_priority(thread: &Arc<Thread>, priority: u32) {
     let mut cpu = this_cpu().lock();
     thread.priority.store(priority, Ordering::Relaxed);
     let weight = kernel_core::sched::weight(priority);
-    if !cpu.fair.reweigh(Queued(Arc::as_ptr(thread)), weight) {
-        thread.entity.lock().weight = weight;
+    let queued = cpu.fair.reweigh(Queued(Arc::as_ptr(thread)), weight);
+    let running = cpu.current.as_ref().is_some_and(|c| Arc::ptr_eq(c, thread));
+    if !queued && running {
+        cpu.fair.reweigh_running(weight);
     }
+    thread.entity.lock().weight = weight;
 }
 
 /// Arms `timer` for `deadline`, replacing an earlier deadline of it.
@@ -1180,7 +1186,7 @@ pub fn run() -> ! {
                 next.switch_in();
                 // SAFETY: `next` is not running.
                 let rsp = unsafe { *next.rsp.get() };
-                start_slice(&mut cpu, now, next, entity);
+                start_slice(&mut cpu, now, next);
                 let save = &raw mut cpu.idle_rsp;
                 drop(cpu);
                 // SAFETY: the idle loop's stack stays mapped, and the
