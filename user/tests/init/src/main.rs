@@ -4924,6 +4924,63 @@ fn signal_frame_reserved_bytes(s: &Startup) -> Result {
     )
 }
 
+/// The stack pointer `on_alternate_stack` ran with, and what removing the
+/// alternate stack from there returned.
+static ALTERNATE: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+extern "sysv64" fn on_alternate_stack(_: u64, _: u64, _: u64) {
+    let rsp: u64;
+    // SAFETY: the instruction only reads the stack pointer.
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::signal_set_altstack(0, 0, core::ptr::null_mut()) };
+    ALTERNATE[0].store(rsp, Ordering::Release);
+    ALTERNATE[1].store(status as u64, Ordering::Release);
+}
+
+/// An alternate signal stack must be at least 16384 bytes in the user
+/// range; setting one reports the one before; a handler with `ONSTACK`
+/// runs on it and cannot change it there; and two zeros remove it.
+fn alternate_signal_stacks(s: &Startup) -> Result {
+    const ONSTACK: u32 = 1 << 1;
+    let size = 16384;
+    let base = map(s.process, create_memory(size)?, size)?;
+    let set = |base: u64, size: u64, old: &mut [u64; 2]| {
+        // SAFETY: `old` holds the two values the call stores.
+        unsafe { sys::signal_set_altstack(base, size, old.as_mut_ptr().cast()) }
+    };
+    let mut old = [u64::MAX; 2];
+    ensure(
+        "refusing less than 16384 bytes",
+        set(base, size - 1, &mut old) == INVALID_ARGS,
+    )?;
+    ensure(
+        "refusing the kernel half",
+        set(0xFFFF_8000_0000_0000, size, &mut old) == INVALID_ARGS,
+    )?;
+    check("setting it", set(base, size, &mut old))?;
+    ensure("having had none", old == [0, 0])?;
+
+    let mut action = [0u8; 32];
+    action[0x00..0x08].copy_from_slice(&(on_alternate_stack as *const () as u64).to_le_bytes());
+    action[0x10..0x18].copy_from_slice(&(signal_restorer as *const () as u64).to_le_bytes());
+    action[0x18..0x1C].copy_from_slice(&ONSTACK.to_le_bytes());
+    let mut previous = [0u8; 32];
+    // SAFETY: the pointers describe `action` and `previous`.
+    check("setting the action", unsafe {
+        sys::signal_set_action(USR1, action.as_ptr(), previous.as_mut_ptr())
+    })?;
+    // SAFETY: the call takes no pointers.
+    let sent = unsafe { sys::thread_signal(s.thread, USR1, 0) };
+    restore_usr1(&previous)?;
+    check("sending the signal", sent)?;
+    let [rsp, status] = ALTERNATE.each_ref().map(|a| a.load(Ordering::Acquire));
+    ensure("running on it", (base..base + size).contains(&rsp))?;
+    ensure("keeping it there", status as i64 == BAD_STATE)?;
+    check("removing it", set(0, 0, &mut old))?;
+    ensure("reporting it", old == [base, size])
+}
+
 /// Set by `signal_sleeper` with what its sleep returned and when.
 static SLEEP_RESULT: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
@@ -5676,7 +5733,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 87] = [
+const TESTS: [(&str, Test); 88] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -5771,6 +5828,7 @@ const TESTS: [(&str, Test); 87] = [
     ("monotonic_clock_and_page", monotonic_clock_and_page),
     ("mappings_outlive_handles", mappings_outlive_handles),
     ("signal_frame", signal_frame),
+    ("alternate_signal_stacks", alternate_signal_stacks),
     ("signal_frame_reserved_bytes", signal_frame_reserved_bytes),
     (
         "signal_interrupts_and_restarts",
