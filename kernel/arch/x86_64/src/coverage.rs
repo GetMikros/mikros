@@ -96,6 +96,13 @@ pub fn switch_in(thread: &Thread) {
     cpu.cov_area.store(area, Ordering::Relaxed);
 }
 
+/// Points the hook at no buffer, as the processor is about to idle.
+pub fn idle() {
+    let cpu = percpu::this();
+    cpu.cov_area.store(0, Ordering::Relaxed);
+    cpu.cov_capacity.store(0, Ordering::Relaxed);
+}
+
 /// Starts collecting coverage for `thread`, the running thread, into
 /// `mem`. Fails with `BadState` when it already collects.
 pub fn enable(thread: &Thread, mem: Arc<MemoryObject>) -> Result<(), Error> {

@@ -3484,16 +3484,16 @@ fn debug_at_syscall_entry(s: &Startup) -> Result {
 }
 
 /// The ranges of kernel code, start and end, that the command line names
-/// with `interrupt_code=`, as `start-end` in hexadecimal separated by
-/// commas, and their number.
+/// with `key`, such as `interrupt_code=`, as `start-end` in hexadecimal
+/// separated by commas, and their number.
 #[cfg(feature = "fuzz")]
-fn interrupt_code(s: &Startup) -> ([(u64, u64); 16], usize) {
+fn code_ranges(s: &Startup, key: &str) -> ([(u64, u64); 16], usize) {
     let mut ranges = [(0, 0); 16];
     let mut count = 0;
     let cmdline = core::str::from_utf8(s.cmdline).unwrap_or("");
     let list = cmdline
         .split_whitespace()
-        .find_map(|word| word.strip_prefix("interrupt_code="))
+        .find_map(|word| word.strip_prefix(key))
         .unwrap_or("");
     for range in list.split(',') {
         let hex = |text: &str| u64::from_str_radix(text, 16).ok();
@@ -3516,6 +3516,7 @@ fn interrupt_code(s: &Startup) -> ([(u64, u64); 16], usize) {
 /// as the object holds. It leaves out the code that handles interrupts,
 /// whose ranges the command line gives: none of its addresses is
 /// recorded while the thread polls a timer that fires in an interrupt.
+/// Nor does it record the idle loop's code while the thread sleeps.
 #[cfg(feature = "fuzz")]
 fn coverage(s: &Startup) -> Result {
     const KERNEL_START: u64 = 0xFFFF_FFFF_8000_0000;
@@ -3553,7 +3554,7 @@ fn coverage(s: &Startup) -> Result {
     let count = u64::from_le_bytes(mem_read_at::<8>(small, 0)?);
     ensure("stopping once the object is full", count == 511)?;
 
-    let (ranges, n) = interrupt_code(s);
+    let (ranges, n) = code_ranges(s, "interrupt_code=");
     ensure("naming the interrupt code", n > 0)?;
     let mut timer = 0;
     // SAFETY: the out pointer is valid for the call.
@@ -3612,7 +3613,38 @@ fn coverage(s: &Startup) -> Result {
     unsafe {
         check("unmapping", sys::vm_unmap(s.process, at, pages * PAGE_SIZE))?;
         check("closing the timer", sys::handle_close(timer))?;
-        check("closing the object", sys::handle_close(large))
+        check("closing the object", sys::handle_close(large))?;
+    }
+
+    // While the thread sleeps, the processor idles on behalf of no
+    // thread: none of the code only the idle loop runs is recorded.
+    let (idle, m) = code_ranges(s, "idle_code=");
+    ensure("naming the idle code", m > 0)?;
+    let pages = 16;
+    let asleep = create_memory(pages * PAGE_SIZE)?;
+    touch_stack();
+    // SAFETY: the call takes a valid handle.
+    check("enabling coverage", unsafe { sys::fuzz_cov_enable(asleep) })?;
+    sleep_ms(20);
+    // SAFETY: the call takes no pointers.
+    check("disabling coverage", unsafe { sys::fuzz_cov_disable() })?;
+    let at = map(s.process, asleep, pages * PAGE_SIZE)?;
+    // SAFETY: the object is mapped readable, and nothing writes it now.
+    let words = unsafe { core::slice::from_raw_parts(at as *const u64, pages as usize * 512) };
+    let count = (words[0] as usize).min(words.len() - 1);
+    let idling = |pc: u64| {
+        idle[..m]
+            .iter()
+            .any(|&(start, end)| (start..end).contains(&pc))
+    };
+    ensure(
+        "recording the sleep",
+        count > 0 && !words[1..=count].iter().any(|&pc| idling(pc)),
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("unmapping", sys::vm_unmap(s.process, at, pages * PAGE_SIZE))?;
+        check("closing the object", sys::handle_close(asleep))
     }
 }
 

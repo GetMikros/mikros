@@ -707,7 +707,11 @@ fn schedule(requeue: bool) {
         }
         None => {
             #[cfg(feature = "fuzz")]
-            crate::fuzz::switch_in(0);
+            {
+                crate::fuzz::switch_in(0);
+                // The idle loop runs on behalf of no thread.
+                crate::coverage::idle();
+            }
             cpu.idle_rsp
         }
     };
@@ -1258,10 +1262,17 @@ pub fn run() -> ! {
             None => {
                 arm(&cpu);
                 drop(cpu);
-                // SAFETY: interrupts are enabled until the next one
-                // arrives; HLT then returns and they are disabled again.
-                unsafe { core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+                halt_until_interrupt();
             }
         }
     }
+}
+
+/// Halts the idle processor until an interrupt arrives. It is a function
+/// of its own so that the fuzz build's coverage test can find its code.
+#[inline(never)]
+fn halt_until_interrupt() {
+    // SAFETY: interrupts are enabled until the next one arrives; HLT then
+    // returns and they are disabled again.
+    unsafe { core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack)) };
 }

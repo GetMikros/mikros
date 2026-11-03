@@ -44,12 +44,17 @@ const INTERRUPT_FUNCTIONS: [&str; 6] = [
     "<kernel::ktimer::Armed>::fire",
 ];
 
-/// The address ranges, start and end, of the `INTERRUPT_FUNCTIONS` and
+/// The kernel function that only the idle loop runs. The fuzz build's
+/// coverage must record none of its code, as the idle loop runs on behalf
+/// of no thread.
+const IDLE_FUNCTIONS: [&str; 1] = ["kernel::sched::halt_until_interrupt"];
+
+/// The address ranges, start and end, of the functions `names` and
 /// their closures in `symbols`, which `llvm-nm -S -C` printed, or the
 /// first function it lacks.
-fn interrupt_code(symbols: &str) -> Result<Vec<(u64, u64)>, &'static str> {
+fn code_ranges(symbols: &str, names: &[&'static str]) -> Result<Vec<(u64, u64)>, &'static str> {
     let mut ranges = Vec::new();
-    for name in INTERRUPT_FUNCTIONS {
+    for &name in names {
         let closure = format!("{name}::{{closure");
         let found = ranges.len();
         for line in symbols.lines() {
@@ -75,15 +80,15 @@ fn interrupt_code(symbols: &str) -> Result<Vec<(u64, u64)>, &'static str> {
 }
 
 /// The kernel command line argument that gives the test init `ranges`:
-/// `interrupt_code=` and each range as `start-end` in hexadecimal,
-/// separated by commas.
-fn interrupt_code_arg(ranges: &[(u64, u64)]) -> String {
+/// `key=` and each range as `start-end` in hexadecimal, separated by
+/// commas.
+fn code_arg(key: &str, ranges: &[(u64, u64)]) -> String {
     let list: Vec<String> = ranges.iter().map(|(s, e)| format!("{s:x}-{e:x}")).collect();
-    format!("interrupt_code={}", list.join(","))
+    format!("{key}={}", list.join(","))
 }
 
 /// What the integration tests of `kind` add to the kernel command line:
-/// for the fuzz build, the interrupt code of `kernel`.
+/// for the fuzz build, the interrupt code and the idle code of `kernel`.
 fn test_cmdline(kind: Kind, kernel: &Path) -> Result<String> {
     if kind != Kind::Fuzz {
         return Ok(String::new());
@@ -94,10 +99,17 @@ fn test_cmdline(kind: Kind, kernel: &Path) -> Result<String> {
         .output()
         .context("failed to run llvm-nm")?;
     let symbols = String::from_utf8_lossy(&symbols.stdout);
-    match interrupt_code(&symbols) {
-        Ok(ranges) => Ok(interrupt_code_arg(&ranges)),
-        Err(name) => bail!("{} has no function {name}", kernel.display()),
+    let mut args = Vec::new();
+    for (key, names) in [
+        ("interrupt_code", &INTERRUPT_FUNCTIONS[..]),
+        ("idle_code", &IDLE_FUNCTIONS[..]),
+    ] {
+        match code_ranges(&symbols, names) {
+            Ok(ranges) => args.push(code_arg(key, &ranges)),
+            Err(name) => bail!("{} has no function {name}", kernel.display()),
+        }
     }
+    Ok(args.join(" "))
 }
 
 /// Where the disk image and the serial output of a test run go.
@@ -255,16 +267,23 @@ ffffffff800f9690 000000000000007a t <core::option::Option<i64>>::map_or::<i64, k
 ffffffff8005be30 0000000000000010 t kernel::time::maintain
 ffffffff800ccff0 000000000000008b t <kernel::ktimer::Armed>::fire
 ";
-        let ranges = interrupt_code(symbols).unwrap();
+        let ranges = code_ranges(symbols, &INTERRUPT_FUNCTIONS).unwrap();
         assert_eq!(ranges.len(), 7);
         assert_eq!(ranges[0], (0xffffffff8006b040, 0xffffffff8006b259));
         assert_eq!(ranges[4], (0xffffffff800cc860, 0xffffffff800cc8b4));
         assert_eq!(
-            interrupt_code_arg(&ranges[..2]),
+            code_arg("interrupt_code", &ranges[..2]),
             "interrupt_code=ffffffff8006b040-ffffffff8006b259,ffffffff800929f0-ffffffff80092a05"
         );
         let without = symbols.replace("kernel::time::maintain", "kernel::time::other");
-        assert_eq!(interrupt_code(&without), Err("kernel::time::maintain"));
+        assert_eq!(
+            code_ranges(&without, &INTERRUPT_FUNCTIONS),
+            Err("kernel::time::maintain")
+        );
+        assert_eq!(
+            code_ranges(symbols, &IDLE_FUNCTIONS),
+            Err("kernel::sched::halt_until_interrupt")
+        );
     }
 
     #[test]
