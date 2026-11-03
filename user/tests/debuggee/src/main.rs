@@ -1,6 +1,9 @@
 //! A test program for exception handling and thread events. With a
-//! second argument of 0 it executes an undefined instruction at once;
-//! otherwise it waits on its bootstrap channel until it is killed.
+//! second argument of 0 it executes an undefined instruction at once.
+//! With 2 it stops at a breakpoint with the address of a user data
+//! selector in R12, then loads SS from that address and executes
+//! `SYSCALL` as the next instruction. Otherwise it waits on its bootstrap
+//! channel until it is killed.
 
 #![no_std]
 #![no_main]
@@ -13,6 +16,23 @@ fn main(bootstrap: Handle, arg2: u64) -> i64 {
     if arg2 == 0 {
         // SAFETY: the instruction only raises an exception.
         unsafe { core::arch::asm!("ud2") };
+    }
+    if arg2 == 2 {
+        static SELECTOR: u16 = 0x23;
+        // SAFETY: SS is reloaded with the user data selector it already
+        // holds, and the system call number is not assigned, so the call
+        // only fails.
+        unsafe {
+            core::arch::asm!(
+                "int3",
+                "mov ss, [r12]",
+                "syscall",
+                in("r12") &raw const SELECTOR,
+                inout("rax") u64::MAX => _,
+                out("rcx") _,
+                out("r11") _,
+            )
+        };
     }
     let mut observed = 0;
     // SAFETY: the out pointer is valid for the call.

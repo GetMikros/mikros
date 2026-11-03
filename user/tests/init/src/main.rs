@@ -2119,6 +2119,38 @@ fn kill_stopped_thread(s: &Startup) -> Result {
     )
 }
 
+/// A data breakpoint hit by loading SS just before `SYSCALL` raises its
+/// debug exception at the first instruction of the kernel's entry, and is
+/// reported as a `DEBUG` exception of the thread.
+fn debug_at_syscall_entry(s: &Startup) -> Result {
+    const BREAKPOINT: u32 = 6;
+    const DEBUG: u32 = 7;
+    let (process, channel) = start_debuggee(s, 2, 0)?;
+    let (kind, thread) = next_report(channel)?;
+    ensure("stopping at the breakpoint", kind == BREAKPOINT)?;
+    let (status, regs) = general_registers(thread);
+    check("reading the registers", status)?;
+    let selector = u64_at(&regs, 12 * 8);
+    // Breakpoint 0 on reads and writes of the two bytes at the selector.
+    let dr7: u64 = 1 | 0b11 << 16 | 0b01 << 18;
+    let mut debug = [0u8; 48];
+    debug[..8].copy_from_slice(&selector.to_le_bytes());
+    debug[40..].copy_from_slice(&dr7.to_le_bytes());
+    // SAFETY: the pointer and length describe `debug`.
+    check("setting the breakpoint", unsafe {
+        sys::thread_write_state(thread, 2, debug.as_ptr(), 48)
+    })?;
+    resume(thread)?;
+    let (kind, thread) = next_report(channel)?;
+    ensure("reporting the debug exception", kind == DEBUG)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(thread) })?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )
+}
+
 /// In a fuzz build, coverage goes only into an anonymous object and
 /// records the kernel's blocks while it is on.
 #[cfg(feature = "fuzz")]
@@ -2846,7 +2878,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 41] = [
+const TESTS: [(&str, Test); 42] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2872,6 +2904,7 @@ const TESTS: [(&str, Test); 41] = [
     ("paged_outputs", paged_outputs),
     ("kill_blocked_thread", kill_blocked_thread),
     ("kill_stopped_thread", kill_stopped_thread),
+    ("debug_at_syscall_entry", debug_at_syscall_entry),
     ("coverage", coverage),
     ("seal_waits_for_outputs", seal_waits_for_outputs),
     ("evict_waits_for_outputs", evict_waits_for_outputs),

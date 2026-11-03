@@ -44,7 +44,9 @@ pub struct PerCpu {
 // written after setup, and the rest is behind locks.
 unsafe impl Sync for PerCpu {}
 
-static BOOT_CPU: PerCpu = PerCpu {
+/// The boot processor's data. Entry code that cannot trust the GS base
+/// finds it by this symbol.
+pub(crate) static BOOT_CPU: PerCpu = PerCpu {
     this: &raw const BOOT_CPU,
     index: 0,
     kernel_stack: AtomicU64::new(0),

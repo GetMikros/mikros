@@ -88,7 +88,7 @@ extern "sysv64" fn on_kernel_tables() -> ! {
         panic!("BootInfo was not kept");
     };
     let ist = || space::new_stack(gdt::IST_STACK_SIZE);
-    gdt::init(space::stack_top(), ist(), ist(), ist());
+    gdt::init(space::stack_top(), ist(), ist(), ist(), ist());
     crate::idt::init();
     // A framebuffer that fails the checks is treated as absent from here
     // on: no console, no panic screen and nothing for init.

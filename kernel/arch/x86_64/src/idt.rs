@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "none")]
 use crate::gdt::Pointer;
-use crate::gdt::{IST_DOUBLE_FAULT, IST_MACHINE_CHECK, IST_NMI, KERNEL_CODE};
+use crate::gdt::{IST_DEBUG, IST_DOUBLE_FAULT, IST_MACHINE_CHECK, IST_NMI, KERNEL_CODE};
 #[cfg(target_os = "none")]
 use core::arch::{asm, global_asm};
 use core::fmt;
@@ -96,6 +96,17 @@ pub struct Frame {
 // registers and calls `interrupt` with the frame. The processor aligns
 // the stack to 16 bytes before it pushes, so the 22 words of the frame
 // leave it aligned for the call.
+//
+// Vectors with an IST entry go through `ist_common` instead. Such an
+// entry can interrupt kernel code that has not yet swapped GS, such as
+// the first instruction of the system call entry, so neither the saved
+// CS nor the current GS base shows which base is loaded. `ist_common`
+// keeps the GS base it finds in RBX, loads the boot processor's data by
+// its address, and writes the kept base back before IRETQ. A debug
+// exception from user mode then moves its frame to the thread's kernel
+// stack and continues in `interrupt_common`, with the kept user base in
+// IA32_KERNEL_GS_BASE as SWAPGS would have left it, so that the thread
+// may block or switch there as on any other entry from user mode.
 #[cfg(target_os = "none")]
 global_asm!(
     ".pushsection .text.interrupt_stubs, \"ax\"",
@@ -109,7 +120,11 @@ global_asm!(
     "push 0",
     ".endif",
     "push vector",
+    ".if vector == {debug} || vector == {nmi} || vector == {double_fault} || vector == {machine_check}",
+    "jmp ist_common",
+    ".else",
     "jmp interrupt_common",
+    ".endif",
     ".set vector, vector + 1",
     ".endr",
     "interrupt_common:",
@@ -122,6 +137,7 @@ global_asm!(
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
+    "interrupt_saved:",
     "cld",
     // In the fuzz build, the depth of hardware interrupt handling is
     // counted, so that coverage leaves it out.
@@ -148,7 +164,58 @@ global_asm!(
     "swapgs",
     "3:",
     "iretq",
+    "ist_common:",
+    "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
+    "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
+    "push r13", "push r14", "push r15",
+    "cld",
+    "mov ecx, {gs_msr}",
+    "rdmsr",
+    "mov ebx, eax",
+    "shl rdx, 32",
+    "or rbx, rdx",
+    "lea rax, [rip + {percpu}]",
+    "mov rdx, rax",
+    "shr rdx, 32",
+    "wrmsr",
+    "cmp qword ptr [rsp + 15*8], {debug}",
+    "jne 6f",
+    "test byte ptr [rsp + 18*8], 3",
+    "jz 6f",
+    "mov ecx, {kernel_gs_msr}",
+    "mov eax, ebx",
+    "mov rdx, rbx",
+    "shr rdx, 32",
+    "wrmsr",
+    "mov rsi, rsp",
+    "mov rdi, gs:[{kernel_stack}]",
+    "sub rdi, 22*8",
+    "mov rsp, rdi",
+    "mov ecx, 22",
+    "rep movsq",
+    "jmp interrupt_saved",
+    "6:",
+    "mov rdi, rsp",
+    "call {interrupt}",
+    "mov ecx, {gs_msr}",
+    "mov eax, ebx",
+    "mov rdx, rbx",
+    "shr rdx, 32",
+    "wrmsr",
+    "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10",
+    "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
+    "pop rcx", "pop rbx", "pop rax",
+    "add rsp, 16",
+    "iretq",
     ".popsection",
+    debug = const DEBUG,
+    nmi = const NMI,
+    double_fault = const DOUBLE_FAULT,
+    machine_check = const MACHINE_CHECK,
+    gs_msr = const crate::percpu::IA32_GS_BASE,
+    kernel_gs_msr = const crate::percpu::IA32_KERNEL_GS_BASE,
+    percpu = sym crate::percpu::BOOT_CPU,
+    kernel_stack = const crate::percpu::KERNEL_STACK_OFFSET,
     mask = const ERROR_CODE_VECTORS,
     interrupt = sym interrupt,
     fuzz = const cfg!(feature = "fuzz") as u8,
@@ -204,6 +271,7 @@ pub fn ist(vector: u8) -> u8 {
         DOUBLE_FAULT => IST_DOUBLE_FAULT,
         NMI => IST_NMI,
         MACHINE_CHECK => IST_MACHINE_CHECK,
+        DEBUG => IST_DEBUG,
         _ => 0,
     }
 }
@@ -352,10 +420,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uses_ist_stacks_only_for_fatal_vectors() {
+    fn uses_ist_stacks_for_fatal_vectors_and_debug() {
         let with_ist: std::vec::Vec<u8> = (0..=255).filter(|&v| ist(v) != 0).collect();
-        assert_eq!(with_ist, [2, 8, 18]);
-        assert_eq!((ist(8), ist(2), ist(18)), (1, 2, 3));
+        assert_eq!(with_ist, [1, 2, 8, 18]);
+        assert_eq!((ist(8), ist(2), ist(18), ist(1)), (1, 2, 3, 4));
         let user: std::vec::Vec<u8> = (0..=255).filter(|&v| dpl(v) != 0).collect();
         assert_eq!(user, [3]);
     }

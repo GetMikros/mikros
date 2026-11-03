@@ -10,6 +10,7 @@ pub const TSS_SELECTOR: u16 = 0x30;
 pub const IST_DOUBLE_FAULT: u8 = 1;
 pub const IST_NMI: u8 = 2;
 pub const IST_MACHINE_CHECK: u8 = 3;
+pub const IST_DEBUG: u8 = 4;
 
 /// The size of each IST stack.
 pub const IST_STACK_SIZE: u64 = 16 << 10;
@@ -108,7 +109,7 @@ pub fn set_ports(start: u64, end: u64, allow: bool) {
 /// Builds the GDT and the TSS, with the IST stacks whose tops are given,
 /// and loads them. Every segment register is reloaded.
 #[cfg(target_os = "none")]
-pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64) {
+pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64, debug: u64) {
     use crate::cpu::read_msr;
     use crate::percpu::{IA32_GS_BASE, IA32_KERNEL_GS_BASE};
     use core::arch::asm;
@@ -120,6 +121,7 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64) {
             (IST_DOUBLE_FAULT, double_fault),
             (IST_NMI, nmi),
             (IST_MACHINE_CHECK, machine_check),
+            (IST_DEBUG, debug),
         ];
         for (entry, top) in ist {
             (&raw mut (*tss).ist[usize::from(entry) - 1]).write_unaligned(top);
