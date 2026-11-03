@@ -1188,6 +1188,13 @@ pub fn run() -> ! {
                 unsafe { context::switch(save, rsp) };
                 finish_switch();
             }
+            // A collection left needed runs before the processor idles;
+            // what it destroys may wake threads, so the queue is looked
+            // at again after it.
+            None if kernel_core::object::channel::collection_pending() => {
+                drop(cpu);
+                kernel_core::object::channel::collect_if_needed();
+            }
             None => {
                 arm(&cpu);
                 drop(cpu);

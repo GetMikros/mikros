@@ -819,7 +819,8 @@ fn need_collection() {
 /// endpoints keep alive, while a collection is needed, unless another
 /// thread is collecting already. A collection that the endpoints it has
 /// not found reachable keep changing under is tried `ATTEMPTS` times and
-/// then left needed. It must be called with no lock held: it counts each
+/// then left needed, for the next return to user mode or the idle loop to
+/// try again. It must be called with no lock held: it counts each
 /// endpoint and message it examines with `sync::destroyed`, which may let
 /// other threads run.
 pub fn collect_if_needed() {
@@ -836,6 +837,12 @@ pub fn collect_if_needed() {
         break;
     }
     COLLECTING.store(false, Ordering::Release);
+}
+
+/// Whether a collection is needed and no thread is running one, so that
+/// `collect_if_needed` would run it.
+pub fn collection_pending() -> bool {
+    NEEDED.load(Ordering::Acquire) && !COLLECTING.load(Ordering::Acquire)
 }
 
 /// Calls `f` with each endpoint in `TRANSIT`, holding a reference to it.
@@ -1111,6 +1118,18 @@ mod tests {
             })
             .unwrap();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn reports_a_pending_collection_unless_one_runs() {
+        let _one = COLLECTOR.lock().unwrap_or_else(|e| e.into_inner());
+        need_collection();
+        assert!(collection_pending());
+        COLLECTING.store(true, Ordering::Release);
+        assert!(!collection_pending());
+        COLLECTING.store(false, Ordering::Release);
+        collect_if_needed();
+        assert!(!NEEDED.load(Ordering::Acquire) || COLLECTING.load(Ordering::Acquire));
     }
 
     #[test]
