@@ -81,13 +81,37 @@ impl Drop for Message {
     fn drop(&mut self) {
         for entry in self.handles.drain(..) {
             if let Some(core) = queued_core(&entry) {
-                core.queued.fetch_sub(1, Ordering::Relaxed);
-                changed();
-                if core.outer.lock().strong_count() == 0 {
-                    need_collection();
-                }
+                left_queue(core);
             }
         }
+    }
+}
+
+/// Accounts for a queued message that carried `core` going away.
+fn left_queue(core: &Core) {
+    core.queued.fetch_sub(1, Ordering::Relaxed);
+    changed();
+    if core.outer.lock().strong_count() == 0 {
+        need_collection();
+    }
+}
+
+/// Moves the endpoints that `message` holds the last reference to onto
+/// `list`, linked through `Core::dying`, so that dropping the message
+/// does not destroy them inside the drop.
+fn take_last(message: &mut Message, list: &mut Option<Arc<Core>>) {
+    let mut i = 0;
+    while i < message.handles.len() {
+        let entry = &message.handles[i];
+        if queued_core(entry).is_none() || Arc::strong_count(&entry.object) != 1 {
+            i += 1;
+            continue;
+        }
+        let entry = message.handles.swap_remove(i);
+        let core = super::downcast::<Core>(entry.object).expect("a queued endpoint");
+        left_queue(&core);
+        *core.dying.lock() = list.take();
+        *list = Some(core);
     }
 }
 
@@ -281,6 +305,9 @@ pub struct Core {
     internal: AtomicUsize,
     live: AtomicBool,
     next: SpinLock<Option<Arc<Core>>>,
+    /// The next endpoint to destroy in the list of the `Drop` of a
+    /// `Core`.
+    dying: SpinLock<Option<Arc<Core>>>,
 }
 
 /// What the kernel does when the peer of an endpoint it holds is
@@ -333,6 +360,7 @@ impl Core {
                 internal: AtomicUsize::new(0),
                 live: AtomicBool::new(false),
                 next: SpinLock::new(None),
+                dying: SpinLock::new(None),
             })
         };
         let (a, b) = (end(0)?, end(1)?);
@@ -636,18 +664,34 @@ impl Drop for Core {
                 observer.peer_closed();
             }
         }
-        // Discarded messages close their handles, which can destroy
-        // further objects, so this happens with no lock held, accounted
-        // for one message at a time.
-        let Queue {
-            messages, calls, ..
-        } = discarded;
-        let replies = calls.into_iter().filter_map(|c| c.reply);
-        for message in messages.into_iter().chain(replies) {
-            let count = 1 + message.handles.len();
-            drop(message);
-            crate::sync::destroyed(count);
+        let mut list = None;
+        discard(discarded, &mut list);
+        // Endpoints that only the discarded messages kept alive are
+        // destroyed here one after another, each with its queue emptied
+        // first, rather than each inside the drop of the one before.
+        while let Some(core) = list.take() {
+            list = core.dying.lock().take();
+            let queue = core::mem::take(&mut core.shared.lock().queues[core.side]);
+            discard(queue, &mut list);
+            drop(core);
         }
+    }
+}
+
+/// Drops the messages of `queue`, moving the endpoints they hold the last
+/// reference to onto `list`. Discarded messages close their handles,
+/// which can destroy further objects, so this happens with no lock held,
+/// accounted for one message at a time.
+fn discard(queue: Queue, list: &mut Option<Arc<Core>>) {
+    let Queue {
+        messages, calls, ..
+    } = queue;
+    let replies = calls.into_iter().filter_map(|c| c.reply);
+    for mut message in messages.into_iter().chain(replies) {
+        let count = 1 + message.handles.len();
+        take_last(&mut message, list);
+        drop(message);
+        crate::sync::destroyed(count);
     }
 }
 
@@ -897,6 +941,28 @@ mod tests {
         assert_eq!(c.header().signals() & signals::PEER_CLOSED, 0);
         assert_eq!(read(&c).unwrap().0, b"x");
         drop((a, b, d, f));
+    }
+
+    #[test]
+    fn drops_chains_of_endpoints_without_recursing() {
+        // A collection would hold references of its own for a moment.
+        let _one = COLLECTOR.lock().unwrap_or_else(|e| e.into_inner());
+        let worker = std::thread::Builder::new().stack_size(32 * 1024);
+        let handle = worker
+            .spawn(|| {
+                let budget = Budget::child(&Budget::root(), u64::MAX, u64::MAX, None).unwrap();
+                // Each endpoint has the previous one queued toward it.
+                let (_, mut last) = Endpoint::pair(Some(&budget)).unwrap();
+                for _ in 0..100_000 {
+                    let (writer, end) = Endpoint::pair(Some(&budget)).unwrap();
+                    writer.write(carrying(&last)).ok().unwrap();
+                    last = end;
+                }
+                drop(last);
+                assert_eq!(used(&budget), 0);
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 
     #[test]
