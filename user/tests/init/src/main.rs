@@ -3483,10 +3483,39 @@ fn debug_at_syscall_entry(s: &Startup) -> Result {
     )
 }
 
+/// The ranges of kernel code, start and end, that the command line names
+/// with `interrupt_code=`, as `start-end` in hexadecimal separated by
+/// commas, and their number.
+#[cfg(feature = "fuzz")]
+fn interrupt_code(s: &Startup) -> ([(u64, u64); 16], usize) {
+    let mut ranges = [(0, 0); 16];
+    let mut count = 0;
+    let cmdline = core::str::from_utf8(s.cmdline).unwrap_or("");
+    let list = cmdline
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("interrupt_code="))
+        .unwrap_or("");
+    for range in list.split(',') {
+        let hex = |text: &str| u64::from_str_radix(text, 16).ok();
+        let Some((start, end)) = range.split_once('-') else {
+            continue;
+        };
+        if let (Some(start), Some(end)) = (hex(start), hex(end))
+            && count < ranges.len()
+        {
+            ranges[count] = (start, end);
+            count += 1;
+        }
+    }
+    (ranges, count)
+}
+
 /// In a fuzz build, coverage goes only into an anonymous object and
 /// records the kernel's blocks while it is on, as kcov does: a `u64`
 /// count and then the addresses, all in the kernel's code, up to as many
-/// as the object holds.
+/// as the object holds. It leaves out the code that handles interrupts,
+/// whose ranges the command line gives: none of its addresses is
+/// recorded while the thread polls a timer that fires in an interrupt.
 #[cfg(feature = "fuzz")]
 fn coverage(s: &Startup) -> Result {
     const KERNEL_START: u64 = 0xFFFF_FFFF_8000_0000;
@@ -3522,7 +3551,69 @@ fn coverage(s: &Startup) -> Result {
         check("disabling coverage", sys::fuzz_cov_disable())?;
     }
     let count = u64::from_le_bytes(mem_read_at::<8>(small, 0)?);
-    ensure("stopping once the object is full", count == 511)
+    ensure("stopping once the object is full", count == 511)?;
+
+    let (ranges, n) = interrupt_code(s);
+    ensure("naming the interrupt code", n > 0)?;
+    let mut timer = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a timer", unsafe {
+        sys::timer_create(0, &mut timer)
+    })?;
+    let pages = 256;
+    let large = create_memory(pages * PAGE_SIZE)?;
+    // No page may fault in while coverage is on, as the kernel's handling
+    // of the fault is recorded.
+    touch_stack();
+    let fired = || wait(timer, SIGNALED, 0).1 & SIGNALED != 0;
+    ensure("waiting for the timer", !fired())?;
+    // SAFETY: the calls take no pointers or a valid one.
+    unsafe {
+        check(
+            "setting the timer",
+            sys::timer_set(timer, now() + 3_000_000),
+        )?;
+        check("enabling coverage", sys::fuzz_cov_enable(large))?;
+    }
+    // Polls about once per million TSC ticks, so that the object holds
+    // what the polls record until the timer fires.
+    for _ in 0..10_000 {
+        if fired() {
+            break;
+        }
+        // SAFETY: RDTSC only reads the time stamp counter.
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        // SAFETY: as above.
+        while unsafe { core::arch::x86_64::_rdtsc() } - start < 1_000_000 {
+            core::hint::spin_loop();
+        }
+    }
+    // SAFETY: the call takes no pointers.
+    check("disabling coverage", unsafe { sys::fuzz_cov_disable() })?;
+    ensure("firing the timer", fired())?;
+    let at = map(s.process, large, pages * PAGE_SIZE)?;
+    // SAFETY: the object is mapped readable, and nothing writes it now.
+    let words = unsafe { core::slice::from_raw_parts(at as *const u64, pages as usize * 512) };
+    let count = words[0] as usize;
+    ensure(
+        "recording without filling the object",
+        count < words.len() - 1,
+    )?;
+    let inside = |pc: u64| {
+        ranges[..n]
+            .iter()
+            .any(|&(start, end)| (start..end).contains(&pc))
+    };
+    ensure(
+        "leaving out the interrupt code",
+        !words[1..=count].iter().any(|&pc| inside(pc)),
+    )?;
+    // SAFETY: the call takes no pointers.
+    unsafe {
+        check("unmapping", sys::vm_unmap(s.process, at, pages * PAGE_SIZE))?;
+        check("closing the timer", sys::handle_close(timer))?;
+        check("closing the object", sys::handle_close(large))
+    }
 }
 
 /// Outside fuzz builds the numbers of the calls that exist only in fuzz
