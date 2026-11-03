@@ -1,5 +1,6 @@
 //! Choosing the display mode.
 
+use alloc::vec::Vec;
 use boot_protocol::{Framebuffer, format};
 
 /// A graphics mode as reported by the firmware.
@@ -63,6 +64,74 @@ pub fn choose(current: ModeInfo, modes: &[ModeInfo], requested: Option<(usize, u
         }
     }
     best.map_or(Choice::Unusable, |m| Choice::Switch(m.index))
+}
+
+/// The protocol on the `console` handle when `open` finds it there, and
+/// otherwise the one on the handle `first` gives, if any.
+pub fn find<H, P>(
+    console: Option<H>,
+    mut open: impl FnMut(H) -> Option<P>,
+    first: impl FnOnce() -> Option<H>,
+) -> Option<P> {
+    console
+        .and_then(&mut open)
+        .or_else(|| first().and_then(open))
+}
+
+/// A graphics output protocol, as `framebuffer` uses it.
+pub trait Output {
+    type Error;
+
+    /// The current mode. Its index and size are not used.
+    fn current_mode(&mut self) -> ModeInfo;
+
+    /// All modes, each with its position as index and no size.
+    fn modes(&mut self) -> Vec<ModeInfo>;
+
+    /// Makes the mode with this index current.
+    fn set_mode(&mut self, index: u32) -> Result<(), Self::Error>;
+
+    /// The size in bytes of the current mode's framebuffer.
+    fn framebuffer_size(&mut self) -> u64;
+
+    /// The current mode's framebuffer, or `None` when its pixels are not
+    /// linear and 32 bits wide.
+    fn framebuffer(&mut self) -> Option<Mode>;
+}
+
+/// Picks the display mode of `out`, with the size `requested` on the
+/// command line if any, and describes its framebuffer, or gives `None`
+/// when there is no usable mode.
+pub fn framebuffer<O: Output>(
+    out: &mut O,
+    requested: Option<(usize, usize)>,
+) -> Result<Option<Framebuffer>, O::Error> {
+    // The firmware has a framebuffer only for linear modes.
+    let size = |out: &mut O, mode: &ModeInfo| mode.linear_32bit.then(|| out.framebuffer_size());
+    let mut current = ModeInfo {
+        index: u32::MAX,
+        size: None,
+        ..out.current_mode()
+    };
+    current.size = size(out, &current);
+    let mut modes = out.modes();
+    // The firmware reports a mode's framebuffer size only once it is
+    // current, so a mode whose framebuffer turns out too small is left
+    // out and the choice is made again.
+    loop {
+        match choose(current, &modes, requested) {
+            Choice::Keep => break,
+            Choice::Switch(index) if index == current.index => break,
+            Choice::Switch(index) => {
+                out.set_mode(index)?;
+                let i = index as usize;
+                modes[i].size = size(out, &modes[i]);
+                current = modes[i];
+            }
+            Choice::Unusable => return Ok(None),
+        }
+    }
+    Ok(out.framebuffer().map(describe))
 }
 
 /// Whether pixels with these channel masks are 32 bits wide, which is the
@@ -275,5 +344,151 @@ mod tests {
             ),
             (3, masks)
         );
+    }
+
+    #[test]
+    fn finds_the_console_protocol_first() {
+        // Handles 1 and 2 have the protocol, handle 3 has not.
+        let open = |h: u32| (h != 3).then_some(h * 10);
+        let first = || Some(2);
+        assert_eq!(find(Some(1), open, || panic!("not asked")), Some(10));
+        assert_eq!(find(Some(3), open, first), Some(20));
+        assert_eq!(find(None, open, first), Some(20));
+        assert_eq!(find(Some(3), open, || None), None);
+        assert_eq!(find(None, open, || Some(3)), None);
+    }
+
+    /// An output whose modes carry their real framebuffer size.
+    struct Fake {
+        modes: Vec<ModeInfo>,
+        current: usize,
+        set: Vec<u32>,
+        refuse: bool,
+    }
+
+    impl Fake {
+        fn new(modes: &[ModeInfo], current: usize) -> Fake {
+            Fake {
+                modes: modes.to_vec(),
+                current,
+                set: Vec::new(),
+                refuse: false,
+            }
+        }
+    }
+
+    impl Output for Fake {
+        type Error = &'static str;
+
+        fn current_mode(&mut self) -> ModeInfo {
+            self.modes[self.current]
+        }
+
+        fn modes(&mut self) -> Vec<ModeInfo> {
+            self.modes
+                .iter()
+                .map(|m| ModeInfo { size: None, ..*m })
+                .collect()
+        }
+
+        fn set_mode(&mut self, index: u32) -> Result<(), &'static str> {
+            if self.refuse {
+                return Err("refused");
+            }
+            self.set.push(index);
+            self.current = index as usize;
+            Ok(())
+        }
+
+        fn framebuffer_size(&mut self) -> u64 {
+            let m = self.modes[self.current];
+            assert!(m.linear_32bit, "no framebuffer");
+            m.size.unwrap()
+        }
+
+        fn framebuffer(&mut self) -> Option<Mode> {
+            let m = self.modes[self.current];
+            m.linear_32bit.then(|| Mode {
+                phys_base: 0x8000_0000,
+                size: m.size.unwrap(),
+                width: m.width as u32,
+                height: m.height as u32,
+                stride: m.stride as u32,
+                pixels: Pixels::Bgr,
+            })
+        }
+    }
+
+    /// `MODES` with framebuffers that fit.
+    fn sized() -> Vec<ModeInfo> {
+        MODES
+            .iter()
+            .map(|m| ModeInfo {
+                size: Some((m.stride * m.height * 4) as u64),
+                ..*m
+            })
+            .collect()
+    }
+
+    fn width(fb: Option<Framebuffer>) -> Option<u32> {
+        fb.map(|fb| fb.width)
+    }
+
+    #[test]
+    fn keeps_a_usable_current_mode_without_switching() {
+        let mut out = Fake::new(&sized(), 0);
+        assert_eq!(width(framebuffer(&mut out, None).unwrap()), Some(800));
+        assert!(out.set.is_empty());
+        let fb = framebuffer(&mut out, None).unwrap().unwrap();
+        assert_eq!((fb.phys_base, fb.size), (0x8000_0000, 800 * 600 * 4));
+    }
+
+    #[test]
+    fn switches_to_the_requested_mode() {
+        let mut out = Fake::new(&sized(), 0);
+        let fb = framebuffer(&mut out, Some((1280, 1024))).unwrap();
+        assert_eq!((width(fb), out.set.as_slice()), (Some(1280), &[3][..]));
+        // A requested mode that is not usable keeps the current one.
+        let mut out = Fake::new(&sized(), 0);
+        let fb = framebuffer(&mut out, Some((2560, 1440))).unwrap();
+        assert_eq!((width(fb), out.set.len()), (Some(800), 0));
+    }
+
+    #[test]
+    fn switches_from_an_unusable_mode_to_the_largest() {
+        let mut out = Fake::new(&sized(), 2);
+        let fb = framebuffer(&mut out, None).unwrap();
+        assert_eq!((width(fb), out.set.as_slice()), (Some(1920), &[1][..]));
+    }
+
+    #[test]
+    fn leaves_out_a_mode_whose_framebuffer_is_too_small() {
+        let mut modes = sized();
+        modes[1].size = Some(4);
+        let mut out = Fake::new(&modes, 2);
+        let fb = framebuffer(&mut out, None).unwrap();
+        assert_eq!((width(fb), out.set.as_slice()), (Some(1280), &[1, 3][..]));
+    }
+
+    #[test]
+    fn has_no_framebuffer_without_a_usable_mode() {
+        let mut modes = sized();
+        for m in &mut modes[1..] {
+            m.size = Some(0);
+        }
+        modes[0].linear_32bit = false;
+        let mut out = Fake::new(&modes, 0);
+        assert_eq!(framebuffer(&mut out, None), Ok(None));
+        assert_eq!(out.set, [1, 3]);
+        let mut out = Fake::new(&modes[2..3], 0);
+        assert_eq!(framebuffer(&mut out, Some((2560, 1440))), Ok(None));
+        assert!(out.set.is_empty());
+    }
+
+    #[test]
+    fn gives_the_error_of_a_failed_switch() {
+        let mut out = Fake::new(&sized(), 2);
+        out.refuse = true;
+        assert_eq!(framebuffer(&mut out, None), Err("refused"));
     }
 }
