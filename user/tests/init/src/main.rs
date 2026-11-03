@@ -4552,6 +4552,265 @@ fn extended_state_round_trip(s: &Startup) -> Result {
     )
 }
 
+const NOT_SUPPORTED: i64 = -2;
+
+/// The rights by name, for the tests below.
+mod right {
+    pub const DUPLICATE: u32 = 1 << 0;
+    pub const TRANSFER: u32 = 1 << 1;
+    pub const READ: u32 = 1 << 2;
+    pub const WRITE: u32 = 1 << 3;
+    pub const MAP: u32 = 1 << 5;
+    pub const WAIT: u32 = 1 << 6;
+    pub const SIGNAL: u32 = 1 << 7;
+    pub const MANAGE: u32 = 1 << 8;
+    pub const INSPECT: u32 = 1 << 9;
+}
+
+/// The handles of the startup message refer to objects of the right types
+/// and have the rights they are given: the default rights, and read-only
+/// rights for the boot image and the clock page.
+fn startup_handle_rights(s: &Startup) -> Result {
+    use right::*;
+    let base = DUPLICATE | TRANSFER;
+    let read_only = base | READ | MAP | INSPECT;
+    let mut expected = [
+        (s.process, 1, base | MAP | WAIT | SIGNAL | MANAGE | INSPECT),
+        (s.thread, 2, base | WAIT | SIGNAL | MANAGE | INSPECT),
+        (s.root_resource, 9, base | MANAGE | INSPECT),
+        (s.boot_image, 3, read_only),
+        (s.log, 10, base | READ | WRITE | MANAGE | INSPECT),
+        (s.budget, 11, base | WRITE | WAIT | MANAGE | INSPECT),
+        (s.clock_page, 3, read_only),
+        (0, 3, base | READ | WRITE | MAP | MANAGE | INSPECT),
+    ];
+    let count = match s.framebuffer {
+        Some(fb) => {
+            expected[7].0 = fb.memory;
+            8
+        }
+        None => 7,
+    };
+    for (handle, kind, rights) in &expected[..count] {
+        let record = info::<0x18>(*handle, 1)?;
+        ensure(
+            "giving a startup handle its type and rights",
+            u32_at(&record, 16) == *kind && u32_at(&record, 20) == *rights,
+        )?;
+    }
+    Ok(())
+}
+
+/// Suspending, resuming and inspecting threads and processes needs the
+/// `MANAGE` right.
+fn debugging_needs_manage(s: &Startup) -> Result {
+    use right::*;
+    let (mut thread, mut process, mut out) = (0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check(
+            "duplicating the thread",
+            sys::handle_duplicate(s.thread, DUPLICATE | WAIT | INSPECT, &mut thread),
+        )?;
+        check(
+            "duplicating the process",
+            sys::handle_duplicate(s.process, DUPLICATE | WAIT | INSPECT, &mut process),
+        )?;
+    }
+    ensure("refusing to suspend", suspend(thread) == ACCESS_DENIED)?;
+    ensure("refusing to resume", resume_thread(thread) == ACCESS_DENIED)?;
+    let koid = koid(s.thread)?;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::process_get_thread(process, koid, &mut out) };
+    ensure("refusing to get a thread", status == ACCESS_DENIED)?;
+    let at = &raw const HANDLED as u64;
+    ensure(
+        "refusing to read memory",
+        read_memory(process, at, &mut [0u8; 8]) == ACCESS_DENIED,
+    )?;
+    ensure(
+        "refusing to write memory",
+        write_memory(process, at, &[0u8; 8]) == ACCESS_DENIED,
+    )?;
+    for h in [thread, process] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// Closing the exception channel while a thread waits in an exception
+/// ends its process with exit code -2.
+fn closed_exception_channel(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 0, 0)?;
+    let (r, _) = report_bytes(channel)?;
+    ensure(
+        "reporting the exception",
+        u32_at(&r, 0) == UNDEFINED_INSTRUCTION,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the channel", unsafe { sys::handle_close(channel) })?;
+    ensure("ending with exit code -2", exit_code(process)? == -2)
+}
+
+/// The status of the call `interrupted_caller` made.
+static INTERRUPTED_STATUS: AtomicU64 = AtomicU64::new(0);
+
+/// Calls through `channel` with no deadline, records the status and exits.
+extern "sysv64" fn interrupted_caller(channel: u64, _: u64) -> ! {
+    let (status, ..) = call(channel as Handle, b"wait", None, 64, i64::MAX);
+    INTERRUPTED_STATUS.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A handler without `RESTART` ends a `channel_call` waiting for its reply
+/// with `ERR_INTERRUPTED`, and a reply that comes later is discarded.
+fn call_interrupted_by_signal(s: &Startup) -> Result {
+    let old = catch_usr1(0)?;
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    check("creating a channel", unsafe {
+        sys::channel_create(0, &mut a, &mut b)
+    })?;
+    let caller = spawn2(s, interrupted_caller, u64::from(a), 0)?;
+    let request = read_message(b, 2000)?;
+    wait_until_blocked(caller)?;
+    // SAFETY: the call takes no pointers.
+    check("signalling the caller", unsafe {
+        sys::thread_signal(caller, USR1, 0)
+    })?;
+    ensure(
+        "ending the caller",
+        wait(caller, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "interrupting the call",
+        INTERRUPTED_STATUS.load(Ordering::Acquire) as i64 == INTERRUPTED,
+    )?;
+    ensure("running the handler", HANDLED.load(Ordering::Acquire) == 1)?;
+    let mut reply = *b"....late";
+    reply[..4].copy_from_slice(&request.bytes[..4]);
+    // SAFETY: the pointer and length describe `reply`.
+    check("replying late", unsafe {
+        sys::channel_write(b, reply.as_ptr(), 8, core::ptr::null(), 0)
+    })?;
+    ensure(
+        "discarding the late reply",
+        read_sizes(a, 16, 2).0 == SHOULD_WAIT,
+    )?;
+    restore_usr1(&old)?;
+    for h in [a, b] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// A thread suspended while it sleeps in `thread_sleep` goes on sleeping
+/// once resumed, until its deadline, and sees no interruption.
+fn suspended_sleep_goes_on(s: &Startup) -> Result {
+    let deadline = now() + 100_000_000;
+    let thread = spawn2(s, signal_sleeper, deadline as u64, 0)?;
+    wait_until_blocked(thread)?;
+    suspend_and_wait(thread)?;
+    check("resuming", resume_thread(thread))?;
+    ensure(
+        "ending the sleeper",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    let [status, ended] = SLEEP_RESULT
+        .each_ref()
+        .map(|a| a.load(Ordering::Acquire) as i64);
+    ensure(
+        "sleeping until the deadline",
+        status == 0 && ended >= deadline,
+    )
+}
+
+/// A `timeline_wait_async` registration that `port_cancel` removed or
+/// whose timeline was closed queues no packet, while one that is met
+/// queues a `TIMELINE` packet with its key.
+fn timeline_registrations_removed(_: &Startup) -> Result {
+    let (mut timeline, mut port) = (0, 0);
+    // SAFETY: the out pointers are valid for the calls; the others take
+    // no pointers.
+    unsafe {
+        check(
+            "creating a timeline",
+            sys::timeline_create(0, 0, &mut timeline),
+        )?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        check(
+            "registering",
+            sys::timeline_wait_async(timeline, port, 7, 5),
+        )?;
+        check("canceling", sys::port_cancel(port, timeline, 7))?;
+        check("signalling", sys::timeline_signal(timeline, 10))?;
+    }
+    ensure(
+        "queueing nothing once canceled",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check(
+            "registering again",
+            sys::timeline_wait_async(timeline, port, 8, 20),
+        )?;
+        check("closing the timeline", sys::handle_close(timeline))?;
+    }
+    ensure(
+        "queueing nothing once closed",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    // SAFETY: the out pointer is valid for the call; the others take no
+    // pointers.
+    unsafe {
+        check(
+            "creating another timeline",
+            sys::timeline_create(0, 0, &mut timeline),
+        )?;
+        check(
+            "registering on it",
+            sys::timeline_wait_async(timeline, port, 9, 1),
+        )?;
+        check("meeting the value", sys::timeline_signal(timeline, 1))?;
+    }
+    let (status, packet) = take_packet(port, soon());
+    ensure(
+        "queueing the packet of the registration met",
+        status == 0 && u64_at(&packet, 0) == 9 && u32_at(&packet, 8) == 4,
+    )?;
+    for h in [timeline, port] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// The debugger calls refuse a range that a physical memory object backs,
+/// here the framebuffer's, when there is one.
+fn physical_memory_not_debugged(s: &Startup) -> Result {
+    let Some(fb) = s.framebuffer else {
+        return Ok(());
+    };
+    let at = map_read_only(s, fb.memory)?;
+    ensure(
+        "refusing to read it",
+        read_memory(s.process, at, &mut [0u8; 8]) == NOT_SUPPORTED,
+    )?;
+    ensure(
+        "refusing to write it",
+        write_memory(s.process, at, &[0u8; 8]) == NOT_SUPPORTED,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })
+}
+
 /// Whether `needle` occurs in `haystack`.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
@@ -4782,7 +5041,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 70] = [
+const TESTS: [(&str, Test); 77] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
@@ -4873,6 +5132,16 @@ const TESTS: [(&str, Test); 70] = [
         signal_interrupts_and_restarts,
     ),
     ("extended_state_round_trip", extended_state_round_trip),
+    ("startup_handle_rights", startup_handle_rights),
+    ("debugging_needs_manage", debugging_needs_manage),
+    ("closed_exception_channel", closed_exception_channel),
+    ("call_interrupted_by_signal", call_interrupted_by_signal),
+    ("suspended_sleep_goes_on", suspended_sleep_goes_on),
+    (
+        "timeline_registrations_removed",
+        timeline_registrations_removed,
+    ),
+    ("physical_memory_not_debugged", physical_memory_not_debugged),
     ("processes_and_channels", processes_and_channels),
 ];
 
