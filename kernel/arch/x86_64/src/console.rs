@@ -7,7 +7,7 @@ use boot_protocol::{BootInfo, flags};
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
-use kernel_core::console::{CELL_HEIGHT, CELL_WIDTH, Console, Layout, Surface};
+use kernel_core::console::{CELL_HEIGHT, CELL_WIDTH, Console, Gate, Layout, Surface};
 
 /// The mapped framebuffer.
 struct Framebuffer(*mut u32);
@@ -28,16 +28,16 @@ struct State {
 struct Shared(UnsafeCell<Option<State>>);
 
 // SAFETY: the state is written once by `init` before `READY` is set, and
-// after that only by the holder of `BUSY` or by the panic screen.
+// after that only by a drawing that `GATE` lets through or by the panic
+// screen.
 unsafe impl Sync for Shared {}
 
 static STATE: Shared = Shared(UnsafeCell::new(None));
 /// Set once the console is drawn on.
 static READY: AtomicBool = AtomicBool::new(false);
-/// Set while a log line is drawn.
-static BUSY: AtomicBool = AtomicBool::new(false);
-/// Set when user space has taken over the framebuffer.
-static RELEASED: AtomicBool = AtomicBool::new(false);
+/// Lets one log line at a time be drawn, until user space takes over the
+/// framebuffer.
+static GATE: Gate = Gate::new();
 
 /// Maps the framebuffer, if there is one, clears it, and draws the log
 /// records written so far.
@@ -74,23 +74,22 @@ pub fn init(info: &BootInfo) {
 /// while another one is drawn, which only an interrupt handler can
 /// cause, is not drawn.
 pub fn write(line: &[u8]) {
-    if !READY.load(Ordering::Acquire) || RELEASED.load(Ordering::Relaxed) {
+    if !READY.load(Ordering::Acquire) {
         return;
     }
-    if BUSY.swap(true, Ordering::Acquire) {
-        return;
-    }
-    // SAFETY: holding BUSY gives exclusive use of the state, which READY
-    // says is set.
-    if let Some(state) = unsafe { (*STATE.0.get()).as_mut() } {
-        state.console.write(line, &mut state.framebuffer);
-    }
-    BUSY.store(false, Ordering::Release);
+    GATE.draw(|| {
+        // SAFETY: a drawing the gate lets through has exclusive use of the
+        // state, which READY says is set.
+        if let Some(state) = unsafe { (*STATE.0.get()).as_mut() } {
+            state.console.write(line, &mut state.framebuffer);
+        }
+    });
 }
 
-/// Stops drawing log records for good.
+/// Stops drawing log records for good, and returns once no line is being
+/// drawn. Never called from an interrupt handler.
 pub fn release() {
-    RELEASED.store(true, Ordering::Relaxed);
+    GATE.release();
 }
 
 /// Writes formatted text to the console.

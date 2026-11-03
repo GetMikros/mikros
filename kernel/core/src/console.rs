@@ -3,6 +3,8 @@
 
 pub mod font;
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 /// The size of a character cell, in pixels.
 pub const CELL_WIDTH: usize = 8;
 pub const CELL_HEIGHT: usize = 16;
@@ -43,6 +45,53 @@ pub fn pixel(masks: [u32; 3], rgb: [u8; 3]) -> u32 {
         value |= (scaled as u32) << shift & mask;
     }
     value
+}
+
+/// Serializes drawing log lines with releasing the console: one line is
+/// drawn at a time, and none once `release` has returned.
+pub struct Gate {
+    busy: AtomicBool,
+    released: AtomicBool,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Gate {
+    pub const fn new() -> Gate {
+        Gate {
+            busy: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+        }
+    }
+
+    /// Runs `draw` unless the console is released or another line is
+    /// being drawn, and returns whether it ran.
+    pub fn draw(&self, draw: impl FnOnce()) -> bool {
+        if self.busy.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        // Read after `busy` is set, which `release` reads after setting
+        // `released`, so that one of the two sees the other.
+        let open = !self.released.load(Ordering::SeqCst);
+        if open {
+            draw();
+        }
+        self.busy.store(false, Ordering::SeqCst);
+        open
+    }
+
+    /// Stops drawing for good, and returns once no line is being drawn.
+    /// Must not interrupt a `draw` on the same processor.
+    pub fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        while self.busy.load(Ordering::SeqCst) {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 pub struct Console<'a> {
@@ -246,6 +295,39 @@ mod tests {
         assert_eq!(cell(&layout, &p, 1, 1), [0; 16]);
         c.write(b"\n\n", &mut p);
         assert!((0..2).all(|x| cell(&layout, &p, x, 0) == [0; 16]));
+    }
+
+    #[test]
+    fn draws_one_line_at_a_time_until_released() {
+        let gate = Gate::new();
+        let mut lines = 0;
+        assert!(gate.draw(|| lines += 1));
+        assert_eq!(lines, 1);
+        // A line that arrives while another is drawn is not drawn.
+        assert!(gate.draw(|| assert!(!gate.draw(|| unreachable!()))));
+        gate.release();
+        assert!(!gate.draw(|| unreachable!()));
+    }
+
+    #[test]
+    fn release_waits_for_the_line_being_drawn() {
+        use std::sync::atomic::AtomicBool;
+        let gate = Gate::new();
+        let (drawing, drawn) = (AtomicBool::new(false), AtomicBool::new(false));
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                gate.draw(|| {
+                    drawing.store(true, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    drawn.store(true, Ordering::SeqCst);
+                })
+            });
+            while !drawing.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+            gate.release();
+            assert!(drawn.load(Ordering::SeqCst));
+        });
     }
 
     #[test]
