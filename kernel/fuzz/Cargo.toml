@@ -13,6 +13,14 @@ libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
 boot-protocol = { path = "../../boot/protocol" }
 kernel-core = { path = "../core" }
 
+[build-dependencies]
+syscall-table = { path = "../syscalls" }
+
+# The calls that exist only in the kernel's fuzz build, which the
+# generated dispatch leaves out unless this is enabled.
+[features]
+fuzz = []
+
 # The targets run with debug assertions and overflow checks.
 [profile.release]
 debug = true
@@ -109,6 +117,13 @@ bench = false
 [[bin]]
 name = "paging"
 path = "fuzz_targets/paging.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "syscall_args"
+path = "fuzz_targets/syscall_args.rs"
 test = false
 doc = false
 bench = false
