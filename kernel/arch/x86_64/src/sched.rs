@@ -1141,15 +1141,8 @@ pub fn set_priority(thread: &Arc<Thread>, priority: u32) {
     let mut cpu = this_cpu().lock();
     thread.priority.store(priority, Ordering::Relaxed);
     let weight = kernel_core::sched::weight(priority);
-    let queued = Queued(Arc::as_ptr(thread));
-    match cpu.fair.remove(queued) {
-        Some(mut entity) => {
-            // The queue's reference to the thread moves to the new entry.
-            entity.weight = weight;
-            *thread.entity.lock() = entity;
-            cpu.fair.enqueue(queued, entity);
-        }
-        None => thread.entity.lock().weight = weight,
+    if !cpu.fair.reweigh(Queued(Arc::as_ptr(thread)), weight) {
+        thread.entity.lock().weight = weight;
     }
 }
 

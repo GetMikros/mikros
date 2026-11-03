@@ -2317,6 +2317,23 @@ extern "sysv64" fn spin(_: u64, _: u64) -> ! {
     }
 }
 
+/// A thread that often blocked after running briefly still runs soon
+/// after waking while another thread spins.
+fn sleeper_runs_beside_spinner(s: &Startup) -> Result {
+    for _ in 0..1000 {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::thread_sleep(now() + 1000) };
+    }
+    let thread = spawn(s, spin, 0)?;
+    let start = now();
+    sleep_ms(5);
+    let slept = now() - start;
+    // SAFETY: the call takes no pointers.
+    check("killing the spinner", unsafe { sys::task_kill(thread) })?;
+    ensure("ending", wait(thread, TERMINATED, in_time()).0 == 0)?;
+    ensure("waking in time", slept < 100_000_000)
+}
+
 /// A suspended thread stops running until every suspension is undone,
 /// shows its registers, and can be killed.
 fn suspend_threads(s: &Startup) -> Result {
@@ -2752,7 +2769,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 39] = [
+const TESTS: [(&str, Test); 40] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2784,6 +2801,7 @@ const TESTS: [(&str, Test); 39] = [
     ("random_bytes", random_bytes),
     ("write_execute_policy", write_execute_policy),
     ("syscall_gate", syscall_gate),
+    ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),
     ("suspend_threads", suspend_threads),
     ("suspend_blocked_waits", suspend_blocked_waits),
     ("suspend_in_call", suspend_in_call),

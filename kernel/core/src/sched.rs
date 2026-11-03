@@ -149,8 +149,14 @@ impl<T: Copy + PartialEq> Fair<T> {
         let pieces = self.share(entity.weight).pieces as u64;
         let step = ROUND + entity.carry;
         entity.carry = step % pieces;
+        // A thread that ran little before it blocked has moved its
+        // position on by whole steps; its slice starts no later than one
+        // round ahead, so that it waits no more than about one period.
+        let latest = self.now.wrapping_add(ROUND);
         entity.start = if before(entity.position, self.now) {
             self.now
+        } else if before(latest, entity.position) {
+            latest
         } else {
             entity.position
         };
@@ -168,6 +174,17 @@ impl<T: Copy + PartialEq> Fair<T> {
         let q = self.queue.remove(i)?;
         self.total -= q.entity.weight;
         Some(q.entity)
+    }
+
+    /// Gives queued thread `id` `weight`, keeping its place, and returns
+    /// whether it is queued.
+    pub fn reweigh(&mut self, id: T, weight: u64) -> bool {
+        let Some(q) = self.queue.iter_mut().find(|q| q.id == id) else {
+            return false;
+        };
+        self.total = self.total - q.entity.weight + weight;
+        q.entity.weight = weight;
+        true
     }
 
     /// Takes the thread to run next, with its state: the first in order
@@ -309,6 +326,47 @@ mod tests {
             })
             .collect();
         assert_eq!(order, [1, 2, 1, 2]);
+    }
+
+    /// Runs thread 1 alone for `wakes` runs of 10 us that each end in a
+    /// block, then queues the always runnable thread 2 and wakes thread
+    /// 1, and returns how long thread 2 runs before thread 1 does.
+    fn wait_after_short_runs(wakes: usize, reweigh: bool) -> i64 {
+        let mut fair = Fair::new();
+        let mut short = Entity::new(16);
+        for _ in 0..wakes {
+            fair.enqueue(1, short);
+            if reweigh {
+                fair.reweigh(1, weight(17));
+                fair.reweigh(1, weight(16));
+            }
+            let (_, e) = fair.pick().unwrap();
+            fair.charge(10_000);
+            short = e;
+        }
+        fair.enqueue(2, Entity::new(16));
+        fair.enqueue(1, short);
+        let mut waited = 0;
+        loop {
+            let (id, e) = fair.pick().unwrap();
+            if id == 1 {
+                return waited;
+            }
+            let slice = fair.slice(e.weight);
+            fair.charge(slice);
+            waited += slice;
+            fair.enqueue(id, e);
+        }
+    }
+
+    #[test]
+    fn bounds_the_wait_after_many_short_runs() {
+        for wakes in [0, 1, 10, 1000] {
+            let waited = wait_after_short_runs(wakes, false);
+            assert!(waited <= SLICE_MAX, "after {wakes} runs: {waited} ns");
+        }
+        let waited = wait_after_short_runs(1000, true);
+        assert!(waited <= SLICE_MAX, "after reweighing: {waited} ns");
     }
 
     #[test]
