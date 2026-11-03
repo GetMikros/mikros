@@ -375,11 +375,15 @@ impl Thread {
     /// Fails with `BadState` when the thread is `NEW` or `DEAD` or the
     /// count is zero.
     pub fn resume(&self) -> Result<bool, Error> {
-        let count = self.suspend_count.load(Ordering::Acquire);
-        if matches!(self.state(), NEW | DEAD) || count == 0 {
+        if matches!(self.state(), NEW | DEAD) {
             return Err(Error::BadState);
         }
-        self.suspend_count.store(count - 1, Ordering::Release);
+        // The count is decreased in one step, so that two resumes never
+        // take the same count.
+        let count = self
+            .suspend_count
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1))
+            .map_err(|_| Error::BadState)?;
         Ok(count == 1)
     }
 
