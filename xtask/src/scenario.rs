@@ -62,7 +62,7 @@ const SCENARIOS: [Scenario; 3] = [
 ];
 
 /// The line the test init logs once it waits for the runner.
-const WAITING: &str = "SCENARIO waiting";
+pub const WAITING: &str = "SCENARIO waiting";
 /// The line the test init logs once it painted the framebuffer.
 const PAINTED: &str = "SCENARIO framebuffer painted";
 /// The colour it paints the framebuffer, as red, green and blue.
@@ -71,7 +71,7 @@ const PANIC_LINE: &str = "KERNEL PANIC: ";
 const PANIC_END: &str = "END KERNEL PANIC";
 
 /// Sends `command` to the QEMU monitor listening on `socket`.
-fn monitor(socket: &Path, command: &str) -> Result<()> {
+pub fn monitor(socket: &Path, command: &str) -> Result<()> {
     let mut stream = UnixStream::connect(socket)
         .with_context(|| format!("connecting to the monitor at {}", socket.display()))?;
     stream.write_all(format!("{command}\n").as_bytes())?;
@@ -158,7 +158,12 @@ fn verdict(scenario: &Scenario, serial: &str, screen: Option<&str>) -> Result<()
 
 /// Waits until `log` holds `line`, or fails once `deadline` has passed
 /// or `qemu` has exited.
-fn wait_for_line(log: &Path, line: &str, qemu: &mut Child, deadline: Instant) -> Result<String> {
+pub fn wait_for_line(
+    log: &Path,
+    line: &str,
+    qemu: &mut Child,
+    deadline: Instant,
+) -> Result<String> {
     loop {
         let serial = String::from_utf8_lossy(&fs::read(log).unwrap_or_default()).into_owned();
         if serial.contains(line) {
@@ -174,6 +179,40 @@ fn wait_for_line(log: &Path, line: &str, qemu: &mut Child, deadline: Instant) ->
     }
 }
 
+/// Boots `dir`/disk.img with the serial output going to `dir`/serial.log
+/// and a monitor listening on `dir`/monitor.sock, on the standard VGA
+/// device, the one the firmware gives a linear framebuffer for. A reset
+/// ends QEMU unless `reboot`.
+pub fn start(machine: &MachineArgs, dir: &Path, reboot: bool) -> Result<Child> {
+    let disk = dir.join("disk.img");
+    for name in ["serial.log", "monitor.sock", "screen.ppm", "console.ppm"] {
+        let _ = fs::remove_file(dir.join(name));
+    }
+    let firmware = firmware::paths();
+    let vars = disk.with_extension("vars.fd");
+    fs::copy(&firmware.vars, &vars)?;
+    let mut machine = machine.clone();
+    machine.gpu = qemu::Gpu::Basic;
+    let mut args = crate::test::test_args(
+        qemu::args(&machine, qemu::kvm_available(), &firmware, &vars, &disk),
+        &dir.join("serial.log"),
+    );
+    if reboot {
+        args.retain(|a| a != "-no-reboot");
+    }
+    args.extend([
+        "-monitor".into(),
+        format!(
+            "unix:{},server=on,wait=off",
+            dir.join("monitor.sock").display()
+        ),
+    ]);
+    Command::new(qemu::QEMU)
+        .args(args)
+        .spawn()
+        .with_context(|| format!("failed to start {}", qemu::QEMU))
+}
+
 /// Boots the test image with the command line of `scenario`, raises its
 /// event, and returns the serial output and what the screen dump showed.
 fn boot(
@@ -182,34 +221,10 @@ fn boot(
     scenario: &Scenario,
     timeout: Duration,
 ) -> Result<(String, Option<&'static str>)> {
-    let disk = dir.join("disk.img");
     let log = dir.join("serial.log");
     let socket = dir.join("monitor.sock");
     let screen = dir.join("screen.ppm");
-    for path in [&log, &socket, &screen] {
-        let _ = fs::remove_file(path);
-    }
-    let firmware = firmware::paths();
-    let vars = disk.with_extension("vars.fd");
-    fs::copy(&firmware.vars, &vars)?;
-    // The firmware gives a linear framebuffer only on the standard VGA
-    // device.
-    let mut machine = machine.clone();
-    if scenario.screen || scenario.console {
-        machine.gpu = qemu::Gpu::Basic;
-    }
-    let mut args = crate::test::test_args(
-        qemu::args(&machine, qemu::kvm_available(), &firmware, &vars, &disk),
-        &log,
-    );
-    args.extend([
-        "-monitor".into(),
-        format!("unix:{},server=on,wait=off", socket.display()),
-    ]);
-    let mut qemu = Command::new(qemu::QEMU)
-        .args(args)
-        .spawn()
-        .with_context(|| format!("failed to start {}", qemu::QEMU))?;
+    let mut qemu = start(machine, dir, false)?;
     let deadline = Instant::now() + timeout;
     let result = (|| {
         let mut problem = None;
@@ -250,7 +265,7 @@ pub fn run(
     for scenario in &SCENARIOS {
         let dir = dir.join(scenario.name);
         fs::create_dir_all(&dir)?;
-        image::create_with(kind, built, &dir.join("disk.img"), scenario.cmdline)?;
+        image::create_with(kind, built, &dir.join("disk.img"), scenario.cmdline, &[])?;
         let (serial, screen) = boot(machine, &dir, scenario, timeout).with_context(|| {
             format!(
                 "scenario {} failed; serial output in {}",

@@ -144,6 +144,9 @@ pub fn run(args: &Args) -> Result<()> {
     let scenarios = dir.join("scenarios");
     crate::scenario::run(&args.machine, args.kind, &built, &scenarios, timeout)?;
     println!("panic scenarios passed");
+    let boot_menu = dir.join("boot-menu");
+    crate::boot_menu::run(&args.machine, args.kind, &built, &boot_menu, timeout)?;
+    println!("boot menu runs passed");
     Ok(())
 }
 

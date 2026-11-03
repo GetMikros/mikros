@@ -1,5 +1,6 @@
 //! Development tasks for the Mikros repository, run with `cargo xtask`.
 
+mod boot_menu;
 mod build;
 mod check;
 mod debug;
