@@ -3337,9 +3337,12 @@ fn debug_at_syscall_entry(s: &Startup) -> Result {
 }
 
 /// In a fuzz build, coverage goes only into an anonymous object and
-/// records the kernel's blocks while it is on.
+/// records the kernel's blocks while it is on, as kcov does: a `u64`
+/// count and then the addresses, all in the kernel's code, up to as many
+/// as the object holds.
 #[cfg(feature = "fuzz")]
 fn coverage(s: &Startup) -> Result {
+    const KERNEL_START: u64 = 0xFFFF_FFFF_8000_0000;
     let (_pager, paged) = paged_object(s, 1, 0)?;
     // SAFETY: the call takes no pointers.
     let status = unsafe { sys::fuzz_cov_enable(paged) };
@@ -3351,8 +3354,28 @@ fn coverage(s: &Startup) -> Result {
         now();
         check("disabling coverage", sys::fuzz_cov_disable())?;
     }
-    let count = u64::from_le_bytes(mem_read_at::<8>(mem, 0)?);
-    ensure("recording blocks", count > 0)
+    let at = map(s.process, mem, 4 * PAGE_SIZE)?;
+    // SAFETY: the object is mapped readable, and nothing writes it now.
+    let words = unsafe { core::slice::from_raw_parts(at as *const u64, 4 * 512) };
+    let count = words[0] as usize;
+    ensure("recording blocks", count > 0 && count < words.len())?;
+    ensure(
+        "recording addresses in the kernel's code",
+        words[1..=count].iter().all(|&pc| pc >= KERNEL_START),
+    )?;
+
+    // One page holds the count and 511 addresses.
+    let small = create_memory(PAGE_SIZE)?;
+    // SAFETY: the calls take no pointers or a valid one.
+    unsafe {
+        check("enabling coverage", sys::fuzz_cov_enable(small))?;
+        for _ in 0..100 {
+            now();
+        }
+        check("disabling coverage", sys::fuzz_cov_disable())?;
+    }
+    let count = u64::from_le_bytes(mem_read_at::<8>(small, 0)?);
+    ensure("stopping once the object is full", count == 511)
 }
 
 /// Outside fuzz builds the numbers of `fuzz_cov_enable` and
