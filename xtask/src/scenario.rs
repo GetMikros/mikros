@@ -82,7 +82,7 @@ pub fn monitor(socket: &Path, command: &str) -> Result<()> {
 
 /// Dumps the screen through the monitor on `socket` to `path` and reads
 /// the dump.
-fn screen_dump(socket: &Path, path: &Path) -> Result<Vec<u8>> {
+pub fn screen_dump(socket: &Path, path: &Path) -> Result<Vec<u8>> {
     monitor(socket, &format!("screendump {}", path.display()))?;
     std::thread::sleep(Duration::from_millis(500));
     fs::read(path).with_context(|| format!("reading {}", path.display()))
@@ -98,7 +98,7 @@ fn console_problem(ppm: &[u8]) -> Option<&'static str> {
 }
 
 /// The pixels of a binary PPM image, or `None` when `ppm` is not one.
-fn ppm_pixels(ppm: &[u8]) -> Option<Vec<[u8; 3]>> {
+pub fn ppm_pixels(ppm: &[u8]) -> Option<Vec<[u8; 3]>> {
     let mut fields = Vec::new();
     let mut at = 0;
     while fields.len() < 4 {
