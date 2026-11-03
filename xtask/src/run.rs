@@ -15,11 +15,17 @@ pub struct Args {
     /// Boot the live image instead.
     #[arg(long)]
     pub live: bool,
+    /// Expose the display over VNC, for example 0.0.0.0:0 (port 5900).
+    #[arg(long, value_name = "ADDRESS:DISPLAY")]
+    pub vnc: Option<String>,
     #[command(flatten)]
     pub machine: MachineArgs,
 }
 
 pub fn run(args: &Args) -> Result<()> {
+    if args.vnc.is_some() && args.machine.gpu == qemu::Gpu::Venus {
+        bail!("VNC is not supported with --gpu venus; use --gpu virtio or --gpu basic");
+    }
     let disk = image::path(args.kind, args.live);
     if !disk.exists() {
         bail!(
@@ -43,8 +49,12 @@ pub fn run(args: &Args) -> Result<()> {
     if !kvm {
         println!("KVM is not available; using QEMU's emulation");
     }
-    let status = Command::new(qemu::QEMU)
-        .args(qemu::args(&args.machine, kvm, &firmware, &vars, &disk))
+    let mut command = Command::new(qemu::QEMU);
+    command.args(qemu::args(&args.machine, kvm, &firmware, &vars, &disk));
+    if let Some(address) = &args.vnc {
+        command.args(["-display", &format!("vnc={address}")]);
+    }
+    let status = command
         .status()
         .with_context(|| format!("failed to start {}", qemu::QEMU))?;
     if !status.success() {
