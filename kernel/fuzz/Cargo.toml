@@ -127,3 +127,10 @@ path = "fuzz_targets/syscall_args.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ports"
+path = "fuzz_targets/ports.rs"
+test = false
+doc = false
+bench = false
