@@ -32,6 +32,8 @@ mod entry;
 mod exception;
 #[cfg(any(target_os = "none", test))]
 mod features;
+#[cfg(all(target_os = "none", feature = "fuzz"))]
+mod fuzz;
 #[cfg(any(target_os = "none", test))]
 #[cfg_attr(test, allow(dead_code))]
 mod gdt;

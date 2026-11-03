@@ -61,6 +61,10 @@ pub struct PerCpu {
     /// The address of a page fault that its handler left to the thread
     /// it interrupted.
     pub fault_address: AtomicU64,
+    /// In the fuzz build, the object ID of the running thread, or 0 while
+    /// the processor idles.
+    #[cfg(feature = "fuzz")]
+    pub running: AtomicU64,
 }
 
 // SAFETY: each processor only reads its own structure, `this` is never
@@ -88,6 +92,8 @@ pub(crate) static BOOT_CPU: PerCpu = PerCpu {
     gdt: UnsafeCell::new([0; 8]),
     handling: AtomicU64::new(0),
     fault_address: AtomicU64::new(0),
+    #[cfg(feature = "fuzz")]
+    running: AtomicU64::new(0),
 };
 
 /// Set once the GS base points to the per-CPU data.

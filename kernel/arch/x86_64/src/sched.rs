@@ -454,6 +454,8 @@ impl Thread {
         crate::process::switch_ports(self.process.as_deref());
         #[cfg(feature = "fuzz")]
         crate::coverage::switch_in(self);
+        #[cfg(feature = "fuzz")]
+        crate::fuzz::switch_in(self.header.koid());
         let Some(process) = &self.process else {
             return;
         };
@@ -703,7 +705,11 @@ fn schedule(requeue: bool) {
             start_slice(&mut cpu, now, next);
             rsp
         }
-        None => cpu.idle_rsp,
+        None => {
+            #[cfg(feature = "fuzz")]
+            crate::fuzz::switch_in(0);
+            cpu.idle_rsp
+        }
     };
     if !requeue && current.state() == DEAD {
         cpu.dead = Some(current.clone());

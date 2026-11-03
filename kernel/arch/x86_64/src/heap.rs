@@ -33,6 +33,10 @@ unsafe impl GlobalAlloc for KernelHeap {
     // SAFETY: the caller passes a layout of nonzero size, as `GlobalAlloc`
     // requires, and the heap hands out each block once until it is freed.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        #[cfg(feature = "fuzz")]
+        if crate::fuzz::alloc_fails(crate::fuzz::HEAP) {
+            return core::ptr::null_mut();
+        }
         self.0
             .lock()
             .alloc(layout)

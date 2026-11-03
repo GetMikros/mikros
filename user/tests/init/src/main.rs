@@ -15,6 +15,9 @@ use mikros_test::{
 
 mikros_rt::main!(main);
 
+#[cfg(feature = "fuzz")]
+mod hooks;
+
 /// Maps `len` bytes of `mem` read-write into `process` and returns the
 /// address.
 fn map(process: Handle, mem: Handle, len: u64) -> Result<u64> {
@@ -3522,15 +3525,16 @@ fn coverage(s: &Startup) -> Result {
     ensure("stopping once the object is full", count == 511)
 }
 
-/// Outside fuzz builds the numbers of `fuzz_cov_enable` and
-/// `fuzz_cov_disable`, 45 and 46, are not assigned, so the bindings leave
-/// the calls out and the test makes them by number.
+/// Outside fuzz builds the numbers of the calls that exist only in fuzz
+/// builds, from `fuzz_cov_enable` at 45 and `fuzz_cov_disable` at 46 to
+/// the test hooks from 91 on, are not assigned, so the bindings leave the
+/// calls out and the test makes them by number.
 #[cfg(not(feature = "fuzz"))]
 fn coverage(_: &Startup) -> Result {
     /// The status of an unassigned number.
     const BAD_SYSCALL: i64 = -5;
     let mem = create_memory(PAGE_SIZE)?;
-    for number in [45u64, 46] {
+    for number in [45u64, 46, 91] {
         let status: i64;
         // SAFETY: SYSCALL changes only RAX, RCX and R11, and an
         // unassigned number reads no argument.
@@ -5990,6 +5994,13 @@ const TESTS: [(&str, Test); 91] = [
     ("boot_image_object", boot_image_object),
 ];
 
+/// The tests of the fuzz build's test hooks, which run before the last
+/// test, as they start programs from the boot image.
+#[cfg(feature = "fuzz")]
+const HOOK_TESTS: &[(&str, Test)] = &hooks::TESTS;
+#[cfg(not(feature = "fuzz"))]
+const HOOK_TESTS: &[(&str, Test)] = &[];
+
 /// The colour `exit_after_painting` paints the framebuffer, as red,
 /// green and blue.
 const PAINT: [u32; 3] = [0x12, 0x34, 0x56];
@@ -6068,7 +6079,8 @@ fn main(s: &Startup) -> i64 {
         return 1;
     }
     let mut failed = 0;
-    for (name, test) in TESTS {
+    let (last, first) = TESTS.split_last().expect("there are tests");
+    for (name, test) in first.iter().chain(HOOK_TESTS).chain([last]) {
         match test(s) {
             Ok(()) => log!(Info, "TEST {name} PASSED"),
             Err(f) => {
@@ -6080,7 +6092,7 @@ fn main(s: &Startup) -> i64 {
     log!(
         Info,
         "TESTS DONE: {} passed, {failed} failed",
-        TESTS.len() - failed
+        TESTS.len() + HOOK_TESTS.len() - failed
     );
     exit_qemu(if failed == 0 { PASSED } else { FAILED })
 }

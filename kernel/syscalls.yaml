@@ -934,3 +934,14 @@ syscalls:
       - {name: addr, type: u64, dir: in}
       - {name: buf, type: "*const u8", dir: in}
       - {name: len, type: u64, dir: in}
+
+  - name: fuzz_fail_alloc
+    number: 91
+    arch: [x86_64]
+    fuzz_only: true
+    spec: [MIKSPEC-0017.R10]
+    args:
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
+      - {name: kind, type: u32, dir: in}
+      - {name: after, type: u64, dir: in}
+      - {name: left, type: "*mut u64", dir: out}

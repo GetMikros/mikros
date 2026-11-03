@@ -114,7 +114,7 @@ static ZERO_FRAME: SpinLock<Option<u64>> = SpinLock::new(None);
 fn zero_frame() -> Option<u64> {
     let mut zero = ZERO_FRAME.lock();
     if zero.is_none() {
-        let phys = FRAMES.lock().as_mut().and_then(|f| f.alloc())?;
+        let phys = crate::memory::alloc_frame()?;
         // SAFETY: the frame was just allocated, so nothing references it.
         unsafe { frame_bytes(phys) }.fill(0);
         *zero = Some(phys);
@@ -1232,7 +1232,7 @@ impl MemoryObject {
                 return Err(e);
             }
         }
-        let Some(phys) = FRAMES.lock().as_mut().and_then(|f| f.alloc()) else {
+        let Some(phys) = crate::memory::alloc_frame() else {
             self.release(1);
             return Err(Error::NoMemory);
         };

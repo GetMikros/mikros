@@ -162,7 +162,7 @@ impl Tables for Charged<'_> {
             self.refused = true;
             return None;
         }
-        let frame = FRAMES.lock().as_mut().and_then(|f| f.alloc());
+        let frame = crate::memory::alloc_frame();
         match frame {
             Some(_) => self.count += 1,
             None => {

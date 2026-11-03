@@ -62,7 +62,7 @@ struct FrameTables;
 
 impl Tables for FrameTables {
     fn alloc(&mut self) -> Option<u64> {
-        FRAMES.lock().as_mut()?.alloc()
+        memory::alloc_frame()
     }
 
     fn table(&mut self, phys: u64) -> &mut [u64; 512] {
@@ -225,7 +225,7 @@ pub fn alloc_pages(size: u64) -> Option<u64> {
     let mut mapper = Mapper::existing(&mut tables, root(), gib_pages());
     let mut mapped = 0;
     while mapped < size {
-        let Some(phys) = FRAMES.lock().as_mut().and_then(|f| f.alloc()) else {
+        let Some(phys) = memory::alloc_frame() else {
             break;
         };
         if mapper.map(virt + mapped, phys, PAGE_SIZE, flags).is_err() {
