@@ -1,13 +1,14 @@
 //! Runs the run queue as the kernel does: threads are woken, picked, run
 //! for their slice or block part-way through it, change priority while
 //! queued, and are removed. Compares the queue with the set of queued
-//! threads, and checks that no queued thread waits more than three times
-//! the longest slice of other threads' run time, however often threads
-//! blocked before.
+//! threads, and checks that no queued thread waits longer than
+//! `wait_limit` gives for the threads queued when it was, in other
+//! threads' run time, however often threads blocked or changed priority
+//! before.
 
 #![no_main]
 
-use kernel_core::sched::{Entity, Fair, MAX_PRIORITY, SLICE_MAX, weight};
+use kernel_core::sched::{Entity, Fair, MAX_PRIORITY, wait_limit, weight};
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 use libfuzzer_sys::fuzz_target;
 
@@ -32,6 +33,9 @@ struct Thread {
     queued: bool,
     /// The run time of other threads since this one was queued.
     waited: i64,
+    /// The longest it may wait, or `i64::MAX` once threads outside the
+    /// queue ran while it waited, which takes the time from all of them.
+    limit: i64,
 }
 
 struct Model {
@@ -53,10 +57,13 @@ impl Model {
         self.fair.charge(ran);
         for other in self.threads.iter_mut().filter(|o| o.queued) {
             other.waited += ran;
+            // Threads whose deadlines come together start 1 ns apart, as
+            // each runs for at least 1 ns.
             assert!(
-                other.waited <= 3 * SLICE_MAX,
-                "a queued thread waited {} ns",
-                other.waited
+                other.waited <= other.limit.saturating_add(THREADS as i64),
+                "a queued thread waited {} ns of {}",
+                other.waited,
+                other.limit
             );
         }
         self.threads[t].entity = entity;
@@ -71,6 +78,7 @@ impl Model {
             thread.queued = true;
             thread.waited = 0;
             self.fair.enqueue(t as u8, thread.entity);
+            self.threads[t].limit = wait_limit(self.fair.len());
         }
     }
 }
@@ -83,6 +91,7 @@ fuzz_target!(|ops: Vec<Op>| {
                 entity: Entity::new(16),
                 queued: false,
                 waited: 0,
+                limit: 0,
             })
             .collect(),
     };
@@ -117,7 +126,14 @@ fuzz_target!(|ops: Vec<Op>| {
             }
             // Time run by threads outside the queue, such as deadline
             // threads, moves virtual time on.
-            Op::Charge(ns) => m.fair.charge(i64::from(ns)),
+            Op::Charge(ns) => {
+                m.fair.charge(i64::from(ns));
+                if ns > 0 {
+                    for t in m.threads.iter_mut().filter(|t| t.queued) {
+                        t.limit = i64::MAX;
+                    }
+                }
+            }
         }
         assert_eq!(m.fair.len(), m.threads.iter().filter(|t| t.queued).count());
     }

@@ -11,6 +11,16 @@
 //! run. So a thread with one slice comes back about one period later, and
 //! a thread with several comes back after the matching part of a period,
 //! without drifting from its share.
+//!
+//! A queued thread also gets a deadline, in run time: the period it is
+//! queued for, as `wait_limit` gives it. No slice runs past the earliest
+//! deadline of the queued threads, and a thread whose deadline has come
+//! runs before the others; threads whose deadlines come together start
+//! up to 1 ns apart, as every slice lasts at least 1 ns. Slices are sized
+//! when their threads are
+//! picked, so without this a queue that shrank or changed weights could
+//! add up a longer wait than one period. A slice cut short moves its
+//! thread's position on only by the part it got, so it keeps its share.
 
 use alloc::collections::{TryReserveError, VecDeque};
 
@@ -78,6 +88,14 @@ fn before(a: u64, b: u64) -> bool {
 struct Queued<T> {
     id: T,
     entity: Entity,
+    /// The run time by which it must have started to run.
+    deadline: i64,
+}
+
+/// The longest a thread queued among `n` queued threads, itself
+/// included, may wait for its next run.
+pub fn wait_limit(n: usize) -> i64 {
+    SLICE_MAX.max(n as i64 * PERIOD_PER_THREAD)
 }
 
 /// The runnable ordinary threads of one processor, other than the one
@@ -90,6 +108,8 @@ pub struct Fair<T: Copy + PartialEq> {
     total: u64,
     /// The virtual time.
     now: u64,
+    /// The run time charged so far.
+    elapsed: i64,
 }
 
 impl<T: Copy + PartialEq> Default for Fair<T> {
@@ -107,6 +127,7 @@ impl<T: Copy + PartialEq> Fair<T> {
             queue: VecDeque::new(),
             total: 0,
             now: 0,
+            elapsed: 0,
         }
     }
 
@@ -141,7 +162,17 @@ impl<T: Copy + PartialEq> Fair<T> {
     /// How long a thread of `weight` that is not queued may run before
     /// the next thread's turn.
     pub fn slice(&self, weight: u64) -> i64 {
-        self.share(weight).slice
+        self.share(weight).slice.min(self.until_due())
+    }
+
+    /// The run time left until the earliest deadline of the queued
+    /// threads, at least 1.
+    fn until_due(&self) -> i64 {
+        self.queue
+            .iter()
+            .map(|q| (q.deadline - self.elapsed).max(1))
+            .min()
+            .unwrap_or(i64::MAX)
     }
 
     /// Queues a thread that is new, was blocked, or used up its slice.
@@ -164,7 +195,15 @@ impl<T: Copy + PartialEq> Fair<T> {
         let at = self
             .queue
             .partition_point(|q| !before(entity.position, q.entity.position));
-        self.queue.insert(at, Queued { id, entity });
+        let deadline = self.elapsed + wait_limit(self.queue.len() + 1);
+        self.queue.insert(
+            at,
+            Queued {
+                id,
+                entity,
+                deadline,
+            },
+        );
         self.total += entity.weight;
     }
 
@@ -187,17 +226,36 @@ impl<T: Copy + PartialEq> Fair<T> {
         true
     }
 
-    /// Takes the thread to run next, with its state: the first in order
-    /// whose slice may start, or the first if none may.
+    /// Takes the thread to run next, with its state: the one whose
+    /// deadline came first if any has come, otherwise the first in order
+    /// whose slice may start, or the first if none may. When `slice` will
+    /// cut its slice short for the next deadline, its position moves on
+    /// only by the part of the slice it gets.
     pub fn pick(&mut self) -> Option<(T, Entity)> {
-        let i = self
+        let due = self
             .queue
             .iter()
-            .position(|q| !before(self.now, q.entity.start))
-            .unwrap_or(0);
+            .enumerate()
+            .filter(|(_, q)| q.deadline <= self.elapsed)
+            .min_by_key(|(_, q)| q.deadline)
+            .map(|(i, _)| i);
+        let i = due.unwrap_or_else(|| {
+            self.queue
+                .iter()
+                .position(|q| !before(self.now, q.entity.start))
+                .unwrap_or(0)
+        });
         let q = self.queue.remove(i)?;
         self.total -= q.entity.weight;
-        Some((q.id, q.entity))
+        let mut entity = q.entity;
+        let full = self.share(entity.weight).slice;
+        let slice = full.min(self.until_due());
+        if slice < full {
+            let step = entity.position.wrapping_sub(entity.start);
+            let part = u128::from(step) * slice as u128 / full as u128;
+            entity.position = entity.start.wrapping_add(part as u64);
+        }
+        Some((q.id, entity))
     }
 
     /// Advances virtual time for `ran` nanoseconds that the running
@@ -207,6 +265,7 @@ impl<T: Copy + PartialEq> Fair<T> {
         let period = SLICE_MAX.max(n * PERIOD_PER_THREAD);
         let step = u128::from(ran.max(0) as u64) * u128::from(ROUND) / period as u128;
         self.now = self.now.wrapping_add(step as u64);
+        self.elapsed += ran.max(0);
     }
 }
 
@@ -367,6 +426,75 @@ mod tests {
         }
         let waited = wait_after_short_runs(1000, true);
         assert!(waited <= SLICE_MAX, "after reweighing: {waited} ns");
+    }
+
+    /// Runs the next thread for `ran`, or for its whole slice, and
+    /// returns the run time it got.
+    fn run(fair: &mut Fair<u32>, ran: Option<i64>, block: bool) -> (u32, i64) {
+        let (id, e) = fair.pick().unwrap();
+        let slice = fair.slice(e.weight);
+        let ran = ran.map_or(slice, |r| r.min(slice));
+        fair.charge(ran);
+        if !block {
+            fair.enqueue(id, e);
+        }
+        (id, ran)
+    }
+
+    #[test]
+    fn bounds_the_wait_when_the_queue_shrinks() {
+        let mut fair = Fair::new();
+        for id in [1, 2, 3, 4] {
+            fair.enqueue(id, Entity::new(16));
+        }
+        // Threads 1, 2 and 3 each run a whole slice and block; each later
+        // slice is sized for a shorter queue.
+        let mut waited = 0;
+        for _ in 0..3 {
+            let (id, ran) = run(&mut fair, None, true);
+            assert_ne!(id, 4);
+            waited += ran;
+        }
+        assert!(waited <= wait_limit(4), "waited {waited} ns");
+        assert_eq!(fair.pick().unwrap().0, 4);
+    }
+
+    #[test]
+    fn bounds_the_wait_when_a_weight_grows() {
+        let mut fair = Fair::new();
+        for id in [1, 2, 3] {
+            fair.enqueue(id, Entity::new(16));
+        }
+        let (first, mut waited) = run(&mut fair, None, false);
+        let heavy = if first == 2 { 3 } else { 2 };
+        assert!(fair.reweigh(heavy, weight(25)));
+        loop {
+            let (id, ran) = run(&mut fair, None, false);
+            if id != heavy {
+                break;
+            }
+            waited += ran;
+        }
+        assert!(waited <= wait_limit(3), "waited {waited} ns");
+    }
+
+    #[test]
+    fn moves_a_slice_cut_short_on_by_its_part() {
+        let mut fair = Fair::new();
+        for id in [1, 2, 3, 4] {
+            fair.enqueue(id, Entity::new(16));
+        }
+        run(&mut fair, None, true);
+        run(&mut fair, None, true);
+        // The third slice would be 5 ms, but thread 4 is due before.
+        let (_, e) = fair.pick().unwrap();
+        let full = fair.share(e.weight).slice;
+        let slice = fair.slice(e.weight);
+        assert_eq!(full, SLICE_MAX / 2);
+        assert!(slice < full);
+        let step = u128::from(ROUND);
+        let expected = step * slice as u128 / full as u128;
+        assert_eq!(u128::from(e.position.wrapping_sub(e.start)), expected);
     }
 
     #[test]
