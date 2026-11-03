@@ -296,6 +296,159 @@ fn start_program_with(
     Ok((process, ours))
 }
 
+/// How many faults `skip_fault` skipped.
+static SKIPPED_FAULTS: AtomicU64 = AtomicU64::new(0);
+/// A return instruction in read-only data and in writable data.
+static RET_RODATA: [u8; 1] = [0xC3];
+static RET_DATA: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0xC3);
+
+// `write_probe` adds zero to the byte at RDI, which writes it unchanged,
+// with an instruction of three bytes: `add byte ptr [rdi], 0`.
+core::arch::global_asm!(
+    ".global write_probe",
+    "write_probe:",
+    ".byte 0x80, 0x07, 0x00",
+    "ret",
+);
+
+unsafe extern "sysv64" {
+    fn write_probe(addr: u64);
+}
+
+/// A `SEGV` handler that goes on past the fault: after `write_probe`'s
+/// write, or, for a call to a page that may not run, back in the caller.
+extern "sysv64" fn skip_fault(_: u64, _: u64, context: u64) {
+    let registers = context as *mut u64;
+    // SAFETY: the context lies on this thread's stack, with RSP and RIP
+    // at 0x38 and 0x80, and the interrupted stack holds the return
+    // address of a call when RIP is not in `write_probe`.
+    unsafe {
+        let (rsp, rip) = (registers.add(7), registers.add(16));
+        let at = rip.read_volatile();
+        if at == write_probe as *const () as u64 {
+            rip.write_volatile(at + 3);
+        } else {
+            let sp = rsp.read_volatile();
+            rip.write_volatile((sp as *const u64).read_volatile());
+            rsp.write_volatile(sp + 8);
+        }
+    }
+    SKIPPED_FAULTS.fetch_add(1, Ordering::AcqRel);
+}
+
+extern "sysv64" fn just_return() {}
+
+/// Whether writing the byte at `addr` faults.
+fn write_faults(addr: u64) -> bool {
+    let before = SKIPPED_FAULTS.load(Ordering::Acquire);
+    // SAFETY: the probe writes the byte unchanged, or faults.
+    unsafe { write_probe(addr) };
+    SKIPPED_FAULTS.load(Ordering::Acquire) != before
+}
+
+/// Whether calling `addr`, which holds a return instruction, faults.
+fn call_faults(addr: u64) -> bool {
+    let before = SKIPPED_FAULTS.load(Ordering::Acquire);
+    // SAFETY: the address holds a return instruction, or the call faults
+    // and `skip_fault` returns to here.
+    let function = unsafe { core::mem::transmute::<u64, extern "sysv64" fn()>(addr) };
+    function();
+    SKIPPED_FAULTS.load(Ordering::Acquire) != before
+}
+
+/// The kernel loads init's segments from its ELF file: each mapping is
+/// writable and executable exactly as the segment's flags say, holds the
+/// file's data, and is zero around the segment within its pages.
+fn init_segments_as_loaded(s: &Startup) -> Result {
+    const SEGV: u32 = 11;
+    const PT_LOAD: u32 = 1;
+    let image_size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("mapping the boot image", unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ,
+            0,
+            s.boot_image,
+            0,
+            image_size,
+            &mut at,
+        )
+    })?;
+    // SAFETY: the boot image is mapped readable at `at`.
+    let image = unsafe { core::slice::from_raw_parts(at as *const u8, s.boot_image_size as usize) };
+    let file = ustar::find(image, b"init").unwrap_or_default();
+    ensure("finding init", file.len() >= 64)?;
+    let mut action = [0u8; 32];
+    action[0x00..0x08].copy_from_slice(&(skip_fault as *const () as u64).to_le_bytes());
+    action[0x10..0x18].copy_from_slice(&(signal_restorer as *const () as u64).to_le_bytes());
+    let mut old = [0u8; 32];
+    // SAFETY: the pointers describe `action` and `old`.
+    check("catching SEGV", unsafe {
+        sys::signal_set_action(SEGV, action.as_ptr(), old.as_mut_ptr())
+    })?;
+    let probes = [
+        just_return as *const () as u64,
+        RET_RODATA.as_ptr() as u64,
+        RET_DATA.as_ptr() as u64,
+    ];
+    let mut found = 0;
+    let (phoff, phnum) = (
+        u64_at(file, 32) as usize,
+        u16::from_le_bytes([file[56], file[57]]),
+    );
+    let phentsize = usize::from(u16::from_le_bytes([file[54], file[55]]));
+    let mut result = Ok(());
+    for i in 0..usize::from(phnum) {
+        let p = &file[phoff + i * phentsize..][..56];
+        if u32_at(p, 0) != PT_LOAD {
+            continue;
+        }
+        let (flags, offset, vaddr) = (u32_at(p, 4), u64_at(p, 8) as usize, u64_at(p, 16));
+        let (filesz, memsz) = (u64_at(p, 32), u64_at(p, 40));
+        let start = vaddr & !(PAGE_SIZE - 1);
+        let end = (vaddr + memsz).next_multiple_of(PAGE_SIZE);
+        // SAFETY: the segment's pages are mapped readable.
+        let pages =
+            unsafe { core::slice::from_raw_parts(start as *const u8, (end - start) as usize) };
+        let (before, after) = ((vaddr - start) as usize, (vaddr + memsz - start) as usize);
+        result = result.and_then(|()| {
+            ensure(
+                "zeroing the pages around the segment",
+                pages[..before]
+                    .iter()
+                    .chain(&pages[after..])
+                    .all(|&b| b == 0),
+            )
+        });
+        if flags & 2 == 0 {
+            let data = &file[offset..offset + filesz as usize];
+            result = result.and_then(|()| {
+                ensure(
+                    "copying the file's data",
+                    pages[before..before + data.len()] == *data,
+                )
+            });
+        }
+        for &probe in probes.iter().filter(|&&a| (start..end).contains(&a)) {
+            found += 1;
+            let writable = flags & 2 != 0;
+            let executable = flags & 1 != 0;
+            result = result
+                .and_then(|()| ensure("writing as PF_W says", write_faults(probe) != writable))
+                .and_then(|()| ensure("running as PF_X says", call_faults(probe) != executable));
+        }
+    }
+    // SAFETY: the pointer describes `old`; the call takes no other.
+    unsafe {
+        sys::signal_set_action(SEGV, old.as_ptr(), core::ptr::null_mut());
+        sys::vm_unmap(s.process, at, image_size);
+    }
+    result?;
+    ensure("finding every probe in a segment", found == probes.len())
+}
+
 fn processes_and_channels(s: &Startup) -> Result {
     let (process, ours) = start_program(s, "channel-echo")?;
 
@@ -527,9 +680,11 @@ fn set_priority(thread: Handle, resource: Handle, priority: u32) -> i64 {
     unsafe { sys::thread_set_priority(thread, resource, priority) }
 }
 
-/// Priorities up to 16 need no resource, higher ones a resource that
-/// covers them.
+/// Init starts at priority 16. Priorities up to 16 need no resource,
+/// higher ones a resource that covers them.
 fn priorities(s: &Startup) -> Result {
+    let thread = info::<0x18>(s.thread, 3)?;
+    ensure("starting init at 16", u32_at(&thread, 0x04) == 16)?;
     check("lowering", set_priority(s.thread, INVALID, 10))?;
     let thread = info::<0x18>(s.thread, 3)?;
     ensure("reading the priority", u32_at(&thread, 0x04) == 10)?;
@@ -5360,7 +5515,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 83] = [
+const TESTS: [(&str, Test); 84] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
@@ -5471,6 +5626,7 @@ const TESTS: [(&str, Test); 83] = [
         faults_on_failed_revoked_and_cut_pages,
     ),
     ("processes_and_channels", processes_and_channels),
+    ("init_segments_as_loaded", init_segments_as_loaded),
 ];
 
 fn main(s: &Startup) -> i64 {
