@@ -4219,8 +4219,239 @@ fn user_bases_set_and_kept(_: &Startup) -> Result {
     set(1, before.1)
 }
 
-const TESTS: [(&str, Test); 63] = [
+/// Whether `needle` occurs in `haystack`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// `log_write` refuses a severity above 3, a message longer than 256
+/// bytes and one that is not UTF-8; `log_read` returns the first record
+/// after a sequence, the first one the kernel wrote naming its build
+/// kind, and fails with `ERR_SHOULD_WAIT` past the newest. This test runs
+/// early, while the first record is still in the log.
+fn log_writes_and_reads(s: &Startup) -> Result {
+    let long = [b'x'; 257];
+    // SAFETY: the pointers and lengths describe the messages.
+    unsafe {
+        ensure(
+            "refusing severity 4",
+            sys::log_write(s.log, 4, b"x".as_ptr(), 1) == INVALID_ARGS,
+        )?;
+        ensure(
+            "refusing 257 bytes",
+            sys::log_write(s.log, 1, long.as_ptr(), 257) == INVALID_ARGS,
+        )?;
+        ensure(
+            "refusing bytes that are not UTF-8",
+            sys::log_write(s.log, 1, [0xFFu8, 0xFE].as_ptr(), 2) == INVALID_ARGS,
+        )?;
+    }
+    let read = |after: u64| {
+        let mut record = [0u8; 288];
+        // SAFETY: the pointer describes `record`.
+        let status = unsafe { sys::log_read(s.log, after, record.as_mut_ptr()) };
+        (status, record)
+    };
+    let (status, first) = read(0);
+    check("reading the first record", status)?;
+    let len = usize::from(u16::from_le_bytes([first[0x1A], first[0x1B]]));
+    let message = &first[0x20..0x20 + len.min(256)];
+    ensure(
+        "starting with the kernel's own record",
+        u64_at(&first, 0) == 1 && first[0x19] == 0 && contains(message, b"Mikros kernel"),
+    )?;
+    ensure(
+        "naming the build kind",
+        [&b"production"[..], b"debug", b"fuzz"]
+            .iter()
+            .any(|kind| contains(message, kind)),
+    )?;
+    let (status, second) = read(1);
+    check("reading the next record", status)?;
+    ensure("returning the next sequence", u64_at(&second, 0) == 2)?;
+    ensure(
+        "finding none past the newest",
+        read(u64::MAX - 1).0 == SHOULD_WAIT,
+    )
+}
+
+/// A child budget starts with the limits given, no usage and both
+/// thresholds disabled. Its thresholds can be set, and `OVER_THRESHOLD`
+/// follows its usage as a process charged to it comes and goes.
+fn budget_creation_and_thresholds(s: &Startup) -> Result {
+    const OVER_THRESHOLD: u32 = 1 << 6;
+    let mut child = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a budget", unsafe {
+        sys::budget_create(s.budget, 1 << 20, 64, &mut child)
+    })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure(
+        "taking the limits",
+        u64_at(&r, 0x00) == 1 << 20 && u64_at(&r, 0x10) == 64,
+    )?;
+    ensure(
+        "starting with no usage",
+        u64_at(&r, 0x08) == 0 && u64_at(&r, 0x18) == 0 && u32_at(&r, 0x20) == 0,
+    )?;
+    ensure(
+        "disabling the thresholds",
+        u64_at(&r, 0x28) == u64::MAX && u64_at(&r, 0x30) == u64::MAX,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("setting the thresholds", unsafe {
+        sys::budget_set_thresholds(child, 1, 32)
+    })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure(
+        "keeping the thresholds",
+        u64_at(&r, 0x28) == 1 && u64_at(&r, 0x30) == 32,
+    )?;
+    ensure(
+        "staying below the thresholds",
+        wait(child, OVER_THRESHOLD, now()).0 == TIMED_OUT,
+    )?;
+    let (name, mut process) = (b"charged", 0);
+    // SAFETY: the pointers describe `name` and `process`.
+    check("creating a process in the budget", unsafe {
+        sys::process_create(child, name.as_ptr(), name.len() as u64, &mut process)
+    })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure(
+        "charging the process",
+        u64_at(&r, 0x08) > 0 && u32_at(&r, 0x20) == 1,
+    )?;
+    ensure(
+        "crossing the kernel threshold",
+        wait(child, OVER_THRESHOLD, now()).0 == 0,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the process", unsafe { sys::handle_close(process) })?;
+    ensure(
+        "releasing the charge",
+        u64_at(&info::<0x38>(child, 6)?, 0x08) == 0,
+    )?;
+    ensure(
+        "falling below the threshold",
+        wait(child, OVER_THRESHOLD, now()).0 == TIMED_OUT,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the budget", unsafe { sys::handle_close(child) })
+}
+
+/// The monotonic clock never goes back, and the clock page that init gets
+/// has its rights and header: version 1, an even sequence, and the
+/// counter as source only with the time stamp counter, whose values then
+/// lie between those of the clock before and after.
+fn monotonic_clock_and_page(s: &Startup) -> Result {
+    let mut last = now();
+    for _ in 0..1000 {
+        let t = now();
+        ensure("never going back", t >= last)?;
+        last = t;
+    }
+    let rights = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 5) | (1 << 9);
+    ensure(
+        "giving the clock page its rights",
+        u32_at(&info::<0x18>(s.clock_page, 1)?, 20) == rights,
+    )?;
+    let at = map_read_only(s, s.clock_page)?;
+    // SAFETY: the page is mapped readable, and only the kernel writes it.
+    let page = unsafe { (at as *const [u8; 0x28]).read_volatile() };
+    ensure(
+        "starting the header",
+        u32_at(&page, 0x00) % 2 == 0 && u32_at(&page, 0x04) == 1,
+    )?;
+    match u32_at(&page, 0x08) {
+        0 => {}
+        1 => {
+            let before = now();
+            let tsc: u64;
+            // SAFETY: RDTSC only reads the counter.
+            unsafe {
+                core::arch::asm!(
+                    "rdtsc",
+                    "shl rdx, 32",
+                    "or rax, rdx",
+                    out("rax") tsc,
+                    out("rdx") _,
+                    options(nomem, nostack),
+                )
+            };
+            let after = now();
+            let (mult, shift) = (u32_at(&page, 0x10), u32_at(&page, 0x14));
+            let (tsc_base, ns_base) = (u64_at(&page, 0x18), u64_at(&page, 0x20) as i64);
+            let delta = (u128::from(tsc - tsc_base) * u128::from(mult)) >> shift;
+            let computed = ns_base + delta as i64;
+            ensure(
+                "computing the clock from the page",
+                (before..=after).contains(&computed),
+            )?;
+        }
+        _ => ensure("naming a defined source", false)?,
+    }
+    // SAFETY: the call takes no pointers.
+    check("unmapping the clock page", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })
+}
+
+/// Maps the page of `mem` read-only into this process.
+fn map_read_only(s: &Startup, mem: Handle) -> Result<u64> {
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::vm_map(s.process, PERM_READ, 0, mem, 0, PAGE_SIZE, &mut at) };
+    check("mapping read-only", status)?;
+    Ok(at)
+}
+
+/// A mapping keeps its object after the last handle to it is closed, and
+/// nothing is or can be mapped in the low 64 KiB.
+fn mappings_outlive_handles(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let at = map(s.process, mem, PAGE_SIZE)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the handle", unsafe { sys::handle_close(mem) })?;
+    // SAFETY: the mapping is readable and writable.
+    let back = unsafe {
+        (at as *mut u64).write_volatile(0x5A5A_A5A5);
+        (at as *const u64).read_volatile()
+    };
+    ensure("using the mapping", back == 0x5A5A_A5A5)?;
+    ensure(
+        "reading the object through the mapping",
+        read_memory(s.process, at, &mut [0u8; 8]) == 0,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })?;
+    let mem = create_memory(PAGE_SIZE)?;
+    let mut addr = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ | mikros_test::SPECIFIC,
+            0x1000,
+            mem,
+            0,
+            PAGE_SIZE,
+            &mut addr,
+        )
+    };
+    ensure("refusing the low 64 KiB", status == OUT_OF_RANGE)?;
+    ensure(
+        "mapping nothing there",
+        read_memory(s.process, 0x1000, &mut [0u8; 1]) == NOT_FOUND,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(mem) })
+}
+
+const TESTS: [(&str, Test); 67] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
+    ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -4297,6 +4528,12 @@ const TESTS: [(&str, Test); 63] = [
     ("new_thread_starts_clean", new_thread_starts_clean),
     ("registers_survive_preemption", registers_survive_preemption),
     ("user_bases_set_and_kept", user_bases_set_and_kept),
+    (
+        "budget_creation_and_thresholds",
+        budget_creation_and_thresholds,
+    ),
+    ("monotonic_clock_and_page", monotonic_clock_and_page),
+    ("mappings_outlive_handles", mappings_outlive_handles),
     ("processes_and_channels", processes_and_channels),
 ];
 
