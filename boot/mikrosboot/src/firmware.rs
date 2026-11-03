@@ -118,6 +118,19 @@ pub fn unix_seconds(t: Time) -> Option<u64> {
     u64::try_from(local - offset).ok()
 }
 
+/// A random number generator of the firmware.
+pub trait Rng {
+    /// Fills `bytes` using the generator's default algorithm, giving
+    /// whether that succeeded.
+    fn fill(&mut self, bytes: &mut [u8]) -> bool;
+}
+
+/// 32 bytes from `rng`, or `None` when there is no generator or it fails.
+pub fn rng_seed(rng: Option<&mut impl Rng>) -> Option<[u8; 32]> {
+    let mut seed = [0; 32];
+    rng?.fill(&mut seed).then_some(seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +213,42 @@ mod tests {
         assert_eq!(unix_seconds(time(2024, 1, 1, (0, 0, 0), 2000)), None);
         assert_eq!(unix_seconds(time(1969, 12, 31, (23, 59, 59), utc)), None);
         assert_eq!(unix_seconds(time(1970, 1, 1, (0, 0, 0), 60)), None);
+    }
+
+    /// A generator that gives `bytes` or fails, and counts the bytes asked.
+    struct Fake {
+        works: bool,
+        asked: usize,
+    }
+
+    impl Rng for Fake {
+        fn fill(&mut self, bytes: &mut [u8]) -> bool {
+            self.asked += bytes.len();
+            bytes.fill(0xa5);
+            self.works
+        }
+    }
+
+    #[test]
+    fn takes_32_bytes_from_a_working_generator() {
+        let mut rng = Fake {
+            works: true,
+            asked: 0,
+        };
+        let seed = rng_seed(Some(&mut rng));
+        assert_eq!((seed, rng.asked), (Some([0xa5; 32]), 32));
+        let flags = crate::info::optional(None, seed, None).flags;
+        assert_eq!(flags, boot_protocol::flags::RNG_SEED_VALID);
+    }
+
+    #[test]
+    fn has_no_seed_without_a_working_generator() {
+        let mut rng = Fake {
+            works: false,
+            asked: 0,
+        };
+        assert_eq!(rng_seed(Some(&mut rng)), None);
+        assert_eq!(rng_seed(None::<&mut Fake>), None);
+        assert_eq!(crate::info::optional(None, None, None).flags, 0);
     }
 }

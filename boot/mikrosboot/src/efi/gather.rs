@@ -197,12 +197,20 @@ fn rsdp() -> Result<u64, Failure> {
     Ok(address)
 }
 
+/// The firmware's random number generator.
+struct UefiRng(ScopedProtocol<Rng>);
+
+impl firmware::Rng for UefiRng {
+    fn fill(&mut self, bytes: &mut [u8]) -> bool {
+        self.0.get_rng(None, bytes).is_ok()
+    }
+}
+
 fn rng_seed() -> Option<[u8; 32]> {
-    let handle = boot::get_handle_for_protocol::<Rng>().ok()?;
-    let mut rng = boot::open_protocol_exclusive::<Rng>(handle).ok()?;
-    let mut seed = [0; 32];
-    rng.get_rng(None, &mut seed).ok()?;
-    Some(seed)
+    let rng = boot::get_handle_for_protocol::<Rng>()
+        .ok()
+        .and_then(|handle| boot::open_protocol_exclusive::<Rng>(handle).ok());
+    firmware::rng_seed(rng.map(UefiRng).as_mut())
 }
 
 fn boot_time() -> Option<u64> {
