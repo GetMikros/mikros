@@ -8,9 +8,10 @@ use crate::qemu::{self, MachineArgs};
 use crate::{firmware, image};
 use anyhow::{Context, Result, bail};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -238,15 +239,27 @@ pub fn wait_for_line(
     }
 }
 
+/// Where the monitor of the run in `dir` listens. A Unix socket's path
+/// must fit in 108 bytes, which a path under a deep checkout may not, so
+/// the socket goes in the temporary directory, named after a hash of
+/// `dir`.
+pub fn monitor_socket(dir: &Path) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    dir.hash(&mut hasher);
+    std::env::temp_dir().join(format!("mikros-{:016x}.sock", hasher.finish()))
+}
+
 /// Boots `dir`/disk.img with the serial output going to `dir`/serial.log
-/// and a monitor listening on `dir`/monitor.sock, on the standard VGA
+/// and a monitor listening on `monitor_socket(dir)`, on the standard VGA
 /// device, the one the firmware gives a linear framebuffer for. A reset
 /// ends QEMU unless `reboot`.
 pub fn start(machine: &MachineArgs, dir: &Path, reboot: bool) -> Result<Child> {
     let disk = dir.join("disk.img");
-    for name in ["serial.log", "monitor.sock", "screen.ppm", "console.ppm"] {
+    for name in ["serial.log", "screen.ppm", "console.ppm"] {
         let _ = fs::remove_file(dir.join(name));
     }
+    let socket = monitor_socket(dir);
+    let _ = fs::remove_file(&socket);
     let firmware = firmware::paths();
     let vars = disk.with_extension("vars.fd");
     fs::copy(&firmware.vars, &vars)?;
@@ -261,10 +274,7 @@ pub fn start(machine: &MachineArgs, dir: &Path, reboot: bool) -> Result<Child> {
     }
     args.extend([
         "-monitor".into(),
-        format!(
-            "unix:{},server=on,wait=off",
-            dir.join("monitor.sock").display()
-        ),
+        format!("unix:{},server=on,wait=off", socket.display()),
     ]);
     Command::new(qemu::QEMU)
         .args(args)
@@ -281,7 +291,7 @@ fn boot(
     timeout: Duration,
 ) -> Result<(String, Option<&'static str>)> {
     let log = dir.join("serial.log");
-    let socket = dir.join("monitor.sock");
+    let socket = monitor_socket(dir);
     let screen = dir.join("screen.ppm");
     let mut qemu = start(machine, dir, false)?;
     let deadline = Instant::now() + timeout;

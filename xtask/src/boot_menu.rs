@@ -5,7 +5,9 @@
 use crate::build::{self, Kind};
 use crate::image;
 use crate::qemu::MachineArgs;
-use crate::scenario::{WAITING, monitor, ppm_pixels, screen_dump, start, wait_for_line};
+use crate::scenario::{
+    WAITING, monitor, monitor_socket, ppm_pixels, screen_dump, start, wait_for_line,
+};
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::Path;
@@ -199,7 +201,7 @@ fn wait_for_menu(socket: &Path, dir: &Path, deadline: Instant) -> Result<()> {
 /// Boots the image in `dir` and checks that `run` ends as it must.
 fn boot(machine: &MachineArgs, dir: &Path, run: &Run, timeout: Duration) -> Result<()> {
     let log = dir.join("serial.log");
-    let socket = dir.join("monitor.sock");
+    let socket = monitor_socket(dir);
     let reboot = matches!(run.outcome, Outcome::Restarts);
     let mut qemu = start(machine, dir, reboot)?;
     let deadline = Instant::now() + timeout;

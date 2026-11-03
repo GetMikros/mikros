@@ -6,7 +6,7 @@
 use crate::build::{self, Kind};
 use crate::image;
 use crate::qemu::MachineArgs;
-use crate::scenario::{WAITING, monitor_output, start, wait_for_line};
+use crate::scenario::{WAITING, monitor_output, monitor_socket, start, wait_for_line};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::fs;
@@ -251,7 +251,7 @@ fn inspect(
     image: &Image,
     timeout: Duration,
 ) -> Result<Vec<String>> {
-    let socket = dir.join("monitor.sock");
+    let socket = monitor_socket(dir);
     let mut qemu = start(machine, dir, false)?;
     let result = (|| {
         wait_for_line(
