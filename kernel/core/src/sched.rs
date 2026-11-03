@@ -590,6 +590,41 @@ mod tests {
     }
 
     #[test]
+    fn handles_a_weight_change_of_the_running_thread() {
+        let mut fair = Fair::new();
+        for id in [1, 2, 3] {
+            fair.enqueue(id, Entity::new(16));
+        }
+        for _ in 0..10 {
+            run(&mut fair, None, false);
+        }
+        assert!(!fair.reweigh_running(weight(25)));
+        let (id, _) = fair.pick().unwrap();
+        fair.charge(fair.slice() / 2);
+        let before = fair.lag(id).unwrap();
+        assert!(fair.reweigh_running(weight(25)));
+        let after = fair.lag(id).unwrap();
+        assert!(
+            (after - before).abs() <= before.abs(),
+            "{before} -> {after}"
+        );
+        fair.charge(fair.slice());
+        fair.requeue(id);
+        // The heavier thread now gets the larger share.
+        let mut ran = [0i64; 4];
+        for _ in 0..3000 {
+            let (id, ran_now, _) = run(&mut fair, None, false);
+            ran[id as usize] += ran_now;
+            check_lags(&fair, 1..=3);
+        }
+        let others = ran
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != 0 && i as u32 != id);
+        assert!(others.into_iter().all(|(_, &r)| ran[id as usize] > 2 * r));
+    }
+
+    #[test]
     fn queues_the_running_thread_woken_before_it_stops() {
         let mut fair = Fair::new();
         fair.enqueue(1, Entity::new(16));
