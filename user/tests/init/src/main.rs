@@ -821,6 +821,15 @@ fn set_kernel_limit(s: &Startup, limit: u64) -> Result {
     })
 }
 
+/// Writes to the 64 KiB of this thread's stack below the caller's frame,
+/// so that the calls it makes next find those pages and their page tables
+/// in place.
+#[inline(never)]
+fn touch_stack() {
+    let mut area = [0u8; 64 * 1024];
+    core::hint::black_box(&mut area);
+}
+
 /// Mapping and splitting regions is charged to the caller's budget, and
 /// a call refused at the limit changes nothing.
 fn region_charges_reach_the_limit(s: &Startup) -> Result {
@@ -828,11 +837,14 @@ fn region_charges_reach_the_limit(s: &Startup) -> Result {
     let len = 3 * PAGE_SIZE;
     let mem = create_memory(len)?;
     let mut mapped = [0u64; 1000];
-    // The first mapping's middle page is touched before the limit is
-    // set, as a fault that needs kernel memory above it would fail.
+    // The first mapping's middle page, and the stack below this frame,
+    // are touched before the limit is set: a fault that needs kernel
+    // memory above it, such as for a page table where the stack crosses
+    // a 2 MiB boundary, would fail and end the process.
     mapped[0] = map(s.process, mem, len)?;
     // SAFETY: the mapping is writable.
     unsafe { ((mapped[0] + PAGE_SIZE) as *mut u64).write_volatile(1) };
+    touch_stack();
     let mut count = 1;
     set_kernel_limit(s, budget_kernel(s)? + 4096)?;
     let refused = loop {
