@@ -148,3 +148,10 @@ path = "fuzz_targets/log.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "budget"
+path = "fuzz_targets/budget.rs"
+test = false
+doc = false
+bench = false
