@@ -2123,6 +2123,57 @@ fn evict_waits_for_outputs(s: &Startup) -> Result {
     )
 }
 
+/// Supplying pages from an object waits for a kernel write into it that
+/// is under way, and moves the pages with the written bytes.
+fn supply_waits_for_outputs(s: &Startup) -> Result {
+    let plain = create_memory(PAGE_SIZE)?;
+    let at = start_straddling_read(s, plain)?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })?;
+    let (mut pager, mut port, mut mem) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 9, PAGE_SIZE, 0, &mut mem);
+        check("creating a paged object", status)?;
+    }
+    // SAFETY: the call takes no pointers.
+    check("supplying", unsafe {
+        sys::pager_supply(pager, mem, 0, PAGE_SIZE, plain, 0)
+    })?;
+    ensure(
+        "waiting for the write",
+        READ_DONE.load(Ordering::Acquire) == 1,
+    )?;
+    ensure(
+        "moving the written bytes",
+        mem_read_at::<8>(mem, PAGE_SIZE - 8)? == *b"01234567",
+    )
+}
+
+/// A clone of an object waits for a kernel write into it that is under
+/// way, and holds the written bytes.
+fn clone_waits_for_outputs(s: &Startup) -> Result {
+    let plain = create_memory(PAGE_SIZE)?;
+    start_straddling_read(s, plain)?;
+    let mut clone = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("cloning", unsafe {
+        sys::mem_clone(plain, 0, 0, PAGE_SIZE, &mut clone)
+    })?;
+    ensure(
+        "waiting for the write",
+        READ_DONE.load(Ordering::Acquire) == 1,
+    )?;
+    ensure(
+        "cloning the written bytes",
+        mem_read_at::<8>(clone, PAGE_SIZE - 8)? == *b"01234567",
+    )
+}
+
 type Test = fn(&Startup) -> Result;
 
 const SUSPENDED: u32 = 1 << 5;
@@ -2604,7 +2655,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 36] = [
+const TESTS: [(&str, Test); 38] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -2628,6 +2679,8 @@ const TESTS: [(&str, Test); 36] = [
     ("coverage", coverage),
     ("seal_waits_for_outputs", seal_waits_for_outputs),
     ("evict_waits_for_outputs", evict_waits_for_outputs),
+    ("supply_waits_for_outputs", supply_waits_for_outputs),
+    ("clone_waits_for_outputs", clone_waits_for_outputs),
     ("memory_objects", memory_objects),
     ("shared_mappings", shared_mappings),
     ("random_bytes", random_bytes),
