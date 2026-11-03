@@ -4454,6 +4454,104 @@ fn signal_interrupts_and_restarts(s: &Startup) -> Result {
     )
 }
 
+/// The values `extended_keeper` loads into XMM0 and XMM1; set by it once
+/// they are loaded, and by the test to let it go on; and what it then
+/// finds in XMM0 and XMM1.
+static EXTENDED_PATTERN: [[u64; 2]; 2] = [
+    [0x0011_2233_4455_6677, 0x8899_AABB_CCDD_EEFF],
+    [0x0F0E_0D0C_0B0A_0908, 0x0706_0504_0302_0100],
+];
+static EXTENDED_READY: AtomicU64 = AtomicU64::new(0);
+static EXTENDED_GO: AtomicU64 = AtomicU64::new(0);
+static mut EXTENDED_FOUND: [u64; 4] = [0; 4];
+
+core::arch::global_asm!(
+    ".global extended_keeper",
+    "extended_keeper:",
+    "movdqu xmm0, [rip + {pattern}]",
+    "movdqu xmm1, [rip + {pattern} + 16]",
+    "mov qword ptr [rip + {ready}], 1",
+    "2:",
+    "pause",
+    "cmp qword ptr [rip + {go}], 0",
+    "je 2b",
+    "movdqu [rip + {found}], xmm0",
+    "movdqu [rip + {found} + 16], xmm1",
+    "jmp {done}",
+    pattern = sym EXTENDED_PATTERN,
+    ready = sym EXTENDED_READY,
+    go = sym EXTENDED_GO,
+    found = sym EXTENDED_FOUND,
+    done = sym end_asm_thread,
+);
+
+unsafe extern "sysv64" {
+    safe fn extended_keeper(a: u64, b: u64) -> !;
+}
+
+/// A suspended thread's `EXTENDED` state is an 8-byte size and its
+/// registers in `XSAVE` format, and a changed state written back is what
+/// the thread finds when it resumes. A state whose MXCSR would make
+/// `XRSTOR` fault, a buffer too short, a kind that does not exist and a
+/// thread that is not suspended are refused.
+fn extended_state_round_trip(s: &Startup) -> Result {
+    EXTENDED_READY.store(0, Ordering::Release);
+    EXTENDED_GO.store(0, Ordering::Release);
+    let thread = spawn2(s, extended_keeper, 0, 0)?;
+    let deadline = in_time();
+    while EXTENDED_READY.load(Ordering::Acquire) == 0 {
+        ensure("starting the keeper", now() < deadline)?;
+        sleep_ms(1);
+    }
+    let read = |buf: &mut [u8], kind| {
+        // SAFETY: the pointer and length describe `buf`.
+        unsafe { sys::thread_read_state(thread, kind, buf.as_mut_ptr(), buf.len() as u64) }
+    };
+    let mut state = [0u8; 4096];
+    ensure(
+        "refusing a thread that is not suspended",
+        read(&mut state, 1) == BAD_STATE,
+    )?;
+    suspend_and_wait(thread)?;
+    ensure(
+        "refusing a buffer too short",
+        read(&mut state[..8], 1) == BUFFER_TOO_SMALL,
+    )?;
+    ensure("refusing another kind", read(&mut state, 3) == INVALID_ARGS)?;
+    check("reading the extended state", read(&mut state, 1))?;
+    let size = u64_at(&state, 0) as usize;
+    ensure("giving the size", (576..=state.len() - 8).contains(&size))?;
+    // The XSAVE image follows the size; its legacy region keeps MXCSR at
+    // offset 24 and XMM0 and XMM1 at 160 and 176.
+    let (mxcsr, xmm0, xmm1) = (8 + 24, 8 + 160, 8 + 176);
+    ensure(
+        "holding XMM0",
+        [u64_at(&state, xmm0), u64_at(&state, xmm0 + 8)] == EXTENDED_PATTERN[0],
+    )?;
+    state.copy_within(xmm0..xmm0 + 16, xmm1);
+    let write = |buf: &[u8]| {
+        // SAFETY: the pointer and length lie in `buf`.
+        unsafe { sys::thread_write_state(thread, 1, buf.as_ptr(), 8 + size as u64) }
+    };
+    let mut bad = state;
+    bad[mxcsr..mxcsr + 4].copy_from_slice(&(0x1F80u32 | 1 << 31).to_le_bytes());
+    ensure("refusing a reserved MXCSR bit", write(&bad) == INVALID_ARGS)?;
+    check("writing the extended state", write(&state))?;
+    check("resuming", resume_thread(thread))?;
+    EXTENDED_GO.store(1, Ordering::Release);
+    ensure(
+        "ending the keeper",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    // SAFETY: the keeper wrote what it found and ended.
+    let found = unsafe { core::ptr::read_volatile(&raw const EXTENDED_FOUND) };
+    ensure("keeping XMM0", found[..2] == EXTENDED_PATTERN[0])?;
+    ensure(
+        "loading the XMM1 written",
+        found[2..] == EXTENDED_PATTERN[0],
+    )
+}
+
 /// Whether `needle` occurs in `haystack`.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
@@ -4684,7 +4782,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 69] = [
+const TESTS: [(&str, Test); 70] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("info_topics", info_topics),
@@ -4774,6 +4872,7 @@ const TESTS: [(&str, Test); 69] = [
         "signal_interrupts_and_restarts",
         signal_interrupts_and_restarts,
     ),
+    ("extended_state_round_trip", extended_state_round_trip),
     ("processes_and_channels", processes_and_channels),
 ];
 
