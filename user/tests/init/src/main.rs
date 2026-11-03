@@ -1038,6 +1038,36 @@ fn log_readers(s: &Startup) -> Result {
     ensure("reading to the end", read_record(reader).0 == SHOULD_WAIT)
 }
 
+/// The frame allocator manages the `Usable`, `BootloaderReclaimable` and
+/// `PageTables` ranges of the boot memory map and the `BootImage` frames,
+/// which the boot image object holds, the `KernelStack` range once the
+/// kernel has taken it, and nothing else.
+fn boot_memory_reclaimed(s: &Startup) -> Result {
+    const USABLE: u32 = 1;
+    const BOOTLOADER_RECLAIMABLE: u32 = 2;
+    const KERNEL_STACK: u32 = 4;
+    const BOOT_IMAGE: u32 = 5;
+    const PAGE_TABLES: u32 = 6;
+    let pages = |kinds: &[u32]| -> u64 {
+        s.memory_map()
+            .filter(|r| kinds.contains(&r.kind))
+            .map(|r| r.page_count)
+            .sum()
+    };
+    let reclaimed = pages(&[USABLE, BOOTLOADER_RECLAIMABLE, PAGE_TABLES, BOOT_IMAGE]);
+    let stack = pages(&[KERNEL_STACK]);
+    let mut record = [0u8; 16];
+    // SAFETY: the pointer describes `record`.
+    check("reading memory information", unsafe {
+        sys::system_get_memory_info(record.as_mut_ptr())
+    })?;
+    let total = u64_at(&record, 0);
+    ensure(
+        "managing exactly the reclaimed ranges",
+        total == reclaimed || total == reclaimed + stack,
+    )
+}
+
 /// The boot image object is anonymous, as large as the image rounded up
 /// to whole pages, holds zeros after the image, and gives its frames back
 /// to the frame allocator once the last handle to it is closed. Nothing
@@ -5784,7 +5814,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 89] = [
+const TESTS: [(&str, Test); 90] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -5903,6 +5933,7 @@ const TESTS: [(&str, Test); 89] = [
     ),
     ("processes_and_channels", processes_and_channels),
     ("init_segments_as_loaded", init_segments_as_loaded),
+    ("boot_memory_reclaimed", boot_memory_reclaimed),
     // Runs last: it closes the boot image.
     ("boot_image_object", boot_image_object),
 ];
