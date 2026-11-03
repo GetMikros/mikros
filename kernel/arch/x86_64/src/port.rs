@@ -1,82 +1,46 @@
 //! Ports: queues of packets, filled by asynchronous waits on objects and
-//! by user space.
+//! by user space. `kernel_core::port` keeps the queues and the
+//! registrations of the waits; this adds the charges, the waiting threads
+//! and the watches of the objects waited on.
 
 use crate::process::Process;
 use crate::sched::{self, Thread};
-use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use kernel_core::object::budget::Budget;
+use core::sync::atomic::{AtomicU64, Ordering};
+use kernel_core::object::budget::{Budget, Held};
 use kernel_core::object::handles::Handle;
 use kernel_core::object::{Header, Object, ObjectType};
+use kernel_core::port::{
+    EDGE, Origin, Packet, Queue, Registration, Registrations, TIMELINE, Target, Wait,
+};
+pub use kernel_core::port::{PACKET_SIZE, packet};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
-/// The size of a packet.
-pub const PACKET_SIZE: usize = 48;
-/// Packet types.
-pub const SIGNAL: u32 = 1;
-pub const USER: u32 = 2;
-pub const TIMELINE: u32 = 4;
-/// The `EDGE` option of `object_wait_async`.
-pub const EDGE: u32 = 1 << 0;
-/// The most `USER` packets queued on a port.
-const USER_MAX: usize = 4096;
-/// The most registrations of a port.
-const REGISTRATIONS_MAX: usize = 65536;
 /// The kernel memory a registration is charged: itself and its packet.
-const REGISTRATION_COST: u64 = (size_of::<Registration>() + size_of::<Queued>()) as u64;
+const REGISTRATION_COST: u64 =
+    (size_of::<Registration<Kernel>>() + size_of::<Packet<Held>>()) as u64;
 /// The kernel memory a queued user packet is charged.
-const USER_COST: u64 = size_of::<Queued>() as u64;
+const USER_COST: u64 = size_of::<Packet<Held>>() as u64;
 /// The kernel memory charged to a thread's process for the length of
 /// its `port_wait`: its place in the port's waiters and that place's
 /// share of their storage.
 const WAITER_COST: u64 = 2 * size_of::<Arc<Thread>>() as u64;
 
-/// The bytes of a packet.
-pub fn packet(key: u64, kind: u32, status: i32, payload: &[u8]) -> [u8; PACKET_SIZE] {
-    let mut p = [0u8; PACKET_SIZE];
-    p[0x00..0x08].copy_from_slice(&key.to_le_bytes());
-    p[0x08..0x0C].copy_from_slice(&kind.to_le_bytes());
-    p[0x0C..0x10].copy_from_slice(&status.to_le_bytes());
-    p[0x10..0x10 + payload.len()].copy_from_slice(payload);
-    p
-}
-
-/// A queued packet, with the registration that queued it, or for a user
-/// packet the budget it is charged to.
-struct Queued {
-    bytes: [u8; PACKET_SIZE],
-    registration: Option<Origin>,
-    charged: Option<Arc<Budget>>,
-}
-
-/// The registration that queued a packet, and the process and handle it
-/// was made through, which outlive it for a one-shot registration.
-#[derive(Clone, Copy)]
-struct Origin {
-    id: u64,
-    process: usize,
-    handle: Handle,
-}
-
-impl Drop for Queued {
-    fn drop(&mut self) {
-        if let Some(budget) = &self.charged {
-            budget.release_kernel(USER_COST);
-        }
-    }
-}
-
 struct State {
-    packets: VecDeque<Queued>,
-    /// The live registrations on the port; each may have one packet
-    /// queued, for which the queue keeps room.
-    registrations: usize,
-    users: usize,
+    queue: Queue<Held>,
     /// The threads in `port_wait`.
     waiters: Vec<Arc<Thread>>,
+}
+
+impl State {
+    /// Wakes the waiting threads, as a packet was queued.
+    fn wake(&self) {
+        for thread in &self.waiters {
+            sched::wake_sleeper(thread);
+        }
+    }
 }
 
 pub struct Port {
@@ -95,47 +59,20 @@ impl Port {
             header: Header::new(ObjectType::Port),
             budget: budget.clone(),
             state: SpinLock::new(State {
-                packets: VecDeque::new(),
-                registrations: 0,
-                users: 0,
+                queue: Queue::new(),
                 waiters: Vec::new(),
             }),
         })
-    }
-
-    /// Queues `bytes`, for which the queue has room, and wakes the
-    /// waiting threads. Allocates nothing.
-    fn push(&self, state: &mut State, packet: Queued) {
-        debug_assert!(state.packets.len() < state.packets.capacity());
-        state.packets.push_back(packet);
-        for thread in &state.waiters {
-            sched::wake_sleeper(thread);
-        }
     }
 
     /// Queues a user packet, as `port_queue` does, charged to `budget`
     /// until it is read.
     pub fn queue_user(&self, bytes: &[u8; PACKET_SIZE], budget: &Arc<Budget>) -> Result<(), Error> {
         let mut state = self.state.lock();
-        if state.users >= USER_MAX {
-            return Err(Error::ShouldWait);
-        }
-        let room = state.registrations + 1;
         state
-            .packets
-            .try_reserve(room)
-            .map_err(|_| Error::NoMemory)?;
-        budget.charge_kernel(USER_COST)?;
-        let mut copy = *bytes;
-        copy[0x08..0x0C].copy_from_slice(&USER.to_le_bytes());
-        copy[0x0C..0x10].fill(0);
-        state.users += 1;
-        let packet = Queued {
-            bytes: copy,
-            registration: None,
-            charged: Some(budget.clone()),
-        };
-        self.push(&mut state, packet);
+            .queue
+            .queue_user(bytes, || budget.hold_kernel(USER_COST))?;
+        state.wake();
         Ok(())
     }
 
@@ -147,20 +84,10 @@ impl Port {
         budget: &Arc<Budget>,
     ) -> Result<(), Error> {
         let mut state = self.state.lock();
-        let room = state.registrations + 1;
         state
-            .packets
-            .try_reserve(room)
-            .map_err(|_| Error::NoMemory)?;
-        budget.charge_kernel(USER_COST)?;
-        let packet = Queued {
-            bytes,
-            registration: None,
-            charged: Some(budget.clone()),
-        };
-        // A kernel packet does not count as a user packet when read.
-        state.users += 1;
-        self.push(&mut state, packet);
+            .queue
+            .queue_kernel(bytes, || budget.hold_kernel(USER_COST))?;
+        state.wake();
         Ok(())
     }
 
@@ -176,7 +103,7 @@ impl Port {
             state.waiters.push(thread.clone());
         }
         let result = loop {
-            if !self.state.lock().packets.is_empty() {
+            if !self.state.lock().queue.is_empty() {
                 break Ok(());
             }
             if crate::signal::interrupted(&thread, &process) || thread.leave_wait_to_suspend() {
@@ -198,21 +125,13 @@ impl Port {
 
     /// Removes the oldest packet, if any.
     pub fn take(&self) -> Option<[u8; PACKET_SIZE]> {
-        let mut state = self.state.lock();
-        let p = state.packets.pop_front()?;
-        if p.registration.is_none() {
-            state.users -= 1;
-        }
-        drop(state);
-        if let Some(Origin { id, .. }) = p.registration {
+        // The packet's charge goes after the lock.
+        let packet = self.state.lock().queue.take()?;
+        if let Some(Origin { id, .. }) = packet.origin {
             // Its registration may queue again.
-            for r in REGISTRATIONS.lock().iter() {
-                if r.id == id {
-                    r.queued.store(false, Ordering::Release);
-                }
-            }
+            REGISTRATIONS.lock().packet_read(id);
         }
-        Some(p.bytes)
+        Some(packet.bytes)
     }
 }
 
@@ -228,80 +147,47 @@ impl Object for Port {
     }
 }
 
-/// An asynchronous wait.
-struct Registration {
-    id: u64,
-    koid: u64,
-    mask: u32,
-    edge: bool,
-    key: u64,
+/// What the kernel keeps with a registration.
+struct Kernel {
     port: Weak<Port>,
     /// The object waited on, to end its watch when the registration is
     /// removed other than by its signals.
     object: Weak<dyn Object>,
-    /// The process and handle the wait was made through.
-    process: usize,
-    handle: Handle,
-    /// The signals of `mask` last seen, for `EDGE`.
-    last: AtomicU32,
-    /// For a timeline wait, the value it waits for; such a registration
-    /// does not watch signals.
-    threshold: Option<u64>,
-    /// Whether a packet of the registration is queued and unread.
-    queued: AtomicBool,
-    /// Set once the registration has ended and its watch with it; it is
-    /// removed from the list outside the signal hook, so that the hook
-    /// never drops anything.
-    done: AtomicBool,
     budget: Arc<Budget>,
 }
 
-/// Every registration. The lock comes after object locks and before port
-/// and scheduler locks.
-static REGISTRATIONS: SpinLock<Vec<Arc<Registration>>> = SpinLock::new(Vec::new());
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-impl Registration {
-    /// Queues a packet for `signals` on the port, unless one is queued.
-    /// Returns whether the port still exists.
-    fn fire(&self, signals: u32) -> bool {
-        let mut payload = [0u8; 8];
-        payload[0..4].copy_from_slice(&self.mask.to_le_bytes());
-        payload[4..8].copy_from_slice(&signals.to_le_bytes());
-        self.queue(SIGNAL, &payload)
+impl Target for Kernel {
+    fn exists(&self) -> bool {
+        self.port.strong_count() > 0
     }
 
-    /// Queues a packet of `kind` with `payload` on the port, unless one is
-    /// queued. Returns whether the port still exists.
-    fn queue(&self, kind: u32, payload: &[u8]) -> bool {
+    fn deliver(&self, bytes: [u8; PACKET_SIZE], origin: Origin) {
         let Some(port) = self.port.upgrade() else {
-            return false;
-        };
-        if self.queued.swap(true, Ordering::AcqRel) {
-            return true;
-        }
-        let packet = Queued {
-            bytes: packet(self.key, kind, 0, payload),
-            registration: Some(Origin {
-                id: self.id,
-                process: self.process,
-                handle: self.handle,
-            }),
-            charged: None,
+            return;
         };
         let mut state = port.state.lock();
-        port.push(&mut state, packet);
+        state.queue.queue_registered(bytes, origin);
+        state.wake();
         drop(state);
         // The port is not the last reference: the caller's handle or a
         // registration's queue holds it while the hook runs.
         drop(port);
-        true
+    }
+}
+
+impl Kernel {
+    /// Ends the registration's hold on the port's queue and its charge.
+    fn release(&self) {
+        if let Some(port) = self.port.upgrade() {
+            port.state.lock().queue.remove_registration();
+        }
+        self.budget.release_kernel(REGISTRATION_COST);
     }
 
-    /// Ends the watch of the object, if it still exists and the
-    /// registration watches signals.
-    fn end_watch(&self) {
-        if self.threshold.is_some() {
+    /// Ends the watch of the object of `wait`, if it still exists and the
+    /// wait watches signals.
+    fn end_watch(&self, wait: &Wait) {
+        if wait.threshold.is_some() {
             return;
         }
         // Upgraded only with no lock held, as dropping the reference may
@@ -310,63 +196,49 @@ impl Registration {
             object.header().unwatch();
         }
     }
-
-    /// Ends the registration's hold on the port's queue and its charge.
-    fn release(&self) {
-        Self::release_parts(&self.port, &self.budget);
-    }
-
-    /// Ends the hold on the queue of `port` and the charge to `budget` of
-    /// a registration.
-    fn release_parts(port: &Weak<Port>, budget: &Budget) {
-        if let Some(port) = port.upgrade() {
-            port.state.lock().registrations -= 1;
-        }
-        budget.release_kernel(REGISTRATION_COST);
-    }
 }
+
+/// Every registration. The lock comes after object locks and before port
+/// and scheduler locks.
+static REGISTRATIONS: SpinLock<Registrations<Kernel>> = SpinLock::new(Registrations::new());
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Called by the signal hook for the object of `header`: fires the
 /// registrations whose signals are now set. Allocates and drops nothing.
 pub fn signals_changed(header: &Header, signals: u32) {
-    for r in REGISTRATIONS.lock().iter() {
-        if r.koid != header.koid() || r.done.load(Ordering::Acquire) || r.threshold.is_some() {
-            continue;
-        }
-        let now = signals & r.mask;
-        let ended = if r.edge {
-            let before = r.last.swap(now, Ordering::AcqRel);
-            now & !before != 0 && !r.fire(signals)
-        } else {
-            now != 0 && {
-                r.fire(signals);
-                true
-            }
-        };
-        if ended {
-            r.done.store(true, Ordering::Release);
-            header.unwatch();
-        }
+    let ended = REGISTRATIONS.lock().signals_changed(header.koid(), signals);
+    for _ in 0..ended {
+        header.unwatch();
     }
+}
+
+/// Removes the registrations that `matches` accepts and returns them,
+/// releasing at once those there is no room to return.
+fn remove(matches: impl Fn(&Registration<Kernel>) -> bool) -> Vec<Registration<Kernel>> {
+    let mut removed = Vec::new();
+    let mut registrations = REGISTRATIONS.lock();
+    let count = registrations.iter().filter(|r| matches(r)).count();
+    let _ = removed.try_reserve_exact(count);
+    registrations.take(matches, &mut removed, |r| r.extra.release());
+    removed
 }
 
 /// Removes the registrations that ended, releasing their charges. They
 /// keep the charges until the list of them goes, so those cover it.
 fn purge() {
-    let mut ended = Vec::new();
-    {
-        let mut registrations = REGISTRATIONS.lock();
-        let mut i = 0;
-        while i < registrations.len() {
-            if registrations[i].done.load(Ordering::Acquire) && ended.try_reserve(1).is_ok() {
-                ended.push(registrations.swap_remove(i));
-            } else {
-                i += 1;
-            }
-        }
+    for r in remove(|r| r.is_done()) {
+        r.extra.release();
     }
-    for r in ended {
-        r.release();
+}
+
+/// Ends the watches of the `removed` registrations that had not ended,
+/// and releases them all.
+fn finish(removed: Vec<Registration<Kernel>>) {
+    for r in removed {
+        if !r.is_done() {
+            r.extra.end_watch(&r.wait);
+        }
+        r.extra.release();
     }
 }
 
@@ -380,38 +252,29 @@ fn reserve(
     key: u64,
     mask: u32,
     threshold: Option<u64>,
-) -> Result<Registration, Error> {
+) -> Result<Registration<Kernel>, Error> {
     purge();
     let budget = process.budget().clone();
-    {
-        let mut state = port.state.lock();
-        if state.registrations >= REGISTRATIONS_MAX {
-            return Err(Error::NoResources);
-        }
-        let room = state.registrations + 1;
-        state
-            .packets
-            .try_reserve(room)
-            .map_err(|_| Error::NoMemory)?;
-        budget.charge_kernel(REGISTRATION_COST)?;
-        state.registrations += 1;
-    }
-    Ok(Registration {
+    port.state
+        .lock()
+        .queue
+        .add_registration(|| budget.charge_kernel(REGISTRATION_COST))?;
+    let wait = Wait {
         id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
         koid: object.header().koid(),
         mask,
         edge: false,
         key,
-        port: Arc::downgrade(port),
-        object: Arc::downgrade(object),
         process: Arc::as_ptr(process) as usize,
         handle,
-        last: AtomicU32::new(0),
         threshold,
-        queued: AtomicBool::new(false),
-        done: AtomicBool::new(false),
+    };
+    let kernel = Kernel {
+        port: Arc::downgrade(port),
+        object: Arc::downgrade(object),
         budget,
-    })
+    };
+    Ok(Registration::new(wait, kernel))
 }
 
 /// Registers a wait on the timeline `object`, whose value is `current`,
@@ -426,25 +289,18 @@ pub fn wait_timeline(
     key: u64,
     value: u64,
 ) -> Result<(), Error> {
-    let registration = reserve(object, process, handle, port, key, 0, Some(value))?;
+    let mut registration = reserve(object, process, handle, port, key, 0, Some(value))?;
     if current >= value {
         registration.queue(TIMELINE, &current.to_le_bytes());
-        registration.release();
+        registration.extra.release();
         return Ok(());
     }
     let mut registrations = REGISTRATIONS.lock();
-    if registrations.try_reserve(1).is_err() {
+    if registrations.try_reserve().is_err() {
         drop(registrations);
-        registration.release();
+        registration.extra.release();
         return Err(Error::NoMemory);
     }
-    // A registration releases its charge only when told to.
-    let (port, budget) = (registration.port.clone(), registration.budget.clone());
-    let Ok(registration) = kernel_core::fallible::try_arc(registration) else {
-        drop(registrations);
-        Registration::release_parts(&port, &budget);
-        return Err(Error::NoMemory);
-    };
     registrations.push(registration);
     Ok(())
 }
@@ -452,13 +308,7 @@ pub fn wait_timeline(
 /// Queues the packets of the timeline waits on the timeline with object
 /// ID `koid` that its new value `value` reaches.
 pub fn timeline_raised(koid: u64, value: u64) {
-    for r in REGISTRATIONS.lock().iter() {
-        let reached = r.threshold.is_some_and(|t| t <= value);
-        if r.koid == koid && reached && !r.done.load(Ordering::Acquire) {
-            r.queue(TIMELINE, &value.to_le_bytes());
-            r.done.store(true, Ordering::Release);
-        }
-    }
+    REGISTRATIONS.lock().timeline_raised(koid, value);
 }
 
 /// Registers an asynchronous wait on `object` through `handle` of
@@ -475,36 +325,21 @@ pub fn wait_async(
     if options & !EDGE != 0 {
         return Err(Error::InvalidArgs);
     }
-    let registration = reserve(object, process, handle, port, key, signals, None)?;
+    let mut registration = reserve(object, process, handle, port, key, signals, None)?;
+    registration.wait.edge = options & EDGE != 0;
     let header = object.header();
-    let registration = Registration {
-        edge: options & EDGE != 0,
-        ..registration
-    };
-    let (port, budget) = (registration.port.clone(), registration.budget.clone());
-    let Ok(registration) = kernel_core::fallible::try_arc(registration) else {
-        Registration::release_parts(&port, &budget);
-        return Err(Error::NoMemory);
-    };
     let mut registrations = REGISTRATIONS.lock();
-    if registrations.try_reserve(1).is_err() {
+    if registrations.try_reserve().is_err() {
         drop(registrations);
-        registration.release();
+        registration.extra.release();
         return Err(Error::NoMemory);
     }
     header.watch();
-    let now = header.signals() & signals;
-    registration.last.store(now, Ordering::Release);
-    if now != 0 {
-        registration.fire(header.signals());
-        if !registration.edge {
-            header.unwatch();
-            drop(registrations);
-            registration.release();
-            return Ok(());
-        }
+    if let Some(ended) = registrations.add_signal_wait(registration, header.signals()) {
+        header.unwatch();
+        drop(registrations);
+        ended.extra.release();
     }
-    registrations.push(registration);
     Ok(())
 }
 
@@ -513,30 +348,9 @@ pub fn wait_async(
 /// `handle` `None`, removes every registration of the process. The
 /// charges of the removed registrations cover the list of them.
 pub fn handle_closed(process: usize, handle: Option<Handle>) {
-    let mut removed = Vec::new();
-    {
-        let mut registrations = REGISTRATIONS.lock();
-        let mut i = 0;
-        while i < registrations.len() {
-            let r = &registrations[i];
-            if r.process == process && handle.is_none_or(|h| h == r.handle) {
-                let r = registrations.swap_remove(i);
-                if removed.try_reserve(1).is_ok() {
-                    removed.push(r);
-                } else {
-                    r.release();
-                }
-            } else {
-                i += 1;
-            }
-        }
-    }
-    for r in removed {
-        if !r.done.load(Ordering::Acquire) {
-            r.end_watch();
-        }
-        r.release();
-    }
+    finish(remove(|r| {
+        r.wait.process == process && handle.is_none_or(|h| h == r.wait.handle)
+    }));
     purge();
 }
 
@@ -544,36 +358,13 @@ pub fn handle_closed(process: usize, handle: Option<Handle>) {
 /// with their unread packets, as `port_cancel` does. The charges of the
 /// removed registrations cover the list of them.
 pub fn cancel(port: &Arc<Port>, process: usize, handle: Handle, key: u64) {
-    let mut removed = Vec::new();
-    {
-        let mut registrations = REGISTRATIONS.lock();
-        let mut i = 0;
-        while i < registrations.len() {
-            let r = &registrations[i];
-            let ours = r.port.as_ptr() == Arc::as_ptr(port);
-            if ours && r.process == process && r.handle == handle && r.key == key {
-                let r = registrations.swap_remove(i);
-                if removed.try_reserve(1).is_ok() {
-                    removed.push(r);
-                } else {
-                    r.release();
-                }
-            } else {
-                i += 1;
-            }
-        }
-    }
-    // Packets of one-shot registrations that already ended go too.
-    port.state.lock().packets.retain(|p| {
-        let packet_key = u64::from_le_bytes(p.bytes[0x00..0x08].try_into().expect("8 bytes"));
-        p.registration
-            .is_none_or(|o| !(o.process == process && o.handle == handle && packet_key == key))
+    let removed = remove(|r| {
+        let w = &r.wait;
+        let ours = r.extra.port.as_ptr() == Arc::as_ptr(port);
+        ours && w.process == process && w.handle == handle && w.key == key
     });
-    for r in removed {
-        if !r.done.load(Ordering::Acquire) {
-            r.end_watch();
-        }
-        r.release();
-    }
+    // Packets of one-shot registrations that already ended go too.
+    port.state.lock().queue.cancel(process, handle, key);
+    finish(removed);
     purge();
 }
