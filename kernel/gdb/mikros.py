@@ -61,14 +61,22 @@ def static(name):
 
 
 def needs_kernel(invoke):
-    """Wraps a command's `invoke` so that it fails with a short message
-    when the kernel's memory cannot be read yet, as before the boot loader
-    has started the kernel."""
+    """Wraps a command's `invoke` so that it reads memory through the boot
+    processor, the only one the kernel runs on, and fails with a short
+    message when the kernel's memory cannot be read yet, as before the
+    boot loader has started the kernel.
+
+    QEMU's GDB stub reads memory through the page tables of the selected
+    processor. Ctrl-C can leave another processor selected, still running
+    the firmware, where no kernel address is mapped."""
 
     def wrapped(self, arg, from_tty):
+        selected = gdb.selected_thread()
+        boot = min(gdb.selected_inferior().threads(), key=lambda t: t.num, default=None)
+        if boot is not None and boot != selected:
+            boot.switch()
         try:
-            address = int(static("kernel::process::FIRST_PROCESS").address)
-            gdb.selected_inferior().read_memory(address, 8)
+            int(scalar(static("kernel::process::FIRST_PROCESS")))
             return invoke(self, arg, from_tty)
         except gdb.MemoryError as e:
             raise gdb.GdbError(
@@ -76,6 +84,9 @@ def needs_kernel(invoke):
                 "for example with `hbreak _start` and `continue`, then "
                 "interrupt it with Ctrl-C."
             )
+        finally:
+            if selected is not None and selected.is_valid() and selected != gdb.selected_thread():
+                selected.switch()
 
     return wrapped
 
