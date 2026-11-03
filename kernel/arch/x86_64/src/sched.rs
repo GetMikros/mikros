@@ -1137,11 +1137,15 @@ fn maintain(now: i64) {
     };
     if clock {
         crate::time::maintain();
+        #[cfg(feature = "fuzz")]
+        crate::fuzz::served(crate::fuzz::CLOCK, now);
         let next = crate::time::maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
         this_cpu().lock().clock_due = next;
     }
     if reseed {
         let next = crate::random::reseed(now);
+        #[cfg(feature = "fuzz")]
+        crate::fuzz::served(crate::fuzz::RESEED, now);
         this_cpu().lock().reseed_due = next;
     }
 }

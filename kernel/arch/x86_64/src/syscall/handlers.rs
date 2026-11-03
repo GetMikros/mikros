@@ -1966,3 +1966,11 @@ pub fn fuzz_fail_alloc(
     crate::fuzz::fail_alloc(&object::<Thread>(thread), kind, after);
     Ok(())
 }
+
+#[cfg(feature = "fuzz")]
+pub fn fuzz_set_interval(which: u32, ns: i64, out: UserOut<i64>) -> Result<(), Error> {
+    let outputs = prepare(&current_process()?, &[out.range(3)])?;
+    let report = crate::fuzz::set_interval(which, ns)?;
+    publish(outputs, &[bytes_of(&report)]);
+    Ok(())
+}

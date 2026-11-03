@@ -945,3 +945,13 @@ syscalls:
       - {name: kind, type: u32, dir: in}
       - {name: after, type: u64, dir: in}
       - {name: left, type: "*mut u64", dir: out}
+
+  - name: fuzz_set_interval
+    number: 92
+    arch: [x86_64]
+    fuzz_only: true
+    spec: [MIKSPEC-0017.R10]
+    args:
+      - {name: which, type: u32, dir: in}
+      - {name: ns, type: i64, dir: in}
+      - {name: out, type: "*mut i64", dir: out}

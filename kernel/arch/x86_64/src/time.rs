@@ -91,8 +91,13 @@ fn counter() -> u64 {
 /// How long the clock may go between samples of a counter that wraps: a
 /// quarter of the counter's wrap period, which keeps samples less than
 /// half a period apart even when the timer interrupt comes late. `None`
-/// for a counter that does not wrap.
+/// for a counter that does not wrap. The fuzz build's
+/// `fuzz_set_interval` can set an interval for any counter.
 pub fn maintenance_interval() -> Option<i64> {
+    #[cfg(feature = "fuzz")]
+    if let Some(ns) = crate::fuzz::interval(crate::fuzz::CLOCK) {
+        return Some(ns);
+    }
     let width = u32::from(WIDTH.load(Ordering::Relaxed));
     let rate = RATE.load(Ordering::Relaxed);
     match SOURCE.load(Ordering::Relaxed) {

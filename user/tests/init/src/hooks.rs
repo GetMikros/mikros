@@ -11,9 +11,10 @@ use mikros_rt::{Startup, log};
 use mikros_test::{Failure, PAGE_SIZE, PERM_READ, Result, check, ensure, sleep_ms};
 
 /// The tests, which `main` runs before the last of its own.
-pub const TESTS: [(&str, Test); 2] = [
+pub const TESTS: [(&str, Test); 3] = [
     ("failed_allocations", failed_allocations),
     ("unqueued_exception_report", unqueued_exception_report),
+    ("maintenance_deadlines", maintenance_deadlines),
 ];
 
 /// The kinds of allocation `fuzz_fail_alloc` makes fail.
@@ -277,4 +278,59 @@ fn unqueued_exception_report(s: &Startup) -> Result {
             .try_for_each(close)?;
     }
     ensure("reporting once nothing fails", false)
+}
+
+/// The maintenance deadlines `fuzz_set_interval` sets.
+const CLOCK: u32 = 0;
+const RESEED: u32 = 1;
+const MS: i64 = 1_000_000;
+
+/// Sets the interval of maintenance deadline `which` to `ns`, keeps it
+/// when `ns` is 0 or goes back to the kernel's own when `ns` is negative,
+/// and returns how often the deadline was served, when last, and when it
+/// last succeeded.
+fn set_interval(which: u32, ns: i64) -> Result<[i64; 3]> {
+    let mut report = [0; 3];
+    // SAFETY: the pointer describes `report`.
+    check("setting an interval", unsafe {
+        sys::fuzz_set_interval(which, ns, report.as_mut_ptr())
+    })?;
+    Ok(report)
+}
+
+/// The kernel serves its clock sampling and reseed deadlines, each at its
+/// own interval, while this thread sleeps and nothing else runs: with
+/// intervals of 2 ms and 25 ms, both are served many times during a sleep
+/// of 200 ms, the reseed no more often than its interval allows, and the
+/// last successful reseed is at most two intervals old at the end.
+fn maintenance_deadlines(_: &Startup) -> Result {
+    let start = now();
+    let clock = set_interval(CLOCK, 2 * MS)?;
+    let reseed = set_interval(RESEED, 25 * MS)?;
+    sleep_ms(200);
+    let end = now();
+    let clock_after = set_interval(CLOCK, -1)?;
+    let reseed_after = set_interval(RESEED, -1)?;
+    let (sampled, reseeded) = (clock_after[0] - clock[0], reseed_after[0] - reseed[0]);
+    ensure(
+        "sampling the clock while idle",
+        sampled >= 20 && clock_after[1] > start,
+    )?;
+    ensure(
+        "reseeding while idle",
+        reseeded >= 2 && reseed_after[1] > start,
+    )?;
+    ensure(
+        "reseeding no more often than the interval",
+        reseeded <= 1 + (now() - start) / (25 * MS),
+    )?;
+    ensure(
+        "reseeding within the interval",
+        reseed_after[2] >= end - 50 * MS,
+    )?;
+    let kept = set_interval(RESEED, 0)?;
+    ensure(
+        "going back to the kernel's interval",
+        kept[0] == reseed_after[0] && set_interval(RESEED, 1).is_err(),
+    )
 }

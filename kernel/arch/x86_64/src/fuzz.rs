@@ -3,7 +3,7 @@
 
 use crate::percpu;
 use crate::sched::Thread;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use kernel_core::object::Object;
 use kernel_core::status::Error;
 
@@ -63,4 +63,54 @@ pub fn alloc_fails(kind: u32) -> bool {
     }
     FAIL_THREAD[kind].store(0, Ordering::Relaxed);
     true
+}
+
+/// The kernel's maintenance deadlines whose intervals `fuzz_set_interval`
+/// sets: sampling the clock counter and reseeding the random number
+/// generator.
+pub const CLOCK: u32 = 0;
+pub const RESEED: u32 = 1;
+
+/// The shortest interval `fuzz_set_interval` sets, 1 ms.
+const MIN_INTERVAL: i64 = 1_000_000;
+
+/// For each deadline, the interval set, or 0 for the kernel's own.
+static INTERVAL: [AtomicI64; 2] = [AtomicI64::new(0), AtomicI64::new(0)];
+/// For each deadline, how often it was served, and when last.
+static SERVED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static LAST_SERVED: [AtomicI64; 2] = [AtomicI64::new(0), AtomicI64::new(0)];
+
+/// The interval set for deadline `which`, if any.
+pub fn interval(which: u32) -> Option<i64> {
+    let ns = INTERVAL[which as usize].load(Ordering::Relaxed);
+    (ns != 0).then_some(ns)
+}
+
+/// Records that deadline `which` was served at `now`.
+pub fn served(which: u32, now: i64) {
+    SERVED[which as usize].fetch_add(1, Ordering::Relaxed);
+    LAST_SERVED[which as usize].store(now, Ordering::Relaxed);
+}
+
+/// Sets the interval of deadline `which` to `ns` nanoseconds, keeps it
+/// when `ns` is 0 and goes back to the kernel's own when it is negative,
+/// and rearms the deadlines. Returns how often the deadline was served,
+/// when last, and when it last succeeded, which for a reseed is when the
+/// last successful one ended. Fails with `InvalidArgs` for an unknown
+/// deadline or an interval below `MIN_INTERVAL`.
+pub fn set_interval(which: u32, ns: i64) -> Result<[i64; 3], Error> {
+    if (which != CLOCK && which != RESEED) || (1..MIN_INTERVAL).contains(&ns) {
+        return Err(Error::InvalidArgs);
+    }
+    if ns != 0 {
+        INTERVAL[which as usize].store(ns.max(0), Ordering::Relaxed);
+        crate::sched::start_maintenance();
+    }
+    let last = LAST_SERVED[which as usize].load(Ordering::Relaxed);
+    let succeeded = match which {
+        RESEED => crate::random::last_reseed(),
+        _ => last,
+    };
+    let served = SERVED[which as usize].load(Ordering::Relaxed) as i64;
+    Ok([served, last, succeeded])
 }
