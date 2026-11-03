@@ -503,11 +503,16 @@ impl AddressSpace {
     ) -> Result<(), Error> {
         let mut at = start;
         let mut refused = false;
-        while let Some(next) =
-            self.regions
+        loop {
+            // The regions are unlocked at the end of the statement, before
+            // the reschedule check.
+            let step = self
+                .regions
                 .lock()
-                .check_range(at, end, ITEM_STEP, &ok, &mut refused)?
-        {
+                .check_range(at, end, ITEM_STEP, &ok, &mut refused)?;
+            let Some(next) = step else {
+                break;
+            };
             at = next;
             crate::sched::preempt_point();
         }
@@ -531,11 +536,16 @@ impl AddressSpace {
     ) -> Result<(), Error> {
         self.regions.lock().split_range(start, end, Some(budget))?;
         let mut at = start;
-        while let Some(next) = self
-            .regions
-            .lock()
-            .change_some(at, end, ITEM_STEP, &mut change)
-        {
+        loop {
+            // As in `check_in_steps`, the regions are unlocked before the
+            // reschedule check.
+            let step = self
+                .regions
+                .lock()
+                .change_some(at, end, ITEM_STEP, &mut change);
+            let Some(next) = step else {
+                break;
+            };
             at = next;
             crate::sched::preempt_point();
         }

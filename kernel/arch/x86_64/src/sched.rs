@@ -820,6 +820,10 @@ pub fn preempt_point() {
         !crate::idt::handling(),
         "a preemption point while handling an interrupt"
     );
+    debug_assert!(
+        kernel_core::sync::none_held(),
+        "a preemption point with a lock held"
+    );
     // SAFETY: enabling interrupts for one instruction lets the processor
     // take pending ones; no lock is held here.
     unsafe { core::arch::asm!("sti", "nop", "cli", options(nomem, nostack)) };
