@@ -2636,6 +2636,93 @@ fn clone_waits_for_outputs(s: &Startup) -> Result {
     )
 }
 
+/// The process and the permissions `waiting_mapper` maps with, and the
+/// status its `vm_map` returned.
+static MAPPER: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+/// Maps a page of `mem` as `MAPPER` says, with its output at `out`,
+/// stores the status in `MAPPER` and exits.
+extern "sysv64" fn waiting_mapper(mem: u64, out: u64) -> ! {
+    let process = MAPPER[0].load(Ordering::Acquire) as Handle;
+    let perms = MAPPER[1].load(Ordering::Acquire) as u32;
+    // SAFETY: `out` lies in a writable mapping.
+    let status = unsafe {
+        sys::vm_map(
+            process,
+            perms,
+            0,
+            mem as Handle,
+            0,
+            PAGE_SIZE,
+            out as *mut u64,
+        )
+    };
+    MAPPER[2].store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Starts a thread mapping a page of `mem` with `perms`, whose output
+/// lies on a page of a paged object that its pager supplies after 50 ms,
+/// and returns the thread once it waits for that page.
+fn start_waiting_map(s: &Startup, mem: Handle, perms: u32, key: u64) -> Result<Handle> {
+    let (mut pager, mut port, mut paged) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, key, PAGE_SIZE, 0, &mut paged);
+        check("creating a paged object", status)?;
+    }
+    PAGER.store(u64::from(pager), Ordering::Release);
+    spawn2(s, slow_pager_thread, u64::from(port), u64::from(paged))?;
+    let out = map(s.process, paged, PAGE_SIZE)?;
+    MAPPER[0].store(u64::from(s.process), Ordering::Release);
+    MAPPER[1].store(u64::from(perms), Ordering::Release);
+    let mapper = spawn2(s, waiting_mapper, u64::from(mem), out)?;
+    wait_until_blocked(mapper)?;
+    Ok(mapper)
+}
+
+/// A seal or a revocation that comes while `vm_map` waits to prepare its
+/// output makes the call fail when it goes on.
+fn map_checks_again_after_waiting(s: &Startup) -> Result {
+    let plain = create_memory(PAGE_SIZE)?;
+    let mapper = start_waiting_map(s, plain, PERM_READ | PERM_WRITE, 10)?;
+    check("sealing meanwhile", seal(plain, 1 << 3))?;
+    ensure(
+        "ending the mapping",
+        wait(mapper, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "refusing a writable mapping of a sealed object",
+        MAPPER[2].load(Ordering::Acquire) as i64 == ACCESS_DENIED,
+    )?;
+
+    let (mut pager, mut port, mut paged) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 11, PAGE_SIZE, 0, &mut paged);
+        check("creating a paged object", status)?;
+    }
+    let mapper = start_waiting_map(s, paged, PERM_READ, 12)?;
+    // SAFETY: the call takes no pointers.
+    check("revoking meanwhile", unsafe {
+        sys::pager_revoke(pager, paged)
+    })?;
+    ensure(
+        "ending the mapping",
+        wait(mapper, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "refusing a mapping of a revoked object",
+        MAPPER[2].load(Ordering::Acquire) as i64 == ACCESS_DENIED,
+    )
+}
+
 type Test = fn(&Startup) -> Result;
 
 const SUSPENDED: u32 = 1 << 5;
@@ -3134,7 +3221,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 49] = [
+const TESTS: [(&str, Test); 50] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -3176,6 +3263,10 @@ const TESTS: [(&str, Test); 49] = [
     ("evict_waits_for_outputs", evict_waits_for_outputs),
     ("supply_waits_for_outputs", supply_waits_for_outputs),
     ("clone_waits_for_outputs", clone_waits_for_outputs),
+    (
+        "map_checks_again_after_waiting",
+        map_checks_again_after_waiting,
+    ),
     ("memory_objects", memory_objects),
     ("shared_mappings", shared_mappings),
     ("random_bytes", random_bytes),

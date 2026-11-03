@@ -346,7 +346,8 @@ impl AddressSpace {
     /// page size, with `options`: at `addr` when they are `SPECIFIC`,
     /// otherwise at a random free address. Returns the start. Pages are
     /// entered into the tables only when they are accessed. The region is
-    /// charged to `budget`.
+    /// charged to `budget`. Fails with `AccessDenied` when `mem` is
+    /// revoked, or has the `WRITE` seal and the mapping is writable.
     #[allow(clippy::too_many_arguments)]
     pub fn add_region(
         self: &Arc<Self>,
@@ -375,7 +376,8 @@ impl AddressSpace {
     }
 
     /// Does what `add_region` does once, failing with `ShouldWait` when
-    /// the range is being removed.
+    /// the range is being removed, and with `AccessDenied` when `mem` is
+    /// revoked or the mapping is writable and `mem` has the `WRITE` seal.
     #[allow(clippy::too_many_arguments)]
     fn try_add_region(
         self: &Arc<Self>,
@@ -388,6 +390,13 @@ impl AddressSpace {
         budget: &Arc<Budget>,
     ) -> Result<u64, Error> {
         let charge = Charge::new(Some(budget))?;
+        // `vm_map` checked both before it waited to prepare its output, and
+        // a seal or a revocation may have come meanwhile. Nothing between
+        // here and the insert waits, so none can come in between.
+        mem.check_revoked()?;
+        if options.perms & PERM_WRITE != 0 {
+            mem.check_writable()?;
+        }
         let mut regions = self.regions.lock();
         let start = if options.specific {
             Ok(addr)
