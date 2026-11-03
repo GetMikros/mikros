@@ -2124,6 +2124,33 @@ fn kill_stopped_thread(s: &Startup) -> Result {
     )
 }
 
+/// A channel's own endpoints cannot be sent through it, under any
+/// handle value.
+fn own_endpoints_not_sent(_: &Startup) -> Result {
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    check("creating a channel", unsafe {
+        sys::channel_create(0, &mut a, &mut b)
+    })?;
+    let mut copy = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("duplicating", unsafe {
+        sys::handle_duplicate(a, 0x8000_0000, &mut copy)
+    })?;
+    let byte = [1u8];
+    for (what, h) in [("the writing end", copy), ("its peer", b)] {
+        // SAFETY: the pointers describe `byte` and `h`.
+        let status = unsafe { sys::channel_write(a, byte.as_ptr(), 1, &h, 1) };
+        ensure(what, status == INVALID_ARGS)?;
+    }
+    ensure("keeping the handles", read_message(b, 1).is_err())?;
+    for h in [a, b, copy] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
 /// The thread state of a thread stopped in an exception.
 const STATE_EXCEPTION: u32 = 3;
 
@@ -2980,7 +3007,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 45] = [
+const TESTS: [(&str, Test); 46] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -3013,6 +3040,7 @@ const TESTS: [(&str, Test); 45] = [
         kill_thread_with_queued_report,
     ),
     ("kill_thread_after_report", kill_thread_after_report),
+    ("own_endpoints_not_sent", own_endpoints_not_sent),
     ("coverage", coverage),
     ("seal_waits_for_outputs", seal_waits_for_outputs),
     ("evict_waits_for_outputs", evict_waits_for_outputs),

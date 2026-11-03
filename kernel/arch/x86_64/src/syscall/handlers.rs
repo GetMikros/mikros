@@ -15,6 +15,7 @@ use kernel_core::exception::{self, DEBUG_EVENTS};
 use kernel_core::log::{MESSAGE_MAX, RECORD_SIZE, Severity};
 use kernel_core::object::budget::{Budget, INFO_BUDGET, Scratch};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
+use kernel_core::object::handles::Entry;
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{
@@ -528,11 +529,25 @@ pub fn channel_write(
     send(&endpoint, value, bytes, len, handles, count, None)
 }
 
+/// Fails with `InvalidArgs` when one of `entries` refers to `endpoint` or
+/// to its peer, whatever handle value reached it.
+fn reject_own_channel(endpoint: &Endpoint, entries: &[Entry]) -> Result<(), Error> {
+    let own = [endpoint.header().koid(), endpoint.related_koid()];
+    match entries
+        .iter()
+        .any(|e| own.contains(&e.object.header().koid()))
+    {
+        true => Err(Error::InvalidArgs),
+        false => Ok(()),
+    }
+}
+
 /// Writes the message of `len` bytes from `bytes` and `count` handles
 /// from `handles` to `endpoint`, reached through `value`, and moves the
 /// handles out of the caller's table once it is written. With `id`, the
-/// message's transaction ID is replaced by it first. Wakes the caller of
-/// a call that the message replies to.
+/// message's transaction ID is replaced by it first; without it, as in
+/// `channel_write`, no handle may refer to either end of the channel.
+/// Wakes the caller of a call that the message replies to.
 fn send(
     endpoint: &Endpoint,
     value: Handle,
@@ -571,6 +586,9 @@ fn send(
         .map_err(|_| Error::NoMemory)?;
     for &h in values.iter() {
         entries.push(table.check(h, &[], rights::TRANSFER)?.clone());
+    }
+    if id.is_none() {
+        reject_own_channel(endpoint, &entries)?;
     }
     let message = Message::charged(data, entries, Some(charge));
     // A message that was not queued drops only its own references, as
