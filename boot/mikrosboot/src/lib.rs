@@ -9,6 +9,7 @@ pub mod cmdline;
 pub mod display;
 pub mod elf;
 pub mod firmware;
+pub mod info;
 pub mod load;
 pub mod memmap;
 pub mod paging;

@@ -9,7 +9,7 @@ use boot_protocol::x86_64::{
 };
 use boot_protocol::{
     BOOT_INFO_SIZE, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, PAGE_SIZE, VERSION_MAJOR,
-    VERSION_MINOR, arch, flags,
+    VERSION_MINOR, arch,
 };
 use core::arch::{asm, global_asm};
 use core::ptr::NonNull;
@@ -410,17 +410,7 @@ fn enter(p: &Prepared, fw: &FinalMap) -> Option<core::convert::Infallible> {
         map.merge();
     }
 
-    let mut info_flags = 0;
-    let framebuffer = p.framebuffer.unwrap_or_default();
-    if p.framebuffer.is_some() {
-        info_flags |= flags::FRAMEBUFFER_PRESENT;
-    }
-    if p.rng_seed.is_some() {
-        info_flags |= flags::RNG_SEED_VALID;
-    }
-    if p.boot_time.is_some() {
-        info_flags |= flags::BOOT_TIME_VALID;
-    }
+    let optional = mikrosboot::info::optional(p.framebuffer, p.rng_seed, p.boot_time);
     let entries = map.entries();
     let info = BootInfo {
         magic: MAGIC,
@@ -428,7 +418,7 @@ fn enter(p: &Prepared, fw: &FinalMap) -> Option<core::convert::Infallible> {
         version_minor: VERSION_MINOR,
         size: BOOT_INFO_SIZE,
         arch: arch::X86_64,
-        flags: info_flags,
+        flags: optional.flags,
         memory_map_phys: entries.as_ptr() as u64,
         memory_map_count: entries.len() as u64,
         memory_map_entry_size: size_of::<MemoryMapEntry>() as u64,
@@ -446,9 +436,9 @@ fn enter(p: &Prepared, fw: &FinalMap) -> Option<core::convert::Infallible> {
         cmdline_len: p.cmdline_len,
         firmware_table_phys: p.rsdp,
         uefi_system_table_phys: p.system_table,
-        framebuffer,
-        rng_seed: p.rng_seed.unwrap_or_default(),
-        boot_time: p.boot_time.and_then(|t| i64::try_from(t).ok()).unwrap_or(0),
+        framebuffer: optional.framebuffer,
+        rng_seed: optional.rng_seed,
+        boot_time: optional.boot_time,
         arch_data0: p.trampoline.unwrap_or(0),
         arch_data1: 0,
     };
