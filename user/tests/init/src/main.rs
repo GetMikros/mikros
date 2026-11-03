@@ -2428,6 +2428,194 @@ fn kill_blocked_thread(s: &Startup) -> Result {
     )
 }
 
+const PAGE_FAULT: u32 = 2;
+const ARITHMETIC: u32 = 4;
+const TERMINATE: u32 = 1;
+const DELIVER_SIGNAL: u32 = 2;
+const ALREADY_EXISTS: i64 = -26;
+
+/// The bytes of the next report on exception channel `channel` and the
+/// handle of its thread.
+fn report_bytes(channel: Handle) -> Result<([u8; 0x28], Handle)> {
+    let m = read_message(channel, 2000)?;
+    ensure("receiving a report", m.len == 0x28 && m.count == 1)?;
+    let mut bytes = [0; 0x28];
+    bytes.copy_from_slice(&m.bytes[..0x28]);
+    Ok((bytes, m.handles[0]))
+}
+
+fn act(thread: Handle, action: u32) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_resume_from_exception(thread, action) }
+}
+
+/// The exit code of `process` once it has terminated.
+fn exit_code(process: Handle) -> Result<i64> {
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )?;
+    Ok(u64_at(&info::<0x20>(process, 2)?, 0) as i64)
+}
+
+/// A read of an unmapped address is reported as a `PAGE_FAULT` at that
+/// address, and a division by zero as `ARITHMETIC` at the instruction,
+/// with the IDs of the process and the thread and the vector and error
+/// code. An undefined action is refused, `TERMINATE` ends the process with
+/// exit code -2, a thread no longer in an exception refuses actions, a
+/// second exception channel is refused while the first is open, and a
+/// killed process ends with exit code -1.
+fn exception_reports_and_actions(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 4, 0)?;
+    let (r, thread) = report_bytes(channel)?;
+    ensure("reporting a page fault", u32_at(&r, 0) == PAGE_FAULT)?;
+    ensure(
+        "naming the process and the thread",
+        u64_at(&r, 0x08) == koid(process)? && u64_at(&r, 0x10) == koid(thread)?,
+    )?;
+    ensure("giving the faulting address", u64_at(&r, 0x18) == 0x1000)?;
+    // A user read of a page that is not present: vector 14, error code 4.
+    ensure(
+        "giving the vector and error code",
+        u64_at(&r, 0x20) == 14 | 4 << 32,
+    )?;
+    ensure(
+        "refusing an undefined action",
+        act(thread, 3) == INVALID_ARGS,
+    )?;
+    check("terminating", act(thread, TERMINATE))?;
+    ensure("ending with exit code -2", exit_code(process)? == -2)?;
+    ensure(
+        "refusing a thread not in an exception",
+        act(thread, RESUME) == BAD_STATE,
+    )?;
+
+    let (process, channel) = start_debuggee(s, 5, 0)?;
+    let (r, _) = report_bytes(channel)?;
+    ensure("reporting a division error", u32_at(&r, 0) == ARITHMETIC)?;
+    ensure(
+        "giving the instruction address",
+        (0x1_0000..0x7FFF_FFFF_F000).contains(&u64_at(&r, 0x18)),
+    )?;
+    ensure("giving the vector", u64_at(&r, 0x20) == 0)?;
+    let mut second = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::exception_channel_create(process, 0, &mut second) };
+    ensure("refusing a second channel", status == ALREADY_EXISTS)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(process) })?;
+    ensure("ending with exit code -1", exit_code(process)? == -1)
+}
+
+/// A thread reports its start with its entry point, where it starts, and
+/// its end through `thread_exit` with address 0; neither report takes
+/// `DELIVER_SIGNAL`; and the process, whose last thread it was, ends with
+/// exit code 0. The threads of a killed process report no exit.
+fn thread_events(s: &Startup) -> Result {
+    let (process, channel) = start_debuggee(s, 6, DEBUG_EVENTS)?;
+    let (r, thread) = report_bytes(channel)?;
+    ensure("reporting the start", u32_at(&r, 0) == THREAD_STARTING)?;
+    let (status, regs) = general_registers(thread);
+    check("reading the registers", status)?;
+    ensure(
+        "giving the entry point",
+        u64_at(&r, 0x18) == u64_at(&regs, 16 * 8),
+    )?;
+    ensure(
+        "refusing a signal for the start",
+        act(thread, DELIVER_SIGNAL) == BAD_STATE,
+    )?;
+    resume(thread)?;
+    let (r, exiting) = report_bytes(channel)?;
+    ensure(
+        "reporting the exit at address 0",
+        u32_at(&r, 0) == THREAD_EXITING && u64_at(&r, 0x18) == 0,
+    )?;
+    ensure(
+        "refusing a signal for the exit",
+        act(exiting, DELIVER_SIGNAL) == BAD_STATE,
+    )?;
+    resume(exiting)?;
+    ensure("ending with exit code 0", exit_code(process)? == 0)?;
+
+    let (process, channel) = start_debuggee(s, 1, DEBUG_EVENTS)?;
+    let (r, thread) = report_bytes(channel)?;
+    ensure("reporting the start", u32_at(&r, 0) == THREAD_STARTING)?;
+    resume(thread)?;
+    wait_until_blocked(thread)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(process) })?;
+    ensure("ending with exit code -1", exit_code(process)? == -1)?;
+    ensure("reporting no exit", read_message(channel, 50).is_err())
+}
+
+/// A thread of a new process cannot be started on its own, a start with
+/// an entry or a stack outside the user range is refused and keeps the
+/// argument handle and the states, and a terminated process takes no new
+/// thread and no start.
+fn start_refusals(s: &Startup) -> Result {
+    let name = b"refused";
+    let len = name.len() as u64;
+    let (mut process, mut thread, mut event) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check(
+            "creating a process",
+            sys::process_create(s.budget, name.as_ptr(), len, &mut process),
+        )?;
+        check(
+            "creating a thread",
+            sys::thread_create(process, name.as_ptr(), len, &mut thread),
+        )?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    let (user, kernel) = (0x10_0000, 0xFFFF_8000_0000_0000);
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        ensure(
+            "refusing a thread of a new process",
+            sys::thread_start(thread, user, user, 0, 0) == BAD_STATE,
+        )?;
+        ensure(
+            "refusing an entry in the kernel half",
+            sys::process_start(process, thread, kernel, user, event, 0) == INVALID_ARGS,
+        )?;
+        ensure(
+            "refusing a stack in the kernel half",
+            sys::process_start(process, thread, user, kernel, event, 0) == INVALID_ARGS,
+        )?;
+    }
+    ensure("keeping the argument handle", koid(event).is_ok())?;
+    ensure(
+        "keeping the process new",
+        u32_at(&info::<0x20>(process, 2)?, 0x08) == 0,
+    )?;
+    ensure("keeping the thread new", thread_state(thread)? == 0)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(process) })?;
+    ensure(
+        "terminating the process",
+        wait(process, TERMINATED, in_time()).0 == 0,
+    )?;
+    let mut other = 0;
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        ensure(
+            "refusing a thread of a terminated process",
+            sys::thread_create(process, name.as_ptr(), len, &mut other) == BAD_STATE,
+        )?;
+        ensure(
+            "refusing to start a terminated process",
+            sys::process_start(process, thread, user, user, 0, 0) == BAD_STATE,
+        )?;
+    }
+    for h in [process, thread, event] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
 /// Killing the last thread of a process while it is stopped in an
 /// exception terminates the process.
 fn kill_stopped_thread(s: &Startup) -> Result {
@@ -4031,7 +4219,7 @@ fn user_bases_set_and_kept(_: &Startup) -> Result {
     set(1, before.1)
 }
 
-const TESTS: [(&str, Test); 60] = [
+const TESTS: [(&str, Test); 63] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
@@ -4062,6 +4250,12 @@ const TESTS: [(&str, Test); 60] = [
     ("paged_outputs", paged_outputs),
     ("access_flag_cleared_on_entry", access_flag_cleared_on_entry),
     ("kill_blocked_thread", kill_blocked_thread),
+    (
+        "exception_reports_and_actions",
+        exception_reports_and_actions,
+    ),
+    ("thread_events", thread_events),
+    ("start_refusals", start_refusals),
     ("kill_stopped_thread", kill_stopped_thread),
     ("debug_at_syscall_entry", debug_at_syscall_entry),
     ("kill_new_thread", kill_new_thread),
