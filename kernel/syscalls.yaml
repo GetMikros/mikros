@@ -979,7 +979,7 @@ syscalls:
     number: 95
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0011.R20, MIKSPEC-0015.R13, MIKSPEC-0015.R24]
+    spec: [MIKSPEC-0011.R20, MIKSPEC-0015.R13, MIKSPEC-0015.R26]
     args:
       - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
       - {name: irq, type: u32, dir: in}
