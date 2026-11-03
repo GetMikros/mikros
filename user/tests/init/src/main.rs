@@ -1994,6 +1994,10 @@ fn large_pager_operations(s: &Startup) -> Result {
 fn pager_operations(s: &Startup) -> Result {
     let size = 3 * PAGE_SIZE;
     let (pager, mem) = paged_object(s, 3, 2)?;
+    ensure(
+        "reporting dirty tracking",
+        u32_at(&info::<0x18>(mem, 4)?, 0x0C) == 2,
+    )?;
     for page in 0..3 {
         mem_read_at::<1>(mem, page * PAGE_SIZE)?;
     }

@@ -1480,7 +1480,15 @@ impl MemoryObject {
         } else {
             KIND_ANONYMOUS
         };
-        self.pages.lock().info(kind, self.seals())
+        // The pages keep only `RESIZABLE`; a paged object's paging state
+        // keeps whether it was created with `TRACK_DIRTY`.
+        let tracked = self
+            .paged
+            .as_ref()
+            .is_some_and(|p| p.state.lock().track_dirty());
+        let pages = self.pages.lock();
+        let options = pages.options() | if tracked { TRACK_DIRTY } else { 0 };
+        pages.info(kind, options, self.seals())
     }
 }
 
