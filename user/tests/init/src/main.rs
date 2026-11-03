@@ -1539,6 +1539,53 @@ fn failed_outputs(s: &Startup) -> Result {
     )
 }
 
+/// Calls that return a handle refuse an output outside the user address
+/// range, also one that wraps around the end of the address space, and
+/// a refused `handle_replace` keeps the handle it was given.
+fn outputs_outside_user_range(s: &Startup) -> Result {
+    let mem = create_memory(PAGE_SIZE)?;
+    let name = b"refused";
+    let thread = koid(s.thread)?;
+    for out in [u64::MAX - 3, 0xFFFF_8000_0000_0000, 0x7FFF_FFFF_EFFE] {
+        let out = out as *mut Handle;
+        let len = name.len() as u64;
+        // SAFETY: `name` is valid; every call refuses `out` before
+        // writing to it.
+        let statuses = unsafe {
+            [
+                ("duplicating", sys::handle_duplicate(mem, 0x8000_0000, out)),
+                ("replacing", sys::handle_replace(mem, 0x8000_0000, out)),
+                (
+                    "creating a memory object",
+                    sys::mem_create(PAGE_SIZE, 0, out),
+                ),
+                (
+                    "creating a budget",
+                    sys::budget_create(s.budget, u64::MAX, u64::MAX, out),
+                ),
+                (
+                    "creating a process",
+                    sys::process_create(s.budget, name.as_ptr(), len, out),
+                ),
+                (
+                    "creating a thread",
+                    sys::thread_create(s.process, name.as_ptr(), len, out),
+                ),
+                (
+                    "getting a thread",
+                    sys::process_get_thread(s.process, thread, out),
+                ),
+            ]
+        };
+        for (what, status) in statuses {
+            ensure(what, status == INVALID_ARGS)?;
+        }
+    }
+    mem_read_at::<1>(mem, 0)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the object", unsafe { sys::handle_close(mem) })
+}
+
 fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
     // SAFETY: the pointer and length describe `bytes`.
     check("writing", unsafe {
@@ -3051,7 +3098,7 @@ fn write_process_memory(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 47] = [
+const TESTS: [(&str, Test); 48] = [
     ("info_topics", info_topics),
     ("events_and_waits", events_and_waits),
     ("timers", timers),
@@ -3070,6 +3117,7 @@ const TESTS: [(&str, Test); 47] = [
     ("timelines", timelines),
     ("streams", streams),
     ("failed_outputs", failed_outputs),
+    ("outputs_outside_user_range", outputs_outside_user_range),
     ("clones", clones),
     ("pagers", pagers),
     ("pager_operations", pager_operations),

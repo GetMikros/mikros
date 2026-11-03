@@ -371,9 +371,10 @@ impl<T: Plain> UserOut<T> {
         UserOut(addr, PhantomData)
     }
 
-    /// The output range of `len` values at the address, which must fit.
+    /// The output range of `len` values at the address. A length that
+    /// does not fit in a `u64` saturates, so that the range never fits.
     pub fn range(&self, len: u64) -> (u64, u64) {
-        (self.0, len * size_of::<T>() as u64)
+        (self.0, len.saturating_mul(size_of::<T>() as u64))
     }
 
     /// Whether the address is zero.

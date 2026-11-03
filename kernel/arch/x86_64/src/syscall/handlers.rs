@@ -29,10 +29,15 @@ use kernel_core::regions::{MapOptions, PERM_WRITE};
 use kernel_core::signal::{self as sig, ACTION_SIZE, Action, Info, UNBLOCKABLE};
 use kernel_core::status::Error;
 
-/// Prepares the output `ranges` of `process`, which have been checked to
-/// fit, by obtaining writable backing for every page, waiting for page
-/// requests as needed. No lock may be held.
+/// Prepares the output `ranges` of `process` by obtaining writable
+/// backing for every page, waiting for page requests as needed. Fails
+/// with `InvalidArgs`, preparing nothing, when a range that is not empty
+/// does not lie in the user address range. No lock may be held.
 fn prepare(process: &Arc<Process>, ranges: &[(u64, u64)]) -> Result<Outputs<Held>, Error> {
+    let fits = |&(addr, len): &(u64, u64)| len == 0 || crate::aspace::in_user_range(addr, len);
+    if !ranges.iter().all(fits) {
+        return Err(Error::InvalidArgs);
+    }
     let aspace = process.aspace();
     let mut work = Work::new(crate::sched::preempt_point);
     Outputs::prepare(ranges, Some(process.budget()), &mut work, |page| {
