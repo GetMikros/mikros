@@ -1292,12 +1292,19 @@ fn futexes(s: &Startup) -> Result {
         "waking the oldest",
         FUTEX_ORDER[0].load(Ordering::Acquire) == 1,
     )?;
-    // The second mapping reaches the same futex.
-    ensure("waking the rest", futex_wake(second + 64, u32::MAX)? == 2)?;
+    // The second mapping reaches the same futex. Waiters are woken one
+    // at a time, as threads woken together may run in either order.
+    ensure("waking the next", futex_wake(second + 64, 1)? == 1)?;
     sleep_ms(5);
     ensure(
         "waking in order",
-        FUTEX_ORDER[1].load(Ordering::Acquire) == 2 && FUTEX_ORDER[2].load(Ordering::Acquire) == 3,
+        FUTEX_ORDER[1].load(Ordering::Acquire) == 2,
+    )?;
+    ensure("waking the rest", futex_wake(word, u32::MAX)? == 1)?;
+    sleep_ms(5);
+    ensure(
+        "waking the last",
+        FUTEX_ORDER[2].load(Ordering::Acquire) == 3,
     )?;
     ensure("waking nobody", futex_wake(word, 1)? == 0)
 }
