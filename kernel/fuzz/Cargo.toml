@@ -162,3 +162,10 @@ path = "fuzz_targets/ranges.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "signals"
+path = "fuzz_targets/signals.rs"
+test = false
+doc = false
+bench = false
