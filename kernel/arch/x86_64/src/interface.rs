@@ -139,9 +139,27 @@ impl Arch for X86 {
         unsafe { (*thread.cast::<ArchThread>()).switch_out(user) };
     }
 
-    unsafe fn thread_switch_in(thread: *mut (), user_stack_top: u64) {
+    unsafe fn thread_switch_in(thread: *mut (), stack_top: u64, user: bool) {
         // SAFETY: as for `thread_saved_context`.
-        unsafe { (*thread.cast::<ArchThread>()).switch_in(user_stack_top) };
+        unsafe { (*thread.cast::<ArchThread>()).switch_in(stack_top, user) };
+    }
+
+    fn io_ports_switch(ranges: &[(u64, u64)]) {
+        let mut open = percpu::this().open_ports.lock();
+        if *open == ranges {
+            return;
+        }
+        for &(start, end) in open.iter() {
+            crate::gdt::set_ports(start, end, false);
+        }
+        open.clear();
+        // `enable_ioports` made room for every range when it was granted,
+        // so pushing them does not allocate.
+        debug_assert!(open.capacity() >= ranges.len());
+        for &(start, end) in ranges {
+            crate::gdt::set_ports(start, end, true);
+            open.push((start, end));
+        }
     }
 
     fn user_thread_entry() -> u64 {

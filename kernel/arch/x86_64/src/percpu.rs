@@ -41,9 +41,6 @@ pub struct PerCpu {
     /// The top of the kernel stack of the thread that last ran, user or
     /// kernel, for backtraces.
     pub thread_stack: AtomicU64,
-    /// Set by the timer interrupt when the running thread's slice has
-    /// ended.
-    pub reschedule: AtomicBool,
     /// Whether the debug registers hold the breakpoints of a user thread.
     pub breakpoints_loaded: AtomicBool,
     /// The I/O port ranges the bitmap of `tss` allows now. Its capacity,
@@ -90,7 +87,6 @@ pub(crate) static BOOT_CPU: PerCpu = PerCpu {
     sched: SpinLock::new(CpuSched::new()),
     pcids: SpinLock::new(Pcids::new()),
     thread_stack: AtomicU64::new(0),
-    reschedule: AtomicBool::new(false),
     breakpoints_loaded: AtomicBool::new(false),
     open_ports: SpinLock::new(Vec::new()),
     tss: UnsafeCell::new(Tss::new()),

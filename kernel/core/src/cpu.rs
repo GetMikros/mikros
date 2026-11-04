@@ -2,7 +2,7 @@
 //! interface's per-processor pointer.
 
 use crate::arch;
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicBool, AtomicUsize};
 
 /// The core's state of one processor.
 pub struct Cpu {
@@ -13,6 +13,9 @@ pub struct Cpu {
     /// The objects destroyed on the processor since its last reschedule
     /// check.
     pub(crate) destroyed: AtomicUsize,
+    /// Set when the running thread's slice has ended or a thread was
+    /// queued that should run first.
+    pub reschedule: AtomicBool,
 }
 
 impl Cpu {
@@ -20,6 +23,7 @@ impl Cpu {
         Cpu {
             locks_held: AtomicUsize::new(0),
             destroyed: AtomicUsize::new(0),
+            reschedule: AtomicBool::new(false),
         }
     }
 }

@@ -116,14 +116,15 @@ impl ArchThread {
     }
 
     /// Loads the extended state and breakpoints of the thread about to
-    /// run, and for a user thread, whose kernel stack ends at `user_top`,
-    /// the stack for entries from user mode and the FS and GS bases. A
-    /// kernel thread has `user_top` 0.
-    pub fn switch_in(&self, user_top: u64) {
+    /// run, whose kernel stack ends at `top`, and records the stack for
+    /// backtraces. For a user thread also loads the stack for entries from
+    /// user mode and the FS and GS bases.
+    pub fn switch_in(&self, top: u64, user: bool) {
+        percpu::this().thread_stack.store(top, Ordering::Relaxed);
         self.extended.restore();
         self.load_breakpoints();
-        if user_top != 0 {
-            self.switch_in_user(user_top);
+        if user {
+            self.switch_in_user(top);
         }
     }
 

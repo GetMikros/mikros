@@ -67,5 +67,5 @@ fn frees_thread_data() {
     assert!(!data.saved_context().is_null());
     data.set_user_start(1, 2, 3, 4);
     data.switch_out(true);
-    data.switch_in(0);
+    data.switch_in(0x1000, false);
 }

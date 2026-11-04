@@ -184,7 +184,9 @@ impl Arch for Mock {
 
     unsafe fn thread_switch_out(_thread: *mut (), _user: bool) {}
 
-    unsafe fn thread_switch_in(_thread: *mut (), _user_stack_top: u64) {}
+    unsafe fn thread_switch_in(_thread: *mut (), _stack_top: u64, _user: bool) {}
+
+    fn io_ports_switch(_ranges: &[(u64, u64)]) {}
 
     fn user_thread_entry() -> u64 {
         0

@@ -136,23 +136,8 @@ const IOPORT_COST: u64 = 2 * (size_of::<(u64, u64)>() + size_of::<Held>()) as u6
 /// of `process`, or none for a kernel thread. Called as a thread is
 /// switched in.
 pub fn switch_ports(process: Option<&Process>) {
-    let mut open = crate::percpu::this().open_ports.lock();
     let ports = process.map(|p| p.ioports.lock());
-    let wanted: &[(u64, u64)] = ports.as_deref().map_or(&[], |p| p.ranges.as_slice());
-    if *open == wanted {
-        return;
-    }
-    for &(start, end) in open.iter() {
-        crate::gdt::set_ports(start, end, false);
-    }
-    open.clear();
-    // `enable_ioports` made room for every range when it was granted, so
-    // pushing them does not allocate.
-    debug_assert!(open.capacity() >= wanted.len());
-    for &(start, end) in wanted {
-        crate::gdt::set_ports(start, end, true);
-        open.push((start, end));
-    }
+    kernel_core::arch::io_ports_switch(ports.as_deref().map_or(&[], |p| p.ranges.as_slice()));
 }
 
 /// The endpoint of a process's exception channel that the kernel keeps.

@@ -328,18 +328,17 @@ impl Thread {
     /// I/O ports and address space, and the architecture's state.
     fn switch_in(&self) {
         let top = self.stack_top.load(Ordering::Relaxed);
-        percpu::this().thread_stack.store(top, Ordering::Relaxed);
         crate::process::switch_ports(self.process.as_deref());
         #[cfg(feature = "fuzz")]
         crate::coverage::switch_in(self);
         #[cfg(feature = "fuzz")]
         crate::fuzz::switch_in(Some((self.header.koid(), &self.alloc_failures)));
         let Some(process) = &self.process else {
-            self.arch.switch_in(0);
+            self.arch.switch_in(top, false);
             return;
         };
         process.aspace().activate();
-        self.arch.switch_in(top);
+        self.arch.switch_in(top, true);
     }
 
     /// The nanoseconds the thread has run, including the slice it is
@@ -463,7 +462,7 @@ fn this_cpu() -> &'static SpinLock<CpuSched> {
 /// timer interrupt when its slice has ended, and when a thread is queued
 /// that the queue would pick before it.
 fn reschedule() -> &'static AtomicBool {
-    &percpu::this().reschedule
+    &kernel_core::cpu::this().reschedule
 }
 
 /// Creates a kernel thread that runs `entry(arg)` and queues it.

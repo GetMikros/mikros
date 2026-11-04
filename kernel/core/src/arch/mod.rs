@@ -217,15 +217,20 @@ interface! {
     /// about to be switched away from.
     [unsafe] fn thread_switch_out(thread: *mut (), user: bool);
 
-    /// Loads the processor state of the thread about to run. For a user
-    /// thread, `user_stack_top` is the top of its kernel stack, which
-    /// entries from user mode use; it is 0 for a kernel thread.
+    /// Loads the processor state of the thread about to run, whose kernel
+    /// stack ends at `stack_top`, including its user state if `user`.
     ///
     /// # Safety
     ///
     /// As for `thread_saved_context`; the thread must be about to be
     /// switched to.
-    [unsafe] fn thread_switch_in(thread: *mut (), user_stack_top: u64);
+    [unsafe] fn thread_switch_in(thread: *mut (), stack_top: u64, user: bool);
+
+    /// Makes this processor allow user mode exactly the I/O port ranges
+    /// `ranges`, each a start and an end past it, as a thread of a process
+    /// granted them is switched in. The architecture keeps room for them
+    /// from `io_ports_reserve`, so this does not allocate.
+    [] fn io_ports_switch(ranges: &[(u64, u64)]);
 
     /// The address of the function a new user thread starts with on its
     /// kernel stack, for `context_prepare`. It enters user mode where
@@ -311,10 +316,11 @@ impl ThreadData {
         unsafe { thread_switch_out(self.as_ptr(), user) };
     }
 
-    /// Loads the state of the thread being switched to.
-    pub fn switch_in(&self, user_stack_top: u64) {
+    /// Loads the state of the thread being switched to, whose kernel stack
+    /// ends at `stack_top`.
+    pub fn switch_in(&self, stack_top: u64, user: bool) {
         // SAFETY: as for `saved_context`.
-        unsafe { thread_switch_in(self.as_ptr(), user_stack_top) };
+        unsafe { thread_switch_in(self.as_ptr(), stack_top, user) };
     }
 }
 
