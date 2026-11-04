@@ -6018,6 +6018,85 @@ fn signal_reaches_other_processor(s: &Startup) -> Result {
     check("allowing every processor", set(s.thread, &[0xFF; 32]))
 }
 
+/// What the waits of `waiter_with_index` returned, by index.
+static WAIT_STATUSES: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
+
+/// Waits for `USER0` on `event`, records the status at `index` and exits.
+extern "sysv64" fn waiter_with_index(event: u64, index: u64) -> ! {
+    let (status, _) = wait(event as Handle, USER0, in_time());
+    WAIT_STATUSES[index as usize].store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A signal sent to the process while two of its threads wait runs its
+/// handler on one of them, whose wait ends with `ERR_INTERRUPTED`; the
+/// other thread goes on waiting until the event is signalled.
+fn process_signal_interrupts_one_wait(s: &Startup) -> Result {
+    let usr1 = 1u64 << (USR1 - 1);
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking USR1 here", unsafe {
+        sys::signal_set_mask(0, usr1, &mut mask)
+    })?;
+    let old = catch_usr1(0)?;
+    let mut event = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let mut threads = [0; 2];
+    for (index, (thread, status)) in threads.iter_mut().zip(&WAIT_STATUSES).enumerate() {
+        status.store(u64::MAX, Ordering::Release);
+        *thread = spawn2(s, waiter_with_index, u64::from(event), index as u64)?;
+    }
+    for &thread in &threads {
+        wait_until_blocked(thread)?;
+    }
+    // SAFETY: the call takes no pointers.
+    check("signalling the process", unsafe {
+        sys::process_signal(s.process, USR1, 7)
+    })?;
+    let deadline = in_time();
+    while HANDLED.load(Ordering::Acquire) == 0 {
+        ensure("running the handler", now() < deadline)?;
+        sleep_ms(1);
+    }
+    sleep_ms(20);
+    let statuses = || {
+        WAIT_STATUSES
+            .each_ref()
+            .map(|s| s.load(Ordering::Acquire) as i64)
+    };
+    let ended = statuses();
+    ensure(
+        "ending one wait",
+        ended.contains(&INTERRUPTED) && ended.contains(&(u64::MAX as i64)),
+    )?;
+    signal(event, 0, USER0)?;
+    for &thread in &threads {
+        ensure(
+            "ending the waiter",
+            wait(thread, TERMINATED, in_time()).0 == 0,
+        )?;
+    }
+    let ended = statuses();
+    ensure(
+        "completing the other wait",
+        ended.contains(&INTERRUPTED) && ended.contains(&0),
+    )?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    restore_usr1(&old)?;
+    // SAFETY: the pointer may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, mask, core::ptr::null_mut())
+    })
+}
+
 /// Set by `signal_sleeper` with what its sleep returned and when.
 static SLEEP_RESULT: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
@@ -6770,7 +6849,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 106] = [
+const TESTS: [(&str, Test); 107] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6783,6 +6862,10 @@ const TESTS: [(&str, Test); 106] = [
     (
         "signal_reaches_other_processor",
         signal_reaches_other_processor,
+    ),
+    (
+        "process_signal_interrupts_one_wait",
+        process_signal_interrupts_one_wait,
     ),
     ("ports", ports),
     ("port_registration_limit", port_registration_limit),

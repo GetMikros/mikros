@@ -89,8 +89,6 @@ pub struct Thread {
     signals: SpinLock<crate::signal::ThreadSignals>,
     /// The context address `signal_return` was called with, or 0.
     sigreturn: AtomicU64,
-    /// Set while the thread waits in `signal_wait`.
-    waiting_for_signals: AtomicBool,
     /// The number of the system call that last ended with
     /// `ERR_INTERRUPTED`, until signals are next delivered, or 0.
     interrupted: AtomicU64,
@@ -149,7 +147,6 @@ impl Thread {
                 crate::signal::ThreadSignals::default(),
             ),
             sigreturn: AtomicU64::new(0),
-            waiting_for_signals: AtomicBool::new(false),
             interrupted: AtomicU64::new(0),
         })
     }
@@ -238,11 +235,6 @@ impl Thread {
     /// The system call that ended with `ERR_INTERRUPTED`, clearing it.
     pub fn take_interrupted(&self) -> Option<u64> {
         Some(self.interrupted.swap(0, Ordering::AcqRel)).filter(|&n| n != 0)
-    }
-
-    /// Whether the thread waits in `signal_wait`.
-    pub fn waits_for_signals(&self) -> bool {
-        self.waiting_for_signals.load(Ordering::Acquire)
     }
 
     pub fn signals(&self) -> &SpinLock<crate::signal::ThreadSignals> {
@@ -950,17 +942,15 @@ pub fn sleep_until(deadline: i64) -> Result<(), Error> {
     Ok(())
 }
 
-/// Blocks the running thread in `signal_wait` until `deadline` or until
-/// `wake_waiter` wakes it. Fails with `Interrupted` at once, or once
+/// Blocks the running thread, which waits for signals, until `deadline`
+/// or until `wake_sleeper` wakes it. Fails with `Interrupted` at once, or once
 /// woken, while the thread is to end, so that it leaves the wait and
 /// reports its exit on the way back to user mode.
 pub fn wait_for_signals(thread: &Thread, deadline: i64) -> Result<(), Error> {
     if thread.exit_requested() {
         return Err(Error::Interrupted);
     }
-    thread.waiting_for_signals.store(true, Ordering::Release);
     let result = sleep_until(deadline);
-    thread.waiting_for_signals.store(false, Ordering::Release);
     match thread.exit_requested() {
         true => Err(Error::Interrupted),
         false => result,

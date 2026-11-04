@@ -278,6 +278,51 @@ impl Pending {
         entry.map(|entry| entry.info)
     }
 
+    /// Moves the oldest pending instance of `signo` to `to`, keeping its
+    /// information and its charge. A standard signal already pending in
+    /// `to` is not queued there again. Returns whether `signo` is
+    /// pending in `to` now; when memory runs out, nothing moves.
+    pub fn move_one(&mut self, signo: u32, to: &mut Pending) -> bool {
+        if !valid(signo) {
+            return false;
+        }
+        if signo < SIG_RT_MIN {
+            let index = signo as usize - 1;
+            match self.standard[index].take() {
+                Some(info) => {
+                    to.standard[index].get_or_insert(info);
+                    return true;
+                }
+                None => return to.standard[index].is_some(),
+            }
+        }
+        let Some(queue) = self.realtime.get_mut(&signo) else {
+            return to.realtime.contains_key(&signo);
+        };
+        let target = match to.realtime.get_mut(&signo) {
+            Some(target) => target,
+            None => {
+                let Ok(_claim) = nodes::claim_insert() else {
+                    return false;
+                };
+                to.realtime.insert(signo, VecDeque::new());
+                to.realtime.get_mut(&signo).expect("just inserted")
+            }
+        };
+        if target.try_reserve(1).is_err() {
+            if target.is_empty() {
+                to.realtime.remove(&signo);
+            }
+            return false;
+        }
+        let entry = queue.pop_front().expect("no queue is empty");
+        if queue.is_empty() {
+            self.realtime.remove(&signo);
+        }
+        target.push_back(entry);
+        true
+    }
+
     /// Discards every pending signal in `signals`.
     pub fn discard(&mut self, signals: u64, queued: &mut usize) {
         while self.take(signals, queued).is_some() {}
@@ -375,6 +420,28 @@ mod tests {
         assert_eq!(p.take(!0, &mut queued), Some(info(33, 1)));
         assert_eq!(p.take(!0, &mut queued), Some(info(40, 2)));
         assert_eq!((p.take(!0, &mut queued), queued), (None, 0));
+    }
+
+    #[test]
+    fn moves_one_signal_to_a_thread() {
+        let (mut process, mut thread) = (Pending::default(), Pending::default());
+        let mut queued = 0;
+        process.add(info(SEGV, 1), &mut queued, None).unwrap();
+        process.add(info(40, 1), &mut queued, None).unwrap();
+        process.add(info(40, 2), &mut queued, None).unwrap();
+        thread.add(info(40, 0), &mut queued, None).unwrap();
+        assert!(process.move_one(SEGV, &mut thread));
+        assert!(process.move_one(40, &mut thread));
+        assert_eq!(process.mask(), bit(40));
+        // Nothing to move, but pending in the thread already.
+        assert!(process.move_one(SEGV, &mut thread));
+        assert!(!process.move_one(33, &mut thread));
+        assert_eq!(queued, 3);
+        assert_eq!(thread.take(!0, &mut queued), Some(info(SEGV, 1)));
+        assert_eq!(thread.take(!0, &mut queued), Some(info(40, 0)));
+        assert_eq!(thread.take(!0, &mut queued), Some(info(40, 1)));
+        assert_eq!(process.take(!0, &mut queued), Some(info(40, 2)));
+        assert_eq!(queued, 0);
     }
 
     #[test]

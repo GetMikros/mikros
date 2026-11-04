@@ -87,14 +87,13 @@ pub fn send(
     let targets = threads
         .iter()
         .filter(|t| thread.is_none_or(|target| Arc::ptr_eq(t, target)));
+    // Waking a thread that has not slept yet leaves it a wake that its
+    // next sleep consumes, so a wait that checked for signals just before
+    // this send does not sleep through it; a thread running on another
+    // processor is interrupted and takes the signal on its way back to
+    // user mode.
     for target in targets {
-        if target.waits_for_signals() {
-            sched::wake_sleeper(target);
-        } else {
-            // A thread running on another processor takes the signal on
-            // its way back to user mode.
-            sched::notify(target);
-        }
+        sched::wake_sleeper(target);
     }
     if info.signo == CONT {
         process.continue_threads();
@@ -110,25 +109,41 @@ pub fn pending_mask(process: &Process, thread: &Thread) -> u64 {
     state.pending.mask() | thread.signals().lock().pending.mask()
 }
 
-/// Waits until a signal in `mask` is pending for the running thread or
-/// its process, and takes it. Fails with `Interrupted` when a signal
-/// outside `mask` that is not ignored becomes deliverable first, and with
-/// `TimedOut` when `deadline` passes.
-/// Whether a signal pending for the thread with `own` signal state or its
-/// process is unmasked and not ignored, so that a blocking call must end.
-fn interrupting(actions: &[Action], pending: &Pending, own: &ThreadSignals) -> bool {
+/// The lowest signal pending for the thread with `own` signal state or
+/// its process that it does not block and for which `ends` holds.
+fn first_deliverable(
+    pending: &Pending,
+    own: &ThreadSignals,
+    ends: impl Fn(u32) -> bool,
+) -> Option<u32> {
     let deliverable = (own.pending.mask() | pending.mask()) & !own.mask;
     (1..=SIG_MAX)
         .filter(|&s| deliverable & bit(s) != 0)
-        .any(|s| !actions[s as usize - 1].ignores(s))
+        .find(|&s| ends(s))
+}
+
+/// Whether the thread with `own` signal state ends its call for `signo`,
+/// found by `first_deliverable`. A signal pending for the process moves
+/// to the thread first, so that no other thread ends a call for it too.
+fn claim(pending: &mut Pending, own: &mut ThreadSignals, signo: u32) -> bool {
+    own.pending.mask() & bit(signo) != 0 || pending.move_one(signo, &mut own.pending)
 }
 
 /// Whether a signal that would run an action is pending for `thread` of
 /// `process`, so that a blocking call must end with `Interrupted`.
 pub fn interrupted(thread: &Thread, process: &Process) -> bool {
-    let state = process.signals().lock();
-    let own = thread.signals().lock();
-    interrupting(&state.actions, &state.pending, &own)
+    let mut state = process.signals().lock();
+    interrupts(&mut state, &mut thread.signals().lock())
+}
+
+/// `interrupted` with the signal state of the process locked as `state`
+/// and that of the thread as `own`.
+fn interrupts(state: &mut ProcessSignals, own: &mut ThreadSignals) -> bool {
+    let ProcessSignals {
+        actions, pending, ..
+    } = state;
+    let first = first_deliverable(pending, own, |s| !actions[s as usize - 1].ignores(s));
+    first.is_some_and(|s| claim(pending, own, s))
 }
 
 /// Whether a signal pending for `thread` of `process` ends a
@@ -136,19 +151,21 @@ pub fn interrupted(thread: &Thread, process: &Process) -> bool {
 /// handler without `RESTART`. A handler with `RESTART` lets the call go
 /// on, and runs once it returns.
 pub fn call_interrupted(thread: &Thread, process: &Process) -> bool {
-    let state = process.signals().lock();
-    let own = thread.signals().lock();
-    let deliverable = (own.pending.mask() | state.pending.mask()) & !own.mask;
-    (1..=SIG_MAX)
-        .filter(|&s| deliverable & bit(s) != 0)
-        .any(|s| {
-            let action = &state.actions[s as usize - 1];
-            match action.handler {
-                HANDLER_IGNORE => false,
-                HANDLER_DEFAULT => default_action(s) == DefaultAction::Terminate,
-                _ => action.flags & RESTART == 0,
-            }
-        })
+    let mut state = process.signals().lock();
+    let mut own = thread.signals().lock();
+    let ProcessSignals {
+        actions, pending, ..
+    } = &mut *state;
+    let ends = |s: u32| {
+        let action = &actions[s as usize - 1];
+        match action.handler {
+            HANDLER_IGNORE => false,
+            HANDLER_DEFAULT => default_action(s) == DefaultAction::Terminate,
+            _ => action.flags & RESTART == 0,
+        }
+    };
+    let first = first_deliverable(pending, &own, ends);
+    first.is_some_and(|s| claim(pending, &mut own, s))
 }
 
 /// Blocks the running thread until `deadline`, or fails with
@@ -176,12 +193,12 @@ pub fn wait_pending(mask: u64, deadline: i64) -> Result<(), Error> {
     let mask = mask & !UNBLOCKABLE;
     loop {
         {
-            let state = process.signals().lock();
-            let own = thread.signals().lock();
+            let mut state = process.signals().lock();
+            let mut own = thread.signals().lock();
             if (own.pending.mask() | state.pending.mask()) & mask != 0 {
                 return Ok(());
             }
-            if interrupting(&state.actions, &state.pending, &own) {
+            if interrupts(&mut state, &mut own) {
                 return Err(Error::Interrupted);
             }
         }
