@@ -1,4 +1,5 @@
-//! What the generated bindings share: message buffers and handles.
+//! What the generated bindings share: message buffers, handles and
+//! channels.
 //!
 //! The kernel module, named when the bindings are generated, provides:
 //!
@@ -21,6 +22,7 @@
 
 use ::alloc::string::String;
 use ::alloc::vec::Vec;
+use core::cell::Cell;
 use core::marker::PhantomData;
 
 pub use KERNEL as kernel;
@@ -418,5 +420,86 @@ impl<'a> Decoder<'a> {
             return Err(Error::Invalid);
         }
         Ok(())
+    }
+}
+
+/// A channel that a client or server owns, which it closes after a
+/// protocol error.
+pub struct Channel(Cell<Option<RawHandle>>);
+
+impl Channel {
+    pub fn new(handle: OwnedHandle) -> Channel {
+        Channel(Cell::new(Some(handle.into_raw())))
+    }
+
+    /// The channel's handle, unless it has been closed.
+    pub fn raw(&self) -> Result<RawHandle, Error> {
+        self.0.get().ok_or(Error::Closed)
+    }
+
+    pub fn close(&self) {
+        if let Some(h) = self.0.take() {
+            kernel::handle_close(h);
+        }
+    }
+
+    /// Gives up the channel's handle, unless it has been closed.
+    pub fn into_handle(self) -> Option<OwnedHandle> {
+        let raw = self.0.take();
+        // SAFETY: the channel owned the handle.
+        raw.map(|h| unsafe { OwnedHandle::from_raw(h) })
+    }
+
+    /// `result`, after closing the channel if it is a protocol error.
+    pub fn checked<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
+        if matches!(result, Err(Error::Invalid)) {
+            self.close();
+        }
+        result
+    }
+
+    fn status(status: i32) -> Error {
+        if status == kernel::PEER_CLOSED {
+            Error::Closed
+        } else {
+            Error::Status(status)
+        }
+    }
+
+    pub fn send(&self, message: Encoder) -> Result<(), Error> {
+        let raw = self.raw()?;
+        let (bytes, handles) = message.finish();
+        kernel::channel_write(raw, &bytes, &handles).map_err(Channel::status)
+    }
+
+    pub fn call(&self, message: Encoder, deadline: i64) -> Result<(Vec<u8>, Vec<RawHandle>), Error> {
+        let raw = self.raw()?;
+        let (bytes, handles) = message.finish();
+        kernel::channel_call(raw, &bytes, &handles, deadline).map_err(Channel::status)
+    }
+
+    /// The next message, if one is queued.
+    pub fn try_receive(&self) -> Result<Option<(Vec<u8>, Vec<RawHandle>)>, Error> {
+        match kernel::channel_read(self.raw()?) {
+            Ok(message) => Ok(Some(message)),
+            Err(s) if s == kernel::SHOULD_WAIT => Ok(None),
+            Err(s) => Err(Channel::status(s)),
+        }
+    }
+
+    /// The next message, waiting for one until `deadline`.
+    pub fn receive(&self, deadline: i64) -> Result<(Vec<u8>, Vec<RawHandle>), Error> {
+        loop {
+            if let Some(message) = self.try_receive()? {
+                return Ok(message);
+            }
+            kernel::wait_readable(self.raw()?, deadline).map_err(Channel::status)?;
+        }
+    }
+}
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        self.close();
     }
 }

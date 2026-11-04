@@ -1,6 +1,6 @@
 //! The `midlc` command: checks MIDL files and writes what they describe.
 //!
-//! Usage: `midlc [--version N] [--json FILE] FILE.midl...`
+//! Usage: `midlc [--version N] [--json FILE] [--rust FILE --kernel PATH] FILE.midl...`
 
 use std::process::ExitCode;
 
@@ -16,6 +16,7 @@ fn main() -> ExitCode {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let (mut version, mut json, mut inputs) = (None, None, Vec::new());
+    let (mut rust, mut kernel) = (None, None);
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
@@ -25,12 +26,20 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 version = Some(v.parse().map_err(|_| format!("invalid version `{v}`"))?);
             }
             "--json" => json = Some(value("--json")?),
+            "--rust" => rust = Some(value("--rust")?),
+            "--kernel" => kernel = Some(value("--kernel")?),
             _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
             _ => inputs.push(arg),
         }
     }
+    if rust.is_some() != kernel.is_some() {
+        return Err("--rust and --kernel go together".into());
+    }
     if inputs.is_empty() {
-        return Err("usage: midlc [--version N] [--json FILE] FILE.midl...".into());
+        return Err(
+            "usage: midlc [--version N] [--json FILE] [--rust FILE --kernel PATH] FILE.midl..."
+                .into(),
+        );
     }
     let texts = inputs
         .iter()
@@ -46,6 +55,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
         let text = serde_json::to_string_pretty(&midlc::json::describe(&model))
             .expect("JSON values print");
         std::fs::write(&path, text + "\n").map_err(|e| format!("writing {path}: {e}"))?;
+    }
+    if let (Some(path), Some(kernel)) = (rust, kernel) {
+        let text = midlc::rust::generate(&model, &midlc::rust::Options { kernel });
+        std::fs::write(&path, text).map_err(|e| format!("writing {path}: {e}"))?;
     }
     Ok(())
 }

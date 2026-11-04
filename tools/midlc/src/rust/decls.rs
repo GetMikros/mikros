@@ -36,7 +36,7 @@ impl Gen<'_> {
                 members,
             } => self.union(name, *strictness, members, out),
             DeclKind::Table(members) => self.table(name, members, out),
-            DeclKind::Protocol(_) => {}
+            DeclKind::Protocol(methods) => self.protocol(name, methods, out),
         }
     }
 

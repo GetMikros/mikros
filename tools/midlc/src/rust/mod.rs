@@ -12,6 +12,7 @@ use std::fmt::Write;
 
 mod codec;
 mod decls;
+mod protocol;
 
 /// What generated bindings depend on.
 pub struct Options {
@@ -154,6 +155,22 @@ pub(crate) fn camel(name: &str) -> String {
             first.into_iter().chain(rest).collect::<String>()
         })
         .collect()
+}
+
+/// `Spawn` as `spawn`, and `GetInfo` as `get_info`.
+pub(crate) fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// `doc` as `///` lines indented by `indent`.
