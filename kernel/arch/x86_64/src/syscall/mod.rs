@@ -1,9 +1,9 @@
 //! The system call entry and return path, and the glue between the
 //! dispatch generated from `kernel/syscalls.yaml` and the handlers.
 
-use crate::aspace::{USER_END, USER_START};
 use crate::cpu::{RFLAGS_AC, write_msr};
 use crate::gdt::{KERNEL_CODE, USER_CODE, USER_DATA};
+use crate::page_tables::{USER_END, USER_START};
 use crate::percpu::{KERNEL_STACK_OFFSET, USER_RSP_OFFSET};
 use crate::thread_arch::ThreadX86;
 use alloc::sync::Arc;

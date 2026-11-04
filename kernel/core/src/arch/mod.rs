@@ -273,6 +273,10 @@ interface! {
     /// `area` must hold initial or saved extended state.
     [unsafe] fn extended_state_restore(area: *const u8);
 
+    /// The user address range: its lowest address and the address past
+    /// its end, both multiples of the page size.
+    [] fn user_range() -> (u64, u64);
+
     /// Makes the page tables of a new user address space, which maps
     /// nothing in the user range and shares the kernel's mappings, taking
     /// table frames from `alloc`. Returns the architecture's state of

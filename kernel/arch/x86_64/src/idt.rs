@@ -434,6 +434,24 @@ extern "sysv64" fn interrupt(frame: &mut Frame) -> bool {
     user || vector == PAGE_FAULT
 }
 
+const FAULT_WRITE: u64 = 1 << 1;
+const FAULT_RESERVED: u64 = 1 << 3;
+const FAULT_FETCH: u64 = 1 << 4;
+
+/// Resolves the page fault at `address` with its registers in `frame`:
+/// one raised by user code, or by the user copy routine, that a region
+/// allows.
+#[cfg(target_os = "none")]
+fn resolve_fault(frame: &Frame, address: u64) -> crate::aspace::Fault {
+    if frame.error & FAULT_RESERVED != 0 || (frame.cs & 3 == 0 && !crate::usercopy::in_copy(frame))
+    {
+        return crate::aspace::Fault::Denied;
+    }
+    let write = frame.error & FAULT_WRITE != 0;
+    let fetch = frame.error & FAULT_FETCH != 0;
+    crate::aspace::resolve_fault(address, write, fetch)
+}
+
 /// Does the work that `interrupt` left to the thread it interrupted,
 /// once the handling has ended. A page fault on a user page that a region
 /// allows is resolved, waiting for the page if need be. Other exceptions
@@ -450,7 +468,7 @@ extern "sysv64" fn after_interrupt(frame: &mut Frame) {
     match vector {
         PAGE_FAULT => {
             let address = crate::percpu::this().fault_address.load(Ordering::Relaxed);
-            match crate::aspace::resolve_fault(frame, address) {
+            match resolve_fault(frame, address) {
                 Fault::Resolved => {}
                 _ if !user && crate::usercopy::recover(frame) => {}
                 _ if !user => crate::panic::exception(frame),

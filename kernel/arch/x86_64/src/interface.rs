@@ -199,6 +199,10 @@ impl Arch for X86 {
         unsafe { context::restore_area(area) };
     }
 
+    fn user_range() -> (u64, u64) {
+        (crate::page_tables::USER_START, crate::page_tables::USER_END)
+    }
+
     fn page_table_new(
         alloc: &mut dyn FnMut() -> Option<u64>,
     ) -> Result<*mut (), kernel_core::arch::PageError> {

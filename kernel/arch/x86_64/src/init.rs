@@ -1,6 +1,5 @@
 //! Starting the initial process from the boot image.
 
-use crate::aspace::{USER_END, USER_START};
 use crate::memory_object::MemoryObject;
 use crate::paging::Policy;
 use crate::process::Process;
@@ -140,8 +139,11 @@ fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
         )
     };
     let file = ustar::find(image, b"init").unwrap_or_else(|e| panic!("{e}"));
-    let elf =
-        elf::parse(file, EM_X86_64, USER_START..USER_END).unwrap_or_else(|e| panic!("init: {e}"));
+    let elf = elf::parse(file, EM_X86_64, {
+        let (start, end) = crate::aspace::user_range();
+        start..end
+    })
+    .unwrap_or_else(|e| panic!("init: {e}"));
 
     let name = || Name::new(b"init").expect("a valid name");
     let process =

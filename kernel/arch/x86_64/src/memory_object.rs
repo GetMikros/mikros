@@ -1,6 +1,6 @@
 //! Anonymous memory objects: their frames and the copies to and from them.
 
-use crate::aspace::{self, Access, AddressSpace, Fault, USER_END, USER_START};
+use crate::aspace::{self, Access, AddressSpace, Fault};
 use crate::memory::FRAMES;
 use crate::paging::Policy;
 use crate::port::Port;
@@ -24,7 +24,10 @@ use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
 /// The largest memory object: the size of the user address range.
-const MAX_SIZE: u64 = USER_END - USER_START;
+fn max_size() -> u64 {
+    let (start, end) = aspace::user_range();
+    end - start
+}
 
 /// The most bytes copied while the pages are locked. Copies to and from
 /// user memory happen in between, without the lock, as they can fault.
@@ -151,7 +154,7 @@ impl MemoryObject {
         size: u64,
         options: u32,
     ) -> Result<Arc<MemoryObject>, Error> {
-        let pages = Pages::new(size, options, MAX_SIZE)?;
+        let pages = Pages::new(size, options, max_size())?;
         let charged = match budget {
             Some(budget) => {
                 let size = size_of::<MemoryObject>() as u64;
@@ -191,7 +194,7 @@ impl MemoryObject {
         if options & !(RESIZABLE | TRACK_DIRTY) != 0 {
             return Err(Error::InvalidArgs);
         }
-        let pages = Pages::new(size, options & RESIZABLE, MAX_SIZE)?;
+        let pages = Pages::new(size, options & RESIZABLE, max_size())?;
         // With its entry in the pager's list of objects and that entry's
         // share of storage.
         let charged = (size_of::<MemoryObject>() + 2 * size_of::<Weak<MemoryObject>>()) as u64;
@@ -661,7 +664,7 @@ impl MemoryObject {
         policy: Policy,
     ) -> Result<Arc<MemoryObject>, Error> {
         debug_assert!(base.is_multiple_of(PAGE_SIZE) && size.is_multiple_of(PAGE_SIZE));
-        let pages = Pages::new(size, 0, MAX_SIZE)?;
+        let pages = Pages::new(size, 0, max_size())?;
         let charged = match budget {
             Some(budget) => {
                 let size = size_of::<MemoryObject>() as u64;
@@ -1600,7 +1603,7 @@ impl MemoryObject {
             return Err(Error::AccessDenied);
         }
         let old = pages.count();
-        let resized = pages.set_size(size, MAX_SIZE)?;
+        let resized = pages.set_size(size, max_size())?;
         if let Some((phys, from)) = resized.zero {
             // SAFETY: the pages are locked.
             let frame = unsafe { frame_bytes(phys) };

@@ -113,8 +113,9 @@ pub const CODE_32BIT: u32 = 1 << 1;
 /// and `stack` lies in it or is its end, the top of a stack that ends
 /// there. Neither needs to be mapped.
 fn check_start(entry: u64, stack: u64) -> Result<(), Error> {
-    use crate::aspace::{USER_END, USER_START, in_user_range};
-    if !in_user_range(entry, 1) || !(USER_START..=USER_END).contains(&stack) {
+    use crate::aspace::{in_user_range, user_range};
+    let (start, end) = user_range();
+    if !in_user_range(entry, 1) || !(start..=end).contains(&stack) {
         return Err(Error::InvalidArgs);
     }
     Ok(())

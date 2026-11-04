@@ -16,16 +16,17 @@ use kernel_core::regions::{
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
 
-/// The lowest user address.
-pub const USER_START: u64 = 0x0000_0000_0001_0000;
-/// The end of the user address range, exclusive.
-pub const USER_END: u64 = 0x0000_7FFF_FFFF_F000;
+/// The user address range, from its lowest address to the one past it.
+pub fn user_range() -> (u64, u64) {
+    kernel_core::arch::user_range()
+}
 /// The end of the range `BELOW_4G` mappings are placed in.
 const END_4G: u64 = 0x1_0000_0000;
 
 /// Whether the `len` bytes from `addr` lie in the user address range.
 pub fn in_user_range(addr: u64, len: u64) -> bool {
-    addr >= USER_START && addr.checked_add(len).is_some_and(|end| end <= USER_END)
+    let (start, end) = user_range();
+    addr >= start && addr.checked_add(len).is_some_and(|e| e <= end)
 }
 
 /// How a user page is mapped. Every mapping is readable.
@@ -126,7 +127,8 @@ impl AddressSpace {
     /// An address space with no user mappings, belonging to `budget`. Its
     /// tables are charged to the budget when `charge` is set.
     pub fn new(budget: Arc<Budget>, charge: bool) -> Result<AddressSpace, Error> {
-        let regions = Regions::new(USER_START, END_4G, USER_END)?;
+        let (start, end) = user_range();
+        let regions = Regions::new(start, END_4G, end)?;
         let mut tables = Charged {
             budget: charge.then_some(&*budget),
             count: 0,
@@ -241,7 +243,8 @@ impl AddressSpace {
         if options.specific && !in_user_range(addr, size) {
             return Err(Error::OutOfRange);
         }
-        if size > USER_END - USER_START {
+        let (start, end) = user_range();
+        if size > end - start {
             return Err(Error::OutOfRange);
         }
         loop {
@@ -311,8 +314,9 @@ impl AddressSpace {
     /// `NoResources` when the budget refuses the charge. No lock may be
     /// held.
     pub fn remove_regions(&self, start: u64, end: u64, budget: &Arc<Budget>) -> Result<(), Error> {
-        let start = start.max(USER_START);
-        let end = end.min(USER_END);
+        let (lowest, past) = user_range();
+        let start = start.max(lowest);
+        let end = end.min(past);
         if start >= end {
             return Ok(());
         }
@@ -331,7 +335,8 @@ impl AddressSpace {
     pub fn remove_all_regions(&self) {
         let removal = self.regions.lock().begin_removal_of_all(next_removal());
         self.remove_in_steps(removal);
-        self.unmap_in_steps(USER_START, USER_END - USER_START)
+        let (start, end) = user_range();
+        self.unmap_in_steps(start, end - start)
             .expect("the user range is page-aligned");
     }
 
@@ -591,10 +596,6 @@ impl AddressSpace {
     }
 }
 
-const FAULT_WRITE: u64 = 1 << 1;
-const FAULT_RESERVED: u64 = 1 << 3;
-const FAULT_FETCH: u64 = 1 << 4;
-
 /// How a page fault on a user page ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
@@ -612,13 +613,12 @@ pub enum Fault {
     Busy(u64),
 }
 
-/// Resolves a page fault at `addr`, raised by user code or by the user
-/// copy routine, when a region allows the access.
-pub fn resolve_fault(frame: &crate::idt::Frame, addr: u64) -> Fault {
-    if frame.error & FAULT_RESERVED != 0
-        || !in_user_range(addr, 1)
-        || (frame.cs & 3 == 0 && !crate::usercopy::in_copy(frame))
-    {
+/// Resolves a page fault of the running thread at the user address
+/// `addr`, raised by user code or by a copy from or to user memory, when
+/// a region allows the access: a write if `write`, an instruction fetch if
+/// `fetch`.
+pub fn resolve_fault(addr: u64, write: bool, fetch: bool) -> Fault {
+    if !in_user_range(addr, 1) {
         return Fault::Denied;
     }
     let Some(process) = crate::sched::current().and_then(|t| t.process().cloned()) else {
@@ -628,8 +628,6 @@ pub fn resolve_fault(frame: &crate::idt::Frame, addr: u64) -> Fault {
     let Some(mem) = aspace.with_region(addr, |r| r.map(|r| r.mem.clone())) else {
         return Fault::Denied;
     };
-    let write = frame.error & FAULT_WRITE != 0;
-    let fetch = frame.error & FAULT_FETCH != 0;
     // An absent page of a paged object is waited for, outside the
     // object's locks, and the access tried again.
     loop {

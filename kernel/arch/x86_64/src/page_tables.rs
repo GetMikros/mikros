@@ -9,6 +9,11 @@ use crate::space;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::arch::{PageError, PageFlags};
 
+/// The lowest user address.
+pub const USER_START: u64 = 0x0000_0000_0001_0000;
+/// The end of the user address range, exclusive.
+pub const USER_END: u64 = 0x0000_7FFF_FFFF_F000;
+
 const CR3_NO_FLUSH: u64 = 1 << 63;
 /// The PCIDs 1 to `SLOTS` are handed to user address spaces; the kernel's
 /// own tables use PCID 0.

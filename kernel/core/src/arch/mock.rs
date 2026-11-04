@@ -214,6 +214,10 @@ impl Arch for Mock {
 
     unsafe fn extended_state_restore(_area: *const u8) {}
 
+    fn user_range() -> (u64, u64) {
+        (0x1_0000, 0x7FFF_FFFF_F000)
+    }
+
     fn page_table_new(
         _alloc: &mut dyn FnMut() -> Option<u64>,
     ) -> Result<*mut (), super::PageError> {
