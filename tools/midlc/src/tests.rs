@@ -289,3 +289,17 @@ mod layouts {
         );
     }
 }
+
+#[test]
+fn describes_libraries_in_json() {
+    let text = "library t;\n/// S.\ntype S = struct { a u8; b u32; };\nprotocol P { @7 F(s S) -> () error i32; };\n";
+    let model = crate::compile(&[("t.midl", text)], None).unwrap();
+    let json = crate::json::describe(&model);
+    let decls = &json["libraries"][0]["declarations"];
+    assert_eq!(decls[0]["name"], "S");
+    assert_eq!(decls[0]["doc"][0], "S.");
+    assert_eq!(decls[0]["size"], 8);
+    assert_eq!(decls[0]["members"][1]["offset"], 4);
+    assert_eq!(decls[1]["methods"][0]["ordinal"], 7);
+    assert_eq!(decls[1]["methods"][0]["error"]["kind"], "i32");
+}

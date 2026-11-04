@@ -3,6 +3,7 @@
 
 pub mod ast;
 pub mod check;
+pub mod json;
 pub mod layout;
 pub mod lexer;
 pub mod model;
