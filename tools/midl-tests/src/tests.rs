@@ -1,5 +1,6 @@
-use crate::midl::__midl::{self as rt, Decoder, Encoder, Error, Header};
+use crate::midl::__midl::{self as rt, Decoder, Encoder, Error, Header, OwnedHandle};
 use crate::midl::test::wire::*;
+use crate::mock;
 use std::sync::Mutex;
 
 /// The mock kernel's handle count is shared, so tests run one at a time.
@@ -14,6 +15,11 @@ const HEADER: Header = Header {
     ordinal: 9,
     flags: 0,
 };
+
+fn owned(raw: u32) -> OwnedHandle {
+    // SAFETY: tests hand each new mock handle to exactly one owner.
+    unsafe { OwnedHandle::from_raw(raw) }
+}
 
 fn everything() -> Everything {
     Everything {
@@ -179,4 +185,76 @@ fn skips_unknown_members_of_flexible_unions_and_tables() {
     let mut d = Decoder::new(&strict, Vec::new());
     let at = d.claim(16).unwrap();
     assert_eq!(Strict::__decode(&mut d, at), Err(Error::Invalid));
+}
+
+fn holder_message(event_rights: u32, event_kind_ok: bool) -> (Vec<u8>, Vec<u32>) {
+    let event = if event_kind_ok {
+        mock::event(event_rights)
+    } else {
+        mock::channel_create().unwrap().0
+    };
+    let holder = Holder {
+        any: owned(mock::event(0x1)),
+        event: owned(event),
+        maybe: None,
+        events: vec![owned(mock::event(0x7))],
+    };
+    let mut e = Encoder::new(HEADER, Holder::__SIZE);
+    holder.__encode(&mut e, rt::HEADER_SIZE).unwrap();
+    e.finish()
+}
+
+fn decode_holder(bytes: &[u8], handles: Vec<u32>) -> Result<Holder, Error> {
+    let mut d = Decoder::new(bytes, handles);
+    d.header()?;
+    let at = d.claim(Holder::__SIZE)?;
+    let value = Holder::__decode(&mut d, at)?;
+    d.finish()?;
+    Ok(value)
+}
+
+#[test]
+fn checks_and_reduces_handle_rights() {
+    let _s = serial();
+    let before = mock::open_handles();
+    let (bytes, handles) = holder_message(mock::READ | mock::WRITE | 0x80, true);
+    let holder = decode_holder(&bytes, handles).unwrap();
+    assert_eq!(
+        mock::handle_info(holder.event.raw()),
+        Some((mock::EVENT, mock::READ | mock::WRITE))
+    );
+    assert_eq!(
+        mock::handle_info(holder.any.raw()),
+        Some((mock::EVENT, 0x1))
+    );
+    // A type without rights checks the type and keeps the rights.
+    assert_eq!(
+        mock::handle_info(holder.events[0].raw()),
+        Some((mock::EVENT, 0x7))
+    );
+    drop(holder);
+    assert_eq!(mock::open_handles(), before);
+
+    let (bytes, handles) = holder_message(mock::READ, true);
+    assert_eq!(
+        decode_holder(&bytes, handles).unwrap_err(),
+        Error::Invalid,
+        "missing a right"
+    );
+    let (bytes, handles) = holder_message(mock::READ | mock::WRITE, false);
+    assert_eq!(
+        decode_holder(&bytes, handles).unwrap_err(),
+        Error::Invalid,
+        "wrong object type"
+    );
+    let (bytes, mut handles) = holder_message(mock::READ | mock::WRITE, true);
+    handles.push(mock::event(0));
+    assert_eq!(
+        decode_holder(&bytes, handles).unwrap_err(),
+        Error::Invalid,
+        "an extra handle"
+    );
+    // Two channel ends stay from the wrong-type case; everything else
+    // that the rejected messages carried is closed.
+    assert_eq!(mock::open_handles(), before + 1);
 }
