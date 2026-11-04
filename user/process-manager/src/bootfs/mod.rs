@@ -91,16 +91,24 @@ pub struct Executable {
 }
 
 impl Fs {
+    /// Whether `path`, relative to the root, names a node.
+    pub fn exists(&self, path: &str) -> bool {
+        self.tree.resolve(0, path.as_bytes(), false).is_ok()
+    }
+
     /// The regular file at `path`, relative to the root and resolved
-    /// without leaving the file system.
+    /// without leaving the file system. Fails with `NOT_FOUND` when
+    /// there is no node, and `ACCESS_DENIED` when it is not a regular
+    /// file.
     pub fn executable(self: &Rc<Self>, path: &str) -> Result<Executable, Status> {
         const NOT_FOUND: Status = -25;
+        const ACCESS_DENIED: Status = -13;
         let node = match self.tree.resolve(0, path.as_bytes(), false) {
             Ok(mikros_bootfs::Resolved::Node(node)) => node,
             _ => return Err(NOT_FOUND),
         };
         let mikros_bootfs::NodeKind::File { offset, size } = self.tree.nodes[node].kind else {
-            return Err(NOT_FOUND);
+            return Err(ACCESS_DENIED);
         };
         let rights = memory::rights(false, true);
         Ok(Executable {

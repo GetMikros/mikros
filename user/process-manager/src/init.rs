@@ -2,7 +2,7 @@
 //! service manager.
 
 use crate::processes::{NewProcess, Shared, bind, koid};
-use crate::records::Record;
+use crate::records::{INIT_PID, Record};
 use crate::start::{self, duplicate};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -31,7 +31,8 @@ const BOOT_HANDLE_IDS: core::ops::RangeInclusive<u32> = 1..=5;
 /// The `USER` startup handle ID of the service manager's control
 /// endpoint.
 const CONTROL_ID: u32 = 0;
-const INIT_PID: u32 = 1;
+/// The process group and session of init.
+const INIT_GROUP: u32 = 1;
 
 /// The process manager's state while it serves init.
 pub struct Manager {
@@ -102,6 +103,8 @@ impl Manager {
         let record = Record {
             koid: koid(&process)?,
             parent: 0,
+            process_group: INIT_GROUP,
+            session: INIT_GROUP,
             app_id: "system.init".into(),
             user: 0,
             login_session: 0,
@@ -126,13 +129,18 @@ impl Manager {
         if self.init_process.is_some() || self.service_manager.is_some() {
             return Err(Status::BadState);
         }
-        let pid = self.shared.records.borrow().next_pid();
-        self.service_manager = Some(pid);
         let boot_handle =
             |h: &StartupHandle| h.role == HandleRole::User && BOOT_HANDLE_IDS.contains(&h.id);
         if !init_handles.iter().all(boot_handle) {
             return Err(Status::InvalidArgs);
         }
+        let pid = self
+            .shared
+            .records
+            .borrow_mut()
+            .reserve()
+            .ok_or(Status::NoResources)?;
+        self.service_manager = Some(pid);
         let (control, control_end) =
             endpoints::<ProcessDirectory>().map_err(|_| Status::NoResources)?;
         let control = ProcessDirectoryAsyncClient::new(control, self.shared.reactor.clone());
@@ -146,23 +154,36 @@ impl Manager {
             program: SERVICE_MANAGER.into(),
             path: SERVICE_MANAGER_PATH.into(),
             parent: INIT_PID,
+            process_group: INIT_GROUP,
+            session: INIT_GROUP,
             app_id: SERVICE_MANAGER_APP.into(),
             user: 0,
             login_session: 0,
             arguments: start::arguments(&[SERVICE_MANAGER_PATH])?,
             handles,
         };
-        let process = self.shared.start(pid, new, &control).await?;
-        let own = match bind_own_directory(&control).await {
-            Ok(own) => own,
+        // The service manager may spawn as soon as its transfer is
+        // complete, and its children are bound over the same endpoint.
+        let control = Rc::new(control);
+        *self.shared.control.borrow_mut() = Some(control.clone());
+        self.shared.identity_setter.set(Some(pid));
+        let started = match self.shared.start(pid, new, &control).await {
+            Ok(process) => bind_own_directory(&control).await.map(|own| (process, own)),
+            Err(status) => Err(status),
+        };
+        let (process, own) = match started {
+            Ok(started) => started,
             Err(status) => {
-                // SAFETY: the call takes no pointers.
-                unsafe { sys::task_kill(process.raw()) };
+                self.shared.identity_setter.set(None);
+                *self.shared.control.borrow_mut() = None;
+                if let Some(record) = self.shared.records.borrow().get(pid) {
+                    // SAFETY: the call takes no pointers.
+                    unsafe { sys::task_kill(record.process.raw()) };
+                }
                 return Err(status);
             }
         };
         self.directory = Some(own);
-        *self.shared.control.borrow_mut() = Some(Rc::new(control));
         Ok(InitBootstrapStartServiceManagerResponse { pid, process })
     }
 }

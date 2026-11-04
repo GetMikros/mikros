@@ -8,8 +8,9 @@ use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
-use core::task::Waker;
+use core::cell::{Cell, RefCell};
+use core::future::poll_fn;
+use core::task::{Poll, Waker};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -43,7 +44,13 @@ pub struct Shared {
     app_budgets: RefCell<BTreeMap<(u32, String), OwnedHandle>>,
     /// The service manager's control endpoint, once it started.
     pub control: RefCell<Option<Rc<ProcessDirectoryAsyncClient>>>,
-    /// The tasks waiting for a process to change state.
+    /// The process ID of the service manager that init asked for, the
+    /// one record allowed to set identities until the permission broker
+    /// serves requests.
+    pub identity_setter: Cell<Option<u32>>,
+    /// How many processes terminated so far.
+    terminations: Cell<u64>,
+    /// The tasks waiting for a process to terminate.
     waiters: RefCell<Vec<Waker>>,
 }
 
@@ -54,6 +61,8 @@ pub struct NewProcess {
     /// The executable path the record keeps.
     pub path: String,
     pub parent: u32,
+    pub process_group: u32,
+    pub session: u32,
     pub app_id: String,
     pub user: u32,
     pub login_session: u32,
@@ -79,15 +88,31 @@ impl Shared {
             user_budgets: RefCell::new(BTreeMap::new()),
             app_budgets: RefCell::new(BTreeMap::new()),
             control: RefCell::new(None),
+            identity_setter: Cell::new(None),
+            terminations: Cell::new(0),
             waiters: RefCell::new(Vec::new()),
         })
     }
 
-    /// Starts `new` as process `pid`: loads it, sends its startup
+    /// Starts `new` as process `pid`, which the caller reserved: loads it, sends its startup
     /// transfer, binds its directory over `control` and only then sends
     /// `Complete`. Records it and watches for its end. Returns its
-    /// process handle. A failure after the process was created kills it.
+    /// process handle. A failure after the process was created kills it,
+    /// and any failure releases `pid`.
     pub async fn start(
+        self: &Rc<Self>,
+        pid: u32,
+        new: NewProcess,
+        control: &ProcessDirectoryAsyncClient,
+    ) -> Result<OwnedHandle, Status> {
+        let started = self.start_reserved(pid, new, control).await;
+        if started.is_err() {
+            self.records.borrow_mut().release(pid);
+        }
+        started
+    }
+
+    async fn start_reserved(
         self: &Rc<Self>,
         pid: u32,
         new: NewProcess,
@@ -99,6 +124,8 @@ impl Shared {
         let NewProcess {
             path,
             parent,
+            process_group,
+            session,
             app_id,
             user,
             login_session,
@@ -118,6 +145,8 @@ impl Shared {
             let record = Record {
                 koid: koid(&started.process)?,
                 parent,
+                process_group,
+                session,
                 app_id,
                 user,
                 login_session,
@@ -169,7 +198,7 @@ impl Shared {
     }
 
     async fn transfer(
-        &self,
+        self: &Rc<Self>,
         started: &start::Started,
         identity: ClientIdentity,
         parent: u32,
@@ -180,11 +209,8 @@ impl Shared {
         let channel = |_| Status::NoResources;
         let (launcher, launcher_end) = endpoints::<Launcher>().map_err(channel)?;
         let (directory, directory_end) = endpoints::<Directory>().map_err(channel)?;
-        self.spawner.spawn(launcher::serve(
-            launcher_end,
-            identity.pid,
-            self.reactor.clone(),
-        ));
+        self.spawner
+            .spawn(launcher::serve(launcher_end, identity.pid, self.clone()));
         started.send(Transfer {
             pid: identity.pid,
             parent,
@@ -214,9 +240,29 @@ impl Shared {
         }
         let exit = exit_of(&process).unwrap_or(Exit { code: 0, signal: 0 });
         self.records.borrow_mut().exited(pid, exit);
+        self.terminations.set(self.terminations.get() + 1);
         for waker in self.waiters.borrow_mut().drain(..) {
             waker.wake();
         }
+    }
+
+    /// Completes once another process terminated, or `deadline` passed,
+    /// which it returns as `false`.
+    pub async fn termination(&self, deadline: i64) -> bool {
+        let seen = self.terminations.get();
+        let timer = self.reactor.sleep_until(deadline);
+        let mut timer = core::pin::pin!(timer);
+        poll_fn(|cx| {
+            if self.terminations.get() != seen {
+                return Poll::Ready(true);
+            }
+            if timer.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(false);
+            }
+            self.waiters.borrow_mut().push(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
     }
 }
 
