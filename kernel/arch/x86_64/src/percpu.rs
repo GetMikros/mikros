@@ -108,7 +108,7 @@ pub(crate) static BOOT_CPU: PerCpu = PerCpu {
 pub static READY: AtomicBool = AtomicBool::new(false);
 
 /// Points the GS base at the boot processor's data, and the user GS base
-/// at zero.
+/// at zero, and gives the processor the core's boot processor data.
 pub fn init() {
     // SAFETY: both MSRs exist in long mode, and nothing else uses the GS
     // base.
@@ -117,6 +117,9 @@ pub fn init() {
         write_msr(IA32_KERNEL_GS_BASE, 0);
     }
     READY.store(true, Ordering::Release);
+    // Locks taken before this counted on the boot processor's core data
+    // too, so the counts carry over.
+    kernel_core::cpu::start_boot();
 }
 
 /// This processor's index, or 0 before `init`.

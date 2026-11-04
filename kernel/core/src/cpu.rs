@@ -1,0 +1,65 @@
+//! The core's data for each processor, reached through the architecture
+//! interface's per-processor pointer.
+
+use crate::arch;
+use core::sync::atomic::AtomicUsize;
+
+/// The core's state of one processor.
+pub struct Cpu {
+    /// The number of spin locks held on the processor. A processor runs
+    /// one thread at a time and switches threads only where no lock is
+    /// held, so this counts the locks of the running thread.
+    pub(crate) locks_held: AtomicUsize,
+    /// The objects destroyed on the processor since its last reschedule
+    /// check.
+    pub(crate) destroyed: AtomicUsize,
+}
+
+impl Cpu {
+    pub const fn new() -> Cpu {
+        Cpu {
+            locks_held: AtomicUsize::new(0),
+            destroyed: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Default for Cpu {
+    fn default() -> Cpu {
+        Cpu::new()
+    }
+}
+
+/// The boot processor's data, which is also used until a processor's
+/// data is set.
+static BOOT: Cpu = Cpu::new();
+
+/// This processor's data. Before the architecture layer has set it, the
+/// boot processor's.
+pub fn this() -> &'static Cpu {
+    let data = arch::cpu_data();
+    if data.is_null() {
+        return &BOOT;
+    }
+    // SAFETY: only `start_boot` and `start` set the pointer, to a `Cpu`
+    // that lives as long as the processor runs.
+    unsafe { &*data.cast::<Cpu>() }
+}
+
+/// Makes the boot processor's data this processor's. Called once on the
+/// boot processor, as soon as the architecture layer can hold the pointer.
+pub fn start_boot() {
+    // SAFETY: `BOOT` is static and is only read as a `Cpu`.
+    unsafe { arch::set_cpu_data((&raw const BOOT).cast()) };
+}
+
+/// Makes `cpu` this processor's data.
+///
+/// # Safety
+///
+/// No spin lock may be held on this processor, and `cpu` must not be
+/// another processor's data.
+pub unsafe fn start(cpu: &'static Cpu) {
+    // SAFETY: `cpu` is static and is only read as a `Cpu`.
+    unsafe { arch::set_cpu_data((cpu as *const Cpu).cast()) };
+}

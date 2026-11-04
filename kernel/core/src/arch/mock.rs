@@ -2,7 +2,8 @@
 //!
 //! It models one processor. Its state is global to the process, so tests
 //! that depend on it must not run at the same time; in host tests `lock`
-//! serializes them. Operations that only make sense on real hardware, such as
+//! serializes them. Only the per-processor data pointer is kept per test
+//! thread in host tests. Operations that only make sense on real hardware, such as
 //! switching stacks or entering user mode, panic.
 
 use super::Arch;
@@ -14,7 +15,22 @@ use core::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering};
 const DISARMED: i64 = i64::MIN;
 
 static INTERRUPTS: AtomicBool = AtomicBool::new(false);
+// In host tests each test thread is a processor of its own, so that a
+// test that sets the per-processor data does not change it for others.
+#[cfg(test)]
+std::thread_local! {
+    static CPU_DATA: AtomicPtr<()> = const { AtomicPtr::new(core::ptr::null_mut()) };
+}
+#[cfg(not(test))]
 static CPU_DATA: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Runs `f` on this processor's data pointer.
+fn with_cpu_data<R>(f: impl FnOnce(&AtomicPtr<()>) -> R) -> R {
+    #[cfg(test)]
+    return CPU_DATA.with(f);
+    #[cfg(not(test))]
+    f(&CPU_DATA)
+}
 static NOW: AtomicI64 = AtomicI64::new(0);
 static TIMER: AtomicI64 = AtomicI64::new(DISARMED);
 static OUTPUT: SpinLock<Vec<u8>> = SpinLock::new(Vec::new());
@@ -31,7 +47,7 @@ pub fn lock() -> std::sync::MutexGuard<'static, ()> {
     static TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = TESTS.lock().unwrap_or_else(|e| e.into_inner());
     INTERRUPTS.store(false, Ordering::Relaxed);
-    CPU_DATA.store(core::ptr::null_mut(), Ordering::Relaxed);
+    with_cpu_data(|d| d.store(core::ptr::null_mut(), Ordering::Relaxed));
     NOW.store(0, Ordering::Relaxed);
     TIMER.store(DISARMED, Ordering::Relaxed);
     OUTPUT.lock().clear();
@@ -84,11 +100,11 @@ impl Arch for Mock {
     }
 
     fn cpu_data() -> *const () {
-        CPU_DATA.load(Ordering::Acquire)
+        with_cpu_data(|d| d.load(Ordering::Acquire))
     }
 
     unsafe fn set_cpu_data(data: *const ()) {
-        CPU_DATA.store(data.cast_mut(), Ordering::Release);
+        with_cpu_data(|d| d.store(data.cast_mut(), Ordering::Release));
     }
 
     fn monotonic_now() -> i64 {

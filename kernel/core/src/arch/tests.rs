@@ -17,13 +17,21 @@ fn restores_interrupts_only_when_they_were_enabled() {
 #[test]
 fn keeps_the_cpu_data() {
     let _mock = mock::lock();
-    static DATA: u32 = 7;
+    static DATA: crate::cpu::Cpu = crate::cpu::Cpu::new();
     assert_eq!(super::cpu_index(), 0);
     assert!(super::cpu_data().is_null());
-    // SAFETY: `DATA` is static and only read as a `u32`.
-    unsafe { super::set_cpu_data((&raw const DATA).cast()) };
-    // SAFETY: the pointer was set to `DATA` above.
-    assert_eq!(unsafe { *super::cpu_data().cast::<u32>() }, 7);
+    // SAFETY: `DATA` is static and only read as a `Cpu`.
+    unsafe { crate::cpu::start(&DATA) };
+    assert_eq!(super::cpu_data(), (&raw const DATA).cast());
+    assert!(core::ptr::eq(crate::cpu::this(), &DATA));
+}
+
+#[test]
+fn uses_the_boot_cpu_until_the_data_is_set() {
+    let _mock = mock::lock();
+    let boot = crate::cpu::this();
+    crate::cpu::start_boot();
+    assert!(core::ptr::eq(crate::cpu::this(), boot));
 }
 
 #[test]

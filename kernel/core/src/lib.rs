@@ -15,6 +15,7 @@ pub mod bootinfo;
 pub mod clock;
 pub mod cmdline;
 pub mod console;
+pub mod cpu;
 pub mod deadline;
 pub mod elf;
 pub mod exception;
