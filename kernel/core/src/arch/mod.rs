@@ -178,6 +178,24 @@ interface! {
     /// mapping any more.
     [unsafe] fn physical_page_unmap(virt: u64);
 
+    /// Maps the RAM frames `frames` writable and contiguous into kernel
+    /// space and returns the address of the first, or `None` when address
+    /// space or page tables run out.
+    [] fn kernel_frames_map(frames: &[u64]) -> Option<u64>;
+
+    /// Removes a mapping of `len` bytes from `kernel_frames_map`.
+    ///
+    /// # Safety
+    ///
+    /// `virt` and `len` must describe a whole mapping from
+    /// `kernel_frames_map`, and nothing may use it any more.
+    [unsafe] fn kernel_frames_unmap(virt: u64, len: u64);
+
+    /// Points this processor's coverage hook at the buffer at `area`, which
+    /// holds `capacity` addresses after its count, or at none when `area`
+    /// is zero.
+    [] fn coverage_point(area: u64, capacity: u64);
+
     /// Allocates `size` bytes of kernel memory, a multiple of the page
     /// size, mapped writable with an unmapped page below it, and returns
     /// its start, or `None` when memory runs out.

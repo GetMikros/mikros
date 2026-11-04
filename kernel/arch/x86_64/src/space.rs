@@ -168,7 +168,6 @@ pub fn map_physical_page(phys: u64, policy: Policy) -> Option<u64> {
 /// Maps `frames` in order, writable and cached, into the dynamic region
 /// and returns the address of the first, or `None`, with nothing left
 /// reserved, when address space or page tables run out.
-#[cfg(feature = "fuzz")]
 pub fn map_frames(frames: &[u64]) -> Option<u64> {
     let len = frames.len() as u64 * PAGE_SIZE;
     let virt = DYNAMIC.lock().alloc(len + PAGE_SIZE, PAGE_SIZE)? + PAGE_SIZE;
@@ -194,7 +193,6 @@ pub fn map_frames(frames: &[u64]) -> Option<u64> {
 
 /// Removes a mapping of `len` bytes made by `map_frames` at `virt`,
 /// leaving the frames allocated.
-#[cfg(feature = "fuzz")]
 pub fn unmap_frames(virt: u64, len: u64) {
     unmap(virt, len, |_, _| {});
     release_dynamic(virt, len);

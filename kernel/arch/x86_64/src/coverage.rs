@@ -1,48 +1,13 @@
 //! Coverage collection for the fuzz build, in the format of Linux's kcov
-//! `KCOV_TRACE_PC` mode: a `u64` count followed by the addresses.
+//! `KCOV_TRACE_PC` mode: a `u64` count followed by the addresses. The hook
+//! that writes them is architecture code, reached through
+//! `kernel_core::arch::coverage_point`.
 
 use crate::memory_object::MemoryObject;
-use crate::percpu::{self, COV_AREA_OFFSET, COV_CAPACITY_OFFSET, INTERRUPTS_OFFSET, READY};
 use crate::sched::Thread;
-use crate::space;
 use alloc::sync::Arc;
-use core::sync::atomic::Ordering;
 use kernel_core::object::memory::PAGE_SIZE;
 use kernel_core::status::Error;
-
-// The fuzz build calls this at the start of every instrumented basic
-// block. It is written in assembly so that it is not instrumented
-// itself. Until the GS base points to the per-CPU data, and during
-// hardware interrupt handling, it does nothing. Otherwise it appends its
-// return address to the running thread's buffer while the count is
-// below the capacity. It changes only RAX, RCX, RDX and the flags, which
-// a call may change.
-core::arch::global_asm!(
-    ".pushsection .text.sanitizer_cov_trace_pc, \"ax\"",
-    ".global __sanitizer_cov_trace_pc",
-    "__sanitizer_cov_trace_pc:",
-    "cmp byte ptr [rip + {ready}], 0",
-    "je 1f",
-    "cmp qword ptr gs:[{interrupts}], 0",
-    "jne 1f",
-    "mov rax, gs:[{area}]",
-    "test rax, rax",
-    "jz 1f",
-    "mov rcx, [rax]",
-    "cmp rcx, gs:[{capacity}]",
-    "jae 1f",
-    "mov rdx, [rsp]",
-    "mov [rax + rcx * 8 + 8], rdx",
-    "inc rcx",
-    "mov [rax], rcx",
-    "1:",
-    "ret",
-    ".popsection",
-    ready = sym READY,
-    interrupts = const INTERRUPTS_OFFSET,
-    area = const COV_AREA_OFFSET,
-    capacity = const COV_CAPACITY_OFFSET,
-);
 
 /// A thread's coverage buffer: an anonymous memory object whose frames
 /// are pinned and mapped into kernel space for as long as this lives.
@@ -61,7 +26,7 @@ impl Buffer {
     fn new(mem: Arc<MemoryObject>) -> Result<Buffer, Error> {
         let (frames, size) = mem.pin_all()?;
         let len = frames.len() as u64 * PAGE_SIZE;
-        let Some(area) = space::map_frames(&frames) else {
+        let Some(area) = kernel_core::arch::kernel_frames_map(&frames) else {
             mem.unpin_all();
             return Err(Error::NoMemory);
         };
@@ -77,7 +42,9 @@ impl Buffer {
 impl Drop for Buffer {
     fn drop(&mut self) {
         if self.len != 0 {
-            space::unmap_frames(self.area, self.len);
+            // SAFETY: the mapping came from `kernel_frames_map` in `new`,
+            // and the hook no longer points at it once the buffer is gone.
+            unsafe { kernel_core::arch::kernel_frames_unmap(self.area, self.len) };
         }
         self.mem.unpin_all();
     }
@@ -90,17 +57,12 @@ pub fn switch_in(thread: &Thread) {
         Some(b) if b.capacity != 0 => (b.area, b.capacity),
         _ => (0, 0),
     };
-    let cpu = percpu::this();
-    cpu.cov_area.store(0, Ordering::Relaxed);
-    cpu.cov_capacity.store(capacity, Ordering::Relaxed);
-    cpu.cov_area.store(area, Ordering::Relaxed);
+    kernel_core::arch::coverage_point(area, capacity);
 }
 
 /// Points the hook at no buffer, as the processor is about to idle.
 pub fn idle() {
-    let cpu = percpu::this();
-    cpu.cov_area.store(0, Ordering::Relaxed);
-    cpu.cov_capacity.store(0, Ordering::Relaxed);
+    kernel_core::arch::coverage_point(0, 0);
 }
 
 /// Starts collecting coverage for `thread`, the running thread, into
@@ -117,8 +79,7 @@ pub fn enable(thread: &Thread, mem: Arc<MemoryObject>) -> Result<(), Error> {
 
 /// Stops collecting coverage for `thread`, the running thread.
 pub fn disable(thread: &Thread) {
-    let cpu = percpu::this();
-    cpu.cov_area.store(0, Ordering::Relaxed);
+    kernel_core::arch::coverage_point(0, 0);
     let buffer = thread.coverage().lock().take();
     drop(buffer);
 }

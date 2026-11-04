@@ -114,6 +114,22 @@ impl Arch for X86 {
         space::unmap_physical_page(virt);
     }
 
+    fn kernel_frames_map(frames: &[u64]) -> Option<u64> {
+        space::map_frames(frames)
+    }
+
+    unsafe fn kernel_frames_unmap(virt: u64, len: u64) {
+        space::unmap_frames(virt, len);
+    }
+
+    fn coverage_point(area: u64, capacity: u64) {
+        // Only the fuzz build has the hook.
+        #[cfg(feature = "fuzz")]
+        crate::coverage_hook::point(area, capacity);
+        #[cfg(not(feature = "fuzz"))]
+        let _ = (area, capacity);
+    }
+
     fn kernel_pages_alloc(size: u64) -> Option<u64> {
         space::alloc_pages(size)
     }

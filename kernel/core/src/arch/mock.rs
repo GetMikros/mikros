@@ -153,6 +153,14 @@ impl Arch for Mock {
 
     unsafe fn physical_page_unmap(_virt: u64) {}
 
+    fn kernel_frames_map(_frames: &[u64]) -> Option<u64> {
+        None
+    }
+
+    unsafe fn kernel_frames_unmap(_virt: u64, _len: u64) {}
+
+    fn coverage_point(_area: u64, _capacity: u64) {}
+
     fn kernel_pages_alloc(size: u64) -> Option<u64> {
         if size == 0 {
             return None;

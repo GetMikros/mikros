@@ -26,6 +26,8 @@ mod context;
 mod control;
 #[cfg(all(target_os = "none", feature = "fuzz"))]
 mod coverage;
+#[cfg(all(target_os = "none", feature = "fuzz"))]
+mod coverage_hook;
 #[cfg(target_os = "none")]
 mod cpu;
 #[cfg(target_os = "none")]
