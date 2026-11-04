@@ -114,6 +114,27 @@ fn needs_a_library_declaration() {
     assert_eq!(errors.len(), 1);
 }
 
+#[test]
+fn reports_every_invalid_declaration() {
+    let text = "library a;\n\
+        using a.missing;\n\
+        type A = struct { x Missing; };\n\
+        type B = struct { x u32; };\n\
+        alias C = vector<Missing>;\n\
+        type D = struct { c C; };\n\
+        type B = struct {};\n\
+        protocol P { @1 F(x u32;\n};\n";
+    let (model, errors) = crate::compile_all(&[("bad.midl", text)], None);
+    let lines: Vec<usize> = errors.iter().map(|e| e.span.line).collect();
+    assert_eq!(lines, [8, 2, 7, 3, 5], "{errors:?}");
+    let names: Vec<&str> = model.libraries[0]
+        .decls
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(names, ["B"]);
+}
+
 const OTHER: &str = "library test.other;\ntype Status = enum : i32 { OK = 0; FAILED = -1; };\n";
 
 mod checks {

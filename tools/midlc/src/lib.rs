@@ -82,3 +82,19 @@ pub fn compile(sources: &[(&str, &str)], version: Option<u64>) -> Result<model::
         .collect::<Result<Vec<_>, _>>()?;
     check::check(&files, version)
 }
+
+/// Parses and checks the `(name, text)` source files like `compile`,
+/// going on after errors: the libraries without the declarations that
+/// have errors, and every error, those of each file in order.
+pub fn compile_all(sources: &[(&str, &str)], version: Option<u64>) -> (model::Model, Vec<Error>) {
+    let mut errors = Vec::new();
+    let mut files = Vec::new();
+    for (name, text) in sources {
+        let (file, found) = parse_all(name, text);
+        files.extend(file);
+        errors.extend(found);
+    }
+    let (model, found) = check::check_all(&files, version);
+    errors.extend(found);
+    (model, errors)
+}

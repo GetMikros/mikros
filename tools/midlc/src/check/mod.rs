@@ -5,6 +5,7 @@
 use crate::ast;
 use crate::model::*;
 use crate::{Error, Span};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod available;
@@ -18,6 +19,20 @@ use available::{Window, window};
 /// Checks `files` and returns their libraries, keeping the elements
 /// available at `version`, or all of them without one.
 pub fn check(files: &[ast::File], version: Option<u64>) -> Result<Model, Error> {
+    let (model, mut errors) = check_all(files, version);
+    match errors.is_empty() {
+        true => Ok(model),
+        false => Err(errors.remove(0)),
+    }
+}
+
+/// Checks `files` like `check`, going on after errors: the libraries
+/// without the declarations that have errors, and every error. A file
+/// whose library's `@available` is invalid adds no declarations. The
+/// checks across declarations, for containment and message sizes, run
+/// only when there is no other error.
+pub fn check_all(files: &[ast::File], version: Option<u64>) -> (Model, Vec<Error>) {
+    let mut errors = Errors::default();
     let mut libraries: BTreeMap<String, Vec<&ast::File>> = BTreeMap::new();
     for file in files {
         let name = file.library.text();
@@ -25,22 +40,27 @@ pub fn check(files: &[ast::File], version: Option<u64>) -> Result<Model, Error> 
             p.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         }) {
-            return Err(file
-                .library
-                .span
-                .error("library names are lowercase identifiers joined by dots"));
+            errors.push(
+                file.library
+                    .span
+                    .error("library names are lowercase identifiers joined by dots"),
+            );
         }
         libraries.entry(name).or_default().push(file);
     }
     let mut decls: HashMap<String, (&ast::Decl, Scope)> = HashMap::new();
     for (name, files) in &libraries {
         for file in files {
-            let library = window(&file.attrs, None, &file.library.span)?;
+            let Some(library) = errors.take(window(&file.attrs, None, &file.library.span)) else {
+                continue;
+            };
             for using in &file.usings {
                 if !libraries.contains_key(&using.text()) {
-                    return Err(using
-                        .span
-                        .error(format!("unknown library `{}`", using.text())));
+                    errors.push(
+                        using
+                            .span
+                            .error(format!("unknown library `{}`", using.text())),
+                    );
                 }
             }
             let scope = Scope {
@@ -49,14 +69,18 @@ pub fn check(files: &[ast::File], version: Option<u64>) -> Result<Model, Error> 
                 window: library,
             };
             for decl in &file.decls {
-                if !scope.includes(&decl.attrs, &decl.span, version)? {
+                if errors.take(scope.includes(&decl.attrs, &decl.span, version)) != Some(true) {
                     continue;
                 }
                 let full = format!("{name}.{}", decl.name);
-                if decls.insert(full, (decl, scope.clone())).is_some() {
-                    return Err(decl
-                        .span
-                        .error(format!("`{}` is declared twice", decl.name)));
+                match decls.entry(full) {
+                    Entry::Occupied(_) => errors.push(
+                        decl.span
+                            .error(format!("`{}` is declared twice", decl.name)),
+                    ),
+                    Entry::Vacant(slot) => {
+                        slot.insert((decl, scope.clone()));
+                    }
                 }
             }
         }
@@ -69,7 +93,10 @@ pub fn check(files: &[ast::File], version: Option<u64>) -> Result<Model, Error> 
     let mut model = Model {
         libraries: Vec::new(),
     };
-    for name in order(&libraries)? {
+    let order = errors
+        .take(order(&libraries))
+        .unwrap_or_else(|| libraries.keys().cloned().collect());
+    for name in order {
         let mut library = Library {
             name: name.clone(),
             doc: libraries[&name]
@@ -81,20 +108,45 @@ pub fn check(files: &[ast::File], version: Option<u64>) -> Result<Model, Error> 
         for file in &libraries[&name] {
             for decl in &file.decls {
                 let full = format!("{name}.{}", decl.name);
-                if let Some((decl, scope)) = decls.get(&full) {
+                // A declaration declared twice is checked once.
+                if let Some((found, scope)) = decls.get(&full)
+                    && std::ptr::eq(*found, decl)
+                    && let Some(kind) = errors.take(checker.decl(decl, scope))
+                {
                     library.decls.push(Decl {
                         name: decl.name.clone(),
                         doc: decl.attrs.doc.clone(),
-                        kind: checker.decl(decl, scope)?,
+                        kind,
                     });
                 }
             }
         }
         model.libraries.push(library);
     }
-    contain::no_self_containment(&model, &decls)?;
-    limits::messages_fit(&model, &decls)?;
-    Ok(model)
+    if errors.0.is_empty() {
+        errors.take(contain::no_self_containment(&model, &decls));
+    }
+    if errors.0.is_empty() {
+        errors.take(limits::messages_fit(&model, &decls));
+    }
+    (model, errors.0)
+}
+
+/// The errors found so far, each once: a declaration with an error can
+/// be checked again from the declarations that refer to it.
+#[derive(Default)]
+struct Errors(Vec<Error>);
+
+impl Errors {
+    fn push(&mut self, error: Error) {
+        if !self.0.contains(&error) {
+            self.0.push(error);
+        }
+    }
+
+    fn take<T>(&mut self, result: Result<T, Error>) -> Option<T> {
+        result.map_err(|e| self.push(e)).ok()
+    }
 }
 
 /// Where a declaration's names are looked up, and the versions at which
@@ -151,7 +203,12 @@ fn order(libraries: &BTreeMap<String, Vec<&ast::File>>) -> Result<Vec<String>, E
         }
         state.insert(name.to_string(), false);
         for file in &libraries[name] {
-            for using in &file.usings {
+            // An unknown library is an error of its own.
+            for using in file
+                .usings
+                .iter()
+                .filter(|u| libraries.contains_key(&u.text()))
+            {
                 visit(&using.text(), libraries, state, out)?;
             }
         }
