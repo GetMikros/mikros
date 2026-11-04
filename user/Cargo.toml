@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["init", "loader", "mikros-rt", "process-manager", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/init", "tests/managed", "tests/pie", "tests/support"]
 # Built here as a dependency, and host-tested in the root workspace.
-exclude = ["ustar"]
+exclude = ["bootfs", "ustar"]
 
 [workspace.package]
 version = "0.0.0"

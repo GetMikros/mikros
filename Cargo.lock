@@ -727,6 +727,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-bootfs"
+version = "0.0.0"
+dependencies = [
+ "mikros-ustar",
+]
+
+[[package]]
 name = "mikros-ustar"
 version = "0.0.0"
 
