@@ -77,6 +77,18 @@ impl Arch for X86 {
         time::maintain();
     }
 
+    fn cycle_counter() -> u64 {
+        cpu::rdtsc()
+    }
+
+    fn random_source_present() -> bool {
+        crate::entropy::present()
+    }
+
+    fn random_seed(out: &mut [u8]) -> usize {
+        crate::entropy::seed(out)
+    }
+
     fn timer_arm(deadline: i64) {
         timer::arm(deadline);
     }

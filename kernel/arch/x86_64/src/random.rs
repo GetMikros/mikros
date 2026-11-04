@@ -1,9 +1,8 @@
-//! Seeding the kernel random number generator on x86_64.
+//! The kernel random number generator, seeded from the firmware and the
+//! processor's random source, or else from timer measurements.
 
-use crate::cpu::rdtsc;
 use crate::log::log;
 use boot_protocol::BootInfo;
-use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use kernel_core::deadline::INFINITE;
 use kernel_core::random::{Error, RESEED_INTERVAL, RESEED_RETRY, Rng};
@@ -11,86 +10,22 @@ use kernel_core::sync::SpinLock;
 
 static RNG: SpinLock<Rng> = SpinLock::new(Rng::new());
 
-/// The words taken from each hardware source per reseed.
-const WORDS: usize = 4;
-/// How often a failed instruction is retried before the word is skipped.
-const TRIES: u32 = 10;
+/// The most seed bytes the processor's random source gives per reseed.
+const SEED_SIZE: usize = 64;
 
 /// Whether CPUID reports a hardware source.
 static HARDWARE: AtomicBool = AtomicBool::new(false);
 /// When the last successful hardware reseed, or the boot seeding, ended.
 static LAST_RESEED: AtomicI64 = AtomicI64::new(0);
 
-#[derive(Clone, Copy)]
-enum Source {
-    Rdseed,
-    Rdrand,
-}
-
-fn reported(source: Source) -> bool {
-    use core::arch::x86_64::{__cpuid, __cpuid_count};
-    match source {
-        Source::Rdseed => __cpuid(0).eax >= 7 && __cpuid_count(7, 0).ebx & (1 << 18) != 0,
-        Source::Rdrand => __cpuid(1).ecx & (1 << 30) != 0,
-    }
-}
-
-/// One word from `source`, or `None` when the instruction reports a
-/// failure.
-fn word(source: Source) -> Option<u64> {
-    let value: u64;
-    let ok: u8;
-    // SAFETY: the instruction is reported by CPUID; it only writes the
-    // output register and the flags.
-    unsafe {
-        match source {
-            Source::Rdseed => {
-                asm!("rdseed {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
-            }
-            Source::Rdrand => {
-                asm!("rdrand {}", "setc {}", out(reg) value, out(reg_byte) ok, options(nomem, nostack))
-            }
-        }
-    }
-    // The fuzz build's `fuzz_fail_random` makes an instruction report
-    // failure, leaving its result as it is.
-    #[cfg(feature = "fuzz")]
-    let ok = match source {
-        Source::Rdseed if crate::fuzz::random_fails(crate::fuzz::RDSEED) => 0,
-        Source::Rdrand if crate::fuzz::random_fails(crate::fuzz::RDRAND) => 0,
-        _ => ok,
-    };
-    (ok != 0).then_some(value)
-}
-
-/// Fills `out` with words from `source` and returns how many bytes of it
-/// hold output. Failed instructions contribute nothing.
-fn read(source: Source, out: &mut [u8; WORDS * 8]) -> usize {
-    if !reported(source) {
-        return 0;
-    }
-    let mut len = 0;
-    for _ in 0..WORDS {
-        if let Some(w) = (0..TRIES).find_map(|_| word(source)) {
-            out[len..len + 8].copy_from_slice(&w.to_le_bytes());
-            len += 8;
-        }
-    }
-    len
-}
-
 /// Mixes output of every hardware source, and `extra`, into the
 /// generator. Returns whether any hardware source gave output.
 fn reseed_with(extra: &[u8]) -> bool {
-    let mut seed = [0u8; WORDS * 8];
-    let mut rand = [0u8; WORDS * 8];
-    let seed_len = read(Source::Rdseed, &mut seed);
-    let rand_len = read(Source::Rdrand, &mut rand);
-    RNG.lock()
-        .reseed(&[extra, &seed[..seed_len], &rand[..rand_len]]);
+    let mut seed = [0u8; SEED_SIZE];
+    let len = kernel_core::arch::random_seed(&mut seed);
+    RNG.lock().reseed(&[extra, &seed[..len]]);
     seed.fill(0);
-    rand.fill(0);
-    seed_len + rand_len > 0
+    len > 0
 }
 
 /// The time from a successful hardware reseed to the next, and from a
@@ -122,7 +57,7 @@ pub fn reseed_due() -> i64 {
 /// output.
 pub fn reseed(now: i64) -> i64 {
     if reseed_with(&[]) {
-        LAST_RESEED.store(crate::time::now(), Ordering::Relaxed);
+        LAST_RESEED.store(kernel_core::arch::monotonic_now(), Ordering::Relaxed);
         reseed_due()
     } else {
         now.saturating_add(intervals().1)
@@ -135,18 +70,6 @@ pub fn last_reseed() -> i64 {
     LAST_RESEED.load(Ordering::Relaxed)
 }
 
-/// TSC differences across short busy loops, whose timing varies with
-/// caches, interrupts and the memory system.
-fn jitter(out: &mut [u8; 2048]) {
-    for byte in out.iter_mut() {
-        let start = rdtsc();
-        for i in 0..64u32 {
-            core::hint::black_box(i);
-        }
-        *byte = (rdtsc() - start) as u8;
-    }
-}
-
 /// Seeds the generator from the firmware seed and the hardware sources,
 /// or from timer measurements when there are neither.
 pub fn init(info: &BootInfo) {
@@ -154,13 +77,21 @@ pub fn init(info: &BootInfo) {
     let seed: &[u8] = firmware.map_or(&[], |s| s.as_slice());
     let hardware = reseed_with(seed);
     HARDWARE.store(
-        reported(Source::Rdseed) || reported(Source::Rdrand),
+        kernel_core::arch::random_source_present(),
         Ordering::Relaxed,
     );
-    LAST_RESEED.store(crate::time::now(), Ordering::Relaxed);
+    LAST_RESEED.store(kernel_core::arch::monotonic_now(), Ordering::Relaxed);
     if firmware.is_none() && !hardware {
+        // Cycle counts across short busy loops, whose timing varies with
+        // caches, interrupts and the memory system.
         let mut samples = [0u8; 2048];
-        jitter(&mut samples);
+        for byte in samples.iter_mut() {
+            let start = kernel_core::arch::cycle_counter();
+            for i in 0..64u32 {
+                core::hint::black_box(i);
+            }
+            *byte = (kernel_core::arch::cycle_counter() - start) as u8;
+        }
         RNG.lock().reseed(&[&samples]);
         log!(
             Warning,

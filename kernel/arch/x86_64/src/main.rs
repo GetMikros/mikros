@@ -29,6 +29,8 @@ mod coverage;
 #[cfg(target_os = "none")]
 mod cpu;
 #[cfg(target_os = "none")]
+mod entropy;
+#[cfg(target_os = "none")]
 mod entry;
 #[cfg(target_os = "none")]
 mod exception;

@@ -121,6 +121,18 @@ impl Arch for Mock {
 
     fn clock_maintain() {}
 
+    fn cycle_counter() -> u64 {
+        NOW.load(Ordering::Relaxed) as u64
+    }
+
+    fn random_source_present() -> bool {
+        false
+    }
+
+    fn random_seed(_out: &mut [u8]) -> usize {
+        0
+    }
+
     fn timer_arm(deadline: i64) {
         TIMER.store(deadline.max(DISARMED + 1), Ordering::Relaxed);
     }

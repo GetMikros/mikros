@@ -23,14 +23,8 @@ const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 /// and write-through.
 pub const PAT_VALUE: u64 = u64::from_le_bytes([6, 1, 7, 0, 6, 5, 7, 4]);
 
-/// A cache policy and the PAT entry that gives it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Policy {
-    Cached = 0,
-    WriteCombining = 1,
-    Uncached = 2,
-    UncachedDevice = 3,
-}
+/// A cache policy, whose value is the PAT entry that gives it.
+pub use kernel_core::arch::CachePolicy as Policy;
 
 /// How a range is mapped. Every mapping is readable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

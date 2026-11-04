@@ -138,6 +138,17 @@ interface! {
     /// gives.
     [] fn clock_maintain();
 
+    /// A counter of processor cycles, for measuring timing jitter.
+    [] fn cycle_counter() -> u64;
+
+    /// Whether the processor has a random source for `random_seed`.
+    [] fn random_source_present() -> bool;
+
+    /// Fills the start of `out` with output of the processor's random
+    /// source and returns how many bytes it filled, 0 when there is no
+    /// source or it failed. `out` holds at least 64 bytes.
+    [] fn random_seed(out: &mut [u8]) -> usize;
+
     /// Arms this processor's timer to interrupt at the monotonic time
     /// `deadline`, replacing any earlier setting. A deadline that has
     /// passed interrupts at once.
@@ -275,6 +286,16 @@ interface! {
 
 #[cfg(not(target_os = "none"))]
 arch_impl!(mock::Mock);
+
+/// How memory a mapping reaches is cached. Every architecture maps each
+/// policy to its own memory types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CachePolicy {
+    Cached = 0,
+    WriteCombining = 1,
+    Uncached = 2,
+    UncachedDevice = 3,
+}
 
 /// The architecture's state of one thread, freed when it is dropped.
 pub struct ThreadData(core::ptr::NonNull<()>);
