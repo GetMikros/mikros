@@ -5,10 +5,8 @@
 //! is never touched from an interrupt that arrives in the middle of a
 //! change to it.
 
-use crate::context;
 use crate::percpu;
 use crate::process::Process;
-use crate::thread_arch::ArchThread;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use kernel_core::arch::ThreadData;
@@ -17,8 +15,6 @@ use kernel_core::object::{Header, Name, Object, ObjectType, signals};
 use kernel_core::sched::{DEFAULT_PRIORITY, Entity, Fair};
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
-
-const IA32_FS_BASE: u32 = 0xC000_0100;
 
 /// The size of a kernel thread's stack.
 pub const KERNEL_STACK_SIZE: u64 = 32 << 10;
@@ -149,7 +145,7 @@ impl Thread {
                 + Deadlines::<Queued>::ENTRY_SIZE;
             let size = size_of::<Thread>() as u64
                 + KERNEL_STACK_SIZE
-                + context::extended_state_size() as u64
+                + kernel_core::arch::extended_state_layout().0 as u64
                 + 2 * entries as u64;
             process.budget().charge_kernel(size)?;
             size
@@ -189,7 +185,7 @@ impl Thread {
         // or reads its saved pointer.
         unsafe {
             *thread.arch.saved_context() =
-                context::prepare(top, kernel_core::arch::user_thread_entry(), 0)
+                kernel_core::arch::context_prepare(top, kernel_core::arch::user_thread_entry(), 0)
         };
         thread.state.store(RUNNABLE, Ordering::Release);
         let mut cpu = this_cpu().lock();
@@ -200,33 +196,6 @@ impl Thread {
     /// Saves the user state that the next thread replaces.
     fn switch_out(&self) {
         self.arch.switch_out(self.process.is_some());
-    }
-
-    /// Whether the thread is in state `EXCEPTION` or `SUSPENDED` with its
-    /// user registers available.
-    fn stopped(&self) -> bool {
-        matches!(self.state(), EXCEPTION | SUSPENDED) && self.x86().has_exception_frame()
-    }
-
-    /// Calls `f` with the debug registers of a thread in state
-    /// `EXCEPTION` or `SUSPENDED`, or returns `None` when it is in another
-    /// state.
-    pub fn with_stopped_debug<R>(&self, f: impl FnOnce(&mut [u64; 6]) -> R) -> Option<R> {
-        if !self.stopped() {
-            return None;
-        }
-        Some(self.x86().with_debug(f))
-    }
-
-    /// Records a debug exception that the thread's breakpoints raised in
-    /// kernel mode, with DR6 `dr6`, and clears DR6.
-    pub fn defer_debug(&self, dr6: u64) {
-        self.x86().defer_debug(dr6);
-    }
-
-    /// Whether a debug exception was deferred, clearing the mark.
-    pub fn take_deferred_debug(&self) -> bool {
-        self.x86().take_deferred_debug()
     }
 
     /// Makes the thread restore the signal context at `context` before
@@ -253,10 +222,6 @@ impl Thread {
     /// Whether the thread waits in `signal_wait`.
     pub fn waits_for_signals(&self) -> bool {
         self.waiting_for_signals.load(Ordering::Acquire)
-    }
-
-    pub fn extended_state(&self) -> &context::ExtendedState {
-        self.x86().extended_state()
     }
 
     pub fn signals(&self) -> &SpinLock<crate::signal::ThreadSignals> {
@@ -342,36 +307,6 @@ impl Thread {
         self.restart.swap(false, Ordering::AcqRel)
     }
 
-    /// Records the registers the thread entered a system call with, or
-    /// null once it leaves the call.
-    pub fn set_syscall_frame(&self, frame: *mut crate::syscall::Frame) {
-        self.x86().set_syscall_frame(frame);
-    }
-
-    /// The registers of the system call the thread is in, or null.
-    pub fn syscall_frame(&self) -> *mut crate::syscall::Frame {
-        self.x86().syscall_frame()
-    }
-
-    /// Records that the registers of the system call may have changed.
-    pub fn mark_syscall_changed(&self) {
-        self.x86().mark_syscall_changed();
-    }
-
-    /// Whether the registers of the system call may have changed,
-    /// clearing the mark.
-    pub fn take_syscall_changed(&self) -> bool {
-        self.x86().take_syscall_changed()
-    }
-
-    /// Whether the thread has breakpoints enabled.
-    pub fn has_breakpoints(&self) -> bool {
-        self.x86().has_breakpoints()
-    }
-
-    /// Loads the user state of the thread about to run: its extended
-    /// state, and for a user thread its address space, its kernel stack
-    /// for entries from user mode, and its FS and GS bases.
     /// The thread's coverage buffer.
     #[cfg(feature = "fuzz")]
     pub fn coverage(&self) -> &SpinLock<Option<crate::coverage::Buffer>> {
@@ -384,6 +319,13 @@ impl Thread {
         &self.alloc_failures
     }
 
+    /// The architecture's state of the thread.
+    pub fn arch(&self) -> &ThreadData {
+        &self.arch
+    }
+
+    /// Loads the state of the thread about to run: for a user thread its
+    /// I/O ports and address space, and the architecture's state.
     fn switch_in(&self) {
         let top = self.stack_top.load(Ordering::Relaxed);
         percpu::this().thread_stack.store(top, Ordering::Relaxed);
@@ -398,25 +340,6 @@ impl Thread {
         };
         process.aspace().activate();
         self.arch.switch_in(top);
-    }
-
-    /// The thread's x86_64 state.
-    fn x86(&self) -> &ArchThread {
-        crate::thread_arch::of(&self.arch)
-    }
-
-    /// Calls `f` with the user registers, the user FS and GS bases and the
-    /// extended state of a thread in state `EXCEPTION` or `SUSPENDED`, or
-    /// returns `None` when it is in another state. The thread does not
-    /// run meanwhile.
-    pub fn with_stopped_state<R>(
-        &self,
-        f: impl FnOnce(&mut crate::idt::Frame, &mut [u64; 2], &context::ExtendedState) -> R,
-    ) -> Option<R> {
-        if !self.stopped() {
-            return None;
-        }
-        Some(self.x86().with_stopped_state(f))
     }
 
     /// The nanoseconds the thread has run, including the slice it is
@@ -551,7 +474,8 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
     // SAFETY: the stack was just mapped and nothing uses it; the thread
     // is not queued yet, so nothing reads its saved pointer.
     unsafe {
-        *thread.arch.saved_context() = context::prepare(top, entry as usize as u64, arg as u64)
+        *thread.arch.saved_context() =
+            kernel_core::arch::context_prepare(top, entry as usize as u64, arg as u64)
     };
     let mut cpu = this_cpu().lock();
     let entity = *thread.entity.lock();
@@ -647,7 +571,7 @@ fn schedule(requeue: bool) {
     drop(current);
     // SAFETY: `load` is a thread's saved stack or the idle loop's, and
     // `save` belongs to a thread that the scheduler still references.
-    unsafe { context::switch(save, load) };
+    unsafe { kernel_core::arch::context_switch(save, load) };
     finish_switch();
 }
 
@@ -802,15 +726,14 @@ pub fn make_dead(thread: &Arc<Thread>) -> u32 {
     was
 }
 
-/// Puts the running user `thread`, whose user registers are in `frame`,
-/// in state `SUSPENDED` while its suspend count is above zero, until
-/// `wake_suspended` or `make_dead`. Returns whether it was suspended; it
-/// is not while it is to end.
-pub fn suspend(thread: &Arc<Thread>, frame: &mut crate::idt::Frame) -> bool {
+/// Puts the running user `thread`, whose user registers the caller has
+/// made available, in state `SUSPENDED` while its suspend count is above
+/// zero, until `wake_suspended` or `make_dead`. Returns whether it was
+/// suspended; it is not while it is to end.
+pub fn suspend(thread: &Arc<Thread>) -> bool {
     if !thread.suspend_pending() || thread.exit_requested() {
         return false;
     }
-    thread.x86().set_exception_frame(frame);
     let suspended = thread
         .state
         .compare_exchange(RUNNABLE, SUSPENDED, Ordering::AcqRel, Ordering::Acquire)
@@ -821,7 +744,6 @@ pub fn suspend(thread: &Arc<Thread>, frame: &mut crate::idt::Frame) -> bool {
         // A thread made DEAD was not woken by `wake_suspended`.
         thread.header.update_signals(signals::SUSPENDED, 0);
     }
-    thread.x86().set_exception_frame(core::ptr::null_mut());
     suspended
 }
 
@@ -862,18 +784,6 @@ pub fn wake(thread: &Arc<Thread>) {
     }
 }
 
-/// The user FS and GS bases of the running thread.
-pub fn user_bases() -> (u64, u64) {
-    // SAFETY: both MSRs exist in long mode; in the kernel the user GS
-    // base is in IA32_KERNEL_GS_BASE.
-    unsafe {
-        (
-            crate::cpu::read_msr(IA32_FS_BASE),
-            crate::cpu::read_msr(percpu::IA32_KERNEL_GS_BASE),
-        )
-    }
-}
-
 /// Queues `thread`, which is not running and not queued.
 fn queue(thread: &Arc<Thread>) {
     let entity = *thread.entity.lock();
@@ -882,26 +792,21 @@ fn queue(thread: &Arc<Thread>) {
         .enqueue(Queued::new(thread.clone()), entity);
 }
 
-/// Puts the running user thread, whose user registers are in `frame`,
-/// in state `EXCEPTION`. It goes on running until `wait_exception`.
-/// Returns false, changing nothing, when it is not RUNNABLE.
-pub fn enter_exception(thread: &Thread, frame: &mut crate::idt::Frame, kind: u32) -> bool {
-    thread.x86().set_exception_frame(frame);
+/// Puts the running user thread, whose user registers the caller has
+/// made available, in state `EXCEPTION`. It goes on running until
+/// `wait_exception`. Returns false, changing nothing, when it is not
+/// RUNNABLE.
+pub fn enter_exception(thread: &Thread, kind: u32) -> bool {
     thread.woken.store(0, Ordering::Relaxed);
     thread.exception_kind.store(kind, Ordering::Release);
-    let entered = thread
+    thread
         .state
         .compare_exchange(RUNNABLE, EXCEPTION, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok();
-    if !entered {
-        thread.x86().set_exception_frame(core::ptr::null_mut());
-    }
-    entered
+        .is_ok()
 }
 
 /// Takes the running thread out of state `EXCEPTION` before it waited.
 pub fn leave_exception(thread: &Thread) {
-    thread.x86().set_exception_frame(core::ptr::null_mut());
     let _ = thread
         .state
         .compare_exchange(EXCEPTION, RUNNABLE, Ordering::AcqRel, Ordering::Acquire);
@@ -916,7 +821,6 @@ pub fn wait_exception(thread: &Thread) -> u32 {
     if thread.state() == EXCEPTION {
         schedule(false);
     }
-    thread.x86().set_exception_frame(core::ptr::null_mut());
     thread.woken.load(Ordering::Acquire)
 }
 
@@ -972,65 +876,6 @@ pub fn running_slice(matches: impl Fn(&Thread) -> bool) -> i64 {
 
 pub fn current() -> Option<Arc<Thread>> {
     this_cpu().lock().current.clone()
-}
-
-/// A user segment base of a thread.
-pub enum UserBase {
-    Fs,
-    Gs,
-}
-
-/// Sets a user segment base of the calling user thread. Its current
-/// values are in the MSRs until `switch_out` saves them.
-pub fn set_user_base(base: UserBase, value: u64) {
-    let msr = match base {
-        UserBase::Fs => IA32_FS_BASE,
-        // In the kernel the user GS base is in IA32_KERNEL_GS_BASE.
-        UserBase::Gs => percpu::IA32_KERNEL_GS_BASE,
-    };
-    // SAFETY: both MSRs exist in long mode, and the kernel uses neither
-    // for itself while it runs.
-    unsafe { crate::cpu::write_msr(msr, value) };
-}
-
-/// The first code of a user thread, on its kernel stack.
-pub fn user_entry(_: usize) {
-    let thread = this_cpu().lock().current.clone();
-    let Some(thread) = thread else {
-        unreachable!("a user thread started without being current");
-    };
-    let [rip, rsp, arg1, arg2] = thread.x86().start();
-    let report = thread.process().is_some_and(|p| p.debug_events());
-    if !report && !thread.suspend_pending() {
-        drop(thread);
-        exit_if_dead();
-        // SAFETY: `switch_in` loaded the thread's address space, extended
-        // state and user bases before switching to it.
-        unsafe { context::enter_user(rip, rsp, arg1, arg2) }
-    }
-    let mut frame = crate::idt::Frame {
-        rdi: arg1,
-        rsi: arg2,
-        rip,
-        cs: u64::from(crate::gdt::USER_CODE) | 3,
-        rflags: 0x202,
-        rsp,
-        ss: u64::from(crate::gdt::USER_DATA) | 3,
-        ..Default::default()
-    };
-    if report {
-        crate::exception::report_event(
-            &mut frame,
-            kernel_core::exception::kind::THREAD_STARTING,
-            rip,
-        );
-    }
-    crate::exception::stay_suspended(&mut frame, &thread);
-    drop(thread);
-    exit_if_dead();
-    // SAFETY: as above; the handler could change only what
-    // `thread_write_state` allows.
-    unsafe { context::enter_user_frame(&frame) }
 }
 
 /// Switches threads, before an interrupt returns to user mode, if the
@@ -1169,7 +1014,7 @@ pub fn run() -> ! {
                 drop(cpu);
                 // SAFETY: the idle loop's stack stays mapped, and the
                 // per-CPU state that holds its pointer is static.
-                unsafe { context::switch(save, rsp) };
+                unsafe { kernel_core::arch::context_switch(save, rsp) };
                 finish_switch();
             }
             // A collection left needed runs before the processor idles;

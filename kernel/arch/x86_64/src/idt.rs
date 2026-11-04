@@ -488,10 +488,11 @@ pub fn handling() -> bool {
 /// running user thread. Returns whether it was one.
 #[cfg(target_os = "none")]
 fn defer_debug() -> bool {
+    use crate::thread_arch::ThreadX86;
     let dr6 = crate::cpu::read_dr(6);
     match crate::sched::current() {
-        Some(thread) if thread.has_breakpoints() && dr6 & 0xF != 0 => {
-            thread.defer_debug(dr6);
+        Some(thread) if thread.x86().has_breakpoints() && dr6 & 0xF != 0 => {
+            thread.x86().defer_debug(dr6);
             true
         }
         _ => false,

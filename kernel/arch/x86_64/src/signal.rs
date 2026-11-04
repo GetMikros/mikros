@@ -5,6 +5,7 @@ use crate::aspace::in_user_range;
 use crate::idt::Frame;
 use crate::process::{Process, STOPPED};
 use crate::sched::{self, Thread};
+use crate::thread_arch::ThreadX86;
 use crate::thread_state::{self, GENERAL_SIZE, General};
 use crate::usercopy::{copy_in, copy_out};
 use alloc::sync::Arc;
@@ -197,7 +198,7 @@ fn write_frame(
     info: &Info,
     action: &Action,
 ) -> Result<(), Error> {
-    let extended = thread.extended_state();
+    let extended = thread.x86().extended_state();
     extended.save();
     let xsave = extended.bytes();
     let size = XSAVE_OFFSET + xsave.len() as u64;
@@ -224,7 +225,7 @@ fn write_frame(
         frame.rip -= SYSCALL_LEN;
         frame.rax = number;
     }
-    let (fs, gs) = sched::user_bases();
+    let (fs, gs) = crate::thread_arch::user_bases();
     let general = General::from_frame(frame, fs, gs);
     let mut head = [0u8; (BELOW_CONTEXT + XSAVE_OFFSET) as usize];
     head[..8].copy_from_slice(&action.restorer.to_le_bytes());
@@ -384,7 +385,7 @@ fn restore(frame: &mut Frame, thread: &Thread, context: u64) -> Result<(), Error
     if head[0xB0..].iter().any(|&b| b != 0) {
         return Err(Error::InvalidArgs);
     }
-    let extended = thread.extended_state();
+    let extended = thread.x86().extended_state();
     if size != extended.bytes().len() as u64 {
         return Err(Error::InvalidArgs);
     }
@@ -401,8 +402,8 @@ fn restore(frame: &mut Frame, thread: &Thread, context: u64) -> Result<(), Error
     extended.bytes_mut().copy_from_slice(&xsave);
     extended.restore();
     general.apply(frame);
-    sched::set_user_base(sched::UserBase::Fs, general.fs_base);
-    sched::set_user_base(sched::UserBase::Gs, general.gs_base);
+    crate::thread_arch::set_user_base(crate::thread_arch::UserBase::Fs, general.fs_base);
+    crate::thread_arch::set_user_base(crate::thread_arch::UserBase::Gs, general.gs_base);
     thread.signals().lock().mask = mask & !UNBLOCKABLE;
     Ok(())
 }

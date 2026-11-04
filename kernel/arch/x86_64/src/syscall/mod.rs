@@ -5,6 +5,7 @@ use crate::aspace::{USER_END, USER_START};
 use crate::cpu::{RFLAGS_AC, write_msr};
 use crate::gdt::{KERNEL_CODE, USER_CODE, USER_DATA};
 use crate::percpu::{KERNEL_STACK_OFFSET, USER_RSP_OFFSET};
+use crate::thread_arch::ThreadX86;
 use crate::usercopy::copy_in;
 use alloc::sync::Arc;
 use core::arch::global_asm;
@@ -145,10 +146,10 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
         frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9, frame.r12, frame.r13,
     ];
     let number = frame.rax;
-    thread.set_syscall_frame(frame);
+    thread.x86().set_syscall_frame(frame);
     let result = generated::dispatch(number, &args);
-    thread.set_syscall_frame(core::ptr::null_mut());
-    let changed = thread.take_syscall_changed();
+    thread.x86().set_syscall_frame(core::ptr::null_mut());
+    let changed = thread.x86().take_syscall_changed();
     frame.rax = result as u64;
     if result == Error::Interrupted as i64 {
         // A wait that ended for a suspension leaves the thread at its
@@ -178,7 +179,7 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
 /// the call with available to `thread_read_state` and
 /// `thread_write_state`. Returns whether it was suspended.
 pub fn stay_suspended(thread: &Arc<crate::sched::Thread>) -> bool {
-    let frame = thread.syscall_frame();
+    let frame = thread.x86().syscall_frame();
     if frame.is_null() || !thread.suspend_pending() {
         return false;
     }
@@ -187,13 +188,13 @@ pub fn stay_suspended(thread: &Arc<crate::sched::Thread>) -> bool {
     let frame = unsafe { &mut *frame };
     let suspended = with_interrupt_frame(frame, |regs| {
         let mut suspended = false;
-        while crate::sched::suspend(thread, regs) {
+        while crate::exception::suspend(thread, regs) {
             suspended = true;
         }
         suspended
     });
     if suspended {
-        thread.mark_syscall_changed();
+        thread.x86().mark_syscall_changed();
     }
     suspended
 }

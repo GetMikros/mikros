@@ -5,6 +5,7 @@
 
 use crate::context::{self, ExtendedState};
 use crate::percpu;
+use crate::sched::{self, Thread};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use kernel_core::arch::ThreadData;
@@ -237,4 +238,111 @@ impl ArchThread {
         [user.fs_base, user.gs_base] = bases;
         result
     }
+}
+
+/// The x86_64 operations on a kernel thread.
+pub trait ThreadX86 {
+    /// The thread's x86_64 state.
+    fn x86(&self) -> &ArchThread;
+
+    /// Whether the thread is in state `EXCEPTION` or `SUSPENDED` with its
+    /// user registers recorded.
+    fn stopped(&self) -> bool;
+
+    /// Calls `f` with the debug registers of a stopped thread, or returns
+    /// `None` when it is not stopped.
+    fn with_stopped_debug<R>(&self, f: impl FnOnce(&mut [u64; 6]) -> R) -> Option<R> {
+        self.stopped().then(|| self.x86().with_debug(f))
+    }
+
+    /// Calls `f` with the user registers, the user FS and GS bases and the
+    /// extended state of a stopped thread, or returns `None` when it is
+    /// not stopped. The thread does not run meanwhile.
+    fn with_stopped_state<R>(
+        &self,
+        f: impl FnOnce(&mut crate::idt::Frame, &mut [u64; 2], &context::ExtendedState) -> R,
+    ) -> Option<R> {
+        self.stopped().then(|| self.x86().with_stopped_state(f))
+    }
+}
+
+impl ThreadX86 for Thread {
+    fn x86(&self) -> &ArchThread {
+        of(self.arch())
+    }
+
+    fn stopped(&self) -> bool {
+        matches!(self.state(), sched::EXCEPTION | sched::SUSPENDED)
+            && self.x86().has_exception_frame()
+    }
+}
+
+/// The user FS and GS bases of the running thread.
+pub fn user_bases() -> (u64, u64) {
+    // SAFETY: both MSRs exist in long mode; in the kernel the user GS
+    // base is in IA32_KERNEL_GS_BASE.
+    unsafe {
+        (
+            crate::cpu::read_msr(IA32_FS_BASE),
+            crate::cpu::read_msr(percpu::IA32_KERNEL_GS_BASE),
+        )
+    }
+}
+
+/// A user segment base of a thread.
+pub enum UserBase {
+    Fs,
+    Gs,
+}
+
+/// Sets a user segment base of the calling user thread. Its current
+/// values are in the MSRs until `ArchThread::switch_out` saves them.
+pub fn set_user_base(base: UserBase, value: u64) {
+    let msr = match base {
+        UserBase::Fs => IA32_FS_BASE,
+        // In the kernel the user GS base is in IA32_KERNEL_GS_BASE.
+        UserBase::Gs => percpu::IA32_KERNEL_GS_BASE,
+    };
+    // SAFETY: both MSRs exist in long mode, and the kernel uses neither
+    // for itself while it runs.
+    unsafe { crate::cpu::write_msr(msr, value) };
+}
+
+/// The first code of a user thread, on its kernel stack.
+pub fn user_entry(_: usize) {
+    let Some(thread) = sched::current() else {
+        unreachable!("a user thread started without being current");
+    };
+    let [rip, rsp, arg1, arg2] = thread.x86().start();
+    let report = thread.process().is_some_and(|p| p.debug_events());
+    if !report && !thread.suspend_pending() {
+        drop(thread);
+        sched::exit_if_dead();
+        // SAFETY: `switch_in` loaded the thread's address space, extended
+        // state and user bases before switching to it.
+        unsafe { context::enter_user(rip, rsp, arg1, arg2) }
+    }
+    let mut frame = crate::idt::Frame {
+        rdi: arg1,
+        rsi: arg2,
+        rip,
+        cs: u64::from(crate::gdt::USER_CODE) | 3,
+        rflags: 0x202,
+        rsp,
+        ss: u64::from(crate::gdt::USER_DATA) | 3,
+        ..Default::default()
+    };
+    if report {
+        crate::exception::report_event(
+            &mut frame,
+            kernel_core::exception::kind::THREAD_STARTING,
+            rip,
+        );
+    }
+    crate::exception::stay_suspended(&mut frame, &thread);
+    drop(thread);
+    sched::exit_if_dead();
+    // SAFETY: as above; the handler could change only what
+    // `thread_write_state` allows.
+    unsafe { context::enter_user_frame(&frame) }
 }

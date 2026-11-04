@@ -9,6 +9,7 @@ use crate::paging::Policy;
 use crate::process::Process;
 use crate::publish::{Outputs, Page, Work};
 use crate::sched::Thread;
+use crate::thread_arch::ThreadX86;
 use crate::thread_state::{self, DEBUG_SIZE, GENERAL_SIZE, General};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -300,14 +301,14 @@ pub fn thread_start(
 
 pub fn thread_set_user_base(which: u32, value: u64) -> Result<(), Error> {
     let base = match which {
-        0 => crate::sched::UserBase::Fs,
-        1 => crate::sched::UserBase::Gs,
+        0 => crate::thread_arch::UserBase::Fs,
+        1 => crate::thread_arch::UserBase::Gs,
         _ => return Err(Error::InvalidArgs),
     };
     if value != 0 && !crate::aspace::in_user_range(value, 1) {
         return Err(Error::InvalidArgs);
     }
-    crate::sched::set_user_base(base, value);
+    crate::thread_arch::set_user_base(base, value);
     Ok(())
 }
 

@@ -145,7 +145,7 @@ impl Arch for X86 {
     }
 
     fn user_thread_entry() -> u64 {
-        crate::sched::user_entry as *const () as u64
+        crate::thread_arch::user_entry as *const () as u64
     }
 
     fn extended_state_layout() -> (usize, usize) {
