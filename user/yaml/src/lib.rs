@@ -19,6 +19,11 @@ mod flow;
 mod parse;
 mod plain;
 mod quoted;
+mod value;
+
+pub use value::Map;
+#[cfg(test)]
+mod tests;
 
 use alloc::string::String;
 use alloc::vec::Vec;
