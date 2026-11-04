@@ -133,7 +133,9 @@ fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
 }
 
 /// The arguments of `qemu::args` with the serial port written to `log`,
-/// no display, the debug exit device, and no reboot.
+/// no display, the debug exit device, QEMU's `edu` device for DMA tests,
+/// able to reach the first 4 GiB, and no reboot. The devices follow the
+/// IOMMU, which must come first.
 pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
     if let Some(i) = args.iter().position(|a| a == "-serial") {
         args[i + 1] = format!("file:{}", log.display());
@@ -144,6 +146,8 @@ pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
             "none",
             "-device",
             "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-device",
+            "edu,dma_mask=0xffffffff",
             "-no-reboot",
         ]
         .map(String::from),
@@ -292,6 +296,7 @@ ffffffff800ccff0 000000000000008b t <kernel::ktimer::Armed>::fire
         let args = test_args(args, Path::new("/t/serial.log"));
         assert_eq!(args[3], "file:/t/serial.log");
         assert!(args.contains(&"isa-debug-exit,iobase=0xf4,iosize=0x04".to_string()));
+        assert!(args.contains(&"edu,dma_mask=0xffffffff".to_string()));
         assert!(args.contains(&"-no-reboot".to_string()));
     }
 }

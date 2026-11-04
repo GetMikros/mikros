@@ -5,6 +5,7 @@
 use super::{Checked, UserIn, UserOut, bytes_of, current_process};
 use crate::aspace::Piece;
 use crate::memory_object::{Held, MemoryObject};
+use crate::paging::Policy;
 use crate::process::Process;
 use crate::publish::{Outputs, Page, Work};
 use crate::sched::Thread;
@@ -19,11 +20,13 @@ use kernel_core::object::handles::Entry;
 use kernel_core::object::handles::Handle;
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{
-    KIND_IOPORT, KIND_IRQ, KIND_POLICY, KIND_PRIORITY, KIND_ROOT, Request, Resource,
+    KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_MSI, KIND_POLICY, KIND_PRIORITY,
+    KIND_ROOT, Request, Resource,
 };
 use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
-    INFO_BASIC, NAME_MAX, Name, Object, ObjectType, basic_info, default_rights, downcast, rights,
+    INFO_BASIC, NAME_MAX, Name, Object, ObjectType, PHYSICAL_MEMORY_DEFAULT_RIGHTS, basic_info,
+    default_rights, downcast, rights,
 };
 use kernel_core::regions::{MapOptions, PERM_WRITE};
 use kernel_core::signal::{self as sig, ACTION_SIZE, Action, Info, UNBLOCKABLE};
@@ -371,6 +374,100 @@ pub fn mem_create(size: u64, options: u32, out: UserOut<Handle>) -> Result<(), E
     page_aligned(&[size])?;
     let mem = MemoryObject::new(Some(current_process()?.budget()), size, options)?;
     give(mem, ObjectType::MemoryObject, out)
+}
+
+/// `BELOW_4G` of `mem_create_contiguous` and `mem_create_pinned`.
+const BELOW_4G: u32 = 1 << 0;
+
+pub fn mem_create_physical(
+    resource: Checked,
+    base: u64,
+    size: u64,
+    cache: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if size == 0 {
+        return Err(Error::OutOfRange);
+    }
+    if !object::<Resource>(resource).grants(KIND_MMIO, base, size) {
+        return Err(Error::AccessDenied);
+    }
+    page_aligned(&[base, size])?;
+    let policy = match cache {
+        0 => Policy::Cached,
+        1 => Policy::Uncached,
+        2 => Policy::UncachedDevice,
+        3 => Policy::WriteCombining,
+        _ => return Err(Error::InvalidArgs),
+    };
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let budget = current_process()?.budget().clone();
+    let mem = MemoryObject::new_physical(Some(&budget), base, size, policy)?;
+    give_with(mem, PHYSICAL_MEMORY_DEFAULT_RIGHTS, out)
+}
+
+pub fn mem_create_contiguous(
+    resource: Checked,
+    size: u64,
+    align_log2: u32,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if !object::<Resource>(resource).grants(KIND_DMA, 0, 0) {
+        return Err(Error::AccessDenied);
+    }
+    page_aligned(&[size])?;
+    if options & !BELOW_4G != 0 || !(12..=21).contains(&align_log2) || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let budget = current_process()?.budget().clone();
+    let mem = MemoryObject::new_contiguous(&budget, size, align_log2, options & BELOW_4G != 0)?;
+    give_with(mem, PHYSICAL_MEMORY_DEFAULT_RIGHTS, out)
+}
+
+pub fn mem_create_pinned(
+    resource: Checked,
+    size: u64,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if !object::<Resource>(resource).grants(KIND_DMA, 0, 0) {
+        return Err(Error::AccessDenied);
+    }
+    page_aligned(&[size])?;
+    if options & !BELOW_4G != 0 || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let budget = current_process()?.budget().clone();
+    let mem = MemoryObject::new_pinned(&budget, size, options & BELOW_4G != 0)?;
+    give_with(mem, PHYSICAL_MEMORY_DEFAULT_RIGHTS, out)
+}
+
+pub fn mem_get_physical(mem: Checked, out: UserOut<u64>) -> Result<(), Error> {
+    let phys = object::<MemoryObject>(mem).physical_start()?;
+    let outputs = prepare(&current_process()?, &[out.range(1)])?;
+    publish(outputs, &[bytes_of(&[phys])]);
+    Ok(())
+}
+
+/// The most page addresses `mem_get_physical_pages` stores at once.
+const MAX_PHYSICAL_PAGES: u64 = 512;
+
+pub fn mem_get_physical_pages(
+    mem: Checked,
+    first: u64,
+    count: u64,
+    out: UserOut<u64>,
+) -> Result<(), Error> {
+    if count > MAX_PHYSICAL_PAGES {
+        return Err(Error::InvalidArgs);
+    }
+    let pages = object::<MemoryObject>(mem).physical_pages(first, count)?;
+    let outputs = prepare(&current_process()?, &[out.range(count)])?;
+    publish(outputs, &[bytes_of(&pages)]);
+    Ok(())
 }
 
 pub fn mem_read(mem: Checked, offset: u64, buf: UserOut<u8>, len: u64) -> Result<(), Error> {
@@ -1440,9 +1537,104 @@ pub fn interrupt_create(
     give(interrupt, ObjectType::Interrupt, out)
 }
 
+pub fn interrupt_create_msi(
+    resource: Checked,
+    bti: Checked,
+    count: u32,
+    options: u32,
+    out: UserOut<Handle>,
+    messages: UserOut<u8>,
+) -> Result<(), Error> {
+    use crate::interrupt::{Interrupt, MSI_MAX};
+    if !object::<Resource>(resource).grants(KIND_MSI, 0, 0) {
+        return Err(Error::AccessDenied);
+    }
+    let n = count as usize;
+    if options != 0 || !(1..=MSI_MAX).contains(&n) {
+        return Err(Error::InvalidArgs);
+    }
+    let len = 16 * u64::from(count);
+    if !out.fits(u64::from(count)) || !messages.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    let process = current_process()?;
+    let outputs = prepare(
+        &process,
+        &[out.range(u64::from(count)), messages.range(len)],
+    )?;
+    let source = object::<crate::bti::Bti>(bti).requester_id();
+    let made = Interrupt::new_msi(process.budget(), source, n)?;
+    let mut entries = Vec::new();
+    entries.try_reserve(n).map_err(|_| Error::NoMemory)?;
+    let mut bytes = [0u8; 16 * MSI_MAX];
+    for (i, (interrupt, message)) in made.iter().enumerate() {
+        entries.push(Entry {
+            object: interrupt.clone(),
+            rights: default_rights(ObjectType::Interrupt),
+        });
+        bytes[16 * i..16 * i + 8].copy_from_slice(&message.address.to_le_bytes());
+        bytes[16 * i + 8..16 * i + 12].copy_from_slice(&message.data.to_le_bytes());
+    }
+    let mut values = [0; MSI_MAX];
+    process.handles().lock().insert_many_then::<MSI_MAX>(
+        &entries,
+        Some(process.budget()),
+        |handles| {
+            values[..n].copy_from_slice(handles);
+            Ok(())
+        },
+    )?;
+    publish(outputs, &[bytes_of(&values[..n]), &bytes[..16 * n]]);
+    Ok(())
+}
+
 pub fn interrupt_ack(interrupt: Checked) -> Result<(), Error> {
     object::<crate::interrupt::Interrupt>(interrupt).ack();
     Ok(())
+}
+
+pub fn bti_create(
+    resource: Checked,
+    requester_id: u64,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if !object::<Resource>(resource).grants(KIND_BTI, requester_id, 1) {
+        return Err(Error::AccessDenied);
+    }
+    if options != 0 || !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let bti = crate::bti::Bti::new(current_process()?.budget(), requester_id)?;
+    give(bti, ObjectType::Bti, out)
+}
+
+pub fn bti_pin(
+    bti: Checked,
+    mem: Checked,
+    offset: u64,
+    size: u64,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let budget = current_process()?.budget().clone();
+    let mem = object::<MemoryObject>(mem);
+    let pmt = object::<crate::bti::Bti>(bti).pin(&budget, mem, offset, size, options)?;
+    give(pmt, ObjectType::Pmt, out)
+}
+
+pub fn pmt_unpin(pmt: Checked) -> Result<(), Error> {
+    downcast::<crate::bti::Pmt>(pmt.object.clone())
+        .expect("the dispatch checked the object type")
+        .unpin()?;
+    handle_close(Some(pmt))
+}
+
+pub fn bti_release_quarantine(bti: Checked) -> Result<(), Error> {
+    object::<crate::bti::Bti>(bti).release_quarantine()
 }
 
 #[cfg(feature = "fuzz")]
@@ -1835,7 +2027,7 @@ pub fn mem_clone(
     page_aligned(&[offset, len])?;
     let rights = mem.rights;
     let source = object::<MemoryObject>(mem);
-    if source.is_physical() {
+    if source.is_physical() || source.is_fixed() {
         return Err(Error::NotSupported);
     }
     source.check_range(offset, len)?;

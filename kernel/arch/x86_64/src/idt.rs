@@ -425,6 +425,7 @@ extern "sysv64" fn interrupt(frame: &mut Frame) -> bool {
         // spurious interrupt.
         v if (PIC_BASE..PIC_BASE + 16).contains(&v) || v == SPURIOUS_VECTOR => {}
         TIMER_VECTOR => crate::timer::interrupt(),
+        crate::apic::IOMMU_FAULT_VECTOR => crate::iommu::fault_interrupt(),
         v if crate::apic::DEVICE_VECTORS.contains(&v) => crate::interrupt::deliver(v),
         // Nothing handles the vectors reserved for the kernel yet.
         _ => crate::apic::eoi(),

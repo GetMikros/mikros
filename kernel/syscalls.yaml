@@ -979,12 +979,25 @@ syscalls:
     number: 95
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0011.R20, MIKSPEC-0015.R13, MIKSPEC-0015.R24]
+    spec: [MIKSPEC-0011.R20, MIKSPEC-0015.R13, MIKSPEC-0015.R27, MIKSPEC-0081.R9]
     args:
       - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
       - {name: irq, type: u32, dir: in}
       - {name: options, type: u32, dir: in}
       - {name: out, type: "*mut Handle", dir: out, object: Interrupt}
+
+  - name: interrupt_create_msi
+    number: 97
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R26, MIKSPEC-0011.R12, MIKSPEC-0015.R28, MIKSPEC-0081.R8]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: bti, type: Handle, dir: in, object: Bti, rights: [MANAGE]}
+      - {name: count, type: u32, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: Interrupt}
+      - {name: messages, type: "*mut u8", dir: out}
 
   - name: interrupt_ack
     number: 96
@@ -993,3 +1006,98 @@ syscalls:
     spec: [MIKSPEC-0011.R13, MIKSPEC-0015.R15]
     args:
       - {name: interrupt, type: Handle, dir: in, object: Interrupt, rights: [WRITE]}
+
+  - name: mem_create_physical
+    number: 98
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R21, MIKSPEC-0006.R11]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: base, type: u64, dir: in}
+      - {name: size, type: u64, dir: in}
+      - {name: cache, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: MemoryObject}
+
+  - name: mem_create_contiguous
+    number: 99
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R22, MIKSPEC-0006.R11]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: size, type: u64, dir: in}
+      - {name: align_log2, type: u32, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: MemoryObject}
+
+  - name: mem_create_pinned
+    number: 100
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R24, MIKSPEC-0006.R11]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: size, type: u64, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: MemoryObject}
+
+  - name: mem_get_physical
+    number: 101
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R23]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [MANAGE]}
+      - {name: out, type: "*mut u64", dir: out}
+
+  - name: mem_get_physical_pages
+    number: 102
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R25]
+    args:
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [MANAGE]}
+      - {name: first, type: u64, dir: in}
+      - {name: count, type: u64, dir: in}
+      - {name: out, type: "*mut u64", dir: out}
+
+  - name: bti_create
+    number: 103
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0080.R11, MIKSPEC-0080.R1, MIKSPEC-0080.R10]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: requester_id, type: u64, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: Bti}
+
+  - name: bti_pin
+    number: 104
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0080.R5, MIKSPEC-0080.R1]
+    args:
+      - {name: bti, type: Handle, dir: in, object: Bti, rights: [MANAGE]}
+      - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [MANAGE]}
+      - {name: offset, type: u64, dir: in}
+      - {name: size, type: u64, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: Pmt}
+
+  - name: pmt_unpin
+    number: 105
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0080.R6]
+    args:
+      - {name: pmt, type: Handle, dir: in, object: Pmt, rights: [MANAGE]}
+
+  - name: bti_release_quarantine
+    number: 106
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0080.R7]
+    args:
+      - {name: bti, type: Handle, dir: in, object: Bti, rights: [MANAGE]}

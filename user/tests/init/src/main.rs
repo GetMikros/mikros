@@ -15,6 +15,7 @@ use mikros_test::{
 
 mikros_rt::main!(main);
 
+mod edu;
 #[cfg(feature = "fuzz")]
 mod hooks;
 
@@ -2980,6 +2981,413 @@ fn interrupt_delivered_and_acked(s: &Startup) -> Result {
         close(handle)?;
     }
     result
+}
+
+const KIND_DMA: u32 = 4;
+const NO_MEMORY: i64 = -4;
+const BELOW_4G: u32 = 1 << 0;
+
+/// The kind of memory object `mem`, from its information record.
+fn memory_kind(mem: Handle) -> Result<u32> {
+    Ok(u32_at(&info::<0x18>(mem, 4)?, 0x08))
+}
+
+fn mem_get_physical(mem: Handle) -> (i64, u64) {
+    let mut phys = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::mem_get_physical(mem, &mut phys) };
+    (status, phys)
+}
+
+fn physical_pages<const N: usize>(mem: Handle, first: u64) -> (i64, [u64; N]) {
+    let mut pages = [0u64; N];
+    // SAFETY: the pointer describes `pages`.
+    let status = unsafe { sys::mem_get_physical_pages(mem, first, N as u64, pages.as_mut_ptr()) };
+    (status, pages)
+}
+
+/// Checks what contiguous and pinned objects of `pages` pages allow
+/// beyond their physical addresses: their bytes start as zero and can be
+/// written, read and mapped, they are charged as pages, and the calls for
+/// anonymous objects refuse them.
+fn fixed_memory_like_ram(s: &Startup, mem: Handle, pages: u64) -> Result {
+    ensure(
+        "zeroing the frames",
+        mem_read_at::<8>(mem, pages * PAGE_SIZE - 8)? == [0; 8],
+    )?;
+    mem_write_at(mem, 8, &[5; 8])?;
+    ensure("keeping writes", mem_read_at::<8>(mem, 8)? == [5; 8])?;
+    let at = map(s.process, mem, PAGE_SIZE)?;
+    // SAFETY: the page was just mapped readable.
+    ensure(
+        "mapping the frames",
+        unsafe { *((at + 8) as *const u8) } == 5,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("unmapping", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })?;
+    let mut clone = 0;
+    // SAFETY: the out pointer is valid for the call; the others take none.
+    let refused = unsafe {
+        [
+            sys::mem_op(mem, 2, 0, PAGE_SIZE),
+            sys::mem_set_size(mem, PAGE_SIZE),
+            sys::mem_seal(mem, 1),
+            sys::mem_clone(mem, 0, 0, PAGE_SIZE, &mut clone),
+        ]
+    };
+    ensure(
+        "refusing the calls for anonymous objects",
+        refused == [NOT_SUPPORTED; 4],
+    )
+}
+
+/// `mem_create_contiguous` and `mem_create_pinned` take a `DMA` resource
+/// or the root, allocate and charge every frame at once, and report
+/// where the frames are; their arguments are checked.
+fn contiguous_and_pinned_memory(s: &Startup) -> Result {
+    let dma = grant(s, KIND_DMA, 0, 0)?;
+    let irq = grant(s, KIND_IRQ, u64::from(RTC_GSI), 1)?;
+    let (mut contiguous, mut pinned) = (0, 0);
+    let before = budget_pages(s)?;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a contiguous object", unsafe {
+        sys::mem_create_contiguous(dma, 4 * PAGE_SIZE, 16, BELOW_4G, &mut contiguous)
+    })?;
+    ensure("charging its pages", budget_pages(s)? == before + 4)?;
+    ensure("reporting the kind", memory_kind(contiguous)? == 3)?;
+    let (status, start) = mem_get_physical(contiguous);
+    check("reading the start", status)?;
+    ensure(
+        "aligning and placing the run",
+        start.is_multiple_of(1 << 16) && start + 4 * PAGE_SIZE <= 1 << 32,
+    )?;
+    let (status, pages) = physical_pages::<4>(contiguous, 0);
+    check("reading the pages", status)?;
+    ensure(
+        "listing consecutive frames",
+        pages == core::array::from_fn(|i| start + i as u64 * PAGE_SIZE),
+    )?;
+    fixed_memory_like_ram(s, contiguous, 4)?;
+
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a pinned object from the root", unsafe {
+        sys::mem_create_pinned(s.root_resource, 3 * PAGE_SIZE, 0, &mut pinned)
+    })?;
+    ensure("charging its pages", budget_pages(s)? == before + 7)?;
+    ensure("reporting the kind", memory_kind(pinned)? == 4)?;
+    ensure(
+        "having no single start",
+        mem_get_physical(pinned).0 == NOT_SUPPORTED,
+    )?;
+    let (status, pages) = physical_pages::<3>(pinned, 0);
+    check("reading the pages", status)?;
+    ensure(
+        "listing distinct frames",
+        pages.iter().all(|p| p.is_multiple_of(PAGE_SIZE))
+            && pages[0] != pages[1]
+            && pages[1] != pages[2]
+            && pages[0] != pages[2],
+    )?;
+    fixed_memory_like_ram(s, pinned, 3)?;
+    ensure(
+        "refusing pages beyond the object",
+        physical_pages::<2>(pinned, 2).0 == OUT_OF_RANGE,
+    )?;
+    ensure(
+        "storing nothing for no pages",
+        physical_pages::<0>(pinned, 100).0 == 0,
+    )?;
+    let mut many = [0u64; 513];
+    ensure(
+        "refusing more than 512 pages",
+        // SAFETY: the pointer describes `many`.
+        unsafe { sys::mem_get_physical_pages(pinned, 0, 513, many.as_mut_ptr()) } == INVALID_ARGS,
+    )?;
+    // Anonymous objects come without MANAGE, which both calls require.
+    let anonymous = create_memory(PAGE_SIZE)?;
+    ensure(
+        "refusing anonymous objects",
+        mem_get_physical(anonymous).0 == ACCESS_DENIED
+            && physical_pages::<1>(anonymous, 0).0 == ACCESS_DENIED,
+    )?;
+    for handle in [contiguous, pinned, anonymous] {
+        close(handle)?;
+    }
+    ensure("releasing the pages", budget_pages(s)? == before)?;
+
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for each call.
+    let statuses = unsafe {
+        [
+            sys::mem_create_contiguous(irq, PAGE_SIZE, 12, 0, &mut out),
+            sys::mem_create_contiguous(dma, PAGE_SIZE, 11, 0, &mut out),
+            sys::mem_create_contiguous(dma, PAGE_SIZE, 22, 0, &mut out),
+            sys::mem_create_contiguous(dma, PAGE_SIZE + 1, 12, 0, &mut out),
+            sys::mem_create_contiguous(dma, 0, 12, 0, &mut out),
+            sys::mem_create_contiguous(dma, PAGE_SIZE, 12, 2, &mut out),
+            sys::mem_create_contiguous(dma, 1 << 40, 12, 0, &mut out),
+            sys::mem_create_pinned(irq, PAGE_SIZE, 0, &mut out),
+            sys::mem_create_pinned(dma, 100, 0, &mut out),
+            sys::mem_create_pinned(dma, 0, 0, &mut out),
+            sys::mem_create_pinned(dma, PAGE_SIZE, 2, &mut out),
+        ]
+    };
+    ensure(
+        "checking the arguments",
+        statuses
+            == [
+                ACCESS_DENIED,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                OUT_OF_RANGE,
+                INVALID_ARGS,
+                NO_MEMORY,
+                ACCESS_DENIED,
+                INVALID_ARGS,
+                OUT_OF_RANGE,
+                INVALID_ARGS,
+            ],
+    )?;
+    close(dma)?;
+    close(irq)
+}
+
+/// `mem_create_physical` takes an `MMIO` resource that covers the range,
+/// or the root, and gives an object of that range that reports its start
+/// and refuses copies; its arguments are checked.
+fn physical_memory_objects(s: &Startup) -> Result {
+    const KIND_MMIO: u32 = 1;
+    // Addresses no memory map range describes, in no other resource.
+    const BASE: u64 = 0xFE00_0000;
+    let mmio = grant(s, KIND_MMIO, BASE, 4 * PAGE_SIZE)?;
+    let mut mem = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a physical object", unsafe {
+        sys::mem_create_physical(mmio, BASE + PAGE_SIZE, 2 * PAGE_SIZE, 1, &mut mem)
+    })?;
+    ensure("reporting the kind", memory_kind(mem)? == 2)?;
+    ensure(
+        "reporting the start",
+        mem_get_physical(mem) == (0, BASE + PAGE_SIZE),
+    )?;
+    ensure(
+        "listing no pages",
+        physical_pages::<1>(mem, 0).0 == NOT_SUPPORTED,
+    )?;
+    let mut byte = [0u8; 1];
+    ensure(
+        "refusing copies",
+        // SAFETY: the pointer describes `byte`.
+        unsafe { sys::mem_read(mem, 0, byte.as_mut_ptr(), 1) } == NOT_SUPPORTED,
+    )?;
+    close(mem)?;
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for each call.
+    let statuses = unsafe {
+        [
+            sys::mem_create_physical(mmio, BASE, 8 * PAGE_SIZE, 0, &mut out),
+            sys::mem_create_physical(mmio, BASE - PAGE_SIZE, PAGE_SIZE, 0, &mut out),
+            sys::mem_create_physical(mmio, BASE + 8, PAGE_SIZE, 0, &mut out),
+            sys::mem_create_physical(mmio, BASE, 100, 0, &mut out),
+            sys::mem_create_physical(mmio, BASE, PAGE_SIZE, 4, &mut out),
+            sys::mem_create_physical(mmio, BASE, 0, 0, &mut out),
+        ]
+    };
+    ensure(
+        "checking the arguments",
+        statuses
+            == [
+                ACCESS_DENIED,
+                ACCESS_DENIED,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                OUT_OF_RANGE,
+            ],
+    )?;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating one from the root", unsafe {
+        sys::mem_create_physical(s.root_resource, BASE, PAGE_SIZE, 3, &mut out)
+    })?;
+    close(out)?;
+    close(mmio)
+}
+
+/// Whether a kernel log record holds `needle`.
+fn kernel_logged(s: &Startup, needle: &[u8]) -> Result<bool> {
+    let mut after = 0;
+    loop {
+        let mut record = [0u8; 288];
+        // SAFETY: the pointer describes `record`.
+        let status = unsafe { sys::log_read(s.log, after, record.as_mut_ptr()) };
+        if status == SHOULD_WAIT {
+            return Ok(false);
+        }
+        check("reading the log", status)?;
+        let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+        if record[0x19] == 0 && contains(&record[0x20..0x20 + len.min(256)], needle) {
+            return Ok(true);
+        }
+        after = u64_at(&record, 0);
+    }
+}
+
+/// The kernel says at boot whether DMA is isolated. When VT-d isolates
+/// it, the register page of QEMU's unit cannot be granted.
+fn dma_isolation_reported(s: &Startup) -> Result {
+    const VTD_REGISTERS: u64 = 0xFED9_0000;
+    if !kernel_logged(s, b"DMA isolated")? {
+        return ensure(
+            "reporting that DMA is not isolated",
+            kernel_logged(s, b"DMA is not isolated")?,
+        );
+    }
+    if !kernel_logged(s, b"VT-d units")? {
+        return Ok(());
+    }
+    let mut resource = 0;
+    ensure(
+        "refusing the IOMMU's registers",
+        // SAFETY: the out pointer is valid for the call.
+        unsafe {
+            sys::resource_create(
+                s.root_resource,
+                1,
+                VTD_REGISTERS,
+                PAGE_SIZE,
+                0,
+                &mut resource,
+            )
+        } == ACCESS_DENIED,
+    )
+}
+
+const KIND_BTI: u32 = 8;
+const WRONG_TYPE: i64 = -12;
+const DEVICE_READ: u32 = 1 << 0;
+const DEVICE_WRITE: u32 = 1 << 1;
+
+fn bti_create(resource: Handle, rid: u64, options: u32) -> (i64, Handle) {
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::bti_create(resource, rid, options, &mut out) };
+    (status, out)
+}
+
+fn bti_pin(bti: Handle, mem: Handle, offset: u64, size: u64, options: u32) -> (i64, Handle) {
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::bti_pin(bti, mem, offset, size, options, &mut out) };
+    (status, out)
+}
+
+/// `bti_create` takes a `BTI` resource covering the requester ID or the
+/// root, and with an IOMMU refuses a device behind none of its units.
+fn bti_create_checks(s: &Startup) -> Result {
+    // A function of QEMU's PCI root bus, which its one VT-d unit covers,
+    // and one of a segment that does not exist.
+    const RID: u64 = 0x18;
+    const NOWHERE: u64 = 0x5_0000;
+    let range = grant(s, KIND_BTI, RID, 2)?;
+    let irq = grant(s, KIND_IRQ, u64::from(RTC_GSI), 1)?;
+    let refused = [
+        bti_create(irq, RID, 0).0,
+        bti_create(range, RID + 2, 0).0,
+        bti_create(range, RID, 1).0,
+    ];
+    ensure(
+        "refusing resources and options",
+        refused == [ACCESS_DENIED, ACCESS_DENIED, INVALID_ARGS],
+    )?;
+    let (status, first) = bti_create(range, RID, 0);
+    check("creating a Bti", status)?;
+    let (status, second) = bti_create(range, RID, 0);
+    check("creating a second for the same device", status)?;
+    let isolated = kernel_logged(s, b"DMA isolated")?;
+    let (status, nowhere) = bti_create(s.root_resource, NOWHERE, 0);
+    if isolated {
+        ensure("refusing a device no IOMMU covers", status == OUT_OF_RANGE)?;
+    } else {
+        check("accepting any device without an IOMMU", status)?;
+        close(nowhere)?;
+    }
+    for handle in [first, second, range, irq] {
+        close(handle)?;
+    }
+    Ok(())
+}
+
+/// `bti_pin` pins ranges of contiguous and pinned objects and checks its
+/// arguments; `pmt_unpin` closes the `Pmt` handle; a `Pmt` closed without
+/// it keeps its pages, and their charge, until the quarantine of its
+/// device is released.
+fn pins_and_quarantine(s: &Startup) -> Result {
+    let dma = grant(s, KIND_DMA, 0, 0)?;
+    let (status, bti) = bti_create(s.root_resource, 0x18, 0);
+    check("creating a Bti", status)?;
+    let mut pinned = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a pinned object", unsafe {
+        sys::mem_create_pinned(dma, 4 * PAGE_SIZE, 0, &mut pinned)
+    })?;
+    let mut physical = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a physical object", unsafe {
+        sys::mem_create_physical(s.root_resource, 0xFE00_0000, PAGE_SIZE, 1, &mut physical)
+    })?;
+    let both = DEVICE_READ | DEVICE_WRITE;
+    let refused = [
+        bti_pin(bti, physical, 0, PAGE_SIZE, both).0,
+        bti_pin(bti, pinned, 8, PAGE_SIZE, both).0,
+        bti_pin(bti, pinned, 0, 100, both).0,
+        bti_pin(bti, pinned, 0, 0, both).0,
+        bti_pin(bti, pinned, 3 * PAGE_SIZE, 2 * PAGE_SIZE, both).0,
+        bti_pin(bti, pinned, 0, PAGE_SIZE, 0).0,
+        bti_pin(bti, pinned, 0, PAGE_SIZE, 4).0,
+    ];
+    ensure(
+        "checking the arguments",
+        refused
+            == [
+                WRONG_TYPE,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+                INVALID_ARGS,
+            ],
+    )?;
+
+    let (status, pmt) = bti_pin(bti, pinned, PAGE_SIZE, 2 * PAGE_SIZE, DEVICE_READ);
+    check("pinning", status)?;
+    // SAFETY: the call takes no pointers.
+    check("unpinning", unsafe { sys::pmt_unpin(pmt) })?;
+    ensure(
+        "closing the handle",
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::handle_close(pmt) } == BAD_HANDLE,
+    )?;
+
+    // A Pmt closed without pmt_unpin keeps the object and its pages.
+    let pages = budget_pages(s)?;
+    let (status, pmt) = bti_pin(bti, pinned, 0, 4 * PAGE_SIZE, both);
+    check("pinning again", status)?;
+    close(pmt)?;
+    close(pinned)?;
+    ensure("keeping the pages charged", budget_pages(s)? == pages)?;
+    // SAFETY: the call takes no pointers.
+    check("releasing the quarantine", unsafe {
+        sys::bti_release_quarantine(bti)
+    })?;
+    ensure("freeing the pages", budget_pages(s)? == pages - 4)?;
+    for handle in [physical, bti, dma] {
+        close(handle)?;
+    }
+    Ok(())
 }
 
 /// Killing a blocked thread whose process reports thread events reports
@@ -6150,7 +6558,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 94] = [
+const TESTS: [(&str, Test); 101] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6234,6 +6642,13 @@ const TESTS: [(&str, Test); 94] = [
         "interrupt_delivered_and_acked",
         interrupt_delivered_and_acked,
     ),
+    ("dma_isolation_reported", dma_isolation_reported),
+    ("bti_create_checks", bti_create_checks),
+    ("pins_and_quarantine", pins_and_quarantine),
+    ("dma_through_pins", edu::dma_through_pins),
+    ("msi_from_device", edu::msi_from_device),
+    ("contiguous_and_pinned_memory", contiguous_and_pinned_memory),
+    ("physical_memory_objects", physical_memory_objects),
     ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),
     ("suspend_threads", suspend_threads),
     ("suspend_blocked_waits", suspend_blocked_waits),

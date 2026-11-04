@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+pub mod dmar;
+pub mod ivrs;
 pub mod madt;
 
 /// Reads physical memory.
@@ -104,6 +106,44 @@ impl<'m, M: PhysRead> Tables<'m, M> {
         }
         Ok(None)
     }
+}
+
+/// A PCI segment's configuration space in memory, from the MCFG table:
+/// its base, segment and first and last bus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ecam {
+    pub base: u64,
+    pub segment: u16,
+    pub buses: (u8, u8),
+}
+
+impl Ecam {
+    /// The physical address of `offset` in the configuration space of a
+    /// function, or `None` when the bus is not in this range.
+    pub fn address(&self, bus: u8, device: u8, function: u8, offset: u16) -> Option<u64> {
+        if !(self.buses.0..=self.buses.1).contains(&bus) || device > 31 || function > 7 {
+            return None;
+        }
+        let at = u64::from(bus - self.buses.0) << 20
+            | u64::from(device) << 15
+            | u64::from(function) << 12
+            | u64::from(offset & 0xFFF);
+        Some(self.base + at)
+    }
+}
+
+/// The configuration space ranges of the MCFG table `mcfg`.
+pub fn ecams(mcfg: &[u8]) -> impl Iterator<Item = Ecam> + '_ {
+    mcfg.get(HEADER_SIZE + 8..)
+        .unwrap_or(&[])
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|e| Ecam {
+            base: u64::from_le_bytes(e[0..8].try_into().expect("8 bytes")),
+            segment: u16::from_le_bytes([e[8], e[9]]),
+            buses: (e[10], e[11]),
+        })
 }
 
 /// Where a register lives, from an ACPI generic address structure.

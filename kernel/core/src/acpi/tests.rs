@@ -124,3 +124,28 @@ fn checks_checksums_and_lengths() {
         Err(Error::Unreadable(0x9000))
     ));
 }
+
+#[test]
+fn reads_configuration_space_ranges() {
+    let mut body = vec![0; 8];
+    body.extend_from_slice(&0xB000_0000u64.to_le_bytes());
+    body.extend_from_slice(&[1, 0, 0, 0xFF, 0, 0, 0, 0]);
+    let mcfg = table(b"MCFG", &body);
+    let ecam: Vec<Ecam> = ecams(&mcfg).collect();
+    assert_eq!(
+        ecam,
+        [Ecam {
+            base: 0xB000_0000,
+            segment: 1,
+            buses: (0, 0xFF),
+        }]
+    );
+    assert_eq!(ecam[0].address(1, 2, 3, 0x19), Some(0xB011_3019));
+    assert_eq!(ecam[0].address(0, 32, 0, 0), None);
+    let narrow = Ecam {
+        buses: (4, 7),
+        ..ecam[0]
+    };
+    assert_eq!(narrow.address(5, 0, 0, 0), Some(0xB010_0000));
+    assert_eq!(narrow.address(8, 0, 0, 0), None);
+}
