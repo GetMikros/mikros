@@ -8,7 +8,8 @@
 
 use crate::interfaces::__midl::{self, OwnedHandle, ServerEnd};
 use crate::interfaces::mikros::process::{
-    BootstrapRequest, BootstrapServer, NamespaceEntry, StartupHandle, StartupHeader,
+    Bootstrap, BootstrapAsyncServer, BootstrapRequest, BootstrapServer, NamespaceEntry,
+    StartupHandle, StartupHeader,
 };
 use crate::{heap, sys};
 use alloc::vec::Vec;
@@ -23,8 +24,9 @@ pub struct Managed {
     pub header: StartupHeader,
     pub handles: Vec<StartupHandle>,
     pub namespace: Vec<NamespaceEntry>,
-    /// Kept open for as long as the state lives.
-    _bootstrap: BootstrapServer,
+    /// The bootstrap channel's server, kept open for as long as the
+    /// state lives.
+    _bootstrap: alloc::boxed::Box<dyn core::any::Any>,
 }
 
 /// Why a transfer was refused.
@@ -51,60 +53,127 @@ impl From<__midl::Error> for Refused {
 
 /// Receives and checks the whole transfer on `bootstrap`.
 pub fn receive(bootstrap: sys::Handle) -> Result<Managed, Refused> {
+    let server = BootstrapServer::new(bootstrap_end(bootstrap));
+    let mut transfer = Transfer::new(server.next(i64::MAX)?)?;
+    loop {
+        if let Some(header) = transfer.accept(server.next(i64::MAX)?)? {
+            return Ok(transfer.finish(header, server));
+        }
+    }
+}
+
+/// Receives and checks the whole transfer on `bootstrap` like `receive`,
+/// waiting on the executor of `reactor`, so that other tasks run
+/// meanwhile. Once every startup handle has arrived, before any
+/// namespace entry, `handles_received` sees the handles and may take
+/// some of them, such as an endpoint that a task serves during the
+/// rest of the transfer.
+pub async fn receive_async(
+    bootstrap: sys::Handle,
+    reactor: crate::exec::Reactor,
+    mut handles_received: impl FnMut(&mut Vec<StartupHandle>),
+) -> Result<Managed, Refused> {
+    let server = BootstrapAsyncServer::new(bootstrap_end(bootstrap), reactor);
+    let mut transfer = Transfer::new(server.next().await?)?;
+    let mut told = false;
+    loop {
+        if !told && transfer.handles_filled() {
+            told = true;
+            handles_received(&mut transfer.handles);
+        }
+        if let Some(header) = transfer.accept(server.next().await?)? {
+            return Ok(transfer.finish(header, server));
+        }
+    }
+}
+
+fn bootstrap_end(bootstrap: sys::Handle) -> ServerEnd<Bootstrap> {
     // SAFETY: the kernel gave the program this handle to the bootstrap
     // channel, and nothing else owns it.
-    let end = ServerEnd::new(unsafe { OwnedHandle::from_raw(bootstrap) });
-    let server = BootstrapServer::new(end);
-    let BootstrapRequest::Begin(begin) = server.next(i64::MAX)? else {
-        return Err(Refused::Order);
-    };
-    let header = begin.startup;
-    // Batches can be larger than the static arena, so the allocator
-    // needs the process handle from here on. On a refusal the program
-    // ends before allocating again.
-    heap::set_process(header.process.raw());
-    if header.version != VERSION {
-        return Err(Refused::Version);
+    ServerEnd::new(unsafe { OwnedHandle::from_raw(bootstrap) })
+}
+
+/// A transfer after `Begin`.
+struct Transfer {
+    header: Option<StartupHeader>,
+    handle_count: u32,
+    namespace_count: u32,
+    handles: Vec<StartupHandle>,
+    namespace: Vec<NamespaceEntry>,
+}
+
+impl Transfer {
+    /// Checks the first message, which must be `Begin`.
+    fn new(first: BootstrapRequest) -> Result<Transfer, Refused> {
+        let BootstrapRequest::Begin(begin) = first else {
+            return Err(Refused::Order);
+        };
+        let header = begin.startup;
+        // Batches can be larger than the static arena, so the allocator
+        // needs the process handle from here on. On a refusal the
+        // program ends before allocating again.
+        heap::set_process(header.process.raw());
+        if header.version != VERSION {
+            return Err(Refused::Version);
+        }
+        if header.handle_count > COUNT_MAX || header.namespace_count > COUNT_MAX {
+            return Err(Refused::Count);
+        }
+        Ok(Transfer {
+            handle_count: header.handle_count,
+            namespace_count: header.namespace_count,
+            header: Some(header),
+            handles: Vec::new(),
+            namespace: Vec::new(),
+        })
     }
-    if header.handle_count > COUNT_MAX || header.namespace_count > COUNT_MAX {
-        return Err(Refused::Count);
+
+    /// Whether every startup handle has arrived. A callback may have
+    /// taken some since, so this is decided before it runs.
+    fn handles_filled(&self) -> bool {
+        self.handles.len() == self.handle_count as usize
     }
-    let (mut handles, mut namespace) = (Vec::new(), Vec::new());
-    loop {
-        match server.next(i64::MAX)? {
-            BootstrapRequest::Begin(_) => return Err(Refused::Order),
+
+    /// Checks the next message, and returns the header once `Complete`
+    /// arrived.
+    fn accept(&mut self, request: BootstrapRequest) -> Result<Option<StartupHeader>, Refused> {
+        match request {
+            BootstrapRequest::Begin(_) => Err(Refused::Order),
             BootstrapRequest::Handles(batch) => {
-                if !namespace.is_empty() {
+                if !self.namespace.is_empty() {
                     return Err(Refused::Order);
                 }
                 append(
-                    &mut handles,
+                    &mut self.handles,
                     batch.offset,
                     batch.handles,
-                    header.handle_count,
+                    self.handle_count,
                 )?;
+                Ok(None)
             }
             BootstrapRequest::Namespace(batch) => {
-                append(
-                    &mut namespace,
-                    batch.offset,
-                    batch.entries,
-                    header.namespace_count,
-                )?;
+                if !self.handles_filled() {
+                    return Err(Refused::Order);
+                }
+                let count = self.namespace_count;
+                append(&mut self.namespace, batch.offset, batch.entries, count)?;
+                Ok(None)
             }
             BootstrapRequest::Complete(_) => {
-                if handles.len() != header.handle_count as usize
-                    || namespace.len() != header.namespace_count as usize
-                {
+                if !self.handles_filled() || self.namespace.len() != self.namespace_count as usize {
                     return Err(Refused::Count);
                 }
-                return Ok(Managed {
-                    header,
-                    handles,
-                    namespace,
-                    _bootstrap: server,
-                });
+                Ok(self.header.take())
             }
+        }
+    }
+
+    fn finish(self, header: StartupHeader, bootstrap: impl core::any::Any) -> Managed {
+        Managed {
+            header,
+            handles: self.handles,
+            namespace: self.namespace,
+            _bootstrap: alloc::boxed::Box::new(bootstrap),
         }
     }
 }
