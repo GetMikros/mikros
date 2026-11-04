@@ -1,4 +1,6 @@
-//! Finding members of the boot image.
+//! Finding members of the boot image, a ustar archive.
+
+#![no_std]
 
 const BLOCK: usize = 512;
 
