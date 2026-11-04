@@ -1,3 +1,5 @@
+// MIKSPEC-0024.R7, MIKSPEC-0010.R2
+
 library mikros.base;
 
 type Status = enum : i32 {
