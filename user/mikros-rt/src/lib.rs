@@ -8,6 +8,7 @@ extern crate alloc;
 
 pub mod heap;
 pub mod log;
+pub mod managed;
 pub mod midl;
 mod relocate;
 pub mod startup;
@@ -17,6 +18,13 @@ pub mod sys {
     include!(concat!(env!("OUT_DIR"), "/syscalls.rs"));
 }
 
+/// The bindings of the system libraries in `midl/`.
+#[allow(clippy::all, unused)]
+pub mod interfaces {
+    include!(concat!(env!("OUT_DIR"), "/interfaces.rs"));
+}
+
+pub use managed::Managed;
 pub use startup::Startup;
 
 /// The value a successful system call returns.
@@ -32,6 +40,18 @@ macro_rules! main {
         #[unsafe(no_mangle)]
         fn __mikros_entry(bootstrap: $crate::sys::Handle, _arg2: u64) -> i64 {
             $crate::run_main(bootstrap, $function)
+        }
+    };
+}
+
+/// Defines `function`, taking a `&Managed` and returning an exit code, as
+/// the main function of a program that the process manager starts.
+#[macro_export]
+macro_rules! managed_main {
+    ($function:path) => {
+        #[unsafe(no_mangle)]
+        fn __mikros_entry(bootstrap: $crate::sys::Handle, _arg2: u64) -> i64 {
+            $crate::run_managed(bootstrap, $function)
         }
     };
 }
@@ -59,6 +79,17 @@ pub fn run_main(bootstrap: sys::Handle, main: fn(&Startup) -> i64) -> i64 {
     match startup::receive(bootstrap) {
         Some(startup) => main(startup),
         None => PANIC_EXIT_CODE,
+    }
+}
+
+/// Receives the process manager's startup transfer on `bootstrap` and
+/// runs `main` with it. A refused transfer ends the program without
+/// running `main`.
+#[doc(hidden)]
+pub fn run_managed(bootstrap: sys::Handle, main: fn(&Managed) -> i64) -> i64 {
+    match managed::receive(bootstrap) {
+        Ok(managed) => main(&managed),
+        Err(_) => PANIC_EXIT_CODE,
     }
 }
 

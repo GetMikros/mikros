@@ -10,4 +10,5 @@ publish = false
 fuzz = []
 
 [build-dependencies]
+midlc = { path = "../../tools/midlc" }
 syscall-table = { path = "../../kernel/syscalls" }
