@@ -18,7 +18,8 @@ use kernel_core::smp::{self, MAX_CPUS};
 use kernel_core::sync::SpinLock;
 
 /// The APIC ID of processor `n` at index `n`, set by `find`.
-pub static APIC_IDS: SpinLock<Vec<u32>> = SpinLock::new(Vec::new());
+pub static APIC_IDS: SpinLock<Vec<u32>> =
+    SpinLock::new(kernel_core::lock_order::SMP_APIC_IDS, Vec::new());
 
 /// Numbers the enabled processors that the MADT `madt` lists, with
 /// `boot`, the boot processor's APIC ID, as processor 0, and logs those
@@ -122,7 +123,8 @@ static MADT: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static MADT_LEN: AtomicUsize = AtomicUsize::new(0);
 /// The boot processor's optional features and whether it uses x2APIC
 /// mode, which every other processor must match.
-static BOOT_FEATURES: SpinLock<Option<(Optional, bool)>> = SpinLock::new(None);
+static BOOT_FEATURES: SpinLock<Option<(Optional, bool)>> =
+    SpinLock::new(kernel_core::lock_order::SMP_BOOT_FEATURES, None);
 
 fn cpuid(leaf: u32, subleaf: u32) -> [u32; 4] {
     let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);

@@ -47,6 +47,9 @@ pub fn destroyed(count: usize) {
 
 pub struct SpinLock<T> {
     locked: AtomicBool,
+    /// The class that orders the lock among the kernel's locks.
+    #[cfg_attr(not(lock_check), allow(dead_code))]
+    class: crate::lock_order::Class,
     value: UnsafeCell<T>,
 }
 
@@ -55,14 +58,31 @@ pub struct SpinLock<T> {
 unsafe impl<T: Send> Sync for SpinLock<T> {}
 
 impl<T> SpinLock<T> {
-    pub const fn new(value: T) -> Self {
+    /// A lock of class `class` around `value`.
+    pub const fn new(class: crate::lock_order::Class, value: T) -> Self {
         SpinLock {
             locked: AtomicBool::new(false),
+            class,
             value: UnsafeCell::new(value),
         }
     }
 
     pub fn lock(&self) -> Guard<'_, T> {
+        #[cfg(lock_check)]
+        crate::lock_order::acquire(self.class, crate::lock_order::Check::Order);
+        self.spin()
+    }
+
+    /// Takes the lock while another lock of its class may be held. The
+    /// caller documents the order among the locks of the class that makes
+    /// this safe.
+    pub fn lock_nested(&self) -> Guard<'_, T> {
+        #[cfg(lock_check)]
+        crate::lock_order::acquire(self.class, crate::lock_order::Check::Nested);
+        self.spin()
+    }
+
+    fn spin(&self) -> Guard<'_, T> {
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -89,6 +109,10 @@ impl<T> SpinLock<T> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .ok()
             .map(|_| {
+                // Trying cannot deadlock, but what is taken while it is
+                // held must still come after it.
+                #[cfg(lock_check)]
+                crate::lock_order::acquire(self.class, crate::lock_order::Check::None);
                 crate::cpu::this()
                     .locks_held
                     .fetch_add(1, Ordering::Relaxed);
@@ -118,6 +142,8 @@ impl<T> DerefMut for Guard<'_, T> {
 
 impl<T> Drop for Guard<'_, T> {
     fn drop(&mut self) {
+        #[cfg(lock_check)]
+        crate::lock_order::release(self.lock.class);
         self.lock.locked.store(false, Ordering::Release);
         crate::cpu::this()
             .locks_held
@@ -131,7 +157,7 @@ mod tests {
 
     #[test]
     fn serializes_access() {
-        let counter = SpinLock::new(0u64);
+        let counter = SpinLock::new(crate::lock_order::TEST, 0u64);
         std::thread::scope(|s| {
             for _ in 0..4 {
                 s.spawn(|| {

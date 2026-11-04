@@ -31,10 +31,13 @@ impl Timer {
         crate::fallible::try_arc(Timer {
             header: Header::new(ObjectType::Timer),
             budget: budget.clone(),
-            state: SpinLock::new(State {
-                cpu: None,
-                generation: 0,
-            }),
+            state: SpinLock::new(
+                crate::lock_order::TIMER,
+                State {
+                    cpu: None,
+                    generation: 0,
+                },
+            ),
         })
     }
 

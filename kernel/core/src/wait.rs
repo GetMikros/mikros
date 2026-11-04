@@ -26,7 +26,8 @@ struct Waiter {
 /// The waiting threads. The lock comes after object locks and before the
 /// scheduler's. Only the waiters themselves add and remove entries, so
 /// the hook never drops a thread.
-static WAITERS: SpinLock<Vec<Arc<Waiter>>> = SpinLock::new(Vec::new());
+static WAITERS: SpinLock<Vec<Arc<Waiter>>> =
+    SpinLock::new(crate::lock_order::WAIT_WAITERS, Vec::new());
 
 /// The kernel memory charged for the length of a wait to the waiting
 /// process: a shared record of `T` with its reference counts, and its
@@ -132,7 +133,7 @@ struct Caller {
 
 /// The threads waiting for replies; the lock comes after a handle
 /// table's and before the scheduler's.
-static CALLERS: SpinLock<Vec<Caller>> = SpinLock::new(Vec::new());
+static CALLERS: SpinLock<Vec<Caller>> = SpinLock::new(crate::lock_order::WAIT_CALLERS, Vec::new());
 
 /// Wakes the caller of call `id` on the endpoint with object ID `koid`,
 /// whose reply has been delivered.
@@ -220,7 +221,8 @@ struct FutexWaiter {
 }
 
 /// The threads waiting on futexes, oldest first.
-static FUTEXES: SpinLock<Vec<Arc<FutexWaiter>>> = SpinLock::new(Vec::new());
+static FUTEXES: SpinLock<Vec<Arc<FutexWaiter>>> =
+    SpinLock::new(crate::lock_order::WAIT_FUTEXES, Vec::new());
 
 /// The futex key of `addr` in `process`: the object ID of the memory
 /// object mapped readable there and the offset in it. Fails with

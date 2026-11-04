@@ -64,11 +64,14 @@ struct Reserve {
 // SAFETY: the free blocks belong to the reserve alone.
 unsafe impl Send for Reserve {}
 
-static RESERVE: SpinLock<Reserve> = SpinLock::new(Reserve {
-    free: None,
-    count: 0,
-    claimed: 0,
-});
+static RESERVE: SpinLock<Reserve> = SpinLock::new(
+    crate::lock_order::NODES_RESERVE,
+    Reserve {
+        free: None,
+        count: 0,
+        claimed: 0,
+    },
+);
 
 const fn block_layout() -> Layout {
     match Layout::from_size_align(BLOCK, HEADER) {

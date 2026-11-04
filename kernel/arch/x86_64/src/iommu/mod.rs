@@ -56,7 +56,7 @@ struct Iommu {
 }
 
 /// The IOMMUs when DMA is isolated, or `None` when it is not.
-static IOMMU: SpinLock<Option<Iommu>> = SpinLock::new(None);
+static IOMMU: SpinLock<Option<Iommu>> = SpinLock::new(kernel_core::lock_order::IOMMU, None);
 
 /// Configuration space through the MCFG table's ranges.
 struct Config(Vec<Ecam>);
@@ -615,7 +615,10 @@ const FAULT_LOG_INTERVAL: i64 = 1_000_000_000;
 
 /// The devices whose blocked DMA was logged last, with when. The oldest
 /// entry makes room for a new device.
-static LOGGED: SpinLock<[(u64, i64); 16]> = SpinLock::new([(u64::MAX, i64::MIN); 16]);
+static LOGGED: SpinLock<[(u64, i64); 16]> = SpinLock::new(
+    kernel_core::lock_order::IOMMU_LOGGED,
+    [(u64::MAX, i64::MIN); 16],
+);
 
 /// Logs blocked DMA from `source`, unless it was logged less than a
 /// second before `now`.

@@ -72,11 +72,11 @@ impl ArchThread {
         Some(ArchThread {
             rsp: UnsafeCell::new(0),
             extended: ExtendedState::new()?,
-            user: SpinLock::new(UserState::default()),
+            user: SpinLock::new(kernel_core::lock_order::THREAD_USER, UserState::default()),
             exception_frame: AtomicPtr::new(core::ptr::null_mut()),
             syscall_frame: AtomicPtr::new(core::ptr::null_mut()),
             syscall_changed: AtomicBool::new(false),
-            debug: SpinLock::new([0; 6]),
+            debug: SpinLock::new(kernel_core::lock_order::THREAD_DEBUG, [0; 6]),
             debug_pending: AtomicBool::new(false),
         })
     }

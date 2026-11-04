@@ -66,7 +66,7 @@ pub struct Process {
 /// scripts follow. The links change only under `REGISTRY`, and a
 /// process leaves the list before its memory goes.
 static FIRST_PROCESS: AtomicPtr<Process> = AtomicPtr::new(core::ptr::null_mut());
-static REGISTRY: SpinLock<()> = SpinLock::new(());
+static REGISTRY: SpinLock<()> = SpinLock::new(crate::lock_order::PROCESS_REGISTRY, ());
 
 /// Adds `process` to the list of all processes.
 fn register(process: &Arc<Process>) {
@@ -110,7 +110,7 @@ pub const ALLOW_WRITE_EXECUTE: u32 = 1 << 0;
 pub const CODE_32BIT: u32 = 1 << 1;
 
 /// The initial process, once it exists.
-static INIT: SpinLock<Weak<Process>> = SpinLock::new(Weak::new());
+static INIT: SpinLock<Weak<Process>> = SpinLock::new(crate::lock_order::PROCESS_INIT, Weak::new());
 
 /// Makes `process` the initial process, whose termination is fatal.
 pub fn set_init(process: &Arc<Process>) {
@@ -201,16 +201,19 @@ impl Process {
             budget: budget.clone(),
             charged,
             aspace,
-            handles: SpinLock::new(HandleTable::new()),
+            handles: SpinLock::new(crate::lock_order::PROCESS_HANDLES, HandleTable::new()),
             state: AtomicU32::new(NEW),
             exit_code: AtomicI64::new(0),
-            threads: SpinLock::new(Vec::new()),
+            threads: SpinLock::new(crate::lock_order::PROCESS_THREADS, Vec::new()),
             started: AtomicU32::new(0),
-            exception: SpinLock::new(None),
-            signals: SpinLock::new(crate::signal::ProcessSignals::default()),
+            exception: SpinLock::new(crate::lock_order::PROCESS_EXCEPTION, None),
+            signals: SpinLock::new(
+                crate::lock_order::PROCESS_SIGNALS,
+                crate::signal::ProcessSignals::default(),
+            ),
             term_signal: AtomicU32::new(0),
-            stopped: SpinLock::new(Vec::new()),
-            ioports: SpinLock::new(Ioports::default()),
+            stopped: SpinLock::new(crate::lock_order::PROCESS_STOPPED, Vec::new()),
+            ioports: SpinLock::new(crate::lock_order::PROCESS_IOPORTS, Ioports::default()),
             cpu_time: AtomicI64::new(0),
             policy: AtomicU32::new(0),
             gate_start: AtomicU64::new(0),

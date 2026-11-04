@@ -35,7 +35,7 @@ impl Pager {
         crate::fallible::try_arc(Pager {
             header: Header::new(ObjectType::Pager),
             budget: budget.clone(),
-            objects: SpinLock::new(Objects::default()),
+            objects: SpinLock::new(crate::lock_order::PAGER_OBJECTS, Objects::default()),
         })
     }
 
@@ -91,7 +91,8 @@ type Waiter = (u64, Arc<Thread>);
 /// The threads waiting for pages, by the ID of the object and of the
 /// thread. A thread waits for one page at a time. The lock comes after an
 /// object's pages lock and before the scheduler's.
-static WAITERS: SpinLock<Map<(u64, u64), Waiter>> = SpinLock::new(nodes::map());
+static WAITERS: SpinLock<Map<(u64, u64), Waiter>> =
+    SpinLock::new(crate::lock_order::PAGER_WAITERS, nodes::map());
 
 /// The kernel memory charged to a process while one of its threads waits
 /// for a page: its entry in `WAITERS` and that entry's share of the

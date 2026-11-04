@@ -25,7 +25,8 @@ const NOT_DEVICE: [Kind; 8] = [
 ];
 
 /// Ranges by resource kind, start and exclusive end.
-static RANGES: SpinLock<Vec<(u32, u64, u64)>> = SpinLock::new(Vec::new());
+static RANGES: SpinLock<Vec<(u32, u64, u64)>> =
+    SpinLock::new(kernel_core::lock_order::RESERVED_RANGES, Vec::new());
 
 /// Keeps the range from `start` to `end`, exclusive, of resource kind
 /// `kind` from being granted.

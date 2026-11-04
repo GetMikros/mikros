@@ -362,11 +362,14 @@ impl Core {
             budget.charge_kernel(CHANNEL_COST)?;
         }
         // Shared releases the charge when it goes, also on failure here.
-        let shared = try_arc(SpinLock::new(Shared {
-            queues: [Queue::default(), Queue::default()],
-            ends: [Weak::new(), Weak::new()],
-            charged: budget.cloned(),
-        }))?;
+        let shared = try_arc(SpinLock::new(
+            crate::lock_order::CHANNEL_SHARED,
+            Shared {
+                queues: [Queue::default(), Queue::default()],
+                ends: [Weak::new(), Weak::new()],
+                charged: budget.cloned(),
+            },
+        ))?;
         let end = |side| {
             let header = Header::new(ObjectType::Channel);
             header.update_signals(0, signals::WRITABLE);
@@ -374,16 +377,16 @@ impl Core {
                 header,
                 side,
                 shared: shared.clone(),
-                observer: SpinLock::new(None),
-                outer: SpinLock::new(Weak::new()),
+                observer: SpinLock::new(crate::lock_order::CHANNEL_OBSERVER, None),
+                outer: SpinLock::new(crate::lock_order::CHANNEL_OUTER, Weak::new()),
                 queued: AtomicUsize::new(0),
                 slot: AtomicUsize::new(usize::MAX),
-                holder: SpinLock::new(Weak::new()),
+                holder: SpinLock::new(crate::lock_order::CHANNEL_HOLDER, Weak::new()),
                 member: AtomicU64::new(0),
                 internal: AtomicUsize::new(0),
                 live: AtomicBool::new(false),
-                next: SpinLock::new(None),
-                dying: SpinLock::new(None),
+                next: SpinLock::new(crate::lock_order::CHANNEL_NEXT, None),
+                dying: SpinLock::new(crate::lock_order::CHANNEL_DYING, None),
             })
         };
         let (a, b) = (end(0)?, end(1)?);
@@ -782,11 +785,14 @@ impl Transit {
     }
 }
 
-static TRANSIT: SpinLock<Transit> = SpinLock::new(Transit {
-    slots: Vec::new(),
-    free: None,
-    free_count: 0,
-});
+static TRANSIT: SpinLock<Transit> = SpinLock::new(
+    crate::lock_order::CHANNEL_TRANSIT,
+    Transit {
+        slots: Vec::new(),
+        free: None,
+        free_count: 0,
+    },
+);
 /// Numbers collections, so that marks of an earlier one do not count.
 static COLLECTION: AtomicU64 = AtomicU64::new(0);
 /// Set when an endpoint that the running collection has not found

@@ -91,7 +91,7 @@ impl Bti {
             header: Header::new(ObjectType::Pmt),
             budget: budget.clone(),
             charged: Pmt::cost(pin.frames.len()),
-            pin: SpinLock::new(None),
+            pin: SpinLock::new(kernel_core::lock_order::BTI_PIN, None),
         });
         let pmt = match pmt {
             Ok(pmt) => pmt,
@@ -183,7 +183,8 @@ impl Pin {
 
 /// The pins of `Pmt` objects closed without `pmt_unpin`, with the budget
 /// charge of each, kept until `bti_release_quarantine`.
-static QUARANTINE: SpinLock<Vec<(Pin, Charge)>> = SpinLock::new(Vec::new());
+static QUARANTINE: SpinLock<Vec<(Pin, Charge)>> =
+    SpinLock::new(kernel_core::lock_order::BTI_QUARANTINE, Vec::new());
 
 /// Kernel memory charged to a budget, released when dropped.
 struct Charge(Arc<Budget>, u64);

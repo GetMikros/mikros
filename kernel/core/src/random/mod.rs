@@ -10,7 +10,7 @@ use crate::sync::SpinLock;
 use boot_protocol::BootInfo;
 use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-static RNG: SpinLock<Rng> = SpinLock::new(Rng::new());
+static RNG: SpinLock<Rng> = SpinLock::new(crate::lock_order::RNG, Rng::new());
 
 /// The most seed bytes the processor's random source gives per reseed.
 const SEED_SIZE: usize = 64;

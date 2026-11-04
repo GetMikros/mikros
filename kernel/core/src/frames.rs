@@ -5,7 +5,8 @@ use crate::sync::SpinLock;
 use boot_protocol::{Kind, MemoryMapEntry, PAGE_SIZE};
 
 /// The frame allocator, set up by `init`.
-pub static FRAMES: SpinLock<Option<Frames<'static>>> = SpinLock::new(None);
+pub static FRAMES: SpinLock<Option<Frames<'static>>> =
+    SpinLock::new(crate::lock_order::FRAMES, None);
 
 /// A frame from the frame allocator, or `None` when none is free.
 pub fn alloc_frame() -> Option<u64> {

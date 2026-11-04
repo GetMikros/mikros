@@ -25,6 +25,12 @@ pub struct Cpu {
     /// The number of threads whose queue entry this processor holds room
     /// for: those it owns that have not gone.
     pub(crate) assigned: AtomicUsize,
+    /// The classes of the locks held on the processor, in the order taken,
+    /// and their number, for the lock order check.
+    #[cfg(lock_check)]
+    pub(crate) held: [core::sync::atomic::AtomicU16; 32],
+    #[cfg(lock_check)]
+    pub(crate) held_count: AtomicUsize,
     /// In the fuzz build, the object ID of the running thread, or 0 while
     /// the processor idles, and its allocation failures, or null.
     #[cfg(feature = "fuzz")]
@@ -39,8 +45,12 @@ impl Cpu {
             locks_held: AtomicUsize::new(0),
             destroyed: AtomicUsize::new(0),
             reschedule: AtomicBool::new(false),
-            sched: SpinLock::new(CpuSched::new()),
+            sched: SpinLock::new(crate::lock_order::SCHED, CpuSched::new()),
             assigned: AtomicUsize::new(0),
+            #[cfg(lock_check)]
+            held: [const { core::sync::atomic::AtomicU16::new(0) }; 32],
+            #[cfg(lock_check)]
+            held_count: AtomicUsize::new(0),
             #[cfg(feature = "fuzz")]
             fuzz_running: AtomicU64::new(0),
             #[cfg(feature = "fuzz")]

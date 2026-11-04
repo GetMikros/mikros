@@ -214,7 +214,8 @@ impl IoApic {
 }
 
 /// The I/O APICs that the MADT lists.
-static IO_APICS: SpinLock<Vec<IoApic>> = SpinLock::new(Vec::new());
+static IO_APICS: SpinLock<Vec<IoApic>> =
+    SpinLock::new(kernel_core::lock_order::IO_APICS, Vec::new());
 
 /// Points the redirection entry of global system interrupt `gsi` at
 /// `vector` on the boot processor with fixed delivery, level or edge

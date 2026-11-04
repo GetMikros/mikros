@@ -27,7 +27,8 @@ const IOPORT_COUNT: u64 = 0x1_0000;
 const PRIORITY_END: u64 = 32;
 
 /// Every live resource except the root, for the overlap rules.
-static LIVE: SpinLock<Vec<Weak<Resource>>> = SpinLock::new(Vec::new());
+static LIVE: SpinLock<Vec<Weak<Resource>>> =
+    SpinLock::new(crate::lock_order::RESOURCE_LIVE, Vec::new());
 
 /// What `resource_create` asks for: a kind, the `size` units from
 /// `base`, and options.

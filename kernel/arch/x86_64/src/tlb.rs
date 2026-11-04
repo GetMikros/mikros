@@ -68,7 +68,7 @@ static REQUEST: Request = Request {
 };
 
 /// Held while a shootdown is sent, so that one is in flight at a time.
-static SENDER: SpinLock<()> = SpinLock::new(());
+static SENDER: SpinLock<()> = SpinLock::new(kernel_core::lock_order::TLB_SENDER, ());
 
 /// Makes every processor in `targets` other than this one drop the
 /// translations of `space`: for the kernel's tables those of the `len`

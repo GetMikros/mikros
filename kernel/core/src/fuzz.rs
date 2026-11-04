@@ -177,7 +177,7 @@ struct Stop {
     deadline: i64,
 }
 
-static STOP: SpinLock<Option<Stop>> = SpinLock::new(None);
+static STOP: SpinLock<Option<Stop>> = SpinLock::new(crate::lock_order::FUZZ_STOP, None);
 
 /// Makes `thread` stop at its `count`-th next pass of `point`, replacing
 /// what was set before, or at none when `count` is 0. Fails with

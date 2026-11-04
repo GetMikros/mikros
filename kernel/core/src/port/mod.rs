@@ -58,10 +58,13 @@ impl Port {
         crate::fallible::try_arc(Port {
             header: Header::new(ObjectType::Port),
             budget: budget.clone(),
-            state: SpinLock::new(State {
-                queue: Queue::new(),
-                waiters: Vec::new(),
-            }),
+            state: SpinLock::new(
+                crate::lock_order::PORT_STATE,
+                State {
+                    queue: Queue::new(),
+                    waiters: Vec::new(),
+                },
+            ),
         })
     }
 
@@ -200,7 +203,8 @@ impl Kernel {
 
 /// Every registration. The lock comes after object locks and before port
 /// and scheduler locks.
-static REGISTRATIONS: SpinLock<Registrations<Kernel>> = SpinLock::new(Registrations::new());
+static REGISTRATIONS: SpinLock<Registrations<Kernel>> =
+    SpinLock::new(crate::lock_order::PORT_REGISTRATIONS, Registrations::new());
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Called by the signal hook for the object of `header`: fires the

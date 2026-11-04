@@ -318,7 +318,7 @@ impl<T> Default for Readers<T> {
 impl<T> Readers<T> {
     pub const fn new() -> Self {
         Readers {
-            list: SpinLock::new(Vec::new()),
+            list: SpinLock::new(crate::lock_order::LOG_READERS, Vec::new()),
             pending: AtomicBool::new(false),
         }
     }

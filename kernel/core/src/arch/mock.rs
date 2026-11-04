@@ -33,7 +33,7 @@ fn with_cpu_data<R>(f: impl FnOnce(&AtomicPtr<()>) -> R) -> R {
 }
 static NOW: AtomicI64 = AtomicI64::new(0);
 static TIMER: AtomicI64 = AtomicI64::new(DISARMED);
-static OUTPUT: SpinLock<Vec<u8>> = SpinLock::new(Vec::new());
+static OUTPUT: SpinLock<Vec<u8>> = SpinLock::new(crate::lock_order::MOCK_OUTPUT, Vec::new());
 
 /// The mock architecture.
 pub struct Mock;

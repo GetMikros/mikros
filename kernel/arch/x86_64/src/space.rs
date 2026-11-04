@@ -31,8 +31,10 @@ unsafe extern "C" {
 /// The direct map base, from BootInfo.
 static DIRECT_MAP_BASE: AtomicU64 = AtomicU64::new(0);
 /// The unused parts of the kernel dynamic region.
-static DYNAMIC: SpinLock<Ranges<DYNAMIC_RANGES>> =
-    SpinLock::new(Ranges::new(DYNAMIC_START, DYNAMIC_END));
+static DYNAMIC: SpinLock<Ranges<DYNAMIC_RANGES>> = SpinLock::new(
+    kernel_core::lock_order::SPACE_DYNAMIC,
+    Ranges::new(DYNAMIC_START, DYNAMIC_END),
+);
 /// The most free ranges the dynamic region keeps track of.
 const DYNAMIC_RANGES: usize = 256;
 /// The physical address of the kernel's top-level table.
@@ -408,11 +410,15 @@ unsafe extern "sysv64" {
 
 /// The BootInfo values the kernel keeps, copied before boot memory is
 /// reclaimed.
-pub static BOOT_INFO: SpinLock<Option<BootInfo>> = SpinLock::new(None);
+pub static BOOT_INFO: SpinLock<Option<BootInfo>> =
+    SpinLock::new(kernel_core::lock_order::SPACE_BOOT_INFO, None);
 
 /// The command line, copied before boot memory is reclaimed: its bytes and
 /// their number.
-pub static CMDLINE: SpinLock<([u8; CMDLINE_MAX], usize)> = SpinLock::new(([0; CMDLINE_MAX], 0));
+pub static CMDLINE: SpinLock<([u8; CMDLINE_MAX], usize)> = SpinLock::new(
+    kernel_core::lock_order::SPACE_CMDLINE,
+    ([0; CMDLINE_MAX], 0),
+);
 
 fn copy_cmdline(info: &BootInfo) {
     let len = (info.cmdline_len as usize).min(CMDLINE_MAX);

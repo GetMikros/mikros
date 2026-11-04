@@ -139,11 +139,14 @@ impl AddressSpace {
         let charged = if charge { tables.count } else { 0 };
         Ok(AddressSpace {
             budget,
-            regions: SpinLock::new(regions),
-            inner: SpinLock::new(Inner {
-                tables: ManuallyDrop::new(page_tables),
-                charged,
-            }),
+            regions: SpinLock::new(crate::lock_order::ASPACE_REGIONS, regions),
+            inner: SpinLock::new(
+                crate::lock_order::ASPACE_INNER,
+                Inner {
+                    tables: ManuallyDrop::new(page_tables),
+                    charged,
+                },
+            ),
         })
     }
 

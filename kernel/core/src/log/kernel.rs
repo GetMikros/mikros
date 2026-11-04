@@ -148,7 +148,8 @@ impl Object for LogObject {
     }
 }
 
-static OBJECT: SpinLock<Option<Arc<LogObject>>> = SpinLock::new(None);
+static OBJECT: SpinLock<Option<Arc<LogObject>>> =
+    SpinLock::new(crate::lock_order::LOG_OBJECT, None);
 
 /// The `Log` object, created on the first call. No other is created.
 pub fn object() -> Arc<LogObject> {

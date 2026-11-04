@@ -129,10 +129,13 @@ impl Thread {
             arch,
             stack_top: AtomicU64::new(stack + KERNEL_STACK_SIZE),
             #[cfg(feature = "fuzz")]
-            coverage: SpinLock::new(None),
+            coverage: SpinLock::new(crate::lock_order::THREAD_COVERAGE, None),
             #[cfg(feature = "fuzz")]
             alloc_failures: Default::default(),
-            entity: SpinLock::new(Entity::new(DEFAULT_PRIORITY)),
+            entity: SpinLock::new(
+                crate::lock_order::THREAD_ENTITY,
+                Entity::new(DEFAULT_PRIORITY),
+            ),
             priority: AtomicU32::new(DEFAULT_PRIORITY),
             cpu_time: AtomicI64::new(0),
             suspend_count: AtomicU64::new(0),
@@ -141,7 +144,10 @@ impl Thread {
             exception_kind: AtomicU32::new(0),
             report_id: AtomicU64::new(0),
             exit_requested: AtomicBool::new(false),
-            signals: SpinLock::new(crate::signal::ThreadSignals::default()),
+            signals: SpinLock::new(
+                crate::lock_order::THREAD_SIGNALS,
+                crate::signal::ThreadSignals::default(),
+            ),
             sigreturn: AtomicU64::new(0),
             waiting_for_signals: AtomicBool::new(false),
             interrupted: AtomicU64::new(0),

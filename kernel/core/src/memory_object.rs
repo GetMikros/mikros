@@ -122,7 +122,7 @@ unsafe fn frame_bytes<'a>(phys: u64) -> &'a mut [u8; PAGE_SIZE as usize] {
 
 /// The frame that pages of anonymous objects read before they are
 /// written map. Nothing ever writes to it.
-static ZERO_FRAME: SpinLock<Option<u64>> = SpinLock::new(None);
+static ZERO_FRAME: SpinLock<Option<u64>> = SpinLock::new(crate::lock_order::ZERO_FRAME, None);
 
 /// The shared zero page, allocated on first use.
 fn zero_frame() -> Option<u64> {
@@ -167,11 +167,11 @@ impl MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
             budget: budget.cloned(),
             charged,
-            pages: SpinLock::new(pages),
+            pages: SpinLock::new(crate::lock_order::MEMORY_PAGES, pages),
             physical: None,
-            mappings: SpinLock::new(nodes::map()),
+            mappings: SpinLock::new(crate::lock_order::MEMORY_MAPPINGS, nodes::map()),
             writable: AtomicU64::new(0),
-            changing: SpinLock::new(Vec::new()),
+            changing: SpinLock::new(crate::lock_order::MEMORY_CHANGING, Vec::new()),
             seals: AtomicU32::new(0),
             supplies: AtomicU32::new(0),
             paged: None,
@@ -203,11 +203,11 @@ impl MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
             budget: Some(budget.clone()),
             charged,
-            pages: SpinLock::new(pages),
+            pages: SpinLock::new(crate::lock_order::MEMORY_PAGES, pages),
             physical: None,
-            mappings: SpinLock::new(nodes::map()),
+            mappings: SpinLock::new(crate::lock_order::MEMORY_MAPPINGS, nodes::map()),
             writable: AtomicU64::new(0),
-            changing: SpinLock::new(Vec::new()),
+            changing: SpinLock::new(crate::lock_order::MEMORY_CHANGING, Vec::new()),
             seals: AtomicU32::new(0),
             supplies: AtomicU32::new(0),
             paged: Some(Paged {
@@ -215,10 +215,11 @@ impl MemoryObject {
                 port: Arc::downgrade(port),
                 key,
                 state: SpinLock::new(
+                    crate::lock_order::MEMORY_PAGING,
                     Paging::new(options & TRACK_DIRTY != 0).charged_to(budget.clone()),
                 ),
-                charges: SpinLock::new(nodes::map()),
-                writeback: SpinLock::new(None),
+                charges: SpinLock::new(crate::lock_order::MEMORY_CHARGES, nodes::map()),
+                writeback: SpinLock::new(crate::lock_order::MEMORY_WRITEBACK, None),
             }),
             fixed: None,
         })
@@ -691,11 +692,11 @@ impl MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
             budget: budget.cloned(),
             charged,
-            pages: SpinLock::new(pages),
+            pages: SpinLock::new(crate::lock_order::MEMORY_PAGES, pages),
             physical: Some((base, policy)),
-            mappings: SpinLock::new(nodes::map()),
+            mappings: SpinLock::new(crate::lock_order::MEMORY_MAPPINGS, nodes::map()),
             writable: AtomicU64::new(0),
-            changing: SpinLock::new(Vec::new()),
+            changing: SpinLock::new(crate::lock_order::MEMORY_CHANGING, Vec::new()),
             seals: AtomicU32::new(0),
             supplies: AtomicU32::new(0),
             paged: None,

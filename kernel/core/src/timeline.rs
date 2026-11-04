@@ -23,7 +23,8 @@ struct Waiter {
     thread: Arc<Thread>,
 }
 
-static WAITERS: SpinLock<Vec<Waiter>> = SpinLock::new(Vec::new());
+static WAITERS: SpinLock<Vec<Waiter>> =
+    SpinLock::new(crate::lock_order::TIMELINE_WAITERS, Vec::new());
 
 /// The kernel memory charged to the waiting process for the length of a
 /// wait: its place in `WAITERS` and that place's share of the storage.

@@ -284,7 +284,7 @@ pub fn process_start(
     // may be locked within the new process's.
     let mut move_arg = |target: &mut HandleTable| {
         let arg = arg.as_ref().map_or(HANDLE_INVALID, |a| a.value);
-        let mut table = caller.handles().lock();
+        let mut table = caller.handles().lock_nested();
         let entry = table.check(arg, &[], rights::TRANSFER)?.clone();
         let handle = target.insert(entry.object, entry.rights, Some(caller.budget()))?;
         table.close(arg)?;
