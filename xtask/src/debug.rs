@@ -14,7 +14,21 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const GDB: &str = "gdb";
+/// The GDB that can debug x86_64 code on this host: `gdb-multiarch` when it
+/// is installed, as Debian and Ubuntu need on hosts that are not x86_64,
+/// and otherwise `gdb`.
+pub fn gdb() -> &'static str {
+    static GDB: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    GDB.get_or_init(|| {
+        let multiarch = Command::new("gdb-multiarch")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if multiarch { "gdb-multiarch" } else { "gdb" }
+    })
+}
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -122,7 +136,7 @@ pub fn run(args: &Args) -> Result<()> {
     let port = free_port()?;
     let mut qemu = start_halted(&args.machine, &disk, &log, port, &[])?;
     println!("serial output goes to {}", log.display());
-    let status = Command::new(GDB)
+    let status = Command::new(gdb())
         .args(gdb_args(&built.kernel, port))
         .spawn()
         .and_then(|mut gdb| {
@@ -134,7 +148,7 @@ pub fn run(args: &Args) -> Result<()> {
             unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
             gdb.wait()
         })
-        .with_context(|| format!("failed to start {GDB}"));
+        .with_context(|| format!("failed to start {}", gdb()));
     let _ = qemu.kill();
     let _ = qemu.wait();
     let status = status?;
@@ -211,13 +225,13 @@ pub fn check_scripts(
     let output = fs::File::create(&output_path)
         .with_context(|| format!("creating {}", output_path.display()))?;
     let errors = output.try_clone()?;
-    let finished = Command::new(GDB)
+    let finished = Command::new(gdb())
         .args(args)
         .stdin(Stdio::null())
         .stdout(output)
         .stderr(errors)
         .spawn()
-        .with_context(|| format!("failed to start {GDB}"))
+        .with_context(|| format!("failed to start {}", gdb()))
         .and_then(|mut gdb| wait_for(&mut gdb, timeout));
     let _ = qemu.kill();
     let _ = qemu.wait();

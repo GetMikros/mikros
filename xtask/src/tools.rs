@@ -110,6 +110,19 @@ pub enum Source {
     Package(&'static str),
     /// With `cargo install` of this crate, which needs no privileges.
     Crate(&'static str),
+    /// GDB with support for x86_64: `gdb-multiarch` on Debian and Ubuntu
+    /// hosts that are not x86_64, whose `gdb` debugs only their own
+    /// architecture, and `gdb` otherwise.
+    Gdb,
+}
+
+/// The package of GDB with support for x86_64 on `distro`, on a host of
+/// architecture `arch`.
+fn gdb_package(distro: Distro, arch: &str) -> &'static str {
+    match distro {
+        Distro::Debian | Distro::Ubuntu if arch != "x86_64" => "gdb-multiarch",
+        _ => "gdb",
+    }
 }
 
 /// A host tool, the version of it the repository needs, and where it
@@ -134,7 +147,7 @@ pub const TOOLS: [Tool; 4] = [
         name: "GDB",
         program: "gdb",
         min_version: Version(12, 1, 0),
-        source: Source::Package("gdb"),
+        source: Source::Gdb,
     },
     Tool {
         name: "mkfs.btrfs",
@@ -161,9 +174,16 @@ impl Tool {
     /// Runs the tool with `--version` and compares the reported version with
     /// the minimum.
     pub fn check(&self) -> Status {
-        let Ok(output) = Command::new(self.program).arg("--version").output() else {
+        let program = match self.source {
+            Source::Gdb => crate::debug::gdb(),
+            _ => self.program,
+        };
+        let Ok(output) = Command::new(program).arg("--version").output() else {
             return Status::Missing;
         };
+        if matches!(self.source, Source::Gdb) && !debugs_x86_64(program) {
+            return Status::Missing;
+        }
         let text = String::from_utf8_lossy(&output.stdout);
         let first_line = text.lines().next().unwrap_or_default();
         match Version::find_in(first_line) {
@@ -180,13 +200,33 @@ impl Tool {
             Source::Crate(name) => ["cargo", "install", name, "--locked"]
                 .map(String::from)
                 .to_vec(),
+            Source::Gdb => distro.install_command(gdb_package(distro, std::env::consts::ARCH)),
         }
     }
+}
+
+/// Whether `gdb` can debug x86_64 code.
+fn debugs_x86_64(gdb: &str) -> bool {
+    let output = Command::new(gdb)
+        .args(["-batch", "-nx", "-ex", "set architecture i386:x86-64"])
+        .output();
+    output.is_ok_and(|o| {
+        o.status.success() && !String::from_utf8_lossy(&o.stderr).contains("Undefined")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installs_gdb_multiarch_where_gdb_has_one_architecture() {
+        assert_eq!(gdb_package(Distro::Debian, "aarch64"), "gdb-multiarch");
+        assert_eq!(gdb_package(Distro::Ubuntu, "aarch64"), "gdb-multiarch");
+        assert_eq!(gdb_package(Distro::Debian, "x86_64"), "gdb");
+        assert_eq!(gdb_package(Distro::Fedora, "aarch64"), "gdb");
+        assert_eq!(gdb_package(Distro::Arch, "aarch64"), "gdb");
+    }
 
     #[test]
     fn finds_versions_in_tool_output() {

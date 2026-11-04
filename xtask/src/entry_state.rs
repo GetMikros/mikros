@@ -2,7 +2,7 @@
 //! entered with: GDB stops QEMU at the kernel's entry point and reads
 //! them.
 
-use crate::debug::{self, GDB};
+use crate::debug;
 use crate::qemu::MachineArgs;
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -121,13 +121,13 @@ pub fn check(
     let output = fs::File::create(&output_path)
         .with_context(|| format!("creating {}", output_path.display()))?;
     let errors = output.try_clone()?;
-    let finished = Command::new(GDB)
+    let finished = Command::new(debug::gdb())
         .args(args)
         .stdin(Stdio::null())
         .stdout(output)
         .stderr(errors)
         .spawn()
-        .with_context(|| format!("failed to start {GDB}"))
+        .with_context(|| format!("failed to start {}", debug::gdb()))
         .and_then(|mut gdb| debug::wait_for(&mut gdb, timeout));
     let _ = qemu.kill();
     let _ = qemu.wait();
