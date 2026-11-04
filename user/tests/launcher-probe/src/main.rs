@@ -1,0 +1,259 @@
+//! A program that the process manager tests start in place of the
+//! service manager, from a boot image of their own, to drive the
+//! process manager's `Launcher` endpoint. It also runs as the children
+//! it spawns, chosen by its arguments:
+//!
+//! - none: drives `Spawn`, `Wait` and `Kill`, and exits with 0 when
+//!   every check passed or with the number of the first that failed;
+//! - `exit <n>`: exits with `n`;
+//! - `sleep`: waits until it is killed;
+//! - `rename`: exits with 0 when it may not name an app ID, 1 otherwise.
+//!
+//! It accepts the `Bind` requests on the control endpoint that arrives
+//! as the `USER` startup handle with ID 0, for itself and its children.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use mikros_rt::exec::{Executor, Reactor};
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::process::{
+    HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
+};
+use mikros_rt::interfaces::mikros::service::{
+    ProcessDirectory, ProcessDirectoryAsyncServer, ProcessDirectoryBindResponse,
+    ProcessDirectoryRequest,
+};
+use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
+
+mikros_rt::raw_main!(main);
+
+const CONTROL_ID: u32 = 0;
+const PROBE: &str = "/usr/bin/probe";
+const KILL: u32 = 9;
+const CALLER_USER: u32 = u32::MAX;
+const FOREVER: i64 = i64::MAX;
+const PAGE_SIZE: u64 = 4096;
+
+fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
+    let Ok(mut executor) = Executor::new() else {
+        return PANIC_EXIT_CODE;
+    };
+    let reactor = executor.reactor().clone();
+    let spawner = executor.spawner().clone();
+    let control_reactor = reactor.clone();
+    let received = executor.block_on(managed::receive_async(
+        bootstrap,
+        reactor.clone(),
+        |handles: &mut Vec<StartupHandle>| {
+            let at = handles
+                .iter()
+                .position(|h| h.role == HandleRole::User && h.id == CONTROL_ID);
+            if let Some(at) = at {
+                let end = handles.remove(at).handle;
+                spawner.spawn(serve_control(end, control_reactor.clone()));
+            }
+        },
+    ));
+    let Ok(managed) = received else {
+        return PANIC_EXIT_CODE;
+    };
+    let args = arguments(&managed.header.arguments);
+    let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    executor.block_on(async move {
+        match args.as_slice() {
+            [_] => probe(&launcher).await,
+            [_, "exit", code] => code.parse().unwrap_or(PANIC_EXIT_CODE),
+            [_, "sleep"] => core::future::pending().await,
+            [_, "rename"] => {
+                let named = spawn(&launcher, &["exit", "0"], |r| {
+                    r.app_id = Some("system.renamed".into())
+                })
+                .await;
+                i64::from(named != Err(Status::AccessDenied))
+            }
+            _ => PANIC_EXIT_CODE,
+        }
+    })
+}
+
+/// Accepts every `Bind` request on the control endpoint `end`, and
+/// keeps the bound connections open.
+async fn serve_control(end: OwnedHandle, reactor: Reactor) {
+    let server = ProcessDirectoryAsyncServer::new(ServerEnd::<ProcessDirectory>::new(end), reactor);
+    let mut bound = Vec::new();
+    while let Ok(ProcessDirectoryRequest::Bind(request, responder)) = server.next().await {
+        bound.push(request.directory);
+        let _ = responder.reply(server.server(), Ok(ProcessDirectoryBindResponse {}));
+    }
+}
+
+/// The arguments in the `arguments` memory object.
+fn arguments(mem: &OwnedHandle) -> Vec<String> {
+    let mut bytes = alloc::vec![0u8; PAGE_SIZE as usize];
+    // SAFETY: the pointer describes `bytes`.
+    let status = unsafe { sys::mem_read(mem.raw(), 0, bytes.as_mut_ptr(), PAGE_SIZE) };
+    if status != mikros_rt::OK {
+        return Vec::new();
+    }
+    let count = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    bytes[8..]
+        .split(|&b| b == 0)
+        .take(count)
+        .map(|s| String::from_utf8_lossy(s).into())
+        .collect()
+}
+
+/// An `arguments` memory object with `PROBE` and then `args`.
+fn arguments_of(args: &[&str]) -> OwnedHandle {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(args.len() as u32 + 1).to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    for arg in core::iter::once(&PROBE).chain(args) {
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
+    }
+    let mut mem = 0;
+    // SAFETY: the pointers describe `mem` and `bytes`.
+    unsafe {
+        sys::mem_create(PAGE_SIZE, 0, &mut mem);
+        sys::mem_write(mem, 0, bytes.as_ptr(), bytes.len() as u64);
+        OwnedHandle::from_raw(mem)
+    }
+}
+
+/// Spawns `PROBE` with `args`, after `change` adjusted the request.
+async fn spawn(
+    launcher: &LauncherAsyncClient,
+    args: &[&str],
+    change: impl FnOnce(&mut SpawnRequest),
+) -> Result<(u32, OwnedHandle), Status> {
+    let mut request = SpawnRequest {
+        path: PROBE.into(),
+        arguments: arguments_of(args),
+        handles: Vec::new(),
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+    };
+    change(&mut request);
+    match launcher.spawn(request).await {
+        Ok(Ok(r)) => Ok((r.pid, r.process)),
+        Ok(Err(status)) => Err(status),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// Waits for the child `selector` chooses, returning its ID, exit code
+/// and terminating signal.
+async fn wait(launcher: &LauncherAsyncClient, selector: i32) -> Option<(u32, i64, u32)> {
+    let r = launcher
+        .wait(selector, WaitOptions(0), FOREVER)
+        .await
+        .ok()?
+        .ok()?;
+    (r.status.kind == StatusKind::Exited).then_some((
+        r.pid,
+        r.status.exit_code,
+        r.status.term_signal,
+    ))
+}
+
+async fn kill(launcher: &LauncherAsyncClient, pid: u32, signo: u32) -> Result<(), Status> {
+    match launcher.kill(pid, signo).await {
+        Ok(result) => result.map(drop),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// Runs every check in turn, and returns the number of the first that
+/// failed, or 0.
+async fn probe(l: &LauncherAsyncClient) -> i64 {
+    let mut step = 0;
+    let mut check = |what: &str, passed: bool| {
+        step += 1;
+        if !passed {
+            mikros_rt::log!(Error, "launcher probe: {what} failed");
+        }
+        passed.then_some(()).ok_or(step)
+    };
+    let checks = async {
+        let exits = spawn(l, &["exit", "7"], |_| {}).await;
+        check("spawning a child as pid 3", matches!(&exits, Ok((3, _))))?;
+        check(
+            "waiting for its exit code",
+            wait(l, 3).await == Some((3, 7, 0)),
+        )?;
+        let sleeper = spawn(l, &["sleep"], |_| {}).await.map(|(pid, _)| pid);
+        check("spawning a sleeping child", sleeper.is_ok())?;
+        let sleeper = sleeper.unwrap_or(0);
+        check("killing it", kill(l, sleeper, KILL).await.is_ok())?;
+        check(
+            "seeing KILL end it",
+            wait(l, -1).await == Some((sleeper, -3, KILL)),
+        )?;
+        check(
+            "refusing to signal init",
+            kill(l, 1, 0).await == Err(Status::AccessDenied),
+        )?;
+        check(
+            "refusing to signal an unknown process",
+            kill(l, 1000, 0).await == Err(Status::NotFound),
+        )?;
+        let refused = async |path: &str| spawn(l, &[], |r| r.path = path.into()).await.err();
+        check(
+            "refusing a relative path",
+            refused("usr/bin/probe").await == Some(Status::InvalidArgs),
+        )?;
+        check(
+            "refusing a missing program",
+            refused("/usr/bin/none").await == Some(Status::NotFound),
+        )?;
+        check(
+            "refusing a directory",
+            refused("/usr/bin").await == Some(Status::AccessDenied),
+        )?;
+        let other = |change: fn(&mut SpawnRequest)| spawn(l, &["exit", "0"], change);
+        check(
+            "refusing another user",
+            other(|r| r.user = 5).await.err() == Some(Status::AccessDenied),
+        )?;
+        check(
+            "refusing a login session",
+            other(|r| r.login_session = true).await.err() == Some(Status::AccessDenied),
+        )?;
+        check(
+            "refusing an app ID outside system",
+            other(|r| r.app_id = Some("test.other".into())).await.err()
+                == Some(Status::AccessDenied),
+        )?;
+        let named = spawn(l, &["exit", "4"], |r| {
+            r.app_id = Some("system.named".into())
+        })
+        .await;
+        check("naming a system app ID", named.is_ok())?;
+        let named = named.map_or(0, |(pid, _)| pid);
+        check(
+            "waiting for it",
+            wait(l, named as i32).await == Some((named, 4, 0)),
+        )?;
+        let rename = spawn(l, &["rename"], |_| {})
+            .await
+            .map_or(0, |(pid, _)| pid);
+        check(
+            "refusing a child an app ID",
+            wait(l, rename as i32).await == Some((rename, 0, 0)),
+        )?;
+        Ok(())
+    };
+    match checks.await {
+        Ok(()) => 0,
+        Err(step) => step,
+    }
+}

@@ -133,8 +133,22 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", manager.display());
             let services = user_build("service-manager", kind)?;
             println!("built    {}", services.display());
+            let probe = user_build("launcher-probe", kind)?;
+            println!("built    {}", probe.display());
+            // The process manager tests serve this image, in which the
+            // probe takes the service manager's place.
+            let launcher = boot_image(
+                kind,
+                "launcher.img",
+                &[
+                    ("usr/bin/service-manager", probe.as_path()),
+                    ("usr/bin/probe", probe.as_path()),
+                ],
+            )?;
+            println!("built    {}", launcher.display());
             let members = [
                 ("init", init.as_path()),
+                ("tests/launcher.img", launcher.as_path()),
                 ("tests/channel-echo", echo.as_path()),
                 ("tests/call-server", server.as_path()),
                 ("tests/debuggee", debuggee.as_path()),

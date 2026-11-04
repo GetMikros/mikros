@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["init", "loader", "mikros-rt", "process-manager", "service-manager", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/init", "tests/managed", "tests/pie", "tests/support"]
+members = ["init", "loader", "mikros-rt", "process-manager", "service-manager", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/init", "tests/launcher-probe", "tests/managed", "tests/pie", "tests/support"]
 # Built here as a dependency, and host-tested in the root workspace.
 exclude = ["bootfs", "ustar"]
 
