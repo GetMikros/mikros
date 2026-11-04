@@ -49,6 +49,9 @@ pub struct Thread {
     /// The processor that owns the thread: whose run queue or sleepers
     /// hold it, or that runs it.
     cpu: AtomicU32,
+    /// Set by `wake_sleeper` when the thread did not sleep yet, so that
+    /// its next sleep returns at once instead of missing the wake.
+    wake_pending: AtomicBool,
     /// The architecture's state of the thread.
     arch: ThreadData,
     /// The top of the kernel stack, or 0 once it is freed.
@@ -115,6 +118,7 @@ impl Thread {
             charged,
             state: AtomicU32::new(state),
             cpu: AtomicU32::new(cpu as u32),
+            wake_pending: AtomicBool::new(false),
             arch,
             stack_top: AtomicU64::new(stack + KERNEL_STACK_SIZE),
             #[cfg(feature = "fuzz")]
@@ -658,7 +662,9 @@ fn arm(cpu: &CpuSched) {
 }
 
 /// Blocks the running thread until the monotonic clock reaches
-/// `deadline`. Returns at once when it already has.
+/// `deadline` or `wake_sleeper` wakes it. Returns at once when the
+/// deadline has passed, and when a wake came since the last sleep, so
+/// callers check what they wait for again after every return.
 pub fn sleep_until(deadline: i64) -> Result<(), Error> {
     if deadline <= crate::arch::monotonic_now() {
         return Ok(());
@@ -668,13 +674,24 @@ pub fn sleep_until(deadline: i64) -> Result<(), Error> {
         let Some(current) = cpu.current.clone() else {
             return Ok(());
         };
-        if current.state() == DEAD {
+        if current.wake_pending.swap(false, Ordering::AcqRel) {
             return Ok(());
         }
+        let queued = Queued::new(current.clone());
         cpu.sleepers
-            .insert(deadline, Queued::new(current.clone()))
+            .insert(deadline, queued)
             .map_err(|_| Error::NoMemory)?;
-        current.state.store(BLOCKED, Ordering::Release);
+        // A thread made DEAD meanwhile does not sleep.
+        if current
+            .state
+            .compare_exchange(RUNNABLE, BLOCKED, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            if cpu.sleepers.remove(&queued) {
+                drop(queued.take());
+            }
+            return Ok(());
+        }
     }
     schedule(false);
     Ok(())
@@ -705,6 +722,10 @@ pub fn wake_sleeper(thread: &Arc<Thread>) {
         thread.state.store(RUNNABLE, Ordering::Release);
         let entity = *thread.entity.lock();
         cpu.enqueue(index, queued, entity);
+    } else if thread.state() == RUNNABLE {
+        // It runs, maybe on another processor about to sleep; with the
+        // owner's state locked, the sleep sees this.
+        thread.wake_pending.store(true, Ordering::Release);
     }
 }
 

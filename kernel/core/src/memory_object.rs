@@ -296,31 +296,45 @@ impl MemoryObject {
             let absent = state.absent(index)?;
             drop(state);
             drop(pages);
-            match absent {
-                Absent::Request => match self.request(paged, index) {
-                    Ok(()) => {}
+            // The thread waits before the page is requested, so that the
+            // pager's answer wakes it however soon it comes; a wake before
+            // the sleep makes the sleep return at once.
+            let thread = match absent {
+                Absent::Request => match crate::pager::wait_for(koid, index) {
+                    Ok(thread) => thread,
+                    Err(e) => {
+                        // Not requested after all; the next access does.
+                        paged.state.lock().withdraw(index);
+                        crate::pager::wake(koid, index, index + 1);
+                        return Err(e);
+                    }
+                },
+                Absent::Wait => crate::pager::wait_for(koid, index)?,
+                Absent::Failed => return Err(Error::Io),
+                Absent::Revoked => return Err(Error::AccessDenied),
+            };
+            if let Absent::Request = absent {
+                let failed = match self.request(paged, index) {
+                    Ok(()) => None,
                     // The page is requested again by the next access,
                     // also by the threads waiting for it.
                     Err(Error::NoResources) => {
                         paged.state.lock().withdraw(index);
-                        crate::pager::wake(koid, index, index + 1);
-                        return Err(Error::NoResources);
+                        Some(Error::NoResources)
                     }
                     Err(_) => {
                         // Without room to record the failure, the next
                         // access requests the page again.
                         let _ = paged.state.lock().fail(index, index + 1);
-                        crate::pager::wake(koid, index, index + 1);
-                        return Err(Error::Io);
+                        Some(Error::Io)
                     }
-                },
-                Absent::Wait => {}
-                Absent::Failed => return Err(Error::Io),
-                Absent::Revoked => return Err(Error::AccessDenied),
+                };
+                if let Some(e) = failed {
+                    crate::pager::stop_waiting(koid, &thread);
+                    crate::pager::wake(koid, index, index + 1);
+                    return Err(e);
+                }
             }
-            // Nothing runs between the request and the registration, as
-            // the kernel runs one thread at a time on the one processor.
-            let thread = crate::pager::wait_for(koid, index)?;
             let slept = crate::sched::wait_for_signals(&thread, i64::MAX);
             crate::pager::stop_waiting(koid, &thread);
             slept?;
