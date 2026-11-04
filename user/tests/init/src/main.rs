@@ -800,6 +800,30 @@ fn queued_thread_preempts(s: &Startup) -> Result {
     ensure("ending it", wait(thread, TERMINATED, in_time()).0 == 0)
 }
 
+/// The processor count is between 1 and 256, a mask that selects no
+/// processor the kernel uses is refused, and this thread still runs once
+/// restricted to processor 0.
+fn cpu_count_and_affinity(s: &Startup) -> Result {
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    let status = unsafe { sys::system_get_cpu_count(&mut count) };
+    check("reading the processor count", status)?;
+    ensure("counting the processors", (1..=256).contains(&count))?;
+    let set = |mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(s.thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    ensure("refusing an empty mask", set(&[0; 4]) == -10)?;
+    if count < 256 {
+        let mut beyond = [0u8; 32];
+        beyond[count as usize / 8] = 1 << (count % 8);
+        ensure("refusing a processor not used", set(&beyond) == -10)?;
+    }
+    check("restricting to processor 0", set(&[1]))?;
+    sleep_ms(1);
+    check("allowing every processor", set(&[0xFF; 32]))
+}
+
 /// Waits for a packet on `port` until `deadline`. The buffer starts
 /// filled with 0xAA, so that bytes the kernel leaves alone show.
 fn take_packet(port: Handle, deadline: i64) -> (i64, [u8; 48]) {
@@ -6682,7 +6706,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 104] = [
+const TESTS: [(&str, Test); 105] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6691,6 +6715,7 @@ const TESTS: [(&str, Test); 104] = [
     ("timers", timers),
     ("priorities", priorities),
     ("queued_thread_preempts", queued_thread_preempts),
+    ("cpu_count_and_affinity", cpu_count_and_affinity),
     ("ports", ports),
     ("port_registration_limit", port_registration_limit),
     ("log_readers", log_readers),

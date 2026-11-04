@@ -1738,6 +1738,18 @@ pub fn thread_set_priority(
     Ok(())
 }
 
+pub fn thread_set_affinity(thread: Checked, mask: UserIn<u8>, len: u64) -> Result<(), Error> {
+    if !mask.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    // Bits past the last processor the kernel can use select nothing, so
+    // only the bytes before them are read.
+    let mut bytes = [0u8; kernel_core::smp::MAX_CPUS / 8];
+    let used = len.min(bytes.len() as u64) as usize;
+    mask.read_into(&mut bytes[..used])?;
+    crate::sched::set_affinity(&object::<Thread>(thread), &bytes[..used])
+}
+
 pub fn port_create(options: u32, out: UserOut<Handle>) -> Result<(), Error> {
     if options != 0 || !out.fits(1) {
         return Err(Error::InvalidArgs);
@@ -1828,6 +1840,16 @@ pub fn mem_op(mem: Checked, op: u32, offset: u64, len: u64) -> Result<(), Error>
         2 => mem.decommit(offset, len),
         _ => Err(Error::InvalidArgs),
     }
+}
+
+pub fn system_get_cpu_count(out: UserOut<u32>) -> Result<(), Error> {
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let outputs = prepare(&current_process()?, &[out.range(1)])?;
+    let count = kernel_core::cpu::count() as u32;
+    publish(outputs, &[bytes_of(&[count])]);
+    Ok(())
 }
 
 pub fn system_get_memory_info(out: UserOut<u8>) -> Result<(), Error> {

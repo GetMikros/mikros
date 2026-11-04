@@ -1102,3 +1102,21 @@ syscalls:
     spec: [MIKSPEC-0080.R7]
     args:
       - {name: bti, type: Handle, dir: in, object: Bti, rights: [MANAGE]}
+
+  - name: thread_set_affinity
+    number: 107
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0018.R7]
+    args:
+      - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
+      - {name: mask, type: "*const u8", dir: in}
+      - {name: len, type: u64, dir: in}
+
+  - name: system_get_cpu_count
+    number: 108
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0018.R8]
+    args:
+      - {name: out, type: "*mut u32", dir: out}
