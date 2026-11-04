@@ -108,6 +108,8 @@ use kernel_core::timeline;
 #[cfg(target_os = "none")]
 mod timer;
 #[cfg(target_os = "none")]
+mod tlb;
+#[cfg(target_os = "none")]
 use kernel_core::user;
 #[cfg(target_os = "none")]
 mod usercopy;

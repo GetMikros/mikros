@@ -6,7 +6,7 @@ use crate::page_tables::Pcids;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use kernel_core::sync::SpinLock;
 
 pub const IA32_GS_BASE: u32 = 0xC000_0101;
@@ -58,6 +58,10 @@ pub struct PerCpu {
     /// The kernel core's data for this processor, set through the
     /// architecture interface.
     pub core_data: AtomicPtr<()>,
+    /// The processor's local APIC ID.
+    pub apic_id: AtomicU32,
+    /// Set when a shootdown waits for this processor.
+    pub shootdown_pending: AtomicBool,
 }
 
 // SAFETY: each processor only reads its own structure, `this` is never
@@ -85,6 +89,8 @@ impl PerCpu {
             handling: AtomicU64::new(0),
             fault_address: AtomicU64::new(0),
             core_data: AtomicPtr::new(core::ptr::null_mut()),
+            apic_id: AtomicU32::new(0),
+            shootdown_pending: AtomicBool::new(false),
         }
     }
 }
@@ -92,6 +98,18 @@ impl PerCpu {
 /// The boot processor's data. Entry code that cannot trust the GS base
 /// finds it by this symbol.
 pub(crate) static BOOT_CPU: PerCpu = PerCpu::new(&raw const BOOT_CPU, 0);
+
+/// The data of each processor, by number, once it has some.
+static ALL: [AtomicPtr<PerCpu>; kernel_core::smp::MAX_CPUS] =
+    [const { AtomicPtr::new(core::ptr::null_mut()) }; kernel_core::smp::MAX_CPUS];
+
+/// The data of processor `cpu`, if it has some.
+pub fn of(cpu: usize) -> Option<&'static PerCpu> {
+    let data = ALL.get(cpu)?.load(Ordering::Acquire);
+    // SAFETY: only `init` and `new_secondary` store pointers, to data
+    // that lives as long as the kernel runs.
+    (!data.is_null()).then(|| unsafe { &*data })
+}
 
 /// Set once the GS base points to the per-CPU data.
 pub static READY: AtomicBool = AtomicBool::new(false);
@@ -105,7 +123,9 @@ pub fn init() {
         write_msr(IA32_GS_BASE, (&raw const BOOT_CPU) as u64);
         write_msr(IA32_KERNEL_GS_BASE, 0);
     }
+    ALL[0].store((&raw const BOOT_CPU).cast_mut(), Ordering::Release);
     READY.store(true, Ordering::Release);
+    crate::tlb::RUNNING.insert(0);
     // Locks taken before this counted on the boot processor's core data
     // too, so the counts carry over.
     kernel_core::cpu::start_boot();
@@ -114,11 +134,13 @@ pub fn init() {
 /// New data for application processor `index`, with `core` as the core's
 /// data, which lives as long as the kernel runs. Returns `None` when
 /// memory runs out.
-pub fn new_secondary(index: u32, core: *const ()) -> Option<&'static PerCpu> {
+pub fn new_secondary(index: u32, apic_id: u32, core: *const ()) -> Option<&'static PerCpu> {
     let cpu = kernel_core::fallible::try_box(PerCpu::new(core::ptr::null(), index)).ok()?;
     let cpu = alloc::boxed::Box::leak(cpu);
     cpu.this = &raw const *cpu;
     cpu.core_data.store(core.cast_mut(), Ordering::Relaxed);
+    cpu.apic_id.store(apic_id, Ordering::Relaxed);
+    ALL[index as usize].store(&raw mut *cpu, Ordering::Release);
     Some(cpu)
 }
 

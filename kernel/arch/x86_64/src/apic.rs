@@ -19,9 +19,9 @@ pub const PIC_BASE: u8 = 32;
 pub const DEVICE_VECTORS: core::ops::Range<u8> = 48..240;
 /// The local APIC timer vector.
 pub const TIMER_VECTOR: u8 = 240;
-/// The vector of the IOMMUs' fault events, the first of those reserved
-/// for the kernel.
-pub const IOMMU_FAULT_VECTOR: u8 = 241;
+/// The vector of the IOMMUs' fault events, one of those reserved for the
+/// kernel.
+pub const IOMMU_FAULT_VECTOR: u8 = 243;
 /// The local APIC spurious interrupt vector.
 pub const SPURIOUS_VECTOR: u8 = 255;
 
@@ -53,6 +53,9 @@ const ICR_HIGH: u32 = 0x310;
 const ICR_PENDING: u32 = 1 << 12;
 /// ICR commands: INIT, level asserted, and a startup interrupt, whose
 /// vector is the page its code starts at.
+/// An ICR command for a fixed interrupt, to be combined with its
+/// vector.
+pub const ICR_FIXED: u32 = 1 << 14;
 pub const ICR_INIT: u32 = 0b101 << 8 | 1 << 14;
 pub const ICR_STARTUP: u32 = 0b110 << 8 | 1 << 14;
 
@@ -393,6 +396,7 @@ pub fn init(info: &BootInfo) {
     drop(apics);
     init_local(madt);
     BOOT_ID.store(id(), Ordering::Relaxed);
+    crate::percpu::this().apic_id.store(id(), Ordering::Relaxed);
     crate::smp::find(madt, id());
     let mode = if X2APIC.load(Ordering::Relaxed) {
         "x2APIC"

@@ -6,6 +6,7 @@ use crate::cpu;
 use crate::paging::{self, Flags, Mapper, PAGE_SIZE, Tables};
 use crate::percpu;
 use crate::space;
+use crate::tlb::{self, CpuMask};
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::arch::{PageError, PageFlags};
 
@@ -57,9 +58,19 @@ pub struct Pcids {
     slots: [Slot; SLOTS],
     /// The slot to hand out next.
     next: usize,
-    /// The loaded address space, or 0 for the kernel's tables.
+    /// The loaded address space, or 0 for the kernel's tables, with its
+    /// root table, its PCID or 0, and the set of processors that have it
+    /// loaded, or null for the kernel's tables.
     current: u64,
+    root: u64,
+    pcid: u64,
+    loaded: *const CpuMask,
 }
+
+// SAFETY: `loaded` points into the loaded space's tables, which are not
+// freed while any processor has them loaded, and only this processor
+// uses its PCIDs.
+unsafe impl Send for Pcids {}
 
 impl Pcids {
     pub const fn new() -> Pcids {
@@ -70,9 +81,29 @@ impl Pcids {
             }; SLOTS],
             next: 0,
             current: 0,
+            root: 0,
+            pcid: 0,
+            loaded: core::ptr::null(),
         }
     }
+
+    /// Records that this processor, `me`, now has `id` loaded from `root`
+    /// with `pcid`, and leaves the set of the space it had loaded.
+    fn set_current(&mut self, me: usize, id: u64, root: u64, pcid: u64, loaded: *const CpuMask) {
+        if self.current != id && !self.loaded.is_null() {
+            // SAFETY: the space that was loaded is not freed before this
+            // processor leaves its set.
+            unsafe { (*self.loaded).remove(me) };
+        }
+        self.current = id;
+        self.root = root;
+        self.pcid = pcid;
+        self.loaded = loaded;
+    }
 }
+
+/// The most removed pages whose frames wait for a shootdown.
+const BATCH: usize = 32;
 
 fn pcids_enabled() -> bool {
     cpu::read_cr4() & CR4_PCIDE != 0
@@ -106,6 +137,8 @@ fn error(e: paging::Error) -> PageError {
 pub struct SpaceTables {
     /// The space's identity in the PCID slots, never 0.
     id: u64,
+    /// The processors that have the space loaded, or are loading it.
+    loaded: CpuMask,
     /// Bumped whenever a translation is removed, so that processors flush
     /// the space's PCID before using it again.
     generation: AtomicU64,
@@ -119,6 +152,7 @@ impl SpaceTables {
             .map_err(error)?;
         Ok(SpaceTables {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            loaded: CpuMask::new(),
             generation: AtomicU64::new(0),
             root,
         })
@@ -154,18 +188,35 @@ impl SpaceTables {
         // Interrupts are off, so the space stays loaded or not loaded on
         // this processor while its pages are removed.
         let here = self.here();
-        let mut removed = false;
+        // The frames are passed on only once no processor can use the
+        // translations, a batch at a time.
+        let mut batch = [0u64; BATCH];
+        let mut count = 0;
         let next = Mapper::existing(&mut Frames(&mut none), self.root, false)
             .unmap_present_some(virt, size, limit, |v, phys| {
                 here.invalidate(v);
-                removed = true;
-                unmapped(phys);
+                batch[count] = phys;
+                count += 1;
+                if count == BATCH {
+                    self.flush_removed(here, &batch, unmapped);
+                    count = 0;
+                }
             })
-            .map_err(error)?;
-        if removed {
-            self.flush_elsewhere(here);
+            .map_err(error);
+        if count != 0 {
+            self.flush_removed(here, &batch[..count], unmapped);
         }
-        Ok(next)
+        next
+    }
+
+    /// Drops the removed translations on every processor, then passes
+    /// `frames` to `unmapped`.
+    fn flush_removed(&self, here: Here, frames: &[u64], unmapped: &mut dyn FnMut(u64)) {
+        self.flush_elsewhere(here);
+        tlb::shootdown(self.id, 0, 0, false, &self.loaded);
+        for &frame in frames {
+            unmapped(frame);
+        }
     }
 
     /// How translations of the space that a change removes are
@@ -202,12 +253,17 @@ impl SpaceTables {
 
     /// Loads the address space on this processor.
     pub fn activate(&self) {
+        let me = percpu::index() as usize;
         let mut pcids = percpu::this().pcids.lock();
+        // The processor joins the set before it reads the generation, and
+        // a change bumps the generation before it reads the set, so that
+        // either this load flushes or the change sends a shootdown here.
+        self.loaded.insert(me);
         if !pcids_enabled() {
             if pcids.current != self.id {
                 // SAFETY: the tables share the kernel half.
                 unsafe { cpu::write_cr3(self.root) };
-                pcids.current = self.id;
+                pcids.set_current(me, self.id, self.root, 0, &self.loaded);
             }
             return;
         }
@@ -241,7 +297,7 @@ impl SpaceTables {
         };
         // SAFETY: the tables share the kernel half.
         unsafe { cpu::write_cr3(self.root | pcid | no_flush) };
-        pcids.current = self.id;
+        pcids.set_current(me, self.id, self.root, pcid, &self.loaded);
     }
 
     /// Frees the tables, passing each table frame to `free`. No user page
@@ -258,6 +314,9 @@ impl SpaceTables {
                 activate_kernel();
             }
         }
+        // Processors that still have the space loaded, idle or running
+        // kernel threads since, switch to the kernel's tables.
+        tlb::shootdown(self.id, 0, 0, true, &self.loaded);
         let mut none = || None;
         Mapper::existing(&mut Frames(&mut none), self.root, false).free_lower_half(&mut *free);
         free(self.root);
@@ -270,6 +329,11 @@ pub fn activate_kernel() {
     if pcids.current == 0 {
         return;
     }
+    load_kernel(&mut pcids);
+}
+
+/// Loads the kernel's own tables with this processor's `pcids` locked.
+fn load_kernel(pcids: &mut Pcids) {
     let value = if pcids_enabled() {
         space::root() | CR3_NO_FLUSH
     } else {
@@ -278,5 +342,33 @@ pub fn activate_kernel() {
     // SAFETY: these are the kernel's own tables; PCID 0 only ever holds
     // their translations.
     unsafe { cpu::write_cr3(value) };
-    pcids.current = 0;
+    pcids.set_current(
+        percpu::index() as usize,
+        0,
+        space::root(),
+        0,
+        core::ptr::null(),
+    );
+}
+
+/// Handles a shootdown of user space `id` on this processor: when it has
+/// the space loaded, drops all its translations, or switches to the
+/// kernel's tables when the space is being freed.
+pub fn serve_shootdown(id: u64, free: bool) {
+    let mut pcids = percpu::this().pcids.lock();
+    if pcids.current != id {
+        return;
+    }
+    if free {
+        load_kernel(&mut pcids);
+    } else if pcids.pcid == 0 {
+        // SAFETY: reloading the loaded tables drops their translations.
+        unsafe { cpu::write_cr3(pcids.root) };
+    } else if cpu::has_invpcid() {
+        cpu::invpcid_context(pcids.pcid);
+    } else {
+        // SAFETY: as above; without the no-flush bit the load drops the
+        // PCID's translations.
+        unsafe { cpu::write_cr3(pcids.root | pcids.pcid) };
+    }
 }

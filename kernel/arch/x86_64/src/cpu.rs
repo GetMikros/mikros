@@ -208,6 +208,28 @@ pub fn has_invpcid() -> bool {
     INVPCID.load(Ordering::Relaxed)
 }
 
+/// Drops every cached translation, global ones included.
+pub fn flush_all() {
+    use crate::control::CR4_PGE;
+    let cr4 = read_cr4();
+    if cr4 & CR4_PGE != 0 {
+        // SAFETY: clearing and setting PGE again changes nothing but
+        // drops all translations.
+        unsafe {
+            write_cr4(cr4 & !CR4_PGE);
+            write_cr4(cr4);
+        }
+    } else {
+        let cr3: u64;
+        // SAFETY: reading CR3 has no side effects; writing it back
+        // reloads the same tables.
+        unsafe {
+            asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+            write_cr3(cr3);
+        }
+    }
+}
+
 /// Runs INVPCID of `kind` for `pcid` and `virt`.
 fn invpcid(kind: u64, pcid: u64, virt: u64) {
     let descriptor = [pcid, virt];

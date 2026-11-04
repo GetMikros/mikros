@@ -259,7 +259,7 @@ fn start_one(page: u64, id: u32, index: usize) -> bool {
         kernel_core::fallible::try_box(Cpu::new())
             .unwrap_or_else(|_| panic!("no memory for processor {index}")),
     );
-    let cpu = percpu::new_secondary(index as u32, (&raw const *core).cast())
+    let cpu = percpu::new_secondary(index as u32, id, (&raw const *core).cast())
         .unwrap_or_else(|| panic!("no memory for processor {index}"));
     let top = space::new_stack(STACK_SIZE);
     STACK_TOP.store(top, Ordering::Relaxed);
@@ -340,6 +340,7 @@ extern "sysv64" fn ap_entry(cpu: &'static PerCpu) -> ! {
         )
     };
     apic::init_secondary(madt);
+    crate::tlb::join();
     crate::timer::init();
     STAGE.store(READY, Ordering::Release);
     kernel_core::boot::start_secondary()

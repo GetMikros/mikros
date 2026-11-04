@@ -93,18 +93,48 @@ pub fn release_dynamic(start: u64, size: u64) {
     }
 }
 
+/// The most removed kernel pages whose frames wait for a shootdown.
+const BATCH: usize = 32;
+
 /// Unmaps `size` bytes at `virt` in the kernel's tables, invalidates their
-/// translations, and calls `unmapped` with the physical address and size
-/// of each page.
+/// translations on every processor, and then calls `unmapped` with the
+/// physical address and size of each page.
 fn unmap(virt: u64, size: u64, mut unmapped: impl FnMut(u64, u64)) {
     let mut tables = FrameTables;
     let mut mapper = Mapper::existing(&mut tables, root(), gib_pages());
+    let mut batch = [(0u64, 0u64); BATCH];
+    let mut count = 0;
+    // The start of the range whose translations other processors may
+    // still hold.
+    let mut from = virt;
+    let mut flush = |to: u64, batch: &[(u64, u64)]| {
+        if to == from {
+            return;
+        }
+        crate::tlb::shootdown(
+            crate::tlb::KERNEL,
+            from,
+            to - from,
+            false,
+            &crate::tlb::RUNNING,
+        );
+        from = to;
+        for &(phys, page) in batch {
+            unmapped(phys, page);
+        }
+    };
     mapper
         .unmap(virt, size, |v, phys, page| {
             crate::cpu::invlpg(v);
-            unmapped(phys, page);
+            batch[count] = (phys, page);
+            count += 1;
+            if count == BATCH {
+                flush(v + page, &batch);
+                count = 0;
+            }
         })
         .unwrap_or_else(|e| panic!("unmapping kernel memory: {e}"));
+    flush(virt + size, &batch[..count]);
 }
 
 /// Maps `size` bytes of device memory at `phys` uncached into the dynamic

@@ -196,6 +196,11 @@ interface! {
     /// is zero.
     [] fn coverage_point(area: u64, capacity: u64);
 
+    /// Called on each turn of a spin loop, so that the processor handles
+    /// requests from other processors that it would otherwise take as
+    /// interrupts, which kernel code runs with disabled.
+    [] fn spin_wait();
+
     /// Allocates `size` bytes of kernel memory, a multiple of the page
     /// size, mapped writable with an unmapped page below it, and returns
     /// its start, or `None` when memory runs out.

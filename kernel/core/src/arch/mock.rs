@@ -161,6 +161,8 @@ impl Arch for Mock {
 
     fn coverage_point(_area: u64, _capacity: u64) {}
 
+    fn spin_wait() {}
+
     fn kernel_pages_alloc(size: u64) -> Option<u64> {
         if size == 0 {
             return None;

@@ -68,6 +68,7 @@ impl<T> SpinLock<T> {
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            crate::arch::spin_wait();
             core::hint::spin_loop();
         }
         crate::cpu::this()

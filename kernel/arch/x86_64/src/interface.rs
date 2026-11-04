@@ -131,6 +131,10 @@ impl Arch for X86 {
         let _ = (area, capacity);
     }
 
+    fn spin_wait() {
+        crate::tlb::service();
+    }
+
     fn kernel_pages_alloc(size: u64) -> Option<u64> {
         space::alloc_pages(size)
     }
