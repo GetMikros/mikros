@@ -1,6 +1,8 @@
 //! The IOMMUs: finding them in the ACPI tables, enabling DMA translation
 //! at boot, and letting devices reach pinned pages.
 
+#[expect(dead_code, reason = "the IOMMU code drives these units from the next change on")]
+mod amdvi;
 mod vtd;
 
 use crate::log::log;
