@@ -1,7 +1,10 @@
 //! A spin lock.
 //!
-//! The lock does not disable interrupts. Code that takes it must not be
-//! interrupted by code that takes it too.
+//! The lock does not disable interrupts itself: kernel code runs with
+//! interrupts disabled, and enables them only at preemption points and
+//! while idle, where no lock is held. So every lock, including one that
+//! interrupt handlers take, is held with interrupts disabled. A thread
+//! never switches away with a lock held; `sched` asserts both.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};

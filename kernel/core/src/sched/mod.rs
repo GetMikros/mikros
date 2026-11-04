@@ -796,6 +796,10 @@ fn schedule(requeue: bool) {
         !crate::arch::handling_interrupt(),
         "scheduling while handling an interrupt"
     );
+    debug_assert!(
+        crate::sync::none_held(),
+        "switching threads with a spin lock held"
+    );
     let now = crate::arch::monotonic_now();
     let mut cpu = this_cpu().lock();
     let Some(current) = cpu.current.take() else {
@@ -1379,5 +1383,9 @@ pub fn run() -> ! {
 /// of its own so that the fuzz build's coverage test can find its code.
 #[inline(never)]
 fn halt_until_interrupt() {
+    debug_assert!(
+        crate::sync::none_held(),
+        "enabling interrupts with a spin lock held"
+    );
     crate::arch::wait_for_interrupt();
 }
