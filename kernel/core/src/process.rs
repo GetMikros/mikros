@@ -392,10 +392,7 @@ impl Process {
 
     /// Terminates the process because of signal `signo`.
     pub fn terminate_by_signal(&self, signo: u32) {
-        let _ = self
-            .term_signal
-            .compare_exchange(0, signo, Ordering::AcqRel, Ordering::Acquire);
-        self.terminate(crate::signal::EXIT_CODE);
+        self.terminate_with(crate::signal::EXIT_CODE, signo);
     }
 
     /// Stops a running process: its threads wait at their next return to
@@ -608,11 +605,18 @@ impl Process {
     /// mapping, closes every handle, and sets the state `TERMINATED` and
     /// the `TERMINATED` signal on the process and its threads.
     pub fn terminate(&self, code: i64) {
+        self.terminate_with(code, 0);
+    }
+
+    /// `terminate` with `signo` recorded as the terminating signal, or
+    /// none for 0, by the termination that sets the exit code.
+    fn terminate_with(&self, code: i64, signo: u32) {
         {
             let mut threads = self.threads.lock();
             if self.state() == TERMINATED {
                 return;
             }
+            self.term_signal.store(signo, Ordering::Release);
             threads.retain(|t| t.strong_count() > 0);
             for thread in threads.iter().filter_map(Weak::upgrade) {
                 sched::make_dead(&thread);
