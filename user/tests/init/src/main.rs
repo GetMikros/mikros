@@ -1673,6 +1673,78 @@ fn futex_wake(addr: u64, count: u32) -> Result<u32> {
     Ok(woken)
 }
 
+/// `STOP` sent to a process stops its thread, which spins in user mode,
+/// sets the process `STOPPED` and `SUSPENDED` on it; `CONT` lets the
+/// thread run again and clears both; `KILL` ends a stopped process with
+/// exit code -3 and `KILL` as its signal.
+fn stop_continue_and_kill(s: &Startup) -> Result {
+    const SHARED: u64 = 0x10_0000_0000;
+    const SPECIFIC: u32 = 1 << 8;
+    const STOPPED: u32 = 3;
+    const RUNNING: u32 = 1;
+    let (stop, cont, kill) = (19, 18, 9);
+    let mem = create_memory(PAGE_SIZE)?;
+    let here = map(s.process, mem, PAGE_SIZE)?;
+    let (process, _) = start_program_with(s, "debuggee", 10, |process| {
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("mapping into the debuggee", unsafe {
+            sys::vm_map(
+                process,
+                PERM_READ | PERM_WRITE | SPECIFIC,
+                SHARED,
+                mem,
+                0,
+                PAGE_SIZE,
+                &mut at,
+            )
+        })
+    })?;
+    // SAFETY: the page is mapped at `here` and the debuggee writes the
+    // counter with single stores.
+    let count = || unsafe { (here as *const u64).read_volatile() };
+    let counting = |what: &'static str| {
+        let (before, deadline) = (count(), in_time());
+        while count() == before {
+            ensure(what, now() < deadline)?;
+            sleep_ms(1);
+        }
+        Ok(())
+    };
+    let send = |signo: u32| {
+        // SAFETY: the call takes no pointers.
+        check("signalling the debuggee", unsafe {
+            sys::process_signal(process, signo, 0)
+        })
+    };
+    let state = || -> Result<u32> { Ok(u32_at(&info::<0x20>(process, 2)?, 0x08)) };
+    counting("starting to count")?;
+    send(stop)?;
+    ensure(
+        "setting SUSPENDED",
+        wait(process, SUSPENDED, in_time()).0 == 0,
+    )?;
+    ensure("stopping the process", state()? == STOPPED)?;
+    let before = count();
+    sleep_ms(20);
+    ensure("stopping the thread", count() == before)?;
+    send(cont)?;
+    ensure("running again", state()? == RUNNING)?;
+    ensure(
+        "clearing SUSPENDED",
+        wait(process, SUSPENDED, now()).1 & SUSPENDED == 0,
+    )?;
+    counting("counting again")?;
+    send(stop)?;
+    ensure("stopping again", wait(process, SUSPENDED, in_time()).0 == 0)?;
+    send(kill)?;
+    ensure("ending with exit code -3", exit_code(process)? == -3)?;
+    ensure(
+        "recording KILL",
+        u32_at(&info::<0x20>(process, 2)?, 0x10) == kill,
+    )
+}
+
 /// Threads of two processes that map the same memory object share its
 /// futexes: waking through this process's mapping ends the debuggee's
 /// wait through its own, at another address.
@@ -6849,7 +6921,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 107] = [
+const TESTS: [(&str, Test); 108] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6867,6 +6939,7 @@ const TESTS: [(&str, Test); 107] = [
         "process_signal_interrupts_one_wait",
         process_signal_interrupts_one_wait,
     ),
+    ("stop_continue_and_kill", stop_continue_and_kill),
     ("ports", ports),
     ("port_registration_limit", port_registration_limit),
     ("log_readers", log_readers),

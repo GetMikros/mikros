@@ -63,7 +63,19 @@ pub fn deliver(frame: &mut Frame) -> bool {
                 .pending
                 .take(allowed, queued)
                 .or_else(|| pending.take(allowed, queued));
-            info.map(|info| (info, actions[info.signo as usize - 1]))
+            let next = info.map(|info| (info, actions[info.signo as usize - 1]));
+            // A stop takes effect before the lock goes, so that a CONT
+            // sent once it is released finds the process stopped.
+            let stops = next.is_some_and(|(info, action)| {
+                action.handler == HANDLER_DEFAULT
+                    && default_action(info.signo) == DefaultAction::Stop
+            });
+            if stops && process.stop() {
+                drop(own);
+                drop(state);
+                process.notify_threads();
+            }
+            next
         };
         let Some((info, action)) = next else {
             // A thread that is to end leaves the stop to report its exit,
@@ -83,7 +95,8 @@ pub fn deliver(frame: &mut Frame) -> bool {
                     process.terminate_by_signal(info.signo);
                     return changed;
                 }
-                DefaultAction::Stop => process.stop(),
+                // The process stopped above.
+                DefaultAction::Stop => {}
             },
             _ => {
                 if write_frame(frame, &thread, &process, &info, &action).is_err() {

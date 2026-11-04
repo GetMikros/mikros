@@ -399,18 +399,27 @@ impl Process {
     }
 
     /// Stops a running process: its threads wait at their next return to
-    /// user mode.
-    pub fn stop(&self) {
-        if self
+    /// user mode. Called with the process's signal state locked, by the
+    /// thread that took the stop signal from it, so that a `CONT` sent
+    /// meanwhile comes after the stop. Returns whether the process
+    /// stopped; the caller then calls `notify_threads` once it has
+    /// released the lock.
+    pub fn stop(&self) -> bool {
+        let stopped = self
             .state
             .compare_exchange(RUNNING, STOPPED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
+            .is_ok();
+        if stopped {
             self.header.update_signals(0, signals::SUSPENDED);
-            // Threads running on other processors stop at once.
-            for thread in self.threads.lock().iter().filter_map(Weak::upgrade) {
-                sched::notify(&thread);
-            }
+        }
+        stopped
+    }
+
+    /// Interrupts the threads of the process that run on other
+    /// processors, so that they see a change at once.
+    pub fn notify_threads(&self) {
+        for thread in self.threads.lock().iter().filter_map(Weak::upgrade) {
+            sched::notify(&thread);
         }
     }
 
@@ -419,6 +428,16 @@ impl Process {
     pub fn stop_here(&self, thread: &Arc<Thread>) {
         let mut stopped = self.stopped.lock();
         if self.state() != STOPPED || stopped.try_reserve(1).is_err() {
+            return;
+        }
+        // What lets the thread leave is checked again with the list
+        // locked: KILL, an exit and a suspension all come before
+        // `wake_stopped`, which takes the list, so one that came since
+        // the caller looked is seen here or wakes the thread.
+        let killed = crate::signal::pending_mask(self, thread)
+            & crate::signal::bit(crate::signal::KILL)
+            != 0;
+        if killed || thread.exit_requested() || thread.suspend_pending() {
             return;
         }
         stopped.push(thread.clone());

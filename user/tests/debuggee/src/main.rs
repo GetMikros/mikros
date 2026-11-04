@@ -9,8 +9,9 @@
 //! `skip_with_reserved_byte` as the handler of `ILL`, and returns 7 if
 //! that returns. With 8 it waits on the futex at `SHARED`, which its
 //! starter maps, and returns the status of the wait. With 9 it writes to
-//! the pages of a memory object it creates, in `touch_own_pages`.
-//! Otherwise it waits on its bootstrap channel until it is killed.
+//! the pages of a memory object it creates, in `touch_own_pages`. With
+//! 10 it counts in the `u64` at `SHARED` forever, never entering the
+//! kernel. Otherwise it waits on its bootstrap channel until it is killed.
 
 #![no_std]
 #![no_main]
@@ -86,6 +87,13 @@ fn main(bootstrap: Handle, arg2: u64) -> i64 {
     }
     if arg2 == 9 {
         return touch_own_pages(bootstrap);
+    }
+    if arg2 == 10 {
+        let counter = SHARED as *mut u64;
+        loop {
+            // SAFETY: the starter maps the page at `SHARED` writable.
+            unsafe { counter.write_volatile(counter.read_volatile() + 1) };
+        }
     }
     let mut observed = 0;
     // SAFETY: the out pointer is valid for the call.
