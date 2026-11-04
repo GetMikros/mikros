@@ -116,6 +116,7 @@ fn enable(dmar: &[u8], config: &Config) -> Result<Iommu, Error> {
                 base: *base,
                 include_all: *include_all,
                 targets: resolve(*segment, scopes),
+                aliases: Vec::new(),
             });
             match vtd::Unit::new(*base) {
                 Ok(unit) => iommu.units.push(unit),

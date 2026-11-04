@@ -38,7 +38,9 @@ fn dmar(flags: u8, structures: &[Vec<u8>]) -> Vec<u8> {
     t
 }
 
-/// A bridge at 0:1c.0 whose secondary bus is 3 and subordinate bus 5.
+/// A PCI Express root port at 0:1c.0 whose secondary bus is 3 and
+/// subordinate bus 5, and below it a PCI Express to PCI bridge at 3:0.0
+/// whose secondary bus is 4.
 struct Bridges;
 
 impl Config for Bridges {
@@ -46,6 +48,17 @@ impl Config for Bridges {
         match (segment, bus, device, function, offset) {
             (0, 0, 0x1C, 0, SECONDARY_BUS) => 3,
             (0, 0, 0x1C, 0, SUBORDINATE_BUS) => 5,
+            (0, 3, 0, 0, SECONDARY_BUS) => 4,
+            (0, 0, 0x1C, 0, STATUS) | (0, 3, 0, 0, STATUS) => 1 << 4,
+            (0, 0, 0x1C, 0, CAPABILITIES) | (0, 3, 0, 0, CAPABILITIES) => 0x40,
+            // A power management capability, then PCI Express.
+            (0, _, _, 0, 0x40) => 0x01,
+            (0, _, _, 0, 0x41) => 0x50,
+            (0, _, _, 0, 0x50) => PCI_EXPRESS,
+            (0, _, _, 0, 0x51) => 0,
+            // A root port, and a PCI Express to PCI bridge.
+            (0, 0, 0x1C, 0, 0x52) => 0x4 << 4,
+            (0, 3, 0, 0, 0x52) => PCIE_TO_PCI << 4,
             _ => 0xFF,
         }
     }
@@ -122,6 +135,20 @@ fn follows_paths_through_bridges() {
         path: &[0x1C, 0, 0, 1],
     };
     assert_eq!(behind.resolve(0, &Bridges), Some(Target::Function(0x301)));
+    assert_eq!(behind.alias(0, &Bridges), None, "behind a root port only");
+    let conventional = Scope {
+        path: &[0x1C, 0, 0, 0, 5, 0],
+        ..behind
+    };
+    assert_eq!(
+        conventional.resolve(0, &Bridges),
+        Some(Target::Function(0x428))
+    );
+    assert_eq!(
+        conventional.alias(0, &Bridges),
+        Some(0x400),
+        "the bridge owns it"
+    );
     let bridge = Scope {
         kind: 2,
         enumeration_id: 0,
@@ -147,20 +174,25 @@ fn finds_the_covering_unit() {
             base: 0x1000,
             include_all: false,
             targets: vec![Target::Function(0x10), Target::Bridge(0xE0, 3..=5)],
+            aliases: vec![(0x10, 0x200), (0x18, 0x18)],
         },
         Unit {
             segment: 0,
             base: 0x2000,
             include_all: true,
             targets: vec![],
+            aliases: vec![],
         },
         Unit {
             segment: 1,
             base: 0x3000,
             include_all: false,
             targets: vec![Target::Function(0x1_0008)],
+            aliases: vec![],
         },
     ];
+    assert_eq!(units[0].alias(0x10), Some(0x200));
+    assert_eq!(units[0].alias(0x18), None, "an alias of itself");
     assert_eq!(covering(&units, 0x10), Some(0));
     assert_eq!(covering(&units, 0x400), Some(0), "below the bridge");
     assert_eq!(covering(&units, 0xE0), Some(0), "the bridge itself");
