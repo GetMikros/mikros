@@ -5272,8 +5272,9 @@ fn read_process_memory(s: &Startup) -> Result {
 /// refused, and access to it cannot be granted.
 fn stack_guard_page_kept(s: &Startup) -> Result {
     const STACK_SIZE: u64 = 256 << 10;
-    /// The bytes of `xor ebp, ebp` and `call`, which `_start` begins with.
-    const FIRST_CALL_END: u64 = 7;
+    /// The bytes of the instructions of `_start` up to the end of the
+    /// call of its Rust entry, after the call that relocates the image.
+    const FIRST_CALL_END: u64 = 24;
     unsafe extern "C" {
         static _start: u8;
     }

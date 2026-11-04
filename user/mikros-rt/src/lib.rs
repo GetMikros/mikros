@@ -9,6 +9,7 @@ extern crate alloc;
 pub mod heap;
 pub mod log;
 pub mod midl;
+mod relocate;
 pub mod startup;
 
 /// The system call bindings.
@@ -63,11 +64,18 @@ pub fn run_main(bootstrap: sys::Handle, main: fn(&Startup) -> i64) -> i64 {
 
 // The kernel starts the first thread with the stack pointer 16-byte
 // aligned, the bootstrap channel in RDI and the second argument in RSI.
-// The call leaves the stack aligned as the SysV ABI expects at a call.
+// The calls leave the stack aligned as the SysV ABI expects at a call.
+// The arguments are kept in callee-saved registers while the image
+// relocates itself.
 core::arch::global_asm!(
     ".globl _start",
     "_start:",
     "xor ebp, ebp",
+    "mov r12, rdi",
+    "mov r13, rsi",
+    "call __mikros_relocate",
+    "mov rdi, r12",
+    "mov rsi, r13",
     "call {start}",
     "ud2",
     start = sym start,

@@ -83,6 +83,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-loader"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "mikros-rt"
 version = "0.0.0"
 dependencies = [
