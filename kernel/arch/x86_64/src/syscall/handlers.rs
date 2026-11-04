@@ -483,7 +483,7 @@ pub fn mem_read(mem: Checked, offset: u64, buf: UserOut<u8>, len: u64) -> Result
     let budget = Some(process.budget());
     let aspace = process.aspace();
     let mut work = Work::new(crate::sched::preempt_point);
-    let source = mem.hold_for_read(offset, len, false, budget, &mut work)?;
+    let mut source = mem.hold_for_read(offset, len, false, budget, &mut work)?;
     let outputs = Outputs::prepare(&[(buf.0, len)], budget, &mut work, |page| {
         aspace.hold_for_write(page)
     });
@@ -494,6 +494,13 @@ pub fn mem_read(mem: Checked, offset: u64, buf: UserOut<u8>, len: u64) -> Result
             return Err(e);
         }
     };
+    // Pages of the source that `buf` is backed by are copied first, so
+    // that writing `buf` does not change what is still to be read.
+    if let Err(e) = source.snapshot(outputs.frames(), budget, &mut work) {
+        outputs.release(&mut work);
+        source.release(&mut work);
+        return Err(e);
+    }
     // Bytes go through a kernel buffer, as `buf` may be backed by the
     // object itself.
     let mut chunk = [0u8; 256];

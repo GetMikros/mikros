@@ -1298,6 +1298,8 @@ impl MemoryObject {
             frames: Vec::new(),
             pinned: false,
             charged: budget.map(|budget| (budget.clone(), bytes)),
+            copies: Vec::new(),
+            copies_charged: None,
         };
         if source.frames.try_reserve_exact(count as usize).is_err() {
             return Err(Error::NoMemory);
@@ -1713,6 +1715,13 @@ impl crate::publish::Page for Held {
         }
     }
 
+    fn frame(&self) -> Option<u64> {
+        match self.backing {
+            Some(Backing::Frame(phys)) => Some(phys),
+            _ => None,
+        }
+    }
+
     fn release<F: FnMut()>(mut self, work: &mut Work<F>) {
         work.item();
         self.end(work);
@@ -1733,6 +1742,10 @@ pub struct Source {
     frames: Vec<Option<u64>>,
     pinned: bool,
     charged: Option<(Arc<Budget>, u64)>,
+    /// Frames the kernel copied recorded pages into, which `frames` then
+    /// names in their place, with the budget they are charged to.
+    copies: Vec<u64>,
+    copies_charged: Option<Arc<Budget>>,
 }
 
 impl Source {
@@ -1754,10 +1767,80 @@ impl Source {
         }
     }
 
+    /// Copies every recorded page whose frame is one of `targets` into a
+    /// frame of its own, charged to `budget`, and reads it from there, so
+    /// that writes to `targets` do not change what is read. Fails with
+    /// `NoMemory`, copying nothing that stays, when there is no frame or
+    /// charge for a copy.
+    pub fn snapshot<F: FnMut()>(
+        &mut self,
+        targets: impl Iterator<Item = u64>,
+        budget: Option<&Arc<Budget>>,
+        work: &mut Work<F>,
+    ) -> Result<(), Error> {
+        let mut targets: Vec<u64> = {
+            let mut v = Vec::new();
+            for t in targets {
+                v.try_reserve(1).map_err(|_| Error::NoMemory)?;
+                v.push(t);
+            }
+            v
+        };
+        if targets.is_empty() {
+            return Ok(());
+        }
+        targets.sort_unstable();
+        self.copies_charged = budget.cloned();
+        for index in 0..self.frames.len() {
+            let Some(phys) = self.frames[index] else {
+                continue;
+            };
+            work.item();
+            if targets.binary_search(&phys).is_err() {
+                continue;
+            }
+            self.copies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+            if let Some(budget) = budget {
+                budget.charge_kernel(PAGE_SIZE)?;
+            }
+            let Some(copy) = crate::memory::alloc_frame() else {
+                if let Some(budget) = budget {
+                    budget.release_kernel(PAGE_SIZE);
+                }
+                return Err(Error::NoMemory);
+            };
+            work.copy(PAGE_SIZE as usize);
+            // SAFETY: the frame is pinned and the copy was just allocated;
+            // nothing writes to either while no output is written yet.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    space::direct(phys) as *const u8,
+                    space::direct(copy) as *mut u8,
+                    PAGE_SIZE as usize,
+                );
+            }
+            self.copies.push(copy);
+            self.frames[index] = Some(copy);
+        }
+        Ok(())
+    }
+
     /// Releases the frames, accounting for the work that takes.
     pub fn release<F: FnMut()>(mut self, work: &mut Work<F>) {
         if core::mem::take(&mut self.pinned) {
             self.mem.unpin(work);
+        }
+        self.free_copies();
+    }
+
+    fn free_copies(&mut self) {
+        for copy in core::mem::take(&mut self.copies) {
+            if let Some(f) = FRAMES.lock().as_mut() {
+                f.free(copy, 1);
+            }
+            if let Some(budget) = &self.copies_charged {
+                budget.release_kernel(PAGE_SIZE);
+            }
         }
     }
 }
@@ -1767,6 +1850,7 @@ impl Drop for Source {
         if core::mem::take(&mut self.pinned) {
             self.mem.unpin(&mut Work::new(|| {}));
         }
+        self.free_copies();
         if let Some((budget, bytes)) = self.charged.take() {
             budget.release_kernel(bytes);
         }

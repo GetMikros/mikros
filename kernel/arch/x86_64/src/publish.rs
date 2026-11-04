@@ -63,6 +63,13 @@ pub trait Page: Sized {
     /// The start of the page's bytes in the kernel's address space.
     fn base(&self) -> *mut u8;
 
+    /// The frame that holds the page's bytes, when it is one that a
+    /// memory object's reader might also hold.
+    #[cfg_attr(test, expect(dead_code, reason = "only kernel system calls use it"))]
+    fn frame(&self) -> Option<u64> {
+        None
+    }
+
     /// Releases the page, accounting for the pages that releasing it
     /// processes.
     fn release<F: FnMut()>(self, work: &mut Work<F>) {
@@ -162,6 +169,12 @@ impl<P: Page> Outputs<P> {
             }
             done += n;
         }
+    }
+
+    /// The frames of the held pages that `Page::frame` names.
+    #[cfg_attr(test, expect(dead_code, reason = "only kernel system calls use it"))]
+    pub fn frames(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pages.iter().filter_map(Page::frame)
     }
 
     /// Releases every page, and the charge for recording them.

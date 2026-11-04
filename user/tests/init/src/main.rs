@@ -3456,6 +3456,37 @@ fn exception_report_ids(s: &Startup) -> Result {
     Ok(())
 }
 
+/// `mem_read` into a buffer mapped from its own source range gives the
+/// bytes the range held when the call began, whichever way the two are
+/// shifted against each other.
+fn mem_read_into_its_source(s: &Startup) -> Result {
+    let len = 2 * PAGE_SIZE;
+    let pattern = |i: u64| (i % 251) as u8;
+    for (from, to) in [(0, 8), (8, 0), (0, PAGE_SIZE - 4)] {
+        let mem = create_memory(3 * PAGE_SIZE)?;
+        let at = map(s.process, mem, 3 * PAGE_SIZE)?;
+        for i in 0..len + 16 {
+            // SAFETY: the mapping is writable and covers the byte.
+            unsafe { *((at + i) as *mut u8) = pattern(i) };
+        }
+        // SAFETY: the buffer lies in the mapping.
+        check("reading into the source", unsafe {
+            sys::mem_read(mem, from, (at + to) as *mut u8, len)
+        })?;
+        let intact = (0..len).all(|i| {
+            // SAFETY: as above.
+            unsafe { *((at + to + i) as *const u8) == pattern(from + i) }
+        });
+        ensure("reading the bytes as they were", intact)?;
+        // SAFETY: the call takes no pointers.
+        check("unmapping", unsafe {
+            sys::vm_unmap(s.process, at, 3 * PAGE_SIZE)
+        })?;
+        close(mem)?;
+    }
+    Ok(())
+}
+
 /// Killing a blocked thread whose process reports thread events reports
 /// its exit, and its end as the last thread terminates the process.
 fn kill_blocked_thread(s: &Startup) -> Result {
@@ -6625,7 +6656,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 102] = [
+const TESTS: [(&str, Test); 103] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6710,6 +6741,7 @@ const TESTS: [(&str, Test); 102] = [
         interrupt_delivered_and_acked,
     ),
     ("exception_report_ids", exception_report_ids),
+    ("mem_read_into_its_source", mem_read_into_its_source),
     ("dma_isolation_reported", dma_isolation_reported),
     ("bti_create_checks", bti_create_checks),
     ("pins_and_quarantine", pins_and_quarantine),
