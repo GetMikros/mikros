@@ -60,3 +60,11 @@ type Wrap = struct {
 };
 
 type Status = enum : i32 { OK = 0; FAILED = -5; };
+
+protocol Calc {
+    @1 Add(a u32, b u32) -> (sum u32);
+    @2 Divide(a u32, b u32) -> (quotient u32) error Status;
+    @3 Note(text string<16>);
+    @4 -> Noted(text string<16>);
+    @5 Pass(h handle) -> (h handle);
+};

@@ -258,3 +258,95 @@ fn checks_and_reduces_handle_rights() {
     // that the rejected messages carried is closed.
     assert_eq!(mock::open_handles(), before + 1);
 }
+
+fn serve(server: CalcServer) {
+    loop {
+        match server.next(i64::MAX) {
+            Ok(CalcRequest::Add(r, responder)) => {
+                responder
+                    .reply(&server, CalcAddResponse { sum: r.a + r.b })
+                    .unwrap();
+            }
+            Ok(CalcRequest::Divide(r, responder)) => {
+                let result = match r.b {
+                    0 => Err(Status::Failed),
+                    b => Ok(CalcDivideResponse { quotient: r.a / b }),
+                };
+                responder.reply(&server, result).unwrap();
+            }
+            Ok(CalcRequest::Note(r)) => server.send_noted(r.text).unwrap(),
+            Ok(CalcRequest::Pass(r, responder)) => responder
+                .reply(&server, CalcPassResponse { h: r.h })
+                .unwrap(),
+            Err(_) => return,
+        }
+    }
+}
+
+#[test]
+fn calls_methods_and_receives_events() {
+    let _s = serial();
+    let (client_end, server_end) = rt::endpoints::<Calc>().unwrap();
+    let server = std::thread::spawn(move || serve(CalcServer::new(server_end)));
+    let client = CalcClient::new(client_end);
+    assert_eq!(
+        client.add(2, 3, i64::MAX).unwrap(),
+        CalcAddResponse { sum: 5 }
+    );
+    assert_eq!(
+        client.divide(9, 3, i64::MAX).unwrap(),
+        Ok(CalcDivideResponse { quotient: 3 })
+    );
+    assert_eq!(client.divide(9, 0, i64::MAX).unwrap(), Err(Status::Failed));
+    client.note("hi".into()).unwrap();
+    assert_eq!(
+        client.next_event(i64::MAX).unwrap(),
+        CalcEvent::Noted(CalcNotedEvent { text: "hi".into() })
+    );
+    let event = mock::event(0x3);
+    let back = client.pass(owned(event), i64::MAX).unwrap();
+    assert_eq!(mock::handle_info(back.h.raw()), Some((mock::EVENT, 0x3)));
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn answers_unknown_flexible_methods_and_closes_on_errors() {
+    let _s = serial();
+    let (client_end, server_end) = rt::endpoints::<Calc>().unwrap();
+    let server = std::thread::spawn(move || serve(CalcServer::new(server_end)));
+    let raw = client_end.into_handle();
+    let unknown = Encoder::new(
+        Header {
+            txid: 0,
+            ordinal: 77,
+            flags: rt::FLAG_FLEXIBLE,
+        },
+        0,
+    );
+    let (bytes, handles) = unknown.finish();
+    let (reply, _) = mock::channel_call(raw.raw(), &bytes, &handles, i64::MAX).unwrap();
+    let d = Decoder::new(&reply, Vec::new());
+    let header = d.header().unwrap();
+    assert_eq!(
+        (header.ordinal, header.flags),
+        (77, rt::FLAG_UNKNOWN_METHOD)
+    );
+    // A strict request with an undeclared ordinal is a protocol error,
+    // after which the server closes the channel.
+    let strict = Encoder::new(
+        Header {
+            txid: 0,
+            ordinal: 78,
+            flags: 0,
+        },
+        0,
+    );
+    let (bytes, handles) = strict.finish();
+    mock::channel_write(raw.raw(), &bytes, &handles).unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        mock::channel_read(raw.raw()).unwrap_err(),
+        mock::PEER_CLOSED
+    );
+}
