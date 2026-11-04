@@ -686,7 +686,7 @@ fn schedule(requeue: bool) {
         !crate::idt::handling(),
         "scheduling while handling an interrupt"
     );
-    let now = crate::time::now();
+    let now = kernel_core::arch::monotonic_now();
     let mut cpu = this_cpu().lock();
     let Some(current) = cpu.current.take() else {
         return;
@@ -788,7 +788,7 @@ fn arm(cpu: &CpuSched) {
 /// Blocks the running thread until the monotonic clock reaches
 /// `deadline`. Returns at once when it already has.
 pub fn sleep_until(deadline: i64) -> Result<(), Error> {
-    if deadline <= crate::time::now() {
+    if deadline <= kernel_core::arch::monotonic_now() {
         return Ok(());
     }
     {
@@ -1072,7 +1072,7 @@ pub const INFO_THREAD_SIZE: usize = 0x18;
 pub fn running_slice(matches: impl Fn(&Thread) -> bool) -> i64 {
     let cpu = this_cpu().lock();
     match &cpu.current {
-        Some(t) if matches(t) => crate::time::now() - cpu.slice_start,
+        Some(t) if matches(t) => kernel_core::arch::monotonic_now() - cpu.slice_start,
         _ => 0,
     }
 }
@@ -1154,9 +1154,10 @@ pub fn preempt_user() {
 /// random number generator are set up. The timer serves them whether or
 /// not any thread runs.
 pub fn start_maintenance() {
-    let now = crate::time::now();
+    let now = kernel_core::arch::monotonic_now();
     let mut cpu = this_cpu().lock();
-    cpu.clock_due = crate::time::maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
+    cpu.clock_due =
+        kernel_core::arch::clock_maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
     cpu.reseed_due = crate::random::reseed_due();
     arm(&cpu);
 }
@@ -1169,10 +1170,11 @@ fn maintain(now: i64) {
         (now >= cpu.clock_due, now >= cpu.reseed_due)
     };
     if clock {
-        crate::time::maintain();
+        kernel_core::arch::clock_maintain();
         #[cfg(feature = "fuzz")]
         crate::fuzz::served(crate::fuzz::CLOCK, now);
-        let next = crate::time::maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
+        let next = kernel_core::arch::clock_maintenance_interval()
+            .map_or(INFINITE, |i| now.saturating_add(i));
         this_cpu().lock().clock_due = next;
     }
     if reseed {
@@ -1187,7 +1189,7 @@ fn maintain(now: i64) {
 /// sleepers whose deadline has passed, and marks a reschedule when the
 /// running thread's slice has ended.
 pub fn timer_interrupt() {
-    let now = crate::time::now();
+    let now = kernel_core::arch::monotonic_now();
     maintain(now);
     let mut cpu = this_cpu().lock();
     while let Some(sleeper) = cpu.sleepers.pop_expired(now) {
@@ -1260,7 +1262,7 @@ pub fn run() -> ! {
         // wrote, may wake threads, so it comes before the queue is
         // looked at.
         crate::log::notify_pending();
-        let now = crate::time::now();
+        let now = kernel_core::arch::monotonic_now();
         let mut cpu = this_cpu().lock();
         match cpu.fair.pick() {
             Some((next, entity)) => {

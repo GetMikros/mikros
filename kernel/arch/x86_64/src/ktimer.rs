@@ -29,7 +29,7 @@ impl Timer {
     pub fn set(self: &Arc<Self>, deadline: i64) -> Result<(), Error> {
         self.header.update_signals(signals::SIGNALED, 0);
         let armed = Armed(Arc::downgrade(self));
-        if deadline <= crate::time::now() {
+        if deadline <= kernel_core::arch::monotonic_now() {
             crate::sched::disarm_timer(&armed);
             self.header.update_signals(0, signals::SIGNALED);
             return Ok(());

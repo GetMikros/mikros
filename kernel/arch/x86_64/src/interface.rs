@@ -63,6 +63,14 @@ impl Arch for X86 {
         time::now()
     }
 
+    fn clock_maintenance_interval() -> Option<i64> {
+        time::maintenance_interval()
+    }
+
+    fn clock_maintain() {
+        time::maintain();
+    }
+
     fn timer_arm(deadline: i64) {
         timer::arm(deadline);
     }

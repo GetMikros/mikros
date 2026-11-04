@@ -1482,7 +1482,7 @@ pub fn clock_get_monotonic(out: UserOut<i64>) -> Result<(), Error> {
         return Err(Error::InvalidArgs);
     }
     let outputs = prepare(&current_process()?, &[out.range(1)])?;
-    publish(outputs, &[bytes_of(&[crate::time::now()])]);
+    publish(outputs, &[bytes_of(&[kernel_core::arch::monotonic_now()])]);
     Ok(())
 }
 

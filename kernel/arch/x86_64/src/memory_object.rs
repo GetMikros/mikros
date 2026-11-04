@@ -342,7 +342,7 @@ impl MemoryObject {
     /// nothing prepared before can still read or write them.
     fn wait_unpinned(&self) {
         while self.pages.lock().pinned() {
-            let _ = crate::sched::sleep_until(crate::time::now() + 1_000_000);
+            let _ = crate::sched::sleep_until(kernel_core::arch::monotonic_now() + 1_000_000);
         }
     }
 
@@ -350,7 +350,7 @@ impl MemoryObject {
     /// or into it.
     fn wait_supplies(&self) {
         while self.supplies.load(Ordering::Relaxed) > 0 {
-            let _ = crate::sched::sleep_until(crate::time::now() + 1_000_000);
+            let _ = crate::sched::sleep_until(kernel_core::arch::monotonic_now() + 1_000_000);
         }
     }
 

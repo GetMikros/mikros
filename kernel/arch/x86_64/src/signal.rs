@@ -306,7 +306,7 @@ pub fn sleep(deadline: i64) -> Result<(), Error> {
         if interrupted(&thread, &process) || thread.leave_wait_to_suspend() {
             return Err(Error::Interrupted);
         }
-        if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
             return Ok(());
         }
         sched::wait_for_signals(&thread, deadline)?;
@@ -334,7 +334,7 @@ pub fn wait_pending(mask: u64, deadline: i64) -> Result<(), Error> {
         if thread.leave_wait_to_suspend() {
             return Err(Error::Interrupted);
         }
-        if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
             return Err(Error::TimedOut);
         }
         sched::wait_for_signals(&thread, deadline)?;

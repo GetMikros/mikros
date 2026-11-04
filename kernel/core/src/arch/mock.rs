@@ -111,6 +111,12 @@ impl Arch for Mock {
         NOW.load(Ordering::Relaxed)
     }
 
+    fn clock_maintenance_interval() -> Option<i64> {
+        None
+    }
+
+    fn clock_maintain() {}
+
     fn timer_arm(deadline: i64) {
         TIMER.store(deadline.max(DISARMED + 1), Ordering::Relaxed);
     }

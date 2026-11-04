@@ -110,7 +110,7 @@ pub fn wait_one(
         if crate::signal::interrupted(&thread, process) || thread.leave_wait_to_suspend() {
             break Err(Error::Interrupted);
         }
-        if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
             break Err(Error::TimedOut);
         }
         if let Err(e) = sched::wait_for_signals(&thread, deadline) {
@@ -196,7 +196,7 @@ pub fn wait_call(
         if crate::syscall::stay_suspended(&thread) {
             continue;
         }
-        if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
             break Err(Error::TimedOut);
         }
         if let Err(e) = sched::wait_for_signals(&thread, deadline) {
@@ -271,7 +271,7 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> 
         if crate::signal::interrupted(&thread, &process) || thread.leave_wait_to_suspend() {
             break Err(Error::Interrupted);
         }
-        if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
             break Err(Error::TimedOut);
         }
         if let Err(e) = sched::wait_for_signals(&thread, deadline) {

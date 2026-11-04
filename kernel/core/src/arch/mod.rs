@@ -125,6 +125,15 @@ interface! {
     /// The monotonic clock, in nanoseconds since boot.
     [] fn monotonic_now() -> i64;
 
+    /// How often, in nanoseconds, `clock_maintain` must run for the
+    /// monotonic clock to stay correct, or `None` if it never needs to.
+    [] fn clock_maintenance_interval() -> Option<i64>;
+
+    /// Does the clock's periodic upkeep, such as extending a counter that
+    /// wraps. Called at least as often as `clock_maintenance_interval`
+    /// gives.
+    [] fn clock_maintain();
+
     /// Arms this processor's timer to interrupt at the monotonic time
     /// `deadline`, replacing any earlier setting. A deadline that has
     /// passed interrupts at once.

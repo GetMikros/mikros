@@ -85,7 +85,7 @@ impl Timeline {
             if crate::signal::interrupted(&thread, process) || thread.leave_wait_to_suspend() {
                 break Err(Error::Interrupted);
             }
-            if thread.state() == sched::DEAD || deadline <= crate::time::now() {
+            if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
                 break Err(Error::TimedOut);
             }
             if let Err(e) = sched::wait_for_signals(&thread, deadline) {
