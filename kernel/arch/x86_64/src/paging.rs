@@ -245,6 +245,13 @@ impl<'t, T: Tables> Mapper<'t, T> {
     /// with the virtual and physical address of each page removed. The
     /// range must not contain large pages. The caller invalidates the
     /// translations.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the kernel removes pages in steps with `unmap_present_some`"
+        )
+    )]
     pub fn unmap_present(
         &mut self,
         virt: u64,

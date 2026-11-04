@@ -303,6 +303,26 @@ pub enum CachePolicy {
     UncachedDevice = 3,
 }
 
+/// How a user page is mapped. Every mapping is readable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageFlags {
+    pub writable: bool,
+    pub executable: bool,
+    pub policy: CachePolicy,
+}
+
+/// Why a change of page tables failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageError {
+    /// No frame could be had for a table.
+    OutOfMemory,
+    /// The page is already mapped.
+    AlreadyMapped,
+    /// The tables do not allow the change, such as a range that ends
+    /// inside a large page.
+    Refused,
+}
+
 /// The architecture's state of one thread, freed when it is dropped.
 pub struct ThreadData(core::ptr::NonNull<()>);
 

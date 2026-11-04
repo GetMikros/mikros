@@ -1,8 +1,8 @@
 //! Per-processor data, reached through the GS base.
 
-use crate::aspace::Pcids;
 use crate::cpu::write_msr;
 use crate::gdt::{Gdt, Tss};
+use crate::page_tables::Pcids;
 use crate::sched::CpuSched;
 use alloc::vec::Vec;
 use core::arch::asm;

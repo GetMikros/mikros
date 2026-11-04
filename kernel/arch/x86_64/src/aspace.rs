@@ -1,19 +1,18 @@
-//! User address spaces: their page tables, and loading them with PCIDs.
+//! User address spaces: the regions that say what they may map, and
+//! their page tables.
 
-use crate::control::CR4_PCIDE;
-use crate::cpu;
 use crate::memory::FRAMES;
 use crate::memory_object::{Mapping, MemoryObject};
-use crate::paging::{self, Flags, Mapper, PAGE_SIZE, Policy, Tables};
-use crate::percpu;
+use crate::page_tables::SpaceTables;
 use crate::publish::ITEM_STEP;
-use crate::space;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicU64, Ordering};
+use kernel_core::arch::PageError;
 use kernel_core::object::budget::{Budget, Scratch};
 use kernel_core::regions::{
-    Charge, MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions, Removal,
+    Charge, MapOptions, PAGE_SIZE, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions, Removal,
 };
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
@@ -30,80 +29,12 @@ pub fn in_user_range(addr: u64, len: u64) -> bool {
     addr >= USER_START && addr.checked_add(len).is_some_and(|end| end <= USER_END)
 }
 
-const CR3_NO_FLUSH: u64 = 1 << 63;
-/// The PCIDs 1 to `SLOTS` are handed to user address spaces; the kernel's
-/// own tables use PCID 0.
-const SLOTS: usize = 6;
-
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Where a change of an address space invalidates the translations it
-/// removes on this processor.
-#[derive(Clone, Copy)]
-enum Here {
-    /// The space is loaded: by address, in the loaded PCID.
-    Loaded,
-    /// The space has this PCID, with its translations valid, but is not
-    /// loaded: by address, with INVPCID.
-    Pcid(u64),
-    /// Nowhere: the space's PCID is flushed before its next load.
-    Elsewhere,
-}
-
-impl Here {
-    fn invalidate(self, virt: u64) {
-        match self {
-            Here::Loaded => cpu::invlpg(virt),
-            Here::Pcid(pcid) => cpu::invpcid_address(pcid, virt),
-            Here::Elsewhere => {}
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Slot {
-    /// The address space that has the slot's PCID, or 0.
-    id: u64,
-    /// That space's generation when its translations were last flushed.
-    generation: u64,
-}
-
-/// The PCIDs of one processor, and the address space it has loaded.
-pub struct Pcids {
-    slots: [Slot; SLOTS],
-    /// The slot to hand out next.
-    next: usize,
-    /// The loaded address space, or 0 for the kernel's tables.
-    current: u64,
-}
-
-impl Pcids {
-    pub const fn new() -> Pcids {
-        Pcids {
-            slots: [Slot {
-                id: 0,
-                generation: 0,
-            }; SLOTS],
-            next: 0,
-            current: 0,
-        }
-    }
-}
-
-fn pcids_enabled() -> bool {
-    cpu::read_cr4() & CR4_PCIDE != 0
-}
-
 /// How a user page is mapped. Every mapping is readable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Access {
-    pub writable: bool,
-    pub executable: bool,
-    pub policy: Policy,
-}
+pub type Access = kernel_core::arch::PageFlags;
 
 struct Inner {
-    root: u64,
+    /// Freed when the space is dropped.
+    tables: ManuallyDrop<SpaceTables>,
     /// Table frames charged to the budget.
     charged: u64,
 }
@@ -114,11 +45,7 @@ struct Inner {
 /// Locks are taken in this order: a memory object's pages, `regions`,
 /// `inner`.
 pub struct AddressSpace {
-    id: u64,
     budget: Arc<Budget>,
-    /// Bumped whenever a translation is removed, so that
-    /// processors flush the space's PCID before using it again.
-    generation: AtomicU64,
     regions: SpinLock<Regions<Arc<MemoryObject>, Mapping>>,
     inner: SpinLock<Inner>,
 }
@@ -154,7 +81,7 @@ struct Charged<'b> {
     refused: bool,
 }
 
-impl Tables for Charged<'_> {
+impl Charged<'_> {
     fn alloc(&mut self) -> Option<u64> {
         if let Some(budget) = self.budget
             && budget.charge_kernel(PAGE_SIZE).is_err()
@@ -174,20 +101,12 @@ impl Tables for Charged<'_> {
         frame
     }
 
-    fn table(&mut self, phys: u64) -> &mut [u64; 512] {
-        // SAFETY: the frame holds a table of this address space, which
-        // the caller has locked, and the direct map covers it.
-        unsafe { &mut *(space::direct(phys) as *mut [u64; 512]) }
-    }
-}
-
-impl Charged<'_> {
-    fn error(&self, e: paging::Error) -> Error {
+    fn error(&self, e: PageError) -> Error {
         match e {
-            paging::Error::OutOfMemory if self.refused => Error::NoResources,
-            paging::Error::OutOfMemory => Error::NoMemory,
-            paging::Error::AlreadyMapped(_) => Error::AlreadyExists,
-            _ => Error::Internal,
+            PageError::OutOfMemory if self.refused => Error::NoResources,
+            PageError::OutOfMemory => Error::NoMemory,
+            PageError::AlreadyMapped => Error::AlreadyExists,
+            PageError::Refused => Error::Internal,
         }
     }
 }
@@ -214,15 +133,16 @@ impl AddressSpace {
             count: 0,
             refused: false,
         };
-        let root = Mapper::user(&mut tables, space::root()).map(|m| m.root());
-        let root = root.map_err(|e| tables.error(e))?;
+        let page_tables = SpaceTables::new(&mut || tables.alloc());
+        let page_tables = page_tables.map_err(|e| tables.error(e))?;
         let charged = if charge { tables.count } else { 0 };
         Ok(AddressSpace {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             budget,
-            generation: AtomicU64::new(0),
             regions: SpinLock::new(regions),
-            inner: SpinLock::new(Inner { root, charged }),
+            inner: SpinLock::new(Inner {
+                tables: ManuallyDrop::new(page_tables),
+                charged,
+            }),
         })
     }
 
@@ -232,21 +152,13 @@ impl AddressSpace {
         if !virt.is_multiple_of(PAGE_SIZE) || !in_user_range(virt, PAGE_SIZE) {
             return Err(Error::OutOfRange);
         }
-        let flags = Flags {
-            writable: access.writable,
-            executable: access.executable,
-            global: false,
-            user: true,
-            policy: access.policy,
-        };
         let mut inner = self.inner.lock();
         let mut tables = Charged {
             budget: charge.then_some(&*self.budget),
             count: 0,
             refused: false,
         };
-        let result =
-            Mapper::existing(&mut tables, inner.root, false).map(virt, phys, PAGE_SIZE, flags);
+        let result = inner.tables.map(virt, phys, access, &mut || tables.alloc());
         if charge {
             inner.charged += tables.count;
         }
@@ -264,26 +176,10 @@ impl AddressSpace {
             return Err(Error::OutOfRange);
         }
         let inner = self.inner.lock();
-        let mut tables = Charged {
-            budget: None,
-            count: 0,
-            refused: false,
-        };
-        // Interrupts are off, so the space stays loaded or not loaded on
-        // this processor while its pages are removed.
-        let here = self.here();
-        let mut pages = Mapper::existing(&mut tables, inner.root, false);
-        let mut removed = false;
-        pages
-            .unmap_present(virt, size, |v, phys| {
-                here.invalidate(v);
-                removed = true;
-                unmapped(phys);
-            })
+        inner
+            .tables
+            .unmap(virt, size, usize::MAX, &mut unmapped)
             .map_err(|_| Error::Internal)?;
-        if removed {
-            self.flush_elsewhere(here);
-        }
         Ok(())
     }
 
@@ -314,26 +210,10 @@ impl AddressSpace {
             return Err(Error::OutOfRange);
         }
         let inner = self.inner.lock();
-        let mut tables = Charged {
-            budget: None,
-            count: 0,
-            refused: false,
-        };
-        // Interrupts are off, so the space stays loaded or not loaded on
-        // this processor while its pages are removed.
-        let here = self.here();
-        let mut pages = Mapper::existing(&mut tables, inner.root, false);
-        let mut removed = false;
-        let next = pages
-            .unmap_present_some(virt, size, limit, |v, _| {
-                here.invalidate(v);
-                removed = true;
-            })
-            .map_err(|_| Error::Internal)?;
-        if removed {
-            self.flush_elsewhere(here);
-        }
-        Ok(next)
+        inner
+            .tables
+            .unmap(virt, size, limit, &mut |_| {})
+            .map_err(|_| Error::Internal)
     }
 
     /// Chooses a start for a mapping of `size` bytes, a multiple of the
@@ -683,81 +563,9 @@ impl AddressSpace {
         self.map(virt, phys, access, true)
     }
 
-    /// How translations of the space that a change removes are
-    /// invalidated on this processor.
-    fn here(&self) -> Here {
-        let pcids = percpu::this().pcids.lock();
-        if pcids.current == self.id {
-            return Here::Loaded;
-        }
-        // A PCID whose translations are all valid keeps them valid when
-        // the removed ones are invalidated in it by address.
-        let generation = self.generation.load(Ordering::Acquire);
-        let current = |s: &Slot| s.id == self.id && s.generation == generation;
-        match pcids.slots.iter().position(current) {
-            Some(i) if pcids_enabled() && cpu::has_invpcid() => Here::Pcid(i as u64 + 1),
-            _ => Here::Elsewhere,
-        }
-    }
-
-    /// Makes processors flush the space's PCID before using it again,
-    /// other than this one when `here` invalidated the removed
-    /// translations in it.
-    fn flush_elsewhere(&self, here: Here) {
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        if matches!(here, Here::Elsewhere) {
-            return;
-        }
-        let mut pcids = percpu::this().pcids.lock();
-        let current = |s: &&mut Slot| s.id == self.id && s.generation == generation - 1;
-        if let Some(slot) = pcids.slots.iter_mut().find(current) {
-            slot.generation = generation;
-        }
-    }
-
     /// Loads the address space on this processor.
     pub fn activate(&self) {
-        let root = self.inner.lock().root;
-        let mut pcids = percpu::this().pcids.lock();
-        if !pcids_enabled() {
-            if pcids.current != self.id {
-                // SAFETY: the tables share the kernel half.
-                unsafe { cpu::write_cr3(root) };
-                pcids.current = self.id;
-            }
-            return;
-        }
-        let generation = self.generation.load(Ordering::Acquire);
-        let found = pcids.slots.iter().position(|s| s.id == self.id);
-        let (index, flush) = match found {
-            Some(i) => (i, pcids.slots[i].generation != generation),
-            None => {
-                let i = pcids.next;
-                pcids.next = (i + 1) % SLOTS;
-                (i, true)
-            }
-        };
-        if !flush && pcids.current == self.id {
-            return;
-        }
-        pcids.slots[index] = Slot {
-            id: self.id,
-            generation,
-        };
-        let pcid = index as u64 + 1;
-        // The PCID's old translations go: with INVPCID before the load,
-        // otherwise by loading without the no-flush bit.
-        let no_flush = if !flush {
-            CR3_NO_FLUSH
-        } else if cpu::has_invpcid() {
-            cpu::invpcid_context(pcid);
-            CR3_NO_FLUSH
-        } else {
-            0
-        };
-        // SAFETY: the tables share the kernel half.
-        unsafe { cpu::write_cr3(root | pcid | no_flush) };
-        pcids.current = self.id;
+        self.inner.lock().tables.activate();
     }
 }
 
@@ -850,54 +658,24 @@ pub fn allows(perms: u32, write: bool, fetch: bool) -> bool {
         && (!fetch || perms & PERM_EXECUTE != 0)
 }
 
-/// Loads the kernel's own tables on this processor.
-pub fn activate_kernel() {
-    let mut pcids = percpu::this().pcids.lock();
-    if pcids.current == 0 {
-        return;
-    }
-    let value = if pcids_enabled() {
-        space::root() | CR3_NO_FLUSH
-    } else {
-        space::root()
-    };
-    // SAFETY: these are the kernel's own tables; PCID 0 only ever holds
-    // their translations.
-    unsafe { cpu::write_cr3(value) };
-    pcids.current = 0;
-}
-
 impl Drop for AddressSpace {
     /// Frees the tables. Every user mapping must have been removed.
     fn drop(&mut self) {
-        {
-            let mut pcids = percpu::this().pcids.lock();
-            if let Some(slot) = pcids.slots.iter_mut().find(|s| s.id == self.id) {
-                slot.id = 0;
-            }
-            let loaded = pcids.current == self.id;
-            drop(pcids);
-            if loaded {
-                activate_kernel();
-            }
-        }
         // Taken without the lock, so that the tables are freed with a
         // reschedule check every `ITEM_STEP` when no other lock is held.
         let inner = self.inner.get_mut();
-        let mut tables = Charged {
-            budget: None,
-            count: 0,
-            refused: false,
-        };
-        let mut count = 1;
-        Mapper::existing(&mut tables, inner.root, false).free_lower_half(|table| {
+        // SAFETY: the space is being dropped, so nothing uses its tables
+        // after this.
+        let tables = unsafe { ManuallyDrop::take(&mut inner.tables) };
+        // The root, which `free` passes last, counts with the tables.
+        let mut count = 0;
+        tables.free(&mut |table| {
             free_frame(table);
             count += 1;
             if count % ITEM_STEP as u64 == 0 {
                 crate::sched::preempt_point_if_unlocked();
             }
         });
-        free_frame(inner.root);
         debug_assert!(inner.charged <= count);
         self.budget.release_kernel(inner.charged * PAGE_SIZE);
     }
