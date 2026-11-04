@@ -5954,6 +5954,70 @@ fn syscall_clears_flags(_: &Startup) -> Result {
     ensure("making the call", status == plain)
 }
 
+/// Counts the loops of `spin_until_handled`.
+static SPINNER_LOOPS: AtomicU64 = AtomicU64::new(0);
+
+/// Spins in user mode, never entering the kernel, until the handler has
+/// run `rounds` times, then exits.
+extern "sysv64" fn spin_until_handled(rounds: u64, _: u64) -> ! {
+    while HANDLED.load(Ordering::Acquire) < rounds {
+        SPINNER_LOOPS.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A signal sent to a thread that spins in user mode on another processor
+/// runs its handler at once, not only when the thread's time slice ends.
+/// A slice of a thread alone lasts 4 ms, so each of five rounds must take
+/// less than 1 ms.
+fn signal_reaches_other_processor(s: &Startup) -> Result {
+    const ROUNDS: u64 = 5;
+    const LIMIT: i64 = 1_000_000;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    if count < 2 {
+        return Ok(());
+    }
+    let set = |thread: Handle, mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    check("keeping this thread on processor 0", set(s.thread, &[1]))?;
+    let old = catch_usr1(0)?;
+    SPINNER_LOOPS.store(0, Ordering::Release);
+    let thread = spawn2(s, spin_until_handled, ROUNDS, 0)?;
+    check("moving the spinner to processor 1", set(thread, &[2]))?;
+    let deadline = in_time();
+    while SPINNER_LOOPS.load(Ordering::Acquire) == 0 {
+        ensure("starting the spinner", now() < deadline)?;
+        sleep_ms(1);
+    }
+    sleep_ms(20);
+    for round in 1..=ROUNDS {
+        let sent = now();
+        // SAFETY: the call takes no pointers.
+        check("signalling the spinner", unsafe {
+            sys::thread_signal(thread, USR1, round)
+        })?;
+        while HANDLED.load(Ordering::Acquire) < round {
+            ensure("running the handler", now() < sent + LIMIT)?;
+            core::hint::spin_loop();
+        }
+    }
+    ensure(
+        "ending the spinner",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    restore_usr1(&old)?;
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))
+}
+
 /// Set by `signal_sleeper` with what its sleep returned and when.
 static SLEEP_RESULT: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
@@ -6706,7 +6770,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 105] = [
+const TESTS: [(&str, Test); 106] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6716,6 +6780,10 @@ const TESTS: [(&str, Test); 105] = [
     ("priorities", priorities),
     ("queued_thread_preempts", queued_thread_preempts),
     ("cpu_count_and_affinity", cpu_count_and_affinity),
+    (
+        "signal_reaches_other_processor",
+        signal_reaches_other_processor,
+    ),
     ("ports", ports),
     ("port_registration_limit", port_registration_limit),
     ("log_readers", log_readers),

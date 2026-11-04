@@ -716,6 +716,13 @@ fn kick(thread: &Thread) {
     }
 }
 
+/// Interrupts the processor that runs `thread` in user mode, when that is
+/// another one, so that the thread enters the kernel and sees what
+/// changed for it before it returns to user mode again.
+pub fn notify(thread: &Thread) {
+    kick(thread);
+}
+
 /// The scheduler state of the processor that owns `thread`, locked, and
 /// its number.
 fn owner(thread: &Thread) -> (crate::sync::Guard<'static, CpuSched>, usize) {

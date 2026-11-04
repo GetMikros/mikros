@@ -84,9 +84,17 @@ pub fn send(
         None => pending.add(info, queued, Some(budget))?,
     }
     drop(state);
-    let waiting = threads.iter().filter(|t| t.waits_for_signals());
-    for waiter in waiting.filter(|t| thread.is_none_or(|target| Arc::ptr_eq(t, target))) {
-        sched::wake_sleeper(waiter);
+    let targets = threads
+        .iter()
+        .filter(|t| thread.is_none_or(|target| Arc::ptr_eq(t, target)));
+    for target in targets {
+        if target.waits_for_signals() {
+            sched::wake_sleeper(target);
+        } else {
+            // A thread running on another processor takes the signal on
+            // its way back to user mode.
+            sched::notify(target);
+        }
     }
     if info.signo == CONT {
         process.continue_threads();

@@ -407,6 +407,10 @@ impl Process {
             .is_ok()
         {
             self.header.update_signals(0, signals::SUSPENDED);
+            // Threads running on other processors stop at once.
+            for thread in self.threads.lock().iter().filter_map(Weak::upgrade) {
+                sched::notify(&thread);
+            }
         }
     }
 
