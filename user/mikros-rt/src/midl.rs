@@ -96,25 +96,35 @@ pub fn channel_write(channel: u32, bytes: &[u8], handles: &[u32]) -> Result<(), 
     status(s)
 }
 
+/// Reads the oldest message into buffers of its size, so that small
+/// messages can be read before the allocator can map memory.
 pub fn channel_read(channel: u32) -> Result<(Vec<u8>, Vec<u32>), i32> {
-    let mut bytes = vec![0u8; BYTES_MAX];
-    let mut handles: Vec<Handle> = vec![0; HANDLES_MAX];
     let (mut len, mut count) = (0u64, 0u64);
-    // SAFETY: the pointers and capacities describe the buffers.
-    status(unsafe {
-        sys::channel_read(
-            channel,
-            bytes.as_mut_ptr(),
-            BYTES_MAX as u64,
-            handles.as_mut_ptr(),
-            HANDLES_MAX as u64,
-            &mut len,
-            &mut count,
-        )
-    })?;
-    bytes.truncate(len as usize);
-    handles.truncate(count as usize);
-    Ok((bytes, handles))
+    loop {
+        let mut bytes = vec![0u8; len as usize];
+        let mut handles: Vec<Handle> = vec![0; count as usize];
+        // SAFETY: the pointers and capacities describe the buffers.
+        let s = unsafe {
+            sys::channel_read(
+                channel,
+                bytes.as_mut_ptr(),
+                bytes.len() as u64,
+                handles.as_mut_ptr(),
+                handles.len() as u64,
+                &mut len,
+                &mut count,
+            )
+        };
+        // The call stored the sizes of a message too large for the
+        // buffers. Another thread may take it first, so this repeats.
+        if s == BUFFER_TOO_SMALL {
+            continue;
+        }
+        status(s)?;
+        bytes.truncate(len as usize);
+        handles.truncate(count as usize);
+        return Ok((bytes, handles));
+    }
 }
 
 /// Makes a call, consuming `handles` even when it fails, and returns the
