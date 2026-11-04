@@ -13,6 +13,7 @@ mod boot;
 mod init;
 mod records;
 
+use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{Error, OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::process::{
     ManagerBootstrapRequest, ManagerBootstrapServer, ManagerStartup,
@@ -28,13 +29,21 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Some(startup) = receive(bootstrap) else {
         return PANIC_EXIT_CODE;
     };
+    let mut executor = match Executor::new() {
+        Ok(executor) => executor,
+        Err(status) => {
+            mikros_rt::log!(Error, "creating the executor failed: {status}");
+            return PANIC_EXIT_CODE;
+        }
+    };
+    let reactor = executor.reactor().clone();
     let mut manager = init::Manager::new(startup);
-    manager.serve_init();
-    // Nothing else is served yet.
-    loop {
-        // SAFETY: thread_sleep takes no pointers.
-        unsafe { sys::thread_sleep(i64::MAX) };
-    }
+    executor.block_on(async move {
+        manager.serve_init(reactor).await;
+        // The other tasks go on after init closes its end.
+        core::future::pending::<()>().await;
+    });
+    PANIC_EXIT_CODE
 }
 
 /// Reads `Start` from `bootstrap` and waits until init closes it.

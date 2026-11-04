@@ -4,12 +4,14 @@
 use crate::boot;
 use crate::records::{Record, Records};
 use mikros_rt::interfaces::__midl::OwnedHandle;
+use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::process::InitBootstrap;
 use mikros_rt::interfaces::mikros::process::{
-    HandleRole, InitBootstrapRegisterResponse, InitBootstrapRequest, InitBootstrapServer,
+    HandleRole, InitBootstrapAsyncServer, InitBootstrapRegisterResponse, InitBootstrapRequest,
     InitBootstrapStartServiceManagerResponse, ManagerStartup, StartupHandle,
 };
-use mikros_rt::sys;
+use mikros_rt::{exec::Reactor, sys};
 
 const SAME_RIGHTS: u32 = 1 << 31;
 const INFO_BASIC: u32 = 1;
@@ -25,7 +27,7 @@ pub struct Manager {
     budget: OwnedHandle,
     boot_image: OwnedHandle,
     init_process: Option<OwnedHandle>,
-    init: Option<InitBootstrapServer>,
+    init: Option<ServerEnd<InitBootstrap>>,
     records: Records,
     service_manager_requested: bool,
 }
@@ -45,26 +47,27 @@ impl Manager {
             budget,
             boot_image,
             init_process: Some(init_process),
-            init: Some(InitBootstrapServer::new(init_bootstrap)),
+            init: Some(init_bootstrap),
             records: Records::default(),
             service_manager_requested: false,
         }
     }
 
     /// Serves init's requests until init closes its end.
-    pub fn serve_init(&mut self) {
-        let Some(server) = self.init.take() else {
+    pub async fn serve_init(&mut self, reactor: Reactor) {
+        let Some(end) = self.init.take() else {
             return;
         };
+        let server = InitBootstrapAsyncServer::new(end, reactor);
         loop {
-            match server.next(i64::MAX) {
+            match server.next().await {
                 Ok(InitBootstrapRequest::Register(_, responder)) => {
                     let result = self.register();
-                    let _ = responder.reply(&server, result);
+                    let _ = responder.reply(server.server(), result);
                 }
                 Ok(InitBootstrapRequest::StartServiceManager(request, responder)) => {
                     let result = self.start_service_manager(request.handles);
-                    let _ = responder.reply(&server, result);
+                    let _ = responder.reply(server.server(), result);
                 }
                 Err(_) => return,
             }
