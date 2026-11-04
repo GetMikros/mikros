@@ -1297,7 +1297,5 @@ pub fn run() -> ! {
 /// of its own so that the fuzz build's coverage test can find its code.
 #[inline(never)]
 fn halt_until_interrupt() {
-    // SAFETY: interrupts are enabled until the next one arrives; HLT then
-    // returns and they are disabled again.
-    unsafe { core::arch::asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+    kernel_core::arch::wait_for_interrupt();
 }

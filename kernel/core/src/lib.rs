@@ -4,11 +4,13 @@
 #![cfg_attr(not(test), no_std)]
 #![feature(allocator_ext)]
 #![feature(btreemap_alloc)]
+#![feature(macro_metavar_expr)]
 #![cfg_attr(test, feature(variant_count))]
 
 extern crate alloc;
 
 pub mod acpi;
+pub mod arch;
 pub mod bootinfo;
 pub mod clock;
 pub mod cmdline;

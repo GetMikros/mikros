@@ -212,16 +212,12 @@ unsafe impl Send for ExtendedState {}
 unsafe impl Sync for ExtendedState {}
 
 impl ExtendedState {
-    /// An area in the initial state. Its header marks every component as
-    /// initial, so XRSTOR loads their initial values, except MXCSR, which
-    /// XRSTOR always takes from the area and which is set to its reset
-    /// value.
+    /// An area in the initial state, as `init_area` sets it.
     pub fn new() -> Option<ExtendedState> {
         // SAFETY: the layout has a nonzero size.
         let area = NonNull::new(unsafe { alloc_zeroed(xsave_layout()) })?;
-        // SAFETY: MXCSR is at offset 24 of the legacy region, inside the
-        // area and aligned.
-        unsafe { area.add(MXCSR_OFFSET).cast::<u32>().write(MXCSR_RESET) };
+        // SAFETY: the area is zeroed and has the XSAVE layout.
+        unsafe { init_area(area.as_ptr()) };
         Some(ExtendedState(area))
     }
 
@@ -246,21 +242,59 @@ impl ExtendedState {
 
     /// Saves the processor's extended state here.
     pub fn save(&self) {
-        // SAFETY: the area is 64-byte aligned and large enough for every
-        // enabled component; EDX:EAX selects all of them.
-        unsafe {
-            asm!("xsave64 [{}]", in(reg) self.0.as_ptr(), in("eax") u32::MAX, in("edx") u32::MAX, options(nostack, preserves_flags))
-        };
+        // SAFETY: the area has the XSAVE layout.
+        unsafe { save_area(self.0.as_ptr()) };
     }
 
     /// Loads the extended state saved here, or the initial state.
     pub fn restore(&self) {
-        // SAFETY: as for `save`; the area holds a valid XSAVE image or
-        // zeros.
-        unsafe {
-            asm!("xrstor64 [{}]", in(reg) self.0.as_ptr(), in("eax") u32::MAX, in("edx") u32::MAX, options(nostack, preserves_flags, readonly))
-        };
+        // SAFETY: the area holds an initial or saved XSAVE image.
+        unsafe { restore_area(self.0.as_ptr()) };
     }
+}
+
+/// The layout of an XSAVE area for the enabled state components.
+pub fn area_layout() -> Layout {
+    xsave_layout()
+}
+
+/// Puts the initial state in the zeroed XSAVE area `area`. Its header
+/// marks every component as initial, so XRSTOR loads their initial
+/// values, except MXCSR, which XRSTOR always takes from the area and
+/// which is set to its reset value.
+///
+/// # Safety
+///
+/// `area` must be zeroed and have the layout `area_layout` gives.
+pub unsafe fn init_area(area: *mut u8) {
+    // SAFETY: MXCSR is at offset 24 of the legacy region, inside the area
+    // and aligned.
+    unsafe { area.add(MXCSR_OFFSET).cast::<u32>().write(MXCSR_RESET) };
+}
+
+/// Saves the processor's extended state in `area`.
+///
+/// # Safety
+///
+/// `area` must have the layout `area_layout` gives.
+pub unsafe fn save_area(area: *mut u8) {
+    // SAFETY: the area is 64-byte aligned and large enough for every
+    // enabled component; EDX:EAX selects all of them.
+    unsafe {
+        asm!("xsave64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX, options(nostack, preserves_flags))
+    };
+}
+
+/// Loads the extended state in `area`.
+///
+/// # Safety
+///
+/// `area` must hold an initial or saved XSAVE image.
+pub unsafe fn restore_area(area: *const u8) {
+    // SAFETY: as for `save_area`; the area holds a valid XSAVE image.
+    unsafe {
+        asm!("xrstor64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX, options(nostack, preserves_flags, readonly))
+    };
 }
 
 impl Drop for ExtendedState {

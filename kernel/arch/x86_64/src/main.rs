@@ -47,6 +47,8 @@ mod idt;
 #[cfg(target_os = "none")]
 mod init;
 #[cfg(target_os = "none")]
+mod interface;
+#[cfg(target_os = "none")]
 mod interrupt;
 #[cfg(target_os = "none")]
 mod iommu;

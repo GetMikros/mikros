@@ -7,7 +7,7 @@ use crate::sched::CpuSched;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use kernel_core::sync::SpinLock;
 
 pub const IA32_GS_BASE: u32 = 0xC000_0101;
@@ -61,6 +61,9 @@ pub struct PerCpu {
     /// The address of a page fault that its handler left to the thread
     /// it interrupted.
     pub fault_address: AtomicU64,
+    /// The kernel core's data for this processor, set through the
+    /// architecture interface.
+    pub core_data: AtomicPtr<()>,
     /// In the fuzz build, the object ID of the running thread, or 0 while
     /// the processor idles, and its allocation failures, or null.
     #[cfg(feature = "fuzz")]
@@ -94,6 +97,7 @@ pub(crate) static BOOT_CPU: PerCpu = PerCpu {
     gdt: UnsafeCell::new([0; 8]),
     handling: AtomicU64::new(0),
     fault_address: AtomicU64::new(0),
+    core_data: AtomicPtr::new(core::ptr::null_mut()),
     #[cfg(feature = "fuzz")]
     running: AtomicU64::new(0),
     #[cfg(feature = "fuzz")]
