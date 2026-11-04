@@ -8,6 +8,7 @@ pub mod layout;
 pub mod lexer;
 pub mod model;
 pub mod parser;
+pub mod rust;
 
 #[cfg(test)]
 mod tests;
