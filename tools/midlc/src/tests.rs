@@ -88,3 +88,75 @@ fn rejects_malformed_files() {
         assert_eq!((err.span.line, err.span.col), (line, col), "{text}: {err}");
     }
 }
+
+mod checks {
+    use crate::compile;
+    use crate::model::*;
+
+    const OTHER: &str = "library test.other;\ntype Status = struct { code i32; };\n";
+
+    fn check_one(text: &str) -> Result<Model, String> {
+        compile(&[("t.midl", text), ("other.midl", OTHER)], None).map_err(|e| e.to_string())
+    }
+
+    fn fails(text: &str, message: &str) {
+        let err = check_one(&format!("library t;\nusing test.other;\n{text}")).unwrap_err();
+        assert!(err.contains(message), "{text}: {err}");
+    }
+
+    #[test]
+    fn resolves_types_and_aliases() {
+        let text = "library t;\nusing test.other;\nalias Deadline = i64;\ntype P = struct { s string<16>?; h handle<Event, READ | WRITE>; d Deadline; o test.other.Status; };\ntype U = union { 1: p P; 2: v vector<P, 4>; };\nprotocol Q { @1 F(u U) -> (n u32) error i32; };\n";
+        let model = check_one(text).unwrap();
+        let names: Vec<_> = model.libraries.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["test.other", "t"]);
+        let Some(Decl {
+            kind: DeclKind::Struct(fields),
+            ..
+        }) = model.decl("t.P")
+        else {
+            panic!("P is a structure");
+        };
+        assert_eq!(
+            fields[0].ty,
+            Type::String {
+                max: 16,
+                optional: true
+            }
+        );
+        assert_eq!(
+            fields[1].ty,
+            Type::Handle {
+                object: Some(5),
+                rights: Some(4 | 8),
+                optional: false
+            }
+        );
+        assert_eq!(fields[2].ty, Type::Int(Int::I64), "the alias is expanded");
+        assert_eq!(
+            fields[3].ty,
+            Type::Named {
+                name: "test.other.Status".into(),
+                optional: false
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unresolved_and_misused_names() {
+        fails("type A = struct { b B; };", "`B` is not declared");
+        fails("type A = struct {}; type A = struct {};", "declared twice");
+        fails(
+            "type A = struct { x test.missing.B; };",
+            "not named by `using`",
+        );
+        fails("alias A = B; alias B = A;", "refers to itself");
+        fails("type A = struct { x u32?; };", "cannot be optional");
+        fails(
+            "type A = struct { x handle<Event, FLY>; };",
+            "unknown right",
+        );
+        fails("type A = struct { x client_end<A>; };", "not a protocol");
+        fails("protocol P { @1 F(); @1 G(); };", "unique");
+    }
+}

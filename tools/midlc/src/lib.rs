@@ -2,6 +2,7 @@
 //! generates bindings.
 
 pub mod ast;
+pub mod check;
 pub mod lexer;
 pub mod model;
 pub mod parser;
@@ -54,3 +55,12 @@ pub fn parse(file: &str, text: &str) -> Result<ast::File, Error> {
     parser::parse(tokens, end)
 }
 
+/// Parses and checks the `(name, text)` source files, keeping what is
+/// available at `version`, or everything without one.
+pub fn compile(sources: &[(&str, &str)], version: Option<u64>) -> Result<model::Model, Error> {
+    let files = sources
+        .iter()
+        .map(|(name, text)| parse(name, text))
+        .collect::<Result<Vec<_>, _>>()?;
+    check::check(&files, version)
+}
