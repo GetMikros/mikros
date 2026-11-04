@@ -89,6 +89,9 @@ pub struct Thread {
     debug_pending: AtomicBool,
     /// The type of the exception the thread is or was last in.
     exception_kind: AtomicU32,
+    /// The identifier of the thread's latest exception report, 0 before
+    /// its first.
+    report_id: AtomicU64,
     /// Set when the thread is to end, after a `THREAD_EXITING` report,
     /// before it returns to user mode.
     exit_requested: AtomicBool,
@@ -170,6 +173,7 @@ impl Thread {
             debug: SpinLock::new([0; 6]),
             debug_pending: AtomicBool::new(false),
             exception_kind: AtomicU32::new(0),
+            report_id: AtomicU64::new(0),
             exit_requested: AtomicBool::new(false),
             signals: SpinLock::new(crate::signal::ThreadSignals::default()),
             sigreturn: AtomicU64::new(0),
@@ -349,6 +353,17 @@ impl Thread {
     /// The type of the exception the thread is in.
     pub fn exception_kind(&self) -> u32 {
         self.exception_kind.load(Ordering::Acquire)
+    }
+
+    /// Takes the identifier of a new exception report, greater than that
+    /// of every earlier one.
+    pub fn next_report_id(&self) -> u64 {
+        self.report_id.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// The identifier of the thread's latest exception report.
+    pub fn report_id(&self) -> u64 {
+        self.report_id.load(Ordering::Acquire)
     }
 
     /// Makes the thread end before it next returns to user mode, after

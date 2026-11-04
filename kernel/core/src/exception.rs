@@ -17,7 +17,7 @@ pub mod kind {
 }
 
 /// The size of an exception report.
-pub const REPORT_SIZE: usize = 0x28;
+pub const REPORT_SIZE: usize = 0x30;
 
 /// The `exception_channel_create` option that enables thread start and
 /// exit reports.
@@ -39,6 +39,7 @@ pub struct Report {
     pub thread_koid: u64,
     pub address: u64,
     pub arch_code: u64,
+    pub report_id: u64,
 }
 
 impl Report {
@@ -49,6 +50,7 @@ impl Report {
         r[0x10..0x18].copy_from_slice(&self.thread_koid.to_le_bytes());
         r[0x18..0x20].copy_from_slice(&self.address.to_le_bytes());
         r[0x20..0x28].copy_from_slice(&self.arch_code.to_le_bytes());
+        r[0x28..0x30].copy_from_slice(&self.report_id.to_le_bytes());
         r
     }
 }
@@ -65,6 +67,7 @@ mod tests {
             thread_koid: 0x22,
             address: 0x3333,
             arch_code: 0x4_0000_000E,
+            report_id: 7,
         }
         .bytes();
         assert_eq!(&r[0..8], &[2, 0, 0, 0, 0, 0, 0, 0]);
@@ -75,5 +78,6 @@ mod tests {
             u64::from_le_bytes(r[32..40].try_into().unwrap()),
             0x4_0000_000E
         );
+        assert_eq!(u64::from_le_bytes(r[40..48].try_into().unwrap()), 7);
     }
 }

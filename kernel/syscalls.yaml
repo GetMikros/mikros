@@ -302,9 +302,10 @@ syscalls:
     number: 27
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0008.R29]
+    spec: [MIKSPEC-0008.R40]
     args:
       - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
+      - {name: report_id, type: u64, dir: in}
       - {name: action, type: u32, dir: in}
 
   - name: thread_read_state
@@ -853,7 +854,7 @@ syscalls:
     number: 82
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0006.R39, MIKSPEC-0006.R40]
+    spec: [MIKSPEC-0006.R39, MIKSPEC-0006.R44]
     args:
       - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
       - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: []}

@@ -127,6 +127,8 @@ fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
         thread_koid: thread.header().koid(),
         address,
         arch_code,
+        // Taken whether or not a kill cancels the report.
+        report_id: thread.next_report_id(),
     };
     if !sched::enter_exception(&thread, frame, kind) {
         return;

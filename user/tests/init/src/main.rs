@@ -2707,14 +2707,48 @@ fn start_debuggee(s: &Startup, arg2: u64, options: u32) -> Result<(Handle, Handl
 /// handle of its thread.
 fn next_report(channel: Handle) -> Result<(u32, Handle)> {
     let m = read_message(channel, 2000)?;
-    ensure("receiving a report", m.len == 0x28 && m.count == 1)?;
+    ensure("receiving a report", m.len == REPORT_SIZE && m.count == 1)?;
+    record_report(m.handles[0], &m.bytes);
     Ok((u32_at(&m.bytes, 0), m.handles[0]))
+}
+
+/// The size of an exception report.
+const REPORT_SIZE: usize = 0x30;
+
+/// The report ID of the latest report read for each thread handle, as
+/// pairs of handle and ID.
+static REPORT_IDS: [(AtomicU64, AtomicU64); 32] =
+    [const { (AtomicU64::new(0), AtomicU64::new(0)) }; 32];
+
+/// Keeps the report ID of a report that came with `thread`.
+fn record_report(thread: Handle, bytes: &[u8]) {
+    let id = u64_at(bytes, 0x28);
+    let slot = REPORT_IDS
+        .iter()
+        .find(|(h, _)| h.load(Ordering::Relaxed) == u64::from(thread))
+        .or_else(|| {
+            REPORT_IDS
+                .iter()
+                .min_by_key(|(_, id)| id.load(Ordering::Relaxed))
+        });
+    if let Some((h, i)) = slot {
+        h.store(u64::from(thread), Ordering::Relaxed);
+        i.store(id, Ordering::Relaxed);
+    }
+}
+
+/// The report ID of the latest report read with `thread`, or 0.
+fn report_id(thread: Handle) -> u64 {
+    REPORT_IDS
+        .iter()
+        .find(|(h, _)| h.load(Ordering::Relaxed) == u64::from(thread))
+        .map_or(0, |(_, id)| id.load(Ordering::Relaxed))
 }
 
 fn resume(thread: Handle) -> Result {
     // SAFETY: the call takes no pointers.
     check("resuming", unsafe {
-        sys::thread_resume_from_exception(thread, RESUME)
+        sys::thread_resume_from_exception(thread, report_id(thread), RESUME)
     })
 }
 
@@ -2751,7 +2785,8 @@ fn syscall_gate(s: &Startup) -> Result {
         }
     })?;
     let m = read_message(channel, 2000)?;
-    ensure("receiving a report", m.len == 0x28 && m.count == 1)?;
+    ensure("receiving a report", m.len == REPORT_SIZE && m.count == 1)?;
+    record_report(m.handles[0], &m.bytes);
     ensure(
         "reporting a protection fault",
         u32_at(&m.bytes, 0) == PROTECTION,
@@ -3390,6 +3425,37 @@ fn pins_and_quarantine(s: &Startup) -> Result {
     Ok(())
 }
 
+/// Each exception report of a thread carries a greater report ID than
+/// the one before, and `thread_resume_from_exception` acts only on the
+/// current report: a stale or future ID fails with `ERR_BAD_STATE`.
+fn exception_report_ids(s: &Startup) -> Result {
+    // The debuggee runs into an undefined instruction, again after each
+    // resume.
+    let (process, channel) = start_debuggee(s, 0, 0)?;
+    let (first, thread) = report_bytes(channel)?;
+    let a = u64_at(&first, 0x28);
+    ensure("starting at 1 or above", a >= 1)?;
+    let with = |id: u64, action: u32| {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::thread_resume_from_exception(thread, id, action) }
+    };
+    ensure("refusing a future report", with(a + 1, RESUME) == BAD_STATE)?;
+    check("resuming the report", with(a, RESUME))?;
+    let (second, again) = report_bytes(channel)?;
+    let b = u64_at(&second, 0x28);
+    ensure("counting up", b > a)?;
+    ensure("refusing the stale report", with(a, TERMINATE) == BAD_STATE)?;
+    // SAFETY: the call takes no pointers.
+    check("terminating through the current report", unsafe {
+        sys::thread_resume_from_exception(again, b, TERMINATE)
+    })?;
+    ensure("terminating", exit_code(process)? == -2)?;
+    for handle in [thread, again, channel, process] {
+        close(handle)?;
+    }
+    Ok(())
+}
+
 /// Killing a blocked thread whose process reports thread events reports
 /// its exit, and its end as the last thread terminates the process.
 fn kill_blocked_thread(s: &Startup) -> Result {
@@ -3417,17 +3483,18 @@ const ALREADY_EXISTS: i64 = -26;
 
 /// The bytes of the next report on exception channel `channel` and the
 /// handle of its thread.
-fn report_bytes(channel: Handle) -> Result<([u8; 0x28], Handle)> {
+fn report_bytes(channel: Handle) -> Result<([u8; 0x30], Handle)> {
     let m = read_message(channel, 2000)?;
-    ensure("receiving a report", m.len == 0x28 && m.count == 1)?;
-    let mut bytes = [0; 0x28];
-    bytes.copy_from_slice(&m.bytes[..0x28]);
+    ensure("receiving a report", m.len == REPORT_SIZE && m.count == 1)?;
+    record_report(m.handles[0], &m.bytes);
+    let mut bytes = [0; 0x30];
+    bytes.copy_from_slice(&m.bytes[..0x30]);
     Ok((bytes, m.handles[0]))
 }
 
 fn act(thread: Handle, action: u32) -> i64 {
     // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_resume_from_exception(thread, action) }
+    unsafe { sys::thread_resume_from_exception(thread, report_id(thread), action) }
 }
 
 /// The exit code of `process` once it has terminated.
@@ -6558,7 +6625,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 101] = [
+const TESTS: [(&str, Test); 102] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6642,6 +6709,7 @@ const TESTS: [(&str, Test); 101] = [
         "interrupt_delivered_and_acked",
         interrupt_delivered_and_acked,
     ),
+    ("exception_report_ids", exception_report_ids),
     ("dma_isolation_reported", dma_isolation_reported),
     ("bti_create_checks", bti_create_checks),
     ("pins_and_quarantine", pins_and_quarantine),

@@ -924,9 +924,14 @@ pub fn exception_channel_create(
     give(end, ObjectType::Channel, out)
 }
 
-pub fn thread_resume_from_exception(thread: Checked, action: u32) -> Result<(), Error> {
+pub fn thread_resume_from_exception(
+    thread: Checked,
+    report_id: u64,
+    action: u32,
+) -> Result<(), Error> {
     let thread = object::<Thread>(thread);
-    if thread.state() != crate::sched::EXCEPTION {
+    // A report that a later one replaced is stale.
+    if thread.state() != crate::sched::EXCEPTION || thread.report_id() != report_id {
         return Err(Error::BadState);
     }
     match action {
