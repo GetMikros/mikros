@@ -133,6 +133,10 @@ name = "mikros-ustar"
 version = "0.0.0"
 
 [[package]]
+name = "mikros-yaml"
+version = "0.0.0"
+
+[[package]]
 name = "pie"
 version = "0.0.0"
 dependencies = [
@@ -213,6 +217,7 @@ name = "service-manager"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
+ "mikros-yaml",
 ]
 
 [[package]]
