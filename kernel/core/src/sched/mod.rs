@@ -1039,11 +1039,19 @@ pub fn arm_timer(timer: crate::ktimer::Armed, deadline: i64) -> Result<(), Error
     Ok(())
 }
 
-/// Removes the deadline of `timer`, if it has one.
-pub fn disarm_timer(timer: &crate::ktimer::Armed) {
-    let mut cpu = this_cpu().lock();
-    cpu.timers.remove(timer);
-    arm(&cpu);
+/// Removes the deadline of `timer` from processor `cpu`'s list, if it is
+/// there.
+pub fn disarm_timer(cpu: usize, timer: &crate::ktimer::Armed) {
+    let Some(data) = crate::cpu::of(cpu) else {
+        return;
+    };
+    let mut sched = data.sched.lock();
+    sched.timers.remove(timer);
+    // Another processor's timer may interrupt early once; its handler
+    // arms it again.
+    if cpu == crate::arch::cpu_index() as usize {
+        arm(&sched);
+    }
 }
 
 /// Runs queued threads, and halts until an interrupt when there are none.

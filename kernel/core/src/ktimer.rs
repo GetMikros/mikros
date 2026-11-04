@@ -3,11 +3,21 @@
 use crate::object::budget::Budget;
 use crate::object::{Header, Object, ObjectType, signals};
 use crate::status::Error;
+use crate::sync::SpinLock;
 use alloc::sync::{Arc, Weak};
 
 pub struct Timer {
     header: Header,
     budget: Arc<Budget>,
+    state: SpinLock<State>,
+}
+
+/// Where a timer's deadline is: the processor whose list holds it, if
+/// any, and the number of the latest `set` or `cancel`, which a deadline
+/// must carry to fire.
+struct State {
+    cpu: Option<usize>,
+    generation: u64,
 }
 
 impl Timer {
@@ -21,26 +31,44 @@ impl Timer {
         crate::fallible::try_arc(Timer {
             header: Header::new(ObjectType::Timer),
             budget: budget.clone(),
+            state: SpinLock::new(State {
+                cpu: None,
+                generation: 0,
+            }),
         })
     }
 
     /// Clears `SIGNALED` and sets it at `deadline`, replacing an earlier
     /// deadline. A deadline that has passed sets it at once.
     pub fn set(self: &Arc<Self>, deadline: i64) -> Result<(), Error> {
+        let mut state = self.state.lock();
+        self.disarm(&mut state);
         self.header.update_signals(signals::SIGNALED, 0);
-        let armed = Armed(Arc::downgrade(self));
         if deadline <= crate::arch::monotonic_now() {
-            crate::sched::disarm_timer(&armed);
             self.header.update_signals(0, signals::SIGNALED);
             return Ok(());
         }
-        crate::sched::arm_timer(armed, deadline)
+        // The deadline goes on this processor's list, whose timer it arms.
+        let armed = Armed(Arc::downgrade(self), state.generation);
+        crate::sched::arm_timer(armed, deadline)?;
+        state.cpu = Some(crate::arch::cpu_index() as usize);
+        Ok(())
     }
 
     /// Clears `SIGNALED` and removes the deadline.
     pub fn cancel(self: &Arc<Self>) {
-        crate::sched::disarm_timer(&Armed(Arc::downgrade(self)));
+        let mut state = self.state.lock();
+        self.disarm(&mut state);
         self.header.update_signals(signals::SIGNALED, 0);
+    }
+
+    /// Removes the deadline from the list that holds it, and makes one
+    /// that has left it already, about to fire, not fire.
+    fn disarm(self: &Arc<Self>, state: &mut State) {
+        state.generation += 1;
+        if let Some(cpu) = state.cpu.take() {
+            crate::sched::disarm_timer(cpu, &Armed(Arc::downgrade(self), 0));
+        }
     }
 }
 
@@ -56,9 +84,9 @@ impl Object for Timer {
     }
 }
 
-/// An armed timer in the scheduler's deadlines. A timer that is gone by
-/// its deadline is skipped.
-pub struct Armed(Weak<Timer>);
+/// An armed timer in the scheduler's deadlines, with the generation it
+/// was armed in. A timer that is gone by its deadline is skipped.
+pub struct Armed(Weak<Timer>, u64);
 
 impl PartialEq for Armed {
     fn eq(&self, other: &Armed) -> bool {
@@ -67,10 +95,15 @@ impl PartialEq for Armed {
 }
 
 impl Armed {
-    /// Sets `SIGNALED` on the timer, if it still exists.
+    /// Sets `SIGNALED` on the timer, if it still exists and was not set
+    /// or cancelled again since it was armed.
     pub fn fire(self) {
         if let Some(timer) = self.0.upgrade() {
-            timer.header.update_signals(0, signals::SIGNALED);
+            let mut state = timer.state.lock();
+            if state.generation == self.1 {
+                state.cpu = None;
+                timer.header.update_signals(0, signals::SIGNALED);
+            }
         }
     }
 }
