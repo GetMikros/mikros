@@ -95,6 +95,10 @@ impl Arch for Mock {
         }
     }
 
+    fn handling_interrupt() -> bool {
+        false
+    }
+
     fn cpu_index() -> u32 {
         0
     }
@@ -123,6 +127,24 @@ impl Arch for Mock {
 
     fn timer_disarm() {
         TIMER.store(DISARMED, Ordering::Relaxed);
+    }
+
+    fn kernel_pages_alloc(size: u64) -> Option<u64> {
+        if size == 0 {
+            return None;
+        }
+        let layout =
+            core::alloc::Layout::from_size_align(usize::try_from(size).ok()?, 4096).ok()?;
+        // SAFETY: the layout has a nonzero size.
+        let start = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        (!start.is_null()).then_some(start as u64)
+    }
+
+    unsafe fn kernel_pages_free(start: u64, size: u64) {
+        let layout = core::alloc::Layout::from_size_align(size as usize, 4096)
+            .expect("the layout of an allocation");
+        // SAFETY: the caller passes an allocation of this layout.
+        unsafe { alloc::alloc::dealloc(start as *mut u8, layout) };
     }
 
     fn debug_write(bytes: &[u8]) {

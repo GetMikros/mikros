@@ -138,11 +138,13 @@ impl Thread {
         charged: u64,
     ) -> Result<Arc<Thread>, Error> {
         let extended = ExtendedState::new().ok_or(Error::NoMemory)?;
-        let stack = crate::space::alloc_pages(KERNEL_STACK_SIZE).ok_or(Error::NoMemory)?;
+        let stack =
+            kernel_core::arch::kernel_pages_alloc(KERNEL_STACK_SIZE).ok_or(Error::NoMemory)?;
         // Every thread that can run has room in the run queue from when
         // it was created.
         if this_cpu().lock().fair.try_reserve(1).is_err() {
-            crate::space::free_pages(stack, KERNEL_STACK_SIZE);
+            // SAFETY: the stack was allocated above and nothing uses it.
+            unsafe { kernel_core::arch::kernel_pages_free(stack, KERNEL_STACK_SIZE) };
             return Err(Error::NoMemory);
         }
         // The thread frees its stack and charge when it goes, also on
@@ -660,7 +662,9 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
 fn free_stack(thread: &Thread) {
     let top = thread.stack_top.swap(0, Ordering::AcqRel);
     if top != 0 {
-        crate::space::free_pages(top - KERNEL_STACK_SIZE, KERNEL_STACK_SIZE);
+        // SAFETY: the caller guarantees nothing runs on the stack, and the
+        // swap gives it to one caller only.
+        unsafe { kernel_core::arch::kernel_pages_free(top - KERNEL_STACK_SIZE, KERNEL_STACK_SIZE) };
     }
 }
 
@@ -676,14 +680,8 @@ fn finish_switch() {
 /// next thread, or idles. Returns when the thread runs again, unless it
 /// is not queued and nothing wakes it.
 fn schedule(requeue: bool) {
-    // RFLAGS.AC is not switched, so a thread that kept it would let the
-    // next one reach user pages past SMAP.
     debug_assert!(
-        crate::cpu::rflags() & crate::cpu::RFLAGS_AC == 0,
-        "scheduling with RFLAGS.AC set"
-    );
-    debug_assert!(
-        !crate::idt::handling(),
+        !kernel_core::arch::handling_interrupt(),
         "scheduling while handling an interrupt"
     );
     let now = kernel_core::arch::monotonic_now();
@@ -779,9 +777,9 @@ fn arm(cpu: &CpuSched) {
         .chain([cpu.clock_due, cpu.reseed_due])
         .fold(slice_end, i64::min);
     if at == INFINITE {
-        crate::timer::disarm();
+        kernel_core::arch::timer_disarm();
     } else {
-        crate::timer::arm(at);
+        kernel_core::arch::timer_arm(at);
     }
 }
 
@@ -846,16 +844,17 @@ pub fn yield_now() {
 /// thread's slice has ended. No lock may be held.
 pub fn preempt_point() {
     debug_assert!(
-        !crate::idt::handling(),
+        !kernel_core::arch::handling_interrupt(),
         "a preemption point while handling an interrupt"
     );
     debug_assert!(
         kernel_core::sync::none_held(),
         "a preemption point with a lock held"
     );
-    // SAFETY: enabling interrupts for one instruction lets the processor
-    // take pending ones; no lock is held here.
-    unsafe { core::arch::asm!("sti", "nop", "cli", options(nomem, nostack)) };
+    // SAFETY: enabling interrupts lets the processor take pending ones;
+    // no lock is held here, and they are disabled again at once.
+    unsafe { kernel_core::arch::interrupts_restore(true) };
+    kernel_core::arch::interrupts_disable();
     if reschedule().swap(false, Ordering::Relaxed) {
         schedule(true);
     }
@@ -865,7 +864,7 @@ pub fn preempt_point() {
 /// exception is being handled, for work that may run either way, such as
 /// destroying an object.
 pub fn preempt_point_if_unlocked() {
-    if kernel_core::sync::none_held() && !crate::idt::handling() {
+    if kernel_core::sync::none_held() && !kernel_core::arch::handling_interrupt() {
         preempt_point();
     }
 }

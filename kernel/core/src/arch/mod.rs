@@ -107,6 +107,10 @@ interface! {
     /// disabled, such as a held lock that interrupt handlers also take.
     [unsafe] fn interrupts_restore(enabled: bool);
 
+    /// Whether this processor is handling an interrupt or exception, in
+    /// which it may neither enable interrupts nor switch threads.
+    [] fn handling_interrupt() -> bool;
+
     /// The number of this processor, from 0 for the boot processor.
     [] fn cpu_index() -> u32;
 
@@ -141,6 +145,19 @@ interface! {
 
     /// Stops this processor's timer.
     [] fn timer_disarm();
+
+    /// Allocates `size` bytes of kernel memory, a multiple of the page
+    /// size, mapped writable with an unmapped page below it, and returns
+    /// its start, or `None` when memory runs out.
+    [] fn kernel_pages_alloc(size: u64) -> Option<u64>;
+
+    /// Frees kernel memory from `kernel_pages_alloc`.
+    ///
+    /// # Safety
+    ///
+    /// `start` and `size` must be those of an allocation, and nothing may
+    /// use its memory any more.
+    [unsafe] fn kernel_pages_free(start: u64, size: u64);
 
     /// Writes `bytes` to the debug output.
     [] fn debug_write(bytes: &[u8]);

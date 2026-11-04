@@ -1,6 +1,6 @@
 //! The x86_64 implementation of the kernel core's architecture interface.
 
-use crate::{context, cpu, percpu, serial, time, timer};
+use crate::{context, cpu, idt, percpu, serial, space, time, timer};
 use core::arch::asm;
 use core::sync::atomic::Ordering;
 use kernel_core::arch::Arch;
@@ -42,6 +42,10 @@ impl Arch for X86 {
         }
     }
 
+    fn handling_interrupt() -> bool {
+        idt::handling()
+    }
+
     fn cpu_index() -> u32 {
         percpu::index()
     }
@@ -77,6 +81,14 @@ impl Arch for X86 {
 
     fn timer_disarm() {
         timer::disarm();
+    }
+
+    fn kernel_pages_alloc(size: u64) -> Option<u64> {
+        space::alloc_pages(size)
+    }
+
+    unsafe fn kernel_pages_free(start: u64, size: u64) {
+        space::free_pages(start, size);
     }
 
     fn debug_write(bytes: &[u8]) {

@@ -110,6 +110,12 @@ unsafe extern "sysv64" {
 /// `load` must be a stack pointer saved by `context_switch` or prepared
 /// by `prepare`, whose stack is mapped and used by nothing else.
 pub unsafe fn switch(save: *mut u64, load: u64) {
+    // RFLAGS.AC is not switched, so a thread that kept it would let the
+    // next one reach user pages past SMAP.
+    debug_assert!(
+        crate::cpu::rflags() & crate::cpu::RFLAGS_AC == 0,
+        "switching threads with RFLAGS.AC set"
+    );
     // SAFETY: the caller guarantees `load` is a switchable stack.
     unsafe { context_switch(save, load) };
 }
