@@ -3487,6 +3487,24 @@ fn mem_read_into_its_source(s: &Startup) -> Result {
     Ok(())
 }
 
+/// The bootloader names the partition it was loaded from on the command
+/// line, as a lowercase GUID.
+fn boot_partition_named(s: &Startup) -> Result {
+    let cmdline = core::str::from_utf8(s.cmdline).unwrap_or("");
+    let mut esp = cmdline
+        .split_ascii_whitespace()
+        .filter_map(|o| o.strip_prefix("esp=PARTUUID="));
+    let (first, second) = (esp.next(), esp.next());
+    ensure("naming the partition once", first.is_some() && second.is_none())?;
+    let guid = first.unwrap_or("").as_bytes();
+    let well_formed = guid.len() == 36
+        && guid.iter().enumerate().all(|(i, &b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        });
+    ensure("writing it as a lowercase GUID", well_formed)
+}
+
 /// Killing a blocked thread whose process reports thread events reports
 /// its exit, and its end as the last thread terminates the process.
 fn kill_blocked_thread(s: &Startup) -> Result {
@@ -6656,7 +6674,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 103] = [
+const TESTS: [(&str, Test); 104] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6741,6 +6759,7 @@ const TESTS: [(&str, Test); 103] = [
         interrupt_delivered_and_acked,
     ),
     ("exception_report_ids", exception_report_ids),
+    ("boot_partition_named", boot_partition_named),
     ("mem_read_into_its_source", mem_read_into_its_source),
     ("dma_isolation_reported", dma_isolation_reported),
     ("bti_create_checks", bti_create_checks),

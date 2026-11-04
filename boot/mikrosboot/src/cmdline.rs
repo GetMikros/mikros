@@ -67,6 +67,64 @@ pub fn check_len(cmdline: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// The partition GUID of a hard drive media device path node, given by
+/// type, subtype and data, when it is one with a GPT signature.
+pub fn gpt_partition_guid(kind: u8, sub: u8, data: &[u8]) -> Option<[u8; 16]> {
+    const MEDIA: u8 = 4;
+    const HARD_DRIVE: u8 = 1;
+    const GPT: u8 = 2;
+    if kind != MEDIA || sub != HARD_DRIVE || *data.get(37)? != GPT {
+        return None;
+    }
+    data.get(20..36)?.try_into().ok()
+}
+
+/// `guid`, stored as GPT stores it, in its 36-character textual form with
+/// lowercase digits.
+pub fn guid_text(guid: &[u8; 16]) -> String {
+    let g = guid;
+    alloc::format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        g[3],
+        g[2],
+        g[1],
+        g[0],
+        g[5],
+        g[4],
+        g[7],
+        g[6],
+        g[8],
+        g[9],
+        g[10],
+        g[11],
+        g[12],
+        g[13],
+        g[14],
+        g[15]
+    )
+}
+
+/// `cmdline` with `esp=PARTUUID=<guid>` appended for the partition the
+/// bootloader was loaded from, unless it already has an `esp=` option or
+/// no such partition is known.
+pub fn with_esp(cmdline: String, partition: Option<[u8; 16]>) -> String {
+    let Some(guid) = partition else {
+        return cmdline;
+    };
+    if cmdline
+        .split_ascii_whitespace()
+        .any(|option| option.starts_with("esp="))
+    {
+        return cmdline;
+    }
+    let option = alloc::format!("esp=PARTUUID={}", guid_text(&guid));
+    if cmdline.is_empty() {
+        option
+    } else {
+        alloc::format!("{cmdline} {option}")
+    }
+}
+
 /// The size asked for with the first `video=<width>x<height>` option, if it
 /// is well formed.
 pub fn video_mode(cmdline: &str) -> Option<(usize, usize)> {
@@ -151,5 +209,54 @@ mod tests {
         assert_eq!(video_mode("video=+1x2"), None);
         assert_eq!(video_mode("myvideo=1x2"), None);
         assert_eq!(video_mode(""), None);
+    }
+
+    /// A hard drive node's data: partition number, start, size, the
+    /// partition GUID, the MBR type and the signature type.
+    fn hard_drive(signature_type: u8) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(&1u32.to_le_bytes());
+        d.extend_from_slice(&2048u64.to_le_bytes());
+        d.extend_from_slice(&4096u64.to_le_bytes());
+        // 01234567-89ab-cdef-0123-456789abcdef as GPT stores it.
+        d.extend_from_slice(&[
+            0x67, 0x45, 0x23, 0x01, 0xab, 0x89, 0xef, 0xcd, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+            0xcd, 0xef,
+        ]);
+        d.extend_from_slice(&[2, signature_type]);
+        d
+    }
+
+    #[test]
+    fn appends_the_boot_partition() {
+        let guid = gpt_partition_guid(4, 1, &hard_drive(2));
+        assert_eq!(
+            guid.map(|g| guid_text(&g)).as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert_eq!(
+            gpt_partition_guid(4, 1, &hard_drive(1)),
+            None,
+            "an MBR disk"
+        );
+        assert_eq!(
+            gpt_partition_guid(4, 4, &hard_drive(2)),
+            None,
+            "a file path"
+        );
+        assert_eq!(gpt_partition_guid(4, 1, &hard_drive(2)[..30]), None);
+        let esp = "esp=PARTUUID=01234567-89ab-cdef-0123-456789abcdef";
+        assert_eq!(
+            with_esp(String::from("root=bootfs"), guid),
+            alloc::format!("root=bootfs {esp}")
+        );
+        assert_eq!(with_esp(String::new(), guid), esp);
+        let given = String::from("quiet esp=PARTUUID=x");
+        assert_eq!(
+            with_esp(given.clone(), guid),
+            given,
+            "an esp= option is kept"
+        );
+        assert_eq!(with_esp(String::from("quiet"), None), "quiet");
     }
 }

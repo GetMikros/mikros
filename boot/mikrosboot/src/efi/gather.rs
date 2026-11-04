@@ -11,6 +11,7 @@ use mikrosboot::{cmdline, load};
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
 use uefi::fs::FileSystem;
 use uefi::proto::console::gop::{GraphicsOutput, Mode, PixelFormat};
+use uefi::proto::device_path::DevicePath;
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::rng::Rng;
 use uefi::table::cfg::ConfigTableEntry;
@@ -65,7 +66,27 @@ fn command_line(fs: &mut FileSystem) -> Result<String, Failure> {
         None => String::new(),
     };
     cmdline::check_len(&line).map_err(|e| Failure::new(step, e))?;
-    Ok(line)
+    // The limit applies before the boot partition is named.
+    Ok(cmdline::with_esp(line, boot_partition(&image)))
+}
+
+/// The partition GUID of the GPT partition the bootloader was loaded
+/// from, when the device path of its device ends in such a partition.
+fn boot_partition(image: &LoadedImage) -> Option<[u8; 16]> {
+    let device = image.device()?;
+    let params = boot::OpenProtocolParams {
+        handle: device,
+        agent: boot::image_handle(),
+        controller: None,
+    };
+    // SAFETY: GetProtocol takes the protocol from no driver, and the
+    // path is dropped before boot services end.
+    let path = unsafe {
+        boot::open_protocol::<DevicePath>(params, boot::OpenProtocolAttributes::GetProtocol)
+    }
+    .ok()?;
+    let last = path.node_iter().last()?;
+    cmdline::gpt_partition_guid(last.device_type().0, last.sub_type().0, last.data())
 }
 
 fn open_gop() -> Option<ScopedProtocol<GraphicsOutput>> {
