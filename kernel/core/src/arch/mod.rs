@@ -196,6 +196,10 @@ interface! {
     /// is zero.
     [] fn coverage_point(area: u64, capacity: u64);
 
+    /// Interrupts processor `cpu`, so that it looks at its run queue and
+    /// its reschedule flag again.
+    [] fn reschedule_send(cpu: usize);
+
     /// Called on each turn of a spin loop, so that the processor handles
     /// requests from other processors that it would otherwise take as
     /// interrupts, which kernel code runs with disabled.

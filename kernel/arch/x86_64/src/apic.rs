@@ -19,6 +19,9 @@ pub const PIC_BASE: u8 = 32;
 pub const DEVICE_VECTORS: core::ops::Range<u8> = 48..240;
 /// The local APIC timer vector.
 pub const TIMER_VECTOR: u8 = 240;
+/// The vector of the interrupt that makes a processor look at its run
+/// queue again.
+pub const RESCHEDULE_VECTOR: u8 = 241;
 /// The vector of the IOMMUs' fault events, one of those reserved for the
 /// kernel.
 pub const IOMMU_FAULT_VECTOR: u8 = 243;

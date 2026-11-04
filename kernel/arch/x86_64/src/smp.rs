@@ -291,7 +291,10 @@ fn start_one(page: u64, id: u32, index: usize) -> bool {
     // Once started, it no longer uses the trampoline page.
     loop {
         match STAGE.load(Ordering::Acquire) {
-            READY => return true,
+            READY => {
+                kernel_core::cpu::register(index, core);
+                return true;
+            }
             FAILED => {
                 log!(
                     Error,

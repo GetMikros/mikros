@@ -46,6 +46,9 @@ pub struct Thread {
     /// Kernel memory charged to the process's budget for the thread.
     charged: u64,
     state: AtomicU32,
+    /// The processor that owns the thread: whose run queue or sleepers
+    /// hold it, or that runs it.
+    cpu: AtomicU32,
     /// The architecture's state of the thread.
     arch: ThreadData,
     /// The top of the kernel stack, or 0 once it is freed.
@@ -95,9 +98,10 @@ impl Thread {
     ) -> Result<Arc<Thread>, Error> {
         let arch = ThreadData::new().ok_or(Error::NoMemory)?;
         let stack = crate::arch::kernel_pages_alloc(KERNEL_STACK_SIZE).ok_or(Error::NoMemory)?;
-        // Every thread that can run has room in the run queue from when
-        // it was created.
-        if this_cpu().lock().fair.try_reserve(1).is_err() {
+        // Every thread that can run has room in its owner's run queue
+        // from when it was created.
+        let cpu = crate::arch::cpu_index() as usize;
+        if reserve(cpu).is_err() {
             // SAFETY: the stack was allocated above and nothing uses it.
             unsafe { crate::arch::kernel_pages_free(stack, KERNEL_STACK_SIZE) };
             return Err(Error::NoMemory);
@@ -110,6 +114,7 @@ impl Thread {
             process,
             charged,
             state: AtomicU32::new(state),
+            cpu: AtomicU32::new(cpu as u32),
             arch,
             stack_top: AtomicU64::new(stack + KERNEL_STACK_SIZE),
             #[cfg(feature = "fuzz")]
@@ -188,9 +193,7 @@ impl Thread {
                 crate::arch::context_prepare(top, crate::arch::user_thread_entry(), 0)
         };
         thread.state.store(RUNNABLE, Ordering::Release);
-        let mut cpu = this_cpu().lock();
-        let entity = *thread.entity.lock();
-        cpu.enqueue(Queued::new(thread.clone()), entity);
+        queue(thread);
     }
 
     /// Saves the user state that the next thread replaces.
@@ -381,6 +384,10 @@ impl Object for Thread {
 impl Drop for Thread {
     fn drop(&mut self) {
         free_stack(self);
+        // The owner no longer needs room for it.
+        if let Some(cpu) = crate::cpu::of(self.cpu.load(Ordering::Acquire) as usize) {
+            cpu.assigned.fetch_sub(1, Ordering::AcqRel);
+        }
         if let Some(process) = &self.process {
             process.budget().release_kernel(self.charged);
         }
@@ -451,17 +458,55 @@ impl CpuSched {
         }
     }
 
-    /// Queues `thread` with `entity`, and marks a reschedule when the
-    /// queue would pick it before the running thread.
-    fn enqueue(&mut self, thread: Queued, entity: Entity) {
-        if self.fair.enqueue(thread, entity) {
-            reschedule().store(true, Ordering::Relaxed);
+    /// Queues `thread` with `entity` on processor `owner`, whose state
+    /// this is, and marks a reschedule there when the queue would pick
+    /// it before the running thread. Another processor that must look at
+    /// its queue again is interrupted.
+    fn enqueue(&mut self, owner: usize, thread: Queued, entity: Entity) {
+        let preempt = self.fair.enqueue(thread, entity);
+        let Some(cpu) = crate::cpu::of(owner) else {
+            return;
+        };
+        if preempt {
+            cpu.reschedule.store(true, Ordering::Relaxed);
+        }
+        if (preempt || self.current.is_none()) && owner != crate::arch::cpu_index() as usize {
+            crate::arch::reschedule_send(owner);
         }
     }
 }
 
 fn this_cpu() -> &'static SpinLock<CpuSched> {
     &crate::cpu::this().sched
+}
+
+/// Makes room in processor `cpu`'s run queue for one more thread that it
+/// owns, and counts it.
+fn reserve(cpu: usize) -> Result<(), Error> {
+    let data = crate::cpu::of(cpu).ok_or(Error::Internal)?;
+    let mut sched = data.sched.lock();
+    let assigned = data.assigned.load(Ordering::Acquire) + 1;
+    let queued = sched.fair.len();
+    sched
+        .fair
+        .try_reserve(assigned.saturating_sub(queued))
+        .map_err(|_| Error::NoMemory)?;
+    data.assigned.store(assigned, Ordering::Release);
+    Ok(())
+}
+
+/// The scheduler state of the processor that owns `thread`, locked, and
+/// its number.
+fn owner(thread: &Thread) -> (crate::sync::Guard<'static, CpuSched>, usize) {
+    loop {
+        let cpu = thread.cpu.load(Ordering::Acquire) as usize;
+        let data = crate::cpu::of(cpu).expect("a thread's owner runs");
+        let sched = data.sched.lock();
+        // A thread changes owner only with its owner's state locked.
+        if thread.cpu.load(Ordering::Acquire) as usize == cpu {
+            return (sched, cpu);
+        }
+    }
 }
 
 /// Set when the thread running on this processor is to give way: by the
@@ -482,9 +527,7 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
         *thread.arch.saved_context() =
             crate::arch::context_prepare(top, entry as usize as u64, arg as u64)
     };
-    let mut cpu = this_cpu().lock();
-    let entity = *thread.entity.lock();
-    cpu.enqueue(Queued::new(thread.clone()), entity);
+    queue(&thread);
     Ok(thread)
 }
 
@@ -656,12 +699,12 @@ pub fn wait_for_signals(thread: &Thread, deadline: i64) -> Result<(), Error> {
 
 /// Wakes `thread` before its deadline if it sleeps.
 pub fn wake_sleeper(thread: &Arc<Thread>) {
-    let mut cpu = this_cpu().lock();
+    let (mut cpu, index) = owner(thread);
     let queued = Queued(Arc::as_ptr(thread));
     if thread.state() == BLOCKED && cpu.sleepers.remove(&queued) {
         thread.state.store(RUNNABLE, Ordering::Release);
         let entity = *thread.entity.lock();
-        cpu.enqueue(queued, entity);
+        cpu.enqueue(index, queued, entity);
     }
 }
 
@@ -715,15 +758,15 @@ pub fn exit() -> ! {
 pub fn make_dead(thread: &Arc<Thread>) -> u32 {
     let was = thread.state.swap(DEAD, Ordering::AcqRel);
     if was == BLOCKED {
-        let mut cpu = this_cpu().lock();
+        let (mut cpu, index) = owner(thread);
         let queued = Queued(Arc::as_ptr(thread));
         // The reference the sleeper held moves to the run queue. A thread
         // blocked by `block` is not a sleeper and is queued afresh.
         let entity = *thread.entity.lock();
         if cpu.sleepers.remove(&queued) {
-            cpu.enqueue(queued, entity);
+            cpu.enqueue(index, queued, entity);
         } else {
-            cpu.enqueue(Queued::new(thread.clone()), entity);
+            cpu.enqueue(index, Queued::new(thread.clone()), entity);
         }
     } else if was == EXCEPTION || was == SUSPENDED {
         queue(thread);
@@ -792,9 +835,8 @@ pub fn wake(thread: &Arc<Thread>) {
 /// Queues `thread`, which is not running and not queued.
 fn queue(thread: &Arc<Thread>) {
     let entity = *thread.entity.lock();
-    this_cpu()
-        .lock()
-        .enqueue(Queued::new(thread.clone()), entity);
+    let (mut cpu, index) = owner(thread);
+    cpu.enqueue(index, Queued::new(thread.clone()), entity);
 }
 
 /// Puts the running user thread, whose user registers the caller has
@@ -872,11 +914,17 @@ pub const INFO_THREAD_SIZE: usize = 0x18;
 /// The nanoseconds the running thread has run in its current slice, when
 /// `matches` accepts it, and 0 otherwise.
 pub fn running_slice(matches: impl Fn(&Thread) -> bool) -> i64 {
-    let cpu = this_cpu().lock();
-    match &cpu.current {
-        Some(t) if matches(t) => crate::arch::monotonic_now() - cpu.slice_start,
-        _ => 0,
-    }
+    let now = crate::arch::monotonic_now();
+    (0..crate::cpu::count())
+        .filter_map(crate::cpu::of)
+        .map(|data| {
+            let cpu = data.sched.lock();
+            match &cpu.current {
+                Some(t) if matches(t) => now - cpu.slice_start,
+                _ => 0,
+            }
+        })
+        .sum()
 }
 
 pub fn current() -> Option<Arc<Thread>> {
@@ -934,13 +982,14 @@ fn maintain(now: i64) {
 pub fn timer_interrupt() {
     let now = crate::arch::monotonic_now();
     maintain(now);
+    let me = crate::arch::cpu_index() as usize;
     let mut cpu = this_cpu().lock();
     while let Some(sleeper) = cpu.sleepers.pop_expired(now) {
         let thread = sleeper.take();
         thread.state.store(RUNNABLE, Ordering::Release);
         let entity = *thread.entity.lock();
-        // Every thread has room in the queue from when it was created.
-        cpu.enqueue(Queued::new(thread), entity);
+        // Every thread has room in its owner's queue, which this is.
+        cpu.enqueue(me, Queued::new(thread), entity);
     }
     if cpu.current.is_some() && now >= cpu.slice_end {
         reschedule().store(true, Ordering::Relaxed);
@@ -968,7 +1017,7 @@ pub fn timer_interrupt() {
 /// Gives `thread` `priority`, which changes its weight from its next
 /// slice on; a queued thread is queued again with the new weight.
 pub fn set_priority(thread: &Arc<Thread>, priority: u32) {
-    let mut cpu = this_cpu().lock();
+    let (mut cpu, _) = owner(thread);
     thread.priority.store(priority, Ordering::Relaxed);
     let weight = fair::weight(priority);
     let queued = cpu.fair.reweigh(Queued(Arc::as_ptr(thread)), weight);

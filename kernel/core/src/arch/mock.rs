@@ -163,6 +163,8 @@ impl Arch for Mock {
 
     fn spin_wait() {}
 
+    fn reschedule_send(_cpu: usize) {}
+
     fn kernel_pages_alloc(size: u64) -> Option<u64> {
         if size == 0 {
             return None;

@@ -131,6 +131,15 @@ impl Arch for X86 {
         let _ = (area, capacity);
     }
 
+    fn reschedule_send(cpu: usize) {
+        if let Some(data) = percpu::of(cpu) {
+            crate::apic::send_ipi(
+                data.apic_id.load(core::sync::atomic::Ordering::Relaxed),
+                crate::apic::ICR_FIXED | u32::from(crate::apic::RESCHEDULE_VECTOR),
+            );
+        }
+    }
+
     fn spin_wait() {
         crate::tlb::service();
     }

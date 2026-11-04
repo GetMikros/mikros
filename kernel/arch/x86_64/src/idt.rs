@@ -438,6 +438,10 @@ extern "sysv64" fn interrupt(frame: &mut Frame) -> bool {
         v if (PIC_BASE..PIC_BASE + 16).contains(&v) || v == SPURIOUS_VECTOR => {}
         TIMER_VECTOR => crate::timer::interrupt(),
         crate::apic::IOMMU_FAULT_VECTOR => crate::iommu::fault_interrupt(),
+        // The interrupt itself is the request: the thread it interrupted
+        // looks at the reschedule flag as the handling ends, and an idle
+        // processor at its run queue.
+        crate::apic::RESCHEDULE_VECTOR => crate::apic::eoi(),
         crate::tlb::SHOOTDOWN_VECTOR => {
             crate::tlb::service();
             crate::apic::eoi();

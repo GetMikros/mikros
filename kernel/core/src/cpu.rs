@@ -22,6 +22,9 @@ pub struct Cpu {
     pub reschedule: AtomicBool,
     /// The scheduler state of the processor.
     pub(crate) sched: SpinLock<CpuSched>,
+    /// The number of threads whose queue entry this processor holds room
+    /// for: those it owns that have not gone.
+    pub(crate) assigned: AtomicUsize,
     /// In the fuzz build, the object ID of the running thread, or 0 while
     /// the processor idles, and its allocation failures, or null.
     #[cfg(feature = "fuzz")]
@@ -37,6 +40,7 @@ impl Cpu {
             destroyed: AtomicUsize::new(0),
             reschedule: AtomicBool::new(false),
             sched: SpinLock::new(CpuSched::new()),
+            assigned: AtomicUsize::new(0),
             #[cfg(feature = "fuzz")]
             fuzz_running: AtomicU64::new(0),
             #[cfg(feature = "fuzz")]
@@ -54,6 +58,39 @@ impl Default for Cpu {
 /// The boot processor's data, which is also used until a processor's
 /// data is set.
 static BOOT: Cpu = Cpu::new();
+
+/// The data of each processor the kernel uses, by number.
+static ALL: [core::sync::atomic::AtomicPtr<Cpu>; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; crate::smp::MAX_CPUS];
+
+/// The number of processors registered.
+static COUNT: AtomicUsize = AtomicUsize::new(1);
+
+/// The data of processor `index`, once it runs.
+pub fn of(index: usize) -> Option<&'static Cpu> {
+    if index == 0 {
+        return Some(&BOOT);
+    }
+    let data = ALL.get(index)?.load(core::sync::atomic::Ordering::Acquire);
+    // SAFETY: only `register` stores pointers, to data that lives as long
+    // as the kernel runs.
+    (!data.is_null()).then(|| unsafe { &*data })
+}
+
+/// The number of processors the kernel uses.
+pub fn count() -> usize {
+    COUNT.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Records `cpu` as the data of processor `index`, the next one to run,
+/// once the architecture has started it.
+pub fn register(index: usize, cpu: &'static Cpu) {
+    ALL[index].store(
+        (cpu as *const Cpu).cast_mut(),
+        core::sync::atomic::Ordering::Release,
+    );
+    COUNT.fetch_max(index + 1, core::sync::atomic::Ordering::AcqRel);
+}
 
 /// This processor's data. Before the architecture layer has set it, the
 /// boot processor's.
