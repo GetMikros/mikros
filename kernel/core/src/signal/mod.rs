@@ -76,6 +76,9 @@ pub fn send(
         pending, queued, ..
     } = &mut *state;
     match thread {
+        // A thread that ended has discarded what was pending for it,
+        // under this lock, so nothing may be added for it now.
+        Some(thread) if thread.state() == sched::DEAD => return Err(Error::BadState),
         Some(thread) => thread
             .signals()
             .lock()
@@ -101,6 +104,20 @@ pub fn send(
         process.wake_stopped();
     }
     Ok(())
+}
+
+/// Discards the signals pending for `thread`, which has ended, so that
+/// the queued real-time ones no longer count toward its process's limit.
+pub fn thread_ended(thread: &Thread) {
+    let Some(process) = thread.process() else {
+        return;
+    };
+    let mut state = process.signals().lock();
+    thread
+        .signals()
+        .lock()
+        .pending
+        .discard(!0, &mut state.queued);
 }
 
 /// The union of the signals pending for `thread` and for its process.

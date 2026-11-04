@@ -1010,8 +1010,11 @@ pub fn preempt_point_if_unlocked() {
 
 /// Ends the running thread.
 pub fn exit() -> ! {
-    if let Some(current) = this_cpu().lock().current.as_ref() {
+    let current = this_cpu().lock().current.clone().inspect(|current| {
         current.state.store(DEAD, Ordering::Release);
+    });
+    if let Some(current) = current {
+        crate::signal::thread_ended(&current);
     }
     schedule(false);
     unreachable!("a dead thread ran again");

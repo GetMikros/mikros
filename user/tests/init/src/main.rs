@@ -6169,6 +6169,69 @@ fn process_signal_interrupts_one_wait(s: &Startup) -> Result {
     })
 }
 
+/// Blocks real-time signal 40, then waits for `USER0` on `event` and
+/// exits with whatever is pending for it.
+extern "sysv64" fn block_40_and_wait(event: u64, _: u64) -> ! {
+    // SAFETY: the old mask is not wanted.
+    unsafe { sys::signal_set_mask(0, 1 << 39, core::ptr::null_mut()) };
+    STARTED.store(1, Ordering::Release);
+    wait(event as Handle, USER0, i64::MAX);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Real-time signals queued for a thread that ends stop counting toward
+/// the process's limit of 1024: once the thread is gone, the process can
+/// queue a signal again.
+fn queued_signals_of_ended_thread(s: &Startup) -> Result {
+    const RT: u32 = 40;
+    let bit = 1u64 << (RT - 1);
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking signal 40 here", unsafe {
+        sys::signal_set_mask(0, bit, &mut mask)
+    })?;
+    let mut event = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    STARTED.store(0, Ordering::Release);
+    let thread = spawn2(s, block_40_and_wait, u64::from(event), 0)?;
+    let deadline = in_time();
+    while STARTED.load(Ordering::Acquire) == 0 {
+        ensure("starting the thread", now() < deadline)?;
+        sleep_ms(1);
+    }
+    // SAFETY: the calls take no pointers.
+    let send = |to: Handle, process: bool| unsafe {
+        match process {
+            true => sys::process_signal(to, RT, 0),
+            false => sys::thread_signal(to, RT, 0),
+        }
+    };
+    for _ in 0..1024 {
+        check("queueing for the thread", send(thread, false))?;
+    }
+    ensure("reaching the limit", send(s.process, true) == SHOULD_WAIT)?;
+    signal(event, 0, USER0)?;
+    ensure(
+        "ending the thread",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    check("queueing for the process", send(s.process, true))?;
+    let mut info = [0u8; 40];
+    // SAFETY: the pointer describes `info`.
+    check("taking the signal", unsafe {
+        sys::signal_wait(bit, soon(), info.as_mut_ptr())
+    })?;
+    // SAFETY: the pointer may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, mask, core::ptr::null_mut())
+    })
+}
+
 /// Set by `signal_sleeper` with what its sleep returned and when.
 static SLEEP_RESULT: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
@@ -6921,7 +6984,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 108] = [
+const TESTS: [(&str, Test); 109] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6940,6 +7003,10 @@ const TESTS: [(&str, Test); 108] = [
         process_signal_interrupts_one_wait,
     ),
     ("stop_continue_and_kill", stop_continue_and_kill),
+    (
+        "queued_signals_of_ended_thread",
+        queued_signals_of_ended_thread,
+    ),
     ("ports", ports),
     ("port_registration_limit", port_registration_limit),
     ("log_readers", log_readers),
