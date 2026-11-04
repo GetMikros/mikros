@@ -713,6 +713,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "midl-tests"
+version = "0.0.0"
+dependencies = [
+ "midlc",
+]
+
+[[package]]
 name = "midlc"
 version = "0.0.0"
 dependencies = [

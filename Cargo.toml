@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["boot/bootmenu", "boot/mikrosboot", "boot/protocol", "kernel/arch/x86_64", "kernel/core", "kernel/syscalls", "tools/midlc", "xtask"]
+members = ["boot/bootmenu", "boot/mikrosboot", "boot/protocol", "kernel/arch/x86_64", "kernel/core", "kernel/syscalls", "tools/midl-tests", "tools/midlc", "xtask"]
 
 [workspace.package]
 version = "0.0.0"
