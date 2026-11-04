@@ -397,16 +397,21 @@ fn copy_cmdline(info: &BootInfo) {
     copy.1 = len;
 }
 
-/// Builds the kernel's page tables, moves onto them and onto a new stack,
-/// and continues in `next`.
-pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
-    DIRECT_MAP_BASE.store(info.direct_map_base, Ordering::Relaxed);
-    copy_cmdline(&info);
+/// Sets this processor's PAT to the kernel's memory types.
+pub fn load_pat() {
     // SAFETY: IA32_PAT exists on every processor with PAT, which the
     // feature check requires. The new value keeps entries 0 to 3, which
     // the bootloader's tables can select, at the memory types of their
     // reset values.
     unsafe { crate::cpu::write_msr(IA32_PAT, PAT_VALUE) };
+}
+
+/// Builds the kernel's page tables, moves onto them and onto a new stack,
+/// and continues in `next`.
+pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
+    DIRECT_MAP_BASE.store(info.direct_map_base, Ordering::Relaxed);
+    copy_cmdline(&info);
+    load_pat();
 
     let mut tables = FrameTables;
     let mut mapper = Mapper::new(&mut tables, gib_pages())

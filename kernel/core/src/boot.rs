@@ -18,6 +18,12 @@ pub fn memory_map(info: &BootInfo) -> impl Iterator<Item = MemoryMapEntry> + Clo
     bootinfo::memory_map(bytes, info.memory_map_entry_size).unwrap_or_else(|e| panic!("{e}"))
 }
 
+/// Runs threads on an application processor, once the architecture has
+/// set it up and given it its data.
+pub fn start_secondary() -> ! {
+    crate::sched::run()
+}
+
 /// Starts the kernel's services and the initial process on the boot
 /// processor, and runs threads from then on. The architecture calls this
 /// once it runs on the kernel's page tables and stack, with interrupts

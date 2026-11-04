@@ -65,26 +65,33 @@ pub struct PerCpu {
 // for the TSS and the GDT, which only their own processor uses.
 unsafe impl Sync for PerCpu {}
 
+impl PerCpu {
+    /// The data of processor `index`, at `this`.
+    const fn new(this: *const PerCpu, index: u32) -> PerCpu {
+        PerCpu {
+            this,
+            index,
+            kernel_stack: AtomicU64::new(0),
+            user_rsp: AtomicU64::new(0),
+            cov_area: AtomicU64::new(0),
+            cov_capacity: AtomicU64::new(0),
+            interrupts: AtomicU64::new(0),
+            pcids: SpinLock::new(Pcids::new()),
+            thread_stack: AtomicU64::new(0),
+            breakpoints_loaded: AtomicBool::new(false),
+            open_ports: SpinLock::new(Vec::new()),
+            tss: UnsafeCell::new(Tss::new()),
+            gdt: UnsafeCell::new([0; 8]),
+            handling: AtomicU64::new(0),
+            fault_address: AtomicU64::new(0),
+            core_data: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+}
+
 /// The boot processor's data. Entry code that cannot trust the GS base
 /// finds it by this symbol.
-pub(crate) static BOOT_CPU: PerCpu = PerCpu {
-    this: &raw const BOOT_CPU,
-    index: 0,
-    kernel_stack: AtomicU64::new(0),
-    user_rsp: AtomicU64::new(0),
-    cov_area: AtomicU64::new(0),
-    cov_capacity: AtomicU64::new(0),
-    interrupts: AtomicU64::new(0),
-    pcids: SpinLock::new(Pcids::new()),
-    thread_stack: AtomicU64::new(0),
-    breakpoints_loaded: AtomicBool::new(false),
-    open_ports: SpinLock::new(Vec::new()),
-    tss: UnsafeCell::new(Tss::new()),
-    gdt: UnsafeCell::new([0; 8]),
-    handling: AtomicU64::new(0),
-    fault_address: AtomicU64::new(0),
-    core_data: AtomicPtr::new(core::ptr::null_mut()),
-};
+pub(crate) static BOOT_CPU: PerCpu = PerCpu::new(&raw const BOOT_CPU, 0);
 
 /// Set once the GS base points to the per-CPU data.
 pub static READY: AtomicBool = AtomicBool::new(false);
@@ -102,6 +109,32 @@ pub fn init() {
     // Locks taken before this counted on the boot processor's core data
     // too, so the counts carry over.
     kernel_core::cpu::start_boot();
+}
+
+/// New data for application processor `index`, with `core` as the core's
+/// data, which lives as long as the kernel runs. Returns `None` when
+/// memory runs out.
+pub fn new_secondary(index: u32, core: *const ()) -> Option<&'static PerCpu> {
+    let cpu = kernel_core::fallible::try_box(PerCpu::new(core::ptr::null(), index)).ok()?;
+    let cpu = alloc::boxed::Box::leak(cpu);
+    cpu.this = &raw const *cpu;
+    cpu.core_data.store(core.cast_mut(), Ordering::Relaxed);
+    Some(cpu)
+}
+
+/// Points the GS base of this application processor at `cpu`, and the
+/// user GS base at zero.
+///
+/// # Safety
+///
+/// `cpu` must come from `new_secondary` and be no other processor's data.
+pub unsafe fn init_secondary(cpu: &'static PerCpu) {
+    // SAFETY: both MSRs exist in long mode, and nothing else uses the GS
+    // base yet.
+    unsafe {
+        write_msr(IA32_GS_BASE, (cpu as *const PerCpu) as u64);
+        write_msr(IA32_KERNEL_GS_BASE, 0);
+    }
 }
 
 /// This processor's index, or 0 before `init`.

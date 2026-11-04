@@ -329,6 +329,13 @@ static mut IDT: [Gate; 256] = [Gate::EMPTY; 256];
 /// Fills the IDT and loads it. The GDT and the TSS must be loaded.
 #[cfg(target_os = "none")]
 pub fn init() {
+    fill();
+    load();
+}
+
+/// Fills the IDT, which every processor shares.
+#[cfg(target_os = "none")]
+fn fill() {
     let stubs = (&raw const interrupt_stubs) as u64;
     let idt = (&raw mut IDT).cast::<Gate>();
     for vector in 0..=255u8 {
@@ -340,9 +347,14 @@ pub fn init() {
                 .write(Gate::new(handler, ist(vector), dpl(vector)))
         };
     }
+}
+
+/// Loads the IDT on this processor. The GDT and the TSS must be loaded.
+#[cfg(target_os = "none")]
+pub fn load() {
     let pointer = Pointer {
         limit: (size_of::<[Gate; 256]>() - 1) as u16,
-        base: idt as u64,
+        base: (&raw const IDT) as u64,
     };
     // SAFETY: every gate points at its entry stub in the kernel code
     // segment, and the IST entries they name are set in the TSS.

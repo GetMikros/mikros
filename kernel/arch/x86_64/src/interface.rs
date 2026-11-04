@@ -224,6 +224,7 @@ impl Arch for X86 {
         time::init(info);
         timer::init();
         crate::iommu::init(info);
+        crate::smp::start(info);
     }
 
     unsafe fn boot_memory_reclaim(info: &boot_protocol::BootInfo) -> u64 {

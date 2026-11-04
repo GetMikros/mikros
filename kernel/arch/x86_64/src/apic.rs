@@ -47,6 +47,14 @@ const LVT_NMI: u32 = 0b100 << 8;
 const LVT_ACTIVE_LOW: u32 = 1 << 13;
 const LVT_LEVEL: u32 = 1 << 15;
 const SPURIOUS_ENABLE: u32 = 1 << 8;
+const ICR_LOW: u32 = 0x300;
+const ICR_HIGH: u32 = 0x310;
+/// The ICR's delivery status bit, set while an interrupt is being sent.
+const ICR_PENDING: u32 = 1 << 12;
+/// ICR commands: INIT, level asserted, and a startup interrupt, whose
+/// vector is the page its code starts at.
+pub const ICR_INIT: u32 = 0b101 << 8 | 1 << 14;
+pub const ICR_STARTUP: u32 = 0b110 << 8 | 1 << 14;
 
 static X2APIC: AtomicBool = AtomicBool::new(false);
 /// The local APIC ID of the boot processor.
@@ -88,6 +96,22 @@ pub fn x2apic() -> bool {
 /// The local APIC ID of the boot processor.
 pub fn boot_id() -> u32 {
     BOOT_ID.load(Ordering::Relaxed)
+}
+
+/// Sends the interrupt command `command`, the low half of the ICR, to the
+/// processor whose APIC ID is `dest`, and waits until it is sent.
+pub fn send_ipi(dest: u32, command: u32) {
+    if X2APIC.load(Ordering::Relaxed) {
+        // SAFETY: the ICR exists in x2APIC mode; callers send only
+        // commands the kernel's setup allows.
+        unsafe { write_msr(0x830, u64::from(dest) << 32 | u64::from(command)) };
+    } else {
+        write(ICR_HIGH, dest << 24);
+        write(ICR_LOW, command);
+        while read(ICR_LOW) & ICR_PENDING != 0 {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 /// Signals end of interrupt to the local APIC.
@@ -256,10 +280,15 @@ pub fn mask_line(gsi: u32, masked: bool) {
     apic.write(index, low);
 }
 
+/// Whether this processor has an x2APIC.
+pub fn has_x2apic() -> bool {
+    core::arch::x86_64::__cpuid(1).ecx & (1 << 21) != 0
+}
+
 /// Sets up the local APIC with every local interrupt masked except the
 /// NMI inputs the MADT names.
 fn init_local(madt: &[u8]) {
-    let x2apic = core::arch::x86_64::__cpuid(1).ecx & (1 << 21) != 0;
+    let x2apic = has_x2apic();
     // SAFETY: IA32_APIC_BASE exists on every processor with an APIC,
     // which the feature check requires. The enable bit is set before the
     // x2APIC bit, as the processor requires.
@@ -277,7 +306,27 @@ fn init_local(madt: &[u8]) {
         }
     }
     X2APIC.store(x2apic, Ordering::Relaxed);
+    init_lvts(madt);
+}
 
+/// Sets up the local APIC of an application processor in the boot
+/// processor's mode, as `init_local` does.
+pub fn init_secondary(madt: &[u8]) {
+    // SAFETY: as in `init_local`; the processor has an x2APIC when the
+    // boot processor uses one, which the caller checked.
+    unsafe {
+        let base = read_msr(IA32_APIC_BASE);
+        write_msr(IA32_APIC_BASE, base | APIC_ENABLE);
+        if x2apic() {
+            write_msr(IA32_APIC_BASE, base | APIC_ENABLE | APIC_X2);
+        }
+    }
+    init_lvts(madt);
+}
+
+/// Masks this processor's local interrupts except the NMI inputs the MADT
+/// names, and enables the local APIC.
+fn init_lvts(madt: &[u8]) {
     let max_lvt = read(VERSION) >> 16 & 0xFF;
     // Entries beyond the first four exist only when the version register
     // counts them.
