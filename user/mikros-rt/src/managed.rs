@@ -99,6 +99,8 @@ struct Transfer {
     handle_count: u32,
     namespace_count: u32,
     handles: Vec<StartupHandle>,
+    /// How many startup handles arrived, including any a callback took.
+    handles_received: usize,
     namespace: Vec<NamespaceEntry>,
 }
 
@@ -124,14 +126,15 @@ impl Transfer {
             namespace_count: header.namespace_count,
             header: Some(header),
             handles: Vec::new(),
+            handles_received: 0,
             namespace: Vec::new(),
         })
     }
 
-    /// Whether every startup handle has arrived. A callback may have
-    /// taken some since, so this is decided before it runs.
+    /// Whether every startup handle has arrived, whether or not a
+    /// callback took some since.
     fn handles_filled(&self) -> bool {
-        self.handles.len() == self.handle_count as usize
+        self.handles_received == self.handle_count as usize
     }
 
     /// Checks the next message, and returns the header once `Complete`
@@ -143,12 +146,15 @@ impl Transfer {
                 if !self.namespace.is_empty() {
                     return Err(Refused::Order);
                 }
-                append(
-                    &mut self.handles,
-                    batch.offset,
-                    batch.handles,
-                    self.handle_count,
-                )?;
+                let count = batch.handles.len();
+                if count == 0 || batch.offset as usize != self.handles_received {
+                    return Err(Refused::Offset);
+                }
+                if self.handles_received + count > self.handle_count as usize {
+                    return Err(Refused::Count);
+                }
+                self.handles.extend(batch.handles);
+                self.handles_received += count;
                 Ok(None)
             }
             BootstrapRequest::Namespace(batch) => {
