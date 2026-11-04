@@ -7227,7 +7227,188 @@ fn midl_bindings_on_channels(s: &Startup) -> Result {
     check("closing the thread", unsafe { sys::handle_close(thread) })
 }
 
-const TESTS: [(&str, Test); 113] = [
+/// The bytes of the boot image member `name`, copied out of the image.
+fn boot_file(s: &Startup, name: &[u8]) -> Result<alloc::vec::Vec<u8>> {
+    let image_size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("mapping the boot image", unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ,
+            0,
+            s.boot_image,
+            0,
+            image_size,
+            &mut at,
+        )
+    })?;
+    // SAFETY: the boot image is mapped readable at `at`.
+    let image = unsafe { core::slice::from_raw_parts(at as *const u8, s.boot_image_size as usize) };
+    let file = ustar::find(image, name).map(<[u8]>::to_vec);
+    // SAFETY: the call takes no pointers.
+    check("unmapping the boot image", unsafe {
+        sys::vm_unmap(s.process, at, image_size)
+    })?;
+    ensure("finding the file", file.is_some())?;
+    Ok(file.unwrap_or_default())
+}
+
+/// Loads `file` into a new process with mikros-loader, starts it, and
+/// returns the process, its base address and its stack top.
+fn load_and_start(
+    s: &Startup,
+    file: &[u8],
+) -> core::result::Result<(Handle, u64, u64), mikros_loader::Error> {
+    use mikros_loader::Error;
+    let status = |st: i64| {
+        if st == 0 {
+            Ok(())
+        } else {
+            Err(Error::Status(st))
+        }
+    };
+    let size = (file.len() as u64).next_multiple_of(PAGE_SIZE);
+    let mut shared = 0;
+    // SAFETY: the out pointer is valid for the call.
+    status(unsafe { sys::mem_create(size, 0, &mut shared) })?;
+    // SAFETY: the pointer and length describe `file`.
+    status(unsafe { sys::mem_write(shared, 0, file.as_ptr(), file.len() as u64) })?;
+    let private = |offset: u64, len: u64| {
+        let mut copy = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let st = unsafe { sys::mem_clone(shared, 0, offset, len, &mut copy) };
+        if st == 0 {
+            Ok(copy)
+        } else {
+            Err(Error::Status(st))
+        }
+    };
+    let image = mikros_loader::Image {
+        file,
+        shared,
+        private: &private,
+    };
+    let (mut process, mut thread) = (0, 0);
+    let name = b"pie";
+    // SAFETY: the pointers describe `name` and `process`.
+    status(unsafe { sys::process_create(s.budget, name.as_ptr(), 3, &mut process) })?;
+    let loaded = mikros_loader::load(process, &image);
+    // SAFETY: closing takes no pointers.
+    unsafe { sys::handle_close(shared) };
+    let loaded = loaded?;
+    let top = mikros_loader::stack(process)?;
+    // SAFETY: the pointers describe `name` and `thread`.
+    status(unsafe { sys::thread_create(process, name.as_ptr(), 3, &mut thread) })?;
+    let (mut ours, mut theirs) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    status(unsafe { sys::channel_create(0, &mut ours, &mut theirs) })?;
+    // SAFETY: closing takes no pointers.
+    unsafe { sys::handle_close(ours) };
+    // SAFETY: the call takes no pointers.
+    status(unsafe { sys::process_start(process, thread, loaded.entry, top, theirs, 0) })?;
+    // SAFETY: closing takes no pointers.
+    unsafe { sys::handle_close(thread) };
+    Ok((process, loaded.base, top))
+}
+
+/// mikros-loader places a position-independent program at a new address
+/// each time, maps its segments and an 8 MiB stack with a reserved page
+/// below it, and the program relocates itself and runs.
+fn loader_runs_pie(s: &Startup) -> Result {
+    let file = boot_file(s, b"tests/pie")?;
+    let fail = |e| mikros_test::Failure {
+        what: "loading the program",
+        status: match e {
+            mikros_loader::Error::Status(st) => st,
+            _ => 0,
+        },
+    };
+    let (a, base_a, top) = load_and_start(s, &file).map_err(fail)?;
+    let guard = top - mikros_loader::STACK_SIZE - PAGE_SIZE;
+    ensure(
+        "reserving the page below the stack",
+        read_memory(a, guard, &mut [0u8; 1]) < 0,
+    )?;
+    ensure("exiting as relocated data says", exit_code(a)? == 10)?;
+    let (b, base_b, _) = load_and_start(s, &file).map_err(fail)?;
+    ensure("exiting again", exit_code(b)? == 10)?;
+    ensure(
+        "choosing new addresses",
+        base_a != base_b && base_a % PAGE_SIZE == 0,
+    )?;
+    for p in [a, b] {
+        // SAFETY: closing takes no pointers.
+        check("closing the process", unsafe { sys::handle_close(p) })?;
+    }
+    Ok(())
+}
+
+/// mikros-loader refuses images that are not ET_DYN, have a segment
+/// that is writable and executable, overlap, lie outside the file, or
+/// name another dynamic linker.
+fn loader_refuses_bad_images(s: &Startup) -> Result {
+    use mikros_loader::Error;
+    let file = boot_file(s, b"tests/pie")?;
+    let phoff = u64::from_le_bytes(file[32..40].try_into().unwrap_or_default()) as usize;
+    let phnum = usize::from(u16::from_le_bytes([file[56], file[57]]));
+    let header = |kind: u32| {
+        (0..phnum)
+            .map(|i| phoff + i * 56)
+            .find(|&h| file[h..h + 4] == kind.to_le_bytes())
+    };
+    let loads: alloc::vec::Vec<usize> = (0..phnum)
+        .map(|i| phoff + i * 56)
+        .filter(|&h| file[h..h + 4] == 1u32.to_le_bytes())
+        .collect();
+    let refused = |change: &dyn Fn(&mut [u8]), expected: Error| {
+        let mut bad = file.clone();
+        change(&mut bad);
+        match load_and_start(s, &bad) {
+            Err(e) => e == expected,
+            Ok(_) => false,
+        }
+    };
+    ensure(
+        "refusing ET_EXEC",
+        refused(&|f| f[16] = 2, Error::NotPositionIndependent),
+    )?;
+    let first = loads[0];
+    ensure(
+        "refusing W+X",
+        refused(&|f| f[first + 4] = 7, Error::WriteExecute),
+    )?;
+    let second = loads[1];
+    // Move the second segment onto the first page, keeping its address
+    // and file offset equal within a page.
+    let onto_first = |f: &mut [u8]| {
+        let offset = u64::from_le_bytes(f[second + 8..second + 16].try_into().unwrap_or_default());
+        f[second + 16..second + 24].copy_from_slice(&(offset % PAGE_SIZE).to_le_bytes());
+    };
+    ensure("refusing overlap", refused(&onto_first, Error::Overlap))?;
+    ensure(
+        "refusing a segment outside the file",
+        refused(
+            &|f| f[second + 32..second + 40].copy_from_slice(&u64::MAX.to_le_bytes()),
+            Error::OutsideFile,
+        ),
+    )?;
+    // Turn GNU_STACK into a PT_INTERP that names the ELF magic.
+    let stack = header(0x6474_e551);
+    ensure("finding GNU_STACK", stack.is_some())?;
+    let stack = stack.unwrap_or_default();
+    let interp = |f: &mut [u8]| {
+        f[stack..stack + 4].copy_from_slice(&3u32.to_le_bytes());
+        f[stack + 8..stack + 16].copy_from_slice(&0u64.to_le_bytes());
+        f[stack + 32..stack + 40].copy_from_slice(&4u64.to_le_bytes());
+    };
+    ensure(
+        "refusing another interpreter",
+        refused(&interp, Error::Interpreter),
+    )
+}
+
+const TESTS: [(&str, Test); 115] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -7249,6 +7430,8 @@ const TESTS: [(&str, Test); 113] = [
     ("stopped_wait_goes_on", stopped_wait_goes_on),
     ("heap_allocates_and_frees", heap_allocates_and_frees),
     ("midl_bindings_on_channels", midl_bindings_on_channels),
+    ("loader_runs_pie", loader_runs_pie),
+    ("loader_refuses_bad_images", loader_refuses_bad_images),
     (
         "queued_signals_of_ended_thread",
         queued_signals_of_ended_thread,

@@ -104,6 +104,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pie"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -186,6 +193,7 @@ name = "test-init"
 version = "0.0.0"
 dependencies = [
  "midlc",
+ "mikros-loader",
  "mikros-rt",
  "mikros-test",
 ]
