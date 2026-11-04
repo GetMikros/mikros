@@ -184,7 +184,13 @@ impl Interrupt {
                         | u64::from(index >> 15) << 2;
                     Message { address, data: 0 }
                 }
-                Remapping::Off => {
+                // On AMD-Vi the vector selects the entry in the device's
+                // table, which delivers it.
+                Remapping::Amd | Remapping::Off => {
+                    if remapping == Remapping::Amd {
+                        crate::iommu::remap(interrupt.vector, source, Some(false))?;
+                        interrupt.set_source(Some(source));
+                    }
                     // Fixed delivery and edge triggering to the boot
                     // processor.
                     Message {

@@ -3235,8 +3235,8 @@ fn kernel_logged(s: &Startup, needle: &[u8]) -> Result<bool> {
     }
 }
 
-/// The kernel says at boot whether DMA is isolated. When it is, the
-/// register page of QEMU's VT-d unit cannot be granted.
+/// The kernel says at boot whether DMA is isolated. When VT-d isolates
+/// it, the register page of QEMU's unit cannot be granted.
 fn dma_isolation_reported(s: &Startup) -> Result {
     const VTD_REGISTERS: u64 = 0xFED9_0000;
     if !kernel_logged(s, b"DMA isolated")? {
@@ -3244,6 +3244,9 @@ fn dma_isolation_reported(s: &Startup) -> Result {
             "reporting that DMA is not isolated",
             kernel_logged(s, b"DMA is not isolated")?,
         );
+    }
+    if !kernel_logged(s, b"VT-d units")? {
+        return Ok(());
     }
     let mut resource = 0;
     ensure(
