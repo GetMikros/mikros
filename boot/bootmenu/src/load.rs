@@ -38,7 +38,7 @@ pub fn load_config(file: Result<Vec<u8>, ReadError>) -> Loaded {
             default: None,
             timeout: None,
             entries: Vec::new(),
-            detect: false,
+            detect: true,
         },
         notice: Some(format!("Couldn't use {ENTRIES_PATH}: {problem}")),
         missing: false,

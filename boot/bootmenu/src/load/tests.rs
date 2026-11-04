@@ -95,12 +95,19 @@ fn reports_files_that_cannot_be_used() {
         );
         assert!(loaded.config.entries.is_empty(), "{problem}");
         assert_eq!(loaded.config.timeout, None, "{problem}");
-        assert!(!loaded.config.detect, "{problem}");
+        assert!(loaded.config.detect, "{problem}");
         assert!(!loaded.missing, "{problem}");
 
-        let menu = build_menu::<()>(&loaded.config, &[], no_icons, loaded.notice, false);
+        let menu = build_menu::<()>(&loaded.config, &[], no_icons, loaded.notice.clone(), false);
         assert!(menu.cards.is_empty());
         assert_eq!(menu.focus, None);
+        assert!(menu.notice.unwrap().ends_with(problem));
+
+        // Other systems are still added, and the first has focus.
+        let others = [detected("Windows", false)];
+        let menu = build_menu(&loaded.config, &others, no_icons, loaded.notice, false);
+        assert_eq!(menu.cards.len(), 1);
+        assert_eq!(menu.focus, Some((Item::Card(0), FocusSource::Keyboard)));
         assert!(menu.notice.unwrap().ends_with(problem));
     }
 }

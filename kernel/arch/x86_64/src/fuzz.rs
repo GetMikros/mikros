@@ -15,57 +15,65 @@ use kernel_core::sync::SpinLock;
 pub const HEAP: u32 = 0;
 pub const FRAMES: u32 = 1;
 
-/// For each kind of allocation, the object ID of the thread one of whose
-/// allocations is to fail, or 0.
-static FAIL_THREAD: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-/// For each kind, the number of allocations of that thread until the one
-/// that fails, counting it.
-static FAIL_AFTER: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// The allocations of a thread that are to fail: for each kind, the
+/// number of allocations of that kind the thread makes in its own system
+/// calls and faults until the one that fails, counting it, or 0 for none.
+#[derive(Default)]
+pub struct AllocFailures([AtomicU64; 2]);
 
-/// Records `thread`, the object ID of the thread about to run on this
-/// processor, or 0 when it is about to idle.
-pub fn switch_in(thread: u64) {
-    percpu::this().running.store(thread, Ordering::Relaxed);
+/// Records the thread about to run on this processor, as its object ID
+/// and allocation failures, or `None` when the processor is about to
+/// idle.
+pub fn switch_in(thread: Option<(u64, &AllocFailures)>) {
+    let cpu = percpu::this();
+    let (koid, failures) = match thread {
+        Some((koid, failures)) => (koid, failures as *const AllocFailures),
+        None => (0, core::ptr::null()),
+    };
+    cpu.running.store(koid, Ordering::Relaxed);
+    cpu.alloc_failures
+        .store(failures.cast_mut(), Ordering::Relaxed);
 }
 
-/// Takes back the failure set for `kind`, and returns how many
-/// allocations it still waited for, counting the one to fail, or 0 when
-/// that one has failed or none was set. Fails with `InvalidArgs` for an
-/// unknown kind.
-pub fn take_alloc_failure(kind: u32) -> Result<u64, Error> {
+/// Checks that `kind` is a kind of allocation.
+pub fn check_kind(kind: u32) -> Result<(), Error> {
     if kind != HEAP && kind != FRAMES {
         return Err(Error::InvalidArgs);
     }
-    let kind = kind as usize;
-    match FAIL_THREAD[kind].swap(0, Ordering::Relaxed) {
-        0 => Ok(0),
-        _ => Ok(FAIL_AFTER[kind].load(Ordering::Relaxed)),
-    }
+    Ok(())
+}
+
+/// Takes back the failure set for `kind`, a known kind, on `thread`, and
+/// returns how many allocations it still waited for, counting the one to
+/// fail, or 0 when that one has failed or none was set.
+pub fn take_alloc_failure(thread: &Thread, kind: u32) -> u64 {
+    thread.alloc_failures().0[kind as usize].swap(0, Ordering::Relaxed)
 }
 
 /// Makes the `after`-th next allocation of `kind`, a known kind, that
 /// `thread` makes fail, or none when `after` is 0.
 pub fn fail_alloc(thread: &Thread, kind: u32, after: u64) {
-    if after != 0 {
-        FAIL_AFTER[kind as usize].store(after, Ordering::Relaxed);
-        FAIL_THREAD[kind as usize].store(thread.header().koid(), Ordering::Relaxed);
-    }
+    thread.alloc_failures().0[kind as usize].store(after, Ordering::Relaxed);
 }
 
-/// Whether the allocation of `kind` that the running thread makes now is
-/// to fail. It is counted when `fail_alloc` chose the thread for the
-/// kind, and once it fails, no other allocation of the kind does.
+/// Whether the allocation of `kind` made now is to fail. Only the
+/// allocations that the running thread makes outside interrupt and
+/// exception handling, which also serves the maintenance deadlines, are
+/// counted, and once one fails, no other of the kind does.
 pub fn alloc_fails(kind: u32) -> bool {
-    let kind = kind as usize;
-    let thread = FAIL_THREAD[kind].load(Ordering::Relaxed);
-    if thread == 0 || thread != percpu::this().running.load(Ordering::Relaxed) {
+    let cpu = percpu::this();
+    if cpu.handling.load(Ordering::Relaxed) != 0 {
         return false;
     }
-    if FAIL_AFTER[kind].fetch_sub(1, Ordering::Relaxed) > 1 {
+    let failures = cpu.alloc_failures.load(Ordering::Relaxed);
+    if failures.is_null() {
         return false;
     }
-    FAIL_THREAD[kind].store(0, Ordering::Relaxed);
-    true
+    // SAFETY: `switch_in` stored the failures of the thread running on
+    // this processor, which lives while it runs, and outside interrupt
+    // handling the code running is that thread's.
+    let left = unsafe { &(*failures).0[kind as usize] };
+    left.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)) == Ok(1)
 }
 
 /// The kernel's maintenance deadlines whose intervals `fuzz_set_interval`

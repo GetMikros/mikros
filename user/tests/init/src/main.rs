@@ -2824,6 +2824,164 @@ fn ioports_as_granted(s: &Startup) -> Result {
     )
 }
 
+const KIND_IRQ: u32 = 3;
+/// The real-time clock's line, which no I/O APIC override moves under
+/// QEMU, and its index and data ports.
+const RTC_GSI: u32 = 8;
+const RTC_PORTS: u64 = 0x70;
+
+/// Reads register `index` of the real-time clock.
+fn rtc_read(index: u8) -> u8 {
+    let value: u8;
+    // SAFETY: the process was granted the two ports, which only select
+    // and access the clock's registers.
+    unsafe {
+        core::arch::asm!("out 0x70, al", in("al") index, options(nomem, nostack));
+        core::arch::asm!("in al, 0x71", out("al") value, options(nomem, nostack));
+    }
+    value
+}
+
+/// Writes register `index` of the real-time clock.
+fn rtc_write(index: u8, value: u8) {
+    // SAFETY: as in `rtc_read`.
+    unsafe {
+        core::arch::asm!("out 0x70, al", in("al") index, options(nomem, nostack));
+        core::arch::asm!("out 0x71, al", in("al") value, options(nomem, nostack));
+    }
+}
+
+/// Creates a resource of `kind` for `base` and `size` from the root.
+fn grant(s: &Startup, kind: u32, base: u64, size: u64) -> Result<Handle> {
+    let mut resource = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a resource", unsafe {
+        sys::resource_create(s.root_resource, kind, base, size, 0, &mut resource)
+    })?;
+    Ok(resource)
+}
+
+fn close(handle: Handle) -> Result {
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(handle) })
+}
+
+fn interrupt_create(resource: Handle, irq: u32, options: u32) -> (i64, Handle) {
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::interrupt_create(resource, irq, options, &mut out) };
+    (status, out)
+}
+
+/// `interrupt_create` takes an `IRQ` resource that covers the line or the
+/// root, checks its options, refuses a second object for a line and a
+/// line no I/O APIC handles, and frees what it took when it fails.
+fn interrupt_create_checks(s: &Startup) -> Result {
+    let irq = grant(s, KIND_IRQ, u64::from(RTC_GSI), 1)?;
+    let ports = grant(s, mikros_test::KIND_IOPORT, RTC_PORTS, 2)?;
+    let far = grant(s, KIND_IRQ, 0x10_0000, 1)?;
+    let cases = [
+        (ports, RTC_GSI, 0, ACCESS_DENIED),
+        (irq, RTC_GSI + 1, 0, ACCESS_DENIED),
+        (irq, RTC_GSI, 1 << 2, INVALID_ARGS),
+        (far, 0x10_0000, 0, NOT_FOUND),
+    ];
+    for (resource, line, options, expected) in cases {
+        ensure(
+            "refusing the request",
+            interrupt_create(resource, line, options).0 == expected,
+        )?;
+    }
+    let (status, first) = interrupt_create(irq, RTC_GSI, 0);
+    check("creating an interrupt", status)?;
+    ensure(
+        "refusing a second object for the line",
+        interrupt_create(irq, RTC_GSI, 0).0 == ALREADY_EXISTS,
+    )?;
+    close(first)?;
+    let (status, again) = interrupt_create(s.root_resource, RTC_GSI, 0);
+    check("creating it again once closed, from the root", status)?;
+    for handle in [again, irq, ports, far] {
+        close(handle)?;
+    }
+    Ok(())
+}
+
+/// `process_ioports_enable` takes an `IOPORT` resource that covers the
+/// ports, or the root, and refuses any other resource.
+fn ioports_resource_checks(s: &Startup) -> Result {
+    // A port no other test or device uses.
+    const FREE_PORT: u64 = 0x2E0;
+    let irq = grant(s, KIND_IRQ, u64::from(RTC_GSI), 1)?;
+    let port = grant(s, mikros_test::KIND_IOPORT, FREE_PORT, 1)?;
+    for (resource, base, size) in [
+        (irq, FREE_PORT, 1),
+        (port, FREE_PORT, 2),
+        (port, FREE_PORT - 1, 1),
+    ] {
+        ensure(
+            "refusing the resource",
+            // SAFETY: the call takes no pointers.
+            unsafe { sys::process_ioports_enable(s.process, resource, base, size) }
+                == ACCESS_DENIED,
+        )?;
+    }
+    // SAFETY: the call takes no pointers.
+    check("granting from the root", unsafe {
+        sys::process_ioports_enable(s.process, s.root_resource, FREE_PORT, 1)
+    })?;
+    close(irq)?;
+    close(port)
+}
+
+/// The real-time clock's periodic interrupt sets `SIGNALED` on the
+/// line's object, which stays set until `interrupt_ack` clears it, and
+/// the next interrupt sets it again.
+fn interrupt_delivered_and_acked(s: &Startup) -> Result {
+    let irq = grant(s, KIND_IRQ, u64::from(RTC_GSI), 1)?;
+    let ports = grant(s, mikros_test::KIND_IOPORT, RTC_PORTS, 2)?;
+    // SAFETY: the call takes no pointers.
+    check("granting the clock's ports", unsafe {
+        sys::process_ioports_enable(s.process, ports, RTC_PORTS, 2)
+    })?;
+    let (status, interrupt) = interrupt_create(irq, RTC_GSI, 0);
+    check("creating an interrupt", status)?;
+    ensure(
+        "starting clear",
+        wait(interrupt, SIGNALED, 0).0 == TIMED_OUT,
+    )?;
+
+    // Periodic interrupts at 8 Hz; reading register C ends each one.
+    rtc_write(0x0A, rtc_read(0x0A) & 0xF0 | 13);
+    rtc_write(0x0B, rtc_read(0x0B) | 0x40);
+    rtc_read(0x0C);
+    let mut result = Ok(());
+    for _ in 0..2 {
+        result = (|| {
+            ensure(
+                "signaling the interrupt",
+                wait(interrupt, SIGNALED, in_time()).0 == 0,
+            )?;
+            rtc_read(0x0C);
+            // SAFETY: the call takes no pointers.
+            check("acknowledging", unsafe { sys::interrupt_ack(interrupt) })?;
+            ensure(
+                "clearing SIGNALED",
+                wait(interrupt, SIGNALED, 0).0 == TIMED_OUT,
+            )
+        })();
+        if result.is_err() {
+            break;
+        }
+    }
+    rtc_write(0x0B, rtc_read(0x0B) & !0x40);
+    rtc_read(0x0C);
+    for handle in [interrupt, irq, ports] {
+        close(handle)?;
+    }
+    result
+}
+
 /// Killing a blocked thread whose process reports thread events reports
 /// its exit, and its end as the last thread terminates the process.
 fn kill_blocked_thread(s: &Startup) -> Result {
@@ -5992,7 +6150,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 91] = [
+const TESTS: [(&str, Test); 94] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6070,6 +6228,12 @@ const TESTS: [(&str, Test); 91] = [
     ("write_execute_policy", write_execute_policy),
     ("syscall_gate", syscall_gate),
     ("ioports_as_granted", ioports_as_granted),
+    ("ioports_resource_checks", ioports_resource_checks),
+    ("interrupt_create_checks", interrupt_create_checks),
+    (
+        "interrupt_delivered_and_acked",
+        interrupt_delivered_and_acked,
+    ),
     ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),
     ("suspend_threads", suspend_threads),
     ("suspend_blocked_waits", suspend_blocked_waits),

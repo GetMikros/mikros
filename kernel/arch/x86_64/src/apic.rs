@@ -5,13 +5,18 @@ use crate::cpu::{out8, read_msr, write_msr};
 use crate::log::log;
 use crate::memory::DirectMem;
 use crate::space::map_device;
+use alloc::vec::Vec;
 use boot_protocol::BootInfo;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use kernel_core::acpi::Tables;
 use kernel_core::acpi::madt::{self, Entry};
+use kernel_core::status::Error;
+use kernel_core::sync::SpinLock;
 
 /// The first vector of the legacy PICs.
 pub const PIC_BASE: u8 = 32;
+/// The vectors of device interrupts.
+pub const DEVICE_VECTORS: core::ops::Range<u8> = 48..240;
 /// The local APIC timer vector.
 pub const TIMER_VECTOR: u8 = 240;
 /// The local APIC spurious interrupt vector.
@@ -37,9 +42,12 @@ const LVT_ERROR: u32 = 0x370;
 const LVT_MASKED: u32 = 1 << 16;
 const LVT_NMI: u32 = 0b100 << 8;
 const LVT_ACTIVE_LOW: u32 = 1 << 13;
+const LVT_LEVEL: u32 = 1 << 15;
 const SPURIOUS_ENABLE: u32 = 1 << 8;
 
 static X2APIC: AtomicBool = AtomicBool::new(false);
+/// The local APIC ID of the boot processor.
+static BOOT_ID: AtomicU32 = AtomicU32::new(0);
 /// The xAPIC registers in the dynamic region.
 static XAPIC: AtomicU64 = AtomicU64::new(0);
 
@@ -108,25 +116,97 @@ fn mask_pics() {
     }
 }
 
-/// Masks every redirection entry of the I/O APIC at `phys`.
-fn mask_io_apic(phys: u64) {
-    crate::reserved::reserve_mmio(phys, 0x20);
-    let base = map_device(phys, 0x20);
-    let select = base as *mut u32;
-    let window = (base + 0x10) as *mut u32;
-    // SAFETY: `base` maps the I/O APIC's select and window registers
-    // uncached, and only this code uses them.
-    let reg = |index: u32| unsafe {
-        select.write_volatile(index);
-        window
-    };
-    // SAFETY: as above; the version register is read-only.
-    let entries = (unsafe { reg(1).read_volatile() } >> 16 & 0xFF) + 1;
-    for n in 0..entries {
-        let low = reg(0x10 + 2 * n);
-        // SAFETY: as above; setting the mask bit only stops delivery.
-        unsafe { low.write_volatile(low.read_volatile() | LVT_MASKED) };
+/// An I/O APIC: the first global system interrupt it handles, how many
+/// it handles, and its select register in the dynamic region, with the
+/// window register 16 bytes above it.
+struct IoApic {
+    gsi_base: u32,
+    entries: u32,
+    base: u64,
+}
+
+impl IoApic {
+    /// Maps the I/O APIC at `phys`, which handles the global system
+    /// interrupts from `gsi_base` on.
+    fn map(phys: u64, gsi_base: u32) -> IoApic {
+        crate::reserved::reserve_mmio(phys, 0x20);
+        let mut apic = IoApic {
+            gsi_base,
+            entries: 0,
+            base: map_device(phys, 0x20),
+        };
+        apic.entries = (apic.read(1) >> 16 & 0xFF) + 1;
+        apic
     }
+
+    fn read(&self, index: u32) -> u32 {
+        // SAFETY: `base` maps the I/O APIC's select and window registers
+        // uncached, and the caller holds the lock of `IO_APICS` or runs
+        // before anything else uses it.
+        unsafe {
+            (self.base as *mut u32).write_volatile(index);
+            ((self.base + 0x10) as *const u32).read_volatile()
+        }
+    }
+
+    fn write(&self, index: u32, value: u32) {
+        // SAFETY: as in `read`; the values written are redirection entries
+        // the kernel chose.
+        unsafe {
+            (self.base as *mut u32).write_volatile(index);
+            ((self.base + 0x10) as *mut u32).write_volatile(value);
+        }
+    }
+
+    /// The register index of the low half of the redirection entry of
+    /// `gsi`, if this I/O APIC handles it.
+    fn entry(&self, gsi: u32) -> Option<u32> {
+        let n = gsi.checked_sub(self.gsi_base)?;
+        (n < self.entries).then_some(0x10 + 2 * n)
+    }
+}
+
+/// The I/O APICs that the MADT lists.
+static IO_APICS: SpinLock<Vec<IoApic>> = SpinLock::new(Vec::new());
+
+/// Points the redirection entry of global system interrupt `gsi` at
+/// `vector` on the boot processor with fixed delivery, level or edge
+/// triggered and active low or high, and unmasks it. Fails with
+/// `NotFound` when no I/O APIC handles `gsi`.
+pub fn route(gsi: u32, vector: u8, level: bool, active_low: bool) -> Result<(), Error> {
+    let apics = IO_APICS.lock();
+    let (apic, index) = apics
+        .iter()
+        .find_map(|a| Some((a, a.entry(gsi)?)))
+        .ok_or(Error::NotFound)?;
+    let mut low = u32::from(vector);
+    if level {
+        low |= LVT_LEVEL;
+    }
+    if active_low {
+        low |= LVT_ACTIVE_LOW;
+    }
+    // Physical destination mode, with the boot processor's ID in the top
+    // byte. The entry stays masked until its destination is set.
+    apic.write(index, LVT_MASKED);
+    apic.write(index + 1, BOOT_ID.load(Ordering::Relaxed) << 24);
+    apic.write(index, low);
+    Ok(())
+}
+
+/// Masks or unmasks the redirection entry of `gsi`, which `route` set.
+pub fn mask_line(gsi: u32, masked: bool) {
+    let apics = IO_APICS.lock();
+    let Some((apic, index)) = apics.iter().find_map(|a| Some((a, a.entry(gsi)?))) else {
+        return;
+    };
+    let low = apic.read(index);
+    let low = if masked {
+        low | LVT_MASKED
+    } else {
+        low & !LVT_MASKED
+    };
+    apic.write(index, low);
 }
 
 /// Sets up the local APIC with every local interrupt masked except the
@@ -194,14 +274,27 @@ pub fn init(info: &BootInfo) {
         .unwrap_or_else(|e| panic!("{e}"))
         .unwrap_or_else(|| panic!("the ACPI MADT is missing"));
     mask_pics();
-    let mut io_apics = 0;
+    let mut apics = IO_APICS.lock();
     for e in madt::entries(madt) {
-        if let Entry::IoApic { address, .. } = e {
-            mask_io_apic(u64::from(address));
-            io_apics += 1;
+        if let Entry::IoApic {
+            address, gsi_base, ..
+        } = e
+        {
+            let apic = IoApic::map(u64::from(address), gsi_base);
+            for n in 0..apic.entries {
+                let index = 0x10 + 2 * n;
+                apic.write(index, apic.read(index) | LVT_MASKED);
+            }
+            apics
+                .try_reserve(1)
+                .unwrap_or_else(|_| panic!("no memory for the I/O APICs"));
+            apics.push(apic);
         }
     }
+    let io_apics = apics.len();
+    drop(apics);
     init_local(madt);
+    BOOT_ID.store(id(), Ordering::Relaxed);
     let mode = if X2APIC.load(Ordering::Relaxed) {
         "x2APIC"
     } else {

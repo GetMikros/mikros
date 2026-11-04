@@ -62,9 +62,11 @@ pub struct PerCpu {
     /// it interrupted.
     pub fault_address: AtomicU64,
     /// In the fuzz build, the object ID of the running thread, or 0 while
-    /// the processor idles.
+    /// the processor idles, and its allocation failures, or null.
     #[cfg(feature = "fuzz")]
     pub running: AtomicU64,
+    #[cfg(feature = "fuzz")]
+    pub alloc_failures: core::sync::atomic::AtomicPtr<crate::fuzz::AllocFailures>,
 }
 
 // SAFETY: each processor only reads its own structure, `this` is never
@@ -94,6 +96,8 @@ pub(crate) static BOOT_CPU: PerCpu = PerCpu {
     fault_address: AtomicU64::new(0),
     #[cfg(feature = "fuzz")]
     running: AtomicU64::new(0),
+    #[cfg(feature = "fuzz")]
+    alloc_failures: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
 };
 
 /// Set once the GS base points to the per-CPU data.

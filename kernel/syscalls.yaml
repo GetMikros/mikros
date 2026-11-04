@@ -212,7 +212,7 @@ syscalls:
     number: 19
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0006.R14]
+    spec: [MIKSPEC-0006.R42]
     args:
       - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: [WRITE]}
       - {name: size, type: u64, dir: in}
@@ -391,7 +391,7 @@ syscalls:
     number: 36
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0020.R20, MIKSPEC-0016.R16]
+    spec: [MIKSPEC-0020.R20, MIKSPEC-0016.R22]
     args:
       - {name: context, type: u64, dir: in}
 
@@ -467,7 +467,7 @@ syscalls:
     number: 44
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0011.R10, MIKSPEC-0014.R5]
+    spec: [MIKSPEC-0011.R19, MIKSPEC-0014.R5]
     args:
       - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
       - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
@@ -609,7 +609,7 @@ syscalls:
     number: 59
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0013.R13, MIKSPEC-0013.R15]
+    spec: [MIKSPEC-0013.R13, MIKSPEC-0013.R18]
     args:
       - {name: log, type: Handle, dir: in, object: Log, rights: [READ]}
       - {name: after, type: u64, dir: in}
@@ -619,7 +619,7 @@ syscalls:
     number: 60
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0013.R14, MIKSPEC-0013.R15]
+    spec: [MIKSPEC-0013.R14, MIKSPEC-0013.R18]
     args:
       - {name: reader, type: Handle, dir: in, object: LogReader, rights: [READ]}
       - {name: out, type: "*mut u8", dir: out}
@@ -647,7 +647,7 @@ syscalls:
     number: 63
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0006.R20, MIKSPEC-0006.R18]
+    spec: [MIKSPEC-0006.R43, MIKSPEC-0006.R18]
     args:
       - {name: process, type: Handle, dir: in, object: Process, rights: [MAP]}
       - {name: options, type: u32, dir: in}
@@ -928,7 +928,7 @@ syscalls:
     number: 90
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0022.R12]
+    spec: [MIKSPEC-0022.R14]
     args:
       - {name: process, type: Handle, dir: in, object: Process, rights: [MANAGE]}
       - {name: addr, type: u64, dir: in}
@@ -939,7 +939,7 @@ syscalls:
     number: 91
     arch: [x86_64]
     fuzz_only: true
-    spec: [MIKSPEC-0017.R10]
+    spec: [MIKSPEC-0017.R16, MIKSPEC-0017.R21]
     args:
       - {name: thread, type: Handle, dir: in, object: Thread, rights: [MANAGE]}
       - {name: kind, type: u32, dir: in}
@@ -950,7 +950,7 @@ syscalls:
     number: 92
     arch: [x86_64]
     fuzz_only: true
-    spec: [MIKSPEC-0017.R10]
+    spec: [MIKSPEC-0017.R16, MIKSPEC-0017.R18]
     args:
       - {name: which, type: u32, dir: in}
       - {name: ns, type: i64, dir: in}
@@ -960,7 +960,7 @@ syscalls:
     number: 93
     arch: [x86_64]
     fuzz_only: true
-    spec: [MIKSPEC-0017.R10]
+    spec: [MIKSPEC-0017.R16, MIKSPEC-0017.R19]
     args:
       - {name: sources, type: u32, dir: in}
 
@@ -968,9 +968,28 @@ syscalls:
     number: 94
     arch: [x86_64]
     fuzz_only: true
-    spec: [MIKSPEC-0017.R10]
+    spec: [MIKSPEC-0017.R16, MIKSPEC-0017.R22]
     args:
       - {name: point, type: u32, dir: in}
       - {name: count, type: u64, dir: in}
       - {name: event, type: Handle, dir: in, object: Event, rights: [SIGNAL, WAIT], allow_invalid: true}
       - {name: deadline, type: i64, dir: in}
+
+  - name: interrupt_create
+    number: 95
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R20, MIKSPEC-0015.R13, MIKSPEC-0015.R24]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: irq, type: u32, dir: in}
+      - {name: options, type: u32, dir: in}
+      - {name: out, type: "*mut Handle", dir: out, object: Interrupt}
+
+  - name: interrupt_ack
+    number: 96
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0011.R13, MIKSPEC-0015.R15]
+    args:
+      - {name: interrupt, type: Handle, dir: in, object: Interrupt, rights: [WRITE]}
