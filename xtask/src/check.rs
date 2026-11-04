@@ -175,6 +175,10 @@ pub fn run(args: &Args) -> Result<()> {
         problems.push("the code is not formatted with rustfmt".to_owned());
     }
 
+    // A module with a folder of its own must be `mod.rs` in that folder,
+    // never a file of the same name beside it.
+    const MODULE_LAYOUT: [&str; 2] = ["-D", "clippy::self_named_module_files"];
+
     // The UEFI code of the boot manager and the bootloader is only compiled
     // for the UEFI target, and the kernel's for its own target.
     let clippy_runs: [&[&str]; 3] = [
@@ -211,7 +215,7 @@ pub fn run(args: &Args) -> Result<()> {
     ];
     for clippy_args in clippy_runs {
         let mut clippy = cargo();
-        clippy.args(clippy_args);
+        clippy.args(clippy_args).args(MODULE_LAYOUT);
         if !passes(clippy)? {
             problems.push(format!(
                 "`cargo {}` reported warnings",
@@ -244,7 +248,10 @@ pub fn run(args: &Args) -> Result<()> {
     ];
     for clippy_args in user_clippy_runs {
         let mut clippy = user_cargo();
-        clippy.args(clippy_args).args(["--", "-D", "warnings"]);
+        clippy
+            .args(clippy_args)
+            .args(["--", "-D", "warnings"])
+            .args(MODULE_LAYOUT);
         if !passes(clippy)? {
             problems.push(format!(
                 "`cargo {}` in the user workspace reported warnings",
