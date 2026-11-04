@@ -69,7 +69,7 @@ impl Connection {
             R::Open(q, r) => r.reply(s, self.open(q)),
             R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes)),
             R::ReadLink(_, r) => r.reply(s, self.read_link()),
-            R::GetMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags)),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -254,6 +254,39 @@ impl Connection {
             })
             .collect();
         Ok(NodeReadDirectoryResponse { entries, next })
+    }
+
+    /// A memory object with the file's contents: with `PRIVATE` a copy
+    /// of its own, and otherwise the file's paged object, which is never
+    /// writable.
+    fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
+        self.require(Rights::READ)?;
+        let (offset, size) = match self.kind(self.node) {
+            NodeKind::File { offset, size } => (*offset, *size),
+            NodeKind::Directory(_) => return Err(Error::IsDirectory),
+            NodeKind::Symlink(_) => return Err(Error::Invalid),
+        };
+        let execute = flags.contains(MemoryFlags::EXECUTE);
+        if execute {
+            self.require(Rights::EXECUTE)?;
+        }
+        let write = flags.contains(MemoryFlags::WRITE);
+        let memory = if flags.contains(MemoryFlags::PRIVATE) {
+            let rights = super::memory::rights(write, execute);
+            self.fs.private_memory(offset, size, rights)
+        } else if write {
+            return Err(self.write_denied());
+        } else {
+            let rights = super::memory::rights(false, execute);
+            self.fs.paged_memory(self.node, offset, size, rights)
+        };
+        match memory {
+            Ok(memory) => Ok(NodeGetMemoryObjectResponse { memory }),
+            Err(status) => {
+                mikros_rt::log!(Error, "a boot file's memory object failed: {status}");
+                Err(Error::Io)
+            }
+        }
     }
 
     fn read_link(&self) -> Result<NodeReadLinkResponse, Error> {

@@ -7874,6 +7874,7 @@ mod bootfs {
 
     use alloc::string::String;
     use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicU32, Ordering};
     use mikros_rt::Startup;
     use mikros_rt::exec::Executor;
     use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
@@ -7883,6 +7884,26 @@ mod bootfs {
     use process_manager::bootfs::Fs;
 
     const SAME_RIGHTS: u32 = 1 << 31;
+    /// The first four bytes that the helper thread read from a paged
+    /// object, and its status.
+    static PAGED_HEAD: AtomicU32 = AtomicU32::new(0);
+    static PAGED_STATUS: AtomicU32 = AtomicU32::new(u32::MAX);
+
+    /// Reads the start of the memory object `mem`, which this thread's
+    /// process supplies pages for, then signals `event` and ends.
+    extern "sysv64" fn read_paged(mem: u64, event: u64) -> ! {
+        let mut head = [0u8; 4];
+        // SAFETY: the pointer describes `head`.
+        let status = unsafe { sys::mem_read(mem as sys::Handle, 0, head.as_mut_ptr(), 4) };
+        PAGED_HEAD.store(u32::from_le_bytes(head), Ordering::Release);
+        PAGED_STATUS.store(status as u32, Ordering::Release);
+        // SAFETY: the calls take no pointers.
+        unsafe {
+            sys::object_signal(event as sys::Handle, 0, super::USER0);
+            sys::thread_exit();
+        }
+        unreachable!("thread_exit returned");
+    }
     const MANAGER: &str = "usr/bin/process-manager";
 
     fn failed(what: &'static str) -> Failure {
@@ -7914,9 +7935,10 @@ mod bootfs {
             .map(|response| (response, NodeAsyncClient::new(client, reactor.clone()))))
     }
 
-    /// Files open and read, with a cursor of their own; directories list
-    /// in name order; paths, flags and rights are checked; and every
-    /// change fails without `WRITE`.
+    /// Files open and read, with a cursor of their own, and give private
+    /// and paged memory objects with their contents; directories list in
+    /// name order; paths, flags and rights are checked; and every change
+    /// fails without `WRITE`.
     pub fn bootfs_serves_the_boot_image(s: &Startup) -> Result {
         let mut ex = Executor::new().map_err(|status| Failure {
             what: "creating an executor",
@@ -7953,7 +7975,8 @@ mod bootfs {
             )?;
 
             // A file reads by offset and by cursor.
-            let opened = open(&root, &reactor, MANAGER, none, Rights::READ).await?;
+            let rights = Rights::READ | Rights::EXECUTE;
+            let opened = open(&root, &reactor, MANAGER, none, rights).await?;
             let Ok((response, file)) = opened else {
                 return Err(failed("opening a file"));
             };
@@ -7986,6 +8009,42 @@ mod bootfs {
             ensure(
                 "refusing a token",
                 token.is_err_and(|e| e == Error::AccessDenied),
+            )?;
+
+            // Memory objects hold the file's contents: a private copy, and
+            // a paged object whose pages this thread's executor supplies
+            // while another thread reads it.
+            let private = MemoryFlags::PRIVATE | MemoryFlags::WRITE;
+            let private = reply("getting memory", file.get_memory_object(private).await)?
+                .map_err(|_| failed("getting a private memory object"))?;
+            let mut head = [0u8; 4];
+            // SAFETY: the pointer describes `head`.
+            check("reading private memory", unsafe {
+                sys::mem_read(private.memory.raw(), 0, head.as_mut_ptr(), 4)
+            })?;
+            ensure("copying the file", head == *b"\x7fELF")?;
+            let flags = MemoryFlags::EXECUTE;
+            let paged = reply("getting memory", file.get_memory_object(flags).await)?
+                .map_err(|_| failed("getting a paged memory object"))?;
+            let mut event = 0;
+            // SAFETY: the out pointer is valid for the call.
+            check("creating an event", unsafe {
+                sys::event_create(0, &mut event)
+            })?;
+            let mem = paged.memory.raw();
+            super::spawn2(s, read_paged, u64::from(mem), u64::from(event))?;
+            let signalled = reactor.signals(event, super::USER0).await;
+            ensure("reading paged memory", signalled.is_ok())?;
+            ensure(
+                "supplying the file's pages",
+                PAGED_STATUS.load(Ordering::Acquire) == 0
+                    && PAGED_HEAD.load(Ordering::Acquire).to_le_bytes() == *b"\x7fELF",
+            )?;
+            let shared = MemoryFlags::WRITE;
+            let shared = reply("getting memory", file.get_memory_object(shared).await)?;
+            ensure(
+                "refusing shared writable memory",
+                shared.err() == Some(Error::AccessDenied),
             )?;
 
             // Rights, flags and paths are checked.

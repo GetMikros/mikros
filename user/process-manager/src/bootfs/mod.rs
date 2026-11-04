@@ -2,8 +2,11 @@
 //! protocol, one executor task per connection.
 
 mod connection;
+mod memory;
 
+use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
+use core::cell::RefCell;
 use mikros_bootfs::Tree;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
@@ -22,6 +25,9 @@ pub struct Fs {
     image: &'static [u8],
     reactor: Reactor,
     spawner: Spawner,
+    pager: OwnedHandle,
+    /// The paged memory objects of files, by node.
+    paged: RefCell<BTreeMap<usize, OwnedHandle>>,
 }
 
 impl Fs {
@@ -35,6 +41,14 @@ impl Fs {
         spawner: Spawner,
     ) -> Result<Rc<Fs>, Status> {
         let image = map(process, image)?;
+        let mut pager = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status = unsafe { sys::pager_create(0, &mut pager) };
+        if status != mikros_rt::OK {
+            return Err(status);
+        }
+        // SAFETY: the kernel just created the handle for us.
+        let pager = unsafe { OwnedHandle::from_raw(pager) };
         let tree = Tree::new(image);
         for (path, flag) in &tree.skipped {
             mikros_rt::log!(
@@ -49,6 +63,8 @@ impl Fs {
             image,
             reactor,
             spawner,
+            pager,
+            paged: RefCell::new(BTreeMap::new()),
         }))
     }
 
