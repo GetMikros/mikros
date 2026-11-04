@@ -59,6 +59,8 @@ const ICR_PENDING: u32 = 1 << 12;
 /// An ICR command for a fixed interrupt, to be combined with its
 /// vector.
 pub const ICR_FIXED: u32 = 1 << 14;
+/// An ICR command for an NMI.
+pub const ICR_NMI: u32 = 0b100 << 8 | 1 << 14;
 pub const ICR_INIT: u32 = 0b101 << 8 | 1 << 14;
 pub const ICR_STARTUP: u32 = 0b110 << 8 | 1 << 14;
 
