@@ -33,6 +33,8 @@ SECTIONS
     . = ALIGN(4096);
     __data_start = .;
     .data : { *(.data .data.*) } :data
+    /* Inside the data range, so that the kernel's own tables map it. */
+    .got : { *(.got .got.*) } :data
     .bss : { *(.bss .bss.*) *(COMMON) } :data
     __data_end = .;
 
