@@ -89,11 +89,12 @@ fn rejects_malformed_files() {
     }
 }
 
+const OTHER: &str = "library test.other;\ntype Status = enum : i32 { OK = 0; FAILED = -1; };\n";
+
 mod checks {
+    use super::{OTHER, SAMPLE};
     use crate::compile;
     use crate::model::*;
-
-    const OTHER: &str = "library test.other;\ntype Status = struct { code i32; };\n";
 
     fn check_one(text: &str) -> Result<Model, String> {
         compile(&[("t.midl", text), ("other.midl", OTHER)], None).map_err(|e| e.to_string())
@@ -105,40 +106,83 @@ mod checks {
     }
 
     #[test]
-    fn resolves_types_and_aliases() {
-        let text = "library t;\nusing test.other;\nalias Deadline = i64;\ntype P = struct { s string<16>?; h handle<Event, READ | WRITE>; d Deadline; o test.other.Status; };\ntype U = union { 1: p P; 2: v vector<P, 4>; };\nprotocol Q { @1 F(u U) -> (n u32) error i32; };\n";
-        let model = check_one(text).unwrap();
+    fn resolves_the_sample() {
+        let model = compile(&[("sample.midl", SAMPLE), ("other.midl", OTHER)], None).unwrap();
         let names: Vec<_> = model.libraries.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, ["test.other", "t"]);
+        assert_eq!(names, ["test.other", "test.sample"]);
         let Some(Decl {
             kind: DeclKind::Struct(fields),
             ..
-        }) = model.decl("t.P")
+        }) = model.decl("test.sample.Point")
         else {
-            panic!("P is a structure");
+            panic!("Point is a structure");
         };
         assert_eq!(
-            fields[0].ty,
+            fields[1].ty,
             Type::String {
                 max: 16,
                 optional: true
             }
         );
         assert_eq!(
-            fields[1].ty,
+            fields[2].ty,
             Type::Handle {
                 object: Some(5),
                 rights: Some(4 | 8),
                 optional: false
             }
         );
-        assert_eq!(fields[2].ty, Type::Int(Int::I64), "the alias is expanded");
+        let Some(Decl {
+            kind: DeclKind::Union { members, .. },
+            ..
+        }) = model.decl("test.sample.Shape")
+        else {
+            panic!("Shape is a union");
+        };
+        assert!(matches!(&members[1].ty, Type::Vector { max: 64, .. }));
+        let Some(Decl {
+            kind: DeclKind::Protocol(methods),
+            ..
+        }) = model.decl("test.sample.Drawing")
+        else {
+            panic!("Drawing is a protocol");
+        };
+        let MethodKind::TwoWay { request, error, .. } = &methods[0].kind else {
+            panic!("Draw is two-way");
+        };
+        assert_eq!(request[1].ty, Type::Int(Int::I64), "the alias is expanded");
         assert_eq!(
-            fields[3].ty,
-            Type::Named {
+            error,
+            &Some(Type::Named {
                 name: "test.other.Status".into(),
                 optional: false
+            })
+        );
+    }
+
+    #[test]
+    fn keeps_what_a_version_has() {
+        let at = |version| {
+            let model = compile(
+                &[("sample.midl", SAMPLE), ("other.midl", OTHER)],
+                Some(version),
+            )
+            .unwrap();
+            match model.decl("test.sample.Point") {
+                Some(Decl {
+                    kind: DeclKind::Struct(fields),
+                    ..
+                }) => fields.len(),
+                _ => panic!("Point is a structure"),
             }
+        };
+        assert_eq!((at(1), at(2), at(3)), (2, 3, 2));
+        let missing =
+            "library t;\n@available(added=2)\ntype A = struct {};\ntype B = struct { a A; };\n";
+        let err = compile(&[("t.midl", missing)], Some(1)).unwrap_err();
+        assert!(
+            err.message.contains("not declared or not available"),
+            "{err}"
         );
     }
 
@@ -153,6 +197,13 @@ mod checks {
         );
         fails("type A = struct { a A; };", "contains itself");
         fails("alias A = B; alias B = A;", "refers to itself");
+        fails("const A u32 = B; const B u32 = A;", "refers to itself");
+        fails("type A = bits : i8 { X = 1; };", "unsigned integer");
+        fails("type A = enum : u8 { X = 256; };", "does not fit");
+        fails(
+            "type A = bits : u8 { X = 1; Y = 2; Z = X | Y; W = Q; };",
+            "`Q`",
+        );
         fails("type A = union { 0: x u32; };", "at least 1");
         fails("type A = table { 1: x string<4>?; };", "cannot be optional");
         fails("type A = struct { x u32?; };", "cannot be optional");
@@ -175,33 +226,17 @@ mod checks {
             "protocol P { @1 F() -> () error string<4>; };",
             "enumeration or i32",
         );
-    }
-
-    #[test]
-    fn keeps_what_a_version_has() {
-        let text = "library t;\ntype A = struct { x u8; @available(added=2, removed=3) y u8; };\n";
-        let at = |version| match compile(&[("t.midl", text)], Some(version))
-            .unwrap()
-            .decl("t.A")
-        {
-            Some(Decl {
-                kind: DeclKind::Struct(fields),
-                ..
-            }) => fields.len(),
-            _ => panic!("A is a structure"),
-        };
-        assert_eq!((at(1), at(2), at(3)), (1, 2, 1));
-        let missing =
-            "library t;\n@available(added=2)\ntype A = struct {};\ntype B = struct { a A; };\n";
-        let err = compile(&[("t.midl", missing)], Some(1)).unwrap_err();
-        assert!(
-            err.message.contains("not declared or not available"),
-            "{err}"
+        fails("const N u8 = 300;", "does not fit");
+        fails("const S string<2> = \"long\";", "longer");
+        fails(
+            "type A = struct { x string<N>; }; const N i32 = -1;",
+            "non-negative",
         );
     }
 
     #[test]
-    fn accepts_a_cycle_through_an_optional_member() {
-        check_one("library t;\ntype A = struct { b B?; };\ntype B = struct { a A; };\n").unwrap();
+    fn accepts_optional_members_and_constants_as_counts() {
+        let text = "library t;\nusing test.other;\nconst N u32 = 4;\ntype A = struct { b B?; v vector<u8, N>; s test.other.Status; };\ntype B = struct { a A; };\nprotocol P { @1 F() -> () error i32; };\n";
+        check_one(text).unwrap();
     }
 }
