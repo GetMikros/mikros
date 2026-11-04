@@ -12,3 +12,6 @@ mikros-test = { path = "../support" }
 [features]
 # Tests the system calls that exist only in fuzz builds.
 fuzz = ["mikros-rt/fuzz"]
+
+[build-dependencies]
+midlc = { path = "../../../tools/midlc" }

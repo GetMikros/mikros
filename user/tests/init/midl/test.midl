@@ -1,0 +1,12 @@
+library test.kernel;
+
+type Note = struct {
+    text string<32>;
+    memory handle<MemoryObject, READ>;
+};
+
+protocol Echo {
+    @1 Send(note Note);
+    @2 -> Sent(text string<32>, size u64);
+    @3 Twice(value u32) -> (value u32);
+};

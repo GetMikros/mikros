@@ -8,6 +8,7 @@ extern crate alloc;
 
 pub mod heap;
 pub mod log;
+pub mod midl;
 pub mod startup;
 
 /// The system call bindings.
