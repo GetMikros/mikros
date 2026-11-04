@@ -1,4 +1,4 @@
-// MIKSPEC-0034.R22
+// MIKSPEC-0034.R25
 
 library mikros.process;
 
@@ -9,7 +9,7 @@ type ManagerStartup = struct {
     init_process handle<Process>;
     budget handle<Budget>;
     boot_image handle<MemoryObject, DUPLICATE | TRANSFER | READ | MAP | INSPECT>;
-    clock_page handle<MemoryObject, READ | MAP>;
+    clock_page handle<MemoryObject, DUPLICATE | TRANSFER | READ | MAP | INSPECT>;
     log handle<Log, WRITE>;
     init_bootstrap server_end<InitBootstrap>;
 };
