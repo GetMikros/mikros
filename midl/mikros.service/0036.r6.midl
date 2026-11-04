@@ -1,0 +1,22 @@
+library mikros.service;
+using mikros.base;
+
+type ClientIdentity = struct {
+    pid u32;
+    user u32;
+    app_id string<128>;
+};
+
+protocol Directory {
+    @1 Connect(protocol string<128>, instance string<64>?,
+               server handle<Channel>) -> () error base.Status;
+    @2 List(protocol string<128>) -> (instances vector<string<64>, 64>) error base.Status;
+    @3 Watch(protocol string<128>) -> () error base.Status;
+    @4 -> OnInstanceAdded(protocol string<128>, instance string<64>);
+    @5 -> OnInstanceRemoved(protocol string<128>, instance string<64>);
+};
+
+protocol Provider {
+    @1 Connect(protocol string<128>, instance string<64>?,
+               server handle<Channel>, client ClientIdentity);
+};

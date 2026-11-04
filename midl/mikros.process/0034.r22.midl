@@ -1,0 +1,17 @@
+library mikros.process;
+
+type ManagerStartup = struct {
+    version u32;
+    process handle<Process>;
+    thread handle<Thread>;
+    init_process handle<Process>;
+    budget handle<Budget>;
+    boot_image handle<MemoryObject, DUPLICATE | TRANSFER | READ | MAP | INSPECT>;
+    clock_page handle<MemoryObject, READ | MAP>;
+    log handle<Log, WRITE>;
+    init_bootstrap server_end<InitBootstrap>;
+};
+
+protocol ManagerBootstrap {
+    @1 Start(startup ManagerStartup);
+};

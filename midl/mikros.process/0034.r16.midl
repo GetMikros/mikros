@@ -1,0 +1,38 @@
+library mikros.process;
+using mikros.base;
+using mikros.fs;
+using mikros.service;
+
+type NamespaceEntry = struct {
+    path string<1024>;
+    directory client_end<mikros.fs.Node>;
+};
+
+type StartupHeader = struct {
+    version u32;
+    pid u32;
+    parent u32;
+    user u32;
+    app_id string<128>;
+    bundle string<1024>?;
+    arguments handle<MemoryObject>;
+    handle_count u32;
+    namespace_count u32;
+    process handle<Process>;
+    thread handle<Thread>;
+    launcher client_end<Launcher>;
+    directory client_end<mikros.service.Directory>;
+    time_page handle<MemoryObject, READ | MAP>?;
+    clock_page handle<MemoryObject, READ | MAP>;
+    program_base u64;
+    program_phdr u64;
+    program_phnum u32;
+    interpreter_base u64;
+};
+
+protocol Bootstrap {
+    @1 Begin(startup StartupHeader);
+    @2 Handles(offset u32, handles vector<StartupHandle, 32>);
+    @3 Namespace(offset u32, entries vector<NamespaceEntry, 32>);
+    @4 Complete();
+};

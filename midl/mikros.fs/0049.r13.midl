@@ -1,0 +1,6 @@
+library mikros.fs;
+
+protocol Filesystem {
+    @1 GetRoot(node server_end<Node>, rights Rights) -> () error Error;
+    @2 QueryFilesystem() -> (info FilesystemInfo) error Error;
+};

@@ -1,0 +1,5 @@
+library mikros.fs;
+
+protocol MemoryRevocation {
+    @1 Revoke() -> () error Error;
+};
