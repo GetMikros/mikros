@@ -1172,7 +1172,7 @@ pub fn exit_if_dead() {
 }
 
 /// Runs on a new thread's stack after its first switch.
-pub extern "sysv64" fn thread_start(entry: usize, arg: usize) -> ! {
+pub extern "C" fn thread_start(entry: usize, arg: usize) -> ! {
     finish_switch();
     // SAFETY: `spawn` stored a `fn(usize)` as the entry.
     let entry: fn(usize) = unsafe { core::mem::transmute(entry) };
