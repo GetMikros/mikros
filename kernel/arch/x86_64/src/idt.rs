@@ -210,7 +210,9 @@ global_asm!(
     "mov ebx, eax",
     "shl rdx, 32",
     "or rbx, rdx",
-    "lea rax, [rip + {percpu}]",
+    // The stack's first word, above the 22 saved, holds this processor's
+    // data.
+    "mov rax, [rsp + 22*8]",
     "mov rdx, rax",
     "shr rdx, 32",
     "wrmsr",
@@ -250,7 +252,6 @@ global_asm!(
     machine_check = const MACHINE_CHECK,
     gs_msr = const crate::percpu::IA32_GS_BASE,
     kernel_gs_msr = const crate::percpu::IA32_KERNEL_GS_BASE,
-    percpu = sym crate::percpu::BOOT_CPU,
     kernel_stack = const crate::percpu::KERNEL_STACK_OFFSET,
     mask = const ERROR_CODE_VECTORS,
     interrupt = sym interrupt,

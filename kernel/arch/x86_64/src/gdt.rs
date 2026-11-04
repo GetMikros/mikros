@@ -138,7 +138,12 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64, debug: u
             (IST_DEBUG, debug),
         ];
         for (entry, top) in ist {
-            (&raw mut (*tss).ist[usize::from(entry) - 1]).write_unaligned(top);
+            // The word at the stack's start, above the frame the
+            // processor pushes, holds this processor's data for the entry
+            // code, which cannot trust the GS base.
+            let start = top - 16;
+            (start as *mut u64).write((&raw const *cpu) as u64);
+            (&raw mut (*tss).ist[usize::from(entry) - 1]).write_unaligned(start);
         }
         set_rsp0(rsp0);
         let gdt = cpu.gdt.get().cast::<u64>();

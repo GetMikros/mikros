@@ -155,10 +155,13 @@ fn page_table_problems(tlb: &str, image: &Image) -> Vec<String> {
 }
 
 /// The tops of the IST stacks 1 to 3 in the task state segment `bytes`.
+/// Each IST entry points 16 bytes below its stack's top, where the
+/// kernel keeps a word for its entry code.
 fn ist_tops(bytes: &[u8]) -> Option<[u64; 3]> {
     let top = |n: usize| -> Option<u64> {
         let at = 0x24 + 8 * (n - 1);
-        Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+        let entry = u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?);
+        Some(entry.wrapping_add(16))
     };
     Some([top(1)?, top(2)?, top(3)?])
 }
@@ -404,7 +407,7 @@ ffff800080000000: 0000000080000000 XGP-----W
         let mut tss = vec![0u8; 0x68];
         tss[0x24..0x2C].copy_from_slice(&7u64.to_le_bytes());
         tss[0x34..0x3C].copy_from_slice(&9u64.to_le_bytes());
-        assert_eq!(ist_tops(&tss), Some([7, 0, 9]));
+        assert_eq!(ist_tops(&tss), Some([23, 16, 25]));
         let dump = "ffffffff801842b8: 0x01 0x02\nffffffff801842ba: 0x03";
         assert_eq!(dumped_bytes(dump), [1, 2, 3]);
         let registers =

@@ -42,7 +42,7 @@ pub struct PerCpu {
     pub breakpoints_loaded: AtomicBool,
     /// The I/O port ranges the bitmap of `tss` allows now. Its capacity,
     /// which never shrinks, covers the ranges of every process, so that
-    /// switching them in needs no allocation. Locked before a process's
+    /// switching them in needs no allocation. Locked after a process's
     /// ports.
     pub open_ports: SpinLock<Vec<(u64, u64)>>,
     /// The processor's task state segment and GDT, which the processor
@@ -95,8 +95,7 @@ impl PerCpu {
     }
 }
 
-/// The boot processor's data. Entry code that cannot trust the GS base
-/// finds it by this symbol.
+/// The boot processor's data.
 pub(crate) static BOOT_CPU: PerCpu = PerCpu::new(&raw const BOOT_CPU, 0);
 
 /// The data of each processor, by number, once it has some.
