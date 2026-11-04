@@ -134,7 +134,11 @@ fn boot_handles(s: &Startup) -> Result<Vec<StartupHandle>> {
     let mut platform_info = 0;
     // SAFETY: the out pointer is valid for the call.
     status("creating the platform information", unsafe {
-        sys::mem_create((message.len() as u64).next_multiple_of(PAGE_SIZE), 0, &mut platform_info)
+        sys::mem_create(
+            (message.len() as u64).next_multiple_of(PAGE_SIZE),
+            0,
+            &mut platform_info,
+        )
     })?;
     // SAFETY: the handle was just created for us.
     let platform_info = unsafe { OwnedHandle::from_raw(platform_info) };
