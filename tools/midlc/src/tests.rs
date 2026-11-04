@@ -404,6 +404,27 @@ mod checks {
     }
 
     #[test]
+    fn requires_the_full_name_when_the_own_library_repeats_a_last_identifier() {
+        let file = |ty: &str| {
+            format!(
+                "library more.other;\nusing test.other;\ntype Own = struct {{}};\ntype A = struct {{ s {ty}; }};\n"
+            )
+        };
+        let compile_with = |text: &str| {
+            compile(&[("t.midl", text), ("other.midl", OTHER)], None).map_err(|e| e.to_string())
+        };
+        // `Status` exists only in the used library, and `Own` only in the
+        // file's own; the short form is refused for both.
+        for ty in ["other.Status", "other.Own"] {
+            let err = compile_with(&file(ty)).unwrap_err();
+            assert!(err.contains("full library name"), "{ty}: {err}");
+        }
+        for ty in ["test.other.Status", "more.other.Own", "Own"] {
+            compile_with(&file(ty)).unwrap_or_else(|e| panic!("{ty}: {e}"));
+        }
+    }
+
+    #[test]
     fn names_its_own_library_in_every_form() {
         let text = "library test.own;\ntype S = enum : i32 { OK = 0; };\ntype A = struct { s S; };\ntype B = struct { s own.S; };\ntype C = struct { s test.own.S; };\n";
         let model = compile(&[("own.midl", text)], None).unwrap();

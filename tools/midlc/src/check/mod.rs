@@ -180,10 +180,8 @@ struct Scope {
 impl Scope {
     /// The full name of the library that `last`, the last identifier of
     /// a library name, refers to: the file's own library or one named by
-    /// `using`. It is an error when more than one of them ends in `last`.
-    ///
-    /// TODO: counting the file's own library in that check is held until
-    /// the clash between it and a used library is decided.
+    /// `using`. It is an error when more than one of them ends in `last`,
+    /// whatever they declare.
     fn short(&self, last: &str, span: &Span) -> Result<&str, Error> {
         let ends = |l: &&String| l.rsplit('.').next() == Some(last);
         let mut found = std::iter::once(&self.library)
