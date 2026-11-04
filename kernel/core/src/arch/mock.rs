@@ -224,6 +224,10 @@ impl Arch for Mock {
         true
     }
 
+    fn thread_stay_suspended(_thread: &alloc::sync::Arc<crate::sched::Thread>) -> bool {
+        false
+    }
+
     fn user_thread_entry() -> u64 {
         0
     }

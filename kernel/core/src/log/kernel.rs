@@ -1,12 +1,12 @@
 //! The kernel's log and its output.
 
+use super::{Log, Message, Readers, Record, Severity, Source, line};
+use crate::object::budget::Budget;
+use crate::object::{Header, Object, ObjectType, signals};
+use crate::status::Error;
+use crate::sync::SpinLock;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicU64, Ordering};
-use kernel_core::log::{Log, Message, Readers, Record, Severity, Source, line};
-use kernel_core::object::budget::Budget;
-use kernel_core::object::{Header, Object, ObjectType, signals};
-use kernel_core::status::Error;
-use kernel_core::sync::SpinLock;
 
 /// 256 records of 288 bytes: 73728 bytes.
 static LOG: Log<256> = Log::new();
@@ -26,20 +26,20 @@ pub fn write_user(koid: u64, severity: Severity, message: &[u8]) {
 
 fn append(koid: u64, severity: Severity, source: Source, message: &[u8]) {
     LOG.write(
-        kernel_core::arch::monotonic_now(),
+        crate::arch::monotonic_now(),
         koid,
         severity,
         source,
         message,
     );
     LOG.drain(|record| {
-        kernel_core::arch::debug_write(line(record, b"\r\n").as_bytes());
-        kernel_core::arch::console_write(line(record, b"\n").as_bytes());
+        crate::arch::debug_write(line(record, b"\r\n").as_bytes());
+        crate::arch::console_write(line(record, b"\n").as_bytes());
     });
     // Notifying a reader takes the locks of the signal hook, which the
     // code that logs, or the code an interrupt that logs interrupted, may
     // hold. With any lock held, the readers are notified later.
-    READERS.notify(kernel_core::sync::none_held(), notify);
+    READERS.notify(crate::sync::none_held(), notify);
 }
 
 /// Notifies the log readers of the records written since a notification
@@ -68,7 +68,7 @@ impl LogReader {
                 readers.retain(|r| r.strong_count() > 0);
                 readers.try_reserve(1).map_err(|_| Error::NoMemory)?;
                 budget.charge_kernel(Self::COST)?;
-                let reader = kernel_core::fallible::try_arc(LogReader {
+                let reader = crate::fallible::try_arc(LogReader {
                     header: Header::new(ObjectType::LogReader),
                     budget: budget.clone(),
                     position: AtomicU64::new(after),
@@ -163,13 +163,15 @@ pub fn object() -> Arc<LogObject> {
 }
 
 /// Logs a formatted kernel message with the given severity.
-macro_rules! log {
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __kernel_log {
     ($severity:ident, $($arg:tt)*) => {
         $crate::log::write(
-            kernel_core::log::Severity::$severity,
+            $crate::log::Severity::$severity,
             format_args!($($arg)*),
         )
     };
 }
 
-pub(crate) use log;
+pub use __kernel_log as log;

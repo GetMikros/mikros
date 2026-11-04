@@ -1,9 +1,9 @@
 //! `Timer` objects, which set `SIGNALED` at a deadline.
 
+use crate::object::budget::Budget;
+use crate::object::{Header, Object, ObjectType, signals};
+use crate::status::Error;
 use alloc::sync::{Arc, Weak};
-use kernel_core::object::budget::Budget;
-use kernel_core::object::{Header, Object, ObjectType, signals};
-use kernel_core::status::Error;
 
 pub struct Timer {
     header: Header,
@@ -13,12 +13,12 @@ pub struct Timer {
 impl Timer {
     /// The timer and its armed entry with that entry's share of storage.
     const COST: u64 =
-        (size_of::<Timer>() + 2 * kernel_core::deadline::Deadlines::<Armed>::ENTRY_SIZE) as u64;
+        (size_of::<Timer>() + 2 * crate::deadline::Deadlines::<Armed>::ENTRY_SIZE) as u64;
 
     /// A timer with no deadline, charged to `budget`.
     pub fn new(budget: &Arc<Budget>) -> Result<Arc<Timer>, Error> {
         budget.charge_kernel(Self::COST)?;
-        kernel_core::fallible::try_arc(Timer {
+        crate::fallible::try_arc(Timer {
             header: Header::new(ObjectType::Timer),
             budget: budget.clone(),
         })
@@ -29,7 +29,7 @@ impl Timer {
     pub fn set(self: &Arc<Self>, deadline: i64) -> Result<(), Error> {
         self.header.update_signals(signals::SIGNALED, 0);
         let armed = Armed(Arc::downgrade(self));
-        if deadline <= kernel_core::arch::monotonic_now() {
+        if deadline <= crate::arch::monotonic_now() {
             crate::sched::disarm_timer(&armed);
             self.header.update_signals(0, signals::SIGNALED);
             return Ok(());

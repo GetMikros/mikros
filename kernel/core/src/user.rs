@@ -1,8 +1,8 @@
 //! User addresses that system calls read from and write to, and the
 //! values that may be copied through them.
 
+use crate::status::Error;
 use core::marker::PhantomData;
-use kernel_core::status::Error;
 
 /// Values that can be copied to and from user memory as their bytes.
 ///
@@ -31,7 +31,7 @@ pub fn bytes_of<T: Plain>(values: &[T]) -> &[u8] {
 
 /// A user address the kernel reads a `T` or an array of them from.
 #[allow(dead_code, reason = "no call in the table reads user memory yet")]
-pub struct UserIn<T>(pub(crate) u64, PhantomData<T>);
+pub struct UserIn<T>(pub u64, PhantomData<T>);
 
 #[allow(dead_code, reason = "no call in the table reads user memory yet")]
 impl<T: Plain> UserIn<T> {
@@ -56,7 +56,7 @@ impl<T: Plain> UserIn<T> {
         let bytes = unsafe {
             core::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<u8>(), size_of_val(dst))
         };
-        kernel_core::arch::user_copy_in(bytes, self.0)
+        crate::arch::user_copy_in(bytes, self.0)
     }
 
     /// Copies the value in once.
@@ -66,7 +66,7 @@ impl<T: Plain> UserIn<T> {
         let bytes = unsafe {
             core::slice::from_raw_parts_mut(value.as_mut_ptr().cast::<u8>(), size_of::<T>())
         };
-        kernel_core::arch::user_copy_in(bytes, self.0)?;
+        crate::arch::user_copy_in(bytes, self.0)?;
         // SAFETY: every bit pattern is a valid T.
         Ok(unsafe { value.assume_init() })
     }
@@ -76,7 +76,7 @@ impl<T: Plain> UserIn<T> {
 impl UserIn<u8> {
     /// Copies `dst.len()` bytes in once.
     pub fn read_bytes(&self, dst: &mut [u8]) -> Result<(), Error> {
-        kernel_core::arch::user_copy_in(dst, self.0)
+        crate::arch::user_copy_in(dst, self.0)
     }
 
     /// The address `offset` bytes further on.
@@ -86,7 +86,7 @@ impl UserIn<u8> {
 }
 
 /// A user address the kernel writes a `T` or an array of them to.
-pub struct UserOut<T>(pub(crate) u64, PhantomData<T>);
+pub struct UserOut<T>(pub u64, PhantomData<T>);
 
 impl<T: Plain> UserOut<T> {
     pub fn new(addr: u64) -> Self {

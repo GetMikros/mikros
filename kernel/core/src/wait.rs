@@ -1,15 +1,15 @@
 //! Threads waiting for object signals.
 
+use crate::object::channel::{Endpoint, Message};
+use crate::object::handles::Handle;
+use crate::object::{Header, Object, signals};
 use crate::process::Process;
 use crate::sched::{self, Thread};
+use crate::status::Error;
+use crate::sync::SpinLock;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use kernel_core::object::channel::{Endpoint, Message};
-use kernel_core::object::handles::Handle;
-use kernel_core::object::{Header, Object, signals};
-use kernel_core::status::Error;
-use kernel_core::sync::SpinLock;
 
 /// A thread in `object_wait_one`.
 struct Waiter {
@@ -48,7 +48,7 @@ fn signals_changed(header: &Header, signals: u32) {
 
 /// Installs the signal hook.
 pub fn init() {
-    kernel_core::object::set_signal_hook(signals_changed);
+    crate::object::set_signal_hook(signals_changed);
 }
 
 /// Ends the waits through `handle` of `process`, which is leaving its
@@ -85,7 +85,7 @@ pub fn wait_one(
     let thread = sched::current().ok_or(Error::BadState)?;
     let header = object.header();
     let _charge = process.budget().hold_kernel(record_cost::<Waiter>())?;
-    let waiter = kernel_core::fallible::try_arc(Waiter {
+    let waiter = crate::fallible::try_arc(Waiter {
         koid: header.koid(),
         mask,
         thread: thread.clone(),
@@ -110,7 +110,7 @@ pub fn wait_one(
         if crate::signal::interrupted(&thread, process) || thread.leave_wait_to_suspend() {
             break Err(Error::Interrupted);
         }
-        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
+        if thread.state() == sched::DEAD || deadline <= crate::arch::monotonic_now() {
             break Err(Error::TimedOut);
         }
         if let Err(e) = sched::wait_for_signals(&thread, deadline) {
@@ -159,7 +159,7 @@ pub fn wait_call(
     let _charge = process
         .budget()
         .hold_kernel(record_cost::<Waiter>() + 2 * size_of::<Caller>() as u64)?;
-    let waiter = kernel_core::fallible::try_arc(Waiter {
+    let waiter = crate::fallible::try_arc(Waiter {
         koid: header.koid(),
         mask: signals::PEER_CLOSED,
         thread: thread.clone(),
@@ -193,10 +193,10 @@ pub fn wait_call(
             break Err(Error::Interrupted);
         }
         // The call stays outstanding while the thread is suspended.
-        if crate::syscall::stay_suspended(&thread) {
+        if crate::arch::thread_stay_suspended(&thread) {
             continue;
         }
-        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
+        if thread.state() == sched::DEAD || deadline <= crate::arch::monotonic_now() {
             break Err(Error::TimedOut);
         }
         if let Err(e) = sched::wait_for_signals(&thread, deadline) {
@@ -233,7 +233,7 @@ fn futex_key(process: &Process, addr: u64) -> Result<(u64, u64), Error> {
     process
         .aspace()
         .with_region(addr, |r| {
-            r.filter(|r| r.perms & kernel_core::regions::PERM_READ != 0)
+            r.filter(|r| r.perms & crate::regions::PERM_READ != 0)
                 .map(|r| (r.mem.header().koid(), r.offset + (addr - r.start)))
         })
         .ok_or(Error::InvalidArgs)
@@ -254,7 +254,7 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> 
         return Err(Error::BadState);
     }
     let _charge = process.budget().hold_kernel(record_cost::<FutexWaiter>())?;
-    let waiter = kernel_core::fallible::try_arc(FutexWaiter {
+    let waiter = crate::fallible::try_arc(FutexWaiter {
         key,
         thread: thread.clone(),
         woken: AtomicBool::new(false),
@@ -271,7 +271,7 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> 
         if crate::signal::interrupted(&thread, &process) || thread.leave_wait_to_suspend() {
             break Err(Error::Interrupted);
         }
-        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
+        if thread.state() == sched::DEAD || deadline <= crate::arch::monotonic_now() {
             break Err(Error::TimedOut);
         }
         if let Err(e) = sched::wait_for_signals(&thread, deadline) {

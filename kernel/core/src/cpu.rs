@@ -2,6 +2,8 @@
 //! interface's per-processor pointer.
 
 use crate::arch;
+use crate::sched::CpuSched;
+use crate::sync::SpinLock;
 use core::sync::atomic::{AtomicBool, AtomicUsize};
 #[cfg(feature = "fuzz")]
 use core::sync::atomic::{AtomicPtr, AtomicU64};
@@ -18,6 +20,8 @@ pub struct Cpu {
     /// Set when the running thread's slice has ended or a thread was
     /// queued that should run first.
     pub reschedule: AtomicBool,
+    /// The scheduler state of the processor.
+    pub(crate) sched: SpinLock<CpuSched>,
     /// In the fuzz build, the object ID of the running thread, or 0 while
     /// the processor idles, and its allocation failures, or null.
     #[cfg(feature = "fuzz")]
@@ -32,6 +36,7 @@ impl Cpu {
             locks_held: AtomicUsize::new(0),
             destroyed: AtomicUsize::new(0),
             reschedule: AtomicBool::new(false),
+            sched: SpinLock::new(CpuSched::new()),
             #[cfg(feature = "fuzz")]
             fuzz_running: AtomicU64::new(0),
             #[cfg(feature = "fuzz")]

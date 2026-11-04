@@ -1,12 +1,12 @@
 //! Installing the handles of received channel messages and publishing
 //! the messages to their prepared outputs.
 
+use crate::object::budget::Budget;
+use crate::object::channel::HANDLES_MAX;
+use crate::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
 use crate::publish::{Outputs, Page, Work};
+use crate::status::Error;
 use alloc::sync::Arc;
-use kernel_core::object::budget::Budget;
-use kernel_core::object::channel::HANDLES_MAX;
-use kernel_core::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
-use kernel_core::status::Error;
 
 /// Installs a received message's handles in `table`, charged to `budget`,
 /// keeping none unless all fit, and returns them.
@@ -61,9 +61,9 @@ pub fn deliver<P: Page, F: FnMut()>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kernel_core::object::channel::{Endpoint, Message};
-    use kernel_core::object::handles::SLOT_COST;
-    use kernel_core::object::rights;
+    use crate::object::channel::{Endpoint, Message};
+    use crate::object::handles::SLOT_COST;
+    use crate::object::rights;
     use std::sync::Arc;
 
     fn entries() -> Vec<Entry> {
@@ -88,7 +88,7 @@ mod tests {
     }
 
     const SIZE: usize = 0x30000;
-    const PAGE: u64 = kernel_core::object::memory::PAGE_SIZE;
+    const PAGE: u64 = crate::object::memory::PAGE_SIZE;
 
     struct UserPage(*mut u8);
 

@@ -3,7 +3,6 @@
 use crate::cpu::write_msr;
 use crate::gdt::{Gdt, Tss};
 use crate::page_tables::Pcids;
-use crate::sched::CpuSched;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::cell::UnsafeCell;
@@ -34,8 +33,6 @@ pub struct PerCpu {
     /// The depth of hardware interrupt handling, during which no
     /// coverage is collected.
     interrupts: AtomicU64,
-    /// The scheduler state of the processor.
-    pub sched: SpinLock<CpuSched>,
     /// The address spaces that have PCIDs on the processor.
     pub pcids: SpinLock<Pcids>,
     /// The top of the kernel stack of the thread that last ran, user or
@@ -78,7 +75,6 @@ pub(crate) static BOOT_CPU: PerCpu = PerCpu {
     cov_area: AtomicU64::new(0),
     cov_capacity: AtomicU64::new(0),
     interrupts: AtomicU64::new(0),
-    sched: SpinLock::new(CpuSched::new()),
     pcids: SpinLock::new(Pcids::new()),
     thread_stack: AtomicU64::new(0),
     breakpoints_loaded: AtomicBool::new(false),

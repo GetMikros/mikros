@@ -76,7 +76,7 @@ def needs_kernel(invoke):
         if boot is not None and boot != selected:
             boot.switch()
         try:
-            int(scalar(static("kernel::process::FIRST_PROCESS")))
+            int(scalar(static("kernel_core::process::FIRST_PROCESS")))
             return invoke(self, arg, from_tty)
         except gdb.MemoryError as e:
             raise gdb.GdbError(
@@ -128,7 +128,7 @@ def perms(bits):
 
 def processes():
     """Every process, newest first."""
-    pointer = scalar(static("kernel::process::FIRST_PROCESS"))
+    pointer = scalar(static("kernel_core::process::FIRST_PROCESS"))
     while int(pointer) != 0:
         process = pointer.dereference()
         yield process
@@ -167,7 +167,7 @@ def arch_thread(thread):
 def running_thread():
     """The address of the `ArcInner` of the thread running on the boot
     processor, or 0."""
-    sched = locked(static("kernel::percpu::BOOT_CPU")["sched"])
+    sched = locked(static("kernel_core::cpu::BOOT")["sched"])
     return word(int(sched["current"].address))
 
 
@@ -328,7 +328,7 @@ class Log(gdb.Command):
 
     @needs_kernel
     def invoke(self, arg, from_tty):
-        log = static("kernel::log::LOG")
+        log = static("kernel_core::log::kernel::LOG")
         slots = log["slots"]
         count = slots.type.strip_typedefs().range()[1] + 1
         wanted = count_argument(arg) if arg.strip() else count

@@ -4,6 +4,7 @@ use crate::page_tables::SpaceTables;
 use crate::thread_arch::ArchThread;
 use crate::{context, cpu, idt, percpu, serial, space, time, timer};
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::arch::asm;
 use core::sync::atomic::Ordering;
 use kernel_core::arch::Arch;
@@ -212,6 +213,10 @@ impl Arch for X86 {
         let mut open = percpu::this().open_ports.lock();
         let missing = count.saturating_sub(open.len());
         open.try_reserve(missing).is_ok()
+    }
+
+    fn thread_stay_suspended(thread: &Arc<kernel_core::sched::Thread>) -> bool {
+        crate::syscall::stay_suspended(thread)
     }
 
     fn user_thread_entry() -> u64 {

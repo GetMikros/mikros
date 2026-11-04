@@ -1,15 +1,15 @@
 //! Process signals: the signal state of processes and threads, and
 //! making signals pending.
 
+mod set;
+pub use set::*;
+
+use crate::object::budget::{Budget, Scratch};
 use crate::process::Process;
 use crate::sched::{self, Thread};
+use crate::status::Error;
 use alloc::sync::Arc;
-use kernel_core::object::budget::{Budget, Scratch};
-use kernel_core::signal::{
-    Action, CODE_EXCEPTION, CONT, Default as DefaultAction, HANDLER_DEFAULT, HANDLER_IGNORE, Info,
-    KILL, Pending, RESTART, SIG_MAX, UNBLOCKABLE, bit, default_action, discarded_by, for_exception,
-};
-use kernel_core::status::Error;
+use set::Default as DefaultAction;
 
 /// The signal state of a process. Its lock is taken before that of any
 /// of its threads' `ThreadSignals`.
@@ -20,7 +20,7 @@ pub struct ProcessSignals {
     pub queued: usize,
 }
 
-impl Default for ProcessSignals {
+impl core::default::Default for ProcessSignals {
     fn default() -> Self {
         ProcessSignals {
             actions: [Action::default(); SIG_MAX as usize],
@@ -152,7 +152,7 @@ pub fn sleep(deadline: i64) -> Result<(), Error> {
         if interrupted(&thread, &process) || thread.leave_wait_to_suspend() {
             return Err(Error::Interrupted);
         }
-        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
+        if thread.state() == sched::DEAD || deadline <= crate::arch::monotonic_now() {
             return Ok(());
         }
         sched::wait_for_signals(&thread, deadline)?;
@@ -180,7 +180,7 @@ pub fn wait_pending(mask: u64, deadline: i64) -> Result<(), Error> {
         if thread.leave_wait_to_suspend() {
             return Err(Error::Interrupted);
         }
-        if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
+        if thread.state() == sched::DEAD || deadline <= crate::arch::monotonic_now() {
             return Err(Error::TimedOut);
         }
         sched::wait_for_signals(&thread, deadline)?;

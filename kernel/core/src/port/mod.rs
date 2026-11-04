@@ -1,22 +1,22 @@
 //! Ports: queues of packets, filled by asynchronous waits on objects and
-//! by user space. `kernel_core::port` keeps the queues and the
+//! by user space. `queue` keeps the queues and the
 //! registrations of the waits; this adds the charges, the waiting threads
 //! and the watches of the objects waited on.
 
+mod queue;
+pub use queue::*;
+
+use crate::object::budget::{Budget, Held};
+use crate::object::handles::Handle;
+use crate::object::{Header, Object, ObjectType};
 use crate::process::Process;
 use crate::sched::{self, Thread};
+use crate::status::Error;
+use crate::sync::SpinLock;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
-use kernel_core::object::budget::{Budget, Held};
-use kernel_core::object::handles::Handle;
-use kernel_core::object::{Header, Object, ObjectType};
-use kernel_core::port::{
-    EDGE, Origin, Packet, Queue, Registration, Registrations, TIMELINE, Target, Wait,
-};
-pub use kernel_core::port::{PACKET_SIZE, packet};
-use kernel_core::status::Error;
-use kernel_core::sync::SpinLock;
+pub use queue::{PACKET_SIZE, packet};
 
 /// The kernel memory a registration is charged: itself and its packet.
 const REGISTRATION_COST: u64 =
@@ -55,7 +55,7 @@ impl Port {
     /// An empty port charged to `budget`.
     pub fn new(budget: &Arc<Budget>) -> Result<Arc<Port>, Error> {
         budget.charge_kernel(Self::COST)?;
-        kernel_core::fallible::try_arc(Port {
+        crate::fallible::try_arc(Port {
             header: Header::new(ObjectType::Port),
             budget: budget.clone(),
             state: SpinLock::new(State {
@@ -109,7 +109,7 @@ impl Port {
             if crate::signal::interrupted(&thread, &process) || thread.leave_wait_to_suspend() {
                 break Err(Error::Interrupted);
             }
-            if thread.state() == sched::DEAD || deadline <= kernel_core::arch::monotonic_now() {
+            if thread.state() == sched::DEAD || deadline <= crate::arch::monotonic_now() {
                 break Err(Error::TimedOut);
             }
             if let Err(e) = sched::wait_for_signals(&thread, deadline) {

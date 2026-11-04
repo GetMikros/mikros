@@ -1,26 +1,26 @@
 //! Anonymous memory objects: their frames and the copies to and from them.
 
+use crate::arch::CachePolicy as Policy;
 use crate::aspace::{self, Access, AddressSpace, Fault};
-use crate::memory::FRAMES;
+use crate::frames::FRAMES;
 use crate::port::Port;
 use crate::publish::{ITEM_STEP, Work};
-use kernel_core::arch::CachePolicy as Policy;
 
-use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use kernel_core::nodes::{self, Map};
-use kernel_core::object::budget::{Budget, Scratch};
-use kernel_core::object::memory::{
+use crate::nodes::{self, Map};
+use crate::object::budget::{Budget, Scratch};
+use crate::object::memory::{
     INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_CONTIGUOUS, KIND_PAGED, KIND_PHYSICAL, KIND_PINNED,
     PAGE_ENTRY_COST, PAGE_SIZE, Pages, RESIZABLE, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE,
     SEALS, TRACK_DIRTY,
 };
-use kernel_core::object::{Header, Object, ObjectType};
-use kernel_core::paging::{Absent, Paging};
-use kernel_core::regions::{PERM_EXECUTE, PERM_WRITE, RECORD_ROOM, Record};
-use kernel_core::status::Error;
-use kernel_core::sync::SpinLock;
+use crate::object::{Header, Object, ObjectType};
+use crate::paging::{Absent, Paging};
+use crate::regions::{PERM_EXECUTE, PERM_WRITE, RECORD_ROOM, Record};
+use crate::status::Error;
+use crate::sync::SpinLock;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// The largest memory object: the size of the user address range.
 fn max_size() -> u64 {
@@ -117,7 +117,7 @@ const PAGER_READ: u32 = 1;
 unsafe fn frame_bytes<'a>(phys: u64) -> &'a mut [u8; PAGE_SIZE as usize] {
     // SAFETY: the direct map covers every frame, and the caller rules out
     // other references.
-    unsafe { &mut *(kernel_core::arch::frame_address(phys) as *mut [u8; PAGE_SIZE as usize]) }
+    unsafe { &mut *(crate::arch::frame_address(phys) as *mut [u8; PAGE_SIZE as usize]) }
 }
 
 /// The frame that pages of anonymous objects read before they are
@@ -128,7 +128,7 @@ static ZERO_FRAME: SpinLock<Option<u64>> = SpinLock::new(None);
 fn zero_frame() -> Option<u64> {
     let mut zero = ZERO_FRAME.lock();
     if zero.is_none() {
-        let phys = crate::memory::alloc_frame()?;
+        let phys = crate::frames::alloc_frame()?;
         // SAFETY: the frame was just allocated, so nothing references it.
         unsafe { frame_bytes(phys) }.fill(0);
         *zero = Some(phys);
@@ -163,7 +163,7 @@ impl MemoryObject {
             None => 0,
         };
         // The object releases the charge when it goes, also on failure.
-        kernel_core::fallible::try_arc(MemoryObject {
+        crate::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
             budget: budget.cloned(),
             charged,
@@ -199,7 +199,7 @@ impl MemoryObject {
         let charged = (size_of::<MemoryObject>() + 2 * size_of::<Weak<MemoryObject>>()) as u64;
         budget.charge_kernel(charged)?;
         // The object releases the charge when it goes, also on failure.
-        kernel_core::fallible::try_arc(MemoryObject {
+        crate::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
             budget: Some(budget.clone()),
             charged,
@@ -344,7 +344,7 @@ impl MemoryObject {
     /// nothing prepared before can still read or write them.
     fn wait_unpinned(&self) {
         while self.pages.lock().pinned() {
-            let _ = crate::sched::sleep_until(kernel_core::arch::monotonic_now() + 1_000_000);
+            let _ = crate::sched::sleep_until(crate::arch::monotonic_now() + 1_000_000);
         }
     }
 
@@ -352,7 +352,7 @@ impl MemoryObject {
     /// or into it.
     fn wait_supplies(&self) {
         while self.supplies.load(Ordering::Relaxed) > 0 {
-            let _ = crate::sched::sleep_until(kernel_core::arch::monotonic_now() + 1_000_000);
+            let _ = crate::sched::sleep_until(crate::arch::monotonic_now() + 1_000_000);
         }
     }
 
@@ -673,7 +673,7 @@ impl MemoryObject {
             None => 0,
         };
         // The object releases the charge when it goes, also on failure.
-        kernel_core::fallible::try_arc(MemoryObject {
+        crate::fallible::try_arc(MemoryObject {
             header: Header::new(ObjectType::MemoryObject),
             budget: budget.cloned(),
             charged,
@@ -704,7 +704,7 @@ impl MemoryObject {
         Self::new_fixed(budget, size, |object| {
             object.charge(count)?;
             let align = 1 << (align_log2 - PAGE_SIZE.trailing_zeros());
-            let Some(first) = crate::memory::alloc_contiguous(count, align, limit) else {
+            let Some(first) = crate::frames::alloc_contiguous(count, align, limit) else {
                 object.release(count);
                 return Err(Error::NoMemory);
             };
@@ -1172,13 +1172,13 @@ impl MemoryObject {
     /// written.
     fn hold_page(
         self: &Arc<Self>,
-        mut pages: kernel_core::sync::Guard<'_, Pages>,
+        mut pages: crate::sync::Guard<'_, Pages>,
         index: u64,
         write: bool,
     ) -> Result<Option<Held>, Error> {
         if let Some((base, policy)) = self.physical {
             drop(pages);
-            let virt = kernel_core::arch::physical_page_map(base + index * PAGE_SIZE, policy)
+            let virt = crate::arch::physical_page_map(base + index * PAGE_SIZE, policy)
                 .ok_or(Error::NoMemory)?;
             return Ok(Some(Held {
                 mem: self.clone(),
@@ -1385,7 +1385,7 @@ impl MemoryObject {
                 return Err(e);
             }
         }
-        let Some(phys) = crate::memory::alloc_frame() else {
+        let Some(phys) = crate::frames::alloc_frame() else {
             self.release(1);
             return Err(Error::NoMemory);
         };
@@ -1704,7 +1704,7 @@ impl Held {
             Some(Backing::Frame(_)) => self.mem.unpin(work),
             // SAFETY: the mapping came from `physical_page_map`, and the hold
             // that used it is gone.
-            Some(Backing::Mapped(virt)) => unsafe { kernel_core::arch::physical_page_unmap(virt) },
+            Some(Backing::Mapped(virt)) => unsafe { crate::arch::physical_page_unmap(virt) },
             None => {}
         }
     }
@@ -1713,7 +1713,7 @@ impl Held {
 impl crate::publish::Page for Held {
     fn base(&self) -> *mut u8 {
         match self.backing {
-            Some(Backing::Frame(phys)) => kernel_core::arch::frame_address(phys) as *mut u8,
+            Some(Backing::Frame(phys)) => crate::arch::frame_address(phys) as *mut u8,
             Some(Backing::Mapped(virt)) => virt as *mut u8,
             None => unreachable!("a released page is never written"),
         }
@@ -1764,7 +1764,7 @@ impl Source {
             // direct map covers it. Writers may change it meanwhile, which
             // only changes the bytes read.
             Some(phys) => unsafe {
-                let from = (kernel_core::arch::frame_address(phys) as *const u8).add(inside);
+                let from = (crate::arch::frame_address(phys) as *const u8).add(inside);
                 core::ptr::copy_nonoverlapping(from, buf.as_mut_ptr(), buf.len());
             },
             None => buf.fill(0),
@@ -1807,7 +1807,7 @@ impl Source {
             if let Some(budget) = budget {
                 budget.charge_kernel(PAGE_SIZE)?;
             }
-            let Some(copy) = crate::memory::alloc_frame() else {
+            let Some(copy) = crate::frames::alloc_frame() else {
                 if let Some(budget) = budget {
                     budget.release_kernel(PAGE_SIZE);
                 }
@@ -1818,8 +1818,8 @@ impl Source {
             // nothing writes to either while no output is written yet.
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    kernel_core::arch::frame_address(phys) as *const u8,
-                    kernel_core::arch::frame_address(copy) as *mut u8,
+                    crate::arch::frame_address(phys) as *const u8,
+                    crate::arch::frame_address(copy) as *mut u8,
                     PAGE_SIZE as usize,
                 );
             }
@@ -1888,7 +1888,7 @@ impl Mapping {
         space: Weak<AddressSpace>,
         writable: bool,
     ) -> Result<Mapping, Error> {
-        let entry = kernel_core::fallible::try_box(Entry {
+        let entry = crate::fallible::try_box(Entry {
             mem: mem.clone(),
             key,
             writable,

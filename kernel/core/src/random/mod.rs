@@ -1,12 +1,14 @@
 //! The kernel random number generator, seeded from the firmware and the
 //! processor's random source, or else from timer measurements.
 
+mod rng;
+pub use rng::*;
+
+use crate::deadline::INFINITE;
 use crate::log::log;
+use crate::sync::SpinLock;
 use boot_protocol::BootInfo;
 use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use kernel_core::deadline::INFINITE;
-use kernel_core::random::{Error, RESEED_INTERVAL, RESEED_RETRY, Rng};
-use kernel_core::sync::SpinLock;
 
 static RNG: SpinLock<Rng> = SpinLock::new(Rng::new());
 
@@ -22,7 +24,7 @@ static LAST_RESEED: AtomicI64 = AtomicI64::new(0);
 /// generator. Returns whether any hardware source gave output.
 fn reseed_with(extra: &[u8]) -> bool {
     let mut seed = [0u8; SEED_SIZE];
-    let len = kernel_core::arch::random_seed(&mut seed);
+    let len = crate::arch::random_seed(&mut seed);
     RNG.lock().reseed(&[extra, &seed[..len]]);
     seed.fill(0);
     len > 0
@@ -57,7 +59,7 @@ pub fn reseed_due() -> i64 {
 /// output.
 pub fn reseed(now: i64) -> i64 {
     if reseed_with(&[]) {
-        LAST_RESEED.store(kernel_core::arch::monotonic_now(), Ordering::Relaxed);
+        LAST_RESEED.store(crate::arch::monotonic_now(), Ordering::Relaxed);
         reseed_due()
     } else {
         now.saturating_add(intervals().1)
@@ -76,21 +78,18 @@ pub fn init(info: &BootInfo) {
     let firmware = info.firmware_seed();
     let seed: &[u8] = firmware.map_or(&[], |s| s.as_slice());
     let hardware = reseed_with(seed);
-    HARDWARE.store(
-        kernel_core::arch::random_source_present(),
-        Ordering::Relaxed,
-    );
-    LAST_RESEED.store(kernel_core::arch::monotonic_now(), Ordering::Relaxed);
+    HARDWARE.store(crate::arch::random_source_present(), Ordering::Relaxed);
+    LAST_RESEED.store(crate::arch::monotonic_now(), Ordering::Relaxed);
     if firmware.is_none() && !hardware {
         // Cycle counts across short busy loops, whose timing varies with
         // caches, interrupts and the memory system.
         let mut samples = [0u8; 2048];
         for byte in samples.iter_mut() {
-            let start = kernel_core::arch::cycle_counter();
+            let start = crate::arch::cycle_counter();
             for i in 0..64u32 {
                 core::hint::black_box(i);
             }
-            *byte = (kernel_core::arch::cycle_counter() - start) as u8;
+            *byte = (crate::arch::cycle_counter() - start) as u8;
         }
         RNG.lock().reseed(&[&samples]);
         log!(

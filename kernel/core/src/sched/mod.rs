@@ -5,16 +5,17 @@
 //! is never touched from an interrupt that arrives in the middle of a
 //! change to it.
 
-use crate::percpu;
+mod fair;
+pub use fair::*;
+
+use crate::arch::ThreadData;
+use crate::deadline::{Deadlines, INFINITE};
+use crate::object::{Header, Name, Object, ObjectType, signals};
 use crate::process::Process;
+use crate::status::Error;
+use crate::sync::SpinLock;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use kernel_core::arch::ThreadData;
-use kernel_core::deadline::{Deadlines, INFINITE};
-use kernel_core::object::{Header, Name, Object, ObjectType, signals};
-use kernel_core::sched::{DEFAULT_PRIORITY, Entity, Fair};
-use kernel_core::status::Error;
-use kernel_core::sync::SpinLock;
 
 /// The size of a kernel thread's stack.
 pub const KERNEL_STACK_SIZE: u64 = 32 << 10;
@@ -93,18 +94,17 @@ impl Thread {
         charged: u64,
     ) -> Result<Arc<Thread>, Error> {
         let arch = ThreadData::new().ok_or(Error::NoMemory)?;
-        let stack =
-            kernel_core::arch::kernel_pages_alloc(KERNEL_STACK_SIZE).ok_or(Error::NoMemory)?;
+        let stack = crate::arch::kernel_pages_alloc(KERNEL_STACK_SIZE).ok_or(Error::NoMemory)?;
         // Every thread that can run has room in the run queue from when
         // it was created.
         if this_cpu().lock().fair.try_reserve(1).is_err() {
             // SAFETY: the stack was allocated above and nothing uses it.
-            unsafe { kernel_core::arch::kernel_pages_free(stack, KERNEL_STACK_SIZE) };
+            unsafe { crate::arch::kernel_pages_free(stack, KERNEL_STACK_SIZE) };
             return Err(Error::NoMemory);
         }
         // The thread frees its stack and charge when it goes, also on
         // failure.
-        kernel_core::fallible::try_arc(Thread {
+        crate::fallible::try_arc(Thread {
             header: Header::new(ObjectType::Thread),
             name,
             process,
@@ -145,7 +145,7 @@ impl Thread {
                 + Deadlines::<Queued>::ENTRY_SIZE;
             let size = size_of::<Thread>() as u64
                 + KERNEL_STACK_SIZE
-                + kernel_core::arch::extended_state_layout().0 as u64
+                + crate::arch::extended_state_layout().0 as u64
                 + 2 * entries as u64;
             process.budget().charge_kernel(size)?;
             size
@@ -185,7 +185,7 @@ impl Thread {
         // or reads its saved pointer.
         unsafe {
             *thread.arch.saved_context() =
-                kernel_core::arch::context_prepare(top, kernel_core::arch::user_thread_entry(), 0)
+                crate::arch::context_prepare(top, crate::arch::user_thread_entry(), 0)
         };
         thread.state.store(RUNNABLE, Ordering::Release);
         let mut cpu = this_cpu().lock();
@@ -429,6 +429,12 @@ pub struct CpuSched {
 // state is used only by its own processor.
 unsafe impl Send for CpuSched {}
 
+impl Default for CpuSched {
+    fn default() -> CpuSched {
+        CpuSched::new()
+    }
+}
+
 impl CpuSched {
     pub const fn new() -> CpuSched {
         CpuSched {
@@ -455,14 +461,14 @@ impl CpuSched {
 }
 
 fn this_cpu() -> &'static SpinLock<CpuSched> {
-    &percpu::this().sched
+    &crate::cpu::this().sched
 }
 
 /// Set when the thread running on this processor is to give way: by the
 /// timer interrupt when its slice has ended, and when a thread is queued
 /// that the queue would pick before it.
 fn reschedule() -> &'static AtomicBool {
-    &kernel_core::cpu::this().reschedule
+    &crate::cpu::this().reschedule
 }
 
 /// Creates a kernel thread that runs `entry(arg)` and queues it.
@@ -474,7 +480,7 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
     // is not queued yet, so nothing reads its saved pointer.
     unsafe {
         *thread.arch.saved_context() =
-            kernel_core::arch::context_prepare(top, entry as usize as u64, arg as u64)
+            crate::arch::context_prepare(top, entry as usize as u64, arg as u64)
     };
     let mut cpu = this_cpu().lock();
     let entity = *thread.entity.lock();
@@ -489,7 +495,7 @@ fn free_stack(thread: &Thread) {
     if top != 0 {
         // SAFETY: the caller guarantees nothing runs on the stack, and the
         // swap gives it to one caller only.
-        unsafe { kernel_core::arch::kernel_pages_free(top - KERNEL_STACK_SIZE, KERNEL_STACK_SIZE) };
+        unsafe { crate::arch::kernel_pages_free(top - KERNEL_STACK_SIZE, KERNEL_STACK_SIZE) };
     }
 }
 
@@ -506,10 +512,10 @@ fn finish_switch() {
 /// is not queued and nothing wakes it.
 fn schedule(requeue: bool) {
     debug_assert!(
-        !kernel_core::arch::handling_interrupt(),
+        !crate::arch::handling_interrupt(),
         "scheduling while handling an interrupt"
     );
-    let now = kernel_core::arch::monotonic_now();
+    let now = crate::arch::monotonic_now();
     let mut cpu = this_cpu().lock();
     let Some(current) = cpu.current.take() else {
         return;
@@ -570,7 +576,7 @@ fn schedule(requeue: bool) {
     drop(current);
     // SAFETY: `load` is a thread's saved stack or the idle loop's, and
     // `save` belongs to a thread that the scheduler still references.
-    unsafe { kernel_core::arch::context_switch(save, load) };
+    unsafe { crate::arch::context_switch(save, load) };
     finish_switch();
 }
 
@@ -602,16 +608,16 @@ fn arm(cpu: &CpuSched) {
         .chain([cpu.clock_due, cpu.reseed_due])
         .fold(slice_end, i64::min);
     if at == INFINITE {
-        kernel_core::arch::timer_disarm();
+        crate::arch::timer_disarm();
     } else {
-        kernel_core::arch::timer_arm(at);
+        crate::arch::timer_arm(at);
     }
 }
 
 /// Blocks the running thread until the monotonic clock reaches
 /// `deadline`. Returns at once when it already has.
 pub fn sleep_until(deadline: i64) -> Result<(), Error> {
-    if deadline <= kernel_core::arch::monotonic_now() {
+    if deadline <= crate::arch::monotonic_now() {
         return Ok(());
     }
     {
@@ -669,17 +675,17 @@ pub fn yield_now() {
 /// thread's slice has ended. No lock may be held.
 pub fn preempt_point() {
     debug_assert!(
-        !kernel_core::arch::handling_interrupt(),
+        !crate::arch::handling_interrupt(),
         "a preemption point while handling an interrupt"
     );
     debug_assert!(
-        kernel_core::sync::none_held(),
+        crate::sync::none_held(),
         "a preemption point with a lock held"
     );
     // SAFETY: enabling interrupts lets the processor take pending ones;
     // no lock is held here, and they are disabled again at once.
-    unsafe { kernel_core::arch::interrupts_restore(true) };
-    kernel_core::arch::interrupts_disable();
+    unsafe { crate::arch::interrupts_restore(true) };
+    crate::arch::interrupts_disable();
     if reschedule().swap(false, Ordering::Relaxed) {
         schedule(true);
     }
@@ -689,7 +695,7 @@ pub fn preempt_point() {
 /// exception is being handled, for work that may run either way, such as
 /// destroying an object.
 pub fn preempt_point_if_unlocked() {
-    if kernel_core::sync::none_held() && !kernel_core::arch::handling_interrupt() {
+    if crate::sync::none_held() && !crate::arch::handling_interrupt() {
         preempt_point();
     }
 }
@@ -843,7 +849,7 @@ pub fn resume_exception(thread: &Arc<Thread>, why: u32) -> bool {
 pub fn exit_if_dead() {
     // Endpoints that the call or interrupt left reachable only through
     // queued messages are destroyed before it returns.
-    kernel_core::object::channel::collect_if_needed();
+    crate::object::channel::collect_if_needed();
     if current().is_some_and(|t| t.state() == DEAD) {
         exit();
     }
@@ -868,7 +874,7 @@ pub const INFO_THREAD_SIZE: usize = 0x18;
 pub fn running_slice(matches: impl Fn(&Thread) -> bool) -> i64 {
     let cpu = this_cpu().lock();
     match &cpu.current {
-        Some(t) if matches(t) => kernel_core::arch::monotonic_now() - cpu.slice_start,
+        Some(t) if matches(t) => crate::arch::monotonic_now() - cpu.slice_start,
         _ => 0,
     }
 }
@@ -891,10 +897,10 @@ pub fn preempt_user() {
 /// random number generator are set up. The timer serves them whether or
 /// not any thread runs.
 pub fn start_maintenance() {
-    let now = kernel_core::arch::monotonic_now();
+    let now = crate::arch::monotonic_now();
     let mut cpu = this_cpu().lock();
     cpu.clock_due =
-        kernel_core::arch::clock_maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
+        crate::arch::clock_maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
     cpu.reseed_due = crate::random::reseed_due();
     arm(&cpu);
 }
@@ -907,11 +913,11 @@ fn maintain(now: i64) {
         (now >= cpu.clock_due, now >= cpu.reseed_due)
     };
     if clock {
-        kernel_core::arch::clock_maintain();
+        crate::arch::clock_maintain();
         #[cfg(feature = "fuzz")]
         crate::fuzz::served(crate::fuzz::CLOCK, now);
-        let next = kernel_core::arch::clock_maintenance_interval()
-            .map_or(INFINITE, |i| now.saturating_add(i));
+        let next =
+            crate::arch::clock_maintenance_interval().map_or(INFINITE, |i| now.saturating_add(i));
         this_cpu().lock().clock_due = next;
     }
     if reseed {
@@ -926,7 +932,7 @@ fn maintain(now: i64) {
 /// sleepers whose deadline has passed, and marks a reschedule when the
 /// running thread's slice has ended.
 pub fn timer_interrupt() {
-    let now = kernel_core::arch::monotonic_now();
+    let now = crate::arch::monotonic_now();
     maintain(now);
     let mut cpu = this_cpu().lock();
     while let Some(sleeper) = cpu.sleepers.pop_expired(now) {
@@ -964,7 +970,7 @@ pub fn timer_interrupt() {
 pub fn set_priority(thread: &Arc<Thread>, priority: u32) {
     let mut cpu = this_cpu().lock();
     thread.priority.store(priority, Ordering::Relaxed);
-    let weight = kernel_core::sched::weight(priority);
+    let weight = fair::weight(priority);
     let queued = cpu.fair.reweigh(Queued(Arc::as_ptr(thread)), weight);
     let running = cpu.current.as_ref().is_some_and(|c| Arc::ptr_eq(c, thread));
     if !queued && running {
@@ -999,7 +1005,7 @@ pub fn run() -> ! {
         // wrote, may wake threads, so it comes before the queue is
         // looked at.
         crate::log::notify_pending();
-        let now = kernel_core::arch::monotonic_now();
+        let now = crate::arch::monotonic_now();
         let mut cpu = this_cpu().lock();
         match cpu.fair.pick() {
             Some((next, entity)) => {
@@ -1013,15 +1019,15 @@ pub fn run() -> ! {
                 drop(cpu);
                 // SAFETY: the idle loop's stack stays mapped, and the
                 // per-CPU state that holds its pointer is static.
-                unsafe { kernel_core::arch::context_switch(save, rsp) };
+                unsafe { crate::arch::context_switch(save, rsp) };
                 finish_switch();
             }
             // A collection left needed runs before the processor idles;
             // what it destroys may wake threads, so the queue is looked
             // at again after it.
-            None if kernel_core::object::channel::collection_pending() => {
+            None if crate::object::channel::collection_pending() => {
                 drop(cpu);
-                kernel_core::object::channel::collect_if_needed();
+                crate::object::channel::collect_if_needed();
             }
             None => {
                 arm(&cpu);
@@ -1036,5 +1042,5 @@ pub fn run() -> ! {
 /// of its own so that the fuzz build's coverage test can find its code.
 #[inline(never)]
 fn halt_until_interrupt() {
-    kernel_core::arch::wait_for_interrupt();
+    crate::arch::wait_for_interrupt();
 }

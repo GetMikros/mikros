@@ -1,24 +1,24 @@
 //! User address spaces: the regions that say what they may map, and
 //! their page tables.
 
-use crate::memory::FRAMES;
+use crate::arch::{PageError, PageTable};
+use crate::frames::FRAMES;
 use crate::memory_object::{Mapping, MemoryObject};
+use crate::object::budget::{Budget, Scratch};
 use crate::publish::ITEM_STEP;
+use crate::regions::{
+    Charge, MapOptions, PAGE_SIZE, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions, Removal,
+};
+use crate::status::Error;
+use crate::sync::SpinLock;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicU64, Ordering};
-use kernel_core::arch::{PageError, PageTable};
-use kernel_core::object::budget::{Budget, Scratch};
-use kernel_core::regions::{
-    Charge, MapOptions, PAGE_SIZE, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions, Removal,
-};
-use kernel_core::status::Error;
-use kernel_core::sync::SpinLock;
 
 /// The user address range, from its lowest address to the one past it.
 pub fn user_range() -> (u64, u64) {
-    kernel_core::arch::user_range()
+    crate::arch::user_range()
 }
 /// The end of the range `BELOW_4G` mappings are placed in.
 const END_4G: u64 = 0x1_0000_0000;
@@ -30,7 +30,7 @@ pub fn in_user_range(addr: u64, len: u64) -> bool {
 }
 
 /// How a user page is mapped. Every mapping is readable.
-pub type Access = kernel_core::arch::PageFlags;
+pub type Access = crate::arch::PageFlags;
 
 struct Inner {
     /// Freed when the space is dropped.
@@ -89,7 +89,7 @@ impl Charged<'_> {
             self.refused = true;
             return None;
         }
-        let frame = crate::memory::alloc_frame();
+        let frame = crate::frames::alloc_frame();
         match frame {
             Some(_) => self.count += 1,
             None => {

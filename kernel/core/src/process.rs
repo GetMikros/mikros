@@ -1,17 +1,17 @@
 //! Processes: an address space, a handle table and threads.
 
 use crate::aspace::AddressSpace;
+use crate::exception::DEBUG_EVENTS;
+use crate::object::budget::{Budget, Held, Scratch};
+use crate::object::channel::{Endpoint, PeerObserver};
+use crate::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
+use crate::object::{Header, Name, Object, ObjectType, signals};
 use crate::sched::{self, Thread};
+use crate::status::Error;
+use crate::sync::SpinLock;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering};
-use kernel_core::exception::DEBUG_EVENTS;
-use kernel_core::object::budget::{Budget, Held, Scratch};
-use kernel_core::object::channel::{Endpoint, PeerObserver};
-use kernel_core::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
-use kernel_core::object::{Header, Name, Object, ObjectType, signals};
-use kernel_core::status::Error;
-use kernel_core::sync::SpinLock;
 
 pub const NEW: u32 = 0;
 pub const RUNNING: u32 = 1;
@@ -154,7 +154,7 @@ const IOPORT_COST: u64 = 2 * (size_of::<(u64, u64)>() + size_of::<Held>()) as u6
 /// switched in.
 pub fn switch_ports(process: Option<&Process>) {
     let ports = process.map(|p| p.ioports.lock());
-    kernel_core::arch::io_ports_switch(ports.as_deref().map_or(&[], |p| p.ranges.as_slice()));
+    crate::arch::io_ports_switch(ports.as_deref().map_or(&[], |p| p.ranges.as_slice()));
 }
 
 /// The endpoint of a process's exception channel that the kernel keeps.
@@ -182,7 +182,7 @@ impl Process {
                 return Err(e);
             }
         };
-        let aspace = match kernel_core::fallible::try_arc(aspace) {
+        let aspace = match crate::fallible::try_arc(aspace) {
             Ok(aspace) => aspace,
             Err(e) => {
                 budget.release_kernel(charged);
@@ -191,7 +191,7 @@ impl Process {
         };
         budget.add_process();
         // The process undoes both when it goes, also on failure.
-        kernel_core::fallible::try_arc(Process {
+        crate::fallible::try_arc(Process {
             header: Header::new(ObjectType::Process),
             name,
             budget: budget.clone(),
@@ -217,7 +217,6 @@ impl Process {
         .inspect(register)
     }
 
-    #[expect(dead_code, reason = "no call reads process names yet")]
     pub fn name(&self) -> &Name {
         &self.name
     }
@@ -232,7 +231,7 @@ impl Process {
         let mut ports = self.ioports.lock();
         ports.ranges.try_reserve(1).map_err(|_| Error::NoMemory)?;
         ports.charges.try_reserve(1).map_err(|_| Error::NoMemory)?;
-        if !kernel_core::arch::io_ports_reserve(ports.ranges.len() + 1) {
+        if !crate::arch::io_ports_reserve(ports.ranges.len() + 1) {
             return Err(Error::NoMemory);
         }
         ports.ranges.push((start, end));
@@ -389,7 +388,7 @@ impl Process {
         let _ = self
             .term_signal
             .compare_exchange(0, signo, Ordering::AcqRel, Ordering::Acquire);
-        self.terminate(kernel_core::signal::EXIT_CODE);
+        self.terminate(crate::signal::EXIT_CODE);
     }
 
     /// Stops a running process: its threads wait at their next return to

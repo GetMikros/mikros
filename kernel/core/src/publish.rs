@@ -6,11 +6,11 @@
 //! the outputs are released. Writing them then cannot fail, and needs no
 //! lock, so it can stop at reschedule checks.
 
+use crate::object::budget::Budget;
+use crate::object::memory::PAGE_SIZE;
+use crate::status::Error;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use kernel_core::object::budget::Budget;
-use kernel_core::object::memory::PAGE_SIZE;
-use kernel_core::status::Error;
 
 /// The most bytes copied between two checks.
 pub const COPY_STEP: usize = 64 * 1024;
@@ -65,7 +65,6 @@ pub trait Page: Sized {
 
     /// The frame that holds the page's bytes, when it is one that a
     /// memory object's reader might also hold.
-    #[cfg_attr(test, expect(dead_code, reason = "only kernel system calls use it"))]
     fn frame(&self) -> Option<u64> {
         None
     }
@@ -172,7 +171,6 @@ impl<P: Page> Outputs<P> {
     }
 
     /// The frames of the held pages that `Page::frame` names.
-    #[cfg_attr(test, expect(dead_code, reason = "only kernel system calls use it"))]
     pub fn frames(&self) -> impl Iterator<Item = u64> + '_ {
         self.pages.iter().filter_map(Page::frame)
     }

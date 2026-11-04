@@ -2,15 +2,15 @@
 //! threads waiting for those pages.
 
 use crate::memory_object::MemoryObject;
+use crate::nodes::{self, Map};
+use crate::object::budget::{Budget, Held};
+use crate::object::{Header, Object, ObjectType};
 use crate::publish::ITEM_STEP;
 use crate::sched::{self, Thread};
+use crate::status::Error;
+use crate::sync::SpinLock;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use kernel_core::nodes::{self, Map};
-use kernel_core::object::budget::{Budget, Held};
-use kernel_core::object::{Header, Object, ObjectType};
-use kernel_core::status::Error;
-use kernel_core::sync::SpinLock;
 
 pub struct Pager {
     header: Header,
@@ -32,7 +32,7 @@ impl Pager {
     /// A pager charged to `budget`.
     pub fn new(budget: &Arc<Budget>) -> Result<Arc<Pager>, Error> {
         budget.charge_kernel(Self::COST)?;
-        kernel_core::fallible::try_arc(Pager {
+        crate::fallible::try_arc(Pager {
             header: Header::new(ObjectType::Pager),
             budget: budget.clone(),
             objects: SpinLock::new(Objects::default()),

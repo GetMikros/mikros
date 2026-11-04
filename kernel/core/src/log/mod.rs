@@ -1,6 +1,9 @@
 //! The kernel log: a ring buffer of fixed-size records that writers never
 //! wait on, and the text lines records are written out as.
 
+mod kernel;
+pub use kernel::*;
+
 use crate::sync::SpinLock;
 use alloc::vec::Vec;
 use core::fmt::{self, Write};

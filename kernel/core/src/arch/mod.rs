@@ -286,6 +286,11 @@ interface! {
     /// keeps, on every processor. Returns false when memory runs out.
     [] fn io_ports_reserve(count: usize) -> bool;
 
+    /// Keeps the running `thread`, which waits in a system call, suspended
+    /// while it is to be suspended, with the registers it entered the call
+    /// with available to the debugger. Returns whether it was suspended.
+    [] fn thread_stay_suspended(thread: &::alloc::sync::Arc<::kernel_core::sched::Thread>) -> bool;
+
     /// The address of the function a new user thread starts with on its
     /// kernel stack, for `context_prepare`. It enters user mode where
     /// `thread_set_user_start` said.

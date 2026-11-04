@@ -1,13 +1,13 @@
 //! Coverage collection for the fuzz build, in the format of Linux's kcov
 //! `KCOV_TRACE_PC` mode: a `u64` count followed by the addresses. The hook
 //! that writes them is architecture code, reached through
-//! `kernel_core::arch::coverage_point`.
+//! `crate::arch::coverage_point`.
 
 use crate::memory_object::MemoryObject;
+use crate::object::memory::PAGE_SIZE;
 use crate::sched::Thread;
+use crate::status::Error;
 use alloc::sync::Arc;
-use kernel_core::object::memory::PAGE_SIZE;
-use kernel_core::status::Error;
 
 /// A thread's coverage buffer: an anonymous memory object whose frames
 /// are pinned and mapped into kernel space for as long as this lives.
@@ -26,7 +26,7 @@ impl Buffer {
     fn new(mem: Arc<MemoryObject>) -> Result<Buffer, Error> {
         let (frames, size) = mem.pin_all()?;
         let len = frames.len() as u64 * PAGE_SIZE;
-        let Some(area) = kernel_core::arch::kernel_frames_map(&frames) else {
+        let Some(area) = crate::arch::kernel_frames_map(&frames) else {
             mem.unpin_all();
             return Err(Error::NoMemory);
         };
@@ -44,7 +44,7 @@ impl Drop for Buffer {
         if self.len != 0 {
             // SAFETY: the mapping came from `kernel_frames_map` in `new`,
             // and the hook no longer points at it once the buffer is gone.
-            unsafe { kernel_core::arch::kernel_frames_unmap(self.area, self.len) };
+            unsafe { crate::arch::kernel_frames_unmap(self.area, self.len) };
         }
         self.mem.unpin_all();
     }
@@ -57,12 +57,12 @@ pub fn switch_in(thread: &Thread) {
         Some(b) if b.capacity != 0 => (b.area, b.capacity),
         _ => (0, 0),
     };
-    kernel_core::arch::coverage_point(area, capacity);
+    crate::arch::coverage_point(area, capacity);
 }
 
 /// Points the hook at no buffer, as the processor is about to idle.
 pub fn idle() {
-    kernel_core::arch::coverage_point(0, 0);
+    crate::arch::coverage_point(0, 0);
 }
 
 /// Starts collecting coverage for `thread`, the running thread, into
@@ -79,7 +79,7 @@ pub fn enable(thread: &Thread, mem: Arc<MemoryObject>) -> Result<(), Error> {
 
 /// Stops collecting coverage for `thread`, the running thread.
 pub fn disable(thread: &Thread) {
-    kernel_core::arch::coverage_point(0, 0);
+    crate::arch::coverage_point(0, 0);
     let buffer = thread.coverage().lock().take();
     drop(buffer);
 }
