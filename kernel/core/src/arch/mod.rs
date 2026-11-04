@@ -157,6 +157,27 @@ interface! {
     /// Stops this processor's timer.
     [] fn timer_disarm();
 
+    /// Writes the log line `line`, which ends in a line feed, to the boot
+    /// framebuffer's console, if there is one and it was not released.
+    [] fn console_write(line: &[u8]);
+
+    /// The kernel address at which the RAM frame at `phys` can be read and
+    /// written.
+    [] fn frame_address(phys: u64) -> u64;
+
+    /// Maps the page of physical memory at `phys` writable with `policy`
+    /// into kernel space and returns its address, or `None` when address
+    /// space or page tables run out.
+    [] fn physical_page_map(phys: u64, policy: ::kernel_core::arch::CachePolicy) -> Option<u64>;
+
+    /// Removes a mapping from `physical_page_map`.
+    ///
+    /// # Safety
+    ///
+    /// `virt` must come from `physical_page_map`, and nothing may use the
+    /// mapping any more.
+    [unsafe] fn physical_page_unmap(virt: u64);
+
     /// Allocates `size` bytes of kernel memory, a multiple of the page
     /// size, mapped writable with an unmapped page below it, and returns
     /// its start, or `None` when memory runs out.
@@ -242,6 +263,10 @@ interface! {
     /// granted them is switched in. The architecture keeps room for them
     /// from `io_ports_reserve`, so this does not allocate.
     [] fn io_ports_switch(ranges: &[(u64, u64)]);
+
+    /// Makes room for `count` I/O port ranges in what `io_ports_switch`
+    /// keeps, on every processor. Returns false when memory runs out.
+    [] fn io_ports_reserve(count: usize) -> bool;
 
     /// The address of the function a new user thread starts with on its
     /// kernel stack, for `context_prepare`. It enters user mode where

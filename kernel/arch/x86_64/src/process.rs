@@ -109,6 +109,22 @@ fn unregister(process: &Process) {
 pub const ALLOW_WRITE_EXECUTE: u32 = 1 << 0;
 pub const CODE_32BIT: u32 = 1 << 1;
 
+/// The initial process, once it exists.
+static INIT: SpinLock<Weak<Process>> = SpinLock::new(Weak::new());
+
+/// Makes `process` the initial process, whose termination is fatal.
+pub fn set_init(process: &Arc<Process>) {
+    *INIT.lock() = Arc::downgrade(process);
+}
+
+/// Panics when `process` is the initial process. Called as a process
+/// terminates.
+fn terminated(process: &Process, code: i64) {
+    if core::ptr::eq(INIT.lock().as_ptr(), process) {
+        panic!("init terminated with exit code {code}");
+    }
+}
+
 /// Fails with `InvalidArgs` unless `entry` lies in the user address range
 /// and `stack` lies in it or is its end, the top of a stack that ends
 /// there. Neither needs to be mapped.
@@ -213,17 +229,15 @@ impl Process {
     /// threads switch in.
     pub fn enable_ioports(&self, start: u64, end: u64, budget: &Arc<Budget>) -> Result<(), Error> {
         let charge = budget.hold_kernel(IOPORT_COST)?;
-        // The boot processor, whose list this is, is the only one.
-        let mut open = crate::percpu::this().open_ports.lock();
         let mut ports = self.ioports.lock();
-        let missing = (ports.ranges.len() + 1).saturating_sub(open.len());
         ports.ranges.try_reserve(1).map_err(|_| Error::NoMemory)?;
         ports.charges.try_reserve(1).map_err(|_| Error::NoMemory)?;
-        open.try_reserve(missing).map_err(|_| Error::NoMemory)?;
+        if !kernel_core::arch::io_ports_reserve(ports.ranges.len() + 1) {
+            return Err(Error::NoMemory);
+        }
         ports.ranges.push((start, end));
         ports.charges.push(charge);
         drop(ports);
-        drop(open);
         let running_here = sched::current()
             .and_then(|t| t.process().cloned())
             .is_some_and(|p| core::ptr::eq(&*p, self));
@@ -575,7 +589,7 @@ impl Process {
             self.exit_code.store(code, Ordering::Release);
             self.state.store(TERMINATED, Ordering::Release);
         }
-        crate::init::terminated(self, code);
+        terminated(self, code);
         // This also removes translations made outside regions, whose
         // frames belong to whoever mapped them and are not freed.
         self.aspace.remove_all_regions();

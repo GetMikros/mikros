@@ -5,7 +5,6 @@ use crate::memory::FRAMES;
 use crate::paging::Policy;
 use crate::port::Port;
 use crate::publish::{ITEM_STEP, Work};
-use crate::space;
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -118,7 +117,7 @@ const PAGER_READ: u32 = 1;
 unsafe fn frame_bytes<'a>(phys: u64) -> &'a mut [u8; PAGE_SIZE as usize] {
     // SAFETY: the direct map covers every frame, and the caller rules out
     // other references.
-    unsafe { &mut *(space::direct(phys) as *mut [u8; PAGE_SIZE as usize]) }
+    unsafe { &mut *(kernel_core::arch::frame_address(phys) as *mut [u8; PAGE_SIZE as usize]) }
 }
 
 /// The frame that pages of anonymous objects read before they are
@@ -1179,7 +1178,7 @@ impl MemoryObject {
     ) -> Result<Option<Held>, Error> {
         if let Some((base, policy)) = self.physical {
             drop(pages);
-            let virt = space::map_physical_page(base + index * PAGE_SIZE, policy)
+            let virt = kernel_core::arch::physical_page_map(base + index * PAGE_SIZE, policy)
                 .ok_or(Error::NoMemory)?;
             return Ok(Some(Held {
                 mem: self.clone(),
@@ -1703,7 +1702,9 @@ impl Held {
     fn end<F: FnMut()>(&mut self, work: &mut Work<F>) {
         match self.backing.take() {
             Some(Backing::Frame(_)) => self.mem.unpin(work),
-            Some(Backing::Mapped(virt)) => space::unmap_physical_page(virt),
+            // SAFETY: the mapping came from `physical_page_map`, and the hold
+            // that used it is gone.
+            Some(Backing::Mapped(virt)) => unsafe { kernel_core::arch::physical_page_unmap(virt) },
             None => {}
         }
     }
@@ -1712,7 +1713,7 @@ impl Held {
 impl crate::publish::Page for Held {
     fn base(&self) -> *mut u8 {
         match self.backing {
-            Some(Backing::Frame(phys)) => space::direct(phys) as *mut u8,
+            Some(Backing::Frame(phys)) => kernel_core::arch::frame_address(phys) as *mut u8,
             Some(Backing::Mapped(virt)) => virt as *mut u8,
             None => unreachable!("a released page is never written"),
         }
@@ -1763,7 +1764,7 @@ impl Source {
             // direct map covers it. Writers may change it meanwhile, which
             // only changes the bytes read.
             Some(phys) => unsafe {
-                let from = (space::direct(phys) as *const u8).add(inside);
+                let from = (kernel_core::arch::frame_address(phys) as *const u8).add(inside);
                 core::ptr::copy_nonoverlapping(from, buf.as_mut_ptr(), buf.len());
             },
             None => buf.fill(0),
@@ -1817,8 +1818,8 @@ impl Source {
             // nothing writes to either while no output is written yet.
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    space::direct(phys) as *const u8,
-                    space::direct(copy) as *mut u8,
+                    kernel_core::arch::frame_address(phys) as *const u8,
+                    kernel_core::arch::frame_address(copy) as *mut u8,
                     PAGE_SIZE as usize,
                 );
             }

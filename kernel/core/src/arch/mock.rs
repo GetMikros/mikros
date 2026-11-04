@@ -141,6 +141,18 @@ impl Arch for Mock {
         TIMER.store(DISARMED, Ordering::Relaxed);
     }
 
+    fn console_write(_line: &[u8]) {}
+
+    fn frame_address(phys: u64) -> u64 {
+        phys
+    }
+
+    fn physical_page_map(_phys: u64, _policy: super::CachePolicy) -> Option<u64> {
+        None
+    }
+
+    unsafe fn physical_page_unmap(_virt: u64) {}
+
     fn kernel_pages_alloc(size: u64) -> Option<u64> {
         if size == 0 {
             return None;
@@ -199,6 +211,10 @@ impl Arch for Mock {
     unsafe fn thread_switch_in(_thread: *mut (), _stack_top: u64, _user: bool) {}
 
     fn io_ports_switch(_ranges: &[(u64, u64)]) {}
+
+    fn io_ports_reserve(_count: usize) -> bool {
+        true
+    }
 
     fn user_thread_entry() -> u64 {
         0

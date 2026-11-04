@@ -1,6 +1,5 @@
 //! The kernel's log and its output.
 
-use crate::serial;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::log::{Log, Message, Readers, Record, Severity, Source, line};
@@ -34,8 +33,8 @@ fn append(koid: u64, severity: Severity, source: Source, message: &[u8]) {
         message,
     );
     LOG.drain(|record| {
-        serial::write(line(record, b"\r\n").as_bytes());
-        crate::console::write(line(record, b"\n").as_bytes());
+        kernel_core::arch::debug_write(line(record, b"\r\n").as_bytes());
+        kernel_core::arch::console_write(line(record, b"\n").as_bytes());
     });
     // Notifying a reader takes the locks of the signal hook, which the
     // code that logs, or the code an interrupt that logs interrupted, may

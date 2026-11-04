@@ -5,7 +5,7 @@ use crate::paging::Policy;
 use crate::process::Process;
 use crate::sched::Thread;
 use crate::space;
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use boot_protocol::{BootInfo, flags};
@@ -19,22 +19,10 @@ use kernel_core::object::rights::{DUPLICATE, INSPECT, MANAGE, MAP, READ, TRANSFE
 use kernel_core::object::{Name, Object, ObjectType, default_rights};
 use kernel_core::regions::{MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, SPECIFIC};
 use kernel_core::startup;
-use kernel_core::sync::SpinLock;
 use kernel_core::ustar;
 
 /// The size of the stack of the initial thread.
 const STACK_SIZE: u64 = 256 * 1024;
-
-/// The initial process, once it exists.
-static INIT: SpinLock<Weak<Process>> = SpinLock::new(Weak::new());
-
-/// Panics when `process` is the initial process. Called as a process
-/// terminates.
-pub fn terminated(process: &Process, code: i64) {
-    if core::ptr::eq(INIT.lock().as_ptr(), process) {
-        panic!("init terminated with exit code {code}");
-    }
-}
 
 /// The rights of the startup handles to the boot image and the clock
 /// page.
@@ -148,7 +136,7 @@ fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
     let name = || Name::new(b"init").expect("a valid name");
     let process =
         Process::new(budget, name(), false).unwrap_or_else(|e| panic!("creating init: {e:?}"));
-    *INIT.lock() = Arc::downgrade(&process);
+    crate::process::set_init(&process);
     for segment in &elf.segments {
         load_segment(&process, file, segment);
     }

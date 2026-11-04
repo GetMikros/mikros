@@ -98,6 +98,22 @@ impl Arch for X86 {
         timer::disarm();
     }
 
+    fn console_write(line: &[u8]) {
+        crate::console::write(line);
+    }
+
+    fn frame_address(phys: u64) -> u64 {
+        space::direct(phys)
+    }
+
+    fn physical_page_map(phys: u64, policy: kernel_core::arch::CachePolicy) -> Option<u64> {
+        space::map_physical_page(phys, policy)
+    }
+
+    unsafe fn physical_page_unmap(virt: u64) {
+        space::unmap_physical_page(virt);
+    }
+
     fn kernel_pages_alloc(size: u64) -> Option<u64> {
         space::alloc_pages(size)
     }
@@ -173,6 +189,13 @@ impl Arch for X86 {
             crate::gdt::set_ports(start, end, true);
             open.push((start, end));
         }
+    }
+
+    fn io_ports_reserve(count: usize) -> bool {
+        // The boot processor, whose list this is, is the only one.
+        let mut open = percpu::this().open_ports.lock();
+        let missing = count.saturating_sub(open.len());
+        open.try_reserve(missing).is_ok()
     }
 
     fn user_thread_entry() -> u64 {
