@@ -1,7 +1,9 @@
 //! `midlc`, the MIDL compiler: parses `.midl` files, checks them and
 //! generates bindings.
 
+pub mod ast;
 pub mod lexer;
+pub mod parser;
 
 /// Where something is in a source file.
 #[derive(Clone, Debug, PartialEq)]
@@ -35,3 +37,15 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Parses the source `text` of the file named `file`.
+pub fn parse(file: &str, text: &str) -> Result<ast::File, Error> {
+    let tokens = lexer::tokens(file, text)?;
+    let lines = text.lines().count().max(1);
+    let end = Span {
+        file: file.to_string(),
+        line: lines,
+        col: text.lines().last().map_or(1, |l| l.chars().count() + 1),
+    };
+    parser::parse(tokens, end)
+}
