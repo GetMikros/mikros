@@ -109,6 +109,28 @@ pub fn deliver(frame: &mut Frame) -> bool {
     }
 }
 
+/// Resets the action of `signo` in `process` to the default action for
+/// `RESETHAND`, discarding the pending instances of `signo` when the
+/// default ignores it. When the list of threads cannot be made, only
+/// those pending for the process and for `thread`, the running one, are
+/// discarded.
+fn reset_action(process: &Process, thread: &Thread, signo: u32) {
+    let ignores = Action::default().ignores(signo);
+    let threads = match ignores {
+        true => process
+            .live_threads(&mut Scratch::new(Some(process.budget())))
+            .unwrap_or_default(),
+        false => Vec::new(),
+    };
+    let mut state = process.signals().lock();
+    state.actions[signo as usize - 1] = Action::default();
+    if ignores {
+        kernel_core::signal::discard(&mut state, &threads, bit(signo));
+        let ProcessSignals { queued, .. } = &mut *state;
+        thread.signals().lock().pending.discard(bit(signo), queued);
+    }
+}
+
 /// Writes a signal frame for `info` with `action` onto the stack of
 /// `thread`, whose registers are in `frame`, and points the registers at
 /// the handler. Fails when the frame cannot be written.
@@ -123,11 +145,16 @@ fn write_frame(
     extended.save();
     let xsave = extended.bytes();
     let size = XSAVE_OFFSET + xsave.len() as u64;
-    let mut own = thread.signals().lock();
-    let alternate =
-        action.flags & ONSTACK != 0 && own.altstack.1 != 0 && !own.on_altstack(frame.rsp);
+    // Only the thread itself changes its mask and alternate stack, so
+    // they stay as read here while the frame is written without the lock,
+    // which a fault on the user stack may wait with.
+    let (altstack, on_altstack, mask) = {
+        let own = thread.signals().lock();
+        (own.altstack, own.on_altstack(frame.rsp), own.mask)
+    };
+    let alternate = action.flags & ONSTACK != 0 && altstack.1 != 0 && !on_altstack;
     let end = if alternate {
-        own.altstack.0 + own.altstack.1
+        altstack.0 + altstack.1
     } else {
         frame.rsp.checked_sub(RED_ZONE).ok_or(Error::InvalidArgs)?
     };
@@ -153,17 +180,19 @@ fn write_frame(
     head[8..8 + INFO_SIZE].copy_from_slice(&info.bytes());
     let c = BELOW_CONTEXT as usize;
     head[c..c + GENERAL_SIZE].copy_from_slice(&general.bytes());
-    head[c + 0xA0..c + 0xA8].copy_from_slice(&own.mask.to_le_bytes());
+    head[c + 0xA0..c + 0xA8].copy_from_slice(&mask.to_le_bytes());
     head[c + 0xA8..c + 0xB0].copy_from_slice(&(xsave.len() as u64).to_le_bytes());
     copy_out(bottom, &head)?;
     copy_out(context + XSAVE_OFFSET, xsave)?;
-    own.mask |= action.mask & !UNBLOCKABLE;
-    if action.flags & NODEFER == 0 {
-        own.mask |= bit(info.signo) & !UNBLOCKABLE;
+    {
+        let mut own = thread.signals().lock();
+        own.mask |= action.mask & !UNBLOCKABLE;
+        if action.flags & NODEFER == 0 {
+            own.mask |= bit(info.signo) & !UNBLOCKABLE;
+        }
     }
-    drop(own);
     if action.flags & RESETHAND != 0 {
-        process.signals().lock().actions[info.signo as usize - 1] = Action::default();
+        reset_action(process, thread, info.signo);
     }
     frame.rsp = bottom;
     frame.rip = action.handler;

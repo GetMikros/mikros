@@ -5763,6 +5763,8 @@ fn user_bases_set_and_kept(_: &Startup) -> Result {
 static SIGNAL_ENTRY: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 static SIGNAL_ARGS: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static SIGNAL_MASK: AtomicU64 = AtomicU64::new(0);
+/// The signals pending as the last handler started.
+static SIGNAL_PENDING: AtomicU64 = AtomicU64::new(0);
 static HANDLED: AtomicU64 = AtomicU64::new(0);
 /// The signal frame `signal_handler` found, from 72 bytes below the
 /// context to its extended state: the restorer, the information record,
@@ -5799,6 +5801,10 @@ extern "sysv64" fn signal_handler(signo: u64, info: u64, context: u64) {
     // SAFETY: the pointer is valid; adding no signal only reads the mask.
     unsafe { sys::signal_set_mask(0, 0, &mut mask) };
     SIGNAL_MASK.store(mask, Ordering::Release);
+    let mut pending = 0;
+    // SAFETY: the pointer is valid for the call.
+    unsafe { sys::signal_get_pending(&mut pending) };
+    SIGNAL_PENDING.store(pending, Ordering::Release);
     for (slot, value) in SIGNAL_ARGS.iter().zip([signo, info, context]) {
         slot.store(value, Ordering::Release);
     }
@@ -6226,6 +6232,56 @@ fn queued_signals_of_ended_thread(s: &Startup) -> Result {
     check("taking the signal", unsafe {
         sys::signal_wait(bit, soon(), info.as_mut_ptr())
     })?;
+    // SAFETY: the pointer may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, mask, core::ptr::null_mut())
+    })
+}
+
+/// When a handler of `CHLD` with `RESETHAND` runs, the action becomes
+/// the default one, which ignores `CHLD`, so the `CHLD` still pending for
+/// the process is discarded before the handler starts.
+fn reset_handler_discards_ignored(s: &Startup) -> Result {
+    const CHLD: u32 = 17;
+    const RESETHAND: u32 = 1 << 3;
+    let bit = 1u64 << (CHLD - 1);
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking CHLD", unsafe {
+        sys::signal_set_mask(0, bit, &mut mask)
+    })?;
+    let mut action = [0u8; 32];
+    action[0x00..0x08].copy_from_slice(&(signal_probe as *const () as u64).to_le_bytes());
+    action[0x10..0x18].copy_from_slice(&(signal_restorer as *const () as u64).to_le_bytes());
+    action[0x18..0x1C].copy_from_slice(&RESETHAND.to_le_bytes());
+    // SAFETY: the pointer describes `action`.
+    check("catching CHLD", unsafe {
+        sys::signal_set_action(CHLD, action.as_ptr(), core::ptr::null_mut())
+    })?;
+    HANDLED.store(0, Ordering::Release);
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check(
+            "sending CHLD to the thread",
+            sys::thread_signal(s.thread, CHLD, 0),
+        )?;
+        check(
+            "sending CHLD to the process",
+            sys::process_signal(s.process, CHLD, 0),
+        )?;
+    }
+    // SAFETY: the pointer may be null.
+    check("unblocking CHLD", unsafe {
+        sys::signal_set_mask(1, bit, core::ptr::null_mut())
+    })?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    ensure(
+        "discarding the other CHLD",
+        SIGNAL_PENDING.load(Ordering::Acquire) & bit == 0,
+    )?;
     // SAFETY: the pointer may be null.
     check("restoring the mask", unsafe {
         sys::signal_set_mask(2, mask, core::ptr::null_mut())
@@ -6984,7 +7040,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 109] = [
+const TESTS: [(&str, Test); 110] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -7006,6 +7062,10 @@ const TESTS: [(&str, Test); 109] = [
     (
         "queued_signals_of_ended_thread",
         queued_signals_of_ended_thread,
+    ),
+    (
+        "reset_handler_discards_ignored",
+        reset_handler_discards_ignored,
     ),
     ("ports", ports),
     ("port_registration_limit", port_registration_limit),
