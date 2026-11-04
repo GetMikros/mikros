@@ -7700,7 +7700,175 @@ mod managed {
     }
 }
 
-const TESTS: [(&str, Test); 117] = [
+mod manager {
+    //! The process manager's start, with this test standing in for init.
+
+    use super::{boot_file, exit_code, load_and_start_keeping};
+    use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
+    use mikros_rt::interfaces::mikros::base::Status;
+    use mikros_rt::interfaces::mikros::process::{
+        InitBootstrap, InitBootstrapClient, ManagerBootstrap, ManagerBootstrapClient,
+        ManagerStartup,
+    };
+    use mikros_rt::sys::{self, Handle};
+    use mikros_rt::{PANIC_EXIT_CODE, Startup};
+    use mikros_test::{Failure, Result, check, ensure};
+
+    /// Handles keep their rights, including `TRANSFER`, which sending
+    /// them needs. The process manager's bindings reduce them to the
+    /// rights `Start` declares.
+    const SAME_RIGHTS: u32 = 1 << 31;
+
+    /// A started process manager waiting for `Start`.
+    struct Manager {
+        process: Handle,
+        thread: Handle,
+        client: Option<ManagerBootstrapClient>,
+    }
+
+    impl Manager {
+        /// Sends `startup`, and closes the channel as init does unless
+        /// `keep_open`.
+        fn send(&mut self, startup: ManagerStartup, keep_open: bool) -> Result {
+            let client = self.client.as_ref().ok_or(Failure {
+                what: "sending on a closed channel",
+                status: 0,
+            })?;
+            ensure("sending Start", client.start(startup).is_ok())?;
+            if !keep_open {
+                self.client = None;
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for Manager {
+        fn drop(&mut self) {
+            // SAFETY: the calls take no pointers.
+            unsafe {
+                sys::task_kill(self.process);
+                sys::handle_close(self.process);
+                sys::handle_close(self.thread);
+            }
+        }
+    }
+
+    fn start(s: &Startup) -> Result<Manager> {
+        let file = boot_file(s, b"usr/bin/process-manager")?;
+        let fail = |e| Failure {
+            what: "loading the process manager",
+            status: match e {
+                mikros_loader::Error::Status(st) => st,
+                _ => 0,
+            },
+        };
+        let (process, _, _, ours, thread) = load_and_start_keeping(s, &file).map_err(fail)?;
+        // SAFETY: the handle is ours alone.
+        let end = ClientEnd::<ManagerBootstrap>::new(unsafe { OwnedHandle::from_raw(ours) });
+        Ok(Manager {
+            process,
+            thread,
+            client: Some(ManagerBootstrapClient::new(end)),
+        })
+    }
+
+    fn copy(handle: Handle, rights: u32) -> Result<OwnedHandle> {
+        let mut out = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("duplicating a handle", unsafe {
+            sys::handle_duplicate(handle, rights, &mut out)
+        })?;
+        // SAFETY: the handle was just created for us.
+        Ok(unsafe { OwnedHandle::from_raw(out) })
+    }
+
+    /// `Start` for `m` and the client of its `InitBootstrap` endpoint.
+    fn start_message(
+        s: &Startup,
+        m: &Manager,
+        version: u32,
+    ) -> Result<(ManagerStartup, InitBootstrapClient)> {
+        let (client, server) = endpoints::<InitBootstrap>().map_err(|_| Failure {
+            what: "creating a channel",
+            status: 0,
+        })?;
+        let startup = ManagerStartup {
+            version,
+            process: copy(m.process, SAME_RIGHTS)?,
+            thread: copy(m.thread, SAME_RIGHTS)?,
+            init_process: copy(s.process, SAME_RIGHTS)?,
+            budget: copy(s.budget, SAME_RIGHTS)?,
+            boot_image: copy(s.boot_image, SAME_RIGHTS)?,
+            clock_page: copy(s.clock_page, SAME_RIGHTS)?,
+            log: copy(s.log, SAME_RIGHTS)?,
+            init_bootstrap: server,
+        };
+        Ok((startup, InitBootstrapClient::new(client)))
+    }
+
+    /// After `Start`, the process manager registers init once, refuses
+    /// to start the service manager before that and a second time, and
+    /// fails to start one that the boot image does not hold.
+    pub fn process_manager_serves_init(s: &Startup) -> Result {
+        let mut m = start(s)?;
+        let (startup, init) = start_message(s, &m, 1)?;
+        m.send(startup, false)?;
+        let deadline = super::in_time();
+        ensure(
+            "refusing the service manager before Register",
+            matches!(
+                init.start_service_manager(alloc::vec![], deadline),
+                Ok(Err(Status::BadState))
+            ),
+        )?;
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        ensure(
+            "refusing a second Register",
+            matches!(init.register(deadline), Ok(Err(Status::BadState))),
+        )?;
+        let first = init.start_service_manager(alloc::vec![], deadline);
+        ensure(
+            "failing without a service manager",
+            matches!(first, Ok(Err(_))),
+        )?;
+        ensure(
+            "refusing a second StartServiceManager",
+            matches!(
+                init.start_service_manager(alloc::vec![], deadline),
+                Ok(Err(Status::BadState))
+            ),
+        )?;
+        drop(m);
+        Ok(())
+    }
+
+    /// The process manager ends without serving init when `Start` has
+    /// another version or another message follows it.
+    pub fn process_manager_refuses_bad_start(s: &Startup) -> Result {
+        let mut m = start(s)?;
+        let (startup, _init) = start_message(s, &m, 2)?;
+        m.send(startup, false)?;
+        ensure(
+            "refusing another version",
+            exit_code(m.process)? == PANIC_EXIT_CODE,
+        )?;
+        let mut m = start(s)?;
+        let (first, _init) = start_message(s, &m, 1)?;
+        let (second, _other) = start_message(s, &m, 1)?;
+        m.send(first, true)?;
+        // The process manager may have ended before the second arrives.
+        let _ = m.send(second, false);
+        ensure(
+            "refusing a second Start",
+            exit_code(m.process)? == PANIC_EXIT_CODE,
+        )
+    }
+}
+
+const TESTS: [(&str, Test); 119] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -7731,6 +7899,14 @@ const TESTS: [(&str, Test); 117] = [
     (
         "startup_transfer_refused",
         managed::startup_transfer_refused,
+    ),
+    (
+        "process_manager_serves_init",
+        manager::process_manager_serves_init,
+    ),
+    (
+        "process_manager_refuses_bad_start",
+        manager::process_manager_refuses_bad_start,
     ),
     (
         "queued_signals_of_ended_thread",

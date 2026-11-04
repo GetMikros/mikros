@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["init", "loader", "mikros-rt", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/init", "tests/managed", "tests/pie", "tests/support", "ustar"]
+members = ["init", "loader", "mikros-rt", "process-manager", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/init", "tests/managed", "tests/pie", "tests/support", "ustar"]
 
 [workspace.package]
 version = "0.0.0"

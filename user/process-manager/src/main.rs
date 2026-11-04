@@ -1,0 +1,60 @@
+//! The process manager.
+//!
+//! init starts it with a channel that carries one `Start` message and is
+//! then closed. Only after that does the process manager serve init's
+//! `InitBootstrap` requests.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+mod boot;
+mod init;
+mod records;
+
+use mikros_rt::interfaces::__midl::{Error, OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::mikros::process::{
+    ManagerBootstrapRequest, ManagerBootstrapServer, ManagerStartup,
+};
+use mikros_rt::{PANIC_EXIT_CODE, heap, log, sys};
+
+mikros_rt::raw_main!(main);
+
+/// The only version of `Start`.
+const VERSION: u32 = 1;
+
+fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
+    let Some(startup) = receive(bootstrap) else {
+        return PANIC_EXIT_CODE;
+    };
+    let mut manager = init::Manager::new(startup);
+    manager.serve_init();
+    // Nothing else is served yet.
+    loop {
+        // SAFETY: thread_sleep takes no pointers.
+        unsafe { sys::thread_sleep(i64::MAX) };
+    }
+}
+
+/// Reads `Start` from `bootstrap` and waits until init closes it.
+/// Returns `None`, having dropped every handle received, when the
+/// message is not a valid version 1 `Start`, or when another message
+/// follows it.
+fn receive(bootstrap: sys::Handle) -> Option<ManagerStartup> {
+    // SAFETY: the kernel gave the program this handle, and nothing else
+    // owns it.
+    let end = ServerEnd::new(unsafe { OwnedHandle::from_raw(bootstrap) });
+    let server = ManagerBootstrapServer::new(end);
+    let ManagerBootstrapRequest::Start(start) = server.next(i64::MAX).ok()?;
+    let startup = start.startup;
+    heap::set_process(startup.process.raw());
+    log::set_handle(startup.log.raw());
+    if startup.version != VERSION {
+        return None;
+    }
+    match server.next(i64::MAX) {
+        Err(Error::Closed) => Some(startup),
+        _ => None,
+    }
+}
