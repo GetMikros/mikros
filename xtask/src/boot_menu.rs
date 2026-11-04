@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 const FIRMWARE_STARTS: &str = "BdsDxe: starting Boot";
 /// The kernel's first line.
 const KERNEL_STARTS: &str = "Mikros kernel";
+/// The colour of the menu's cards, which every menu screen has.
+const MENU_SURFACE: [u8; 3] = [0x11, 0x12, 0x14];
 /// How long the boot menu is given to start an entry on its own.
 const SETTLE: Duration = Duration::from_secs(4);
 /// The time between two key presses.
@@ -175,15 +177,17 @@ fn hold_key(socket: &Path, log: &Path, qemu: &mut Child, deadline: Instant) -> R
 }
 
 /// Waits until the screen, dumped through the monitor on `socket` into
-/// `dir`, shows something and stays the same for a second, as the menu
-/// does once it is drawn and waits for keys, or fails once `deadline`
-/// has passed or the kernel has started.
+/// `dir`, shows the menu's card surface and stays the same between two
+/// dumps, as the menu does once it is drawn and waits for keys, or fails
+/// once `deadline` has passed or the kernel has started. The firmware's
+/// text screen, which can stay unchanged while an entry fails to start,
+/// never has that colour.
 fn wait_for_menu(socket: &Path, dir: &Path, deadline: Instant) -> Result<()> {
     let path = dir.join("menu.ppm");
     let mut last: Option<Vec<u8>> = None;
     loop {
         let dump = screen_dump(socket, &path)?;
-        let drawn = ppm_pixels(&dump).is_some_and(|p| p.iter().any(|&c| c != p[0]));
+        let drawn = ppm_pixels(&dump).is_some_and(|p| p.contains(&MENU_SURFACE));
         if drawn && last.as_ref() == Some(&dump) {
             return Ok(());
         }
