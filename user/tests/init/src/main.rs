@@ -1745,6 +1745,51 @@ fn stop_continue_and_kill(s: &Startup) -> Result {
     )
 }
 
+/// A wait that `STOP` ends runs no handler, so once `CONT` lets the
+/// process run, the wait goes on, and it returns 0 when the futex is
+/// woken.
+fn stopped_wait_goes_on(s: &Startup) -> Result {
+    const SHARED: u64 = 0x10_0000_0000;
+    const SPECIFIC: u32 = 1 << 8;
+    let mem = create_memory(PAGE_SIZE)?;
+    let here = map(s.process, mem, PAGE_SIZE)?;
+    let (process, _) = start_program_with(s, "debuggee", 8, |process| {
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("mapping into the debuggee", unsafe {
+            sys::vm_map(
+                process,
+                PERM_READ | SPECIFIC,
+                SHARED,
+                mem,
+                0,
+                PAGE_SIZE,
+                &mut at,
+            )
+        })
+    })?;
+    let send = |signo: u32| {
+        // SAFETY: the call takes no pointers.
+        check("signalling the debuggee", unsafe {
+            sys::process_signal(process, signo, 0)
+        })
+    };
+    sleep_ms(20);
+    send(19)?;
+    ensure(
+        "stopping the debuggee",
+        wait(process, SUSPENDED, in_time()).0 == 0,
+    )?;
+    send(18)?;
+    sleep_ms(20);
+    let deadline = in_time();
+    while futex_wake(here, 1)? == 0 {
+        ensure("waking the debuggee", now() < deadline)?;
+        sleep_ms(1);
+    }
+    ensure("completing its wait", exit_code(process)? == 0)
+}
+
 /// Threads of two processes that map the same memory object share its
 /// futexes: waking through this process's mapping ends the debuggee's
 /// wait through its own, at another address.
@@ -7040,7 +7085,7 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 110] = [
+const TESTS: [(&str, Test); 111] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -7059,6 +7104,7 @@ const TESTS: [(&str, Test); 110] = [
         process_signal_interrupts_one_wait,
     ),
     ("stop_continue_and_kill", stop_continue_and_kill),
+    ("stopped_wait_goes_on", stopped_wait_goes_on),
     (
         "queued_signals_of_ended_thread",
         queued_signals_of_ended_thread,

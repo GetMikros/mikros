@@ -121,6 +121,10 @@ pub fn init() {
 /// The length of the `SYSCALL` instruction.
 const SYSCALL_LEN: u64 = 2;
 
+/// The number of `channel_call`, which never runs again by itself once
+/// interrupted, as its request has been written.
+pub const CHANNEL_CALL: u64 = generated::CHANNEL_CALL;
+
 extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     // The entry code leaves RFLAGS as SYSCALL set it through IA32_FMASK.
     debug_assert!(

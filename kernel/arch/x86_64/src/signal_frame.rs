@@ -84,7 +84,16 @@ pub fn deliver(frame: &mut Frame) -> bool {
                 process.stop_here(&thread);
                 continue;
             }
-            thread.take_interrupted();
+            // A wait that a stop or a continue ended without a handler
+            // waits again, with the same arguments, as one that a
+            // suspension ended does.
+            if let Some(number) = thread.take_interrupted()
+                && number != crate::syscall::CHANNEL_CALL
+            {
+                frame.rip -= SYSCALL_LEN;
+                frame.rax = number;
+                changed = true;
+            }
             return changed;
         };
         match action.handler {
