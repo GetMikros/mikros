@@ -198,6 +198,10 @@ impl Arch for X86 {
         unsafe { context::restore_area(area) };
     }
 
+    fn user_copy_in(dst: &mut [u8], src: u64) -> Result<(), kernel_core::status::Error> {
+        crate::usercopy::copy_in(dst, src)
+    }
+
     unsafe fn enter_user(entry: u64, stack: u64, arg1: u64, arg2: u64) -> ! {
         // SAFETY: the caller guarantees the thread's user state is in
         // place.

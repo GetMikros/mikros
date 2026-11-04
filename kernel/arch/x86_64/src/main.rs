@@ -105,6 +105,8 @@ mod timeline;
 #[cfg(target_os = "none")]
 mod timer;
 #[cfg(target_os = "none")]
+mod user;
+#[cfg(target_os = "none")]
 mod usercopy;
 #[cfg(target_os = "none")]
 mod wait;

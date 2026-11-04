@@ -214,6 +214,10 @@ impl Arch for Mock {
 
     unsafe fn extended_state_restore(_area: *const u8) {}
 
+    fn user_copy_in(_dst: &mut [u8], _src: u64) -> Result<(), crate::status::Error> {
+        Err(crate::status::Error::InvalidArgs)
+    }
+
     unsafe fn enter_user(_entry: u64, _stack: u64, _arg1: u64, _arg2: u64) -> ! {
         panic!("the mock architecture cannot enter user mode");
     }

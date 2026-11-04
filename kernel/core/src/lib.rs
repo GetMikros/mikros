@@ -8,6 +8,9 @@
 #![cfg_attr(test, feature(variant_count))]
 
 extern crate alloc;
+// The architecture interface names its types by paths that also hold in
+// the crates that implement it.
+extern crate self as kernel_core;
 
 pub mod acpi;
 pub mod arch;

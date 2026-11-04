@@ -273,6 +273,12 @@ interface! {
     /// `area` must hold initial or saved extended state.
     [unsafe] fn extended_state_restore(area: *const u8);
 
+    /// Copies `dst.len()` bytes from the user address `src` of the running
+    /// thread's address space into `dst`. Fails with `InvalidArgs` when the
+    /// range is not in the user address range or a page of it cannot be
+    /// read.
+    [] fn user_copy_in(dst: &mut [u8], src: u64) -> Result<(), ::kernel_core::status::Error>;
+
     /// Leaves the kernel for user mode at `entry` with the stack pointer
     /// `stack`, passing `arg1` and `arg2` in the first two argument
     /// registers.
