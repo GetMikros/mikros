@@ -54,10 +54,10 @@ pub fn before_user_return(frame: &mut Frame) -> bool {
     }
     reported |= end_if_requested(frame, &thread);
     if let Some(context) = thread.take_sigreturn() {
-        crate::signal::sigreturn(frame, context);
+        crate::signal_frame::sigreturn(frame, context);
         reported = true;
     }
-    reported |= crate::signal::deliver(frame);
+    reported |= crate::signal_frame::deliver(frame);
     // A stop may have held the thread when it was asked to end;
     // `stay_suspended` ends it first if so.
     reported | stay_suspended(frame, &thread)
@@ -72,7 +72,7 @@ pub fn stay_suspended(frame: &mut Frame, thread: &alloc::sync::Arc<sched::Thread
     let mut suspended = end_if_requested(frame, thread);
     while suspend(thread, frame) {
         suspended = true;
-        crate::signal::deliver(frame);
+        crate::signal_frame::deliver(frame);
         end_if_requested(frame, thread);
     }
     suspended

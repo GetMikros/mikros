@@ -89,6 +89,8 @@ mod serial;
 #[cfg(target_os = "none")]
 mod signal;
 #[cfg(target_os = "none")]
+mod signal_frame;
+#[cfg(target_os = "none")]
 mod space;
 #[cfg(target_os = "none")]
 mod syscall;
