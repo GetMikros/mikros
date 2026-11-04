@@ -6,7 +6,7 @@ use super::{Checked, UserIn, UserOut, bytes_of, current_process};
 use crate::aspace::Piece;
 use crate::memory_object::{Held, MemoryObject};
 use crate::paging::Policy;
-use crate::process::Process;
+use crate::process::{AddHandle, Process};
 use crate::publish::{Outputs, Page, Work};
 use crate::sched::Thread;
 use crate::thread_arch::ThreadX86;
@@ -17,8 +17,8 @@ use kernel_core::exception::{self, DEBUG_EVENTS};
 use kernel_core::log::{MESSAGE_MAX, RECORD_SIZE, Severity};
 use kernel_core::object::budget::{Budget, INFO_BUDGET, Scratch};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
-use kernel_core::object::handles::Entry;
 use kernel_core::object::handles::Handle;
+use kernel_core::object::handles::{Entry, HANDLE_INVALID, HandleTable};
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{
     KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_MSI, KIND_POLICY, KIND_PRIORITY,
@@ -272,21 +272,28 @@ pub fn process_start(
     arg2: u64,
 ) -> Result<(), Error> {
     let caller = current_process()?;
-    // The caller's table stays locked until `arg` is closed in it, so the
-    // handle cannot change in between.
-    let mut table = caller.handles().lock();
-    let moved = match &arg {
-        Some(arg) => Some(table.check(arg.value, &[], rights::TRANSFER)?.clone()),
-        None => None,
-    };
-    let (process, thread) = (object::<Process>(process), object::<Thread>(thread));
-    let budget = Some(caller.budget());
-    Process::start(&process, &thread, entry, stack, moved, arg2, budget)?;
-    if let Some(arg) = arg {
-        table.close(arg.value)?;
-        crate::wait::handle_closed(&caller, arg.value);
+    if let Some(arg) = &arg {
+        caller
+            .handles()
+            .lock()
+            .check(arg.value, &[], rights::TRANSFER)?;
     }
-    Ok(())
+    let (process, thread) = (object::<Process>(process), object::<Thread>(thread));
+    // The caller's table is locked until `arg` is closed in it, so the
+    // handle cannot change in between. Process::start documents why it
+    // may be locked within the new process's.
+    let mut move_arg = |target: &mut HandleTable| {
+        let arg = arg.as_ref().map_or(HANDLE_INVALID, |a| a.value);
+        let mut table = caller.handles().lock();
+        let entry = table.check(arg, &[], rights::TRANSFER)?.clone();
+        let handle = target.insert(entry.object, entry.rights, Some(caller.budget()))?;
+        table.close(arg)?;
+        drop(table);
+        crate::wait::handle_closed(&caller, arg);
+        Ok(handle)
+    };
+    let arg = arg.is_some().then_some(&mut move_arg as &mut AddHandle);
+    Process::start(&process, &thread, entry, stack, arg, arg2)
 }
 
 pub fn thread_start(

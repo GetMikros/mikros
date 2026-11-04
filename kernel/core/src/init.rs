@@ -5,7 +5,7 @@ use crate::elf::{self, PF_W, PF_X, Segment};
 use crate::memory_object::MemoryObject;
 use crate::object::budget::Budget;
 use crate::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
-use crate::object::handles::Entry;
+use crate::object::handles::{Entry, HandleTable};
 use crate::object::memory::PAGE_SIZE;
 use crate::object::resource::Resource;
 use crate::object::rights::{DUPLICATE, INSPECT, MANAGE, MAP, READ, TRANSFER, WRITE};
@@ -246,18 +246,15 @@ pub fn start(info: &BootInfo) {
         panic!("writing the startup message: {e:?}");
     }
     drop(ours);
-    let bootstrap = Entry {
-        object: theirs,
-        rights: default_rights(ObjectType::Channel),
-    };
+    let rights = default_rights(ObjectType::Channel);
+    let mut bootstrap = |table: &mut HandleTable| table.insert(theirs.clone(), rights, None);
     Process::start(
         &loaded.process,
         &loaded.thread,
         loaded.entry,
         loaded.stack,
-        Some(bootstrap),
+        Some(&mut bootstrap),
         0,
-        None,
     )
     .unwrap_or_else(|e| panic!("starting init: {e:?}"));
 }

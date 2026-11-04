@@ -4,7 +4,7 @@ use crate::aspace::AddressSpace;
 use crate::exception::DEBUG_EVENTS;
 use crate::object::budget::{Budget, Held, Scratch};
 use crate::object::channel::{Endpoint, PeerObserver};
-use crate::object::handles::{Entry, HANDLE_INVALID, Handle, HandleTable};
+use crate::object::handles::{HANDLE_INVALID, Handle, HandleTable};
 use crate::object::{Header, Name, Object, ObjectType, signals};
 use crate::sched::{self, Thread};
 use crate::status::Error;
@@ -162,6 +162,10 @@ struct ExceptionChannel {
     end: Arc<Endpoint>,
     options: u32,
 }
+
+/// Adds a handle to the handle table it is given, as `Process::start`
+/// does for the argument of the first thread.
+pub type AddHandle<'a> = dyn FnMut(&mut HandleTable) -> Result<Handle, Error> + 'a;
 
 impl Process {
     /// A process in state `NEW` with no mappings, handles or threads,
@@ -492,21 +496,26 @@ impl Process {
         Ok(thread)
     }
 
-    /// Moves `arg` into the handle table of `process`, sets it `RUNNING`
-    /// and starts `thread` at `entry` with stack pointer `stack`, the new
-    /// handle value (or `HANDLE_INVALID` without `arg`) and `arg2` as its
-    /// arguments. Fails with `InvalidArgs` as `check_start` does and
-    /// with `BadState` unless the process is `NEW` and `thread` is one of
-    /// its threads and `NEW`, in each case changing nothing. A new handle
-    /// table slot for `arg` is charged to `budget`, if given.
+    /// Sets `process` `RUNNING` and starts `thread` at `entry` with stack
+    /// pointer `stack`, the handle that `arg` returns (or `HANDLE_INVALID`
+    /// without `arg`) and `arg2` as its arguments. `arg` is given the
+    /// process's handle table to add the handle to; it runs with the
+    /// table locked, as the last step that can fail. Fails with
+    /// `InvalidArgs` as `check_start` does, with `BadState` unless the
+    /// process is `NEW` and `thread` is one of its threads and `NEW`, and
+    /// with the error of `arg`, in each case changing nothing.
+    ///
+    /// `arg` may lock the handle table of another process: the table of
+    /// a `NEW` process, which no thread of it uses, is locked before that
+    /// of any other process. Starting a process makes it leave `NEW`, so
+    /// no process holds its table while waiting for another's.
     pub fn start(
         process: &Arc<Process>,
         thread: &Arc<Thread>,
         entry: u64,
         stack: u64,
-        arg: Option<Entry>,
+        arg: Option<&mut AddHandle>,
         arg2: u64,
-        budget: Option<&Arc<Budget>>,
     ) -> Result<(), Error> {
         check_start(entry, stack)?;
         let threads = process.threads.lock();
@@ -515,10 +524,7 @@ impl Process {
             return Err(Error::BadState);
         }
         let handle: Handle = match arg {
-            Some(entry) => process
-                .handles
-                .lock()
-                .insert(entry.object, entry.rights, budget)?,
+            Some(arg) => arg(&mut process.handles.lock())?,
             None => HANDLE_INVALID,
         };
         process.state.store(RUNNING, Ordering::Release);

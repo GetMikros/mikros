@@ -948,7 +948,8 @@ fn collect() -> bool {
     // each is gone.
     members(collection, |core| {
         if !core.live.load(Ordering::Relaxed) {
-            destroy_queue(mem::take(&mut core.shared.lock().queues[core.side]));
+            let queue = mem::take(&mut core.shared.lock().queues[core.side]);
+            destroy_queue(queue);
         }
     });
     true
