@@ -135,6 +135,60 @@ fn reports_every_invalid_declaration() {
     assert_eq!(names, ["B"]);
 }
 
+#[test]
+fn indexes_declarations_and_references() {
+    use crate::analysis::{Kind, analyze};
+    let text = "library test.main;\n\
+        using test.other;\n\
+        /// A pair.\n\
+        type Pair = struct { a other.Status; b Missing; };\n\
+        protocol P { @1 F(p Pair) -> (s test.other.Status); };\n";
+    let analysis = analyze(&[("t.midl", text), ("other.midl", OTHER)], None);
+    assert_eq!(analysis.diagnostics.len(), 1, "{:?}", analysis.diagnostics);
+    let pair = analysis
+        .declarations
+        .iter()
+        .find(|d| d.name == "test.main.Pair")
+        .expect("Pair is declared");
+    assert_eq!(pair.kind, Kind::Struct);
+    assert_eq!((pair.span.line, pair.span.col, pair.end.col), (4, 6, 10));
+    assert_eq!(pair.doc, ["A pair."]);
+    let names: Vec<(&str, Kind)> = analysis
+        .declarations
+        .iter()
+        .filter(|d| d.span.file == "t.midl")
+        .map(|d| (d.name.as_str(), d.kind))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("test.main", Kind::Library),
+            ("test.main.Pair", Kind::Struct),
+            ("test.main.Pair.a", Kind::Member),
+            ("test.main.Pair.b", Kind::Member),
+            ("test.main.P", Kind::Protocol),
+            ("test.main.P.F", Kind::Method),
+            ("test.main.P.F.p", Kind::Parameter),
+            ("test.main.P.F.s", Kind::Parameter),
+        ]
+    );
+    let refs: Vec<((usize, usize, usize), &str)> = analysis
+        .references
+        .iter()
+        .filter(|r| r.span.file == "t.midl")
+        .map(|r| ((r.span.line, r.span.col, r.end.col), r.target.as_str()))
+        .collect();
+    assert_eq!(
+        refs,
+        [
+            ((2, 7, 17), "test.other"),
+            ((4, 24, 36), "test.other.Status"),
+            ((5, 21, 25), "test.main.Pair"),
+            ((5, 33, 50), "test.other.Status"),
+        ]
+    );
+}
+
 const OTHER: &str = "library test.other;\ntype Status = enum : i32 { OK = 0; FAILED = -1; };\n";
 
 mod checks {

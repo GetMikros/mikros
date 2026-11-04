@@ -2,6 +2,7 @@
 //! expands aliases, checks types, values and ordinals, and keeps only
 //! what is available at the chosen version.
 
+use crate::analysis::Reference;
 use crate::ast;
 use crate::model::*;
 use crate::{Error, Span};
@@ -19,19 +20,29 @@ use available::{Window, window};
 /// Checks `files` and returns their libraries, keeping the elements
 /// available at `version`, or all of them without one.
 pub fn check(files: &[ast::File], version: Option<u64>) -> Result<Model, Error> {
-    let (model, mut errors) = check_all(files, version);
-    match errors.is_empty() {
-        true => Ok(model),
-        false => Err(errors.remove(0)),
+    let mut checked = check_all(files, version);
+    match checked.errors.is_empty() {
+        true => Ok(checked.model),
+        false => Err(checked.errors.remove(0)),
     }
 }
 
-/// Checks `files` like `check`, going on after errors: the libraries
-/// without the declarations that have errors, and every error. A file
+/// What `check_all` found.
+pub struct Checked {
+    /// The libraries, without the declarations that have errors.
+    pub model: Model,
+    /// Every error, each once.
+    pub errors: Vec<Error>,
+    /// The names that resolved to declarations, each once, in the order
+    /// they were resolved.
+    pub references: Vec<Reference>,
+}
+
+/// Checks `files` like `check`, going on after errors. A file
 /// whose library's `@available` is invalid adds no declarations. The
 /// checks across declarations, for containment and message sizes, run
 /// only when there is no other error.
-pub fn check_all(files: &[ast::File], version: Option<u64>) -> (Model, Vec<Error>) {
+pub fn check_all(files: &[ast::File], version: Option<u64>) -> Checked {
     let mut errors = Errors::default();
     let mut libraries: BTreeMap<String, Vec<&ast::File>> = BTreeMap::new();
     for file in files {
@@ -89,6 +100,7 @@ pub fn check_all(files: &[ast::File], version: Option<u64>) -> (Model, Vec<Error
         decls: &decls,
         version,
         expanding: Default::default(),
+        references: Default::default(),
     };
     let mut model = Model {
         libraries: Vec::new(),
@@ -129,7 +141,14 @@ pub fn check_all(files: &[ast::File], version: Option<u64>) -> (Model, Vec<Error
     if errors.0.is_empty() {
         errors.take(limits::messages_fit(&model, &decls));
     }
-    (model, errors.0)
+    let mut seen = HashSet::new();
+    let mut references = checker.references.into_inner();
+    references.retain(|r| seen.insert((r.span.file.clone(), r.span.line, r.span.col)));
+    Checked {
+        model,
+        errors: errors.0,
+        references,
+    }
 }
 
 /// The errors found so far, each once: a declaration with an error can
@@ -228,6 +247,7 @@ struct Checker<'a> {
     version: Option<u64>,
     /// The aliases and constants being resolved, to find cycles.
     expanding: std::cell::RefCell<HashSet<String>>,
+    references: std::cell::RefCell<Vec<Reference>>,
 }
 
 impl Checker<'_> {
@@ -250,7 +270,14 @@ impl Checker<'_> {
             [] => unreachable!("a path has a part"),
         };
         match self.decls.get(&full) {
-            Some((decl, scope)) => Ok((full, decl, scope)),
+            Some((decl, scope)) => {
+                self.references.borrow_mut().push(Reference {
+                    span: path.span.clone(),
+                    end: path.end.clone(),
+                    target: full.clone(),
+                });
+                Ok((full, decl, scope))
+            }
             None => Err(path.span.error(format!(
                 "`{}` is not declared or not available",
                 path.text()

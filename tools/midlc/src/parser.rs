@@ -185,11 +185,14 @@ impl Parser {
 
     fn path(&mut self) -> Result<Path, Error> {
         let (first, span) = self.ident()?;
+        let mut end = span.after(&first);
         let mut parts = vec![first];
         while self.eat_punct('.') {
-            parts.push(self.ident()?.0);
+            let (part, at) = self.ident()?;
+            end = at.after(&part);
+            parts.push(part);
         }
-        Ok(Path { parts, span })
+        Ok(Path { parts, span, end })
     }
 
     /// Documentation comments and `@available(...)`, but not a method

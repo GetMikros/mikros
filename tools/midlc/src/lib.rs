@@ -1,6 +1,7 @@
 //! `midlc`, the MIDL compiler: parses `.midl` files, checks them and
 //! generates bindings.
 
+pub mod analysis;
 pub mod ast;
 pub mod check;
 pub mod json;
@@ -22,6 +23,14 @@ pub struct Span {
 }
 
 impl Span {
+    /// Where `text`, starting here on one line, ends.
+    pub fn after(&self, text: &str) -> Span {
+        Span {
+            col: self.col + text.chars().count(),
+            ..self.clone()
+        }
+    }
+
     pub fn error(&self, message: impl Into<String>) -> Error {
         Error {
             span: self.clone(),
@@ -87,14 +96,6 @@ pub fn compile(sources: &[(&str, &str)], version: Option<u64>) -> Result<model::
 /// going on after errors: the libraries without the declarations that
 /// have errors, and every error, those of each file in order.
 pub fn compile_all(sources: &[(&str, &str)], version: Option<u64>) -> (model::Model, Vec<Error>) {
-    let mut errors = Vec::new();
-    let mut files = Vec::new();
-    for (name, text) in sources {
-        let (file, found) = parse_all(name, text);
-        files.extend(file);
-        errors.extend(found);
-    }
-    let (model, found) = check::check_all(&files, version);
-    errors.extend(found);
-    (model, errors)
+    let analysis = analysis::analyze(sources, version);
+    (analysis.model, analysis.diagnostics)
 }

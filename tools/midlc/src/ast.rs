@@ -8,6 +8,8 @@ use crate::Span;
 pub struct Path {
     pub parts: Vec<String>,
     pub span: Span,
+    /// Just after the last identifier.
+    pub end: Span,
 }
 
 impl Path {
