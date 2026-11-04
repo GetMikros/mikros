@@ -278,6 +278,10 @@ fn serve(server: CalcServer) {
             Ok(CalcRequest::Pass(r, responder)) => responder
                 .reply(&server, CalcPassResponse { h: r.h })
                 .unwrap(),
+            Ok(CalcRequest::Later(r, responder)) => {
+                let sum = r.deadline + i64::from(r.message) + i64::from(r.__message);
+                responder.reply(&server, CalcLaterResponse { sum }).unwrap();
+            }
             Err(_) => return,
         }
     }
@@ -306,6 +310,11 @@ fn calls_methods_and_receives_events() {
     let event = mock::event(0x3);
     let back = client.pass(owned(event), i64::MAX).unwrap();
     assert_eq!(mock::handle_info(back.h.raw()), Some((mock::EVENT, 0x3)));
+    // Members named like the generated method's own variables.
+    assert_eq!(
+        client.later(100, 20, 3, i64::MAX).unwrap(),
+        CalcLaterResponse { sum: 123 }
+    );
     drop(client);
     server.join().unwrap();
 }

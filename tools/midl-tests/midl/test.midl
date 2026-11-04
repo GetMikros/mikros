@@ -67,4 +67,5 @@ protocol Calc {
     @3 Note(text string<16>);
     @4 -> Noted(text string<16>);
     @5 Pass(h handle) -> (h handle);
+    @6 Later(deadline i64, message u32, __message u32) -> (sum i64);
 };

@@ -47,7 +47,7 @@ impl Gen<'_> {
                     client.push_str(&doc(&m.doc, ""));
                     writeln!(
                         client,
-                        "pub fn {func}(&self, {params}deadline: i64) -> Result<{result}, {rt}::Error> {{\nlet mut message = {rt}::Encoder::new({rt}::Header {{ txid: 0, ordinal: {ordinal}, flags: {flags} }}, {req}::__SIZE);\n{build}.__encode(&mut message, {rt}::HEADER_SIZE)?;\nlet (bytes, handles) = self.channel.call(message, deadline)?;\nself.channel.checked(Self::__{func}_reply(&bytes, handles))\n}}\n\nfn __{func}_reply(bytes: &[u8], handles: ::alloc::vec::Vec<{rt}::RawHandle>) -> Result<{result}, {rt}::Error> {{\nlet mut decoder = {rt}::Decoder::new(bytes, handles);\nlet d = &mut decoder;\nlet header = d.header()?;\nif header.ordinal != {ordinal} || header.flags & {rt}::FLAG_FLEXIBLE != 0 {{\nreturn Err({rt}::Error::Invalid);\n}}\nif header.flags & {rt}::FLAG_UNKNOWN_METHOD != 0 {{\ndecoder.finish()?;\nreturn Err({rt}::Error::UnknownMethod);\n}}\n{}decoder.finish()?;\nOk(result)\n}}\n",
+                        "pub fn {func}(&self, {params}deadline: i64) -> Result<{result}, {rt}::Error> {{\nlet mut __message = {rt}::Encoder::new({rt}::Header {{ txid: 0, ordinal: {ordinal}, flags: {flags} }}, {req}::__SIZE);\n{build}.__encode(&mut __message, {rt}::HEADER_SIZE)?;\nlet (bytes, handles) = self.channel.call(__message, deadline)?;\nself.channel.checked(Self::__{func}_reply(&bytes, handles))\n}}\n\nfn __{func}_reply(bytes: &[u8], handles: ::alloc::vec::Vec<{rt}::RawHandle>) -> Result<{result}, {rt}::Error> {{\nlet mut decoder = {rt}::Decoder::new(bytes, handles);\nlet d = &mut decoder;\nlet header = d.header()?;\nif header.ordinal != {ordinal} || header.flags & {rt}::FLAG_FLEXIBLE != 0 {{\nreturn Err({rt}::Error::Invalid);\n}}\nif header.flags & {rt}::FLAG_UNKNOWN_METHOD != 0 {{\ndecoder.finish()?;\nreturn Err({rt}::Error::UnknownMethod);\n}}\n{}decoder.finish()?;\nOk(result)\n}}\n",
                         self.decode_result(&resp, error.as_ref())
                     )
                     .unwrap();
@@ -65,7 +65,7 @@ impl Gen<'_> {
                     let (body, encode) = self.encode_result(&resp, error.as_ref());
                     writeln!(
                         out,
-                        "/// Replies to one `{}` request.\n#[derive(Debug, PartialEq)]\npub struct {responder} {{\ntxid: u32,\n}}\n\nimpl {responder} {{\npub fn reply(self, server: &{name}Server, result: {result}) -> Result<(), {rt}::Error> {{\nlet mut message = {rt}::Encoder::new({rt}::Header {{ txid: self.txid, ordinal: {ordinal}, flags: 0 }}, {body});\nlet e = &mut message;\nlet at = {rt}::HEADER_SIZE;\n{encode}server.channel.send(message)\n}}\n}}\n",
+                        "/// Replies to one `{}` request.\n#[derive(Debug, PartialEq)]\npub struct {responder} {{\ntxid: u32,\n}}\n\nimpl {responder} {{\npub fn reply(self, server: &{name}Server, result: {result}) -> Result<(), {rt}::Error> {{\nlet mut __message = {rt}::Encoder::new({rt}::Header {{ txid: self.txid, ordinal: {ordinal}, flags: 0 }}, {body});\nlet e = &mut __message;\nlet at = {rt}::HEADER_SIZE;\n{encode}server.channel.send(__message)\n}}\n}}\n",
                         m.name
                     )
                     .unwrap();
@@ -77,7 +77,7 @@ impl Gen<'_> {
                     client.push_str(&doc(&m.doc, ""));
                     writeln!(
                         client,
-                        "pub fn {func}(&self, {params}) -> Result<(), {rt}::Error> {{\nlet mut message = {rt}::Encoder::new({rt}::Header {{ txid: 0, ordinal: {ordinal}, flags: {flags} }}, {req}::__SIZE);\n{build}.__encode(&mut message, {rt}::HEADER_SIZE)?;\nself.channel.send(message)\n}}\n"
+                        "pub fn {func}(&self, {params}) -> Result<(), {rt}::Error> {{\nlet mut __message = {rt}::Encoder::new({rt}::Header {{ txid: 0, ordinal: {ordinal}, flags: {flags} }}, {req}::__SIZE);\n{build}.__encode(&mut __message, {rt}::HEADER_SIZE)?;\nself.channel.send(__message)\n}}\n"
                     )
                     .unwrap();
                     writeln!(requests, "{}    {variant}({req}),", doc(&m.doc, "    ")).unwrap();
@@ -94,7 +94,7 @@ impl Gen<'_> {
                     server.push_str(&doc(&m.doc, ""));
                     writeln!(
                         server,
-                        "pub fn send_{func}(&self, {params}) -> Result<(), {rt}::Error> {{\nlet mut message = {rt}::Encoder::new({rt}::Header {{ txid: 0, ordinal: {ordinal}, flags: {flags} }}, {ev}::__SIZE);\n{build}.__encode(&mut message, {rt}::HEADER_SIZE)?;\nself.channel.send(message)\n}}\n"
+                        "pub fn send_{func}(&self, {params}) -> Result<(), {rt}::Error> {{\nlet mut __message = {rt}::Encoder::new({rt}::Header {{ txid: 0, ordinal: {ordinal}, flags: {flags} }}, {ev}::__SIZE);\n{build}.__encode(&mut __message, {rt}::HEADER_SIZE)?;\nself.channel.send(__message)\n}}\n"
                     )
                     .unwrap();
                     writeln!(
@@ -130,12 +130,27 @@ impl Gen<'_> {
 
     /// The parameters of a method taking `fields`, each followed by a
     /// comma, and the expression that builds its structure `name`.
+    ///
+    /// A parameter that would take the name of the `deadline` parameter,
+    /// or a name starting with `__` like the method's own variables, gets
+    /// a trailing `_`.
     fn params(&self, name: &str, fields: &[Field]) -> (String, String) {
+        let param = |f: &Field| {
+            let field = super::ident(&f.name);
+            if f.name == "deadline" || f.name.starts_with("__") {
+                format!("{field}_")
+            } else {
+                field
+            }
+        };
         let params: String = fields
             .iter()
-            .map(|f| format!("{}: {}, ", super::ident(&f.name), self.rust_type(&f.ty)))
+            .map(|f| format!("{}: {}, ", param(f), self.rust_type(&f.ty)))
             .collect();
-        let names: Vec<String> = fields.iter().map(|f| super::ident(&f.name)).collect();
+        let names: Vec<String> = fields
+            .iter()
+            .map(|f| format!("{}: {}", super::ident(&f.name), param(f)))
+            .collect();
         (params, format!("{name} {{ {} }}", names.join(", ")))
     }
 
