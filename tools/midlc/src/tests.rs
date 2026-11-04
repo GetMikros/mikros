@@ -89,6 +89,31 @@ fn rejects_malformed_files() {
     }
 }
 
+#[test]
+fn reports_every_malformed_declaration() {
+    let text = "library a;\n\
+        using b c;\n\
+        type A = struct { x u32 y u32; };\n\
+        type B = struct { x u32; };\n\
+        protocol P {\n    @1 F(x u32;\n    @2 G();\n};\n\
+        /// Documented.\n\
+        const C u32 = ;\n\
+        const D u32 = 1;\n";
+    let (file, errors) = crate::parse_all("bad.midl", text);
+    let lines: Vec<usize> = errors.iter().map(|e| e.span.line).collect();
+    assert_eq!(lines, [2, 3, 6, 10], "{errors:?}");
+    let file = file.expect("the library declaration is valid");
+    assert!(file.usings.is_empty());
+    assert_eq!(file.decls.len(), 2);
+}
+
+#[test]
+fn needs_a_library_declaration() {
+    let (file, errors) = crate::parse_all("bad.midl", "type A = struct {};");
+    assert!(file.is_none());
+    assert_eq!(errors.len(), 1);
+}
+
 const OTHER: &str = "library test.other;\ntype Status = enum : i32 { OK = 0; FAILED = -1; };\n";
 
 mod checks {

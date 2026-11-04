@@ -4,29 +4,67 @@ use crate::ast::*;
 use crate::lexer::Token;
 use crate::{Error, Span};
 
+/// The syntax tree of the file, or its first error.
 pub fn parse(tokens: Vec<(Token, Span)>, end: Span) -> Result<File, Error> {
+    let (file, mut errors) = parse_all(tokens, end);
+    match file {
+        Some(file) if errors.is_empty() => Ok(file),
+        _ => Err(errors.remove(0)),
+    }
+}
+
+/// The syntax tree of the file, without the declarations that have
+/// errors, and every error. After an error in a declaration, parsing
+/// goes on after the `;` that ends it. The tree is `None` when the
+/// `library` declaration cannot be parsed.
+pub fn parse_all(tokens: Vec<(Token, Span)>, end: Span) -> (Option<File>, Vec<Error>) {
     let mut p = Parser { tokens, at: 0, end };
-    let attrs = p.attributes()?;
-    p.keyword("library")?;
-    let library = p.path()?;
-    p.punct(';')?;
+    let mut errors = Vec::new();
+    let header = (|| {
+        let attrs = p.attributes()?;
+        p.keyword("library")?;
+        let library = p.path()?;
+        p.punct(';')?;
+        Ok((attrs, library))
+    })();
+    let (attrs, library) = match header {
+        Ok(header) => header,
+        Err(e) => return (None, vec![e]),
+    };
     let mut usings = Vec::new();
     while p.peek_ident("using") {
+        let start = p.at;
         p.at += 1;
-        usings.push(p.path()?);
-        p.punct(';')?;
+        match p.path().and_then(|path| p.punct(';').map(|()| path)) {
+            Ok(path) => usings.push(path),
+            Err(e) => {
+                errors.push(e);
+                p.skip_from(start);
+            }
+        }
     }
     let mut decls = Vec::new();
     while p.at < p.tokens.len() {
-        decls.push(p.decl()?);
+        let start = p.at;
+        match p.decl() {
+            Ok(decl) => decls.push(decl),
+            Err(e) => {
+                errors.push(e);
+                p.skip_from(start);
+            }
+        }
     }
-    Ok(File {
+    let file = File {
         attrs,
         library,
         usings,
         decls,
-    })
+    };
+    (Some(file), errors)
 }
+
+/// The words that start a declaration.
+const DECLARATION_WORDS: [&str; 5] = ["const", "alias", "type", "protocol", "using"];
 
 struct Parser {
     tokens: Vec<(Token, Span)>,
@@ -36,6 +74,35 @@ struct Parser {
 }
 
 impl Parser {
+    /// After an error in the statement that starts at `start`, moves to
+    /// just after the `;` that ends it, or to the start of a line with
+    /// a declaration, a documentation comment or an attribute after
+    /// the error, whichever comes first.
+    fn skip_from(&mut self, start: usize) {
+        let failed = self.at.max(start + 1);
+        let mut depth = 0i32;
+        self.at = start;
+        while let Some((token, span)) = self.tokens.get(self.at) {
+            let after = self.at >= failed;
+            match token {
+                Token::Punct('{' | '(' | '<') => depth += 1,
+                Token::Punct('}' | ')' | '>') => depth -= 1,
+                Token::Punct(';') if after && depth <= 0 => {
+                    self.at += 1;
+                    return;
+                }
+                Token::Ident(word)
+                    if after && span.col == 1 && DECLARATION_WORDS.contains(&word.as_str()) =>
+                {
+                    return;
+                }
+                Token::Doc(_) | Token::Punct('@') if after && span.col == 1 => return,
+                _ => {}
+            }
+            self.at += 1;
+        }
+    }
+
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.at).map(|(t, _)| t)
     }
