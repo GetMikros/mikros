@@ -1,7 +1,6 @@
 //! The test hooks of the fuzz build, which the `fuzz_*` system calls
 //! other than the coverage calls set.
 
-use crate::percpu;
 use crate::sched::Thread;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -25,14 +24,14 @@ pub struct AllocFailures([AtomicU64; 2]);
 /// and allocation failures, or `None` when the processor is about to
 /// idle.
 pub fn switch_in(thread: Option<(u64, &AllocFailures)>) {
-    let cpu = percpu::this();
+    let cpu = kernel_core::cpu::this();
     let (koid, failures) = match thread {
         Some((koid, failures)) => (koid, failures as *const AllocFailures),
         None => (0, core::ptr::null()),
     };
-    cpu.running.store(koid, Ordering::Relaxed);
-    cpu.alloc_failures
-        .store(failures.cast_mut(), Ordering::Relaxed);
+    cpu.fuzz_running.store(koid, Ordering::Relaxed);
+    cpu.fuzz_alloc_failures
+        .store(failures.cast_mut().cast(), Ordering::Relaxed);
 }
 
 /// Checks that `kind` is a kind of allocation.
@@ -61,11 +60,13 @@ pub fn fail_alloc(thread: &Thread, kind: u32, after: u64) {
 /// exception handling, which also serves the maintenance deadlines, are
 /// counted, and once one fails, no other of the kind does.
 pub fn alloc_fails(kind: u32) -> bool {
-    let cpu = percpu::this();
-    if cpu.handling.load(Ordering::Relaxed) != 0 {
+    if kernel_core::arch::handling_interrupt() {
         return false;
     }
-    let failures = cpu.alloc_failures.load(Ordering::Relaxed);
+    let failures = kernel_core::cpu::this()
+        .fuzz_alloc_failures
+        .load(Ordering::Relaxed)
+        .cast::<AllocFailures>();
     if failures.is_null() {
         return false;
     }
@@ -215,7 +216,9 @@ pub fn preempt_at(
 /// waiting for it run, and waits until `USER1` is set on it or the
 /// deadline passes. No lock may be held.
 pub fn pass(point: u32) {
-    let running = percpu::this().running.load(Ordering::Relaxed);
+    let running = kernel_core::cpu::this()
+        .fuzz_running
+        .load(Ordering::Relaxed);
     let stop = {
         let mut stop = STOP.lock();
         match &mut *stop {

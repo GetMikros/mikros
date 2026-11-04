@@ -3,6 +3,8 @@
 
 use crate::arch;
 use core::sync::atomic::{AtomicBool, AtomicUsize};
+#[cfg(feature = "fuzz")]
+use core::sync::atomic::{AtomicPtr, AtomicU64};
 
 /// The core's state of one processor.
 pub struct Cpu {
@@ -16,6 +18,12 @@ pub struct Cpu {
     /// Set when the running thread's slice has ended or a thread was
     /// queued that should run first.
     pub reschedule: AtomicBool,
+    /// In the fuzz build, the object ID of the running thread, or 0 while
+    /// the processor idles, and its allocation failures, or null.
+    #[cfg(feature = "fuzz")]
+    pub fuzz_running: AtomicU64,
+    #[cfg(feature = "fuzz")]
+    pub fuzz_alloc_failures: AtomicPtr<()>,
 }
 
 impl Cpu {
@@ -24,6 +32,10 @@ impl Cpu {
             locks_held: AtomicUsize::new(0),
             destroyed: AtomicUsize::new(0),
             reschedule: AtomicBool::new(false),
+            #[cfg(feature = "fuzz")]
+            fuzz_running: AtomicU64::new(0),
+            #[cfg(feature = "fuzz")]
+            fuzz_alloc_failures: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 }

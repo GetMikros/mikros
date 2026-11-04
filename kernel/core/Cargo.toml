@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+[features]
+# Keeps the per-processor state of the fuzz build's test hooks.
+fuzz = []
+
 [dependencies]
 boot-protocol = { path = "../../boot/protocol" }
 blake2 = { version = "=0.10.6", default-features = false }

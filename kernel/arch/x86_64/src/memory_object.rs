@@ -2,9 +2,9 @@
 
 use crate::aspace::{self, Access, AddressSpace, Fault};
 use crate::memory::FRAMES;
-use crate::paging::Policy;
 use crate::port::Port;
 use crate::publish::{ITEM_STEP, Work};
+use kernel_core::arch::CachePolicy as Policy;
 
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;

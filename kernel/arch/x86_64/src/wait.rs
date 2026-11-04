@@ -247,7 +247,7 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> 
     let thread = sched::current().ok_or(Error::BadState)?;
     let process = thread.process().cloned().ok_or(Error::BadState)?;
     let key = futex_key(&process, addr)?;
-    let value: u32 = crate::syscall::UserIn::<u32>::new(addr)
+    let value: u32 = crate::user::UserIn::<u32>::new(addr)
         .read()
         .map_err(|_| Error::InvalidArgs)?;
     if value != expected {
