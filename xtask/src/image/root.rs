@@ -41,6 +41,18 @@ const TOP_DIRS: [&str; 9] = [
     "@system",
 ];
 
+/// The directories a live system's boot image holds: the system at its
+/// namespace path under `usr`, and the top-level directories that the
+/// process manager fills from the boot image.
+pub fn live_dirs() -> Vec<String> {
+    let system = SYSTEM_DIRS.iter().map(|d| format!("usr/{d}"));
+    let top = ["etc", "var", "Users", "Apps", "Libraries"];
+    core::iter::once("usr".to_owned())
+        .chain(system)
+        .chain(top.map(str::to_owned))
+        .collect()
+}
+
 /// The `--subvol` values for the tree written by `write_tree`.
 fn subvolumes(version: &str) -> Vec<String> {
     vec![
@@ -113,6 +125,29 @@ pub fn create(kind: Kind) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_the_live_system_at_its_paths() {
+        let dirs = live_dirs();
+        assert_eq!(dirs[0], "usr");
+        for d in [
+            "usr/bin",
+            "usr/lib/services",
+            "usr/share",
+            "etc",
+            "var",
+            "Users",
+            "Apps",
+            "Libraries",
+        ] {
+            assert!(dirs.iter().any(|x| x == d), "{d}");
+        }
+        assert!(
+            !dirs
+                .iter()
+                .any(|d| d.contains('@') || d == "tmp" || d == "Volumes")
+        );
+    }
 
     #[test]
     fn names_the_version_after_the_workspace_and_kind() {

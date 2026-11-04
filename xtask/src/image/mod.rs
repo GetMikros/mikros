@@ -5,7 +5,7 @@ mod gpt;
 mod root;
 
 use crate::build::{self, Kind};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -110,12 +110,55 @@ fn write_image(path: &Path, parts: &[Part]) -> Result<()> {
     Ok(())
 }
 
+pub use root::live_dirs;
+
 pub fn run(args: &Args) -> Result<()> {
-    if args.live {
-        bail!("live images are not supported yet: the boot image's contents are not defined");
-    }
     let built = build::build(args.kind)?;
+    if args.live {
+        let boot_image = build::live_boot_image(args.kind)?;
+        return create_live(&built, &boot_image, &path(args.kind, true));
+    }
     create(args.kind, &built, &path(args.kind, false))
+}
+
+/// The files of the EFI system partition: the boot manager, also at the
+/// fallback path, the bootloader, the kernel, `boot_image` and
+/// `command_line`.
+fn esp_files(
+    built: &build::Built,
+    boot_image: &Path,
+    command_line: String,
+) -> Result<Vec<(&'static str, Vec<u8>)>> {
+    let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
+    let bootmenu = read(&built.bootmenu)?;
+    Ok(vec![
+        ("EFI/Mikros/bootmenu.efi", bootmenu.clone()),
+        ("EFI/BOOT/BOOTX64.EFI", bootmenu),
+        ("EFI/Mikros/mikrosboot.efi", read(&built.bootloader)?),
+        ("EFI/Mikros/kernel", read(&built.kernel)?),
+        ("EFI/Mikros/boot.img", read(boot_image)?),
+        ("EFI/Mikros/boot.conf", command_line.into_bytes()),
+    ])
+}
+
+/// Writes a live image to `out`: only the EFI system partition, with the
+/// live system's `boot_image` and `root=bootfs` on the command line.
+fn create_live(built: &build::Built, boot_image: &Path, out: &Path) -> Result<()> {
+    let contents = esp_files(built, boot_image, "root=bootfs".to_owned())?;
+    let files: Vec<(&str, &[u8])> = contents.iter().map(|(p, d)| (*p, d.as_slice())).collect();
+    let total = files.iter().map(|(_, d)| d.len() as u64).sum();
+    let esp = esp::build(esp::size_for(total), &files)?;
+    write_image(
+        out,
+        &[Part {
+            type_guid: ESP_TYPE,
+            guid: Uuid::new_v4(),
+            name: "EFI system partition",
+            data: Data::Bytes(&esp),
+        }],
+    )?;
+    println!("created  {}", out.display());
+    Ok(())
 }
 
 /// Writes the disk image of the components `built` for the build kind
@@ -135,20 +178,11 @@ pub fn create_with(
     more: &[(&str, &[u8])],
 ) -> Result<()> {
     let root_guid = Uuid::new_v4();
-    let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
-    let bootmenu = read(&built.bootmenu)?;
     let mut command_line = format!("root=PARTUUID={root_guid}");
     if !extra.is_empty() {
         command_line = format!("{command_line} {extra}");
     }
-    let contents = [
-        ("EFI/Mikros/bootmenu.efi", bootmenu.clone()),
-        ("EFI/BOOT/BOOTX64.EFI", bootmenu),
-        ("EFI/Mikros/mikrosboot.efi", read(&built.bootloader)?),
-        ("EFI/Mikros/kernel", read(&built.kernel)?),
-        ("EFI/Mikros/boot.img", read(&built.boot_image)?),
-        ("EFI/Mikros/boot.conf", command_line.into_bytes()),
-    ];
+    let contents = esp_files(built, &built.boot_image, command_line)?;
     let files: Vec<(&str, &[u8])> = contents
         .iter()
         .map(|(p, d)| (*p, d.as_slice()))

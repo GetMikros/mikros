@@ -134,9 +134,24 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     })
 }
 
+/// Builds the boot image of a live system for `kind`: `init`, and the
+/// directories of the root file system at their paths there, which hold
+/// the whole system as it stands.
+pub fn live_boot_image(kind: Kind) -> Result<PathBuf> {
+    let init = user_build("init", kind)?;
+    let dirs = crate::image::live_dirs();
+    let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+    archive(kind, "live-boot.img", &[("init", &init)], &dirs)
+}
+
 /// Writes the boot archive `file` with each of `members`, given by name
 /// and the path of its contents, as a regular file.
 fn boot_image(kind: Kind, file: &str, members: &[(&str, &Path)]) -> Result<PathBuf> {
+    archive(kind, file, members, &[])
+}
+
+/// Like `boot_image`, with the directories `dirs` after the files.
+fn archive(kind: Kind, file: &str, members: &[(&str, &Path)], dirs: &[&str]) -> Result<PathBuf> {
     let dir = crate::workspace_root()
         .join("target/boot")
         .join(kind.name());
@@ -154,8 +169,22 @@ fn boot_image(kind: Kind, file: &str, members: &[(&str, &Path)]) -> Result<PathB
             .append_data(&mut header, name, data.as_slice())
             .with_context(|| format!("adding {name} to the boot archive"))?;
     }
+    for &dir in dirs {
+        let mut header = tar::Header::new_ustar();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Directory);
+        archive
+            .append_data(&mut header, dir_name(dir), std::io::empty())
+            .with_context(|| format!("adding {dir} to the boot archive"))?;
+    }
     archive.finish().context("finishing the boot archive")?;
     Ok(path)
+}
+
+/// The archive name of directory `dir`, which ends in a slash.
+fn dir_name(dir: &str) -> String {
+    format!("{dir}/")
 }
 
 pub fn run(args: &Args) -> Result<()> {
