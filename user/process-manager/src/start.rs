@@ -129,7 +129,7 @@ pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Start
 
 /// The `arguments` memory object: the argument and environment counts,
 /// then each argument NUL-terminated. There is no environment yet.
-fn arguments(args: &[&str]) -> Result<OwnedHandle, Status> {
+pub fn arguments(args: &[&str]) -> Result<OwnedHandle, Status> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&(args.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
@@ -150,12 +150,13 @@ fn arguments(args: &[&str]) -> Result<OwnedHandle, Status> {
 
 /// What the startup transfer of a process carries besides its loaded
 /// program.
-pub struct Transfer<'a> {
+pub struct Transfer {
     pub pid: u32,
     pub parent: u32,
     pub user: u32,
     pub app_id: String,
-    pub args: &'a [&'a str],
+    /// The `arguments` memory object.
+    pub arguments: OwnedHandle,
     pub handles: Vec<StartupHandle>,
     pub launcher: ClientEnd<Launcher>,
     pub directory: ClientEnd<Directory>,
@@ -180,7 +181,7 @@ impl Started {
             user: transfer.user,
             app_id: transfer.app_id,
             bundle: None,
-            arguments: arguments(transfer.args)?,
+            arguments: transfer.arguments,
             handle_count: transfer.handles.len() as u32,
             namespace_count: namespace.len() as u32,
             process: same(&self.process)?,

@@ -15,6 +15,17 @@ pub struct Record {
     pub budget: OwnedHandle,
     pub path: String,
     pub process: OwnedHandle,
+    /// How the process ended, once it did.
+    pub exit: Option<Exit>,
+}
+
+/// How a process ended: its exit code, or the signal that terminated
+/// it.
+#[derive(Clone, Copy)]
+#[expect(dead_code, reason = "read once the process manager serves Wait")]
+pub struct Exit {
+    pub code: i64,
+    pub signal: u32,
 }
 
 /// The records by process ID.
@@ -36,5 +47,12 @@ impl Records {
         }
         self.by_pid.insert(pid, record);
         true
+    }
+
+    /// Keeps `exit` as how process `pid` ended.
+    pub fn exited(&mut self, pid: u32, exit: Exit) {
+        if let Some(record) = self.by_pid.get_mut(&pid) {
+            record.exit = Some(exit);
+        }
     }
 }

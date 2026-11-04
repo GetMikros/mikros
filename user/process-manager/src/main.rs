@@ -11,6 +11,7 @@ extern crate alloc;
 
 mod init;
 mod launcher;
+mod processes;
 mod records;
 mod start;
 
