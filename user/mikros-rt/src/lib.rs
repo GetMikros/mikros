@@ -1,9 +1,12 @@
 //! The Mikros runtime for programs without the standard library: the
-//! program entry point, the system call bindings, logging and the panic
-//! handler.
+//! program entry point, the system call bindings, the global allocator,
+//! logging and the panic handler.
 
 #![no_std]
 
+extern crate alloc;
+
+pub mod heap;
 pub mod log;
 pub mod startup;
 

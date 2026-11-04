@@ -5,6 +5,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::sync::atomic::{AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
@@ -7085,7 +7087,55 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 111] = [
+/// The global allocator serves small and large blocks of any common
+/// alignment, keeps their contents, and reuses freed memory.
+fn heap_allocates_and_frees(_: &Startup) -> Result {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    #[repr(align(256))]
+    struct Aligned([u8; 300]);
+    let mut blocks: Vec<Vec<u8>> = Vec::new();
+    for (i, size) in [1, 15, 16, 17, 100, 2048, 2049, 5000, 1 << 20]
+        .into_iter()
+        .enumerate()
+    {
+        let mut v = Vec::with_capacity(size);
+        v.resize(size, i as u8 + 1);
+        blocks.push(v);
+    }
+    for (i, v) in blocks.iter().enumerate() {
+        ensure(
+            "keeping block contents",
+            v.iter().all(|&b| b == i as u8 + 1),
+        )?;
+    }
+    let aligned = Box::new(Aligned([7; 300]));
+    ensure(
+        "aligning blocks",
+        (&*aligned as *const Aligned as usize).is_multiple_of(256),
+    )?;
+    ensure(
+        "keeping aligned contents",
+        aligned.0.iter().all(|&b| b == 7),
+    )?;
+    drop(blocks);
+    let first = Box::new([0u8; 64]);
+    let at = &*first as *const [u8; 64] as usize;
+    drop(first);
+    let again = Box::new([1u8; 64]);
+    ensure(
+        "reusing a freed block",
+        &*again as *const [u8; 64] as usize == at,
+    )?;
+    // Far more than the static arena, in blocks that are each freed.
+    for round in 0..64 {
+        let big: Vec<u64> = (0..64 * 1024).map(|n| n ^ round).collect();
+        ensure("filling a large block", big[4095] == 4095 ^ round)?;
+    }
+    Ok(())
+}
+
+const TESTS: [(&str, Test); 112] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -7105,6 +7155,7 @@ const TESTS: [(&str, Test); 111] = [
     ),
     ("stop_continue_and_kill", stop_continue_and_kill),
     ("stopped_wait_goes_on", stopped_wait_goes_on),
+    ("heap_allocates_and_frees", heap_allocates_and_frees),
     (
         "queued_signals_of_ended_thread",
         queued_signals_of_ended_thread,

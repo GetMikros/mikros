@@ -194,5 +194,6 @@ pub(crate) fn receive(bootstrap: Handle) -> Option<&'static Startup> {
         return None;
     };
     crate::log::set_handle(decoded.log);
+    crate::heap::set_process(decoded.process);
     Some(startup.write(decoded))
 }
