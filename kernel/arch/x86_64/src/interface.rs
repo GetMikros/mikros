@@ -1,6 +1,8 @@
 //! The x86_64 implementation of the kernel core's architecture interface.
 
+use crate::thread_arch::ArchThread;
 use crate::{context, cpu, idt, percpu, serial, space, time, timer};
+use alloc::boxed::Box;
 use core::arch::asm;
 use core::sync::atomic::Ordering;
 use kernel_core::arch::Arch;
@@ -104,6 +106,46 @@ impl Arch for X86 {
     unsafe fn context_switch(save: *mut u64, load: u64) {
         // SAFETY: the caller guarantees `load` is a switchable context.
         unsafe { context::switch(save, load) };
+    }
+
+    fn thread_new() -> *mut () {
+        let Some(thread) = ArchThread::new() else {
+            return core::ptr::null_mut();
+        };
+        match kernel_core::fallible::try_box(thread) {
+            Ok(thread) => Box::into_raw(thread).cast(),
+            Err(_) => core::ptr::null_mut(),
+        }
+    }
+
+    unsafe fn thread_free(thread: *mut ()) {
+        // SAFETY: the caller passes a state from `thread_new`, a boxed
+        // `ArchThread`, which nothing uses any more.
+        drop(unsafe { Box::from_raw(thread.cast::<ArchThread>()) });
+    }
+
+    unsafe fn thread_saved_context(thread: *mut ()) -> *mut u64 {
+        // SAFETY: the caller passes a live state from `thread_new`.
+        unsafe { (*thread.cast::<ArchThread>()).saved_rsp() }
+    }
+
+    unsafe fn thread_set_user_start(thread: *mut (), entry: u64, stack: u64, arg1: u64, arg2: u64) {
+        // SAFETY: as for `thread_saved_context`.
+        unsafe { (*thread.cast::<ArchThread>()).set_start([entry, stack, arg1, arg2]) };
+    }
+
+    unsafe fn thread_switch_out(thread: *mut (), user: bool) {
+        // SAFETY: as for `thread_saved_context`.
+        unsafe { (*thread.cast::<ArchThread>()).switch_out(user) };
+    }
+
+    unsafe fn thread_switch_in(thread: *mut (), user_stack_top: u64) {
+        // SAFETY: as for `thread_saved_context`.
+        unsafe { (*thread.cast::<ArchThread>()).switch_in(user_stack_top) };
+    }
+
+    fn user_thread_entry() -> u64 {
+        crate::sched::user_entry as *const () as u64
     }
 
     fn extended_state_layout() -> (usize, usize) {

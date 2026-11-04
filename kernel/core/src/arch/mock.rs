@@ -162,6 +162,34 @@ impl Arch for Mock {
         panic!("the mock architecture cannot switch kernel stacks");
     }
 
+    fn thread_new() -> *mut () {
+        // The saved context, then the user start.
+        alloc::boxed::Box::into_raw(alloc::boxed::Box::new([0u64; 5])).cast()
+    }
+
+    unsafe fn thread_free(thread: *mut ()) {
+        // SAFETY: the caller passes a state from `thread_new`.
+        drop(unsafe { alloc::boxed::Box::from_raw(thread.cast::<[u64; 5]>()) });
+    }
+
+    unsafe fn thread_saved_context(thread: *mut ()) -> *mut u64 {
+        thread.cast()
+    }
+
+    unsafe fn thread_set_user_start(thread: *mut (), entry: u64, stack: u64, arg1: u64, arg2: u64) {
+        // SAFETY: the caller passes a live state from `thread_new`.
+        let state = unsafe { &mut *thread.cast::<[u64; 5]>() };
+        state[1..].copy_from_slice(&[entry, stack, arg1, arg2]);
+    }
+
+    unsafe fn thread_switch_out(_thread: *mut (), _user: bool) {}
+
+    unsafe fn thread_switch_in(_thread: *mut (), _user_stack_top: u64) {}
+
+    fn user_thread_entry() -> u64 {
+        0
+    }
+
     fn extended_state_layout() -> (usize, usize) {
         (64, 64)
     }

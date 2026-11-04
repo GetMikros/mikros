@@ -180,6 +180,58 @@ interface! {
     /// earlier switch, and its stack must be used by nothing else.
     [unsafe] fn context_switch(save: *mut u64, load: u64);
 
+    /// Allocates the architecture's state of a new thread, or returns null
+    /// when memory runs out.
+    [] fn thread_new() -> *mut ();
+
+    /// Frees the state of a thread from `thread_new`.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must come from `thread_new`, and nothing may use it any
+    /// more.
+    [unsafe] fn thread_free(thread: *mut ());
+
+    /// Where the thread's kernel context is saved while it does not run,
+    /// for `context_switch`.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must come from `thread_new` and not be freed.
+    [unsafe] fn thread_saved_context(thread: *mut ()) -> *mut u64;
+
+    /// Records where a new user thread starts in user mode: at `entry`
+    /// with the stack pointer `stack` and the two arguments.
+    ///
+    /// # Safety
+    ///
+    /// As for `thread_saved_context`; the thread must not have run.
+    [unsafe] fn thread_set_user_start(thread: *mut (), entry: u64, stack: u64, arg1: u64, arg2: u64);
+
+    /// Saves the processor state of the running thread that the next one
+    /// replaces, including its user state if `user`.
+    ///
+    /// # Safety
+    ///
+    /// As for `thread_saved_context`; the thread must be the running one,
+    /// about to be switched away from.
+    [unsafe] fn thread_switch_out(thread: *mut (), user: bool);
+
+    /// Loads the processor state of the thread about to run. For a user
+    /// thread, `user_stack_top` is the top of its kernel stack, which
+    /// entries from user mode use; it is 0 for a kernel thread.
+    ///
+    /// # Safety
+    ///
+    /// As for `thread_saved_context`; the thread must be about to be
+    /// switched to.
+    [unsafe] fn thread_switch_in(thread: *mut (), user_stack_top: u64);
+
+    /// The address of the function a new user thread starts with on its
+    /// kernel stack, for `context_prepare`. It enters user mode where
+    /// `thread_set_user_start` said.
+    [] fn user_thread_entry() -> u64;
+
     /// The size and alignment of a thread's extended processor state.
     [] fn extended_state_layout() -> (usize, usize);
 
@@ -218,3 +270,58 @@ interface! {
 
 #[cfg(not(target_os = "none"))]
 arch_impl!(mock::Mock);
+
+/// The architecture's state of one thread, freed when it is dropped.
+pub struct ThreadData(core::ptr::NonNull<()>);
+
+// SAFETY: an architecture's thread state is shared by the processors that
+// run the thread, and its operations are made for that.
+unsafe impl Send for ThreadData {}
+// SAFETY: as for `Send`.
+unsafe impl Sync for ThreadData {}
+
+impl ThreadData {
+    /// New thread state, or `None` when memory runs out.
+    pub fn new() -> Option<ThreadData> {
+        core::ptr::NonNull::new(thread_new()).map(ThreadData)
+    }
+
+    /// The pointer the architecture layer made the state with.
+    pub fn as_ptr(&self) -> *mut () {
+        self.0.as_ptr()
+    }
+
+    /// Where the thread's kernel context is saved while it does not run.
+    pub fn saved_context(&self) -> *mut u64 {
+        // SAFETY: the state is not freed while `self` lives.
+        unsafe { thread_saved_context(self.as_ptr()) }
+    }
+
+    /// Records where a new user thread starts in user mode. The thread
+    /// must not have run.
+    pub fn set_user_start(&self, entry: u64, stack: u64, arg1: u64, arg2: u64) {
+        // SAFETY: as for `saved_context`.
+        unsafe { thread_set_user_start(self.as_ptr(), entry, stack, arg1, arg2) };
+    }
+
+    /// Saves the state of the running thread, which is being switched
+    /// away from.
+    pub fn switch_out(&self, user: bool) {
+        // SAFETY: as for `saved_context`.
+        unsafe { thread_switch_out(self.as_ptr(), user) };
+    }
+
+    /// Loads the state of the thread being switched to.
+    pub fn switch_in(&self, user_stack_top: u64) {
+        // SAFETY: as for `saved_context`.
+        unsafe { thread_switch_in(self.as_ptr(), user_stack_top) };
+    }
+}
+
+impl Drop for ThreadData {
+    fn drop(&mut self) {
+        // SAFETY: the state came from `thread_new`, and nothing uses it
+        // once its owner is dropped.
+        unsafe { thread_free(self.as_ptr()) };
+    }
+}

@@ -157,6 +157,13 @@ def threads(process):
         yield int(inner), inner.dereference()["data"]
 
 
+def arch_thread(thread):
+    """The `ArchThread` behind the `ThreadData` of `thread`."""
+    pointer = int(thread["arch"]["__0"]["pointer"])
+    arch = gdb.lookup_type("kernel::thread_arch::ArchThread")
+    return gdb.Value(pointer).cast(arch.pointer()).dereference()
+
+
 def running_thread():
     """The address of the `ArcInner` of the thread running on the boot
     processor, or 0."""
@@ -247,7 +254,8 @@ class Threads(gdb.Command):
                 f"thread {int(t['header']['koid'])} {text(t['name'])!r}: {state}, "
                 f"priority {int(scalar(t['priority']))}"
             )
-            rsp = int(t["arch"]["rsp"]["value"])
+            arch = arch_thread(t)
+            rsp = int(arch["rsp"]["value"])
             if inner == running:
                 print("  running; its registers are GDB's")
             elif state == "DEAD" or int(scalar(t["stack_top"])) == 0:
@@ -260,7 +268,7 @@ class Threads(gdb.Command):
                 regs = " ".join(f"{n}={v:#x}" for n, v in zip(SWITCH_FRAME, saved))
                 print(f"  kernel rsp={rsp + 8 * len(SWITCH_FRAME):#x} {regs}")
             for field in ["exception_frame", "syscall_frame"]:
-                frame = scalar(t["arch"][field])
+                frame = scalar(arch[field])
                 if int(frame) != 0:
                     f = frame.dereference()
                     names = ["rip", "rsp", "rax", "rdi", "rsi", "rdx", "rflags"]

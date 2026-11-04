@@ -60,3 +60,12 @@ fn describes_the_extended_state() {
     let (size, align) = super::extended_state_layout();
     assert!(size > 0 && align.is_power_of_two());
 }
+
+#[test]
+fn frees_thread_data() {
+    let data = super::ThreadData::new().expect("thread data");
+    assert!(!data.saved_context().is_null());
+    data.set_user_start(1, 2, 3, 4);
+    data.switch_out(true);
+    data.switch_in(0);
+}

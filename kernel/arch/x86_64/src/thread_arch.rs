@@ -7,6 +7,7 @@ use crate::context::{self, ExtendedState};
 use crate::percpu;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use kernel_core::arch::ThreadData;
 use kernel_core::sync::SpinLock;
 
 const IA32_FS_BASE: u32 = 0xC000_0100;
@@ -58,6 +59,13 @@ pub struct ArchThread {
 // that runs it, with interrupts disabled.
 unsafe impl Sync for ArchThread {}
 
+/// The x86_64 state behind a thread's `ThreadData`.
+pub fn of(data: &ThreadData) -> &ArchThread {
+    // SAFETY: on x86_64 every `ThreadData` comes from `thread_new`, which
+    // makes it from a boxed `ArchThread`, alive as long as `data`.
+    unsafe { &*data.as_ptr().cast::<ArchThread>() }
+}
+
 impl ArchThread {
     pub fn new() -> Option<ArchThread> {
         Some(ArchThread {
@@ -77,7 +85,8 @@ impl ArchThread {
         self.rsp.get()
     }
 
-    /// Records where a new user thread starts in user mode.
+    /// Records where a new user thread starts in user mode: RIP, RSP and
+    /// the two arguments.
     pub fn set_start(&self, start: [u64; 4]) {
         self.user.lock().start = start;
     }
@@ -106,16 +115,18 @@ impl ArchThread {
     }
 
     /// Loads the extended state and breakpoints of the thread about to
-    /// run.
-    pub fn switch_in(&self) {
+    /// run, and for a user thread, whose kernel stack ends at `user_top`,
+    /// the stack for entries from user mode and the FS and GS bases. A
+    /// kernel thread has `user_top` 0.
+    pub fn switch_in(&self, user_top: u64) {
         self.extended.restore();
         self.load_breakpoints();
+        if user_top != 0 {
+            self.switch_in_user(user_top);
+        }
     }
 
-    /// Loads the rest of the state of the user thread about to run, whose
-    /// kernel stack ends at `top`: the stack for entries from user mode
-    /// and the FS and GS bases.
-    pub fn switch_in_user(&self, top: u64) {
+    fn switch_in_user(&self, top: u64) {
         crate::gdt::set_rsp0(top);
         percpu::this().kernel_stack.store(top, Ordering::Relaxed);
         let user = *self.user.lock();
