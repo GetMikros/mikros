@@ -21,6 +21,16 @@ pub const KNOWN_IMAGES: [(&str, &str); 3] = [
     ("\\EFI\\refind\\refind_aa64.efi", "rEFInd"),
 ];
 
+/// The images looked for in the other folders of `\EFI\`: shim, and else
+/// GRUB.
+#[cfg(not(target_arch = "aarch64"))]
+pub const LOADERS: [&str; 2] = ["shimx64.efi", "grubx64.efi"];
+#[cfg(target_arch = "aarch64")]
+pub const LOADERS: [&str; 2] = ["shimaa64.efi", "grubaa64.efi"];
+
+/// The folders of `\EFI\` whose systems are found otherwise, or are Mikros.
+const NOT_SEARCHED: [&str; 5] = ["boot", "mikros", "microsoft", "systemd", "refind"];
+
 /// The removable-media fallback path.
 #[cfg(not(target_arch = "aarch64"))]
 pub const FALLBACK_PATH: &str = "\\EFI\\BOOT\\BOOTX64.EFI";
@@ -248,6 +258,8 @@ pub trait Disks {
     fn exists(&mut self, volume: Self::Volume, path: &str) -> bool;
     /// The device path of the file at `path` on the boot volume.
     fn file_device_path(&mut self, path: &str) -> Option<Self::DevicePath>;
+    /// The names of the folders directly in the folder `path` on `volume`.
+    fn folders(&mut self, volume: Self::Volume, path: &str) -> Vec<String>;
 }
 
 /// Whether the file at `path` on `volume` is a Mikros boot file.
@@ -261,8 +273,9 @@ fn is_mikros_boot_file<D: Disks>(disks: &mut D, volume: Option<D::Volume>, path:
 
 /// Finds the systems to add after the entries of `config`, which are on
 /// `boot_volume`: the load options in `BootOrder` that end in a file path,
-/// then the `KNOWN_IMAGES` on the boot volume, skipping Mikros boot files
-/// and files that an earlier entry starts. An option with the same device
+/// then the `KNOWN_IMAGES` on the boot volume, then shim or else GRUB in
+/// each other folder of `\EFI\` there, by folder name regardless of case,
+/// skipping Mikros boot files and files that an earlier entry starts. An option with the same device
 /// path as an earlier one starts the same file, also when its volume is not
 /// present.
 pub fn find<D: Disks>(
@@ -322,6 +335,27 @@ pub fn find<D: Disks>(
             Some(boot_volume),
             full,
         ));
+    }
+
+    let mut folders = disks.folders(boot_volume, "\\EFI");
+    folders.retain(|f| !NOT_SEARCHED.contains(&f.to_lowercase().as_str()));
+    folders.sort_by_key(|f| f.to_lowercase());
+    for folder in folders {
+        let image = LOADERS
+            .iter()
+            .map(|loader| format!("\\EFI\\{folder}\\{loader}"))
+            .find(|path| disks.exists(boot_volume, path));
+        let Some(path) = image else {
+            continue;
+        };
+        if started.contains(&boot_volume, &path) {
+            continue;
+        }
+        let Some(full) = disks.file_device_path(&path) else {
+            continue;
+        };
+        started.insert(boot_volume, &path);
+        found.push((folder, path, Some(boot_volume), full));
     }
 
     let mut ids = ids(|id| config.entries.iter().any(|e| e.id == id));

@@ -216,6 +216,27 @@ impl Disks for FakeDisks {
     fn file_device_path(&mut self, path: &str) -> Option<(u8, String)> {
         Some((BOOT, path.to_string()))
     }
+
+    fn folders(&mut self, volume: u8, path: &str) -> Vec<String> {
+        let prefix = alloc::format!("{}\\", path.to_lowercase());
+        let mut found: Vec<String> = Vec::new();
+        for (v, p, _) in &self.files {
+            let Some(rest) = p
+                .to_lowercase()
+                .strip_prefix(&prefix)
+                .map(|r| p[p.len() - r.len()..].to_string())
+            else {
+                continue;
+            };
+            if *v == volume
+                && let Some((folder, _)) = rest.split_once('\\')
+                && !found.iter().any(|f| f == folder)
+            {
+                found.push(folder.to_string());
+            }
+        }
+        found
+    }
 }
 
 fn config(text: &str) -> Config {
@@ -371,4 +392,41 @@ fn gives_detected_systems_ids_the_entries_do_not_use() {
         .map(|d| d.id)
         .collect();
     assert_eq!(ids, ["detected-2", "detected-3"]);
+}
+
+#[test]
+fn adds_shim_or_grub_from_other_folders_by_name() {
+    let [shim, grub] = LOADERS;
+    let path = |folder: &str, image: &str| alloc::format!("\\EFI\\{folder}\\{image}");
+    let leak = |s: String| -> &'static str { alloc::boxed::Box::leak(s.into_boxed_str()) };
+    let mut disks = FakeDisks {
+        present: vec![BOOT],
+        files: vec![
+            (BOOT, leak(path("ubuntu", shim)), Vec::new()),
+            (BOOT, leak(path("ubuntu", grub)), Vec::new()),
+            (BOOT, leak(path("Fedora", grub)), Vec::new()),
+            (BOOT, leak(path("arch", "vmlinuz.efi")), Vec::new()),
+            // Folders found otherwise, or Mikros's own, are not searched.
+            (BOOT, leak(path("BOOT", grub)), Vec::new()),
+            (BOOT, leak(path("mikros", grub)), Vec::new()),
+            (2, leak(path("debian", shim)), Vec::new()),
+        ],
+        ..FakeDisks::default()
+    };
+    assert_eq!(
+        found(&mut disks, &config("")),
+        [
+            system("Fedora", &path("Fedora", grub), BOOT, false),
+            system("ubuntu", &path("ubuntu", shim), BOOT, false),
+        ]
+    );
+    let entry = alloc::format!(
+        "entries:\n  - id: u\n    name: U\n    path: '{}'\n",
+        path("ubuntu", shim)
+    );
+    assert_eq!(
+        found(&mut disks, &config(&entry)),
+        [system("Fedora", &path("Fedora", grub), BOOT, false)],
+        "already an entry"
+    );
 }

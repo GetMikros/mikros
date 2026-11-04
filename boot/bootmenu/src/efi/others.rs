@@ -4,6 +4,7 @@
 use super::launch;
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use bootmenu::detect::{self, Disks};
 use bootmenu::entries::Config;
@@ -92,6 +93,27 @@ fn exists(handle: Handle, path: &str) -> bool {
     FileSystem::new(volume).try_exists(name.as_ref()) == Ok(true)
 }
 
+/// The names of the folders directly in the folder `path` on the volume
+/// `handle`.
+fn folders(handle: Handle, path: &str) -> Vec<String> {
+    let (Some(volume), Ok(name)) = (
+        open_shared::<SimpleFileSystem>(handle),
+        CString16::try_from(path),
+    ) else {
+        return Vec::new();
+    };
+    let mut fs = FileSystem::new(volume);
+    let Ok(entries) = fs.read_dir(name.as_ref()) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|info| info.is_directory())
+        .map(|info| info.file_name().to_string())
+        .filter(|name| name != "." && name != "..")
+        .collect()
+}
+
 /// The load options and volumes of the firmware, with the device path of
 /// the boot volume.
 struct Firmware<'a> {
@@ -140,6 +162,10 @@ impl Disks for Firmware<'_> {
 
     fn file_device_path(&mut self, path: &str) -> Option<Box<DevicePath>> {
         launch::file_device_path(self.boot_path, path).ok()
+    }
+
+    fn folders(&mut self, volume: Handle, path: &str) -> Vec<String> {
+        folders(volume, path)
     }
 }
 
