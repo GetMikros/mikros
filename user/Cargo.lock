@@ -60,7 +60,9 @@ dependencies = [
 name = "init"
 version = "0.0.0"
 dependencies = [
+ "mikros-loader",
  "mikros-rt",
+ "mikros-ustar",
 ]
 
 [[package]]
