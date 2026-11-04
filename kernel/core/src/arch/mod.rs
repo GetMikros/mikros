@@ -286,6 +286,13 @@ interface! {
     /// keeps, on every processor. Returns false when memory runs out.
     [] fn io_ports_reserve(count: usize) -> bool;
 
+    /// The ELF machine number of user programs.
+    [] fn elf_machine() -> u16;
+
+    /// Writes the start of the clock page given to the initial process to
+    /// `out`, a page long, and returns how many bytes it wrote.
+    [] fn clock_page_header(out: &mut [u8]) -> usize;
+
     /// Keeps the running `thread`, which waits in a system call, suspended
     /// while it is to be suspended, with the registers it entered the call
     /// with available to the debugger. Returns whether it was suspended.

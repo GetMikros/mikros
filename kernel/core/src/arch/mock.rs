@@ -224,6 +224,14 @@ impl Arch for Mock {
         true
     }
 
+    fn elf_machine() -> u16 {
+        crate::elf::EM_X86_64
+    }
+
+    fn clock_page_header(_out: &mut [u8]) -> usize {
+        0
+    }
+
     fn thread_stay_suspended(_thread: &alloc::sync::Arc<crate::sched::Thread>) -> bool {
         false
     }

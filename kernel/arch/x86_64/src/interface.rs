@@ -215,6 +215,16 @@ impl Arch for X86 {
         open.try_reserve(missing).is_ok()
     }
 
+    fn elf_machine() -> u16 {
+        kernel_core::elf::EM_X86_64
+    }
+
+    fn clock_page_header(out: &mut [u8]) -> usize {
+        let header = time::clock_page_header();
+        out[..header.len()].copy_from_slice(&header);
+        header.len()
+    }
+
     fn thread_stay_suspended(thread: &Arc<kernel_core::sched::Thread>) -> bool {
         crate::syscall::stay_suspended(thread)
     }

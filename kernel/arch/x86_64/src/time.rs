@@ -7,15 +7,11 @@ use crate::clock::{
 use crate::cpu::{in8, in32, out8, rdtsc};
 use crate::log::log;
 use crate::memory::DirectMem;
-use crate::memory_object::MemoryObject;
-use alloc::sync::Arc;
 use boot_protocol::BootInfo;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use kernel_core::acpi::{self, Address, PmTimer, Tables};
 use kernel_core::clock::{Extender, quarter_wrap_ns, ticks_to_ns};
-use kernel_core::object::memory::PAGE_SIZE;
 use kernel_core::object::resource::KIND_IOPORT;
-use kernel_core::status::Error;
 
 const NONE: u8 = 0;
 const TSC: u8 = 1;
@@ -285,21 +281,13 @@ pub fn init(info: &BootInfo) {
     log!(Info, "monotonic clock from {name}");
 }
 
-/// Creates the clock page at boot, charged to no budget. Its contents
-/// never change after boot, so `sequence` stays 0.
-pub fn create_clock_page() -> Result<Arc<MemoryObject>, Error> {
+/// The contents of the clock page. They never change after boot, so
+/// `sequence` stays 0.
+pub fn clock_page_header() -> [u8; crate::clock::CLOCK_PAGE_SIZE] {
     let tsc = (SOURCE.load(Ordering::Acquire) == TSC).then(|| {
         let rate = RATE.load(Ordering::Relaxed);
         let base = BASE.load(Ordering::Relaxed);
         (rate as u32, (rate >> 32) as u32, base, 0)
     });
-    let header = clock_page(tsc);
-    let page = MemoryObject::new(None, PAGE_SIZE, 0)?;
-    // This runs during boot, where no other thread could run.
-    let mut work = crate::publish::Work::new(|| {});
-    page.write(0, header.len() as u64, &mut work, |chunk| {
-        chunk.copy_from_slice(&header[..chunk.len()]);
-        Ok(())
-    })?;
-    Ok(page)
+    clock_page(tsc)
 }

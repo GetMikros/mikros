@@ -1,25 +1,24 @@
 //! Starting the initial process from the boot image.
 
+use crate::arch::CachePolicy as Policy;
+use crate::elf::{self, PF_W, PF_X, Segment};
 use crate::memory_object::MemoryObject;
-use crate::paging::Policy;
+use crate::object::budget::Budget;
+use crate::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
+use crate::object::handles::Entry;
+use crate::object::memory::PAGE_SIZE;
+use crate::object::resource::Resource;
+use crate::object::rights::{DUPLICATE, INSPECT, MANAGE, MAP, READ, TRANSFER, WRITE};
+use crate::object::{Name, Object, ObjectType, default_rights};
 use crate::process::Process;
+use crate::regions::{MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, SPECIFIC};
 use crate::sched::Thread;
-use crate::space;
+use crate::startup;
+use crate::ustar;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use boot_protocol::{BootInfo, flags};
-use kernel_core::elf::{self, EM_X86_64, PF_W, PF_X, Segment};
-use kernel_core::object::budget::Budget;
-use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
-use kernel_core::object::handles::Entry;
-use kernel_core::object::memory::PAGE_SIZE;
-use kernel_core::object::resource::Resource;
-use kernel_core::object::rights::{DUPLICATE, INSPECT, MANAGE, MAP, READ, TRANSFER, WRITE};
-use kernel_core::object::{Name, Object, ObjectType, default_rights};
-use kernel_core::regions::{MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, SPECIFIC};
-use kernel_core::startup;
-use kernel_core::ustar;
 
 /// The size of the stack of the initial thread.
 const STACK_SIZE: u64 = 256 * 1024;
@@ -49,7 +48,7 @@ fn boot_image(info: &BootInfo) -> Arc<MemoryObject> {
     // lie in the direct map and which nothing else uses.
     let after = unsafe {
         core::slice::from_raw_parts_mut(
-            space::direct(info.boot_image_phys + size) as *mut u8,
+            crate::arch::frame_address(info.boot_image_phys + size) as *mut u8,
             tail as usize,
         )
     };
@@ -122,12 +121,12 @@ fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
     // to them while the kernel reads the image.
     let image = unsafe {
         core::slice::from_raw_parts(
-            space::direct(info.boot_image_phys) as *const u8,
+            crate::arch::frame_address(info.boot_image_phys) as *const u8,
             info.boot_image_size as usize,
         )
     };
     let file = ustar::find(image, b"init").unwrap_or_else(|e| panic!("{e}"));
-    let elf = elf::parse(file, EM_X86_64, {
+    let elf = elf::parse(file, crate::arch::elf_machine(), {
         let (start, end) = crate::aspace::user_range();
         start..end
     })
@@ -161,6 +160,22 @@ fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
     }
 }
 
+/// Creates the clock page, charged to no budget, with the contents the
+/// architecture gives.
+fn clock_page() -> Result<Arc<MemoryObject>, crate::status::Error> {
+    let mut header = vec![0; PAGE_SIZE as usize];
+    let len = crate::arch::clock_page_header(&mut header);
+    header.truncate(len);
+    let page = MemoryObject::new(None, PAGE_SIZE, 0)?;
+    // This runs during boot, where no other thread could run.
+    let mut work = crate::publish::Work::new(|| {});
+    page.write(0, header.len() as u64, &mut work, |chunk| {
+        chunk.copy_from_slice(&header[..chunk.len()]);
+        Ok(())
+    })?;
+    Ok(page)
+}
+
 /// The framebuffer as a physical memory object covering its pages.
 fn framebuffer(info: &BootInfo) -> Option<Arc<MemoryObject>> {
     if info.flags & flags::FRAMEBUFFER_PRESENT == 0 {
@@ -186,13 +201,12 @@ pub fn start(info: &BootInfo) {
     // until the kernel reclaims boot memory, which happens later.
     let cmdline = unsafe {
         core::slice::from_raw_parts(
-            space::direct(info.cmdline_phys) as *const u8,
+            crate::arch::frame_address(info.cmdline_phys) as *const u8,
             info.cmdline_len as usize,
         )
     };
-    let bytes = startup::message(info, cmdline, crate::memory::memory_map(info));
-    let clock_page = crate::time::create_clock_page()
-        .unwrap_or_else(|e| panic!("no memory for the clock page: {e:?}"));
+    let bytes = startup::message(info, cmdline, crate::boot::memory_map(info));
+    let clock_page = clock_page().unwrap_or_else(|e| panic!("no memory for the clock page: {e:?}"));
     let entry = |object: Arc<dyn Object>, kind| Entry {
         object,
         rights: default_rights(kind),
