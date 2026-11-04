@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Condvar, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 pub const SHOULD_WAIT: i32 = -22;
@@ -331,5 +332,45 @@ pub fn wait_readable(ch: u32, _deadline: i64) -> Result<(), i32> {
         if timeout.timed_out() {
             return Err(TIMED_OUT);
         }
+    }
+}
+
+/// The mock's reactor. A wait that cannot complete yet blocks for a
+/// moment until the mock's state changes, then wakes its task, so that
+/// `block_on` polls it again without keeping other threads from the
+/// state.
+#[derive(Clone, Default)]
+pub struct Reactor;
+
+pub fn readable(_reactor: &Reactor, ch: u32) -> impl Future<Output = Result<(), i32>> {
+    std::future::poll_fn(move |cx| {
+        let mut guard = state();
+        let s = guard.as_mut().expect("initialized");
+        let at = match endpoint_of(s, ch) {
+            Ok(at) => at,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        let endpoint = &s.endpoints[&at];
+        if !endpoint.queue.is_empty() || endpoint.peer_closed {
+            return Poll::Ready(Ok(()));
+        }
+        let _ = CHANGED
+            .wait_timeout(guard, Duration::from_millis(10))
+            .unwrap_or_else(|e| e.into_inner());
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
+}
+
+/// Runs `future` to completion on this thread, polling it again
+/// whenever it is pending.
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut cx = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(out) = future.as_mut().poll(&mut cx) {
+            return out;
+        }
+        std::thread::yield_now();
     }
 }

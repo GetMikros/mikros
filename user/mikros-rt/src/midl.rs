@@ -189,3 +189,15 @@ pub fn wait_readable(channel: u32, deadline: i64) -> Result<(), i32> {
         )
     })
 }
+
+/// The executor's reactor, which asynchronous bindings wait through.
+pub type Reactor = crate::exec::Reactor;
+
+/// Completes once `channel` is readable or its peer closed.
+pub async fn readable(reactor: &Reactor, channel: u32) -> Result<(), i32> {
+    reactor
+        .readable(channel)
+        .await
+        .map(|_| ())
+        .map_err(|s| s as i32)
+}

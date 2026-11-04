@@ -359,3 +359,80 @@ fn answers_unknown_flexible_methods_and_closes_on_errors() {
         mock::PEER_CLOSED
     );
 }
+
+#[test]
+fn async_calls_overlap_on_one_channel() {
+    let _s = serial();
+    let (client_end, server_end) = rt::endpoints::<Calc>().unwrap();
+    // The server takes both requests before it replies, and replies to
+    // the second first.
+    let server = std::thread::spawn(move || {
+        let server = CalcServer::new(server_end);
+        let mut pending = Vec::new();
+        while pending.len() < 2 {
+            match server.next(i64::MAX).unwrap() {
+                CalcRequest::Add(r, responder) => pending.push((r.a + r.b, responder)),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        for (sum, responder) in pending.into_iter().rev() {
+            responder.reply(&server, CalcAddResponse { sum }).unwrap();
+        }
+        server.send_noted("done".into()).unwrap();
+        server
+    });
+    let client = CalcAsyncClient::new(client_end, mock::Reactor);
+    let (first, second, event) = mock::block_on(async {
+        let mut a = std::pin::pin!(client.add(1, 2));
+        let mut b = std::pin::pin!(client.add(10, 20));
+        let (mut ra, mut rb) = (None, None);
+        std::future::poll_fn(|cx| {
+            if ra.is_none()
+                && let std::task::Poll::Ready(r) = a.as_mut().poll(cx)
+            {
+                ra = Some(r);
+            }
+            if rb.is_none()
+                && let std::task::Poll::Ready(r) = b.as_mut().poll(cx)
+            {
+                rb = Some(r);
+            }
+            if ra.is_some() && rb.is_some() {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+        (ra.unwrap(), rb.unwrap(), client.next_event().await)
+    });
+    assert_eq!(first.unwrap(), CalcAddResponse { sum: 3 });
+    assert_eq!(second.unwrap(), CalcAddResponse { sum: 30 });
+    assert_eq!(
+        event.unwrap(),
+        CalcEvent::Noted(CalcNotedEvent {
+            text: "done".into()
+        })
+    );
+    drop(server.join().unwrap());
+}
+
+#[test]
+fn async_server_serves_a_client() {
+    let _s = serial();
+    let (client_end, server_end) = rt::endpoints::<Calc>().unwrap();
+    let client = std::thread::spawn(move || {
+        let client = CalcClient::new(client_end);
+        client.add(4, 5, i64::MAX).unwrap()
+    });
+    let server = CalcAsyncServer::new(server_end, mock::Reactor);
+    mock::block_on(async {
+        match server.next().await.unwrap() {
+            CalcRequest::Add(r, responder) => responder
+                .reply(server.server(), CalcAddResponse { sum: r.a + r.b })
+                .unwrap(),
+            other => panic!("unexpected {other:?}"),
+        }
+    });
+    assert_eq!(client.join().unwrap(), CalcAddResponse { sum: 9 });
+}

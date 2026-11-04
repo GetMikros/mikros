@@ -5,7 +5,8 @@
 //! a two-way method the result structure `PMResponse` and the
 //! `PMResponder` that replies, for an event the structure `PMEvent`, and
 //! the enumerations `PRequest` of the requests a server receives and
-//! `PEvent` of the events a client receives.
+//! `PEvent` of the events a client receives. `PAsyncClient` and
+//! `PAsyncServer` do the same on the executor.
 
 use super::{Gen, camel, doc, snake};
 use crate::model::*;
@@ -16,6 +17,7 @@ impl Gen<'_> {
         let rt = self.rt();
         writeln!(out, "#[derive(Debug, PartialEq)]\npub struct {name};\n").unwrap();
         let (mut client, mut server, mut requests) = (String::new(), String::new(), String::new());
+        let mut async_client = String::new();
         let (mut request_arms, mut event_arms, mut event_variants) =
             (String::new(), String::new(), String::new());
         for m in methods {
@@ -51,6 +53,12 @@ impl Gen<'_> {
                         self.decode_result(&resp, error.as_ref())
                     )
                     .unwrap();
+                    async_client.push_str(&doc(&m.doc, ""));
+                    writeln!(
+                        async_client,
+                        "pub async fn {func}(&self, {params}) -> Result<{result}, {rt}::Error> {{\nlet mut __message = {rt}::Encoder::new({rt}::Header {{ txid: 0, ordinal: {ordinal}, flags: {flags} }}, {req}::__SIZE);\n{build}.__encode(&mut __message, {rt}::HEADER_SIZE)?;\nlet (bytes, handles) = self.channel.call(__message).await?;\nself.channel.checked({name}Client::__{func}_reply(&bytes, handles))\n}}\n"
+                    )
+                    .unwrap();
                     writeln!(
                         requests,
                         "{}    {variant}({req}, {responder}),",
@@ -77,6 +85,12 @@ impl Gen<'_> {
                     client.push_str(&doc(&m.doc, ""));
                     writeln!(
                         client,
+                        "pub fn {func}(&self, {params}) -> Result<(), {rt}::Error> {{\nlet mut __message = {rt}::Encoder::new({rt}::Header {{ txid: 0, ordinal: {ordinal}, flags: {flags} }}, {req}::__SIZE);\n{build}.__encode(&mut __message, {rt}::HEADER_SIZE)?;\nself.channel.send(__message)\n}}\n"
+                    )
+                    .unwrap();
+                    async_client.push_str(&doc(&m.doc, ""));
+                    writeln!(
+                        async_client,
                         "pub fn {func}(&self, {params}) -> Result<(), {rt}::Error> {{\nlet mut __message = {rt}::Encoder::new({rt}::Header {{ txid: 0, ordinal: {ordinal}, flags: {flags} }}, {req}::__SIZE);\n{build}.__encode(&mut __message, {rt}::HEADER_SIZE)?;\nself.channel.send(__message)\n}}\n"
                     )
                     .unwrap();
@@ -118,12 +132,22 @@ impl Gen<'_> {
                 "/// The next event, waiting for one until `deadline`. Events this\n/// version does not declare are discarded when they are flexible.\npub fn next_event(&self, deadline: i64) -> Result<{name}Event, {rt}::Error> {{\nloop {{\nlet (bytes, handles) = self.channel.receive(deadline)?;\nif let Some(event) = self.channel.checked(Self::__event(&bytes, handles))? {{\nreturn Ok(event);\n}}\n}}\n}}\n\nfn __event(bytes: &[u8], handles: ::alloc::vec::Vec<{rt}::RawHandle>) -> Result<Option<{name}Event>, {rt}::Error> {{\nlet mut decoder = {rt}::Decoder::new(bytes, handles);\nlet d = &mut decoder;\nlet header = d.header()?;\nif header.txid != 0 || header.flags & {rt}::FLAG_UNKNOWN_METHOD != 0 {{\nreturn Err({rt}::Error::Invalid);\n}}\nmatch header.ordinal {{\n{event_arms}_ if header.flags & {rt}::FLAG_FLEXIBLE != 0 => Ok(None),\n_ => Err({rt}::Error::Invalid),\n}}\n}}"
             )
             .unwrap();
+            writeln!(
+                async_client,
+                "/// The next event. Events this version does not declare are\n/// discarded when they are flexible.\npub async fn next_event(&self) -> Result<{name}Event, {rt}::Error> {{\nloop {{\nlet (bytes, handles) = self.channel.next_event().await?;\nif let Some(event) = self.channel.checked({name}Client::__event(&bytes, handles))? {{\nreturn Ok(event);\n}}\n}}\n}}\n"
+            )
+            .unwrap();
             writeln!(out, "/// The events a `{name}` client receives.\n#[derive(Debug, PartialEq)]\npub enum {name}Event {{\n{event_variants}}}\n").unwrap();
         }
         writeln!(
             out,
             "/// The requests a `{name}` server receives.\n#[derive(Debug, PartialEq)]\npub enum {name}Request {{\n{requests}}}\n\n/// The client side of a `{name}` channel.\npub struct {name}Client {{\nchannel: {rt}::Channel,\n}}\n\nimpl {name}Client {{\npub fn new(end: {rt}::ClientEnd<{name}>) -> {name}Client {{\n{name}Client {{ channel: {rt}::Channel::new(end.into_handle()) }}\n}}\n\n/// The channel, unless a protocol error closed it.\npub fn channel(&self) -> Result<{rt}::RawHandle, {rt}::Error> {{\nself.channel.raw()\n}}\n\n{client}}}\n\n/// The server side of a `{name}` channel.\npub struct {name}Server {{\nchannel: {rt}::Channel,\n}}\n\nimpl {name}Server {{\npub fn new(end: {rt}::ServerEnd<{name}>) -> {name}Server {{\n{name}Server {{ channel: {rt}::Channel::new(end.into_handle()) }}\n}}\n\n/// The channel, unless a protocol error closed it.\npub fn channel(&self) -> Result<{rt}::RawHandle, {rt}::Error> {{\nself.channel.raw()\n}}\n\n/// The next request, waiting for one until `deadline`.\npub fn next(&self, deadline: i64) -> Result<{name}Request, {rt}::Error> {{\nloop {{\nlet (bytes, handles) = self.channel.receive(deadline)?;\nif let Some(request) = self.channel.checked(self.__request(&bytes, handles))? {{\nreturn Ok(request);\n}}\n}}\n}}\n\n/// The next request, if one is queued.\npub fn try_next(&self) -> Result<Option<{name}Request>, {rt}::Error> {{\nwhile let Some((bytes, handles)) = self.channel.try_receive()? {{\nif let Some(request) = self.channel.checked(self.__request(&bytes, handles))? {{\nreturn Ok(Some(request));\n}}\n}}\nOk(None)\n}}\n\n/// A request decoded, or `None` for one this version does not declare,\n/// which is discarded or answered as unknown when it is flexible.\nfn __request(&self, bytes: &[u8], handles: ::alloc::vec::Vec<{rt}::RawHandle>) -> Result<Option<{name}Request>, {rt}::Error> {{\nlet mut decoder = {rt}::Decoder::new(bytes, handles);\nlet d = &mut decoder;\nlet header = d.header()?;\nif header.flags & {rt}::FLAG_UNKNOWN_METHOD != 0 {{\nreturn Err({rt}::Error::Invalid);\n}}\nmatch header.ordinal {{\n{request_arms}_ if header.flags & {rt}::FLAG_FLEXIBLE != 0 && !{name}::__declares(header.ordinal) => {{\ndrop(decoder);\nif header.txid != 0 {{\nlet reply = {rt}::Encoder::new({rt}::Header {{ txid: header.txid, ordinal: header.ordinal, flags: {rt}::FLAG_UNKNOWN_METHOD }}, 0);\nself.channel.send(reply)?;\n}}\nOk(None)\n}}\n_ => Err({rt}::Error::Invalid),\n}}\n}}\n\n{server}}}\n\nimpl {name} {{\n#[doc(hidden)]\npub fn __declares(ordinal: u32) -> bool {{\nmatches!(ordinal, {})\n}}\n}}\n",
             if methods.is_empty() { "0".to_string() } else { methods.iter().map(|m| m.ordinal.to_string()).collect::<Vec<_>>().join(" | ") }
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "/// The client side of a `{name}` channel on the executor, on which\n/// many calls may be outstanding at once.\npub struct {name}AsyncClient {{\nchannel: {rt}::AsyncChannel,\n}}\n\nimpl {name}AsyncClient {{\npub fn new(end: {rt}::ClientEnd<{name}>, reactor: {rt}::kernel::Reactor) -> {name}AsyncClient {{\n{name}AsyncClient {{ channel: {rt}::AsyncChannel::new(end.into_handle(), reactor) }}\n}}\n\n/// The channel, unless a protocol error closed it.\npub fn channel(&self) -> Result<{rt}::RawHandle, {rt}::Error> {{\nself.channel.raw()\n}}\n\n{async_client}}}\n\n/// The server side of a `{name}` channel on the executor. Replies and\n/// events go through `server`.\npub struct {name}AsyncServer {{\nserver: {name}Server,\nreactor: {rt}::kernel::Reactor,\n}}\n\nimpl {name}AsyncServer {{\npub fn new(end: {rt}::ServerEnd<{name}>, reactor: {rt}::kernel::Reactor) -> {name}AsyncServer {{\n{name}AsyncServer {{ server: {name}Server::new(end), reactor }}\n}}\n\npub fn server(&self) -> &{name}Server {{\n&self.server\n}}\n\n/// The next request.\npub async fn next(&self) -> Result<{name}Request, {rt}::Error> {{\nloop {{\nif let Some(request) = self.server.try_next()? {{\nreturn Ok(request);\n}}\n{rt}::AsyncChannel::wait_readable(&self.reactor, self.server.channel()?).await?;\n}}\n}}\n}}\n"
         )
         .unwrap();
     }

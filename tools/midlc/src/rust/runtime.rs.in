@@ -18,11 +18,16 @@
 //!   deadline: i64) -> Result<(Vec<u8>, Vec<u32>), i32>`, which consumes
 //!   the handles even when it fails;
 //! - `wait_readable(channel: u32, deadline: i64) -> Result<(), i32>`,
-//!   which returns once the channel is readable or its peer closed.
+//!   which returns once the channel is readable or its peer closed;
+//! - `Reactor`, a cloneable type through which asynchronous waits are
+//!   made, and `readable(reactor: &Reactor, channel: u32) -> impl
+//!   Future<Output = Result<(), i32>>`, which completes once the channel
+//!   is readable or its peer closed.
 
+use ::alloc::collections::{BTreeMap, VecDeque};
 use ::alloc::string::String;
 use ::alloc::vec::Vec;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::marker::PhantomData;
 
 pub use KERNEL as kernel;
@@ -501,5 +506,252 @@ impl Channel {
 impl Drop for Channel {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// A received message: its bytes and its handles.
+pub type Message = (Vec<u8>, Vec<RawHandle>);
+
+/// What an asynchronous call is waiting for.
+enum Pending {
+    /// No reply yet; the waker of the task that waits for it.
+    Waiting(Option<core::task::Waker>),
+    Replied(Message),
+    /// The call was dropped; its reply is discarded.
+    Abandoned,
+}
+
+fn close_message((_, handles): Message) {
+    for h in handles {
+        kernel::handle_close(h);
+    }
+}
+
+/// A channel on which many calls may be outstanding at once. Calls get
+/// their own transaction IDs. Whichever task reads a message hands a
+/// reply to its call, or keeps an event for `next_event`, and wakes the
+/// task that waits for it.
+pub struct AsyncChannel {
+    channel: Channel,
+    reactor: kernel::Reactor,
+    next_txid: Cell<u32>,
+    calls: RefCell<BTreeMap<u32, Pending>>,
+    events: RefCell<VecDeque<Message>>,
+    event_waiters: RefCell<Vec<core::task::Waker>>,
+}
+
+/// Abandons a call that is dropped before its reply arrives.
+struct CallGuard<'a> {
+    channel: &'a AsyncChannel,
+    txid: u32,
+}
+
+impl Drop for CallGuard<'_> {
+    fn drop(&mut self) {
+        let mut calls = self.channel.calls.borrow_mut();
+        match calls.remove(&self.txid) {
+            Some(Pending::Waiting(_)) => {
+                calls.insert(self.txid, Pending::Abandoned);
+            }
+            Some(Pending::Replied(message)) => close_message(message),
+            _ => {}
+        }
+    }
+}
+
+type Wait = core::pin::Pin<::alloc::boxed::Box<dyn core::future::Future<Output = Result<(), i32>>>>;
+
+impl AsyncChannel {
+    pub fn new(handle: OwnedHandle, reactor: kernel::Reactor) -> AsyncChannel {
+        AsyncChannel {
+            channel: Channel::new(handle),
+            reactor,
+            next_txid: Cell::new(1),
+            calls: RefCell::new(BTreeMap::new()),
+            events: RefCell::new(VecDeque::new()),
+            event_waiters: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The channel's handle, unless it has been closed.
+    pub fn raw(&self) -> Result<RawHandle, Error> {
+        self.channel.raw()
+    }
+
+    pub fn checked<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
+        self.channel.checked(result)
+    }
+
+    pub fn send(&self, message: Encoder) -> Result<(), Error> {
+        self.channel.send(message)
+    }
+
+    /// A transaction ID with bit 31 clear that no outstanding call uses.
+    fn txid(&self) -> u32 {
+        let calls = self.calls.borrow();
+        loop {
+            let txid = self.next_txid.get();
+            self.next_txid.set(if txid >= 0x7FFF_FFFF { 1 } else { txid + 1 });
+            if !calls.contains_key(&txid) {
+                return txid;
+            }
+        }
+    }
+
+    /// Reads the queued messages, handing replies to their calls and
+    /// keeping events, and wakes the tasks that wait for them. A reply
+    /// that no call waits for is a protocol error, which closes the
+    /// channel.
+    fn drain(&self) -> Result<(), Error> {
+        let result = self.drain_queued();
+        if result.is_err() {
+            // Every waiting task sees the error when it polls again.
+            for pending in self.calls.borrow_mut().values_mut() {
+                if let Pending::Waiting(waker) = pending {
+                    if let Some(w) = waker.take() {
+                        w.wake();
+                    }
+                }
+            }
+            for w in self.event_waiters.borrow_mut().drain(..) {
+                w.wake();
+            }
+        }
+        result
+    }
+
+    fn drain_queued(&self) -> Result<(), Error> {
+        while let Some(message) = self.channel.try_receive()? {
+            let Some(txid) = message.0.get(..4) else {
+                close_message(message);
+                self.channel.close();
+                return Err(Error::Invalid);
+            };
+            let txid = u32::from_le_bytes([txid[0], txid[1], txid[2], txid[3]]);
+            if txid == 0 {
+                self.events.borrow_mut().push_back(message);
+                for w in self.event_waiters.borrow_mut().drain(..) {
+                    w.wake();
+                }
+                continue;
+            }
+            let mut calls = self.calls.borrow_mut();
+            match calls.get_mut(&txid) {
+                Some(pending @ Pending::Waiting(_)) => {
+                    let Pending::Waiting(waker) = core::mem::replace(pending, Pending::Replied(message)) else {
+                        unreachable!("matched as waiting");
+                    };
+                    drop(calls);
+                    if let Some(w) = waker {
+                        w.wake();
+                    }
+                }
+                Some(Pending::Abandoned) => {
+                    calls.remove(&txid);
+                    close_message(message);
+                }
+                _ => {
+                    drop(calls);
+                    close_message(message);
+                    self.channel.close();
+                    return Err(Error::Invalid);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Polls `wait`, a wait for the channel to become readable that is
+    /// started when there is none. `Ready` once it completes.
+    fn poll_readable(&self, wait: &mut Option<Wait>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Result<(), Error>> {
+        use core::task::Poll;
+        if wait.is_none() {
+            let raw = match self.raw() {
+                Ok(raw) => raw,
+                Err(e) => return Poll::Ready(Err(e)),
+            };
+            let reactor = self.reactor.clone();
+            *wait = Some(::alloc::boxed::Box::pin(async move { kernel::readable(&reactor, raw).await }));
+        }
+        let polled = wait.as_mut().map(|w| w.as_mut().poll(cx));
+        match polled {
+            Some(Poll::Ready(result)) => {
+                *wait = None;
+                Poll::Ready(result.map_err(Channel::status))
+            }
+            _ => Poll::Pending,
+        }
+    }
+
+    /// Sends `message` as a call and returns its reply.
+    pub async fn call(&self, message: Encoder) -> Result<Message, Error> {
+        use core::task::Poll;
+        let raw = self.raw()?;
+        let txid = self.txid();
+        let (mut bytes, handles) = message.finish();
+        bytes[..4].copy_from_slice(&txid.to_le_bytes());
+        self.calls.borrow_mut().insert(txid, Pending::Waiting(None));
+        let guard = CallGuard { channel: self, txid };
+        if let Err(s) = kernel::channel_write(raw, &bytes, &handles) {
+            return Err(Channel::status(s));
+        }
+        let mut wait = None;
+        let reply = core::future::poll_fn(|cx| loop {
+            if let Err(e) = self.drain() {
+                return Poll::Ready(Err(e));
+            }
+            {
+                let mut calls = self.calls.borrow_mut();
+                match calls.get_mut(&txid) {
+                    Some(Pending::Replied(_)) => {
+                        return Poll::Ready(match calls.remove(&txid) {
+                            Some(Pending::Replied(message)) => Ok(message),
+                            _ => Err(Error::Closed),
+                        });
+                    }
+                    Some(Pending::Waiting(waker)) => *waker = Some(cx.waker().clone()),
+                    _ => return Poll::Ready(Err(Error::Closed)),
+                }
+            }
+            match self.poll_readable(&mut wait, cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        })
+        .await;
+        // The reply is taken, or the call failed; either way there is
+        // nothing left to abandon unless the reply is still outstanding.
+        if reply.is_ok() {
+            core::mem::forget(guard);
+        }
+        reply
+    }
+
+    /// The next event.
+    pub async fn next_event(&self) -> Result<Message, Error> {
+        use core::task::Poll;
+        let mut wait = None;
+        core::future::poll_fn(|cx| loop {
+            if let Err(e) = self.drain() {
+                return Poll::Ready(Err(e));
+            }
+            if let Some(message) = self.events.borrow_mut().pop_front() {
+                return Poll::Ready(Ok(message));
+            }
+            self.event_waiters.borrow_mut().push(cx.waker().clone());
+            match self.poll_readable(&mut wait, cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        })
+        .await
+    }
+
+    /// Completes once a message may be queued or the peer closed, for
+    /// servers.
+    pub async fn wait_readable(reactor: &kernel::Reactor, raw: RawHandle) -> Result<(), Error> {
+        kernel::readable(reactor, raw).await.map_err(Channel::status)
     }
 }
