@@ -3,6 +3,7 @@
 
 pub mod ast;
 pub mod lexer;
+pub mod model;
 pub mod parser;
 
 #[cfg(test)]
@@ -52,3 +53,4 @@ pub fn parse(file: &str, text: &str) -> Result<ast::File, Error> {
     };
     parser::parse(tokens, end)
 }
+
