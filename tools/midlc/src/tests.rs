@@ -143,20 +143,65 @@ mod checks {
     }
 
     #[test]
-    fn rejects_unresolved_and_misused_names() {
+    fn rejects_invalid_libraries() {
         fails("type A = struct { b B; };", "`B` is not declared");
         fails("type A = struct {}; type A = struct {};", "declared twice");
+        fails("type A = struct { x u32; x u32; };", "declared twice");
         fails(
             "type A = struct { x test.missing.B; };",
             "not named by `using`",
         );
+        fails("type A = struct { a A; };", "contains itself");
         fails("alias A = B; alias B = A;", "refers to itself");
+        fails("type A = union { 0: x u32; };", "at least 1");
+        fails("type A = table { 1: x string<4>?; };", "cannot be optional");
         fails("type A = struct { x u32?; };", "cannot be optional");
+        fails(
+            "type A = struct { x array<u8, 4>?; };",
+            "cannot be optional",
+        );
+        fails(
+            "type A = struct { x handle<Socket>; };",
+            "unknown object type",
+        );
         fails(
             "type A = struct { x handle<Event, FLY>; };",
             "unknown right",
         );
         fails("type A = struct { x client_end<A>; };", "not a protocol");
         fails("protocol P { @1 F(); @1 G(); };", "unique");
+        fails("protocol P { @2147483648 F(); };", "2^31");
+        fails(
+            "protocol P { @1 F() -> () error string<4>; };",
+            "enumeration or i32",
+        );
+    }
+
+    #[test]
+    fn keeps_what_a_version_has() {
+        let text = "library t;\ntype A = struct { x u8; @available(added=2, removed=3) y u8; };\n";
+        let at = |version| match compile(&[("t.midl", text)], Some(version))
+            .unwrap()
+            .decl("t.A")
+        {
+            Some(Decl {
+                kind: DeclKind::Struct(fields),
+                ..
+            }) => fields.len(),
+            _ => panic!("A is a structure"),
+        };
+        assert_eq!((at(1), at(2), at(3)), (1, 2, 1));
+        let missing =
+            "library t;\n@available(added=2)\ntype A = struct {};\ntype B = struct { a A; };\n";
+        let err = compile(&[("t.midl", missing)], Some(1)).unwrap_err();
+        assert!(
+            err.message.contains("not declared or not available"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_cycle_through_an_optional_member() {
+        check_one("library t;\ntype A = struct { b B?; };\ntype B = struct { a A; };\n").unwrap();
     }
 }
