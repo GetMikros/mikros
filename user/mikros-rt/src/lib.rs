@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+pub mod exec;
 pub mod heap;
 pub mod log;
 pub mod managed;
