@@ -4,6 +4,7 @@
 use crate::launcher;
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, Transfer, duplicate};
+use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -36,6 +37,10 @@ pub struct Shared {
     pub reactor: Reactor,
     pub spawner: Spawner,
     pub records: RefCell<Records>,
+    /// The budget of each user, under the root budget.
+    user_budgets: RefCell<BTreeMap<u32, OwnedHandle>>,
+    /// The budget of each user and app ID, under the user's budget.
+    app_budgets: RefCell<BTreeMap<(u32, String), OwnedHandle>>,
     /// The service manager's control endpoint, once it started.
     pub control: RefCell<Option<Rc<ProcessDirectoryAsyncClient>>>,
     /// The tasks waiting for a process to change state.
@@ -71,6 +76,8 @@ impl Shared {
             reactor,
             spawner,
             records: RefCell::new(Records::default()),
+            user_budgets: RefCell::new(BTreeMap::new()),
+            app_budgets: RefCell::new(BTreeMap::new()),
             control: RefCell::new(None),
             waiters: RefCell::new(Vec::new()),
         })
@@ -87,7 +94,8 @@ impl Shared {
         control: &ProcessDirectoryAsyncClient,
     ) -> Result<OwnedHandle, Status> {
         let name = new.program.rsplit('/').next().unwrap_or("process");
-        let started = start::load(&self.fs, self.budget.raw(), &new.program, name)?;
+        let budget = self.budget_of(new.user, &new.app_id)?;
+        let started = start::load(&self.fs, budget.raw(), &new.program, name)?;
         let NewProcess {
             path,
             parent,
@@ -113,7 +121,7 @@ impl Shared {
                 app_id,
                 user,
                 login_session,
-                budget: duplicate(self.budget.raw(), SAME_RIGHTS)?,
+                budget,
                 path,
                 process: duplicate(started.process.raw(), SAME_RIGHTS)?,
                 exit: None,
@@ -134,6 +142,30 @@ impl Shared {
                 Err(status)
             }
         }
+    }
+
+    /// A handle to the budget of `user` and `app_id`, which is created
+    /// with no limits on first use, like the user's budget above it.
+    fn budget_of(&self, user: u32, app_id: &str) -> Result<OwnedHandle, Status> {
+        let mut apps = self.app_budgets.borrow_mut();
+        let key = (user, String::from(app_id));
+        if let Some(budget) = apps.get(&key) {
+            return duplicate(budget.raw(), SAME_RIGHTS);
+        }
+        let mut users = self.user_budgets.borrow_mut();
+        let user_budget = match users.get(&user) {
+            Some(budget) => budget.raw(),
+            None => {
+                let budget = create_budget(self.budget.raw())?;
+                let raw = budget.raw();
+                users.insert(user, budget);
+                raw
+            }
+        };
+        let budget = create_budget(user_budget)?;
+        let handle = duplicate(budget.raw(), SAME_RIGHTS)?;
+        apps.insert(key, budget);
+        Ok(handle)
     }
 
     async fn transfer(
@@ -199,6 +231,18 @@ pub async fn bind(
         Ok(Ok(_)) => Ok(()),
         Ok(Err(status)) => Err(status),
         Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// A new budget under `parent` with no limits.
+fn create_budget(parent: sys::Handle) -> Result<OwnedHandle, Status> {
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::budget_create(parent, u64::MAX, u64::MAX, &mut out) };
+    match status {
+        // SAFETY: the kernel just created the handle for us.
+        mikros_rt::OK => Ok(unsafe { OwnedHandle::from_raw(out) }),
+        status => Err(start::status(status)),
     }
 }
 
