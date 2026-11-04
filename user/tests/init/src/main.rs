@@ -7868,6 +7868,200 @@ mod manager {
     }
 }
 
+mod bootfs {
+    //! The process manager's boot file system, served on this thread's
+    //! executor and driven over a channel.
+
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use mikros_rt::Startup;
+    use mikros_rt::exec::Executor;
+    use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
+    use mikros_rt::interfaces::mikros::fs::*;
+    use mikros_rt::sys;
+    use mikros_test::{Failure, Result, check, ensure};
+    use process_manager::bootfs::Fs;
+
+    const SAME_RIGHTS: u32 = 1 << 31;
+    const MANAGER: &str = "usr/bin/process-manager";
+
+    fn failed(what: &'static str) -> Failure {
+        Failure { what, status: 0 }
+    }
+
+    /// The reply to a call, or a failure naming `what`.
+    fn reply<T>(
+        what: &'static str,
+        r: core::result::Result<
+            core::result::Result<T, Error>,
+            mikros_rt::interfaces::__midl::Error,
+        >,
+    ) -> Result<core::result::Result<T, Error>> {
+        r.map_err(|_| failed(what))
+    }
+
+    /// Opens `path` from `dir` with `flags` and `rights`.
+    async fn open(
+        dir: &NodeAsyncClient,
+        reactor: &mikros_rt::exec::Reactor,
+        path: &str,
+        flags: OpenFlags,
+        rights: Rights,
+    ) -> Result<core::result::Result<(NodeOpenResponse, NodeAsyncClient), Error>> {
+        let (client, server) = endpoints::<Node>().map_err(|_| failed("creating a channel"))?;
+        let r = dir.open(path.into(), flags, 0, rights, server).await;
+        Ok(reply("opening", r)?
+            .map(|response| (response, NodeAsyncClient::new(client, reactor.clone()))))
+    }
+
+    /// Files open and read, with a cursor of their own; directories list
+    /// in name order; paths, flags and rights are checked; and every
+    /// change fails without `WRITE`.
+    pub fn bootfs_serves_the_boot_image(s: &Startup) -> Result {
+        let mut ex = Executor::new().map_err(|status| Failure {
+            what: "creating an executor",
+            status,
+        })?;
+        let reactor = ex.reactor().clone();
+        let mut image = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("duplicating the boot image", unsafe {
+            sys::handle_duplicate(s.boot_image, SAME_RIGHTS, &mut image)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let image = unsafe { OwnedHandle::from_raw(image) };
+        let fs = Fs::new(s.process, &image, reactor.clone(), ex.spawner().clone()).map_err(
+            |status| Failure {
+                what: "serving the boot image",
+                status,
+            },
+        )?;
+        let (client, server) = endpoints::<Node>().map_err(|_| failed("creating a channel"))?;
+        fs.serve_root(server, Rights::READ | Rights::EXECUTE);
+        let root = NodeAsyncClient::new(client, reactor.clone());
+        let none = OpenFlags(0);
+        ex.block_on(async {
+            let attrs = reply("reading attributes", root.get_attributes().await)?;
+            ensure(
+                "describing the root",
+                attrs.is_ok_and(|a| a.attributes.r#type == NodeType::Directory),
+            )?;
+            let info = reply("querying", root.query_filesystem().await)?;
+            ensure(
+                "naming the file system",
+                info.is_ok_and(|i| i.info.r#type == "bootfs" && i.info.read_only),
+            )?;
+
+            // A file reads by offset and by cursor.
+            let opened = open(&root, &reactor, MANAGER, none, Rights::READ).await?;
+            let Ok((response, file)) = opened else {
+                return Err(failed("opening a file"));
+            };
+            ensure("opening a file", response.r#type == NodeType::File)?;
+            let head = reply("reading", file.read(0, 8).await)?;
+            ensure(
+                "reading the start",
+                head.as_ref().is_ok_and(|r| r.data.starts_with(b"\x7fELF")),
+            )?;
+            let first = reply("reading next", file.read_next(4).await)?;
+            let second = reply("reading next", file.read_next(4).await)?;
+            ensure(
+                "reading at the cursor",
+                first.is_ok_and(|f| f.data == b"\x7fELF")
+                    && second.is_ok_and(|n| head.is_ok_and(|h| h.data[4..] == n.data[..])),
+            )?;
+            let size = reply("reading attributes", file.get_attributes().await)?
+                .map(|a| a.attributes.size)
+                .map_err(|_| failed("sizing the file"))?;
+            let end = reply("seeking", file.seek(-4, SeekOrigin::End).await)?;
+            ensure(
+                "seeking from the end",
+                end.is_ok_and(|e| e.position == size - 4),
+            )?;
+            let tail = reply("reading", file.read(size - 2, 100).await)?;
+            ensure("reading to the end", tail.is_ok_and(|t| t.data.len() == 2))?;
+            let write = reply("writing", file.write(0, Vec::from(*b"x")).await)?;
+            ensure("refusing to write", write == Err(Error::AccessDenied))?;
+            let token = reply("getting a token", root.get_token().await)?;
+            ensure(
+                "refusing a token",
+                token.is_err_and(|e| e == Error::AccessDenied),
+            )?;
+
+            // Rights, flags and paths are checked.
+            let refused = [
+                (
+                    MANAGER,
+                    none,
+                    Rights::READ | Rights::WRITE,
+                    Error::AccessDenied,
+                ),
+                ("missing", none, Rights::READ, Error::NotFound),
+                (
+                    "missing",
+                    OpenFlags::CREATE,
+                    Rights::READ,
+                    Error::AccessDenied,
+                ),
+                (
+                    MANAGER,
+                    OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
+                    Rights::READ,
+                    Error::Exists,
+                ),
+                (
+                    "init",
+                    OpenFlags::DIRECTORY,
+                    Rights::READ,
+                    Error::NotDirectory,
+                ),
+                ("init/x", none, Rights::READ, Error::NotDirectory),
+                ("/init", none, Rights::READ, Error::Invalid),
+                ("usr/../init", none, Rights::READ, Error::AccessDenied),
+            ];
+            for (path, flags, rights, error) in refused {
+                let opened = open(&root, &reactor, path, flags, rights).await?;
+                ensure("refusing to open", opened.err() == Some(error))?;
+            }
+            let existing = open(&root, &reactor, "usr", OpenFlags::CREATE, Rights::READ).await?;
+            ensure("opening an existing name to create", existing.is_ok())?;
+
+            // A directory lists in name order, in parts.
+            let Ok((_, tests)) = open(&root, &reactor, "tests", none, Rights::READ).await? else {
+                return Err(failed("opening a directory"));
+            };
+            let mut names: Vec<String> = Vec::new();
+            let mut cookie = 0;
+            loop {
+                let listed = reply("listing", tests.read_directory(cookie, true).await)?
+                    .map_err(|_| failed("listing a directory"))?;
+                if listed.entries.is_empty() {
+                    break;
+                }
+                ensure(
+                    "listing attributes",
+                    listed.entries.iter().all(|e| e.attributes.is_some()),
+                )?;
+                names.extend(listed.entries.into_iter().map(|e| e.name));
+                cookie = listed.next;
+            }
+            ensure(
+                "listing a directory",
+                names == ["call-server", "channel-echo", "debuggee", "managed", "pie"],
+            )?;
+
+            // A clone gets no more rights than its connection.
+            let (_, server) = endpoints::<Node>().map_err(|_| failed("creating a channel"))?;
+            let clone = reply("cloning", root.clone(server, Rights::WRITE).await)?;
+            ensure(
+                "refusing more rights",
+                clone.is_err_and(|e| e == Error::AccessDenied),
+            )?;
+            Ok(())
+        })
+    }
+}
+
 mod executor {
     //! The runtime's executor, waiting on one port.
 
@@ -8033,7 +8227,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 120] = [
+const TESTS: [(&str, Test); 121] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -8076,6 +8270,10 @@ const TESTS: [(&str, Test); 120] = [
     (
         "executor_waits_on_objects",
         executor::executor_waits_on_objects,
+    ),
+    (
+        "bootfs_serves_the_boot_image",
+        bootfs::bootfs_serves_the_boot_image,
     ),
     (
         "queued_signals_of_ended_thread",

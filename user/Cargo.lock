@@ -92,6 +92,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-bootfs"
+version = "0.0.0"
+dependencies = [
+ "mikros-ustar",
+]
+
+[[package]]
 name = "mikros-loader"
 version = "0.0.0"
 dependencies = [
@@ -138,6 +145,7 @@ dependencies = [
 name = "process-manager"
 version = "0.0.0"
 dependencies = [
+ "mikros-bootfs",
  "mikros-rt",
  "mikros-ustar",
 ]
@@ -219,6 +227,7 @@ dependencies = [
  "mikros-loader",
  "mikros-rt",
  "mikros-test",
+ "process-manager",
 ]
 
 [[package]]
