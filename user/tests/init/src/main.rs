@@ -7260,6 +7260,20 @@ fn load_and_start(
     s: &Startup,
     file: &[u8],
 ) -> core::result::Result<(Handle, u64, u64), mikros_loader::Error> {
+    let (process, base, top, bootstrap, thread) = load_and_start_keeping(s, file)?;
+    for h in [bootstrap, thread] {
+        // SAFETY: closing takes no pointers.
+        unsafe { sys::handle_close(h) };
+    }
+    Ok((process, base, top))
+}
+
+/// Like `load_and_start`, but also returns this end of the program's
+/// bootstrap channel and its thread.
+fn load_and_start_keeping(
+    s: &Startup,
+    file: &[u8],
+) -> core::result::Result<(Handle, u64, u64, Handle, Handle), mikros_loader::Error> {
     use mikros_loader::Error;
     let status = |st: i64| {
         if st == 0 {
@@ -7303,13 +7317,9 @@ fn load_and_start(
     let (mut ours, mut theirs) = (0, 0);
     // SAFETY: the out pointers are valid for the call.
     status(unsafe { sys::channel_create(0, &mut ours, &mut theirs) })?;
-    // SAFETY: closing takes no pointers.
-    unsafe { sys::handle_close(ours) };
     // SAFETY: the call takes no pointers.
     status(unsafe { sys::process_start(process, thread, loaded.entry, top, theirs, 0) })?;
-    // SAFETY: closing takes no pointers.
-    unsafe { sys::handle_close(thread) };
-    Ok((process, loaded.base, top))
+    Ok((process, loaded.base, top, ours, thread))
 }
 
 /// mikros-loader places a position-independent program at a new address
@@ -7408,7 +7418,289 @@ fn loader_refuses_bad_images(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 115] = [
+mod managed {
+    //! The startup transfer of programs that the process manager starts,
+    //! with this test standing in for the process manager.
+
+    use super::{PAGE_SIZE, Result, boot_file, create_memory, exit_code, load_and_start_keeping};
+    use alloc::vec::Vec;
+    use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
+    use mikros_rt::interfaces::mikros::fs::Node;
+    use mikros_rt::interfaces::mikros::process::{
+        Bootstrap, BootstrapClient, HandleRole, Launcher, NamespaceEntry, StartupHandle,
+        StartupHeader,
+    };
+    use mikros_rt::interfaces::mikros::service::Directory;
+    use mikros_rt::sys::{self, Handle};
+    use mikros_rt::{PANIC_EXIT_CODE, Startup};
+    use mikros_test::{Failure, check, ensure};
+
+    const SAME_RIGHTS: u32 = 1 << 31;
+
+    /// A started copy of tests/managed waiting for its transfer.
+    struct Child {
+        process: Handle,
+        thread: Handle,
+        client: BootstrapClient,
+    }
+
+    fn start(s: &Startup) -> Result<Child> {
+        let file = boot_file(s, b"tests/managed")?;
+        let fail = |e| Failure {
+            what: "loading the program",
+            status: match e {
+                mikros_loader::Error::Status(st) => st,
+                _ => 0,
+            },
+        };
+        let (process, _, _, ours, thread) = load_and_start_keeping(s, &file).map_err(fail)?;
+        // SAFETY: the handle is ours alone.
+        let end = ClientEnd::<Bootstrap>::new(unsafe { OwnedHandle::from_raw(ours) });
+        Ok(Child {
+            process,
+            thread,
+            client: BootstrapClient::new(end),
+        })
+    }
+
+    fn copy(handle: Handle) -> Result<OwnedHandle> {
+        let mut out = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("duplicating a handle", unsafe {
+            sys::handle_duplicate(handle, SAME_RIGHTS, &mut out)
+        })?;
+        // SAFETY: the handle was just created for us.
+        Ok(unsafe { OwnedHandle::from_raw(out) })
+    }
+
+    fn memory() -> Result<OwnedHandle> {
+        // SAFETY: the handle was just created for us.
+        Ok(unsafe { OwnedHandle::from_raw(create_memory(PAGE_SIZE)?) })
+    }
+
+    fn header(s: &Startup, c: &Child, version: u32, counts: (u32, u32)) -> Result<StartupHeader> {
+        let failed = |_| Failure {
+            what: "creating a channel",
+            status: 0,
+        };
+        Ok(StartupHeader {
+            version,
+            pid: 7,
+            parent: 1,
+            user: 0,
+            app_id: "test.managed".into(),
+            bundle: None,
+            arguments: memory()?,
+            handle_count: counts.0,
+            namespace_count: counts.1,
+            process: copy(c.process)?,
+            thread: copy(c.thread)?,
+            launcher: endpoints::<Launcher>().map_err(failed)?.0,
+            directory: endpoints::<Directory>().map_err(failed)?.0,
+            time_page: None,
+            clock_page: copy(s.clock_page)?,
+            program_base: 0,
+            program_phdr: 0,
+            program_phnum: 3,
+            interpreter_base: 0,
+        })
+    }
+
+    fn handles(first: u32, n: u32) -> Result<Vec<StartupHandle>> {
+        (first..first + n)
+            .map(|id| {
+                Ok(StartupHandle {
+                    role: HandleRole::User,
+                    id,
+                    handle: memory()?,
+                })
+            })
+            .collect()
+    }
+
+    fn entries(n: usize) -> Vec<NamespaceEntry> {
+        (0..n)
+            .filter_map(|i| {
+                let (client, _) = endpoints::<Node>().ok()?;
+                let path = if i == 0 { "/data" } else { "/config" };
+                Some(NamespaceEntry {
+                    path: path.into(),
+                    directory: client,
+                })
+            })
+            .collect()
+    }
+
+    /// One message of a transfer.
+    enum Step {
+        Begin { version: u32, counts: (u32, u32) },
+        Handles { offset: u32, first: u32, n: u32 },
+        Namespace { offset: u32, n: usize },
+        Complete,
+    }
+
+    /// Starts tests/managed, sends it `steps`, closes the channel and
+    /// returns its exit code. A send may fail once the program has
+    /// refused the transfer and ended.
+    fn run(s: &Startup, steps: &[Step]) -> Result<i64> {
+        let c = start(s)?;
+        for step in steps {
+            let _ = match *step {
+                Step::Begin { version, counts } => c.client.begin(header(s, &c, version, counts)?),
+                Step::Handles { offset, first, n } => c.client.handles(offset, handles(first, n)?),
+                Step::Namespace { offset, n } => c.client.namespace(offset, entries(n)),
+                Step::Complete => c.client.complete(),
+            };
+        }
+        let Child {
+            process,
+            thread,
+            client,
+        } = c;
+        drop(client);
+        let code = exit_code(process);
+        for h in [process, thread] {
+            // SAFETY: closing takes no pointers.
+            unsafe { sys::handle_close(h) };
+        }
+        code
+    }
+
+    /// A complete transfer reaches the program's main function, with
+    /// the handles and namespace entries of every batch in order.
+    pub fn startup_transfer_accepted(s: &Startup) -> Result {
+        use Step::*;
+        let full = [
+            Begin {
+                version: 1,
+                counts: (3, 2),
+            },
+            Handles {
+                offset: 0,
+                first: 0,
+                n: 2,
+            },
+            Handles {
+                offset: 2,
+                first: 2,
+                n: 1,
+            },
+            Namespace { offset: 0, n: 2 },
+            Complete,
+        ];
+        ensure("receiving every batch", run(s, &full)? == 132)?;
+        let empty = [
+            Begin {
+                version: 1,
+                counts: (0, 0),
+            },
+            Complete,
+        ];
+        ensure("receiving no batches", run(s, &empty)? == 100)
+    }
+
+    /// A transfer out of order, of another version, over its counts,
+    /// with a misplaced or empty batch, or cut short ends the program
+    /// before its main function runs.
+    pub fn startup_transfer_refused(s: &Startup) -> Result {
+        use Step::*;
+        let begin = |handles, names| Begin {
+            version: 1,
+            counts: (handles, names),
+        };
+        let cases: [(&'static str, Vec<Step>); 10] = [
+            (
+                "refusing a batch before Begin",
+                alloc::vec![
+                    Handles {
+                        offset: 0,
+                        first: 0,
+                        n: 1
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing another version",
+                alloc::vec![
+                    Begin {
+                        version: 2,
+                        counts: (0, 0)
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing more than 32 handles",
+                alloc::vec![begin(33, 0), Complete],
+            ),
+            (
+                "refusing a second Begin",
+                alloc::vec![begin(0, 0), begin(0, 0), Complete],
+            ),
+            (
+                "refusing an early Complete",
+                alloc::vec![begin(1, 0), Complete],
+            ),
+            (
+                "refusing a batch at the wrong offset",
+                alloc::vec![
+                    begin(2, 0),
+                    Handles {
+                        offset: 1,
+                        first: 1,
+                        n: 1
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing an empty batch",
+                alloc::vec![
+                    begin(1, 0),
+                    Handles {
+                        offset: 0,
+                        first: 0,
+                        n: 0
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing a batch over its count",
+                alloc::vec![
+                    begin(1, 0),
+                    Handles {
+                        offset: 0,
+                        first: 0,
+                        n: 2
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing handles after the namespace",
+                alloc::vec![
+                    begin(1, 1),
+                    Namespace { offset: 0, n: 1 },
+                    Handles {
+                        offset: 0,
+                        first: 0,
+                        n: 1
+                    },
+                    Complete,
+                ],
+            ),
+            ("refusing a closed channel", alloc::vec![begin(1, 0)]),
+        ];
+        for (what, steps) in cases {
+            ensure(what, run(s, &steps)? == PANIC_EXIT_CODE)?;
+        }
+        Ok(())
+    }
+}
+
+const TESTS: [(&str, Test); 117] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -7432,6 +7724,14 @@ const TESTS: [(&str, Test); 115] = [
     ("midl_bindings_on_channels", midl_bindings_on_channels),
     ("loader_runs_pie", loader_runs_pie),
     ("loader_refuses_bad_images", loader_refuses_bad_images),
+    (
+        "startup_transfer_accepted",
+        managed::startup_transfer_accepted,
+    ),
+    (
+        "startup_transfer_refused",
+        managed::startup_transfer_refused,
+    ),
     (
         "queued_signals_of_ended_thread",
         queued_signals_of_ended_thread,
