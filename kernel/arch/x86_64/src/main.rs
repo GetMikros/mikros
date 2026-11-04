@@ -48,8 +48,6 @@ mod heap;
 #[cfg_attr(test, allow(dead_code))]
 mod idt;
 #[cfg(target_os = "none")]
-use kernel_core::init;
-#[cfg(target_os = "none")]
 mod interface;
 #[cfg(target_os = "none")]
 mod interrupt;

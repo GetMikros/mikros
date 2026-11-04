@@ -286,6 +286,34 @@ interface! {
     /// keeps, on every processor. Returns false when memory runs out.
     [] fn io_ports_reserve(count: usize) -> bool;
 
+    /// Sets up the boot processor and what the kernel needs before its
+    /// services start: descriptor and interrupt tables, the console, and
+    /// the system call entry. Clears flags in `info` for boot resources the
+    /// architecture finds unusable.
+    ///
+    /// # Safety
+    ///
+    /// Called once, on the boot processor, on the kernel's page tables and
+    /// stack, with interrupts disabled.
+    [unsafe] fn early_setup(info: &mut ::boot_protocol::BootInfo);
+
+    /// Sets up the interrupt controllers, the monotonic clock, the timer
+    /// and DMA isolation from the firmware's tables.
+    ///
+    /// # Safety
+    ///
+    /// Called once, on the boot processor, after `early_setup`.
+    [unsafe] fn platform_setup(info: &::boot_protocol::BootInfo);
+
+    /// Gives the memory the bootloader used to the frame allocator, once
+    /// nothing reads it any more, and returns the number of free frames.
+    ///
+    /// # Safety
+    ///
+    /// Called once, after the last use of boot memory, including `info`'s
+    /// memory map and command line.
+    [unsafe] fn boot_memory_reclaim(info: &::boot_protocol::BootInfo) -> u64;
+
     /// The ELF machine number of user programs.
     [] fn elf_machine() -> u16;
 

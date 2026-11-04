@@ -224,6 +224,14 @@ impl Arch for Mock {
         true
     }
 
+    unsafe fn early_setup(_info: &mut boot_protocol::BootInfo) {}
+
+    unsafe fn platform_setup(_info: &boot_protocol::BootInfo) {}
+
+    unsafe fn boot_memory_reclaim(_info: &boot_protocol::BootInfo) -> u64 {
+        0
+    }
+
     fn elf_machine() -> u16 {
         crate::elf::EM_X86_64
     }

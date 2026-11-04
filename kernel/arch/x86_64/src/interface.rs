@@ -215,6 +215,21 @@ impl Arch for X86 {
         open.try_reserve(missing).is_ok()
     }
 
+    unsafe fn early_setup(info: &mut boot_protocol::BootInfo) {
+        crate::entry::early_setup(info);
+    }
+
+    unsafe fn platform_setup(info: &boot_protocol::BootInfo) {
+        crate::apic::init(info);
+        time::init(info);
+        timer::init();
+        crate::iommu::init(info);
+    }
+
+    unsafe fn boot_memory_reclaim(info: &boot_protocol::BootInfo) -> u64 {
+        space::reclaim_boot_memory(info)
+    }
+
     fn elf_machine() -> u16 {
         kernel_core::elf::EM_X86_64
     }
