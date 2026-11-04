@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod available;
 mod contain;
+mod limits;
 mod types;
 mod values;
 
@@ -92,6 +93,7 @@ pub fn check(files: &[ast::File], version: Option<u64>) -> Result<Model, Error> 
         model.libraries.push(library);
     }
     contain::no_self_containment(&model, &decls)?;
+    limits::messages_fit(&model, &decls)?;
     Ok(model)
 }
 

@@ -239,4 +239,53 @@ mod checks {
         let text = "library t;\nusing test.other;\nconst N u32 = 4;\ntype A = struct { b B?; v vector<u8, N>; s test.other.Status; };\ntype B = struct { a A; };\nprotocol P { @1 F() -> () error i32; };\n";
         check_one(text).unwrap();
     }
+
+    #[test]
+    fn rejects_messages_over_the_channel_limits() {
+        fails("protocol P { @1 F(v vector<u8, 65536>); };", "exceed");
+        fails("protocol P { @1 F(v vector<handle, 65>); };", "exceed");
+        fails(
+            "type L = struct { next L?; }; protocol P { @1 F(l L); };",
+            "exceed",
+        );
+        fails("protocol P { @1 F() -> (s string<65520>); };", "exceed");
+        check_one("library t;\nprotocol P { @1 F(v vector<u8, 65232>, h vector<handle, 64>); };\n")
+            .unwrap();
+    }
+}
+
+mod layouts {
+    use crate::compile;
+    use crate::layout::*;
+    use crate::model::*;
+
+    #[test]
+    fn lays_out_structures() {
+        let text = "library t;\ntype S = struct { a u8; b u32; c u16; o S?; s string<9>; h handle; };\ntype E = enum : u16 { A = 1; };\n";
+        let model = compile(&[("t.midl", text)], None).unwrap();
+        let layout = Layout { model: &model };
+        let Some(Decl {
+            kind: DeclKind::Struct(fields),
+            ..
+        }) = model.decl("t.S")
+        else {
+            panic!("S is a structure");
+        };
+        let (shape, offsets) = layout.struct_shape(fields);
+        assert_eq!(offsets, [0, 4, 8, 16, 24, 40]);
+        assert_eq!(shape, Shape { size: 48, align: 8 });
+        let e = Type::Named {
+            name: "t.E".into(),
+            optional: false,
+        };
+        assert_eq!(layout.shape(&e), Shape { size: 2, align: 2 });
+        let message = layout.message_max(&fields[4..]);
+        assert_eq!(
+            message,
+            Some(Max {
+                bytes: 16 + 24 + 16,
+                handles: 1
+            })
+        );
+    }
 }
