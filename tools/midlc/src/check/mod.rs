@@ -106,6 +106,31 @@ struct Scope {
     window: Window,
 }
 
+impl Scope {
+    /// The full name of the library that `last`, the last identifier of
+    /// a library name, refers to: the file's own library or one named by
+    /// `using`. It is an error when more than one of them ends in `last`.
+    ///
+    /// TODO: counting the file's own library in that check is held until
+    /// the clash between it and a used library is decided.
+    fn short(&self, last: &str, span: &Span) -> Result<&str, Error> {
+        let ends = |l: &&String| l.rsplit('.').next() == Some(last);
+        let mut found = std::iter::once(&self.library)
+            .chain(&self.usings)
+            .filter(ends)
+            .collect::<Vec<_>>();
+        found.sort();
+        found.dedup();
+        match found.as_slice() {
+            [library] => Ok(library),
+            [] => Err(span.error(format!("library `{last}` is not named by `using`"))),
+            _ => Err(span.error(format!(
+                "`{last}` ends more than one library name; use the full library name"
+            ))),
+        }
+    }
+}
+
 /// The libraries in an order in which each comes after those it uses.
 fn order(libraries: &BTreeMap<String, Vec<&ast::File>>) -> Result<Vec<String>, Error> {
     fn visit(
@@ -159,12 +184,11 @@ impl Checker<'_> {
             [name] => format!("{}.{name}", scope.library),
             [library @ .., name] => {
                 let library = library.join(".");
-                if library != scope.library && !scope.usings.contains(&library) {
-                    return Err(path
-                        .span
-                        .error(format!("library `{library}` is not named by `using`")));
+                if library == scope.library || scope.usings.contains(&library) {
+                    format!("{library}.{name}")
+                } else {
+                    format!("{}.{name}", scope.short(&library, &path.span)?)
                 }
-                format!("{library}.{name}")
             }
             [] => unreachable!("a path has a part"),
         };

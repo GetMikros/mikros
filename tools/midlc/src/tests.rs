@@ -252,6 +252,65 @@ mod checks {
         check_one("library t;\nprotocol P { @1 F(v vector<u8, 65232>, h vector<handle, 64>); };\n")
             .unwrap();
     }
+
+    fn status_of(model: &Model, decl: &str) -> String {
+        match model.decl(decl) {
+            Some(Decl {
+                kind: DeclKind::Struct(fields),
+                ..
+            }) => match &fields[0].ty {
+                Type::Named { name, .. } => name.clone(),
+                ty => panic!("{ty:?} is not named"),
+            },
+            _ => panic!("{decl} is a structure"),
+        }
+    }
+
+    #[test]
+    fn accepts_the_last_identifier_of_a_used_library() {
+        let model =
+            check_one("library t;\nusing test.other;\ntype A = struct { s other.Status; };\n");
+        let model = model.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(status_of(&model, "t.A"), "test.other.Status");
+        fails(
+            "type A = struct { s test.Status; };",
+            "not named by `using`",
+        );
+        fails(
+            "type A = struct { s x.other.Status; };",
+            "not named by `using`",
+        );
+    }
+
+    #[test]
+    fn requires_the_full_name_when_last_identifiers_repeat() {
+        let same = "library more.other;\ntype Status = enum : i32 { OK = 0; };\n";
+        let file = |ty: &str| {
+            format!(
+                "library t;\nusing test.other;\nusing more.other;\ntype A = struct {{ s {ty}; }};\n"
+            )
+        };
+        let compile_with = |text: &str| {
+            compile(
+                &[("t.midl", text), ("other.midl", OTHER), ("more.midl", same)],
+                None,
+            )
+            .map_err(|e| e.to_string())
+        };
+        let err = compile_with(&file("other.Status")).unwrap_err();
+        assert!(err.contains("full library name"), "{err}");
+        let model = compile_with(&file("more.other.Status")).unwrap();
+        assert_eq!(status_of(&model, "t.A"), "more.other.Status");
+    }
+
+    #[test]
+    fn names_its_own_library_in_every_form() {
+        let text = "library test.own;\ntype S = enum : i32 { OK = 0; };\ntype A = struct { s S; };\ntype B = struct { s own.S; };\ntype C = struct { s test.own.S; };\n";
+        let model = compile(&[("own.midl", text)], None).unwrap();
+        for decl in ["test.own.A", "test.own.B", "test.own.C"] {
+            assert_eq!(status_of(&model, decl), "test.own.S");
+        }
+    }
 }
 
 mod layouts {
