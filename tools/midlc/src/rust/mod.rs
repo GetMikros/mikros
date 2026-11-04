@@ -141,6 +141,21 @@ pub(crate) fn ident(name: &str) -> String {
     }
 }
 
+/// `NOT_FOUND` as `NotFound`, `point` as `Point`, and `GetInfo`
+/// unchanged.
+pub(crate) fn camel(name: &str) -> String {
+    name.split('_')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let upper = !p.chars().any(|c| c.is_ascii_lowercase());
+            let mut chars = p.chars();
+            let first = chars.next().map(|c| c.to_ascii_uppercase());
+            let rest = chars.map(|c| if upper { c.to_ascii_lowercase() } else { c });
+            first.into_iter().chain(rest).collect::<String>()
+        })
+        .collect()
+}
+
 /// `doc` as `///` lines indented by `indent`.
 pub(crate) fn doc(doc: &[String], indent: &str) -> String {
     doc.iter().map(|l| format!("{indent}/// {l}\n")).collect()
