@@ -3,6 +3,7 @@
 use core::fmt;
 
 pub mod dmar;
+pub mod ivrs;
 pub mod madt;
 
 /// Reads physical memory.
