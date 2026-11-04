@@ -3495,7 +3495,10 @@ fn boot_partition_named(s: &Startup) -> Result {
         .split_ascii_whitespace()
         .filter_map(|o| o.strip_prefix("esp=PARTUUID="));
     let (first, second) = (esp.next(), esp.next());
-    ensure("naming the partition once", first.is_some() && second.is_none())?;
+    ensure(
+        "naming the partition once",
+        first.is_some() && second.is_none(),
+    )?;
     let guid = first.unwrap_or("").as_bytes();
     let well_formed = guid.len() == 36
         && guid.iter().enumerate().all(|(i, &b)| match i {
