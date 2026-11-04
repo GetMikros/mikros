@@ -273,6 +273,64 @@ interface! {
     /// `area` must hold initial or saved extended state.
     [unsafe] fn extended_state_restore(area: *const u8);
 
+    /// Makes the page tables of a new user address space, which maps
+    /// nothing in the user range and shares the kernel's mappings, taking
+    /// table frames from `alloc`. Returns the architecture's state of
+    /// them.
+    [] fn page_table_new(alloc: &mut dyn FnMut() -> Option<u64>) -> Result<*mut (), ::kernel_core::arch::PageError>;
+
+    /// Maps the 4 KiB user page at `virt` to the frame at `phys` in
+    /// `table`, taking the frames of tables it needs from `alloc`.
+    ///
+    /// # Safety
+    ///
+    /// `table` must come from `page_table_new` and not be freed, and the
+    /// caller must keep other changes of it out meanwhile.
+    [unsafe] fn page_table_map(
+        table: *mut (),
+        virt: u64,
+        phys: u64,
+        flags: ::kernel_core::arch::PageFlags,
+        alloc: &mut dyn FnMut() -> Option<u64>,
+    ) -> Result<(), ::kernel_core::arch::PageError>;
+
+    /// Removes the mapped pages among the `size` bytes of user addresses
+    /// from `virt` in `table`, calling `unmapped` with the frame of each,
+    /// and invalidates their translations, so that no processor uses them
+    /// once it returns. Visits at most `limit` entries, and returns the
+    /// address it stopped at when the range goes on.
+    ///
+    /// # Safety
+    ///
+    /// As for `page_table_map`.
+    [unsafe] fn page_table_unmap(
+        table: *mut (),
+        virt: u64,
+        size: u64,
+        limit: usize,
+        unmapped: &mut dyn FnMut(u64),
+    ) -> Result<Option<u64>, ::kernel_core::arch::PageError>;
+
+    /// Loads `table` on this processor.
+    ///
+    /// # Safety
+    ///
+    /// As for `page_table_map`; its mappings must be ones the running
+    /// thread may use.
+    [unsafe] fn page_table_activate(table: *mut ());
+
+    /// Loads the kernel's own page tables on this processor.
+    [] fn page_table_activate_kernel();
+
+    /// Frees `table`, passing each of its table frames to `free`. No user
+    /// page may be mapped in it any more.
+    ///
+    /// # Safety
+    ///
+    /// `table` must come from `page_table_new`, and nothing may use it any
+    /// more.
+    [unsafe] fn page_table_free(table: *mut (), free: &mut dyn FnMut(u64));
+
     /// Copies `dst.len()` bytes from the user address `src` of the running
     /// thread's address space into `dst`. Fails with `InvalidArgs` when the
     /// range is not in the user address range or a page of it cannot be
@@ -321,6 +379,68 @@ pub enum PageError {
     /// The tables do not allow the change, such as a range that ends
     /// inside a large page.
     Refused,
+}
+
+/// The page tables of one user address space. They are freed with
+/// `free`, which needs a place to return table frames to; dropping them
+/// otherwise leaks them.
+pub struct PageTable(core::ptr::NonNull<()>);
+
+// SAFETY: the architecture's page table state is made to be changed and
+// loaded from any processor, with changes kept apart by the owner.
+unsafe impl Send for PageTable {}
+// SAFETY: as for `Send`.
+unsafe impl Sync for PageTable {}
+
+impl PageTable {
+    /// New page tables, with table frames from `alloc`.
+    pub fn new(alloc: &mut dyn FnMut() -> Option<u64>) -> Result<PageTable, PageError> {
+        let table = page_table_new(alloc)?;
+        core::ptr::NonNull::new(table)
+            .map(PageTable)
+            .ok_or(PageError::OutOfMemory)
+    }
+
+    /// Maps the user page at `virt` to `phys`. The caller keeps other
+    /// changes of the tables out meanwhile.
+    pub fn map(
+        &self,
+        virt: u64,
+        phys: u64,
+        flags: PageFlags,
+        alloc: &mut dyn FnMut() -> Option<u64>,
+    ) -> Result<(), PageError> {
+        // SAFETY: the state is alive while `self` is, and the caller keeps
+        // other changes out.
+        unsafe { page_table_map(self.0.as_ptr(), virt, phys, flags, alloc) }
+    }
+
+    /// Removes and invalidates mapped pages, as `page_table_unmap` does.
+    /// The caller keeps other changes of the tables out meanwhile.
+    pub fn unmap(
+        &self,
+        virt: u64,
+        size: u64,
+        limit: usize,
+        unmapped: &mut dyn FnMut(u64),
+    ) -> Result<Option<u64>, PageError> {
+        // SAFETY: as for `map`.
+        unsafe { page_table_unmap(self.0.as_ptr(), virt, size, limit, unmapped) }
+    }
+
+    /// Loads the tables on this processor.
+    pub fn activate(&self) {
+        // SAFETY: the state is alive while `self` is; the owner loads the
+        // tables only for threads that may use them.
+        unsafe { page_table_activate(self.0.as_ptr()) };
+    }
+
+    /// Frees the tables, passing their table frames to `free`. No user
+    /// page may be mapped any more.
+    pub fn free(self, free: &mut dyn FnMut(u64)) {
+        // SAFETY: `self` is consumed, so nothing uses the state any more.
+        unsafe { page_table_free(self.0.as_ptr(), free) };
+    }
 }
 
 /// The architecture's state of one thread, freed when it is dropped.

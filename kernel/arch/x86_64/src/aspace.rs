@@ -3,13 +3,12 @@
 
 use crate::memory::FRAMES;
 use crate::memory_object::{Mapping, MemoryObject};
-use crate::page_tables::SpaceTables;
 use crate::publish::ITEM_STEP;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicU64, Ordering};
-use kernel_core::arch::PageError;
+use kernel_core::arch::{PageError, PageTable};
 use kernel_core::object::budget::{Budget, Scratch};
 use kernel_core::regions::{
     Charge, MapOptions, PAGE_SIZE, PERM_EXECUTE, PERM_READ, PERM_WRITE, Region, Regions, Removal,
@@ -34,7 +33,7 @@ pub type Access = kernel_core::arch::PageFlags;
 
 struct Inner {
     /// Freed when the space is dropped.
-    tables: ManuallyDrop<SpaceTables>,
+    tables: ManuallyDrop<PageTable>,
     /// Table frames charged to the budget.
     charged: u64,
 }
@@ -133,7 +132,7 @@ impl AddressSpace {
             count: 0,
             refused: false,
         };
-        let page_tables = SpaceTables::new(&mut || tables.alloc());
+        let page_tables = PageTable::new(&mut || tables.alloc());
         let page_tables = page_tables.map_err(|e| tables.error(e))?;
         let charged = if charge { tables.count } else { 0 };
         Ok(AddressSpace {

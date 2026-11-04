@@ -69,3 +69,20 @@ fn frees_thread_data() {
     data.switch_out(true);
     data.switch_in(0x1000, false);
 }
+
+#[test]
+fn makes_and_frees_page_tables() {
+    let table = super::PageTable::new(&mut || None).expect("page tables");
+    let flags = super::PageFlags {
+        writable: true,
+        executable: false,
+        policy: super::CachePolicy::Cached,
+    };
+    assert_eq!(table.map(0x10000, 0x2000, flags, &mut || None), Ok(()));
+    assert_eq!(
+        table.unmap(0x10000, 0x1000, usize::MAX, &mut |_| {}),
+        Ok(None)
+    );
+    table.activate();
+    table.free(&mut |_| {});
+}

@@ -1,5 +1,6 @@
 //! The x86_64 implementation of the kernel core's architecture interface.
 
+use crate::page_tables::SpaceTables;
 use crate::thread_arch::ArchThread;
 use crate::{context, cpu, idt, percpu, serial, space, time, timer};
 use alloc::boxed::Box;
@@ -196,6 +197,54 @@ impl Arch for X86 {
     unsafe fn extended_state_restore(area: *const u8) {
         // SAFETY: the caller guarantees the area holds valid state.
         unsafe { context::restore_area(area) };
+    }
+
+    fn page_table_new(
+        alloc: &mut dyn FnMut() -> Option<u64>,
+    ) -> Result<*mut (), kernel_core::arch::PageError> {
+        let tables = SpaceTables::new(alloc)?;
+        match kernel_core::fallible::try_box(tables) {
+            Ok(tables) => Ok(Box::into_raw(tables).cast()),
+            Err(_) => Err(kernel_core::arch::PageError::OutOfMemory),
+        }
+    }
+
+    unsafe fn page_table_map(
+        table: *mut (),
+        virt: u64,
+        phys: u64,
+        flags: kernel_core::arch::PageFlags,
+        alloc: &mut dyn FnMut() -> Option<u64>,
+    ) -> Result<(), kernel_core::arch::PageError> {
+        // SAFETY: the caller passes a live state from `page_table_new`.
+        unsafe { (*table.cast::<SpaceTables>()).map(virt, phys, flags, alloc) }
+    }
+
+    unsafe fn page_table_unmap(
+        table: *mut (),
+        virt: u64,
+        size: u64,
+        limit: usize,
+        unmapped: &mut dyn FnMut(u64),
+    ) -> Result<Option<u64>, kernel_core::arch::PageError> {
+        // SAFETY: as for `page_table_map`.
+        unsafe { (*table.cast::<SpaceTables>()).unmap(virt, size, limit, unmapped) }
+    }
+
+    unsafe fn page_table_activate(table: *mut ()) {
+        // SAFETY: as for `page_table_map`.
+        unsafe { (*table.cast::<SpaceTables>()).activate() };
+    }
+
+    fn page_table_activate_kernel() {
+        crate::page_tables::activate_kernel();
+    }
+
+    unsafe fn page_table_free(table: *mut (), free: &mut dyn FnMut(u64)) {
+        // SAFETY: the caller passes a state from `page_table_new`, a boxed
+        // `SpaceTables`, which nothing uses any more.
+        let tables = unsafe { Box::from_raw(table.cast::<SpaceTables>()) };
+        tables.free(free);
     }
 
     fn user_copy_in(dst: &mut [u8], src: u64) -> Result<(), kernel_core::status::Error> {

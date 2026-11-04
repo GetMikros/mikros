@@ -214,6 +214,41 @@ impl Arch for Mock {
 
     unsafe fn extended_state_restore(_area: *const u8) {}
 
+    fn page_table_new(
+        _alloc: &mut dyn FnMut() -> Option<u64>,
+    ) -> Result<*mut (), super::PageError> {
+        Ok(alloc::boxed::Box::into_raw(alloc::boxed::Box::new(0u8)).cast())
+    }
+
+    unsafe fn page_table_map(
+        _table: *mut (),
+        _virt: u64,
+        _phys: u64,
+        _flags: super::PageFlags,
+        _alloc: &mut dyn FnMut() -> Option<u64>,
+    ) -> Result<(), super::PageError> {
+        Ok(())
+    }
+
+    unsafe fn page_table_unmap(
+        _table: *mut (),
+        _virt: u64,
+        _size: u64,
+        _limit: usize,
+        _unmapped: &mut dyn FnMut(u64),
+    ) -> Result<Option<u64>, super::PageError> {
+        Ok(None)
+    }
+
+    unsafe fn page_table_activate(_table: *mut ()) {}
+
+    fn page_table_activate_kernel() {}
+
+    unsafe fn page_table_free(table: *mut (), _free: &mut dyn FnMut(u64)) {
+        // SAFETY: the caller passes a state from `page_table_new`.
+        drop(unsafe { alloc::boxed::Box::from_raw(table.cast::<u8>()) });
+    }
+
     fn user_copy_in(_dst: &mut [u8], _src: u64) -> Result<(), crate::status::Error> {
         Err(crate::status::Error::InvalidArgs)
     }
