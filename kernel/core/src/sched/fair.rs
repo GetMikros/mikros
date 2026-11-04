@@ -160,8 +160,13 @@ impl<T: Copy + PartialEq> Fair<T> {
         self.queue.is_empty()
     }
 
+    /// The queued threads, in no particular order.
+    pub fn queued(&self) -> impl Iterator<Item = T> + '_ {
+        self.queue.iter().map(|q| q.id)
+    }
+
     /// The total weight of the runnable threads.
-    fn runnable_weight(&self) -> u64 {
+    pub fn runnable_weight(&self) -> u64 {
         self.total + self.running.map_or(0, |(_, e)| e.weight)
     }
 

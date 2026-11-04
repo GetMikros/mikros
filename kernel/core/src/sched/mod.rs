@@ -49,6 +49,9 @@ pub struct Thread {
     /// The processor that owns the thread: whose run queue or sleepers
     /// hold it, or that runs it.
     cpu: AtomicU32,
+    /// Set from when the thread starts a slice until its state is saved
+    /// after it stops, so that no other processor runs it meanwhile.
+    on_cpu: AtomicBool,
     /// Set by `wake_sleeper` when the thread did not sleep yet, so that
     /// its next sleep returns at once instead of missing the wake.
     wake_pending: AtomicBool,
@@ -119,6 +122,7 @@ impl Thread {
             state: AtomicU32::new(state),
             cpu: AtomicU32::new(cpu as u32),
             wake_pending: AtomicBool::new(false),
+            on_cpu: AtomicBool::new(false),
             arch,
             stack_top: AtomicU64::new(stack + KERNEL_STACK_SIZE),
             #[cfg(feature = "fuzz")]
@@ -197,6 +201,7 @@ impl Thread {
                 crate::arch::context_prepare(top, crate::arch::user_thread_entry(), 0)
         };
         thread.state.store(RUNNABLE, Ordering::Release);
+        place(thread);
         queue(thread);
     }
 
@@ -426,6 +431,9 @@ pub struct CpuSched {
     slice_end: i64,
     /// A thread that exited, whose stack is freed after switching away.
     dead: Option<Arc<Thread>>,
+    /// The thread that ran before the switch in progress, which may run
+    /// elsewhere once its state is saved.
+    prev: Option<Arc<Thread>>,
     /// Threads sleeping until a deadline.
     sleepers: Deadlines<Queued>,
     /// Armed `Timer` objects.
@@ -455,6 +463,7 @@ impl CpuSched {
             slice_start: 0,
             slice_end: 0,
             dead: None,
+            prev: None,
             sleepers: Deadlines::new(),
             timers: Deadlines::new(),
             clock_due: INFINITE,
@@ -499,6 +508,92 @@ fn reserve(cpu: usize) -> Result<(), Error> {
     Ok(())
 }
 
+/// Moves `thread`, which is new and was never queued, to the processor
+/// with the least runnable weight, if that processor has room for it.
+fn place(thread: &Thread) {
+    let me = crate::arch::cpu_index() as usize;
+    let load = |cpu: usize| {
+        crate::cpu::of(cpu).map_or(u64::MAX, |data| {
+            let sched = data.sched.lock();
+            let running = sched.current.as_ref().map_or(0, |t| t.entity.lock().weight);
+            sched.fair.runnable_weight() + running
+        })
+    };
+    let best = (0..crate::cpu::count()).min_by_key(|&cpu| (load(cpu), cpu != me));
+    let Some(target) = best else {
+        return;
+    };
+    // No two processors' states are locked at once. Nothing else moves
+    // a thread that was never queued.
+    if target == thread.cpu.load(Ordering::Acquire) as usize || reserve(target).is_err() {
+        return;
+    }
+    let (sched, from) = owner(thread);
+    thread.cpu.store(target as u32, Ordering::Release);
+    drop(sched);
+    if let Some(data) = crate::cpu::of(from) {
+        data.assigned.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Takes a queued thread that is not running from the processor with the
+/// longest run queue and queues it on this one, which has nothing to
+/// run. Returns whether it took one.
+fn steal() -> bool {
+    let me = crate::arch::cpu_index() as usize;
+    let victim = (0..crate::cpu::count())
+        .filter(|&cpu| cpu != me)
+        .filter_map(|cpu| Some((cpu, crate::cpu::of(cpu)?.sched.lock().fair.len())))
+        .filter(|&(_, queued)| queued > 0)
+        .max_by_key(|&(_, queued)| queued);
+    let Some((victim, _)) = victim else {
+        return false;
+    };
+    // Room comes first, so that nothing fails once the thread is out of
+    // the other queue.
+    if reserve(me).is_err() {
+        return false;
+    }
+    let Some(data) = crate::cpu::of(victim) else {
+        return false;
+    };
+    let stolen = {
+        let mut sched = data.sched.lock();
+        // SAFETY: queued pointers are references to threads.
+        let free = |q: &Queued| !unsafe { &*q.0 }.on_cpu.load(Ordering::Acquire);
+        let candidate = sched.fair.queued().find(free);
+        candidate.and_then(|q| {
+            let entity = sched.fair.remove(q)?;
+            // SAFETY: as above; the queue's reference moves with it.
+            unsafe { &*q.0 }.cpu.store(me as u32, Ordering::Release);
+            data.assigned.fetch_sub(1, Ordering::AcqRel);
+            Some((q, entity))
+        })
+    };
+    match stolen {
+        Some((queued, entity)) => {
+            this_cpu().lock().enqueue(me, queued, entity);
+            true
+        }
+        None => {
+            if let Some(mine) = crate::cpu::of(me) {
+                mine.assigned.fetch_sub(1, Ordering::AcqRel);
+            }
+            false
+        }
+    }
+}
+
+/// Interrupts the processor that runs `thread`, when that is another
+/// one, so that it notices a change for the thread at once instead of at
+/// its next interrupt.
+fn kick(thread: &Thread) {
+    let cpu = thread.cpu.load(Ordering::Acquire) as usize;
+    if thread.on_cpu.load(Ordering::Acquire) && cpu != crate::arch::cpu_index() as usize {
+        crate::arch::reschedule_send(cpu);
+    }
+}
+
 /// The scheduler state of the processor that owns `thread`, locked, and
 /// its number.
 fn owner(thread: &Thread) -> (crate::sync::Guard<'static, CpuSched>, usize) {
@@ -531,6 +626,7 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
         *thread.arch.saved_context() =
             crate::arch::context_prepare(top, entry as usize as u64, arg as u64)
     };
+    place(&thread);
     queue(&thread);
     Ok(thread)
 }
@@ -546,9 +642,16 @@ fn free_stack(thread: &Thread) {
     }
 }
 
-/// Frees what the thread that ran before left behind.
+/// Frees what the thread that ran before left behind, and lets other
+/// processors run it, now that its state is saved.
 fn finish_switch() {
-    let dead = this_cpu().lock().dead.take();
+    let (dead, prev) = {
+        let mut cpu = this_cpu().lock();
+        (cpu.dead.take(), cpu.prev.take())
+    };
+    if let Some(prev) = prev {
+        prev.on_cpu.store(false, Ordering::Release);
+    }
     if let Some(dead) = dead {
         free_stack(&dead);
     }
@@ -619,6 +722,7 @@ fn schedule(requeue: bool) {
     if !requeue && current.state() == DEAD {
         cpu.dead = Some(current.clone());
     }
+    cpu.prev = Some(current.clone());
     drop(cpu);
     drop(current);
     // SAFETY: `load` is a thread's saved stack or the idle loop's, and
@@ -632,6 +736,7 @@ fn schedule(requeue: bool) {
 /// dropped.
 fn start_slice(cpu: &mut CpuSched, now: i64, thread: Arc<Thread>) {
     reschedule().store(false, Ordering::Relaxed);
+    thread.on_cpu.store(true, Ordering::Release);
     cpu.current = Some(thread);
     cpu.slice_start = now;
     cpu.slice_end = now.saturating_add(cpu.fair.slice());
@@ -726,6 +831,7 @@ pub fn wake_sleeper(thread: &Arc<Thread>) {
         // It runs, maybe on another processor about to sleep; with the
         // owner's state locked, the sleep sees this.
         thread.wake_pending.store(true, Ordering::Release);
+        kick(thread);
     }
 }
 
@@ -791,6 +897,8 @@ pub fn make_dead(thread: &Arc<Thread>) -> u32 {
         }
     } else if was == EXCEPTION || was == SUSPENDED {
         queue(thread);
+    } else {
+        kick(thread);
     }
     was
 }
@@ -1108,8 +1216,18 @@ pub fn run() -> ! {
                 crate::object::channel::collect_if_needed();
             }
             None => {
+                drop(cpu);
+                if steal() {
+                    continue;
+                }
+                let cpu = this_cpu().lock();
+                if !cpu.fair.is_empty() {
+                    continue;
+                }
                 arm(&cpu);
                 drop(cpu);
+                // A thread queued here from now on comes with an
+                // interrupt, which stays pending until the halt.
                 halt_until_interrupt();
             }
         }

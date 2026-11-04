@@ -767,7 +767,8 @@ extern "sysv64" fn mark_started(_: u64, _: u64) -> ! {
 
 /// A thread that the queue would pick before the running one runs
 /// before the running one goes on: a new thread of priority 31, started
-/// by this one at 16, has run by the time `thread_start` returns.
+/// by this one at 16, runs while this one spins without blocking. On the
+/// same processor it must preempt this one; on another it runs at once.
 fn queued_thread_preempts(s: &Startup) -> Result {
     let stack_size = 16 * 1024;
     let stack = create_memory(stack_size)?;
@@ -791,7 +792,11 @@ fn queued_thread_preempts(s: &Startup) -> Result {
     // SAFETY: the call takes no pointers; the stack is mapped and unused.
     let status = unsafe { sys::thread_start(thread, entry, at + stack_size - 8, 0, 0) };
     check("starting it", status)?;
-    ensure("running it first", STARTED.load(Ordering::Acquire) == 1)?;
+    let deadline = in_time();
+    while STARTED.load(Ordering::Acquire) == 0 && now() < deadline {
+        core::hint::spin_loop();
+    }
+    ensure("running it", STARTED.load(Ordering::Acquire) == 1)?;
     ensure("ending it", wait(thread, TERMINATED, in_time()).0 == 0)
 }
 

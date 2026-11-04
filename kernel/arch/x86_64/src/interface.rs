@@ -222,10 +222,14 @@ impl Arch for X86 {
     }
 
     fn io_ports_reserve(count: usize) -> bool {
-        // The boot processor, whose list this is, is the only one.
-        let mut open = percpu::this().open_ports.lock();
-        let missing = count.saturating_sub(open.len());
-        open.try_reserve(missing).is_ok()
+        // A process's threads may run on any processor.
+        (0..kernel_core::smp::MAX_CPUS)
+            .map_while(percpu::of)
+            .all(|cpu| {
+                let mut open = cpu.open_ports.lock();
+                let missing = count.saturating_sub(open.len());
+                open.try_reserve(missing).is_ok()
+            })
     }
 
     unsafe fn early_setup(info: &mut boot_protocol::BootInfo) {
