@@ -14,8 +14,11 @@
 extern crate alloc;
 
 mod block;
+mod block_scalar;
+mod flow;
 mod parse;
 mod plain;
+mod quoted;
 
 use alloc::string::String;
 use alloc::vec::Vec;

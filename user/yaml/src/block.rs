@@ -63,8 +63,20 @@ impl Parser<'_> {
                 }
                 self.block_list(column)?
             }
-            // TODO: flow collections and block scalars.
-            Some(b'[' | b'{' | b'|' | b'>') => return Err(self.error(ErrorKind::Unsupported)),
+            Some(b'[' | b'{') => {
+                let node = self.flow()?;
+                self.skip_spaces();
+                if self.peek() == Some(b':') && is_break_or_space(self.peek_at(1)) {
+                    return Err(Error {
+                        line: line + 1,
+                        column: column + 1,
+                        kind: ErrorKind::NonScalarKey,
+                    });
+                }
+                self.end_line()?;
+                node
+            }
+            Some(b'|' | b'>') => self.block_scalar(parent)?,
             Some(b'?') if is_break_or_space(self.peek_at(1)) => {
                 return Err(self.error(ErrorKind::Unsupported));
             }
@@ -213,8 +225,7 @@ impl Parser<'_> {
     /// cursor.
     pub(crate) fn scalar_start(&mut self) -> Result<(String, Style), Error> {
         match self.peek() {
-            // TODO: quoted scalars.
-            Some(b'\'' | b'"') => Err(self.error(ErrorKind::Unsupported)),
+            Some(b'\'' | b'"') => Ok((self.quoted()?, Style::Quoted)),
             _ => Ok((self.plain_line(false)?.into(), Style::Plain)),
         }
     }
