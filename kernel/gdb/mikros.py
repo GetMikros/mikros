@@ -247,7 +247,7 @@ class Threads(gdb.Command):
                 f"thread {int(t['header']['koid'])} {text(t['name'])!r}: {state}, "
                 f"priority {int(scalar(t['priority']))}"
             )
-            rsp = int(t["rsp"]["value"])
+            rsp = int(t["arch"]["rsp"]["value"])
             if inner == running:
                 print("  running; its registers are GDB's")
             elif state == "DEAD" or int(scalar(t["stack_top"])) == 0:
@@ -260,7 +260,7 @@ class Threads(gdb.Command):
                 regs = " ".join(f"{n}={v:#x}" for n, v in zip(SWITCH_FRAME, saved))
                 print(f"  kernel rsp={rsp + 8 * len(SWITCH_FRAME):#x} {regs}")
             for field in ["exception_frame", "syscall_frame"]:
-                frame = scalar(t[field])
+                frame = scalar(t["arch"][field])
                 if int(frame) != 0:
                     f = frame.dereference()
                     names = ["rip", "rsp", "rax", "rdi", "rsi", "rdx", "rflags"]

@@ -90,6 +90,8 @@ mod signal;
 mod space;
 #[cfg(target_os = "none")]
 mod syscall;
+#[cfg(target_os = "none")]
+mod thread_arch;
 #[cfg(any(target_os = "none", test))]
 mod thread_state;
 #[cfg(target_os = "none")]
