@@ -50,6 +50,7 @@ pub mod ranges;
 pub mod regions;
 pub mod sched;
 pub mod signal;
+pub mod smp;
 pub mod startup;
 pub mod status;
 pub mod sync;

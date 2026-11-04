@@ -92,6 +92,8 @@ use kernel_core::signal;
 #[cfg(target_os = "none")]
 mod signal_frame;
 #[cfg(target_os = "none")]
+mod smp;
+#[cfg(target_os = "none")]
 mod space;
 #[cfg(target_os = "none")]
 mod syscall;

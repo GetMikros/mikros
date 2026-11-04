@@ -122,6 +122,23 @@ pub fn nmi_inputs(madt: &[u8], apic_id: u32) -> impl Iterator<Item = (u8, u16)> 
     })
 }
 
+/// The flag of a local APIC entry whose processor is enabled.
+pub const ENABLED: u32 = 1 << 0;
+
+/// The APIC IDs of the processors whose local APIC or x2APIC entry has
+/// `ENABLED` set, in table order, each once.
+pub fn enabled_processors(madt: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    let enabled = move |e| match e {
+        Entry::LocalApic { apic_id, flags, .. } if flags & ENABLED != 0 => Some(apic_id),
+        _ => None,
+    };
+    entries(madt)
+        .filter_map(enabled)
+        .enumerate()
+        .filter(move |&(n, id)| !entries(madt).filter_map(enabled).take(n).any(|i| i == id))
+        .map(|(_, id)| id)
+}
+
 /// Whether MPS INTI `flags` select an active-low input.
 pub fn active_low(flags: u16) -> bool {
     flags & 0b11 == 0b11
@@ -196,6 +213,20 @@ mod tests {
         assert_eq!(nmi, [(1, 5), (0, 0xF)]);
         assert!(active_low(0xF) && level_triggered(0xF));
         assert!(!active_low(5) && !level_triggered(5));
+    }
+
+    #[test]
+    fn lists_enabled_processors_once() {
+        let t = madt(&[
+            &[0, 8, 0, 0, 1, 0, 0, 0],
+            &[0, 8, 1, 2, 2, 0, 0, 0],
+            &[0, 8, 2, 3, 0, 0, 0, 0],
+            &[9, 16, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0],
+            &[9, 16, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0],
+            &[9, 16, 0, 0, 1, 1, 0, 0, 3, 0, 0, 0, 6, 0, 0, 0],
+        ]);
+        let ids: Vec<u32> = enabled_processors(&t).collect();
+        assert_eq!(ids, [0, 0x100, 0x101]);
     }
 
     #[test]

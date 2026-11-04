@@ -344,6 +344,7 @@ pub fn init(info: &BootInfo) {
     drop(apics);
     init_local(madt);
     BOOT_ID.store(id(), Ordering::Relaxed);
+    crate::smp::find(madt, id());
     let mode = if X2APIC.load(Ordering::Relaxed) {
         "x2APIC"
     } else {
