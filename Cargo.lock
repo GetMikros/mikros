@@ -738,6 +738,10 @@ name = "mikros-ustar"
 version = "0.0.0"
 
 [[package]]
+name = "mikros-yaml"
+version = "0.0.0"
+
+[[package]]
 name = "mikrosboot"
 version = "0.0.0"
 dependencies = [
