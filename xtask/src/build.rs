@@ -107,9 +107,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", init.display());
             let manager = user_build("process-manager", kind)?;
             println!("built    {}", manager.display());
+            let services = user_build("service-manager", kind)?;
+            println!("built    {}", services.display());
             let members = [
                 ("init", init.as_path()),
                 ("usr/bin/process-manager", manager.as_path()),
+                ("usr/bin/service-manager", services.as_path()),
             ];
             boot_image(kind, "boot.img", &members)?
         }
@@ -128,6 +131,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", managed.display());
             let manager = user_build("process-manager", kind)?;
             println!("built    {}", manager.display());
+            let services = user_build("service-manager", kind)?;
+            println!("built    {}", services.display());
             let members = [
                 ("init", init.as_path()),
                 ("tests/channel-echo", echo.as_path()),
@@ -136,6 +141,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/pie", pie.as_path()),
                 ("tests/managed", managed.as_path()),
                 ("usr/bin/process-manager", manager.as_path()),
+                ("usr/bin/service-manager", services.as_path()),
             ];
             boot_image(kind, "test-boot.img", &members)?
         }
