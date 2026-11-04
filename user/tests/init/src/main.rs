@@ -7703,7 +7703,7 @@ mod managed {
 mod manager {
     //! The process manager's start, with this test standing in for init.
 
-    use super::{boot_file, exit_code, load_and_start_keeping};
+    use super::{TERMINATED, TIMED_OUT, boot_file, exit_code, load_and_start_keeping};
     use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
     use mikros_rt::interfaces::mikros::base::Status;
     use mikros_rt::interfaces::mikros::process::{
@@ -7808,7 +7808,9 @@ mod manager {
 
     /// After `Start`, the process manager registers init once, refuses
     /// to start the service manager before that and a second time, and
-    /// fails to start one that the boot image does not hold.
+    /// starts it from the boot file system: its transfer, with the
+    /// directory bound over its control endpoint, completes and it runs
+    /// on.
     pub fn process_manager_serves_init(s: &Startup) -> Result {
         let mut m = start(s)?;
         let (startup, init) = start_message(s, &m, 1)?;
@@ -7830,9 +7832,27 @@ mod manager {
             matches!(init.register(deadline), Ok(Err(Status::BadState))),
         )?;
         let first = init.start_service_manager(alloc::vec![], deadline);
+        let Ok(Ok(started)) = first else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", first.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        ensure("giving the service manager pid 2", started.pid == 2)?;
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let running = unsafe {
+            sys::object_wait_one(
+                started.process.raw(),
+                TERMINATED,
+                super::now() + 50_000_000,
+                &mut observed,
+            )
+        };
         ensure(
-            "failing without a service manager",
-            matches!(first, Ok(Err(_))),
+            "keeping the service manager running after its transfer",
+            running == TIMED_OUT,
         )?;
         ensure(
             "refusing a second StartServiceManager",
@@ -7841,6 +7861,8 @@ mod manager {
                 Ok(Err(Status::BadState))
             ),
         )?;
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
         drop(m);
         Ok(())
     }

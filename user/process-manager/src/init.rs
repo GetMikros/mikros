@@ -1,64 +1,101 @@
 //! Serving init: registering it as process ID 1 and starting the
 //! service manager.
 
-use crate::boot;
+use crate::launcher;
 use crate::records::{Record, Records};
-use mikros_rt::interfaces::__midl::OwnedHandle;
-use mikros_rt::interfaces::__midl::ServerEnd;
+use crate::start::{self, Transfer, duplicate};
+use alloc::rc::Rc;
+use mikros_rt::exec::{Reactor, Spawner};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::process::InitBootstrap;
 use mikros_rt::interfaces::mikros::process::{
-    HandleRole, InitBootstrapAsyncServer, InitBootstrapRegisterResponse, InitBootstrapRequest,
-    InitBootstrapStartServiceManagerResponse, ManagerStartup, StartupHandle,
+    HandleRole, InitBootstrap, InitBootstrapAsyncServer, InitBootstrapRegisterResponse,
+    InitBootstrapRequest, InitBootstrapStartServiceManagerResponse, Launcher, ManagerStartup,
+    StartupHandle,
 };
-use mikros_rt::{exec::Reactor, sys};
+use mikros_rt::interfaces::mikros::service::{
+    ClientIdentity, Directory, ProcessDirectory, ProcessDirectoryAsyncClient,
+};
+use mikros_rt::sys;
+use process_manager::bootfs::Fs;
 
 const SAME_RIGHTS: u32 = 1 << 31;
 const INFO_BASIC: u32 = 1;
 const INFO_BASIC_SIZE: usize = 24;
-/// The boot image member of the service manager.
-const SERVICE_MANAGER: &[u8] = b"usr/bin/service-manager";
+/// The service manager's program, and its path in its own namespace.
+const SERVICE_MANAGER: &str = "usr/bin/service-manager";
+const SERVICE_MANAGER_PATH: &str = "/usr/bin/service-manager";
+const SERVICE_MANAGER_APP: &str = "system.service-manager";
+/// The identity of the process manager's own directory.
+const PROCESS_MANAGER_APP: &str = "system.process-manager";
 /// The IDs of the boot handles that init passes to the service manager.
 const BOOT_HANDLE_IDS: core::ops::RangeInclusive<u32> = 1..=5;
+/// The `USER` startup handle ID of the service manager's control
+/// endpoint.
+const CONTROL_ID: u32 = 0;
+const INIT_PID: u32 = 1;
 
 /// The process manager's state while it serves init.
 pub struct Manager {
-    process: OwnedHandle,
+    /// The log handle, which the runtime's logging writes to.
+    _log: OwnedHandle,
     budget: OwnedHandle,
-    boot_image: OwnedHandle,
+    clock_page: OwnedHandle,
     init_process: Option<OwnedHandle>,
     init: Option<ServerEnd<InitBootstrap>>,
     records: Records,
-    service_manager_requested: bool,
+    fs: Rc<Fs>,
+    reactor: Reactor,
+    spawner: Spawner,
+    /// The process ID of the service manager, once its start began.
+    service_manager: Option<u32>,
+    /// The control endpoint of the service manager, once it started.
+    control: Option<ProcessDirectoryAsyncClient>,
+    /// The process manager's own directory, once it is bound.
+    directory: Option<ClientEnd<Directory>>,
 }
 
 impl Manager {
-    pub fn new(startup: ManagerStartup) -> Manager {
+    /// The manager of the processes of `startup`, which serves the boot
+    /// file system on the executor of `reactor` and `spawner`.
+    pub fn new(
+        startup: ManagerStartup,
+        reactor: Reactor,
+        spawner: Spawner,
+    ) -> Result<Manager, sys::Status> {
         let ManagerStartup {
             process,
             init_process,
             budget,
             boot_image,
+            clock_page,
+            log,
             init_bootstrap,
             ..
         } = startup;
-        Manager {
-            process,
+        let fs = Fs::new(process.raw(), &boot_image, reactor.clone(), spawner.clone())?;
+        Ok(Manager {
+            _log: log,
             budget,
-            boot_image,
+            clock_page,
             init_process: Some(init_process),
             init: Some(init_bootstrap),
             records: Records::default(),
-            service_manager_requested: false,
-        }
+            fs,
+            reactor,
+            spawner,
+            service_manager: None,
+            control: None,
+            directory: None,
+        })
     }
 
     /// Serves init's requests until init closes its end.
-    pub async fn serve_init(&mut self, reactor: Reactor) {
+    pub async fn serve_init(&mut self) {
         let Some(end) = self.init.take() else {
             return;
         };
-        let server = InitBootstrapAsyncServer::new(end, reactor);
+        let server = InitBootstrapAsyncServer::new(end, self.reactor.clone());
         loop {
             match server.next().await {
                 Ok(InitBootstrapRequest::Register(_, responder)) => {
@@ -66,7 +103,7 @@ impl Manager {
                     let _ = responder.reply(server.server(), result);
                 }
                 Ok(InitBootstrapRequest::StartServiceManager(request, responder)) => {
-                    let result = self.start_service_manager(request.handles);
+                    let result = self.start_service_manager(request.handles).await;
                     let _ = responder.reply(server.server(), result);
                 }
                 Err(_) => return,
@@ -83,41 +120,143 @@ impl Manager {
             app_id: "system.init".into(),
             user: 0,
             login_session: 0,
-            budget: duplicate(&self.budget)?,
+            budget: duplicate(self.budget.raw(), SAME_RIGHTS)?,
             path: "init".into(),
             process,
         };
-        if !self.records.insert(1, record) {
+        if !self.records.insert(INIT_PID, record) {
             return Err(Status::BadState);
         }
         Ok(InitBootstrapRegisterResponse {})
     }
 
     /// Starts the service manager, once, after init has registered.
-    fn start_service_manager(
+    async fn start_service_manager(
         &mut self,
         handles: alloc::vec::Vec<StartupHandle>,
     ) -> Result<InitBootstrapStartServiceManagerResponse, Status> {
-        if self.init_process.is_some() || self.service_manager_requested {
+        if self.init_process.is_some() || self.service_manager.is_some() {
             return Err(Status::BadState);
         }
-        self.service_manager_requested = true;
+        let pid = self.records.next_pid();
+        self.service_manager = Some(pid);
         let boot_handle =
             |h: &StartupHandle| h.role == HandleRole::User && BOOT_HANDLE_IDS.contains(&h.id);
         if !handles.iter().all(boot_handle) {
             return Err(Status::InvalidArgs);
         }
-        let found = boot::with_image(self.process.raw(), &self.boot_image, |image| {
-            mikros_ustar::find(image, SERVICE_MANAGER).is_some()
-        })
-        .map_err(|s| Status::from_raw(s as i32))?;
-        if !found {
-            return Err(Status::NotFound);
+        let started = start::load(
+            &self.fs,
+            self.budget.raw(),
+            SERVICE_MANAGER,
+            "service-manager",
+        )?;
+        let bound = match self.transfer(&started, pid, handles).await {
+            Ok(control) => bind_own_directory(&control).await.map(|own| (control, own)),
+            Err(status) => Err(status),
+        };
+        match bound {
+            Ok((control, own)) => {
+                self.control = Some(control);
+                self.directory = Some(own);
+            }
+            Err(status) => {
+                started.kill();
+                return Err(status);
+            }
         }
-        // TODO: load and start the service manager once the boot file
-        // system and the startup transfer are served.
-        Err(Status::NotSupported)
+        let record = Record {
+            koid: koid(&started.process)?,
+            parent: INIT_PID,
+            app_id: SERVICE_MANAGER_APP.into(),
+            user: 0,
+            login_session: 0,
+            budget: duplicate(self.budget.raw(), SAME_RIGHTS)?,
+            path: SERVICE_MANAGER_PATH.into(),
+            process: duplicate(started.process.raw(), SAME_RIGHTS)?,
+        };
+        if !self.records.insert(pid, record) {
+            return Err(Status::BadState);
+        }
+        Ok(InitBootstrapStartServiceManagerResponse {
+            pid,
+            process: duplicate(started.process.raw(), SAME_RIGHTS)?,
+        })
     }
+
+    /// Sends the service manager's startup transfer, with its control
+    /// endpoint ahead of init's `handles`. Its directory is bound over
+    /// that endpoint before `Complete`. Returns the control endpoint.
+    async fn transfer(
+        &self,
+        started: &start::Started,
+        pid: u32,
+        init_handles: alloc::vec::Vec<StartupHandle>,
+    ) -> Result<ProcessDirectoryAsyncClient, Status> {
+        let channel = |_| Status::NoResources;
+        let (control, control_end) = endpoints::<ProcessDirectory>().map_err(channel)?;
+        let (launcher, launcher_end) = endpoints::<Launcher>().map_err(channel)?;
+        let (directory, directory_end): (ClientEnd<Directory>, _) =
+            endpoints::<Directory>().map_err(channel)?;
+        self.spawner
+            .spawn(launcher::serve(launcher_end, pid, self.reactor.clone()));
+        let mut handles = alloc::vec![StartupHandle {
+            role: HandleRole::User,
+            id: CONTROL_ID,
+            handle: control_end.into_handle(),
+        }];
+        handles.extend(init_handles);
+        started.send(Transfer {
+            pid,
+            parent: INIT_PID,
+            user: 0,
+            app_id: SERVICE_MANAGER_APP.into(),
+            args: &[SERVICE_MANAGER_PATH],
+            handles,
+            launcher,
+            directory,
+            clock_page: self.clock_page.raw(),
+            root: start::root(&self.fs)?,
+        })?;
+        let control = ProcessDirectoryAsyncClient::new(control, self.reactor.clone());
+        let identity = ClientIdentity {
+            pid,
+            user: 0,
+            app_id: SERVICE_MANAGER_APP.into(),
+        };
+        bind(&control, identity, directory_end).await?;
+        started.complete()?;
+        Ok(control)
+    }
+}
+
+/// Binds `directory` to `identity` over the service manager's control
+/// endpoint, and waits for the acknowledgment.
+async fn bind(
+    control: &ProcessDirectoryAsyncClient,
+    identity: ClientIdentity,
+    directory: ServerEnd<Directory>,
+) -> Result<(), Status> {
+    match control.bind(identity, directory).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(status)) => Err(status),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// The process manager's own `Directory` connection, bound over the
+/// service manager's control endpoint.
+async fn bind_own_directory(
+    control: &ProcessDirectoryAsyncClient,
+) -> Result<ClientEnd<Directory>, Status> {
+    let (own, own_end) = endpoints::<Directory>().map_err(|_| Status::NoResources)?;
+    let identity = ClientIdentity {
+        pid: 0,
+        user: 0,
+        app_id: PROCESS_MANAGER_APP.into(),
+    };
+    bind(control, identity, own_end).await?;
+    Ok(own)
 }
 
 /// The kernel object ID of `handle`'s object.
@@ -138,16 +277,4 @@ fn koid(handle: &OwnedHandle) -> Result<u64, Status> {
         return Err(Status::from_raw(status as i32));
     }
     Ok(u64::from_le_bytes(record[..8].try_into().expect("8 bytes")))
-}
-
-/// A second handle to `handle`'s object with the same rights.
-fn duplicate(handle: &OwnedHandle) -> Result<OwnedHandle, Status> {
-    let mut out = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe { sys::handle_duplicate(handle.raw(), SAME_RIGHTS, &mut out) };
-    if status != mikros_rt::OK {
-        return Err(Status::from_raw(status as i32));
-    }
-    // SAFETY: the handle was just created for us.
-    Ok(unsafe { OwnedHandle::from_raw(out) })
 }

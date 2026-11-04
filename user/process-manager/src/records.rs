@@ -24,6 +24,11 @@ pub struct Records {
 }
 
 impl Records {
+    /// The lowest process ID above every ID in use, never 0.
+    pub fn next_pid(&self) -> u32 {
+        self.by_pid.keys().next_back().map_or(1, |&pid| pid + 1)
+    }
+
     /// Adds `record` under `pid`, unless that ID is in use.
     pub fn insert(&mut self, pid: u32, record: Record) -> bool {
         if self.by_pid.contains_key(&pid) {

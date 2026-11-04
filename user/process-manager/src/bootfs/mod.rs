@@ -80,6 +80,52 @@ impl Fs {
     }
 }
 
+/// An executable file of the boot file system, for the loader.
+pub struct Executable {
+    /// The file's bytes.
+    pub file: &'static [u8],
+    /// The file's paged memory object, readable and executable.
+    pub shared: OwnedHandle,
+    /// Where the file starts in the image.
+    offset: usize,
+}
+
+impl Fs {
+    /// The regular file at `path`, relative to the root and resolved
+    /// without leaving the file system.
+    pub fn executable(self: &Rc<Self>, path: &str) -> Result<Executable, Status> {
+        const NOT_FOUND: Status = -25;
+        let node = match self.tree.resolve(0, path.as_bytes(), false) {
+            Ok(mikros_bootfs::Resolved::Node(node)) => node,
+            _ => return Err(NOT_FOUND),
+        };
+        let mikros_bootfs::NodeKind::File { offset, size } = self.tree.nodes[node].kind else {
+            return Err(NOT_FOUND);
+        };
+        let rights = memory::rights(false, true);
+        Ok(Executable {
+            file: &self.image[offset..offset + size],
+            shared: self.paged_memory(node, offset, size, rights)?,
+            offset,
+        })
+    }
+
+    /// A new memory object of `len` bytes, a page multiple, private to
+    /// its holder, with the bytes of `executable` from `from` and zeros
+    /// after the end of the file.
+    pub fn private_range(
+        &self,
+        executable: &Executable,
+        from: u64,
+        len: u64,
+    ) -> Result<OwnedHandle, Status> {
+        let size = executable.file.len();
+        let start = usize::try_from(from).map_or(size, |f| f.min(size));
+        let count = usize::try_from(len).map_or(size - start, |l| l.min(size - start));
+        memory::copy(self, executable.offset + start, count, len)
+    }
+}
+
 /// Maps the memory object `image` read-only into `process` and returns
 /// its bytes.
 fn map(process: Handle, image: &OwnedHandle) -> Result<&'static [u8], Status> {

@@ -9,9 +9,10 @@
 
 extern crate alloc;
 
-mod boot;
 mod init;
+mod launcher;
 mod records;
+mod start;
 
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{Error, OwnedHandle, ServerEnd};
@@ -37,9 +38,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         }
     };
     let reactor = executor.reactor().clone();
-    let mut manager = init::Manager::new(startup);
+    let spawner = executor.spawner().clone();
+    let mut manager = match init::Manager::new(startup, reactor, spawner) {
+        Ok(manager) => manager,
+        Err(status) => {
+            mikros_rt::log!(Error, "serving the boot image failed: {status}");
+            return PANIC_EXIT_CODE;
+        }
+    };
     executor.block_on(async move {
-        manager.serve_init(reactor).await;
+        manager.serve_init().await;
         // The other tasks go on after init closes its end.
         core::future::pending::<()>().await;
     });

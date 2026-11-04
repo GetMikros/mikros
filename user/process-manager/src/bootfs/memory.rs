@@ -37,7 +37,7 @@ fn owned(status: Status, raw: sys::Handle) -> Result<OwnedHandle, Status> {
 
 /// A new anonymous memory object of `len` bytes, a page multiple, that
 /// holds the image's bytes from `from` for `count` bytes and zeros after.
-fn copy(fs: &Fs, from: usize, count: usize, len: u64) -> Result<OwnedHandle, Status> {
+pub(super) fn copy(fs: &Fs, from: usize, count: usize, len: u64) -> Result<OwnedHandle, Status> {
     let mut raw = 0;
     // SAFETY: the out pointer is valid for the call.
     let mem = owned(unsafe { sys::mem_create(len, 0, &mut raw) }, raw)?;

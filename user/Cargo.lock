@@ -146,8 +146,8 @@ name = "process-manager"
 version = "0.0.0"
 dependencies = [
  "mikros-bootfs",
+ "mikros-loader",
  "mikros-rt",
- "mikros-ustar",
 ]
 
 [[package]]
