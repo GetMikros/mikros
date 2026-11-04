@@ -48,10 +48,23 @@ const SMALL: Style = Style {
 
 const CARD_SIZE: i32 = 162;
 const CARD_SPACING: i32 = 188;
-const CARD_TOP: i32 = -121;
+/// The distance between the tops of two rows of cards.
+const ROW_SPACING: i32 = 212;
+/// Where the heading of a menu with one row of cards lies above the
+/// screen's center, and the distances from the heading to the first row
+/// and from the last row to the buttons' centers.
+const HEADING_Y: i32 = -167;
+const HEADING_TO_CARDS: i32 = 46;
+const CARDS_TO_BUTTONS: i32 = 255;
+/// The space the menu leaves free: above the heading, for the notice, and
+/// below the buttons' labels, for the hint at the bottom.
+const TOP_MARGIN: i32 = 90;
+const BOTTOM_MARGIN: i32 = 45;
+/// The space between the cards and the sides of the screen.
+const SIDE_MARGIN: i32 = 24;
 const BUTTON_RADIUS: f32 = 28.0;
 const BUTTON_SPACING: i32 = 88;
-const BUTTON_Y: i32 = 134;
+const BUTTON_LABEL: i32 = 49;
 
 /// A power action offered by a button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +124,20 @@ pub struct Menu {
 /// A rectangle as (x, y, width, height).
 pub type Rect = (i32, i32, i32, i32);
 
+/// How the cards are laid out on a screen: how many fit in a row, how
+/// many rows there are, the first row shown and how many are shown, and
+/// the y of the heading, the first row shown and the buttons' centers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grid {
+    pub per_row: usize,
+    pub rows: usize,
+    pub first: usize,
+    pub shown: usize,
+    pub heading_y: i32,
+    cards_y: i32,
+    buttons_y: i32,
+}
+
 impl Menu {
     /// The items in focus order.
     pub fn items(&self) -> Vec<Item> {
@@ -120,41 +147,91 @@ impl Menu {
             .collect()
     }
 
-    /// The area of `item` on a screen of `width` × `height` pixels.
-    pub fn bounds(&self, item: Item, width: i32, height: i32) -> Rect {
-        let (cx, cy) = (width / 2, height / 2);
+    /// The layout of the cards on a screen of `width` × `height` pixels.
+    /// Rows that do not fit scroll: the focused card's row is shown, as
+    /// far down the shown rows as it takes, and with a button focused the
+    /// last rows are shown.
+    pub fn grid(&self, width: i32, height: i32) -> Grid {
+        let fit = (width - 2 * SIDE_MARGIN + CARD_SPACING - CARD_SIZE) / CARD_SPACING;
+        let per_row = fit.max(1) as usize;
+        let rows = self.cards.len().div_ceil(per_row).max(1);
+        // The block from the heading to the buttons' labels, for one row.
+        let block = CARDS_TO_BUTTONS + HEADING_TO_CARDS + BUTTON_LABEL;
+        let room = height - TOP_MARGIN - BOTTOM_MARGIN - block;
+        let fits = (room.max(0) / ROW_SPACING + 1) as usize;
+        let shown = rows.min(fits);
+        let first = match self.focus {
+            Some((Item::Card(index), _)) => (index / per_row + 1).saturating_sub(shown),
+            Some((Item::Button(_), _)) => rows - shown,
+            None => 0,
+        };
+        let heading_y = height / 2 + HEADING_Y - (shown as i32 - 1) * ROW_SPACING / 2;
+        let cards_y = heading_y + HEADING_TO_CARDS;
+        let buttons_y = cards_y + (shown as i32 - 1) * ROW_SPACING + CARDS_TO_BUTTONS;
+        Grid {
+            per_row,
+            rows,
+            first,
+            shown,
+            heading_y,
+            cards_y,
+            buttons_y,
+        }
+    }
+
+    /// The row of card `index` in `grid`.
+    pub fn row(grid: &Grid, index: usize) -> usize {
+        index / grid.per_row
+    }
+
+    /// The area of `item` on a screen of `width` × `height` pixels, and
+    /// whether it is shown there.
+    fn place(&self, item: Item, width: i32, height: i32) -> (Rect, bool) {
+        let grid = self.grid(width, height);
+        let cx = width / 2;
         match item {
             Item::Card(index) => {
-                let x = card_center(cx, index, self.cards.len()) - CARD_SIZE / 2;
-                (x, cy + CARD_TOP, CARD_SIZE, CARD_SIZE)
+                let (row, column) = (index / grid.per_row, index % grid.per_row);
+                let in_row = (self.cards.len() - row * grid.per_row).min(grid.per_row);
+                let x = row_center(cx, column, in_row, CARD_SPACING) - CARD_SIZE / 2;
+                let offset = row as i32 - grid.first as i32;
+                let y = grid.cards_y + offset * ROW_SPACING;
+                let shown = (grid.first..grid.first + grid.shown).contains(&row);
+                ((x, y, CARD_SIZE, CARD_SIZE), shown)
             }
             Item::Button(power) => {
                 let index = self.buttons.iter().position(|&b| b == power).unwrap_or(0);
                 let x = row_center(cx, index, self.buttons.len(), BUTTON_SPACING);
                 let r = BUTTON_RADIUS as i32;
-                (x - r, cy + BUTTON_Y - r, 2 * r, 2 * r)
+                ((x - r, grid.buttons_y - r, 2 * r, 2 * r), true)
             }
         }
     }
 
-    /// The item at (`x`, `y`), if any.
+    /// The area of `item` on a screen of `width` × `height` pixels.
+    pub fn bounds(&self, item: Item, width: i32, height: i32) -> Rect {
+        self.place(item, width, height).0
+    }
+
+    /// The item shown at (`x`, `y`), if any.
     pub fn item_at(&self, x: i32, y: i32, width: i32, height: i32) -> Option<Item> {
         self.items().into_iter().find(|&item| {
-            let (ix, iy, iw, ih) = self.bounds(item, width, height);
-            (ix..ix + iw).contains(&x) && (iy..iy + ih).contains(&y)
+            let ((ix, iy, iw, ih), shown) = self.place(item, width, height);
+            shown && (ix..ix + iw).contains(&x) && (iy..iy + ih).contains(&y)
         })
     }
 
     pub fn draw(&self, text: &mut Text, canvas: &mut Canvas) {
         let (width, height) = (canvas.width() as i32, canvas.height() as i32);
-        let (cx, cy) = (width / 2, height / 2);
+        let cx = width / 2;
+        let grid = self.grid(width, height);
         canvas.clear(BACKGROUND);
         text.draw_centered(
             canvas,
             "Choose a system to boot",
             HEADING,
             cx,
-            cy - 167,
+            grid.heading_y,
             PRIMARY,
         );
 
@@ -162,7 +239,9 @@ impl Menu {
             self.draw_empty(text, canvas);
         } else {
             for index in 0..self.cards.len() {
-                self.draw_card(text, canvas, index);
+                if self.place(Item::Card(index), width, height).1 {
+                    self.draw_card(text, canvas, index);
+                }
             }
             if let Some(notice) = &self.notice {
                 text.draw_centered(canvas, notice, BODY, cx, 53, WARNING);
@@ -287,7 +366,7 @@ impl Menu {
         }
         draw_power_icon(canvas, power, center, icon, fill);
         if focus.is_some() {
-            let label_y = canvas.height() as i32 / 2 + BUTTON_Y + 49;
+            let label_y = y + h / 2 + BUTTON_LABEL;
             text.draw_centered(
                 canvas,
                 power.label(),
@@ -304,10 +383,6 @@ impl Menu {
 /// `cx`, `spacing` pixels apart.
 fn row_center(cx: i32, index: usize, count: usize, spacing: i32) -> i32 {
     cx + (2 * index as i32 - (count as i32 - 1)) * spacing / 2
-}
-
-fn card_center(cx: i32, index: usize, count: usize) -> i32 {
-    row_center(cx, index, count, CARD_SPACING)
 }
 
 /// The corners of the gear of the firmware settings icon, relative to the

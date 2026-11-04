@@ -31,12 +31,12 @@ fn focus(menu: &Menu) -> Option<Item> {
 
 #[test]
 fn translates_the_keys_of_the_focus_order() {
-    for key in [Key::Right, Key::Down, Key::Char('\t')] {
+    for key in [Key::Right, Key::Char('\t')] {
         assert_eq!(translate(key), Event::Next, "{key:?}");
     }
-    for key in [Key::Left, Key::Up] {
-        assert_eq!(translate(key), Event::Previous, "{key:?}");
-    }
+    assert_eq!(translate(Key::Left), Event::Previous);
+    assert_eq!(translate(Key::Down), Event::Down);
+    assert_eq!(translate(Key::Up), Event::Up);
     for key in [Key::Char('\r'), Key::Char('\n'), Key::Char(' ')] {
         assert_eq!(translate(key), Event::Activate, "{key:?}");
     }
@@ -168,4 +168,43 @@ fn clicks_activate_only_when_pressed_and_released_on_one_item() {
     input.handle(&mut m, Event::PointerMoved(10, 10));
     input.handle(&mut m, Event::PointerPressed);
     assert_eq!(input.handle(&mut m, Event::PointerReleased), Action::None);
+}
+
+#[test]
+fn moves_between_rows_to_the_nearest_card() {
+    // On a 640-pixel screen three cards fit in a row: rows 0–2, 3–5, 6.
+    let (w, h) = (640, 2000);
+    let mut m = menu(7);
+    let mut input = Input::new(w, h, 0);
+    assert_eq!(m.grid(w, h).per_row, 3);
+    input.handle(&mut m, Event::Up);
+    assert_eq!(focus(&m), Some(Item::Card(0)), "up from the first row");
+    m.focus = Some((Item::Card(2), FocusSource::Keyboard));
+    input.handle(&mut m, Event::Down);
+    assert_eq!(focus(&m), Some(Item::Card(5)));
+    input.handle(&mut m, Event::Down);
+    assert_eq!(focus(&m), Some(Item::Card(6)), "the last row's one card");
+    input.handle(&mut m, Event::Down);
+    assert_eq!(focus(&m), Some(Item::Button(Power::Restart)));
+    assert_eq!(input.handle(&mut m, Event::Down), Action::None);
+    assert_eq!(focus(&m), Some(Item::Button(Power::Restart)));
+    m.focus = Some((Item::Button(Power::ShutDown), FocusSource::Keyboard));
+    input.handle(&mut m, Event::Up);
+    assert_eq!(focus(&m), Some(Item::Card(6)));
+    input.handle(&mut m, Event::Up);
+    assert_eq!(focus(&m), Some(Item::Card(4)), "the middle card above");
+    // Right and Left still walk the focus order across rows.
+    input.handle(&mut m, Event::Previous);
+    assert_eq!(focus(&m), Some(Item::Card(3)));
+    input.handle(&mut m, Event::Previous);
+    assert_eq!(focus(&m), Some(Item::Card(2)));
+}
+
+#[test]
+fn stays_on_a_button_without_cards() {
+    let mut m = menu(0);
+    m.focus = Some((Item::Button(Power::Restart), FocusSource::Keyboard));
+    let mut input = Input::new(W, H, 0);
+    assert_eq!(input.handle(&mut m, Event::Up), Action::None);
+    assert_eq!(focus(&m), Some(Item::Button(Power::Restart)));
 }

@@ -200,3 +200,68 @@ fn draws_icons_in_place_of_the_tile() {
     assert_eq!(canvas.get(left, top + 18), BACKGROUND, "rounded corner");
     assert_eq!(canvas.get(left + 1, top + 36), Color(0xff0000), "left edge");
 }
+
+fn cards(count: usize) -> Menu {
+    Menu {
+        cards: (0..count)
+            .map(|i| card(&alloc::format!("E{i}"), None, 0x3b82f6))
+            .collect(),
+        ..menu()
+    }
+}
+
+#[test]
+fn fills_centered_rows() {
+    // Five cards fit in a row of 1000 pixels.
+    let m = cards(7);
+    let grid = m.grid(1000, H);
+    assert_eq!((grid.per_row, grid.rows, grid.shown), (5, 2, 2));
+    let (x0, y0, _, _) = m.bounds(Item::Card(0), 1000, H);
+    let (x4, y4, _, _) = m.bounds(Item::Card(4), 1000, H);
+    let (x5, y5, _, _) = m.bounds(Item::Card(5), 1000, H);
+    let (x6, _, _, _) = m.bounds(Item::Card(6), 1000, H);
+    assert_eq!(y0, y4, "one row");
+    assert!(y5 > y0 + CARD_SIZE, "the next row below");
+    assert_eq!(x0 + x4 + CARD_SIZE, 1000, "the full row centered");
+    assert_eq!(x5 + x6 + CARD_SIZE, 1000, "the short row centered");
+}
+
+#[test]
+fn keeps_one_row_where_it_was() {
+    let m = menu();
+    let (_, y, _, _) = m.bounds(Item::Card(0), W, H);
+    let (_, by, _, bh) = m.bounds(Item::Button(Power::Restart), W, H);
+    assert_eq!(y, H / 2 - 121);
+    assert_eq!(by + bh / 2, H / 2 + 134);
+}
+
+#[test]
+fn scrolls_rows_to_the_focus() {
+    // Seven rows of one card each on a short screen: only some fit.
+    let mut m = cards(7);
+    let (w, h) = (300, 800);
+    let grid = m.grid(w, h);
+    assert!(grid.shown < grid.rows);
+    assert_eq!(grid.first, 0);
+    m.focus = Some((Item::Card(6), FocusSource::Keyboard));
+    let grid = m.grid(w, h);
+    assert_eq!(grid.first + grid.shown, 7, "the last row shown");
+    let (_, y, _, ch) = m.bounds(Item::Card(6), w, h);
+    let (_, by, _, _) = m.bounds(Item::Button(Power::Restart), w, h);
+    assert!(
+        y > grid.heading_y && y + ch < by,
+        "between the heading and the buttons"
+    );
+    assert_eq!(m.item_at(150, y + 10, w, h), Some(Item::Card(6)));
+    let (_, y0, _, _) = m.bounds(Item::Card(0), w, h);
+    assert!(
+        m.item_at(150, y0 + 10, w, h) != Some(Item::Card(0)),
+        "scrolled away"
+    );
+    m.focus = Some((Item::Button(Power::Restart), FocusSource::Keyboard));
+    assert_eq!(
+        m.grid(w, h).first,
+        grid.first,
+        "the last rows with a button"
+    );
+}

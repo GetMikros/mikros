@@ -5,10 +5,14 @@ use crate::menu::{FocusSource, Item, Menu};
 /// An input event, already translated from the firmware's representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// Tab, Right or Down.
+    /// Tab or Right.
     Next,
-    /// Left or Up.
+    /// Left.
     Previous,
+    /// Down: to the next row of cards, or from the last to the buttons.
+    Down,
+    /// Up: to the previous row of cards, or from the buttons to the last.
+    Up,
     /// Enter or Space.
     Activate,
     /// Any other key.
@@ -39,8 +43,10 @@ pub enum Key {
 /// The menu event of `key`.
 pub fn translate(key: Key) -> Event {
     match key {
-        Key::Right | Key::Down | Key::Char('\t') => Event::Next,
-        Key::Left | Key::Up => Event::Previous,
+        Key::Right | Key::Char('\t') => Event::Next,
+        Key::Left => Event::Previous,
+        Key::Down => Event::Down,
+        Key::Up => Event::Up,
         Key::Char('\r' | '\n' | ' ') => Event::Activate,
         Key::Char(_) | Key::OtherSpecial => Event::OtherKey,
     }
@@ -94,6 +100,8 @@ impl Input {
         let action = match event {
             Event::Next => move_focus(menu, 1),
             Event::Previous => move_focus(menu, -1),
+            Event::Down => move_vertically(menu, true, self.width, self.height),
+            Event::Up => move_vertically(menu, false, self.width, self.height),
             Event::Activate => match menu.focus {
                 Some((item, _)) => Action::Activate(item),
                 None => Action::None,
@@ -164,6 +172,50 @@ fn move_focus(menu: &mut Menu, step: isize) -> Action {
     };
     menu.focus = Some((items[next as usize], FocusSource::Keyboard));
     Action::Redraw
+}
+
+/// Moves the keyboard focus a row down or up on a screen of `width` ×
+/// `height` pixels: from a card to the card of the next or previous row
+/// whose center is horizontally nearest, from the last row down to the
+/// first button, and from a button up to the card of the last row nearest
+/// to it. Up from the first row and down from a button change nothing;
+/// without a focus, the first or the last item gets it.
+fn move_vertically(menu: &mut Menu, down: bool, width: i32, height: i32) -> Action {
+    let Some((item, _)) = menu.focus else {
+        return move_focus(menu, if down { 1 } else { -1 });
+    };
+    let grid = menu.grid(width, height);
+    let center = |item| {
+        let (x, _, w, _) = menu.bounds(item, width, height);
+        x + w / 2
+    };
+    let nearest = |row: usize, x: i32| {
+        let first = row * grid.per_row;
+        let last = (first + grid.per_row).min(menu.cards.len());
+        (first..last).min_by_key(|&i| (center(Item::Card(i)) - x).abs())
+    };
+    let target = match item {
+        Item::Card(index) => {
+            let row = Menu::row(&grid, index);
+            let x = center(item);
+            match down {
+                true if row + 1 < grid.rows => nearest(row + 1, x).map(Item::Card),
+                true => menu.buttons.first().copied().map(Item::Button),
+                false if row > 0 => nearest(row - 1, x).map(Item::Card),
+                false => None,
+            }
+        }
+        Item::Button(_) if down => None,
+        Item::Button(_) if menu.cards.is_empty() => None,
+        Item::Button(_) => nearest(grid.rows - 1, center(item)).map(Item::Card),
+    };
+    match target {
+        Some(target) => {
+            menu.focus = Some((target, FocusSource::Keyboard));
+            Action::Redraw
+        }
+        None => Action::None,
+    }
 }
 
 #[cfg(test)]
