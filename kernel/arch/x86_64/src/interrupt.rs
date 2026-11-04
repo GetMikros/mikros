@@ -2,8 +2,10 @@
 //! triggered or a device sends their message.
 
 use crate::apic::{self, DEVICE_VECTORS};
+use crate::iommu::Remapping;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::object::budget::Budget;
 use kernel_core::object::{Header, Object, ObjectType, signals};
 use kernel_core::status::Error;
@@ -45,7 +47,12 @@ pub struct Interrupt {
     /// The line, for an object that is not message-signaled.
     gsi: Option<u32>,
     vector: u8,
+    /// The requester ID whose interrupts the vector's remapping entry
+    /// accepts, or `NO_SOURCE` when it has none.
+    source: AtomicU64,
 }
+
+const NO_SOURCE: u64 = u64::MAX;
 
 impl Interrupt {
     /// The kernel memory an interrupt object is charged.
@@ -65,13 +72,13 @@ impl Interrupt {
             Self::claim(budget, gsi).inspect_err(|_| budget.release_kernel(Self::COST))?;
         // From here on, dropping the object releases the charge and the
         // vector.
-        apic::route(
+        let source = apic::route(
             gsi,
             interrupt.vector,
-            interrupt.index(),
             options & LEVEL != 0,
             options & ACTIVE_LOW != 0,
         )?;
+        interrupt.set_source(source);
         Ok(interrupt)
     }
 
@@ -99,7 +106,13 @@ impl Interrupt {
             budget: budget.clone(),
             gsi,
             vector: DEVICE_VECTORS.start + index as u8,
+            source: AtomicU64::new(NO_SOURCE),
         })
+    }
+
+    fn set_source(&self, source: Option<u64>) {
+        self.source
+            .store(source.unwrap_or(NO_SOURCE), Ordering::Relaxed);
     }
 
     /// `count` message-signaled objects for the device with requester ID
@@ -114,9 +127,9 @@ impl Interrupt {
         count: usize,
     ) -> Result<Vec<(Arc<Interrupt>, Message)>, Error> {
         debug_assert!((1..=MSI_MAX).contains(&count));
-        let remapped = crate::iommu::remapping();
+        let remapping = crate::iommu::remapping();
         let id = apic::boot_id();
-        if !remapped && id > 0xFF {
+        if remapping == Remapping::Off && id > 0xFF {
             return Err(Error::NotSupported);
         }
         budget.charge_kernel(count as u64 * Self::COST)?;
@@ -159,20 +172,25 @@ impl Interrupt {
         out.try_reserve(count).map_err(|_| Error::NoMemory)?;
         for interrupt in objects {
             let index = interrupt.index();
-            let message = if remapped {
-                crate::iommu::remap(index, Some((interrupt.vector, false, source)))?;
-                // The remappable format: the index, with its top bit apart,
-                // and the format bit; the data is not used.
-                let address = MSI_BASE
-                    | u64::from(index & 0x7FFF) << 5
-                    | 1 << 4
-                    | u64::from(index >> 15) << 2;
-                Message { address, data: 0 }
-            } else {
-                // Fixed delivery and edge triggering to the boot processor.
-                Message {
-                    address: MSI_BASE | u64::from(id) << 12,
-                    data: u32::from(interrupt.vector),
+            let message = match remapping {
+                Remapping::Vtd => {
+                    crate::iommu::remap(interrupt.vector, source, Some(false))?;
+                    interrupt.set_source(Some(source));
+                    // The remappable format: the index, with its top bit
+                    // apart, and the format bit; the data is not used.
+                    let address = MSI_BASE
+                        | u64::from(index & 0x7FFF) << 5
+                        | 1 << 4
+                        | u64::from(index >> 15) << 2;
+                    Message { address, data: 0 }
+                }
+                Remapping::Off => {
+                    // Fixed delivery and edge triggering to the boot
+                    // processor.
+                    Message {
+                        address: MSI_BASE | u64::from(id & 0xFF) << 12,
+                        data: u32::from(interrupt.vector),
+                    }
                 }
             };
             out.push((interrupt, message));
@@ -201,7 +219,10 @@ impl Drop for Interrupt {
         }
         // When the unit does not confirm, the entry stays, but its vector
         // reaches no object until it is given out again.
-        let _ = crate::iommu::remap(self.index(), None);
+        let source = self.source.load(Ordering::Relaxed);
+        if source != NO_SOURCE {
+            let _ = crate::iommu::remap(self.vector, source, None);
+        }
         SLOTS.lock()[usize::from(self.vector - DEVICE_VECTORS.start)] = None;
         self.budget.release_kernel(Self::COST);
     }

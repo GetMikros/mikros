@@ -1,10 +1,14 @@
 //! The IOMMUs: finding them in the ACPI tables, enabling DMA translation
 //! at boot, and letting devices reach pinned pages.
 
-#[expect(dead_code, reason = "the IOMMU code drives these units from the next change on")]
+#[expect(
+    dead_code,
+    reason = "the IOMMU code drives these units from the next change on"
+)]
 mod amdvi;
 mod vtd;
 
+use crate::apic::DEVICE_VECTORS;
 use crate::log::log;
 use crate::memory::DirectMem;
 use crate::space;
@@ -15,6 +19,16 @@ use kernel_core::acpi::{Ecam, Tables};
 use kernel_core::object::memory::PAGE_SIZE;
 use kernel_core::status::Error;
 use kernel_core::sync::SpinLock;
+
+/// How interrupts reach the processor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Remapping {
+    /// Unremapped, in compatibility format.
+    Off,
+    /// Through VT-d entries, which I/O APICs and devices name by index in
+    /// the remappable format.
+    Vtd,
+}
 
 /// The units that translate DMA, with the devices each covers, and
 /// whether they remap interrupts.
@@ -243,10 +257,12 @@ pub fn sync(rid: u64) -> Result<(), Error> {
     }
 }
 
-/// Whether interrupts are remapped, so that they reach the processor only
-/// through entries that `remap` writes.
-pub fn remapping() -> bool {
-    IOMMU.lock().as_ref().is_some_and(|i| i.remapping)
+/// How interrupts reach the processor.
+pub fn remapping() -> Remapping {
+    match IOMMU.lock().as_ref() {
+        Some(i) if i.remapping => Remapping::Vtd,
+        _ => Remapping::Off,
+    }
 }
 
 /// The requester ID that the interrupts of the I/O APIC with ID `id`
@@ -261,17 +277,19 @@ pub fn io_apic_source(id: u8) -> Option<u64> {
     })
 }
 
-/// Makes remapping entry `index` deliver `vector` to the boot processor
-/// with fixed delivery, level triggered when `level`, accepting it only
-/// from the requester ID `source`, or blocks it when `vector` is `None`.
-/// Does nothing unless interrupts are remapped.
-pub fn remap(index: u16, vector: Option<(u8, bool, u64)>) -> Result<(), Error> {
+/// Makes the remapping entry of `vector` for interrupts from the requester
+/// ID `source` deliver the vector to the boot processor with fixed
+/// delivery, level triggered when `level` is `Some(true)`, or blocks it
+/// when `level` is `None`. The entry is the vector's index in every
+/// unit's table and checks the source. Does nothing unless interrupts are
+/// remapped.
+pub fn remap(vector: u8, source: u64, level: Option<bool>) -> Result<(), Error> {
     let mut iommu = IOMMU.lock();
     let Some(iommu) = iommu.as_mut().filter(|i| i.remapping) else {
         return Ok(());
     };
-    let entry = match vector {
-        Some((vector, level, source)) => {
+    let entry = match level {
+        Some(level) => {
             let id = u64::from(crate::apic::boot_id());
             let destination = if iommu.wide { id } else { id << 8 };
             let low = 1 | u64::from(level) << 4 | u64::from(vector) << 16 | destination << 32;
@@ -280,6 +298,7 @@ pub fn remap(index: u16, vector: Option<(u8, bool, u64)>) -> Result<(), Error> {
         }
         None => [0, 0],
     };
+    let index = u16::from(vector - DEVICE_VECTORS.start);
     iommu
         .units
         .iter_mut()

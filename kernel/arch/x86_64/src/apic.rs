@@ -187,24 +187,30 @@ static IO_APICS: SpinLock<Vec<IoApic>> = SpinLock::new(Vec::new());
 /// Points the redirection entry of global system interrupt `gsi` at
 /// `vector` on the boot processor with fixed delivery, level or edge
 /// triggered and active low or high, and unmasks it. When interrupts are
-/// remapped, the entry instead refers to remapping entry `index`, which
-/// gets the vector, destination and trigger mode and accepts the
-/// interrupt only from the I/O APIC's source. Fails with `NotFound` when
-/// no I/O APIC handles `gsi`, and when remapping, with `NotSupported` when
-/// the DMAR table gives no source for that I/O APIC.
-pub fn route(gsi: u32, vector: u8, index: u16, level: bool, active_low: bool) -> Result<(), Error> {
-    let (id, remapped) = {
+/// remapped, the vector's remapping entry gets the vector, destination
+/// and trigger mode and accepts the interrupt only from the I/O APIC's
+/// source, which is returned; on VT-d the redirection entry refers to it
+/// in the remappable format. Fails with `NotFound` when no I/O APIC
+/// handles `gsi`, and when remapping, with `NotSupported` when the ACPI
+/// tables give no source for that I/O APIC.
+pub fn route(gsi: u32, vector: u8, level: bool, active_low: bool) -> Result<Option<u64>, Error> {
+    use crate::iommu::Remapping;
+    let id = {
         let apics = IO_APICS.lock();
         let apic = apics
             .iter()
             .find(|a| a.entry(gsi).is_some())
             .ok_or(Error::NotFound)?;
-        (apic.id, crate::iommu::remapping())
+        apic.id
     };
-    if remapped {
+    let remapping = crate::iommu::remapping();
+    let source = if remapping == Remapping::Off {
+        None
+    } else {
         let source = crate::iommu::io_apic_source(id).ok_or(Error::NotSupported)?;
-        crate::iommu::remap(index, Some((vector, level, source)))?;
-    }
+        crate::iommu::remap(vector, source, Some(level))?;
+        Some(source)
+    };
     let apics = IO_APICS.lock();
     let (apic, entry) = apics
         .iter()
@@ -217,11 +223,12 @@ pub fn route(gsi: u32, vector: u8, index: u16, level: bool, active_low: bool) ->
     if active_low {
         low |= LVT_ACTIVE_LOW;
     }
-    let high = if remapped {
+    let high = if remapping == Remapping::Vtd {
         // The remappable format: the index, with its top bit in the low
         // half, and the format bit.
-        low |= u32::from(index >> 15) << 11;
-        u32::from(index & 0x7FFF) << 17 | 1 << 16
+        let index = u32::from(vector - DEVICE_VECTORS.start);
+        low |= (index >> 15) << 11;
+        (index & 0x7FFF) << 17 | 1 << 16
     } else {
         // Physical destination mode, with the boot processor's ID in the
         // top byte.
@@ -231,7 +238,7 @@ pub fn route(gsi: u32, vector: u8, index: u16, level: bool, active_low: bool) ->
     apic.write(entry, LVT_MASKED);
     apic.write(entry + 1, high);
     apic.write(entry, low);
-    Ok(())
+    Ok(source)
 }
 
 /// Masks or unmasks the redirection entry of `gsi`, which `route` set.
