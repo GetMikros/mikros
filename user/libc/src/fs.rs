@@ -248,31 +248,35 @@ pub fn connect(
 /// `openat`: opens `path` relative to `dirfd` and installs a descriptor
 /// for it.
 pub fn open(dirfd: i64, path: *const u8, flags: u32, mode: u32) -> i64 {
+    match open_description(dirfd, path, flags, mode) {
+        Ok(description) => fd::insert(description, flags & O_CLOEXEC != 0, 0),
+        Err(e) => -e,
+    }
+}
+
+/// The open description of `path` relative to `dirfd`, opened as
+/// `openat` opens it.
+pub fn open_description(
+    dirfd: i64,
+    path: *const u8,
+    flags: u32,
+    mode: u32,
+) -> Result<Arc<Description>, i64> {
     // SAFETY: musl passes a NUL-terminated path.
-    let bytes = match unsafe { c_path(path) } {
-        Ok(bytes) => bytes,
-        Err(e) => return -e,
-    };
-    let path = match absolute(dirfd, bytes) {
-        Ok(path) => path,
-        Err(e) => return -e,
-    };
-    let Connection { node, kind, device } = match connect(&path, flags, mode, None) {
-        Ok(opened) => opened,
-        Err(e) => return -e,
-    };
+    let bytes = unsafe { c_path(path) }?;
+    let path = absolute(dirfd, bytes)?;
+    let Connection { node, kind, device } = connect(&path, flags, mode, None)?;
     let node = Node {
         node: Lock::new(node),
         path,
         device,
         flags: AtomicU32::new(flags & !(O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC)),
     };
-    let description = match kind {
+    Ok(Arc::new(match kind {
         NodeType::Directory => Description::Directory(node, Lock::new(Listing::default())),
-        _ if flags & O_DIRECTORY != 0 => return -ENOTDIR,
+        _ if flags & O_DIRECTORY != 0 => return Err(ENOTDIR),
         _ => Description::File(node),
-    };
-    fd::insert(Arc::new(description), flags & O_CLOEXEC != 0, 0)
+    }))
 }
 
 /// `getcwd`: copies the current directory, with its NUL, to the `size`

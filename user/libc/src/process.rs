@@ -2,7 +2,6 @@
 //! manager's `Launcher`.
 
 use crate::errno::{self, EINVAL, EIO, ENOSYS, EPERM, ESRCH};
-use crate::lock::Lock;
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
@@ -14,15 +13,15 @@ const FOREVER: i64 = i64::MAX;
 
 static PID: AtomicU32 = AtomicU32::new(0);
 static PARENT: AtomicU32 = AtomicU32::new(0);
-/// The `Launcher` channel of the startup transfer, which carries one
-/// call at a time.
-static LAUNCHER: Lock<Handle> = Lock::new(0);
+/// The `Launcher` channel of the startup transfer. Calls may share it,
+/// since each reply goes to the call of its transaction.
+static LAUNCHER: AtomicU32 = AtomicU32::new(0);
 
 /// Keeps the IDs and the `Launcher` channel of the startup transfer.
 pub fn install(pid: u32, parent: u32, launcher: Handle) {
     PID.store(pid, Ordering::Relaxed);
     PARENT.store(parent, Ordering::Relaxed);
-    *LAUNCHER.lock() = launcher;
+    LAUNCHER.store(launcher, Ordering::Relaxed);
 }
 
 pub fn getpid() -> i64 {
@@ -31,6 +30,28 @@ pub fn getpid() -> i64 {
 
 pub fn getppid() -> i64 {
     i64::from(PARENT.load(Ordering::Relaxed))
+}
+
+/// A client of the `Launcher` channel.
+pub fn launcher() -> ManuallyDrop<LauncherClient> {
+    // SAFETY: the channel stays open for as long as the process runs; the
+    // client is never dropped, so it never closes it.
+    ManuallyDrop::new(LauncherClient::new(ClientEnd::new(unsafe {
+        OwnedHandle::from_raw(LAUNCHER.load(Ordering::Relaxed))
+    })))
+}
+
+/// Runs `call` with every signal blocked, so that a signal does not
+/// interrupt a call whose reply the caller needs; a signal sent to the
+/// caller meanwhile is delivered as the mask is restored.
+pub fn unsignalled<R>(call: impl FnOnce() -> R) -> R {
+    let mut mask = 0;
+    // SAFETY: the out pointer is valid for the call.
+    unsafe { sys::signal_set_mask(0, u64::MAX, &mut mask) };
+    let result = call();
+    // SAFETY: the old mask may be null.
+    unsafe { sys::signal_set_mask(2, mask, core::ptr::null_mut()) };
+    result
 }
 
 /// The error number of a failed `Kill`: those of POSIX `kill` for a
@@ -58,26 +79,14 @@ pub fn kill(pid: i64, signo: i64) -> i64 {
         },
         _ => return -ENOSYS,
     };
-    let launcher = LAUNCHER.lock();
-    // SAFETY: the channel stays open for as long as the process runs; the
-    // client is never dropped, so it never closes it.
-    let client = ManuallyDrop::new(LauncherClient::new(ClientEnd::new(unsafe {
-        OwnedHandle::from_raw(*launcher)
-    })));
+    let client = launcher();
     let signo = signo as u32;
-    // A signal to the caller would interrupt the call; it is blocked
-    // until the call returns, and delivered as the mask is restored.
-    let mut mask = 0;
-    // SAFETY: the out pointer is valid for the call.
-    unsafe { sys::signal_set_mask(0, u64::MAX, &mut mask) };
-    let result = match group {
+    let result = unsignalled(|| match group {
         None => client.kill(pid as u32, signo, FOREVER).map(|r| r.map(drop)),
         Some(group) => client
             .kill_group(group, signo, FOREVER)
             .map(|r| r.map(drop)),
-    };
-    // SAFETY: the old mask may be null.
-    unsafe { sys::signal_set_mask(2, mask, core::ptr::null_mut()) };
+    });
     match result {
         Ok(Ok(())) => 0,
         Ok(Err(status)) => -kill_error(status),

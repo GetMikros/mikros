@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -640,6 +641,16 @@ static int processes_are_signalled(void)
 	return ok;
 }
 
+/* A process without children has none to wait for, and cannot fork. */
+static int no_children_to_wait_for(void)
+{
+	int status;
+	return waitpid(-1, &status, WNOHANG) == -1 && errno == ECHILD
+		&& wait(&status) == -1 && errno == ECHILD
+		&& waitpid(-1, &status, 1 << 20) == -1 && errno == EINVAL
+		&& fork() == -1 && errno == ENOSYS;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -691,9 +702,11 @@ int main(int argc, char **argv)
 		return 23;
 	if (!processes_are_signalled())
 		return 24;
+	if (!no_children_to_wait_for())
+		return 25;
 	char *copy = malloc(64);
 	if (!copy)
-		return 25;
+		return 26;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

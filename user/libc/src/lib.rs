@@ -18,6 +18,7 @@ mod library;
 mod lock;
 mod process;
 mod signal;
+mod spawn;
 mod start;
 mod stat;
 mod syscall;

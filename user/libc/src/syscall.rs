@@ -6,7 +6,7 @@
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENODEV, ENOSYS, ENOTTY};
 use crate::fd::Description;
-use crate::{clock, dir, fd, fs, futex, io, process, signal, stat, thread};
+use crate::{clock, dir, fd, fs, futex, io, process, signal, spawn, stat, thread};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::MemoryFlags;
@@ -37,6 +37,7 @@ const SYS_DUP: i64 = 32;
 const SYS_GETPID: i64 = 39;
 const SYS_DUP2: i64 = 33;
 const SYS_EXIT: i64 = 60;
+const SYS_WAIT4: i64 = 61;
 const SYS_KILL: i64 = 62;
 const SYS_FCNTL: i64 = 72;
 const SYS_GETCWD: i64 = 79;
@@ -192,6 +193,7 @@ extern "C" fn __mikros_syscall(
         }
         SYS_GETPID => process::getpid(),
         SYS_GETPPID => process::getppid(),
+        SYS_WAIT4 => spawn::wait4(a1, a2 as *mut i32, a3, a4 as *mut u8),
         SYS_KILL => process::kill(a1, a2),
         SYS_TKILL => signal::tkill(a1, a2),
         SYS_TGKILL => signal::tkill(a2, a3),

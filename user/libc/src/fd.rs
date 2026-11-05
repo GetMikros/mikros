@@ -7,12 +7,18 @@ use crate::lock::Lock;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU32;
-use mikros_rt::interfaces::__midl::OwnedHandle;
-use mikros_rt::interfaces::mikros::fs::NodeClient;
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
+use mikros_rt::interfaces::mikros::fs::{NodeClient, NodeType};
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 
+/// The descriptor kind of a file or directory.
+pub const KIND_FILE: u32 = 1;
 /// The descriptor kind of a stream.
-const KIND_STREAM: u32 = 2;
+pub const KIND_STREAM: u32 = 2;
+/// The bits of a startup handle's `id` that hold its descriptor number.
+pub const ID_FD: u32 = (1 << 24) - 1;
+/// The object type of a channel.
+const TYPE_CHANNEL: u32 = 4;
 /// The object type of a stream.
 const TYPE_STREAM: u32 = 15;
 /// The most descriptors a process has open.
@@ -142,29 +148,63 @@ pub fn set_close_on_exec(fd: i64, value: bool) -> i64 {
     }
 }
 
-/// Takes the standard handles out of `handles` and installs each that
-/// is a stream with the `id` of its descriptor. Any other is closed
-/// with the handle it holds, and its descriptor stays closed.
+/// Takes the descriptors out of `handles`: the standard handles, and
+/// the `USER` handles whose `id` names a descriptor. Each is installed
+/// under the descriptor number and with the kind its `id` gives, when the
+/// handle has that kind's object type; any other is closed, and its
+/// descriptor stays closed. Other `USER` handles stay in `handles`.
 pub fn install(handles: &mut Vec<StartupHandle>) {
     let mut i = 0;
     while i < handles.len() {
-        let fd = match handles[i].role {
-            HandleRole::Stdin => 0,
-            HandleRole::Stdout => 1,
-            HandleRole::Stderr => 2,
+        let id = handles[i].id;
+        let (fd, kind) = ((id & ID_FD) as usize, id >> 28);
+        let standard = match handles[i].role {
+            HandleRole::Stdin => Some(0),
+            HandleRole::Stdout => Some(1),
+            HandleRole::Stderr => Some(2),
+            HandleRole::User if matches!(kind, KIND_FILE | KIND_STREAM) => None,
             _ => {
                 i += 1;
                 continue;
             }
         };
-        let handle = handles.remove(i);
-        let id = fd | KIND_STREAM << 28;
-        let is_stream = mikros_rt::midl::handle_info(handle.handle.raw())
-            .is_some_and(|(kind, _)| kind == TYPE_STREAM);
-        if handle.id == id && is_stream && get(i64::from(fd)).is_none() {
-            let description = Arc::new(Description::Stream(handle.handle));
-            duplicate_into(i64::from(fd), description);
+        let handle = handles.remove(i).handle;
+        // Each descriptor has one handle, so `k` is 0.
+        let valid = standard.is_none_or(|s| s == fd) && id >> 24 & 0xF == 0;
+        let free = fd < FDS_MAX && get(fd as i64).is_none();
+        if let (true, true, Some(description)) = (valid, free, inherited(handle, kind)) {
+            duplicate_into(fd as i64, Arc::new(description));
         }
+    }
+}
+
+/// The description of a handle with descriptor kind `kind`, or none,
+/// closing the handle, when its object type is not that of the kind.
+fn inherited(handle: OwnedHandle, kind: u32) -> Option<Description> {
+    let object = mikros_rt::midl::handle_info(handle.raw()).map(|(object, _)| object);
+    match (kind, object) {
+        (KIND_STREAM, Some(TYPE_STREAM)) => Some(Description::Stream(handle)),
+        (KIND_FILE, Some(TYPE_CHANNEL)) => {
+            let node = NodeClient::new(ClientEnd::new(handle));
+            let directory = matches!(
+                node.get_attributes(i64::MAX),
+                Ok(Ok(r)) if r.attributes.r#type == NodeType::Directory
+            );
+            // The path it was opened with is not passed, so paths are
+            // not resolved relative to it.
+            let node = Node {
+                node: Lock::new(node),
+                path: alloc::string::String::new(),
+                device: 0,
+                flags: AtomicU32::new(0),
+            };
+            Some(if directory {
+                Description::Directory(node, Lock::new(crate::dir::Listing::default()))
+            } else {
+                Description::File(node)
+            })
+        }
+        _ => None,
     }
 }
 
