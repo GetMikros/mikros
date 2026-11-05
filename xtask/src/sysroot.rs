@@ -46,7 +46,7 @@ pub fn build() -> Result<PathBuf> {
         let path = sysroot.join(d);
         fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
     }
-    let cfg = sysroot.join(format!("{TRIPLE}.cfg"));
+    let cfg = config(&sysroot);
     fs::write(&cfg, driver_config()).with_context(|| format!("writing {}", cfg.display()))?;
     let musl = crate::musl::build(&cfg, &sysroot)?;
     let lib = sysroot.join("lib");
@@ -117,6 +117,11 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
     fs::copy(from, to)
         .map(drop)
         .with_context(|| format!("copying {} to {}", from.display(), to.display()))
+}
+
+/// The Clang driver configuration file of `sysroot`.
+pub fn config(sysroot: &Path) -> PathBuf {
+    sysroot.join(format!("{TRIPLE}.cfg"))
 }
 
 /// Fails unless `tool --version` reports the pinned LLVM release.

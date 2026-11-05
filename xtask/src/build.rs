@@ -144,6 +144,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", services.display());
             let probe = user_build("launcher-probe", kind)?;
             println!("built    {}", probe.display());
+            let hello = c_build("hello-c", &["user/tests/hello-c/hello.c"])?;
+            println!("built    {}", hello.display());
             // The process manager tests serve this image, in which the
             // probe takes the service manager's place.
             let launcher = boot_image(
@@ -152,6 +154,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[
                     ("usr/bin/service-manager", probe.as_path()),
                     ("usr/bin/probe", probe.as_path()),
+                    ("usr/bin/hello", hello.as_path()),
                 ],
             )?;
             println!("built    {}", launcher.display());
@@ -328,6 +331,52 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
         .join("user/target/x86_64-unknown-mikros")
         .join(kind.profile_dir())
         .join(bin))
+}
+
+/// Builds the static C program `name` from `sources`, paths relative
+/// to the repository, against the sysroot, and returns its path.
+fn c_build(name: &str, sources: &[&str]) -> Result<PathBuf> {
+    let root = crate::workspace_root();
+    let sysroot = crate::sysroot::build()?;
+    let lib = sysroot.join("lib");
+    let dir = root.join("target/c").join(name);
+    fs::create_dir_all(&dir)?;
+    let mut objects = Vec::new();
+    for source in sources {
+        let object = dir.join(Path::new(source).with_extension("o").file_name().unwrap());
+        let status = Command::new("clang")
+            .arg(format!(
+                "--config={}",
+                crate::sysroot::config(&sysroot).display()
+            ))
+            .args(["-O2", "-c"])
+            .arg(root.join(source))
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .context("failed to run clang")?;
+        if !status.success() {
+            bail!("compiling {source} failed");
+        }
+        objects.push(object);
+    }
+    // Clang links through the host's GCC for a triple it does not
+    // know, so LLD links the program directly.
+    let program = dir.join(name);
+    let status = Command::new("ld.lld")
+        .args(["-static", "-pie", "--no-dynamic-linker", "-o"])
+        .arg(&program)
+        .arg(lib.join("crt1.o"))
+        .arg(lib.join("crti.o"))
+        .args(&objects)
+        .arg(lib.join("libc.slib"))
+        .arg(lib.join("crtn.o"))
+        .status()
+        .context("failed to run ld.lld")?;
+    if !status.success() {
+        bail!("linking {name} failed");
+    }
+    Ok(program)
 }
 
 /// Writes the syzkaller descriptions and constants generated from the

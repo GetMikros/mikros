@@ -9,6 +9,9 @@
 //! - `sleep`: waits until it is killed;
 //! - `rename`: exits with 0 when it may not name an app ID, 1 otherwise.
 //!
+//! It also spawns `/usr/bin/hello`, a static C program, with a stream as
+//! its standard output, and checks what it prints.
+//!
 //! It accepts the `Bind` requests on the control endpoint that arrives
 //! as the `USER` startup handle with ID 0, for itself and its children.
 
@@ -35,6 +38,10 @@ mikros_rt::raw_main!(main);
 
 const CONTROL_ID: u32 = 0;
 const PROBE: &str = "/usr/bin/probe";
+/// A static C program, which prints a greeting for its argument.
+const HELLO: &str = "/usr/bin/hello";
+/// The `id` of a stream as descriptor 1.
+const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const KILL: u32 = 9;
 const CALLER_USER: u32 = u32::MAX;
 const FOREVER: i64 = i64::MAX;
@@ -112,10 +119,18 @@ fn arguments(mem: &OwnedHandle) -> Vec<String> {
 
 /// An `arguments` memory object with `PROBE` and then `args`.
 fn arguments_of(args: &[&str]) -> OwnedHandle {
+    let all: Vec<&str> = core::iter::once(PROBE)
+        .chain(args.iter().copied())
+        .collect();
+    arguments_from(&all)
+}
+
+/// An `arguments` memory object with `args`.
+fn arguments_from(args: &[&str]) -> OwnedHandle {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(args.len() as u32 + 1).to_le_bytes());
+    bytes.extend_from_slice(&(args.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
-    for arg in core::iter::once(&PROBE).chain(args) {
+    for arg in args {
         bytes.extend_from_slice(arg.as_bytes());
         bytes.push(0);
     }
@@ -126,6 +141,32 @@ fn arguments_of(args: &[&str]) -> OwnedHandle {
         sys::mem_write(mem, 0, bytes.as_ptr(), bytes.len() as u64);
         OwnedHandle::from_raw(mem)
     }
+}
+
+/// A new stream: the end the probe reads, and the end it gives away.
+fn stream() -> (OwnedHandle, OwnedHandle) {
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the out pointers are valid for the call, and the handles
+    // were just created for us.
+    unsafe {
+        sys::stream_create(0, &mut a, &mut b);
+        (OwnedHandle::from_raw(a), OwnedHandle::from_raw(b))
+    }
+}
+
+/// Every byte queued toward `stream`.
+fn read_all(stream: &OwnedHandle) -> Vec<u8> {
+    let mut bytes = alloc::vec![0u8; PAGE_SIZE as usize];
+    let mut actual = 0;
+    // SAFETY: the pointers describe `bytes` and `actual`.
+    let status =
+        unsafe { sys::stream_read(stream.raw(), bytes.as_mut_ptr(), PAGE_SIZE, &mut actual) };
+    bytes.truncate(if status == mikros_rt::OK {
+        actual as usize
+    } else {
+        0
+    });
+    bytes
 }
 
 /// Spawns `PROBE` with `args`, after `change` adjusted the request.
@@ -249,6 +290,26 @@ async fn probe(l: &LauncherAsyncClient) -> i64 {
         check(
             "refusing a child an app ID",
             wait(l, rename as i32).await == Some((rename, 0, 0)),
+        )?;
+        let (output, stdout) = stream();
+        let hello = spawn(l, &[], |r| {
+            r.path = HELLO.into();
+            r.arguments = arguments_from(&[HELLO, "world"]);
+            r.handles.push(StartupHandle {
+                role: HandleRole::Stdout,
+                id: STDOUT_STREAM,
+                handle: stdout,
+            });
+        })
+        .await
+        .map_or(0, |(pid, _)| pid);
+        check(
+            "running a C program",
+            wait(l, hello as i32).await == Some((hello, 0, 0)),
+        )?;
+        check(
+            "reading what it printed",
+            read_all(&output).as_slice() == b"hello, world\n",
         )?;
         Ok(())
     };
