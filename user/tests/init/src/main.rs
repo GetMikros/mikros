@@ -7959,7 +7959,6 @@ mod bootfs {
     use mikros_test::{Failure, Result, check, ensure};
     use process_manager::bootfs::Fs;
 
-    const SAME_RIGHTS: u32 = 1 << 31;
     /// The first four bytes that the helper thread read from a paged
     /// object, and its status.
     static PAGED_HEAD: AtomicU32 = AtomicU32::new(0);
@@ -8015,19 +8014,55 @@ mod bootfs {
     /// and paged memory objects with their contents; directories list in
     /// name order; paths, flags and rights are checked; and every change
     /// fails without `WRITE`.
+    /// A new memory object that holds the bytes of the boot image.
+    fn copy_of_boot_image(s: &Startup) -> Result<OwnedHandle> {
+        let size = s.boot_image_size.next_multiple_of(super::PAGE_SIZE);
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("mapping the boot image", unsafe {
+            sys::vm_map(
+                s.process,
+                super::PERM_READ,
+                0,
+                s.boot_image,
+                0,
+                size,
+                &mut at,
+            )
+        })?;
+        let mut mem = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let created = check("creating the copy", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        });
+        // SAFETY: the boot image is mapped readable at `at` for `size`
+        // bytes.
+        let written = created.and_then(|()| {
+            check("writing the copy", unsafe {
+                sys::mem_write(mem, 0, at as *const u8, size)
+            })
+        });
+        // SAFETY: the call takes no pointers.
+        let unmapped = check("unmapping the boot image", unsafe {
+            sys::vm_unmap(s.process, at, size)
+        });
+        // SAFETY: the handle, when created, is ours alone.
+        let mem = (mem != 0).then(|| unsafe { OwnedHandle::from_raw(mem) });
+        written?;
+        unmapped?;
+        mem.ok_or(failed("creating the copy"))
+    }
+
     pub fn bootfs_serves_the_boot_image(s: &Startup) -> Result {
         let mut ex = Executor::new().map_err(|status| Failure {
             what: "creating an executor",
             status,
         })?;
         let reactor = ex.reactor().clone();
-        let mut image = 0;
-        // SAFETY: the out pointer is valid for the call.
-        check("duplicating the boot image", unsafe {
-            sys::handle_duplicate(s.boot_image, SAME_RIGHTS, &mut image)
-        })?;
-        // SAFETY: the handle was just created for us.
-        let image = unsafe { OwnedHandle::from_raw(image) };
+        // Fs maps its image into this process for good, which would keep
+        // the boot image object alive past the close in
+        // boot_image_object, so it is given a copy.
+        let image = copy_of_boot_image(s)?;
         let fs = Fs::new(s.process, &image, reactor.clone(), ex.spawner().clone()).map_err(
             |status| Failure {
                 what: "serving the boot image",
