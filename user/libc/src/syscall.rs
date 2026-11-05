@@ -5,7 +5,7 @@
 //! not perform yet fail with `ENOSYS`.
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENOSYS, ENOTTY, EPIPE};
-use crate::fd;
+use crate::{clock, fd};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::sys::{self, Handle};
 
@@ -19,6 +19,7 @@ const SYS_WRITEV: i64 = 20;
 const SYS_EXIT: i64 = 60;
 const SYS_SET_THREAD_AREA: i64 = 205;
 const SYS_SET_TID_ADDRESS: i64 = 218;
+const SYS_CLOCK_GETTIME: i64 = 228;
 const SYS_EXIT_GROUP: i64 = 231;
 const SYS_GETRANDOM: i64 = 318;
 
@@ -77,6 +78,7 @@ extern "C" fn __mikros_syscall(
         }
         SYS_SET_TID_ADDRESS => i64::from(TID.load(Ordering::Relaxed)),
         SYS_GETRANDOM => getrandom(a1 as *mut u8, a2 as u64),
+        SYS_CLOCK_GETTIME => clock::gettime(a1, a2 as *mut clock::Timespec),
         SYS_EXIT_GROUP => exit(a1),
         SYS_EXIT => {
             // SAFETY: ending the thread takes no pointers.

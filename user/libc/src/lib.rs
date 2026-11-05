@@ -6,6 +6,7 @@
 
 extern crate alloc;
 
+mod clock;
 mod errno;
 mod fd;
 mod start;

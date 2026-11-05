@@ -4,7 +4,7 @@
 //! and only then runs musl's start, which runs the initializers and
 //! `main`.
 
-use crate::{fd, syscall};
+use crate::{clock, fd, syscall};
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -69,6 +69,12 @@ extern "sysv64" fn start(bootstrap: u64, main: Main) -> ! {
     let header = &managed.header;
     let tid = object_id(header.thread.raw()).unwrap_or(1);
     syscall::set_process(header.process.raw(), tid);
+    clock::install(
+        header.process.raw(),
+        header.thread.raw(),
+        header.clock_page.raw(),
+        header.time_page.as_ref().map(|page| page.raw()),
+    );
     fd::install(&mut managed.handles);
     let Some(strings) = arguments(&header.arguments) else {
         exit(REFUSED)
