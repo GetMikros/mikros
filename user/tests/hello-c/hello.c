@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <mikros/abi.h>
 #include <mikros/syscalls.h>
+#include <poll.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <setjmp.h>
@@ -609,6 +610,36 @@ static int pipes_carry_data(void)
 	return ok;
 }
 
+/* poll reports a pipe's ends as they become ready, waits for its
+   timeout, reports closed descriptors and finds files always ready. */
+static int pipes_are_polled(void)
+{
+	int p[2];
+	char c;
+	struct timespec before, after;
+	if (pipe(p))
+		return 0;
+	struct pollfd fds[2] = {{.fd = p[0], .events = POLLIN}, {.fd = p[1], .events = POLLOUT}};
+	int ok = poll(fds, 1, 0) == 0 && fds[0].revents == 0;
+	clock_gettime(CLOCK_MONOTONIC, &before);
+	ok = ok && poll(fds, 1, 20) == 0;
+	clock_gettime(CLOCK_MONOTONIC, &after);
+	ok = ok && ns(after) - ns(before) >= 20000000;
+	ok = ok && poll(fds, 2, -1) == 1 && fds[0].revents == 0 && fds[1].revents == POLLOUT;
+	ok = ok && write(p[1], "x", 1) == 1 && poll(fds, 2, -1) == 2 && fds[0].revents == POLLIN
+		&& fds[1].revents == POLLOUT;
+	ok = ok && read(p[0], &c, 1) == 1 && close(p[1]) == 0;
+	ok = ok && poll(fds, 2, -1) == 2 && (fds[0].revents & POLLHUP) && fds[1].revents == POLLNVAL;
+	close(p[0]);
+	int file = open(GREETING, O_RDONLY);
+	struct pollfd f = {.fd = file, .events = POLLIN | POLLOUT};
+	ok = ok && file >= 0 && poll(&f, 1, -1) == 1 && f.revents == (POLLIN | POLLOUT);
+	struct pollfd none = {.fd = -1, .events = POLLIN};
+	ok = ok && poll(&none, 1, 0) == 0 && none.revents == 0;
+	close(file);
+	return ok;
+}
+
 static volatile sig_atomic_t piped;
 
 static void on_pipe(int signo)
@@ -778,9 +809,11 @@ int main(int argc, char **argv)
 		return 25;
 	if (!programs_are_spawned())
 		return 26;
+	if (!pipes_are_polled())
+		return 27;
 	char *copy = malloc(64);
 	if (!copy)
-		return 27;
+		return 28;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

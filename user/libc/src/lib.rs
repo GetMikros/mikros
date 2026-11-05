@@ -16,6 +16,7 @@ mod futex;
 mod io;
 mod library;
 mod lock;
+mod poll;
 mod process;
 mod signal;
 mod spawn;
