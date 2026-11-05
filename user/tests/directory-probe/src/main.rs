@@ -41,6 +41,7 @@ const REGISTRAR: &str = "mikros.service.Registrar";
 const NAMED: &str = "test.directory.Named";
 const INFO_BASIC: u32 = 1;
 const PEER_CLOSED: u32 = 1 << 2;
+const ACCESS_DENIED: sys::Status = -13;
 const INFO_BASIC_SIZE: usize = 24;
 /// The app ID of the program when it runs as the restart probe, and as
 /// the on-demand demand probe and its dependency.
@@ -54,6 +55,8 @@ const HELLO: &[u8] = b"hi";
 const SETUP: i64 = 100;
 /// The step that wrong boot handles end with.
 const BOOT_HANDLES: i64 = 101;
+/// The step that a wrong `PRIORITY` resource ends with.
+const PRIORITY: i64 = 102;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -80,6 +83,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     // through, and the platform information, without a framebuffer.
     if !boot_handles(&managed.handles) {
         return BOOT_HANDLES;
+    }
+    if !priority(&managed.handles, managed.header.thread.raw()) {
+        return PRIORITY;
     }
     let at = managed
         .handles
@@ -215,6 +221,26 @@ fn now() -> i64 {
     // SAFETY: the out pointer is valid for the call.
     unsafe { sys::clock_get_monotonic(&mut now) };
     now
+}
+
+/// Whether `handles` hold a `PRIORITY` resource with ID 0 that lets
+/// `thread` take the manifest's priority 20 but not 21. The thread goes
+/// back to the default priority 16 after.
+fn priority(handles: &[StartupHandle], thread: sys::Handle) -> bool {
+    let Some(resource) = handles
+        .iter()
+        .find(|h| h.role == HandleRole::Priority && h.id == 0)
+    else {
+        return false;
+    };
+    let set = |priority| {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::thread_set_priority(thread, resource.handle.raw(), priority) }
+    };
+    let (twenty, twenty_one) = (set(20), set(21));
+    // SAFETY: the call takes no pointers; 16 needs no resource.
+    let back = unsafe { sys::thread_set_priority(thread, 0, 16) };
+    twenty == mikros_rt::OK && twenty_one == ACCESS_DENIED && back == mikros_rt::OK
 }
 
 /// The koid of the object `handle` refers to and the koid of its peer.

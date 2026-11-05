@@ -7,3 +7,4 @@ provides:
     permission: camera
 permissions: [permissions.check, services.register]
 boot_handles: [log_manage, platform_info, framebuffer]
+priority: 20

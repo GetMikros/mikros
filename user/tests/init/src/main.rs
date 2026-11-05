@@ -7978,7 +7978,8 @@ mod manager {
     /// the directory probe and their manifests, the service manager
     /// starts the broker, registers permissions with it, and starts the
     /// probe, giving it the log and the platform information that init's
-    /// boot handles hold here, and no framebuffer. The probe drives its
+    /// boot handles hold here, and no framebuffer, and a `PRIORITY`
+    /// resource made from the root resource for its priority 20. The probe drives its
     /// directory and exits with 0 once every check passed. The restart
     /// probe exits with 1 each time, and is restarted five times and then
     /// given up on. The service manager says all of it in the log.
@@ -8042,7 +8043,12 @@ mod manager {
             id: 5,
             handle: info,
         };
-        let handles = alloc::vec![log, info];
+        let root = StartupHandle {
+            role: HandleRole::User,
+            id: 1,
+            handle: copy(s.root_resource, SAME_RIGHTS)?,
+        };
+        let handles = alloc::vec![root, log, info];
         let Ok(Ok(started)) = init.start_service_manager(handles, deadline) else {
             return Err(Failure {
                 what: "starting the service manager",
