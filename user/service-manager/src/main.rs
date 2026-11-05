@@ -2,10 +2,11 @@
 //!
 //! While it receives its startup transfer, it accepts the process
 //! manager's `Bind` requests on the control endpoint that arrives as the
-//! `USER` startup handle with ID 0. The connections it binds are kept
-//! open, and nothing serves them yet. Once started, it keeps init's boot
-//! handles, logs through the log among them, and reads the service
-//! manifests of its boot file system.
+//! `USER` startup handle with ID 0, and serves `Directory` on each
+//! connection it binds, to the identity it is bound to. Once started, it
+//! keeps init's boot handles, logs through the log among them, reads the
+//! service manifests of its boot file system and starts the boot
+//! services.
 
 #![no_std]
 #![no_main]
@@ -13,20 +14,21 @@
 extern crate alloc;
 
 mod broker;
+mod directory;
 mod files;
 mod launch;
 mod services;
 
+use crate::directory::Dir;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use mikros_rt::exec::{Executor, Reactor};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
 use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient, StartupHandle};
 use mikros_rt::interfaces::mikros::service::{
-    ClientIdentity, Directory, ProcessDirectory, ProcessDirectoryAsyncServer,
-    ProcessDirectoryBindResponse, ProcessDirectoryRequest,
+    ClientIdentity, ProcessDirectory, ProcessDirectoryAsyncServer, ProcessDirectoryBindResponse,
+    ProcessDirectoryRequest,
 };
 use mikros_rt::{PANIC_EXIT_CODE, log, managed, sys};
 
@@ -40,10 +42,6 @@ const LOG_ID: u32 = 2;
 const ROOT_BUDGET_ID: u32 = 3;
 const FRAMEBUFFER_ID: u32 = 4;
 const PLATFORM_INFO_ID: u32 = 5;
-
-/// The `Directory` connections bound so far, with the identities they
-/// are bound to.
-type Bindings = Rc<RefCell<Vec<(ClientIdentity, ServerEnd<Directory>)>>>;
 
 /// The handles init gave the service manager for the services that list
 /// them.
@@ -81,9 +79,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let reactor = executor.reactor().clone();
     let spawner = executor.spawner().clone();
-    let bindings = Bindings::default();
+    let dir = Dir::new(reactor.clone(), spawner.clone());
     let control_reactor = reactor.clone();
-    let control_bindings = bindings.clone();
+    let control_dir = dir.clone();
     let control_spawner = spawner.clone();
     let mut control = Some(move |handles: &mut Vec<StartupHandle>| {
         let at = handles
@@ -91,7 +89,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             .position(|h| h.role == HandleRole::User && h.id == CONTROL_ID);
         if let Some(at) = at {
             let end = handles.remove(at).handle;
-            control_spawner.spawn(serve_control(end, control_reactor, control_bindings));
+            control_spawner.spawn(serve_control(end, control_reactor, control_dir));
         }
     });
     let received = executor.block_on(managed::receive_async(
@@ -126,24 +124,24 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 app_id: header.app_id,
             };
             let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
-            spawner.spawn(services::start(root, reactor, boot, launcher, me));
+            spawner.spawn(services::start(root, reactor, launcher, me, dir));
         }
         None => mikros_rt::log!(Error, "the namespace has no root"),
     }
-    // The control endpoint stays served.
+    // The control endpoint stays served, and the boot handles, the log
+    // among them, stay open.
     executor.block_on(core::future::pending::<()>());
+    drop(boot);
     PANIC_EXIT_CODE
 }
 
 /// Accepts `Bind` requests on the control endpoint `end` until the
 /// process manager closes it.
-async fn serve_control(end: OwnedHandle, reactor: Reactor, bindings: Bindings) {
+async fn serve_control(end: OwnedHandle, reactor: Reactor, dir: Rc<Dir>) {
     let server = ProcessDirectoryAsyncServer::new(ServerEnd::<ProcessDirectory>::new(end), reactor);
     while let Ok(ProcessDirectoryRequest::Bind(request, responder)) = server.next().await {
-        // The binding is active once it is recorded, before the reply.
-        bindings
-            .borrow_mut()
-            .push((request.client, request.directory));
+        // The binding is active once it is served, before the reply.
+        dir.serve(request.directory, request.client);
         let _ = responder.reply(server.server(), Ok(ProcessDirectoryBindResponse {}));
     }
 }

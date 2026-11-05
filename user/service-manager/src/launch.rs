@@ -1,10 +1,12 @@
-//! Starting services through the process manager's `Launcher`.
+//! Starting services through the process manager's `Launcher`, and
+//! seeing them end.
 
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_manifest::{PRIORITY_DEFAULT, Service};
+use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::process::{
     HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle,
@@ -15,11 +17,13 @@ use mikros_rt::sys;
 /// `user` in a Spawn request: the caller's own user.
 const CALLER_USER: u32 = u32::MAX;
 const PAGE_SIZE: u64 = 4096;
+const TERMINATED: u32 = 1 << 4;
+const INFO_PROCESS: u32 = 2;
+const INFO_PROCESS_SIZE: usize = 0x20;
 
 /// A service that started.
 pub struct Started {
     pub pid: u32,
-    #[expect(dead_code, reason = "watched once services are restarted")]
     pub process: OwnedHandle,
     /// The service manager's end of the service's `Provider` channel.
     pub provider: Rc<ProviderClient>,
@@ -66,6 +70,30 @@ pub async fn launch(
         Ok(Err(status)) => Err(format!("Spawn failed: {status:?}")),
         Err(e) => Err(format!("Spawn failed: {e:?}")),
     }
+}
+
+/// Waits for `process` to end, and returns its exit code and the signal
+/// that ended it, or `None` when they cannot be read.
+pub async fn exited(reactor: &Reactor, process: &OwnedHandle) -> Option<(i64, u32)> {
+    reactor.signals(process.raw(), TERMINATED).await.ok()?;
+    let mut record = [0u8; INFO_PROCESS_SIZE];
+    let mut len = 0;
+    // SAFETY: the pointers describe `record` and `len`.
+    let status = unsafe {
+        sys::object_get_info(
+            process.raw(),
+            INFO_PROCESS,
+            record.as_mut_ptr(),
+            record.len() as u64,
+            &mut len,
+        )
+    };
+    if status != mikros_rt::OK {
+        return None;
+    }
+    let code = i64::from_le_bytes(record[..8].try_into().ok()?);
+    let signal = u32::from_le_bytes(record[0x10..0x14].try_into().ok()?);
+    Some((code, signal))
 }
 
 /// A new memory object of whole pages that starts with `bytes`.

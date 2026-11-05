@@ -1,8 +1,11 @@
 //! The services of the manifests in `usr/lib/services/`.
 
+use crate::broker;
+use crate::directory::Dir;
 use crate::files::{self, Failure};
-use crate::{BootHandles, broker};
+use crate::launch::{self, Started};
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 use mikros_manifest::{Service, order};
 use mikros_rt::exec::Reactor;
@@ -14,15 +17,16 @@ use mikros_rt::interfaces::mikros::service::ClientIdentity;
 const SERVICES: &str = "usr/lib/services";
 const SUFFIX: &str = ".yaml";
 
-/// Reads the service manifests under `root`, works out the order in
-/// which the boot services start, and starts the permission broker,
-/// which comes first, as the service manager `me`.
+/// Reads the service manifests under `root`, records the protocols
+/// they provide in `dir`, and starts the boot services in order as the
+/// service manager `me`: the permission broker first, then each other
+/// one once its permissions are registered with the broker.
 pub async fn start(
     root: NodeAsyncClient,
     reactor: Reactor,
-    _boot: BootHandles,
     launcher: LauncherAsyncClient,
     me: ClientIdentity,
+    dir: Rc<Dir>,
 ) {
     let (services, manifests): (Vec<Service>, Vec<Vec<u8>>) =
         read_all(&root, &reactor).await.into_iter().unzip();
@@ -40,31 +44,69 @@ pub async fn start(
         services.len(),
         order.start.len()
     );
-    let Some(&first) = order.start.first() else {
+    // TODO: start on-demand services at the first connection; until
+    // then, connections to them wait.
+    dir.set_services(&services, |i| order.blocked.iter().all(|(b, _)| *b != i));
+    let Some((&first, rest)) = order.start.split_first() else {
         return;
     };
     // `order` puts the broker first whenever anything starts.
-    let running = broker::start(&launcher, &reactor, me, &services[first], &manifests[first]);
-    let running = match running.await {
-        Ok(running) => running,
+    let started = broker::start(&launcher, &reactor, me, &services[first], &manifests[first]);
+    let broker = match started.await {
+        Ok((started, broker)) => {
+            mikros_rt::log!(Info, "started the permission broker as pid {}", started.pid);
+            dir.set_broker(broker.clone());
+            running(&dir, &reactor, &services[first], started);
+            broker
+        }
         Err(why) => {
             mikros_rt::log!(Error, "the permission broker did not start: {why}");
+            for &i in &order.start {
+                dir.never(&services[i].name);
+            }
             return;
         }
     };
-    mikros_rt::log!(
-        Info,
-        "started the permission broker as pid {}",
-        running.0.pid
-    );
-    // TODO: register each service's permissions and start it, once
-    // services can be given their boot handles.
-    for &i in &order.start[1..] {
-        mikros_rt::log!(Warning, "service {} is not started yet", services[i].name);
+    for &i in rest {
+        let service = &services[i];
+        let app_id = format!("system.{}", service.name);
+        let started = match broker::grant(&broker, &app_id, service.permissions.clone()).await {
+            Ok(()) => launch::launch(&launcher, service, Vec::new()).await,
+            Err(why) => Err(why),
+        };
+        match started {
+            Ok(started) => {
+                mikros_rt::log!(
+                    Info,
+                    "started service {} as pid {}",
+                    service.name,
+                    started.pid
+                );
+                running(&dir, &reactor, service, started);
+            }
+            Err(why) => {
+                mikros_rt::log!(Error, "service {} did not start: {why}", service.name);
+                dir.never(&service.name);
+            }
+        }
     }
-    // The broker's connections stay open for as long as this runs.
-    let _running = running;
-    core::future::pending::<()>().await;
+}
+
+/// Forwards connections to `service`, which `started` runs, and logs
+/// when it ends, after which its protocols are no longer provided.
+fn running(dir: &Rc<Dir>, reactor: &Reactor, service: &Service, started: Started) {
+    dir.running(&service.name, started.provider);
+    let (dir, reactor, name) = (dir.clone(), reactor.clone(), service.name.clone());
+    let spawner = dir.spawner().clone();
+    spawner.spawn(async move {
+        // TODO: restart services as their manifests say.
+        match launch::exited(&reactor, &started.process).await {
+            Some((code, 0)) => mikros_rt::log!(Info, "service {name} exited with code {code}"),
+            Some((_, signal)) => mikros_rt::log!(Info, "service {name} ended by signal {signal}"),
+            None => mikros_rt::log!(Error, "service {name} could not be watched"),
+        }
+        dir.never(&name);
+    });
 }
 
 /// The services of the valid manifests, with the manifests' bytes.
