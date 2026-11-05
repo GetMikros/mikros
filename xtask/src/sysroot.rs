@@ -1,7 +1,8 @@
 //! `cargo xtask sysroot`: the directory that C and C++ programs for
 //! Mikros are built against, laid out like `/usr`.
 //!
-//! It holds the musl headers in `include/`, with `include/mikros/`;
+//! It holds the musl headers in `include/`, with the generated
+//! `<mikros/syscalls.h>` in `include/mikros/`;
 //! `libc.slib`, `crti.o` and `crtn.o` in `lib/`, with
 //! `lib/pkgconfig/`, and the Clang driver configuration file
 //! `x86_64-unknown-mikros.cfg`, which selects the target, its options
@@ -48,6 +49,9 @@ pub fn build() -> Result<PathBuf> {
     }
     let cfg = config(&sysroot);
     fs::write(&cfg, driver_config()).with_context(|| format!("writing {}", cfg.display()))?;
+    let header = sysroot.join("include/mikros/syscalls.h");
+    fs::write(&header, syscalls_header()?)
+        .with_context(|| format!("writing {}", header.display()))?;
     let musl = crate::musl::build(&cfg, &sysroot)?;
     let lib = sysroot.join("lib");
     let layer = mikros_layer()?;
@@ -117,6 +121,15 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
     fs::copy(from, to)
         .map(drop)
         .with_context(|| format!("copying {} to {}", from.display(), to.display()))
+}
+
+/// `<mikros/syscalls.h>`, generated from the system call table.
+fn syscalls_header() -> Result<String> {
+    let path = crate::workspace_root().join("kernel/syscalls.yaml");
+    let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let read = syscall_table::table::read(&bytes)
+        .map_err(|e| anyhow::anyhow!("{}:{e}", path.display()))?;
+    Ok(syscall_table::c::header(&read.table, "x86_64"))
 }
 
 /// The Clang driver configuration file of `sysroot`.

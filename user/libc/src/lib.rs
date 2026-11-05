@@ -10,3 +10,11 @@ mod errno;
 mod fd;
 mod start;
 mod syscall;
+
+/// The `mikros_<name>` function of every system call of production
+/// builds, which `<mikros/syscalls.h>` declares.
+mod syscalls {
+    use mikros_rt::sys;
+
+    include!(concat!(env!("OUT_DIR"), "/syscalls.rs"));
+}

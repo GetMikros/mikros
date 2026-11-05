@@ -124,6 +124,7 @@ name = "mikros-libc"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
+ "syscall-table",
 ]
 
 [[package]]

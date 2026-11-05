@@ -1,3 +1,4 @@
+use crate::c;
 use crate::generate::{fuzz_harness, kernel_dispatch, user_bindings_x86_64};
 use crate::table::{Dir, HandleCheck, OBJECT_TYPES, Type, read};
 
@@ -201,4 +202,48 @@ fn generates_handle_checks_and_bindings() {
     table.calls[0].arches.clear();
     assert!(!kernel_dispatch(&table, "x86_64").contains("OBJ_OP"));
     assert!(!user_bindings_x86_64(&table).contains("obj_op"));
+}
+
+#[test]
+fn generates_c_functions() {
+    let text = table(
+        "      - {name: a, type: Handle, dir: in, object: any, rights: []}\n\
+         \x20     - {name: b, type: '*const u8', dir: in}\n\
+         \x20     - {name: c, type: i32, dir: in}\n\
+         \x20     - {name: d, type: '*mut Handle', dir: out}\n",
+    );
+    let mut table = read(text.as_bytes()).unwrap().table;
+    let header = c::header(&table, "x86_64");
+    assert!(header.contains("typedef uint32_t mikros_handle_t;"));
+    assert!(header.contains("typedef int64_t mikros_status_t;"));
+    assert!(header.contains(
+        "mikros_status_t mikros_obj_op(mikros_handle_t a, const uint8_t *b, int32_t c, \
+         mikros_handle_t *d);"
+    ));
+    let rust = c::definitions(&table, "x86_64");
+    assert!(rust.contains(
+        "pub unsafe extern \"C\" fn mikros_obj_op(a: sys::Handle, b: *const u8, c: i32, \
+         d: *mut sys::Handle) -> sys::Status"
+    ));
+    assert!(rust.contains("unsafe { sys::obj_op(a, b, c, d) }"));
+
+    table.calls[0].args.clear();
+    assert!(c::header(&table, "x86_64").contains("mikros_obj_op(void);"));
+    table.calls[0].fuzz_only = true;
+    assert!(!c::header(&table, "x86_64").contains("obj_op"));
+    assert!(!c::definitions(&table, "x86_64").contains("obj_op"));
+}
+
+/// Every call of production builds gets a function, and no other call.
+#[test]
+fn generates_a_c_function_per_production_call() {
+    let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../syscalls.yaml")).unwrap();
+    let table = read(&text).unwrap().table;
+    let header = c::header(&table, "x86_64");
+    let rust = c::definitions(&table, "x86_64");
+    for call in &table.calls {
+        let declared = format!("mikros_{}(", call.name);
+        assert_eq!(header.contains(&declared), !call.fuzz_only, "{}", call.name);
+        assert_eq!(rust.contains(&declared), !call.fuzz_only, "{}", call.name);
+    }
 }

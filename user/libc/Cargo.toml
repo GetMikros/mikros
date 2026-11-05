@@ -12,3 +12,6 @@ crate-type = ["staticlib"]
 
 [dependencies]
 mikros-rt = { path = "../mikros-rt", default-features = false }
+
+[build-dependencies]
+syscall-table = { path = "../../kernel/syscalls" }
