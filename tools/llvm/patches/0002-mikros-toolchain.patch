@@ -1,0 +1,324 @@
+diff -ruN a/clang/lib/Driver/Driver.cpp b/clang/lib/Driver/Driver.cpp
+--- a/clang/lib/Driver/Driver.cpp
++++ b/clang/lib/Driver/Driver.cpp
+@@ -45,6 +45,7 @@
+ #include "ToolChains/SPIRV.h"
+ #include "ToolChains/SPIRVOpenMP.h"
+ #include "ToolChains/SYCL.h"
++#include "ToolChains/Mikros.h"
+ #include "ToolChains/Serenity.h"
+ #include "ToolChains/Solaris.h"
+ #include "ToolChains/TCE.h"
+@@ -7167,6 +7168,9 @@
+     case llvm::Triple::Serenity:
+       TC = std::make_unique<toolchains::Serenity>(*this, Target, Args);
+       break;
++    case llvm::Triple::Mikros:
++      TC = std::make_unique<toolchains::Mikros>(*this, Target, Args);
++      break;
+     case llvm::Triple::Solaris:
+       TC = std::make_unique<toolchains::Solaris>(*this, Target, Args);
+       break;
+diff -ruN a/clang/lib/Driver/CMakeLists.txt b/clang/lib/Driver/CMakeLists.txt
+--- a/clang/lib/Driver/CMakeLists.txt
++++ b/clang/lib/Driver/CMakeLists.txt
+@@ -77,6 +77,7 @@
+   ToolChains/LFILinux.cpp
+   ToolChains/Linux.cpp
+   ToolChains/Managarm.cpp
++  ToolChains/Mikros.cpp
+   ToolChains/MipsLinux.cpp
+   ToolChains/MinGW.cpp
+   ToolChains/MSP430.cpp
+diff -ruN a/clang/lib/Driver/ToolChains/Mikros.h b/clang/lib/Driver/ToolChains/Mikros.h
+--- a/clang/lib/Driver/ToolChains/Mikros.h
++++ b/clang/lib/Driver/ToolChains/Mikros.h
+@@ -0,0 +1,95 @@
++//===--- Mikros.h - Mikros ToolChain Implementation -------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_MIKROS_H
++#define LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_MIKROS_H
++
++#include "Gnu.h"
++#include "clang/Basic/LangOptions.h"
++#include "clang/Driver/Tool.h"
++#include "clang/Driver/ToolChain.h"
++
++namespace clang {
++namespace driver {
++namespace tools {
++namespace mikros {
++
++class LLVM_LIBRARY_VISIBILITY Linker final : public Tool {
++public:
++  Linker(const ToolChain &TC) : Tool("mikros::Linker", "ld.lld", TC) {}
++
++  bool hasIntegratedCPP() const override { return false; }
++  bool isLinkJob() const override { return true; }
++
++  void ConstructJob(Compilation &C, const JobAction &JA,
++                    const InputInfo &Output, const InputInfoList &Inputs,
++                    const llvm::opt::ArgList &TCArgs,
++                    const char *LinkingOutput) const override;
++};
++
++} // end namespace mikros
++} // end namespace tools
++
++namespace toolchains {
++
++/// Mikros. The sysroot has the layout of /usr: headers in include/, and
++/// libraries, with the suffixes .dlib and .slib, in lib/.
++class LLVM_LIBRARY_VISIBILITY Mikros final : public Generic_ELF {
++public:
++  Mikros(const Driver &D, const llvm::Triple &Triple,
++         const llvm::opt::ArgList &Args);
++
++  void
++  AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
++                            llvm::opt::ArgStringList &CC1Args) const override;
++
++  RuntimeLibType GetDefaultRuntimeLibType() const override {
++    return ToolChain::RLT_CompilerRT;
++  }
++
++  CXXStdlibType GetDefaultCXXStdlibType() const override {
++    return ToolChain::CST_Libcxx;
++  }
++
++  const char *getDefaultLinker() const override { return "ld.lld"; }
++
++  std::string getDynamicLinker(const llvm::opt::ArgList &) const override {
++    return "/usr/lib/ld-mikros.dlib";
++  }
++
++  bool HasNativeLLVMSupport() const override { return true; }
++  bool isPICDefault() const override { return true; }
++  bool isPIEDefault(const llvm::opt::ArgList &) const override { return true; }
++  bool IsMathErrnoDefault() const override { return false; }
++
++  UnwindTableLevel
++  getDefaultUnwindTableLevel(const llvm::opt::ArgList &Args) const override {
++    return UnwindTableLevel::Asynchronous;
++  }
++
++  LangOptions::StackProtectorMode
++  GetDefaultStackProtectorLevel(bool KernelOrKext) const override {
++    return LangOptions::SSPStrong;
++  }
++
++  /// The path of the library that `-l<Name>` names: lib<Name>.dlib, or
++  /// lib<Name>.slib for a static link or when there is no .dlib, in the
++  /// directories of `-L` and then the toolchain's. Empty when there is
++  /// neither.
++  std::string findLibrary(const llvm::opt::ArgList &Args, llvm::StringRef Name,
++                          bool Static) const;
++
++protected:
++  Tool *buildLinker() const override;
++};
++
++} // end namespace toolchains
++} // end namespace driver
++} // end namespace clang
++
++#endif // LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_MIKROS_H
+diff -ruN a/clang/lib/Driver/ToolChains/Mikros.cpp b/clang/lib/Driver/ToolChains/Mikros.cpp
+--- a/clang/lib/Driver/ToolChains/Mikros.cpp
++++ b/clang/lib/Driver/ToolChains/Mikros.cpp
+@@ -0,0 +1,189 @@
++//===--- Mikros.cpp - Mikros ToolChain Implementation -----------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "Mikros.h"
++#include "clang/Driver/CommonArgs.h"
++#include "clang/Driver/Compilation.h"
++#include "clang/Driver/Driver.h"
++#include "clang/Options/Options.h"
++#include "llvm/Option/ArgList.h"
++#include "llvm/Support/Path.h"
++#include "llvm/Support/VirtualFileSystem.h"
++#include <string>
++
++using namespace clang::driver;
++using namespace clang::driver::toolchains;
++using namespace clang;
++using namespace llvm::opt;
++
++void tools::mikros::Linker::ConstructJob(Compilation &C, const JobAction &JA,
++                                         const InputInfo &Output,
++                                         const InputInfoList &Inputs,
++                                         const ArgList &Args,
++                                         const char *LinkingOutput) const {
++  const auto &TC = static_cast<const toolchains::Mikros &>(getToolChain());
++  const Driver &D = TC.getDriver();
++  const bool IsShared = Args.hasArg(options::OPT_shared);
++  const bool IsStaticPIE = Args.hasArg(options::OPT_static_pie);
++  const bool IsStatic = Args.hasArg(options::OPT_static) || IsStaticPIE;
++  const bool IsRelocatable = Args.hasArg(options::OPT_r);
++  ArgStringList CmdArgs;
++
++  if (!D.SysRoot.empty())
++    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
++
++  // Executables are always position independent. A static one, which
++  // only system components are, has no interpreter.
++  if (IsShared) {
++    CmdArgs.push_back("-shared");
++  } else if (IsStatic) {
++    CmdArgs.push_back("-static");
++    CmdArgs.push_back("-pie");
++    CmdArgs.push_back("--no-dynamic-linker");
++  } else if (!IsRelocatable) {
++    if (Args.hasArg(options::OPT_rdynamic))
++      CmdArgs.push_back("-export-dynamic");
++    CmdArgs.push_back("-pie");
++    CmdArgs.push_back("-dynamic-linker");
++    CmdArgs.push_back(Args.MakeArgString(TC.getDynamicLinker(Args)));
++  }
++
++  if (!IsRelocatable) {
++    CmdArgs.push_back("--eh-frame-hdr");
++    // There is no lazy binding.
++    CmdArgs.push_back("-z");
++    CmdArgs.push_back("now");
++    CmdArgs.push_back("-z");
++    CmdArgs.push_back("relro");
++  }
++
++  assert((Output.isFilename() || Output.isNothing()) && "Invalid output.");
++  if (Output.isFilename()) {
++    CmdArgs.push_back("-o");
++    CmdArgs.push_back(Output.getFilename());
++  }
++
++  const bool NoStdLib = Args.hasArg(options::OPT_nostdlib, options::OPT_r);
++  const bool NoDefaultLibs = Args.hasArg(options::OPT_nodefaultlibs);
++  const bool LinkStartFiles =
++      !NoStdLib && !Args.hasArg(options::OPT_nostartfiles);
++  const bool LinkLibC =
++      !NoStdLib && !NoDefaultLibs && !Args.hasArg(options::OPT_nolibc);
++  const bool LinkLibCXX = D.CCCIsCXX() && !NoStdLib && !NoDefaultLibs &&
++                          !Args.hasArg(options::OPT_nostdlibxx);
++
++  if (LinkStartFiles) {
++    if (!IsShared)
++      CmdArgs.push_back(Args.MakeArgString(TC.GetFilePath("crt1.o")));
++    CmdArgs.push_back(Args.MakeArgString(TC.GetFilePath("crti.o")));
++  }
++
++  Args.addAllArgs(CmdArgs, {options::OPT_L, options::OPT_u});
++  TC.AddFilePathLibArgs(Args, CmdArgs);
++
++  if (auto LTO = TC.getLTOMode(Args); LTO != LTOK_None)
++    addLTOOptions(TC, Args, CmdArgs, Output, Inputs, LTO == LTOK_Thin);
++
++  Args.addAllArgs(CmdArgs, {options::OPT_T_Group, options::OPT_s,
++                            options::OPT_t, options::OPT_r});
++  addLinkerCompressDebugSectionsOption(TC, Args, CmdArgs);
++
++  // LLD looks for lib<Name>.so and lib<Name>.a only, so each -l<Name>
++  // becomes the path of lib<Name>.dlib or lib<Name>.slib.
++  ArgStringList InputArgs;
++  AddLinkerInputs(TC, Inputs, Args, InputArgs, JA);
++  for (const char *A : InputArgs) {
++    llvm::StringRef S(A);
++    if (S.starts_with("-l") && !S.starts_with("-l:")) {
++      std::string Path = TC.findLibrary(Args, S.drop_front(2), IsStatic);
++      if (!Path.empty()) {
++        CmdArgs.push_back(Args.MakeArgString(Path));
++        continue;
++      }
++    }
++    CmdArgs.push_back(A);
++  }
++
++  if (LinkLibCXX) {
++    for (llvm::StringRef Name : {"c++", "c++abi", "unwind"}) {
++      std::string Path = TC.findLibrary(Args, Name, IsStatic);
++      CmdArgs.push_back(Path.empty()
++                            ? Args.MakeArgString("-l" + Name)
++                            : Args.MakeArgString(Path));
++    }
++  }
++  // Silence warnings when linking C code with a C++ '-stdlib' argument.
++  Args.ClaimAllArgs(options::OPT_stdlib_EQ);
++
++  if (LinkLibC) {
++    std::string Path = TC.findLibrary(Args, "c", IsStatic);
++    CmdArgs.push_back(Path.empty() ? "-lc" : Args.MakeArgString(Path));
++  }
++
++  // The compiler runtime is linked when it was built for Mikros.
++  if (!NoStdLib && !NoDefaultLibs) {
++    std::string Builtins =
++        TC.getCompilerRT(Args, "builtins", ToolChain::FT_Static);
++    if (TC.getVFS().exists(Builtins))
++      CmdArgs.push_back(Args.MakeArgString(Builtins));
++  }
++
++  if (LinkStartFiles)
++    CmdArgs.push_back(Args.MakeArgString(TC.GetFilePath("crtn.o")));
++
++  const char *Exec = Args.MakeArgString(TC.GetLinkerPath());
++  C.addCommand(std::make_unique<Command>(JA, *this,
++                                         ResponseFileSupport::AtFileCurCP(),
++                                         Exec, CmdArgs, Inputs, Output));
++}
++
++Mikros::Mikros(const Driver &D, const llvm::Triple &Triple,
++               const ArgList &Args)
++    : Generic_ELF(D, Triple, Args) {
++  getFilePaths().push_back(concat(getDriver().SysRoot, "/lib"));
++}
++
++std::string Mikros::findLibrary(const ArgList &Args, llvm::StringRef Name,
++                                bool Static) const {
++  llvm::SmallVector<std::string, 8> Dirs;
++  for (const Arg *A : Args.filtered(options::OPT_L))
++    Dirs.push_back(A->getValue());
++  for (const std::string &Dir : getFilePaths())
++    Dirs.push_back(Dir);
++  llvm::SmallVector<std::string, 2> Files;
++  if (!Static)
++    Files.push_back(("lib" + Name + ".dlib").str());
++  Files.push_back(("lib" + Name + ".slib").str());
++  for (const std::string &File : Files) {
++    for (const std::string &Dir : Dirs) {
++      llvm::SmallString<256> Path(Dir);
++      llvm::sys::path::append(Path, File);
++      if (getVFS().exists(Path))
++        return std::string(Path);
++    }
++  }
++  return {};
++}
++
++Tool *Mikros::buildLinker() const { return new tools::mikros::Linker(*this); }
++
++void Mikros::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
++                                       ArgStringList &CC1Args) const {
++  const Driver &D = getDriver();
++
++  if (DriverArgs.hasArg(options::OPT_nostdinc))
++    return;
++
++  if (!DriverArgs.hasArg(options::OPT_nobuiltininc))
++    addSystemInclude(DriverArgs, CC1Args, concat(D.ResourceDir, "/include"));
++
++  if (DriverArgs.hasArg(options::OPT_nostdlibinc))
++    return;
++
++  addSystemInclude(DriverArgs, CC1Args, concat(D.SysRoot, "/include"));
++}

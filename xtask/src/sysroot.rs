@@ -5,9 +5,10 @@
 //! `<mikros/syscalls.h>` and `<mikros/abi.h>` in `include/mikros/`;
 //! `libc.slib`, `crti.o` and `crtn.o` in `lib/`, with
 //! `lib/pkgconfig/`, and the Clang driver configuration file
-//! `x86_64-unknown-mikros.cfg`, which selects the target, its options
-//! and this sysroot. The Clang that `crate::llvm` builds is used with it
-//! as `clang --config=<sysroot>/x86_64-unknown-mikros.cfg`.
+//! `x86_64-unknown-mikros.cfg`, which selects the target, its CPU level
+//! and this sysroot. The Clang that `crate::llvm` builds, which knows the
+//! target, is used with it as
+//! `clang --config=<sysroot>/x86_64-unknown-mikros.cfg`.
 
 use crate::llvm::{self, LLVM};
 use anyhow::{Context, Result, bail};
@@ -41,6 +42,7 @@ pub fn build() -> Result<PathBuf> {
     llvm::build()?;
     check_llvm(&llvm::tool("clang"))?;
     check_llvm(&llvm::tool("ld.lld"))?;
+    check_driver()?;
     let sysroot = dir();
     for d in DIRS {
         let path = sysroot.join(d);
@@ -153,21 +155,48 @@ fn check_llvm(tool: &Path) -> Result<()> {
     }
 }
 
+/// Fails unless Clang compiles and links for the target with the
+/// settings it must have: position-independent code with the strong
+/// stack protector, linked by LLD as a position-independent executable
+/// with the Mikros interpreter.
+fn check_driver() -> Result<()> {
+    let output = Command::new(llvm::tool("clang"))
+        .args([
+            &format!("--target={TRIPLE}"),
+            "-###",
+            "-x",
+            "c",
+            "-",
+            "-o",
+            "a.out",
+        ])
+        .output()
+        .context("running clang -###")?;
+    let text = String::from_utf8_lossy(&output.stderr);
+    for wanted in [
+        "\"-mrelocation-model\" \"pic\"",
+        "\"-stack-protector\" \"2\"",
+        "ld.lld\"",
+        "\"-pie\"",
+        "\"-dynamic-linker\" \"/usr/lib/ld-mikros.dlib\"",
+        "crt1.o\"",
+    ] {
+        if !text.contains(wanted) {
+            bail!("clang for {TRIPLE} lacks {wanted}:\n{text}");
+        }
+    }
+    Ok(())
+}
+
 /// The Clang driver configuration of the target. `<CFGDIR>` is the
-/// directory of the file, which is the sysroot.
+/// directory of the file, which is the sysroot. The rest of the target's
+/// settings are the defaults of Clang's Mikros toolchain.
 fn driver_config() -> String {
     [
         "# The Mikros target, written by cargo xtask sysroot.",
         &format!("--target={TRIPLE}"),
         "-march=x86-64-v3",
-        "-fPIC",
-        "-fstack-protector-strong",
         "--sysroot=<CFGDIR>",
-        "-isystem",
-        "<CFGDIR>/include",
-        "-fuse-ld=lld",
-        "-pie",
-        "-Wl,--dynamic-linker=/usr/lib/ld-mikros.dlib",
         "",
     ]
     .join("\n")
@@ -183,11 +212,7 @@ mod tests {
         for option in [
             "--target=x86_64-unknown-mikros",
             "-march=x86-64-v3",
-            "-fPIC",
-            "-fstack-protector-strong",
-            "-fuse-ld=lld",
-            "-pie",
-            "-Wl,--dynamic-linker=/usr/lib/ld-mikros.dlib",
+            "--sysroot=<CFGDIR>",
         ] {
             assert!(cfg.lines().any(|l| l == option), "{option}");
         }

@@ -338,42 +338,21 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
 fn c_build(name: &str, sources: &[&str]) -> Result<PathBuf> {
     let root = crate::workspace_root();
     let sysroot = crate::sysroot::build()?;
-    let lib = sysroot.join("lib");
     let dir = root.join("target/c").join(name);
     fs::create_dir_all(&dir)?;
-    let mut objects = Vec::new();
-    for source in sources {
-        let object = dir.join(Path::new(source).with_extension("o").file_name().unwrap());
-        let status = Command::new(crate::llvm::tool("clang"))
-            .arg(format!(
-                "--config={}",
-                crate::sysroot::config(&sysroot).display()
-            ))
-            .args(["-O2", "-c"])
-            .arg(root.join(source))
-            .arg("-o")
-            .arg(&object)
-            .status()
-            .context("failed to run clang")?;
-        if !status.success() {
-            bail!("compiling {source} failed");
-        }
-        objects.push(object);
-    }
-    // LLD links the program directly, until Clang can.
     let program = dir.join(name);
-    let status = Command::new(crate::llvm::tool("ld.lld"))
-        .args(["-static", "-pie", "--no-dynamic-linker", "-o"])
+    let status = Command::new(crate::llvm::tool("clang"))
+        .arg(format!(
+            "--config={}",
+            crate::sysroot::config(&sysroot).display()
+        ))
+        .args(["-O2", "-static-pie", "-o"])
         .arg(&program)
-        .arg(lib.join("crt1.o"))
-        .arg(lib.join("crti.o"))
-        .args(&objects)
-        .arg(lib.join("libc.slib"))
-        .arg(lib.join("crtn.o"))
+        .args(sources.iter().map(|s| root.join(s)))
         .status()
-        .context("failed to run ld.lld")?;
+        .context("failed to run clang")?;
     if !status.success() {
-        bail!("linking {name} failed");
+        bail!("building {name} failed");
     }
     Ok(program)
 }
