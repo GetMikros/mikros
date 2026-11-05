@@ -5,4 +5,4 @@ provides:
   - protocol: test.directory.Open
   - protocol: test.directory.Protected
     permission: camera
-permissions: [permissions.check]
+permissions: [permissions.check, services.register]

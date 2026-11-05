@@ -2,8 +2,10 @@
 //! drive its `Directory` endpoint from a service's side. It connects
 //! through its directory to the permission broker, to protocols that do
 //! not exist or that it may not use, and to a protocol it provides
-//! itself, and exits with 0 when every check passed or with the number
-//! of the first that failed.
+//! itself. It then registers named instances through the registrar,
+//! lists, watches and connects to them, and removes them. It exits with
+//! 0 when every check passed or with the number of the first that
+//! failed.
 
 #![no_std]
 #![no_main]
@@ -18,7 +20,8 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerAsyncClient, Decision};
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 use mikros_rt::interfaces::mikros::service::{
-    ClientIdentity, DirectoryAsyncClient, Provider, ProviderAsyncServer, ProviderRequest,
+    ClientIdentity, DirectoryAsyncClient, DirectoryEvent, Provider, ProviderAsyncServer,
+    ProviderRequest, Registrar, RegistrarAsyncClient,
 };
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
@@ -29,6 +32,8 @@ const BROKER: &str = "mikros.permissions.Broker";
 const MISSING: &str = "test.directory.None";
 const OPEN: &str = "test.directory.Open";
 const PROTECTED: &str = "test.directory.Protected";
+const REGISTRAR: &str = "mikros.service.Registrar";
+const NAMED: &str = "test.directory.Named";
 const INFO_BASIC: u32 = 1;
 const INFO_BASIC_SIZE: usize = 24;
 /// The step a failure to set the checks up ends with.
@@ -110,10 +115,50 @@ async fn connect(
     }
 }
 
-async fn list(directory: &DirectoryAsyncClient, protocol: &str) -> Result<(), Status> {
+async fn list(directory: &DirectoryAsyncClient, protocol: &str) -> Result<Vec<String>, Status> {
     match directory.list(protocol.into()).await {
+        Ok(r) => r.map(|r| r.instances),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// Registers `instance` of `protocol` with `permission`, and returns
+/// the server end of its provider.
+async fn register(
+    registrar: &RegistrarAsyncClient,
+    protocol: &str,
+    instance: &str,
+    permission: Option<&str>,
+) -> Result<ServerEnd<Provider>, Status> {
+    let (client, server) = endpoints::<Provider>().map_err(|_| Status::NoMemory)?;
+    let permission = permission.map(String::from);
+    match registrar
+        .register(protocol.into(), instance.into(), permission, client)
+        .await
+    {
+        Ok(r) => r.map(|_| server),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+async fn unregister(registrar: &RegistrarAsyncClient, instance: &str) -> Result<(), Status> {
+    match registrar.unregister(NAMED.into(), instance.into()).await {
         Ok(r) => r.map(drop),
         Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// Whether the next event of `directory` says that `instance` of
+/// `NAMED` was added, or removed.
+async fn told(directory: &DirectoryAsyncClient, instance: &str, added: bool) -> bool {
+    match directory.next_event().await {
+        Ok(DirectoryEvent::OnInstanceAdded(e)) => {
+            added && e.protocol == NAMED && e.instance == instance
+        }
+        Ok(DirectoryEvent::OnInstanceRemoved(e)) => {
+            !added && e.protocol == NAMED && e.instance == instance
+        }
+        Err(_) => false,
     }
 }
 
@@ -207,5 +252,79 @@ async fn probe(
             }
             _ => false,
         },
+    )?;
+
+    let (client, server) = endpoints::<Registrar>().map_err(|_| SETUP)?;
+    let connected = d
+        .connect(REGISTRAR.into(), None, server.into_handle())
+        .await;
+    check(
+        "connecting to the registrar",
+        matches!(connected, Ok(Ok(_))),
+    )?;
+    let r = RegistrarAsyncClient::new(client, reactor.clone());
+    let one = register(&r, NAMED, "one", None).await;
+    check("registering an instance", one.is_ok())?;
+    let one = ProviderAsyncServer::new(one.map_err(|_| SETUP)?, reactor.clone());
+    check(
+        "refusing an instance twice",
+        register(&r, NAMED, "one", None).await.err() == Some(Status::AlreadyExists),
+    )?;
+    check(
+        "refusing an instance of a provided protocol",
+        register(&r, OPEN, "x", None).await.err() == Some(Status::AlreadyExists),
+    )?;
+    check(
+        "refusing an unknown permission",
+        register(&r, NAMED, "bad", Some("nope")).await.err() == Some(Status::InvalidArgs),
+    )?;
+    let watched = d.watch(NAMED.into()).await;
+    check("watching named instances", matches!(watched, Ok(Ok(_))))?;
+    let two = register(&r, NAMED, "two", None).await;
+    check(
+        "telling of an added instance",
+        two.is_ok() && told(d, "two", true).await,
+    )?;
+    let secret = register(&r, NAMED, "secret", Some("camera")).await;
+    check("registering a protected instance", secret.is_ok())?;
+    let listed = list(d, NAMED).await;
+    check(
+        "listing only the instances it may use",
+        listed.as_deref() == Ok(&[String::from("one"), String::from("two")][..]),
+    )?;
+    check(
+        "refusing a named protocol without an instance",
+        connect(d, NAMED, None).await.err() == Some(Status::InvalidArgs),
+    )?;
+    check(
+        "refusing a missing instance",
+        connect(d, NAMED, Some("zzz")).await.err() == Some(Status::NotFound),
+    )?;
+    check(
+        "refusing a protected instance",
+        connect(d, NAMED, Some("secret")).await.err() == Some(Status::AccessDenied),
+    )?;
+    let named = connect(d, NAMED, Some("one")).await;
+    let forwarded = match &named {
+        Ok(_) => one.next().await.ok(),
+        Err(_) => None,
+    };
+    check(
+        "forwarding a connection to an instance",
+        matches!(forwarded, Some(ProviderRequest::Connect(c))
+            if c.protocol == NAMED && c.instance.as_deref() == Some("one") && c.client == *own),
+    )?;
+    check(
+        "unregistering an instance",
+        unregister(&r, "two").await == Ok(()) && told(d, "two", false).await,
+    )?;
+    check(
+        "refusing a missing instance to unregister",
+        unregister(&r, "two").await == Err(Status::NotFound),
+    )?;
+    drop(one);
+    check(
+        "removing an instance whose provider closed",
+        told(d, "one", false).await && list(d, NAMED).await == Ok(Vec::new()),
     )
 }
