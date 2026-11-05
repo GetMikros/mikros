@@ -589,6 +589,24 @@ static int signals_wait(void)
 		&& woke && gettid() > 0;
 }
 
+/* A pipe carries what is written to its other end, ends once the
+   writing end is closed, and keeps FD_CLOEXEC. */
+static int pipes_carry_data(void)
+{
+	int p[2], q[2];
+	char buf[8];
+	struct stat st;
+	if (pipe(p) || write(p[1], "abc", 3) != 3 || read(p[0], buf, sizeof buf) != 3
+	    || memcmp(buf, "abc", 3) != 0 || fstat(p[0], &st) || !S_ISFIFO(st.st_mode)
+	    || close(p[1]) || read(p[0], buf, sizeof buf) != 0 || close(p[0]))
+		return 0;
+	int ok = pipe2(q, O_CLOEXEC) == 0 && fcntl(q[0], F_GETFD) == FD_CLOEXEC
+		&& fcntl(q[1], F_GETFD) == FD_CLOEXEC;
+	close(q[0]);
+	close(q[1]);
+	return ok;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -636,9 +654,11 @@ int main(int argc, char **argv)
 		return 21;
 	if (!signals_wait())
 		return 22;
+	if (!pipes_carry_data())
+		return 23;
 	char *copy = malloc(64);
 	if (!copy)
-		return 23;
+		return 24;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

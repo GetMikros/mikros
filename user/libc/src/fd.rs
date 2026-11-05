@@ -191,3 +191,32 @@ pub fn duplicate_from(fd: i64, from: i64, close_on_exec: bool) -> i64 {
         None => -EBADF,
     }
 }
+
+/// `pipe2`: a new stream, with descriptors for reading from one end and
+/// writing to the other at `fds`. Only `O_CLOEXEC` is taken in `flags`.
+pub fn pipe(fds: *mut [i32; 2], flags: u32) -> i64 {
+    if flags & !crate::fs::O_CLOEXEC != 0 {
+        return -EINVAL;
+    }
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    let status = unsafe { mikros_rt::sys::stream_create(0, &mut a, &mut b) };
+    if status != mikros_rt::OK {
+        return -crate::errno::from_status(status);
+    }
+    // SAFETY: the kernel just created the handles for us.
+    let (a, b) = unsafe { (OwnedHandle::from_raw(a), OwnedHandle::from_raw(b)) };
+    let cloexec = flags & crate::fs::O_CLOEXEC != 0;
+    let read = insert(Arc::new(Description::Stream(a)), cloexec, 0);
+    if read < 0 {
+        return read;
+    }
+    let write = insert(Arc::new(Description::Stream(b)), cloexec, 0);
+    if write < 0 {
+        close(read);
+        return write;
+    }
+    // SAFETY: musl passes room for two descriptors.
+    unsafe { fds.write([read as i32, write as i32]) };
+    0
+}

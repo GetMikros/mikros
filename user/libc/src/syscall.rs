@@ -32,6 +32,7 @@ const SYS_PWRITE64: i64 = 18;
 const SYS_READV: i64 = 19;
 const SYS_WRITEV: i64 = 20;
 const SYS_ACCESS: i64 = 21;
+const SYS_PIPE: i64 = 22;
 const SYS_DUP: i64 = 32;
 const SYS_DUP2: i64 = 33;
 const SYS_EXIT: i64 = 60;
@@ -57,6 +58,7 @@ const SYS_NEWFSTATAT: i64 = 262;
 const SYS_READLINKAT: i64 = 267;
 const SYS_FACCESSAT: i64 = 269;
 const SYS_DUP3: i64 = 292;
+const SYS_PIPE2: i64 = 293;
 const SYS_GETRANDOM: i64 = 318;
 const SYS_FACCESSAT2: i64 = 439;
 
@@ -141,6 +143,8 @@ extern "C" fn __mikros_syscall(
         SYS_ACCESS => fs::access(fs::AT_FDCWD, a1 as *const u8, a2, 0),
         SYS_FACCESSAT => fs::access(a1, a2 as *const u8, a3, 0),
         SYS_FACCESSAT2 => fs::access(a1, a2 as *const u8, a3, a4),
+        SYS_PIPE => fd::pipe(a1 as *mut [i32; 2], 0),
+        SYS_PIPE2 => fd::pipe(a1 as *mut [i32; 2], a2 as u32),
         SYS_DUP => fd::duplicate_from(a1, 0, false),
         SYS_DUP2 => dup2(a1, a2),
         SYS_DUP3 => dup3(a1, a2, a3 as u32),
