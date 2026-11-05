@@ -466,9 +466,15 @@ static void on_signal_blocking(int signo, siginfo_t *info, void *context)
 	sigaddset(&((ucontext_t *)context)->uc_sigmask, SIGUSR2);
 }
 
+static sem_t waiter_ready;
+
+/* Waits for SIGUSR1, which it blocks, after saying it is ready: a new
+   thread starts with no signals blocked until musl restores the mask it
+   inherits. */
 static void *wait_for_usr1(void *arg)
 {
 	(void)arg;
+	sem_post(&waiter_ready);
 	sigset_t set;
 	sigemptyset(&set);
 	sigaddset(&set, SIGUSR1);
@@ -534,9 +540,10 @@ static int signals_are_handled(void)
 	sigset_t usr1;
 	sigemptyset(&usr1);
 	sigaddset(&usr1, SIGUSR1);
+	sem_init(&waiter_ready, 0, 0);
 	if (sigprocmask(SIG_BLOCK, &usr1, 0)
 	    || pthread_create(&waiter, 0, wait_for_usr1, 0)
-	    || sigprocmask(SIG_UNBLOCK, &usr1, 0)
+	    || sigprocmask(SIG_UNBLOCK, &usr1, 0) || sem_wait(&waiter_ready)
 	    || pthread_kill(waiter, SIGUSR1) || pthread_join(waiter, &woke) || !woke)
 		return 0;
 	struct timespec none = { 0, 1000000 };
@@ -574,9 +581,10 @@ static int signals_wait(void)
 	sigset_t usr1;
 	sigemptyset(&usr1);
 	sigaddset(&usr1, SIGUSR1);
+	sem_init(&waiter_ready, 0, 0);
 	return sigprocmask(SIG_BLOCK, &usr1, 0) == 0
 		&& pthread_create(&waiter, 0, wait_for_usr1, 0) == 0
-		&& sigprocmask(SIG_UNBLOCK, &usr1, 0) == 0
+		&& sigprocmask(SIG_UNBLOCK, &usr1, 0) == 0 && sem_wait(&waiter_ready) == 0
 		&& pthread_kill(waiter, SIGUSR1) == 0 && pthread_join(waiter, &woke) == 0
 		&& woke && gettid() > 0;
 }
