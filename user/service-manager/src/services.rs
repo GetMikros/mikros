@@ -4,10 +4,12 @@ use crate::boot::BootHandles;
 use crate::broker;
 use crate::directory::Dir;
 use crate::files::{self, Failure};
-use crate::launch::{self, Started};
+use crate::supervisor::Supervisor;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use mikros_manifest::{Service, order};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient};
@@ -22,7 +24,8 @@ const SUFFIX: &str = ".yaml";
 /// they provide in `dir`, and starts the boot services in order as the
 /// service manager `me`: the permission broker first, then each other
 /// one once its permissions are registered with the broker. Each gets
-/// the boot handles of `boot` that its manifest lists.
+/// the boot handles of `boot` that its manifest lists, and is restarted
+/// as its manifest says.
 pub async fn start(
     root: NodeAsyncClient,
     reactor: Reactor,
@@ -50,73 +53,33 @@ pub async fn start(
     // TODO: start on-demand services at the first connection; until
     // then, connections to them wait.
     dir.set_services(&services, |i| order.blocked.iter().all(|(b, _)| *b != i));
-    let Some((&first, rest)) = order.start.split_first() else {
+    let start = order.start.clone();
+    let supervisor = Rc::new(Supervisor {
+        launcher,
+        boot,
+        reactor,
+        me,
+        dir,
+        services,
+        manifests,
+        broker: RefCell::new(None),
+        active: RefCell::new(BTreeSet::new()),
+        restarts: RefCell::new(BTreeMap::new()),
+    });
+    // `order` puts the broker first whenever anything starts; without
+    // it, nothing else can.
+    let Some((&first, rest)) = start.split_first() else {
         return;
     };
-    // `order` puts the broker first whenever anything starts.
-    let started = broker::start(
-        &launcher,
-        &boot,
-        &reactor,
-        me,
-        &services[first],
-        &manifests[first],
-    );
-    let broker = match started.await {
-        Ok((started, broker)) => {
-            mikros_rt::log!(Info, "started the permission broker as pid {}", started.pid);
-            dir.set_broker(broker.clone());
-            running(&dir, &reactor, &services[first], started);
-            broker
+    if !supervisor.start(first).await {
+        for &i in rest {
+            supervisor.dir.never(&supervisor.services[i].name);
         }
-        Err(why) => {
-            mikros_rt::log!(Error, "the permission broker did not start: {why}");
-            for &i in &order.start {
-                dir.never(&services[i].name);
-            }
-            return;
-        }
-    };
-    for &i in rest {
-        let service = &services[i];
-        let app_id = format!("system.{}", service.name);
-        let started = match broker::grant(&broker, &app_id, service.permissions.clone()).await {
-            Ok(()) => launch::launch(&launcher, &boot, service, Vec::new()).await,
-            Err(why) => Err(why),
-        };
-        match started {
-            Ok(started) => {
-                mikros_rt::log!(
-                    Info,
-                    "started service {} as pid {}",
-                    service.name,
-                    started.pid
-                );
-                running(&dir, &reactor, service, started);
-            }
-            Err(why) => {
-                mikros_rt::log!(Error, "service {} did not start: {why}", service.name);
-                dir.never(&service.name);
-            }
-        }
+        return;
     }
-}
-
-/// Forwards connections to `service`, which `started` runs, and logs
-/// when it ends, after which its protocols are no longer provided.
-fn running(dir: &Rc<Dir>, reactor: &Reactor, service: &Service, started: Started) {
-    dir.running(&service.name, started.provider);
-    let (dir, reactor, name) = (dir.clone(), reactor.clone(), service.name.clone());
-    let spawner = dir.spawner().clone();
-    spawner.spawn(async move {
-        // TODO: restart services as their manifests say.
-        match launch::exited(&reactor, &started.process).await {
-            Some((code, 0)) => mikros_rt::log!(Info, "service {name} exited with code {code}"),
-            Some((_, signal)) => mikros_rt::log!(Info, "service {name} ended by signal {signal}"),
-            None => mikros_rt::log!(Error, "service {name} could not be watched"),
-        }
-        dir.never(&name);
-    });
+    for &i in rest {
+        supervisor.start(i).await;
+    }
 }
 
 /// The services of the valid manifests, with the manifests' bytes.

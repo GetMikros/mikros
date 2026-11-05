@@ -20,6 +20,7 @@ mod files;
 mod launch;
 mod registrar;
 mod services;
+mod supervisor;
 
 use crate::boot::BootHandles;
 use crate::directory::Dir;

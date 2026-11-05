@@ -199,6 +199,16 @@ impl Dir {
         }
     }
 
+    /// Keeps the connections to the protocols of `service`, which ended
+    /// and is restarting, until it runs again.
+    pub fn stopped(&self, service: &str) {
+        for p in self.provided.borrow_mut().values_mut() {
+            if p.service == service {
+                p.provider = Provider::Waiting(Vec::new());
+            }
+        }
+    }
+
     /// Fails the connections to the protocols of `service`, which will
     /// not run, by closing them.
     pub fn never(&self, service: &str) {
