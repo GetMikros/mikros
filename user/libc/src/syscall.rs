@@ -4,23 +4,30 @@
 //! value, or a negated error number. Operations that the C library does
 //! not perform yet fail with `ENOSYS`.
 
-use crate::errno::{self, EACCES, EBADF, EINVAL, ENOSYS, ENOTTY, EPIPE};
-use crate::{clock, fd};
+use crate::errno::{self, EACCES, EBADF, EINVAL, ENOSYS, ENOTTY};
+use crate::{clock, fd, io};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::sys::{self, Handle};
 
+const SYS_READ: i64 = 0;
 const SYS_WRITE: i64 = 1;
+const SYS_CLOSE: i64 = 3;
 const SYS_MMAP: i64 = 9;
 const SYS_MPROTECT: i64 = 10;
 const SYS_MUNMAP: i64 = 11;
 const SYS_BRK: i64 = 12;
 const SYS_IOCTL: i64 = 16;
+const SYS_READV: i64 = 19;
 const SYS_WRITEV: i64 = 20;
+const SYS_DUP: i64 = 32;
+const SYS_DUP2: i64 = 33;
 const SYS_EXIT: i64 = 60;
+const SYS_FCNTL: i64 = 72;
 const SYS_SET_THREAD_AREA: i64 = 205;
 const SYS_SET_TID_ADDRESS: i64 = 218;
 const SYS_CLOCK_GETTIME: i64 = 228;
 const SYS_EXIT_GROUP: i64 = 231;
+const SYS_DUP3: i64 = 292;
 const SYS_GETRANDOM: i64 = 318;
 
 const PROT_READ: i64 = 1;
@@ -35,10 +42,15 @@ const PERM_EXECUTE: u32 = 1 << 2;
 const SPECIFIC: u32 = 1 << 8;
 const PAGE_SIZE: u64 = 4096;
 
-const WRITABLE: u32 = 1 << 1;
-const PEER_CLOSED: u32 = 1 << 2;
-const SHOULD_WAIT: sys::Status = -22;
-const STATUS_PEER_CLOSED: sys::Status = -24;
+const F_DUPFD: i64 = 0;
+const F_GETFD: i64 = 1;
+const F_SETFD: i64 = 2;
+const F_GETFL: i64 = 3;
+const F_SETFL: i64 = 4;
+const F_DUPFD_CLOEXEC: i64 = 1030;
+const FD_CLOEXEC: i64 = 1;
+const O_RDWR: u32 = 0o2;
+const O_CLOEXEC: u32 = 0o2000000;
 
 /// The process handle, for the mappings of `mmap`.
 static PROCESS: AtomicU32 = AtomicU32::new(0);
@@ -63,9 +75,23 @@ extern "C" fn __mikros_syscall(
 ) -> i64 {
     let _ = a6;
     match n {
-        SYS_WRITE => write(a1, a2 as *const u8, a3 as u64),
-        SYS_WRITEV => writev(a1, a2 as *const Iovec, a3),
-        SYS_IOCTL => ioctl(a1),
+        SYS_READ => io::read(a1, a2 as *mut u8, a3 as u64),
+        SYS_WRITE => io::write(a1, a2 as *const u8, a3 as u64),
+        SYS_READV => io::vectored(a1, a2 as *const io::Iovec, a3, false),
+        SYS_WRITEV => io::vectored(a1, a2 as *const io::Iovec, a3, true),
+        SYS_CLOSE => fd::close(a1),
+        SYS_DUP => fd::duplicate_from(a1, 0, false),
+        SYS_DUP2 => dup2(a1, a2),
+        SYS_DUP3 => dup3(a1, a2, a3 as u32),
+        SYS_FCNTL => fcntl(a1, a2, a3),
+        // No descriptor is a terminal yet.
+        SYS_IOCTL => {
+            if fd::get(a1).is_some() {
+                -ENOTTY
+            } else {
+                -EBADF
+            }
+        }
         SYS_MMAP => mmap(a1 as u64, a2 as u64, a3, a4, a5),
         SYS_MPROTECT => mprotect(a1 as u64, a2 as u64, a3),
         // SAFETY: unmapping takes no pointers.
@@ -97,73 +123,6 @@ fn exit(code: i64) -> ! {
     // SAFETY: ending the process takes no pointers.
     unsafe { sys::process_exit(code) };
     unreachable!("process_exit returned");
-}
-
-#[repr(C)]
-struct Iovec {
-    base: *const u8,
-    len: u64,
-}
-
-/// Writes `len` bytes at `buf` to descriptor `fd`, waiting while the
-/// stream is full.
-fn write(fd: i64, buf: *const u8, len: u64) -> i64 {
-    let Some(stream) = fd::stream(fd) else {
-        return -EBADF;
-    };
-    loop {
-        let mut actual = 0;
-        // SAFETY: musl passes a buffer of `len` bytes.
-        let status = unsafe { sys::stream_write(stream, buf, len, &mut actual) };
-        if status != SHOULD_WAIT {
-            return match status {
-                STATUS_PEER_CLOSED => -EPIPE,
-                _ => errno::result(status, actual as i64),
-            };
-        }
-        let mut observed = 0;
-        // SAFETY: the out pointer is valid for the call.
-        let waited = unsafe {
-            sys::object_wait_one(stream, WRITABLE | PEER_CLOSED, i64::MAX, &mut observed)
-        };
-        if waited != mikros_rt::OK {
-            return -errno::from_status(waited);
-        }
-    }
-}
-
-/// Writes the `count` buffers at `iov` in order, and stops at the first
-/// that is written only in part.
-fn writev(fd: i64, iov: *const Iovec, count: i64) -> i64 {
-    if !(0..=1024).contains(&count) {
-        return -EINVAL;
-    }
-    let mut total = 0;
-    for i in 0..count as usize {
-        // SAFETY: musl passes `count` buffers.
-        let v = unsafe { &*iov.add(i) };
-        if v.len == 0 {
-            continue;
-        }
-        let written = write(fd, v.base, v.len);
-        if written < 0 {
-            return if total > 0 { total } else { written };
-        }
-        total += written;
-        if (written as u64) < v.len {
-            break;
-        }
-    }
-    total
-}
-
-/// No descriptor is a terminal yet.
-fn ioctl(fd: i64) -> i64 {
-    if fd::stream(fd).is_some() {
-        -ENOTTY
-    } else {
-        -EBADF
-    }
 }
 
 /// The Mikros permissions of `prot`, or `EACCES` when it asks for
@@ -237,4 +196,37 @@ fn mprotect(addr: u64, len: u64, prot: i64) -> i64 {
 fn getrandom(buf: *mut u8, len: u64) -> i64 {
     // SAFETY: musl passes a buffer of `len` bytes.
     errno::result(unsafe { sys::system_get_random(buf, len) }, len as i64)
+}
+
+fn dup2(from: i64, to: i64) -> i64 {
+    if from == to {
+        return if fd::get(from).is_some() { to } else { -EBADF };
+    }
+    fd::duplicate_to(from, to, false)
+}
+
+fn dup3(from: i64, to: i64, flags: u32) -> i64 {
+    if from == to || flags & !O_CLOEXEC != 0 {
+        return -EINVAL;
+    }
+    fd::duplicate_to(from, to, flags & O_CLOEXEC != 0)
+}
+
+fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
+    match cmd {
+        F_DUPFD => fd::duplicate_from(fd, arg, false),
+        F_DUPFD_CLOEXEC => fd::duplicate_from(fd, arg, true),
+        F_GETFD => match fd::close_on_exec(fd) {
+            Some(cloexec) => i64::from(cloexec) * FD_CLOEXEC,
+            None => -EBADF,
+        },
+        F_SETFD => fd::set_close_on_exec(fd, arg & FD_CLOEXEC != 0),
+        // Streams are read and written, and have no other flags.
+        F_GETFL | F_SETFL => match fd::get(fd) {
+            Some(_) if cmd == F_GETFL => i64::from(O_RDWR),
+            Some(_) => 0,
+            None => -EBADF,
+        },
+        _ => -EINVAL,
+    }
 }

@@ -10,6 +10,8 @@ mod abi;
 mod clock;
 mod errno;
 mod fd;
+mod io;
+mod lock;
 mod start;
 mod syscall;
 

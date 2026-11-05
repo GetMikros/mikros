@@ -11,6 +11,7 @@ pub const ENOMEM: i64 = 12;
 pub const EACCES: i64 = 13;
 pub const EEXIST: i64 = 17;
 pub const EINVAL: i64 = 22;
+pub const EMFILE: i64 = 24;
 pub const ENOTTY: i64 = 25;
 pub const EPIPE: i64 = 32;
 pub const ERANGE: i64 = 34;
