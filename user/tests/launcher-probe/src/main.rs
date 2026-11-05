@@ -48,6 +48,8 @@ const PROBE: &str = "/usr/bin/probe";
 const HELLO: &str = "/usr/bin/hello";
 /// The same program linked with the shared C library.
 const HELLO_DYNAMIC: &str = "/usr/bin/hello-dynamic";
+/// A C program that needs a shared library.
+const LIBRARY_USER: &str = "/usr/bin/library-user";
 /// The `id` of a stream as descriptor 1.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const KILL: u32 = 9;
@@ -394,6 +396,12 @@ async fn probe(l: &LauncherAsyncClient) -> i64 {
         check(
             "reading what it printed",
             output.as_slice() == b"hello, world\n",
+        )?;
+        let (output, code) = run_c(l, LIBRARY_USER).await;
+        check("running a C program with a shared library", code == Some(0))?;
+        check(
+            "reading what the library wrote",
+            output.as_slice() == b"hello from a library, call 1\n",
         )?;
         Ok(())
     };

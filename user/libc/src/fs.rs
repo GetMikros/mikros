@@ -88,6 +88,11 @@ pub fn normalize(base: &str, path: &[u8]) -> Option<String> {
     Some(out)
 }
 
+/// The absolute path of the current directory.
+pub fn cwd() -> String {
+    CWD.lock().clone()
+}
+
 /// The namespace entry for the absolute, normalized `path`: its path,
 /// its connection, the rest of the path below it, which is empty for the
 /// entry itself, and its device number.

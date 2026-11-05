@@ -147,6 +147,7 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
     );
     fd::install(&mut managed.handles);
     fs::install(core::mem::take(&mut managed.namespace));
+    crate::library::install(header.bundle.as_deref());
     SYSTEM_PROCESS.store(
         header.app_id.as_bytes().starts_with(SYSTEM),
         core::sync::atomic::Ordering::Relaxed,

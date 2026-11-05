@@ -13,6 +13,7 @@ mod errno;
 mod fd;
 mod fs;
 mod io;
+mod library;
 mod lock;
 mod start;
 mod stat;

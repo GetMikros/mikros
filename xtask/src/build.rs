@@ -144,14 +144,47 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", services.display());
             let probe = user_build("launcher-probe", kind)?;
             println!("built    {}", probe.display());
-            let hello = c_build("hello-c", &["user/tests/hello-c/hello.c"], Linking::Static)?;
+            let hello = c_build(
+                "hello-c",
+                &["user/tests/hello-c/hello.c"],
+                Linking::Static,
+                &[],
+            )?;
             println!("built    {}", hello.display());
             let hello_dynamic = c_build(
                 "hello-c-dynamic",
                 &["user/tests/hello-c/hello.c"],
                 Linking::Dynamic,
+                &[],
             )?;
             println!("built    {}", hello_dynamic.display());
+            let greet = c_build(
+                "libgreet",
+                &["user/tests/library-c/greet.c"],
+                Linking::Shared("libgreet.1.dlib"),
+                &[],
+            )?;
+            println!("built    {}", greet.display());
+            let decoy = c_build(
+                "libgreet-decoy",
+                &["user/tests/library-c/decoy.c"],
+                Linking::Shared("libgreet.1.dlib"),
+                &[],
+            )?;
+            println!("built    {}", decoy.display());
+            // The program names the decoy's directory in a DT_RPATH,
+            // which the dynamic linker ignores.
+            let library_user = c_build(
+                "library-user",
+                &["user/tests/library-c/main.c"],
+                Linking::Dynamic,
+                &[
+                    format!("-L{}", c_dir("libgreet").display()),
+                    "-lgreet".to_owned(),
+                    "-Wl,--disable-new-dtags,-rpath,/usr/share/decoy".to_owned(),
+                ],
+            )?;
+            println!("built    {}", library_user.display());
             let dynamic_linker = crate::sysroot::dir().join("lib/ld-mikros.dlib");
             let greeting = crate::workspace_root().join("user/tests/hello-c/greeting.txt");
             // The process manager tests serve this image, in which the
@@ -165,6 +198,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/hello", hello.as_path()),
                     ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
                     ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
+                    ("usr/bin/library-user", library_user.as_path()),
+                    ("usr/lib/libgreet.1.dlib", greet.as_path()),
+                    ("usr/share/decoy/libgreet.1.dlib", decoy.as_path()),
                     ("usr/share/hello/greeting.txt", greeting.as_path()),
                 ],
                 &[],
@@ -370,32 +406,51 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
 enum Linking {
     Static,
     Dynamic,
+    /// A shared library `<name>.dlib` with this `DT_SONAME`.
+    Shared(&'static str),
 }
 
-/// Builds the C program `name` from `sources`, paths relative to the
-/// repository, against the sysroot, and returns its path.
-fn c_build(name: &str, sources: &[&str], linking: Linking) -> Result<PathBuf> {
+/// Builds the C program or library `name` from `sources`, paths relative
+/// to the repository, against the sysroot, with the further arguments
+/// `args`, and returns its path, in `target/c/<name>/`.
+fn c_build(name: &str, sources: &[&str], linking: Linking, args: &[String]) -> Result<PathBuf> {
     let root = crate::workspace_root();
     let sysroot = crate::sysroot::build()?;
-    let dir = root.join("target/c").join(name);
+    let dir = c_dir(name);
     fs::create_dir_all(&dir)?;
-    let program = dir.join(name);
-    let status = Command::new(crate::llvm::tool("clang"))
-        .arg(format!(
-            "--config={}",
-            crate::sysroot::config(&sysroot).display()
-        ))
-        .arg("-O2")
-        .args((linking == Linking::Static).then_some("-static-pie"))
+    let mut command = Command::new(crate::llvm::tool("clang"));
+    command.arg(format!(
+        "--config={}",
+        crate::sysroot::config(&sysroot).display()
+    ));
+    command.arg("-O2");
+    let program = match linking {
+        Linking::Static => {
+            command.arg("-static-pie");
+            dir.join(name)
+        }
+        Linking::Dynamic => dir.join(name),
+        Linking::Shared(soname) => {
+            command.args(["-shared", "-fPIC", &format!("-Wl,-soname,{soname}")]);
+            dir.join(format!("{name}.dlib"))
+        }
+    };
+    let status = command
         .arg("-o")
         .arg(&program)
         .args(sources.iter().map(|s| root.join(s)))
+        .args(args)
         .status()
         .context("failed to run clang")?;
     if !status.success() {
         bail!("building {name} failed");
     }
     Ok(program)
+}
+
+/// The directory that `c_build` builds `name` in.
+fn c_dir(name: &str) -> PathBuf {
+    crate::workspace_root().join("target/c").join(name)
 }
 
 /// Writes the syzkaller descriptions and constants generated from the

@@ -1,0 +1,174 @@
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -625,20 +625,6 @@
+ 	}
+ }
+ 
+-static ssize_t read_loop(int fd, void *p, size_t n)
+-{
+-	for (size_t i=0; i<n; ) {
+-		ssize_t l = read(fd, (char *)p+i, n-i);
+-		if (l<0) {
+-			if (errno==EINTR) continue;
+-			else return -1;
+-		}
+-		if (l==0) return i;
+-		i += l;
+-	}
+-	return n;
+-}
+-
+ static void *mmap_fixed(void *p, size_t n, int prot, int flags, int fd, off_t off)
+ {
+ 	static int no_map_fixed;
+@@ -896,80 +882,23 @@
+ 	}
+ }
+ 
++/* Mikros: the Mikros layer keeps only the DT_RUNPATH entries that
++ * start with $ORIGIN and stay within the app's bundle, and gives the
++ * directories searched after them. Each returns the size of its list,
++ * which it writes only when it fits. */
++hidden size_t __mikros_runpath(const char *, const char *, char *, size_t);
++hidden size_t __mikros_library_path(char *, size_t);
++
+ static int fixup_rpath(struct dso *p, char *buf, size_t buf_size)
+ {
+-	size_t n, l;
+-	const char *s, *t, *origin;
+-	char *d;
++	size_t n;
++	const char *origin;
+ 	if (p->rpath || !p->rpath_orig) return 0;
+-	if (!strchr(p->rpath_orig, '$')) {
+-		p->rpath = p->rpath_orig;
+-		return 0;
+-	}
+-	n = 0;
+-	s = p->rpath_orig;
+-	while ((t=strchr(s, '$'))) {
+-		if (strncmp(t, "$ORIGIN", 7) && strncmp(t, "${ORIGIN}", 9))
+-			return 0;
+-		s = t+1;
+-		n++;
+-	}
+-	if (n > SSIZE_MAX/PATH_MAX) return 0;
+-
+-	if (p->kernel_mapped) {
+-		/* $ORIGIN searches cannot be performed for the main program
+-		 * when it is suid/sgid/AT_SECURE. This is because the
+-		 * pathname is under the control of the caller of execve.
+-		 * For libraries, however, $ORIGIN can be processed safely
+-		 * since the library's pathname came from a trusted source
+-		 * (either system paths or a call to dlopen). */
+-		if (libc.secure)
+-			return 0;
+-		l = readlink("/proc/self/exe", buf, buf_size);
+-		if (l == -1) switch (errno) {
+-		case ENOENT:
+-		case ENOTDIR:
+-		case EACCES:
+-			return 0;
+-		default:
+-			return -1;
+-		}
+-		if (l >= buf_size)
+-			return 0;
+-		buf[l] = 0;
+-		origin = buf;
+-	} else {
+-		origin = p->name;
+-	}
+-	t = strrchr(origin, '/');
+-	if (t) {
+-		l = t-origin;
+-	} else {
+-		/* Normally p->name will always be an absolute or relative
+-		 * pathname containing at least one '/' character, but in the
+-		 * case where ldso was invoked as a command to execute a
+-		 * program in the working directory, app.name may not. Fix. */
+-		origin = ".";
+-		l = 1;
+-	}
+-	/* Disallow non-absolute origins for suid/sgid/AT_SECURE. */
+-	if (libc.secure && *origin != '/')
+-		return 0;
+-	p->rpath = malloc(strlen(p->rpath_orig) + n*l + 1);
+-	if (!p->rpath) return -1;
+-
+-	d = p->rpath;
+-	s = p->rpath_orig;
+-	while ((t=strchr(s, '$'))) {
+-		memcpy(d, s, t-s);
+-		d += t-s;
+-		memcpy(d, origin, l);
+-		d += l;
+-		/* It was determined previously that the '$' is followed
+-		 * either by "ORIGIN" or "{ORIGIN}". */
+-		s = t + 7 + 2*(t[1]=='{');
+-	}
+-	strcpy(d, s);
++	/* The path of the main program is not known. */
++	origin = p->kernel_mapped ? 0 : p->name;
++	n = __mikros_runpath(p->rpath_orig, origin, 0, 0);
++	if (!(p->rpath = malloc(n))) return -1;
++	__mikros_runpath(p->rpath_orig, origin, p->rpath, n);
+ 	return 0;
+ }
+ 
+@@ -981,8 +910,7 @@
+ 	p->strings = laddr(p, dyn[DT_STRTAB]);
+ 	if (dyn[0]&(1<<DT_HASH))
+ 		p->hashtab = laddr(p, dyn[DT_HASH]);
+-	if (dyn[0]&(1<<DT_RPATH))
+-		p->rpath_orig = p->strings + dyn[DT_RPATH];
++	/* Mikros: DT_RPATH is ignored. */
+ 	if (dyn[0]&(1<<DT_RUNPATH))
+ 		p->rpath_orig = p->strings + dyn[DT_RUNPATH];
+ 	if (dyn[0]&(1<<DT_PLTGOT))
+@@ -1125,41 +1053,12 @@
+ 		}
+ 		if (fd == -1) {
+ 			if (!sys_path) {
+-				char *prefix = 0;
+-				size_t prefix_len;
+-				if (ldso.name[0]=='/') {
+-					char *s, *t, *z;
+-					for (s=t=z=ldso.name; *s; s++)
+-						if (*s=='/') z=t, t=s;
+-					prefix_len = z-ldso.name;
+-					if (prefix_len < PATH_MAX)
+-						prefix = ldso.name;
+-				}
+-				if (!prefix) {
+-					prefix = "";
+-					prefix_len = 0;
+-				}
+-				char etc_ldso_path[prefix_len + 1
+-					+ sizeof "/etc/ld-musl-" LDSO_ARCH ".path"];
+-				snprintf(etc_ldso_path, sizeof etc_ldso_path,
+-					"%.*s/etc/ld-musl-" LDSO_ARCH ".path",
+-					(int)prefix_len, prefix);
+-				fd = open(etc_ldso_path, O_RDONLY|O_CLOEXEC);
+-				if (fd>=0) {
+-					size_t n = 0;
+-					if (!fstat(fd, &st)) n = st.st_size;
+-					if ((sys_path = malloc(n+1)))
+-						sys_path[n] = 0;
+-					if (!sys_path || read_loop(fd, sys_path, n)<0) {
+-						free(sys_path);
+-						sys_path = "";
+-					}
+-					close(fd);
+-				} else if (errno != ENOENT) {
++				size_t n = __mikros_library_path(0, 0);
++				if ((sys_path = malloc(n)))
++					__mikros_library_path(sys_path, n);
++				else
+ 					sys_path = "";
+-				}
+ 			}
+-			if (!sys_path) sys_path = "/lib:/usr/local/lib:/usr/lib";
+ 			fd = path_open(name, sys_path, buf, sizeof buf);
+ 		}
+ 		pathname = buf;
