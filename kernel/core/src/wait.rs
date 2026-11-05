@@ -242,19 +242,14 @@ fn futex_key(process: &Process, addr: u64) -> Result<(u64, u64), Error> {
 }
 
 /// Blocks the running thread on the futex at `addr` if the `u32` there
-/// is `expected`, as `futex_wait` does. The comparison and the
-/// registration happen in one system call, which nothing else runs
-/// during, so no wake can come in between.
+/// is `expected`, as `futex_wait` does. The thread is registered before
+/// the value is read: a wake on another processor that stored a new
+/// value before it took the lock of the waiters is seen by the read, and
+/// one that took the lock after finds the thread registered.
 pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> {
     let thread = sched::current().ok_or(Error::BadState)?;
     let process = thread.process().cloned().ok_or(Error::BadState)?;
     let key = futex_key(&process, addr)?;
-    let value: u32 = crate::user::UserIn::<u32>::new(addr)
-        .read()
-        .map_err(|_| Error::InvalidArgs)?;
-    if value != expected {
-        return Err(Error::BadState);
-    }
     let _charge = process.budget().hold_kernel(record_cost::<FutexWaiter>())?;
     let waiter = crate::fallible::try_arc(FutexWaiter {
         key,
@@ -265,6 +260,18 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> 
         let mut futexes = FUTEXES.lock();
         futexes.try_reserve(1).map_err(|_| Error::NoMemory)?;
         futexes.push(waiter.clone());
+    }
+    let value = crate::user::UserIn::<u32>::new(addr).read();
+    if value != Ok(expected) {
+        FUTEXES.lock().retain(|w| !Arc::ptr_eq(w, &waiter));
+        // A wake that took this thread already counts as one.
+        if waiter.woken.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        return Err(match value {
+            Ok(_) => Error::BadState,
+            Err(_) => Error::InvalidArgs,
+        });
     }
     let result = loop {
         if waiter.woken.load(Ordering::Acquire) {

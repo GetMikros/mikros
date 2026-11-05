@@ -12,7 +12,7 @@ mod midl {
     include!(concat!(env!("OUT_DIR"), "/midl.rs"));
 }
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::{
@@ -6207,6 +6207,81 @@ fn killed_as_it_sleeps(s: &Startup) -> Result {
     check("allowing every processor", set(s.thread, &[0xFF; 32]))
 }
 
+/// The turn of `futex_partner` and `futexes_across_processors`: odd for
+/// the partner, even for the test.
+static TURN: AtomicU32 = AtomicU32::new(0);
+/// How many waits of either side timed out, which a lost wake causes.
+static LOST_WAKES: AtomicU32 = AtomicU32::new(0);
+
+/// Waits on `TURN` until it is `turn`, counting waits that time out.
+fn wait_for_turn(turn: u32) {
+    loop {
+        let seen = TURN.load(Ordering::Acquire);
+        if seen == turn {
+            return;
+        }
+        // SAFETY: the word is a static of this program.
+        let status = unsafe { sys::futex_wait(TURN.as_ptr(), seen, in_time()) };
+        if status == TIMED_OUT {
+            LOST_WAKES.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Hands `TURN` to `turn` and wakes the other side.
+fn give_turn(turn: u32) {
+    TURN.store(turn, Ordering::Release);
+    let mut woken = 0;
+    // SAFETY: the pointers are valid for the call.
+    unsafe { sys::futex_wake(TURN.as_ptr(), 1, &mut woken) };
+}
+
+/// Takes `rounds` odd turns, each handed back as the next even one.
+extern "sysv64" fn futex_partner(rounds: u64, _: u64) -> ! {
+    for round in 0..rounds as u32 {
+        wait_for_turn(2 * round + 1);
+        give_turn(2 * round + 2);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread on processor 1 and this one on processor 0 hand a futex word
+/// back and forth many times, each waking the other as it changes the
+/// word. No wake is lost: each wait ends with its wake, not its
+/// deadline.
+fn futexes_across_processors(s: &Startup) -> Result {
+    const ROUNDS: u32 = 20_000;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    if count < 2 {
+        return Ok(());
+    }
+    let set = |thread: Handle, mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    check("keeping this thread on processor 0", set(s.thread, &[1]))?;
+    TURN.store(0, Ordering::Release);
+    LOST_WAKES.store(0, Ordering::Release);
+    let partner = spawn2(s, futex_partner, ROUNDS.into(), 0)?;
+    check("moving the partner to processor 1", set(partner, &[2]))?;
+    for round in 0..ROUNDS {
+        give_turn(2 * round + 1);
+        wait_for_turn(2 * round + 2);
+    }
+    ensure(
+        "ending the partner",
+        wait(partner, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure("losing no wake", LOST_WAKES.load(Ordering::Acquire) == 0)?;
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))
+}
+
 /// What the waits of `waiter_with_index` returned, by index.
 static WAIT_STATUSES: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
 
@@ -8649,7 +8724,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 125] = [
+const TESTS: [(&str, Test); 126] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -8664,6 +8739,7 @@ const TESTS: [(&str, Test); 125] = [
         signal_reaches_other_processor,
     ),
     ("killed_as_it_sleeps", killed_as_it_sleeps),
+    ("futexes_across_processors", futexes_across_processors),
     (
         "process_signal_interrupts_one_wait",
         process_signal_interrupts_one_wait,
