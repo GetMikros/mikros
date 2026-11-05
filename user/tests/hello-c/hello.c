@@ -13,6 +13,7 @@
 #include <semaphore.h>
 #include <setjmp.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -651,6 +652,65 @@ static int no_children_to_wait_for(void)
 		&& fork() == -1 && errno == ENOSYS;
 }
 
+/* Starts spawn-child, which checks what it was given and exits with 7,
+   with its output to a pipe, a file opened for it as descriptor 5 and a
+   descriptor 6 that closes on exec, and waits for it. */
+static int spawn_and_wait(int search)
+{
+	int p[2];
+	if (pipe(p) || dup3(p[0], 6, O_CLOEXEC) != 6)
+		return 0;
+	posix_spawn_file_actions_t fa;
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_adddup2(&fa, p[1], 1);
+	posix_spawn_file_actions_addclose(&fa, p[0]);
+	posix_spawn_file_actions_addopen(&fa, 5, GREETING, O_RDONLY, 0);
+	char *args[] = { "spawn-child", "one", "two", 0 };
+	char *env[] = { "SPAWN_TEST=yes", 0 };
+	pid_t pid;
+	int r = search ? posix_spawnp(&pid, "spawn-child", &fa, 0, args, env)
+		       : posix_spawn(&pid, "/usr/bin/spawn-child", &fa, 0, args, env);
+	posix_spawn_file_actions_destroy(&fa);
+	close(p[1]);
+	close(6);
+	char buf[64];
+	size_t got = 0;
+	ssize_t n;
+	while (r == 0 && (n = read(p[0], buf + got, sizeof buf - got)) > 0)
+		got += n;
+	close(p[0]);
+	int status;
+	return r == 0 && pid > 0 && got == 13 && memcmp(buf, "child output\n", 13) == 0
+		&& waitpid(pid, &status, 0) == pid && WIFEXITED(status)
+		&& WEXITSTATUS(status) == 7 && waitpid(pid, &status, 0) == -1
+		&& errno == ECHILD;
+}
+
+/* Programs are started by path and by search, their exit is waited
+   for, and what cannot be done fails as it should. */
+static int programs_are_spawned(void)
+{
+	char *args[] = { "missing", 0 };
+	pid_t pid;
+	int status;
+	posix_spawnattr_t attr;
+	posix_spawnattr_init(&attr);
+	sigset_t usr1;
+	sigemptyset(&usr1);
+	sigaddset(&usr1, SIGUSR1);
+	posix_spawnattr_setsigmask(&attr, &usr1);
+	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK);
+	int masked = posix_spawn(&pid, "/usr/bin/spawn-child", 0, &attr, args, 0);
+	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+	int grouped = posix_spawn(&pid, "/usr/bin/spawn-child", 0, &attr, args, 0);
+	return spawn_and_wait(0) && setenv("PATH", "/nowhere:/usr/bin", 1) == 0
+		&& spawn_and_wait(1)
+		&& posix_spawn(&pid, "/usr/bin/missing", 0, 0, args, 0) == ENOENT
+		&& posix_spawnp(&pid, "missing", 0, 0, args, 0) == ENOENT
+		&& masked == ENOSYS && grouped == ENOSYS
+		&& waitpid(-1, &status, WNOHANG) == -1 && errno == ECHILD;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -704,9 +764,11 @@ int main(int argc, char **argv)
 		return 24;
 	if (!no_children_to_wait_for())
 		return 25;
+	if (!programs_are_spawned())
+		return 26;
 	char *copy = malloc(64);
 	if (!copy)
-		return 26;
+		return 27;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

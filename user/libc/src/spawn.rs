@@ -1,16 +1,270 @@
-//! Waiting for children with the process manager's `Wait`.
+//! Starting programs with the process manager's `Spawn`, and waiting
+//! for children with its `Wait`.
+//!
+//! `posix_spawn` builds the new program's descriptors from the caller's
+//! that do not close on `exec`, changed by the file actions in order, and
+//! passes a duplicate of each one's handle: descriptors 0 to 2 with the
+//! standard roles and the rest with the role `USER`, each with an `id`
+//! that holds its number and kind. A new program starts in `/`, with
+//! every signal unblocked and at its default action, so the file actions
+//! that change directory, and the attributes that ask for a mask, a
+//! process group, a session or a scheduler, are not supported.
 
-use crate::errno::{self, ECHILD, EINTR, EINVAL, EIO};
-use crate::{clock, process};
-use mikros_rt::interfaces::__midl;
+use crate::errno::{self, E2BIG, EBADF, ECHILD, EINTR, EINVAL, EIO, ENOSYS};
+use crate::fd::{self, Description};
+use crate::{clock, fs, process};
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::ffi::{CStr, c_char};
+use mikros_rt::interfaces::__midl::{self, OwnedHandle};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::process::{StatusKind, WaitOptions};
+use mikros_rt::interfaces::mikros::process::{
+    HandleRole, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
+};
+use mikros_rt::sys;
 
+const FDOP_CLOSE: i32 = 1;
+const FDOP_DUP2: i32 = 2;
+const FDOP_OPEN: i32 = 3;
+const POSIX_SPAWN_RESETIDS: i32 = 1;
+const POSIX_SPAWN_SETSIGDEF: i32 = 4;
+const POSIX_SPAWN_SETSIGMASK: i32 = 8;
+const POSIX_SPAWN_USEVFORK: i32 = 64;
+/// The most handles a `SpawnRequest` carries.
+const HANDLES_MAX: usize = 32;
+/// Rights that a duplicate keeps: those of the original.
+const SAME_RIGHTS: u32 = 1 << 31;
+/// The user ID that names the caller's.
+const CALLER_USER: u32 = u32::MAX;
 const WNOHANG: i64 = 1;
 const WUNTRACED: i64 = 2;
 const WCONTINUED: i64 = 8;
 const INTERRUPTED: i32 = -27;
 const FOREVER: i64 = i64::MAX;
+const PAGE_SIZE: u64 = 4096;
+
+/// musl's `struct fdop`, a file action.
+#[repr(C)]
+pub struct Fdop {
+    next: *const Fdop,
+    prev: *const Fdop,
+    cmd: i32,
+    fd: i32,
+    srcfd: i32,
+    oflag: i32,
+    mode: u32,
+    path: [c_char; 0],
+}
+
+/// musl's `posix_spawnattr_t`.
+#[repr(C)]
+pub struct SpawnAttr {
+    flags: i32,
+    pgrp: i32,
+    default: [u64; 16],
+    mask: [u64; 16],
+}
+
+/// The descriptors of a new program: description and close-on-exec.
+type Descriptors = BTreeMap<usize, (Arc<Description>, bool)>;
+
+/// The strings of a null-terminated array of C strings.
+///
+/// # Safety
+///
+/// `array` must be null or a null-terminated array of C strings.
+unsafe fn strings<'a>(array: *const *const c_char) -> Vec<&'a [u8]> {
+    let mut out = Vec::new();
+    if array.is_null() {
+        return out;
+    }
+    let mut i = 0;
+    // SAFETY: the caller passes a null-terminated array.
+    while let Some(s) = unsafe { (*array.add(i)).as_ref() } {
+        // SAFETY: each entry is a C string.
+        out.push(unsafe { CStr::from_ptr(s) }.to_bytes());
+        i += 1;
+    }
+    out
+}
+
+/// A memory object with the argument count, the environment count and
+/// the strings, each ending in NUL, that a `SpawnRequest` carries.
+fn arguments(args: &[&[u8]], env: &[&[u8]]) -> Result<OwnedHandle, i64> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(args.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(env.len() as u32).to_le_bytes());
+    for s in args.iter().chain(env) {
+        bytes.extend_from_slice(s);
+        bytes.push(0);
+    }
+    let mut mem = 0;
+    // Memory objects hold whole pages.
+    let size = (bytes.len() as u64).next_multiple_of(PAGE_SIZE);
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::mem_create(size, 0, &mut mem) };
+    if status != mikros_rt::OK {
+        return Err(errno::from_status(status));
+    }
+    // SAFETY: the kernel just created the handle for us.
+    let mem = unsafe { OwnedHandle::from_raw(mem) };
+    // SAFETY: the buffer holds `bytes.len()` bytes.
+    let status = unsafe { sys::mem_write(mem.raw(), 0, bytes.as_ptr(), bytes.len() as u64) };
+    match status {
+        mikros_rt::OK => Ok(mem),
+        status => Err(errno::from_status(status)),
+    }
+}
+
+/// Applies the file actions from `actions`, the most recent, back to the
+/// first, in the order they were added.
+///
+/// # Safety
+///
+/// `actions` must be null or the newest of musl's list of file actions.
+unsafe fn apply(descriptors: &mut Descriptors, actions: *const Fdop) -> Result<(), i64> {
+    let mut op = actions;
+    // SAFETY: the list is linked both ways and ends in null.
+    unsafe {
+        while !op.is_null() && !(*op).next.is_null() {
+            op = (*op).next;
+        }
+        while let Some(action) = op.as_ref() {
+            let fd = usize::try_from(action.fd).map_err(|_| EBADF)?;
+            match action.cmd {
+                FDOP_CLOSE => {
+                    descriptors.remove(&fd);
+                }
+                FDOP_DUP2 => {
+                    let src = usize::try_from(action.srcfd).map_err(|_| EBADF)?;
+                    let (description, _) = descriptors.get(&src).cloned().ok_or(EBADF)?;
+                    descriptors.insert(fd, (description, false));
+                }
+                FDOP_OPEN => {
+                    let path = action.path.as_ptr().cast();
+                    let flags = action.oflag as u32;
+                    let opened = fs::open_description(fs::AT_FDCWD, path, flags, action.mode)?;
+                    descriptors.insert(fd, (opened, flags & fs::O_CLOEXEC != 0));
+                }
+                _ => return Err(ENOSYS),
+            }
+            op = action.prev;
+        }
+    }
+    Ok(())
+}
+
+/// The startup handles for `descriptors` that do not close on `exec`.
+fn handles(descriptors: &Descriptors) -> Result<Vec<StartupHandle>, i64> {
+    let mut out = Vec::new();
+    for (&fd, (description, cloexec)) in descriptors {
+        if *cloexec {
+            continue;
+        }
+        if out.len() == HANDLES_MAX || fd > fd::ID_FD as usize {
+            return Err(E2BIG);
+        }
+        let (raw, kind) = fd::shared_handle(description).ok_or(EBADF)?;
+        let mut copy = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status = unsafe { sys::handle_duplicate(raw, SAME_RIGHTS, &mut copy) };
+        if status != mikros_rt::OK {
+            return Err(errno::from_status(status));
+        }
+        let role = match fd {
+            0 => HandleRole::Stdin,
+            1 => HandleRole::Stdout,
+            2 => HandleRole::Stderr,
+            _ => HandleRole::User,
+        };
+        out.push(StartupHandle {
+            role,
+            id: fd as u32 | kind << 28,
+            // SAFETY: the kernel just created the handle for us.
+            handle: unsafe { OwnedHandle::from_raw(copy) },
+        });
+    }
+    Ok(out)
+}
+
+/// `posix_spawn`: starts the program at `path` with `argv` and `envp`,
+/// stores its process ID at `res`, and returns 0 or an error number.
+///
+/// # Safety
+///
+/// The pointers must be as `posix_spawn` takes them, with `actions` the
+/// newest of musl's list of file actions.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __mikros_spawn(
+    res: *mut i32,
+    path: *const c_char,
+    actions: *const Fdop,
+    attr: *const SpawnAttr,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> i32 {
+    // SAFETY: the caller passes what `posix_spawn` takes.
+    match unsafe { spawn(path, actions, attr, argv, envp) } {
+        Ok(pid) => {
+            if !res.is_null() {
+                // SAFETY: the caller passes room for the process ID.
+                unsafe { res.write(pid as i32) };
+            }
+            0
+        }
+        Err(e) => e as i32,
+    }
+}
+
+/// # Safety
+///
+/// As for `__mikros_spawn`.
+unsafe fn spawn(
+    path: *const c_char,
+    actions: *const Fdop,
+    attr: *const SpawnAttr,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> Result<u32, i64> {
+    // SAFETY: the caller passes attributes or null.
+    if let Some(attr) = unsafe { attr.as_ref() } {
+        let known = POSIX_SPAWN_RESETIDS | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_USEVFORK;
+        let mask_flag = attr.flags & POSIX_SPAWN_SETSIGMASK != 0;
+        if attr.flags & !(known | POSIX_SPAWN_SETSIGMASK) != 0
+            || mask_flag && attr.mask.iter().any(|&w| w != 0)
+        {
+            return Err(ENOSYS);
+        }
+    }
+    // SAFETY: the caller passes a C string.
+    let path = unsafe { fs::c_path(path.cast()) }?;
+    let path: String = fs::absolute(fs::AT_FDCWD, path)?;
+    let mut descriptors: Descriptors = fd::snapshot()
+        .into_iter()
+        .map(|(fd, description, cloexec)| (fd, (description, cloexec)))
+        .collect();
+    // SAFETY: the caller passes musl's list of file actions.
+    unsafe { apply(&mut descriptors, actions) }?;
+    let handles = handles(&descriptors)?;
+    // SAFETY: the caller passes null-terminated arrays of C strings.
+    let (args, env) = unsafe { (strings(argv), strings(envp)) };
+    let request = SpawnRequest {
+        path,
+        arguments: arguments(&args, &env)?,
+        handles,
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+    };
+    let client = process::launcher();
+    match process::unsignalled(|| client.spawn(request, FOREVER)) {
+        Ok(Ok(spawned)) => Ok(spawned.pid),
+        Ok(Err(status)) => Err(errno::from_status(i64::from(status.into_raw()))),
+        Err(_) => Err(EIO),
+    }
+}
 
 /// `wait4`: waits for the child that `pid` selects, as `waitpid` does,
 /// stores its status at `status`, and returns its process ID, or 0 when

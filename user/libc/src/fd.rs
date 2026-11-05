@@ -208,6 +208,31 @@ fn inherited(handle: OwnedHandle, kind: u32) -> Option<Description> {
     }
 }
 
+/// The open descriptors, each with its description and whether it closes
+/// on `exec`.
+pub fn snapshot() -> Vec<(usize, Arc<Description>, bool)> {
+    let table = TABLE.lock();
+    table
+        .iter()
+        .enumerate()
+        .filter_map(|(fd, e)| {
+            let e = e.as_ref()?;
+            Some((fd, e.description.clone(), e.close_on_exec))
+        })
+        .collect()
+}
+
+/// The handle of `description` that another process is given a
+/// duplicate of, and its descriptor kind.
+pub fn shared_handle(description: &Description) -> Option<(mikros_rt::sys::Handle, u32)> {
+    match description {
+        Description::Stream(stream) => Some((stream.raw(), KIND_STREAM)),
+        Description::File(node) | Description::Directory(node, _) => {
+            Some((node.node.lock().channel().ok()?, KIND_FILE))
+        }
+    }
+}
+
 /// Installs `description` as descriptor `fd`, which is free.
 fn duplicate_into(fd: i64, description: Arc<Description>) {
     let mut table = TABLE.lock();

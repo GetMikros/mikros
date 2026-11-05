@@ -158,6 +158,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", hello_dynamic.display());
+            let spawn_child = c_build(
+                "spawn-child",
+                &["user/tests/spawn-c/child.c"],
+                Linking::Static,
+                &[],
+            )?;
+            println!("built    {}", spawn_child.display());
             let greet = c_build(
                 "libgreet",
                 &["user/tests/library-c/greet.c"],
@@ -197,6 +204,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/probe", probe.as_path()),
                     ("usr/bin/hello", hello.as_path()),
                     ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
+                    ("usr/bin/spawn-child", spawn_child.as_path()),
                     ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
                     ("usr/bin/library-user", library_user.as_path()),
                     ("usr/lib/libgreet.1.dlib", greet.as_path()),
