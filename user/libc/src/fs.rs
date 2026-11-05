@@ -40,8 +40,11 @@ const REDIRECTS_MAX: usize = 40;
 const PATH_MAX: usize = 4096;
 const FOREVER: i64 = i64::MAX;
 
-/// The namespace entries, by their absolute paths.
-static NAMESPACE: Lock<Vec<(String, Arc<Lock<NodeClient>>)>> = Lock::new(Vec::new());
+/// A namespace entry: its absolute path and its directory.
+type Entry = (String, Arc<Lock<NodeClient>>);
+
+/// The namespace entries.
+static NAMESPACE: Lock<Vec<Entry>> = Lock::new(Vec::new());
 /// The absolute path of the current directory.
 static CWD: Lock<String> = Lock::new(String::new());
 
@@ -84,25 +87,28 @@ pub fn normalize(base: &str, path: &[u8]) -> Option<String> {
     Some(out)
 }
 
-/// The namespace entry for the absolute, normalized `path`, and the rest
-/// of the path below it, which is empty for the entry itself.
-fn entry(path: &str) -> Option<(String, Arc<Lock<NodeClient>>, String)> {
+/// The namespace entry for the absolute, normalized `path`: its path,
+/// its connection, the rest of the path below it, which is empty for the
+/// entry itself, and its device number.
+fn entry(path: &str) -> Option<(String, Arc<Lock<NodeClient>>, String, u64)> {
     let namespace = NAMESPACE.lock();
-    let mut best: Option<&(String, Arc<Lock<NodeClient>>)> = None;
-    for e in namespace.iter() {
+    let mut best: Option<(usize, &Entry)> = None;
+    for (i, e) in namespace.iter().enumerate() {
         let prefix = e.0.as_str();
         let below = prefix == "/"
             || path == prefix
             || path
                 .strip_prefix(prefix)
                 .is_some_and(|r| r.starts_with('/'));
-        if below && best.is_none_or(|b| b.0.len() < prefix.len()) {
-            best = Some(e);
+        if below && best.is_none_or(|(_, b)| b.0.len() < prefix.len()) {
+            best = Some((i, e));
         }
     }
-    let (prefix, node) = best?;
+    let (i, (prefix, node)) = best?;
     let rest = path[prefix.len()..].trim_start_matches('/');
-    Some((prefix.clone(), node.clone(), String::from(rest)))
+    // Each entry is a device of its own, numbered from 1.
+    let device = i as u64 + 1;
+    Some((prefix.clone(), node.clone(), String::from(rest), device))
 }
 
 /// The C string at `path`, as bytes without its NUL.
@@ -168,12 +174,27 @@ fn open_flags(flags: u32) -> OpenFlags {
     out
 }
 
-/// A new connection to the absolute, normalized `path`, and its type.
-pub fn connect(path: &str, flags: u32, mode: u32) -> Result<(NodeClient, NodeType), i64> {
+/// A new connection to a node.
+pub struct Connection {
+    pub node: NodeClient,
+    pub kind: NodeType,
+    /// The device number of the namespace entry it was opened through.
+    pub device: u64,
+}
+
+/// A new connection to the absolute, normalized `path`, with `rights`,
+/// or with the rights of the access mode of `flags` for `None`.
+pub fn connect(
+    path: &str,
+    flags: u32,
+    mode: u32,
+    rights: Option<Rights>,
+) -> Result<Connection, i64> {
+    let wanted = rights;
     let mut path = String::from(path);
     for _ in 0..=REDIRECTS_MAX {
-        let (prefix, directory, rest) = entry(&path).ok_or(ENOENT)?;
-        let mut rights = rights(flags);
+        let (prefix, directory, rest, device) = entry(&path).ok_or(ENOENT)?;
+        let mut rights = wanted.unwrap_or_else(|| self::rights(flags));
         loop {
             let (client, server) = endpoints::<NodeProtocol>().map_err(|_| errno::ENOMEM)?;
             let node = directory.lock();
@@ -187,7 +208,9 @@ pub fn connect(path: &str, flags: u32, mode: u32) -> Result<(NodeClient, NodeTyp
             drop(node);
             match opened {
                 Err(_) => return Err(errno::EIO),
-                Ok(Err(Error::AccessDenied)) if rights.contains(Rights::EXECUTE) => {
+                Ok(Err(Error::AccessDenied))
+                    if wanted.is_none() && rights.contains(Rights::EXECUTE) =>
+                {
                     rights = Rights(rights.0 & !Rights::EXECUTE.0);
                 }
                 Ok(Err(e)) => return Err(errno::from_fs(e)),
@@ -197,13 +220,18 @@ pub fn connect(path: &str, flags: u32, mode: u32) -> Result<(NodeClient, NodeTyp
                     path = normalize(&prefix, target.as_bytes()).ok_or(EINVAL)?;
                     break;
                 }
-                Ok(Ok(Some((kind, None)))) => return Ok((NodeClient::new(client), kind)),
+                Ok(Ok(Some((kind, None)))) => {
+                    let node = NodeClient::new(client);
+                    return Ok(Connection { node, kind, device });
+                }
                 Ok(Ok(None)) => {
                     // The entry itself, which `Open` does not name.
                     if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
                         return Err(errno::EEXIST);
                     }
-                    return Ok((NodeClient::new(client), NodeType::Directory));
+                    let node = NodeClient::new(client);
+                    let kind = NodeType::Directory;
+                    return Ok(Connection { node, kind, device });
                 }
             }
         }
@@ -223,13 +251,14 @@ pub fn open(dirfd: i64, path: *const u8, flags: u32, mode: u32) -> i64 {
         Ok(path) => path,
         Err(e) => return -e,
     };
-    let (node, kind) = match connect(&path, flags, mode) {
+    let Connection { node, kind, device } = match connect(&path, flags, mode, None) {
         Ok(opened) => opened,
         Err(e) => return -e,
     };
     let node = Node {
         node: Lock::new(node),
         path,
+        device,
         flags: AtomicU32::new(flags & !(O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC)),
     };
     let description = match kind {

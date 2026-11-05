@@ -6,7 +6,7 @@
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENOSYS, ENOTTY};
 use crate::fd::Description;
-use crate::{clock, fd, fs, io};
+use crate::{clock, fd, fs, io, stat};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::sys::{self, Handle};
 
@@ -14,6 +14,9 @@ const SYS_READ: i64 = 0;
 const SYS_WRITE: i64 = 1;
 const SYS_OPEN: i64 = 2;
 const SYS_CLOSE: i64 = 3;
+const SYS_STAT: i64 = 4;
+const SYS_FSTAT: i64 = 5;
+const SYS_LSTAT: i64 = 6;
 const SYS_LSEEK: i64 = 8;
 const SYS_MMAP: i64 = 9;
 const SYS_MPROTECT: i64 = 10;
@@ -33,6 +36,7 @@ const SYS_SET_TID_ADDRESS: i64 = 218;
 const SYS_CLOCK_GETTIME: i64 = 228;
 const SYS_EXIT_GROUP: i64 = 231;
 const SYS_OPENAT: i64 = 257;
+const SYS_NEWFSTATAT: i64 = 262;
 const SYS_DUP3: i64 = 292;
 const SYS_GETRANDOM: i64 = 318;
 
@@ -89,6 +93,18 @@ extern "C" fn __mikros_syscall(
         SYS_OPEN => fs::open(fs::AT_FDCWD, a1 as *const u8, a2 as u32, a3 as u32),
         SYS_OPENAT => fs::open(a1, a2 as *const u8, a3 as u32, a4 as u32),
         SYS_CLOSE => fd::close(a1),
+        SYS_STAT => stat::fstatat(fs::AT_FDCWD, a1 as *const u8, a2 as *mut stat::Kstat, 0),
+        SYS_LSTAT => {
+            let out = a2 as *mut stat::Kstat;
+            stat::fstatat(
+                fs::AT_FDCWD,
+                a1 as *const u8,
+                out,
+                stat::AT_SYMLINK_NOFOLLOW,
+            )
+        }
+        SYS_FSTAT => stat::fstat(a1, a2 as *mut stat::Kstat),
+        SYS_NEWFSTATAT => stat::fstatat(a1, a2 as *const u8, a3 as *mut stat::Kstat, a4),
         SYS_DUP => fd::duplicate_from(a1, 0, false),
         SYS_DUP2 => dup2(a1, a2),
         SYS_DUP3 => dup3(a1, a2, a3 as u32),

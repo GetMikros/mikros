@@ -35,6 +35,8 @@ pub struct Node {
     /// The absolute path it was opened with, which paths relative to the
     /// descriptor are resolved against.
     pub path: alloc::string::String,
+    /// The device number of the namespace entry it was opened through.
+    pub device: u64,
     /// The `O_` status flags, such as `O_APPEND`.
     pub flags: AtomicU32,
 }

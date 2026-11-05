@@ -14,6 +14,7 @@ mod fs;
 mod io;
 mod lock;
 mod start;
+mod stat;
 mod syscall;
 
 /// The `mikros_<name>` function of every system call of production

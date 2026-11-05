@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -134,6 +135,34 @@ static int close_on_exec_is_kept(void)
 	return ok && fcntl(fd, F_GETFD) == -1 && errno == EBADF;
 }
 
+/* stat, fstat and fstatat agree on a file and its directory, and a
+   stream is a pipe. */
+static int stat_reports_attributes(void)
+{
+	struct stat st, dir, opened, at, out;
+	if (stat(GREETING, &st) != 0 || !S_ISREG(st.st_mode)
+	    || (st.st_mode & 07777) != 0755
+	    || st.st_size != (off_t)strlen(GREETING_TEXT) || st.st_nlink < 1
+	    || st.st_ino == 0 || st.st_blksize != 4096)
+		return 0;
+	if (stat("/usr/share/hello", &dir) != 0 || !S_ISDIR(dir.st_mode)
+	    || dir.st_dev != st.st_dev || dir.st_ino == st.st_ino)
+		return 0;
+	int fd = open(GREETING, O_RDONLY);
+	int dirfd = open("/usr/share/hello", O_RDONLY | O_DIRECTORY);
+	int ok = fd >= 0 && dirfd >= 0 && fstat(fd, &opened) == 0
+		&& opened.st_ino == st.st_ino && opened.st_dev == st.st_dev
+		&& opened.st_size == st.st_size
+		&& fstatat(dirfd, "greeting.txt", &at, 0) == 0
+		&& at.st_ino == st.st_ino && lstat(GREETING, &at) == 0
+		&& S_ISREG(at.st_mode) && fstat(1, &out) == 0
+		&& S_ISFIFO(out.st_mode);
+	close(fd);
+	close(dirfd);
+	return ok && stat("/usr/share/hello/missing", &at) == -1
+		&& errno == ENOENT;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -161,9 +190,11 @@ int main(int argc, char **argv)
 		return 11;
 	if (!close_on_exec_is_kept())
 		return 12;
+	if (!stat_reports_attributes())
+		return 13;
 	char *copy = malloc(64);
 	if (!copy)
-		return 13;
+		return 14;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);
