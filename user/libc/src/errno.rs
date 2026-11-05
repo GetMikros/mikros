@@ -3,6 +3,7 @@
 use mikros_rt::interfaces::mikros::fs::Error;
 use mikros_rt::sys::Status;
 
+pub const EPERM: i64 = 1;
 pub const ENOENT: i64 = 2;
 pub const ESRCH: i64 = 3;
 pub const EINTR: i64 = 4;

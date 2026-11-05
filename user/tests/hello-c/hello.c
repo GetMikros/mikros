@@ -11,6 +11,7 @@
 #include <mikros/syscalls.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -427,6 +428,54 @@ static int threads_run(void)
 	return 1;
 }
 
+static void *wait_for_usr1(void *arg)
+{
+	(void)arg;
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, SIGUSR1);
+	struct timespec timeout = { 5, 0 };
+	siginfo_t info;
+	int signo = sigtimedwait(&set, &info, &timeout);
+	return (void *)(long)(signo == SIGUSR1 && info.si_code == SI_TKILL);
+}
+
+/* Blocked signals stay pending until they are waited for, threads are
+   signalled, and alternate stacks are set and reported. */
+static int signals_are_handled(void)
+{
+	sigset_t usr2, pending, mask;
+	sigemptyset(&usr2);
+	sigaddset(&usr2, SIGUSR2);
+	siginfo_t info;
+	struct timespec none = { 0, 1000000 };
+	if (sigprocmask(SIG_BLOCK, &usr2, 0) || raise(SIGUSR2) || sigpending(&pending)
+	    || !sigismember(&pending, SIGUSR2) || sigprocmask(SIG_BLOCK, 0, &mask)
+	    || !sigismember(&mask, SIGUSR2)
+	    || sigtimedwait(&usr2, &info, &none) != SIGUSR2 || info.si_code != SI_TKILL
+	    || sigtimedwait(&usr2, 0, &none) != -1 || sigpending(&pending)
+	    || sigismember(&pending, SIGUSR2) || sigprocmask(SIG_UNBLOCK, &usr2, 0))
+		return 0;
+	stack_t ss = { .ss_sp = malloc(65536), .ss_size = 65536 }, small = ss, got;
+	small.ss_size = 8192;
+	if (!ss.ss_sp || sigaltstack(&small, 0) != -1 || errno != ENOMEM
+	    || sigaltstack(&ss, 0) || sigaltstack(0, &got) || got.ss_sp != ss.ss_sp
+	    || got.ss_size != 65536 || got.ss_flags != 0)
+		return 0;
+	/* The waiter starts with SIGUSR1 blocked, so the signal waits for
+	   it. */
+	pthread_t waiter;
+	void *woke;
+	sigset_t usr1;
+	sigemptyset(&usr1);
+	sigaddset(&usr1, SIGUSR1);
+	return sigprocmask(SIG_BLOCK, &usr1, 0) == 0
+		&& pthread_create(&waiter, 0, wait_for_usr1, 0) == 0
+		&& sigprocmask(SIG_UNBLOCK, &usr1, 0) == 0
+		&& pthread_kill(waiter, SIGUSR1) == 0 && pthread_join(waiter, &woke) == 0
+		&& woke && gettid() > 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -470,9 +519,11 @@ int main(int argc, char **argv)
 		return 19;
 	if (!threads_run())
 		return 20;
+	if (!signals_are_handled())
+		return 21;
 	char *copy = malloc(64);
 	if (!copy)
-		return 21;
+		return 22;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

@@ -13,6 +13,7 @@ use crate::errno::{self, ENOSYS};
 use crate::lock::Lock;
 use crate::syscall;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::sys::{self, Handle};
 
 const CLONE_VM: i32 = 0x100;
@@ -25,9 +26,12 @@ const FS_BASE: u32 = 0;
 
 struct Thread {
     tid: u32,
-    /// The thread's handle; none for the first thread, whose handle the
-    /// startup transfer holds.
-    handle: Option<Handle>,
+    handle: Handle,
+    /// Whether the table owns the handle; the startup transfer holds the
+    /// first thread's.
+    owned: bool,
+    /// The alternate signal stack, as base and size, or zeros.
+    altstack: (u64, u64),
     /// The thread pointer, which is the address of musl's thread.
     tls: usize,
     /// The address to clear and wake when the thread ends, or 0.
@@ -35,6 +39,13 @@ struct Thread {
 }
 
 static THREADS: Lock<Vec<Thread>> = Lock::new(Vec::new());
+/// The handle of the first thread, from the startup transfer.
+static FIRST: AtomicU32 = AtomicU32::new(0);
+
+/// Keeps the handle of the first thread, which `set_tid_address` records.
+pub fn install(first: Handle) {
+    FIRST.store(first, Ordering::Relaxed);
+}
 /// Where the ending threads' wakes store their counts.
 static mut WOKEN: u32 = 0;
 
@@ -55,15 +66,50 @@ pub fn set_tid_address(clear: usize, first: u32) -> i64 {
     let mut threads = THREADS.lock();
     if let Some(t) = threads.iter_mut().find(|t| t.tls == tp) {
         t.clear = clear;
+        // The dynamic linker first calls it before the startup transfer
+        // gave the first thread's ID and handle.
+        if !t.owned {
+            t.tid = first;
+            t.handle = FIRST.load(Ordering::Relaxed);
+        }
         return i64::from(t.tid);
     }
     threads.push(Thread {
         tid: first,
-        handle: None,
+        handle: FIRST.load(Ordering::Relaxed),
+        owned: false,
+        altstack: (0, 0),
         tls: tp,
         clear,
     });
     i64::from(first)
+}
+
+/// The handle of thread `tid`.
+pub fn handle_of(tid: u32) -> Option<Handle> {
+    THREADS
+        .lock()
+        .iter()
+        .find(|t| t.tid == tid)
+        .map(|t| t.handle)
+}
+
+/// The alternate signal stack of the calling thread, as base and size.
+pub fn altstack() -> (u64, u64) {
+    let tp = tls();
+    let threads = THREADS.lock();
+    threads
+        .iter()
+        .find(|t| t.tls == tp)
+        .map_or((0, 0), |t| t.altstack)
+}
+
+/// Records the alternate signal stack of the calling thread.
+pub fn set_altstack(altstack: (u64, u64)) {
+    let tp = tls();
+    if let Some(t) = THREADS.lock().iter_mut().find(|t| t.tls == tp) {
+        t.altstack = altstack;
+    }
 }
 
 /// `gettid`: the ID of the calling thread.
@@ -110,14 +156,16 @@ extern "C" fn __mikros_clone(
     } else {
         0
     };
+    // The entry pops the function and its argument.
+    let sp = (stack & !15) - 16;
     THREADS.lock().push(Thread {
         tid,
-        handle: Some(handle),
+        handle,
+        owned: true,
+        altstack: (0, 0),
         tls,
         clear,
     });
-    // The entry pops the function and its argument.
-    let sp = (stack & !15) - 16;
     // SAFETY: musl's stack for the thread is mapped and unused below
     // `stack`.
     unsafe {
@@ -173,9 +221,9 @@ fn forget() -> usize {
         return 0;
     };
     let thread = threads.swap_remove(at);
-    if let Some(handle) = thread.handle {
+    if thread.owned {
         // SAFETY: closing takes no pointers; the thread runs on.
-        unsafe { sys::handle_close(handle) };
+        unsafe { sys::handle_close(thread.handle) };
     }
     thread.clear
 }

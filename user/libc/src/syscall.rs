@@ -6,7 +6,7 @@
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENODEV, ENOSYS, ENOTTY};
 use crate::fd::Description;
-use crate::{clock, dir, fd, fs, futex, io, stat, thread};
+use crate::{clock, dir, fd, fs, futex, io, signal, stat, thread};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::MemoryFlags;
@@ -24,6 +24,7 @@ const SYS_MMAP: i64 = 9;
 const SYS_MPROTECT: i64 = 10;
 const SYS_MUNMAP: i64 = 11;
 const SYS_BRK: i64 = 12;
+const SYS_RT_SIGPROCMASK: i64 = 14;
 const SYS_IOCTL: i64 = 16;
 const SYS_PREAD64: i64 = 17;
 const SYS_PWRITE64: i64 = 18;
@@ -38,13 +39,18 @@ const SYS_GETCWD: i64 = 79;
 const SYS_CHDIR: i64 = 80;
 const SYS_FCHDIR: i64 = 81;
 const SYS_READLINK: i64 = 89;
+const SYS_RT_SIGPENDING: i64 = 127;
+const SYS_RT_SIGTIMEDWAIT: i64 = 128;
+const SYS_SIGALTSTACK: i64 = 131;
 const SYS_GETTID: i64 = 186;
+const SYS_TKILL: i64 = 200;
 const SYS_FUTEX: i64 = 202;
 const SYS_SET_THREAD_AREA: i64 = 205;
 const SYS_GETDENTS64: i64 = 217;
 const SYS_SET_TID_ADDRESS: i64 = 218;
 const SYS_CLOCK_GETTIME: i64 = 228;
 const SYS_EXIT_GROUP: i64 = 231;
+const SYS_TGKILL: i64 = 234;
 const SYS_OPENAT: i64 = 257;
 const SYS_NEWFSTATAT: i64 = 262;
 const SYS_READLINKAT: i64 = 267;
@@ -159,6 +165,19 @@ extern "C" fn __mikros_syscall(
         SYS_SET_TID_ADDRESS => thread::set_tid_address(a1 as usize, TID.load(Ordering::Relaxed)),
         SYS_GETTID => thread::gettid(),
         SYS_FUTEX => futex::futex(a1 as *const u32, a2, a3, a4 as *const futex::Timeout, a6),
+        SYS_RT_SIGPROCMASK => signal::sigprocmask(a1, a2 as *const u64, a3 as *mut u64, a4 as u64),
+        SYS_RT_SIGPENDING => signal::sigpending(a1 as *mut u64, a2 as u64),
+        SYS_RT_SIGTIMEDWAIT => signal::sigtimedwait(
+            a1 as *const u64,
+            a2 as *mut u8,
+            a3 as *const [i64; 2],
+            a4 as u64,
+        ),
+        SYS_SIGALTSTACK => {
+            signal::sigaltstack(a1 as *const signal::Stack, a2 as *mut signal::Stack)
+        }
+        SYS_TKILL => signal::tkill(a1, a2),
+        SYS_TGKILL => signal::tkill(a2, a3),
         SYS_GETRANDOM => getrandom(a1 as *mut u8, a2 as u64),
         SYS_CLOCK_GETTIME => clock::gettime(a1, a2 as *mut clock::Timespec),
         SYS_EXIT_GROUP => exit(a1),
