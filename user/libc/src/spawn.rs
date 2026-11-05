@@ -1,5 +1,5 @@
-//! Starting programs with the process manager's `Spawn`, and waiting
-//! for children with its `Wait`.
+//! Starting programs with the process manager's `Spawn`, replacing the
+//! process with `Exec`, and waiting for children with `Wait`.
 //!
 //! `posix_spawn` builds the new program's descriptors from the caller's
 //! that do not close on `exec`, changed by the file actions in order, and
@@ -218,6 +218,75 @@ unsafe extern "C" fn __mikros_spawn(
     }
 }
 
+/// The caller's descriptors.
+fn descriptors() -> Descriptors {
+    fd::snapshot()
+        .into_iter()
+        .map(|(fd, description, cloexec)| (fd, (description, cloexec)))
+        .collect()
+}
+
+/// The request that starts the program at `path` with `argv`, `envp` and
+/// `descriptors`.
+///
+/// # Safety
+///
+/// `path` must be a C string, and `argv` and `envp` null or
+/// null-terminated arrays of C strings.
+unsafe fn request(
+    path: *const c_char,
+    descriptors: &Descriptors,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> Result<SpawnRequest, i64> {
+    // SAFETY: the caller passes a C string.
+    let path = unsafe { fs::c_path(path.cast()) }?;
+    let path: String = fs::absolute(fs::AT_FDCWD, path)?;
+    let handles = handles(descriptors)?;
+    // SAFETY: the caller passes null-terminated arrays of C strings.
+    let (args, env) = unsafe { (strings(argv), strings(envp)) };
+    Ok(SpawnRequest {
+        path,
+        arguments: arguments(&args, &env)?,
+        handles,
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+    })
+}
+
+/// `execve`: replaces the process with the program at `path`, given
+/// `argv`, `envp` and the descriptors that do not close on `exec`. It
+/// returns only on failure. The new program starts in `/`, with every
+/// signal unblocked and at its default action.
+///
+/// # Safety
+///
+/// The pointers must be as `execve` takes them.
+pub unsafe fn execve(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> i64 {
+    // SAFETY: the caller passes what `execve` takes.
+    let request = match unsafe { request(path, &descriptors(), argv, envp) } {
+        Ok(request) => request,
+        Err(e) => return -e,
+    };
+    let client = process::launcher();
+    match process::unsignalled(|| client.exec(request, FOREVER)) {
+        // The process manager kills the process before it replies, and
+        // no longer reports its end.
+        Ok(Ok(_)) => {
+            // SAFETY: the call takes no pointers.
+            unsafe { sys::process_exit(0) };
+            unreachable!("process_exit returned")
+        }
+        Ok(Err(status)) => -errno::from_status(i64::from(status.into_raw())),
+        Err(_) => -EIO,
+    }
+}
+
 /// # Safety
 ///
 /// As for `__mikros_spawn`.
@@ -238,26 +307,11 @@ unsafe fn spawn(
             return Err(ENOSYS);
         }
     }
-    // SAFETY: the caller passes a C string.
-    let path = unsafe { fs::c_path(path.cast()) }?;
-    let path: String = fs::absolute(fs::AT_FDCWD, path)?;
-    let mut descriptors: Descriptors = fd::snapshot()
-        .into_iter()
-        .map(|(fd, description, cloexec)| (fd, (description, cloexec)))
-        .collect();
+    let mut descriptors = descriptors();
     // SAFETY: the caller passes musl's list of file actions.
     unsafe { apply(&mut descriptors, actions) }?;
-    let handles = handles(&descriptors)?;
-    // SAFETY: the caller passes null-terminated arrays of C strings.
-    let (args, env) = unsafe { (strings(argv), strings(envp)) };
-    let request = SpawnRequest {
-        path,
-        arguments: arguments(&args, &env)?,
-        handles,
-        app_id: None,
-        user: CALLER_USER,
-        login_session: false,
-    };
+    // SAFETY: the caller passes what `posix_spawn` takes.
+    let request = unsafe { request(path, &descriptors, argv, envp) }?;
     let client = process::launcher();
     match process::unsignalled(|| client.spawn(request, FOREVER)) {
         Ok(Ok(spawned)) => Ok(spawned.pid),

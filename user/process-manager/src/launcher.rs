@@ -2,11 +2,11 @@
 //!
 //! Each process has its own channel, so the record it is bound to is
 //! the one it was created for, and requests act for that record only.
-//! `Spawn`, `Wait` and `Kill` are served; every other method fails with
+//! `Spawn`, `Exec`, `Wait` and `Kill` are served; every other method fails with
 //! `NOT_SUPPORTED`, and `List`, which cannot fail, closes the channel.
 
 use crate::processes::{NewProcess, Shared};
-use crate::records::Exit;
+use crate::records::{Exit, Record};
 use crate::start::{self, duplicate};
 use alloc::format;
 use alloc::rc::Rc;
@@ -14,8 +14,8 @@ use alloc::string::String;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
-    ExitStatus, Launcher, LauncherAsyncServer, LauncherKillResponse, LauncherRequest,
-    LauncherSpawnResponse, LauncherWaitResponse, SpawnRequest, StatusKind,
+    ExitStatus, Launcher, LauncherAsyncServer, LauncherExecResponse, LauncherKillResponse,
+    LauncherRequest, LauncherSpawnResponse, LauncherWaitResponse, SpawnRequest, StatusKind,
 };
 use mikros_rt::sys;
 
@@ -32,7 +32,7 @@ const CALLER_USER: u32 = u32::MAX;
 const SYSTEM_PREFIX: &str = "system.";
 
 /// Serves the `Launcher` endpoint `end` of process `pid` until it
-/// closes. `Spawn` and `Wait` run as tasks of their own, so that one
+/// closes. `Spawn`, `Exec` and `Wait` run as tasks of their own, so that one
 /// that waits does not hold up the others.
 pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
     use LauncherRequest as R;
@@ -58,7 +58,16 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                 Ok(())
             }
             R::Kill(request, r) => r.reply(s, kill(&shared, pid, request.pid, request.signo)),
-            R::Exec(_, r) => r.reply(s, Err(no)),
+            R::Exec(request, r) => {
+                let (shared, server) = (shared.clone(), server.clone());
+                shared.clone().spawner.spawn(async move {
+                    // On success the caller was killed, and the reply
+                    // finds no one.
+                    let result = exec(&shared, pid, request.request).await;
+                    let _ = r.reply(server.server(), result);
+                });
+                Ok(())
+            }
             R::GetInfo(_, r) => r.reply(s, Err(no)),
             R::CreateSession(_, r) => r.reply(s, Err(no)),
             R::SetProcessGroup(_, r) => r.reply(s, Err(no)),
@@ -71,12 +80,14 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
     }
 }
 
-/// Starts the program of `request` as a child of process `caller`.
-async fn spawn(
-    shared: &Rc<Shared>,
+/// The process that `request` of process `caller` starts with the
+/// parent `parent`, and whether it keeps the caller's user and app ID.
+fn new_process(
+    shared: &Shared,
     caller: u32,
+    parent: impl FnOnce(&Record) -> u32,
     request: SpawnRequest,
-) -> Result<LauncherSpawnResponse, Status> {
+) -> Result<(NewProcess, bool), Status> {
     // TODO: resolve the path in the caller's namespace (MIKSPEC-0050.R3)
     // rather than the boot file system.
     let program = request.path.strip_prefix('/').ok_or(Status::InvalidArgs)?;
@@ -85,28 +96,35 @@ async fn spawn(
     if request.user != CALLER_USER || request.login_session {
         return Err(Status::AccessDenied);
     }
-    let (parent, new_app) = {
-        let records = shared.records.borrow();
-        let parent = records.get(caller).ok_or(Status::BadState)?;
-        let app_id = match &request.app_id {
-            None => parent.app_id.clone(),
-            Some(app_id) => named_app(shared, caller, app_id)?,
-        };
-        let new = NewProcess {
-            program: program.into(),
-            path: request.path.clone(),
-            parent: caller,
-            process_group: parent.process_group,
-            session: parent.session,
-            app_id,
-            user: parent.user,
-            login_session: parent.login_session,
-            arguments: duplicate(request.arguments.raw(), SAME_RIGHTS)?,
-            handles: request.handles,
-        };
-        ((parent.user, parent.app_id.clone()), new)
+    let records = shared.records.borrow();
+    let from = records.get(caller).ok_or(Status::BadState)?;
+    let app_id = match &request.app_id {
+        None => from.app_id.clone(),
+        Some(app_id) => named_app(shared, caller, app_id)?,
     };
-    let same = (new_app.user, &new_app.app_id) == (parent.0, &parent.1);
+    let same = app_id == from.app_id;
+    let new = NewProcess {
+        program: program.into(),
+        path: request.path.clone(),
+        parent: parent(from),
+        process_group: from.process_group,
+        session: from.session,
+        app_id,
+        user: from.user,
+        login_session: from.login_session,
+        arguments: duplicate(request.arguments.raw(), SAME_RIGHTS)?,
+        handles: request.handles,
+    };
+    Ok((new, same))
+}
+
+/// Starts the program of `request` as a child of process `caller`.
+async fn spawn(
+    shared: &Rc<Shared>,
+    caller: u32,
+    request: SpawnRequest,
+) -> Result<LauncherSpawnResponse, Status> {
+    let (new_app, same) = new_process(shared, caller, |_| caller, request)?;
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
     let pid = shared
         .records
@@ -122,6 +140,19 @@ async fn spawn(
         pid,
         process: duplicate(process.raw(), rights)?,
     })
+}
+
+/// Replaces process `caller` with the program of `request`, which keeps
+/// its process ID, parent and children.
+async fn exec(
+    shared: &Rc<Shared>,
+    caller: u32,
+    request: SpawnRequest,
+) -> Result<LauncherExecResponse, Status> {
+    let (new, _) = new_process(shared, caller, |from| from.parent, request)?;
+    let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
+    shared.replace(caller, new, &control).await?;
+    Ok(LauncherExecResponse {})
 }
 
 /// Checks that process `caller` may give a new process `app_id`, and

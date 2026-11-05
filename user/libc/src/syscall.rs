@@ -36,6 +36,7 @@ const SYS_PIPE: i64 = 22;
 const SYS_DUP: i64 = 32;
 const SYS_GETPID: i64 = 39;
 const SYS_DUP2: i64 = 33;
+const SYS_EXECVE: i64 = 59;
 const SYS_EXIT: i64 = 60;
 const SYS_WAIT4: i64 = 61;
 const SYS_KILL: i64 = 62;
@@ -193,6 +194,10 @@ extern "C" fn __mikros_syscall(
         }
         SYS_GETPID => process::getpid(),
         SYS_GETPPID => process::getppid(),
+        // SAFETY: musl passes what `execve` takes.
+        SYS_EXECVE => unsafe {
+            spawn::execve(a1 as *const _, a2 as *const *const _, a3 as *const *const _)
+        },
         SYS_WAIT4 => spawn::wait4(a1, a2 as *mut i32, a3, a4 as *mut u8),
         SYS_KILL => process::kill(a1, a2),
         SYS_TKILL => signal::tkill(a1, a2),

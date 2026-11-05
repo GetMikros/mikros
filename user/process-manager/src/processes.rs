@@ -105,18 +105,33 @@ impl Shared {
         new: NewProcess,
         control: &ProcessDirectoryAsyncClient,
     ) -> Result<OwnedHandle, Status> {
-        let started = self.start_reserved(pid, new, control).await;
+        let started = self.start_as(pid, new, control, false).await;
         if started.is_err() {
             self.records.borrow_mut().release(pid);
         }
         started
     }
 
-    async fn start_reserved(
+    /// Starts `new` in place of the running process `pid`, as `start`
+    /// does, then puts its record in place of that process's and kills
+    /// that process, whose end is not reported.
+    pub async fn replace(
         self: &Rc<Self>,
         pid: u32,
         new: NewProcess,
         control: &ProcessDirectoryAsyncClient,
+    ) -> Result<(), Status> {
+        self.start_as(pid, new, control, true).await.map(drop)
+    }
+
+    /// Starts `new` as process `pid`, whose record it adds, or replaces
+    /// when `replacing`.
+    async fn start_as(
+        self: &Rc<Self>,
+        pid: u32,
+        new: NewProcess,
+        control: &ProcessDirectoryAsyncClient,
+        replacing: bool,
     ) -> Result<OwnedHandle, Status> {
         let name = new.program.rsplit('/').next().unwrap_or("process");
         let budget = self.budget_of(new.user, &new.app_id)?;
@@ -156,7 +171,12 @@ impl Shared {
                 exit: None,
             };
             let watched = duplicate(started.process.raw(), SAME_RIGHTS)?;
-            if !self.records.borrow_mut().insert(pid, record) {
+            let mut records = self.records.borrow_mut();
+            if replacing {
+                let old = records.replace(pid, record).ok_or(Status::BadState)?;
+                // SAFETY: the call takes no pointers.
+                unsafe { sys::task_kill(old.process.raw()) };
+            } else if !records.insert(pid, record) {
                 return Err(Status::BadState);
             }
             Ok(watched)
@@ -228,8 +248,12 @@ impl Shared {
     }
 
     /// Waits for process `pid` to terminate, then keeps its exit status
-    /// and wakes the tasks waiting for a change.
+    /// and wakes the tasks waiting for a change, unless another process
+    /// replaced it.
     async fn watch(self: Rc<Self>, pid: u32, process: OwnedHandle) {
+        let Ok(watched) = koid(&process) else {
+            return;
+        };
         if self
             .reactor
             .signals(process.raw(), TERMINATED)
@@ -239,7 +263,12 @@ impl Shared {
             return;
         }
         let exit = exit_of(&process).unwrap_or(Exit { code: 0, signal: 0 });
-        self.records.borrow_mut().exited(pid, exit);
+        let mut records = self.records.borrow_mut();
+        if records.get(pid).map(|r| r.koid) != Some(watched) {
+            return;
+        }
+        records.exited(pid, exit);
+        drop(records);
         self.terminations.set(self.terminations.get() + 1);
         for waker in self.waiters.borrow_mut().drain(..) {
             waker.wake();

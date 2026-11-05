@@ -11,7 +11,6 @@ const PID_MAX: u32 = i32::MAX as u32;
 
 /// What the process manager keeps about one process.
 pub struct Record {
-    #[expect(dead_code, reason = "read once GetInfo is served")]
     pub koid: u64,
     pub parent: u32,
     pub process_group: u32,
@@ -77,6 +76,17 @@ impl Records {
         }
         self.by_pid.insert(pid, record);
         true
+    }
+
+    /// Puts `record` in place of the record of `pid`, which must be of
+    /// a running process, keeping that process's children, and returns
+    /// the record it replaced.
+    pub fn replace(&mut self, pid: u32, record: Record) -> Option<Record> {
+        let old = self.by_pid.get_mut(&pid)?;
+        if old.exit.is_some() {
+            return None;
+        }
+        Some(core::mem::replace(old, record))
     }
 
     pub fn get(&self, pid: u32) -> Option<&Record> {
