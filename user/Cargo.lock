@@ -113,6 +113,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-manifest"
+version = "0.0.0"
+dependencies = [
+ "mikros-yaml",
+]
+
+[[package]]
 name = "mikros-rt"
 version = "0.0.0"
 dependencies = [
@@ -216,6 +223,7 @@ dependencies = [
 name = "service-manager"
 version = "0.0.0"
 dependencies = [
+ "mikros-manifest",
  "mikros-rt",
  "mikros-yaml",
 ]
