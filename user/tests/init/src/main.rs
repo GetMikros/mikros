@@ -7977,9 +7977,10 @@ mod manager {
     /// From a boot image with the service manager, the permission broker,
     /// the directory probe and their manifests, the service manager
     /// starts the broker, registers permissions with it, and starts the
-    /// probe, which drives its directory and exits with 0 once every
-    /// check passed. The service manager says so in the log that it is
-    /// given as init's boot handle with ID 2.
+    /// probe, giving it the log and the platform information that init's
+    /// boot handles hold here, and no framebuffer. The probe drives its
+    /// directory and exits with 0 once every check passed. The service
+    /// manager says so in the log.
     pub fn service_manager_starts_boot_services(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service directory-probe exited with code 0";
         const FAILED: &[&[u8]] = &[
@@ -8022,7 +8023,26 @@ mod manager {
             id: 2,
             handle: copy(s.log, SAME_RIGHTS)?,
         };
-        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![log], deadline) else {
+        // Platform information that the probe reads back, and no
+        // framebuffer.
+        let mut info = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the platform information", unsafe {
+            sys::mem_create(super::PAGE_SIZE, 0, &mut info)
+        })?;
+        // SAFETY: the kernel just created the handle for us.
+        let info = unsafe { OwnedHandle::from_raw(info) };
+        // SAFETY: the pointer describes the bytes.
+        check("writing the platform information", unsafe {
+            sys::mem_write(info.raw(), 0, b"platform".as_ptr(), 8)
+        })?;
+        let info = StartupHandle {
+            role: HandleRole::User,
+            id: 5,
+            handle: info,
+        };
+        let handles = alloc::vec![log, info];
+        let Ok(Ok(started)) = init.start_service_manager(handles, deadline) else {
             return Err(Failure {
                 what: "starting the service manager",
                 status: 0,

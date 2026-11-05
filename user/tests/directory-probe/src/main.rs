@@ -38,6 +38,8 @@ const INFO_BASIC: u32 = 1;
 const INFO_BASIC_SIZE: usize = 24;
 /// The step a failure to set the checks up ends with.
 const SETUP: i64 = 100;
+/// The step that wrong boot handles end with.
+const BOOT_HANDLES: i64 = 101;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -52,6 +54,11 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    // The boot handles its manifest lists: the log, which it logs
+    // through, and the platform information, without a framebuffer.
+    if !boot_handles(&managed.handles) {
+        return BOOT_HANDLES;
+    }
     let at = managed
         .handles
         .iter()
@@ -74,6 +81,42 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             Err(step) => step,
         }
     })
+}
+
+/// Whether `handles` hold the log as `USER` 2, with `MANAGE`, and the
+/// platform information as `USER` 5, readable without `WRITE`, and no
+/// other `USER` handle. Logs through the log when they do.
+fn boot_handles(handles: &[StartupHandle]) -> bool {
+    const LOG: u32 = 10;
+    const MEMORY_OBJECT: u32 = 3;
+    const READ: u32 = 1 << 2;
+    const WRITE: u32 = 1 << 3;
+    const MANAGE: u32 = 1 << 8;
+    let user = |id| {
+        handles
+            .iter()
+            .find(|h| h.role == HandleRole::User && h.id == id)
+            .map(|h| &h.handle)
+    };
+    let users = handles
+        .iter()
+        .filter(|h| h.role == HandleRole::User)
+        .count();
+    let (Some(log), Some(info)) = (user(2), user(5)) else {
+        return false;
+    };
+    let log_ok = mikros_rt::midl::handle_info(log.raw())
+        .is_some_and(|(kind, rights)| kind == LOG && rights & MANAGE != 0);
+    let info_ok = mikros_rt::midl::handle_info(info.raw()).is_some_and(|(kind, rights)| {
+        kind == MEMORY_OBJECT && rights & READ != 0 && rights & WRITE == 0
+    });
+    let mut bytes = [0u8; 8];
+    // SAFETY: the pointer describes `bytes`.
+    let read = unsafe { sys::mem_read(info.raw(), 0, bytes.as_mut_ptr(), 8) };
+    if log_ok {
+        mikros_rt::log::set_handle(log.raw());
+    }
+    users == 2 && log_ok && info_ok && read == mikros_rt::OK && &bytes == b"platform"
 }
 
 /// The koid of the object `handle` refers to and the koid of its peer.
