@@ -1,0 +1,47 @@
+--- a/src/thread/pthread_create.c
++++ b/src/thread/pthread_create.c
+@@ -299,6 +299,8 @@
+ 				__munmap(map, size);
+ 				goto fail;
+ 			}
++			/* Mikros: the guard page is unmapped. */
++			__munmap(map, guard);
+ 		} else {
+ 			map = __mmap(0, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+ 			if (map == MAP_FAILED) goto fail;
+@@ -311,8 +313,10 @@
+ 	}
+ 
+ 	new = __copy_tls(tsd - libc.tls_size);
+-	new->map_base = map;
+-	new->map_size = size;
++	/* Mikros: the memory freed with the thread is what lies above
++	 * its unmapped guard page. */
++	new->map_base = map ? map + guard : 0;
++	new->map_size = size - guard;
+ 	new->stack = stack;
+ 	new->stack_size = stack - stack_limit;
+ 	new->guard_size = guard;
+--- a/src/thread/x86_64/clone.s
++++ b/src/thread/x86_64/clone.s
+@@ -0,0 +1,8 @@
++/* Mikros: threads are created by the Mikros layer. */
++.text
++.global __clone
++.hidden __clone
++.hidden __mikros_clone
++.type   __clone,@function
++__clone:
++	jmp __mikros_clone
+--- a/src/thread/x86_64/__unmapself.s
++++ b/src/thread/x86_64/__unmapself.s
+@@ -0,0 +1,9 @@
++/* Mikros: the Mikros layer unmaps the stack of an ending thread and
++ * ends it. */
++.text
++.global __unmapself
++.hidden __unmapself
++.hidden __mikros_unmapself
++.type   __unmapself,@function
++__unmapself:
++	jmp __mikros_unmapself

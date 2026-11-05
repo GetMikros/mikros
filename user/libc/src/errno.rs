@@ -4,6 +4,7 @@ use mikros_rt::interfaces::mikros::fs::Error;
 use mikros_rt::sys::Status;
 
 pub const ENOENT: i64 = 2;
+pub const ESRCH: i64 = 3;
 pub const EINTR: i64 = 4;
 pub const EIO: i64 = 5;
 pub const EBADF: i64 = 9;

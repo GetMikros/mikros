@@ -200,7 +200,7 @@ fn exit(code: i64) -> ! {
 }
 
 /// The object ID of `handle`.
-fn object_id(handle: sys::Handle) -> Option<u32> {
+pub(crate) fn object_id(handle: sys::Handle) -> Option<u32> {
     let record = info::<0x18>(handle, INFO_BASIC)?;
     Some(u64::from_le_bytes(record[..8].try_into().ok()?) as u32)
 }

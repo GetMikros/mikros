@@ -6,7 +6,7 @@
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENODEV, ENOSYS, ENOTTY};
 use crate::fd::Description;
-use crate::{clock, dir, fd, fs, futex, io, stat};
+use crate::{clock, dir, fd, fs, futex, io, stat, thread};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::MemoryFlags;
@@ -38,6 +38,7 @@ const SYS_GETCWD: i64 = 79;
 const SYS_CHDIR: i64 = 80;
 const SYS_FCHDIR: i64 = 81;
 const SYS_READLINK: i64 = 89;
+const SYS_GETTID: i64 = 186;
 const SYS_FUTEX: i64 = 202;
 const SYS_SET_THREAD_AREA: i64 = 205;
 const SYS_GETDENTS64: i64 = 217;
@@ -155,21 +156,18 @@ extern "C" fn __mikros_syscall(
             // SAFETY: setting the FS base takes no pointers.
             errno::result(unsafe { sys::thread_set_user_base(0, a1 as u64) }, 0)
         }
-        SYS_SET_TID_ADDRESS => i64::from(TID.load(Ordering::Relaxed)),
+        SYS_SET_TID_ADDRESS => thread::set_tid_address(a1 as usize, TID.load(Ordering::Relaxed)),
+        SYS_GETTID => thread::gettid(),
         SYS_FUTEX => futex::futex(a1 as *const u32, a2, a3, a4 as *const futex::Timeout, a6),
         SYS_GETRANDOM => getrandom(a1 as *mut u8, a2 as u64),
         SYS_CLOCK_GETTIME => clock::gettime(a1, a2 as *mut clock::Timespec),
         SYS_EXIT_GROUP => exit(a1),
-        SYS_EXIT => {
-            // SAFETY: ending the thread takes no pointers.
-            unsafe { sys::thread_exit() };
-            exit(a1)
-        }
+        SYS_EXIT => thread::exit(),
         _ => -ENOSYS,
     }
 }
 
-fn process() -> Handle {
+pub(crate) fn process() -> Handle {
     PROCESS.load(Ordering::Relaxed)
 }
 

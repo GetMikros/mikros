@@ -3,11 +3,14 @@
  * was given exactly one argument and every check below passed, and with
  * the number of the first check that failed otherwise. */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <mikros/abi.h>
 #include <mikros/syscalls.h>
+#include <pthread.h>
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -315,6 +318,115 @@ static int futexes_wait_and_wake(void)
 		&& syscall(SYS_futex, &word, WAKE | PRIVATE, 1) == 0;
 }
 
+static _Thread_local int tls_word = 5;
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
+static long counter;
+static int turn;
+static sem_t detached_done;
+
+static void *count(void *arg)
+{
+	tls_word = (int)(long)arg;
+	for (int i = 0; i < 10000; i++) {
+		pthread_mutex_lock(&lock);
+		counter++;
+		pthread_mutex_unlock(&lock);
+	}
+	return (void *)(long)tls_word;
+}
+
+static void *take_turn(void *arg)
+{
+	(void)arg;
+	pthread_mutex_lock(&lock);
+	while (turn == 0)
+		pthread_cond_wait(&changed, &lock);
+	turn = 2;
+	pthread_cond_signal(&changed);
+	pthread_mutex_unlock(&lock);
+	return 0;
+}
+
+static void *post(void *arg)
+{
+	(void)arg;
+	sem_post(&detached_done);
+	return 0;
+}
+
+/* Whether the page below the calling thread's stack is unmapped, which
+   mprotect cannot change. */
+static void *guard_unmapped(void *arg)
+{
+	(void)arg;
+	pthread_attr_t attr;
+	void *base;
+	size_t size, guard;
+	if (pthread_getattr_np(pthread_self(), &attr)
+	    || pthread_attr_getstack(&attr, &base, &size)
+	    || pthread_attr_getguardsize(&attr, &guard) || guard < 4096)
+		return 0;
+	int unmapped = mprotect((char *)base - 4096, 4096, PROT_READ) == -1;
+	return (void *)(long)(unmapped && mprotect(base, 4096, PROT_READ | PROT_WRITE) == 0);
+}
+
+static void *nothing(void *arg)
+{
+	return arg;
+}
+
+/* Threads have their own thread-local storage and share a mutex, hand
+   over through a condition variable, end detached, and are created and
+   joined many times. */
+static int threads_run(void)
+{
+	pthread_t t[4];
+	for (long i = 0; i < 4; i++)
+		if (pthread_create(&t[i], 0, count, (void *)(i + 10)))
+			return 0;
+	for (long i = 0; i < 4; i++) {
+		void *ret;
+		if (pthread_join(t[i], &ret) || ret != (void *)(i + 10))
+			return 0;
+	}
+	if (counter != 40000 || tls_word != 5)
+		return 0;
+	pthread_t waiter;
+	if (pthread_create(&waiter, 0, take_turn, 0))
+		return 0;
+	pthread_mutex_lock(&lock);
+	turn = 1;
+	pthread_cond_signal(&changed);
+	while (turn != 2)
+		pthread_cond_wait(&changed, &lock);
+	pthread_mutex_unlock(&lock);
+	if (pthread_join(waiter, 0))
+		return 0;
+	pthread_attr_t detached;
+	pthread_attr_init(&detached);
+	pthread_attr_setdetachstate(&detached, PTHREAD_CREATE_DETACHED);
+	sem_init(&detached_done, 0, 0);
+	for (int i = 0; i < 20; i++) {
+		pthread_t d;
+		if (pthread_create(&d, &detached, post, 0) || sem_wait(&detached_done))
+			return 0;
+	}
+	pthread_t g;
+	void *unmapped;
+	if (pthread_create(&g, 0, guard_unmapped, 0) || pthread_join(g, &unmapped)
+	    || !unmapped)
+		return 0;
+	for (long i = 0; i < 200; i++) {
+		pthread_t n;
+		void *ret;
+		if (pthread_create(&n, 0, nothing, (void *)i) || pthread_join(n, &ret)
+		    || ret != (void *)i)
+			return 0;
+	}
+	return 1;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -356,9 +468,11 @@ int main(int argc, char **argv)
 		return 18;
 	if (!futexes_wait_and_wake())
 		return 19;
+	if (!threads_run())
+		return 20;
 	char *copy = malloc(64);
 	if (!copy)
-		return 20;
+		return 21;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);
