@@ -174,6 +174,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", directory_probe.display());
             let directory_probe_manifest =
                 crate::workspace_root().join("user/tests/directory-probe/directory-probe.yaml");
+            let restart_probe_manifest =
+                crate::workspace_root().join("user/tests/directory-probe/restart-probe.yaml");
             // The service manager tests serve this image, which holds the
             // system's services and their manifests, and a probe that
             // starts as a boot service.
@@ -193,6 +195,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     (
                         "usr/lib/services/directory-probe.yaml",
                         directory_probe_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/restart-probe.yaml",
+                        restart_probe_manifest.as_path(),
                     ),
                 ],
             )?;

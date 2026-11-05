@@ -5,7 +5,8 @@
 //! itself. It then registers named instances through the registrar,
 //! lists, watches and connects to them, and removes them. It exits with
 //! 0 when every check passed or with the number of the first that
-//! failed.
+//! failed. Started as `system.restart-probe`, it exits with 1 at once,
+//! for the service manager to restart it.
 
 #![no_std]
 #![no_main]
@@ -36,6 +37,8 @@ const REGISTRAR: &str = "mikros.service.Registrar";
 const NAMED: &str = "test.directory.Named";
 const INFO_BASIC: u32 = 1;
 const INFO_BASIC_SIZE: usize = 24;
+/// The app ID of the program when it runs as the restart probe.
+const RESTART_PROBE: &str = "system.restart-probe";
 /// The step a failure to set the checks up ends with.
 const SETUP: i64 = 100;
 /// The step that wrong boot handles end with.
@@ -54,6 +57,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    // Started as the restart probe, it fails at once, every time.
+    if managed.header.app_id == RESTART_PROBE {
+        return 1;
+    }
     // The boot handles its manifest lists: the log, which it logs
     // through, and the platform information, without a framebuffer.
     if !boot_handles(&managed.handles) {

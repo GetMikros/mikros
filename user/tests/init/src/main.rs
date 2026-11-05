@@ -7979,8 +7979,9 @@ mod manager {
     /// starts the broker, registers permissions with it, and starts the
     /// probe, giving it the log and the platform information that init's
     /// boot handles hold here, and no framebuffer. The probe drives its
-    /// directory and exits with 0 once every check passed. The service
-    /// manager says so in the log.
+    /// directory and exits with 0 once every check passed. The restart
+    /// probe exits with 1 each time, and is restarted five times and then
+    /// given up on. The service manager says all of it in the log.
     pub fn service_manager_starts_boot_services(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service directory-probe exited with code 0";
         const FAILED: &[&[u8]] = &[
@@ -8049,7 +8050,15 @@ mod manager {
             });
         };
         let deadline = super::now() + 30_000_000_000;
+        // The restart probe fails every time it runs: it is started once
+        // and restarted five times.
+        const RESTARTED: &[u8] = b"started service restart-probe";
+        const GAVE_UP: &[u8] = b"service restart-probe failed after 5 restarts";
+        let (mut passed, mut starts, mut gave_up) = (false, 0, false);
         let outcome = loop {
+            if passed && gave_up {
+                break Some(starts == 6);
+            }
             let (status, record) = super::read_record(reader.raw());
             if status == super::SHOULD_WAIT {
                 if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
@@ -8061,8 +8070,11 @@ mod manager {
             let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
             let message = &record[0x20..0x20 + len.min(256)];
             if super::contains(message, PASSED) {
-                break Some(true);
+                passed = true;
+                continue;
             }
+            starts += usize::from(super::contains(message, RESTARTED));
+            gave_up |= super::contains(message, GAVE_UP);
             if FAILED.iter().any(|f| super::contains(message, f)) {
                 mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
                 break Some(false);
@@ -8072,7 +8084,10 @@ mod manager {
         unsafe { sys::task_kill(started.process.raw()) };
         drop(m);
         ensure("logging an outcome in time", outcome.is_some())?;
-        ensure("passing every check of the probe", outcome == Some(true))
+        ensure(
+            "passing every check, and restarting five times",
+            outcome == Some(true),
+        )
     }
 
     /// The process manager ends without serving init when `Start` has
