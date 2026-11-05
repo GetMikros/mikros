@@ -146,7 +146,23 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", launcher.display());
+            let broker = user_build("permissions-broker", kind)?;
+            println!("built    {}", broker.display());
+            let broker_probe = user_build("broker-probe", kind)?;
+            println!("built    {}", broker_probe.display());
+            // The broker tests serve this image, in which the broker
+            // probe takes the service manager's place.
+            let broker_image = boot_image(
+                kind,
+                "broker.img",
+                &[
+                    ("usr/bin/service-manager", broker_probe.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                ],
+            )?;
+            println!("built    {}", broker_image.display());
             let members = [
+                ("tests/broker.img", broker_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/channel-echo", echo.as_path()),

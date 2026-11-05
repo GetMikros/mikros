@@ -7921,6 +7921,59 @@ mod manager {
         Ok(())
     }
 
+    /// From a boot image in which the broker probe stands in for the
+    /// service manager, the permission broker starts from a sealed
+    /// manifest and serves its protocol: the probe exits with 0 once
+    /// every check passed, or with the number of the first that failed.
+    pub fn permission_broker_serves(s: &Startup) -> Result {
+        let image = boot_file(s, b"tests/broker.img")?;
+        let mut mem = 0;
+        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the image", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `image`.
+        check("writing the image", unsafe {
+            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
+        })?;
+        let mut m = start(s)?;
+        let (mut startup, init) = start_message(s, &m, 1)?;
+        startup.boot_image = mem;
+        m.send(startup, false)?;
+        let deadline = super::in_time();
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![], deadline) else {
+            return Err(Failure {
+                what: "starting the probe",
+                status: 0,
+            });
+        };
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let ended = unsafe {
+            sys::object_wait_one(
+                started.process.raw(),
+                TERMINATED,
+                super::now() + 30_000_000_000,
+                &mut observed,
+            )
+        };
+        ensure("ending the probe", ended == 0)?;
+        let code = super::u64_at(&super::info::<0x20>(started.process.raw(), 2)?, 0) as i64;
+        if code != 0 {
+            mikros_rt::log!(Error, "the broker probe failed check {code}");
+        }
+        ensure("passing every check of the probe", code == 0)?;
+        drop(m);
+        Ok(())
+    }
+
     /// The process manager ends without serving init when `Start` has
     /// another version or another message follows it.
     pub fn process_manager_refuses_bad_start(s: &Startup) -> Result {
@@ -8219,6 +8272,7 @@ mod bootfs {
                 "listing a directory",
                 names
                     == [
+                        "broker.img",
                         "call-server",
                         "channel-echo",
                         "debuggee",
@@ -8405,7 +8459,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 122] = [
+const TESTS: [(&str, Test); 123] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -8448,6 +8502,10 @@ const TESTS: [(&str, Test); 122] = [
     (
         "process_manager_serves_launcher",
         manager::process_manager_serves_launcher,
+    ),
+    (
+        "permission_broker_serves",
+        manager::permission_broker_serves,
     ),
     (
         "executor_waits_on_objects",
