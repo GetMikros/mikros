@@ -12,6 +12,7 @@ mod dir;
 mod errno;
 mod fd;
 mod fs;
+mod futex;
 mod io;
 mod library;
 mod lock;

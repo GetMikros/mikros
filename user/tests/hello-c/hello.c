@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -295,6 +296,25 @@ static int access_checks_rights(void)
 	return ok;
 }
 
+/* A futex wait fails at once on another value and when its timeout
+   passes, and a wake with no waiters wakes none. */
+static int futexes_wait_and_wake(void)
+{
+	enum { WAIT = 0, WAKE = 1, PRIVATE = 128 };
+	static int word = 1;
+	struct timespec timeout = { 0, 10000000 }, start, end;
+	if (syscall(SYS_futex, &word, WAIT | PRIVATE, 0, 0) != -1)
+		return 0;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	if (syscall(SYS_futex, &word, WAIT, 1, &timeout) != -1 || errno != ETIMEDOUT)
+		return 0;
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	struct timespec bad = { 0, 1000000000 };
+	return ns(end) - ns(start) >= 10000000
+		&& syscall(SYS_futex, &word, WAIT, 1, &bad) == -1 && errno == EINVAL
+		&& syscall(SYS_futex, &word, WAKE | PRIVATE, 1) == 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -334,9 +354,11 @@ int main(int argc, char **argv)
 		return 17;
 	if (!access_checks_rights())
 		return 18;
+	if (!futexes_wait_and_wake())
+		return 19;
 	char *copy = malloc(64);
 	if (!copy)
-		return 19;
+		return 20;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);
