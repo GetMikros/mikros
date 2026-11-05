@@ -24,7 +24,6 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
 use mikros_rt::exec::Spawner;
 use mikros_rt::exec::{Executor, Reactor};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
@@ -47,6 +46,8 @@ const CONTROL_ID: u32 = 0;
 const PROBE: &str = "/usr/bin/probe";
 /// A static C program, which prints a greeting for its argument.
 const HELLO: &str = "/usr/bin/hello";
+/// The same program linked with the shared C library.
+const HELLO_DYNAMIC: &str = "/usr/bin/hello-dynamic";
 /// The `id` of a stream as descriptor 1.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const KILL: u32 = 9;
@@ -117,27 +118,25 @@ async fn serve_control(end: OwnedHandle, reactor: Reactor, spawner: Spawner) {
     }
 }
 
-/// Whether a connection to `mikros.time.Clock` was refused yet.
-static CLOCK_REFUSED: AtomicBool = AtomicBool::new(false);
-
 /// Serves a child's directory: the first connection to
 /// `mikros.time.Clock` finds no service, as before the time service
 /// starts, and later ones reach a clock that hands out a time page with
 /// `UTC_OFFSET`. No other protocol is provided.
 async fn serve_directory(end: ServerEnd<Directory>, reactor: Reactor, spawner: Spawner) {
     let server = DirectoryAsyncServer::new(end, reactor.clone());
+    let mut clock_refused = false;
     while let Ok(request) = server.next().await {
         let DirectoryRequest::Connect(q, r) = request else {
             continue;
         };
-        let result =
-            if q.protocol == "mikros.time.Clock" && CLOCK_REFUSED.swap(true, Ordering::Relaxed) {
-                let clock = ServerEnd::<Clock>::new(q.server);
-                spawner.spawn(serve_clock(clock, reactor.clone()));
-                Ok(DirectoryConnectResponse {})
-            } else {
-                Err(Status::NotFound)
-            };
+        let clock = q.protocol == "mikros.time.Clock";
+        let result = if clock && core::mem::replace(&mut clock_refused, true) {
+            let clock = ServerEnd::<Clock>::new(q.server);
+            spawner.spawn(serve_clock(clock, reactor.clone()));
+            Ok(DirectoryConnectResponse {})
+        } else {
+            Err(Status::NotFound)
+        };
         let _ = r.reply(server.server(), result);
     }
 }
@@ -210,6 +209,30 @@ fn arguments_from(args: &[&str]) -> OwnedHandle {
         sys::mem_write(mem, 0, bytes.as_ptr(), bytes.len() as u64);
         OwnedHandle::from_raw(mem)
     }
+}
+
+/// Runs the C program at `path` with the argument `world` and a stream
+/// as its standard output, and returns what it printed and its exit
+/// code.
+async fn run_c(l: &LauncherAsyncClient, path: &str) -> (Vec<u8>, Option<i64>) {
+    let (output, stdout) = stream();
+    let pid = spawn(l, &[], |r| {
+        r.path = path.into();
+        r.arguments = arguments_from(&[path, "world"]);
+        r.handles.push(StartupHandle {
+            role: HandleRole::Stdout,
+            id: STDOUT_STREAM,
+            handle: stdout,
+        });
+    })
+    .await
+    .map_or(0, |(pid, _)| pid);
+    let ended = wait(l, pid as i32).await;
+    let code = ended.and_then(|(p, code, signal)| (p == pid && signal == 0).then_some(code));
+    if code != Some(0) {
+        mikros_rt::log!(Error, "launcher probe: {path} ended with {ended:?}");
+    }
+    (read_all(&output), code)
 }
 
 /// A new stream: the end the probe reads, and the end it gives away.
@@ -360,25 +383,17 @@ async fn probe(l: &LauncherAsyncClient) -> i64 {
             "refusing a child an app ID",
             wait(l, rename as i32).await == Some((rename, 0, 0)),
         )?;
-        let (output, stdout) = stream();
-        let hello = spawn(l, &[], |r| {
-            r.path = HELLO.into();
-            r.arguments = arguments_from(&[HELLO, "world"]);
-            r.handles.push(StartupHandle {
-                role: HandleRole::Stdout,
-                id: STDOUT_STREAM,
-                handle: stdout,
-            });
-        })
-        .await
-        .map_or(0, |(pid, _)| pid);
-        check(
-            "running a C program",
-            wait(l, hello as i32).await == Some((hello, 0, 0)),
-        )?;
+        let (output, code) = run_c(l, HELLO).await;
+        check("running a static C program", code == Some(0))?;
         check(
             "reading what it printed",
-            read_all(&output).as_slice() == b"hello, world\n",
+            output.as_slice() == b"hello, world\n",
+        )?;
+        let (output, code) = run_c(l, HELLO_DYNAMIC).await;
+        check("running a dynamically linked C program", code == Some(0))?;
+        check(
+            "reading what it printed",
+            output.as_slice() == b"hello, world\n",
         )?;
         Ok(())
     };

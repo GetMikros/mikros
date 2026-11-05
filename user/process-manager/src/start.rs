@@ -12,7 +12,7 @@ use mikros_rt::interfaces::mikros::process::{
 };
 use mikros_rt::interfaces::mikros::service::Directory;
 use mikros_rt::sys::{self, Handle};
-use process_manager::bootfs::Fs;
+use process_manager::bootfs::{Executable, Fs};
 
 const PAGE_SIZE: u64 = 4096;
 /// The only version of the transfer.
@@ -60,6 +60,8 @@ pub struct Started {
     base: u64,
     phdr: u64,
     phnum: u32,
+    /// Where the dynamic linker was loaded, or 0.
+    interpreter_base: u64,
 }
 
 impl Started {
@@ -70,12 +72,26 @@ impl Started {
     }
 }
 
-/// Loads the program at `path` of `fs` into a new process charged to
-/// `budget`, and starts it with a new bootstrap channel.
-pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Started, Status> {
-    let executable = fs.executable(path).map_err(status)?;
+fn loading(e: mikros_loader::Error) -> Status {
+    match e {
+        mikros_loader::Error::Status(raw) => status(raw),
+        _ => Status::InvalidArgs,
+    }
+}
+
+/// Where an image was loaded, and whether it names the dynamic linker.
+struct Image {
+    base: u64,
+    entry: u64,
+    phdr: u64,
+    phnum: u32,
+    dynamic: bool,
+}
+
+/// Maps `executable` of `fs` into `process`.
+fn load_image(fs: &Rc<Fs>, process: Handle, executable: &Executable) -> Result<Image, Status> {
     let private = |offset: u64, len: u64| {
-        fs.private_range(&executable, offset, len)
+        fs.private_range(executable, offset, len)
             .map(OwnedHandle::into_raw)
             .map_err(mikros_loader::Error::Status)
     };
@@ -84,16 +100,43 @@ pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Start
         shared: executable.shared.raw(),
         private: &private,
     };
-    let loading = |e| match e {
-        mikros_loader::Error::Status(raw) => status(raw),
-        _ => Status::InvalidArgs,
-    };
+    let loaded = mikros_loader::load(process, &image).map_err(loading)?;
+    Ok(Image {
+        base: loaded.base,
+        entry: loaded.entry,
+        phdr: loaded.phdr,
+        phnum: loaded.phnum,
+        dynamic: loaded.interpreter.is_some(),
+    })
+}
+
+/// Loads the program at `path` of `fs` into a new process charged to
+/// `budget`, and starts it with a new bootstrap channel: at the entry of
+/// the dynamic linker, which is loaded too, when the program names one,
+/// and at its own entry otherwise.
+pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Started, Status> {
+    let executable = fs.executable(path).map_err(status)?;
     let mut process = 0;
     // SAFETY: the pointers describe `name` and `process`.
     check(unsafe { sys::process_create(budget, name.as_ptr(), name.len() as u64, &mut process) })?;
     // SAFETY: the handle was just created for us.
     let process = unsafe { OwnedHandle::from_raw(process) };
-    let loaded = mikros_loader::load(process.raw(), &image).map_err(loading)?;
+    let loaded = load_image(fs, process.raw(), &executable)?;
+    // The loader accepts only the one dynamic linker.
+    let (entry, interpreter_base) = if loaded.dynamic {
+        // `fs` resolves paths from its root, without the leading slash.
+        let path = core::str::from_utf8(mikros_loader::INTERPRETER).expect("an ASCII path");
+        let path = path.strip_prefix('/').unwrap_or(path);
+        let linker = fs.executable(path).map_err(status)?;
+        let linked = load_image(fs, process.raw(), &linker)?;
+        // The dynamic linker is not itself linked dynamically.
+        if linked.dynamic {
+            return Err(Status::InvalidArgs);
+        }
+        (linked.entry, linked.base)
+    } else {
+        (loaded.entry, 0)
+    };
     let top = mikros_loader::stack(process.raw()).map_err(loading)?;
     let mut thread = 0;
     // SAFETY: the pointers describe `name` and `thread`.
@@ -105,16 +148,7 @@ pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Start
     let (ours, theirs) = endpoints::<Bootstrap>().map_err(|_| Status::NoResources)?;
     let theirs = theirs.into_handle();
     // SAFETY: the call takes no pointers.
-    check(unsafe {
-        sys::process_start(
-            process.raw(),
-            thread.raw(),
-            loaded.entry,
-            top,
-            theirs.raw(),
-            0,
-        )
-    })?;
+    check(unsafe { sys::process_start(process.raw(), thread.raw(), entry, top, theirs.raw(), 0) })?;
     // The handle moved into the new process's table.
     let _ = theirs.into_raw();
     Ok(Started {
@@ -124,6 +158,7 @@ pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Start
         base: loaded.base,
         phdr: loaded.phdr,
         phnum: loaded.phnum,
+        interpreter_base,
     })
 }
 
@@ -193,7 +228,7 @@ impl Started {
             program_base: self.base,
             program_phdr: self.phdr,
             program_phnum: self.phnum,
-            interpreter_base: 0,
+            interpreter_base: self.interpreter_base,
         };
         sent(self.bootstrap.begin(header))?;
         let mut handles = transfer.handles;

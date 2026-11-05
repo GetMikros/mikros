@@ -144,8 +144,15 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", services.display());
             let probe = user_build("launcher-probe", kind)?;
             println!("built    {}", probe.display());
-            let hello = c_build("hello-c", &["user/tests/hello-c/hello.c"])?;
+            let hello = c_build("hello-c", &["user/tests/hello-c/hello.c"], Linking::Static)?;
             println!("built    {}", hello.display());
+            let hello_dynamic = c_build(
+                "hello-c-dynamic",
+                &["user/tests/hello-c/hello.c"],
+                Linking::Dynamic,
+            )?;
+            println!("built    {}", hello_dynamic.display());
+            let dynamic_linker = crate::sysroot::dir().join("lib/ld-mikros.dlib");
             // The process manager tests serve this image, in which the
             // probe takes the service manager's place.
             let launcher = boot_image(
@@ -155,6 +162,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/service-manager", probe.as_path()),
                     ("usr/bin/probe", probe.as_path()),
                     ("usr/bin/hello", hello.as_path()),
+                    ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
+                    ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
                 ],
             )?;
             println!("built    {}", launcher.display());
@@ -333,9 +342,16 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
         .join(bin))
 }
 
-/// Builds the static C program `name` from `sources`, paths relative
-/// to the repository, against the sysroot, and returns its path.
-fn c_build(name: &str, sources: &[&str]) -> Result<PathBuf> {
+/// How a C program is linked with the C library.
+#[derive(Clone, Copy, PartialEq)]
+enum Linking {
+    Static,
+    Dynamic,
+}
+
+/// Builds the C program `name` from `sources`, paths relative to the
+/// repository, against the sysroot, and returns its path.
+fn c_build(name: &str, sources: &[&str], linking: Linking) -> Result<PathBuf> {
     let root = crate::workspace_root();
     let sysroot = crate::sysroot::build()?;
     let dir = root.join("target/c").join(name);
@@ -346,7 +362,9 @@ fn c_build(name: &str, sources: &[&str]) -> Result<PathBuf> {
             "--config={}",
             crate::sysroot::config(&sysroot).display()
         ))
-        .args(["-O2", "-static-pie", "-o"])
+        .arg("-O2")
+        .args((linking == Linking::Static).then_some("-static-pie"))
+        .arg("-o")
         .arg(&program)
         .args(sources.iter().map(|s| root.join(s)))
         .status()
