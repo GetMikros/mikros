@@ -18,6 +18,7 @@ mod run;
 mod scenario;
 mod setup;
 mod symbolize;
+mod sysroot;
 mod test;
 mod tools;
 
@@ -51,6 +52,8 @@ enum Command {
     /// Replace the backtrace addresses in the panic reports of a serial
     /// log with their functions, files and lines.
     Symbolize(symbolize::Args),
+    /// Build the sysroot that C and C++ programs are built against.
+    Sysroot(sysroot::Args),
     /// Run the host unit tests and the integration tests in QEMU.
     Test(test::Args),
 }
@@ -74,6 +77,7 @@ fn main() -> ExitCode {
         Command::Run(args) => run::run(&args),
         Command::Setup(args) => setup::run(&args),
         Command::Symbolize(args) => symbolize::run(&args),
+        Command::Sysroot(args) => sysroot::run(&args),
         Command::Test(args) => test::run(&args),
     };
     match result {
