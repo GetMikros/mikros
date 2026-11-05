@@ -17,6 +17,7 @@ const STATUS_PEER_CLOSED: sys::Status = -24;
 /// The most bytes one file request carries.
 const CHUNK_MAX: u64 = 32768;
 const FOREVER: i64 = i64::MAX;
+const SIGPIPE: u32 = 13;
 pub const SEEK_SET: i64 = 0;
 pub const SEEK_CUR: i64 = 1;
 const SEEK_END: i64 = 2;
@@ -103,7 +104,14 @@ pub fn write(fd: i64, buf: *const u8, len: u64) -> i64 {
                         return -e;
                     }
                 }
-                STATUS_PEER_CLOSED => return -EPIPE,
+                STATUS_PEER_CLOSED => {
+                    // The calling thread gets SIGPIPE, as the write fails.
+                    if let Some(thread) = crate::thread::current() {
+                        // SAFETY: sending a signal takes no pointers.
+                        unsafe { sys::thread_signal(thread, SIGPIPE, 0) };
+                    }
+                    return -EPIPE;
+                }
                 status => return errno::result(status, actual as i64),
             }
         },

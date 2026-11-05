@@ -139,6 +139,7 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
     let tid = object_id(header.thread.raw()).unwrap_or(1);
     syscall::set_process(header.process.raw(), tid);
     crate::thread::install(header.thread.raw());
+    crate::process::install(header.pid, header.parent, header.launcher.handle().raw());
     clock::install(
         header.process.raw(),
         header.thread.raw(),

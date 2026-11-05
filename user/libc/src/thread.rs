@@ -109,6 +109,16 @@ pub fn starting(sp: u64) -> Option<Handle> {
         .map(|t| t.handle)
 }
 
+/// The handle of the calling thread.
+pub fn current() -> Option<Handle> {
+    let tp = tls();
+    THREADS
+        .lock()
+        .iter()
+        .find(|t| t.tls == tp)
+        .map(|t| t.handle)
+}
+
 /// The alternate signal stack of the calling thread, as base and size.
 pub fn altstack() -> (u64, u64) {
     let tp = tls();

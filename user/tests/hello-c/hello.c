@@ -565,7 +565,7 @@ static int signals_wait(void)
 	    || !sigismember(&pending, SIGUSR2) || sigprocmask(SIG_BLOCK, 0, &mask)
 	    || !sigismember(&mask, SIGUSR2)
 	    || sigtimedwait(&usr2, &info, &none) != SIGUSR2 || info.si_code != SI_TKILL
-	    || sigtimedwait(&usr2, 0, &none) != -1 || sigpending(&pending)
+	    || sigtimedwait(&usr2, 0, &none) != -1 || errno != EAGAIN || sigpending(&pending)
 	    || sigismember(&pending, SIGUSR2) || sigprocmask(SIG_UNBLOCK, &usr2, 0))
 		return 0;
 	stack_t ss = { .ss_sp = malloc(65536), .ss_size = 65536 }, small = ss, got;
@@ -604,6 +604,39 @@ static int pipes_carry_data(void)
 		&& fcntl(q[1], F_GETFD) == FD_CLOEXEC;
 	close(q[0]);
 	close(q[1]);
+	return ok;
+}
+
+static volatile sig_atomic_t piped;
+
+static void on_pipe(int signo)
+{
+	piped = signo;
+}
+
+/* kill sends to a process ID through the process manager, before it
+   returns when the process is the caller, and a write to a pipe whose
+   reading end is closed raises SIGPIPE and fails. */
+static int processes_are_signalled(void)
+{
+	struct sigaction sa = { 0 };
+	sa.sa_sigaction = on_signal;
+	sa.sa_flags = SA_SIGINFO;
+	caught = 0;
+	if (getpid() <= 0 || getppid() <= 0 || sigaction(SIGUSR1, &sa, 0)
+	    || kill(getpid(), 0) || kill(getpid(), SIGUSR1) || caught != SIGUSR1
+	    || caught_code != SI_USER || kill(999999, 0) != -1 || errno != ESRCH
+	    || kill(getpid(), 65) != -1 || errno != EINVAL)
+		return 0;
+	signal(SIGUSR1, SIG_DFL);
+	int p[2];
+	if (pipe(p) || close(p[0]) || signal(SIGPIPE, on_pipe) == SIG_ERR)
+		return 0;
+	int ok = write(p[1], "x", 1) == -1 && errno == EPIPE && piped == SIGPIPE;
+	signal(SIGPIPE, SIG_IGN);
+	piped = 0;
+	ok = ok && write(p[1], "x", 1) == -1 && errno == EPIPE && piped == 0;
+	close(p[1]);
 	return ok;
 }
 
@@ -656,9 +689,11 @@ int main(int argc, char **argv)
 		return 22;
 	if (!pipes_carry_data())
 		return 23;
+	if (!processes_are_signalled())
+		return 24;
 	char *copy = malloc(64);
 	if (!copy)
-		return 24;
+		return 25;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

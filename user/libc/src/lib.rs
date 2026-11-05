@@ -16,6 +16,7 @@ mod futex;
 mod io;
 mod library;
 mod lock;
+mod process;
 mod signal;
 mod start;
 mod stat;

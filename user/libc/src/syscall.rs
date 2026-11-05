@@ -6,7 +6,7 @@
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENODEV, ENOSYS, ENOTTY};
 use crate::fd::Description;
-use crate::{clock, dir, fd, fs, futex, io, signal, stat, thread};
+use crate::{clock, dir, fd, fs, futex, io, process, signal, stat, thread};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::MemoryFlags;
@@ -34,13 +34,16 @@ const SYS_WRITEV: i64 = 20;
 const SYS_ACCESS: i64 = 21;
 const SYS_PIPE: i64 = 22;
 const SYS_DUP: i64 = 32;
+const SYS_GETPID: i64 = 39;
 const SYS_DUP2: i64 = 33;
 const SYS_EXIT: i64 = 60;
+const SYS_KILL: i64 = 62;
 const SYS_FCNTL: i64 = 72;
 const SYS_GETCWD: i64 = 79;
 const SYS_CHDIR: i64 = 80;
 const SYS_FCHDIR: i64 = 81;
 const SYS_READLINK: i64 = 89;
+const SYS_GETPPID: i64 = 110;
 const SYS_RT_SIGPENDING: i64 = 127;
 const SYS_RT_SIGTIMEDWAIT: i64 = 128;
 const SYS_SIGALTSTACK: i64 = 131;
@@ -187,6 +190,9 @@ extern "C" fn __mikros_syscall(
         SYS_SIGALTSTACK => {
             signal::sigaltstack(a1 as *const signal::Stack, a2 as *mut signal::Stack)
         }
+        SYS_GETPID => process::getpid(),
+        SYS_GETPPID => process::getppid(),
+        SYS_KILL => process::kill(a1, a2),
         SYS_TKILL => signal::tkill(a1, a2),
         SYS_TGKILL => signal::tkill(a2, a3),
         SYS_GETRANDOM => getrandom(a1 as *mut u8, a2 as u64),

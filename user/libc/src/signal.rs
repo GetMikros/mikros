@@ -7,7 +7,7 @@
 //! may have changed back into the saved context, and returns to the
 //! restorer, which calls `signal_return`.
 
-use crate::errno::{self, EINVAL, ENOMEM, EPERM, ESRCH};
+use crate::errno::{self, EAGAIN, EINVAL, ENOMEM, EPERM, ESRCH};
 use crate::thread;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use mikros_rt::sys;
@@ -31,6 +31,7 @@ const SS_DISABLE: i32 = 2;
 /// The smallest alternate stack the kernel takes.
 const ALTSTACK_MIN: u64 = 16384;
 const NANOSECONDS: i64 = 1_000_000_000;
+const TIMED_OUT: sys::Status = -21;
 
 /// musl's `struct k_sigaction`.
 #[repr(C)]
@@ -462,8 +463,11 @@ pub fn sigtimedwait(set: *const u64, out: *mut u8, timeout: *const [i64; 2], siz
     // SAFETY: musl passes a signal set, and the record is valid for the
     // call.
     let status = unsafe { sys::signal_wait(*set, deadline, (&raw mut info).cast()) };
-    if status != mikros_rt::OK {
-        return -errno::from_status(status);
+    match status {
+        mikros_rt::OK => {}
+        // POSIX's error for a timeout.
+        TIMED_OUT => return -EAGAIN,
+        status => return -errno::from_status(status),
     }
     if !out.is_null() {
         let mut siginfo = [0u8; 128];
