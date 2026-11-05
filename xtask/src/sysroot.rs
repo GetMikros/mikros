@@ -57,9 +57,13 @@ pub fn build() -> Result<PathBuf> {
         .with_context(|| format!("writing {}", header.display()))?;
     let abi = crate::workspace_root().join("user/libc/include/mikros/abi.h");
     copy(&abi, &sysroot.join("include/mikros/abi.h"))?;
+    // The compiler-rt builtins are built against musl's headers, and
+    // musl's libraries with the builtins.
+    crate::musl::install_headers(&cfg, &sysroot)?;
+    llvm::build_builtins(&sysroot)?;
     let layer = mikros_layer(false)?;
     let shared_layer = exported_object(&mikros_layer(true)?)?;
-    let musl = crate::musl::build(&cfg, &sysroot, &shared_layer)?;
+    let musl = crate::musl::build(&cfg, &shared_layer)?;
     let lib = sysroot.join("lib");
     combine(&lib.join("libc.slib"), &[&musl.libc, &layer])?;
     // The shared library is also the dynamic linker.

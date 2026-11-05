@@ -39,11 +39,58 @@ pub struct Built {
     pub crtn: PathBuf,
 }
 
-/// Fetches, patches and builds musl with the Clang configuration `cfg`,
-/// linking `layer`, the object of the shared variant of the Mikros
-/// layer, into the shared library, and installs its headers into
-/// `sysroot`.
-pub fn build(cfg: &Path, sysroot: &Path, layer: &Path) -> Result<Built> {
+/// Fetches, patches and configures musl with the Clang configuration
+/// `cfg`, and installs its headers into `sysroot`. Neither needs the
+/// compiler-rt builtins, which are built against these headers.
+pub fn install_headers(cfg: &Path, sysroot: &Path) -> Result<()> {
+    let build = configured(cfg)?;
+    run(Command::new("make")
+        .current_dir(&build)
+        .args(["-s", "install-headers"])
+        .arg(format!("DESTDIR={}", sysroot.display())))
+    .context("installing the musl headers")
+}
+
+/// Builds musl, configured by `install_headers` with the Clang
+/// configuration `cfg`, linking `layer`, the object of the shared
+/// variant of the Mikros layer, into the shared library.
+pub fn build(cfg: &Path, layer: &Path) -> Result<Built> {
+    let build = configured(cfg)?;
+    // The shared library is linked again every time, since make does not
+    // see the Mikros layer change.
+    let shared = build.join("lib/libc.so");
+    if shared.exists() {
+        fs::remove_file(&shared)?;
+    }
+    let jobs = format!(
+        "-j{}",
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    );
+    run(Command::new("make").current_dir(&build).args([
+        "-s",
+        &jobs,
+        "lib/libc.a",
+        "lib/libc.so",
+        "lib/crti.o",
+        "lib/crtn.o",
+        &format!(
+            "LIBCC={} {}",
+            layer.display(),
+            crate::llvm::builtins().display()
+        ),
+    ]))
+    .context("building musl")?;
+    Ok(Built {
+        libc: build.join("lib/libc.a"),
+        shared,
+        crti: build.join("lib/crti.o"),
+        crtn: build.join("lib/crtn.o"),
+    })
+}
+
+/// The build directory of musl, fetched, patched and configured with
+/// the Clang configuration `cfg`.
+fn configured(cfg: &Path) -> Result<PathBuf> {
     let archive = dir().join(format!("musl-{VERSION}.tar.gz"));
     crate::fetch::cached(&format!("musl {VERSION}"), URL, SHA256, &archive)?;
     let source = patched_source(&archive)?;
@@ -73,41 +120,7 @@ pub fn build(cfg: &Path, sysroot: &Path, layer: &Path) -> Result<Built> {
         .context("configuring musl")?;
         fs::write(&configured, stamp)?;
     }
-    // The shared library is linked again every time, since make does not
-    // see the Mikros layer change.
-    let shared = build.join("lib/libc.so");
-    if shared.exists() {
-        fs::remove_file(&shared)?;
-    }
-    let jobs = format!(
-        "-j{}",
-        std::thread::available_parallelism().map_or(1, |n| n.get())
-    );
-    run(Command::new("make").current_dir(&build).args([
-        "-s",
-        &jobs,
-        "lib/libc.a",
-        "lib/libc.so",
-        "lib/crti.o",
-        "lib/crtn.o",
-        &format!(
-            "LIBCC={} {}",
-            layer.display(),
-            crate::llvm::builtins().display()
-        ),
-    ]))
-    .context("building musl")?;
-    run(Command::new("make")
-        .current_dir(&build)
-        .args(["-s", "install-headers"])
-        .arg(format!("DESTDIR={}", sysroot.display())))
-    .context("installing the musl headers")?;
-    Ok(Built {
-        libc: build.join("lib/libc.a"),
-        shared,
-        crti: build.join("lib/crti.o"),
-        crtn: build.join("lib/crtn.o"),
-    })
+    Ok(build)
 }
 
 /// The musl source with every patch applied, extracted again from

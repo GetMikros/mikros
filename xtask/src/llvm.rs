@@ -91,8 +91,7 @@ pub fn build() -> Result<()> {
         fs::write(&configured, args.join("\n"))?;
     }
     crate::port::run(Command::new("ninja").current_dir(&build).args(COMPONENTS))
-        .context("building LLVM")?;
-    build_builtins(&source)
+        .context("building LLVM")
 }
 
 /// The resource directory of the installed Clang.
@@ -107,8 +106,10 @@ pub fn builtins() -> PathBuf {
 }
 
 /// Builds the compiler-rt builtins for the Mikros target with the
-/// installed Clang, and installs them where its driver finds them.
-fn build_builtins(source: &Path) -> Result<()> {
+/// installed Clang against the C headers in `sysroot`, and installs them
+/// where its driver finds them.
+pub fn build_builtins(sysroot: &Path) -> Result<()> {
+    let source = dir().join(SOURCE);
     let build = dir().join("builtins");
     let target = crate::sysroot::TRIPLE;
     let args = [
@@ -125,10 +126,16 @@ fn build_builtins(source: &Path) -> Result<()> {
         format!("-DCMAKE_ASM_COMPILER_TARGET={target}"),
         "-DCMAKE_BUILD_TYPE=Release".to_owned(),
         "-DCMAKE_SYSTEM_NAME=Generic".to_owned(),
-        // There is no C library to link test programs with yet.
+        // The C library is not built yet, only its headers installed.
         "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY".to_owned(),
-        "-DCMAKE_C_FLAGS=-march=x86-64-v3".to_owned(),
-        "-DCMAKE_ASM_FLAGS=-march=x86-64-v3".to_owned(),
+        format!(
+            "-DCMAKE_C_FLAGS=-march=x86-64-v3 --sysroot={}",
+            sysroot.display()
+        ),
+        format!(
+            "-DCMAKE_ASM_FLAGS=-march=x86-64-v3 --sysroot={}",
+            sysroot.display()
+        ),
         "-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON".to_owned(),
         "-DCOMPILER_RT_BAREMETAL_BUILD=ON".to_owned(),
         "-DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=ON".to_owned(),
