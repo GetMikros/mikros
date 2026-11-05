@@ -72,10 +72,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         // Dropping the partial state closed every handle received.
         return PANIC_EXIT_CODE;
     };
-    let boot = Rc::new(BootHandles::take(&mut managed.handles));
+    let mut boot = BootHandles::take(&mut managed.handles);
     if let Some(log) = boot.log() {
         log::set_handle(log.raw());
     }
+    boot.make_priority();
+    let boot = Rc::new(boot);
     let root = managed
         .namespace
         .iter()

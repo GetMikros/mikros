@@ -6,7 +6,7 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use mikros_manifest::{PRIORITY_DEFAULT, Service};
+use mikros_manifest::Service;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::process::{
@@ -32,20 +32,15 @@ pub struct Started {
 
 /// Starts `service` with app ID `system.<name>`, the service manager's
 /// own user, a new `Provider` channel, the boot handles its manifest
-/// lists, from `boot`, and the startup handles `handles`.
+/// lists and the `PRIORITY` resource its priority needs, from `boot`,
+/// and the startup handles `handles`.
 pub async fn launch(
     launcher: &LauncherAsyncClient,
     boot: &BootHandles,
     service: &Service,
     mut handles: Vec<StartupHandle>,
 ) -> Result<Started, String> {
-    if service.priority > 31 {
-        return Err(format!("its priority {} is above 31", service.priority));
-    }
-    // TODO: give a PRIORITY resource for priorities 17 to 31.
-    if service.priority > PRIORITY_DEFAULT {
-        return Err("priorities above 16 are not given yet".into());
-    }
+    handles.extend(boot.priority(service.priority)?);
     handles.extend(boot.give(&service.boot_handles)?);
     let (provider, server) = endpoints::<Provider>().map_err(|e| format!("{e:?}"))?;
     handles.push(StartupHandle {
