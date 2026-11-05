@@ -1,7 +1,8 @@
 //! `cargo xtask sysroot`: the directory that C and C++ programs for
 //! Mikros are built against, laid out like `/usr`.
 //!
-//! It holds `include/` with `include/mikros/`, `lib/` with
+//! It holds the musl headers in `include/`, with `include/mikros/`;
+//! `libc.slib`, `crti.o` and `crtn.o` in `lib/`, with
 //! `lib/pkgconfig/`, and the Clang driver configuration file
 //! `x86_64-unknown-mikros.cfg`, which selects the target, its options
 //! and this sysroot. A compiler is used with it as
@@ -10,7 +11,7 @@
 use crate::tools::Version;
 use anyhow::{Context, Result, bail};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The pinned LLVM release whose Clang and LLD build C and C++ code.
@@ -46,7 +47,18 @@ pub fn build() -> Result<PathBuf> {
     }
     let cfg = sysroot.join(format!("{TRIPLE}.cfg"));
     fs::write(&cfg, driver_config()).with_context(|| format!("writing {}", cfg.display()))?;
+    let musl = crate::musl::build(&cfg, &sysroot)?;
+    let lib = sysroot.join("lib");
+    copy(&musl.libc, &lib.join("libc.slib"))?;
+    copy(&musl.crti, &lib.join("crti.o"))?;
+    copy(&musl.crtn, &lib.join("crtn.o"))?;
     Ok(sysroot)
+}
+
+fn copy(from: &Path, to: &Path) -> Result<()> {
+    fs::copy(from, to)
+        .map(drop)
+        .with_context(|| format!("copying {} to {}", from.display(), to.display()))
 }
 
 /// Fails unless `tool --version` reports the pinned LLVM release.
