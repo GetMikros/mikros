@@ -24,6 +24,7 @@ const SYS_MMAP: i64 = 9;
 const SYS_MPROTECT: i64 = 10;
 const SYS_MUNMAP: i64 = 11;
 const SYS_BRK: i64 = 12;
+const SYS_RT_SIGACTION: i64 = 13;
 const SYS_RT_SIGPROCMASK: i64 = 14;
 const SYS_IOCTL: i64 = 16;
 const SYS_PREAD64: i64 = 17;
@@ -165,6 +166,12 @@ extern "C" fn __mikros_syscall(
         SYS_SET_TID_ADDRESS => thread::set_tid_address(a1 as usize, TID.load(Ordering::Relaxed)),
         SYS_GETTID => thread::gettid(),
         SYS_FUTEX => futex::futex(a1 as *const u32, a2, a3, a4 as *const futex::Timeout, a6),
+        SYS_RT_SIGACTION => signal::sigaction(
+            a1,
+            a2 as *const signal::KSigaction,
+            a3 as *mut signal::KSigaction,
+            a4 as u64,
+        ),
         SYS_RT_SIGPROCMASK => signal::sigprocmask(a1, a2 as *const u64, a3 as *mut u64, a4 as u64),
         SYS_RT_SIGPENDING => signal::sigpending(a1 as *mut u64, a2 as u64),
         SYS_RT_SIGTIMEDWAIT => signal::sigtimedwait(

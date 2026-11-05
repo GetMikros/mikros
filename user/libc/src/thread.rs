@@ -32,6 +32,8 @@ struct Thread {
     owned: bool,
     /// The alternate signal stack, as base and size, or zeros.
     altstack: (u64, u64),
+    /// The stack pointer the thread started with, or 0 for the first.
+    start: usize,
     /// The thread pointer, which is the address of musl's thread.
     tls: usize,
     /// The address to clear and wake when the thread ends, or 0.
@@ -79,6 +81,7 @@ pub fn set_tid_address(clear: usize, first: u32) -> i64 {
         handle: FIRST.load(Ordering::Relaxed),
         owned: false,
         altstack: (0, 0),
+        start: 0,
         tls: tp,
         clear,
     });
@@ -91,6 +94,18 @@ pub fn handle_of(tid: u32) -> Option<Handle> {
         .lock()
         .iter()
         .find(|t| t.tid == tid)
+        .map(|t| t.handle)
+}
+
+/// The handle of the thread that started with a stack pointer at most a
+/// page above `sp`, which a thread interrupted before its entry set its
+/// thread pointer has.
+pub fn starting(sp: u64) -> Option<Handle> {
+    let sp = sp as usize;
+    let threads = THREADS.lock();
+    threads
+        .iter()
+        .find(|t| t.start != 0 && sp <= t.start && t.start - sp <= 4096)
         .map(|t| t.handle)
 }
 
@@ -163,6 +178,7 @@ extern "C" fn __mikros_clone(
         handle,
         owned: true,
         altstack: (0, 0),
+        start: sp,
         tls,
         clear,
     });

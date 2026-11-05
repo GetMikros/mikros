@@ -11,6 +11,7 @@
 #include <mikros/syscalls.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -428,6 +429,43 @@ static int threads_run(void)
 	return 1;
 }
 
+static volatile sig_atomic_t caught, caught_code;
+static void *volatile caught_at;
+static char *volatile altstack_base;
+static volatile int on_altstack;
+static sigjmp_buf fault_return;
+
+static void on_signal(int signo, siginfo_t *info, void *context)
+{
+	(void)context;
+	caught = signo;
+	caught_code = info->si_code;
+}
+
+static void on_altstack_signal(int signo)
+{
+	char here;
+	(void)signo;
+	on_altstack = &here >= altstack_base && &here < altstack_base + 65536;
+}
+
+static void on_fault(int signo, siginfo_t *info, void *context)
+{
+	(void)context;
+	caught = signo;
+	caught_code = info->si_code;
+	caught_at = info->si_addr;
+	siglongjmp(fault_return, 1);
+}
+
+/* A handler that also blocks SIGUSR2 for the code it returns to. */
+static void on_signal_blocking(int signo, siginfo_t *info, void *context)
+{
+	(void)info;
+	caught = signo;
+	sigaddset(&((ucontext_t *)context)->uc_sigmask, SIGUSR2);
+}
+
 static void *wait_for_usr1(void *arg)
 {
 	(void)arg;
@@ -440,9 +478,76 @@ static void *wait_for_usr1(void *arg)
 	return (void *)(long)(signo == SIGUSR1 && info.si_code == SI_TKILL);
 }
 
+/* Handlers run with Linux's siginfo_t and ucontext_t, on the alternate
+   stack when asked, for blocked signals once they are unblocked, and for
+   faults; threads are signalled and wait for signals. */
+static int signals_are_handled(void)
+{
+	struct sigaction sa = { 0 }, old;
+	sa.sa_sigaction = on_signal;
+	sa.sa_flags = SA_SIGINFO;
+	if (sigaction(SIGUSR1, &sa, 0) || raise(SIGUSR1) || caught != SIGUSR1
+	    || caught_code != SI_TKILL)
+		return 0;
+	if (sigaction(SIGUSR1, 0, &old) || old.sa_sigaction != on_signal
+	    || !(old.sa_flags & SA_SIGINFO))
+		return 0;
+	sigset_t usr2, pending, mask;
+	sigemptyset(&usr2);
+	sigaddset(&usr2, SIGUSR2);
+	caught = 0;
+	if (sigaction(SIGUSR2, &sa, 0) || sigprocmask(SIG_BLOCK, &usr2, 0)
+	    || raise(SIGUSR2) || caught != 0 || sigpending(&pending)
+	    || !sigismember(&pending, SIGUSR2)
+	    || sigprocmask(SIG_UNBLOCK, &usr2, 0) || caught != SIGUSR2)
+		return 0;
+	sa.sa_sigaction = on_signal_blocking;
+	if (sigaction(SIGUSR1, &sa, 0) || raise(SIGUSR1)
+	    || sigprocmask(SIG_BLOCK, 0, &mask) || !sigismember(&mask, SIGUSR2)
+	    || sigprocmask(SIG_UNBLOCK, &usr2, 0))
+		return 0;
+	stack_t ss = { .ss_sp = malloc(65536), .ss_size = 65536 }, small = ss, got;
+	small.ss_size = 8192;
+	altstack_base = ss.ss_sp;
+	struct sigaction alt = { 0 };
+	alt.sa_handler = on_altstack_signal;
+	alt.sa_flags = SA_ONSTACK;
+	if (!ss.ss_sp || sigaltstack(&small, 0) != -1 || errno != ENOMEM
+	    || sigaltstack(&ss, 0) || sigaltstack(0, &got) || got.ss_sp != ss.ss_sp
+	    || got.ss_flags != 0 || sigaction(SIGUSR2, &alt, 0) || raise(SIGUSR2)
+	    || !on_altstack)
+		return 0;
+	struct sigaction fault = { 0 };
+	fault.sa_sigaction = on_fault;
+	fault.sa_flags = SA_SIGINFO;
+	caught = 0;
+	if (sigaction(SIGSEGV, &fault, 0))
+		return 0;
+	if (sigsetjmp(fault_return, 1) == 0)
+		*(volatile int *)16 = 1;
+	if (caught != SIGSEGV || caught_code != SEGV_MAPERR || caught_at != (void *)16)
+		return 0;
+	/* The waiter starts with SIGUSR1 blocked, so the signal waits for
+	   it. */
+	pthread_t waiter;
+	void *woke;
+	sigset_t usr1;
+	sigemptyset(&usr1);
+	sigaddset(&usr1, SIGUSR1);
+	if (sigprocmask(SIG_BLOCK, &usr1, 0)
+	    || pthread_create(&waiter, 0, wait_for_usr1, 0)
+	    || sigprocmask(SIG_UNBLOCK, &usr1, 0)
+	    || pthread_kill(waiter, SIGUSR1) || pthread_join(waiter, &woke) || !woke)
+		return 0;
+	struct timespec none = { 0, 1000000 };
+	signal(SIGUSR1, SIG_IGN);
+	return raise(SIGUSR1) == 0 && sigtimedwait(&usr2, 0, &none) == -1
+		&& signal(SIGUSR1, SIG_DFL) == SIG_IGN;
+}
+
 /* Blocked signals stay pending until they are waited for, threads are
    signalled, and alternate stacks are set and reported. */
-static int signals_are_handled(void)
+static int signals_wait(void)
 {
 	sigset_t usr2, pending, mask;
 	sigemptyset(&usr2);
@@ -521,9 +626,11 @@ int main(int argc, char **argv)
 		return 20;
 	if (!signals_are_handled())
 		return 21;
+	if (!signals_wait())
+		return 22;
 	char *copy = malloc(64);
 	if (!copy)
-		return 22;
+		return 23;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);
