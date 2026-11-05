@@ -140,7 +140,7 @@ fn stamp(patches: &[PathBuf]) -> Result<String> {
         .collect())
 }
 
-fn run(command: &mut Command) -> Result<()> {
+pub fn run(command: &mut Command) -> Result<()> {
     let status = command
         .status()
         .with_context(|| format!("running {:?}", command.get_program()))?;

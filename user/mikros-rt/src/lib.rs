@@ -70,6 +70,7 @@ macro_rules! raw_main {
     };
 }
 
+#[cfg(feature = "entry")]
 unsafe extern "Rust" {
     fn __mikros_entry(bootstrap: sys::Handle, arg2: u64) -> i64;
 }
@@ -99,6 +100,7 @@ pub fn run_managed(bootstrap: sys::Handle, main: fn(&Managed) -> i64) -> i64 {
 // The calls leave the stack aligned as the SysV ABI expects at a call.
 // The arguments are kept in callee-saved registers while the image
 // relocates itself.
+#[cfg(feature = "entry")]
 core::arch::global_asm!(
     ".globl _start",
     "_start:",
@@ -113,6 +115,7 @@ core::arch::global_asm!(
     start = sym start,
 );
 
+#[cfg(feature = "entry")]
 extern "sysv64" fn start(bootstrap: u64, arg2: u64) -> ! {
     // SAFETY: the program defines `__mikros_entry` with `main!` or
     // `raw_main!`.

@@ -11,6 +11,7 @@
 use crate::tools::Version;
 use anyhow::{Context, Result, bail};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -49,10 +50,67 @@ pub fn build() -> Result<PathBuf> {
     fs::write(&cfg, driver_config()).with_context(|| format!("writing {}", cfg.display()))?;
     let musl = crate::musl::build(&cfg, &sysroot)?;
     let lib = sysroot.join("lib");
-    copy(&musl.libc, &lib.join("libc.slib"))?;
+    let layer = mikros_layer()?;
+    combine(&lib.join("libc.slib"), &[&musl.libc, &layer])?;
     copy(&musl.crti, &lib.join("crti.o"))?;
     copy(&musl.crtn, &lib.join("crtn.o"))?;
+    let crt1 = crate::workspace_root().join("user/libc/crt/crt1.S");
+    crate::musl::run(
+        Command::new("clang")
+            .arg(format!("--config={}", cfg.display()))
+            .arg("-c")
+            .arg(&crt1)
+            .arg("-o")
+            .arg(lib.join("crt1.o")),
+    )
+    .context("assembling crt1.o")?;
     Ok(sysroot)
+}
+
+/// Builds the Mikros layer of the C library, a static library of the
+/// `user` workspace, and returns its path.
+fn mikros_layer() -> Result<PathBuf> {
+    let root = crate::workspace_root();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    crate::musl::run(
+        Command::new(cargo)
+            .current_dir(root.join("user"))
+            .args([
+                "build",
+                "--release",
+                "--package",
+                "mikros-libc",
+                "--lib",
+                "--target",
+            ])
+            .arg(root.join(crate::build::USER_TARGET)),
+    )
+    .context("building the Mikros layer of the C library")?;
+    Ok(root.join("user/target/x86_64-unknown-mikros/release/libmikros_libc.slib"))
+}
+
+/// Writes the static library `to` with the members of every archive of
+/// `from`.
+fn combine(to: &Path, from: &[&Path]) -> Result<()> {
+    let mut script = format!("create {}\n", to.display());
+    for archive in from {
+        script += &format!("addlib {}\n", archive.display());
+    }
+    script += "save\nend\n";
+    let mut child = Command::new("llvm-ar")
+        .arg("-M")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("running llvm-ar")?;
+    child
+        .stdin
+        .take()
+        .expect("piped")
+        .write_all(script.as_bytes())?;
+    if !child.wait()?.success() {
+        bail!("combining the archives of {} failed", to.display());
+    }
+    Ok(())
 }
 
 fn copy(from: &Path, to: &Path) -> Result<()> {
