@@ -72,6 +72,7 @@ extern "sysv64" fn start(bootstrap: u64, main: Main) -> ! {
     clock::install(
         header.process.raw(),
         header.thread.raw(),
+        header.directory.handle().raw(),
         header.clock_page.raw(),
         header.time_page.as_ref().map(|page| page.raw()),
     );

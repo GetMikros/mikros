@@ -13,7 +13,9 @@
 //! its standard output, and checks what it prints.
 //!
 //! It accepts the `Bind` requests on the control endpoint that arrives
-//! as the `USER` startup handle with ID 0, for itself and its children.
+//! as the `USER` startup handle with ID 0, for itself and its children,
+//! and serves their directories, which provide only a clock with a time
+//! page.
 
 #![no_std]
 #![no_main]
@@ -22,6 +24,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
+use mikros_rt::exec::Spawner;
 use mikros_rt::exec::{Executor, Reactor};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -29,8 +33,11 @@ use mikros_rt::interfaces::mikros::process::{
     HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::{
-    ProcessDirectory, ProcessDirectoryAsyncServer, ProcessDirectoryBindResponse,
-    ProcessDirectoryRequest,
+    Directory, DirectoryAsyncServer, DirectoryConnectResponse, DirectoryRequest, ProcessDirectory,
+    ProcessDirectoryAsyncServer, ProcessDirectoryBindResponse, ProcessDirectoryRequest,
+};
+use mikros_rt::interfaces::mikros::time::{
+    Clock, ClockAsyncServer, ClockGetTimePageResponse, ClockRequest,
 };
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
@@ -46,6 +53,13 @@ const KILL: u32 = 9;
 const CALLER_USER: u32 = u32::MAX;
 const FOREVER: i64 = i64::MAX;
 const PAGE_SIZE: u64 = 4096;
+/// UTC minus monotonic time on the time page the probe hands out: 1
+/// January 2024.
+const UTC_OFFSET: i64 = 1_704_067_200 * 1_000_000_000;
+const TRANSFER: u32 = 1 << 1;
+const READ: u32 = 1 << 2;
+const MAP: u32 = 1 << 5;
+const INSPECT: u32 = 1 << 9;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -63,7 +77,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 .position(|h| h.role == HandleRole::User && h.id == CONTROL_ID);
             if let Some(at) = at {
                 let end = handles.remove(at).handle;
-                spawner.spawn(serve_control(end, control_reactor.clone()));
+                let tasks = spawner.clone();
+                spawner.spawn(serve_control(end, control_reactor.clone(), tasks));
             }
         },
     ));
@@ -91,13 +106,67 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 }
 
 /// Accepts every `Bind` request on the control endpoint `end`, and
-/// keeps the bound connections open.
-async fn serve_control(end: OwnedHandle, reactor: Reactor) {
-    let server = ProcessDirectoryAsyncServer::new(ServerEnd::<ProcessDirectory>::new(end), reactor);
-    let mut bound = Vec::new();
+/// serves each bound directory.
+async fn serve_control(end: OwnedHandle, reactor: Reactor, spawner: Spawner) {
+    let server =
+        ProcessDirectoryAsyncServer::new(ServerEnd::<ProcessDirectory>::new(end), reactor.clone());
     while let Ok(ProcessDirectoryRequest::Bind(request, responder)) = server.next().await {
-        bound.push(request.directory);
+        let tasks = spawner.clone();
+        spawner.spawn(serve_directory(request.directory, reactor.clone(), tasks));
         let _ = responder.reply(server.server(), Ok(ProcessDirectoryBindResponse {}));
+    }
+}
+
+/// Whether a connection to `mikros.time.Clock` was refused yet.
+static CLOCK_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// Serves a child's directory: the first connection to
+/// `mikros.time.Clock` finds no service, as before the time service
+/// starts, and later ones reach a clock that hands out a time page with
+/// `UTC_OFFSET`. No other protocol is provided.
+async fn serve_directory(end: ServerEnd<Directory>, reactor: Reactor, spawner: Spawner) {
+    let server = DirectoryAsyncServer::new(end, reactor.clone());
+    while let Ok(request) = server.next().await {
+        let DirectoryRequest::Connect(q, r) = request else {
+            continue;
+        };
+        let result =
+            if q.protocol == "mikros.time.Clock" && CLOCK_REFUSED.swap(true, Ordering::Relaxed) {
+                let clock = ServerEnd::<Clock>::new(q.server);
+                spawner.spawn(serve_clock(clock, reactor.clone()));
+                Ok(DirectoryConnectResponse {})
+            } else {
+                Err(Status::NotFound)
+            };
+        let _ = r.reply(server.server(), result);
+    }
+}
+
+async fn serve_clock(end: ServerEnd<Clock>, reactor: Reactor) {
+    let server = ClockAsyncServer::new(end, reactor);
+    while let Ok(request) = server.next().await {
+        if let ClockRequest::GetTimePage(_, r) = request {
+            let _ = r.reply(
+                server.server(),
+                ClockGetTimePageResponse { page: time_page() },
+            );
+        }
+    }
+}
+
+/// A read-only time page whose offset is `UTC_OFFSET`.
+fn time_page() -> OwnedHandle {
+    let mut page = [0u8; 16];
+    page[4..8].copy_from_slice(&1u32.to_le_bytes());
+    page[8..16].copy_from_slice(&UTC_OFFSET.to_le_bytes());
+    let (mut mem, mut read_only) = (0, 0);
+    // SAFETY: the pointers describe `mem`, `page` and `read_only`.
+    unsafe {
+        sys::mem_create(PAGE_SIZE, 0, &mut mem);
+        sys::mem_write(mem, 0, page.as_ptr(), page.len() as u64);
+        sys::handle_duplicate(mem, TRANSFER | READ | MAP | INSPECT, &mut read_only);
+        sys::handle_close(mem);
+        OwnedHandle::from_raw(read_only)
     }
 }
 

@@ -1,9 +1,16 @@
 //! The clocks of `clock_gettime`: the monotonic clock from the clock
 //! page, the real-time clock from the time page and the monotonic clock,
-//! and the CPU time of the process and of the thread.
+//! and the CPU time of the process and of the thread. A process started
+//! without the time page asks `mikros.time.Clock` for it through its
+//! directory.
 
-use crate::errno::{self, EAGAIN, EINVAL};
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
+use crate::errno::{self, EAGAIN, EINVAL, EIO};
+use core::mem::ManuallyDrop;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
+use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::service::DirectoryClient;
+use mikros_rt::interfaces::mikros::time::ClockClient;
 use mikros_rt::sys::{self, Handle};
 
 pub const CLOCK_REALTIME: i64 = 0;
@@ -24,6 +31,15 @@ const SOURCE_TSC: u32 = 1;
 /// The addresses of the mapped clock and time pages, or 0.
 static CLOCK_PAGE: AtomicU64 = AtomicU64::new(0);
 static TIME_PAGE: AtomicU64 = AtomicU64::new(0);
+/// The protocol that hands out the time page.
+const CLOCK_PROTOCOL: &str = "mikros.time.Clock";
+const FOREVER: i64 = i64::MAX;
+
+/// The process's directory connection, which the time page is asked
+/// for through, or 0.
+static DIRECTORY: AtomicU32 = AtomicU32::new(0);
+/// Set while a thread asks for the time page.
+static ACQUIRING: AtomicBool = AtomicBool::new(false);
 /// The handles that the CPU time clocks read.
 static PROCESS: AtomicU32 = AtomicU32::new(0);
 static THREAD: AtomicU32 = AtomicU32::new(0);
@@ -31,8 +47,15 @@ static THREAD: AtomicU32 = AtomicU32::new(0);
 /// Maps the clock page and, when the transfer holds one, the time page,
 /// and records the process and thread whose CPU time the clocks read.
 /// A page that cannot be mapped is left unused.
-pub fn install(process: Handle, thread: Handle, clock_page: Handle, time_page: Option<Handle>) {
+pub fn install(
+    process: Handle,
+    thread: Handle,
+    directory: Handle,
+    clock_page: Handle,
+    time_page: Option<Handle>,
+) {
     PROCESS.store(process, Ordering::Relaxed);
+    DIRECTORY.store(directory, Ordering::Relaxed);
     THREAD.store(thread, Ordering::Relaxed);
     if let Some(addr) = map(process, clock_page) {
         CLOCK_PAGE.store(addr, Ordering::Release);
@@ -138,14 +161,59 @@ pub fn monotonic() -> Result<i64, i64> {
 }
 
 /// UTC: the time page's offset plus the monotonic clock. Without a time
-/// page, the time is not known yet.
+/// page, it is asked for again on every call.
 fn realtime() -> Result<i64, i64> {
-    let page = TIME_PAGE.load(Ordering::Acquire);
+    let mut page = TIME_PAGE.load(Ordering::Acquire);
     if page == 0 {
-        return Err(EAGAIN);
+        page = acquire()?;
     }
     let offset = consistent(page, || u64_at(page, 0x08) as i64);
     Ok(offset.wrapping_add(monotonic()?))
+}
+
+/// Asks the time service for the time page and maps it. While another
+/// thread asks, or while the service does not provide its protocol yet,
+/// the time is not known yet.
+fn acquire() -> Result<u64, i64> {
+    if ACQUIRING.swap(true, Ordering::Acquire) {
+        return Err(EAGAIN);
+    }
+    let fetched = fetch_time_page();
+    if let Ok(addr) = fetched {
+        TIME_PAGE.store(addr, Ordering::Release);
+    }
+    ACQUIRING.store(false, Ordering::Release);
+    fetched
+}
+
+fn fetch_time_page() -> Result<u64, i64> {
+    let raw = DIRECTORY.load(Ordering::Relaxed);
+    if raw == 0 {
+        return Err(EAGAIN);
+    }
+    // SAFETY: the directory handle stays open for as long as the
+    // process runs; the client is never dropped, so it never closes it.
+    let directory = ManuallyDrop::new(DirectoryClient::new(ClientEnd::new(unsafe {
+        OwnedHandle::from_raw(raw)
+    })));
+    let (mut ours, mut theirs) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    let status = unsafe { sys::channel_create(0, &mut ours, &mut theirs) };
+    if status != mikros_rt::OK {
+        return Err(errno::from_status(status));
+    }
+    // SAFETY: the channel was just created for us.
+    let (ours, theirs) = unsafe { (OwnedHandle::from_raw(ours), OwnedHandle::from_raw(theirs)) };
+    match directory.connect(CLOCK_PROTOCOL.into(), None, theirs, FOREVER) {
+        Ok(Ok(_)) => {}
+        Ok(Err(Status::NotFound)) => return Err(EAGAIN),
+        Ok(Err(status)) => return Err(errno::from_status(i64::from(status.into_raw()))),
+        Err(_) => return Err(EIO),
+    }
+    let clock = ClockClient::new(ClientEnd::new(ours));
+    let page = clock.get_time_page(FOREVER).map_err(|_| EIO)?.page;
+    // The mapping keeps the page alive once its handle is closed.
+    map(PROCESS.load(Ordering::Relaxed), page.raw()).ok_or(EIO)
 }
 
 /// The `cpu_time` of the `topic` record of `handle`.

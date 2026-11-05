@@ -35,12 +35,30 @@ static int cpu_time_counts(clockid_t clock)
 	return clock_gettime(clock, &ts) == 0 && ns(ts) > 0;
 }
 
-/* Without a time page, the time of day is not known yet. */
+/* The parent's directory has no time service at the first request, so
+ * the time of day is not known yet; at the next it hands out a time
+ * page whose offset is UTC_OFFSET. */
+#define UTC_OFFSET (1704067200 * (int64_t)1000000000)
+
 static int realtime_waits_for_the_time_page(void)
 {
 	struct timespec ts;
 	errno = 0;
 	return clock_gettime(CLOCK_REALTIME, &ts) == -1 && errno == EAGAIN;
+}
+
+static int realtime_from_the_time_page(void)
+{
+	int64_t before = 0, after = 0;
+	struct timespec ts;
+	if (mikros_clock_get_monotonic(&before) != 0)
+		return 0;
+	if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+		return 0;
+	if (mikros_clock_get_monotonic(&after) != 0)
+		return 0;
+	int64_t monotonic = ns(ts) - UTC_OFFSET;
+	return before <= monotonic && monotonic <= after;
 }
 
 int main(int argc, char **argv)
@@ -55,12 +73,14 @@ int main(int argc, char **argv)
 		return 4;
 	if (!realtime_waits_for_the_time_page())
 		return 5;
+	if (!realtime_from_the_time_page())
+		return 6;
 	struct timespec ts;
 	if (clock_gettime(42, &ts) != -1 || errno != EINVAL)
-		return 6;
+		return 7;
 	char *copy = malloc(64);
 	if (!copy)
-		return 7;
+		return 8;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);
