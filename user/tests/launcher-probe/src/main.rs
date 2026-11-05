@@ -54,6 +54,8 @@ const LIBRARY_USER: &str = "/usr/bin/library-user";
 /// A Rust program that uses the standard library, which opens
 /// `/dev/null` for its closed standard input and error.
 const HELLO_STD: &str = "/usr/bin/hello-std";
+/// A Rust program that starts processes with `std::process::Command`.
+const SPAWN_STD: &str = "/usr/bin/spawn-std";
 /// The `id` of a stream as descriptor 1.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const KILL: u32 = 9;
@@ -412,6 +414,12 @@ async fn probe(l: &LauncherAsyncClient) -> i64 {
         check(
             "reading what it printed",
             output.as_slice() == b"hello, world, from std\n",
+        )?;
+        let (output, code) = run_c(l, SPAWN_STD).await;
+        check("starting processes with std's Command", code == Some(0))?;
+        check(
+            "reading what it printed",
+            output.as_slice() == b"spawned, world\n",
         )?;
         Ok(())
     };

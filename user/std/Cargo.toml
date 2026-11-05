@@ -3,7 +3,7 @@
 # Cargo alone cannot build them.
 [workspace]
 resolver = "3"
-members = ["tests/hello-std"]
+members = ["tests/hello-std", "tests/spawn-std"]
 
 [workspace.package]
 version = "0.0.0"

@@ -1,0 +1,8 @@
+[package]
+name = "spawn-std"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "spawn-std"
+path = "src/main.rs"

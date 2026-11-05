@@ -194,6 +194,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", library_user.display());
             let hello_std = crate::rust_std::build("hello-std", kind)?;
             println!("built    {}", hello_std.display());
+            let spawn_std = crate::rust_std::build("spawn-std", kind)?;
+            println!("built    {}", spawn_std.display());
             let dynamic_linker = crate::sysroot::dir().join("lib/ld-mikros.dlib");
             let greeting = crate::workspace_root().join("user/tests/hello-c/greeting.txt");
             // The process manager tests serve this image, in which the
@@ -207,6 +209,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/hello", hello.as_path()),
                     ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
                     ("usr/bin/hello-std", hello_std.as_path()),
+                    ("usr/bin/spawn-std", spawn_std.as_path()),
                     ("usr/bin/spawn-child", spawn_child.as_path()),
                     ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
                     ("usr/bin/library-user", library_user.as_path()),
