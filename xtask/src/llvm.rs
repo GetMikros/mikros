@@ -1,7 +1,7 @@
 //! The pinned LLVM release whose Clang and LLD build C and C++ code for
 //! Mikros: fetching its source, applying the Mikros patches in
 //! `tools/llvm/patches/`, and building and installing Clang and LLD in
-//! `target/llvm/install`.
+//! `target/llvm/install`, with the compiler-rt builtins for Mikros.
 
 use crate::tools::Version;
 use anyhow::{Context, Result};
@@ -38,12 +38,13 @@ const CMAKE_OPTIONS: [&str; 16] = [
     "-DCLANG_ENABLE_STATIC_ANALYZER=OFF",
 ];
 /// The installed parts of the build.
-const COMPONENTS: [&str; 5] = [
+const COMPONENTS: [&str; 6] = [
     "install-clang",
     "install-clang-resource-headers",
     "install-lld",
     "install-llvm-ar",
     "install-llvm-ranlib",
+    "install-llvm-objcopy",
 ];
 
 fn dir() -> PathBuf {
@@ -89,7 +90,64 @@ pub fn build() -> Result<()> {
         fs::write(&configured, args.join("\n"))?;
     }
     crate::port::run(Command::new("ninja").current_dir(&build).args(COMPONENTS))
-        .context("building LLVM")
+        .context("building LLVM")?;
+    build_builtins(&source)
+}
+
+/// The resource directory of the installed Clang.
+fn resource_dir() -> PathBuf {
+    dir().join(format!("install/lib/clang/{}", LLVM.0))
+}
+
+/// The compiler-rt builtins for the Mikros target, which Clang links
+/// into every program and library.
+pub fn builtins() -> PathBuf {
+    resource_dir().join("lib/x86_64-unknown-mikros/libclang_rt.builtins.a")
+}
+
+/// Builds the compiler-rt builtins for the Mikros target with the
+/// installed Clang, and installs them where its driver finds them.
+fn build_builtins(source: &Path) -> Result<()> {
+    let build = dir().join("builtins");
+    let target = crate::sysroot::TRIPLE;
+    let args = [
+        format!(
+            "-DLLVM_DIR={}",
+            dir().join("build/lib/cmake/llvm").display()
+        ),
+        format!("-DCMAKE_INSTALL_PREFIX={}", resource_dir().display()),
+        format!("-DCMAKE_C_COMPILER={}", tool("clang").display()),
+        format!("-DCMAKE_ASM_COMPILER={}", tool("clang").display()),
+        format!("-DCMAKE_AR={}", tool("llvm-ar").display()),
+        format!("-DCMAKE_RANLIB={}", tool("llvm-ranlib").display()),
+        format!("-DCMAKE_C_COMPILER_TARGET={target}"),
+        format!("-DCMAKE_ASM_COMPILER_TARGET={target}"),
+        "-DCMAKE_BUILD_TYPE=Release".to_owned(),
+        "-DCMAKE_SYSTEM_NAME=Generic".to_owned(),
+        // There is no C library to link test programs with yet.
+        "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY".to_owned(),
+        "-DCMAKE_C_FLAGS=-march=x86-64-v3".to_owned(),
+        "-DCMAKE_ASM_FLAGS=-march=x86-64-v3".to_owned(),
+        "-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON".to_owned(),
+        "-DCOMPILER_RT_BAREMETAL_BUILD=ON".to_owned(),
+        "-DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=ON".to_owned(),
+    ];
+    let configured = build.join(".mikros-cmake-options");
+    if fs::read_to_string(&configured).ok() != Some(args.join("\n")) {
+        fs::create_dir_all(&build)?;
+        crate::port::run(
+            Command::new("cmake")
+                .args(["-G", "Ninja", "-S"])
+                .arg(source.join("compiler-rt/lib/builtins"))
+                .arg("-B")
+                .arg(&build)
+                .args(&args),
+        )
+        .context("configuring the compiler-rt builtins")?;
+        fs::write(&configured, args.join("\n"))?;
+    }
+    crate::port::run(Command::new("ninja").current_dir(&build).arg("install"))
+        .context("building the compiler-rt builtins")
 }
 
 /// The source with every patch applied, extracted again from `archive`
