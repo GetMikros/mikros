@@ -2,8 +2,9 @@
 //!
 //! Each process has its own channel, so the record it is bound to is
 //! the one it was created for, and requests act for that record only.
-//! `Spawn`, `Exec`, `Wait` and `Kill` are served; every other method fails with
-//! `NOT_SUPPORTED`, and `List`, which cannot fail, closes the channel.
+//! `Spawn`, `Exec`, `Wait`, `Kill` and `GetInfo` are served; every other
+//! method fails with `NOT_SUPPORTED`, and `List`, which cannot fail,
+//! closes the channel.
 
 use crate::processes::{NewProcess, Shared};
 use crate::records::{Exit, Record};
@@ -14,8 +15,9 @@ use alloc::string::String;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
-    ExitStatus, Launcher, LauncherAsyncServer, LauncherExecResponse, LauncherKillResponse,
-    LauncherRequest, LauncherSpawnResponse, LauncherWaitResponse, SpawnRequest, StatusKind,
+    ExitStatus, Launcher, LauncherAsyncServer, LauncherExecResponse, LauncherGetInfoResponse,
+    LauncherKillResponse, LauncherRequest, LauncherSpawnResponse, LauncherWaitResponse,
+    ProcessInfo, SpawnRequest, StatusKind,
 };
 use mikros_rt::sys;
 
@@ -68,7 +70,7 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                 });
                 Ok(())
             }
-            R::GetInfo(_, r) => r.reply(s, Err(no)),
+            R::GetInfo(request, r) => r.reply(s, get_info(&shared, pid, request.pid)),
             R::CreateSession(_, r) => r.reply(s, Err(no)),
             R::SetProcessGroup(_, r) => r.reply(s, Err(no)),
             R::KillGroup(_, r) => r.reply(s, Err(no)),
@@ -212,6 +214,31 @@ async fn wait(
             return Err(Status::TimedOut);
         }
     }
+}
+
+/// What process `caller` may know of process `target`: the whole record,
+/// when `target` has the caller's user ID. Other processes are reported
+/// missing, as `process.list_all` cannot be held before the permission
+/// broker serves requests.
+fn get_info(shared: &Shared, caller: u32, target: u32) -> Result<LauncherGetInfoResponse, Status> {
+    let records = shared.records.borrow();
+    let from = records.get(caller).ok_or(Status::BadState)?;
+    let record = records
+        .get(target)
+        .filter(|r| r.user == from.user)
+        .ok_or(Status::NotFound)?;
+    Ok(LauncherGetInfoResponse {
+        info: ProcessInfo {
+            pid: target,
+            parent: record.parent,
+            process_group: record.process_group,
+            session: record.session,
+            login_session: record.login_session,
+            user: record.user,
+            app_id: record.app_id.clone(),
+            path: record.path.clone(),
+        },
+    })
 }
 
 /// Sends `signo` to process `target` for process `caller`.

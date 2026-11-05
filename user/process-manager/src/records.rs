@@ -20,7 +20,7 @@ pub struct Record {
     pub login_session: u32,
     #[expect(dead_code, reason = "kept so that the budget lives")]
     pub budget: OwnedHandle,
-    #[expect(dead_code, reason = "read once GetInfo is served")]
+    /// The executable path the process was started with.
     pub path: String,
     pub process: OwnedHandle,
     /// How the process ended, once it did.

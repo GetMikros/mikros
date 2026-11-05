@@ -7,7 +7,8 @@
 //!   every check passed or with the number of the first that failed;
 //! - `exit <n>`: exits with `n`;
 //! - `sleep`: waits until it is killed;
-//! - `rename`: exits with 0 when it may not name an app ID, 1 otherwise.
+//! - `rename`: exits with 0 when it may not name an app ID, 1 otherwise;
+//! - `exec`: replaces itself with `SELF_PATH` run with `sleep`.
 //!
 //! It also spawns `/usr/bin/hello`, a static C program, and
 //! `/usr/bin/hello-std`, a Rust program that uses the standard library,
@@ -30,7 +31,8 @@ use mikros_rt::exec::{Executor, Reactor};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
-    HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
+    HandleRole, LauncherAsyncClient, ProcessInfo, SpawnRequest, StartupHandle, StatusKind,
+    WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::{
     Directory, DirectoryAsyncServer, DirectoryConnectResponse, DirectoryRequest, ProcessDirectory,
@@ -45,6 +47,9 @@ mikros_rt::raw_main!(main);
 
 const CONTROL_ID: u32 = 0;
 const PROBE: &str = "/usr/bin/probe";
+/// The probe's own path, as init starts it in place of the service
+/// manager; the image holds the probe there too.
+const SELF_PATH: &str = "/usr/bin/service-manager";
 /// A static C program, which prints a greeting for its argument.
 const HELLO: &str = "/usr/bin/hello";
 /// The same program linked with the shared C library.
@@ -95,11 +100,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let args = arguments(&managed.header.arguments);
-    let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor);
+    let me = managed.header.pid;
+    let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     executor.block_on(async move {
         match args.as_slice() {
-            [_] => probe(&launcher).await,
+            [_] => probe(&launcher, &reactor, me).await,
             [_, "exit", code] => code.parse().unwrap_or(PANIC_EXIT_CODE),
             [_, "sleep"] => core::future::pending().await,
             [_, "rename"] => {
@@ -108,6 +114,19 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 })
                 .await;
                 i64::from(named != Err(Status::AccessDenied))
+            }
+            [_, "exec"] => {
+                let request = SpawnRequest {
+                    path: SELF_PATH.into(),
+                    arguments: arguments_from(&[SELF_PATH, "sleep"]),
+                    handles: Vec::new(),
+                    app_id: None,
+                    user: CALLER_USER,
+                    login_session: false,
+                };
+                // On success this process is killed before the reply.
+                let _ = launcher.exec(request).await;
+                PANIC_EXIT_CODE
             }
             _ => PANIC_EXIT_CODE,
         }
@@ -306,6 +325,13 @@ async fn wait(launcher: &LauncherAsyncClient, selector: i32) -> Option<(u32, i64
     ))
 }
 
+async fn get_info(launcher: &LauncherAsyncClient, pid: u32) -> Result<ProcessInfo, Status> {
+    match launcher.get_info(pid).await {
+        Ok(result) => result.map(|r| r.info),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
 async fn kill(launcher: &LauncherAsyncClient, pid: u32, signo: u32) -> Result<(), Status> {
     match launcher.kill(pid, signo).await {
         Ok(result) => result.map(drop),
@@ -313,9 +339,9 @@ async fn kill(launcher: &LauncherAsyncClient, pid: u32, signo: u32) -> Result<()
     }
 }
 
-/// Runs every check in turn, and returns the number of the first that
-/// failed, or 0.
-async fn probe(l: &LauncherAsyncClient) -> i64 {
+/// Runs every check in turn as process `me` on the executor of
+/// `reactor`, and returns the number of the first that failed, or 0.
+async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
     let mut step = 0;
     let mut check = |what: &str, passed: bool| {
         step += 1;
@@ -391,6 +417,50 @@ async fn probe(l: &LauncherAsyncClient) -> i64 {
             "refusing a child an app ID",
             wait(l, rename as i32).await == Some((rename, 0, 0)),
         )?;
+        let own = get_info(l, me).await;
+        check(
+            "describing itself",
+            own.as_ref()
+                .is_ok_and(|i| i.pid == me && i.parent == 1 && i.path == SELF_PATH),
+        )?;
+        let sleeper = spawn(l, &["sleep"], |_| {}).await.map_or(0, |(pid, _)| pid);
+        let info = get_info(l, sleeper).await;
+        check(
+            "describing a child",
+            info.as_ref().is_ok_and(|i| {
+                i.pid == sleeper
+                    && i.parent == me
+                    && i.path == PROBE
+                    && own
+                        .as_ref()
+                        .is_ok_and(|o| o.user == i.user && o.app_id == i.app_id)
+            }),
+        )?;
+        check("ending it", kill(l, sleeper, KILL).await.is_ok())?;
+        check("waiting for it", wait(l, sleeper as i32).await.is_some())?;
+        check(
+            "finding no process 999",
+            get_info(l, 999).await.err() == Some(Status::NotFound),
+        )?;
+        // A process that replaced itself reports its new program.
+        let replaced = spawn(l, &["exec"], |_| {}).await.map_or(0, |(pid, _)| pid);
+        let mut path = String::new();
+        for _ in 0..1000 {
+            path = get_info(l, replaced)
+                .await
+                .map(|i| i.path)
+                .unwrap_or_default();
+            if path == SELF_PATH {
+                break;
+            }
+            let mut now = 0;
+            // SAFETY: the pointer is valid for the call.
+            unsafe { sys::clock_get_monotonic(&mut now) };
+            let _ = reactor.sleep_until(now + 1_000_000).await;
+        }
+        check("describing a replaced process", path == SELF_PATH)?;
+        check("ending it", kill(l, replaced, KILL).await.is_ok())?;
+        check("waiting for it", wait(l, replaced as i32).await.is_some())?;
         let (output, code) = run_c(l, HELLO).await;
         check("running a static C program", code == Some(0))?;
         check(
