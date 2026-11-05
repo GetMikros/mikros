@@ -109,10 +109,19 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", manager.display());
             let services = user_build("service-manager", kind)?;
             println!("built    {}", services.display());
+            let broker = user_build("permissions-broker", kind)?;
+            println!("built    {}", broker.display());
+            let broker_manifest =
+                crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let members = [
                 ("init", init.as_path()),
                 ("usr/bin/process-manager", manager.as_path()),
                 ("usr/bin/service-manager", services.as_path()),
+                ("usr/bin/permissions-broker", broker.as_path()),
+                (
+                    "usr/lib/services/permissions.yaml",
+                    broker_manifest.as_path(),
+                ),
             ];
             boot_image(kind, "boot.img", &members)?
         }
@@ -161,8 +170,26 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", broker_image.display());
+            // The service manager tests serve this image, which holds the
+            // system's services and their manifests.
+            let broker_manifest =
+                crate::workspace_root().join("user/permissions-broker/permissions.yaml");
+            let services_image = boot_image(
+                kind,
+                "services.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                ],
+            )?;
+            println!("built    {}", services_image.display());
             let members = [
                 ("tests/broker.img", broker_image.as_path()),
+                ("tests/services.img", services_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/channel-echo", echo.as_path()),

@@ -7707,8 +7707,8 @@ mod manager {
     use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
     use mikros_rt::interfaces::mikros::base::Status;
     use mikros_rt::interfaces::mikros::process::{
-        InitBootstrap, InitBootstrapClient, ManagerBootstrap, ManagerBootstrapClient,
-        ManagerStartup,
+        HandleRole, InitBootstrap, InitBootstrapClient, ManagerBootstrap, ManagerBootstrapClient,
+        ManagerStartup, StartupHandle,
     };
     use mikros_rt::sys::{self, Handle};
     use mikros_rt::{PANIC_EXIT_CODE, Startup};
@@ -7972,6 +7972,79 @@ mod manager {
         ensure("passing every check of the probe", code == 0)?;
         drop(m);
         Ok(())
+    }
+
+    /// From a boot image with the service manager, the permission broker
+    /// and the broker's manifest, the service manager starts the broker
+    /// and registers the process manager's permissions with it, which it
+    /// says in the log that it is given as init's boot handle with ID 2.
+    pub fn service_manager_starts_the_broker(s: &Startup) -> Result {
+        const STARTED: &[u8] = b"started the permission broker";
+        const FAILED: &[u8] = b"the permission broker did not start";
+        let image = boot_file(s, b"tests/services.img")?;
+        let mut mem = 0;
+        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the image", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `image`.
+        check("writing the image", unsafe {
+            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
+        })?;
+        let mut reader = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating a log reader", unsafe {
+            sys::log_reader_create(s.log, 0, &mut reader)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let reader = unsafe { OwnedHandle::from_raw(reader) };
+        let mut m = start(s)?;
+        let (mut startup, init) = start_message(s, &m, 1)?;
+        startup.boot_image = mem;
+        m.send(startup, false)?;
+        let deadline = super::in_time();
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![log], deadline) else {
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::now() + 30_000_000_000;
+        let outcome = loop {
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if super::contains(message, STARTED) {
+                break Some(true);
+            }
+            if super::contains(message, FAILED) {
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("starting the broker", outcome == Some(true))
     }
 
     /// The process manager ends without serving init when `Start` has
@@ -8279,6 +8352,7 @@ mod bootfs {
                         "launcher.img",
                         "managed",
                         "pie",
+                        "services.img",
                     ],
             )?;
 
@@ -8459,7 +8533,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 123] = [
+const TESTS: [(&str, Test); 124] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -8506,6 +8580,10 @@ const TESTS: [(&str, Test); 123] = [
     (
         "permission_broker_serves",
         manager::permission_broker_serves,
+    ),
+    (
+        "service_manager_starts_the_broker",
+        manager::service_manager_starts_the_broker,
     ),
     (
         "executor_waits_on_objects",

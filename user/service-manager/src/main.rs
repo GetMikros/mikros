@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+mod broker;
 mod files;
 mod services;
 
@@ -21,7 +22,7 @@ use core::cell::RefCell;
 use mikros_rt::exec::{Executor, Reactor};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
-use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
+use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient, StartupHandle};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, ProcessDirectory, ProcessDirectoryAsyncServer,
     ProcessDirectoryBindResponse, ProcessDirectoryRequest,
@@ -117,7 +118,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     match root {
         Some(root) => {
             let root = NodeAsyncClient::new(root, reactor.clone());
-            spawner.spawn(services::start(root, reactor, boot));
+            let header = managed.header;
+            let me = ClientIdentity {
+                pid: header.pid,
+                user: header.user,
+                app_id: header.app_id,
+            };
+            let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
+            spawner.spawn(services::start(root, reactor, boot, launcher, me));
         }
         None => mikros_rt::log!(Error, "the namespace has no root"),
     }
