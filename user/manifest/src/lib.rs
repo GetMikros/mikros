@@ -1,14 +1,21 @@
-//! Reading service manifests.
+//! Reading service manifests, and choosing the order in which the boot
+//! services start.
 //!
 //! `parse` reads one manifest file into a `Service`, or says why the
-//! file is invalid and where.
+//! file is invalid and where. `order` takes the services of the valid
+//! files and returns the boot services in an order that starts each
+//! one after those it waits for, with the services that cannot start
+//! and why.
 
 #![no_std]
 
 extern crate alloc;
 
+mod order;
 #[cfg(test)]
 mod tests;
+
+pub use order::{Blocked, Order, order};
 
 use alloc::string::String;
 use alloc::vec::Vec;
