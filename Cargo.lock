@@ -734,6 +734,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-manifest"
+version = "0.0.0"
+dependencies = [
+ "mikros-yaml",
+]
+
+[[package]]
 name = "mikros-ustar"
 version = "0.0.0"
 
