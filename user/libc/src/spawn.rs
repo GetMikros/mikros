@@ -132,22 +132,24 @@ unsafe fn apply(descriptors: &mut Descriptors, actions: *const Fdop) -> Result<(
             op = (*op).next;
         }
         while let Some(action) = op.as_ref() {
-            let fd = usize::try_from(action.fd).map_err(|_| EBADF)?;
+            // Only the descriptor actions have a descriptor.
+            let fd = || usize::try_from(action.fd).map_err(|_| EBADF);
             match action.cmd {
                 FDOP_CLOSE => {
-                    descriptors.remove(&fd);
+                    descriptors.remove(&fd()?);
                 }
                 FDOP_DUP2 => {
                     let src = usize::try_from(action.srcfd).map_err(|_| EBADF)?;
                     let (description, _) = descriptors.get(&src).cloned().ok_or(EBADF)?;
-                    descriptors.insert(fd, (description, false));
+                    descriptors.insert(fd()?, (description, false));
                 }
                 FDOP_OPEN => {
                     let path = action.path.as_ptr().cast();
                     let flags = action.oflag as u32;
                     let opened = fs::open_description(fs::AT_FDCWD, path, flags, action.mode)?;
-                    descriptors.insert(fd, (opened, flags & fs::O_CLOEXEC != 0));
+                    descriptors.insert(fd()?, (opened, flags & fs::O_CLOEXEC != 0));
                 }
+                // A new working directory cannot be given to the child.
                 _ => return Err(ENOSYS),
             }
             op = action.prev;
