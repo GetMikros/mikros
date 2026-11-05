@@ -24,41 +24,60 @@ fn patches_dir() -> PathBuf {
     crate::workspace_root().join("user/libc/patches")
 }
 
+/// The `DT_SONAME` of the shared C library.
+pub const SONAME: &str = "libc.1.dlib";
+
 /// What building musl produced.
 pub struct Built {
     /// musl's static library, before the Mikros layer is added.
     pub libc: PathBuf,
+    /// The shared library, with the Mikros layer, which is also the
+    /// dynamic linker.
+    pub shared: PathBuf,
     /// The objects that a program is linked with around its own code.
     pub crti: PathBuf,
     pub crtn: PathBuf,
 }
 
 /// Fetches, patches and builds musl with the Clang configuration `cfg`,
-/// and installs its headers into `sysroot`.
-pub fn build(cfg: &Path, sysroot: &Path) -> Result<Built> {
+/// linking `layer`, the object of the shared variant of the Mikros
+/// layer, into the shared library, and installs its headers into
+/// `sysroot`.
+pub fn build(cfg: &Path, sysroot: &Path, layer: &Path) -> Result<Built> {
     let archive = dir().join(format!("musl-{VERSION}.tar.gz"));
     crate::fetch::cached(&format!("musl {VERSION}"), URL, SHA256, &archive)?;
     let source = patched_source(&archive)?;
     let build = dir().join("build");
     let clang = crate::llvm::tool("clang");
     let cc = format!("{} --config={}", clang.display(), cfg.display());
-    // A build configured with another compiler is configured again.
-    let configured = fs::read_to_string(build.join("config.mak")).unwrap_or_default();
-    if !configured.lines().any(|l| l == format!("CC = {cc}")) {
+    let ldflags = format!("-Wl,-soname,{SONAME}");
+    let options = [
+        "--target=x86_64",
+        "--prefix=/",
+        "--includedir=/include",
+        "--libdir=/lib",
+        "--enable-shared",
+    ];
+    // A build configured otherwise is configured again.
+    let stamp = format!("{cc}\n{ldflags}\n{}", options.join("\n"));
+    let configured = build.join(".mikros-configure");
+    if fs::read_to_string(&configured).ok() != Some(stamp.clone()) {
         fs::create_dir_all(&build)?;
         run(Command::new(source.join("configure"))
             .current_dir(&build)
-            .args([
-                "--target=x86_64",
-                "--prefix=/",
-                "--includedir=/include",
-                "--libdir=/lib",
-                "--disable-shared",
-            ])
+            .args(options)
             .env("CC", &cc)
+            .env("LDFLAGS", &ldflags)
             .env("AR", crate::llvm::tool("llvm-ar"))
             .env("RANLIB", crate::llvm::tool("llvm-ranlib")))
         .context("configuring musl")?;
+        fs::write(&configured, stamp)?;
+    }
+    // The shared library is linked again every time, since make does not
+    // see the Mikros layer change.
+    let shared = build.join("lib/libc.so");
+    if shared.exists() {
+        fs::remove_file(&shared)?;
     }
     let jobs = format!(
         "-j{}",
@@ -68,8 +87,14 @@ pub fn build(cfg: &Path, sysroot: &Path) -> Result<Built> {
         "-s",
         &jobs,
         "lib/libc.a",
+        "lib/libc.so",
         "lib/crti.o",
         "lib/crtn.o",
+        &format!(
+            "LIBCC={} {}",
+            layer.display(),
+            crate::llvm::builtins().display()
+        ),
     ]))
     .context("building musl")?;
     run(Command::new("make")
@@ -79,6 +104,7 @@ pub fn build(cfg: &Path, sysroot: &Path) -> Result<Built> {
     .context("installing the musl headers")?;
     Ok(Built {
         libc: build.join("lib/libc.a"),
+        shared,
         crti: build.join("lib/crti.o"),
         crtn: build.join("lib/crtn.o"),
     })

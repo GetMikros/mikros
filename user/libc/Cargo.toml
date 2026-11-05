@@ -10,6 +10,11 @@ publish = false
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+# The variant of the shared library, libc.dlib, which is also the
+# dynamic linker.
+shared = []
+
 [dependencies]
 mikros-rt = { path = "../mikros-rt", default-features = false }
 

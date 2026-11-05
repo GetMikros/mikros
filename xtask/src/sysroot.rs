@@ -3,7 +3,8 @@
 //!
 //! It holds the musl headers in `include/`, with the generated
 //! `<mikros/syscalls.h>` and `<mikros/abi.h>` in `include/mikros/`;
-//! `libc.slib`, `crti.o` and `crtn.o` in `lib/`, with
+//! `libc.slib`, `libc.dlib`, the dynamic linker `ld-mikros.dlib`, which
+//! is the same file, `crt1.o`, `crti.o` and `crtn.o` in `lib/`, with
 //! `lib/pkgconfig/`, and the Clang driver configuration file
 //! `x86_64-unknown-mikros.cfg`, which selects the target, its CPU level
 //! and this sysroot. The Clang that `crate::llvm` builds, which knows the
@@ -55,10 +56,14 @@ pub fn build() -> Result<PathBuf> {
         .with_context(|| format!("writing {}", header.display()))?;
     let abi = crate::workspace_root().join("user/libc/include/mikros/abi.h");
     copy(&abi, &sysroot.join("include/mikros/abi.h"))?;
-    let musl = crate::musl::build(&cfg, &sysroot)?;
+    let layer = mikros_layer(false)?;
+    let shared_layer = exported_object(&mikros_layer(true)?)?;
+    let musl = crate::musl::build(&cfg, &sysroot, &shared_layer)?;
     let lib = sysroot.join("lib");
-    let layer = mikros_layer()?;
     combine(&lib.join("libc.slib"), &[&musl.libc, &layer])?;
+    // The shared library is also the dynamic linker.
+    copy(&musl.shared, &lib.join("libc.dlib"))?;
+    copy(&musl.shared, &lib.join("ld-mikros.dlib"))?;
     copy(&musl.crti, &lib.join("crti.o"))?;
     copy(&musl.crtn, &lib.join("crtn.o"))?;
     let crt1 = crate::workspace_root().join("user/libc/crt/crt1.S");
@@ -75,25 +80,57 @@ pub fn build() -> Result<PathBuf> {
 }
 
 /// Builds the Mikros layer of the C library, a static library of the
-/// `user` workspace, and returns its path.
-fn mikros_layer() -> Result<PathBuf> {
+/// `user` workspace, and returns its path: with `shared`, the variant
+/// for the shared library, in a target directory of its own.
+fn mikros_layer(shared: bool) -> Result<PathBuf> {
     let root = crate::workspace_root();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let target_dir = if shared {
+        root.join("user/target/libc-shared")
+    } else {
+        root.join("user/target")
+    };
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(root.join("user"))
+        .args(["build", "--release", "--package", "mikros-libc", "--lib"])
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .arg("--target")
+        .arg(root.join(crate::build::USER_TARGET));
+    if shared {
+        command.args(["--features", "shared"]);
+    }
+    crate::port::run(&mut command).context("building the Mikros layer of the C library")?;
+    Ok(target_dir.join("x86_64-unknown-mikros/release/libmikros_libc.slib"))
+}
+
+/// The members of the static library `archive` linked into one object,
+/// in which only the `mikros_` and `__mikros_` functions stay global.
+/// musl hides what the shared library takes from archives, so the
+/// Mikros layer goes in as this object: its C functions are exported,
+/// and the Rust code and runtime functions they use are not.
+fn exported_object(archive: &Path) -> Result<PathBuf> {
+    let object = archive.with_extension("o");
     crate::port::run(
-        Command::new(cargo)
-            .current_dir(root.join("user"))
-            .args([
-                "build",
-                "--release",
-                "--package",
-                "mikros-libc",
-                "--lib",
-                "--target",
-            ])
-            .arg(root.join(crate::build::USER_TARGET)),
+        Command::new(llvm::tool("ld.lld"))
+            .args(["-r", "--whole-archive"])
+            .arg(archive)
+            .arg("-o")
+            .arg(&object),
     )
-    .context("building the Mikros layer of the C library")?;
-    Ok(root.join("user/target/x86_64-unknown-mikros/release/libmikros_libc.slib"))
+    .context("linking the Mikros layer into one object")?;
+    crate::port::run(
+        Command::new(llvm::tool("llvm-objcopy"))
+            .args([
+                "--wildcard",
+                "--keep-global-symbol=mikros_*",
+                "--keep-global-symbol=__mikros_*",
+            ])
+            .arg(&object),
+    )
+    .context("hiding the Rust symbols of the Mikros layer")?;
+    Ok(object)
 }
 
 /// Writes the static library `to` with the members of every archive of
