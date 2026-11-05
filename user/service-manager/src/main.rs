@@ -14,6 +14,7 @@ extern crate alloc;
 
 mod broker;
 mod files;
+mod launch;
 mod services;
 
 use alloc::rc::Rc;

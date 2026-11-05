@@ -52,7 +52,11 @@ pub async fn start(
             return;
         }
     };
-    mikros_rt::log!(Info, "started the permission broker as pid {}", running.pid);
+    mikros_rt::log!(
+        Info,
+        "started the permission broker as pid {}",
+        running.0.pid
+    );
     // TODO: register each service's permissions and start it, once
     // services can be given their boot handles.
     for &i in &order.start[1..] {
