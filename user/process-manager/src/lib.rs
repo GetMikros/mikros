@@ -5,3 +5,4 @@
 extern crate alloc;
 
 pub mod bootfs;
+pub mod devfs;

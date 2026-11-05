@@ -640,6 +640,34 @@ static int pipes_are_polled(void)
 	return ok;
 }
 
+/* /dev holds only null, which reads nothing and takes every write,
+   and nothing can be created there. */
+static int null_device_works(void)
+{
+	char buf[8];
+	struct stat st;
+	int fd = open("/dev/null", O_RDWR);
+	int ok = fd >= 0 && write(fd, "discarded", 9) == 9 && read(fd, buf, sizeof buf) == 0
+		&& fstat(fd, &st) == 0 && (st.st_mode & 0777) == 0666;
+	close(fd);
+	fd = open("/dev/null", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	ok = ok && fd >= 0 && write(fd, "x", 1) == 1;
+	close(fd);
+	ok = ok && open("/dev/other", O_WRONLY | O_CREAT, 0644) == -1 && errno == EROFS;
+	ok = ok && open("/dev/other", O_RDONLY) == -1 && errno == ENOENT;
+	DIR *dev = opendir("/dev");
+	struct dirent *e;
+	int found = 0, others = 0;
+	while (dev && (e = readdir(dev)))
+		if (strcmp(e->d_name, "null") == 0)
+			found++;
+		else if (strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
+			others++;
+	if (dev)
+		closedir(dev);
+	return ok && found == 1 && others == 0;
+}
+
 static volatile sig_atomic_t piped;
 
 static void on_pipe(int signo)
@@ -811,9 +839,11 @@ int main(int argc, char **argv)
 		return 26;
 	if (!pipes_are_polled())
 		return 27;
+	if (!null_device_works())
+		return 28;
 	char *copy = malloc(64);
 	if (!copy)
-		return 28;
+		return 29;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

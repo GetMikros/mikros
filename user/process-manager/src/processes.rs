@@ -20,6 +20,7 @@ use mikros_rt::interfaces::mikros::service::{
 };
 use mikros_rt::sys;
 use process_manager::bootfs::Fs;
+use process_manager::devfs::Dev;
 
 const SAME_RIGHTS: u32 = 1 << 31;
 const INFO_BASIC: u32 = 1;
@@ -32,6 +33,8 @@ const TERMINATED: u32 = 1 << 4;
 /// What the process manager's tasks share.
 pub struct Shared {
     pub fs: Rc<Fs>,
+    /// The `/dev` of every process.
+    dev: Dev,
     /// The root budget.
     pub budget: OwnedHandle,
     pub clock_page: OwnedHandle,
@@ -80,6 +83,7 @@ impl Shared {
     ) -> Rc<Shared> {
         Rc::new(Shared {
             fs,
+            dev: Dev::new(reactor.clone(), spawner.clone()),
             budget,
             clock_page,
             reactor,
@@ -242,6 +246,7 @@ impl Shared {
             directory,
             clock_page: self.clock_page.raw(),
             root: start::root(&self.fs)?,
+            dev: self.dev.directory()?,
         })?;
         bind(control, identity, directory_end).await?;
         started.complete()
