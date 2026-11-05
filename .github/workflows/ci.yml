@@ -17,7 +17,8 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git \
-            qemu-system-x86 gdb btrfs-progs
+            qemu-system-x86 gdb btrfs-progs \
+            cmake ninja-build clang lld python3 zstd
       - uses: actions/checkout@v4
         with:
           # The commit checks look at every commit since the base branch.
@@ -32,6 +33,15 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cargo install cargo-fuzz --locked
           cargo xtask setup
+      # Building Clang and LLD takes about an hour, so the LLVM directory,
+      # with its source and build tree, is kept between runs.
+      - name: Restore the LLVM build
+        id: llvm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: target/llvm
+          key: llvm-${{ hashFiles('xtask/src/llvm.rs', 'tools/llvm/patches/**') }}
+          restore-keys: llvm-
       - name: Check
         run: cargo xtask check --base "origin/${{ github.base_ref || 'main' }}"
       - name: Build
@@ -41,6 +51,16 @@ jobs:
           done
       - name: Test
         run: cargo xtask test
+      # Saved even when the tests fail, but only once the build is whole:
+      # the compiler-rt builtins are the last thing it installs.
+      - name: Save the LLVM build
+        if: >-
+          always() && steps.llvm-cache.outputs.cache-hit != 'true' &&
+          hashFiles('target/llvm/install/lib/clang/*/lib/x86_64-unknown-mikros/libclang_rt.builtins.a') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: target/llvm
+          key: ${{ steps.llvm-cache.outputs.cache-primary-key }}
       # Some integration tests, such as the coverage test, exist only in
       # fuzz builds. The host tests ran in the step above.
       - name: Test the fuzz build
