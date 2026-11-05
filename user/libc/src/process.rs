@@ -54,6 +54,31 @@ pub fn unsignalled<R>(call: impl FnOnce() -> R) -> R {
     result
 }
 
+/// `mikros_executable_path`: the executable path that the process
+/// manager keeps for the calling process. Copies at most `len` bytes of
+/// it to `buf`, without a terminating NUL, and returns its whole length,
+/// or the negated error number when the process manager does not give
+/// it.
+///
+/// # Safety
+///
+/// `buf` must have room for `len` bytes.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mikros_executable_path(buf: *mut u8, len: usize) -> i64 {
+    let pid = PID.load(Ordering::Relaxed);
+    let info = match unsignalled(|| launcher().get_info(pid, FOREVER)) {
+        Ok(Ok(reply)) => reply.info,
+        Ok(Err(status)) => return -errno::from_status(i64::from(status.into_raw())),
+        Err(_) => return -EIO,
+    };
+    let path = info.path.as_bytes();
+    let count = path.len().min(len);
+    // SAFETY: the caller gives room for `len` bytes, and `count` is at
+    // most that.
+    unsafe { core::ptr::copy_nonoverlapping(path.as_ptr(), buf, count) };
+    path.len() as i64
+}
+
 /// The error number of a failed `Kill`: those of POSIX `kill` for a
 /// process that does not exist or may not be signalled.
 fn kill_error(status: Status) -> i64 {

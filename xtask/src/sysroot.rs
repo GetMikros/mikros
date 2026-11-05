@@ -2,7 +2,8 @@
 //! Mikros are built against, laid out like `/usr`.
 //!
 //! It holds the musl headers in `include/`, with the generated
-//! `<mikros/syscalls.h>` and `<mikros/abi.h>` in `include/mikros/`;
+//! `<mikros/syscalls.h>`, `<mikros/abi.h>` and `<mikros/process.h>` in
+//! `include/mikros/`;
 //! `libc.slib`, `libc.dlib`, the dynamic linker `ld-mikros.dlib`, which
 //! is the same file, `crt1.o`, `crti.o`, `crtn.o` and LLVM's static
 //! unwinder `libunwind.slib` in `lib/`, with
@@ -55,8 +56,12 @@ pub fn build() -> Result<PathBuf> {
     let header = sysroot.join("include/mikros/syscalls.h");
     fs::write(&header, syscalls_header()?)
         .with_context(|| format!("writing {}", header.display()))?;
-    let abi = crate::workspace_root().join("user/libc/include/mikros/abi.h");
-    copy(&abi, &sysroot.join("include/mikros/abi.h"))?;
+    for header in ["abi.h", "process.h"] {
+        let from = crate::workspace_root()
+            .join("user/libc/include/mikros")
+            .join(header);
+        copy(&from, &sysroot.join("include/mikros").join(header))?;
+    }
     // The compiler-rt builtins are built against musl's headers, and
     // musl's libraries with the builtins.
     crate::musl::install_headers(&cfg, &sysroot)?;

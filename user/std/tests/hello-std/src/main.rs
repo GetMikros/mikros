@@ -36,6 +36,9 @@ fn checks() -> Result<String, u8> {
     // A thread starts, returns a value and is joined.
     let joined = thread::spawn(|| (1..=10).sum::<u32>()).join();
     check(joined.ok() == Some(55))?;
+    // The process manager gives the program's path.
+    let exe = std::env::current_exe();
+    check(exe.is_ok_and(|p| p == std::path::Path::new("/usr/bin/hello-std")))?;
     // A panic unwinds to `catch_unwind`.
     panic::set_hook(Box::new(|_| {}));
     let caught = panic::catch_unwind(|| panic!("unwinding"));

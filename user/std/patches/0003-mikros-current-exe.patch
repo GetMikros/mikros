@@ -1,0 +1,44 @@
+diff --git a/std/src/sys/paths/unix.rs b/std/src/sys/paths/unix.rs
+index 92623e7..0e776ca 100644
+--- a/std/src/sys/paths/unix.rs
++++ b/std/src/sys/paths/unix.rs
+@@ -405,16 +405,33 @@ pub fn current_exe() -> io::Result<PathBuf> {
+     path.canonicalize()
+ }
+ 
+-#[cfg(any(
+-    target_os = "espidf",
+-    target_os = "horizon",
+-    target_os = "mikros",
+-    target_os = "vita"
+-))]
++#[cfg(any(target_os = "espidf", target_os = "horizon", target_os = "vita"))]
+ pub fn current_exe() -> io::Result<PathBuf> {
+     crate::sys::pal::unsupported()
+ }
+ 
++/// The executable path that the process manager keeps for this process,
++/// as the C library gives it.
++#[cfg(target_os = "mikros")]
++pub fn current_exe() -> io::Result<PathBuf> {
++    unsafe extern "C" {
++        fn mikros_executable_path(buf: *mut u8, len: usize) -> i64;
++    }
++    let mut buf = vec![0u8; 1024];
++    loop {
++        // SAFETY: the buffer has room for `buf.len()` bytes.
++        let len = unsafe { mikros_executable_path(buf.as_mut_ptr(), buf.len()) };
++        let Ok(len) = usize::try_from(len) else {
++            return Err(io::Error::from_raw_os_error(-len as i32));
++        };
++        if len <= buf.len() {
++            buf.truncate(len);
++            return Ok(PathBuf::from(OsString::from_vec(buf)));
++        }
++        buf.resize(len, 0);
++    }
++}
++
+ #[cfg(target_os = "fuchsia")]
+ pub fn current_exe() -> io::Result<PathBuf> {
+     #[cfg(test)]
