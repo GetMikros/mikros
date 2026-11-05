@@ -5,18 +5,23 @@
 //! not perform yet fail with `ENOSYS`.
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENOSYS, ENOTTY};
-use crate::{clock, fd, io};
+use crate::fd::Description;
+use crate::{clock, fd, fs, io};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::sys::{self, Handle};
 
 const SYS_READ: i64 = 0;
 const SYS_WRITE: i64 = 1;
+const SYS_OPEN: i64 = 2;
 const SYS_CLOSE: i64 = 3;
+const SYS_LSEEK: i64 = 8;
 const SYS_MMAP: i64 = 9;
 const SYS_MPROTECT: i64 = 10;
 const SYS_MUNMAP: i64 = 11;
 const SYS_BRK: i64 = 12;
 const SYS_IOCTL: i64 = 16;
+const SYS_PREAD64: i64 = 17;
+const SYS_PWRITE64: i64 = 18;
 const SYS_READV: i64 = 19;
 const SYS_WRITEV: i64 = 20;
 const SYS_DUP: i64 = 32;
@@ -27,6 +32,7 @@ const SYS_SET_THREAD_AREA: i64 = 205;
 const SYS_SET_TID_ADDRESS: i64 = 218;
 const SYS_CLOCK_GETTIME: i64 = 228;
 const SYS_EXIT_GROUP: i64 = 231;
+const SYS_OPENAT: i64 = 257;
 const SYS_DUP3: i64 = 292;
 const SYS_GETRANDOM: i64 = 318;
 
@@ -49,8 +55,6 @@ const F_GETFL: i64 = 3;
 const F_SETFL: i64 = 4;
 const F_DUPFD_CLOEXEC: i64 = 1030;
 const FD_CLOEXEC: i64 = 1;
-const O_RDWR: u32 = 0o2;
-const O_CLOEXEC: u32 = 0o2000000;
 
 /// The process handle, for the mappings of `mmap`.
 static PROCESS: AtomicU32 = AtomicU32::new(0);
@@ -79,6 +83,11 @@ extern "C" fn __mikros_syscall(
         SYS_WRITE => io::write(a1, a2 as *const u8, a3 as u64),
         SYS_READV => io::vectored(a1, a2 as *const io::Iovec, a3, false),
         SYS_WRITEV => io::vectored(a1, a2 as *const io::Iovec, a3, true),
+        SYS_PREAD64 => io::pread(a1, a2 as *mut u8, a3 as u64, a4),
+        SYS_PWRITE64 => io::pwrite(a1, a2 as *const u8, a3 as u64, a4),
+        SYS_LSEEK => io::lseek(a1, a2, a3),
+        SYS_OPEN => fs::open(fs::AT_FDCWD, a1 as *const u8, a2 as u32, a3 as u32),
+        SYS_OPENAT => fs::open(a1, a2 as *const u8, a3 as u32, a4 as u32),
         SYS_CLOSE => fd::close(a1),
         SYS_DUP => fd::duplicate_from(a1, 0, false),
         SYS_DUP2 => dup2(a1, a2),
@@ -206,11 +215,14 @@ fn dup2(from: i64, to: i64) -> i64 {
 }
 
 fn dup3(from: i64, to: i64, flags: u32) -> i64 {
-    if from == to || flags & !O_CLOEXEC != 0 {
+    if from == to || flags & !fs::O_CLOEXEC != 0 {
         return -EINVAL;
     }
-    fd::duplicate_to(from, to, flags & O_CLOEXEC != 0)
+    fd::duplicate_to(from, to, flags & fs::O_CLOEXEC != 0)
 }
+
+/// The status flags that `F_SETFL` changes.
+const SETFL_MASK: u32 = fs::O_APPEND | fs::O_NONBLOCK;
 
 fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
     match cmd {
@@ -221,12 +233,32 @@ fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
             None => -EBADF,
         },
         F_SETFD => fd::set_close_on_exec(fd, arg & FD_CLOEXEC != 0),
-        // Streams are read and written, and have no other flags.
-        F_GETFL | F_SETFL => match fd::get(fd) {
-            Some(_) if cmd == F_GETFL => i64::from(O_RDWR),
-            Some(_) => 0,
-            None => -EBADF,
-        },
+        F_GETFL | F_SETFL => {
+            let Some(description) = fd::get(fd) else {
+                return -EBADF;
+            };
+            let node = match &*description {
+                Description::File(node) | Description::Directory(node, _) => node,
+                // Streams are read and written, and have no other flags.
+                Description::Stream(_) => {
+                    return if cmd == F_GETFL {
+                        i64::from(fs::O_RDWR)
+                    } else {
+                        0
+                    };
+                }
+            };
+            let flags = &node.flags;
+            if cmd == F_GETFL {
+                return i64::from(flags.load(Ordering::Relaxed));
+            }
+            let old = flags.load(Ordering::Relaxed);
+            flags.store(
+                old & !SETFL_MASK | arg as u32 & SETFL_MASK,
+                Ordering::Relaxed,
+            );
+            0
+        }
         _ => -EINVAL,
     }
 }

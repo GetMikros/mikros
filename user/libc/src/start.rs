@@ -9,7 +9,7 @@
 //! with `__mikros_dynamic_start` before it loaded the program, so
 //! `__mikros_start` only runs musl's start with the arguments it kept.
 
-use crate::{clock, fd, syscall};
+use crate::{clock, fd, fs, syscall};
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -146,6 +146,7 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
         header.time_page.as_ref().map(|page| page.raw()),
     );
     fd::install(&mut managed.handles);
+    fs::install(core::mem::take(&mut managed.namespace));
     SYSTEM_PROCESS.store(
         header.app_id.as_bytes().starts_with(SYSTEM),
         core::sync::atomic::Ordering::Relaxed,

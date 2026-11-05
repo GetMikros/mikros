@@ -1,12 +1,14 @@
 //! The descriptor table of the process. Each descriptor refers to an open
-//! description, which `dup` shares between descriptors. Only streams
-//! exist yet.
+//! description: a stream, or a connection to a file or directory, which
+//! `dup` shares between descriptors.
 
 use crate::errno::{EBADF, EINVAL, EMFILE};
 use crate::lock::Lock;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, AtomicU64};
 use mikros_rt::interfaces::__midl::OwnedHandle;
+use mikros_rt::interfaces::mikros::fs::NodeClient;
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 
 /// The descriptor kind of a stream.
@@ -19,6 +21,22 @@ pub const FDS_MAX: usize = 1024;
 /// What a descriptor refers to.
 pub enum Description {
     Stream(OwnedHandle),
+    /// A connection to a file, whose cursor is the descriptor's offset.
+    File(Node),
+    /// A connection to a directory, with the position of its listing.
+    Directory(Node, AtomicU64),
+}
+
+/// A connection to a file system node, with the status flags it was
+/// opened with.
+pub struct Node {
+    /// The connection, which carries one call at a time.
+    pub node: Lock<NodeClient>,
+    /// The absolute path it was opened with, which paths relative to the
+    /// descriptor are resolved against.
+    pub path: alloc::string::String,
+    /// The `O_` status flags, such as `O_APPEND`.
+    pub flags: AtomicU32,
 }
 
 struct Entry {

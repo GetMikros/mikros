@@ -153,6 +153,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", hello_dynamic.display());
             let dynamic_linker = crate::sysroot::dir().join("lib/ld-mikros.dlib");
+            let greeting = crate::workspace_root().join("user/tests/hello-c/greeting.txt");
             // The process manager tests serve this image, in which the
             // probe takes the service manager's place.
             let launcher = boot_image(
@@ -164,6 +165,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/hello", hello.as_path()),
                     ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
                     ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
+                    ("usr/share/hello/greeting.txt", greeting.as_path()),
                 ],
             )?;
             println!("built    {}", launcher.display());
