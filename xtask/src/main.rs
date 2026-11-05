@@ -19,6 +19,7 @@ mod musl;
 mod port;
 mod qemu;
 mod run;
+mod rust_std;
 mod scenario;
 mod setup;
 mod symbolize;

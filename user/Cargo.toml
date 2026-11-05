@@ -1,8 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["init", "libc", "loader", "mikros-rt", "permissions-broker", "process-manager", "service-manager", "tests/broker-probe", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/directory-probe", "tests/init", "tests/launcher-probe", "tests/managed", "tests/pie", "tests/support"]
-# Built here as a dependency, and host-tested in the root workspace.
-exclude = ["bootfs", "manifest", "permissions", "ustar", "yaml"]
+# Built here as a dependency, and host-tested in the root workspace,
+# except `std`, a workspace of its own for programs that use the
+# standard library.
+exclude = ["bootfs", "manifest", "permissions", "std", "ustar", "yaml"]
 
 [workspace.package]
 version = "0.0.0"

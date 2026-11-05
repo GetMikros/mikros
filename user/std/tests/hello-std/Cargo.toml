@@ -1,0 +1,8 @@
+[package]
+name = "hello-std"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hello-std"
+path = "src/main.rs"

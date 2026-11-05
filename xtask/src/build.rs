@@ -25,7 +25,7 @@ impl Kind {
     }
 
     /// The Cargo profile used for this kind.
-    fn profile(self) -> &'static str {
+    pub fn profile(self) -> &'static str {
         match self {
             Kind::Production => "release",
             Kind::Debug => "dev",
@@ -34,7 +34,7 @@ impl Kind {
     }
 
     /// The directory Cargo writes the profile's output to.
-    fn profile_dir(self) -> &'static str {
+    pub fn profile_dir(self) -> &'static str {
         match self {
             Kind::Production => "release",
             Kind::Debug => "debug",
@@ -192,6 +192,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", library_user.display());
+            let hello_std = crate::rust_std::build("hello-std", kind)?;
+            println!("built    {}", hello_std.display());
             let dynamic_linker = crate::sysroot::dir().join("lib/ld-mikros.dlib");
             let greeting = crate::workspace_root().join("user/tests/hello-c/greeting.txt");
             // The process manager tests serve this image, in which the
@@ -204,6 +206,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/probe", probe.as_path()),
                     ("usr/bin/hello", hello.as_path()),
                     ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
+                    ("usr/bin/hello-std", hello_std.as_path()),
                     ("usr/bin/spawn-child", spawn_child.as_path()),
                     ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
                     ("usr/bin/library-user", library_user.as_path()),
