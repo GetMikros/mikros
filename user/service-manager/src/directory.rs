@@ -54,6 +54,7 @@ pub struct Dir {
     /// The number of instances registered so far, which tells each
     /// one apart from a later one of the same name.
     registered: Cell<u64>,
+    demand: RefCell<Option<Demand>>,
 }
 
 /// A protocol that a manifest provides.
@@ -70,9 +71,26 @@ enum Provider {
     Running(Rc<ProviderClient>),
     /// The service will not run.
     Never,
+    /// An on-demand service that is not running; the first connection
+    /// starts it.
+    Idle,
     /// The service manager's own registrar.
     Registrar,
 }
+
+/// What the protocols of a service start as.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Initially {
+    /// The service starts at boot; connections wait for it.
+    Starting,
+    /// An on-demand service, started by the first connection.
+    Idle,
+    /// The service will not run.
+    Never,
+}
+
+/// What starts an idle service, by name.
+type Demand = Rc<dyn Fn(&str)>;
 
 /// A named instance of a protocol.
 struct Instance {
@@ -102,6 +120,7 @@ impl Dir {
             instances: RefCell::new(BTreeMap::new()),
             watchers: RefCell::new(Vec::new()),
             registered: Cell::new(0),
+            demand: RefCell::new(None),
         })
     }
 
@@ -111,10 +130,10 @@ impl Dir {
         self.spawner.spawn(serve(dir, end, Rc::new(caller)));
     }
 
-    /// Records the protocols that `services` provide, where `runs` says
-    /// whether each service may still run, and lets requests through.
-    /// A protocol that two services provide is left unprovided.
-    pub fn set_services(&self, services: &[Service], runs: impl Fn(usize) -> bool) {
+    /// Records the protocols that `services` provide, as `initially`
+    /// says for each service, and lets requests through. A protocol that
+    /// two services provide is left unprovided.
+    pub fn set_services(&self, services: &[Service], initially: impl Fn(usize) -> Initially) {
         let mut providers = BTreeMap::<String, Vec<usize>>::new();
         for (i, s) in services.iter().enumerate() {
             for p in &s.provides {
@@ -136,10 +155,10 @@ impl Dir {
                 .iter()
                 .find(|p| p.protocol == protocol)
                 .and_then(|p| p.permission.clone());
-            let provider = if runs(i) {
-                Provider::Waiting(Vec::new())
-            } else {
-                Provider::Never
+            let provider = match initially(i) {
+                Initially::Starting => Provider::Waiting(Vec::new()),
+                Initially::Idle => Provider::Idle,
+                Initially::Never => Provider::Never,
             };
             let service = s.name.clone();
             provided.insert(
@@ -195,6 +214,22 @@ impl Dir {
                 for (server, client) in waiting {
                     let _ = provider.connect(protocol.clone(), None, server, client);
                 }
+            }
+        }
+    }
+
+    /// Calls `demand` with the name of an idle service when a connection
+    /// to it arrives.
+    pub fn set_demand(&self, demand: Demand) {
+        *self.demand.borrow_mut() = Some(demand);
+    }
+
+    /// Makes `service`, an on-demand service that ended, idle again, so
+    /// that the next connection starts it.
+    pub fn idle(&self, service: &str) {
+        for p in self.provided.borrow_mut().values_mut() {
+            if p.service == service {
+                p.provider = Provider::Idle;
             }
         }
     }
@@ -266,24 +301,46 @@ impl Dir {
             return Err(Status::AccessDenied);
         }
         // The provider may have changed while the broker answered.
-        if let Some(p) = self.provided.borrow_mut().get_mut(&protocol) {
-            return match &mut p.provider {
+        let mut provided = self.provided.borrow_mut();
+        if let Some(p) = provided.get_mut(&protocol) {
+            let client = clone(caller);
+            let demanded = match &mut p.provider {
                 Provider::Waiting(waiting) => {
-                    waiting.push((server, clone(caller)));
-                    Ok(())
+                    waiting.push((server, client));
+                    None
                 }
                 Provider::Running(provider) => {
-                    let _ = provider.connect(protocol, None, server, clone(caller));
-                    Ok(())
+                    let _ = provider.connect(protocol, None, server, client);
+                    None
                 }
-                Provider::Never => Err(Status::NotFound),
+                Provider::Never => return Err(Status::NotFound),
+                Provider::Idle => {
+                    p.provider = Provider::Waiting(alloc::vec![(server, client)]);
+                    Some(p.service.clone())
+                }
                 Provider::Registrar => {
+                    drop(provided);
                     let server = ServerEnd::new(server);
                     crate::registrar::serve(self.clone(), server, clone(caller));
-                    Ok(())
+                    return Ok(());
                 }
             };
+            if let Some(service) = demanded {
+                // Every protocol of the service waits for it now.
+                for q in provided.values_mut() {
+                    if q.service == service && matches!(q.provider, Provider::Idle) {
+                        q.provider = Provider::Waiting(Vec::new());
+                    }
+                }
+                drop(provided);
+                let demand = self.demand.borrow().clone();
+                if let Some(demand) = demand {
+                    demand(&service);
+                }
+            }
+            return Ok(());
         }
+        drop(provided);
         let instances = self.instances.borrow();
         let found = instances
             .get(&protocol)

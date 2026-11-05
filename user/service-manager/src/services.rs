@@ -2,10 +2,10 @@
 
 use crate::boot::BootHandles;
 use crate::broker;
-use crate::directory::Dir;
+use crate::directory::{Dir, Initially};
 use crate::files::{self, Failure};
 use crate::supervisor::Supervisor;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -25,7 +25,8 @@ const SUFFIX: &str = ".yaml";
 /// service manager `me`: the permission broker first, then each other
 /// one once its permissions are registered with the broker. Each gets
 /// the boot handles of `boot` that its manifest lists, and is restarted
-/// as its manifest says.
+/// as its manifest says. On-demand services then start at the first
+/// connection to one of their protocols.
 pub async fn start(
     root: NodeAsyncClient,
     reactor: Reactor,
@@ -50,9 +51,15 @@ pub async fn start(
         services.len(),
         order.start.len()
     );
-    // TODO: start on-demand services at the first connection; until
-    // then, connections to them wait.
-    dir.set_services(&services, |i| order.blocked.iter().all(|(b, _)| *b != i));
+    dir.set_services(&services, |i| {
+        if order.blocked.iter().any(|(b, _)| *b == i) {
+            Initially::Never
+        } else if order.start.contains(&i) {
+            Initially::Starting
+        } else {
+            Initially::Idle
+        }
+    });
     let start = order.start.clone();
     let supervisor = Rc::new(Supervisor {
         launcher,
@@ -65,21 +72,34 @@ pub async fn start(
         broker: RefCell::new(None),
         active: RefCell::new(BTreeSet::new()),
         restarts: RefCell::new(BTreeMap::new()),
+        demanded: RefCell::new(VecDeque::new()),
+        demand_waker: RefCell::new(None),
     });
+    let weak = Rc::downgrade(&supervisor);
+    supervisor.dir.set_demand(Rc::new(move |name: &str| {
+        if let Some(supervisor) = weak.upgrade() {
+            supervisor.demand(name);
+        }
+    }));
     // `order` puts the broker first whenever anything starts; without
     // it, nothing else can.
     let Some((&first, rest)) = start.split_first() else {
+        for s in &supervisor.services {
+            supervisor.dir.never(&s.name);
+        }
         return;
     };
     if !supervisor.start(first).await {
-        for &i in rest {
-            supervisor.dir.never(&supervisor.services[i].name);
+        for s in &supervisor.services {
+            supervisor.dir.never(&s.name);
         }
         return;
     }
     for &i in rest {
         supervisor.start(i).await;
     }
+    // On-demand services start once the boot services have.
+    supervisor.serve_demands().await;
 }
 
 /// The services of the valid manifests, with the manifests' bytes.

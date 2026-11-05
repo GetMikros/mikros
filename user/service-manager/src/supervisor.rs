@@ -13,8 +13,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::Future;
+use core::future::poll_fn;
 use core::pin::Pin;
-use mikros_manifest::{Restart, Service};
+use core::task::{Poll, Waker};
+use mikros_manifest::{Restart, Service, Start};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::mikros::permissions::BrokerAsyncClient;
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
@@ -40,6 +42,18 @@ pub struct Supervisor {
     pub active: RefCell<BTreeSet<usize>>,
     /// When each service was restarted, within the last `WINDOW`.
     pub restarts: RefCell<BTreeMap<usize, VecDeque<i64>>>,
+    /// The on-demand services that connections asked for, in order.
+    pub demanded: RefCell<VecDeque<usize>>,
+    pub demand_waker: RefCell<Option<Waker>>,
+}
+
+/// What happens to a service that ended.
+enum After {
+    Restart,
+    /// It is not restarted; an on-demand one may start again on demand.
+    Stop,
+    /// It failed too often, and does not start again.
+    GiveUp,
 }
 
 fn now() -> i64 {
@@ -139,20 +153,29 @@ impl Supervisor {
                 None => mikros_rt::log!(Error, "service {name} could not be watched"),
             }
             drop(process);
-            if ended.is_some_and(|ended| this.restarts(i, ended)) {
-                this.dir.stopped(&name);
-                this.start(i).await;
-            } else {
-                this.active.borrow_mut().remove(&i);
-                this.dir.never(&name);
+            let after = ended.map_or(After::Stop, |ended| this.after(i, ended));
+            match after {
+                After::Restart => {
+                    this.dir.stopped(&name);
+                    this.start(i).await;
+                }
+                After::Stop if this.services[i].start == Start::OnDemand => {
+                    this.active.borrow_mut().remove(&i);
+                    this.dir.idle(&name);
+                }
+                After::Stop | After::GiveUp => {
+                    this.active.borrow_mut().remove(&i);
+                    this.dir.never(&name);
+                }
             }
         });
     }
 
-    /// Whether service `i`, which ended with `ended`, is to be restarted:
-    /// with `always`, or with `on-failure` after any end but exit code 0,
-    /// unless it was restarted `RESTARTS_MAX` times within `WINDOW`.
-    fn restarts(&self, i: usize, (code, signal): (i64, u32)) -> bool {
+    /// What happens to service `i`, which ended with `ended`: it is
+    /// restarted with `always`, or with `on-failure` after any end but
+    /// exit code 0, unless it was restarted `RESTARTS_MAX` times within
+    /// `WINDOW`.
+    fn after(&self, i: usize, (code, signal): (i64, u32)) -> After {
         let service = &self.services[i];
         let failed = code != 0 || signal != 0;
         let wanted = match service.restart {
@@ -161,7 +184,7 @@ impl Supervisor {
             Restart::Never => false,
         };
         if !wanted {
-            return false;
+            return After::Stop;
         }
         let now = now();
         let mut restarts = self.restarts.borrow_mut();
@@ -175,9 +198,76 @@ impl Supervisor {
                 "service {} failed after {RESTARTS_MAX} restarts within 60 s; it is not restarted again",
                 service.name
             );
-            return false;
+            return After::GiveUp;
         }
         times.push_back(now);
-        true
+        After::Restart
+    }
+
+    /// Asks for the on-demand service `name`, which a connection waits
+    /// for, to be started.
+    pub fn demand(&self, name: &str) {
+        let Some(i) = self.services.iter().position(|s| s.name == name) else {
+            return;
+        };
+        self.demanded.borrow_mut().push_back(i);
+        if let Some(waker) = self.demand_waker.borrow_mut().take() {
+            waker.wake();
+        }
+    }
+
+    /// Starts the demanded services one at a time, for as long as the
+    /// service manager runs.
+    pub async fn serve_demands(self: &Rc<Self>) {
+        loop {
+            let i = poll_fn(|cx| match self.demanded.borrow_mut().pop_front() {
+                Some(i) => Poll::Ready(i),
+                None => {
+                    *self.demand_waker.borrow_mut() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            })
+            .await;
+            if !self.active.borrow().contains(&i) {
+                self.start_with_after(i, Vec::new()).await;
+            }
+        }
+    }
+
+    /// Starts the services that service `i` lists in `after` and that
+    /// are not active, each with its own, then `i`. `chain` holds the
+    /// services that wait for `i` to start; meeting one again is a
+    /// cycle. Returns whether `i` started.
+    fn start_with_after(
+        self: &Rc<Self>,
+        i: usize,
+        chain: Vec<usize>,
+    ) -> Pin<Box<dyn Future<Output = bool>>> {
+        let this = self.clone();
+        Box::pin(async move {
+            let name = this.services[i].name.clone();
+            let mut chain = chain;
+            chain.push(i);
+            for after in this.services[i].after.clone() {
+                let Some(j) = this.services.iter().position(|s| s.name == after) else {
+                    continue;
+                };
+                let failed = if chain.contains(&j) {
+                    Some("waits for itself through after")
+                } else if this.active.borrow().contains(&j) {
+                    None
+                } else if !this.start_with_after(j, chain.clone()).await {
+                    Some("a service it waits for did not start")
+                } else {
+                    None
+                };
+                if let Some(why) = failed {
+                    mikros_rt::log!(Error, "service {name} did not start: {why}");
+                    this.dir.never(&name);
+                    return false;
+                }
+            }
+            this.start(i).await
+        })
     }
 }
