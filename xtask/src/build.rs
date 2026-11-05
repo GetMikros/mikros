@@ -176,6 +176,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 crate::workspace_root().join("user/tests/directory-probe/directory-probe.yaml");
             let restart_probe_manifest =
                 crate::workspace_root().join("user/tests/directory-probe/restart-probe.yaml");
+            let demand_probe_manifest =
+                crate::workspace_root().join("user/tests/directory-probe/demand-probe.yaml");
+            let demand_dep_manifest =
+                crate::workspace_root().join("user/tests/directory-probe/demand-dep.yaml");
             // The service manager tests serve this image, which holds the
             // system's services and their manifests, and a probe that
             // starts as a boot service.
@@ -199,6 +203,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     (
                         "usr/lib/services/restart-probe.yaml",
                         restart_probe_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/demand-probe.yaml",
+                        demand_probe_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/demand-dep.yaml",
+                        demand_dep_manifest.as_path(),
                     ),
                 ],
             )?;

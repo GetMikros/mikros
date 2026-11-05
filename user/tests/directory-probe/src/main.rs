@@ -6,7 +6,11 @@
 //! lists, watches and connects to them, and removes them. It exits with
 //! 0 when every check passed or with the number of the first that
 //! failed. Started as `system.restart-probe`, it exits with 1 at once,
-//! for the service manager to restart it.
+//! for the service manager to restart it. Started as
+//! `system.demand-probe`, an on-demand service, it greets the one
+//! connection it is started for and exits; as `system.demand-dep`, the
+//! service that the demand probe lists in `after`, it only runs. The
+//! probe connects to the demand probe twice, so that it starts twice.
 
 #![no_std]
 #![no_main]
@@ -36,9 +40,16 @@ const PROTECTED: &str = "test.directory.Protected";
 const REGISTRAR: &str = "mikros.service.Registrar";
 const NAMED: &str = "test.directory.Named";
 const INFO_BASIC: u32 = 1;
+const PEER_CLOSED: u32 = 1 << 2;
 const INFO_BASIC_SIZE: usize = 24;
-/// The app ID of the program when it runs as the restart probe.
+/// The app ID of the program when it runs as the restart probe, and as
+/// the on-demand demand probe and its dependency.
 const RESTART_PROBE: &str = "system.restart-probe";
+const DEMAND_PROBE: &str = "system.demand-probe";
+const DEMAND_DEP: &str = "system.demand-dep";
+const DEMAND: &str = "test.directory.Demand";
+/// What the demand probe writes on each connection.
+const HELLO: &[u8] = b"hi";
 /// The step a failure to set the checks up ends with.
 const SETUP: i64 = 100;
 /// The step that wrong boot handles end with.
@@ -57,9 +68,13 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
-    // Started as the restart probe, it fails at once, every time.
-    if managed.header.app_id == RESTART_PROBE {
-        return 1;
+    match managed.header.app_id.as_str() {
+        // The restart probe fails at once, every time.
+        RESTART_PROBE => return 1,
+        // The dependency of the demand probe only runs.
+        DEMAND_DEP => executor.block_on(core::future::pending::<()>()),
+        DEMAND_PROBE => return demanded(&mut managed.handles, &mut executor, &reactor),
+        _ => {}
     }
     // The boot handles its manifest lists: the log, which it logs
     // through, and the platform information, without a framebuffer.
@@ -124,6 +139,82 @@ fn boot_handles(handles: &[StartupHandle]) -> bool {
         mikros_rt::log::set_handle(log.raw());
     }
     users == 2 && log_ok && info_ok && read == mikros_rt::OK && &bytes == b"platform"
+}
+
+/// Runs as the demand probe: writes `HELLO` on the first connection
+/// that its Provider channel forwards, waits for the client to close it,
+/// and exits with 0, or with 1 when that fails.
+fn demanded(handles: &mut Vec<StartupHandle>, executor: &mut Executor, reactor: &Reactor) -> i64 {
+    let at = handles
+        .iter()
+        .position(|h| h.role == HandleRole::Provider && h.id == PROVIDER_ID);
+    let Some(at) = at else {
+        return SETUP;
+    };
+    let provider = ServerEnd::<Provider>::new(handles.remove(at).handle);
+    let provider = ProviderAsyncServer::new(provider, reactor.clone());
+    executor.block_on(async {
+        let Ok(ProviderRequest::Connect(c)) = provider.next().await else {
+            return 1;
+        };
+        // SAFETY: the pointer and length describe `HELLO`.
+        let wrote = unsafe {
+            sys::channel_write(
+                c.server.raw(),
+                HELLO.as_ptr(),
+                HELLO.len() as u64,
+                core::ptr::null(),
+                0,
+            )
+        };
+        if wrote != mikros_rt::OK {
+            return 1;
+        }
+        let _ = reactor.signals(c.server.raw(), PEER_CLOSED).await;
+        0
+    })
+}
+
+/// Connects to `DEMAND`, which starts the demand probe, and returns
+/// whether the connection carried `HELLO`. A connection made while the
+/// probe from an earlier one is still ending closes without it; that is
+/// tried again.
+async fn hello(d: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
+    for _ in 0..50 {
+        let Ok(client) = connect(d, DEMAND, None).await else {
+            return false;
+        };
+        let client = client.into_handle();
+        if reactor.readable(client.raw()).await.is_err() {
+            return false;
+        }
+        let mut bytes = [0u8; 8];
+        let (mut len, mut count) = (0, 0);
+        // SAFETY: the pointers describe `bytes`, `len` and `count`.
+        let read = unsafe {
+            sys::channel_read(
+                client.raw(),
+                bytes.as_mut_ptr(),
+                bytes.len() as u64,
+                core::ptr::null_mut(),
+                0,
+                &mut len,
+                &mut count,
+            )
+        };
+        if read == mikros_rt::OK {
+            return &bytes[..len as usize] == HELLO;
+        }
+        let _ = reactor.sleep_until(now() + 20_000_000).await;
+    }
+    false
+}
+
+fn now() -> i64 {
+    let mut now = 0;
+    // SAFETY: the out pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    now
 }
 
 /// The koid of the object `handle` refers to and the koid of its peer.
@@ -376,5 +467,10 @@ async fn probe(
     check(
         "removing an instance whose provider closed",
         told(d, "one", false).await && list(d, NAMED).await == Ok(Vec::new()),
-    )
+    )?;
+    check(
+        "starting an on-demand service at the first connection",
+        hello(d, reactor).await,
+    )?;
+    check("starting it again once it ended", hello(d, reactor).await)
 }

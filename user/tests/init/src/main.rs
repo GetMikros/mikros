@@ -8054,10 +8054,14 @@ mod manager {
         // and restarted five times.
         const RESTARTED: &[u8] = b"started service restart-probe";
         const GAVE_UP: &[u8] = b"service restart-probe failed after 5 restarts";
+        // The demand probe starts twice, its dependency once, before it.
+        const DEMAND: &[u8] = b"started service demand-probe";
+        const DEMAND_DEP: &[u8] = b"started service demand-dep";
         let (mut passed, mut starts, mut gave_up) = (false, 0, false);
+        let (mut demands, mut deps, mut dep_first) = (0, 0, false);
         let outcome = loop {
             if passed && gave_up {
-                break Some(starts == 6);
+                break Some(starts == 6 && demands == 2 && deps == 1 && dep_first);
             }
             let (status, record) = super::read_record(reader.raw());
             if status == super::SHOULD_WAIT {
@@ -8074,6 +8078,11 @@ mod manager {
                 continue;
             }
             starts += usize::from(super::contains(message, RESTARTED));
+            if super::contains(message, DEMAND_DEP) {
+                deps += 1;
+                dep_first = demands == 0;
+            }
+            demands += usize::from(super::contains(message, DEMAND));
             gave_up |= super::contains(message, GAVE_UP);
             if FAILED.iter().any(|f| super::contains(message, f)) {
                 mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
@@ -8085,7 +8094,7 @@ mod manager {
         drop(m);
         ensure("logging an outcome in time", outcome.is_some())?;
         ensure(
-            "passing every check, and restarting five times",
+            "passing every check, restarting five times, and starting on demand",
             outcome == Some(true),
         )
     }
