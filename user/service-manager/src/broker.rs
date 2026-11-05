@@ -1,6 +1,7 @@
 //! Starting the permission broker, before every other service, and
 //! registering permissions with it.
 
+use crate::boot::BootHandles;
 use crate::launch::{self, Started};
 use alloc::format;
 use alloc::rc::Rc;
@@ -45,6 +46,7 @@ const INSPECT: u32 = 1 << 9;
 /// connection.
 pub async fn start(
     launcher: &LauncherAsyncClient,
+    boot: &BootHandles,
     reactor: &Reactor,
     me: ClientIdentity,
     service: &Service,
@@ -56,7 +58,7 @@ pub async fn start(
         id: MANIFEST_ID,
         handle: sealed,
     }];
-    let started = launch::launch(launcher, service, handles).await?;
+    let started = launch::launch(launcher, boot, service, handles).await?;
     let (client, server) = endpoints::<Broker>().map_err(|e| format!("{e:?}"))?;
     started
         .provider

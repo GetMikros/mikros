@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+mod boot;
 mod broker;
 mod directory;
 mod files;
@@ -20,6 +21,7 @@ mod launch;
 mod registrar;
 mod services;
 
+use crate::boot::BootHandles;
 use crate::directory::Dir;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -37,43 +39,6 @@ mikros_rt::raw_main!(main);
 
 /// The `id` of the control endpoint among the `USER` startup handles.
 const CONTROL_ID: u32 = 0;
-/// The `id`s of init's boot handles among the `USER` startup handles.
-const ROOT_RESOURCE_ID: u32 = 1;
-const LOG_ID: u32 = 2;
-const ROOT_BUDGET_ID: u32 = 3;
-const FRAMEBUFFER_ID: u32 = 4;
-const PLATFORM_INFO_ID: u32 = 5;
-
-/// The handles init gave the service manager for the services that list
-/// them.
-#[expect(dead_code, reason = "given to services once they start")]
-pub struct BootHandles {
-    root_resource: Option<OwnedHandle>,
-    log: Option<OwnedHandle>,
-    root_budget: Option<OwnedHandle>,
-    framebuffer: Option<OwnedHandle>,
-    platform_info: Option<OwnedHandle>,
-}
-
-impl BootHandles {
-    /// Takes init's boot handles from `handles`.
-    fn take(handles: &mut Vec<StartupHandle>) -> BootHandles {
-        let mut take = |id| {
-            let at = handles
-                .iter()
-                .position(|h| h.role == HandleRole::User && h.id == id)?;
-            Some(handles.remove(at).handle)
-        };
-        BootHandles {
-            root_resource: take(ROOT_RESOURCE_ID),
-            log: take(LOG_ID),
-            root_budget: take(ROOT_BUDGET_ID),
-            framebuffer: take(FRAMEBUFFER_ID),
-            platform_info: take(PLATFORM_INFO_ID),
-        }
-    }
-}
-
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
         return PANIC_EXIT_CODE;
@@ -106,8 +71,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         // Dropping the partial state closed every handle received.
         return PANIC_EXIT_CODE;
     };
-    let boot = BootHandles::take(&mut managed.handles);
-    if let Some(log) = &boot.log {
+    let boot = Rc::new(BootHandles::take(&mut managed.handles));
+    if let Some(log) = boot.log() {
         log::set_handle(log.raw());
     }
     let root = managed
@@ -125,7 +90,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 app_id: header.app_id,
             };
             let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
-            spawner.spawn(services::start(root, reactor, launcher, me, dir));
+            spawner.spawn(services::start(
+                root,
+                reactor,
+                launcher,
+                me,
+                dir,
+                boot.clone(),
+            ));
         }
         None => mikros_rt::log!(Error, "the namespace has no root"),
     }

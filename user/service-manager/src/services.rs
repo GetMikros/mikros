@@ -1,5 +1,6 @@
 //! The services of the manifests in `usr/lib/services/`.
 
+use crate::boot::BootHandles;
 use crate::broker;
 use crate::directory::Dir;
 use crate::files::{self, Failure};
@@ -20,13 +21,15 @@ const SUFFIX: &str = ".yaml";
 /// Reads the service manifests under `root`, records the protocols
 /// they provide in `dir`, and starts the boot services in order as the
 /// service manager `me`: the permission broker first, then each other
-/// one once its permissions are registered with the broker.
+/// one once its permissions are registered with the broker. Each gets
+/// the boot handles of `boot` that its manifest lists.
 pub async fn start(
     root: NodeAsyncClient,
     reactor: Reactor,
     launcher: LauncherAsyncClient,
     me: ClientIdentity,
     dir: Rc<Dir>,
+    boot: Rc<BootHandles>,
 ) {
     let (services, manifests): (Vec<Service>, Vec<Vec<u8>>) =
         read_all(&root, &reactor).await.into_iter().unzip();
@@ -51,7 +54,14 @@ pub async fn start(
         return;
     };
     // `order` puts the broker first whenever anything starts.
-    let started = broker::start(&launcher, &reactor, me, &services[first], &manifests[first]);
+    let started = broker::start(
+        &launcher,
+        &boot,
+        &reactor,
+        me,
+        &services[first],
+        &manifests[first],
+    );
     let broker = match started.await {
         Ok((started, broker)) => {
             mikros_rt::log!(Info, "started the permission broker as pid {}", started.pid);
@@ -71,7 +81,7 @@ pub async fn start(
         let service = &services[i];
         let app_id = format!("system.{}", service.name);
         let started = match broker::grant(&broker, &app_id, service.permissions.clone()).await {
-            Ok(()) => launch::launch(&launcher, service, Vec::new()).await,
+            Ok(()) => launch::launch(&launcher, &boot, service, Vec::new()).await,
             Err(why) => Err(why),
         };
         match started {
