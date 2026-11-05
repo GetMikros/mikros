@@ -1,7 +1,8 @@
 //! The pinned LLVM release whose Clang and LLD build C and C++ code for
 //! Mikros: fetching its source, applying the Mikros patches in
 //! `tools/llvm/patches/`, and building and installing Clang and LLD in
-//! `target/llvm/install`, with the compiler-rt builtins for Mikros.
+//! `target/llvm/install`, with the compiler-rt builtins and libunwind for
+//! Mikros.
 
 use crate::tools::Version;
 use anyhow::{Context, Result};
@@ -148,6 +149,57 @@ fn build_builtins(source: &Path) -> Result<()> {
     }
     crate::port::run(Command::new("ninja").current_dir(&build).arg("install"))
         .context("building the compiler-rt builtins")
+}
+
+/// Builds LLVM's libunwind as a static library for the Mikros target
+/// with the installed Clang and the sysroot's driver configuration
+/// `cfg`, and returns its path. It finds a program's unwind tables
+/// through `dl_iterate_phdr` and `PT_GNU_EH_FRAME`, its default on ELF
+/// systems that it has no special case for.
+pub fn build_unwinder(cfg: &Path) -> Result<PathBuf> {
+    let build = dir().join("unwind");
+    // musl declares `Dl_info` only for `_GNU_SOURCE`.
+    let flags = format!("--config={} -D_GNU_SOURCE", cfg.display());
+    let args = [
+        "-DLLVM_ENABLE_RUNTIMES=libunwind".to_owned(),
+        format!("-DCMAKE_C_COMPILER={}", tool("clang").display()),
+        format!("-DCMAKE_CXX_COMPILER={}", tool("clang++").display()),
+        format!("-DCMAKE_ASM_COMPILER={}", tool("clang").display()),
+        format!("-DCMAKE_AR={}", tool("llvm-ar").display()),
+        format!("-DCMAKE_RANLIB={}", tool("llvm-ranlib").display()),
+        format!("-DCMAKE_C_FLAGS={flags}"),
+        format!("-DCMAKE_CXX_FLAGS={flags}"),
+        format!("-DCMAKE_ASM_FLAGS={flags}"),
+        "-DCMAKE_BUILD_TYPE=Release".to_owned(),
+        "-DCMAKE_SYSTEM_NAME=Generic".to_owned(),
+        "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY".to_owned(),
+        "-DLIBUNWIND_ENABLE_SHARED=OFF".to_owned(),
+        "-DLIBUNWIND_ENABLE_STATIC=ON".to_owned(),
+        "-DLIBUNWIND_USE_COMPILER_RT=ON".to_owned(),
+        "-DLIBUNWIND_INCLUDE_TESTS=OFF".to_owned(),
+        // These are part of the C library. The checks would find them
+        // anyway, since nothing is linked when they run.
+        "-DLIBUNWIND_HAS_DL_LIB=OFF".to_owned(),
+        "-DLIBUNWIND_HAS_PTHREAD_LIB=OFF".to_owned(),
+        "-DLLVM_INCLUDE_TESTS=OFF".to_owned(),
+    ];
+    let configured = build.join(".mikros-cmake-options");
+    if fs::read_to_string(&configured).ok() != Some(args.join("\n")) {
+        fs::create_dir_all(&build)?;
+        crate::port::run(
+            Command::new("cmake")
+                .args(["-G", "Ninja", "-S"])
+                .arg(dir().join(SOURCE).join("runtimes"))
+                .arg("-B")
+                .arg(&build)
+                .args(&args),
+        )
+        .context("configuring libunwind")?;
+        fs::write(&configured, args.join("\n"))?;
+    }
+    crate::port::run(Command::new("ninja").current_dir(&build).arg("unwind"))
+        .context("building libunwind")?;
+    Ok(build.join("lib/libunwind.a"))
 }
 
 /// The source with every patch applied, extracted again from `archive`

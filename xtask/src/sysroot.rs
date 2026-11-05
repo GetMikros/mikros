@@ -4,7 +4,8 @@
 //! It holds the musl headers in `include/`, with the generated
 //! `<mikros/syscalls.h>` and `<mikros/abi.h>` in `include/mikros/`;
 //! `libc.slib`, `libc.dlib`, the dynamic linker `ld-mikros.dlib`, which
-//! is the same file, `crt1.o`, `crti.o` and `crtn.o` in `lib/`, with
+//! is the same file, `crt1.o`, `crti.o`, `crtn.o` and LLVM's static
+//! unwinder `libunwind.slib` in `lib/`, with
 //! `lib/pkgconfig/`, and the Clang driver configuration file
 //! `x86_64-unknown-mikros.cfg`, which selects the target, its CPU level
 //! and this sysroot. The Clang that `crate::llvm` builds, which knows the
@@ -66,6 +67,7 @@ pub fn build() -> Result<PathBuf> {
     copy(&musl.shared, &lib.join("ld-mikros.dlib"))?;
     copy(&musl.crti, &lib.join("crti.o"))?;
     copy(&musl.crtn, &lib.join("crtn.o"))?;
+    copy(&llvm::build_unwinder(&cfg)?, &lib.join("libunwind.slib"))?;
     let crt1 = crate::workspace_root().join("user/libc/crt/crt1.S");
     crate::port::run(
         Command::new(llvm::tool("clang"))
