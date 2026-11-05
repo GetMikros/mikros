@@ -7,13 +7,14 @@
 //! rest is opened on that entry. A relative path is resolved against the
 //! current directory, and a redirect from the server as a new path.
 
+use crate::dir::Listing;
 use crate::errno::{self, EINVAL, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR};
 use crate::fd::{self, Description, Node};
 use crate::lock::Lock;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64};
+use core::sync::atomic::AtomicU32;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::fs::{
     Error, Node as NodeProtocol, NodeClient, NodeType, OpenFlags, Rights,
@@ -262,9 +263,84 @@ pub fn open(dirfd: i64, path: *const u8, flags: u32, mode: u32) -> i64 {
         flags: AtomicU32::new(flags & !(O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC)),
     };
     let description = match kind {
-        NodeType::Directory => Description::Directory(node, AtomicU64::new(0)),
+        NodeType::Directory => Description::Directory(node, Lock::new(Listing::default())),
         _ if flags & O_DIRECTORY != 0 => return -ENOTDIR,
         _ => Description::File(node),
     };
     fd::insert(Arc::new(description), flags & O_CLOEXEC != 0, 0)
+}
+
+/// `getcwd`: copies the current directory, with its NUL, to the `size`
+/// bytes at `buf`, and returns its length with the NUL.
+pub fn getcwd(buf: *mut u8, size: u64) -> i64 {
+    let cwd = CWD.lock();
+    let len = cwd.len() + 1;
+    if buf.is_null() {
+        return -errno::EFAULT;
+    }
+    if (size as usize) < len {
+        return -errno::ERANGE;
+    }
+    // SAFETY: musl passes `size` bytes, which hold the path and its NUL.
+    unsafe {
+        core::ptr::copy_nonoverlapping(cwd.as_ptr(), buf, cwd.len());
+        buf.add(cwd.len()).write(0);
+    }
+    len as i64
+}
+
+/// `chdir`: makes `path` the current directory, if it is a directory.
+pub fn chdir(path: *const u8) -> i64 {
+    // SAFETY: musl passes a NUL-terminated path.
+    let path = match unsafe { c_path(path) }.and_then(|p| absolute(AT_FDCWD, p)) {
+        Ok(path) => path,
+        Err(e) => return -e,
+    };
+    match connect(&path, O_DIRECTORY, 0, Some(Rights(0))) {
+        Ok(c) if c.kind == NodeType::Directory => {
+            *CWD.lock() = path;
+            0
+        }
+        Ok(_) => -ENOTDIR,
+        Err(e) => -e,
+    }
+}
+
+/// `fchdir`: makes the directory of descriptor `fd` the current one.
+pub fn fchdir(fd: i64) -> i64 {
+    match fd::get(fd).as_deref() {
+        Some(Description::Directory(node, _)) => {
+            *CWD.lock() = node.path.clone();
+            0
+        }
+        Some(_) => -ENOTDIR,
+        None => -errno::EBADF,
+    }
+}
+
+/// `readlinkat`: copies the target of the symbolic link `path` to the
+/// `size` bytes at `buf`, without a NUL and cut to fit, and returns the
+/// length copied.
+pub fn readlink(dirfd: i64, path: *const u8, buf: *mut u8, size: u64) -> i64 {
+    if size == 0 || size > i64::MAX as u64 {
+        return -EINVAL;
+    }
+    // SAFETY: musl passes a NUL-terminated path.
+    let path = match unsafe { c_path(path) }.and_then(|p| absolute(dirfd, p)) {
+        Ok(path) => path,
+        Err(e) => return -e,
+    };
+    let link = match connect(&path, O_NOFOLLOW, 0, Some(Rights::READ)) {
+        Ok(c) => c,
+        Err(e) => return -e,
+    };
+    let target = match link.node.read_link(FOREVER) {
+        Ok(Ok(r)) => r.target,
+        Ok(Err(e)) => return -errno::from_fs(e),
+        Err(_) => return -errno::EIO,
+    };
+    let len = target.len().min(size as usize);
+    // SAFETY: musl passes `size` bytes, and `len` is at most that.
+    unsafe { core::ptr::copy_nonoverlapping(target.as_ptr(), buf, len) };
+    len as i64
 }

@@ -4,6 +4,7 @@
  * the number of the first check that failed otherwise. */
 
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <mikros/abi.h>
 #include <mikros/syscalls.h>
@@ -163,6 +164,81 @@ static int stat_reports_attributes(void)
 		&& errno == ENOENT;
 }
 
+/* A listing has each entry once, without . and .., with its type, and
+   seekdir returns to where telldir was. */
+static int directory_lists_its_entries(void)
+{
+	DIR *d = opendir("/usr/share/hello");
+	if (!d)
+		return 0;
+	int seen = 0, count = 0;
+	long second = -1;
+	char again[256] = "";
+	struct dirent *e;
+	while ((e = readdir(d))) {
+		if (count++ == 0)
+			second = telldir(d);
+		if (strcmp(e->d_name, "greeting.txt") == 0 && e->d_type == DT_REG)
+			seen |= 1;
+		else if (strcmp(e->d_name, "near") == 0 && e->d_type == DT_LNK)
+			seen |= 2;
+		else if (strcmp(e->d_name, "far") == 0 && e->d_type == DT_LNK)
+			seen |= 4;
+		else
+			seen |= 8;
+		if (count == 2)
+			strcpy(again, e->d_name);
+	}
+	seekdir(d, second);
+	e = readdir(d);
+	int ok = seen == 7 && count == 3 && e && strcmp(e->d_name, again) == 0;
+	closedir(d);
+	return ok;
+}
+
+/* The current directory resolves relative paths, and changes only to a
+   directory. */
+static int current_directory_moves(void)
+{
+	char cwd[64];
+	if (!getcwd(cwd, sizeof cwd) || strcmp(cwd, "/") != 0)
+		return 0;
+	int dirfd = open("/usr/share/hello", O_RDONLY | O_DIRECTORY);
+	if (dirfd < 0 || chdir("/usr/share/hello/") != 0
+	    || !getcwd(cwd, sizeof cwd) || strcmp(cwd, "/usr/share/hello") != 0)
+		return 0;
+	struct stat st;
+	int ok = stat("greeting.txt", &st) == 0 && S_ISREG(st.st_mode)
+		&& chdir("greeting.txt") == -1 && errno == ENOTDIR
+		&& getcwd(cwd, 4) == 0 && errno == ERANGE && chdir("..") == 0
+		&& getcwd(cwd, sizeof cwd) && strcmp(cwd, "/usr/share") == 0
+		&& fchdir(dirfd) == 0 && getcwd(cwd, sizeof cwd)
+		&& strcmp(cwd, "/usr/share/hello") == 0;
+	close(dirfd);
+	return chdir("/") == 0 && ok;
+}
+
+/* readlink returns a link's target, and stat follows links that the
+   server follows and links it redirects. */
+static int links_resolve(void)
+{
+	char target[32];
+	struct stat file, near, far, link;
+	ssize_t n = readlink("/usr/share/hello/near", target, sizeof target);
+	if (n != 12 || memcmp(target, "greeting.txt", 12) != 0)
+		return 0;
+	if (readlink("/usr/share/hello/far", target, 4) != 4
+	    || memcmp(target, "/usr", 4) != 0)
+		return 0;
+	if (readlink(GREETING, target, sizeof target) != -1 || errno != EINVAL)
+		return 0;
+	return stat(GREETING, &file) == 0 && stat("/usr/share/hello/near", &near) == 0
+		&& stat("/usr/share/hello/far", &far) == 0
+		&& near.st_ino == file.st_ino && far.st_ino == file.st_ino
+		&& lstat("/usr/share/hello/far", &link) == 0 && S_ISLNK(link.st_mode)
+		&& link.st_ino != file.st_ino;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -192,9 +268,15 @@ int main(int argc, char **argv)
 		return 12;
 	if (!stat_reports_attributes())
 		return 13;
+	if (!directory_lists_its_entries())
+		return 14;
+	if (!current_directory_moves())
+		return 15;
+	if (!links_resolve())
+		return 16;
 	char *copy = malloc(64);
 	if (!copy)
-		return 14;
+		return 17;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

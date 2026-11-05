@@ -6,7 +6,6 @@
 use crate::errno::{self, EBADF, EINVAL, EIO, EISDIR, EPIPE, ESPIPE};
 use crate::fd::{self, Description};
 use alloc::vec::Vec;
-use core::sync::atomic::Ordering;
 use mikros_rt::interfaces::mikros::fs::SeekOrigin;
 use mikros_rt::sys::{self, Handle};
 
@@ -18,8 +17,8 @@ const STATUS_PEER_CLOSED: sys::Status = -24;
 /// The most bytes one file request carries.
 const CHUNK_MAX: u64 = 32768;
 const FOREVER: i64 = i64::MAX;
-const SEEK_SET: i64 = 0;
-const SEEK_CUR: i64 = 1;
+pub const SEEK_SET: i64 = 0;
+pub const SEEK_CUR: i64 = 1;
 const SEEK_END: i64 = 2;
 
 #[repr(C)]
@@ -176,12 +175,7 @@ pub fn lseek(fd: i64, offset: i64, whence: i64) -> i64 {
             Ok(Err(e)) => -errno::from_fs(e),
             Err(_) => -EIO,
         },
-        // Only rewinding a directory listing is supported.
-        Description::Directory(_, position) if whence == SEEK_SET && offset == 0 => {
-            position.store(0, Ordering::Relaxed);
-            0
-        }
-        Description::Directory(..) => -EINVAL,
+        Description::Directory(_, listing) => crate::dir::seek(listing, offset, whence),
         Description::Stream(_) => -ESPIPE,
     }
 }

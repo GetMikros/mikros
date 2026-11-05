@@ -6,7 +6,7 @@ use crate::errno::{EBADF, EINVAL, EMFILE};
 use crate::lock::Lock;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64};
+use core::sync::atomic::AtomicU32;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::NodeClient;
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
@@ -23,8 +23,8 @@ pub enum Description {
     Stream(OwnedHandle),
     /// A connection to a file, whose cursor is the descriptor's offset.
     File(Node),
-    /// A connection to a directory, with the position of its listing.
-    Directory(Node, AtomicU64),
+    /// A connection to a directory, with the state of its listing.
+    Directory(Node, Lock<crate::dir::Listing>),
 }
 
 /// A connection to a file system node, with the status flags it was

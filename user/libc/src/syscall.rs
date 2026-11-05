@@ -6,7 +6,7 @@
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENOSYS, ENOTTY};
 use crate::fd::Description;
-use crate::{clock, fd, fs, io, stat};
+use crate::{clock, dir, fd, fs, io, stat};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::sys::{self, Handle};
 
@@ -31,12 +31,18 @@ const SYS_DUP: i64 = 32;
 const SYS_DUP2: i64 = 33;
 const SYS_EXIT: i64 = 60;
 const SYS_FCNTL: i64 = 72;
+const SYS_GETCWD: i64 = 79;
+const SYS_CHDIR: i64 = 80;
+const SYS_FCHDIR: i64 = 81;
+const SYS_READLINK: i64 = 89;
 const SYS_SET_THREAD_AREA: i64 = 205;
+const SYS_GETDENTS64: i64 = 217;
 const SYS_SET_TID_ADDRESS: i64 = 218;
 const SYS_CLOCK_GETTIME: i64 = 228;
 const SYS_EXIT_GROUP: i64 = 231;
 const SYS_OPENAT: i64 = 257;
 const SYS_NEWFSTATAT: i64 = 262;
+const SYS_READLINKAT: i64 = 267;
 const SYS_DUP3: i64 = 292;
 const SYS_GETRANDOM: i64 = 318;
 
@@ -105,6 +111,12 @@ extern "C" fn __mikros_syscall(
         }
         SYS_FSTAT => stat::fstat(a1, a2 as *mut stat::Kstat),
         SYS_NEWFSTATAT => stat::fstatat(a1, a2 as *const u8, a3 as *mut stat::Kstat, a4),
+        SYS_GETDENTS64 => dir::getdents(a1, a2 as *mut u8, a3 as u64),
+        SYS_GETCWD => fs::getcwd(a1 as *mut u8, a2 as u64),
+        SYS_CHDIR => fs::chdir(a1 as *const u8),
+        SYS_FCHDIR => fs::fchdir(a1),
+        SYS_READLINK => fs::readlink(fs::AT_FDCWD, a1 as *const u8, a2 as *mut u8, a3 as u64),
+        SYS_READLINKAT => fs::readlink(a1, a2 as *const u8, a3 as *mut u8, a4 as u64),
         SYS_DUP => fd::duplicate_from(a1, 0, false),
         SYS_DUP2 => dup2(a1, a2),
         SYS_DUP3 => dup3(a1, a2, a3 as u32),

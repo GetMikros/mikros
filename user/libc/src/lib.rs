@@ -8,6 +8,7 @@ extern crate alloc;
 
 mod abi;
 mod clock;
+mod dir;
 mod errno;
 mod fd;
 mod fs;

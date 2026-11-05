@@ -156,7 +156,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let greeting = crate::workspace_root().join("user/tests/hello-c/greeting.txt");
             // The process manager tests serve this image, in which the
             // probe takes the service manager's place.
-            let launcher = boot_image(
+            let launcher = archive(
                 kind,
                 "launcher.img",
                 &[
@@ -166,6 +166,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
                     ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
                     ("usr/share/hello/greeting.txt", greeting.as_path()),
+                ],
+                &[],
+                &[
+                    ("usr/share/hello/near", "greeting.txt"),
+                    ("usr/share/hello/far", "/usr/share/hello/greeting.txt"),
                 ],
             )?;
             println!("built    {}", launcher.display());
@@ -261,17 +266,24 @@ pub fn live_boot_image(kind: Kind) -> Result<PathBuf> {
     let init = user_build("init", kind)?;
     let dirs = crate::image::live_dirs();
     let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
-    archive(kind, "live-boot.img", &[("init", &init)], &dirs)
+    archive(kind, "live-boot.img", &[("init", &init)], &dirs, &[])
 }
 
 /// Writes the boot archive `file` with each of `members`, given by name
 /// and the path of its contents, as a regular file.
 fn boot_image(kind: Kind, file: &str, members: &[(&str, &Path)]) -> Result<PathBuf> {
-    archive(kind, file, members, &[])
+    archive(kind, file, members, &[], &[])
 }
 
-/// Like `boot_image`, with the directories `dirs` after the files.
-fn archive(kind: Kind, file: &str, members: &[(&str, &Path)], dirs: &[&str]) -> Result<PathBuf> {
+/// Like `boot_image`, with the directories `dirs` after the files, and
+/// the symbolic links `links`, given by name and target, after those.
+fn archive(
+    kind: Kind,
+    file: &str,
+    members: &[(&str, &Path)],
+    dirs: &[&str],
+    links: &[(&str, &str)],
+) -> Result<PathBuf> {
     let dir = crate::workspace_root()
         .join("target/boot")
         .join(kind.name());
@@ -297,6 +309,15 @@ fn archive(kind: Kind, file: &str, members: &[(&str, &Path)], dirs: &[&str]) -> 
         archive
             .append_data(&mut header, dir_name(dir), std::io::empty())
             .with_context(|| format!("adding {dir} to the boot archive"))?;
+    }
+    for &(name, target) in links {
+        let mut header = tar::Header::new_ustar();
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_entry_type(tar::EntryType::Symlink);
+        archive
+            .append_link(&mut header, name, target)
+            .with_context(|| format!("adding {name} to the boot archive"))?;
     }
     archive.finish().context("finishing the boot archive")?;
     Ok(path)
