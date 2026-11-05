@@ -1,0 +1,12 @@
+[package]
+name = "permissions-broker"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-manifest = { path = "../manifest" }
+mikros-permissions = { path = "../permissions" }
+mikros-rt = { path = "../mikros-rt" }
+mikros-yaml = { path = "../yaml" }
