@@ -7974,13 +7974,20 @@ mod manager {
         Ok(())
     }
 
-    /// From a boot image with the service manager, the permission broker
-    /// and the broker's manifest, the service manager starts the broker
-    /// and registers the process manager's permissions with it, which it
-    /// says in the log that it is given as init's boot handle with ID 2.
-    pub fn service_manager_starts_the_broker(s: &Startup) -> Result {
-        const STARTED: &[u8] = b"started the permission broker";
-        const FAILED: &[u8] = b"the permission broker did not start";
+    /// From a boot image with the service manager, the permission broker,
+    /// the directory probe and their manifests, the service manager
+    /// starts the broker, registers permissions with it, and starts the
+    /// probe, which drives its directory and exits with 0 once every
+    /// check passed. The service manager says so in the log that it is
+    /// given as init's boot handle with ID 2.
+    pub fn service_manager_starts_boot_services(s: &Startup) -> Result {
+        const PASSED: &[u8] = b"service directory-probe exited with code 0";
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service directory-probe exited",
+            b"service directory-probe ended",
+        ];
         let image = boot_file(s, b"tests/services.img")?;
         let mut mem = 0;
         let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
@@ -8033,10 +8040,11 @@ mod manager {
             check("reading the log", status)?;
             let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
             let message = &record[0x20..0x20 + len.min(256)];
-            if super::contains(message, STARTED) {
+            if super::contains(message, PASSED) {
                 break Some(true);
             }
-            if super::contains(message, FAILED) {
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
                 break Some(false);
             }
         };
@@ -8044,7 +8052,7 @@ mod manager {
         unsafe { sys::task_kill(started.process.raw()) };
         drop(m);
         ensure("logging an outcome in time", outcome.is_some())?;
-        ensure("starting the broker", outcome == Some(true))
+        ensure("passing every check of the probe", outcome == Some(true))
     }
 
     /// The process manager ends without serving init when `Start` has
@@ -8582,8 +8590,8 @@ const TESTS: [(&str, Test); 124] = [
         manager::permission_broker_serves,
     ),
     (
-        "service_manager_starts_the_broker",
-        manager::service_manager_starts_the_broker,
+        "service_manager_starts_boot_services",
+        manager::service_manager_starts_boot_services,
     ),
     (
         "executor_waits_on_objects",

@@ -170,8 +170,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", broker_image.display());
+            let directory_probe = user_build("directory-probe", kind)?;
+            println!("built    {}", directory_probe.display());
+            let directory_probe_manifest =
+                crate::workspace_root().join("user/tests/directory-probe/directory-probe.yaml");
             // The service manager tests serve this image, which holds the
-            // system's services and their manifests.
+            // system's services and their manifests, and a probe that
+            // starts as a boot service.
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let services_image = boot_image(
@@ -183,6 +188,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     (
                         "usr/lib/services/permissions.yaml",
                         broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/directory-probe", directory_probe.as_path()),
+                    (
+                        "usr/lib/services/directory-probe.yaml",
+                        directory_probe_manifest.as_path(),
                     ),
                 ],
             )?;

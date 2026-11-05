@@ -1,0 +1,8 @@
+name: directory-probe
+binary: /usr/bin/directory-probe
+start: boot
+provides:
+  - protocol: test.directory.Open
+  - protocol: test.directory.Protected
+    permission: camera
+permissions: [permissions.check]
