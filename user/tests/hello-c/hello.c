@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -239,6 +240,43 @@ static int links_resolve(void)
 		&& link.st_ino != file.st_ino;
 }
 
+/* A file maps privately, a private copy keeps its changes from the file,
+   and a mapping longer than the file reserves the rest, which can be
+   mapped over. */
+static int files_map(void)
+{
+	size_t n = strlen(GREETING_TEXT);
+	int fd = open(GREETING, O_RDONLY);
+	int dirfd = open("/usr/share/hello", O_RDONLY | O_DIRECTORY);
+	if (fd < 0 || dirfd < 0)
+		return 0;
+	char *view = mmap(0, n, PROT_READ, MAP_PRIVATE, fd, 0);
+	char *copy = mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+	char *span = mmap(0, 3 * 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+	if (view == MAP_FAILED || copy == MAP_FAILED || span == MAP_FAILED)
+		return 0;
+	copy[0] = 'A';
+	char first = 0;
+	char *over = mmap(span + 4096, 4096, PROT_READ | PROT_WRITE,
+			  MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS, -1, 0);
+	int ok = memcmp(view, GREETING_TEXT, n) == 0
+		&& memcmp(span, GREETING_TEXT, n) == 0 && copy[0] == 'A'
+		&& view[0] == 'a' && pread(fd, &first, 1, 0) == 1 && first == 'a'
+		&& over == span + 4096 && (over[0] = 1, over[0] == 1);
+	ok = ok && mmap(0, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) == MAP_FAILED
+		&& errno == EACCES
+		&& mmap(0, n, PROT_READ, MAP_PRIVATE, fd, 1) == MAP_FAILED
+		&& errno == EINVAL
+		&& mmap(0, n, PROT_READ, MAP_PRIVATE, dirfd, 0) == MAP_FAILED
+		&& errno == ENODEV;
+	munmap(view, n);
+	munmap(copy, n);
+	munmap(span, 3 * 4096);
+	close(fd);
+	close(dirfd);
+	return ok;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -274,9 +312,11 @@ int main(int argc, char **argv)
 		return 15;
 	if (!links_resolve())
 		return 16;
+	if (!files_map())
+		return 17;
 	char *copy = malloc(64);
 	if (!copy)
-		return 17;
+		return 18;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);
