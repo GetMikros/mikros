@@ -9,8 +9,9 @@
 //! - `sleep`: waits until it is killed;
 //! - `rename`: exits with 0 when it may not name an app ID, 1 otherwise.
 //!
-//! It also spawns `/usr/bin/hello`, a static C program, with a stream as
-//! its standard output, and checks what it prints.
+//! It also spawns `/usr/bin/hello`, a static C program, and
+//! `/usr/bin/hello-std`, a Rust program that uses the standard library,
+//! with a stream as their standard output, and checks what they print.
 //!
 //! It accepts the `Bind` requests on the control endpoint that arrives
 //! as the `USER` startup handle with ID 0, for itself and its children,
@@ -50,8 +51,14 @@ const HELLO: &str = "/usr/bin/hello";
 const HELLO_DYNAMIC: &str = "/usr/bin/hello-dynamic";
 /// A C program that needs a shared library.
 const LIBRARY_USER: &str = "/usr/bin/library-user";
+/// A Rust program that uses the standard library, which is given all
+/// three standard descriptors.
+const HELLO_STD: &str = "/usr/bin/hello-std";
 /// The `id` of a stream as descriptor 1.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
+/// The `id`s of streams as descriptors 0 and 2.
+const STDIN_STREAM: u32 = 2 << 28;
+const STDERR_STREAM: u32 = 2 | 2 << 28;
 const KILL: u32 = 9;
 const CALLER_USER: u32 = u32::MAX;
 const FOREVER: i64 = i64::MAX;
@@ -213,11 +220,14 @@ fn arguments_from(args: &[&str]) -> OwnedHandle {
     }
 }
 
-/// Runs the C program at `path` with the argument `world` and a stream
-/// as its standard output, and returns what it printed and its exit
-/// code.
-async fn run_c(l: &LauncherAsyncClient, path: &str) -> (Vec<u8>, Option<i64>) {
+/// Runs the program at `path` with the argument `world` and a stream as
+/// its standard output, and returns what it printed and its exit code.
+/// With `all_standard`, it also gets streams as its standard input,
+/// which is at its end, and its standard error.
+async fn run_c(l: &LauncherAsyncClient, path: &str, all_standard: bool) -> (Vec<u8>, Option<i64>) {
     let (output, stdout) = stream();
+    let (_input, stdin) = stream();
+    let (_errors, stderr) = stream();
     let pid = spawn(l, &[], |r| {
         r.path = path.into();
         r.arguments = arguments_from(&[path, "world"]);
@@ -226,6 +236,18 @@ async fn run_c(l: &LauncherAsyncClient, path: &str) -> (Vec<u8>, Option<i64>) {
             id: STDOUT_STREAM,
             handle: stdout,
         });
+        if all_standard {
+            r.handles.push(StartupHandle {
+                role: HandleRole::Stdin,
+                id: STDIN_STREAM,
+                handle: stdin,
+            });
+            r.handles.push(StartupHandle {
+                role: HandleRole::Stderr,
+                id: STDERR_STREAM,
+                handle: stderr,
+            });
+        }
     })
     .await
     .map_or(0, |(pid, _)| pid);
@@ -385,23 +407,29 @@ async fn probe(l: &LauncherAsyncClient) -> i64 {
             "refusing a child an app ID",
             wait(l, rename as i32).await == Some((rename, 0, 0)),
         )?;
-        let (output, code) = run_c(l, HELLO).await;
+        let (output, code) = run_c(l, HELLO, false).await;
         check("running a static C program", code == Some(0))?;
         check(
             "reading what it printed",
             output.as_slice() == b"hello, world\n",
         )?;
-        let (output, code) = run_c(l, HELLO_DYNAMIC).await;
+        let (output, code) = run_c(l, HELLO_DYNAMIC, false).await;
         check("running a dynamically linked C program", code == Some(0))?;
         check(
             "reading what it printed",
             output.as_slice() == b"hello, world\n",
         )?;
-        let (output, code) = run_c(l, LIBRARY_USER).await;
+        let (output, code) = run_c(l, LIBRARY_USER, false).await;
         check("running a C program with a shared library", code == Some(0))?;
         check(
             "reading what the library wrote",
             output.as_slice() == b"hello from a library, call 1\n",
+        )?;
+        let (output, code) = run_c(l, HELLO_STD, true).await;
+        check("running a Rust program that uses std", code == Some(0))?;
+        check(
+            "reading what it printed",
+            output.as_slice() == b"hello, world, from std\n",
         )?;
         Ok(())
     };
