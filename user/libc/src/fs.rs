@@ -344,3 +344,42 @@ pub fn readlink(dirfd: i64, path: *const u8, buf: *mut u8, size: u64) -> i64 {
     unsafe { core::ptr::copy_nonoverlapping(target.as_ptr(), buf, len) };
     len as i64
 }
+
+const R_OK: i64 = 4;
+const W_OK: i64 = 2;
+const X_OK: i64 = 1;
+const AT_SYMLINK_NOFOLLOW: i64 = 0x100;
+const AT_EACCESS: i64 = 0x200;
+
+/// `faccessat2`: whether `path` relative to `dirfd` opens with the rights
+/// that `amode` names: `READ` for `R_OK`, `WRITE` for `W_OK` and
+/// `EXECUTE` for `X_OK`, or none for `F_OK`. Every process has the one
+/// set of IDs, so `AT_EACCESS` changes nothing.
+pub fn access(dirfd: i64, path: *const u8, amode: i64, flag: i64) -> i64 {
+    if amode & !(R_OK | W_OK | X_OK) != 0 || flag & !(AT_SYMLINK_NOFOLLOW | AT_EACCESS) != 0 {
+        return -EINVAL;
+    }
+    let mut rights = 0;
+    for (bit, right) in [
+        (R_OK, Rights::READ),
+        (W_OK, Rights::WRITE),
+        (X_OK, Rights::EXECUTE),
+    ] {
+        if amode & bit != 0 {
+            rights |= right.0;
+        }
+    }
+    let follow = if flag & AT_SYMLINK_NOFOLLOW != 0 {
+        O_NOFOLLOW
+    } else {
+        0
+    };
+    // SAFETY: musl passes a NUL-terminated path.
+    let connected = unsafe { c_path(path) }
+        .and_then(|p| absolute(dirfd, p))
+        .and_then(|p| connect(&p, follow, 0, Some(Rights(rights))));
+    match connected {
+        Ok(_) => 0,
+        Err(e) => -e,
+    }
+}

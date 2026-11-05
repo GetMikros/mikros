@@ -277,6 +277,24 @@ static int files_map(void)
 	return ok;
 }
 
+/* access asks for the rights of its mode, which the boot file system
+   grants for reading and executing only. */
+static int access_checks_rights(void)
+{
+	int dirfd = open("/usr/share/hello", O_RDONLY | O_DIRECTORY);
+	int ok = dirfd >= 0 && access(GREETING, F_OK) == 0
+		&& access(GREETING, R_OK | X_OK) == 0
+		&& access(GREETING, W_OK) == -1 && errno == EACCES
+		&& access("/usr/share/hello/missing", F_OK) == -1 && errno == ENOENT
+		&& access(GREETING, 8) == -1 && errno == EINVAL
+		&& faccessat(dirfd, "greeting.txt", R_OK, 0) == 0
+		&& faccessat(AT_FDCWD, "/usr/share/hello/far", F_OK,
+			     AT_SYMLINK_NOFOLLOW) == 0
+		&& faccessat(dirfd, "near", R_OK, AT_EACCESS) == 0;
+	close(dirfd);
+	return ok;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -314,9 +332,11 @@ int main(int argc, char **argv)
 		return 16;
 	if (!files_map())
 		return 17;
+	if (!access_checks_rights())
+		return 18;
 	char *copy = malloc(64);
 	if (!copy)
-		return 18;
+		return 19;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);
