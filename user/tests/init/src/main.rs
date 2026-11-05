@@ -6149,6 +6149,64 @@ fn signal_reaches_other_processor(s: &Startup) -> Result {
     check("allowing every processor", set(s.thread, &[0xFF; 32]))
 }
 
+/// Sleeps for a few microseconds again and again.
+extern "sysv64" fn sleep_again_and_again(_: u64, _: u64) -> ! {
+    loop {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::thread_sleep(now() + 5_000) };
+    }
+}
+
+/// A thread on processor 1 that sleeps briefly again and again is killed
+/// from processor 0, many times and at moments that vary, so that some
+/// kills come while it is going to sleep. Each one ends, and none runs
+/// again on the stack it ended with, which would fault in the kernel.
+fn killed_as_it_sleeps(s: &Startup) -> Result {
+    const ROUNDS: i64 = 2000;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    if count < 2 {
+        return Ok(());
+    }
+    let set = |thread: Handle, mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    check("keeping this thread on processor 0", set(s.thread, &[1]))?;
+    // Each thread ends before the next starts, so they share a stack.
+    let stack_size = 16 * 1024;
+    let stack = create_memory(stack_size)?;
+    let at = map(s.process, stack, stack_size)?;
+    let name = b"sleeper";
+    for round in 0..ROUNDS {
+        let mut thread = 0;
+        // SAFETY: the pointers describe `name` and `thread`.
+        check("creating a sleeper", unsafe {
+            sys::thread_create(s.process, name.as_ptr(), name.len() as u64, &mut thread)
+        })?;
+        check("moving it to processor 1", set(thread, &[2]))?;
+        let entry = sleep_again_and_again as *const () as u64;
+        // SAFETY: the call takes no pointers; the stack is mapped and
+        // unused.
+        check("starting it", unsafe {
+            sys::thread_start(thread, entry, at + stack_size - 8, 0, 0)
+        })?;
+        let until = now() + 20_000 + round % 89 * 700;
+        while now() < until {
+            core::hint::spin_loop();
+        }
+        // SAFETY: the call takes no pointers.
+        check("killing it", unsafe { sys::task_kill(thread) })?;
+        ensure("ending it", wait(thread, TERMINATED, in_time()).0 == 0)?;
+        // SAFETY: the handle is ours and not used again.
+        check("closing it", unsafe { sys::handle_close(thread) })?;
+    }
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))
+}
+
 /// What the waits of `waiter_with_index` returned, by index.
 static WAIT_STATUSES: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
 
@@ -8591,7 +8649,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 124] = [
+const TESTS: [(&str, Test); 125] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -8605,6 +8663,7 @@ const TESTS: [(&str, Test); 124] = [
         "signal_reaches_other_processor",
         signal_reaches_other_processor,
     ),
+    ("killed_as_it_sleeps", killed_as_it_sleeps),
     (
         "process_signal_interrupts_one_wait",
         process_signal_interrupts_one_wait,

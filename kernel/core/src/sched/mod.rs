@@ -812,6 +812,7 @@ fn schedule(requeue: bool) {
     cpu.fair.charge(ran);
     // A thread made DEAD by another goes on running until it reaches
     // `exit_if_dead`, so it is queued again like a runnable one.
+    let mut queued_again = false;
     if requeue && current.state() != BLOCKED {
         // Room for the running thread was reserved when it was queued.
         let queued = Queued::new(current.clone());
@@ -821,10 +822,14 @@ fn schedule(requeue: bool) {
         {
             cpu.migrating = Some((queued, entity));
         }
-    } else if let Some(stopped) = cpu.fair.stop() {
-        // It keeps its lag for when it is runnable again. One woken
-        // before it got here was queued again instead.
-        *current.entity.lock() = stopped;
+    } else {
+        match cpu.fair.stop() {
+            // It keeps its lag for when it is runnable again.
+            Some(stopped) => *current.entity.lock() = stopped,
+            // One woken or made DEAD before it got here was queued again
+            // instead, and the queue holds a reference to it.
+            None => queued_again = true,
+        }
     }
     let picked = cpu.fair.pick();
     if let Some((next, entity)) = picked
@@ -859,7 +864,9 @@ fn schedule(requeue: bool) {
             cpu.idle_rsp
         }
     };
-    if !requeue && current.state() == DEAD {
+    // A DEAD thread that is queued again runs once more, to
+    // `exit_if_dead`, so its stack stays until it stops for good.
+    if !requeue && !queued_again && current.state() == DEAD {
         cpu.dead = Some(current.clone());
     }
     cpu.prev = Some(current.clone());
@@ -1016,17 +1023,24 @@ pub fn exit() -> ! {
     if let Some(current) = current {
         crate::signal::thread_ended(&current);
     }
-    schedule(false);
-    unreachable!("a dead thread ran again");
+    // A thread made DEAD by another as it stopped may have been queued
+    // again, and then picked to go on; it stops again until it is no
+    // longer queued, and does not return then.
+    loop {
+        schedule(false);
+    }
 }
 
 /// Makes `thread` DEAD and returns the state it was in. A sleeping
 /// thread is queued again, so that it runs to `exit_if_dead`; a queued or
 /// running one gets there by itself, and a `NEW` one never runs.
 pub fn make_dead(thread: &Arc<Thread>) -> u32 {
+    // The state changes with the owner's state locked, so that a sleeper
+    // whose deadline passes is either woken first, and found RUNNABLE
+    // here, or still among the sleepers, and not queued twice.
+    let (mut cpu, index) = owner(thread);
     let was = thread.state.swap(DEAD, Ordering::AcqRel);
     if was == BLOCKED {
-        let (mut cpu, index) = owner(thread);
         let queued = Queued(Arc::as_ptr(thread));
         // The reference the sleeper held moves to the run queue. A thread
         // blocked by `block` is not a sleeper and is queued afresh.
@@ -1036,7 +1050,10 @@ pub fn make_dead(thread: &Arc<Thread>) -> u32 {
         } else {
             cpu.enqueue(index, Queued::new(thread.clone()), entity);
         }
-    } else if was == EXCEPTION || was == SUSPENDED {
+        return was;
+    }
+    drop(cpu);
+    if was == EXCEPTION || was == SUSPENDED {
         queue(thread);
     } else {
         kick(thread);
