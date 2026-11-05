@@ -344,7 +344,7 @@ fn c_build(name: &str, sources: &[&str]) -> Result<PathBuf> {
     let mut objects = Vec::new();
     for source in sources {
         let object = dir.join(Path::new(source).with_extension("o").file_name().unwrap());
-        let status = Command::new("clang")
+        let status = Command::new(crate::llvm::tool("clang"))
             .arg(format!(
                 "--config={}",
                 crate::sysroot::config(&sysroot).display()
@@ -360,10 +360,9 @@ fn c_build(name: &str, sources: &[&str]) -> Result<PathBuf> {
         }
         objects.push(object);
     }
-    // Clang links through the host's GCC for a triple it does not
-    // know, so LLD links the program directly.
+    // LLD links the program directly, until Clang can.
     let program = dir.join(name);
-    let status = Command::new("ld.lld")
+    let status = Command::new(crate::llvm::tool("ld.lld"))
         .args(["-static", "-pie", "--no-dynamic-linker", "-o"])
         .arg(&program)
         .arg(lib.join("crt1.o"))

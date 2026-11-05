@@ -6,18 +6,16 @@
 //! `libc.slib`, `crti.o` and `crtn.o` in `lib/`, with
 //! `lib/pkgconfig/`, and the Clang driver configuration file
 //! `x86_64-unknown-mikros.cfg`, which selects the target, its options
-//! and this sysroot. A compiler is used with it as
-//! `clang --config=<sysroot>/x86_64-unknown-mikros.cfg`.
+//! and this sysroot. The Clang that `crate::llvm` builds is used with it
+//! as `clang --config=<sysroot>/x86_64-unknown-mikros.cfg`.
 
-use crate::tools::Version;
+use crate::llvm::{self, LLVM};
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The pinned LLVM release whose Clang and LLD build C and C++ code.
-pub const LLVM: Version = Version(23, 1, 4);
 /// The target triple of C and C++ code.
 pub const TRIPLE: &str = "x86_64-unknown-mikros";
 
@@ -38,10 +36,11 @@ pub fn dir() -> PathBuf {
     crate::workspace_root().join("target/sysroot")
 }
 
-/// Checks the toolchain and builds the sysroot, returning its path.
+/// Builds the toolchain and the sysroot, returning the sysroot's path.
 pub fn build() -> Result<PathBuf> {
-    check_llvm("clang")?;
-    check_llvm("ld.lld")?;
+    llvm::build()?;
+    check_llvm(&llvm::tool("clang"))?;
+    check_llvm(&llvm::tool("ld.lld"))?;
     let sysroot = dir();
     for d in DIRS {
         let path = sysroot.join(d);
@@ -61,8 +60,8 @@ pub fn build() -> Result<PathBuf> {
     copy(&musl.crti, &lib.join("crti.o"))?;
     copy(&musl.crtn, &lib.join("crtn.o"))?;
     let crt1 = crate::workspace_root().join("user/libc/crt/crt1.S");
-    crate::musl::run(
-        Command::new("clang")
+    crate::port::run(
+        Command::new(llvm::tool("clang"))
             .arg(format!("--config={}", cfg.display()))
             .arg("-c")
             .arg(&crt1)
@@ -78,7 +77,7 @@ pub fn build() -> Result<PathBuf> {
 fn mikros_layer() -> Result<PathBuf> {
     let root = crate::workspace_root();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    crate::musl::run(
+    crate::port::run(
         Command::new(cargo)
             .current_dir(root.join("user"))
             .args([
@@ -103,7 +102,7 @@ fn combine(to: &Path, from: &[&Path]) -> Result<()> {
         script += &format!("addlib {}\n", archive.display());
     }
     script += "save\nend\n";
-    let mut child = Command::new("llvm-ar")
+    let mut child = Command::new(llvm::tool("llvm-ar"))
         .arg("-M")
         .stdin(std::process::Stdio::piped())
         .spawn()
@@ -140,16 +139,17 @@ pub fn config(sysroot: &Path) -> PathBuf {
 }
 
 /// Fails unless `tool --version` reports the pinned LLVM release.
-fn check_llvm(tool: &str) -> Result<()> {
+fn check_llvm(tool: &Path) -> Result<()> {
+    let shown = tool.display();
     let output = Command::new(tool)
         .arg("--version")
         .output()
-        .with_context(|| format!("running {tool} --version; LLVM {LLVM} is needed"))?;
+        .with_context(|| format!("running {shown} --version"))?;
     let text = String::from_utf8_lossy(&output.stdout);
-    match Version::find_in(&text) {
+    match crate::tools::Version::find_in(&text) {
         Some(found) if found == LLVM => Ok(()),
-        Some(found) => bail!("{tool} is LLVM {found}, but Mikros pins LLVM {LLVM}"),
-        None => bail!("{tool} --version names no version; LLVM {LLVM} is needed"),
+        Some(found) => bail!("{shown} is LLVM {found}, but Mikros pins LLVM {LLVM}"),
+        None => bail!("{shown} --version names no version"),
     }
 }
 
