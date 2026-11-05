@@ -4,6 +4,7 @@
  * the number of the first check that failed otherwise. */
 
 #include <errno.h>
+#include <mikros/abi.h>
 #include <mikros/syscalls.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,9 +79,11 @@ int main(int argc, char **argv)
 	struct timespec ts;
 	if (clock_gettime(42, &ts) != -1 || errno != EINVAL)
 		return 7;
+	if (mikros_abi_level() != 0)
+		return 8;
 	char *copy = malloc(64);
 	if (!copy)
-		return 8;
+		return 9;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

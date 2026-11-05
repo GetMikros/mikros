@@ -2,7 +2,7 @@
 //! Mikros are built against, laid out like `/usr`.
 //!
 //! It holds the musl headers in `include/`, with the generated
-//! `<mikros/syscalls.h>` in `include/mikros/`;
+//! `<mikros/syscalls.h>` and `<mikros/abi.h>` in `include/mikros/`;
 //! `libc.slib`, `crti.o` and `crtn.o` in `lib/`, with
 //! `lib/pkgconfig/`, and the Clang driver configuration file
 //! `x86_64-unknown-mikros.cfg`, which selects the target, its options
@@ -52,6 +52,8 @@ pub fn build() -> Result<PathBuf> {
     let header = sysroot.join("include/mikros/syscalls.h");
     fs::write(&header, syscalls_header()?)
         .with_context(|| format!("writing {}", header.display()))?;
+    let abi = crate::workspace_root().join("user/libc/include/mikros/abi.h");
+    copy(&abi, &sysroot.join("include/mikros/abi.h"))?;
     let musl = crate::musl::build(&cfg, &sysroot)?;
     let lib = sysroot.join("lib");
     let layer = mikros_layer()?;
