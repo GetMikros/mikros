@@ -5,9 +5,13 @@
 //! A protocol that a manifest provides has one provider and no
 //! instance names; connections to it wait while its service is not
 //! running yet, and fail once it will not run. Named instances are kept
-//! apart, for the registrar. When a protocol or instance has a
-//! permission, the caller must hold it, as the broker decides; without
-//! an answer from the broker, it does not.
+//! apart: the registrar adds them, and they go when they are
+//! unregistered, when their provider closes, or when the bound
+//! connection of the process that registered them closes. The service
+//! manager provides the registrar itself, as `mikros.service.Registrar`.
+//! When a protocol or instance has a permission, the caller must hold
+//! it, as the broker decides; without an answer from the broker, it
+//! does not.
 
 use alloc::collections::BTreeMap;
 use alloc::rc::{Rc, Weak};
@@ -18,13 +22,20 @@ use core::future::poll_fn;
 use core::task::{Poll, Waker};
 use mikros_manifest::Service;
 use mikros_rt::exec::{Reactor, Spawner};
-use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::{BrokerAsyncClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, DirectoryAsyncServer, DirectoryConnectResponse,
-    DirectoryListResponse, DirectoryRequest, DirectoryWatchResponse, ProviderClient,
+    DirectoryListResponse, DirectoryRequest, DirectoryWatchResponse, Provider as ProviderProtocol,
+    ProviderClient,
 };
+
+/// The protocol of the registrar, which the service manager provides,
+/// and the permission it needs.
+pub const REGISTRAR: &str = "mikros.service.Registrar";
+const REGISTER_PERMISSION: &str = "services.register";
+const PEER_CLOSED: u32 = 1 << 2;
 
 /// The directory's state, shared by every connection.
 pub struct Dir {
@@ -40,6 +51,9 @@ pub struct Dir {
     instances: RefCell<BTreeMap<String, BTreeMap<String, Instance>>>,
     /// The connections that watch each protocol.
     watchers: RefCell<Vec<Watcher>>,
+    /// The number of instances registered so far, which tells each
+    /// one apart from a later one of the same name.
+    registered: Cell<u64>,
 }
 
 /// A protocol that a manifest provides.
@@ -56,18 +70,20 @@ enum Provider {
     Running(Rc<ProviderClient>),
     /// The service will not run.
     Never,
+    /// The service manager's own registrar.
+    Registrar,
 }
 
 /// A named instance of a protocol.
-#[expect(dead_code, reason = "made by the registrar")]
-pub struct Instance {
-    pub permission: Option<String>,
-    pub provider: ProviderClient,
+struct Instance {
+    permission: Option<String>,
+    provider: ProviderClient,
     /// The pid of the process that registered it.
-    pub owner: u32,
+    owner: u32,
+    /// Which registration this is.
+    number: u64,
 }
 
-#[expect(dead_code, reason = "told of instances by the registrar")]
 struct Watcher {
     protocol: String,
     caller: Rc<ClientIdentity>,
@@ -85,6 +101,7 @@ impl Dir {
             provided: RefCell::new(BTreeMap::new()),
             instances: RefCell::new(BTreeMap::new()),
             watchers: RefCell::new(Vec::new()),
+            registered: Cell::new(0),
         })
     }
 
@@ -134,6 +151,18 @@ impl Dir {
                 },
             );
         }
+        if provided.contains_key(REGISTRAR) {
+            mikros_rt::log!(
+                Error,
+                "protocol {REGISTRAR} is the service manager's own, not a service's"
+            );
+        }
+        let registrar = Provided {
+            service: String::new(),
+            permission: Some(REGISTER_PERMISSION.into()),
+            provider: Provider::Registrar,
+        };
+        provided.insert(REGISTRAR.into(), registrar);
         drop(provided);
         self.ready.set(true);
         for waker in self.waiting.take() {
@@ -143,6 +172,10 @@ impl Dir {
 
     pub fn spawner(&self) -> &Spawner {
         &self.spawner
+    }
+
+    pub fn reactor(&self) -> &Reactor {
+        &self.reactor
     }
 
     /// Uses `broker` for permission checks.
@@ -190,19 +223,12 @@ impl Dir {
 
     /// Whether `caller` holds `permission`, if there is one.
     async fn allowed(&self, caller: &ClientIdentity, permission: Option<&str>) -> bool {
-        let Some(permission) = permission else {
-            return true;
-        };
         let broker = self.broker.borrow().clone();
-        let Some(broker) = broker else {
-            return false;
-        };
-        let checked = broker.check(clone(caller), permission.into()).await;
-        matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
+        allowed(broker, caller, permission).await
     }
 
     async fn connect(
-        &self,
+        self: &Rc<Self>,
         caller: &ClientIdentity,
         protocol: String,
         instance: Option<String>,
@@ -241,6 +267,11 @@ impl Dir {
                     Ok(())
                 }
                 Provider::Never => Err(Status::NotFound),
+                Provider::Registrar => {
+                    let server = ServerEnd::new(server);
+                    crate::registrar::serve(self.clone(), server, clone(caller));
+                    Ok(())
+                }
             };
         }
         let instances = self.instances.borrow();
@@ -277,6 +308,187 @@ impl Dir {
         }
         Ok(listed)
     }
+}
+
+impl Dir {
+    /// Adds `instance` of `protocol` for `owner`, forwarded to
+    /// `provider` and protected by `permission`, and tells the watchers.
+    pub async fn register(
+        self: &Rc<Self>,
+        owner: &ClientIdentity,
+        protocol: String,
+        instance: String,
+        permission: Option<String>,
+        provider: ClientEnd<ProviderProtocol>,
+    ) -> Result<(), Status> {
+        self.check_free(&protocol, &instance)?;
+        if let Some(permission) = &permission {
+            self.known(owner, permission).await?;
+            // The broker may have taken a while.
+            self.check_free(&protocol, &instance)?;
+        }
+        let number = self.registered.get() + 1;
+        self.registered.set(number);
+        let channel = provider.handle().raw();
+        let added = Instance {
+            permission: permission.clone(),
+            provider: ProviderClient::new(provider),
+            owner: owner.pid,
+            number,
+        };
+        self.instances
+            .borrow_mut()
+            .entry(protocol.clone())
+            .or_default()
+            .insert(instance.clone(), added);
+        self.tell(&protocol, &instance, permission, true);
+        // The instance goes when its provider closes. The channel stays
+        // open while the instance is kept, and a later instance of the
+        // same name has another number.
+        let dir = self.clone();
+        self.spawner.spawn(async move {
+            if dir.reactor.signals(channel, PEER_CLOSED).await.is_ok() {
+                dir.remove(&protocol, &instance, |i| i.number == number);
+            }
+        });
+        Ok(())
+    }
+
+    /// Removes `owner`'s `instance` of `protocol`.
+    pub fn unregister(
+        &self,
+        owner: &ClientIdentity,
+        protocol: &str,
+        instance: &str,
+    ) -> Result<(), Status> {
+        let instances = self.instances.borrow();
+        let found = instances
+            .get(protocol)
+            .and_then(|named| named.get(instance));
+        let found = found.ok_or(Status::NotFound)?;
+        if found.owner != owner.pid {
+            return Err(Status::AccessDenied);
+        }
+        drop(instances);
+        self.remove(protocol, instance, |_| true);
+        Ok(())
+    }
+
+    /// Fails with `ALREADY_EXISTS` when `instance` of `protocol` exists
+    /// or the protocol is provided otherwise.
+    fn check_free(&self, protocol: &str, instance: &str) -> Result<(), Status> {
+        let taken = self.provided.borrow().contains_key(protocol)
+            || self
+                .instances
+                .borrow()
+                .get(protocol)
+                .is_some_and(|named| named.contains_key(instance));
+        if taken {
+            Err(Status::AlreadyExists)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Fails with `INVALID_ARGS` when the broker does not know
+    /// `permission`, and with `ACCESS_DENIED` when it cannot be asked.
+    async fn known(&self, owner: &ClientIdentity, permission: &str) -> Result<(), Status> {
+        let broker = self.broker.borrow().clone();
+        let broker = broker.ok_or(Status::AccessDenied)?;
+        match broker.check(clone(owner), permission.into()).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(Status::NotFound)) => Err(Status::InvalidArgs),
+            _ => Err(Status::AccessDenied),
+        }
+    }
+
+    /// Removes `instance` of `protocol` when `which` accepts it, and
+    /// tells the watchers.
+    fn remove(&self, protocol: &str, instance: &str, which: impl Fn(&Instance) -> bool) {
+        let mut instances = self.instances.borrow_mut();
+        let Some(named) = instances.get_mut(protocol) else {
+            return;
+        };
+        if !named.get(instance).is_some_and(which) {
+            return;
+        }
+        let removed = named.remove(instance);
+        if named.is_empty() {
+            instances.remove(protocol);
+        }
+        drop(instances);
+        if let Some(removed) = removed {
+            self.tell(protocol, instance, removed.permission, false);
+        }
+    }
+
+    /// Removes the instances that process `pid` registered, once its
+    /// bound connection closed.
+    fn closed(&self, pid: u32) {
+        let owned: Vec<(String, String)> = self
+            .instances
+            .borrow()
+            .iter()
+            .flat_map(|(protocol, named)| {
+                named
+                    .iter()
+                    .filter(|(_, i)| i.owner == pid)
+                    .map(|(name, _)| (protocol.clone(), name.clone()))
+            })
+            .collect();
+        for (protocol, instance) in owned {
+            self.remove(&protocol, &instance, |i| i.owner == pid);
+        }
+    }
+
+    /// Sends `OnInstanceAdded`, or `OnInstanceRemoved`, to every live
+    /// connection that watches `protocol` and holds `permission`, and
+    /// forgets the closed ones.
+    fn tell(&self, protocol: &str, instance: &str, permission: Option<String>, added: bool) {
+        let mut tell = Vec::new();
+        self.watchers.borrow_mut().retain(|w| {
+            let Some(server) = w.server.upgrade() else {
+                return false;
+            };
+            if w.protocol == protocol {
+                tell.push((server, w.caller.clone()));
+            }
+            true
+        });
+        for (server, caller) in tell {
+            let (protocol, instance) = (String::from(protocol), String::from(instance));
+            let permission = permission.clone();
+            let broker = self.broker.borrow().clone();
+            self.spawner.spawn(async move {
+                if !allowed(broker, &caller, permission.as_deref()).await {
+                    return;
+                }
+                let s = server.server();
+                let _ = if added {
+                    s.send_on_instance_added(protocol, instance)
+                } else {
+                    s.send_on_instance_removed(protocol, instance)
+                };
+            });
+        }
+    }
+}
+
+/// Whether `caller` holds `permission`, if there is one, as `broker`
+/// answers.
+async fn allowed(
+    broker: Option<Rc<BrokerAsyncClient>>,
+    caller: &ClientIdentity,
+    permission: Option<&str>,
+) -> bool {
+    let Some(permission) = permission else {
+        return true;
+    };
+    let Some(broker) = broker else {
+        return false;
+    };
+    let checked = broker.check(clone(caller), permission.into()).await;
+    matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
 }
 
 fn clone(identity: &ClientIdentity) -> ClientIdentity {
@@ -324,4 +536,6 @@ async fn serve(dir: Rc<Dir>, end: ServerEnd<Directory>, caller: Rc<ClientIdentit
             };
         });
     }
+    // The bound connection closes when its process ends.
+    dir.closed(caller.pid);
 }

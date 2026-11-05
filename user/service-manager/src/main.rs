@@ -17,6 +17,7 @@ mod broker;
 mod directory;
 mod files;
 mod launch;
+mod registrar;
 mod services;
 
 use crate::directory::Dir;
