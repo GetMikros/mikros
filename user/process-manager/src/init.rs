@@ -38,6 +38,9 @@ const INIT_GROUP: u32 = 1;
 pub struct Manager {
     /// The log handle, which the runtime's logging writes to.
     _log: OwnedHandle,
+    /// The process manager's own process, which the runtime's heap maps
+    /// its larger blocks into.
+    _process: OwnedHandle,
     shared: Rc<Shared>,
     init_process: Option<OwnedHandle>,
     init: Option<ServerEnd<InitBootstrap>>,
@@ -68,6 +71,7 @@ impl Manager {
         let fs = Fs::new(process.raw(), &boot_image, reactor.clone(), spawner.clone())?;
         Ok(Manager {
             _log: log,
+            _process: process,
             shared: Shared::new(fs, budget, clock_page, reactor, spawner),
             init_process: Some(init_process),
             init: Some(init_bootstrap),

@@ -12,7 +12,9 @@
 //!
 //! It also spawns `/usr/bin/hello`, a static C program, and
 //! `/usr/bin/hello-std`, a Rust program that uses the standard library,
-//! with a stream as their standard output, and checks what they print.
+//! with a stream as their standard output, and checks what they print,
+//! and reads more than the process manager's small heap blocks hold of
+//! `/usr/bin/hello` with one `Read`.
 //!
 //! It accepts the `Bind` requests on the control endpoint that arrives
 //! as the `USER` startup handle with ID 0, for itself and its children,
@@ -28,8 +30,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::exec::Spawner;
 use mikros_rt::exec::{Executor, Reactor};
-use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::fs::{Node, NodeAsyncClient, OpenFlags, Rights};
 use mikros_rt::interfaces::mikros::process::{
     ExitStatus, HandleRole, LauncherAsyncClient, ProcessInfo, SpawnRequest, StartupHandle,
     StatusKind, WaitOptions,
@@ -116,16 +119,25 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             }
         },
     ));
-    let Ok(managed) = received else {
+    let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    let root = managed
+        .namespace
+        .iter()
+        .position(|e| e.path == "/")
+        .map(|at| managed.namespace.swap_remove(at).directory);
+    let Some(root) = root else {
+        return PANIC_EXIT_CODE;
+    };
+    let root = NodeAsyncClient::new(root, reactor.clone());
     let args = arguments(&managed.header.arguments);
     let me = managed.header.pid;
     let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     executor.block_on(async move {
         match args.as_slice() {
-            [_] => probe(&launcher, &reactor, me).await,
+            [_] => probe(&launcher, &root, &reactor, me).await,
             [_, "exit", code] => code.parse().unwrap_or(PANIC_EXIT_CODE),
             [_, "sleep"] => core::future::pending().await,
             [_, "rename"] => {
@@ -412,9 +424,20 @@ async fn kill(launcher: &LauncherAsyncClient, pid: u32, signo: u32) -> Result<()
     }
 }
 
+/// How many bytes one `Read` of up to 32 KiB returns from the start of
+/// the file at `path` under `root`.
+async fn read_at_once(root: &NodeAsyncClient, reactor: &Reactor, path: &str) -> Option<usize> {
+    let (client, server) = endpoints::<Node>().ok()?;
+    let opened = root.open(path.into(), OpenFlags(0), 0, Rights::READ, server);
+    opened.await.ok()?.ok()?;
+    let file = NodeAsyncClient::new(client, reactor.clone());
+    Some(file.read(0, 32768).await.ok()?.ok()?.data.len())
+}
+
 /// Runs every check in turn as process `me` on the executor of
-/// `reactor`, and returns the number of the first that failed, or 0.
-async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
+/// `reactor`, with the namespace root `root`, and returns the number of
+/// the first that failed, or 0.
+async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reactor, me: u32) -> i64 {
     let mut step = 0;
     let mut check = |what: &str, passed: bool| {
         step += 1;
@@ -750,6 +773,12 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
         check(
             "reading what it printed",
             output.as_slice() == b"spawned, world\n",
+        )?;
+        // The process manager's heap maps larger blocks of their own.
+        let read = read_at_once(root, reactor, &HELLO[1..]).await;
+        check(
+            "reading more than 2 KiB of a file at once",
+            read.is_some_and(|n| n > 2048),
         )?;
         Ok(())
     };
