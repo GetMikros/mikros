@@ -207,6 +207,23 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", library_user.display());
+            // A project built with Meson, through the sysroot's cross
+            // file.
+            let tally_source = crate::workspace_root().join("user/tests/build-systems");
+            let meson_tree = crate::build_systems::meson("tally-meson", &tally_source, &[])?;
+            crate::build_systems::check_installed(
+                &meson_tree,
+                &[
+                    "bin/tally-meson-user",
+                    "lib/libtally-meson.1.2.3.dlib",
+                    "lib/libcount-meson.slib",
+                ],
+                &[
+                    ("lib/libtally-meson.1.dlib", "libtally-meson.1.2.3.dlib"),
+                    ("lib/libtally-meson.dlib", "libtally-meson.1.dlib"),
+                ],
+            )?;
+            println!("built    {}", meson_tree.display());
             let hello_std = crate::rust_std::build("hello-std", kind)?;
             println!("built    {}", hello_std.display());
             let spawn_std = crate::rust_std::build("spawn-std", kind)?;
@@ -247,6 +264,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/lib/libgreet.1.dlib", greet.as_path()),
                     ("usr/share/decoy/libgreet.1.dlib", decoy.as_path()),
                     ("usr/lib/libnonote.1.dlib", no_note.as_path()),
+                    (
+                        "usr/bin/tally-meson-user",
+                        &meson_tree.join("bin/tally-meson-user"),
+                    ),
+                    (
+                        "usr/lib/libtally-meson.1.dlib",
+                        &meson_tree.join("lib/libtally-meson.1.dlib"),
+                    ),
                     ("usr/share/hello/greeting.txt", greeting.as_path()),
                 ],
                 &[],

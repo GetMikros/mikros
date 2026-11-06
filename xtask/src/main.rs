@@ -2,6 +2,7 @@
 
 mod boot_menu;
 mod build;
+mod build_systems;
 mod check;
 mod debug;
 mod debug_build;
@@ -15,6 +16,7 @@ mod image;
 mod llvm;
 mod loader_check;
 mod machine_state;
+mod meson;
 mod musl;
 mod port;
 mod qemu;

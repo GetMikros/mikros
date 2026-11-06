@@ -1,0 +1,75 @@
+//! Building C and C++ projects for Mikros with Meson, through the
+//! sysroot's cross file, in `target/ported/<name>/`.
+
+use anyhow::{Context, Result, bail};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+
+fn dir(name: &str) -> PathBuf {
+    crate::workspace_root().join("target/ported").join(name)
+}
+
+/// Builds the Meson project in `source` as `name`, with the further
+/// options `options`, and returns the directory it was installed in.
+pub fn meson(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
+    crate::sysroot::build()?;
+    let (build, install) = fresh(name)?;
+    crate::port::run(
+        crate::meson::command()?
+            .arg("setup")
+            .arg(format!(
+                "--cross-file={}",
+                crate::sysroot::meson_cross_file().display()
+            ))
+            .args(["--buildtype=release", "--libdir=lib"])
+            .arg(format!("--prefix={}", install.display()))
+            .args(options)
+            .arg(&build)
+            .arg(source),
+    )
+    .with_context(|| format!("configuring {name}"))?;
+    crate::port::run(
+        crate::meson::command()?
+            .arg("compile")
+            .arg("-C")
+            .arg(&build),
+    )
+    .with_context(|| format!("building {name}"))?;
+    crate::port::run(
+        crate::meson::command()?
+            .args(["install", "--quiet", "-C"])
+            .arg(&build)
+            .stdout(Stdio::null()),
+    )
+    .with_context(|| format!("installing {name}"))?;
+    Ok(install)
+}
+
+/// The build and the install directory of `name`, with what an earlier
+/// build left removed: every build configures its project afresh, so
+/// that changed tools and build system files take effect.
+fn fresh(name: &str) -> Result<(PathBuf, PathBuf)> {
+    let dir = dir(name);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+    }
+    Ok((dir.join("build"), dir.join("install")))
+}
+
+/// Fails unless every one of `files`, relative to `install`, is there,
+/// and those of `links` are symbolic links to their targets.
+pub fn check_installed(install: &Path, files: &[&str], links: &[(&str, &str)]) -> Result<()> {
+    for file in files {
+        if !install.join(file).is_file() {
+            bail!("{} has no {file}", install.display());
+        }
+    }
+    for (link, target) in links {
+        let found = fs::read_link(install.join(link)).ok();
+        if found.as_deref() != Some(Path::new(target)) {
+            bail!("{link} in {} is not a link to {target}", install.display());
+        }
+    }
+    Ok(())
+}

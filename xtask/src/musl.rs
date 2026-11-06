@@ -5,7 +5,7 @@
 
 use crate::port::{self, run};
 use anyhow::{Context, Result};
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -13,8 +13,6 @@ pub const VERSION: &str = "1.2.5";
 const URL: &str = "https://musl.libc.org/releases/musl-1.2.5.tar.gz";
 /// SHA-256 of the release archive at `URL`.
 const SHA256: &str = "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4";
-/// The file in the patched source that records which patches it has.
-const STAMP: &str = ".mikros-patches";
 
 fn dir() -> PathBuf {
     crate::workspace_root().join("target/musl")
@@ -128,33 +126,15 @@ fn configured(cfg: &Path) -> Result<PathBuf> {
     Ok(build)
 }
 
-/// The musl source with every patch applied, extracted again from
-/// `archive` whenever the patches changed. The build directory is
-/// removed with it, so that nothing built from older sources stays.
+/// The musl source with every patch applied. The build directory is
+/// removed whenever the source is extracted again, so that nothing built
+/// from older sources stays.
 fn patched_source(archive: &Path) -> Result<PathBuf> {
-    let patches = port::patches(&patches_dir())?;
-    let stamp = port::stamp(&patches)?;
-    let source = dir().join(format!("musl-{VERSION}"));
-    if fs::read_to_string(source.join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
-        return Ok(source);
-    }
-    for stale in [&source, &dir().join("build")] {
-        if stale.exists() {
-            fs::remove_dir_all(stale).with_context(|| format!("removing {}", stale.display()))?;
-        }
-    }
-    let gz = flate2::read::GzDecoder::new(File::open(archive)?);
-    tar::Archive::new(gz)
-        .unpack(dir())
-        .with_context(|| format!("extracting {}", archive.display()))?;
-    for patch in &patches {
-        run(Command::new("patch")
-            .args(["-p1", "-s", "-d"])
-            .arg(&source)
-            .arg("-i")
-            .arg(patch))
-        .with_context(|| format!("applying {}", patch.display()))?;
-    }
-    fs::write(source.join(STAMP), stamp)?;
-    Ok(source)
+    port::patched_source(
+        archive,
+        &dir(),
+        &format!("musl-{VERSION}"),
+        &patches_dir(),
+        &[&dir().join("build")],
+    )
 }

@@ -12,6 +12,13 @@
 //! and this sysroot. The Clang that `crate::llvm` builds, which knows the
 //! target, is used with it as
 //! `clang --config=<sysroot>/x86_64-unknown-mikros.cfg`.
+//!
+//! For ported projects, it holds the Meson cross file
+//! `x86_64-unknown-mikros.meson`. It selects these compilers and this
+//! sysroot, and works with the Meson that `crate::meson` patches, which
+//! names shared libraries `lib<name>.<version>.dlib` with the
+//! `DT_SONAME` `lib<name>.<major>.dlib`, links `lib<name>.dlib` to the
+//! latter, and names static libraries `lib<name>.slib`.
 
 use crate::llvm::{self, LLVM};
 use anyhow::{Context, Result, bail};
@@ -53,6 +60,9 @@ pub fn build() -> Result<PathBuf> {
     }
     let cfg = config(&sysroot);
     fs::write(&cfg, driver_config()).with_context(|| format!("writing {}", cfg.display()))?;
+    let cross = meson_cross_file();
+    fs::write(&cross, meson_cross(&llvm_from_sysroot()?))
+        .with_context(|| format!("writing {}", cross.display()))?;
     let header = sysroot.join("include/mikros/syscalls.h");
     fs::write(&header, syscalls_header()?)
         .with_context(|| format!("writing {}", header.display()))?;
@@ -205,6 +215,55 @@ pub fn config(sysroot: &Path) -> PathBuf {
     sysroot.join(format!("{TRIPLE}.cfg"))
 }
 
+/// The Meson cross file of the sysroot.
+pub fn meson_cross_file() -> PathBuf {
+    dir().join(format!("{TRIPLE}.meson"))
+}
+
+/// The directory of the LLVM programs relative to the sysroot, beside
+/// which the LLVM directory lies.
+fn llvm_from_sysroot() -> Result<String> {
+    let bin = llvm::bin();
+    match dir().parent().map(|parent| bin.strip_prefix(parent)) {
+        Some(Ok(relative)) => Ok(format!("../{}", relative.display())),
+        _ => bail!("{} lies apart from the sysroot", bin.display()),
+    }
+}
+
+/// The Meson cross file, with the LLVM programs in `llvm`, relative to
+/// the sysroot. Meson replaces `@DIRNAME@` with the file's directory,
+/// the sysroot.
+fn meson_cross(llvm: &str) -> String {
+    let tool = |name: &str| format!("'@DIRNAME@/{llvm}/{name}'");
+    let compiler = |name: &str| format!("[{}, '--config=@DIRNAME@/{TRIPLE}.cfg']", tool(name));
+    format!(
+        "# The Mikros target for Meson, written by cargo xtask sysroot, for the
+# Meson with the Mikros patches that cargo xtask runs:
+#   meson setup --cross-file <sysroot>/{TRIPLE}.meson ...
+# The system mikros names the libraries.
+
+[binaries]
+c = {}
+cpp = {}
+ar = {}
+ranlib = {}
+
+[properties]
+sys_root = '@DIRNAME@'
+
+[host_machine]
+system = 'mikros'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+",
+        compiler("clang"),
+        compiler("clang++"),
+        tool("llvm-ar"),
+        tool("llvm-ranlib"),
+    )
+}
+
 /// Fails unless `tool --version` reports the pinned LLVM release.
 fn check_llvm(tool: &Path) -> Result<()> {
     let shown = tool.display();
@@ -280,6 +339,18 @@ mod tests {
             "--sysroot=<CFGDIR>",
         ] {
             assert!(cfg.lines().any(|l| l == option), "{option}");
+        }
+    }
+
+    #[test]
+    fn cross_file_selects_mikros_and_the_compilers() {
+        let cross = meson_cross("../llvm/bin");
+        for line in [
+            "c = ['@DIRNAME@/../llvm/bin/clang', '--config=@DIRNAME@/x86_64-unknown-mikros.cfg']",
+            "sys_root = '@DIRNAME@'",
+            "system = 'mikros'",
+        ] {
+            assert!(cross.lines().any(|l| l == line), "{line}");
         }
     }
 }

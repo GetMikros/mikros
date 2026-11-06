@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -32,6 +32,48 @@ pub fn stamp(patches: &[PathBuf]) -> Result<String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
+}
+
+/// The file in a patched source that records which patches it has.
+const STAMP: &str = ".mikros-patches";
+
+/// The source `dir/<source>`, extracted from the gzip-compressed tar
+/// `archive`, with every patch in `patches` applied. It is extracted
+/// again whenever the patches changed, and the directories `stale`,
+/// built from the older source, are removed then.
+pub fn patched_source(
+    archive: &Path,
+    dir: &Path,
+    source: &str,
+    patches: &Path,
+    stale: &[&Path],
+) -> Result<PathBuf> {
+    let patches = self::patches(patches)?;
+    let stamp = self::stamp(&patches)?;
+    let source = dir.join(source);
+    if fs::read_to_string(source.join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
+        return Ok(source);
+    }
+    for stale in std::iter::once(&source.as_path()).chain(stale) {
+        if stale.exists() {
+            fs::remove_dir_all(stale).with_context(|| format!("removing {}", stale.display()))?;
+        }
+    }
+    println!("extracting {}", archive.display());
+    let gz = flate2::read::GzDecoder::new(File::open(archive)?);
+    tar::Archive::new(gz)
+        .unpack(dir)
+        .with_context(|| format!("extracting {}", archive.display()))?;
+    for patch in &patches {
+        run(Command::new("patch")
+            .args(["-p1", "-s", "-d"])
+            .arg(&source)
+            .arg("-i")
+            .arg(patch))
+        .with_context(|| format!("applying {}", patch.display()))?;
+    }
+    fs::write(source.join(STAMP), stamp)?;
+    Ok(source)
 }
 
 /// Runs `command`, and fails unless it succeeds.
