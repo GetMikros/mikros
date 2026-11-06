@@ -8286,7 +8286,9 @@ mod manager {
         let (mut startup, init) = start_message(s, &m, 1)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
-        let deadline = super::in_time();
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
         ensure(
             "registering init",
             matches!(init.register(deadline), Ok(Ok(_))),
@@ -8339,7 +8341,9 @@ mod manager {
         let (mut startup, init) = start_message(s, &m, 1)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
-        let deadline = super::in_time();
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
         ensure(
             "registering init",
             matches!(init.register(deadline), Ok(Ok(_))),
@@ -8397,7 +8401,9 @@ mod manager {
         let (mut startup, init) = start_message(s, &m, 1)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
-        let deadline = super::in_time();
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
         ensure(
             "registering init",
             matches!(init.register(deadline), Ok(Ok(_))),
@@ -8469,7 +8475,9 @@ mod manager {
         let (mut startup, init) = start_message(s, &m, 1)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
-        let deadline = super::in_time();
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
         ensure(
             "registering init",
             matches!(init.register(deadline), Ok(Ok(_))),
@@ -8503,7 +8511,9 @@ mod manager {
             handle: copy(s.root_resource, SAME_RIGHTS)?,
         };
         let handles = alloc::vec![root, log, info];
-        let Ok(Ok(started)) = init.start_service_manager(handles, deadline) else {
+        let reply = init.start_service_manager(handles, deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
             return Err(Failure {
                 what: "starting the service manager",
                 status: 0,
