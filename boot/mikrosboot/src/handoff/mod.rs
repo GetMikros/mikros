@@ -132,6 +132,7 @@ impl Prepared {
             boot_time: optional.boot_time,
             arch_data0: self.trampoline.unwrap_or(0),
             arch_data1: 0,
+            boot_time_ns: optional.boot_time_ns,
         }
     }
 }

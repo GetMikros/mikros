@@ -39,6 +39,7 @@ fn sample() -> BootInfo {
         boot_time: 1_793_577_600,
         arch_data0: 0x9f000,
         arch_data1: 0,
+        boot_time_ns: 1_793_577_600_000_000_000,
     }
 }
 
@@ -58,7 +59,50 @@ fn encode(info: &BootInfo) -> Vec<u8> {
 fn decodes_every_field() {
     let info = sample();
     let data = encode(&info);
-    assert_eq!(size(&data[..HEADER_SIZE]), Ok(0xE8));
+    assert_eq!(size(&data[..HEADER_SIZE]), Ok(0xF0));
+    assert_eq!(decode(&data), Ok(info));
+}
+
+/// `sample` as version 1.0, in its 0xE8 bytes, with the flags `flags`.
+fn version_1_0(flags: u32) -> (BootInfo, Vec<u8>) {
+    let mut info = sample();
+    (info.version_minor, info.size, info.flags) = (0, 0xE8, flags);
+    let mut data = encode(&info);
+    data.truncate(0xE8);
+    (info, data)
+}
+
+#[test]
+fn derives_boot_time_ns_from_version_1_0() {
+    let (info, data) = version_1_0(boot_protocol::flags::BOOT_TIME_VALID);
+    assert_eq!(decode(&data), Ok(info));
+    let (mut info, data) = version_1_0(0);
+    info.boot_time_ns = 0;
+    assert_eq!(decode(&data), Ok(info));
+}
+
+#[test]
+fn reads_boot_time_ns_only_with_version_and_size() {
+    // A version 1.1 structure the size of 1.0, and a 1.0 one with room
+    // for the field, do not give it.
+    let (mut info, mut data) = version_1_0(boot_protocol::flags::BOOT_TIME_VALID);
+    data[0x0A] = 1;
+    info.version_minor = 1;
+    assert_eq!(decode(&data), Ok(info));
+    let mut info = sample();
+    info.version_minor = 0;
+    let given = info.boot_time_ns;
+    info.boot_time_ns = 7;
+    let data = encode(&info);
+    info.boot_time_ns = given;
+    assert_eq!(decode(&data), Ok(info));
+}
+
+#[test]
+fn derives_no_boot_time_ns_that_does_not_fit() {
+    let (mut info, mut data) = version_1_0(boot_protocol::flags::BOOT_TIME_VALID);
+    data[0xD0..0xD8].copy_from_slice(&i64::MAX.to_le_bytes());
+    (info.flags, info.boot_time, info.boot_time_ns) = (0, 0, 0);
     assert_eq!(decode(&data), Ok(info));
 }
 
@@ -90,7 +134,7 @@ fn refuses_bad_headers() {
     assert_eq!(decode(&encode(&info)), Err(Error::BadSize(0xE0)));
 
     info = sample();
-    info.size = 0xF0;
+    info.size = 0xF8;
     assert_eq!(decode(&encode(&info)), Err(Error::Truncated));
     assert_eq!(size(&[0; 4]), Err(Error::Truncated));
 }

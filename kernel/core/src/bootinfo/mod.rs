@@ -2,7 +2,8 @@
 //! passes to the kernel.
 
 use boot_protocol::{
-    BOOT_INFO_SIZE, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, VERSION_MAJOR,
+    BOOT_INFO_SIZE, BOOT_INFO_SIZE_1_0, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry,
+    NANOS_PER_SECOND, VERSION_MAJOR, flags,
 };
 use core::fmt;
 
@@ -70,19 +71,36 @@ pub fn size(header: &[u8]) -> Result<usize, Error> {
         return Err(Error::UnsupportedVersion(major, minor));
     }
     let size = u32_at(header, 0x0C)?;
-    if size < BOOT_INFO_SIZE {
+    if size < BOOT_INFO_SIZE_1_0 {
         return Err(Error::BadSize(size));
     }
     Ok(size as usize)
 }
 
 /// Decodes `data`, which holds the whole structure as `size` gives it.
-/// Bytes after the fields of version 1.0 are ignored.
+/// Bytes after the fields of version 1.1 are ignored. `boot_time_ns` is
+/// read only from a structure of version 1.1 or later that is large
+/// enough to hold it, and otherwise derived from `boot_time`; a boot time
+/// whose nanoseconds do not fit an `i64` then counts as none.
 pub fn decode(data: &[u8]) -> Result<BootInfo, Error> {
     let size = size(data)?;
-    // Only the fields of version 1.0 are read, all of which lie below the
-    // checked size.
+    // The fields of version 1.0 lie below the checked size.
     let d = data.get(..size).ok_or(Error::Truncated)?;
+    let minor = u16_at(d, 0x0A)?;
+    let mut info_flags = u32_at(d, 0x14)?;
+    let mut boot_time = u64_at(d, 0xD0)? as i64;
+    let boot_time_ns = if size >= BOOT_INFO_SIZE as usize && minor >= 1 {
+        u64_at(d, 0xE8)? as i64
+    } else if info_flags & flags::BOOT_TIME_VALID != 0 {
+        // A time whose nanoseconds do not fit an i64 counts as none.
+        boot_time.checked_mul(NANOS_PER_SECOND).unwrap_or_else(|| {
+            info_flags &= !flags::BOOT_TIME_VALID;
+            boot_time = 0;
+            0
+        })
+    } else {
+        0
+    };
     let framebuffer = Framebuffer {
         phys_base: u64_at(d, 0x80)?,
         size: u64_at(d, 0x88)?,
@@ -98,10 +116,10 @@ pub fn decode(data: &[u8]) -> Result<BootInfo, Error> {
     Ok(BootInfo {
         magic: MAGIC,
         version_major: u16_at(d, 0x08)?,
-        version_minor: u16_at(d, 0x0A)?,
+        version_minor: minor,
         size: u32_at(d, 0x0C)?,
         arch: u32_at(d, 0x10)?,
-        flags: u32_at(d, 0x14)?,
+        flags: info_flags,
         memory_map_phys: u64_at(d, 0x18)?,
         memory_map_count: u64_at(d, 0x20)?,
         memory_map_entry_size: u64_at(d, 0x28)?,
@@ -117,9 +135,10 @@ pub fn decode(data: &[u8]) -> Result<BootInfo, Error> {
         uefi_system_table_phys: u64_at(d, 0x78)?,
         framebuffer,
         rng_seed: bytes(d, 0xB0)?,
-        boot_time: u64_at(d, 0xD0)? as i64,
+        boot_time,
         arch_data0: u64_at(d, 0xD8)?,
         arch_data1: u64_at(d, 0xE0)?,
+        boot_time_ns,
     })
 }
 
