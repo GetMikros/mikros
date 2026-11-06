@@ -204,6 +204,21 @@ impl<'t, T: Tables> Mapper<'t, T> {
         unreachable!()
     }
 
+    /// The deepest table on the way to `virt` and its level: the table
+    /// whose entry for `virt` is missing, maps a page, or is at the last
+    /// level.
+    fn deepest_table(&mut self, virt: u64) -> (u64, u32) {
+        let mut table = self.root;
+        for level in (1..=3).rev() {
+            let entry = self.tables.table(table)[index(virt, level)];
+            if entry & PRESENT == 0 || (level < 3 && entry & HUGE != 0) {
+                return (table, level);
+            }
+            table = entry & ADDR_MASK;
+        }
+        (table, 0)
+    }
+
     /// The physical address that `virt` maps to, or `None` when it is
     /// not mapped.
     pub fn translate(&mut self, virt: u64) -> Option<u64> {
@@ -284,21 +299,31 @@ impl<'t, T: Tables> Mapper<'t, T> {
         let mut v = virt;
         let mut visited = 0;
         while v != end {
-            if visited == limit {
-                return Ok(Some(v));
-            }
-            visited += 1;
-            match self.walk(v) {
-                Ok((table, i, page)) => {
-                    if page != PAGE_SIZE {
+            // The entries of one table are visited in turn; the walk from
+            // the top level is done again only where the table ends or an
+            // entry leads to a lower table.
+            let (table, level) = self.deepest_table(v);
+            let span = 1u64 << (12 + 9 * level);
+            loop {
+                if visited == limit {
+                    return Ok(Some(v));
+                }
+                let i = index(v, level);
+                let entry = self.tables.table(table)[i];
+                let leaf = level == 0 || (level < 3 && entry & HUGE != 0);
+                if entry & PRESENT != 0 && !leaf {
+                    break;
+                }
+                visited += 1;
+                if entry & PRESENT != 0 {
+                    if level != 0 {
                         return Err(Error::PartOfLargePage(v));
                     }
-                    let entry = core::mem::take(&mut self.tables.table(table)[i]);
+                    self.tables.table(table)[i] = 0;
                     unmapped(v, entry & ADDR_MASK);
                     v = v.wrapping_add(PAGE_SIZE);
-                }
-                // Skip the rest of the range the missing entry covers.
-                Err(span) => {
+                } else {
+                    // Skip the rest of the range the missing entry covers.
                     let next = (v | (span - 1)).wrapping_add(1);
                     let left = end.wrapping_sub(v);
                     v = if next.wrapping_sub(v) >= left {
@@ -306,6 +331,9 @@ impl<'t, T: Tables> Mapper<'t, T> {
                     } else {
                         next
                     };
+                }
+                if v == end || index(v, level) == 0 {
+                    break;
                 }
             }
         }
@@ -380,6 +408,42 @@ mod tests {
     }
 
     /// The leaf entry and page size that map `virt`.
+    /// What `unmap_present_some` does, walking from the top level for
+    /// every entry it visits.
+    fn unmap_by_walks(
+        mapper: &mut Mapper<'_, Pool>,
+        virt: u64,
+        size: u64,
+        limit: usize,
+        seen: &mut Vec<(u64, u64)>,
+    ) -> Result<Option<u64>, Error> {
+        let end = virt.wrapping_add(size);
+        let (mut v, mut visited) = (virt, 0);
+        while v != end {
+            if visited == limit {
+                return Ok(Some(v));
+            }
+            visited += 1;
+            match mapper.walk(v) {
+                Ok((_, _, page)) if page != PAGE_SIZE => return Err(Error::PartOfLargePage(v)),
+                Ok((table, i, _)) => {
+                    let entry = core::mem::take(&mut mapper.tables.table(table)[i]);
+                    seen.push((v, entry & ADDR_MASK));
+                    v = v.wrapping_add(PAGE_SIZE);
+                }
+                Err(span) => {
+                    let next = (v | (span - 1)).wrapping_add(1);
+                    v = if next.wrapping_sub(v) >= end.wrapping_sub(v) {
+                        end
+                    } else {
+                        next
+                    };
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn leaf(pool: &mut Pool, root: u64, virt: u64) -> Option<(u64, u64)> {
         let mut table = root;
         for level in (0..=3).rev() {
@@ -554,6 +618,55 @@ mod tests {
         let u = *pool.table(user);
         assert_eq!(k[256..], u[256..]);
         assert!(u[..256].iter().all(|&e| e == 0));
+    }
+
+    #[test]
+    fn unmaps_in_the_steps_of_walks_from_the_top() {
+        // Pages at the ends and in the middle of tables at every level,
+        // and a 2 MiB page, which stops both walks with the same error.
+        let pages = [
+            0x40_0000,
+            0x40_1000,
+            0x5F_F000,
+            0x60_0000,
+            0x3FFF_F000,
+            0x40_0000_0000,
+            0x7F_FFFF_F000,
+            0x7FFF_FFFF_E000,
+        ];
+        let range = (0x1_0000, 0x7FFF_FFFF_F000 - 0x1_0000);
+        for limit in [1, 2, 3, 7, 64, 511, 512, 513, 5000, usize::MAX] {
+            for huge in [false, true] {
+                let mut results = Vec::new();
+                for by_walks in [false, true] {
+                    let mut pool = Pool(Vec::new());
+                    let kernel = Mapper::new(&mut pool, false).unwrap().root();
+                    let mut mapper = Mapper::user(&mut pool, kernel).unwrap();
+                    for (n, &page) in pages.iter().enumerate() {
+                        let phys = 0x1000_0000 + n as u64 * PAGE_SIZE;
+                        mapper.map(page, phys, PAGE_SIZE, USER_DATA).unwrap();
+                    }
+                    if huge {
+                        mapper
+                            .map(0x20_0000_0000, 0x4000_0000, 2 << 20, USER_DATA)
+                            .unwrap();
+                    }
+                    let (mut at, mut seen, mut steps) = (Some(range.0), Vec::new(), Vec::new());
+                    while let Some(v) = at {
+                        let size = range.0 + range.1 - v;
+                        let step = if by_walks {
+                            unmap_by_walks(&mut mapper, v, size, limit, &mut seen)
+                        } else {
+                            mapper.unmap_present_some(v, size, limit, |v, p| seen.push((v, p)))
+                        };
+                        steps.push(step);
+                        at = step.ok().flatten();
+                    }
+                    results.push((seen, steps));
+                }
+                assert_eq!(results[0], results[1], "limit {limit}, huge {huge}");
+            }
+        }
     }
 
     #[test]
