@@ -131,7 +131,8 @@ pub fn start_halted(
 pub fn run(args: &Args) -> Result<()> {
     let built = build::build(args.kind)?;
     let disk = image::path(args.kind, false);
-    image::create(args.kind, &built, &disk)?;
+    // The kernel runs at the addresses of its debug information.
+    image::create_with(args.kind, &built, &disk, image::KASLR_OFF, &[])?;
     let log = disk.with_extension("serial.log");
     let port = free_port()?;
     let mut qemu = start_halted(&args.machine, &disk, &log, port, &[])?;

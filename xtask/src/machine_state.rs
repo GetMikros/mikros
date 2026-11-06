@@ -302,7 +302,9 @@ pub fn run(
     let Some(image) = image(&String::from_utf8_lossy(&symbols.stdout)) else {
         bail!("{} lacks its section symbols", built.kernel.display());
     };
-    image::create_with(kind, built, &dir.join("disk.img"), "test=wait", &[])?;
+    // As for the debugger, the kernel runs at its linked addresses.
+    let cmdline = ["test=wait", image::KASLR_OFF].join(" ");
+    image::create_with(kind, built, &dir.join("disk.img"), &cmdline, &[])?;
     let problems = inspect(machine, dir, &image, timeout)
         .with_context(|| format!("inspecting the machine failed; output in {}", dir.display()))?;
     if !problems.is_empty() {

@@ -167,9 +167,15 @@ pub fn create(kind: Kind, built: &build::Built, out: &Path) -> Result<()> {
     create_with(kind, built, out, "", &[])
 }
 
+/// The command line word that makes the bootloader place the kernel at
+/// its linked addresses.
+pub const KASLR_OFF: &str = "kaslr=off";
+
 /// Like `create`, with `extra` added to the kernel command line and
 /// `more` files, given as paths and contents, on the EFI system
-/// partition.
+/// partition. A fuzz build always boots with `KASLR_OFF`, so that the
+/// addresses its coverage records are those of the kernel image as
+/// linked.
 pub fn create_with(
     kind: Kind,
     built: &build::Built,
@@ -181,6 +187,9 @@ pub fn create_with(
     let mut command_line = format!("root=PARTUUID={root_guid}");
     if !extra.is_empty() {
         command_line = format!("{command_line} {extra}");
+    }
+    if kind == Kind::Fuzz && !extra.split(' ').any(|w| w == KASLR_OFF) {
+        command_line = format!("{command_line} {KASLR_OFF}");
     }
     let contents = esp_files(built, &built.boot_image, command_line)?;
     let files: Vec<(&str, &[u8])> = contents
