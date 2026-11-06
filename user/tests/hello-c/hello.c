@@ -668,6 +668,50 @@ static int null_device_works(void)
 	return ok && found == 1 && others == 0;
 }
 
+static void on_wake(int signo)
+{
+	(void)signo;
+}
+
+static void *wake_main(void *arg)
+{
+	struct timespec t = {0, 5000000};
+	nanosleep(&t, 0);
+	pthread_kill(*(pthread_t *)arg, SIGUSR2);
+	return 0;
+}
+
+/* nanosleep and clock_nanosleep sleep for a time or until a deadline,
+   refuse an invalid time and a clock they cannot sleep on, and a signal
+   ends a sleep early with EINTR and the time that was left. */
+static int sleeps_end_in_time(void)
+{
+	struct timespec before, after, t = {0, 10000000};
+	clock_gettime(CLOCK_MONOTONIC, &before);
+	int ok = nanosleep(&t, 0) == 0;
+	clock_gettime(CLOCK_MONOTONIC, &after);
+	ok = ok && ns(after) - ns(before) >= 10000000;
+	struct timespec until = {after.tv_sec + (after.tv_nsec >= 990000000),
+		(after.tv_nsec + 10000000) % 1000000000};
+	ok = ok && clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, 0) == 0;
+	clock_gettime(CLOCK_MONOTONIC, &after);
+	ok = ok && ns(after) >= ns(until);
+	struct timespec bad = {0, 1000000000};
+	ok = ok && nanosleep(&bad, 0) == -1 && errno == EINVAL;
+	ok = ok && clock_nanosleep(CLOCK_PROCESS_CPUTIME_ID, 0, &t, 0) == EINVAL;
+	struct sigaction sa = {.sa_handler = on_wake}, old;
+	sigaction(SIGUSR2, &sa, &old);
+	pthread_t self = pthread_self(), waker;
+	struct timespec second = {1, 0}, left = {0, 0};
+	if (pthread_create(&waker, 0, wake_main, &self))
+		return 0;
+	int r = nanosleep(&second, &left);
+	int e = errno;
+	pthread_join(waker, 0);
+	sigaction(SIGUSR2, &old, 0);
+	return ok && r == -1 && e == EINTR && left.tv_sec == 0 && left.tv_nsec > 0;
+}
+
 static volatile sig_atomic_t piped;
 
 static void on_pipe(int signo)
@@ -841,9 +885,11 @@ int main(int argc, char **argv)
 		return 27;
 	if (!null_device_works())
 		return 28;
+	if (!sleeps_end_in_time())
+		return 29;
 	char *copy = malloc(64);
 	if (!copy)
-		return 29;
+		return 30;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

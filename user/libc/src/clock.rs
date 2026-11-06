@@ -4,7 +4,7 @@
 //! without the time page asks `mikros.time.Clock` for it through its
 //! directory.
 
-use crate::errno::{self, EAGAIN, EINVAL, EIO};
+use crate::errno::{self, EAGAIN, EFAULT, EINTR, EINVAL, EIO};
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
@@ -100,6 +100,63 @@ pub fn gettime(clock: i64, ts: *mut Timespec) -> i64 {
         }
         Err(e) => -e,
     }
+}
+
+/// The `clock_nanosleep` flag for a deadline instead of a duration.
+const TIMER_ABSTIME: i64 = 1;
+const NANOSECONDS: i64 = 1_000_000_000;
+const INTERRUPTED: mikros_rt::sys::Status = -27;
+
+/// The nanoseconds that `ts` holds, or `EINVAL` when it is not a valid
+/// time.
+fn nanos(ts: *const Timespec) -> Result<i64, i64> {
+    // SAFETY: musl passes a `struct timespec`.
+    let Some(t) = (unsafe { ts.as_ref() }) else {
+        return Err(EFAULT);
+    };
+    if t.sec < 0 || !(0..NANOSECONDS).contains(&t.nsec) {
+        return Err(EINVAL);
+    }
+    Ok(t.sec.saturating_mul(NANOSECONDS).saturating_add(t.nsec))
+}
+
+/// `clock_nanosleep`, and `nanosleep` as `CLOCK_REALTIME` without flags:
+/// sleeps until the time `req` of `clock` with `TIMER_ABSTIME`, and for
+/// `req` otherwise. A signal ends the sleep with `EINTR`, after storing
+/// at `rem` what was left of a sleep for a time.
+pub fn nanosleep(clock: i64, flags: i64, req: *const Timespec, rem: *mut Timespec) -> i64 {
+    let sleep = || -> Result<i64, i64> {
+        if clock != CLOCK_MONOTONIC && clock != CLOCK_REALTIME {
+            return Err(EINVAL);
+        }
+        let ns = nanos(req)?;
+        let now = monotonic()?;
+        let absolute = flags & TIMER_ABSTIME != 0;
+        let deadline = match (absolute, clock) {
+            (false, _) => now.saturating_add(ns),
+            (true, CLOCK_MONOTONIC) => ns,
+            (true, _) => now.saturating_add(ns.saturating_sub(realtime()?)),
+        };
+        // SAFETY: the call takes no pointers.
+        match unsafe { sys::thread_sleep(deadline) } {
+            mikros_rt::OK => Ok(0),
+            INTERRUPTED => {
+                if !absolute && !rem.is_null() {
+                    let left = deadline.saturating_sub(monotonic()?).max(0);
+                    // SAFETY: musl passes room for the time left.
+                    unsafe {
+                        rem.write(Timespec {
+                            sec: left / NANOSECONDS,
+                            nsec: left % NANOSECONDS,
+                        })
+                    };
+                }
+                Err(EINTR)
+            }
+            status => Err(errno::from_status(status)),
+        }
+    };
+    sleep().unwrap_or_else(|e| -e)
 }
 
 /// Reads the `u32` at `offset` of the page at `page`.

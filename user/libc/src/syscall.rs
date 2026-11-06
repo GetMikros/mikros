@@ -37,6 +37,7 @@ const SYS_PIPE: i64 = 22;
 const SYS_DUP: i64 = 32;
 const SYS_GETPID: i64 = 39;
 const SYS_DUP2: i64 = 33;
+const SYS_NANOSLEEP: i64 = 35;
 const SYS_EXECVE: i64 = 59;
 const SYS_EXIT: i64 = 60;
 const SYS_WAIT4: i64 = 61;
@@ -57,6 +58,7 @@ const SYS_SET_THREAD_AREA: i64 = 205;
 const SYS_GETDENTS64: i64 = 217;
 const SYS_SET_TID_ADDRESS: i64 = 218;
 const SYS_CLOCK_GETTIME: i64 = 228;
+const SYS_CLOCK_NANOSLEEP: i64 = 230;
 const SYS_EXIT_GROUP: i64 = 231;
 const SYS_TGKILL: i64 = 234;
 const SYS_OPENAT: i64 = 257;
@@ -206,6 +208,18 @@ extern "C" fn __mikros_syscall(
         SYS_POLL => poll::poll(a1 as *mut poll::Pollfd, a2 as u64, a3),
         SYS_GETRANDOM => getrandom(a1 as *mut u8, a2 as u64),
         SYS_CLOCK_GETTIME => clock::gettime(a1, a2 as *mut clock::Timespec),
+        SYS_NANOSLEEP => clock::nanosleep(
+            clock::CLOCK_REALTIME,
+            0,
+            a1 as *const clock::Timespec,
+            a2 as *mut clock::Timespec,
+        ),
+        SYS_CLOCK_NANOSLEEP => clock::nanosleep(
+            a1,
+            a2,
+            a3 as *const clock::Timespec,
+            a4 as *mut clock::Timespec,
+        ),
         SYS_EXIT_GROUP => exit(a1),
         SYS_EXIT => thread::exit(),
         _ => -ENOSYS,
