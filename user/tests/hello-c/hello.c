@@ -16,6 +16,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -674,11 +675,20 @@ static void on_wake(int signo)
 	(void)signo;
 }
 
+/* Set once the wait that wake_main interrupts has ended. */
+static atomic_int waited;
+
+/* Sends SIGUSR2 to the thread `arg` every 5 ms until its wait has ended:
+   a signal that comes before the wait begins, as on a slow machine, is
+   handled without ending it. The caller clears `waited` before it
+   starts the thread and sets it once the wait ended. */
 static void *wake_main(void *arg)
 {
 	struct timespec t = {0, 5000000};
-	nanosleep(&t, 0);
-	pthread_kill(*(pthread_t *)arg, SIGUSR2);
+	while (!atomic_load(&waited)) {
+		nanosleep(&t, 0);
+		pthread_kill(*(pthread_t *)arg, SIGUSR2);
+	}
 	return 0;
 }
 
@@ -704,10 +714,12 @@ static int sleeps_end_in_time(void)
 	sigaction(SIGUSR2, &sa, &old);
 	pthread_t self = pthread_self(), waker;
 	struct timespec second = {1, 0}, left = {0, 0};
+	atomic_store(&waited, 0);
 	if (pthread_create(&waker, 0, wake_main, &self))
 		return 0;
 	int r = nanosleep(&second, &left);
 	int e = errno;
+	atomic_store(&waited, 1);
 	pthread_join(waker, 0);
 	sigaction(SIGUSR2, &old, 0);
 	return ok && r == -1 && e == EINTR && left.tv_sec == 0 && left.tv_nsec > 0;
@@ -824,10 +836,16 @@ static int masks_apply_to_waits(void)
 	sa.sa_flags = SA_RESTART;
 	sigaction(SIGUSR2, &sa, 0);
 	pthread_t self = pthread_self(), waker;
+	atomic_store(&waited, 0);
 	if (pthread_create(&waker, 0, wake_main, &self))
 		return 0;
-	ok = ok && pause() == -1 && errno == EINTR && woken == 4;
+	int r = pause();
+	int e = errno;
+	atomic_store(&waited, 1);
 	pthread_join(waker, 0);
+	/* A signal sent again before the waker saw the wait end may have run
+	   the handler once more. */
+	ok = ok && r == -1 && e == EINTR && woken >= 4;
 	sigaction(SIGUSR2, &old, 0);
 	return ok;
 }
