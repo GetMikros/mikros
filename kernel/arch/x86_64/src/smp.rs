@@ -56,7 +56,10 @@ const T_DESCRIPTORS: [u64; 3] = [0, 0x00AF_9A00_0000_FFFF, 0x00CF_9200_0000_FFFF
 // the page's physical address divided by 16. The code loads the GDT,
 // enables PAE, the startup page table, long mode and no-execute pages,
 // and then paging and protection together, and jumps to its 64-bit part,
-// which takes the stack and the argument and jumps to the entry point.
+// which takes the stack and the argument, points the GS base at the
+// argument, the processor's data, and jumps to the entry point. The
+// fuzz build's coverage hook reads that data through GS from the entry
+// point's first instruction on.
 core::arch::global_asm!(
     ".pushsection .rodata.ap_trampoline, \"a\"",
     ".global ap_trampoline_start",
@@ -86,6 +89,11 @@ core::arch::global_asm!(
     "ap_trampoline_long:",
     "movq (ap_trampoline_start + {stack})(%rip), %rsp",
     "movq (ap_trampoline_start + {arg})(%rip), %rdi",
+    "movl ${gs_base}, %ecx",
+    "movl %edi, %eax",
+    "movq %rdi, %rdx",
+    "shrq $32, %rdx",
+    "wrmsr",
     "movq (ap_trampoline_start + {entry})(%rip), %rax",
     "jmpq *%rax",
     "ap_trampoline_end:",
@@ -96,6 +104,7 @@ core::arch::global_asm!(
     stack = const T_STACK,
     arg = const T_ARG,
     entry = const T_ENTRY,
+    gs_base = const crate::percpu::IA32_GS_BASE,
     options(att_syntax),
 );
 
