@@ -1,10 +1,11 @@
 [alias]
 xtask = "run --package xtask --quiet --"
 
-# The kernel is linked at fixed addresses in the top 2 GiB.
+# The kernel is a position-independent image in the top 2 GiB, whose
+# only relocations are relative ones.
 [target.x86_64-unknown-none]
 rustflags = [
-    "-C", "relocation-model=static",
+    "-C", "relocation-model=pie",
     "-C", "code-model=kernel",
     "-C", "force-frame-pointers=yes",
     # Keep chacha20 on its portable backend; it would otherwise select
