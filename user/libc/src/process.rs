@@ -1,12 +1,12 @@
-//! The process's IDs and `kill`, which sends signals through the process
-//! manager's `Launcher`.
+//! The process's IDs, its process group and session, and `kill`, which
+//! go through the process manager's `Launcher`.
 
 use crate::errno::{self, EINVAL, EIO, ENOSYS, EPERM, ESRCH};
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::process::LauncherClient;
+use mikros_rt::interfaces::mikros::process::{LauncherClient, ProcessInfo};
 use mikros_rt::sys::{self, Handle};
 
 const FOREVER: i64 = i64::MAX;
@@ -89,20 +89,84 @@ fn kill_error(status: Status) -> i64 {
     }
 }
 
-/// `kill`: sends `signo` to process `pid`, or to process group `-pid`
-/// below -1. Signalling every process, or the caller's group, is not
-/// supported yet.
+/// What the process manager knows of process `pid`, 0 for the caller.
+fn info(pid: i64) -> Result<ProcessInfo, i64> {
+    let pid = match pid {
+        0 => PID.load(Ordering::Relaxed),
+        pid => u32::try_from(pid).map_err(|_| ESRCH)?,
+    };
+    match unsignalled(|| launcher().get_info(pid, FOREVER)) {
+        Ok(Ok(reply)) => Ok(reply.info),
+        Ok(Err(status)) => Err(kill_error(status)),
+        Err(_) => Err(EIO),
+    }
+}
+
+/// `getpgid`: the process group of process `pid`, 0 for the caller.
+pub fn getpgid(pid: i64) -> i64 {
+    info(pid).map_or_else(|e| -e, |i| i64::from(i.process_group))
+}
+
+/// `getsid`: the session of process `pid`, 0 for the caller.
+pub fn getsid(pid: i64) -> i64 {
+    info(pid).map_or_else(|e| -e, |i| i64::from(i.session))
+}
+
+/// `setsid`: makes the caller the leader of a new session and process
+/// group, and returns its ID. Fails with `EPERM` when the caller leads a
+/// process group.
+pub fn setsid() -> i64 {
+    match unsignalled(|| launcher().create_session(FOREVER)) {
+        Ok(Ok(reply)) => i64::from(reply.session),
+        Ok(Err(Status::BadState)) => -EPERM,
+        Ok(Err(status)) => -kill_error(status),
+        Err(_) => -EIO,
+    }
+}
+
+/// `setpgid`: moves process `pid`, 0 for the caller, to process group
+/// `pgid`, 0 for a group with the process's own ID. A process that is
+/// not the caller or a child of its session, or a group of another
+/// session or that does not exist, is refused with `EPERM`.
+pub fn setpgid(pid: i64, pgid: i64) -> i64 {
+    if pgid < 0 {
+        return -EINVAL;
+    }
+    let pid = match pid {
+        0 => PID.load(Ordering::Relaxed),
+        pid => match u32::try_from(pid) {
+            Ok(pid) => pid,
+            Err(_) => return -ESRCH,
+        },
+    };
+    let Ok(group) = u32::try_from(if pgid == 0 { i64::from(pid) } else { pgid }) else {
+        return -EINVAL;
+    };
+    match unsignalled(|| launcher().set_process_group(pid, group, FOREVER)) {
+        Ok(Ok(_)) => 0,
+        Ok(Err(status)) => -kill_error(status),
+        Err(_) => -EIO,
+    }
+}
+
+/// `kill`: sends `signo` to process `pid`, to the caller's process group
+/// for 0, or to process group `-pid` below -1. Signalling every process
+/// is not supported yet.
 pub fn kill(pid: i64, signo: i64) -> i64 {
     if !(0..=64).contains(&signo) {
         return -EINVAL;
     }
     let group = match pid {
         1.. => None,
-        ..-1 => match u32::try_from(-pid) {
+        0 => match info(0) {
+            Ok(own) => Some(own.process_group),
+            Err(e) => return -e,
+        },
+        ..=-2 => match u32::try_from(-pid) {
             Ok(group) => Some(group),
             Err(_) => return -ESRCH,
         },
-        _ => return -ENOSYS,
+        -1 => return -ENOSYS,
     };
     let client = launcher();
     let signo = signo as u32;

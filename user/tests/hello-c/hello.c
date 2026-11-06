@@ -712,6 +712,22 @@ static int sleeps_end_in_time(void)
 	return ok && r == -1 && e == EINTR && left.tv_sec == 0 && left.tv_nsec > 0;
 }
 
+/* The process manager keeps each process's group and session: setsid
+   makes the caller lead a new session and group, a group leader cannot
+   start another, setpgid moves the caller only to a group of its
+   session, and kill(0) signals the caller's group. */
+static int groups_and_sessions(void)
+{
+	pid_t me = getpid();
+	int ok = getpgrp() == getpgid(0) && getpgid(me) == getpgid(0) && getsid(0) == getsid(me);
+	ok = ok && getpgid(99999) == -1 && errno == ESRCH;
+	ok = ok && setsid() == me && getsid(0) == me && getpgrp() == me;
+	ok = ok && setsid() == -1 && errno == EPERM;
+	ok = ok && setpgid(0, 0) == 0 && getpgrp() == me;
+	ok = ok && setpgid(0, 99999) == -1 && errno == EPERM;
+	return ok && kill(0, 0) == 0;
+}
+
 static volatile sig_atomic_t piped;
 
 static void on_pipe(int signo)
@@ -887,9 +903,11 @@ int main(int argc, char **argv)
 		return 28;
 	if (!sleeps_end_in_time())
 		return 29;
+	if (!groups_and_sessions())
+		return 30;
 	char *copy = malloc(64);
 	if (!copy)
-		return 30;
+		return 31;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

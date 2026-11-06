@@ -47,7 +47,11 @@ const SYS_GETCWD: i64 = 79;
 const SYS_CHDIR: i64 = 80;
 const SYS_FCHDIR: i64 = 81;
 const SYS_READLINK: i64 = 89;
+const SYS_SETPGID: i64 = 109;
 const SYS_GETPPID: i64 = 110;
+const SYS_SETSID: i64 = 112;
+const SYS_GETPGID: i64 = 121;
+const SYS_GETSID: i64 = 124;
 const SYS_RT_SIGPENDING: i64 = 127;
 const SYS_RT_SIGTIMEDWAIT: i64 = 128;
 const SYS_SIGALTSTACK: i64 = 131;
@@ -197,6 +201,10 @@ extern "C" fn __mikros_syscall(
         }
         SYS_GETPID => process::getpid(),
         SYS_GETPPID => process::getppid(),
+        SYS_SETPGID => process::setpgid(a1, a2),
+        SYS_GETPGID => process::getpgid(a1),
+        SYS_SETSID => process::setsid(),
+        SYS_GETSID => process::getsid(a1),
         // SAFETY: musl passes what `execve` takes.
         SYS_EXECVE => unsafe {
             spawn::execve(a1 as *const _, a2 as *const *const _, a3 as *const *const _)
