@@ -215,16 +215,20 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             for (tree, system) in [(&cmake_tree, "cmake"), (&meson_tree, "meson")] {
                 let real = format!("libtally-{system}.1.2.3.dlib");
                 let major = format!("libtally-{system}.1.dlib");
+                // The library without a version has the major version 0.
+                let base = format!("libbase-{system}.0.dlib");
                 crate::build_systems::check_installed(
                     tree,
                     &[
                         &format!("bin/tally-{system}-user"),
                         &format!("lib/{real}"),
+                        &format!("lib/{base}"),
                         &format!("lib/libcount-{system}.slib"),
                     ],
                     &[
                         (&format!("lib/{major}"), &real),
                         (&format!("lib/libtally-{system}.dlib"), &major),
+                        (&format!("lib/libbase-{system}.dlib"), &base),
                     ],
                 )?;
                 println!("built    {}", tree.display());
@@ -278,12 +282,20 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         &cmake_tree.join("lib/libtally-cmake.1.dlib"),
                     ),
                     (
+                        "usr/lib/libbase-cmake.0.dlib",
+                        &cmake_tree.join("lib/libbase-cmake.0.dlib"),
+                    ),
+                    (
                         "usr/bin/tally-meson-user",
                         &meson_tree.join("bin/tally-meson-user"),
                     ),
                     (
                         "usr/lib/libtally-meson.1.dlib",
                         &meson_tree.join("lib/libtally-meson.1.dlib"),
+                    ),
+                    (
+                        "usr/lib/libbase-meson.0.dlib",
+                        &meson_tree.join("lib/libbase-meson.0.dlib"),
                     ),
                     ("usr/share/hello/greeting.txt", greeting.as_path()),
                 ],

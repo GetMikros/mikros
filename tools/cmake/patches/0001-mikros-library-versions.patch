@@ -1,8 +1,21 @@
 diff --git a/Source/cmGeneratorTarget.cxx b/Source/cmGeneratorTarget.cxx
-index 458e9616..7187c140 100644
+index 458e9616..8ca2f280 100644
 --- a/Source/cmGeneratorTarget.cxx
 +++ b/Source/cmGeneratorTarget.cxx
-@@ -4616,12 +4616,17 @@ std::string cmGeneratorTarget::ComputeVersionedName(std::string const& prefix,
+@@ -3788,6 +3788,12 @@ cmGeneratorTarget::Names cmGeneratorTarget::GetLibraryNames(
+     // and then only when the platform supports an soname flag.
+     version = nullptr;
+     soversion = nullptr;
++  } else if (!version && !soversion &&
++             this->GetType() == cmStateEnums::SHARED_LIBRARY) {
++    // Platforms that set CMAKE_SHARED_LIBRARY_DEFAULT_SOVERSION give a
++    // shared library without a version that one.
++    soversion =
++      this->Makefile->GetDefinition("CMAKE_SHARED_LIBRARY_DEFAULT_SOVERSION");
+   }
+   if (version && !soversion) {
+     // The soversion must be set if the library version is set.  Use
+@@ -4616,12 +4622,17 @@ std::string cmGeneratorTarget::ComputeVersionedName(std::string const& prefix,
                                                      std::string const& name,
                                                      cmValue version) const
  {

@@ -4,8 +4,9 @@ project('tally', 'c')
 tally = shared_library('tally-meson', 'tally.c',
   c_args: '-DBUILD_SYSTEM="meson"', version: '1.2.3', soversion: '1',
   install: true)
+base = shared_library('base-meson', 'base.c', install: true)
 count = static_library('count-meson', 'count.c', install: true)
-executable('tally-meson-user', 'main.c', link_with: [tally, count],
+executable('tally-meson-user', 'main.c', link_with: [tally, base, count],
   install: true)
 
 # Libraries in the sysroot are found with their Mikros suffixes.

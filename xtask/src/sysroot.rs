@@ -21,7 +21,9 @@
 //! and `crate::cmake` patch, which name shared libraries
 //! `lib<name>.<version>.dlib` with the `DT_SONAME`
 //! `lib<name>.<major>.dlib`, link `lib<name>.dlib` to the latter, and
-//! name static libraries `lib<name>.slib`.
+//! name static libraries `lib<name>.slib`. A shared library without a
+//! version has the major version 0; loadable modules keep the names the
+//! project gives them.
 
 use crate::llvm::{self, LLVM};
 use anyhow::{Context, Result, bail};
@@ -330,7 +332,9 @@ set(CMAKE_FIND_LIBRARY_PREFIXES "lib")
 set(CMAKE_FIND_LIBRARY_SUFFIXES ".dlib" ".slib")
 # The version goes before the suffix, which the Mikros patch of CMake
 # allows: lib<name>.<version>.dlib, with the soname lib<name>.<major>.dlib.
+# A shared library without a version has the major version 0.
 set(CMAKE_SHARED_LIBRARY_VERSION_BEFORE_SUFFIX 1)
+set(CMAKE_SHARED_LIBRARY_DEFAULT_SOVERSION 0)
 set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,")
 set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")
 set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG_SEP ":")
@@ -441,6 +445,7 @@ mod tests {
             "set(CMAKE_SHARED_LIBRARY_SUFFIX \".dlib\")",
             "set(CMAKE_STATIC_LIBRARY_SUFFIX \".slib\")",
             "set(CMAKE_SHARED_LIBRARY_VERSION_BEFORE_SUFFIX 1)",
+            "set(CMAKE_SHARED_LIBRARY_DEFAULT_SOVERSION 0)",
         ] {
             assert!(CMAKE_PLATFORM.lines().any(|l| l == line), "{line}");
         }
