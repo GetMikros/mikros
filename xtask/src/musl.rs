@@ -52,9 +52,10 @@ pub fn install_headers(cfg: &Path, sysroot: &Path) -> Result<()> {
 }
 
 /// Builds musl, configured by `install_headers` with the Clang
-/// configuration `cfg`, linking `layer`, the object of the shared
-/// variant of the Mikros layer, into the shared library.
-pub fn build(cfg: &Path, layer: &Path) -> Result<Built> {
+/// configuration `cfg`, linking `extra`, the object of the shared
+/// variant of the Mikros layer and the ABI note, into the shared
+/// library.
+pub fn build(cfg: &Path, extra: &[&Path]) -> Result<Built> {
     let build = configured(cfg)?;
     // The shared library is linked again every time, since make does not
     // see the Mikros layer change.
@@ -75,7 +76,11 @@ pub fn build(cfg: &Path, layer: &Path) -> Result<Built> {
         "lib/crtn.o",
         &format!(
             "LIBCC={} {}",
-            layer.display(),
+            extra
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
             crate::llvm::builtins().display()
         ),
     ]))

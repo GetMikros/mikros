@@ -68,26 +68,43 @@ pub fn build() -> Result<PathBuf> {
     llvm::build_builtins(&sysroot)?;
     let layer = mikros_layer(false)?;
     let shared_layer = exported_object(&mikros_layer(true)?)?;
-    let musl = crate::musl::build(&cfg, &shared_layer)?;
+    let abi_note = crate::workspace_root().join("target/musl/abi-note.o");
+    assemble(&cfg, "user/libc/crt/abi-note.S", &abi_note)?;
+    let musl = crate::musl::build(&cfg, &[&shared_layer, &abi_note])?;
     let lib = sysroot.join("lib");
     combine(&lib.join("libc.slib"), &[&musl.libc, &layer])?;
     // The shared library is also the dynamic linker.
     copy(&musl.shared, &lib.join("libc.dlib"))?;
     copy(&musl.shared, &lib.join("ld-mikros.dlib"))?;
-    copy(&musl.crti, &lib.join("crti.o"))?;
+    // Every executable and shared library links crti.o, and so gets the
+    // ABI note.
+    crate::port::run(
+        Command::new(llvm::tool("ld.lld"))
+            .arg("-r")
+            .arg(&musl.crti)
+            .arg(&abi_note)
+            .arg("-o")
+            .arg(lib.join("crti.o")),
+    )
+    .context("adding the ABI note to crti.o")?;
     copy(&musl.crtn, &lib.join("crtn.o"))?;
     copy(&llvm::build_unwinder(&cfg)?, &lib.join("libunwind.slib"))?;
-    let crt1 = crate::workspace_root().join("user/libc/crt/crt1.S");
+    assemble(&cfg, "user/libc/crt/crt1.S", &lib.join("crt1.o"))?;
+    Ok(sysroot)
+}
+
+/// Assembles `source`, a path relative to the repository, to `object`
+/// with the Clang configuration `cfg`.
+fn assemble(cfg: &Path, source: &str, object: &Path) -> Result<()> {
     crate::port::run(
         Command::new(llvm::tool("clang"))
             .arg(format!("--config={}", cfg.display()))
             .arg("-c")
-            .arg(&crt1)
+            .arg(crate::workspace_root().join(source))
             .arg("-o")
-            .arg(lib.join("crt1.o")),
+            .arg(object),
     )
-    .context("assembling crt1.o")?;
-    Ok(sysroot)
+    .with_context(|| format!("assembling {source}"))
 }
 
 /// Builds the Mikros layer of the C library, a static library of the

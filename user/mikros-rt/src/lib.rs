@@ -95,6 +95,23 @@ pub fn run_managed(bootstrap: sys::Handle, main: fn(&Managed) -> i64) -> i64 {
     }
 }
 
+// The ABI levels of the program, the minimum it needs and the one it was
+// built for, as a note of the name `Mikros` and the type 1, as the C
+// library's crti.o gives C programs.
+#[cfg(feature = "entry")]
+core::arch::global_asm!(
+    ".pushsection .note.mikros.abi, \"a\", @note",
+    ".p2align 2",
+    ".long 7",
+    ".long 8",
+    ".long 1",
+    ".asciz \"Mikros\"",
+    ".p2align 2",
+    ".long 0",
+    ".long 0",
+    ".popsection",
+);
+
 // The kernel starts the first thread with the stack pointer 16-byte
 // aligned, the bootstrap channel in RDI and the second argument in RSI.
 // The calls leave the stack aligned as the SysV ABI expects at a call.
