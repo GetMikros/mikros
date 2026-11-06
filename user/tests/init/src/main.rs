@@ -870,6 +870,10 @@ fn within(seconds: i64) -> i64 {
 /// machine.
 const PROBE_SECONDS: i64 = 120;
 
+/// The seconds that the runner of the ported projects' tests has to run
+/// them all, each of which it kills after its own timeout.
+const PORT_TESTS_SECONDS: i64 = 1200;
+
 /// Waits until `thread` is blocked, or fails after `in_time`.
 fn wait_until_blocked(thread: Handle) -> Result {
     wait_for_state(thread, STATE_BLOCKED)
@@ -8313,6 +8317,64 @@ mod manager {
         Ok(())
     }
 
+    /// From a boot image in which the runner of the ported projects'
+    /// tests stands in for the service manager, every test of their
+    /// suites that it runs passes: the runner, which logs each result,
+    /// exits with the number that did not.
+    pub fn ported_software_passes_its_tests(s: &Startup) -> Result {
+        let image = boot_file(s, b"tests/ports.img")?;
+        let mut mem = 0;
+        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the image", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `image`.
+        check("writing the image", unsafe {
+            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
+        })?;
+        let mut m = start(s)?;
+        let (mut startup, init) = start_message(s, &m, 1)?;
+        startup.boot_image = mem;
+        m.send(startup, false)?;
+        let deadline = super::in_time();
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![log], deadline) else {
+            return Err(Failure {
+                what: "starting the runner",
+                status: 0,
+            });
+        };
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let ended = unsafe {
+            sys::object_wait_one(
+                started.process.raw(),
+                TERMINATED,
+                super::within(super::PORT_TESTS_SECONDS),
+                &mut observed,
+            )
+        };
+        ensure("ending the runner", ended == 0)?;
+        let code = super::u64_at(&super::info::<0x28>(started.process.raw(), 2)?, 0) as i64;
+        if code != 0 {
+            mikros_rt::log!(Error, "{code} tests of ported software did not pass");
+        }
+        ensure("passing every test of ported software", code == 0)?;
+        drop(m);
+        Ok(())
+    }
+
     /// From a boot image in which the broker probe stands in for the
     /// service manager, the permission broker starts from a sealed
     /// manifest and serves its protocol: the probe exits with 0 once
@@ -8802,6 +8864,7 @@ mod bootfs {
                         "launcher.img",
                         "managed",
                         "pie",
+                        "ports.img",
                         "services.img",
                     ],
             )?;
@@ -8983,7 +9046,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 129] = [
+const TESTS: [(&str, Test); 130] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9037,6 +9100,10 @@ const TESTS: [(&str, Test); 129] = [
     (
         "process_manager_serves_launcher",
         manager::process_manager_serves_launcher,
+    ),
+    (
+        "ported_software_passes_its_tests",
+        manager::ported_software_passes_its_tests,
     ),
     (
         "permission_broker_serves",

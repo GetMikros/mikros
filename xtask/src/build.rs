@@ -103,7 +103,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     }
     let xkbcommon = crate::ports::build(&crate::ports::XKBCOMMON)?;
     crate::build_systems::check_installed(
-        &xkbcommon,
+        &xkbcommon.install,
         &[
             "lib/libxkbcommon.0.13.2.dlib",
             "include/xkbcommon/xkbcommon.h",
@@ -114,7 +114,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             ("lib/libxkbcommon.dlib", "libxkbcommon.0.dlib"),
         ],
     )?;
-    println!("built    {}", xkbcommon.display());
+    println!("built    {}", xkbcommon.install.display());
     let boot_image = match boot {
         BootImage::System => {
             let init = user_build("init", kind)?;
@@ -321,6 +321,22 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", launcher.display());
+            let runner = user_build("port-tests", kind)?;
+            println!("built    {}", runner.display());
+            // The ported software test serves this image, in which the
+            // runner of the ported projects' tests takes the service
+            // manager's place.
+            let plan = crate::workspace_root().join("target/ported/port-tests.plan");
+            let mut members =
+                crate::port_tests::members(&crate::ports::XKBCOMMON, &xkbcommon, &plan)?;
+            members.push(("usr/bin/service-manager".into(), runner));
+            members.push(("usr/lib/ld-mikros.dlib".into(), dynamic_linker.clone()));
+            let members: Vec<(&str, &Path)> = members
+                .iter()
+                .map(|(n, p)| (n.as_str(), p.as_path()))
+                .collect();
+            let ports_image = boot_image(kind, "ports.img", &members)?;
+            println!("built    {}", ports_image.display());
             let broker = user_build("permissions-broker", kind)?;
             println!("built    {}", broker.display());
             let broker_probe = user_build("broker-probe", kind)?;
@@ -386,6 +402,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/services.img", services_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
+                ("tests/ports.img", ports_image.as_path()),
                 ("tests/channel-echo", echo.as_path()),
                 ("tests/call-server", server.as_path()),
                 ("tests/debuggee", debuggee.as_path()),

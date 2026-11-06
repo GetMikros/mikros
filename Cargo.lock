@@ -1443,6 +1443,7 @@ dependencies = [
  "flate2",
  "libc",
  "lzma-rs",
+ "serde_json",
  "sha2",
  "syscall-table",
  "tar",
