@@ -844,10 +844,24 @@ fn soon() -> i64 {
     now() + 5_000_000
 }
 
+/// How many times longer things may take in a fuzz build, whose kernel
+/// checks every lock it takes and calls the coverage hook in every block,
+/// which is slow under emulation.
+#[cfg(feature = "fuzz")]
+const SLOWER: i64 = 10;
+#[cfg(not(feature = "fuzz"))]
+const SLOWER: i64 = 1;
+
 /// A deadline for something that must happen, far enough off that a
 /// slow or loaded machine still meets it.
 fn in_time() -> i64 {
-    now() + 1_000_000_000
+    within(1)
+}
+
+/// A deadline `seconds` from now for something that must happen, scaled
+/// by `SLOWER`.
+fn within(seconds: i64) -> i64 {
+    now() + SLOWER * seconds * 1_000_000_000
 }
 
 /// Waits until `thread` is blocked, or fails after `in_time`.
@@ -6126,12 +6140,14 @@ extern "sysv64" fn spin_until_handled(rounds: u64, _: u64) -> ! {
 /// also runs the handler's code and its return for the first time, which
 /// an emulator such as QEMU without KVM takes milliseconds to translate.
 /// Each round starts once the spinner spins again, and each of the ten
-/// rounds after the first must take less than 2 ms, half a slice. The
+/// rounds after the first must take less than 2 ms, half a slice, or
+/// `SLOWER` times that in a fuzz build, which only shows that the handler
+/// runs. The
 /// spinner ends and the action is restored whether the rounds passed or
 /// not, so that a failure leaves nothing behind for later tests.
 fn signal_reaches_other_processor(s: &Startup) -> Result {
     const ROUNDS: u64 = 10;
-    const LIMIT: i64 = 2_000_000;
+    const LIMIT: i64 = SLOWER * 2_000_000;
     let mut count = 0u32;
     // SAFETY: the pointer describes `count`.
     check("reading the processor count", unsafe {
@@ -8277,7 +8293,7 @@ mod manager {
             sys::object_wait_one(
                 started.process.raw(),
                 TERMINATED,
-                super::now() + 30_000_000_000,
+                super::within(30),
                 &mut observed,
             )
         };
@@ -8330,7 +8346,7 @@ mod manager {
             sys::object_wait_one(
                 started.process.raw(),
                 TERMINATED,
-                super::now() + 30_000_000_000,
+                super::within(30),
                 &mut observed,
             )
         };
@@ -8425,7 +8441,7 @@ mod manager {
                 status: 0,
             });
         };
-        let deadline = super::now() + 30_000_000_000;
+        let deadline = super::within(30);
         // The restart probe fails every time it runs: it is started once
         // and restarted five times.
         const RESTARTED: &[u8] = b"started service restart-probe";
