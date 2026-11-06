@@ -125,6 +125,14 @@ const SYSCALL_LEN: u64 = 2;
 /// interrupted, as its request has been written.
 pub const CHANNEL_CALL: u64 = generated::CHANNEL_CALL;
 
+/// The waits that a temporary mask of `signal_set_wait_mask` applies to.
+const WAITS: [u64; 4] = [
+    generated::PORT_WAIT,
+    generated::FUTEX_WAIT,
+    generated::OBJECT_WAIT_ONE,
+    generated::THREAD_SLEEP,
+];
+
 extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     // The entry code leaves RFLAGS as SYSCALL set it through IA32_FMASK.
     debug_assert!(
@@ -148,12 +156,43 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
         frame.rdi, frame.rsi, frame.rdx, frame.r10, frame.r8, frame.r9, frame.r12, frame.r13,
     ];
     let number = frame.rax;
+    // A temporary mask applies to a wait that is the next call, from
+    // before it begins, and is dropped for any other call. Signals are
+    // delivered only on the way back to user mode, so none slips in
+    // before the wait.
+    let temporary = {
+        let mut own = thread.signals().lock();
+        match own.wait_mask.take() {
+            Some(mask) if WAITS.contains(&number) => {
+                own.saved_mask = Some(own.mask);
+                own.mask = mask;
+                Some(mask)
+            }
+            _ => None,
+        }
+    };
     thread.x86().set_syscall_frame(frame);
     let result = generated::dispatch(number, &args);
     thread.x86().set_syscall_frame(core::ptr::null_mut());
     let changed = thread.x86().take_syscall_changed();
     frame.rax = result as u64;
-    if result == Error::Interrupted as i64 {
+    if let Some(mask) = temporary
+        && result == Error::Interrupted as i64
+    {
+        // The wait ends with ERR_INTERRUPTED, even for a handler that
+        // asks to restart, unless a suspension ended it: then it runs
+        // again with the same temporary mask, and the thread's own mask
+        // comes back meanwhile.
+        if thread.take_restart() {
+            frame.rip = at;
+            frame.rax = number;
+            let mut own = thread.signals().lock();
+            own.wait_mask = Some(mask);
+            if let Some(saved) = own.saved_mask.take() {
+                own.mask = saved;
+            }
+        }
+    } else if result == Error::Interrupted as i64 {
         // A wait that ended for a suspension leaves the thread at its
         // SYSCALL instruction with the number restored, so that the call
         // runs again with the same arguments.
@@ -166,9 +205,17 @@ extern "sysv64" fn syscall_handler(frame: &mut Frame) -> u64 {
     } else {
         thread.take_restart();
     }
-    drop(thread);
     crate::sched::preempt_user();
     let reported = before_user_return(frame);
+    // Without a handler, whose frame keeps it, the thread's own mask
+    // comes back as the call returns.
+    {
+        let mut own = thread.signals().lock();
+        if let Some(saved) = own.saved_mask.take() {
+            own.mask = saved;
+        }
+    }
+    drop(thread);
     crate::sched::exit_if_dead();
     // SYSRET to an address outside the user range would fault in ring 0,
     // and after a report or a suspension the handler may have changed RCX

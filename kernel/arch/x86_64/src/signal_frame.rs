@@ -157,9 +157,12 @@ fn write_frame(
     // Only the thread itself changes its mask and alternate stack, so
     // they stay as read here while the frame is written without the lock,
     // which a fault on the user stack may wait with.
+    // The frame keeps the mask that a temporary one replaced, for
+    // `signal_return` to restore.
     let (altstack, on_altstack, mask) = {
-        let own = thread.signals().lock();
-        (own.altstack, own.on_altstack(frame.rsp), own.mask)
+        let mut own = thread.signals().lock();
+        let mask = own.saved_mask.take().unwrap_or(own.mask);
+        (own.altstack, own.on_altstack(frame.rsp), mask)
     };
     let alternate = action.flags & ONSTACK != 0 && altstack.1 != 0 && !on_altstack;
     let end = if alternate {

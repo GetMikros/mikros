@@ -6322,6 +6322,60 @@ fn futexes_across_processors(s: &Startup) -> Result {
     check("allowing every processor", set(s.thread, &[0xFF; 32]))
 }
 
+/// A temporary mask that `signal_set_wait_mask` gives applies to the next
+/// call when it is a wait: a pending signal it does not block ends
+/// `thread_sleep` at once with `ERR_INTERRUPTED`, even though the action
+/// has `RESTART`, the handler runs, and the thread's own mask, which
+/// blocks the signal, is back afterwards. Another call in between drops
+/// the temporary mask.
+fn temporary_mask_ends_a_wait(s: &Startup) -> Result {
+    const RESTART: u32 = 1 << 0;
+    let usr1 = 1u64 << (USR1 - 1);
+    let mut own = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking USR1", unsafe {
+        sys::signal_set_mask(0, usr1, &mut own)
+    })?;
+    let old = catch_usr1(RESTART)?;
+    // SAFETY: the call takes no pointers.
+    check("making USR1 pending", unsafe {
+        sys::thread_signal(s.thread, USR1, 1)
+    })?;
+    let soon = now() + 2_000_000;
+    // SAFETY: the calls take no pointers.
+    let status = unsafe {
+        sys::signal_set_wait_mask(0);
+        now();
+        sys::thread_sleep(soon)
+    };
+    ensure(
+        "dropping the temporary mask for another call",
+        status == 0 && HANDLED.load(Ordering::Acquire) == 0,
+    )?;
+    let deadline = in_time();
+    // SAFETY: the calls take no pointers.
+    let status = unsafe {
+        sys::signal_set_wait_mask(0);
+        sys::thread_sleep(deadline)
+    };
+    ensure(
+        "ending the sleep with ERR_INTERRUPTED",
+        status == INTERRUPTED,
+    )?;
+    ensure("running the handler", HANDLED.load(Ordering::Acquire) == 1)?;
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("reading the mask", unsafe {
+        sys::signal_set_mask(0, 0, &mut mask)
+    })?;
+    ensure("restoring the thread's mask", mask & usr1 != 0)?;
+    restore_usr1(&old)?;
+    // SAFETY: the old mask may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, own, core::ptr::null_mut())
+    })
+}
+
 /// What the waits of `waiter_with_index` returned, by index.
 static WAIT_STATUSES: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
 
@@ -8785,7 +8839,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 126] = [
+const TESTS: [(&str, Test); 127] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -8805,6 +8859,7 @@ const TESTS: [(&str, Test); 126] = [
         "process_signal_interrupts_one_wait",
         process_signal_interrupts_one_wait,
     ),
+    ("temporary_mask_ends_a_wait", temporary_mask_ends_a_wait),
     ("stop_continue_and_kill", stop_continue_and_kill),
     ("stopped_wait_goes_on", stopped_wait_goes_on),
     ("heap_allocates_and_frees", heap_allocates_and_frees),

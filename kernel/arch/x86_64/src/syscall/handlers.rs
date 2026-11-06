@@ -1337,6 +1337,13 @@ pub fn signal_set_mask(how: u32, mask: u64, old: UserOut<u64>) -> Result<(), Err
     Ok(())
 }
 
+/// Gives the calling thread `mask`, without `KILL` and `STOP`, as the
+/// temporary mask of its next system call, replacing any earlier one.
+pub fn signal_set_wait_mask(mask: u64) -> Result<(), Error> {
+    current_thread()?.signals().lock().wait_mask = Some(mask & !UNBLOCKABLE);
+    Ok(())
+}
+
 /// Publishes `bytes` to an output `prepare_optional` prepared for `out`.
 fn publish_optional<T: super::Plain>(outputs: Outputs<Held>, out: &UserOut<T>, bytes: &[u8]) {
     match out.is_null() {

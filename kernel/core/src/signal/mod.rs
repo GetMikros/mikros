@@ -38,6 +38,13 @@ pub struct ThreadSignals {
     pub mask: u64,
     /// The base and size of the alternate stack, or zeros for none.
     pub altstack: (u64, u64),
+    /// The temporary mask that `signal_set_wait_mask` gave for the next
+    /// system call.
+    pub wait_mask: Option<u64>,
+    /// The mask that a temporary mask replaced for the system call that
+    /// runs, to be restored when it returns or saved in its handler's
+    /// frame.
+    pub saved_mask: Option<u64>,
 }
 
 impl ThreadSignals {

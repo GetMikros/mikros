@@ -1120,3 +1120,11 @@ syscalls:
     spec: [MIKSPEC-0018.R8]
     args:
       - {name: out, type: "*mut u32", dir: out}
+
+  - name: signal_set_wait_mask
+    number: 109
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0020.R26]
+    args:
+      - {name: mask, type: u64, dir: in}
