@@ -1,5 +1,6 @@
-/* Loads libgreet at start and with dlopen, and prints its greeting. The
-   exit code names the first check that failed. */
+/* Loads libgreet at start and with dlopen, and prints its greeting, and
+   is refused libraries that are missing or have no ABI note. The exit
+   code names the first check that failed. */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +24,12 @@ int main(void)
 		return 4;
 	if (dlopen("libmissing.1.dlib", RTLD_NOW) || !dlerror())
 		return 5;
+	/* A library linked without crti.o has no ABI note, and is refused. */
+	if (dlopen("libnonote.1.dlib", RTLD_NOW))
+		return 6;
+	const char *why = dlerror();
+	if (!why || !strstr(why, "Exec format error"))
+		return 7;
 	puts(first);
 	return 0;
 }

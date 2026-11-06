@@ -179,6 +179,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", decoy.display());
+            // Without the start files, the library has no ABI note.
+            let no_note = c_build(
+                "libnonote",
+                &["user/tests/library-c/decoy.c"],
+                Linking::Shared("libnonote.1.dlib"),
+                &["-nostartfiles".to_owned()],
+            )?;
+            println!("built    {}", no_note.display());
             // The program names the decoy's directory in a DT_RPATH,
             // which the dynamic linker ignores.
             let library_user = c_build(
@@ -215,6 +223,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/library-user", library_user.as_path()),
                     ("usr/lib/libgreet.1.dlib", greet.as_path()),
                     ("usr/share/decoy/libgreet.1.dlib", decoy.as_path()),
+                    ("usr/lib/libnonote.1.dlib", no_note.as_path()),
                     ("usr/share/hello/greeting.txt", greeting.as_path()),
                 ],
                 &[],
