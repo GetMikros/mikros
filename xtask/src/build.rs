@@ -56,6 +56,8 @@ pub struct Built {
     pub bootloader: PathBuf,
     pub kernel: PathBuf,
     pub boot_image: PathBuf,
+    /// Where xkbcommon was built.
+    pub xkbcommon: crate::ports::Built,
 }
 
 /// The boot images that can be built.
@@ -420,6 +422,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         bootloader,
         kernel,
         boot_image,
+        xkbcommon,
     })
 }
 

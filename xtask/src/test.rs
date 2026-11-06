@@ -272,6 +272,7 @@ pub fn run(args: &Args) -> Result<()> {
     }
 
     let built = build::build_for(args.kind, BootImage::Test)?;
+    crate::port_tests::run_on_host(&crate::ports::XKBCOMMON, &built.xkbcommon)?;
     let dir = test_dir(args.kind);
     fs::create_dir_all(&dir)?;
     let disk = dir.join("disk.img");

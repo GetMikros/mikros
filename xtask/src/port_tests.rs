@@ -1,7 +1,8 @@
 //! The test suites of the ported projects, which the `port-tests` runner
 //! runs on Mikros from the boot image `ports.img`: the tests Meson lists
 //! for a port, checked against what `ports/<name>/tests.txt` expects of
-//! them, the plan the runner follows, and the files the tests need.
+//! them, the plan the runner follows, the files the tests need, and the
+//! tests that run on the build host instead.
 
 use crate::ports::{self, Built, Port};
 use anyhow::{Context, Result, bail};
@@ -216,6 +217,34 @@ fn suite(port: &Port, built: &Built) -> Result<(Value, BTreeMap<String, Expected
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
     let expected = expectations(&text).with_context(|| format!("in {}", file.display()))?;
     Ok((listed, expected))
+}
+
+/// Runs the tests of `port`, built in `built`, that `tests.txt` has run
+/// on the build host, each as Meson would: its command, in the build
+/// directory, with its environment added. Fails unless each passes.
+pub fn run_on_host(port: &Port, built: &Built) -> Result<()> {
+    let (listed, expected) = suite(port, built)?;
+    let listed = listed.as_array().context("the test list is not an array")?;
+    for test in listed {
+        let name = test["name"].as_str().context("a test's name")?;
+        if expected.get(name) != Some(&Expected::Host) {
+            continue;
+        }
+        let cmd: Option<Vec<&str>> = test["cmd"]
+            .as_array()
+            .and_then(|c| c.iter().map(Value::as_str).collect());
+        let cmd = cmd.with_context(|| format!("{name}'s command"))?;
+        let (program, args) = cmd.split_first().context("a test has no command")?;
+        let env = test["env"].as_object().context("a test's environment")?;
+        let mut command = std::process::Command::new(program);
+        command.args(args).current_dir(&built.build);
+        for (var, value) in env {
+            command.env(var, value.as_str().context("a test's environment")?);
+        }
+        crate::port::run(&mut command).with_context(|| format!("{}/{name}", port.name))?;
+        println!("passed   {}/{name} on the build host", port.name);
+    }
+    Ok(())
 }
 
 /// The members of the boot image of the tests of `port`, built in
