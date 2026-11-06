@@ -14,11 +14,14 @@
 //! `clang --config=<sysroot>/x86_64-unknown-mikros.cfg`.
 //!
 //! For ported projects, it holds the Meson cross file
-//! `x86_64-unknown-mikros.meson`. It selects these compilers and this
-//! sysroot, and works with the Meson that `crate::meson` patches, which
-//! names shared libraries `lib<name>.<version>.dlib` with the
-//! `DT_SONAME` `lib<name>.<major>.dlib`, links `lib<name>.dlib` to the
-//! latter, and names static libraries `lib<name>.slib`.
+//! `x86_64-unknown-mikros.meson` and the CMake toolchain file
+//! `x86_64-unknown-mikros.cmake`, with the CMake platform module
+//! `share/cmake/Platform/Mikros.cmake`. They select these compilers and
+//! this sysroot, and work with the Meson and CMake that `crate::meson`
+//! and `crate::cmake` patch, which name shared libraries
+//! `lib<name>.<version>.dlib` with the `DT_SONAME`
+//! `lib<name>.<major>.dlib`, link `lib<name>.dlib` to the latter, and
+//! name static libraries `lib<name>.slib`.
 
 use crate::llvm::{self, LLVM};
 use anyhow::{Context, Result, bail};
@@ -31,7 +34,13 @@ use std::process::Command;
 pub const TRIPLE: &str = "x86_64-unknown-mikros";
 
 /// The directories of the sysroot, relative to it.
-const DIRS: [&str; 4] = ["include", "include/mikros", "lib", "lib/pkgconfig"];
+const DIRS: [&str; 5] = [
+    "include",
+    "include/mikros",
+    "lib",
+    "lib/pkgconfig",
+    "share/cmake/Platform",
+];
 
 #[derive(clap::Args)]
 pub struct Args {}
@@ -60,9 +69,17 @@ pub fn build() -> Result<PathBuf> {
     }
     let cfg = config(&sysroot);
     fs::write(&cfg, driver_config()).with_context(|| format!("writing {}", cfg.display()))?;
-    let cross = meson_cross_file();
-    fs::write(&cross, meson_cross(&llvm_from_sysroot()?))
-        .with_context(|| format!("writing {}", cross.display()))?;
+    let llvm = llvm_from_sysroot()?;
+    for (file, contents) in [
+        (meson_cross_file(), meson_cross(&llvm)),
+        (cmake_toolchain_file(), cmake_toolchain(&llvm)),
+        (
+            sysroot.join("share/cmake/Platform/Mikros.cmake"),
+            CMAKE_PLATFORM.to_owned(),
+        ),
+    ] {
+        fs::write(&file, contents).with_context(|| format!("writing {}", file.display()))?;
+    }
     let header = sysroot.join("include/mikros/syscalls.h");
     fs::write(&header, syscalls_header()?)
         .with_context(|| format!("writing {}", header.display()))?;
@@ -220,6 +237,11 @@ pub fn meson_cross_file() -> PathBuf {
     dir().join(format!("{TRIPLE}.meson"))
 }
 
+/// The CMake toolchain file of the sysroot.
+pub fn cmake_toolchain_file() -> PathBuf {
+    dir().join(format!("{TRIPLE}.cmake"))
+}
+
 /// The directory of the LLVM programs relative to the sysroot, beside
 /// which the LLVM directory lies.
 fn llvm_from_sysroot() -> Result<String> {
@@ -263,6 +285,61 @@ endian = 'little'
         tool("llvm-ranlib"),
     )
 }
+
+/// The CMake toolchain file, with the LLVM programs in `llvm`, relative
+/// to the sysroot.
+fn cmake_toolchain(llvm: &str) -> String {
+    format!(
+        "# The Mikros target for CMake, written by cargo xtask sysroot, for the
+# CMake with the Mikros patches that cargo xtask builds:
+#   cmake -DCMAKE_TOOLCHAIN_FILE=<sysroot>/{TRIPLE}.cmake ...
+# The platform module share/cmake/Platform/Mikros.cmake names the
+# libraries.
+set(CMAKE_SYSTEM_NAME Mikros)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+list(APPEND CMAKE_MODULE_PATH \"${{CMAKE_CURRENT_LIST_DIR}}/share/cmake\")
+
+set(CMAKE_SYSROOT \"${{CMAKE_CURRENT_LIST_DIR}}\")
+set(CMAKE_FIND_ROOT_PATH \"${{CMAKE_CURRENT_LIST_DIR}}\")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
+get_filename_component(_MIKROS_LLVM \"${{CMAKE_CURRENT_LIST_DIR}}/{llvm}\" ABSOLUTE)
+set(_MIKROS_CONFIG \"--config=${{CMAKE_CURRENT_LIST_DIR}}/{TRIPLE}.cfg\")
+set(CMAKE_C_COMPILER \"${{_MIKROS_LLVM}}/clang\" \"${{_MIKROS_CONFIG}}\")
+set(CMAKE_CXX_COMPILER \"${{_MIKROS_LLVM}}/clang++\" \"${{_MIKROS_CONFIG}}\")
+set(CMAKE_ASM_COMPILER \"${{_MIKROS_LLVM}}/clang\" \"${{_MIKROS_CONFIG}}\")
+set(CMAKE_AR \"${{_MIKROS_LLVM}}/llvm-ar\")
+set(CMAKE_RANLIB \"${{_MIKROS_LLVM}}/llvm-ranlib\")
+"
+    )
+}
+
+/// The CMake platform module of Mikros, which the toolchain file
+/// selects.
+const CMAKE_PLATFORM: &str = r#"# The Mikros platform for CMake, written by cargo xtask sysroot.
+set(CMAKE_SHARED_LIBRARY_PREFIX "lib")
+set(CMAKE_SHARED_LIBRARY_SUFFIX ".dlib")
+set(CMAKE_SHARED_MODULE_PREFIX "lib")
+set(CMAKE_SHARED_MODULE_SUFFIX ".dlib")
+set(CMAKE_STATIC_LIBRARY_PREFIX "lib")
+set(CMAKE_STATIC_LIBRARY_SUFFIX ".slib")
+set(CMAKE_FIND_LIBRARY_PREFIXES "lib")
+set(CMAKE_FIND_LIBRARY_SUFFIXES ".dlib" ".slib")
+# The version goes before the suffix, which the Mikros patch of CMake
+# allows: lib<name>.<version>.dlib, with the soname lib<name>.<major>.dlib.
+set(CMAKE_SHARED_LIBRARY_VERSION_BEFORE_SUFFIX 1)
+set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,")
+set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")
+set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG_SEP ":")
+set(CMAKE_SHARED_LIBRARY_RPATH_ORIGIN_TOKEN "\$ORIGIN")
+set(CMAKE_EXE_EXPORTS_C_FLAG "-Wl,--export-dynamic")
+# The C library has the dynamic loading functions.
+set(CMAKE_DL_LIBS "")
+include(Platform/UnixPaths)
+"#;
 
 /// Fails unless `tool --version` reports the pinned LLVM release.
 fn check_llvm(tool: &Path) -> Result<()> {
@@ -343,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_file_selects_mikros_and_the_compilers() {
+    fn build_system_files_select_mikros_and_the_compilers() {
         let cross = meson_cross("../llvm/bin");
         for line in [
             "c = ['@DIRNAME@/../llvm/bin/clang', '--config=@DIRNAME@/x86_64-unknown-mikros.cfg']",
@@ -351,6 +428,21 @@ mod tests {
             "system = 'mikros'",
         ] {
             assert!(cross.lines().any(|l| l == line), "{line}");
+        }
+        let toolchain = cmake_toolchain("../llvm/bin");
+        for line in [
+            "set(CMAKE_SYSTEM_NAME Mikros)",
+            "set(CMAKE_SYSROOT \"${CMAKE_CURRENT_LIST_DIR}\")",
+            "set(CMAKE_C_COMPILER \"${_MIKROS_LLVM}/clang\" \"${_MIKROS_CONFIG}\")",
+        ] {
+            assert!(toolchain.lines().any(|l| l == line), "{line}");
+        }
+        for line in [
+            "set(CMAKE_SHARED_LIBRARY_SUFFIX \".dlib\")",
+            "set(CMAKE_STATIC_LIBRARY_SUFFIX \".slib\")",
+            "set(CMAKE_SHARED_LIBRARY_VERSION_BEFORE_SUFFIX 1)",
+        ] {
+            assert!(CMAKE_PLATFORM.lines().any(|l| l == line), "{line}");
         }
     }
 }

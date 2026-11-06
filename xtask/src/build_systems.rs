@@ -1,13 +1,47 @@
-//! Building C and C++ projects for Mikros with Meson, through the
-//! sysroot's cross file, in `target/ported/<name>/`.
+//! Building C and C++ projects for Mikros with Meson and CMake, through
+//! the sysroot's cross file and toolchain file, in
+//! `target/ported/<name>/`.
 
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 fn dir(name: &str) -> PathBuf {
     crate::workspace_root().join("target/ported").join(name)
+}
+
+/// Builds the CMake project in `source` as `name`, with the further
+/// options `options`, and returns the directory it was installed in.
+pub fn cmake(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
+    crate::sysroot::build()?;
+    let cmake = crate::cmake::build()?;
+    let (build, install) = fresh(name)?;
+    crate::port::run(
+        Command::new(&cmake)
+            .args(["-G", "Ninja", "-S"])
+            .arg(source)
+            .arg("-B")
+            .arg(&build)
+            .arg(format!(
+                "-DCMAKE_TOOLCHAIN_FILE={}",
+                crate::sysroot::cmake_toolchain_file().display()
+            ))
+            .arg("-DCMAKE_BUILD_TYPE=Release")
+            .arg(format!("-DCMAKE_INSTALL_PREFIX={}", install.display()))
+            .args(options),
+    )
+    .with_context(|| format!("configuring {name}"))?;
+    crate::port::run(Command::new(&cmake).arg("--build").arg(&build))
+        .with_context(|| format!("building {name}"))?;
+    crate::port::run(
+        Command::new(&cmake)
+            .arg("--install")
+            .arg(&build)
+            .stdout(Stdio::null()),
+    )
+    .with_context(|| format!("installing {name}"))?;
+    Ok(install)
 }
 
 /// Builds the Meson project in `source` as `name`, with the further

@@ -1,0 +1,24 @@
+diff --git a/Source/cmGeneratorTarget.cxx b/Source/cmGeneratorTarget.cxx
+index 458e9616..7187c140 100644
+--- a/Source/cmGeneratorTarget.cxx
++++ b/Source/cmGeneratorTarget.cxx
+@@ -4616,12 +4616,17 @@ std::string cmGeneratorTarget::ComputeVersionedName(std::string const& prefix,
+                                                     std::string const& name,
+                                                     cmValue version) const
+ {
+-  std::string vName = this->IsApple() ? (prefix + base) : name;
++  // Apple platforms, and those that set
++  // CMAKE_SHARED_LIBRARY_VERSION_BEFORE_SUFFIX, put the version before the
++  // suffix: libfoo.1.dylib rather than libfoo.so.1.
++  bool const beforeSuffix = this->IsApple() ||
++    this->Makefile->IsOn("CMAKE_SHARED_LIBRARY_VERSION_BEFORE_SUFFIX");
++  std::string vName = beforeSuffix ? (prefix + base) : name;
+   if (version) {
+     vName += ".";
+     vName += *version;
+   }
+-  vName += this->IsApple() ? suffix : std::string();
++  vName += beforeSuffix ? suffix : std::string();
+   return vName;
+ }
+ 

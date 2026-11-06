@@ -4,6 +4,7 @@ mod boot_menu;
 mod build;
 mod build_systems;
 mod check;
+mod cmake;
 mod debug;
 mod debug_build;
 mod debuginfo;

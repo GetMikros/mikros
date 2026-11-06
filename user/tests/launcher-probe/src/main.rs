@@ -56,8 +56,9 @@ const HELLO: &str = "/usr/bin/hello";
 const HELLO_DYNAMIC: &str = "/usr/bin/hello-dynamic";
 /// A C program that needs a shared library.
 const LIBRARY_USER: &str = "/usr/bin/library-user";
-/// A C program that needs a shared library, built with Meson through
-/// the sysroot's cross file.
+/// C programs that need a shared library, built with CMake and with
+/// Meson through the sysroot's toolchain files.
+const TALLY_CMAKE: &str = "/usr/bin/tally-cmake-user";
 const TALLY_MESON: &str = "/usr/bin/tally-meson-user";
 /// A Rust program that uses the standard library, which opens
 /// `/dev/null` for its closed standard input and error.
@@ -692,11 +693,16 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
             "reading what the library wrote",
             output.as_slice() == b"hello from a library, call 1\n",
         )?;
-        let (output, code) = run_c(l, TALLY_MESON).await;
-        check(
-            "running a program built with Meson",
-            code == Some(0) && output.as_slice() == b"built by meson, 42\n",
-        )?;
+        for (path, wanted) in [
+            (TALLY_CMAKE, b"built by cmake, 42\n"),
+            (TALLY_MESON, b"built by meson, 42\n"),
+        ] {
+            let (output, code) = run_c(l, path).await;
+            check(
+                "running a program built with CMake or Meson",
+                code == Some(0) && output.as_slice() == wanted,
+            )?;
+        }
         // Applications run with the system call gate; static ones are
         // refused, whatever path names them.
         let refused = async |path: &str| spawn(l, &[], |r| r.path = path.into()).await.err();
