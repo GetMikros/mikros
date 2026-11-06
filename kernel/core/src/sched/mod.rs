@@ -95,25 +95,34 @@ pub struct Thread {
 }
 
 impl Thread {
-    /// A thread with a new kernel stack, in `state`, not queued.
+    /// A thread with a new kernel stack, in `state`, not queued. The
+    /// `charged` kernel memory of `process`'s budget goes with the
+    /// thread, and is released when creating it fails.
     fn new(
         process: Option<Arc<Process>>,
         name: Name,
         state: u32,
         charged: u64,
     ) -> Result<Arc<Thread>, Error> {
-        let arch = ThreadData::new().ok_or(Error::NoMemory)?;
-        let stack = crate::arch::kernel_pages_alloc(KERNEL_STACK_SIZE).ok_or(Error::NoMemory)?;
+        // Until the thread exists, a failure releases the charge here.
+        let release = || {
+            if let Some(process) = &process {
+                process.budget().release_kernel(charged);
+            }
+            Error::NoMemory
+        };
+        let arch = ThreadData::new().ok_or_else(release)?;
+        let stack = crate::arch::kernel_pages_alloc(KERNEL_STACK_SIZE).ok_or_else(release)?;
         // Every thread that can run has room in its owner's run queue
         // from when it was created.
         let cpu = crate::arch::cpu_index() as usize;
         if reserve(cpu).is_err() {
             // SAFETY: the stack was allocated above and nothing uses it.
             unsafe { crate::arch::kernel_pages_free(stack, KERNEL_STACK_SIZE) };
-            return Err(Error::NoMemory);
+            return Err(release());
         }
-        // The thread frees its stack and charge when it goes, also on
-        // failure.
+        // The thread frees its stack and releases its charge when it goes,
+        // also when it cannot be allocated.
         crate::fallible::try_arc(Thread {
             header: Header::new(ObjectType::Thread),
             name,
@@ -171,10 +180,7 @@ impl Thread {
         } else {
             0
         };
-        let budget = process.budget().clone();
-        Thread::new(Some(process), name, NEW, charged).inspect_err(|_| {
-            budget.release_kernel(charged);
-        })
+        Thread::new(Some(process), name, NEW, charged)
     }
 
     #[allow(

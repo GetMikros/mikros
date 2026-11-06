@@ -293,11 +293,7 @@ impl Arch for X86 {
     fn page_table_new(
         alloc: &mut dyn FnMut() -> Option<u64>,
     ) -> Result<*mut (), kernel_core::arch::PageError> {
-        let tables = SpaceTables::new(alloc)?;
-        match kernel_core::fallible::try_box(tables) {
-            Ok(tables) => Ok(Box::into_raw(tables).cast()),
-            Err(_) => Err(kernel_core::arch::PageError::OutOfMemory),
-        }
+        Ok(Box::into_raw(SpaceTables::new(alloc)?).cast())
     }
 
     unsafe fn page_table_map(

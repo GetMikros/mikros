@@ -7,6 +7,7 @@ use crate::paging::{self, Flags, Mapper, PAGE_SIZE, Tables};
 use crate::percpu;
 use crate::space;
 use crate::tlb::{self, CpuMask};
+use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::arch::{PageError, PageFlags};
 
@@ -146,16 +147,21 @@ pub struct SpaceTables {
 }
 
 impl SpaceTables {
-    pub fn new(alloc: &mut dyn FnMut() -> Option<u64>) -> Result<SpaceTables, PageError> {
-        let root = Mapper::user(&mut Frames(alloc), space::root())
-            .map(|m| m.root())
-            .map_err(error)?;
-        Ok(SpaceTables {
+    /// New tables, with the root table from `alloc`. The state is
+    /// allocated before the root, so that a failure leaves no frame or
+    /// charge behind.
+    pub fn new(alloc: &mut dyn FnMut() -> Option<u64>) -> Result<Box<SpaceTables>, PageError> {
+        let mut tables = kernel_core::fallible::try_box(SpaceTables {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             loaded: CpuMask::new(),
             generation: AtomicU64::new(0),
-            root,
+            root: 0,
         })
+        .map_err(|_| PageError::OutOfMemory)?;
+        tables.root = Mapper::user(&mut Frames(alloc), space::root())
+            .map(|m| m.root())
+            .map_err(error)?;
+        Ok(tables)
     }
 
     pub fn map(
