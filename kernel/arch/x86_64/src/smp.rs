@@ -11,7 +11,7 @@ use crate::percpu::{self, PerCpu};
 use crate::space;
 use alloc::vec::Vec;
 use boot_protocol::BootInfo;
-use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use kernel_core::acpi::madt;
 use kernel_core::cpu::Cpu;
 use kernel_core::smp::{self, MAX_CPUS};
@@ -113,6 +113,22 @@ const WAITING: u8 = 0;
 const STARTED: u8 = 1;
 const READY: u8 = 2;
 const FAILED: u8 = 3;
+/// The processor compares its TSC with processor 0's.
+const SYNCING: u8 = 4;
+
+/// The rounds in which a starting processor and processor 0 read their
+/// TSC in turn, each value checked not to lie before the other's last.
+const SYNC_ROUNDS: u64 = 1000;
+/// The turn of the comparison: odd for the starting processor, even for
+/// processor 0, and the value the last one read.
+static SYNC_TURN: AtomicU64 = AtomicU64::new(0);
+static SYNC_LAST: AtomicU64 = AtomicU64::new(0);
+/// Set when a processor's TSC lay before processor 0's by more than the
+/// clock's resolution, or the comparison did not end.
+static TSC_DISAGREES: AtomicBool = AtomicBool::new(false);
+/// Set once every processor started and the clock source is final; the
+/// started processors use the clock only then.
+static RELEASED: AtomicBool = AtomicBool::new(false);
 
 /// The stage of the processor being started.
 static STAGE: AtomicU8 = AtomicU8::new(WAITING);
@@ -218,6 +234,25 @@ pub fn start(info: &BootInfo) {
         free_frame(root);
         MADT.store(core::ptr::null_mut(), Ordering::Release);
     }
+    if used.len() > 1 {
+        match TSC_DISAGREES.load(Ordering::Relaxed) {
+            false => log!(Info, "the TSCs of all {} processors agree", used.len()),
+            true if crate::time::from_tsc() && crate::time::leave_tsc() => {
+                log!(
+                    Warning,
+                    "the processors' TSCs disagree: monotonic clock from the HPET"
+                )
+            }
+            true if crate::time::from_tsc() => {
+                log!(
+                    Error,
+                    "the processors' TSCs disagree, and there is no HPET to use instead"
+                )
+            }
+            true => log!(Info, "the processors' TSCs disagree"),
+        }
+    }
+    RELEASED.store(true, Ordering::Release);
     log!(Info, "{} processors running", used.len());
     *APIC_IDS.lock() = used;
 }
@@ -254,6 +289,63 @@ fn write_trampoline(page: u64, root: u64) {
     const _: () = assert!(T_GDT >= 0x100);
 }
 
+/// The TSC, read after the loads before it and before the stores after
+/// it.
+fn ordered_tsc() -> u64 {
+    // SAFETY: LFENCE and RDTSC have no preconditions.
+    unsafe {
+        core::arch::x86_64::_mm_lfence();
+        let tsc = core::arch::x86_64::_rdtsc();
+        core::arch::x86_64::_mm_lfence();
+        tsc
+    }
+}
+
+/// The clock's resolution, a nanosecond, in TSC ticks.
+fn tolerance() -> u64 {
+    crate::time::tsc_hz().div_ceil(1_000_000_000).max(1)
+}
+
+/// Processor 0's part of the comparison with a starting processor: it
+/// reads its TSC and gives the turn over, then checks its next value
+/// against the one the other processor read. A comparison that does not
+/// end within 100 ms counts as a disagreement.
+fn compare_tsc_boot() {
+    let (tolerance, deadline) = (tolerance(), crate::time::now() + 100_000_000);
+    for round in 0..SYNC_ROUNDS {
+        SYNC_LAST.store(ordered_tsc(), Ordering::Release);
+        SYNC_TURN.store(2 * round + 1, Ordering::Release);
+        if !wait_until(deadline, || {
+            SYNC_TURN.load(Ordering::Acquire) == 2 * round + 2
+        }) {
+            TSC_DISAGREES.store(true, Ordering::Relaxed);
+            return;
+        }
+        if ordered_tsc() + tolerance < SYNC_LAST.load(Ordering::Acquire) {
+            TSC_DISAGREES.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The starting processor's part of the comparison: once processor 0
+/// gives it the turn, it checks its TSC against processor 0's last value
+/// and gives the turn back with its own.
+fn compare_tsc_secondary() {
+    let tolerance = tolerance();
+    for round in 0..SYNC_ROUNDS {
+        while SYNC_TURN.load(Ordering::Acquire) != 2 * round + 1 {
+            core::hint::spin_loop();
+        }
+        let theirs = SYNC_LAST.load(Ordering::Acquire);
+        let mine = ordered_tsc();
+        if mine + tolerance < theirs {
+            TSC_DISAGREES.store(true, Ordering::Relaxed);
+        }
+        SYNC_LAST.store(mine, Ordering::Release);
+        SYNC_TURN.store(2 * round + 2, Ordering::Release);
+    }
+}
+
 /// Starts the processor whose APIC ID is `id` as processor `index`.
 /// Returns whether it runs.
 fn start_one(page: u64, id: u32, index: usize) -> bool {
@@ -265,6 +357,7 @@ fn start_one(page: u64, id: u32, index: usize) -> bool {
         .unwrap_or_else(|| panic!("no memory for processor {index}"));
     let top = space::new_stack(STACK_SIZE);
     STACK_TOP.store(top, Ordering::Relaxed);
+    SYNC_TURN.store(0, Ordering::Relaxed);
     STAGE.store(WAITING, Ordering::Release);
     let base = space::direct(page) as *mut u8;
     // SAFETY: the data lies in the trampoline page, which no processor
@@ -293,6 +386,13 @@ fn start_one(page: u64, id: u32, index: usize) -> bool {
     // Once started, it no longer uses the trampoline page.
     loop {
         match STAGE.load(Ordering::Acquire) {
+            SYNCING => {
+                compare_tsc_boot();
+                // The processor goes on to READY.
+                while STAGE.load(Ordering::Acquire) == SYNCING {
+                    core::hint::spin_loop();
+                }
+            }
             READY => {
                 kernel_core::cpu::register(index, core);
                 return true;
@@ -346,7 +446,15 @@ extern "sysv64" fn ap_entry(cpu: &'static PerCpu) -> ! {
     };
     apic::init_secondary(madt);
     crate::tlb::join();
-    crate::timer::init();
+    STAGE.store(SYNCING, Ordering::Release);
+    compare_tsc_secondary();
     STAGE.store(READY, Ordering::Release);
+    // Processor 0 may still move the clock to another source; until it is
+    // final, this processor only answers TLB shootdowns.
+    while !RELEASED.load(Ordering::Acquire) {
+        crate::tlb::service();
+        core::hint::spin_loop();
+    }
+    crate::timer::init();
     kernel_core::boot::start_secondary()
 }

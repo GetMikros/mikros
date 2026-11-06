@@ -6376,6 +6376,128 @@ fn temporary_mask_ends_a_wait(s: &Startup) -> Result {
     })
 }
 
+/// The turn of `clock_partner` and `clock_agrees_across_processors`, the
+/// clock value the last one read, and how often a reading lay before the
+/// other processor's last one.
+static CLOCK_TURN: AtomicU64 = AtomicU64::new(0);
+static CLOCK_LAST: AtomicU64 = AtomicU64::new(0);
+static CLOCK_BACKWARDS: AtomicU64 = AtomicU64::new(0);
+
+/// Reads the clock on its turns, odd ones, and checks each value against
+/// the other side's last.
+fn clock_turn(turn: u64) {
+    while CLOCK_TURN.load(Ordering::Acquire) != turn {
+        core::hint::spin_loop();
+    }
+    let reading = now() as u64;
+    if reading < CLOCK_LAST.load(Ordering::Acquire) {
+        CLOCK_BACKWARDS.fetch_add(1, Ordering::AcqRel);
+    }
+    CLOCK_LAST.store(reading, Ordering::Release);
+    CLOCK_TURN.store(turn + 1, Ordering::Release);
+}
+
+extern "sysv64" fn clock_partner(rounds: u64, _: u64) -> ! {
+    for round in 0..rounds {
+        clock_turn(2 * round + 1);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread on processor 0 and one on processor 1 read the monotonic
+/// clock in turn, each after seeing the other's value, and no value lies
+/// before the other's last.
+fn clock_agrees_across_processors(s: &Startup) -> Result {
+    const ROUNDS: u64 = 10_000;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    if count < 2 {
+        return Ok(());
+    }
+    let set = |thread: Handle, mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    check("keeping this thread on processor 0", set(s.thread, &[1]))?;
+    CLOCK_TURN.store(0, Ordering::Release);
+    CLOCK_LAST.store(0, Ordering::Release);
+    CLOCK_BACKWARDS.store(0, Ordering::Release);
+    let partner = spawn2(s, clock_partner, ROUNDS, 0)?;
+    check("moving the partner to processor 1", set(partner, &[2]))?;
+    for round in 0..ROUNDS {
+        clock_turn(2 * round);
+    }
+    ensure(
+        "ending the partner",
+        wait(partner, TERMINATED, in_time()).0 == 0,
+    )?;
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))?;
+    ensure(
+        "never going back",
+        CLOCK_BACKWARDS.load(Ordering::Acquire) == 0,
+    )
+}
+
+/// The APIC IDs that `busy_on_processors` threads ran on, as bits, and
+/// how many of the threads still run.
+static SEEN_PROCESSORS: AtomicU64 = AtomicU64::new(0);
+static BUSY_LEFT: AtomicU64 = AtomicU64::new(0);
+
+/// The initial APIC ID of the processor that runs the caller.
+fn apic_id() -> u32 {
+    core::arch::x86_64::__cpuid(1).ebx >> 24
+}
+
+/// Spins until `deadline`, recording the processors it runs on, and
+/// stops early once `want` processors were seen.
+extern "sysv64" fn busy_on_processors(deadline: u64, want: u64) -> ! {
+    while (now() as u64) < deadline {
+        SEEN_PROCESSORS.fetch_or(1 << (apic_id() % 64), Ordering::AcqRel);
+        if u64::from(SEEN_PROCESSORS.load(Ordering::Acquire).count_ones()) >= want {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    BUSY_LEFT.fetch_sub(1, Ordering::AcqRel);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Busy threads that may run anywhere run on every processor: the
+/// scheduler places new threads and takes queued ones over to idle
+/// processors.
+fn threads_run_on_every_processor(s: &Startup) -> Result {
+    const THREADS: u64 = 4;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    SEEN_PROCESSORS.store(0, Ordering::Release);
+    BUSY_LEFT.store(THREADS, Ordering::Release);
+    let deadline = in_time() as u64;
+    for _ in 0..THREADS {
+        spawn2(s, busy_on_processors, deadline, count.into())?;
+    }
+    while BUSY_LEFT.load(Ordering::Acquire) != 0 {
+        ensure(
+            "ending the threads",
+            (now() as u64) < deadline + 1_000_000_000,
+        )?;
+        sleep_ms(1);
+    }
+    ensure(
+        "running on every processor",
+        SEEN_PROCESSORS.load(Ordering::Acquire).count_ones() == count,
+    )
+}
+
 /// What the waits of `waiter_with_index` returned, by index.
 static WAIT_STATUSES: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
 
@@ -8839,7 +8961,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 127] = [
+const TESTS: [(&str, Test); 129] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -8855,6 +8977,14 @@ const TESTS: [(&str, Test); 127] = [
     ),
     ("killed_as_it_sleeps", killed_as_it_sleeps),
     ("futexes_across_processors", futexes_across_processors),
+    (
+        "clock_agrees_across_processors",
+        clock_agrees_across_processors,
+    ),
+    (
+        "threads_run_on_every_processor",
+        threads_run_on_every_processor,
+    ),
     (
         "process_signal_interrupts_one_wait",
         process_signal_interrupts_one_wait,
