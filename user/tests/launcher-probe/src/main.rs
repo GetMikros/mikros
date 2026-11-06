@@ -514,9 +514,12 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
             "refusing a caller that the manifest does not list",
             as_app("system.closed", PROBE).await.err() == Some(Status::AccessDenied),
         )?;
+        // An invalid manifest counts as none: the binary it names, which
+        // is not the probe, is not checked.
+        let unmanifested = as_app("system.bad", PROBE).await.map_or(0, |(pid, _)| pid);
         check(
-            "refusing an app ID whose manifest is invalid",
-            as_app("system.bad", PROBE).await.err() == Some(Status::AccessDenied),
+            "naming an app ID whose manifest is invalid",
+            wait(l, unmanifested as i32).await == Some((unmanifested, 0, 0)),
         )?;
         let rename = spawn(l, &["rename"], |_| {})
             .await

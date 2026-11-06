@@ -193,11 +193,19 @@ fn named_app(shared: &Shared, caller: u32, app_id: &str, program: &str) -> Resul
         };
     };
     let file_name = format!("{app_id}.yaml");
-    let Some(bytes) = shared.fs.file(&format!("usr/lib/programs/{file_name}")) else {
+    let path = format!("usr/lib/programs/{file_name}");
+    let Some(bytes) = shared.fs.file(&path) else {
         return Ok(app_id.into());
     };
-    let manifest =
-        mikros_manifest::parse_program(&file_name, bytes).map_err(|_| Status::AccessDenied)?;
+    // A manifest that is not valid counts as none, as the service
+    // manager ignores such service manifests.
+    let manifest = match mikros_manifest::parse_program(&file_name, bytes) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            mikros_rt::log!(Error, "/{path}:{}:{}: {:?}", e.line, e.column, e.kind);
+            return Ok(app_id.into());
+        }
+    };
     let program_manifest = manifest.program;
     let service = shared.fs.exists(&format!("usr/lib/services/{name}.yaml"));
     let binary = program_manifest.binary.trim_start_matches('/');
