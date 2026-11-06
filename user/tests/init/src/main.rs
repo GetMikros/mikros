@@ -864,6 +864,12 @@ fn within(seconds: i64) -> i64 {
     now() + SLOWER * seconds * 1_000_000_000
 }
 
+/// The seconds that the service manager, or a probe started in its
+/// place, has to finish what a test waits for. Emulated with page-table
+/// isolation, the launcher probe takes about half a minute on a fast
+/// machine.
+const PROBE_SECONDS: i64 = 120;
+
 /// Waits until `thread` is blocked, or fails after `in_time`.
 fn wait_until_blocked(thread: Handle) -> Result {
     wait_for_state(thread, STATE_BLOCKED)
@@ -8293,7 +8299,7 @@ mod manager {
             sys::object_wait_one(
                 started.process.raw(),
                 TERMINATED,
-                super::within(30),
+                super::within(super::PROBE_SECONDS),
                 &mut observed,
             )
         };
@@ -8346,7 +8352,7 @@ mod manager {
             sys::object_wait_one(
                 started.process.raw(),
                 TERMINATED,
-                super::within(30),
+                super::within(super::PROBE_SECONDS),
                 &mut observed,
             )
         };
@@ -8441,7 +8447,7 @@ mod manager {
                 status: 0,
             });
         };
-        let deadline = super::within(30);
+        let deadline = super::within(super::PROBE_SECONDS);
         // The restart probe fails every time it runs: it is started once
         // and restarted five times.
         const RESTARTED: &[u8] = b"started service restart-probe";
