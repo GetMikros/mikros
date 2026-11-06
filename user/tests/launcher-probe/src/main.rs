@@ -64,6 +64,8 @@ const SPAWN_STD: &str = "/usr/bin/spawn-std";
 /// The `id` of a stream as descriptor 1.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const KILL: u32 = 9;
+/// The bit of `CHLD` in a signal mask.
+const CHLD_BIT: u64 = 1 << (17 - 1);
 const CALLER_USER: u32 = u32::MAX;
 const FOREVER: i64 = i64::MAX;
 const PAGE_SIZE: u64 = 4096;
@@ -332,6 +334,34 @@ async fn get_info(launcher: &LauncherAsyncClient, pid: u32) -> Result<ProcessInf
     }
 }
 
+async fn create_session(launcher: &LauncherAsyncClient) -> Result<u32, Status> {
+    match launcher.create_session().await {
+        Ok(result) => result.map(|r| r.session),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+async fn set_process_group(l: &LauncherAsyncClient, pid: u32, group: u32) -> Result<(), Status> {
+    match l.set_process_group(pid, group).await {
+        Ok(result) => result.map(drop),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+async fn kill_group(l: &LauncherAsyncClient, group: u32, signo: u32) -> Result<(), Status> {
+    match l.kill_group(group, signo).await {
+        Ok(result) => result.map(drop),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
+/// Takes the pending `CHLD`, if any, and returns whether there was one.
+fn take_chld() -> bool {
+    let mut info = [0u8; 64];
+    // SAFETY: the pointer refers to room for the signal's information.
+    unsafe { sys::signal_wait(CHLD_BIT, 0, info.as_mut_ptr()) == mikros_rt::OK }
+}
+
 async fn kill(launcher: &LauncherAsyncClient, pid: u32, signo: u32) -> Result<(), Status> {
     match launcher.kill(pid, signo).await {
         Ok(result) => result.map(drop),
@@ -461,6 +491,63 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
         check("describing a replaced process", path == SELF_PATH)?;
         check("ending it", kill(l, replaced, KILL).await.is_ok())?;
         check("waiting for it", wait(l, replaced as i32).await.is_some())?;
+        // Sessions and process groups, and CHLD for the children that
+        // end, which is blocked to be seen pending.
+        let mut mask = 0;
+        // SAFETY: the out pointer is valid for the call.
+        unsafe { sys::signal_set_mask(0, CHLD_BIT, &mut mask) };
+        while take_chld() {}
+        check("leading a new session", create_session(l).await == Ok(me))?;
+        check(
+            "leading its process group",
+            get_info(l, me)
+                .await
+                .is_ok_and(|i| i.process_group == me && i.session == me),
+        )?;
+        check(
+            "refusing a second session",
+            create_session(l).await == Err(Status::BadState),
+        )?;
+        let a = spawn(l, &["sleep"], |_| {}).await.map_or(0, |(pid, _)| pid);
+        let b = spawn(l, &["sleep"], |_| {}).await.map_or(0, |(pid, _)| pid);
+        check(
+            "moving a child to a new group",
+            set_process_group(l, a, a).await.is_ok(),
+        )?;
+        check(
+            "moving another child to that group",
+            set_process_group(l, b, a).await.is_ok(),
+        )?;
+        check(
+            "describing the group",
+            get_info(l, b)
+                .await
+                .is_ok_and(|i| i.process_group == a && i.session == me),
+        )?;
+        check(
+            "refusing a group that does not exist",
+            set_process_group(l, b, 999).await == Err(Status::AccessDenied),
+        )?;
+        check(
+            "refusing to move init",
+            set_process_group(l, 1, me).await == Err(Status::AccessDenied),
+        )?;
+        check("signalling the group", kill_group(l, a, KILL).await.is_ok())?;
+        check(
+            "ending one member",
+            wait(l, a as i32).await == Some((a, -3, KILL)),
+        )?;
+        check(
+            "ending the other",
+            wait(l, b as i32).await == Some((b, -3, KILL)),
+        )?;
+        check(
+            "finding the group empty",
+            kill_group(l, a, 0).await == Err(Status::NotFound),
+        )?;
+        check("getting CHLD", take_chld())?;
+        // SAFETY: the old mask may be null.
+        unsafe { sys::signal_set_mask(2, mask, core::ptr::null_mut()) };
         let (output, code) = run_c(l, HELLO).await;
         check("running a static C program", code == Some(0))?;
         check(

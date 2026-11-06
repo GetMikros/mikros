@@ -2,12 +2,13 @@
 //!
 //! Each process has its own channel, so the record it is bound to is
 //! the one it was created for, and requests act for that record only.
-//! `Spawn`, `Exec`, `Wait`, `Kill` and `GetInfo` are served; every other
-//! method fails with `NOT_SUPPORTED`, and `List`, which cannot fail,
-//! closes the channel.
+//! `Spawn`, `Exec`, `Wait`, `Kill`, `GetInfo`, `CreateSession`,
+//! `SetProcessGroup` and `KillGroup` are served; every other method fails
+//! with `NOT_SUPPORTED`, and `List`, which cannot fail, closes the
+//! channel.
 
 use crate::processes::{NewProcess, Shared};
-use crate::records::{Exit, Record};
+use crate::records::{Exit, Record, Records};
 use crate::start::{self, duplicate};
 use alloc::format;
 use alloc::rc::Rc;
@@ -15,9 +16,10 @@ use alloc::string::String;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
-    ExitStatus, Launcher, LauncherAsyncServer, LauncherExecResponse, LauncherGetInfoResponse,
-    LauncherKillResponse, LauncherRequest, LauncherSpawnResponse, LauncherWaitResponse,
-    ProcessInfo, SpawnRequest, StatusKind,
+    ExitStatus, Launcher, LauncherAsyncServer, LauncherCreateSessionResponse, LauncherExecResponse,
+    LauncherGetInfoResponse, LauncherKillGroupResponse, LauncherKillResponse, LauncherRequest,
+    LauncherSetProcessGroupResponse, LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo,
+    SpawnRequest, StatusKind,
 };
 use mikros_rt::sys;
 
@@ -71,9 +73,15 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                 Ok(())
             }
             R::GetInfo(request, r) => r.reply(s, get_info(&shared, pid, request.pid)),
-            R::CreateSession(_, r) => r.reply(s, Err(no)),
-            R::SetProcessGroup(_, r) => r.reply(s, Err(no)),
-            R::KillGroup(_, r) => r.reply(s, Err(no)),
+            R::CreateSession(_, r) => r.reply(s, create_session(&shared, pid)),
+            R::SetProcessGroup(request, r) => r.reply(
+                s,
+                set_process_group(&shared, pid, request.pid, request.process_group),
+            ),
+            R::KillGroup(request, r) => r.reply(
+                s,
+                kill_group(&shared, pid, request.process_group, request.signo),
+            ),
             R::Fork(_, r) => r.reply(s, Err(no)),
             R::KillLoginSession(_, r) => r.reply(s, Err(no)),
             // TODO: list the processes the caller may see.
@@ -241,6 +249,26 @@ fn get_info(shared: &Shared, caller: u32, target: u32) -> Result<LauncherGetInfo
     })
 }
 
+/// Whether process `caller` may signal process `target`: a descendant,
+/// or one with its user ID and app ID. `process.signal_any` cannot be
+/// held before the permission broker serves requests.
+fn may_signal(records: &Records, caller: u32, target: u32) -> bool {
+    let (Some(from), Some(to)) = (records.get(caller), records.get(target)) else {
+        return false;
+    };
+    let same = to.user == from.user && to.app_id == from.app_id;
+    same || records.descends_from(target, caller)
+}
+
+/// Sends `signo` to `record`'s process.
+fn signal(record: &Record, signo: u32) -> Result<(), Status> {
+    // SAFETY: the call takes no pointers.
+    match unsafe { sys::process_signal(record.process.raw(), signo, 0) } {
+        mikros_rt::OK => Ok(()),
+        status => Err(start::status(status)),
+    }
+}
+
 /// Sends `signo` to process `target` for process `caller`.
 fn kill(
     shared: &Shared,
@@ -249,16 +277,86 @@ fn kill(
     signo: u32,
 ) -> Result<LauncherKillResponse, Status> {
     let records = shared.records.borrow();
-    let from = records.get(caller).ok_or(Status::BadState)?;
+    records.get(caller).ok_or(Status::BadState)?;
     let to = records.get(target).ok_or(Status::NotFound)?;
-    let same = to.user == from.user && to.app_id == from.app_id;
-    // `process.signal_any` cannot be held before the permission broker.
-    if !same && !records.descends_from(target, caller) {
+    if !may_signal(&records, caller, target) {
         return Err(Status::AccessDenied);
     }
-    // SAFETY: the call takes no pointers.
-    match unsafe { sys::process_signal(to.process.raw(), signo, 0) } {
-        mikros_rt::OK => Ok(LauncherKillResponse {}),
-        status => Err(start::status(status)),
+    signal(to, signo).map(|()| LauncherKillResponse {})
+}
+
+/// Sends `signo` for process `caller` to every running process of
+/// `group` that it may signal. Fails with `NOT_FOUND` when the group has
+/// no running process, and with `ACCESS_DENIED` when it may signal none.
+fn kill_group(
+    shared: &Shared,
+    caller: u32,
+    group: u32,
+    signo: u32,
+) -> Result<LauncherKillGroupResponse, Status> {
+    let records = shared.records.borrow();
+    records.get(caller).ok_or(Status::BadState)?;
+    let mut members = records
+        .iter()
+        .filter(|(_, r)| r.process_group == group && r.exit.is_none())
+        .peekable();
+    if members.peek().is_none() {
+        return Err(Status::NotFound);
     }
+    let mut signalled = false;
+    for (pid, record) in members {
+        if may_signal(&records, caller, pid) {
+            signal(record, signo)?;
+            signalled = true;
+        }
+    }
+    match signalled {
+        true => Ok(LauncherKillGroupResponse {}),
+        false => Err(Status::AccessDenied),
+    }
+}
+
+/// Makes process `caller` the leader of a new session and of a new
+/// process group, both with its process ID. Fails with `BAD_STATE` when
+/// it leads a process group already.
+fn create_session(shared: &Shared, caller: u32) -> Result<LauncherCreateSessionResponse, Status> {
+    let mut records = shared.records.borrow_mut();
+    let record = records.get_mut(caller).ok_or(Status::BadState)?;
+    if record.process_group == caller {
+        return Err(Status::BadState);
+    }
+    record.process_group = caller;
+    record.session = caller;
+    Ok(LauncherCreateSessionResponse { session: caller })
+}
+
+/// Moves process `target`, the caller or one of its children, to process
+/// group `group` of its session: one that a running process of that
+/// session is in, or a new one when `group` is `target`. Fails with
+/// `ACCESS_DENIED` for any other process, a child in another session, or
+/// another group.
+fn set_process_group(
+    shared: &Shared,
+    caller: u32,
+    target: u32,
+    group: u32,
+) -> Result<LauncherSetProcessGroupResponse, Status> {
+    let mut records = shared.records.borrow_mut();
+    let session = records.get(caller).ok_or(Status::BadState)?.session;
+    let moved = records
+        .get(target)
+        .filter(|r| target == caller || (r.parent == caller && r.exit.is_none()))
+        .filter(|r| r.session == session)
+        .ok_or(Status::AccessDenied)?;
+    let exists = records
+        .iter()
+        .any(|(_, r)| r.process_group == group && r.session == moved.session && r.exit.is_none());
+    if group != target && !exists {
+        return Err(Status::AccessDenied);
+    }
+    records
+        .get_mut(target)
+        .ok_or(Status::BadState)?
+        .process_group = group;
+    Ok(LauncherSetProcessGroupResponse {})
 }

@@ -93,6 +93,15 @@ impl Records {
         self.by_pid.get(&pid)
     }
 
+    pub fn get_mut(&mut self, pid: u32) -> Option<&mut Record> {
+        self.by_pid.get_mut(&pid)
+    }
+
+    /// Every record, by process ID.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &Record)> {
+        self.by_pid.iter().map(|(&pid, record)| (pid, record))
+    }
+
     /// Whether `pid` is a descendant of `ancestor`.
     pub fn descends_from(&self, pid: u32, ancestor: u32) -> bool {
         let mut at = pid;

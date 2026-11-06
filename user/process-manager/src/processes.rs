@@ -29,6 +29,8 @@ const INFO_PROCESS: u32 = 2;
 const INFO_PROCESS_SIZE: usize = 32;
 /// The signal of a process that has terminated.
 const TERMINATED: u32 = 1 << 4;
+/// The signal a parent gets when a child terminates.
+const CHLD: u32 = 17;
 
 /// What the process manager's tasks share.
 pub struct Shared {
@@ -269,10 +271,19 @@ impl Shared {
         }
         let exit = exit_of(&process).unwrap_or(Exit { code: 0, signal: 0 });
         let mut records = self.records.borrow_mut();
-        if records.get(pid).map(|r| r.koid) != Some(watched) {
+        let Some(parent) = records
+            .get(pid)
+            .filter(|r| r.koid == watched)
+            .map(|r| r.parent)
+        else {
             return;
-        }
+        };
         records.exited(pid, exit);
+        // The parent learns of the end with CHLD, unless it ended too.
+        if let Some(parent) = records.get(parent).filter(|r| r.exit.is_none()) {
+            // SAFETY: the call takes no pointers.
+            unsafe { sys::process_signal(parent.process.raw(), CHLD, 0) };
+        }
         drop(records);
         self.terminations.set(self.terminations.get() + 1);
         for waker in self.waiters.borrow_mut().drain(..) {
