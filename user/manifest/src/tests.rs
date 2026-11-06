@@ -222,3 +222,57 @@ fn priority_is_read_without_a_range() {
     let s = manifest("log.yaml", &std::format!("{MINIMAL}priority: 40\n")).service;
     assert_eq!(s.priority, 40);
 }
+
+const PROGRAM: &str = "app_id: system.console
+binary: /usr/bin/console
+permissions:
+  - devices.framebuffer
+namespace:
+  - path: /usr
+    rights: rx
+spawned_by:
+  - system.service-manager
+";
+
+#[test]
+fn reads_a_program_manifest() {
+    let read = parse_program("system.console.yaml", PROGRAM.as_bytes()).unwrap();
+    let p = read.program;
+    assert_eq!(p.app_id, "system.console");
+    assert_eq!(p.binary, "/usr/bin/console");
+    assert_eq!(p.permissions, ["devices.framebuffer"]);
+    assert_eq!(
+        p.namespace,
+        [NamespaceEntry {
+            path: "/usr".into(),
+            rights: "rx".into()
+        }]
+    );
+    assert_eq!(p.spawned_by, ["system.service-manager"]);
+    assert!(read.unknown.is_empty());
+}
+
+#[test]
+fn refuses_program_manifests_that_break_the_rules() {
+    let kind = |file: &str, text: &str| {
+        parse_program(file, text.as_bytes())
+            .map(drop)
+            .map_err(|e| e.kind)
+    };
+    let with = |id: &str| alloc::format!("app_id: {id}\nbinary: /usr/bin/x\n");
+    assert_eq!(
+        kind("other.yaml", &with("system.console")),
+        Err(ErrorKind::FileName)
+    );
+    for id in ["test.app", "system.cli", "system.driver.gpu"] {
+        let file = alloc::format!("{id}.yaml");
+        assert_eq!(kind(&file, &with(id)), Err(ErrorKind::BadAppId), "{id}");
+    }
+    let outside = "app_id: system.x\nbinary: /Apps/x/bin\n";
+    assert_eq!(kind("system.x.yaml", outside), Err(ErrorKind::BadBinary));
+    assert_eq!(
+        kind("system.x.yaml", "app_id: system.x\n"),
+        Err(ErrorKind::Missing("binary"))
+    );
+    assert_eq!(kind("system.x.yaml", &with("system.x")), Ok(()));
+}

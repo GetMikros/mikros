@@ -1,21 +1,24 @@
-//! Reading service manifests, and choosing the order in which the boot
-//! services start.
+//! Reading service and program manifests, and choosing the order in
+//! which the boot services start.
 //!
-//! `parse` reads one manifest file into a `Service`, or says why the
-//! file is invalid and where. `order` takes the services of the valid
-//! files and returns the boot services in an order that starts each
-//! one after those it waits for, with the services that cannot start
-//! and why.
+//! `parse` reads one service manifest file into a `Service`, and
+//! `parse_program` one program manifest file into a `Program`, or says
+//! why the file is invalid and where. `order` takes the services of the
+//! valid files and returns the boot services in an order that starts
+//! each one after those it waits for, with the services that cannot
+//! start and why.
 
 #![no_std]
 
 extern crate alloc;
 
 mod order;
+mod program;
 #[cfg(test)]
 mod tests;
 
 pub use order::{Blocked, Order, order};
+pub use program::{NamespaceEntry, Program, ProgramManifest, parse_program};
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -127,6 +130,9 @@ pub enum ErrorKind {
     BadRestart,
     /// `boot_handles` holds a value that names no boot handle.
     BadBootHandle,
+    /// A program's `app_id` does not start with `system.`, or is one that
+    /// no program manifest may name.
+    BadAppId,
 }
 
 impl From<mikros_yaml::Error> for Error {
