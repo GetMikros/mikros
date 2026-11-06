@@ -798,8 +798,8 @@ static void on_usr2(int signo)
 /* sigsuspend, ppoll and pselect wait with their mask in one step: a
    signal that the mask lets in ends the wait with EINTR even when it was
    pending before, its handler runs, and the old mask, which blocks it,
-   is back afterwards. pause, which the C library does not provide yet,
-   fails with ENOSYS. */
+   is back afterwards. pause ends with EINTR after a handler runs, also
+   when its action asks for interrupted calls to restart. */
 static int masks_apply_to_waits(void)
 {
 	struct sigaction sa = {.sa_handler = on_usr2}, old;
@@ -821,7 +821,13 @@ static int masks_apply_to_waits(void)
 	raise(SIGUSR2);
 	ok = ok && pselect(0, 0, 0, 0, &second, &empty) == -1 && errno == EINTR && woken == 3;
 	sigprocmask(SIG_SETMASK, &before, 0);
-	ok = ok && pause() == -1 && errno == ENOSYS;
+	sa.sa_flags = SA_RESTART;
+	sigaction(SIGUSR2, &sa, 0);
+	pthread_t self = pthread_self(), waker;
+	if (pthread_create(&waker, 0, wake_main, &self))
+		return 0;
+	ok = ok && pause() == -1 && errno == EINTR && woken == 4;
+	pthread_join(waker, 0);
 	sigaction(SIGUSR2, &old, 0);
 	return ok;
 }

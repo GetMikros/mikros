@@ -53,6 +53,7 @@ const SYS_GETPPID: i64 = 110;
 const SYS_SETSID: i64 = 112;
 const SYS_GETPGID: i64 = 121;
 const SYS_GETSID: i64 = 124;
+const SYS_PAUSE: i64 = 34;
 const SYS_RT_SIGPENDING: i64 = 127;
 const SYS_RT_SIGTIMEDWAIT: i64 = 128;
 const SYS_RT_SIGSUSPEND: i64 = 130;
@@ -195,6 +196,7 @@ extern "C" fn __mikros_syscall(
         SYS_RT_SIGPROCMASK => signal::sigprocmask(a1, a2 as *const u64, a3 as *mut u64, a4 as u64),
         SYS_RT_SIGPENDING => signal::sigpending(a1 as *mut u64, a2 as u64),
         SYS_RT_SIGSUSPEND => signal::sigsuspend(a1 as *const u64, a2 as u64),
+        SYS_PAUSE => signal::pause(),
         SYS_RT_SIGTIMEDWAIT => signal::sigtimedwait(
             a1 as *const u64,
             a2 as *mut u8,

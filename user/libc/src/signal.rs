@@ -450,7 +450,27 @@ pub fn sigsuspend(mask: *const u64, size: u64) -> i64 {
         return -EINVAL;
     }
     // SAFETY: musl passes the mask.
-    let mask = unsafe { mask.read() };
+    wait_for_handler(unsafe { mask.read() })
+}
+
+/// `pause`: waits with the current signal mask until a signal runs a
+/// handler, and fails with `EINTR` then. The mask is a temporary one for
+/// the wait, so that the wait ends after the handler even when its
+/// action asks for interrupted calls to restart.
+pub fn pause() -> i64 {
+    let mut mask = 0;
+    // SAFETY: the out pointer is valid for the call, which blocks nothing
+    // more.
+    let status = unsafe { sys::signal_set_mask(0, 0, &mut mask) };
+    if status != mikros_rt::OK {
+        return -errno::from_status(status);
+    }
+    wait_for_handler(mask)
+}
+
+/// Sleeps with `mask` as the temporary mask of the sleep until a signal
+/// runs a handler, and returns the error that ended it, `-EINTR` then.
+fn wait_for_handler(mask: u64) -> i64 {
     loop {
         // SAFETY: the calls take no pointers.
         let status = unsafe {
