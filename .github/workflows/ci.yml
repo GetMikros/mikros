@@ -15,7 +15,10 @@ jobs:
   ci:
     runs-on: ubuntu-24.04
     # Debian trixie has the btrfs-progs and QEMU versions the tools need.
-    container: debian:trixie
+    # QEMU runs with KVM, which the runner passes into the container.
+    container:
+      image: debian:trixie
+      options: --device /dev/kvm
     steps:
       - name: Install the host tools
         run: |
@@ -39,14 +42,12 @@ jobs:
           for kind in production debug fuzz; do
             cargo xtask build --kind "$kind"
           done
-      # The runner has no KVM, so QEMU emulates every instruction, and the
-      # QEMU runs take longer than xtask's default limit of 120 s.
       - name: Test
-        run: cargo xtask test --timeout 600
+        run: cargo xtask test
       # Some integration tests, such as the coverage test, exist only in
       # fuzz builds. The host tests ran in the step above.
       - name: Test the fuzz build
-        run: cargo xtask test --kind fuzz --no-host --timeout 600
+        run: cargo xtask test --kind fuzz --no-host
       # The caches are saved even when the tests fail, once the build
       # succeeded, under the keys and paths that the setup restored them
       # with. A cache whose exact key was found is not saved again.
@@ -115,3 +116,27 @@ jobs:
         with:
           path: target/llvm
           key: ${{ steps.setup.outputs.llvm-key }}
+
+  # The integration tests once more, without KVM, after the job above
+  # passed. QEMU then emulates every instruction, and threads run much
+  # later than with KVM, which shows tests that depend on timing. It
+  # builds from the caches the job above saved, and saves none itself.
+  emulated:
+    needs: ci
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    steps:
+      - name: Install the host tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git \
+            qemu-system-x86 gdb btrfs-progs \
+            cmake ninja-build clang lld python3 zstd bison
+      - uses: actions/checkout@v4
+      - name: Set up the build
+        uses: ./.github/actions/setup
+      # The QEMU runs take longer than xtask's default limit of 120 s
+      # without KVM. The host tests ran in the job above.
+      - name: Test without KVM
+        run: cargo xtask test --no-host --timeout 600
