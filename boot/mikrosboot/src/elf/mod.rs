@@ -69,9 +69,24 @@ pub struct Kernel {
     pub segments: Vec<Segment>,
     /// The protocol version the kernel was built for.
     pub version: (u16, u16),
+    /// Whether the image is position-independent, of type `ET_DYN`.
+    pub relocatable: bool,
     /// The relocations of a position-independent image, none for an
     /// `ET_EXEC` one.
     pub relocations: Vec<Relocation>,
+}
+
+impl Kernel {
+    /// The kernel with its entry point and segments `slide` bytes above
+    /// their linked addresses, where its relocations, which keep their
+    /// linked addresses, have placed it.
+    pub fn moved(mut self, slide: u64) -> Kernel {
+        self.entry = self.entry.wrapping_add(slide);
+        for segment in &mut self.segments {
+            segment.vaddr = segment.vaddr.wrapping_add(slide);
+        }
+        self
+    }
 }
 
 /// Why a kernel image was refused.
@@ -357,6 +372,7 @@ pub fn check(file: &[u8], range_start: u64) -> Result<Kernel, Error> {
         entry,
         segments,
         version,
+        relocatable: image_type == ET_DYN,
         relocations,
     })
 }

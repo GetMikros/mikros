@@ -120,6 +120,18 @@ fn reports_a_full_buffer() {
 }
 
 #[test]
+fn ends_the_direct_map_at_its_highest_covered_range() {
+    let mut buf = [MemoryMapEntry::default(); 4];
+    let mut map = Map::new(&mut buf);
+    assert_eq!(map.direct_map_end(), 0);
+    map.push_firmware(0x10_0000, 4, 7).unwrap();
+    // MMIO above conventional memory is not in the direct map.
+    map.push_firmware(0xfe00_0000, 1, 11).unwrap();
+    map.sort().unwrap();
+    assert_eq!(map.direct_map_end(), 0x10_0000 + 4 * P);
+}
+
+#[test]
 fn checks_the_direct_map_limit() {
     let mut buf = [MemoryMapEntry::default(); 4];
     let mut map = Map::new(&mut buf);

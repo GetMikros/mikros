@@ -207,6 +207,18 @@ impl<'a> Map<'a> {
     }
 
     /// Fails when a range the direct map covers ends above `limit`.
+    /// The end of the highest range that the direct map covers, or 0
+    /// without one.
+    pub fn direct_map_end(&self) -> u64 {
+        self.entries()
+            .iter()
+            .map(region)
+            .filter(|r| r.kind.in_direct_map())
+            .map(|r| r.end())
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn check_direct_map_limit(&self, limit: u64) -> Result<(), Error> {
         for r in self.entries().iter().map(region) {
             if r.kind.in_direct_map() && r.end() > limit {

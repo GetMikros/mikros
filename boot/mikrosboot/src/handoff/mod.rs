@@ -5,7 +5,7 @@ use crate::elf::Kernel;
 use crate::load::{self, Layout};
 use crate::memmap::{self, Map, Region};
 use crate::paging::BOOT_STACK_SIZE;
-use boot_protocol::x86_64::{DIRECT_MAP_BASE, DIRECT_MAP_LIMIT};
+use boot_protocol::x86_64::DIRECT_MAP_LIMIT;
 use boot_protocol::{
     BOOT_INFO_SIZE, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, PAGE_SIZE, VERSION_MAJOR,
     VERSION_MINOR, arch,
@@ -43,6 +43,8 @@ pub struct Prepared {
     pub system_table: u64,
     pub rng_seed: Option<[u8; 32]>,
     pub boot_time: Option<u64>,
+    /// Where the direct map starts.
+    pub direct_map_base: u64,
 }
 
 impl Prepared {
@@ -116,7 +118,7 @@ impl Prepared {
             kernel_phys_base: self.kernel_phys,
             kernel_virt_base: self.layout.virt_base,
             kernel_size: self.layout.size,
-            direct_map_base: DIRECT_MAP_BASE,
+            direct_map_base: self.direct_map_base,
             boot_image_phys: self.boot_image_phys,
             boot_image_size: self.boot_image_size,
             cmdline_phys: if self.cmdline_len == 0 {

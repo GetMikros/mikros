@@ -95,6 +95,7 @@ fn kernel(phs: &[Ph]) -> Vec<u8> {
 #[test]
 fn accepts_a_valid_kernel() {
     let k = check(&kernel(&[text(), data()]), START).unwrap();
+    assert!(!k.relocatable);
     assert_eq!(k.entry, START + 0x10);
     assert_eq!(k.version, (1, 0));
     assert_eq!(k.segments.len(), 2);
@@ -266,6 +267,7 @@ fn accepts_a_position_independent_kernel() {
         rela(START + 0x2ff8, R_X86_64_RELATIVE, START + 0x1000),
     ];
     let k = check(&dyn_kernel(&table_entries(2), &table, &[]), START).unwrap();
+    assert!(k.relocatable);
     assert_eq!(
         k.relocations,
         [

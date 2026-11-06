@@ -170,6 +170,7 @@ fn builds_the_entry_tables() {
             },
         ],
         version: (1, 0),
+        relocatable: false,
         relocations: Vec::new(),
     };
     let layout = crate::load::layout(&kernel);

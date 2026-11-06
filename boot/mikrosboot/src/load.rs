@@ -92,6 +92,7 @@ mod tests {
                 },
             ],
             version: (1, 0),
+            relocatable: true,
             relocations: vec![Relocation {
                 offset: START + 0x3010,
                 addend: START + 0x1008,
