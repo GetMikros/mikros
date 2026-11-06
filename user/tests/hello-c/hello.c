@@ -784,6 +784,48 @@ static int pipes_are_selected(void)
 	return ok && select(p[0] + 1, &r, 0, 0, &none) == -1 && errno == EBADF;
 }
 
+static volatile sig_atomic_t woken;
+
+static void on_usr2(int signo)
+{
+	(void)signo;
+	woken++;
+}
+
+/* sigsuspend, ppoll and pselect wait with their mask in one step: a
+   signal that the mask lets in ends the wait with EINTR even when it was
+   pending before, its handler runs, and the old mask, which blocks it,
+   is back afterwards. pause ends with EINTR when a handler runs. */
+static int masks_apply_to_waits(void)
+{
+	struct sigaction sa = {.sa_handler = on_usr2}, old;
+	sigset_t usr2, before, now, empty;
+	sigemptyset(&usr2);
+	sigaddset(&usr2, SIGUSR2);
+	sigemptyset(&empty);
+	sigaction(SIGUSR2, &sa, &old);
+	sigprocmask(SIG_BLOCK, &usr2, &before);
+	woken = 0;
+	raise(SIGUSR2);
+	int ok = woken == 0 && sigsuspend(&empty) == -1 && errno == EINTR && woken == 1;
+	sigprocmask(SIG_BLOCK, 0, &now);
+	ok = ok && sigismember(&now, SIGUSR2);
+	struct timespec second = {1, 0};
+	struct pollfd none = {.fd = -1};
+	raise(SIGUSR2);
+	ok = ok && ppoll(&none, 1, &second, &empty) == -1 && errno == EINTR && woken == 2;
+	raise(SIGUSR2);
+	ok = ok && pselect(0, 0, 0, 0, &second, &empty) == -1 && errno == EINTR && woken == 3;
+	sigprocmask(SIG_SETMASK, &before, 0);
+	pthread_t self = pthread_self(), waker;
+	if (pthread_create(&waker, 0, wake_main, &self))
+		return 0;
+	ok = ok && pause() == -1 && errno == EINTR && woken == 4;
+	pthread_join(waker, 0);
+	sigaction(SIGUSR2, &old, 0);
+	return ok;
+}
+
 static volatile sig_atomic_t piped;
 
 static void on_pipe(int signo)
@@ -965,9 +1007,11 @@ int main(int argc, char **argv)
 		return 31;
 	if (!pipes_are_selected())
 		return 32;
+	if (!masks_apply_to_waits())
+		return 33;
 	char *copy = malloc(64);
 	if (!copy)
-		return 33;
+		return 34;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

@@ -4,7 +4,7 @@
 //! on that port, and cancels the waits that did not end. Files and
 //! directories are always ready.
 
-use crate::errno::{self, EBADF, EINVAL, ENOSYS};
+use crate::errno::{self, EBADF, EINVAL};
 use crate::fd::{self, Description};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -97,20 +97,19 @@ pub fn poll(fds: *mut Pollfd, nfds: u64, timeout_ms: i64) -> i64 {
         // SAFETY: musl passes an array of `nfds` entries.
         unsafe { core::slice::from_raw_parts_mut(fds, nfds as usize) }
     };
-    wait(fds, deadline)
+    wait(fds, deadline, None)
 }
 
-/// `ppoll`: `poll` with a timeout of `ts`, none for null. A signal mask
-/// to wait with is not supported yet.
+/// `ppoll`: `poll` with a timeout of `ts`, none for null, and while it
+/// waits the signal mask at `mask`, if it is not null.
 pub fn ppoll(
     fds: *mut Pollfd,
     nfds: u64,
     ts: *const crate::clock::Timespec,
     mask: *const u64,
 ) -> i64 {
-    if !mask.is_null() {
-        return -ENOSYS;
-    }
+    // SAFETY: musl passes a mask or null.
+    let mask = unsafe { mask.as_ref() }.copied();
     if nfds > NFDS_MAX {
         return -EINVAL;
     }
@@ -124,7 +123,7 @@ pub fn ppoll(
         // SAFETY: musl passes an array of `nfds` entries.
         unsafe { core::slice::from_raw_parts_mut(fds, nfds as usize) }
     };
-    wait(fds, deadline)
+    wait(fds, deadline, mask)
 }
 
 /// The deadline `ts` from now, none for null.
@@ -140,12 +139,17 @@ fn timespec_deadline(ts: *const crate::clock::Timespec) -> Result<i64, i64> {
 const SET_WORDS: usize = 1024 / 64;
 type FdSet = [u64; SET_WORDS];
 
-/// `select`, and `pselect6` without a signal mask: waits until one of the
-/// first `n` descriptors in `read`, `write` and `except`, any of which may
-/// be null, is ready, or until `deadline`, keeps only the ready ones in
-/// the sets and returns how many bits it kept. A descriptor that is not
-/// open fails the call with `EBADF`.
-fn select_until(n: i64, sets: [*mut FdSet; 3], deadline: Result<i64, i64>) -> i64 {
+/// `select`, and `pselect6`: waits, with the signal mask `mask` if any,
+/// until one of the first `n` descriptors in `read`, `write` and
+/// `except`, any of which may be null, is ready, or until `deadline`,
+/// keeps only the ready ones in the sets and returns how many bits it
+/// kept. A descriptor that is not open fails the call with `EBADF`.
+fn select_until(
+    n: i64,
+    sets: [*mut FdSet; 3],
+    deadline: Result<i64, i64>,
+    mask: Option<u64>,
+) -> i64 {
     let Some(n) = usize::try_from(n).ok().filter(|&n| n <= SET_WORDS * 64) else {
         return -EINVAL;
     };
@@ -173,7 +177,7 @@ fn select_until(n: i64, sets: [*mut FdSet; 3], deadline: Result<i64, i64>) -> i6
             });
         }
     }
-    let result = wait(&mut fds, deadline);
+    let result = wait(&mut fds, deadline, mask);
     if result < 0 {
         return result;
     }
@@ -226,11 +230,11 @@ pub fn select(n: i64, r: *mut FdSet, w: *mut FdSet, e: *mut FdSet, tv: *const Ti
             )
         }),
     };
-    select_until(n, [r, w, e], deadline)
+    select_until(n, [r, w, e], deadline, None)
 }
 
 /// `pselect6`: `select` with a timeout of `ts`. `data` points at the
-/// signal mask to wait with and its size; a mask is not supported yet.
+/// signal mask to wait with, or null, and its size.
 pub fn pselect6(
     n: i64,
     r: *mut FdSet,
@@ -239,16 +243,19 @@ pub fn pselect6(
     ts: *const crate::clock::Timespec,
     data: *const [u64; 2],
 ) -> i64 {
-    // SAFETY: musl passes the mask's address and size, or null.
-    if unsafe { data.as_ref() }.is_some_and(|d| d[0] != 0) {
-        return -ENOSYS;
-    }
-    select_until(n, [r, w, e], timespec_deadline(ts))
+    // SAFETY: musl passes the mask's address and size, or null, and the
+    // mask at that address.
+    let mask = unsafe { data.as_ref() }
+        .filter(|d| d[0] != 0)
+        .map(|d| unsafe { *(d[0] as *const u64) });
+    select_until(n, [r, w, e], timespec_deadline(ts), mask)
 }
 
 /// Waits until one of `fds` is ready or `deadline` passed, as `poll`
-/// does.
-fn wait(fds: &mut [Pollfd], deadline: i64) -> i64 {
+/// does, with the signal mask `mask` while it waits, if any: a temporary
+/// mask given just before the wait, so that the change and the wait are
+/// one step.
+fn wait(fds: &mut [Pollfd], deadline: i64, mut mask: Option<u64>) -> i64 {
     let mut port = 0;
     // SAFETY: the out pointer is valid for the call.
     let status = unsafe { sys::port_create(0, &mut port) };
@@ -301,6 +308,10 @@ fn wait(fds: &mut [Pollfd], deadline: i64) -> i64 {
     let mut until = if ready { 0 } else { deadline };
     loop {
         let mut packet = [0u8; PACKET_SIZE];
+        if let Some(mask) = mask.take() {
+            // SAFETY: the call takes no pointers.
+            unsafe { sys::signal_set_wait_mask(mask) };
+        }
         // SAFETY: the pointer refers to a whole packet.
         let status = unsafe { sys::port_wait(waits.port.raw(), until, packet.as_mut_ptr()) };
         match status {
