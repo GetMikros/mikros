@@ -9,9 +9,11 @@
 //! - `env <name>`: prints the variable `name`, or `unset`;
 //! - `sleep`: sleeps until it is killed.
 
-#![feature(process_setsid)]
+#![feature(mikros_handles, process_setsid)]
 
 use std::io::{ErrorKind, Read, Write};
+use std::os::mikros::io::{AsHandleExt, RawHandle};
+use std::os::mikros::process::ChildExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
@@ -21,6 +23,13 @@ const ME: &str = "/usr/bin/spawn-std";
 /// The C hello world, which prints a greeting for its one argument.
 const HELLO: &str = "/usr/bin/hello";
 const SIGKILL: i32 = 9;
+/// A file of the boot image.
+const GREETING: &str = "/usr/share/hello/greeting.txt";
+
+unsafe extern "C" {
+    fn mikros_stream_write(stream: RawHandle, bytes: *const u8, len: u64, actual: *mut u64) -> i64;
+    fn mikros_process_signal(process: RawHandle, signo: u32, value: u64) -> i64;
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -106,6 +115,8 @@ fn checks() -> Result<(), u8> {
             .status()
             .is_err_and(|e| e.kind() == ErrorKind::Unsupported)
     };
+    // The handles behind descriptors and children.
+    check(handles().is_some())?;
     let mut pre_exec = Command::new(ME);
     // SAFETY: the closure does nothing.
     unsafe { pre_exec.pre_exec(|| Ok(())) };
@@ -130,4 +141,38 @@ fn echo(input: &[u8]) -> Option<Vec<u8>> {
     child.stdin.take()?.write_all(input).ok()?;
     let output = child.wait_with_output().ok()?;
     output.status.success().then_some(output.stdout)
+}
+
+/// The kernel handles of a pipe, a file, standard output and a child are
+/// the objects behind them: bytes written to the pipe's stream through
+/// its handle come out of the pipe, and a signal sent to the child's
+/// process handle ends it. A child's handle is taken only once.
+fn handles() -> Option<()> {
+    let (mut reader, writer) = std::io::pipe().ok()?;
+    let stream = writer.handle().ok()?;
+    let mut actual = 0;
+    // SAFETY: the pointers describe the bytes and `actual`.
+    let status =
+        unsafe { mikros_stream_write(stream.as_raw_handle(), b"raw".as_ptr(), 3, &mut actual) };
+    drop((stream, writer));
+    let mut read = Vec::new();
+    reader.read_to_end(&mut read).ok()?;
+    (status == 0 && actual == 3 && read == b"raw").then_some(())?;
+    let file = std::fs::File::open(GREETING).ok()?;
+    let (a, b) = (file.handle().ok()?, file.handle().ok()?);
+    (a.as_raw_handle() != b.as_raw_handle()).then_some(())?;
+    std::io::stdout().handle().ok()?;
+    let mut child = Command::new(ME).arg("sleep").spawn().ok()?;
+    let process = child.take_process_handle().ok()?;
+    child.take_process_handle().is_err().then_some(())?;
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { mikros_process_signal(process.as_raw_handle(), SIGKILL as u32, 0) };
+    let ended = child.wait().ok()?;
+    (status == 0 && ended.signal() == Some(SIGKILL)).then_some(())?;
+    let waited = Command::new(ME).args(["exit", "0"]).spawn().ok()?;
+    let mut waited = waited;
+    waited.wait().ok()?;
+    let gone = waited.take_process_handle();
+    gone.is_err_and(|e| e.raw_os_error() == Some(10))
+        .then_some(())
 }

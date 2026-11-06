@@ -12,6 +12,7 @@
 
 use crate::errno::{self, E2BIG, EBADF, ECHILD, EINTR, EINVAL, EIO, ENOSYS};
 use crate::fd::{self, Description};
+use crate::lock::Lock;
 use crate::{clock, fs, process};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -316,9 +317,32 @@ unsafe fn spawn(
     let request = unsafe { request(path, &descriptors, argv, envp) }?;
     let client = process::launcher();
     match process::unsignalled(|| client.spawn(request, FOREVER)) {
-        Ok(Ok(spawned)) => Ok(spawned.pid),
+        Ok(Ok(spawned)) => {
+            CHILDREN.lock().insert(spawned.pid, spawned.process);
+            Ok(spawned.pid)
+        }
         Ok(Err(status)) => Err(errno::from_status(i64::from(status.into_raw()))),
         Err(_) => Err(EIO),
+    }
+}
+
+/// The process handles that `Spawn` gave for the children that have not
+/// ended or been waited for, by process ID, until
+/// `mikros_process_handle` takes them.
+static CHILDREN: Lock<BTreeMap<u32, OwnedHandle>> = Lock::new(BTreeMap::new());
+
+/// `mikros_process_handle`: takes the process handle of the child `pid`
+/// that `posix_spawn` started, which the caller owns from then on, or
+/// returns `-ECHILD` when there is none: when `pid` is not such a child,
+/// was waited for, or its handle was taken already.
+#[unsafe(no_mangle)]
+extern "C" fn mikros_process_handle(pid: i32) -> i64 {
+    let taken = u32::try_from(pid)
+        .ok()
+        .and_then(|pid| CHILDREN.lock().remove(&pid));
+    match taken {
+        Some(handle) => i64::from(handle.into_raw()),
+        None => -ECHILD,
     }
 }
 
@@ -357,6 +381,10 @@ pub fn wait4(pid: i64, status: *mut i32, options: i64, rusage: *mut u8) -> i64 {
         Err(_) => return -EIO,
     };
     let s = &ended.status;
+    // A child that ended is gone, and so is its handle.
+    if s.kind == StatusKind::Exited {
+        CHILDREN.lock().remove(&ended.pid);
+    }
     let encoded = match s.kind {
         StatusKind::Stopped => (s.stop_signal as i32 & 0xff) << 8 | 0x7f,
         StatusKind::Continued => 0xffff,

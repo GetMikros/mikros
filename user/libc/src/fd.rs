@@ -21,6 +21,8 @@ pub const ID_FD: u32 = (1 << 24) - 1;
 const TYPE_CHANNEL: u32 = 4;
 /// The object type of a stream.
 const TYPE_STREAM: u32 = 15;
+/// The rights argument that keeps a handle's rights.
+const SAME_RIGHTS: u32 = 1 << 31;
 /// The most descriptors a process has open.
 pub const FDS_MAX: usize = 1024;
 
@@ -231,6 +233,24 @@ pub fn shared_handle(description: &Description) -> Option<(mikros_rt::sys::Handl
             Some((node.node.lock().channel().ok()?, KIND_FILE))
         }
     }
+}
+
+/// `mikros_fd_handle`: a new handle, which the caller owns, with the
+/// rights of the descriptor's own, to the object behind descriptor `fd`:
+/// the stream of a pipe, or the connection to a file or directory. Fails
+/// with the negated error number.
+#[unsafe(no_mangle)]
+extern "C" fn mikros_fd_handle(fd: i32) -> i64 {
+    let Some((handle, _)) = get(fd.into()).as_deref().and_then(shared_handle) else {
+        return -EBADF;
+    };
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { mikros_rt::sys::handle_duplicate(handle, SAME_RIGHTS, &mut out) };
+    if status != mikros_rt::OK {
+        return -crate::errno::from_status(status);
+    }
+    i64::from(out)
 }
 
 /// Installs `description` as descriptor `fd`, which is free.
