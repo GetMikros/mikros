@@ -147,6 +147,8 @@ fn prepare(g: Gathered) -> Result<Prepared, Failure> {
     let range =
         unsafe { core::slice::from_raw_parts_mut(kernel_phys as *mut u8, g.layout.size as usize) };
     load::copy(&g.kernel_file, &g.kernel, g.layout, range);
+    // A position-independent kernel runs at its linked addresses.
+    load::relocate(&g.kernel, g.layout, g.layout.virt_base, range);
 
     let step = "allocating memory for the boot image";
     let boot_image_size = g.boot_image.len() as u64;

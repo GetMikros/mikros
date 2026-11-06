@@ -16,6 +16,7 @@ fn prepared() -> Prepared {
             entry: 0xffff_ffff_8000_0000,
             segments: Vec::new(),
             version: (VERSION_MAJOR, VERSION_MINOR),
+            relocations: Vec::new(),
         },
         layout: Layout {
             virt_base: 0xffff_ffff_8000_0000,

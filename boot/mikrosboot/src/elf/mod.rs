@@ -5,6 +5,7 @@ use boot_protocol::{NOTE_NAME, NOTE_TYPE, PAGE_SIZE, VERSION_MAJOR};
 use core::fmt;
 
 const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
@@ -13,6 +14,23 @@ const PT_NOTE: u32 = 4;
 const PT_TLS: u32 = 7;
 pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
+
+/// Tags of the dynamic segment.
+const DT_NULL: u64 = 0;
+const DT_PLTRELSZ: u64 = 2;
+const DT_RELA: u64 = 7;
+const DT_RELASZ: u64 = 8;
+const DT_RELAENT: u64 = 9;
+const DT_REL: u64 = 17;
+const DT_RELSZ: u64 = 18;
+const DT_JMPREL: u64 = 23;
+const DT_RELRSZ: u64 = 35;
+const DT_RELR: u64 = 36;
+/// The size of a dynamic segment entry and of an `Elf64_Rela`.
+const DYN_SIZE: u64 = 16;
+const RELA_SIZE: u64 = 24;
+/// `r_info` of a relative relocation, which names no symbol.
+const R_X86_64_RELATIVE: u64 = 8;
 
 /// A loadable segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +53,15 @@ impl Segment {
     }
 }
 
+/// A relative relocation of a position-independent kernel: the eight
+/// bytes at the linked address `offset` become `addend`, a linked
+/// address, moved as far as the image is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Relocation {
+    pub offset: u64,
+    pub addend: u64,
+}
+
 /// A kernel image that passed the checks.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Kernel {
@@ -42,6 +69,9 @@ pub struct Kernel {
     pub segments: Vec<Segment>,
     /// The protocol version the kernel was built for.
     pub version: (u16, u16),
+    /// The relocations of a position-independent image, none for an
+    /// `ET_EXEC` one.
+    pub relocations: Vec<Relocation>,
 }
 
 /// Why a kernel image was refused.
@@ -60,12 +90,19 @@ pub enum Error {
     NoVersionNote,
     SeveralVersionNotes,
     WrongVersion(u16, u16),
+    /// A position-independent image without exactly one dynamic segment.
+    DynamicSegments(usize),
+    /// The dynamic segment describes relocations other than one table of
+    /// `Elf64_Rela` in a loaded segment.
+    BadRelocations,
+    /// The relocation is not a relative one within a loaded segment.
+    BadRelocation(u64),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Error::BadHeader => write!(f, "not an x86_64 ELF64 executable"),
+            Error::BadHeader => write!(f, "not an x86_64 ELF64 executable or shared object"),
             Error::Truncated => write!(f, "the file is truncated"),
             Error::ForbiddenSegment(t) => write!(f, "it has a program header of type {t}"),
             Error::NoLoadSegment => write!(f, "it has no loadable segment"),
@@ -87,6 +124,16 @@ impl fmt::Display for Error {
                 f,
                 "it was built for boot protocol {major}.{minor}, not {VERSION_MAJOR}.x"
             ),
+            Error::DynamicSegments(n) => {
+                write!(
+                    f,
+                    "it is position-independent with {n} dynamic segments, not 1"
+                )
+            }
+            Error::BadRelocations => write!(f, "it has relocations other than one RELA table"),
+            Error::BadRelocation(i) => {
+                write!(f, "relocation {i} is not a relative one within the image")
+            }
         }
     }
 }
@@ -147,13 +194,74 @@ fn notes(
     Ok(found)
 }
 
+/// The relative relocations that the dynamic segment at `offset` of
+/// `size` bytes in `file` describes, whose table and targets lie in
+/// `segments`.
+fn relocations(
+    file: &[u8],
+    offset: u64,
+    size: u64,
+    segments: &[Segment],
+) -> Result<Vec<Relocation>, Error> {
+    let end = offset.checked_add(size).ok_or(Error::Truncated)?;
+    let (mut table, mut table_size, mut entry_size) = (None, 0, RELA_SIZE);
+    let mut at = offset;
+    while add(at, DYN_SIZE)? <= end {
+        let (tag, value) = (u64_at(file, at)?, u64_at(file, add(at, 8)?)?);
+        match tag {
+            DT_NULL => break,
+            DT_RELA => table = Some(value),
+            DT_RELASZ => table_size = value,
+            DT_RELAENT => entry_size = value,
+            DT_REL | DT_JMPREL | DT_RELR => return Err(Error::BadRelocations),
+            DT_RELSZ | DT_PLTRELSZ | DT_RELRSZ if value != 0 => {
+                return Err(Error::BadRelocations);
+            }
+            _ => {}
+        }
+        at += DYN_SIZE;
+    }
+    if entry_size != RELA_SIZE || !table_size.is_multiple_of(RELA_SIZE) {
+        return Err(Error::BadRelocations);
+    }
+    if table_size == 0 {
+        return Ok(Vec::new());
+    }
+    // The table's address is a linked one, in a segment's file bytes.
+    let table = table.ok_or(Error::BadRelocations)?;
+    let from = segments
+        .iter()
+        .find(|s| s.vaddr <= table && table.checked_add(table_size) <= Some(s.vaddr + s.file_size))
+        .map(|s| s.offset + (table - s.vaddr))
+        .ok_or(Error::BadRelocations)?;
+    let mut found = Vec::new();
+    for i in 0..table_size / RELA_SIZE {
+        let entry = add(from, i * RELA_SIZE)?;
+        let target = u64_at(file, entry)?;
+        let info = u64_at(file, add(entry, 8)?)?;
+        let addend = u64_at(file, add(entry, 16)?)?;
+        let inside = segments
+            .iter()
+            .any(|s| s.vaddr <= target && target.checked_add(8) <= s.vaddr.checked_add(s.mem_size));
+        if info != R_X86_64_RELATIVE || !inside {
+            return Err(Error::BadRelocation(i));
+        }
+        found.push(Relocation {
+            offset: target,
+            addend,
+        });
+    }
+    Ok(found)
+}
+
 /// Checks the kernel image `file` and returns its entry point, loadable
-/// segments and protocol version. Segments must lie at or above
-/// `range_start`.
+/// segments, protocol version and, for a position-independent image,
+/// its relocations. Segments must lie at or above `range_start`.
 pub fn check(file: &[u8], range_start: u64) -> Result<Kernel, Error> {
     let ident_ok = file.get(..7) == Some(&[0x7f, b'E', b'L', b'F', 2, 1, 1][..]);
+    let image_type = u16_at(file, 16)?;
     if !ident_ok
-        || u16_at(file, 16)? != ET_EXEC
+        || !matches!(image_type, ET_EXEC | ET_DYN)
         || u16_at(file, 18)? != EM_X86_64
         || u32_at(file, 20)? != 1
     {
@@ -169,6 +277,7 @@ pub fn check(file: &[u8], range_start: u64) -> Result<Kernel, Error> {
 
     let mut segments: Vec<Segment> = Vec::new();
     let mut versions = Vec::new();
+    let mut dynamic = Vec::new();
     for i in 0..ph_count {
         let ph = add(ph_offset, i * ph_size)?;
         let kind = u32_at(file, ph)?;
@@ -179,6 +288,7 @@ pub fn check(file: &[u8], range_start: u64) -> Result<Kernel, Error> {
         let mem_size = u64_at(file, add(ph, 40)?)?;
         let align = u64_at(file, add(ph, 48)?)?;
         match kind {
+            PT_DYNAMIC if image_type == ET_DYN => dynamic.push((offset, file_size)),
             PT_INTERP | PT_DYNAMIC | PT_TLS => return Err(Error::ForbiddenSegment(kind)),
             PT_NOTE => versions.extend(notes(file, offset, file_size, align)?),
             PT_LOAD => {
@@ -238,10 +348,16 @@ pub fn check(file: &[u8], range_start: u64) -> Result<Kernel, Error> {
     if version.0 != VERSION_MAJOR {
         return Err(Error::WrongVersion(version.0, version.1));
     }
+    let relocations = match (image_type, &dynamic[..]) {
+        (ET_EXEC, _) => Vec::new(),
+        (_, &[(offset, size)]) => relocations(file, offset, size, &segments)?,
+        (_, all) => return Err(Error::DynamicSegments(all.len())),
+    };
     Ok(Kernel {
         entry,
         segments,
         version,
+        relocations,
     })
 }
 
