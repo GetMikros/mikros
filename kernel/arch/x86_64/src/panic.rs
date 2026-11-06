@@ -137,6 +137,18 @@ pub fn set_stack(start: u64, end: u64) {
 }
 
 /// Writes the panic report and stops. `rbp` starts the backtrace.
+/// The lowest address of the image's loadable segments as linked, where
+/// link.ld places it.
+const LINKED_BASE: u64 = boot_protocol::x86_64::KERNEL_RANGE_START;
+
+/// The linked address of the kernel image address `address`, wherever the
+/// bootloader placed the image: `__kernel_start` is the start of the
+/// image's lowest segment, `kernel_virt_base`, where it runs.
+fn linked(address: u64) -> u64 {
+    let base = (&raw const __kernel_start) as u64;
+    address.wrapping_sub(base).wrapping_add(LINKED_BASE)
+}
+
 fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> ! {
     // SAFETY: disabling interrupts touches no memory.
     unsafe { asm!("cli", options(nomem, nostack)) };
@@ -183,7 +195,7 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
             build_id: build_id(),
             cpu: crate::percpu::index(),
             registers,
-            frames: backtrace::frames(rbp, stack, read),
+            frames: backtrace::frames(rbp, stack, read).map(linked),
         },
     );
     crate::console::panic_screen(|mut screen| {
@@ -195,7 +207,7 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
                 build_id: build_id(),
                 cpu: crate::percpu::index(),
                 registers,
-                frames: backtrace::frames(rbp, stack, read),
+                frames: backtrace::frames(rbp, stack, read).map(linked),
             },
         );
     });

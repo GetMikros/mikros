@@ -18,6 +18,8 @@ PHDRS
 
 SECTIONS
 {
+    /* The panic report gives addresses as linked, from this base
+       (LINKED_BASE in src/panic.rs). */
     . = 0xFFFFFFFF80000000;
 
     __kernel_start = .;
