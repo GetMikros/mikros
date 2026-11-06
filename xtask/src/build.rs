@@ -101,6 +101,20 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         let dir = syzkaller_descriptions()?;
         println!("built    {}", dir.display());
     }
+    let xkbcommon = crate::ports::build(&crate::ports::XKBCOMMON)?;
+    crate::build_systems::check_installed(
+        &xkbcommon,
+        &[
+            "lib/libxkbcommon.0.13.2.dlib",
+            "include/xkbcommon/xkbcommon.h",
+            "bin/xkbcli",
+        ],
+        &[
+            ("lib/libxkbcommon.0.dlib", "libxkbcommon.0.13.2.dlib"),
+            ("lib/libxkbcommon.dlib", "libxkbcommon.0.dlib"),
+        ],
+    )?;
+    println!("built    {}", xkbcommon.display());
     let boot_image = match boot {
         BootImage::System => {
             let init = user_build("init", kind)?;
