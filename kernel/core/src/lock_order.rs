@@ -27,6 +27,9 @@ macro_rules! classes {
 }
 
 classes! {
+    // Taken with no other lock held, and held while notifying a reader
+    // takes the locks of the signal hook.
+    LOG_READERS,
     PROCESS_REGISTRY,
     PROCESS_INIT,
     RESOURCE_LIVE,
@@ -62,7 +65,6 @@ classes! {
     WAIT_FUTEXES,
     TIMELINE_WAITERS,
     LOG_OBJECT,
-    LOG_READERS,
     FUZZ_STOP,
     BTI_QUARANTINE,
     BTI_PIN,
@@ -71,8 +73,9 @@ classes! {
     INTERRUPT_SLOTS,
     IO_APICS,
     RESERVED_RANGES,
-    THREAD_COVERAGE,
     SCHED,
+    // Switching a thread in points the coverage hook at its buffer.
+    THREAD_COVERAGE,
     THREAD_USER,
     THREAD_DEBUG,
     THREAD_ENTITY,

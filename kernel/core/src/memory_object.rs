@@ -20,7 +20,7 @@ use crate::status::Error;
 use crate::sync::SpinLock;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// The largest memory object: the size of the user address range.
 fn max_size() -> u64 {
@@ -88,6 +88,9 @@ pub struct Paged {
     key: u64,
     /// Locked after the pages.
     state: SpinLock<Paging>,
+    /// Set with the state's revocation, for checks that hold locks that
+    /// come before the state's, such as an address space's regions.
+    revoked: AtomicBool,
     /// The budgets that frames supplied to the object stay charged to, by
     /// frame address: `None` for a frame of an object without a budget,
     /// which stays uncharged.
@@ -218,6 +221,7 @@ impl MemoryObject {
                     crate::lock_order::MEMORY_PAGING,
                     Paging::new(options & TRACK_DIRTY != 0).charged_to(budget.clone()),
                 ),
+                revoked: AtomicBool::new(false),
                 charges: SpinLock::new(crate::lock_order::MEMORY_CHARGES, nodes::map()),
                 writeback: SpinLock::new(crate::lock_order::MEMORY_WRITEBACK, None),
             }),
@@ -243,7 +247,7 @@ impl MemoryObject {
     /// Fails with `AccessDenied` when the object is revoked.
     pub fn check_revoked(&self) -> Result<(), Error> {
         match &self.paged {
-            Some(p) if p.state.lock().revoked() => Err(Error::AccessDenied),
+            Some(p) if p.revoked.load(Ordering::Acquire) => Err(Error::AccessDenied),
             _ => Ok(()),
         }
     }
@@ -550,6 +554,7 @@ impl MemoryObject {
                 continue;
             }
             paged.state.lock().revoke();
+            paged.revoked.store(true, Ordering::Release);
             break pages.count();
         };
         // No page can be entered once revoked, and the size stays, so the
