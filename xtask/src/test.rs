@@ -155,6 +155,28 @@ pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
     args
 }
 
+/// How many of the last serial lines a timed-out run prints.
+const TAIL_LINES: usize = 40;
+
+/// What a timed-out run prints of its serial output: the `TEST` lines,
+/// as a finished run prints them, then the last `TAIL_LINES` lines, which
+/// show where the run stopped.
+fn timeout_report(serial: &str) -> String {
+    let mut report = String::new();
+    for line in serial.lines().filter(|l| l.contains("TEST")) {
+        report.push_str(line);
+        report.push('\n');
+    }
+    let lines: Vec<&str> = serial.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
+    report.push_str(&format!("last {} serial lines:\n", tail.len()));
+    for line in tail {
+        report.push_str(line);
+        report.push('\n');
+    }
+    report
+}
+
 /// Boots the test image and returns QEMU's exit code, or fails when the
 /// run takes longer than `timeout`.
 fn boot(args: &Args, disk: &Path, log: &Path) -> Result<Option<i32>> {
@@ -179,7 +201,13 @@ fn boot(args: &Args, disk: &Path, log: &Path) -> Result<Option<i32>> {
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("the integration tests timed out after {} s", args.timeout);
+            let serial = fs::read(log).unwrap_or_default();
+            print!("{}", timeout_report(&String::from_utf8_lossy(&serial)));
+            bail!(
+                "the integration tests timed out after {} s; serial output in {}",
+                args.timeout,
+                log.display()
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -256,6 +284,24 @@ mod tests {
         assert!(verdict(Some(35), "").is_err());
         assert!(verdict(None, "").is_err());
         assert!(verdict(Some(PASSED), "x\nKERNEL PANIC: oops\n").is_err());
+    }
+
+    #[test]
+    fn reports_the_tests_and_the_end_of_a_timed_out_run() {
+        let mut serial = String::from("TEST a PASSED\n");
+        for i in 0..TAIL_LINES + 5 {
+            serial.push_str(&format!("line {i}\n"));
+        }
+        let report = timeout_report(&serial);
+        let lines: Vec<&str> = report.lines().collect();
+        assert_eq!(lines[0], "TEST a PASSED");
+        assert_eq!(lines[1], format!("last {TAIL_LINES} serial lines:"));
+        assert_eq!(lines[2], "line 5");
+        assert_eq!(
+            lines.last(),
+            Some(&format!("line {}", TAIL_LINES + 4).as_str())
+        );
+        assert_eq!(timeout_report(""), "last 0 serial lines:\n");
     }
 
     #[test]
