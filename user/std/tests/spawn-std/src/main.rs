@@ -73,6 +73,11 @@ fn checks() -> Result<(), u8> {
     };
     // A C program's output and status.
     let hello = Command::new(HELLO).arg("world").output();
+    match &hello {
+        Ok(o) if !o.status.success() => println!("{HELLO} ended with {}", o.status),
+        Err(e) => println!("starting {HELLO} failed: {e}"),
+        Ok(_) => {}
+    }
     check(hello.as_ref().is_ok_and(|o| o.status.success()))?;
     check(hello.is_ok_and(|o| o.stdout == b"hello, world\n"))?;
     // An exit code.
