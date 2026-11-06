@@ -194,6 +194,7 @@ pub fn init(double_fault: u64, nmi: u64, machine_check: u64, debug: u64) {
             out("edx") _,
         );
     }
+    crate::isolation::add_cpu(cpu, [double_fault, nmi, machine_check, debug]);
 }
 
 #[cfg(test)]

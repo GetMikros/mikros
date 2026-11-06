@@ -48,6 +48,11 @@ pub struct PerCpu {
     /// register in while it moves to that stack.
     entry_stack_top: AtomicU64,
     scratch: AtomicU64,
+    /// With kernel page-table isolation, the CR3 values that entries to
+    /// the kernel and returns to user mode load: the loaded address
+    /// space's tables, or the kernel's own, and its tables for user mode.
+    pub kernel_cr3: AtomicU64,
+    pub user_cr3: AtomicU64,
     /// The processor's task state segment and GDT, which the processor
     /// reads as it runs and `gdt` changes.
     pub tss: UnsafeCell<Tss>,
@@ -102,6 +107,8 @@ impl PerCpu {
             interrupts: AtomicU64::new(0),
             entry_stack_top: AtomicU64::new(0),
             scratch: AtomicU64::new(0),
+            kernel_cr3: AtomicU64::new(0),
+            user_cr3: AtomicU64::new(0),
             tss: UnsafeCell::new(Tss::new()),
             gdt: UnsafeCell::new([0; 8]),
             entry_stack: UnsafeCell::new([0; ENTRY_STACK_SIZE]),
@@ -249,6 +256,8 @@ pub const COV_CAPACITY_OFFSET: usize = 40;
 pub const INTERRUPTS_OFFSET: usize = 48;
 pub const ENTRY_STACK_TOP_OFFSET: usize = 56;
 pub const SCRATCH_OFFSET: usize = 64;
+pub const KERNEL_CR3_OFFSET: usize = 72;
+pub const USER_CR3_OFFSET: usize = 80;
 /// The size of the part of a processor's data that the entry and exit
 /// code uses, whole pages.
 pub const ENTRY_SIZE: usize = core::mem::offset_of!(PerCpu, rest);
@@ -261,4 +270,6 @@ const _: () = assert!(core::mem::offset_of!(PerCpu, cov_capacity) == COV_CAPACIT
 const _: () = assert!(core::mem::offset_of!(PerCpu, interrupts) == INTERRUPTS_OFFSET);
 const _: () = assert!(core::mem::offset_of!(PerCpu, entry_stack_top) == ENTRY_STACK_TOP_OFFSET);
 const _: () = assert!(core::mem::offset_of!(PerCpu, scratch) == SCRATCH_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpu, kernel_cr3) == KERNEL_CR3_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpu, user_cr3) == USER_CR3_OFFSET);
 const _: () = assert!(ENTRY_SIZE.is_multiple_of(4096));

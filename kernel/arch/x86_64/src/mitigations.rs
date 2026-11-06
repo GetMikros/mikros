@@ -30,6 +30,7 @@ const AMD_IBRS: u32 = 1 << 14;
 /// Bit of CPUID.(EAX=80000021h):EAX.
 const AUTOMATIC_IBRS: u32 = 1 << 8;
 /// Bits of `IA32_ARCH_CAPABILITIES`.
+const RDCL_NO: u64 = 1;
 const IBRS_ALL: u64 = 1 << 1;
 const MDS_NO: u64 = 1 << 5;
 
@@ -89,6 +90,8 @@ pub enum Ibrs {
 /// The mitigations a processor needs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Needed {
+    /// Kernel page-table isolation.
+    pub isolation: bool,
     pub ibrs: Ibrs,
     /// An indirect branch prediction barrier on every switch to a thread
     /// of another process.
@@ -110,6 +113,7 @@ pub fn needed(reported: Reported) -> Needed {
         Ibrs::None
     };
     Needed {
+        isolation: reported.vendor == Vendor::Intel && capabilities & RDCL_NO == 0,
         ibrs,
         ibpb: reported.leaf7_edx & IBRS_IBPB != 0 || reported.leaf_80000008_ebx & AMD_IBPB != 0,
         verw: reported.leaf7_edx & MD_CLEAR != 0 && capabilities & MDS_NO == 0,
@@ -132,6 +136,19 @@ pub static VERW_SELECTOR: u16 = crate::gdt::KERNEL_DATA;
 #[cfg(target_os = "none")]
 #[unsafe(link_section = ".data.entry")]
 pub static IBRS_ON_ENTRY: AtomicBool = AtomicBool::new(false);
+
+/// Whether the kernel runs user mode on page tables of its own, as some
+/// processor needs: kernel page-table isolation.
+#[cfg(target_os = "none")]
+#[unsafe(link_section = ".data.entry")]
+pub static ISOLATION: AtomicBool = AtomicBool::new(false);
+
+/// Whether the kernel uses kernel page-table isolation. `init` decides it
+/// on the boot processor before the kernel's page tables are built.
+#[cfg(target_os = "none")]
+pub fn isolation() -> bool {
+    ISOLATION.load(Ordering::Relaxed)
+}
 
 /// Whether switches to another process's thread need a barrier.
 #[cfg(target_os = "none")]
@@ -180,6 +197,9 @@ pub fn init() {
         },
         Ibrs::OnEntry => IBRS_ON_ENTRY.store(true, Ordering::Relaxed),
         Ibrs::None => {}
+    }
+    if needed.isolation {
+        ISOLATION.store(true, Ordering::Relaxed);
     }
     if needed.ibpb {
         IBPB.store(true, Ordering::Relaxed);
@@ -260,6 +280,15 @@ mod tests {
             ..Reported::default()
         });
         assert_eq!(other.ibrs, Ibrs::None);
+    }
+
+    #[test]
+    fn isolates_only_intel_processors_without_rdcl_no() {
+        assert!(intel(0, None).isolation);
+        assert!(intel(ARCH_CAPABILITIES, Some(IBRS_ALL)).isolation);
+        assert!(!intel(ARCH_CAPABILITIES, Some(RDCL_NO)).isolation);
+        assert!(!amd(0, 0).isolation);
+        assert!(!needed(Reported::default()).isolation);
     }
 
     #[test]

@@ -148,6 +148,12 @@ global_asm!(
     "jz 2f",
     "swapgs",
     "mov gs:[{scratch}], rdi",
+    // With kernel page-table isolation, the kernel's tables come first.
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 15f",
+    "mov rdi, gs:[{kernel_cr3}]",
+    "mov cr3, rdi",
+    "15:",
     "mov rdi, rsp",
     "mov rsp, gs:[{kernel_stack}]",
     "push qword ptr [rdi + 48]",
@@ -221,6 +227,11 @@ global_asm!(
     "push qword ptr [rdi + 16]",
     "push qword ptr [rdi + 8]",
     "push qword ptr [rdi]",
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 16f",
+    "mov rdi, gs:[{user_cr3}]",
+    "mov cr3, rdi",
+    "16:",
     "mov rdi, gs:[{scratch}]",
     "cmp byte ptr [rip + {verw}], 0",
     "je 9f",
@@ -243,10 +254,6 @@ global_asm!(
     "call {after_interrupt}",
     "jmp interrupt_restore",
     "ist_common:",
-    "cmp byte ptr [rip + {smap}], 0",
-    "je 8f",
-    "clac",
-    "8:",
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
@@ -258,6 +265,21 @@ global_asm!(
     "xor edx, edx",
     "wrmsr",
     "13:",
+    // These interrupts arrive whatever tables are loaded, user mode's
+    // too. With kernel page-table isolation, they run on the kernel's
+    // tables of the processor, from its data, and leave with the tables
+    // they found, which R12 keeps.
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 17f",
+    "mov r12, cr3",
+    "mov rax, [rsp + 22*8]",
+    "mov rax, [rax + {kernel_cr3}]",
+    "mov cr3, rax",
+    "17:",
+    "cmp byte ptr [rip + {smap}], 0",
+    "je 8f",
+    "clac",
+    "8:",
     "mov ecx, {gs_msr}",
     "rdmsr",
     "mov ebx, eax",
@@ -302,6 +324,10 @@ global_asm!(
     "xor edx, edx",
     "wrmsr",
     "14:",
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 18f",
+    "mov cr3, r12",
+    "18:",
     "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10",
     "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
     "pop rcx", "pop rbx", "pop rax",
@@ -337,6 +363,9 @@ global_asm!(
     verw_selector = sym crate::mitigations::VERW_SELECTOR,
     ibrs = sym crate::mitigations::IBRS_ON_ENTRY,
     spec_ctrl = const 0x48,
+    isolation = sym crate::mitigations::ISOLATION,
+    kernel_cr3 = const crate::percpu::KERNEL_CR3_OFFSET,
+    user_cr3 = const crate::percpu::USER_CR3_OFFSET,
 );
 
 #[cfg(target_os = "none")]
@@ -406,6 +435,12 @@ struct Table([Gate; 256]);
 
 #[cfg(target_os = "none")]
 static mut IDT: Table = Table([Gate::EMPTY; 256]);
+
+/// The address of the IDT.
+#[cfg(target_os = "none")]
+pub fn table() -> u64 {
+    (&raw const IDT) as u64
+}
 
 /// Fills the IDT and loads it. The GDT and the TSS must be loaded.
 #[cfg(target_os = "none")]

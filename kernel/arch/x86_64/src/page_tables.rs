@@ -129,6 +129,13 @@ impl Tables for Frames<'_> {
     }
 }
 
+/// Gives a frame that `SpaceTables::new` took back to the allocator.
+fn free_frame(phys: u64) {
+    if let Some(frames) = kernel_core::frames::FRAMES.lock().as_mut() {
+        frames.free(phys, 1);
+    }
+}
+
 fn error(e: paging::Error) -> PageError {
     match e {
         paging::Error::OutOfMemory => PageError::OutOfMemory,
@@ -147,23 +154,36 @@ pub struct SpaceTables {
     /// the space's PCID before using it again.
     generation: AtomicU64,
     root: u64,
+    /// With kernel page-table isolation, the top-level table that user
+    /// mode runs with: the same lower half, and the kernel half that
+    /// `isolation` keeps. Otherwise 0.
+    user_root: u64,
 }
 
 impl SpaceTables {
-    /// New tables, with the root table from `alloc`. The state is
-    /// allocated before the root, so that a failure leaves no frame or
-    /// charge behind.
+    /// New tables, with the root tables from `alloc`. The state is
+    /// allocated before the roots, and a root already taken is freed when
+    /// the other cannot be, so that a failure leaves no frame behind.
     pub fn new(alloc: &mut dyn FnMut() -> Option<u64>) -> Result<Box<SpaceTables>, PageError> {
         let mut tables = kernel_core::fallible::try_box(SpaceTables {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             loaded: CpuMask::new(),
             generation: AtomicU64::new(0),
             root: 0,
+            user_root: 0,
         })
         .map_err(|_| PageError::OutOfMemory)?;
         tables.root = Mapper::user(&mut Frames(alloc), space::root())
             .map(|m| m.root())
             .map_err(error)?;
+        if crate::mitigations::isolation() {
+            let Some(user_root) = alloc() else {
+                free_frame(tables.root);
+                return Err(PageError::OutOfMemory);
+            };
+            crate::isolation::fill_user_root(&mut Frames(alloc), user_root);
+            tables.user_root = user_root;
+        }
         Ok(tables)
     }
 
@@ -183,7 +203,15 @@ impl SpaceTables {
         };
         Mapper::existing(&mut Frames(alloc), self.root, false)
             .map(virt, phys, PAGE_SIZE, flags)
-            .map_err(error)
+            .map_err(error)?;
+        // The tables for user mode share the lower half's top-level entry,
+        // which the mapping may have made.
+        if self.user_root != 0 {
+            let i = (virt >> 39) as usize & 511;
+            let entry = Frames(alloc).table(self.root)[i];
+            Frames(alloc).table(self.user_root)[i] = entry;
+        }
+        Ok(())
     }
 
     pub fn unmap(
@@ -270,6 +298,11 @@ impl SpaceTables {
             pcids.last_user = self.id;
             crate::mitigations::barrier();
         }
+        // With kernel page-table isolation, entries to the kernel load the
+        // space's tables and returns to user mode its tables for user mode.
+        let cpu = percpu::this();
+        cpu.kernel_cr3.store(self.root, Ordering::Relaxed);
+        cpu.user_cr3.store(self.user_root, Ordering::Relaxed);
         // The processor joins the set before it reads the generation, and
         // a change bumps the generation before it reads the set, so that
         // either this load flushes or the change sends a shootdown here.
@@ -335,6 +368,9 @@ impl SpaceTables {
         let mut none = || None;
         Mapper::existing(&mut Frames(&mut none), self.root, false).free_lower_half(&mut *free);
         free(self.root);
+        if self.user_root != 0 {
+            free(self.user_root);
+        }
     }
 }
 
@@ -354,6 +390,12 @@ fn load_kernel(pcids: &mut Pcids) {
     } else {
         space::root()
     };
+    // User mode that returns on the kernel's own tables, as a thread
+    // being ended may, finds nothing mapped in the lower half.
+    let cpu = percpu::this();
+    cpu.kernel_cr3.store(space::root(), Ordering::Relaxed);
+    cpu.user_cr3
+        .store(crate::isolation::empty_user_root(), Ordering::Relaxed);
     // SAFETY: these are the kernel's own tables; PCID 0 only ever holds
     // their translations.
     unsafe { cpu::write_cr3(value) };

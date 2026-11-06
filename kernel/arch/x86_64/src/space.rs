@@ -52,7 +52,7 @@ pub fn direct(phys: u64) -> u64 {
 /// Page table frames from the frame allocator, reached through the direct
 /// map, which both the bootloader's and the kernel's tables contain at the
 /// same base.
-struct FrameTables;
+pub struct FrameTables;
 
 impl Tables for FrameTables {
     fn alloc(&mut self) -> Option<u64> {

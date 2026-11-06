@@ -134,8 +134,15 @@ impl AddressSpace {
             count: 0,
             refused: false,
         };
-        let page_tables = PageTable::new(&mut || tables.alloc());
-        let page_tables = page_tables.map_err(|e| tables.error(e))?;
+        // Tables that cannot be made give back the frames they took, whose
+        // charges go here.
+        let page_tables = PageTable::new(&mut || tables.alloc()).map_err(|e| {
+            if let Some(budget) = tables.budget {
+                budget.release_kernel(tables.count * PAGE_SIZE);
+            }
+            tables.error(e)
+        });
+        let page_tables = page_tables?;
         let charged = if charge { tables.count } else { 0 };
         Ok(AddressSpace {
             budget,

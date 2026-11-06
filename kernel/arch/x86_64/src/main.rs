@@ -67,6 +67,8 @@ use kernel_core::output;
 mod page_tables;
 #[cfg(target_os = "none")]
 use kernel_core::pager;
+#[cfg(target_os = "none")]
+mod isolation;
 #[cfg(any(target_os = "none", test))]
 mod mitigations;
 #[cfg(any(target_os = "none", test))]

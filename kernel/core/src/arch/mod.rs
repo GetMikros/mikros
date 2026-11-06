@@ -372,7 +372,7 @@ interface! {
     /// Makes the page tables of a new user address space, which maps
     /// nothing in the user range and shares the kernel's mappings, taking
     /// table frames from `alloc`. Returns the architecture's state of
-    /// them.
+    /// them. On failure, the frames taken are freed again.
     [] fn page_table_new(alloc: &mut dyn FnMut() -> Option<u64>) -> Result<*mut (), ::kernel_core::arch::PageError>;
 
     /// Maps the 4 KiB user page at `virt` to the frame at `phys` in

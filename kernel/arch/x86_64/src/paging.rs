@@ -204,6 +204,14 @@ impl<'t, T: Tables> Mapper<'t, T> {
         unreachable!()
     }
 
+    /// The physical address that `virt` maps to, or `None` when it is
+    /// not mapped.
+    pub fn translate(&mut self, virt: u64) -> Option<u64> {
+        let (table, i, span) = self.find_leaf(virt)?;
+        let entry = self.tables.table(table)[i];
+        Some((entry & ADDR_MASK & !(span - 1)) + (virt & (span - 1)))
+    }
+
     /// The table holding the leaf entry for `virt`, the entry's index and
     /// its page size, or `None` when `virt` is not mapped.
     fn find_leaf(&mut self, virt: u64) -> Option<(u64, usize, u64)> {
@@ -404,6 +412,20 @@ mod tests {
         user: true,
         policy: Policy::Cached,
     };
+
+    #[test]
+    fn translates_small_and_large_pages() {
+        let mut pool = Pool(Vec::new());
+        let mut m = Mapper::new(&mut pool, true).unwrap();
+        let small = 0xffff_c000_0000_3000;
+        m.map(small, 0x7000, PAGE_SIZE, KERNEL_DATA).unwrap();
+        let large = 0xffff_8000_4000_0000;
+        m.map(large, 0x8000_0000, GIB_1, KERNEL_DATA).unwrap();
+        assert_eq!(m.translate(small + 0x12), Some(0x7012));
+        assert_eq!(m.translate(large + 0x20_3456), Some(0x8020_3456));
+        assert_eq!(m.translate(small + PAGE_SIZE), None);
+        assert_eq!(m.translate(0x1000), None);
+    }
 
     #[test]
     fn programs_the_pat_entries() {
