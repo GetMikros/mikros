@@ -7,7 +7,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 // Saves the callee-saved registers on the current stack, stores the stack
 // pointer at RDI, loads RSI as the stack pointer, and restores the
-// registers saved there. Returns on the new stack.
+// registers saved there. Returns on the new stack, after filling the
+// return stack buffer with 32 entries that lead to speculation traps, so
+// that no return in the thread switched to is predicted from another
+// thread's calls.
 global_asm!(
     ".global context_switch",
     "context_switch:",
@@ -19,6 +22,24 @@ global_asm!(
     "push r15",
     "mov [rdi], rsp",
     "mov rsp, rsi",
+    "mov ecx, 16",
+    "2:",
+    "call 3f",
+    "4:",
+    "pause",
+    "lfence",
+    "jmp 4b",
+    "3:",
+    "call 5f",
+    "6:",
+    "pause",
+    "lfence",
+    "jmp 6b",
+    "5:",
+    "add rsp, 16",
+    "dec ecx",
+    "jnz 2b",
+    "lfence",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -39,7 +60,8 @@ global_asm!(
 
 // Enters user mode at RDI with stack pointer RSI, RDX and RCX as the
 // first two arguments, RFLAGS 0x202 and every other general-purpose
-// register zero. The user GS base must be in IA32_KERNEL_GS_BASE.
+// register zero, after clearing CPU buffers when the processor needs it.
+// The user GS base must be in IA32_KERNEL_GS_BASE.
 global_asm!(
     ".global context_enter_user",
     "context_enter_user:",
@@ -63,14 +85,21 @@ global_asm!(
     "xor r13d, r13d",
     "xor r14d, r14d",
     "xor r15d, r15d",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 2f",
+    "verw word ptr [rip + {verw_selector}]",
+    "2:",
     "swapgs",
     "iretq",
     user_data = const crate::gdt::USER_DATA as u64 | 3,
     user_code = const crate::gdt::USER_CODE as u64 | 3,
+    verw = sym crate::mitigations::VERW,
+    verw_selector = sym crate::mitigations::VERW_SELECTOR,
 );
 
 // Leaves for user mode with every register taken from the interrupt
-// frame at RDI. The user GS base must be in IA32_KERNEL_GS_BASE.
+// frame at RDI, after clearing CPU buffers when the processor needs it.
+// The user GS base must be in IA32_KERNEL_GS_BASE.
 global_asm!(
     ".global context_enter_user_frame",
     "context_enter_user_frame:",
@@ -91,8 +120,14 @@ global_asm!(
     "pop rbx",
     "pop rax",
     "add rsp, 16",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 2f",
+    "verw word ptr [rip + {verw_selector}]",
+    "2:",
     "swapgs",
     "iretq",
+    verw = sym crate::mitigations::VERW,
+    verw_selector = sym crate::mitigations::VERW_SELECTOR,
 );
 
 unsafe extern "sysv64" {

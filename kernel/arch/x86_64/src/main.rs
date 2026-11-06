@@ -68,6 +68,8 @@ mod page_tables;
 #[cfg(target_os = "none")]
 use kernel_core::pager;
 #[cfg(any(target_os = "none", test))]
+mod mitigations;
+#[cfg(any(target_os = "none", test))]
 mod paging;
 #[cfg(target_os = "none")]
 mod panic;

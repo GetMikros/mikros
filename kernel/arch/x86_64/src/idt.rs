@@ -180,6 +180,10 @@ global_asm!(
     "add rsp, 16",
     "test byte ptr [rsp + 8], 3",
     "jz 3f",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 9f",
+    "verw word ptr [rip + {verw_selector}]",
+    "9:",
     "swapgs",
     "3:",
     "iretq",
@@ -244,6 +248,12 @@ global_asm!(
     "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
     "pop rcx", "pop rbx", "pop rax",
     "add rsp, 16",
+    "test byte ptr [rsp + 8], 3",
+    "jz 10f",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 10f",
+    "verw word ptr [rip + {verw_selector}]",
+    "10:",
     "iretq",
     ".popsection",
     debug = const DEBUG,
@@ -263,6 +273,8 @@ global_asm!(
     fuzz = const cfg!(feature = "fuzz") as u8,
     interrupts = const crate::percpu::INTERRUPTS_OFFSET,
     smap = sym crate::cpu::SMAP,
+    verw = sym crate::mitigations::VERW,
+    verw_selector = sym crate::mitigations::VERW_SELECTOR,
 );
 
 #[cfg(target_os = "none")]

@@ -85,9 +85,17 @@ global_asm!(
     "mov rcx, [rsp]",
     "mov r11, [rsp + 16]",
     "mov rsp, [rsp + 24]",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 3f",
+    "verw word ptr [rip + {verw_selector}]",
+    "3:",
     "swapgs",
     "sysretq",
     "2:",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 4f",
+    "verw word ptr [rip + {verw_selector}]",
+    "4:",
     "swapgs",
     "iretq",
     user_rsp = const USER_RSP_OFFSET,
@@ -95,6 +103,8 @@ global_asm!(
     user_data = const USER_DATA as u64 | 3,
     user_code = const USER_CODE as u64 | 3,
     handler = sym syscall_handler,
+    verw = sym crate::mitigations::VERW,
+    verw_selector = sym crate::mitigations::VERW_SELECTOR,
 );
 
 unsafe extern "sysv64" {

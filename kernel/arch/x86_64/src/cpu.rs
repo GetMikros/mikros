@@ -201,6 +201,7 @@ pub fn init() {
     }
     INVPCID.store(features.pcid && features.invpcid, Ordering::Relaxed);
     SMAP.store(features.smap, Ordering::Relaxed);
+    crate::mitigations::init();
 }
 
 /// Whether `invpcid_address` and `invpcid_context` may be used.
