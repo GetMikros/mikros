@@ -86,3 +86,16 @@ pub fn run(command: &mut Command) -> Result<()> {
     }
     Ok(())
 }
+
+/// Runs `command`, fails unless it succeeds, and returns its standard
+/// output.
+pub fn output(command: &mut Command) -> Result<String> {
+    let output = command
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .with_context(|| format!("running {:?}", command.get_program()))?;
+    if !output.status.success() {
+        bail!("{:?} failed with {}", command.get_program(), output.status);
+    }
+    String::from_utf8(output.stdout).context("the output is not UTF-8")
+}

@@ -87,8 +87,14 @@ fn code_arg(key: &str, ranges: &[(u64, u64)]) -> String {
     format!("{key}={}", list.join(","))
 }
 
+/// The command line word that has the test init leave out the test of
+/// ported software, whose suites take minutes when emulated. Only the
+/// first run of a build kind other than fuzz runs it.
+const SKIP_PORTED: &str = "skip=ported_software_passes_its_tests";
+
 /// What the integration tests of `kind` add to the kernel command line:
-/// for the fuzz build, the interrupt code and the idle code of `kernel`.
+/// for the fuzz build, the interrupt code and the idle code of `kernel`,
+/// and `SKIP_PORTED`.
 fn test_cmdline(kind: Kind, kernel: &Path) -> Result<String> {
     if kind != Kind::Fuzz {
         return Ok(String::new());
@@ -109,6 +115,7 @@ fn test_cmdline(kind: Kind, kernel: &Path) -> Result<String> {
             Err(name) => bail!("{} has no function {name}", kernel.display()),
         }
     }
+    args.push(SKIP_PORTED.to_owned());
     Ok(args.join(" "))
 }
 
@@ -239,6 +246,14 @@ fn integration(
         println!("{line}");
     }
     if let Err(why) = verdict(code, &serial) {
+        // What the tests logged as errors besides their results tells why
+        // one failed.
+        for line in serial
+            .lines()
+            .filter(|l| l.contains("] E ") && !l.contains("TEST"))
+        {
+            println!("{line}");
+        }
         bail!(
             "integration tests{what} failed: {why}; serial output in {}",
             log.display()
@@ -272,6 +287,7 @@ pub fn run(args: &Args) -> Result<()> {
     }
 
     let built = build::build_for(args.kind, BootImage::Test)?;
+    crate::port_tests::run_on_host(&crate::ports::XKBCOMMON, &built.xkbcommon)?;
     let dir = test_dir(args.kind);
     fs::create_dir_all(&dir)?;
     let disk = dir.join("disk.img");
@@ -285,7 +301,9 @@ pub fn run(args: &Args) -> Result<()> {
     // names that vendor. Emulation takes about five times as long as KVM.
     if args.kind != Kind::Fuzz {
         let isolation_disk = dir.join("isolation-disk.img");
-        image::create_with(args.kind, &built, &isolation_disk, &cmdline, &[])?;
+        let isolation_cmdline = [cmdline.as_str(), SKIP_PORTED].join(" ");
+        let isolation_cmdline = isolation_cmdline.trim();
+        image::create_with(args.kind, &built, &isolation_disk, isolation_cmdline, &[])?;
         let timeout = match processor {
             qemu::Processor::Host => args.timeout * 5,
             _ => args.timeout,

@@ -691,7 +691,7 @@ fn send(
     let charge = process.budget().hold_kernel(Message::cost(len, count))?;
     let mut data = Vec::new();
     data.try_reserve_exact(len).map_err(|_| Error::NoMemory)?;
-    data.resize(len, 0);
+    fill_zeros(&mut data, len);
     bytes.read_bytes(&mut data)?;
     if let Some(id) = id {
         data[..4].copy_from_slice(&id.to_le_bytes());
@@ -1228,7 +1228,7 @@ pub fn thread_write_state(
     let mut bytes = Vec::new();
     let mut scratch = Scratch::new(Some(current_process()?.budget()));
     scratch.reserve_exact(&mut bytes, size as usize)?;
-    bytes.resize(size as usize, 0);
+    fill_zeros(&mut bytes, size as usize);
     buf.read_bytes(&mut bytes)?;
     if kind == STATE_DEBUG {
         let state: &[u8; DEBUG_SIZE] = bytes[..].try_into().expect("the DEBUG size");
@@ -2019,8 +2019,21 @@ fn stream_buffer(len: u64, scratch: &mut Scratch) -> Result<Vec<u8>, Error> {
     let n = len.min(STREAM_QUEUE_BYTES as u64) as usize;
     let mut buf = Vec::new();
     scratch.reserve_exact(&mut buf, n)?;
-    buf.resize(n, 0);
+    fill_zeros(&mut buf, n);
     Ok(buf)
+}
+
+/// Makes the empty `buf`, which has room for `n` bytes, hold `n` zeros,
+/// written at once: `Vec::resize` writes them one at a time where the
+/// kernel is built without optimizations.
+fn fill_zeros(buf: &mut Vec<u8>, n: usize) {
+    assert!(buf.is_empty() && buf.capacity() >= n);
+    // SAFETY: the buffer has room for `n` bytes, which are written
+    // before its length covers them.
+    unsafe {
+        core::ptr::write_bytes(buf.as_mut_ptr(), 0, n);
+        buf.set_len(n);
+    }
 }
 
 pub fn stream_write(

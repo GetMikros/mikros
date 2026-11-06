@@ -870,6 +870,10 @@ fn within(seconds: i64) -> i64 {
 /// machine.
 const PROBE_SECONDS: i64 = 120;
 
+/// The seconds that the runner of the ported projects' tests has to run
+/// them all, each of which it kills after its own timeout.
+const PORT_TESTS_SECONDS: i64 = 1200;
+
 /// Waits until `thread` is blocked, or fails after `in_time`.
 fn wait_until_blocked(thread: Handle) -> Result {
     wait_for_state(thread, STATE_BLOCKED)
@@ -8282,12 +8286,20 @@ mod manager {
         let (mut startup, init) = start_message(s, &m, 1)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
-        let deadline = super::in_time();
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
         ensure(
             "registering init",
             matches!(init.register(deadline), Ok(Ok(_))),
         )?;
-        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![], deadline) else {
+        // The probe logs the checks that fail.
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![log], deadline) else {
             return Err(Failure {
                 what: "starting the probe",
                 status: 0,
@@ -8309,6 +8321,66 @@ mod manager {
             mikros_rt::log!(Error, "the launcher probe failed check {code}");
         }
         ensure("passing every check of the probe", code == 0)?;
+        drop(m);
+        Ok(())
+    }
+
+    /// From a boot image in which the runner of the ported projects'
+    /// tests stands in for the service manager, every test of their
+    /// suites that it runs passes: the runner, which logs each result,
+    /// exits with the number that did not.
+    pub fn ported_software_passes_its_tests(s: &Startup) -> Result {
+        let image = boot_file(s, b"tests/ports.img")?;
+        let mut mem = 0;
+        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the image", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `image`.
+        check("writing the image", unsafe {
+            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
+        })?;
+        let mut m = start(s)?;
+        let (mut startup, init) = start_message(s, &m, 1)?;
+        startup.boot_image = mem;
+        m.send(startup, false)?;
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![log], deadline) else {
+            return Err(Failure {
+                what: "starting the runner",
+                status: 0,
+            });
+        };
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let ended = unsafe {
+            sys::object_wait_one(
+                started.process.raw(),
+                TERMINATED,
+                super::within(super::PORT_TESTS_SECONDS),
+                &mut observed,
+            )
+        };
+        ensure("ending the runner", ended == 0)?;
+        let code = super::u64_at(&super::info::<0x28>(started.process.raw(), 2)?, 0) as i64;
+        if code != 0 {
+            mikros_rt::log!(Error, "{code} tests of ported software did not pass");
+        }
+        ensure("passing every test of ported software", code == 0)?;
         drop(m);
         Ok(())
     }
@@ -8335,7 +8407,9 @@ mod manager {
         let (mut startup, init) = start_message(s, &m, 1)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
-        let deadline = super::in_time();
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
         ensure(
             "registering init",
             matches!(init.register(deadline), Ok(Ok(_))),
@@ -8407,7 +8481,9 @@ mod manager {
         let (mut startup, init) = start_message(s, &m, 1)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
-        let deadline = super::in_time();
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
         ensure(
             "registering init",
             matches!(init.register(deadline), Ok(Ok(_))),
@@ -8441,7 +8517,9 @@ mod manager {
             handle: copy(s.root_resource, SAME_RIGHTS)?,
         };
         let handles = alloc::vec![root, log, info];
-        let Ok(Ok(started)) = init.start_service_manager(handles, deadline) else {
+        let reply = init.start_service_manager(handles, deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
             return Err(Failure {
                 what: "starting the service manager",
                 status: 0,
@@ -8802,6 +8880,7 @@ mod bootfs {
                         "launcher.img",
                         "managed",
                         "pie",
+                        "ports.img",
                         "services.img",
                     ],
             )?;
@@ -8983,7 +9062,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 129] = [
+const TESTS: [(&str, Test); 130] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9037,6 +9116,10 @@ const TESTS: [(&str, Test); 129] = [
     (
         "process_manager_serves_launcher",
         manager::process_manager_serves_launcher,
+    ),
+    (
+        "ported_software_passes_its_tests",
+        manager::ported_software_passes_its_tests,
     ),
     (
         "permission_broker_serves",
@@ -9270,6 +9353,17 @@ fn scenario(s: &Startup) -> Option<i64> {
     })
 }
 
+/// The tests that the command line names with `skip=`, separated by
+/// commas, which are left out. Nothing is allocated, so that the first
+/// test finds no heap memory charged.
+fn skipped(s: &Startup) -> impl Iterator<Item = &'static str> {
+    let cmdline: &'static str = core::str::from_utf8(s.cmdline).unwrap_or("");
+    cmdline
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("skip="))
+        .flat_map(|list| list.split(','))
+}
+
 fn main(s: &Startup) -> i64 {
     if let Some(code) = scenario(s) {
         return code;
@@ -9278,9 +9372,19 @@ fn main(s: &Startup) -> i64 {
         log!(Error, "TEST setup FAILED: {} ({})", f.what, f.status);
         return 1;
     }
-    let mut failed = 0;
+    let known = |name: &&str| TESTS.iter().chain(HOOK_TESTS).any(|(n, _)| n == name);
+    if let Some(name) = skipped(s).find(|name| !known(name)) {
+        log!(Error, "TEST setup FAILED: there is no test {name} to skip");
+        return 1;
+    }
+    let (mut failed, mut left_out) = (0, 0);
     let (last, first) = TESTS.split_last().expect("there are tests");
     for (name, test) in first.iter().chain(HOOK_TESTS).chain([last]) {
+        if skipped(s).any(|n| n == *name) {
+            left_out += 1;
+            log!(Info, "TEST {name} SKIPPED");
+            continue;
+        }
         match test(s) {
             Ok(()) => log!(Info, "TEST {name} PASSED"),
             Err(f) => {
@@ -9289,10 +9393,14 @@ fn main(s: &Startup) -> i64 {
             }
         }
     }
-    log!(
-        Info,
-        "TESTS DONE: {} passed, {failed} failed",
-        TESTS.len() + HOOK_TESTS.len() - failed
-    );
+    let passed = TESTS.len() + HOOK_TESTS.len() - failed - left_out;
+    if left_out == 0 {
+        log!(Info, "TESTS DONE: {passed} passed, {failed} failed");
+    } else {
+        log!(
+            Info,
+            "TESTS DONE: {passed} passed, {failed} failed, {left_out} skipped"
+        );
+    }
     exit_qemu(if failed == 0 { PASSED } else { FAILED })
 }

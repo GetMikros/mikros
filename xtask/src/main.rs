@@ -20,6 +20,7 @@ mod machine_state;
 mod meson;
 mod musl;
 mod port;
+mod port_tests;
 mod ports;
 mod qemu;
 mod run;

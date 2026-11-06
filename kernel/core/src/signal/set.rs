@@ -194,6 +194,10 @@ pub struct Pending {
     standard: [Option<Info>; (SIG_RT_MIN - 1) as usize],
     /// The queued real-time signals, by number. No queue is empty.
     realtime: Map<u32, VecDeque<Queued>>,
+    /// The mask of the signals in `standard` and `realtime`, which every
+    /// change to them keeps up to date, so that finding none pending,
+    /// as every return to user mode does, takes no scan.
+    bits: u64,
 }
 
 impl core::default::Default for Pending {
@@ -201,6 +205,7 @@ impl core::default::Default for Pending {
         Pending {
             standard: [None; (SIG_RT_MIN - 1) as usize],
             realtime: nodes::map(),
+            bits: 0,
         }
     }
 }
@@ -208,6 +213,13 @@ impl core::default::Default for Pending {
 impl Pending {
     /// The mask of the pending signals.
     pub fn mask(&self) -> u64 {
+        self.bits
+    }
+
+    /// The mask of the pending signals, found from the signals
+    /// themselves.
+    #[cfg(test)]
+    fn scanned(&self) -> u64 {
         let standard = self.standard.iter().enumerate();
         let standard = standard
             .filter(|(_, i)| i.is_some())
@@ -231,6 +243,7 @@ impl Pending {
             let slot = &mut self.standard[info.signo as usize - 1];
             if slot.is_none() {
                 *slot = Some(info);
+                self.bits |= bit(info.signo);
             }
             return Ok(());
         }
@@ -254,6 +267,7 @@ impl Pending {
             queue.push_back(entry);
             let _claim = nodes::claim_insert()?;
             self.realtime.insert(info.signo, queue);
+            self.bits |= bit(info.signo);
         }
         *queued += 1;
         Ok(())
@@ -267,12 +281,14 @@ impl Pending {
             return None;
         }
         if signo < SIG_RT_MIN {
+            self.bits &= !bit(signo);
             return self.standard[signo as usize - 1].take();
         }
         let queue = self.realtime.get_mut(&signo)?;
         let entry = queue.pop_front();
         if queue.is_empty() {
             self.realtime.remove(&signo);
+            self.bits &= !bit(signo);
         }
         *queued -= 1;
         entry.map(|entry| entry.info)
@@ -290,7 +306,9 @@ impl Pending {
             let index = signo as usize - 1;
             match self.standard[index].take() {
                 Some(info) => {
+                    self.bits &= !bit(signo);
                     to.standard[index].get_or_insert(info);
+                    to.bits |= bit(signo);
                     return true;
                 }
                 None => return to.standard[index].is_some(),
@@ -318,8 +336,10 @@ impl Pending {
         let entry = queue.pop_front().expect("no queue is empty");
         if queue.is_empty() {
             self.realtime.remove(&signo);
+            self.bits &= !bit(signo);
         }
         target.push_back(entry);
+        to.bits |= bit(signo);
         true
     }
 
@@ -415,11 +435,14 @@ mod tests {
         p.add(info(40, 2), &mut queued, None).unwrap();
         assert_eq!(queued, 3);
         assert_eq!(p.mask(), bit(SEGV) | bit(33) | bit(40));
+        assert_eq!(p.mask(), p.scanned());
         assert_eq!(p.take(!0, &mut queued), Some(info(SEGV, 1)));
         assert_eq!(p.take(!bit(33), &mut queued), Some(info(40, 1)));
+        assert_eq!(p.mask(), p.scanned());
         assert_eq!(p.take(!0, &mut queued), Some(info(33, 1)));
         assert_eq!(p.take(!0, &mut queued), Some(info(40, 2)));
         assert_eq!((p.take(!0, &mut queued), queued), (None, 0));
+        assert_eq!(p.mask(), 0);
     }
 
     #[test]
@@ -433,6 +456,11 @@ mod tests {
         assert!(process.move_one(SEGV, &mut thread));
         assert!(process.move_one(40, &mut thread));
         assert_eq!(process.mask(), bit(40));
+        assert_eq!(thread.mask(), bit(SEGV) | bit(40));
+        assert_eq!(
+            (process.mask(), thread.mask()),
+            (process.scanned(), thread.scanned())
+        );
         // Nothing to move, but pending in the thread already.
         assert!(process.move_one(SEGV, &mut thread));
         assert!(!process.move_one(33, &mut thread));
@@ -442,6 +470,7 @@ mod tests {
         assert_eq!(thread.take(!0, &mut queued), Some(info(40, 1)));
         assert_eq!(process.take(!0, &mut queued), Some(info(40, 2)));
         assert_eq!(queued, 0);
+        assert_eq!((process.mask(), thread.mask()), (0, 0));
     }
 
     #[test]

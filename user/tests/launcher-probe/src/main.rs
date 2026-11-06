@@ -16,6 +16,9 @@
 //! and reads more than the process manager's small heap blocks hold of
 //! `/usr/bin/hello` with one `Read`.
 //!
+//! It logs each check that failed to the `USER` startup handle with ID 2,
+//! when it has one.
+//!
 //! It accepts the `Bind` requests on the control endpoint that arrives
 //! as the `USER` startup handle with ID 0, for itself and its children,
 //! and serves their directories, which provide only a clock with a time
@@ -49,6 +52,10 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 mikros_rt::raw_main!(main);
 
 const CONTROL_ID: u32 = 0;
+const LOG_ID: u32 = 2;
+/// How long the probe waits for a process to be replaced, which takes
+/// seconds when emulated.
+const EXEC_WAIT_NS: i64 = 60_000_000_000;
 const PROBE: &str = "/usr/bin/probe";
 /// The probe's own path, as init starts it in place of the service
 /// manager; the image holds the probe there too.
@@ -122,6 +129,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    let log = managed
+        .handles
+        .iter()
+        .position(|h| h.role == HandleRole::User && h.id == LOG_ID)
+        .map(|at| managed.handles.swap_remove(at).handle);
+    if let Some(log) = &log {
+        mikros_rt::log::set_handle(log.raw());
+    }
     let root = managed
         .namespace
         .iter()
@@ -410,6 +425,13 @@ async fn wait_for(
     }
 }
 
+fn now() -> i64 {
+    let mut now = 0;
+    // SAFETY: the out pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    now
+}
+
 /// Takes the pending `CHLD`, if any, and returns whether there was one.
 fn take_chld() -> bool {
     let mut info = [0u8; 64];
@@ -595,7 +617,8 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
         // A process that replaced itself reports its new program.
         let replaced = spawn(l, &["exec"], |_| {}).await.map_or(0, |(pid, _)| pid);
         let mut path = String::new();
-        for _ in 0..1000 {
+        let deadline = now().saturating_add(EXEC_WAIT_NS);
+        while now() < deadline {
             path = get_info(l, replaced)
                 .await
                 .map(|i| i.path)
@@ -603,10 +626,7 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
             if path == SELF_PATH {
                 break;
             }
-            let mut now = 0;
-            // SAFETY: the pointer is valid for the call.
-            unsafe { sys::clock_get_monotonic(&mut now) };
-            let _ = reactor.sleep_until(now + 1_000_000).await;
+            let _ = reactor.sleep_until(now() + 1_000_000).await;
         }
         check("describing a replaced process", path == SELF_PATH)?;
         check("ending it", kill(l, replaced, KILL).await.is_ok())?;

@@ -11,13 +11,14 @@
 //! - `arg <argument>`: the next argument, the first being the program's
 //!   name;
 //! - `env <name>=<value>`: a variable of its environment;
-//! - `timeout <seconds>`: how long it may run before it is killed.
+//! - `timeout <seconds>`: how long it may run before it is killed;
+//! - `expect fail`: the test is expected to fail, not to pass.
 //!
 //! Each test runs in turn, with one stream as its standard output and
 //! error, and passes when it exits with 0. The runner logs every result,
-//! and the end of the output of each test that did not pass, to the
-//! `USER` startup handle with ID 2, and exits with the number of tests
-//! that did not pass.
+//! and the end of the output of each test that unexpectedly failed, to
+//! the `USER` startup handle with ID 2, and exits with the number of
+//! tests whose result was not the expected one.
 //!
 //! It accepts the `Bind` requests on the control endpoint that arrives
 //! as the `USER` startup handle with ID 0, and serves its children's
@@ -76,6 +77,7 @@ struct Test {
     args: Vec<String>,
     env: Vec<String>,
     timeout: i64,
+    expect_fail: bool,
 }
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
@@ -130,15 +132,19 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             mikros_rt::log!(Error, "port tests: the plan is not valid");
             return PANIC_EXIT_CODE;
         };
-        let mut failed = 0;
+        let mut unexpected = 0;
         for test in &tests {
             if !run(&launcher, &reactor, test).await {
-                failed += 1;
+                unexpected += 1;
             }
         }
-        let passed = tests.len() as i64 - failed;
-        mikros_rt::log!(Info, "port tests: {passed} of {} passed", tests.len());
-        failed
+        let expected = tests.len() as i64 - unexpected;
+        mikros_rt::log!(
+            Info,
+            "port tests: {expected} of {} as expected",
+            tests.len()
+        );
+        unexpected
     });
     drop(log);
     failed
@@ -206,6 +212,7 @@ fn parse(plan: &[u8]) -> Option<Vec<Test>> {
             ("arg", Some(t)) => t.args.push(value.into()),
             ("env", Some(t)) => t.env.push(value.into()),
             ("timeout", Some(t)) => t.timeout = value.parse().ok()?,
+            ("expect", Some(t)) if value == "fail" => t.expect_fail = true,
             ("end", Some(_)) => tests.push(test.take()?),
             _ => return None,
         }
@@ -213,7 +220,8 @@ fn parse(plan: &[u8]) -> Option<Vec<Test>> {
     test.is_none().then_some(tests)
 }
 
-/// Runs `test` and returns whether it passed.
+/// Runs `test` and returns whether it passed or, when it is expected to,
+/// failed.
 async fn run(launcher: &LauncherAsyncClient, reactor: &Reactor, test: &Test) -> bool {
     let name = &test.name;
     let (output, stdout) = stream();
@@ -256,27 +264,32 @@ async fn run(launcher: &LauncherAsyncClient, reactor: &Reactor, test: &Test) -> 
         wait(launcher, pid, FOREVER).await.map(|s| (s, true))
     };
     let (ended, tail) = join(ended, collect(&output, reactor)).await;
-    match ended {
-        Some((status, false)) if status.kind == StatusKind::Exited && status.exit_code == 0 => {
-            mikros_rt::log!(Info, "port test {name}: passed");
-            return true;
-        }
-        Some((_, true)) => mikros_rt::log!(Error, "port test {name}: killed after its timeout"),
+    let failure = match ended {
+        Some((status, false)) if status.kind == StatusKind::Exited && status.exit_code == 0 => None,
+        Some((_, true)) => Some(String::from("killed after its timeout")),
         Some((status, false)) if status.kind == StatusKind::Exited => {
-            let code = status.exit_code;
-            mikros_rt::log!(Error, "port test {name}: exited with {code}");
+            Some(alloc::format!("exited with {}", status.exit_code))
         }
-        Some((status, false)) => {
-            let signal = status.term_signal;
-            mikros_rt::log!(Error, "port test {name}: ended by signal {signal}");
+        Some((status, false)) => Some(alloc::format!("ended by signal {}", status.term_signal)),
+        None => Some(String::from("waiting for it failed")),
+    };
+    match (failure, test.expect_fail) {
+        (None, false) => mikros_rt::log!(Info, "port test {name}: passed"),
+        (Some(why), true) => mikros_rt::log!(Info, "port test {name}: {why}, as expected"),
+        (None, true) => {
+            mikros_rt::log!(Error, "port test {name}: passed, but is expected to fail");
+            return false;
         }
-        None => mikros_rt::log!(Error, "port test {name}: waiting for it failed"),
+        (Some(why), false) => {
+            mikros_rt::log!(Error, "port test {name}: {why}");
+            let tail = String::from_utf8_lossy(tail.as_slices().0);
+            for line in tail.lines() {
+                mikros_rt::log!(Error, "port test {name}| {line}");
+            }
+            return false;
+        }
     }
-    let tail = String::from_utf8_lossy(tail.as_slices().0);
-    for line in tail.lines() {
-        mikros_rt::log!(Error, "port test {name}| {line}");
-    }
-    false
+    true
 }
 
 /// How the child `pid` ended, unless it did not before `deadline`.
