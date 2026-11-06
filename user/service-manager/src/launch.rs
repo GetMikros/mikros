@@ -20,7 +20,7 @@ const CALLER_USER: u32 = u32::MAX;
 const PAGE_SIZE: u64 = 4096;
 const TERMINATED: u32 = 1 << 4;
 const INFO_PROCESS: u32 = 2;
-const INFO_PROCESS_SIZE: usize = 0x20;
+const INFO_PROCESS_SIZE: usize = 0x28;
 
 /// A service that started.
 pub struct Started {

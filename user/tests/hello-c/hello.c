@@ -728,6 +728,25 @@ static int groups_and_sessions(void)
 	return ok && kill(0, 0) == 0;
 }
 
+/* waitpid reports a child's stop with WUNTRACED and its continuation
+   with WCONTINUED, each once, before its end. */
+static int stops_are_reported(void)
+{
+	char *args[] = {"/usr/bin/probe", "sleep", 0};
+	pid_t pid;
+	int status = 0;
+	if (posix_spawn(&pid, args[0], 0, 0, args, environ))
+		return 0;
+	int ok = kill(pid, SIGSTOP) == 0 && waitpid(pid, &status, WUNTRACED) == pid
+		&& WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP;
+	ok = ok && waitpid(pid, &status, WUNTRACED | WNOHANG) == 0;
+	ok = ok && kill(pid, SIGCONT) == 0 && waitpid(pid, &status, WCONTINUED) == pid
+		&& WIFCONTINUED(status);
+	kill(pid, SIGKILL);
+	return ok && waitpid(pid, &status, 0) == pid && WIFSIGNALED(status)
+		&& WTERMSIG(status) == SIGKILL;
+}
+
 static volatile sig_atomic_t piped;
 
 static void on_pipe(int signo)
@@ -905,9 +924,11 @@ int main(int argc, char **argv)
 		return 29;
 	if (!groups_and_sessions())
 		return 30;
+	if (!stops_are_reported())
+		return 31;
 	char *copy = malloc(64);
 	if (!copy)
-		return 31;
+		return 32;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);

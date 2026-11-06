@@ -22,7 +22,7 @@ pub const STOPPED: u32 = 3;
 pub const INFO_PROCESS: u32 = 2;
 /// The topic of the list of a process's threads.
 pub const INFO_THREADS: u32 = 7;
-pub const INFO_PROCESS_SIZE: usize = 0x20;
+pub const INFO_PROCESS_SIZE: usize = 0x28;
 
 pub struct Process {
     header: Header,
@@ -43,6 +43,11 @@ pub struct Process {
     signals: SpinLock<crate::signal::ProcessSignals>,
     /// The signal that terminated the process, or 0.
     term_signal: AtomicU32,
+    /// The signal that last stopped the process, or 0, and how many
+    /// times it stopped and was continued, both wrapping around.
+    stop_signal: AtomicU32,
+    stop_count: AtomicU32,
+    continue_count: AtomicU32,
     /// The threads waiting while the process is stopped.
     stopped: SpinLock<Vec<Arc<Thread>>>,
     /// The I/O port ranges, start and exclusive end, that the process's
@@ -212,6 +217,9 @@ impl Process {
                 crate::signal::ProcessSignals::default(),
             ),
             term_signal: AtomicU32::new(0),
+            stop_signal: AtomicU32::new(0),
+            stop_count: AtomicU32::new(0),
+            continue_count: AtomicU32::new(0),
             stopped: SpinLock::new(crate::lock_order::PROCESS_STOPPED, Vec::new()),
             ioports: SpinLock::new(crate::lock_order::PROCESS_IOPORTS, Ioports::default()),
             cpu_time: AtomicI64::new(0),
@@ -382,7 +390,11 @@ impl Process {
         record[0x08..0x0C].copy_from_slice(&self.state().to_le_bytes());
         record[0x0C..0x10].copy_from_slice(&threads.to_le_bytes());
         record[0x10..0x14].copy_from_slice(&self.term_signal().to_le_bytes());
+        record[0x14..0x18].copy_from_slice(&self.stop_signal.load(Ordering::Acquire).to_le_bytes());
         record[0x18..0x20].copy_from_slice(&cpu_time.to_le_bytes());
+        record[0x20..0x24].copy_from_slice(&self.stop_count.load(Ordering::Acquire).to_le_bytes());
+        record[0x24..0x28]
+            .copy_from_slice(&self.continue_count.load(Ordering::Acquire).to_le_bytes());
         record
     }
 
@@ -401,13 +413,18 @@ impl Process {
     /// meanwhile comes after the stop. Returns whether the process
     /// stopped; the caller then calls `notify_threads` once it has
     /// released the lock.
-    pub fn stop(&self) -> bool {
+    pub fn stop(&self, signo: u32) -> bool {
         let stopped = self
             .state
             .compare_exchange(RUNNING, STOPPED, Ordering::AcqRel, Ordering::Acquire)
             .is_ok();
         if stopped {
-            self.header.update_signals(0, signals::SUSPENDED);
+            // The record changes before the signals, so that whoever the
+            // change wakes reads the new values.
+            self.stop_signal.store(signo, Ordering::Release);
+            self.stop_count.fetch_add(1, Ordering::AcqRel);
+            self.header
+                .update_signals(signals::CONTINUED, signals::SUSPENDED);
         }
         stopped
     }
@@ -457,7 +474,9 @@ impl Process {
             .compare_exchange(STOPPED, RUNNING, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            self.header.update_signals(signals::SUSPENDED, 0);
+            self.continue_count.fetch_add(1, Ordering::AcqRel);
+            self.header
+                .update_signals(signals::SUSPENDED, signals::CONTINUED);
         }
         self.wake_stopped();
     }

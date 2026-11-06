@@ -280,7 +280,7 @@ fn cpu_time(handle: Handle, topic: u32) -> Result<i64, i64> {
     } else {
         THREAD_CPU_TIME
     };
-    let mut record = [0u8; 0x20];
+    let mut record = [0u8; 0x28];
     let mut len = 0;
     // SAFETY: the pointers describe `record` and `len`.
     let status = unsafe {

@@ -70,7 +70,7 @@ pub fn deliver(frame: &mut Frame) -> bool {
                 action.handler == HANDLER_DEFAULT
                     && default_action(info.signo) == DefaultAction::Stop
             });
-            if stops && process.stop() {
+            if stops && next.is_some_and(|(info, _)| process.stop(info.signo)) {
                 drop(own);
                 drop(state);
                 process.notify_threads();

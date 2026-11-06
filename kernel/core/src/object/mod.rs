@@ -114,6 +114,8 @@ pub mod signals {
     pub const TERMINATED: u32 = 1 << 4;
     pub const SUSPENDED: u32 = 1 << 5;
     pub const OVER_THRESHOLD: u32 = 1 << 6;
+    /// Set on a process that a `CONT` resumed, until it stops again.
+    pub const CONTINUED: u32 = 1 << 7;
     /// `USER0` to `USER7`.
     pub const USER_ALL: u32 = 0xFF << 24;
 }
@@ -127,7 +129,8 @@ pub const fn allowed_signals(t: ObjectType) -> u32 {
         LogReader => READABLE,
         Event => SIGNALED | USER_ALL,
         Timer | Interrupt => SIGNALED,
-        Process | Thread => TERMINATED | SUSPENDED,
+        Process => TERMINATED | SUSPENDED | CONTINUED,
+        Thread => TERMINATED | SUSPENDED,
         Budget => OVER_THRESHOLD,
         _ => 0,
     }

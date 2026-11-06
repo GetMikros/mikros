@@ -26,9 +26,14 @@ const SAME_RIGHTS: u32 = 1 << 31;
 const INFO_BASIC: u32 = 1;
 const INFO_BASIC_SIZE: usize = 24;
 const INFO_PROCESS: u32 = 2;
-const INFO_PROCESS_SIZE: usize = 32;
-/// The signal of a process that has terminated.
+const INFO_PROCESS_SIZE: usize = 0x28;
+/// The signals of a process that has terminated, is stopped, and was
+/// continued.
 const TERMINATED: u32 = 1 << 4;
+const SUSPENDED: u32 = 1 << 5;
+const CONTINUED: u32 = 1 << 7;
+/// The process state of a stopped process.
+const STATE_STOPPED: u32 = 3;
 /// The signal a parent gets when a child terminates.
 const CHLD: u32 = 17;
 
@@ -53,9 +58,10 @@ pub struct Shared {
     /// one record allowed to set identities until the permission broker
     /// serves requests.
     pub identity_setter: Cell<Option<u32>>,
-    /// How many processes terminated so far.
-    terminations: Cell<u64>,
-    /// The tasks waiting for a process to terminate.
+    /// How many times a process terminated, stopped or was continued.
+    changes: Cell<u64>,
+    /// The tasks waiting for a process to terminate, stop or be
+    /// continued.
     waiters: RefCell<Vec<Waker>>,
 }
 
@@ -95,7 +101,7 @@ impl Shared {
             app_budgets: RefCell::new(BTreeMap::new()),
             control: RefCell::new(None),
             identity_setter: Cell::new(None),
-            terminations: Cell::new(0),
+            changes: Cell::new(0),
             waiters: RefCell::new(Vec::new()),
         })
     }
@@ -175,6 +181,8 @@ impl Shared {
                 path,
                 process: duplicate(started.process.raw(), SAME_RIGHTS)?,
                 exit: None,
+                stopped: None,
+                continued: false,
             };
             let watched = duplicate(started.process.raw(), SAME_RIGHTS)?;
             let mut records = self.records.borrow_mut();
@@ -254,20 +262,52 @@ impl Shared {
         started.complete()
     }
 
-    /// Waits for process `pid` to terminate, then keeps its exit status
-    /// and wakes the tasks waiting for a change, unless another process
-    /// replaced it.
+    /// Watches process `pid` until it terminates, then keeps its exit
+    /// status and wakes the tasks waiting for a change, unless another
+    /// process replaced it. Until then, each time the process stopped or
+    /// was continued, which its stop and continue counts tell even when
+    /// both happened between two looks, the change is kept for its parent
+    /// to collect, the parent gets CHLD, and the waiting tasks are woken.
     async fn watch(self: Rc<Self>, pid: u32, process: OwnedHandle) {
         let Ok(watched) = koid(&process) else {
             return;
         };
-        if self
-            .reactor
-            .signals(process.raw(), TERMINATED)
-            .await
-            .is_err()
-        {
-            return;
+        let (mut stops, mut continues) = (0, 0);
+        // The signal awaited besides TERMINATED is the one not set.
+        let mut next = SUSPENDED;
+        loop {
+            let Ok(observed) = self.reactor.signals(process.raw(), TERMINATED | next).await else {
+                return;
+            };
+            if observed & TERMINATED != 0 {
+                break;
+            }
+            let Ok(record) = info::<INFO_PROCESS_SIZE>(&process, INFO_PROCESS) else {
+                return;
+            };
+            let word =
+                |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("4 bytes"));
+            let stopped = word(0x08) == STATE_STOPPED;
+            next = if stopped { CONTINUED } else { SUSPENDED };
+            if (word(0x20), word(0x24)) == (stops, continues) {
+                continue;
+            }
+            (stops, continues) = (word(0x20), word(0x24));
+            let mut records = self.records.borrow_mut();
+            let Some(record) = records.get_mut(pid).filter(|r| r.koid == watched) else {
+                return;
+            };
+            // Only the latest change is reported: a stop that a continue
+            // followed is not, nor a continue that a stop followed.
+            record.stopped = stopped.then(|| word(0x14));
+            record.continued = !stopped;
+            let parent = record.parent;
+            if let Some(parent) = records.get(parent).filter(|r| r.exit.is_none()) {
+                // SAFETY: the call takes no pointers.
+                unsafe { sys::process_signal(parent.process.raw(), CHLD, 0) };
+            }
+            drop(records);
+            self.changed();
         }
         let exit = exit_of(&process).unwrap_or(Exit { code: 0, signal: 0 });
         let mut records = self.records.borrow_mut();
@@ -285,20 +325,26 @@ impl Shared {
             unsafe { sys::process_signal(parent.process.raw(), CHLD, 0) };
         }
         drop(records);
-        self.terminations.set(self.terminations.get() + 1);
+        self.changed();
+    }
+
+    /// Wakes the tasks waiting for a process to terminate, stop or be
+    /// continued.
+    fn changed(&self) {
+        self.changes.set(self.changes.get() + 1);
         for waker in self.waiters.borrow_mut().drain(..) {
             waker.wake();
         }
     }
 
-    /// Completes once another process terminated, or `deadline` passed,
-    /// which it returns as `false`.
-    pub async fn termination(&self, deadline: i64) -> bool {
-        let seen = self.terminations.get();
+    /// Completes once another process terminated, stopped or was
+    /// continued, or `deadline` passed, which it returns as `false`.
+    pub async fn change(&self, deadline: i64) -> bool {
+        let seen = self.changes.get();
         let timer = self.reactor.sleep_until(deadline);
         let mut timer = core::pin::pin!(timer);
         poll_fn(|cx| {
-            if self.terminations.get() != seen {
+            if self.changes.get() != seen {
                 return Poll::Ready(true);
             }
             if timer.as_mut().poll(cx).is_ready() {

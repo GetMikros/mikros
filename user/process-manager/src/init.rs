@@ -112,6 +112,8 @@ impl Manager {
             path: "init".into(),
             process,
             exit: None,
+            stopped: None,
+            continued: false,
         };
         if !self.shared.records.borrow_mut().insert(INIT_PID, record) {
             return Err(Status::BadState);

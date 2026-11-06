@@ -31,8 +31,8 @@ use mikros_rt::exec::{Executor, Reactor};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
-    HandleRole, LauncherAsyncClient, ProcessInfo, SpawnRequest, StartupHandle, StatusKind,
-    WaitOptions,
+    ExitStatus, HandleRole, LauncherAsyncClient, ProcessInfo, SpawnRequest, StartupHandle,
+    StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::{
     Directory, DirectoryAsyncServer, DirectoryConnectResponse, DirectoryRequest, ProcessDirectory,
@@ -64,6 +64,8 @@ const SPAWN_STD: &str = "/usr/bin/spawn-std";
 /// The `id` of a stream as descriptor 1.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const KILL: u32 = 9;
+const STOP: u32 = 19;
+const CONT: u32 = 18;
 /// The bit of `CHLD` in a signal mask.
 const CHLD_BIT: u64 = 1 << (17 - 1);
 const CALLER_USER: u32 = u32::MAX;
@@ -355,6 +357,20 @@ async fn kill_group(l: &LauncherAsyncClient, group: u32, signo: u32) -> Result<(
     }
 }
 
+/// The first change of the child `selector` chooses that `options` asks
+/// for, until `deadline`.
+async fn wait_for(
+    l: &LauncherAsyncClient,
+    selector: i32,
+    options: WaitOptions,
+    deadline: i64,
+) -> Result<(u32, ExitStatus), Status> {
+    match l.wait(selector, options, deadline).await {
+        Ok(result) => result.map(|r| (r.pid, r.status)),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
 /// Takes the pending `CHLD`, if any, and returns whether there was one.
 fn take_chld() -> bool {
     let mut info = [0u8; 64];
@@ -546,6 +562,39 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
             kill_group(l, a, 0).await == Err(Status::NotFound),
         )?;
         check("getting CHLD", take_chld())?;
+        // A stop and a continuation are reported once each, when asked
+        // for, and with CHLD.
+        let c = spawn(l, &["sleep"], |_| {}).await.map_or(0, |(pid, _)| pid);
+        check("stopping a child", kill(l, c, STOP).await.is_ok())?;
+        let stopped = wait_for(l, c as i32, WaitOptions::STOPPED, FOREVER).await;
+        check(
+            "seeing it stop",
+            stopped.is_ok_and(|(p, s)| {
+                p == c && s.kind == StatusKind::Stopped && s.stop_signal == STOP
+            }),
+        )?;
+        check("getting CHLD for the stop", take_chld())?;
+        check(
+            "reporting the stop once",
+            wait_for(l, c as i32, WaitOptions::STOPPED, 0).await.err() == Some(Status::TimedOut),
+        )?;
+        check("continuing it", kill(l, c, CONT).await.is_ok())?;
+        let continued = wait_for(l, c as i32, WaitOptions::CONTINUED, FOREVER).await;
+        check(
+            "seeing it continue",
+            continued.is_ok_and(|(p, s)| p == c && s.kind == StatusKind::Continued),
+        )?;
+        check("getting CHLD for the continuation", take_chld())?;
+        check(
+            "not reporting it unasked",
+            wait_for(l, c as i32, WaitOptions(0), 0).await.err() == Some(Status::TimedOut),
+        )?;
+        check("ending it", kill(l, c, KILL).await.is_ok())?;
+        check(
+            "waiting for its end",
+            wait(l, c as i32).await == Some((c, -3, KILL)),
+        )?;
+        while take_chld() {}
         // SAFETY: the old mask may be null.
         unsafe { sys::signal_set_mask(2, mask, core::ptr::null_mut()) };
         let (output, code) = run_c(l, HELLO).await;

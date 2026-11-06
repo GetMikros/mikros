@@ -497,7 +497,7 @@ fn processes_and_channels(s: &Startup) -> Result {
     ensure("checking the returned object", back == *text)?;
     // The process ends once it has answered.
     for _ in 0..1000 {
-        let info = info::<0x20>(process, 2)?;
+        let info = info::<0x28>(process, 2)?;
         if u32_at(&info, 0x08) == 2 {
             ensure(
                 "checking the exit code",
@@ -528,7 +528,7 @@ fn u32_at(record: &[u8], at: usize) -> u32 {
 
 /// The process and thread records describe the running test.
 fn info_topics(s: &Startup) -> Result {
-    let process = info::<0x20>(s.process, 2)?;
+    let process = info::<0x28>(s.process, 2)?;
     ensure("checking the process state", u32_at(&process, 0x08) == 1)?;
     ensure("checking the thread count", u32_at(&process, 0x0C) >= 1)?;
     ensure(
@@ -1681,15 +1681,18 @@ fn futex_wake(addr: u64, count: u32) -> Result<u32> {
 }
 
 /// `STOP` sent to a process stops its thread, which spins in user mode,
-/// sets the process `STOPPED` and `SUSPENDED` on it; `CONT` lets the
-/// thread run again and clears both; `KILL` ends a stopped process with
-/// exit code -3 and `KILL` as its signal.
+/// sets the process `STOPPED` and `SUSPENDED` on it, and records the
+/// signal and a stop; `CONT` lets the thread run again, clears both, sets
+/// `CONTINUED` and records a continuation; `TSTP` stops it again, records
+/// itself and clears `CONTINUED`; `KILL` ends a stopped process with exit
+/// code -3 and `KILL` as its signal.
 fn stop_continue_and_kill(s: &Startup) -> Result {
     const SHARED: u64 = 0x10_0000_0000;
     const SPECIFIC: u32 = 1 << 8;
     const STOPPED: u32 = 3;
     const RUNNING: u32 = 1;
-    let (stop, cont, kill) = (19, 18, 9);
+    const CONTINUED: u32 = 1 << 7;
+    let (stop, cont, kill, tstp) = (19, 18, 9, 20);
     let mem = create_memory(PAGE_SIZE)?;
     let here = map(s.process, mem, PAGE_SIZE)?;
     let (process, _) = start_program_with(s, "debuggee", 10, |process| {
@@ -1724,7 +1727,17 @@ fn stop_continue_and_kill(s: &Startup) -> Result {
             sys::process_signal(process, signo, 0)
         })
     };
-    let state = || -> Result<u32> { Ok(u32_at(&info::<0x20>(process, 2)?, 0x08)) };
+    let state = || -> Result<u32> { Ok(u32_at(&info::<0x28>(process, 2)?, 0x08)) };
+    // The stop signal, and the stop and continue counts.
+    let record = || -> Result<(u32, u32, u32)> {
+        let info = info::<0x28>(process, 2)?;
+        Ok((
+            u32_at(&info, 0x14),
+            u32_at(&info, 0x20),
+            u32_at(&info, 0x24),
+        ))
+    };
+    ensure("having never stopped", record()? == (0, 0, 0))?;
     counting("starting to count")?;
     send(stop)?;
     ensure(
@@ -1732,23 +1745,30 @@ fn stop_continue_and_kill(s: &Startup) -> Result {
         wait(process, SUSPENDED, in_time()).0 == 0,
     )?;
     ensure("stopping the process", state()? == STOPPED)?;
+    ensure("recording the stop", record()? == (stop, 1, 0))?;
     let before = count();
     sleep_ms(20);
     ensure("stopping the thread", count() == before)?;
     send(cont)?;
     ensure("running again", state()? == RUNNING)?;
     ensure(
-        "clearing SUSPENDED",
-        wait(process, SUSPENDED, now()).1 & SUSPENDED == 0,
+        "clearing SUSPENDED and setting CONTINUED",
+        wait(process, SUSPENDED, now()).1 & (SUSPENDED | CONTINUED) == CONTINUED,
     )?;
+    ensure("recording the continuation", record()? == (stop, 1, 1))?;
     counting("counting again")?;
-    send(stop)?;
+    send(tstp)?;
     ensure("stopping again", wait(process, SUSPENDED, in_time()).0 == 0)?;
+    ensure(
+        "clearing CONTINUED",
+        wait(process, CONTINUED, now()).1 & CONTINUED == 0,
+    )?;
+    ensure("recording the second stop", record()? == (tstp, 2, 1))?;
     send(kill)?;
     ensure("ending with exit code -3", exit_code(process)? == -3)?;
     ensure(
         "recording KILL",
-        u32_at(&info::<0x20>(process, 2)?, 0x10) == kill,
+        u32_at(&info::<0x28>(process, 2)?, 0x10) == kill,
     )
 }
 
@@ -3708,7 +3728,7 @@ fn exit_code(process: Handle) -> Result<i64> {
         "terminating the process",
         wait(process, TERMINATED, in_time()).0 == 0,
     )?;
-    Ok(u64_at(&info::<0x20>(process, 2)?, 0) as i64)
+    Ok(u64_at(&info::<0x28>(process, 2)?, 0) as i64)
 }
 
 /// A read of an unmapped address is reported as a `PAGE_FAULT` at that
@@ -3881,7 +3901,7 @@ fn start_refusals(s: &Startup) -> Result {
     ensure("keeping the argument handle", koid(event).is_ok())?;
     ensure(
         "keeping the process new",
-        u32_at(&info::<0x20>(process, 2)?, 0x08) == 0,
+        u32_at(&info::<0x28>(process, 2)?, 0x08) == 0,
     )?;
     ensure("keeping the thread new", thread_state(thread)? == 0)?;
     // SAFETY: the call takes no pointers.
@@ -5992,7 +6012,7 @@ fn signal_frame_reserved_bytes(s: &Startup) -> Result {
     ensure("refusing the context", exit_code(process)? == -3)?;
     ensure(
         "ending the process as SEGV",
-        u32_at(&info::<0x20>(process, 2)?, 0x10) == SEGV,
+        u32_at(&info::<0x28>(process, 2)?, 0x10) == SEGV,
     )
 }
 
@@ -8065,7 +8085,7 @@ mod manager {
             )
         };
         ensure("ending the probe", ended == 0)?;
-        let code = super::u64_at(&super::info::<0x20>(started.process.raw(), 2)?, 0) as i64;
+        let code = super::u64_at(&super::info::<0x28>(started.process.raw(), 2)?, 0) as i64;
         if code != 0 {
             mikros_rt::log!(Error, "the launcher probe failed check {code}");
         }
@@ -8118,7 +8138,7 @@ mod manager {
             )
         };
         ensure("ending the probe", ended == 0)?;
-        let code = super::u64_at(&super::info::<0x20>(started.process.raw(), 2)?, 0) as i64;
+        let code = super::u64_at(&super::info::<0x28>(started.process.raw(), 2)?, 0) as i64;
         if code != 0 {
             mikros_rt::log!(Error, "the broker probe failed check {code}");
         }

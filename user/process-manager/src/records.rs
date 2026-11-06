@@ -25,6 +25,12 @@ pub struct Record {
     pub process: OwnedHandle,
     /// How the process ended, once it did.
     pub exit: Option<Exit>,
+    /// The signal that stopped the process, while that stop is not
+    /// reported to its parent.
+    pub stopped: Option<u32>,
+    /// Whether the process was continued, while that is not reported to
+    /// its parent.
+    pub continued: bool,
 }
 
 /// How a process ended: its exit code, or the signal that terminated

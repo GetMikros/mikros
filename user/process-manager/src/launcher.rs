@@ -19,7 +19,7 @@ use mikros_rt::interfaces::mikros::process::{
     ExitStatus, Launcher, LauncherAsyncServer, LauncherCreateSessionResponse, LauncherExecResponse,
     LauncherGetInfoResponse, LauncherKillGroupResponse, LauncherKillResponse, LauncherRequest,
     LauncherSetProcessGroupResponse, LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo,
-    SpawnRequest, StatusKind,
+    SpawnRequest, StatusKind, WaitOptions,
 };
 use mikros_rt::sys;
 
@@ -56,7 +56,14 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
             R::Wait(request, r) => {
                 let (shared, server) = (shared.clone(), server.clone());
                 shared.clone().spawner.spawn(async move {
-                    let result = wait(&shared, pid, request.selector, request.deadline).await;
+                    let result = wait(
+                        &shared,
+                        pid,
+                        request.selector,
+                        request.options,
+                        request.deadline,
+                    )
+                    .await;
                     let _ = r.reply(server.server(), result);
                 });
                 Ok(())
@@ -187,13 +194,18 @@ fn named_app(shared: &Shared, caller: u32, app_id: &str) -> Result<String, Statu
 }
 
 /// Waits until a child of `caller` that `selector` chooses terminated,
-/// or `deadline` passed, and collects its status.
+/// or stopped or was continued when `options` asks for those, or until
+/// `deadline` passed. A termination is collected; a stop or continuation
+/// is reported once.
 async fn wait(
     shared: &Shared,
     caller: u32,
     selector: i32,
+    options: WaitOptions,
     deadline: i64,
 ) -> Result<LauncherWaitResponse, Status> {
+    let stops = options.contains(WaitOptions::STOPPED);
+    let continues = options.contains(WaitOptions::CONTINUED);
     loop {
         let found = {
             let records = shared.records.borrow();
@@ -202,26 +214,44 @@ async fn wait(
                 return Err(Status::NotFound);
             }
             children
-                .find(|(_, record)| record.exit.is_some())
+                .find(|(_, r)| {
+                    r.exit.is_some() || (stops && r.stopped.is_some()) || (continues && r.continued)
+                })
                 .map(|(pid, _)| pid)
         };
         if let Some(pid) = found {
-            let exit = shared.records.borrow_mut().collect(pid);
-            let Exit { code, signal } = exit.ok_or(Status::BadState)?;
-            return Ok(LauncherWaitResponse {
-                pid,
-                status: ExitStatus {
-                    kind: StatusKind::Exited,
-                    exit_code: code,
-                    term_signal: signal,
-                    stop_signal: 0,
-                },
-            });
+            return report(shared, pid, stops);
         }
-        if !shared.termination(deadline).await {
+        if !shared.change(deadline).await {
             return Err(Status::TimedOut);
         }
     }
+}
+
+/// The change of child `pid` that `wait` found: its termination, which is
+/// collected, or else its stop when `stops`, or else its continuation,
+/// which are reported once.
+fn report(shared: &Shared, pid: u32, stops: bool) -> Result<LauncherWaitResponse, Status> {
+    let status = |kind, exit_code, term_signal, stop_signal| LauncherWaitResponse {
+        pid,
+        status: ExitStatus {
+            kind,
+            exit_code,
+            term_signal,
+            stop_signal,
+        },
+    };
+    let mut records = shared.records.borrow_mut();
+    let record = records.get_mut(pid).ok_or(Status::BadState)?;
+    if record.exit.is_some() {
+        let Exit { code, signal } = records.collect(pid).ok_or(Status::BadState)?;
+        return Ok(status(StatusKind::Exited, code, signal, 0));
+    }
+    if let Some(signo) = record.stopped.take().filter(|_| stops) {
+        return Ok(status(StatusKind::Stopped, 0, 0, signo));
+    }
+    record.continued = false;
+    Ok(status(StatusKind::Continued, 0, 0, 0))
 }
 
 /// What process `caller` may know of process `target`: the whole record,
