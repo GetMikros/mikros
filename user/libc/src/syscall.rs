@@ -20,6 +20,7 @@ const SYS_STAT: i64 = 4;
 const SYS_FSTAT: i64 = 5;
 const SYS_LSTAT: i64 = 6;
 const SYS_POLL: i64 = 7;
+const SYS_SELECT: i64 = 23;
 const SYS_LSEEK: i64 = 8;
 const SYS_MMAP: i64 = 9;
 const SYS_MPROTECT: i64 = 10;
@@ -67,6 +68,8 @@ const SYS_EXIT_GROUP: i64 = 231;
 const SYS_TGKILL: i64 = 234;
 const SYS_OPENAT: i64 = 257;
 const SYS_NEWFSTATAT: i64 = 262;
+const SYS_PSELECT6: i64 = 270;
+const SYS_PPOLL: i64 = 271;
 const SYS_READLINKAT: i64 = 267;
 const SYS_FACCESSAT: i64 = 269;
 const SYS_DUP3: i64 = 292;
@@ -214,6 +217,21 @@ extern "C" fn __mikros_syscall(
         SYS_TKILL => signal::tkill(a1, a2),
         SYS_TGKILL => signal::tkill(a2, a3),
         SYS_POLL => poll::poll(a1 as *mut poll::Pollfd, a2 as u64, a3),
+        SYS_PPOLL => poll::ppoll(
+            a1 as *mut poll::Pollfd,
+            a2 as u64,
+            a3 as *const clock::Timespec,
+            a4 as *const u64,
+        ),
+        SYS_SELECT => poll::select(a1, a2 as *mut _, a3 as *mut _, a4 as *mut _, a5 as *const _),
+        SYS_PSELECT6 => poll::pselect6(
+            a1,
+            a2 as *mut _,
+            a3 as *mut _,
+            a4 as *mut _,
+            a5 as *const clock::Timespec,
+            a6 as *const [u64; 2],
+        ),
         SYS_GETRANDOM => getrandom(a1 as *mut u8, a2 as u64),
         SYS_CLOCK_GETTIME => clock::gettime(a1, a2 as *mut clock::Timespec),
         SYS_NANOSLEEP => clock::nanosleep(

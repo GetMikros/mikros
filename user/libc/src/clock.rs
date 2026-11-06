@@ -109,7 +109,7 @@ const INTERRUPTED: mikros_rt::sys::Status = -27;
 
 /// The nanoseconds that `ts` holds, or `EINVAL` when it is not a valid
 /// time.
-fn nanos(ts: *const Timespec) -> Result<i64, i64> {
+pub fn nanos(ts: *const Timespec) -> Result<i64, i64> {
     // SAFETY: musl passes a `struct timespec`.
     let Some(t) = (unsafe { ts.as_ref() }) else {
         return Err(EFAULT);

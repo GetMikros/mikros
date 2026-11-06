@@ -10,6 +10,7 @@
 #include <mikros/abi.h>
 #include <mikros/syscalls.h>
 #include <poll.h>
+#include <sys/select.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <setjmp.h>
@@ -747,6 +748,42 @@ static int stops_are_reported(void)
 		&& WTERMSIG(status) == SIGKILL;
 }
 
+/* select reports a pipe's ends as they become ready and keeps only the
+   ready descriptors in its sets, waits for its timeout, and refuses a
+   closed descriptor; pselect and ppoll do the same with a timespec. */
+static int pipes_are_selected(void)
+{
+	int p[2];
+	if (pipe(p))
+		return 0;
+	fd_set r, w;
+	struct timeval none = {0, 0}, short_wait = {0, 20000};
+	struct timespec before, after;
+	FD_ZERO(&r);
+	FD_ZERO(&w);
+	FD_SET(p[0], &r);
+	FD_SET(p[1], &w);
+	int ok = select(p[1] + 1, &r, &w, 0, &none) == 1 && !FD_ISSET(p[0], &r) && FD_ISSET(p[1], &w);
+	FD_ZERO(&r);
+	FD_SET(p[0], &r);
+	clock_gettime(CLOCK_MONOTONIC, &before);
+	ok = ok && select(p[0] + 1, &r, 0, 0, &short_wait) == 0;
+	clock_gettime(CLOCK_MONOTONIC, &after);
+	ok = ok && ns(after) - ns(before) >= 20000000;
+	ok = ok && write(p[1], "x", 1) == 1;
+	FD_ZERO(&r);
+	FD_SET(p[0], &r);
+	struct timespec ts = {1, 0};
+	ok = ok && pselect(p[0] + 1, &r, 0, 0, &ts, 0) == 1 && FD_ISSET(p[0], &r);
+	struct pollfd f = {.fd = p[0], .events = POLLIN};
+	ok = ok && ppoll(&f, 1, &ts, 0) == 1 && f.revents == POLLIN;
+	close(p[0]);
+	close(p[1]);
+	FD_ZERO(&r);
+	FD_SET(p[0], &r);
+	return ok && select(p[0] + 1, &r, 0, 0, &none) == -1 && errno == EBADF;
+}
+
 static volatile sig_atomic_t piped;
 
 static void on_pipe(int signo)
@@ -926,9 +963,11 @@ int main(int argc, char **argv)
 		return 30;
 	if (!stops_are_reported())
 		return 31;
+	if (!pipes_are_selected())
+		return 32;
 	char *copy = malloc(64);
 	if (!copy)
-		return 32;
+		return 33;
 	snprintf(copy, 64, "hello, %s", argv[1]);
 	puts(copy);
 	free(copy);
