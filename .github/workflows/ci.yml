@@ -136,7 +136,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Set up the build
         uses: ./.github/actions/setup
-      # The QEMU runs take longer than xtask's default limit of 120 s
-      # without KVM. The host tests ran in the job above.
+      # Without KVM, the first integration run took about 150 s on the
+      # runner, and the test suites of ported projects add some 5 minutes
+      # to it, so the limit leaves room well above xtask's default of
+      # 120 s. The host tests ran in the job above.
       - name: Test without KVM
-        run: cargo xtask test --no-host --timeout 600
+        run: cargo xtask test --no-host --timeout 1200
