@@ -66,6 +66,8 @@ pub struct Pcids {
     root: u64,
     pcid: u64,
     loaded: *const CpuMask,
+    /// The user address space loaded last, or 0.
+    last_user: u64,
 }
 
 // SAFETY: `loaded` points into the loaded space's tables, which are not
@@ -85,6 +87,7 @@ impl Pcids {
             root: 0,
             pcid: 0,
             loaded: core::ptr::null(),
+            last_user: 0,
         }
     }
 
@@ -261,6 +264,12 @@ impl SpaceTables {
     pub fn activate(&self) {
         let me = percpu::index() as usize;
         let mut pcids = percpu::this().pcids.lock();
+        // Each address space is a process's: a thread of another process
+        // runs after a barrier, when the processor needs one.
+        if pcids.last_user != self.id {
+            pcids.last_user = self.id;
+            crate::mitigations::barrier();
+        }
         // The processor joins the set before it reads the generation, and
         // a change bumps the generation before it reads the set, so that
         // either this load flushes or the change sends a shootdown here.

@@ -72,6 +72,13 @@ global_asm!(
     "push rdi",
     "mov rdi, rdx",
     "mov rsi, rcx",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 3f",
+    "mov ecx, {spec_ctrl}",
+    "xor eax, eax",
+    "xor edx, edx",
+    "wrmsr",
+    "3:",
     "xor eax, eax",
     "xor ebx, ebx",
     "xor ecx, ecx",
@@ -95,6 +102,8 @@ global_asm!(
     user_code = const crate::gdt::USER_CODE as u64 | 3,
     verw = sym crate::mitigations::VERW,
     verw_selector = sym crate::mitigations::VERW_SELECTOR,
+    ibrs = sym crate::mitigations::IBRS_ON_ENTRY,
+    spec_ctrl = const 0x48,
 );
 
 // Leaves for user mode with every register taken from the interrupt
@@ -103,6 +112,13 @@ global_asm!(
 global_asm!(
     ".global context_enter_user_frame",
     "context_enter_user_frame:",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 3f",
+    "mov ecx, {spec_ctrl}",
+    "xor eax, eax",
+    "xor edx, edx",
+    "wrmsr",
+    "3:",
     "mov rsp, rdi",
     "pop r15",
     "pop r14",
@@ -128,6 +144,8 @@ global_asm!(
     "iretq",
     verw = sym crate::mitigations::VERW,
     verw_selector = sym crate::mitigations::VERW_SELECTOR,
+    ibrs = sym crate::mitigations::IBRS_ON_ENTRY,
+    spec_ctrl = const 0x48,
 );
 
 unsafe extern "sysv64" {

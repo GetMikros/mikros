@@ -74,10 +74,26 @@ global_asm!(
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 5f",
+    "mov ecx, {spec_ctrl}",
+    "mov eax, 1",
+    "xor edx, edx",
+    "wrmsr",
+    "5:",
     "mov rdi, rsp",
     "call {handler}",
-    // POP leaves the flags alone, so the test decides the path below.
-    "test eax, eax",
+    // R12 keeps the result while IBRS is cleared, and POP leaves the
+    // flags alone, so the test decides the path below.
+    "mov r12d, eax",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 6f",
+    "mov ecx, {spec_ctrl}",
+    "xor eax, eax",
+    "xor edx, edx",
+    "wrmsr",
+    "6:",
+    "test r12d, r12d",
     "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10",
     "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
     "pop rcx", "pop rbx", "pop rax",
@@ -105,6 +121,8 @@ global_asm!(
     handler = sym syscall_handler,
     verw = sym crate::mitigations::VERW,
     verw_selector = sym crate::mitigations::VERW_SELECTOR,
+    ibrs = sym crate::mitigations::IBRS_ON_ENTRY,
+    spec_ctrl = const 0x48,
 );
 
 unsafe extern "sysv64" {
