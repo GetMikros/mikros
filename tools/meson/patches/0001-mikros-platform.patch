@@ -1,5 +1,5 @@
 diff --git a/mesonbuild/build.py b/mesonbuild/build.py
-index 6b502e8..26f5332 100644
+index 6b502e8..439af70 100644
 --- a/mesonbuild/build.py
 +++ b/mesonbuild/build.py
 @@ -167,6 +167,7 @@ DEFAULT_STATIC_LIBRARY_NAMES: T.Mapping[str, T.Tuple[str, str]] = {
@@ -18,7 +18,19 @@ index 6b502e8..26f5332 100644
  }
  
  def _process_install_tag(install_tag: T.Optional[T.List[T.Optional[str]]],
-@@ -1958,6 +1960,8 @@ class BuildTarget(Target):
+@@ -1780,6 +1782,11 @@ class BuildTarget(Target):
+                 if self.environment.machines[self.for_machine].is_darwin():
+                     raise MesonException(
+                         f'target {self.name} links against shared module {link_target.name}. This is not permitted on OSX')
++                elif self.environment.machines[self.for_machine].is_mikros():
++                    # A module has no soname with a major version, which a
++                    # library that is linked against needs on Mikros.
++                    raise MesonException(
++                        f'target {self.name} links against shared module {link_target.name}. This is not permitted on Mikros')
+                 elif self.environment.machines[self.for_machine].is_android() and isinstance(self, SharedModule):
+                     # Android requires shared modules that use symbols from other shared modules to
+                     # be linked before they can be dlopen()ed in the correct order. Not doing so
+@@ -1958,6 +1965,8 @@ class BuildTarget(Target):
              return 'windows'
          elif m.is_darwin():
              return 'darwin'
@@ -27,7 +39,7 @@ index 6b502e8..26f5332 100644
          else:
              return 'unix'
  
-@@ -2403,6 +2407,8 @@ class StaticLibrary(BuildTarget, LinkableTarget):
+@@ -2403,6 +2412,8 @@ class StaticLibrary(BuildTarget, LinkableTarget):
                      suffix = 'a'
              elif self.environment.machines[self.for_machine].is_os2() and self.environment.coredata.optstore.get_value_for(OptionKey('os2_emxomf')):
                  suffix = 'lib'
@@ -36,7 +48,7 @@ index 6b502e8..26f5332 100644
              else:
                  suffix = 'a'
                  if 'c' in self.compilers and self.compilers['c'].get_id() == 'tasking' and not self.prelink:
-@@ -2524,6 +2530,11 @@ class SharedLibrary(BuildTarget, LinkableTarget):
+@@ -2524,6 +2535,11 @@ class SharedLibrary(BuildTarget, LinkableTarget):
              if self.darwin_versions is None and self.soversion is not None:
                  # If unspecified, pick the soversion
                  self.darwin_versions = (self.soversion, self.soversion)
@@ -48,7 +60,7 @@ index 6b502e8..26f5332 100644
  
          self.win_subsystem = kwargs.get('win_subsystem') or 'console'
  
-@@ -2665,6 +2676,19 @@ class SharedLibrary(BuildTarget, LinkableTarget):
+@@ -2665,6 +2681,19 @@ class SharedLibrary(BuildTarget, LinkableTarget):
              else:
                  # libfoo.dylib
                  filename_tpl = '{0.prefix}{0.name}.{0.suffix}'
@@ -68,7 +80,7 @@ index 6b502e8..26f5332 100644
          elif self.environment.machines[self.for_machine].is_android():
              prefix = prefix if prefix is not None else 'lib'
              suffix = suffix if suffix is not None else 'so'
-@@ -2762,13 +2786,14 @@ class SharedLibrary(BuildTarget, LinkableTarget):
+@@ -2762,13 +2791,14 @@ class SharedLibrary(BuildTarget, LinkableTarget):
          aliases: T.List[T.Tuple[str, str, str]] = []
          # Aliases are only useful with .so and .dylib libraries. Also if
          # there's no self.soversion (no versioning), we don't need aliases.
