@@ -463,18 +463,6 @@ pub fn sigsuspend(mask: *const u64, size: u64) -> i64 {
     }
 }
 
-/// `pause`: waits until a signal runs a handler, and fails with `EINTR`
-/// then.
-pub fn pause() -> i64 {
-    loop {
-        // SAFETY: the call takes no pointers.
-        let status = unsafe { sys::thread_sleep(i64::MAX) };
-        if status != mikros_rt::OK {
-            return -errno::from_status(status);
-        }
-    }
-}
-
 /// `rt_sigtimedwait`: waits for a signal of `set` until the relative
 /// `timeout`, and returns its number.
 pub fn sigtimedwait(set: *const u64, out: *mut u8, timeout: *const [i64; 2], size: u64) -> i64 {
