@@ -49,8 +49,10 @@ jobs:
           for kind in production debug fuzz; do
             cargo xtask build --kind "$kind"
           done
+      # The runner has no KVM, so QEMU emulates every instruction, and the
+      # QEMU runs take longer than xtask's default limit of 120 s.
       - name: Test
-        run: cargo xtask test
+        run: cargo xtask test --timeout 600
       # Saved even when the tests fail, but only once the build is whole:
       # the compiler-rt builtins are the last thing it installs.
       - name: Save the LLVM build
@@ -64,4 +66,4 @@ jobs:
       # Some integration tests, such as the coverage test, exist only in
       # fuzz builds. The host tests ran in the step above.
       - name: Test the fuzz build
-        run: cargo xtask test --kind fuzz --no-host
+        run: cargo xtask test --kind fuzz --no-host --timeout 600
