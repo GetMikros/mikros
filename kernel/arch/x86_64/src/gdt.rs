@@ -91,16 +91,6 @@ pub struct Pointer {
     pub base: u64,
 }
 
-/// Sets the stack this processor switches to on an interrupt from user
-/// mode.
-#[cfg(target_os = "none")]
-pub fn set_rsp0(top: u64) {
-    let tss = crate::percpu::this().tss.get();
-    // SAFETY: only this processor uses its TSS, and an interrupt, which
-    // reads RSP0, arrives between instructions, never during the store.
-    unsafe { (&raw mut (*tss).rsp[0]).write_unaligned(top) };
-}
-
 /// Allows or denies user-mode access to the I/O ports from `start` to
 /// `end`, exclusive, which must not exceed 0x10000, on this processor.
 #[cfg(target_os = "none")]
@@ -118,11 +108,12 @@ pub fn set_ports(start: u64, end: u64, allow: bool) {
     }
 }
 
-/// Builds this processor's GDT and TSS, with the IST stacks whose tops
-/// are given, and loads them. Every segment register is reloaded. The
-/// per-CPU data must be set up.
+/// Builds this processor's GDT and TSS, with its entry stack for
+/// interrupts in user mode and the IST stacks whose tops are given, and
+/// loads them. Every segment register is reloaded. The per-CPU data must
+/// be set up.
 #[cfg(target_os = "none")]
-pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64, debug: u64) {
+pub fn init(double_fault: u64, nmi: u64, machine_check: u64, debug: u64) {
     use crate::cpu::read_msr;
     use crate::percpu::{IA32_GS_BASE, IA32_KERNEL_GS_BASE};
     use core::arch::asm;
@@ -145,7 +136,8 @@ pub fn init(rsp0: u64, double_fault: u64, nmi: u64, machine_check: u64, debug: u
             (start as *mut u64).write((&raw const *cpu) as u64);
             (&raw mut (*tss).ist[usize::from(entry) - 1]).write_unaligned(start);
         }
-        set_rsp0(rsp0);
+        let entry_stack = crate::percpu::set_entry_stack_top();
+        (&raw mut (*tss).rsp[0]).write_unaligned(entry_stack);
         let gdt = cpu.gdt.get().cast::<u64>();
         let limit = (IO_BITMAP_OFFSET + IO_BITMAP_SIZE) as u32;
         let tss_words = tss_descriptor(tss as u64, limit);

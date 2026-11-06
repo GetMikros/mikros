@@ -119,15 +119,18 @@ pub fn needed(reported: Reported) -> Needed {
 /// Whether returns to user mode clear CPU buffers with `VERW` first, as
 /// some processor needs.
 #[cfg(target_os = "none")]
+#[unsafe(link_section = ".data.entry")]
 pub static VERW: AtomicBool = AtomicBool::new(false);
 
 /// The operand of `VERW`: a writable data segment's selector.
 #[cfg(target_os = "none")]
+#[unsafe(link_section = ".data.entry")]
 pub static VERW_SELECTOR: u16 = crate::gdt::KERNEL_DATA;
 
 /// Whether every entry to the kernel sets `IA32_SPEC_CTRL.IBRS` and every
 /// return to user mode clears it.
 #[cfg(target_os = "none")]
+#[unsafe(link_section = ".data.entry")]
 pub static IBRS_ON_ENTRY: AtomicBool = AtomicBool::new(false);
 
 /// Whether switches to another process's thread need a barrier.

@@ -14,7 +14,18 @@ pub const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
 
 /// The data of one processor. The layout is fixed because entry code
 /// reaches the fields at their offsets from the GS base.
-#[repr(C)]
+/// The size of a processor's entry stack.
+pub const ENTRY_STACK_SIZE: usize = 4096;
+
+/// Starts the page after the fields that the entry and exit code uses.
+#[derive(Clone, Copy)]
+#[repr(C, align(4096))]
+struct PageBreak;
+
+/// A processor's data. The fields up to `rest`, which the code that enters
+/// and leaves the kernel uses, fill pages of their own, which kernel
+/// page-table isolation also maps for user mode.
+#[repr(C, align(4096))]
 pub struct PerCpu {
     /// The address of this structure.
     this: *const PerCpu,
@@ -33,6 +44,19 @@ pub struct PerCpu {
     /// The depth of hardware interrupt handling, during which no
     /// coverage is collected.
     interrupts: AtomicU64,
+    /// The top of `entry_stack`, and a word that the exit code keeps a
+    /// register in while it moves to that stack.
+    entry_stack_top: AtomicU64,
+    scratch: AtomicU64,
+    /// The processor's task state segment and GDT, which the processor
+    /// reads as it runs and `gdt` changes.
+    pub tss: UnsafeCell<Tss>,
+    pub gdt: UnsafeCell<Gdt>,
+    /// The stack that the processor switches to on an interrupt or
+    /// exception in user mode, and that returns to user mode leave from.
+    /// Entries move to the thread's kernel stack at once.
+    entry_stack: UnsafeCell<[u8; ENTRY_STACK_SIZE]>,
+    rest: PageBreak,
     /// The address spaces that have PCIDs on the processor.
     pub pcids: SpinLock<Pcids>,
     /// The top of the kernel stack of the thread that last ran, user or
@@ -45,10 +69,6 @@ pub struct PerCpu {
     /// switching them in needs no allocation. Locked after a process's
     /// ports.
     pub open_ports: SpinLock<Vec<(u64, u64)>>,
-    /// The processor's task state segment and GDT, which the processor
-    /// reads as it runs and `gdt` changes.
-    pub tss: UnsafeCell<Tss>,
-    pub gdt: UnsafeCell<Gdt>,
     /// The depth of interrupt and exception handling, which nothing may
     /// enable interrupts or switch threads within.
     pub handling: AtomicU64,
@@ -80,12 +100,16 @@ impl PerCpu {
             cov_area: AtomicU64::new(0),
             cov_capacity: AtomicU64::new(0),
             interrupts: AtomicU64::new(0),
+            entry_stack_top: AtomicU64::new(0),
+            scratch: AtomicU64::new(0),
+            tss: UnsafeCell::new(Tss::new()),
+            gdt: UnsafeCell::new([0; 8]),
+            entry_stack: UnsafeCell::new([0; ENTRY_STACK_SIZE]),
+            rest: PageBreak,
             pcids: SpinLock::new(kernel_core::lock_order::PCIDS, Pcids::new()),
             thread_stack: AtomicU64::new(0),
             breakpoints_loaded: AtomicBool::new(false),
             open_ports: SpinLock::new(kernel_core::lock_order::OPEN_PORTS, Vec::new()),
-            tss: UnsafeCell::new(Tss::new()),
-            gdt: UnsafeCell::new([0; 8]),
             handling: AtomicU64::new(0),
             fault_address: AtomicU64::new(0),
             core_data: AtomicPtr::new(core::ptr::null_mut()),
@@ -97,6 +121,9 @@ impl PerCpu {
 
 /// The boot processor's data.
 pub(crate) static BOOT_CPU: PerCpu = PerCpu::new(&raw const BOOT_CPU, 0);
+
+/// The data that every application processor's starts as.
+static FRESH: PerCpu = PerCpu::new(core::ptr::null(), 0);
 
 /// The data of each processor, by number, once it has some.
 static ALL: [AtomicPtr<PerCpu>; kernel_core::smp::MAX_CPUS] =
@@ -134,9 +161,16 @@ pub fn init() {
 /// data, which lives as long as the kernel runs. Returns `None` when
 /// memory runs out.
 pub fn new_secondary(index: u32, apic_id: u32, core: *const ()) -> Option<&'static PerCpu> {
-    let cpu = kernel_core::fallible::try_box(PerCpu::new(core::ptr::null(), index)).ok()?;
-    let cpu = alloc::boxed::Box::leak(cpu);
+    let mut place = kernel_core::fallible::try_box_uninit::<PerCpu>().ok()?;
+    // SAFETY: `FRESH` is a valid PerCpu that nothing uses, none of whose
+    // fields owns memory yet, so a copy of its bytes is a new one. It is
+    // copied rather than built, as it does not fit on a stack.
+    let cpu = unsafe {
+        core::ptr::copy_nonoverlapping(&raw const FRESH, place.as_mut_ptr(), 1);
+        alloc::boxed::Box::leak(place.assume_init())
+    };
     cpu.this = &raw const *cpu;
+    cpu.index = index;
     cpu.core_data.store(core.cast_mut(), Ordering::Relaxed);
     cpu.apic_id.store(apic_id, Ordering::Relaxed);
     ALL[index as usize].store(&raw mut *cpu, Ordering::Release);
@@ -192,6 +226,15 @@ pub fn this() -> &'static PerCpu {
     unsafe { &*this }
 }
 
+/// Points this processor's entry stack top at the end of its entry stack,
+/// and returns it.
+pub fn set_entry_stack_top() -> u64 {
+    let cpu = this();
+    let top = cpu.entry_stack.get() as u64 + ENTRY_STACK_SIZE as u64;
+    cpu.entry_stack_top.store(top, Ordering::Relaxed);
+    top
+}
+
 /// The user stack pointer saved by the last system call entry on this
 /// processor.
 pub fn user_rsp() -> u64 {
@@ -204,6 +247,11 @@ pub const USER_RSP_OFFSET: usize = 24;
 pub const COV_AREA_OFFSET: usize = 32;
 pub const COV_CAPACITY_OFFSET: usize = 40;
 pub const INTERRUPTS_OFFSET: usize = 48;
+pub const ENTRY_STACK_TOP_OFFSET: usize = 56;
+pub const SCRATCH_OFFSET: usize = 64;
+/// The size of the part of a processor's data that the entry and exit
+/// code uses, whole pages.
+pub const ENTRY_SIZE: usize = core::mem::offset_of!(PerCpu, rest);
 
 const _: () = assert!(core::mem::offset_of!(PerCpu, index) == 8);
 const _: () = assert!(core::mem::offset_of!(PerCpu, kernel_stack) == KERNEL_STACK_OFFSET);
@@ -211,3 +259,6 @@ const _: () = assert!(core::mem::offset_of!(PerCpu, user_rsp) == USER_RSP_OFFSET
 const _: () = assert!(core::mem::offset_of!(PerCpu, cov_area) == COV_AREA_OFFSET);
 const _: () = assert!(core::mem::offset_of!(PerCpu, cov_capacity) == COV_CAPACITY_OFFSET);
 const _: () = assert!(core::mem::offset_of!(PerCpu, interrupts) == INTERRUPTS_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpu, entry_stack_top) == ENTRY_STACK_TOP_OFFSET);
+const _: () = assert!(core::mem::offset_of!(PerCpu, scratch) == SCRATCH_OFFSET);
+const _: () = assert!(ENTRY_SIZE.is_multiple_of(4096));

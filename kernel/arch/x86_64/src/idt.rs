@@ -121,7 +121,7 @@ pub struct Frame {
 // handler would have.
 #[cfg(target_os = "none")]
 global_asm!(
-    ".pushsection .text.interrupt_stubs, \"ax\"",
+    ".pushsection .text.entry, \"ax\"",
     ".balign 16",
     ".global interrupt_stubs",
     "interrupt_stubs:",
@@ -140,16 +140,29 @@ global_asm!(
     ".set vector, vector + 1",
     ".endr",
     "interrupt_common:",
+    // Swap to the kernel GS base when the interrupted code ran in user
+    // mode, as its saved CS shows, and back before returning to it. The
+    // processor pushed the frame on the entry stack then; it moves to
+    // the thread's kernel stack, which handling may switch away from.
+    "test byte ptr [rsp + 24], 3",
+    "jz 2f",
+    "swapgs",
+    "mov gs:[{scratch}], rdi",
+    "mov rdi, rsp",
+    "mov rsp, gs:[{kernel_stack}]",
+    "push qword ptr [rdi + 48]",
+    "push qword ptr [rdi + 40]",
+    "push qword ptr [rdi + 32]",
+    "push qword ptr [rdi + 24]",
+    "push qword ptr [rdi + 16]",
+    "push qword ptr [rdi + 8]",
+    "push qword ptr [rdi]",
+    "mov rdi, gs:[{scratch}]",
+    "2:",
     "cmp byte ptr [rip + {smap}], 0",
     "je 7f",
     "clac",
     "7:",
-    // Swap to the kernel GS base when the interrupted code ran in user
-    // mode, as its saved CS shows, and back before returning to it.
-    "test byte ptr [rsp + 24], 3",
-    "jz 2f",
-    "swapgs",
-    "2:",
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
@@ -199,6 +212,16 @@ global_asm!(
     "add rsp, 16",
     "test byte ptr [rsp + 8], 3",
     "jz 3f",
+    // A return to user mode leaves from the entry stack.
+    "mov gs:[{scratch}], rdi",
+    "mov rdi, rsp",
+    "mov rsp, gs:[{entry_stack_top}]",
+    "push qword ptr [rdi + 32]",
+    "push qword ptr [rdi + 24]",
+    "push qword ptr [rdi + 16]",
+    "push qword ptr [rdi + 8]",
+    "push qword ptr [rdi]",
+    "mov rdi, gs:[{scratch}]",
     "cmp byte ptr [rip + {verw}], 0",
     "je 9f",
     "verw word ptr [rip + {verw_selector}]",
@@ -298,6 +321,8 @@ global_asm!(
     gs_msr = const crate::percpu::IA32_GS_BASE,
     kernel_gs_msr = const crate::percpu::IA32_KERNEL_GS_BASE,
     kernel_stack = const crate::percpu::KERNEL_STACK_OFFSET,
+    scratch = const crate::percpu::SCRATCH_OFFSET,
+    entry_stack_top = const crate::percpu::ENTRY_STACK_TOP_OFFSET,
     mask = const ERROR_CODE_VECTORS,
     interrupt = sym interrupt,
     after_interrupt = sym after_interrupt,
@@ -373,8 +398,14 @@ pub fn dpl(vector: u8) -> u8 {
     if vector == BREAKPOINT { 3 } else { 0 }
 }
 
+/// The IDT, in a page of its own, which kernel page-table isolation also
+/// maps for user mode.
 #[cfg(target_os = "none")]
-static mut IDT: [Gate; 256] = [Gate::EMPTY; 256];
+#[repr(C, align(4096))]
+struct Table([Gate; 256]);
+
+#[cfg(target_os = "none")]
+static mut IDT: Table = Table([Gate::EMPTY; 256]);
 
 /// Fills the IDT and loads it. The GDT and the TSS must be loaded.
 #[cfg(target_os = "none")]

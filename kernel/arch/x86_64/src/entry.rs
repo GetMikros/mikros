@@ -93,7 +93,7 @@ extern "sysv64" fn on_kernel_tables() -> ! {
 /// The boot processor's setup for `kernel_core::arch::early_setup`.
 pub fn early_setup(info: &mut BootInfo) {
     let ist = || space::new_stack(gdt::IST_STACK_SIZE);
-    gdt::init(space::stack_top(), ist(), ist(), ist(), ist());
+    gdt::init(ist(), ist(), ist(), ist());
     crate::idt::init();
     // A framebuffer that fails the checks is treated as absent from here
     // on: no console, no panic screen and nothing for init.

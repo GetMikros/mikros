@@ -63,8 +63,10 @@ global_asm!(
 // register zero, after clearing CPU buffers when the processor needs it.
 // The user GS base must be in IA32_KERNEL_GS_BASE.
 global_asm!(
+    ".pushsection .text.entry, \"ax\"",
     ".global context_enter_user",
     "context_enter_user:",
+    "mov rsp, gs:[{entry_stack_top}]",
     "push {user_data}",
     "push rsi",
     "push 0x202",
@@ -98,18 +100,21 @@ global_asm!(
     "2:",
     "swapgs",
     "iretq",
+    ".popsection",
     user_data = const crate::gdt::USER_DATA as u64 | 3,
     user_code = const crate::gdt::USER_CODE as u64 | 3,
     verw = sym crate::mitigations::VERW,
     verw_selector = sym crate::mitigations::VERW_SELECTOR,
     ibrs = sym crate::mitigations::IBRS_ON_ENTRY,
     spec_ctrl = const 0x48,
+    entry_stack_top = const crate::percpu::ENTRY_STACK_TOP_OFFSET,
 );
 
 // Leaves for user mode with every register taken from the interrupt
 // frame at RDI, after clearing CPU buffers when the processor needs it.
 // The user GS base must be in IA32_KERNEL_GS_BASE.
 global_asm!(
+    ".pushsection .text.entry, \"ax\"",
     ".global context_enter_user_frame",
     "context_enter_user_frame:",
     "cmp byte ptr [rip + {ibrs}], 0",
@@ -136,12 +141,25 @@ global_asm!(
     "pop rbx",
     "pop rax",
     "add rsp, 16",
+    // The return leaves from the entry stack.
+    "mov gs:[{scratch}], rdi",
+    "mov rdi, rsp",
+    "mov rsp, gs:[{entry_stack_top}]",
+    "push qword ptr [rdi + 32]",
+    "push qword ptr [rdi + 24]",
+    "push qword ptr [rdi + 16]",
+    "push qword ptr [rdi + 8]",
+    "push qword ptr [rdi]",
+    "mov rdi, gs:[{scratch}]",
     "cmp byte ptr [rip + {verw}], 0",
     "je 2f",
     "verw word ptr [rip + {verw_selector}]",
     "2:",
     "swapgs",
     "iretq",
+    ".popsection",
+    scratch = const crate::percpu::SCRATCH_OFFSET,
+    entry_stack_top = const crate::percpu::ENTRY_STACK_TOP_OFFSET,
     verw = sym crate::mitigations::VERW,
     verw_selector = sym crate::mitigations::VERW_SELECTOR,
     ibrs = sym crate::mitigations::IBRS_ON_ENTRY,

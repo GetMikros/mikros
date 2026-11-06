@@ -129,7 +129,6 @@ impl ArchThread {
     }
 
     fn switch_in_user(&self, top: u64) {
-        crate::gdt::set_rsp0(top);
         percpu::this().kernel_stack.store(top, Ordering::Relaxed);
         let user = *self.user.lock();
         // SAFETY: the bases are user addresses or zero, and the kernel

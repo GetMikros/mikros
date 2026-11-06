@@ -39,14 +39,6 @@ static DYNAMIC: SpinLock<Ranges<DYNAMIC_RANGES>> = SpinLock::new(
 const DYNAMIC_RANGES: usize = 256;
 /// The physical address of the kernel's top-level table.
 static ROOT: AtomicU64 = AtomicU64::new(0);
-/// The top of the stack the kernel moves to at boot.
-static STACK_TOP: AtomicU64 = AtomicU64::new(0);
-
-/// The top of the stack the kernel moved to at boot.
-pub fn stack_top() -> u64 {
-    STACK_TOP.load(Ordering::Relaxed)
-}
-
 /// The kernel's top-level table, once it runs on it.
 pub fn root() -> u64 {
     ROOT.load(Ordering::Relaxed)
@@ -456,7 +448,6 @@ pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
         .unwrap_or_else(|e| panic!("building the kernel page tables: {e}"));
     let root = mapper.root();
     ROOT.store(root, Ordering::Relaxed);
-    STACK_TOP.store(stack + STACK_SIZE, Ordering::Relaxed);
     crate::panic::set_stack(stack, stack + STACK_SIZE);
     *BOOT_INFO.lock() = Some(info);
     // SAFETY: the new tables map the kernel image at the same addresses,

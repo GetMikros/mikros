@@ -23,7 +23,16 @@ SECTIONS
     . = 0xFFFFFFFF80000000;
 
     __kernel_start = .;
-    .text : ALIGN(4096) { *(.text .text.*) } :text
+    .text : ALIGN(4096) {
+        /* The code that enters and leaves the kernel, in pages of its
+           own, which the user page tables map under kernel page-table
+           isolation. */
+        __entry_text_start = .;
+        KEEP(*(.text.entry))
+        . = ALIGN(4096);
+        __entry_text_end = .;
+        *(.text .text.*)
+    } :text
     __text_end = .;
 
     . = ALIGN(4096);
@@ -44,7 +53,15 @@ SECTIONS
 
     . = ALIGN(4096);
     __data_start = .;
-    .data : { *(.data .data.*) } :data
+    .data : {
+        /* The data that the entry code reads, in a page of its own,
+           mapped like that code. */
+        __entry_data_start = .;
+        KEEP(*(.data.entry))
+        . = ALIGN(4096);
+        __entry_data_end = .;
+        *(.data .data.*)
+    } :data
     /* Inside the data range, so that the kernel's own tables map it. */
     .got : { *(.got .got.*) } :data
     .dynamic : { *(.dynamic) } :data :dynamic

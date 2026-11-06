@@ -23,3 +23,9 @@ pub fn try_box<T>(value: T) -> Result<alloc::boxed::Box<T>, Error> {
     let boxed = alloc::boxed::Box::<T>::try_new_uninit().map_err(|_| Error::NoMemory)?;
     Ok(alloc::boxed::Box::write(boxed, value))
 }
+
+/// Memory for a `T` on the heap, not yet initialized, for a value too
+/// large to build on a stack, or `NoMemory`.
+pub fn try_box_uninit<T>() -> Result<alloc::boxed::Box<core::mem::MaybeUninit<T>>, Error> {
+    alloc::boxed::Box::<T>::try_new_uninit().map_err(|_| Error::NoMemory)
+}

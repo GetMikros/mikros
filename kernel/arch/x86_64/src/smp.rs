@@ -141,8 +141,6 @@ static RELEASED: AtomicBool = AtomicBool::new(false);
 
 /// The stage of the processor being started.
 static STAGE: AtomicU8 = AtomicU8::new(WAITING);
-/// The top of its stack.
-static STACK_TOP: AtomicU64 = AtomicU64::new(0);
 /// The MADT, while processors start.
 static MADT: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static MADT_LEN: AtomicUsize = AtomicUsize::new(0);
@@ -365,7 +363,6 @@ fn start_one(page: u64, id: u32, index: usize) -> bool {
     let cpu = percpu::new_secondary(index as u32, id, (&raw const *core).cast())
         .unwrap_or_else(|| panic!("no memory for processor {index}"));
     let top = space::new_stack(STACK_SIZE);
-    STACK_TOP.store(top, Ordering::Relaxed);
     SYNC_TURN.store(0, Ordering::Relaxed);
     STAGE.store(WAITING, Ordering::Release);
     let base = space::direct(page) as *mut u8;
@@ -436,13 +433,7 @@ extern "sysv64" fn ap_entry(cpu: &'static PerCpu) -> ! {
     space::load_pat();
     crate::cpu::init();
     let ist = || space::new_stack(gdt::IST_STACK_SIZE);
-    gdt::init(
-        STACK_TOP.load(Ordering::Relaxed),
-        ist(),
-        ist(),
-        ist(),
-        ist(),
-    );
+    gdt::init(ist(), ist(), ist(), ist());
     crate::idt::load();
     crate::syscall::init();
     // SAFETY: `start` keeps the MADT in place until this processor is
