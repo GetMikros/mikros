@@ -70,6 +70,8 @@ const RAW_SYSCALL: &str = "/usr/bin/raw-syscall";
 const APP_RAW_SYSCALL: &str = "/Apps/test/bin/raw-syscall";
 /// A Rust program that starts processes with `std::process::Command`.
 const SPAWN_STD: &str = "/usr/bin/spawn-std";
+/// A dynamic C program in the bundle of the app `test.app`.
+const BUNDLED: &str = "/Apps/test.app/bin/hello";
 /// The `id` of a stream as descriptor 1.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const KILL: u32 = 9;
@@ -256,6 +258,16 @@ fn arguments_from(args: &[&str]) -> OwnedHandle {
 /// its standard output, and returns what it printed and its exit code.
 /// Its standard input and error are left closed.
 async fn run_c(l: &LauncherAsyncClient, path: &str) -> (Vec<u8>, Option<i64>) {
+    run_with(l, path, |_| {}).await
+}
+
+/// Runs the program at `path` as `run_c` does, after `change` adjusted
+/// the request.
+async fn run_with(
+    l: &LauncherAsyncClient,
+    path: &str,
+    change: impl FnOnce(&mut SpawnRequest),
+) -> (Vec<u8>, Option<i64>) {
     let (output, stdout) = stream();
     let pid = spawn(l, &[], |r| {
         r.path = path.into();
@@ -265,6 +277,7 @@ async fn run_c(l: &LauncherAsyncClient, path: &str) -> (Vec<u8>, Option<i64>) {
             id: STDOUT_STREAM,
             handle: stdout,
         });
+        change(r);
     })
     .await
     .map_or(0, |(pid, _)| pid);
@@ -465,6 +478,41 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
         check(
             "waiting for it",
             wait(l, named as i32).await == Some((named, 4, 0)),
+        )?;
+        // An app ID outside system. names the app whose bundle holds the
+        // program; one with a program manifest names its binary, for the
+        // app IDs it lists.
+        let (output, code) = run_with(l, BUNDLED, |r| r.app_id = Some("test.app".into())).await;
+        check(
+            "naming the app ID of the program's bundle",
+            code == Some(0) && output.as_slice() == b"hello, world\n",
+        )?;
+        let as_app = |app: &'static str, path: &'static str| {
+            spawn(l, &["exit", "0"], move |r| {
+                r.app_id = Some(app.into());
+                r.path = path.into();
+            })
+        };
+        check(
+            "refusing the app ID of another bundle",
+            as_app("test.other", BUNDLED).await.err() == Some(Status::AccessDenied),
+        )?;
+        let manifested = as_app("system.prog", PROBE).await.map_or(0, |(pid, _)| pid);
+        check(
+            "naming an app ID that its manifest allows",
+            wait(l, manifested as i32).await == Some((manifested, 0, 0)),
+        )?;
+        check(
+            "refusing a program that is not the manifest's binary",
+            as_app("system.prog", HELLO).await.err() == Some(Status::AccessDenied),
+        )?;
+        check(
+            "refusing a caller that the manifest does not list",
+            as_app("system.closed", PROBE).await.err() == Some(Status::AccessDenied),
+        )?;
+        check(
+            "refusing an app ID whose manifest is invalid",
+            as_app("system.bad", PROBE).await.err() == Some(Status::AccessDenied),
         )?;
         let rename = spawn(l, &["rename"], |_| {})
             .await

@@ -117,7 +117,7 @@ fn new_process(
     let from = records.get(caller).ok_or(Status::BadState)?;
     let app_id = match &request.app_id {
         None => from.app_id.clone(),
-        Some(app_id) => named_app(shared, caller, app_id)?,
+        Some(app_id) => named_app(shared, caller, app_id, program)?,
     };
     let same = app_id == from.app_id;
     let new = NewProcess {
@@ -172,25 +172,46 @@ async fn exec(
     Ok(LauncherExecResponse {})
 }
 
-/// Checks that process `caller` may give a new process `app_id`, and
-/// returns it.
-fn named_app(shared: &Shared, caller: u32, app_id: &str) -> Result<String, Status> {
+/// Checks that process `caller` may give the new process of `program`, a
+/// path relative to the boot file system's root, `app_id`, and returns
+/// it. An app ID outside `system.` needs the program to lie in the app's
+/// bundle under `/Apps`. A `system.` app ID with a program manifest needs
+/// a manifest that is valid, the program to be its `binary`, and the
+/// caller's app ID in its `spawned_by`; one whose manifest cannot be used
+/// is refused.
+fn named_app(shared: &Shared, caller: u32, app_id: &str, program: &str) -> Result<String, Status> {
     // Until the permission broker serves requests, only the service
-    // manager that init asked for holds `process.set_identity`.
+    // manager that init asked for holds `process.set_identity`, and no
+    // process holds `files.full_disk`, which `system.cli` needs.
     if shared.identity_setter.get() != Some(caller) {
         return Err(Status::AccessDenied);
     }
-    // TODO: check bundle locations for other app IDs.
-    if !app_id.starts_with(SYSTEM_PREFIX) {
-        return Err(Status::AccessDenied);
+    let Some(name) = app_id.strip_prefix(SYSTEM_PREFIX) else {
+        // User bundles are not in the boot file system.
+        let bundle = format!("Apps/{app_id}");
+        return match !app_id.contains('/') && shared.fs.lies_in(program, &bundle) {
+            true => Ok(app_id.into()),
+            false => Err(Status::AccessDenied),
+        };
+    };
+    let file_name = format!("{app_id}.yaml");
+    let Some(bytes) = shared.fs.file(&format!("usr/lib/programs/{file_name}")) else {
+        return Ok(app_id.into());
+    };
+    let manifest =
+        mikros_manifest::parse_program(&file_name, bytes).map_err(|_| Status::AccessDenied)?;
+    let program_manifest = manifest.program;
+    let service = shared.fs.exists(&format!("usr/lib/services/{name}.yaml"));
+    let binary = program_manifest.binary.trim_start_matches('/');
+    let records = shared.records.borrow();
+    let from = records.get(caller).ok_or(Status::BadState)?;
+    let allowed = !service
+        && shared.fs.same_file(program, binary)
+        && program_manifest.spawned_by.contains(&from.app_id);
+    match allowed {
+        true => Ok(app_id.into()),
+        false => Err(Status::AccessDenied),
     }
-    // TODO: check the program manifest once it can be parsed; until
-    // then an app ID that has one is refused.
-    let manifest = format!("usr/lib/programs/{app_id}.yaml");
-    if shared.fs.exists(&manifest) {
-        return Err(Status::AccessDenied);
-    }
-    Ok(app_id.into())
 }
 
 /// Waits until a child of `caller` that `selector` chooses terminated,

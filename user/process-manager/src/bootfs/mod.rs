@@ -99,6 +99,40 @@ impl Fs {
         self.tree.resolve(0, path.as_bytes(), false).is_ok()
     }
 
+    /// The node that `path`, relative to the root, names, following
+    /// links that stay within the file system.
+    fn node(&self, path: &str) -> Option<usize> {
+        match self.tree.resolve(0, path.as_bytes(), false) {
+            Ok(mikros_bootfs::Resolved::Node(node)) => Some(node),
+            _ => None,
+        }
+    }
+
+    /// The bytes of the regular file at `path`, relative to the root.
+    pub fn file(&self, path: &str) -> Option<&'static [u8]> {
+        match self.tree.nodes[self.node(path)?].kind {
+            mikros_bootfs::NodeKind::File { offset, size } => {
+                Some(&self.image[offset..offset + size])
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the file `path` names lies in the directory `dir`, both
+    /// relative to the root, reached through directories only.
+    pub fn lies_in(&self, path: &str, dir: &str) -> bool {
+        let dir = self.tree.resolve(0, dir.as_bytes(), true);
+        match (self.node(path), dir) {
+            (Some(node), Ok(mikros_bootfs::Resolved::Node(dir))) => self.tree.contains(dir, node),
+            _ => false,
+        }
+    }
+
+    /// Whether `a` and `b`, relative to the root, name the same file.
+    pub fn same_file(&self, a: &str, b: &str) -> bool {
+        self.node(a).is_some_and(|node| self.node(b) == Some(node))
+    }
+
     /// The regular file at `path`, relative to the root and resolved
     /// without leaving the file system. Fails with `NOT_FOUND` when
     /// there is no node, and `ACCESS_DENIED` when it is not a regular

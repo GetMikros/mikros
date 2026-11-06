@@ -1,0 +1,4 @@
+app_id: system.closed
+binary: /usr/bin/probe
+spawned_by:
+  - system.other

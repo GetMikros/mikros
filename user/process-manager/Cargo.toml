@@ -8,4 +8,5 @@ publish = false
 [dependencies]
 mikros-bootfs = { path = "../bootfs" }
 mikros-loader = { path = "../loader" }
+mikros-manifest = { path = "../manifest" }
 mikros-rt = { path = "../mikros-rt" }

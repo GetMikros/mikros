@@ -211,6 +211,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", hello_std.display());
             let spawn_std = crate::rust_std::build("spawn-std", kind)?;
             println!("built    {}", spawn_std.display());
+            let programs = crate::workspace_root().join("user/tests/launcher-probe/programs");
+            let (prog, closed, bad) = (
+                programs.join("system.prog.yaml"),
+                programs.join("system.closed.yaml"),
+                programs.join("system.bad.yaml"),
+            );
             let dynamic_linker = crate::sysroot::dir().join("lib/ld-mikros.dlib");
             let greeting = crate::workspace_root().join("user/tests/hello-c/greeting.txt");
             // The process manager tests serve this image, in which the
@@ -228,6 +234,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("Apps/test/bin/hello", hello.as_path()),
                     ("Apps/test/bin/hello-dynamic", hello_dynamic.as_path()),
                     ("Apps/test/bin/raw-syscall", raw_syscall.as_path()),
+                    // An app's bundle, and program manifests.
+                    ("Apps/test.app/bin/hello", hello_dynamic.as_path()),
+                    ("usr/lib/programs/system.prog.yaml", prog.as_path()),
+                    ("usr/lib/programs/system.closed.yaml", closed.as_path()),
+                    ("usr/lib/programs/system.bad.yaml", bad.as_path()),
                     ("usr/bin/hello-std", hello_std.as_path()),
                     ("usr/bin/spawn-std", spawn_std.as_path()),
                     ("usr/bin/spawn-child", spawn_child.as_path()),
