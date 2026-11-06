@@ -158,6 +158,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", hello_dynamic.display());
+            let raw_syscall = c_build(
+                "raw-syscall",
+                &["user/tests/gate-c/raw-syscall.c"],
+                Linking::Dynamic,
+                &[],
+            )?;
+            println!("built    {}", raw_syscall.display());
             let spawn_child = c_build(
                 "spawn-child",
                 &["user/tests/spawn-c/child.c"],
@@ -216,6 +223,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/probe", probe.as_path()),
                     ("usr/bin/hello", hello.as_path()),
                     ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
+                    ("usr/bin/raw-syscall", raw_syscall.as_path()),
+                    // Applications that the boot image provides.
+                    ("Apps/test/bin/hello", hello.as_path()),
+                    ("Apps/test/bin/hello-dynamic", hello_dynamic.as_path()),
+                    ("Apps/test/bin/raw-syscall", raw_syscall.as_path()),
                     ("usr/bin/hello-std", hello_std.as_path()),
                     ("usr/bin/spawn-std", spawn_std.as_path()),
                     ("usr/bin/spawn-child", spawn_child.as_path()),
@@ -230,6 +242,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[
                     ("usr/share/hello/near", "greeting.txt"),
                     ("usr/share/hello/far", "/usr/share/hello/greeting.txt"),
+                    ("usr/bin/app-hello", "../../Apps/test/bin/hello"),
                 ],
             )?;
             println!("built    {}", launcher.display());

@@ -86,6 +86,8 @@ struct Image {
     phdr: u64,
     phnum: u32,
     dynamic: bool,
+    /// The start and length of the executable segment.
+    code: Option<(u64, u64)>,
 }
 
 /// Maps `executable` of `fs` into `process`.
@@ -107,6 +109,7 @@ fn load_image(fs: &Rc<Fs>, process: Handle, executable: &Executable) -> Result<I
         phdr: loaded.phdr,
         phnum: loaded.phnum,
         dynamic: loaded.interpreter.is_some(),
+        code: loaded.code,
     })
 }
 
@@ -116,6 +119,12 @@ fn load_image(fs: &Rc<Fs>, process: Handle, executable: &Executable) -> Result<I
 /// and at its own entry otherwise.
 pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Started, Status> {
     let executable = fs.executable(path).map_err(status)?;
+    // An application makes system calls only through the dynamic linker,
+    // which is also the C library, so one that has none is refused.
+    let application = !executable.system;
+    if application && !mikros_loader::is_dynamic(executable.file).map_err(loading)? {
+        return Err(Status::NotSupported);
+    }
     let mut process = 0;
     // SAFETY: the pointers describe `name` and `process`.
     check(unsafe { sys::process_create(budget, name.as_ptr(), name.len() as u64, &mut process) })?;
@@ -132,6 +141,11 @@ pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Start
         // The dynamic linker is not itself linked dynamically.
         if linked.dynamic {
             return Err(Status::InvalidArgs);
+        }
+        if application {
+            let (start, len) = linked.code.ok_or(Status::InvalidArgs)?;
+            // SAFETY: the call takes no pointers.
+            check(unsafe { sys::process_set_syscall_gate(process.raw(), start, len) })?;
         }
         (linked.entry, linked.base)
     } else {

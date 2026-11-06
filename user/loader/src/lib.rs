@@ -89,6 +89,9 @@ pub struct Loaded<'a> {
     pub phnum: u32,
     /// The dynamic linker the image names, if any.
     pub interpreter: Option<&'a [u8]>,
+    /// The start and length of the pages of the image's executable
+    /// segment, or of its first one, as loaded.
+    pub code: Option<(u64, u64)>,
 }
 
 fn u16_at(d: &[u8], at: usize) -> u16 {
@@ -357,13 +360,27 @@ pub fn load<'a>(process: Handle, image: &Image<'a>) -> Result<Loaded<'a>, Error>
             .find(|s| (s.offset..s.offset + s.filesz).contains(&phoff))
             .map(|s| s.vaddr + (phoff - s.offset))
     });
+    let code = match segments().find(|s| s.flags & PF_X != 0) {
+        Some(s) => {
+            let start = page_down(s.vaddr);
+            Some((base + start, page_up(s.vaddr + s.memsz)? - start))
+        }
+        None => None,
+    };
     Ok(Loaded {
         base,
         entry: base + u64_at(file, 24),
         phdr: base + phdr.ok_or(Error::Unmappable)?,
         phnum: u32::from(u16_at(file, 56)),
         interpreter,
+        code,
     })
+}
+
+/// Whether `file`, checked as `load` checks it, names the dynamic
+/// linker.
+pub fn is_dynamic(file: &[u8]) -> Result<bool, Error> {
+    Ok(segments(file)?.1.is_some())
 }
 
 /// Maps the main thread's stack of `STACK_SIZE` bytes into `process` at

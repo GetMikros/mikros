@@ -223,6 +223,25 @@ impl Tree {
     /// is followed when its target is relative and stays within `dir`;
     /// any other link ends resolution with a redirect. With `no_follow`,
     /// a link as the last component is the result itself.
+    /// Whether `node` is `dir` or lies below it, reached through
+    /// directory entries only, without following links.
+    pub fn contains(&self, dir: usize, node: usize) -> bool {
+        let mut pending = alloc::vec![dir];
+        let mut seen = alloc::collections::BTreeSet::new();
+        while let Some(at) = pending.pop() {
+            if at == node {
+                return true;
+            }
+            if !seen.insert(at) {
+                continue;
+            }
+            if let NodeKind::Directory(entries) = &self.nodes[at].kind {
+                pending.extend(entries.values().copied());
+            }
+        }
+        false
+    }
+
     pub fn resolve(&self, dir: usize, path: &[u8], no_follow: bool) -> Result<Resolved, Error> {
         if path.is_empty() || path[0] == b'/' {
             return Err(Error::Invalid);

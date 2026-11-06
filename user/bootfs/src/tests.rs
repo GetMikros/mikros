@@ -154,3 +154,16 @@ fn lists_directories_in_name_order() {
     assert_eq!(rest.len(), 1);
     assert_eq!(t.read_directory(lib, end, 3).0, vec![]);
 }
+
+#[test]
+fn finds_what_a_directory_contains() {
+    let t = sample();
+    let usr = node(&t, 0, "usr");
+    assert!(t.contains(usr, node(&t, 0, "usr/bin/sh")));
+    assert!(t.contains(usr, usr));
+    assert!(!t.contains(usr, 0));
+    // A link is followed by resolve, not by contains: the link up resolves
+    // to usr/bin, which usr contains, but usr/bin does not contain usr.
+    let bin = node(&t, 0, "usr/lib/up");
+    assert!(t.contains(usr, bin) && !t.contains(bin, usr));
+}

@@ -59,11 +59,21 @@ const LIBRARY_USER: &str = "/usr/bin/library-user";
 /// A Rust program that uses the standard library, which opens
 /// `/dev/null` for its closed standard input and error.
 const HELLO_STD: &str = "/usr/bin/hello-std";
+/// The same C programs as applications, which the boot image provides
+/// under /Apps, a link under /usr to the static one, and a dynamic C
+/// program that makes a system call with its own instruction, as a
+/// system component and as an application.
+const APP_HELLO: &str = "/Apps/test/bin/hello";
+const APP_HELLO_DYNAMIC: &str = "/Apps/test/bin/hello-dynamic";
+const APP_LINK: &str = "/usr/bin/app-hello";
+const RAW_SYSCALL: &str = "/usr/bin/raw-syscall";
+const APP_RAW_SYSCALL: &str = "/Apps/test/bin/raw-syscall";
 /// A Rust program that starts processes with `std::process::Command`.
 const SPAWN_STD: &str = "/usr/bin/spawn-std";
 /// The `id` of a stream as descriptor 1.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const KILL: u32 = 9;
+const SEGV: u32 = 11;
 const STOP: u32 = 19;
 const CONT: u32 = 18;
 /// The bit of `CHLD` in a signal mask.
@@ -614,6 +624,39 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
         check(
             "reading what the library wrote",
             output.as_slice() == b"hello from a library, call 1\n",
+        )?;
+        // Applications run with the system call gate; static ones are
+        // refused, whatever path names them.
+        let refused = async |path: &str| spawn(l, &[], |r| r.path = path.into()).await.err();
+        check(
+            "refusing a static application",
+            refused(APP_HELLO).await == Some(Status::NotSupported),
+        )?;
+        check(
+            "refusing it through a link under /usr",
+            refused(APP_LINK).await == Some(Status::NotSupported),
+        )?;
+        let (output, code) = run_c(l, APP_HELLO_DYNAMIC).await;
+        check("running a dynamic application", code == Some(0))?;
+        check(
+            "reading what it printed",
+            output.as_slice() == b"hello, world\n",
+        )?;
+        check(
+            "making a system call as a system component",
+            run_c(l, RAW_SYSCALL).await.1 == Some(0),
+        )?;
+        // The gate turns the instruction into a protection fault, which
+        // ends the program with SEGV.
+        let gated = spawn(l, &[], |r| {
+            r.path = APP_RAW_SYSCALL.into();
+            r.arguments = arguments_from(&[APP_RAW_SYSCALL]);
+        })
+        .await
+        .map_or(0, |(pid, _)| pid);
+        check(
+            "stopping it as an application",
+            wait(l, gated as i32).await == Some((gated, -3, SEGV)),
         )?;
         let (output, code) = run_c(l, HELLO_STD).await;
         check("running a Rust program that uses std", code == Some(0))?;
