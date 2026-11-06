@@ -9347,6 +9347,17 @@ fn scenario(s: &Startup) -> Option<i64> {
     })
 }
 
+/// The tests that the command line names with `skip=`, separated by
+/// commas, which are left out. Nothing is allocated, so that the first
+/// test finds no heap memory charged.
+fn skipped(s: &Startup) -> impl Iterator<Item = &'static str> {
+    let cmdline: &'static str = core::str::from_utf8(s.cmdline).unwrap_or("");
+    cmdline
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("skip="))
+        .flat_map(|list| list.split(','))
+}
+
 fn main(s: &Startup) -> i64 {
     if let Some(code) = scenario(s) {
         return code;
@@ -9355,9 +9366,19 @@ fn main(s: &Startup) -> i64 {
         log!(Error, "TEST setup FAILED: {} ({})", f.what, f.status);
         return 1;
     }
-    let mut failed = 0;
+    let known = |name: &&str| TESTS.iter().chain(HOOK_TESTS).any(|(n, _)| n == name);
+    if let Some(name) = skipped(s).find(|name| !known(name)) {
+        log!(Error, "TEST setup FAILED: there is no test {name} to skip");
+        return 1;
+    }
+    let (mut failed, mut left_out) = (0, 0);
     let (last, first) = TESTS.split_last().expect("there are tests");
     for (name, test) in first.iter().chain(HOOK_TESTS).chain([last]) {
+        if skipped(s).any(|n| n == *name) {
+            left_out += 1;
+            log!(Info, "TEST {name} SKIPPED");
+            continue;
+        }
         match test(s) {
             Ok(()) => log!(Info, "TEST {name} PASSED"),
             Err(f) => {
@@ -9366,10 +9387,14 @@ fn main(s: &Startup) -> i64 {
             }
         }
     }
-    log!(
-        Info,
-        "TESTS DONE: {} passed, {failed} failed",
-        TESTS.len() + HOOK_TESTS.len() - failed
-    );
+    let passed = TESTS.len() + HOOK_TESTS.len() - failed - left_out;
+    if left_out == 0 {
+        log!(Info, "TESTS DONE: {passed} passed, {failed} failed");
+    } else {
+        log!(
+            Info,
+            "TESTS DONE: {passed} passed, {failed} failed, {left_out} skipped"
+        );
+    }
     exit_qemu(if failed == 0 { PASSED } else { FAILED })
 }
