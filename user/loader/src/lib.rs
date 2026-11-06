@@ -1,6 +1,7 @@
 //! Loading native executables into new processes: checking the image,
-//! placing it at an address the kernel chooses, mapping its segments, and
-//! giving the main thread its stack.
+//! including the ABI levels its note records, placing it at an address
+//! the kernel chooses, mapping its segments, and giving the main thread
+//! its stack.
 
 #![no_std]
 
@@ -19,9 +20,17 @@ const EM_X86_64: u16 = 62;
 const PHDR_SIZE: usize = 56;
 const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
+const PT_NOTE: u32 = 4;
 const PT_PHDR: u32 = 6;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
+
+/// The ABI level of the running system, which the C library's
+/// `mikros_abi_level` also gives.
+pub const ABI_LEVEL: u32 = 0;
+/// The name and type of the note that holds an image's ABI levels.
+const ABI_NOTE_NAME: &[u8] = b"Mikros\0";
+const NT_MIKROS_ABI: u32 = 1;
 
 /// The only dynamic linker an image may name.
 pub const INTERPRETER: &[u8] = b"/usr/lib/ld-mikros.dlib";
@@ -43,6 +52,10 @@ pub enum Error {
     Overlap,
     /// A `PT_INTERP` other than `INTERPRETER`.
     Interpreter,
+    /// No note with the image's ABI levels.
+    NoAbiNote,
+    /// A minimum ABI level above `ABI_LEVEL`.
+    AbiLevel,
     /// A segment that cannot be mapped from the file as it is: one whose
     /// file offset and address differ within a page, that is larger in
     /// the file than in memory, or that has no `PF_W` but is larger in
@@ -149,10 +162,32 @@ fn headers(file: &[u8]) -> Result<impl Iterator<Item = &[u8; PHDR_SIZE]>, Error>
 /// Room for the loadable segments of an image.
 type Segments = [Option<Segment>; 16];
 
+/// The minimum and target ABI levels in the notes of `notes`, a
+/// `PT_NOTE` segment's bytes, if they hold them.
+fn abi_levels(notes: &[u8]) -> Option<(u32, u32)> {
+    let mut at = 0;
+    while at + 12 <= notes.len() {
+        let (namesz, descsz) = (u32_at(notes, at) as usize, u32_at(notes, at + 4) as usize);
+        let kind = u32_at(notes, at + 8);
+        let name = at + 12;
+        let desc = name.checked_add(namesz.next_multiple_of(4))?;
+        let next = desc.checked_add(descsz.next_multiple_of(4))?;
+        if next > notes.len() {
+            return None;
+        }
+        if kind == NT_MIKROS_ABI && &notes[name..name + namesz] == ABI_NOTE_NAME && descsz == 8 {
+            return Some((u32_at(notes, desc), u32_at(notes, desc + 4)));
+        }
+        at = next;
+    }
+    None
+}
+
 fn segments(file: &[u8]) -> Result<(Segments, Option<&[u8]>), Error> {
     let mut found: Segments = [None; 16];
     let mut count = 0;
     let mut interpreter = None;
+    let mut abi = None;
     for p in headers(file)? {
         let (kind, flags) = (u32_at(p, 0), u32_at(p, 4));
         let (offset, vaddr) = (u64_at(p, 8), u64_at(p, 16));
@@ -169,6 +204,9 @@ fn segments(file: &[u8]) -> Result<(Segments, Option<&[u8]>), Error> {
                 Some((0, name)) if name == INTERPRETER => interpreter = Some(name),
                 _ => return Err(Error::Interpreter),
             }
+        }
+        if kind == PT_NOTE && in_file && abi.is_none() {
+            abi = abi_levels(&file[offset as usize..(offset + filesz) as usize]);
         }
         if kind != PT_LOAD {
             continue;
@@ -203,7 +241,11 @@ fn segments(file: &[u8]) -> Result<(Segments, Option<&[u8]>), Error> {
     if count == 0 {
         return Err(Error::Unmappable);
     }
-    Ok((found, interpreter))
+    match abi {
+        None => Err(Error::NoAbiNote),
+        Some((minimum, _)) if minimum > ABI_LEVEL => Err(Error::AbiLevel),
+        Some(_) => Ok((found, interpreter)),
+    }
 }
 
 /// Maps `len` bytes of `mem` from `offset` into `process` at `addr`,

@@ -7528,8 +7528,9 @@ fn loader_runs_pie(s: &Startup) -> Result {
 }
 
 /// mikros-loader refuses images that are not ET_DYN, have a segment
-/// that is writable and executable, overlap, lie outside the file, or
-/// name another dynamic linker.
+/// that is writable and executable, overlap, lie outside the file, name
+/// another dynamic linker, have no ABI note, or need a higher ABI level
+/// than the system's.
 fn loader_refuses_bad_images(s: &Startup) -> Result {
     use mikros_loader::Error;
     let file = boot_file(s, b"tests/pie")?;
@@ -7588,6 +7589,26 @@ fn loader_refuses_bad_images(s: &Startup) -> Result {
     ensure(
         "refusing another interpreter",
         refused(&interp, Error::Interpreter),
+    )?;
+    let note = header(4);
+    ensure("finding the ABI note", note.is_some())?;
+    let note = note.unwrap_or_default();
+    ensure(
+        "refusing an image without the ABI note",
+        refused(
+            &|f| f[note..note + 4].copy_from_slice(&0u32.to_le_bytes()),
+            Error::NoAbiNote,
+        ),
+    )?;
+    // The minimum level is the first word of the note's descriptor, after
+    // its 12-byte header and the 8 bytes of "Mikros\0" padded.
+    let at = u64::from_le_bytes(file[note + 8..note + 16].try_into().unwrap_or_default()) as usize;
+    ensure(
+        "refusing an image for a newer system",
+        refused(
+            &|f| f[at + 20..at + 24].copy_from_slice(&1u32.to_le_bytes()),
+            Error::AbiLevel,
+        ),
     )
 }
 
