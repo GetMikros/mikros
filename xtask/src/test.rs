@@ -38,16 +38,16 @@ const PANIC_LINE: &str = "KERNEL PANIC:";
 const INTERRUPT_FUNCTIONS: [&str; 6] = [
     "kernel::idt::interrupt",
     "kernel::timer::interrupt",
-    "kernel::sched::timer_interrupt",
-    "kernel::sched::maintain",
+    "kernel_core::sched::timer_interrupt",
+    "kernel_core::sched::maintain",
     "kernel::time::maintain",
-    "<kernel::ktimer::Armed>::fire",
+    "<kernel_core::ktimer::Armed>::fire",
 ];
 
 /// The kernel function that only the idle loop runs. The fuzz build's
 /// coverage must record none of its code, as the idle loop runs on behalf
 /// of no thread.
-const IDLE_FUNCTIONS: [&str; 1] = ["kernel::sched::halt_until_interrupt"];
+const IDLE_FUNCTIONS: [&str; 1] = ["kernel_core::sched::halt_until_interrupt"];
 
 /// The address ranges, start and end, of the functions `names` and
 /// their closures in `symbols`, which `llvm-nm -S -C` printed, or the
@@ -310,12 +310,12 @@ mod tests {
 ffffffff8006b040 0000000000000219 t kernel::idt::interrupt
 ffffffff8006aa30 00000000000001c3 t kernel::idt::after_interrupt
 ffffffff800929f0 0000000000000015 t kernel::timer::interrupt
-ffffffff8006fc40 00000000000003fb t kernel::sched::timer_interrupt
-ffffffff80070a30 0000000000000140 t kernel::sched::maintain
-ffffffff800cc860 0000000000000054 t kernel::sched::maintain::{closure#0}
-ffffffff800f9690 000000000000007a t <core::option::Option<i64>>::map_or::<i64, kernel::sched::maintain::{closure#0}>
+ffffffff8006fc40 00000000000003fb t kernel_core::sched::timer_interrupt
+ffffffff80070a30 0000000000000140 t kernel_core::sched::maintain
+ffffffff800cc860 0000000000000054 t kernel_core::sched::maintain::{closure#0}
+ffffffff800f9690 000000000000007a t <core::option::Option<i64>>::map_or::<i64, kernel_core::sched::maintain::{closure#0}>
 ffffffff8005be30 0000000000000010 t kernel::time::maintain
-ffffffff800ccff0 000000000000008b t <kernel::ktimer::Armed>::fire
+ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
 ";
         let ranges = code_ranges(symbols, &INTERRUPT_FUNCTIONS).unwrap();
         assert_eq!(ranges.len(), 7);
@@ -332,7 +332,7 @@ ffffffff800ccff0 000000000000008b t <kernel::ktimer::Armed>::fire
         );
         assert_eq!(
             code_ranges(symbols, &IDLE_FUNCTIONS),
-            Err("kernel::sched::halt_until_interrupt")
+            Err("kernel_core::sched::halt_until_interrupt")
         );
     }
 
