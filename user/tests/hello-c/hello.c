@@ -716,7 +716,8 @@ static int sleeps_end_in_time(void)
 /* The process manager keeps each process's group and session: setsid
    makes the caller lead a new session and group, a group leader cannot
    start another, setpgid moves the caller only to a group of its
-   session, and kill(0) signals the caller's group. */
+   session, kill(0) signals the caller's group, and kill(-1) the
+   processes it may signal. */
 static int groups_and_sessions(void)
 {
 	pid_t me = getpid();
@@ -726,7 +727,9 @@ static int groups_and_sessions(void)
 	ok = ok && setsid() == -1 && errno == EPERM;
 	ok = ok && setpgid(0, 0) == 0 && getpgrp() == me;
 	ok = ok && setpgid(0, 99999) == -1 && errno == EPERM;
-	return ok && kill(0, 0) == 0;
+	/* Other processes run, so kill(-1) finds some; run as an app, it may
+	   signal none of them. */
+	return ok && kill(0, 0) == 0 && (kill(-1, 0) == 0 || errno == EPERM);
 }
 
 /* waitpid reports a child's stop with WUNTRACED and its continuation

@@ -1,7 +1,7 @@
 //! The process's IDs, its process group and session, and `kill`, which
 //! go through the process manager's `Launcher`.
 
-use crate::errno::{self, EINVAL, EIO, ENOSYS, EPERM, ESRCH};
+use crate::errno::{self, EINVAL, EIO, EPERM, ESRCH};
 use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
@@ -149,9 +149,37 @@ pub fn setpgid(pid: i64, pgid: i64) -> i64 {
     }
 }
 
+/// `kill(-1, signo)`: sends `signo` through the process manager to every
+/// process that its `List` gives the caller, but init and the caller,
+/// leaving out those it may not signal and those that ended meanwhile.
+/// Fails with `EPERM` when it may signal none of them, and with `ESRCH`
+/// when there is none.
+fn kill_all(signo: i64) -> i64 {
+    let me = PID.load(Ordering::Relaxed);
+    let client = launcher();
+    let Ok(listed) = unsignalled(|| client.list(FOREVER)) else {
+        return -EIO;
+    };
+    let (mut signalled, mut refused) = (false, false);
+    for pid in listed.pids.into_iter().filter(|&p| p != 1 && p != me) {
+        match unsignalled(|| client.kill(pid, signo as u32, FOREVER)) {
+            Ok(Ok(_)) => signalled = true,
+            Ok(Err(Status::AccessDenied)) => refused = true,
+            Ok(Err(Status::NotFound)) => {}
+            Ok(Err(status)) => return -kill_error(status),
+            Err(_) => return -EIO,
+        }
+    }
+    match (signalled, refused) {
+        (true, _) => 0,
+        (false, true) => -EPERM,
+        (false, false) => -ESRCH,
+    }
+}
+
 /// `kill`: sends `signo` to process `pid`, to the caller's process group
-/// for 0, or to process group `-pid` below -1. Signalling every process
-/// is not supported yet.
+/// for 0, to every process it may signal for -1, or to process group
+/// `-pid` below -1.
 pub fn kill(pid: i64, signo: i64) -> i64 {
     if !(0..=64).contains(&signo) {
         return -EINVAL;
@@ -166,7 +194,7 @@ pub fn kill(pid: i64, signo: i64) -> i64 {
             Ok(group) => Some(group),
             Err(_) => return -ESRCH,
         },
-        -1 => return -ENOSYS,
+        -1 => return kill_all(signo),
     };
     let client = launcher();
     let signo = signo as u32;

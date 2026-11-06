@@ -2,10 +2,9 @@
 //!
 //! Each process has its own channel, so the record it is bound to is
 //! the one it was created for, and requests act for that record only.
-//! `Spawn`, `Exec`, `Wait`, `Kill`, `GetInfo`, `CreateSession`,
+//! `Spawn`, `Exec`, `Wait`, `Kill`, `GetInfo`, `List`, `CreateSession`,
 //! `SetProcessGroup` and `KillGroup` are served; every other method fails
-//! with `NOT_SUPPORTED`, and `List`, which cannot fail, closes the
-//! channel.
+//! with `NOT_SUPPORTED`.
 
 use crate::processes::{NewProcess, Shared};
 use crate::records::{Exit, Record, Records};
@@ -17,9 +16,9 @@ use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
     ExitStatus, Launcher, LauncherAsyncServer, LauncherCreateSessionResponse, LauncherExecResponse,
-    LauncherGetInfoResponse, LauncherKillGroupResponse, LauncherKillResponse, LauncherRequest,
-    LauncherSetProcessGroupResponse, LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo,
-    SpawnRequest, StatusKind, WaitOptions,
+    LauncherGetInfoResponse, LauncherKillGroupResponse, LauncherKillResponse, LauncherListResponse,
+    LauncherRequest, LauncherSetProcessGroupResponse, LauncherSpawnResponse, LauncherWaitResponse,
+    ProcessInfo, SpawnRequest, StatusKind, WaitOptions,
 };
 use mikros_rt::sys;
 
@@ -91,8 +90,7 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
             ),
             R::Fork(_, r) => r.reply(s, Err(no)),
             R::KillLoginSession(_, r) => r.reply(s, Err(no)),
-            // TODO: list the processes the caller may see.
-            R::List(..) => return,
+            R::List(_, r) => r.reply(s, list(&shared, pid)),
         };
     }
 }
@@ -298,6 +296,25 @@ fn get_info(shared: &Shared, caller: u32, target: u32) -> Result<LauncherGetInfo
             path: record.path.clone(),
         },
     })
+}
+
+/// The most process IDs one `List` reply carries.
+const LIST_MAX: usize = 4096;
+
+/// The process IDs, in order, that process `caller` may see: those of
+/// its user ID, ended ones that their parent has not collected included,
+/// as `process.list_all` cannot be held before the permission broker
+/// serves requests. At most `LIST_MAX` are given.
+fn list(shared: &Shared, caller: u32) -> LauncherListResponse {
+    let records = shared.records.borrow();
+    let user = records.get(caller).map(|r| r.user);
+    let pids = records
+        .iter()
+        .filter(|(_, r)| Some(r.user) == user)
+        .map(|(pid, _)| pid)
+        .take(LIST_MAX)
+        .collect();
+    LauncherListResponse { pids }
 }
 
 /// Whether process `caller` may signal process `target`: a descendant,

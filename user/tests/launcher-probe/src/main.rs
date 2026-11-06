@@ -546,6 +546,22 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, me: u32) -> i64 {
             "finding no process 999",
             get_info(l, 999).await.err() == Some(Status::NotFound),
         )?;
+        let listed_child = spawn(l, &["sleep"], |_| {}).await.map_or(0, |(pid, _)| pid);
+        let listed = l.list().await.map(|r| r.pids);
+        check(
+            "listing itself and its child in order",
+            listed.is_ok_and(|pids| {
+                pids.contains(&me) && pids.contains(&listed_child) && pids.is_sorted()
+            }),
+        )?;
+        check(
+            "ending the child",
+            kill(l, listed_child, KILL).await.is_ok(),
+        )?;
+        check(
+            "waiting for it",
+            wait(l, listed_child as i32).await.is_some(),
+        )?;
         // A process that replaced itself reports its new program.
         let replaced = spawn(l, &["exec"], |_| {}).await.map_or(0, |(pid, _)| pid);
         let mut path = String::new();
