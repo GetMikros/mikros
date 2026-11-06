@@ -6102,11 +6102,16 @@ extern "sysv64" fn spin_until_handled(rounds: u64, _: u64) -> ! {
 
 /// A signal sent to a thread that spins in user mode on another processor
 /// runs its handler at once, not only when the thread's time slice ends.
-/// A slice of a thread alone lasts 4 ms, so each of five rounds must take
-/// less than 1 ms.
+/// A slice of a thread alone lasts 4 ms. A first round is not timed: it
+/// also runs the handler's code and its return for the first time, which
+/// an emulator such as QEMU without KVM takes milliseconds to translate.
+/// Each round starts once the spinner spins again, and each of the ten
+/// rounds after the first must take less than 2 ms, half a slice. The
+/// spinner ends and the action is restored whether the rounds passed or
+/// not, so that a failure leaves nothing behind for later tests.
 fn signal_reaches_other_processor(s: &Startup) -> Result {
-    const ROUNDS: u64 = 5;
-    const LIMIT: i64 = 1_000_000;
+    const ROUNDS: u64 = 10;
+    const LIMIT: i64 = 2_000_000;
     let mut count = 0u32;
     // SAFETY: the pointer describes `count`.
     check("reading the processor count", unsafe {
@@ -6122,31 +6127,46 @@ fn signal_reaches_other_processor(s: &Startup) -> Result {
     check("keeping this thread on processor 0", set(s.thread, &[1]))?;
     let old = catch_usr1(0)?;
     SPINNER_LOOPS.store(0, Ordering::Release);
-    let thread = spawn2(s, spin_until_handled, ROUNDS, 0)?;
-    check("moving the spinner to processor 1", set(thread, &[2]))?;
-    let deadline = in_time();
-    while SPINNER_LOOPS.load(Ordering::Acquire) == 0 {
-        ensure("starting the spinner", now() < deadline)?;
-        sleep_ms(1);
-    }
-    sleep_ms(20);
-    for round in 1..=ROUNDS {
-        let sent = now();
-        // SAFETY: the call takes no pointers.
-        check("signalling the spinner", unsafe {
-            sys::thread_signal(thread, USR1, round)
-        })?;
-        while HANDLED.load(Ordering::Acquire) < round {
-            ensure("running the handler", now() < sent + LIMIT)?;
-            core::hint::spin_loop();
+    let thread = spawn2(s, spin_until_handled, ROUNDS + 1, 0)?;
+    let rounds = (|| -> Result {
+        check("moving the spinner to processor 1", set(thread, &[2]))?;
+        let deadline = in_time();
+        while SPINNER_LOOPS.load(Ordering::Acquire) == 0 {
+            ensure("starting the spinner", now() < deadline)?;
+            sleep_ms(1);
         }
-    }
-    ensure(
-        "ending the spinner",
-        wait(thread, TERMINATED, in_time()).0 == 0,
-    )?;
+        sleep_ms(20);
+        for round in 1..=ROUNDS + 1 {
+            let sent = now();
+            // SAFETY: the call takes no pointers.
+            check("signalling the spinner", unsafe {
+                sys::thread_signal(thread, USR1, round)
+            })?;
+            let limit = if round == 1 { in_time() } else { sent + LIMIT };
+            while HANDLED.load(Ordering::Acquire) < round {
+                ensure("running the handler", now() < limit)?;
+                core::hint::spin_loop();
+            }
+            // The next round starts once the spinner has returned from
+            // the handler and spins again; after the last it ends.
+            let loops = SPINNER_LOOPS.load(Ordering::Acquire);
+            let deadline = in_time();
+            while round <= ROUNDS && SPINNER_LOOPS.load(Ordering::Acquire) == loops {
+                ensure("spinning again", now() < deadline)?;
+                core::hint::spin_loop();
+            }
+        }
+        Ok(())
+    })();
+    // The spinner ends once the count reaches its rounds, and the action
+    // is restored only then, so that no signal pending for it meets the
+    // default action.
+    HANDLED.fetch_max(ROUNDS + 1, Ordering::AcqRel);
+    let ended = wait(thread, TERMINATED, in_time()).0 == 0;
     restore_usr1(&old)?;
-    check("allowing every processor", set(s.thread, &[0xFF; 32]))
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))?;
+    rounds?;
+    ensure("ending the spinner", ended)
 }
 
 /// Sleeps for a few microseconds again and again.
