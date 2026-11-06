@@ -18,6 +18,12 @@ outputs:
   cargo-home-hit:
     description: Whether the cargo-fuzz and crate registry cache had that exact key.
     value: ${{ steps.cargo-home.outputs.cache-hit }}
+  tools-key:
+    description: The key of the downloads and tool builds cache.
+    value: ${{ steps.tools.outputs.cache-primary-key }}
+  tools-hit:
+    description: Whether the downloads and tool builds cache had that exact key.
+    value: ${{ steps.tools.outputs.cache-hit }}
   llvm-key:
     description: The key of the LLVM build cache.
     value: ${{ steps.llvm.outputs.cache-primary-key }}
@@ -62,6 +68,22 @@ runs:
         path: target/llvm
         key: llvm-${{ hashFiles('xtask/src/llvm.rs', 'tools/llvm/patches/**') }}
         restore-keys: llvm-
+    # The firmware, the Meson, CMake, musl and port downloads with their
+    # patched sources, and the builds of CMake and musl. xtask extracts a
+    # source again when its patches change, and Ninja and make rebuild
+    # what changed in it.
+    - name: Restore the downloads and tool builds
+      id: tools
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          target/firmware
+          target/meson
+          target/cmake
+          target/musl
+          target/sources
+        key: tools-${{ hashFiles('xtask/src/firmware.rs', 'xtask/src/meson.rs', 'xtask/src/cmake.rs', 'xtask/src/musl.rs', 'xtask/src/ports.rs', 'tools/meson/patches/**', 'tools/cmake/patches/**', 'user/libc/patches/**', 'ports/*/patches/**') }}
+        restore-keys: tools-
     - name: Install Rust
       shell: sh
       run: |

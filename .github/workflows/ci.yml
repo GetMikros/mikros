@@ -74,6 +74,19 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
           key: ${{ steps.setup.outputs.cargo-home-key }}
+      - name: Save the downloads and tool builds
+        if: >-
+          always() && steps.build.outcome == 'success' &&
+          steps.setup.outputs.tools-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/firmware
+            target/meson
+            target/cmake
+            target/musl
+            target/sources
+          key: ${{ steps.setup.outputs.tools-key }}
       # The LLVM build is saved only once it is whole: the compiler-rt
       # builtins are the last thing it installs.
       - name: Save the LLVM build
