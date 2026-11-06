@@ -24,6 +24,12 @@ outputs:
   tools-hit:
     description: Whether the downloads and tool builds cache had that exact key.
     value: ${{ steps.tools.outputs.cache-hit }}
+  rust-build-key:
+    description: The key of the Rust build cache.
+    value: ${{ steps.rust-build.outputs.cache-primary-key }}
+  rust-build-hit:
+    description: Whether the Rust build cache had that exact key.
+    value: ${{ steps.rust-build.outputs.cache-hit }}
   llvm-key:
     description: The key of the LLVM build cache.
     value: ${{ steps.llvm.outputs.cache-primary-key }}
@@ -84,6 +90,29 @@ runs:
           target/sources
         key: tools-${{ hashFiles('xtask/src/firmware.rs', 'xtask/src/meson.rs', 'xtask/src/cmake.rs', 'xtask/src/musl.rs', 'xtask/src/ports.rs', 'tools/meson/patches/**', 'tools/cmake/patches/**', 'user/libc/patches/**', 'ports/*/patches/**') }}
         restore-keys: tools-
+    # The target directories of every Rust build, and the standard library
+    # that user/std builds from the patched copy in target/rust-std. Cargo
+    # reuses the builds of the crates from the registry and of the
+    # standard library; the repository's own crates are built again,
+    # since the checkout gives their sources new times. An older entry is
+    # restored only for the same toolchain, whose change rebuilds all.
+    - name: Restore the Rust builds
+      id: rust-build
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          target/debug
+          target/release
+          target/fuzz
+          target/x86_64-unknown-none
+          target/x86_64-unknown-uefi
+          target/rust-std
+          user/target
+          user/std/target
+          kernel/fuzz/target
+          boot/mikrosboot/fuzz/target
+        key: rust-build-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'user/Cargo.lock', 'user/std/Cargo.lock', 'kernel/fuzz/Cargo.lock', 'boot/mikrosboot/fuzz/Cargo.lock', 'user/std/patches/**', 'xtask/src/rust_std.rs') }}
+        restore-keys: rust-build-${{ hashFiles('rust-toolchain.toml') }}-
     - name: Install Rust
       shell: sh
       run: |
