@@ -8293,7 +8293,13 @@ mod manager {
             "registering init",
             matches!(init.register(deadline), Ok(Ok(_))),
         )?;
-        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![], deadline) else {
+        // The probe logs the checks that fail.
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![log], deadline) else {
             return Err(Failure {
                 what: "starting the probe",
                 status: 0,

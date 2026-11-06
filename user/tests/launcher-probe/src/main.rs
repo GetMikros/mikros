@@ -16,6 +16,9 @@
 //! and reads more than the process manager's small heap blocks hold of
 //! `/usr/bin/hello` with one `Read`.
 //!
+//! It logs each check that failed to the `USER` startup handle with ID 2,
+//! when it has one.
+//!
 //! It accepts the `Bind` requests on the control endpoint that arrives
 //! as the `USER` startup handle with ID 0, for itself and its children,
 //! and serves their directories, which provide only a clock with a time
@@ -49,6 +52,7 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 mikros_rt::raw_main!(main);
 
 const CONTROL_ID: u32 = 0;
+const LOG_ID: u32 = 2;
 /// How long the probe waits for a process to be replaced, which takes
 /// seconds when emulated.
 const EXEC_WAIT_NS: i64 = 60_000_000_000;
@@ -125,6 +129,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    let log = managed
+        .handles
+        .iter()
+        .position(|h| h.role == HandleRole::User && h.id == LOG_ID)
+        .map(|at| managed.handles.swap_remove(at).handle);
+    if let Some(log) = &log {
+        mikros_rt::log::set_handle(log.raw());
+    }
     let root = managed
         .namespace
         .iter()

@@ -246,6 +246,14 @@ fn integration(
         println!("{line}");
     }
     if let Err(why) = verdict(code, &serial) {
+        // What the tests logged as errors besides their results tells why
+        // one failed.
+        for line in serial
+            .lines()
+            .filter(|l| l.contains("] E ") && !l.contains("TEST"))
+        {
+            println!("{line}");
+        }
         bail!(
             "integration tests{what} failed: {why}; serial output in {}",
             log.display()
