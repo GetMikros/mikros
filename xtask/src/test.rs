@@ -177,9 +177,15 @@ fn timeout_report(serial: &str) -> String {
     report
 }
 
-/// Boots the test image and returns QEMU's exit code, or fails when the
-/// run takes longer than `timeout`.
-fn boot(args: &Args, disk: &Path, log: &Path) -> Result<Option<i32>> {
+/// Boots the test image `disk` on `processor` and returns QEMU's exit
+/// code, or fails when the run takes longer than `timeout` seconds.
+fn boot(
+    args: &Args,
+    processor: qemu::Processor,
+    timeout: u64,
+    disk: &Path,
+    log: &Path,
+) -> Result<Option<i32>> {
     let firmware = firmware::paths();
     if !firmware.code.exists() {
         bail!("the firmware is missing; fetch it with `cargo xtask setup`");
@@ -187,13 +193,15 @@ fn boot(args: &Args, disk: &Path, log: &Path) -> Result<Option<i32>> {
     let vars = disk.with_extension("vars.fd");
     fs::copy(&firmware.vars, &vars)
         .with_context(|| format!("copying the firmware variables to {}", vars.display()))?;
-    let kvm = qemu::kvm_available();
-    let qemu_args = test_args(qemu::args(&args.machine, kvm, &firmware, &vars, disk), log);
+    let qemu_args = test_args(
+        qemu::args(&args.machine, processor, &firmware, &vars, disk),
+        log,
+    );
     let mut child = Command::new(qemu::QEMU)
         .args(qemu_args)
         .spawn()
         .with_context(|| format!("failed to start {}", qemu::QEMU))?;
-    let deadline = Instant::now() + Duration::from_secs(args.timeout);
+    let deadline = Instant::now() + Duration::from_secs(timeout);
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status.code());
@@ -204,13 +212,49 @@ fn boot(args: &Args, disk: &Path, log: &Path) -> Result<Option<i32>> {
             let serial = fs::read(log).unwrap_or_default();
             print!("{}", timeout_report(&String::from_utf8_lossy(&serial)));
             bail!(
-                "the integration tests timed out after {} s; serial output in {}",
-                args.timeout,
+                "the integration tests timed out after {timeout} s; serial output in {}",
                 log.display()
             );
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Runs the integration tests of `disk` on `processor`, prints their
+/// results and fails unless they passed and the kernel logged `expected`.
+/// `what` tells the run apart in the messages.
+fn integration(
+    args: &Args,
+    processor: qemu::Processor,
+    timeout: u64,
+    disk: &Path,
+    log: &Path,
+    what: &str,
+    expected: &str,
+) -> Result<()> {
+    let code = boot(args, processor, timeout, disk, log)?;
+    let serial = fs::read(log).with_context(|| format!("reading {}", log.display()))?;
+    let serial = String::from_utf8_lossy(&serial);
+    for line in serial.lines().filter(|l| l.contains("TEST")) {
+        println!("{line}");
+    }
+    if let Err(why) = verdict(code, &serial) {
+        bail!(
+            "integration tests{what} failed: {why}; serial output in {}",
+            log.display()
+        );
+    }
+    if !serial.contains(expected) {
+        bail!(
+            "integration tests{what} ran without the kernel logging \"{expected}\"; serial output in {}",
+            log.display()
+        );
+    }
+    println!(
+        "integration tests{what} passed; serial output in {}",
+        log.display()
+    );
+    Ok(())
 }
 
 pub fn run(args: &Args) -> Result<()> {
@@ -234,22 +278,29 @@ pub fn run(args: &Args) -> Result<()> {
     let cmdline = test_cmdline(args.kind, &built.kernel)?;
     image::create_with(args.kind, &built, &disk, &cmdline, &[])?;
     let log = dir.join("serial.log");
-    let code = boot(args, &disk, &log)?;
-    let serial = fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
-    let serial = String::from_utf8_lossy(&serial);
-    for line in serial.lines().filter(|l| l.contains("TEST")) {
-        println!("{line}");
+    let processor = qemu::Processor::available();
+    integration(args, processor, args.timeout, &disk, &log, "", "")?;
+    // Kernel page-table isolation applies only to Intel processors that do
+    // not report RDCL_NO, as QEMU's emulated processor does not when it
+    // names that vendor. Emulation takes about five times as long as KVM.
+    if args.kind != Kind::Fuzz {
+        let isolation_disk = dir.join("isolation-disk.img");
+        image::create_with(args.kind, &built, &isolation_disk, &cmdline, &[])?;
+        let timeout = match processor {
+            qemu::Processor::Host => args.timeout * 5,
+            _ => args.timeout,
+        };
+        let isolation_log = dir.join("isolation-serial.log");
+        integration(
+            args,
+            qemu::Processor::EmulatedIntel,
+            timeout,
+            &isolation_disk,
+            &isolation_log,
+            " with kernel page-table isolation",
+            "page-table isolation on",
+        )?;
     }
-    if let Err(why) = verdict(code, &serial) {
-        bail!(
-            "integration tests failed: {why}; serial output in {}",
-            log.display()
-        );
-    }
-    println!(
-        "integration tests passed; serial output in {}",
-        log.display()
-    );
     // The debugger checks boot as cargo xtask debug does, at the kernel's
     // linked addresses.
     let gdb_disk = dir.join("gdb-disk.img");

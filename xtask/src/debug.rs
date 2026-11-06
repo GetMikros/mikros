@@ -92,8 +92,12 @@ pub fn start_halted(
     let vars = disk.with_extension("vars.fd");
     fs::copy(&firmware.vars, &vars)
         .with_context(|| format!("copying the firmware variables to {}", vars.display()))?;
-    let kvm = qemu::kvm_available();
-    let mut args = halted_args(qemu::args(machine, kvm, &firmware, &vars, disk), log, port);
+    let processor = qemu::Processor::available();
+    let mut args = halted_args(
+        qemu::args(machine, processor, &firmware, &vars, disk),
+        log,
+        port,
+    );
     args.extend(extra.iter().map(|a| a.to_string()));
     // In a process group of its own, QEMU does not get the SIGINT that
     // Ctrl-C sends to the terminal's foreground group, which GDB uses to

@@ -45,12 +45,18 @@ pub fn run(args: &Args) -> Result<()> {
             .with_context(|| format!("copying the firmware variables to {}", vars.display()))?;
     }
 
-    let kvm = qemu::kvm_available();
-    if !kvm {
+    let processor = qemu::Processor::available();
+    if processor != qemu::Processor::Host {
         println!("KVM is not available; using QEMU's emulation");
     }
     let mut command = Command::new(qemu::QEMU);
-    command.args(qemu::args(&args.machine, kvm, &firmware, &vars, &disk));
+    command.args(qemu::args(
+        &args.machine,
+        processor,
+        &firmware,
+        &vars,
+        &disk,
+    ));
     if let Some(address) = &args.vnc {
         command.args(["-display", &format!("vnc={address}")]);
     }

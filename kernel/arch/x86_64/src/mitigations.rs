@@ -182,6 +182,19 @@ fn reported() -> Reported {
 #[cfg(target_os = "none")]
 pub fn init() {
     let needed = needed(reported());
+    // The boot processor, which runs this before its per-CPU data is set
+    // up, logs what the processors need.
+    if crate::percpu::index() == 0 {
+        let on = |b: bool| if b { "on" } else { "off" };
+        crate::log::log!(
+            Info,
+            "page-table isolation {}, IBRS {:?}, IBPB {}, VERW {}",
+            on(needed.isolation),
+            needed.ibrs,
+            on(needed.ibpb),
+            on(needed.verw)
+        );
+    }
     match needed.ibrs {
         // SAFETY: the processor reports IBRS_ALL, and the bit restricts
         // speculation and changes nothing else.
