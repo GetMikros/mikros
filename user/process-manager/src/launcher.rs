@@ -136,6 +136,7 @@ async fn new_process(
         login_session: from.login_session,
         arguments: duplicate(request.arguments.raw(), SAME_RIGHTS)?,
         handles: request.handles,
+        service_manager: false,
     };
     Ok((new, same))
 }

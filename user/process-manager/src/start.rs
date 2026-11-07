@@ -210,10 +210,8 @@ pub struct Transfer {
     pub launcher: ClientEnd<Launcher>,
     pub directory: ClientEnd<Directory>,
     pub clock_page: Handle,
-    /// The connection to the root directory, the namespace's `/`.
-    pub root: ClientEnd<Node>,
-    /// The connection to the namespace's `/dev`.
-    pub dev: ClientEnd<Node>,
+    /// The namespace's entries.
+    pub namespace: Vec<NamespaceEntry>,
 }
 
 impl Started {
@@ -221,16 +219,7 @@ impl Started {
     /// `transfer`, but not `Complete`.
     pub fn send(&self, transfer: Transfer) -> Result<(), Status> {
         let sent = |r: Result<(), _>| r.map_err(|_| Status::PeerClosed);
-        let namespace = alloc::vec![
-            NamespaceEntry {
-                path: "/".into(),
-                directory: transfer.root,
-            },
-            NamespaceEntry {
-                path: "/dev".into(),
-                directory: transfer.dev,
-            },
-        ];
+        let namespace = transfer.namespace;
         let header = StartupHeader {
             version: VERSION,
             pid: transfer.pid,

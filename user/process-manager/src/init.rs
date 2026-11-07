@@ -1,6 +1,7 @@
 //! Serving init: registering it as process ID 1 and starting the
 //! service manager.
 
+use crate::namespace::Namespaces;
 use crate::processes::{NewProcess, Shared, bind, koid};
 use crate::records::{INIT_PID, Record};
 use crate::start::{self, duplicate};
@@ -14,7 +15,7 @@ use mikros_rt::interfaces::mikros::process::{
     InitBootstrapRequest, InitBootstrapStartServiceManagerResponse, ManagerStartup, StartupHandle,
 };
 use mikros_rt::interfaces::mikros::service::{
-    ClientIdentity, Directory, ProcessDirectory, ProcessDirectoryAsyncClient,
+    ClientIdentity, Directory, DirectoryAsyncClient, ProcessDirectory, ProcessDirectoryAsyncClient,
 };
 use mikros_rt::sys;
 use process_manager::bootfs::Fs;
@@ -46,8 +47,6 @@ pub struct Manager {
     init: Option<ServerEnd<InitBootstrap>>,
     /// The process ID of the service manager, once its start began.
     service_manager: Option<u32>,
-    /// The kernel's command line, as init gave it.
-    _command_line: alloc::string::String,
 }
 
 impl Manager {
@@ -70,14 +69,14 @@ impl Manager {
             ..
         } = startup;
         let fs = Fs::new(process.raw(), &boot_image, reactor.clone(), spawner.clone())?;
+        let namespaces = Rc::new(Namespaces::new(&command_line));
         Ok(Manager {
             _log: log,
             _process: process,
-            shared: Shared::new(fs, budget, clock_page, reactor, spawner),
+            shared: Shared::new(fs, namespaces, budget, clock_page, reactor, spawner),
             init_process: Some(init_process),
             init: Some(init_bootstrap),
             service_manager: None,
-            _command_line: command_line,
         })
     }
 
@@ -168,6 +167,7 @@ impl Manager {
             login_session: 0,
             arguments: start::arguments(&[SERVICE_MANAGER_PATH])?,
             handles,
+            service_manager: true,
         };
         // The service manager may spawn as soon as its transfer is
         // complete, and its children are bound over the same endpoint.
@@ -190,6 +190,21 @@ impl Manager {
                 return Err(status);
             }
         };
+        // Running from the boot image, namespaces come from profiles once
+        // tmpfs serves, through a directory of the process manager's own.
+        if self.shared.namespaces.runs_from_boot_image() {
+            let shared = self.shared.clone();
+            if let Ok(directory) = bind_own_directory(&control).await {
+                self.shared.spawner.spawn(async move {
+                    let reactor = shared.reactor.clone();
+                    let directory = DirectoryAsyncClient::new(directory, reactor.clone());
+                    let namespaces = shared.namespaces.clone();
+                    namespaces
+                        .prepare(directory, shared.fs.clone(), reactor)
+                        .await;
+                });
+            }
+        }
         let shared = self.shared.clone();
         self.shared.spawner.spawn(async move {
             let reactor = shared.reactor.clone();

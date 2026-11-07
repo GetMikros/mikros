@@ -3,6 +3,7 @@
 
 use crate::broker::Permissions;
 use crate::launcher;
+use crate::namespace::Namespaces;
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, Transfer, duplicate};
 use alloc::collections::BTreeMap;
@@ -42,7 +43,9 @@ const CHLD: u32 = 17;
 pub struct Shared {
     pub fs: Rc<Fs>,
     /// The `/dev` of every process.
-    dev: Dev,
+    pub dev: Dev,
+    /// How the namespaces of new processes are built.
+    pub namespaces: Rc<Namespaces>,
     /// The root budget.
     pub budget: OwnedHandle,
     pub clock_page: OwnedHandle,
@@ -82,11 +85,14 @@ pub struct NewProcess {
     pub login_session: u32,
     pub arguments: OwnedHandle,
     pub handles: Vec<StartupHandle>,
+    /// Whether it is the service manager that init asked for.
+    pub service_manager: bool,
 }
 
 impl Shared {
     pub fn new(
         fs: Rc<Fs>,
+        namespaces: Rc<Namespaces>,
         budget: OwnedHandle,
         clock_page: OwnedHandle,
         reactor: Reactor,
@@ -95,6 +101,7 @@ impl Shared {
         Rc::new(Shared {
             fs,
             dev: Dev::new(reactor.clone(), spawner.clone()),
+            namespaces,
             budget,
             clock_page,
             reactor,
@@ -162,6 +169,7 @@ impl Shared {
             login_session,
             arguments,
             handles,
+            service_manager,
             ..
         } = new;
         let identity = ClientIdentity {
@@ -170,7 +178,15 @@ impl Shared {
             app_id: app_id.clone(),
         };
         let transferred = self
-            .transfer(&started, identity, parent, arguments, handles, control)
+            .transfer(
+                &started,
+                identity,
+                parent,
+                arguments,
+                handles,
+                service_manager,
+                control,
+            )
             .await;
         let recorded = transferred.and_then(|()| {
             let record = Record {
@@ -235,6 +251,7 @@ impl Shared {
         Ok(handle)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn transfer(
         self: &Rc<Self>,
         started: &start::Started,
@@ -242,8 +259,13 @@ impl Shared {
         parent: u32,
         arguments: OwnedHandle,
         handles: Vec<StartupHandle>,
+        service_manager: bool,
         control: &ProcessDirectoryAsyncClient,
     ) -> Result<(), Status> {
+        let namespaces = self.namespaces.clone();
+        let namespace = namespaces
+            .of(self, &identity.app_id, identity.user, service_manager)
+            .await?;
         let channel = |_| Status::NoResources;
         let (launcher, launcher_end) = endpoints::<Launcher>().map_err(channel)?;
         let (directory, directory_end) = endpoints::<Directory>().map_err(channel)?;
@@ -259,8 +281,7 @@ impl Shared {
             launcher,
             directory,
             clock_page: self.clock_page.raw(),
-            root: start::root(&self.fs)?,
-            dev: self.dev.directory()?,
+            namespace,
         })?;
         bind(control, identity, directory_end).await?;
         started.complete()

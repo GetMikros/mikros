@@ -80,6 +80,91 @@ impl Fs {
     }
 }
 
+/// A node below a directory of the boot file system, as `subtree` gives
+/// it.
+pub struct Item {
+    /// Its path relative to the directory.
+    pub path: alloc::string::String,
+    pub mode: u32,
+    pub kind: ItemKind,
+}
+
+pub enum ItemKind {
+    Directory,
+    File(&'static [u8]),
+    Symlink(alloc::vec::Vec<u8>),
+}
+
+impl Fs {
+    /// Serves a connection with `rights` on `end` to the directory at
+    /// `path`, relative to the root, the root itself when it is empty.
+    /// Returns false, and serves nothing, without a directory there.
+    pub fn serve_directory(
+        self: &Rc<Self>,
+        end: ServerEnd<Node>,
+        path: &str,
+        rights: Rights,
+    ) -> bool {
+        let node = match path.is_empty() {
+            true => Some(0),
+            false => self.node(path),
+        };
+        match node {
+            Some(node)
+                if matches!(
+                    self.tree.nodes[node].kind,
+                    mikros_bootfs::NodeKind::Directory(_)
+                ) =>
+            {
+                self.serve(end, node, rights);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Everything below the directory at `path`, relative to the root,
+    /// each directory before what it holds, without following links.
+    /// None without a directory there.
+    pub fn subtree(&self, path: &str) -> Option<alloc::vec::Vec<Item>> {
+        let top = self.node(path)?;
+        let mikros_bootfs::NodeKind::Directory(_) = &self.tree.nodes[top].kind else {
+            return None;
+        };
+        let mut items = alloc::vec::Vec::new();
+        let mut pending = alloc::vec![(alloc::string::String::new(), top)];
+        while let Some((prefix, dir)) = pending.pop() {
+            let mikros_bootfs::NodeKind::Directory(entries) = &self.tree.nodes[dir].kind else {
+                continue;
+            };
+            for (name, &node) in entries {
+                let name = alloc::string::String::from_utf8_lossy(name);
+                let path = match prefix.is_empty() {
+                    true => alloc::string::String::from(name),
+                    false => alloc::format!("{prefix}/{name}"),
+                };
+                let n = &self.tree.nodes[node];
+                let kind = match &n.kind {
+                    mikros_bootfs::NodeKind::Directory(_) => {
+                        pending.push((path.clone(), node));
+                        ItemKind::Directory
+                    }
+                    mikros_bootfs::NodeKind::File { offset, size } => {
+                        ItemKind::File(&self.image[*offset..offset + size])
+                    }
+                    mikros_bootfs::NodeKind::Symlink(target) => ItemKind::Symlink(target.clone()),
+                };
+                items.push(Item {
+                    path,
+                    mode: n.mode,
+                    kind,
+                });
+            }
+        }
+        Some(items)
+    }
+}
+
 /// An executable file of the boot file system, for the loader.
 pub struct Executable {
     /// The file's bytes.
