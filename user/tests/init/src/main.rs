@@ -8658,6 +8658,69 @@ mod manager {
         )
     }
 
+    /// From a boot image with the service manager, the permission broker,
+    /// the temporary file system and its probe, with their manifests, the
+    /// service manager starts the temporary file system and then the
+    /// probe, which holds the permission to connect to it. The probe drives
+    /// files, directories, links, names and rights through it and exits
+    /// with 0 once every check passed, as the service manager logs.
+    pub fn tmpfs_serves_its_clients(s: &Startup) -> Result {
+        const PASSED: &[u8] = b"service tmpfs-probe exited with code 0";
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service tmpfs-probe exited",
+            b"service tmpfs-probe ended",
+            b"service tmpfs exited",
+            b"service tmpfs ended",
+        ];
+        let (m, init, reader) = serving(s, b"tests/tmpfs.img")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let root = StartupHandle {
+            role: HandleRole::User,
+            id: 1,
+            handle: copy(s.root_resource, SAME_RIGHTS)?,
+        };
+        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        let outcome = loop {
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if super::contains(message, PASSED) {
+                break Some(true);
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("passing every check of the probe", outcome == Some(true))
+    }
+
     /// A process manager serving the boot image member `image` as its
     /// boot file system, with init registered, the client of its
     /// `InitBootstrap` endpoint, and a reader of the log from before it
@@ -9370,6 +9433,7 @@ mod bootfs {
                         "pie",
                         "ports.img",
                         "services.img",
+                        "tmpfs.img",
                     ],
             )?;
 
@@ -9550,7 +9614,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 135] = [
+const TESTS: [(&str, Test); 136] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9616,6 +9680,10 @@ const TESTS: [(&str, Test); 135] = [
     (
         "service_manager_starts_boot_services",
         manager::service_manager_starts_boot_services,
+    ),
+    (
+        "tmpfs_serves_its_clients",
+        manager::tmpfs_serves_its_clients,
     ),
     (
         "device_manager_adds_platform_devices",

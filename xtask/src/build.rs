@@ -452,6 +452,36 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", services_image.display());
+            // The temporary file system test serves this image: the
+            // service manager, the broker, the temporary file system and
+            // a probe that drives it, with their manifests.
+            let tmpfs = user_build("tmpfs", kind)?;
+            println!("built    {}", tmpfs.display());
+            let tmpfs_probe = user_build("tmpfs-probe", kind)?;
+            println!("built    {}", tmpfs_probe.display());
+            let tmpfs_manifest = crate::workspace_root().join("user/tmpfs/tmpfs.yaml");
+            let tmpfs_probe_manifest =
+                crate::workspace_root().join("user/tests/tmpfs-probe/tmpfs-probe.yaml");
+            let tmpfs_image = boot_image(
+                kind,
+                "tmpfs.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/tmpfs", tmpfs.as_path()),
+                    ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
+                    ("usr/bin/tmpfs-probe", tmpfs_probe.as_path()),
+                    (
+                        "usr/lib/services/tmpfs-probe.yaml",
+                        tmpfs_probe_manifest.as_path(),
+                    ),
+                ],
+            )?;
+            println!("built    {}", tmpfs_image.display());
             // The device manager tests serve these images. Each holds the
             // service manager, the broker and the device manager with
             // their manifests, and test drivers: their manifests from
@@ -586,6 +616,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let members = [
                 ("tests/broker.img", broker_image.as_path()),
                 ("tests/services.img", services_image.as_path()),
+                ("tests/tmpfs.img", tmpfs_image.as_path()),
                 ("tests/devices.img", devices_image.as_path()),
                 ("tests/failing.img", failing_image.as_path()),
                 ("tests/pci.img", pci_image.as_path()),
