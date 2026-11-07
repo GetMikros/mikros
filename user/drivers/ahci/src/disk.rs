@@ -104,6 +104,8 @@ pub struct Disk {
     /// that are free.
     pub memory: Rc<Memory>,
     pub spare: RefCell<Vec<Contiguous>>,
+    /// The disk's writable connections.
+    pub writer: mikros_storage::Writer,
 }
 
 /// Where the driver's DMA memory comes from: the `DMA` resource, the

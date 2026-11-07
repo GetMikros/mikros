@@ -1,4 +1,4 @@
-// MIKSPEC-0044.R1
+// MIKSPEC-0044.R15
 
 library mikros.storage;
 using mikros.base;
@@ -31,4 +31,6 @@ protocol Block {
              fua bool) -> () error base.Status;
     @6 Flush() -> () error base.Status;
     @7 Discard(block u64, count u64) -> () error base.Status;
+    @8 LockWritable() -> () error base.Status;
+    @9 UnlockWritable();
 };

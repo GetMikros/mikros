@@ -149,7 +149,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             return;
                         };
                         let _ = responder.reply(server.server(), Ok(DriverConnectChildResponse {}));
-                        mikros_storage::serve(disk, request.bus, true, reactor, spawner2, || {})
+                        let writer = disk.writer.clone();
+                        mikros_storage::serve_bus(disk, request.bus, writer, reactor, spawner2)
                             .await;
                     });
                     Ok(())
@@ -258,6 +259,7 @@ async fn start(
             queued,
             memory: memory.clone(),
             spare: RefCell::new(Vec::new()),
+            writer: mikros_storage::Writer::default(),
         }));
     }
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
@@ -348,8 +350,9 @@ async fn add_disks(
         if let Ok((client, server)) = endpoints::<Provider>()
             && let Ok(Ok(_)) = manager.publish_service(SERVICE_CLASS.into(), client).await
         {
-            let task =
-                mikros_storage::serve_provider(disk, server, reactor.clone(), spawner.clone());
+            let writer = disk.writer.clone();
+            let (reactor, tasks) = (reactor.clone(), spawner.clone());
+            let task = mikros_storage::serve_provider(disk, server, writer, reactor, tasks);
             spawner.spawn(task);
         }
     }

@@ -1,7 +1,8 @@
-//! The `Block` protocol on one connection: its buffers, and its reads,
-//! writes, flushes and discards.
+//! The `Block` protocol on one connection: its buffers, its reads,
+//! writes, flushes and discards, and on `bus` connections the writable
+//! lock.
 
-use crate::{Disk, PAGE, pages, pinned_with};
+use crate::{Disk, PAGE, Writer, pages, pinned_with};
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -11,11 +12,13 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{
     Block, BlockAsyncServer, BlockCreateBufferResponse, BlockDiscardResponse, BlockFlags,
-    BlockFlushResponse, BlockGetInfoResponse, BlockReadResponse, BlockRequest, BlockWriteResponse,
+    BlockFlushResponse, BlockGetInfoResponse, BlockLockWritableResponse, BlockReadResponse,
+    BlockRequest, BlockWriteResponse,
 };
 use mikros_rt::sys;
 
-/// The most bytes of buffers one connection may have.
+/// The most bytes of buffers one connection other than a `bus`
+/// connection may have.
 const BUFFERS_MAX: u64 = 64 << 20;
 /// The rights of the buffer handles that clients get: DUPLICATE,
 /// TRANSFER, READ, WRITE, MAP and INSPECT.
@@ -38,24 +41,48 @@ impl Drop for Buffer {
     }
 }
 
-/// A connection's buffers by ID, their total size, and the ID the next
-/// one gets.
+/// How a connection was made: as a `bus` channel, or with `Open`, which
+/// may write when its flag is true.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Access {
+    Bus,
+    Open(bool),
+}
+
+/// A connection's buffers by ID, their total size, the ID the next one
+/// gets, and whether it holds the disk's writable lock.
 #[derive(Default)]
 struct Connection {
     buffers: RefCell<BTreeMap<u32, Rc<Buffer>>>,
     total: Cell<u64>,
     next: Cell<u32>,
+    locked: Cell<bool>,
 }
 
-/// Serves `Block` for `disk` on the channel `end`, which may write when
-/// `writable` is true, until it closes, and then calls `closed`. Each
-/// request runs as a task of its own, so that many may be outstanding.
-/// Writes and discards fail with `ACCESS_DENIED` on a read-only
-/// connection or disk.
-pub async fn serve<D: Disk>(
+/// Serves `Block` for `disk` on its `bus` channel `end` until it closes.
+/// The connection may write, its buffers have no limit, and its writable
+/// lock counts in `writer`, the disk's.
+pub async fn serve_bus<D: Disk>(
     disk: Rc<D>,
     end: OwnedHandle,
-    writable: bool,
+    writer: Writer,
+    reactor: Reactor,
+    spawner: Spawner,
+) {
+    serve(disk, end, Access::Bus, writer, reactor, spawner, || {}).await;
+}
+
+/// Serves `Block` for `disk` on the channel `end`, made with `access`,
+/// until it closes, and then calls `closed`. Each request runs as a task
+/// of its own, so that many may be outstanding. Writes and discards fail
+/// with `ACCESS_DENIED` on a read-only connection or disk.
+/// `LockWritable` takes `writer`'s lock on a `bus` connection, and fails
+/// with `ACCESS_DENIED` on any other.
+pub(crate) async fn serve<D: Disk>(
+    disk: Rc<D>,
+    end: OwnedHandle,
+    access: Access,
+    writer: Writer,
     reactor: Reactor,
     spawner: Spawner,
     closed: impl FnOnce(),
@@ -63,15 +90,20 @@ pub async fn serve<D: Disk>(
     use BlockRequest as R;
     let server = Rc::new(BlockAsyncServer::new(ServerEnd::<Block>::new(end), reactor));
     let connection = Rc::new(Connection::default());
+    let writable = access != Access::Open(false);
     while let Ok(request) = server.next().await {
         let (disk, server, connection) = (disk.clone(), server.clone(), connection.clone());
+        let writer = writer.clone();
         spawner.spawn(async move {
             let s = server.server();
             let read_only = disk.info().flags.0 & BlockFlags::READ_ONLY.0 != 0;
             let may_write = writable && !read_only;
+            let limited = access != Access::Bus;
             let _ = match request {
                 R::GetInfo(_, r) => r.reply(s, BlockGetInfoResponse { info: disk.info() }),
-                R::CreateBuffer(q, r) => r.reply(s, create_buffer(&*disk, &connection, q.size)),
+                R::CreateBuffer(q, r) => {
+                    r.reply(s, create_buffer(&*disk, &connection, q.size, limited))
+                }
                 R::DestroyBuffer(q) => {
                     if let Some(buffer) = connection.buffers.borrow_mut().remove(&q.buffer) {
                         connection.total.set(connection.total.get() - buffer.size);
@@ -115,20 +147,42 @@ pub async fn serve<D: Disk>(
                     let discarded = discard(&*disk, may_write, q.block, q.count).await;
                     r.reply(s, discarded.map(|()| BlockDiscardResponse {}))
                 }
+                R::LockWritable(_, r) => {
+                    let locked = match access {
+                        Access::Open(_) => Err(Status::AccessDenied),
+                        Access::Bus if connection.locked.get() => Ok(()),
+                        Access::Bus if writer.lock() => {
+                            connection.locked.set(true);
+                            Ok(())
+                        }
+                        Access::Bus => Err(Status::AlreadyExists),
+                    };
+                    r.reply(s, locked.map(|()| BlockLockWritableResponse {}))
+                }
+                R::UnlockWritable(_) => {
+                    if connection.locked.replace(false) {
+                        writer.unlock();
+                    }
+                    Ok(())
+                }
             };
         });
+    }
+    if connection.locked.replace(false) {
+        writer.unlock();
     }
     closed();
 }
 
 /// A new buffer of `size` bytes, rounded up to a page, for `connection`,
 /// pinned for the device, and a handle to it that the client can map.
-/// Fails with `NO_RESOURCES` when the connection's buffers would exceed
-/// 64 MiB.
+/// Fails with `NO_RESOURCES` when the connection is `limited` and its
+/// buffers would exceed 64 MiB.
 fn create_buffer(
     disk: &impl Disk,
     connection: &Connection,
     size: u64,
+    limited: bool,
 ) -> Result<BlockCreateBufferResponse, Status> {
     let size = size
         .checked_next_multiple_of(PAGE)
@@ -137,7 +191,7 @@ fn create_buffer(
         return Err(Status::InvalidArgs);
     }
     let total = connection.total.get() + size;
-    if total > BUFFERS_MAX {
+    if limited && total > BUFFERS_MAX {
         return Err(Status::NoResources);
     }
     let (mem, pmt) = pinned_with(disk.dma(), disk.bti(), size, disk.below_4g())?;

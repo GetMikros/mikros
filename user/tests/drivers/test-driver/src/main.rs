@@ -52,10 +52,12 @@
 //!   writable disk; reads find the protective MBR's
 //!   signature in block 0 and the GPT header in block 1; requests of no
 //!   blocks or at an offset that is not a multiple of 4 fail with
-//!   `INVALID_ARGS`, and requests beyond the disk with `OUT_OF_RANGE`, and a buffer above the connection's limit with
-//!   `NO_RESOURCES`; and the last block, written with `fua`, reads back
-//!   as written before it is written back as it was and flushed. It fails
-//!   with `INVALID_ARGS` otherwise.
+//!   `INVALID_ARGS`, and requests beyond the disk with `OUT_OF_RANGE`; a
+//!   buffer above 64 MiB succeeds, as bus connections have no limit;
+//!   `LockWritable` succeeds again after `UnlockWritable`; and the last
+//!   block, written with `fua`, reads back as written before it is
+//!   written back as it was and flushed. It fails with `INVALID_ARGS`
+//!   otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver publishes a `storage`
 //!   service and ends without replying.
@@ -441,7 +443,12 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
     let none = disk.read(id, 0, 0, 0).await;
     let unaligned = disk.read(id, 2, 0, 1).await;
     let beyond = disk.read(id, 0, info.block_count, 1).await;
-    let too_big = disk.create_buffer(65 << 20).await;
+    let big = match disk.create_buffer(65 << 20).await {
+        Ok(Ok(big)) => disk.destroy_buffer(big.buffer).is_ok(),
+        _ => false,
+    };
+    let locked = ok(disk.lock_writable().await) && disk.unlock_writable().is_ok();
+    let relocked = ok(disk.lock_writable().await) && disk.unlock_writable().is_ok();
     let last = info.block_count - 1;
     let saved = ok(disk.read(id, 1024, last, 1).await);
     for (i, byte) in bytes[2048..2560].iter_mut().enumerate() {
@@ -457,7 +464,9 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
         && matches!(none, Ok(Err(Status::InvalidArgs)))
         && matches!(unaligned, Ok(Err(Status::InvalidArgs)))
         && matches!(beyond, Ok(Err(Status::OutOfRange)))
-        && matches!(too_big, Ok(Err(Status::NoResources)))
+        && big
+        && locked
+        && relocked
         && saved
         && written
         && read_back

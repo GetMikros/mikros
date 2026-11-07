@@ -94,6 +94,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let process = managed.header.process.raw();
     let mut disk: Option<Rc<Disk>> = None;
     let device = Rc::new(DiskDevice::default());
+    let writer = mikros_storage::Writer::default();
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
@@ -104,9 +105,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             let started = Rc::new(started);
                             disk = Some(started.clone());
                             let replied = responder.reply(s, Ok(DriverStartResponse {}));
-                            let (device, reactor, tasks) =
-                                (device.clone(), reactor.clone(), spawner.clone());
-                            spawner.spawn(add_disk(started, manager, device, reactor, tasks));
+                            let (device, writer) = (device.clone(), writer.clone());
+                            let (reactor, tasks) = (reactor.clone(), spawner.clone());
+                            let added = add_disk(started, manager, device, writer, reactor, tasks);
+                            spawner.spawn(added);
                             replied
                         }
                         Err(status) => responder.reply(s, Err(status)),
@@ -127,7 +129,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         let _ = responder.reply(s, Err(Status::BadState));
                         continue;
                     };
-                    let (device, server) = (device.clone(), server.clone());
+                    let (device, server, writer) = (device.clone(), server.clone(), writer.clone());
                     let (reactor, spawner2) = (reactor.clone(), spawner.clone());
                     spawner.spawn(async move {
                         if request.device != device.get().await {
@@ -135,7 +137,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             return;
                         }
                         let _ = responder.reply(server.server(), Ok(DriverConnectChildResponse {}));
-                        mikros_storage::serve(disk, request.bus, true, reactor, spawner2, || {})
+                        mikros_storage::serve_bus(disk, request.bus, writer, reactor, spawner2)
                             .await;
                     });
                     Ok(())
@@ -177,12 +179,14 @@ async fn start(
 }
 
 /// Adds the disk's device, as `disk-0` and `storage:disk`, and publishes
-/// its raw access service, which it then serves. Keeps the device
-/// manager's channel open for as long as the driver runs.
+/// its raw access service, which it then serves with the disk's
+/// `writer`. Keeps the device manager's channel open for as long as the
+/// driver runs.
 async fn add_disk(
     disk: Rc<Disk>,
     manager: DeviceManagerAsyncClient,
     device: Rc<DiskDevice>,
+    writer: mikros_storage::Writer,
     reactor: Reactor,
     spawner: Spawner,
 ) {
@@ -198,6 +202,7 @@ async fn add_disk(
         spawner.spawn(mikros_storage::serve_provider(
             disk,
             server,
+            writer,
             reactor,
             spawner.clone(),
         ));

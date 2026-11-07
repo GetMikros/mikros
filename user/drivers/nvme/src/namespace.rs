@@ -30,6 +30,8 @@ pub struct Namespace {
     pub block_size: u32,
     pub blocks: u64,
     pub controller: Rc<Controller>,
+    /// The namespace's writable connections.
+    pub writer: mikros_storage::Writer,
 }
 
 impl Namespace {

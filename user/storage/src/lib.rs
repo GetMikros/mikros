@@ -2,9 +2,10 @@
 //! connection, serving the disk's raw access service, and the pinned
 //! memory that buffers and requests use.
 //!
-//! A driver implements `Disk` for each disk it drives, and calls `serve`
-//! for each `Block` channel and `serve_provider` for the provider it
-//! publishes with the class `storage`.
+//! A driver implements `Disk` for each disk it drives, makes a `Writer`
+//! for it, and calls `serve_bus` for each `bus` channel of the disk and
+//! `serve_provider` for the provider it publishes with the class
+//! `storage`.
 
 #![no_std]
 
@@ -15,12 +16,14 @@ mod dma;
 mod memory;
 mod mmio;
 mod service;
+mod writer;
 
-pub use block::serve;
+pub use block::serve_bus;
 pub use dma::Contiguous;
 pub use memory::{PAGE, pages, pinned, pinned_with};
 pub use mmio::Mmio;
 pub use service::serve_provider;
+pub use writer::Writer;
 
 /// One millisecond, in nanoseconds of the monotonic clock.
 pub const MS: i64 = 1_000_000;
