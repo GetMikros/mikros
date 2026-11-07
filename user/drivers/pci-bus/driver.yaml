@@ -5,3 +5,5 @@ binary: /usr/lib/drivers/pci-bus/pci-bus
 match: [platform:pci-host-ecam]
 kind: normal
 needs: [bus, dma]
+# To ask the ACPI server for INTx routes.
+permissions: [device.registry]

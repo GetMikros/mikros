@@ -34,8 +34,9 @@
 //!   fails with `INVALID_ARGS`, a `WriteConfig` of the command register
 //!   fails with `ACCESS_DENIED`, and, as its manifest does not need
 //!   `dma`, `GetBti` and `SetBusMaster(true)` fail with `ACCESS_DENIED`
-//!   while `SetBusMaster(false)` succeeds. It fails with `INVALID_ARGS`
-//!   otherwise.
+//!   while `SetBusMaster(false)` succeeds, and `GetInterrupt` fails with
+//!   `NOT_SUPPORTED`, as the function has no INTx pin. It fails with
+//!   `INVALID_ARGS` otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver publishes a `storage`
 //!   service and ends without replying.
@@ -266,6 +267,7 @@ async fn pci_device_works(bus: OwnedHandle, reactor: &Reactor) -> bool {
     let bti = device.get_bti().await;
     let master = device.set_bus_master(true).await;
     let no_master = device.set_bus_master(false).await;
+    let no_intx = device.get_interrupt().await;
     at_host_bridge
         && matches!(vendor, Ok(Ok(r)) if r.value == 0x8086)
         && matches!(misaligned, Ok(Err(Status::InvalidArgs)))
@@ -273,6 +275,7 @@ async fn pci_device_works(bus: OwnedHandle, reactor: &Reactor) -> bool {
         && matches!(bti, Ok(Err(Status::AccessDenied)))
         && matches!(master, Ok(Err(Status::AccessDenied)))
         && matches!(no_master, Ok(Ok(_)))
+        && matches!(no_intx, Ok(Err(Status::NotSupported)))
 }
 
 /// As the child's driver: writes a message on the bus channel `bus`.

@@ -3,6 +3,7 @@
 //! transaction initiators, and adding them as devices.
 
 use crate::ecam::Ecam;
+use crate::interrupts::{Intx, Line};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
@@ -12,9 +13,11 @@ use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
 use mikros_pci::{Address, Bar, BarKind, Header, scan, size_bars};
+use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
+use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::sys;
 
 pub const KIND_MMIO: u32 = 1;
@@ -22,24 +25,32 @@ pub const KIND_IOPORT: u32 = 2;
 pub const KIND_BTI: u32 = 8;
 
 /// A function: its address and header, its BARs, each with the
-/// resource claimed for it or why there is none, and its bus
-/// transaction initiator or why there is none.
+/// resource claimed for it or why there is none, its bus transaction
+/// initiator or why there is none, and its INTx once a driver asked for
+/// it.
 pub struct Function {
     pub at: Address,
     pub header: Header,
     pub bars: Vec<(Bar, Result<OwnedHandle, Status>)>,
     pub bti: Result<OwnedHandle, Status>,
+    pub intx: RefCell<Option<Intx>>,
 }
 
 /// The host bridge's buses: their configuration space, segment, the
-/// device manager, the `BTI` resource of their requester IDs, and the
+/// device manager, the driver's directory, the `BTI` resource of their
+/// requester IDs, the INTx lines in use by global system interrupt, the
+/// executor, and the
 /// functions found, by the ID of their device, with whether they have
 /// all been added.
 pub struct Bus {
     pub ecam: Ecam,
     pub segment: u16,
     pub manager: DeviceManagerAsyncClient,
+    pub directory: DirectoryAsyncClient,
     pub bti_resource: Result<OwnedHandle, Status>,
+    pub lines: RefCell<BTreeMap<u32, Rc<Line>>>,
+    pub reactor: Reactor,
+    pub spawner: Spawner,
     functions: RefCell<BTreeMap<u64, Rc<Function>>>,
     complete: Cell<bool>,
     waiters: RefCell<Vec<Waker>>,
@@ -50,13 +61,20 @@ impl Bus {
         ecam: Ecam,
         segment: u16,
         manager: DeviceManagerAsyncClient,
+        directory: DirectoryAsyncClient,
         bti_resource: Result<OwnedHandle, Status>,
+        reactor: Reactor,
+        spawner: Spawner,
     ) -> Bus {
         Bus {
             ecam,
             segment,
+            reactor,
             manager,
+            directory,
             bti_resource,
+            lines: RefCell::new(BTreeMap::new()),
+            spawner,
             functions: RefCell::new(BTreeMap::new()),
             complete: Cell::new(false),
             waiters: RefCell::new(Vec::new()),
@@ -135,6 +153,7 @@ pub async fn enumerate(bus: Rc<Bus>) {
                 header,
                 bars,
                 bti,
+                intx: RefCell::new(None),
             };
             bus.functions
                 .borrow_mut()

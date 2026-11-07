@@ -8,7 +8,9 @@
 //! claimed and a bus transaction initiator of its own. For each child,
 //! it serves `Device` on the bus channel that `ConnectChild` gives it;
 //! `ConnectChild` for a device it did not add fails with `NOT_FOUND`.
-//! `ResetChild` fails with `NOT_SUPPORTED`.
+//! It holds the INTx lines that the functions use and shares each one
+//! between the functions on it. `ResetChild` fails with
+//! `NOT_SUPPORTED`.
 
 #![no_std]
 #![no_main]
@@ -18,6 +20,7 @@ extern crate alloc;
 mod bus;
 mod device;
 mod ecam;
+mod interrupts;
 
 use alloc::rc::Rc;
 use bus::{Bus, KIND_BTI, KIND_MMIO};
@@ -30,6 +33,7 @@ use mikros_rt::interfaces::mikros::driver::{
     DriverStartRequest, DriverStartResponse, DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
+use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
@@ -59,13 +63,21 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let end = ServerEnd::new(managed.handles.remove(at).handle);
     let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
     let process = managed.header.process.raw();
+    let mut directory = Some(DirectoryAsyncClient::new(
+        managed.header.directory,
+        reactor.clone(),
+    ));
     let mut bus: Option<Rc<Bus>> = None;
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
             let _ = match request {
                 DriverRequest::Start(request, responder) => {
-                    match start(request, process, &reactor).await {
+                    let Some(directory) = directory.take() else {
+                        let _ = responder.reply(s, Err(Status::BadState));
+                        continue;
+                    };
+                    match start(request, process, directory, &reactor, &spawner).await {
                         Ok(started) => {
                             let started = Rc::new(started);
                             spawner.spawn(bus::enumerate(started.clone()));
@@ -87,7 +99,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         let _ = responder.reply(s, Err(Status::BadState));
                         continue;
                     };
-                    let (server, reactor) = (server.clone(), reactor.clone());
+                    let server = server.clone();
                     spawner.spawn(async move {
                         let Some(function) = bus.function(request.device).await else {
                             let _ = responder.reply(server.server(), Err(Status::NotFound));
@@ -95,7 +107,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         };
                         let connected = Ok(DriverConnectChildResponse {});
                         let _ = responder.reply(server.server(), connected);
-                        device::serve(bus, function, request.bus, request.dma, reactor).await;
+                        device::serve(bus, function, request.bus, request.dma).await;
                     });
                     Ok(())
                 }
@@ -112,7 +124,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 async fn start(
     request: DriverStartRequest,
     process: sys::Handle,
+    directory: DirectoryAsyncClient,
     reactor: &mikros_rt::exec::Reactor,
+    spawner: &mikros_rt::exec::Spawner,
 ) -> Result<Bus, Status> {
     let property = |key: &str| {
         let found = request.device.properties.iter().find(|p| p.key == key);
@@ -159,7 +173,15 @@ async fn start(
         Ok(Err(status)) => Err(status),
         Err(_) => Err(Status::PeerClosed),
     };
-    Ok(Bus::new(ecam, segment, manager, bti))
+    Ok(Bus::new(
+        ecam,
+        segment,
+        manager,
+        directory,
+        bti,
+        reactor.clone(),
+        spawner.clone(),
+    ))
 }
 
 /// The kind of `resource`, if it is one.

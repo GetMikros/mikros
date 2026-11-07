@@ -2,17 +2,17 @@
 //! bus channel.
 
 use crate::bus::{Bus, Function};
+use crate::interrupts;
 use alloc::rc::Rc;
 use mikros_pci::{
     BarKind, COMMAND, COMMAND_BUS_MASTER, COMMAND_IO, COMMAND_MEMORY, Config, msi_registers,
 };
-use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::pci::{
-    self, Device, DeviceAsyncServer, DeviceGetBarResponse, DeviceGetBtiResponse,
-    DeviceGetInfoResponse, DeviceInfo, DeviceReadConfigResponse, DeviceRequest,
-    DeviceSetBusMasterResponse, DeviceWriteConfigResponse,
+    self, Device, DeviceAckInterruptResponse, DeviceAsyncServer, DeviceGetBarResponse,
+    DeviceGetBtiResponse, DeviceGetInfoResponse, DeviceGetInterruptResponse, DeviceInfo,
+    DeviceReadConfigResponse, DeviceRequest, DeviceSetBusMasterResponse, DeviceWriteConfigResponse,
 };
 use mikros_rt::sys;
 
@@ -28,15 +28,8 @@ const WRITABLE_FROM: u16 = 0x40;
 /// the channel closes, bus mastering and decoding are disabled and the
 /// quarantine of its bus transaction initiator is released.
 ///
-/// `GetInterrupt`, `AckInterrupt`, `EnableMsi` and `DisableMsi` fail
-/// with `NOT_SUPPORTED`.
-pub async fn serve(
-    bus: Rc<Bus>,
-    function: Rc<Function>,
-    end: OwnedHandle,
-    dma: bool,
-    reactor: Reactor,
-) {
+/// `EnableMsi` and `DisableMsi` fail with `NOT_SUPPORTED`.
+pub async fn serve(bus: Rc<Bus>, function: Rc<Function>, end: OwnedHandle, dma: bool) {
     use DeviceRequest as R;
     let at = function.at;
     let command = |change: &dyn Fn(u32) -> u32| {
@@ -45,10 +38,9 @@ pub async fn serve(
         config.write(at, COMMAND, 2, change(value));
     };
     command(&|c| c | u32::from(COMMAND_IO | COMMAND_MEMORY));
-    let server = DeviceAsyncServer::new(ServerEnd::<Device>::new(end), reactor);
+    let server = DeviceAsyncServer::new(ServerEnd::<Device>::new(end), bus.reactor.clone());
     while let Ok(request) = server.next().await {
         let s = server.server();
-        let no = Status::NotSupported;
         let _ = match request {
             R::GetInfo(_, r) => r.reply(
                 s,
@@ -83,10 +75,16 @@ pub async fn serve(
                 };
                 r.reply(s, set)
             }
-            R::GetInterrupt(_, r) => r.reply(s, Err(no)),
-            R::AckInterrupt(_, r) => r.reply(s, Err(no)),
-            R::EnableMsi(_, r) => r.reply(s, Err(no)),
-            R::DisableMsi(_, r) => r.reply(s, Err(no)),
+            R::GetInterrupt(_, r) => {
+                let event = interrupts::get_interrupt(&bus, &function).await;
+                r.reply(s, event.map(|event| DeviceGetInterruptResponse { event }))
+            }
+            R::AckInterrupt(_, r) => {
+                let acked = interrupts::ack_interrupt(&bus, &function);
+                r.reply(s, acked.map(|()| DeviceAckInterruptResponse {}))
+            }
+            R::EnableMsi(_, r) => r.reply(s, Err(Status::NotSupported)),
+            R::DisableMsi(_, r) => r.reply(s, Err(Status::NotSupported)),
             R::GetBti(_, r) => {
                 let bti = match (dma, &function.bti) {
                     (false, _) => Err(Status::AccessDenied),
