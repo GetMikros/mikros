@@ -28,8 +28,21 @@ const FIRST: &str = "permissions";
 #[test]
 fn first_starts_before_everything() {
     let services = [boot("a", &[]), boot("b", &[]), boot(FIRST, &[])];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(o.start, [2, 0, 1]);
+    assert!(o.blocked.is_empty());
+}
+
+#[test]
+fn early_services_start_right_after_the_first() {
+    let services = [
+        boot("a", &[]),
+        boot("tmpfs", &[]),
+        boot("b", &["a"]),
+        boot(FIRST, &[]),
+    ];
+    let o = order(&services, FIRST, &["tmpfs", "missing"]);
+    assert_eq!(o.start, [3, 1, 0, 2]);
     assert!(o.blocked.is_empty());
 }
 
@@ -42,14 +55,14 @@ fn after_is_respected_and_ties_keep_slice_order() {
         boot("d", &[]),
         boot(FIRST, &[]),
     ];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(o.start, [4, 2, 1, 0, 3]);
 }
 
 #[test]
 fn on_demand_services_are_left_out() {
     let services = [boot(FIRST, &[]), service("lazy", Start::OnDemand, &[])];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(o.start, [0]);
     assert!(o.blocked.is_empty());
 }
@@ -62,7 +75,7 @@ fn duplicate_names_block_every_copy_and_their_dependents() {
         service("a", Start::OnDemand, &[]),
         boot("b", &["a"]),
     ];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(o.start, [0]);
     assert_eq!(
         o.blocked,
@@ -77,7 +90,7 @@ fn duplicate_names_block_every_copy_and_their_dependents() {
 #[test]
 fn unknown_dependencies_block() {
     let services = [boot(FIRST, &[]), boot("a", &["nowhere"]), boot("b", &["a"])];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(o.start, [0]);
     assert_eq!(
         o.blocked,
@@ -97,7 +110,7 @@ fn on_demand_dependencies_start_at_boot() {
         service("unused", Start::OnDemand, &[]),
         boot(FIRST, &[]),
     ];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(o.start, [4, 2, 1, 0]);
     assert!(o.blocked.is_empty());
 }
@@ -110,7 +123,7 @@ fn blocked_on_demand_dependencies_block_their_dependents() {
         boot("b", &["lazy"]),
         service("unused", Start::OnDemand, &["nowhere"]),
     ];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(o.start, [0]);
     assert_eq!(
         o.blocked,
@@ -131,7 +144,7 @@ fn cycles_block_their_members_and_dependents() {
         boot("self", &["self"]),
         boot("ok", &[]),
     ];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(o.start, [0, 5]);
     assert_eq!(
         o.blocked,
@@ -147,7 +160,7 @@ fn cycles_block_their_members_and_dependents() {
 #[test]
 fn first_waiting_on_another_service_is_a_cycle() {
     let services = [boot(FIRST, &["a"]), boot("a", &[])];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert!(o.start.is_empty());
     assert_eq!(o.blocked, [(0, Blocked::Cycle), (1, Blocked::Cycle)]);
 }
@@ -155,12 +168,12 @@ fn first_waiting_on_another_service_is_a_cycle() {
 #[test]
 fn without_first_nothing_else_starts_and_an_on_demand_first_starts_at_boot() {
     let services = [boot("a", &[]), boot("b", &[])];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert!(o.start.is_empty());
     assert_eq!(o.blocked, [(0, Blocked::NoFirst), (1, Blocked::NoFirst)]);
 
     let services = [service(FIRST, Start::OnDemand, &[]), boot("a", &[])];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(o.start, [0, 1]);
     assert!(o.blocked.is_empty());
 }
@@ -168,7 +181,7 @@ fn without_first_nothing_else_starts_and_an_on_demand_first_starts_at_boot() {
 #[test]
 fn blocked_first_blocks_the_rest() {
     let services = [boot(FIRST, &["nowhere"]), boot("a", &[])];
-    let o = order(&services, FIRST);
+    let o = order(&services, FIRST, &[]);
     assert_eq!(
         o.blocked,
         [

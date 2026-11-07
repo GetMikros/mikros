@@ -18,15 +18,17 @@ use mikros_rt::interfaces::mikros::service::ClientIdentity;
 
 /// The directory of the service manifests, relative to the root.
 const SERVICES: &str = "usr/lib/services";
+/// The service that starts right after the broker.
+const TMPFS: &str = "tmpfs";
 const SUFFIX: &str = ".yaml";
 
 /// Reads the service manifests under `root`, records the protocols
 /// they provide in `dir`, and starts the boot services in order as the
-/// service manager `me`: the permission broker first, then each other
-/// one once its permissions are registered with the broker. Each gets
-/// the boot handles of `boot` that its manifest lists, and is restarted
-/// as its manifest says. On-demand services then start at the first
-/// connection to one of their protocols.
+/// service manager `me`: the permission broker first, then tmpfs, then
+/// each other one once its permissions are registered with the broker.
+/// Each gets the boot handles of `boot` that its manifest lists, and is
+/// restarted as its manifest says. On-demand services then start at the
+/// first connection to one of their protocols.
 pub async fn start(
     root: NodeAsyncClient,
     reactor: Reactor,
@@ -37,7 +39,7 @@ pub async fn start(
 ) {
     let (services, manifests): (Vec<Service>, Vec<Vec<u8>>) =
         read_all(&root, &reactor).await.into_iter().unzip();
-    let order = order(&services, broker::NAME);
+    let order = order(&services, broker::NAME, &[TMPFS]);
     for (i, why) in &order.blocked {
         mikros_rt::log!(
             Error,

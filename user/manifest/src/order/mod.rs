@@ -48,9 +48,10 @@ enum State {
 
 /// Orders the boot services of `services`, and the on-demand services
 /// they wait for, with the service named `first` before every other
-/// one. Services that are equally ready start in the order of the
+/// one. Of the services that are equally ready, those named in `early`
+/// start first, in that order, and the others in the order of the
 /// slice.
-pub fn order(services: &[Service], first: &str) -> Order {
+pub fn order(services: &[Service], first: &str, early: &[&str]) -> Order {
     let mut count = BTreeMap::<&str, usize>::new();
     for s in services {
         *count.entry(&s.name).or_default() += 1;
@@ -111,10 +112,16 @@ pub fn order(services: &[Service], first: &str) -> Order {
         }
     }
 
-    // Start the first ready service, then look again from the start of
-    // the slice, so that ties keep the slice's order.
+    // Start the first ready service, then look again from the start, so
+    // that ties keep the early names' order and then the slice's.
+    let first_ones: Vec<usize> = early
+        .iter()
+        .filter_map(|name| index.get(name).copied())
+        .collect();
+    let rest = (0..services.len()).filter(|i| !first_ones.contains(i));
+    let scan: Vec<usize> = first_ones.iter().copied().chain(rest).collect();
     'scan: loop {
-        for i in 0..services.len() {
+        for &i in &scan {
             if state[i] != State::Pending {
                 continue;
             }
