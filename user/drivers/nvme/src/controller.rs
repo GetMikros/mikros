@@ -1,23 +1,25 @@
 //! The controller: bringing it up, its admin and I/O queue pairs, its
-//! interrupts, identifying it and its namespaces, and shutting it down.
+//! interrupts, identifying it and its namespaces, the command timeout,
+//! resetting it, and shutting it down.
 
-use crate::queue::{Command, QueuePair};
+use crate::queue::{Abort, Command, Failure, QueuePair};
 use crate::regs::Regs;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::sys;
-use mikros_storage::{Contiguous, Mmio, PAGE};
+use mikros_storage::{Contiguous, MS, Mmio, PAGE, now};
 
 /// Admin opcodes.
 const CREATE_IO_SQ: u8 = 0x01;
 const CREATE_IO_CQ: u8 = 0x05;
 const IDENTIFY: u8 = 0x06;
+const ABORT: u8 = 0x08;
 const SET_FEATURES: u8 = 0x09;
 /// Identify's CNS values, and the feature of the number of queues.
 const CNS_NAMESPACE: u32 = 0x00;
@@ -29,6 +31,10 @@ const ADMIN_ENTRIES: u16 = 32;
 const IO_ENTRIES_MAX: u32 = 1024;
 /// The ID of the I/O queue pair.
 const IO_QUEUE: u16 = 1;
+/// How long a command may take before it is aborted, and how often the
+/// driver looks for such commands.
+pub const COMMAND_LIMIT: i64 = 30_000 * MS;
+const WATCH_PERIOD: i64 = 1000 * MS;
 /// The largest transfer, which a PRP list of one page always covers.
 const TRANSFER_MAX: u64 = 2 << 20;
 const SIGNALED: u32 = 1 << 3;
@@ -66,6 +72,9 @@ pub struct Controller {
     process: sys::Handle,
     /// Pages for PRP lists and Dataset Management ranges.
     pages: RefCell<Vec<Contiguous>>,
+    resetting: Cell<bool>,
+    /// Set when a reset could not bring the I/O queues back.
+    pub failed: Cell<bool>,
     _device: Rc<DeviceAsyncClient>,
     _interrupts: Vec<OwnedHandle>,
 }
@@ -153,10 +162,13 @@ impl Controller {
             bti,
             process,
             pages: RefCell::new(alloc::vec![page]),
+            resetting: Cell::new(false),
+            failed: Cell::new(false),
             _device: device,
             _interrupts: interrupts,
         });
         controller.create_io_queues().await?;
+        spawner.spawn(watch(controller.clone(), reactor.clone(), spawner.clone()));
         Ok(controller)
     }
 
@@ -247,6 +259,31 @@ impl Controller {
     /// The largest transfer in bytes.
     pub fn transfer_max(&self) -> u64 {
         self.identity.transfer_max
+    }
+
+    /// Resets the controller and enables it again, failing every command
+    /// in flight, and creates the I/O queues again. Sets `failed` when
+    /// that does not work.
+    async fn reset(&self, reactor: &Reactor) {
+        if self.resetting.replace(true) {
+            return;
+        }
+        self.io.pause();
+        self.admin.pause();
+        let _ = self.regs.disable(reactor).await;
+        self.admin.restart();
+        self.io.restart();
+        let enabled = enable(&self.regs, &self.admin, reactor).await;
+        self.admin.resume();
+        let created = match enabled {
+            Ok(()) => self.create_io_queues().await,
+            Err(status) => Err(status),
+        };
+        self.failed.set(created.is_err());
+        if created.is_ok() {
+            self.io.resume();
+        }
+        self.resetting.set(false);
     }
 
     /// Shuts the controller down normally, before the driver ends.
@@ -355,4 +392,48 @@ async fn interrupts(
         }
     });
     Ok((alloc::vec![event], 0))
+}
+
+/// Looks for commands in flight for longer than `COMMAND_LIMIT` once a
+/// period. Each one is aborted. When the abort fails, does not report
+/// the command aborted, or does not complete in time itself, or the
+/// command still has not completed `COMMAND_LIMIT` after its abort, the
+/// controller is reset.
+async fn watch(controller: Rc<Controller>, reactor: Reactor, spawner: Spawner) {
+    loop {
+        let _ = reactor.sleep_until(now() + WATCH_PERIOD).await;
+        if controller.resetting.get() {
+            continue;
+        }
+        let mut reset = false;
+        for queue in [&controller.admin, &controller.io] {
+            for (cid, opcode, abort) in queue.overdue(COMMAND_LIMIT) {
+                match abort {
+                    _ if queue.id == 0 && opcode == ABORT => reset = true,
+                    Abort::Done(at) if now() - at > COMMAND_LIMIT => reset = true,
+                    Abort::Done(_) | Abort::Sent => {}
+                    Abort::None => {
+                        queue.set_abort(cid, Abort::Sent);
+                        let (controller, queue) = (controller.clone(), queue.clone());
+                        let reactor = reactor.clone();
+                        spawner.spawn(async move {
+                            let command = Command {
+                                opcode: ABORT,
+                                cdw: [u32::from(queue.id) | u32::from(cid) << 16, 0, 0, 0, 0, 0],
+                                ..Command::default()
+                            };
+                            match controller.admin.submit(command).await {
+                                Ok(dw0) if dw0 & 1 == 0 => queue.set_abort(cid, Abort::Done(now())),
+                                Err(Failure::Reset) => {}
+                                _ => controller.reset(&reactor).await,
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        if reset {
+            controller.reset(&reactor).await;
+        }
+    }
 }

@@ -65,6 +65,9 @@ impl Namespace {
         len: u64,
         fua: bool,
     ) -> Result<(), Status> {
+        if self.controller.failed.get() {
+            return Err(Status::Internal);
+        }
         let first = (offset / PAGE) as usize;
         let within = offset % PAGE;
         let count = (within + len).div_ceil(PAGE) as usize;
@@ -105,6 +108,9 @@ impl Namespace {
 
     /// Flushes the volatile write cache.
     pub async fn flush(&self) -> Result<(), Status> {
+        if self.controller.failed.get() {
+            return Err(Status::Internal);
+        }
         let command = Command {
             opcode: FLUSH,
             nsid: self.nsid,
@@ -122,6 +128,9 @@ impl Namespace {
     /// Management commands as their ranges need.
     pub async fn discard(&self, mut block: u64, mut count: u64) -> Result<(), Status> {
         while count > 0 {
+            if self.controller.failed.get() {
+                return Err(Status::Internal);
+            }
             let page = self.controller.page()?;
             let mut ranges = 0;
             while count > 0 && ranges < RANGES_MAX {

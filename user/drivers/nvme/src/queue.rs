@@ -13,7 +13,7 @@ use core::task::{Poll, Waker};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::sys;
-use mikros_storage::Contiguous;
+use mikros_storage::{Contiguous, now};
 
 /// The sizes of submission and completion entries.
 const SQE: u64 = 64;
@@ -36,6 +36,8 @@ pub enum Failure {
     /// The controller completed it with this status field: the status
     /// code type and status code, without the phase tag.
     Status(u16),
+    /// The controller was reset before it completed.
+    Reset,
 }
 
 impl From<Failure> for Status {
@@ -44,9 +46,24 @@ impl From<Failure> for Status {
     }
 }
 
-/// A command in flight: its result once it completes, and the task
+/// Where aborting a command stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Abort {
+    /// No abort was sent for it.
+    None,
+    /// An abort was sent and has not completed.
+    Sent,
+    /// An abort for it succeeded at this time.
+    Done(i64),
+}
+
+/// A command in flight: its opcode, when it was submitted, where
+/// aborting it stands, its result once it completes, and the task
 /// waiting for it.
 struct InFlight {
+    opcode: u8,
+    since: i64,
+    abort: Abort,
     result: Option<Result<u32, Failure>>,
     waker: Option<Waker>,
 }
@@ -58,6 +75,8 @@ struct State {
     free: Vec<u16>,
     in_flight: BTreeMap<u16, InFlight>,
     waiting: Vec<Waker>,
+    /// Set while the controller is being reset: submissions wait.
+    paused: bool,
 }
 
 /// A queue pair of `entries` entries with ID `id`.
@@ -99,6 +118,7 @@ impl QueuePair {
                 free: (0..entries - 1).rev().collect(),
                 in_flight: BTreeMap::new(),
                 waiting: Vec::new(),
+                paused: false,
             }),
         })
     }
@@ -108,7 +128,9 @@ impl QueuePair {
     pub async fn submit(&self, command: Command) -> Result<u32, Failure> {
         let cid = poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
-            if let Some(cid) = state.free.pop() {
+            if !state.paused
+                && let Some(cid) = state.free.pop()
+            {
                 return Poll::Ready(cid);
             }
             state.waiting.push(cx.waker().clone());
@@ -131,6 +153,9 @@ impl QueuePair {
             state.in_flight.insert(
                 cid,
                 InFlight {
+                    opcode: command.opcode,
+                    since: now(),
+                    abort: Abort::None,
                     result: None,
                     waker: None,
                 },
@@ -209,6 +234,67 @@ impl QueuePair {
             }
         }
         for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// The commands that have been in flight for longer than `limit`
+    /// nanoseconds: their IDs, opcodes, and where aborting them stands.
+    pub fn overdue(&self, limit: i64) -> Vec<(u16, u8, Abort)> {
+        let now = now();
+        let state = self.state.borrow();
+        state
+            .in_flight
+            .iter()
+            .filter(|(_, c)| c.result.is_none() && now - c.since > limit)
+            .map(|(cid, c)| (*cid, c.opcode, c.abort))
+            .collect()
+    }
+
+    /// Records where aborting `cid` stands.
+    pub fn set_abort(&self, cid: u16, abort: Abort) {
+        if let Some(command) = self.state.borrow_mut().in_flight.get_mut(&cid) {
+            command.abort = abort;
+        }
+    }
+
+    /// Stops new submissions until `resume`.
+    pub fn pause(&self) {
+        self.state.borrow_mut().paused = true;
+    }
+
+    /// Fails every command in flight with `Failure::Reset`, and starts
+    /// the queues from their first entries again, once the controller
+    /// has been reset.
+    pub fn restart(&self) {
+        let mut wakers = Vec::new();
+        {
+            let mut state = self.state.borrow_mut();
+            for command in state.in_flight.values_mut() {
+                if command.result.is_none() {
+                    command.result = Some(Err(Failure::Reset));
+                    wakers.extend(command.waker.take());
+                }
+            }
+            state.tail = 0;
+            state.head = 0;
+            state.phase = true;
+        }
+        self.submission.zero();
+        self.completion.zero();
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// Lets submissions go on after `pause`.
+    pub fn resume(&self) {
+        let waiting = {
+            let mut state = self.state.borrow_mut();
+            state.paused = false;
+            core::mem::take(&mut state.waiting)
+        };
+        for waker in waiting {
             waker.wake();
         }
     }
