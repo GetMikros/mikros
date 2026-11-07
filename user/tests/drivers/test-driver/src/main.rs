@@ -212,7 +212,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                                 false => Err(Status::InvalidArgs),
                             }
                         }
-                        FAT => match fat::works(&directory, &reactor).await {
+                        FAT => match fat::works(&directory, &reactor, process).await {
                             true => Ok(DriverStartResponse {}),
                             false => Err(Status::InvalidArgs),
                         },

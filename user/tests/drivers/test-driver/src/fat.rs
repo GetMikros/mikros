@@ -3,19 +3,24 @@
 //! `filesystem` service as it should.
 
 use crate::now;
+use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemAsyncClient, LockKind, Node, NodeAsyncClient, NodeType, OpenFlags,
-    Rights,
+    Error, Filesystem, FilesystemAsyncClient, LockKind, MemoryFlags, Node, NodeAsyncClient,
+    NodeType, OpenFlags, Rights,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
+use mikros_rt::sys;
 
 /// The protocol of the service.
 const FILESYSTEM: &str = "device.filesystem";
 /// How long the FAT server has to publish the service.
 const PUBLISH_LIMIT: i64 = 10_000_000_000;
 const POLL: i64 = 20_000_000;
+const PERM_READ: u32 = 1 << 0;
+const PERM_WRITE: u32 = 1 << 1;
+const PAGE: u64 = 4096;
 
 type Reply<T> = Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>;
 
@@ -74,17 +79,27 @@ async fn open(
 /// Whether the volume behaves: it is FAT32 and writable; the root lists
 /// the `EFI` directory; the boot configuration reads by a name in
 /// another case; a file created in a new directory is written, read back
-/// and appended to; bad names and `..` are refused; byte-range locks of
+/// and appended to; its shared memory object shows a later write, and a
+/// private one keeps its own changes; bad names and `..` are refused;
+/// byte-range locks of
 /// two connections conflict, part of one is released, and a waiting
 /// lock is granted once the other connection closes; a rename into the
 /// root moves the file, whose open connection follows it; and the file
 /// and directory are removed again, after which that connection finds
 /// its file gone.
-pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
-    check(directory, reactor).await.is_some()
+pub async fn works(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    process: sys::Handle,
+) -> bool {
+    check(directory, reactor, process).await.is_some()
 }
 
-async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()> {
+async fn check(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    process: sys::Handle,
+) -> Option<()> {
     let root = root(directory, reactor).await?;
     let info = ok(root.query_filesystem().await)?.info;
     expect(info.r#type == "fat32" && !info.read_only && info.free_bytes > 0)?;
@@ -116,6 +131,7 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
         attributes.size == 10 && attributes.mode == 0o644 && attributes.r#type == NodeType::File,
     )?;
     expect(ok(file.read(0, 100).await)?.data == b"hello fat!")?;
+    memory(&file, process).await?;
     let again = open(&folder, "a LONG file NAME.txt", create, reactor).await;
     expect(matches!(again, Err(Some(Error::Exists))))?;
     let bad = open(&root, "bad:name", OpenFlags::CREATE, reactor).await;
@@ -139,6 +155,45 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     ok(root.unlink("Test Folder".into(), true).await)?;
     ok(root.sync().await)?;
     Some(())
+}
+
+/// Whether the memory objects of `file`, which holds `hello fat!`,
+/// behave. It holds the same afterwards.
+async fn memory(file: &NodeAsyncClient, process: sys::Handle) -> Option<()> {
+    let shared = ok(file.get_memory_object(MemoryFlags(0)).await)?.memory;
+    let view = map(shared.raw(), process, PERM_READ)?;
+    let page = bytes(view, PAGE as usize);
+    expect(&page[..10] == b"hello fat!" && page[10..].iter().all(|&b| b == 0))?;
+    ok(file.write(0, b"HELLO".to_vec()).await)?;
+    expect(bytes(view, 10) == b"HELLO fat!")?;
+    let flags = MemoryFlags(MemoryFlags::PRIVATE.0 | MemoryFlags::WRITE.0);
+    let private = ok(file.get_memory_object(flags).await)?.memory;
+    let copy = map(private.raw(), process, PERM_READ | PERM_WRITE)?;
+    expect(bytes(copy, 10) == b"HELLO fat!")?;
+    // SAFETY: the copy is mapped writable at `copy` for a page.
+    unsafe { core::ptr::write_volatile(copy as *mut u8, b'J') };
+    expect(bytes(copy, 10) == b"JELLO fat!")?;
+    expect(ok(file.read(0, 10).await)?.data == b"HELLO fat!")?;
+    let writable = file.get_memory_object(MemoryFlags::WRITE).await;
+    expect(failed(writable) == Some(Error::NotSupported))?;
+    ok(file.write(0, b"hello".to_vec()).await)?;
+    Some(())
+}
+
+/// Maps a page of the memory object `mem` with `perms`.
+fn map(mem: sys::Handle, process: sys::Handle, perms: u32) -> Option<u64> {
+    let mut at = 0;
+    // SAFETY: the out pointer is valid; the kernel picks a free range.
+    let status = unsafe { sys::vm_map(process, perms, 0, mem, 0, PAGE, &mut at) };
+    (status == mikros_rt::OK).then_some(at)
+}
+
+/// The first `n` bytes mapped at `at`, read anew each time.
+fn bytes(at: u64, n: usize) -> Vec<u8> {
+    // SAFETY: a page is mapped at `at`, and `n` is at most a page.
+    (0..n)
+        .map(|i| unsafe { core::ptr::read_volatile((at as *const u8).add(i)) })
+        .collect()
 }
 
 /// Whether the locks of `file` and of a clone of it behave.

@@ -16,6 +16,7 @@ extern crate alloc;
 
 mod device;
 mod fs;
+mod memory;
 mod node;
 mod time;
 
@@ -101,9 +102,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 /// Mounts the volume on the partition behind the `bus` channel of
 /// `request`, for writing unless the disk is read-only, and returns it
 /// and the device manager. Fails with `INVALID_ARGS` without a bus
-/// channel, with `NO_RESOURCES` when the disk gives no buffer, with
-/// `NOT_SUPPORTED` when the partition holds no valid FAT volume, and with
-/// `INTERNAL` when reading it fails.
+/// channel, with `NO_RESOURCES` when the disk gives no buffer or there
+/// is no pager, with `NOT_SUPPORTED` when the partition holds no valid
+/// FAT volume, and with `INTERNAL` when reading it fails.
 fn start(
     request: DriverStartRequest,
     process: sys::Handle,
@@ -120,7 +121,14 @@ fn start(
         _ => Status::Internal,
     })?;
     let utc = time::Utc::new(directory, process);
-    let fs = Rc::new(Fs::new(volume, utc, reactor.clone(), spawner.clone()));
+    let pager = memory::pager().ok_or(Status::NoResources)?;
+    let fs = Rc::new(Fs::new(
+        volume,
+        utc,
+        pager,
+        reactor.clone(),
+        spawner.clone(),
+    ));
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     Ok((fs, manager))
 }

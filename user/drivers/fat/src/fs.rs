@@ -60,6 +60,10 @@ pub struct Fs {
     next: Cell<u64>,
     /// The directories that tokens name, by the token's object ID.
     tokens: RefCell<BTreeMap<u64, Dir>>,
+    /// The pager of the paged objects of files, and those objects with
+    /// their sizes, by node.
+    pub pager: OwnedHandle,
+    pub paged: RefCell<BTreeMap<u64, (OwnedHandle, u64)>>,
     pub utc: Utc,
     pub reactor: Reactor,
     pub spawner: Spawner,
@@ -83,12 +87,20 @@ pub fn error(e: mikros_fat::Error) -> Error {
 }
 
 impl Fs {
-    pub fn new(volume: Volume<BlockDevice>, utc: Utc, reactor: Reactor, spawner: Spawner) -> Fs {
+    pub fn new(
+        volume: Volume<BlockDevice>,
+        utc: Utc,
+        pager: OwnedHandle,
+        reactor: Reactor,
+        spawner: Spawner,
+    ) -> Fs {
         Fs {
             volume: RefCell::new(volume),
             nodes: RefCell::new(BTreeMap::new()),
             next: Cell::new(1),
             tokens: RefCell::new(BTreeMap::new()),
+            pager,
+            paged: RefCell::new(BTreeMap::new()),
             utc,
             reactor,
             spawner,
@@ -194,6 +206,13 @@ impl Fs {
         match target {
             Target::Root => Ok(true),
             Target::Node(id) => self.with_node(id, |_, node| Ok(node.is_directory())),
+        }
+    }
+
+    /// Keeps node `id` for as long as the server runs.
+    pub fn hold(&self, id: u64) {
+        if let Some(open) = self.nodes.borrow_mut().get_mut(&id) {
+            open.refs += 1;
         }
     }
 

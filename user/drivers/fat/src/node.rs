@@ -1,6 +1,7 @@
 //! One connection to a node of the volume.
 
 use crate::fs::{self, Fs, Target};
+use crate::memory;
 use crate::time;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -119,7 +120,7 @@ impl Connection {
             R::Link(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::CreateSymlink(_, r) => r.reply(s, Err(Error::NotSupported)),
             // What this server does not provide.
-            R::GetMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
@@ -217,12 +218,15 @@ impl Connection {
         self.require_write()?;
         let id = self.file()?;
         let now = self.fs.now();
-        self.fs
+        let written = self
+            .fs
             .with_node(id, |volume, node| {
                 let at = offset.unwrap_or(node.size());
                 volume.write(node, at, data, now).map(|()| at)
             })
-            .map_err(|e| too_big(offset, data.len(), e))
+            .map_err(|e| too_big(offset, data.len(), e));
+        self.fs.changed(id);
+        written
     }
 
     fn write_next(&mut self, data: &[u8]) -> Result<NodeWriteNextResponse, Error> {
@@ -241,8 +245,11 @@ impl Connection {
         }
         let id = self.file()?;
         let now = self.fs.now();
-        self.fs
-            .with_node(id, |volume, node| volume.truncate(node, size, now))
+        let truncated = self
+            .fs
+            .with_node(id, |volume, node| volume.truncate(node, size, now));
+        self.fs.changed(id);
+        truncated
     }
 
     fn seek(&mut self, offset: i64, origin: SeekOrigin) -> Result<NodeSeekResponse, Error> {
@@ -258,6 +265,27 @@ impl Connection {
         Ok(NodeSeekResponse {
             position: self.cursor,
         })
+    }
+
+    /// A memory object with the file's contents: with `PRIVATE` a copy of
+    /// its own, and otherwise the file's paged object, which is never
+    /// writable.
+    fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
+        self.require(Rights::READ)?;
+        let id = self.file()?;
+        let execute = flags.contains(MemoryFlags::EXECUTE);
+        if execute {
+            self.require(Rights::EXECUTE)?;
+        }
+        let write = flags.contains(MemoryFlags::WRITE);
+        let memory = if flags.contains(MemoryFlags::PRIVATE) {
+            self.fs.private_memory(id, memory::rights(write, execute))?
+        } else if write {
+            return Err(Error::NotSupported);
+        } else {
+            self.fs.paged_memory(id, memory::rights(false, execute))?
+        };
+        Ok(NodeGetMemoryObjectResponse { memory })
     }
 
     /// Takes a byte-range lock of the file, waiting for it when asked to
@@ -348,8 +376,11 @@ impl Connection {
                 return Err(Error::Io);
             };
             let now = self.fs.now();
-            self.fs
-                .with_node(id, |volume, node| volume.truncate(node, 0, now))?;
+            let truncated = self
+                .fs
+                .with_node(id, |volume, node| volume.truncate(node, 0, now));
+            self.fs.changed(id);
+            truncated?;
         }
         let append = q.flags.contains(OpenFlags::APPEND);
         self.fs.serve(q.node, target, q.rights, append);
