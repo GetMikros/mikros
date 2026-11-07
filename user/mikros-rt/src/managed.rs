@@ -6,7 +6,8 @@
 //! partial state, so a refused transfer drops it, which closes every
 //! handle received so far.
 
-use crate::interfaces::__midl::{self, OwnedHandle, ServerEnd};
+use crate::interfaces::__midl::{self, ClientEnd, OwnedHandle, ServerEnd};
+use crate::interfaces::mikros::fs::Node;
 use crate::interfaces::mikros::process::{
     Bootstrap, BootstrapAsyncServer, BootstrapRequest, BootstrapServer, NamespaceEntry,
     StartupHandle, StartupHeader,
@@ -181,6 +182,35 @@ impl Transfer {
             namespace: self.namespace,
             _bootstrap: alloc::boxed::Box::new(bootstrap),
         }
+    }
+}
+
+/// Takes the entry of `namespace` whose path is the longest prefix of
+/// the absolute `path`, whole components at a time. Returns its
+/// directory and the rest of `path` below it, which is `.` when the
+/// entry's path is `path` itself.
+pub fn take_entry<'a>(
+    namespace: &mut Vec<NamespaceEntry>,
+    path: &'a str,
+) -> Option<(ClientEnd<Node>, &'a str)> {
+    let (at, rest) = namespace
+        .iter()
+        .enumerate()
+        .filter_map(|(at, e)| below(&e.path, path).map(|rest| (at, rest)))
+        .max_by_key(|&(at, _)| namespace[at].path.trim_end_matches('/').len())?;
+    Some((namespace.swap_remove(at).directory, rest))
+}
+
+/// The rest of `path` below `prefix`, if `prefix` is `path` or one of
+/// its ancestors: `.` for `path` itself.
+fn below<'a>(prefix: &str, path: &'a str) -> Option<&'a str> {
+    let rest = path.strip_prefix(prefix.trim_end_matches('/'))?;
+    if rest.is_empty() {
+        return Some(".");
+    }
+    match rest.strip_prefix('/')? {
+        "" => Some("."),
+        rest => Some(rest),
     }
 }
 

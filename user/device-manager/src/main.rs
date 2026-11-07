@@ -113,18 +113,17 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         Some(mcfg) => add_host_bridges(&mut devices, &root, &mcfg),
         None => mikros_rt::log!(Warning, "device-manager: no MCFG table, so no PCI"),
     }
-    let root_directory = managed
-        .namespace
-        .iter()
-        .position(|e| e.path == "/")
-        .map(|at| managed.namespace.swap_remove(at).directory);
-    let drivers = match root_directory {
-        Some(directory) => {
+    let drivers = match managed::take_entry(&mut managed.namespace, drivers::DRIVERS) {
+        Some((directory, at)) => {
             let directory = NodeAsyncClient::new(directory, reactor.clone());
-            executor.block_on(drivers::read_all(&directory, &reactor))
+            executor.block_on(drivers::read_all(&directory, at, &reactor))
         }
         None => {
-            mikros_rt::log!(Error, "device-manager: the namespace has no root");
+            mikros_rt::log!(
+                Error,
+                "device-manager: the namespace has no {}",
+                drivers::DRIVERS
+            );
             Vec::new()
         }
     };

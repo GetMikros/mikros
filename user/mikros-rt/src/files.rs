@@ -20,6 +20,15 @@ pub enum Failure {
     TooLarge,
 }
 
+/// The path of `name` in `dir`, a path relative to a root that is `.`
+/// for the root itself.
+pub fn join(dir: &str, name: &str) -> String {
+    match dir {
+        "." => String::from(name),
+        dir => alloc::format!("{dir}/{name}"),
+    }
+}
+
 /// The node at `path` under `dir`, opened with `READ`.
 async fn open(
     dir: &NodeAsyncClient,

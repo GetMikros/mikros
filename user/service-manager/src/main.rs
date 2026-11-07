@@ -77,14 +77,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     }
     boot.make_priority();
     let boot = Rc::new(boot);
-    let root = managed
-        .namespace
-        .iter()
-        .position(|e| e.path == "/")
-        .map(|at| managed.namespace.swap_remove(at).directory);
-    match root {
-        Some(root) => {
-            let root = NodeAsyncClient::new(root, reactor.clone());
+    match managed::take_entry(&mut managed.namespace, services::SERVICES) {
+        Some((fs, at)) => {
+            let fs = NodeAsyncClient::new(fs, reactor.clone());
             let header = managed.header;
             let me = ClientIdentity {
                 pid: header.pid,
@@ -93,7 +88,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             };
             let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
             spawner.spawn(services::start(
-                root,
+                fs,
+                at,
                 reactor,
                 launcher,
                 me,
@@ -101,7 +97,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 boot.clone(),
             ));
         }
-        None => mikros_rt::log!(Error, "the namespace has no root"),
+        None => mikros_rt::log!(Error, "the namespace has no {}", services::SERVICES),
     }
     // The control endpoint stays served, and the boot handles, the log
     // among them, stay open.
