@@ -112,6 +112,26 @@ impl Short {
         }
     }
 
+    pub(crate) fn encode(&self) -> [u8; ENTRY] {
+        let mut b = [0u8; ENTRY];
+        b[..11].copy_from_slice(&self.name);
+        if b[0] == FREE {
+            b[0] = 0x05;
+        }
+        b[11] = self.attributes;
+        b[12] = self.case;
+        b[13] = self.created.hundredths;
+        b[14..16].copy_from_slice(&self.created.time.to_le_bytes());
+        b[16..18].copy_from_slice(&self.created.date.to_le_bytes());
+        b[18..20].copy_from_slice(&self.accessed.to_le_bytes());
+        b[20..22].copy_from_slice(&((self.cluster >> 16) as u16).to_le_bytes());
+        b[22..24].copy_from_slice(&self.modified.time.to_le_bytes());
+        b[24..26].copy_from_slice(&self.modified.date.to_le_bytes());
+        b[26..28].copy_from_slice(&(self.cluster as u16).to_le_bytes());
+        b[28..32].copy_from_slice(&self.size.to_le_bytes());
+        b
+    }
+
     pub(crate) fn is_directory(&self) -> bool {
         self.attributes & DIRECTORY != 0
     }

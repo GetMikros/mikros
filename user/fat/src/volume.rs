@@ -3,11 +3,17 @@
 use crate::bpb::{FatType, Layout};
 use crate::dir::{self, ENTRY, LongName, Short, Slot, Stamp, VOLUME_ID};
 use crate::disk::Disk;
-use crate::table;
+use crate::table::{self, Entry};
 use crate::{Device, Error};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+
+/// The largest file, in bytes.
+pub const FILE_MAX: u64 = 0xFFFF_FFFF;
+const FS_INFO_LEAD: u32 = 0x4161_5252;
+const FS_INFO_STRUCT: u32 = 0x6141_7272;
+const FS_INFO_TRAIL: u32 = 0xAA55_0000;
 
 /// A directory, by where its entries lie: the fixed root directory of
 /// FAT12 and FAT16, or a chain of clusters.
@@ -81,25 +87,50 @@ pub struct Volume<D> {
     pub(crate) disk: Disk<D>,
     pub(crate) layout: Layout,
     pub(crate) writable: bool,
+    /// The free clusters, once counted, and where to look for one next.
+    pub(crate) free: Option<u32>,
+    pub(crate) hint: u32,
 }
 
 impl<D: Device> Volume<D> {
-    /// Mounts the volume on `device`, a partition of `size` bytes.
-    /// Mounting for writing is not there yet, and fails with `ReadOnly`.
+    /// Mounts the volume on `device`, a partition of `size` bytes, for
+    /// writing when `writable`. A volume that was not shut down cleanly
+    /// is mounted read-only. Mounting for writing marks the volume as
+    /// in use until `unmount`.
     pub fn mount(device: D, size: u64, writable: bool) -> Result<Volume<D>, Error> {
-        if writable {
-            return Err(Error::ReadOnly);
-        }
         let mut disk = Disk::new(device, 512);
         let mut boot = [0u8; 512];
         disk.read(0, &mut boot)?;
         let layout = Layout::parse(&boot, size)?;
-        let disk = Disk::new(disk.device, layout.sector_size);
-        Ok(Volume {
+        let mut disk = Disk::new(disk.device, layout.sector_size);
+        let writable = writable && table::clean(&mut disk, &layout)?;
+        let mut volume = Volume {
             disk,
             layout,
-            writable: false,
-        })
+            writable,
+            free: None,
+            hint: 2,
+        };
+        if writable {
+            table::set_clean(&mut volume.disk, &volume.layout, false)?;
+            volume.disk.device.flush()?;
+        }
+        Ok(volume)
+    }
+
+    /// Writes the free cluster count, marks the volume as shut down
+    /// cleanly and flushes the device, when it is mounted for writing.
+    /// It stays mounted read-only.
+    pub fn unmount(&mut self) -> Result<(), Error> {
+        if !self.writable {
+            return Ok(());
+        }
+        self.write_fs_info()?;
+        self.disk.device.flush()?;
+        table::set_clean(&mut self.disk, &self.layout, true)?;
+        self.disk.device.flush()?;
+        self.writable = false;
+        Ok(())
     }
 
     /// The device the volume lies on.
@@ -126,6 +157,49 @@ impl<D: Device> Volume<D> {
             FatType::Fat32 => Dir::Cluster(self.layout.root_cluster),
             _ => Dir::Root,
         }
+    }
+
+    /// Makes everything written durable.
+    pub fn sync(&mut self) -> Result<(), Error> {
+        if self.writable {
+            self.write_fs_info()?;
+        }
+        self.disk.device.flush()
+    }
+
+    /// How many clusters are free.
+    pub fn free_clusters(&mut self) -> Result<u32, Error> {
+        if let Some(free) = self.free {
+            return Ok(free);
+        }
+        let mut free = 0;
+        for cluster in 2..self.layout.clusters + 2 {
+            if table::get(&mut self.disk, &self.layout, cluster)? == Entry::Free {
+                free += 1;
+            }
+        }
+        self.free = Some(free);
+        Ok(free)
+    }
+
+    fn write_fs_info(&mut self) -> Result<(), Error> {
+        let Some(at) = self.layout.fs_info else {
+            return Ok(());
+        };
+        let free = self.free_clusters()?;
+        let mut sector = [0u8; 512];
+        self.disk.read(at, &mut sector)?;
+        let u32_at = |b: &[u8], i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        if u32_at(&sector, 0) != FS_INFO_LEAD
+            || u32_at(&sector, 484) != FS_INFO_STRUCT
+            || u32_at(&sector, 508) != FS_INFO_TRAIL
+        {
+            return Ok(());
+        }
+        let mut values = [0u8; 8];
+        values[..4].copy_from_slice(&free.to_le_bytes());
+        values[4..].copy_from_slice(&self.hint.to_le_bytes());
+        self.disk.write(at + 488, &values)
     }
 
     // Clusters.

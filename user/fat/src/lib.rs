@@ -13,12 +13,13 @@ extern crate alloc;
 mod bpb;
 mod dir;
 mod disk;
+mod files;
 mod table;
 mod volume;
 
 pub use bpb::{FatType, Layout};
 pub use dir::{ARCHIVE, DIRECTORY, HIDDEN, READ_ONLY, SYSTEM, Stamp};
-pub use volume::{Dir, Node, Volume};
+pub use volume::{Dir, FILE_MAX, Node, Volume};
 
 /// Why an operation failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

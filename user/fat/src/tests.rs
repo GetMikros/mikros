@@ -3,7 +3,7 @@
 extern crate std;
 
 use super::*;
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Write};
 use std::string::String;
 use std::vec;
 use std::vec::Vec;
@@ -185,5 +185,86 @@ fn reads_volumes_of_each_type() {
         assert_eq!(volume.read(&mut big, 4600, &mut part).unwrap(), 400);
         assert_eq!(&part[..400], &expected[4600..]);
         assert_eq!(volume.find(root, "missing"), Err(Error::NotFound));
+    }
+}
+
+// Writing files.
+
+fn volume_bytes(volume: Volume<Mem>) -> Vec<u8> {
+    volume.into_device().0
+}
+
+fn volume_bytes_ref(volume: &mut Volume<Mem>) -> Vec<u8> {
+    volume.device().0.clone()
+}
+
+fn fatfs_read(bytes: &mut Vec<u8>, path: &str) -> Vec<u8> {
+    let fs = fatfs::FileSystem::new(Cursor::new(bytes), fatfs::FsOptions::new()).unwrap();
+    let mut data = Vec::new();
+    fs.root_dir()
+        .open_file(path)
+        .unwrap()
+        .read_to_end(&mut data)
+        .unwrap();
+    data
+}
+
+#[test]
+fn keeps_the_clean_shutdown_bit() {
+    let size = 8 << 20;
+    let bytes = image(size, fatfs::FatType::Fat16, |_| {});
+    let fat = |b: &[u8]| {
+        let reserved = u16::from_le_bytes([b[14], b[15]]) as usize * 512;
+        u16::from_le_bytes([b[reserved + 2], b[reserved + 3]])
+    };
+    assert_ne!(fat(&bytes) & 0x8000, 0);
+    let mut volume = Volume::mount(Mem(bytes), size as u64, true).unwrap();
+    let mounted = volume_bytes_ref(&mut volume);
+    assert_eq!(fat(&mounted) & 0x8000, 0);
+    // Mounted again without the bit, as after a crash: read-only.
+    let crashed = Volume::mount(Mem(mounted), size as u64, true).unwrap();
+    assert!(crashed.read_only());
+    volume.unmount().unwrap();
+    let bytes = volume_bytes(volume);
+    assert_ne!(fat(&bytes) & 0x8000, 0);
+}
+
+#[test]
+fn writes_files_that_fatfs_reads() {
+    let now = Stamp::new(2026, 11, 7, 13, 30, 41, 250);
+    for (size, ty, _) in TYPES {
+        let bytes = image(size, ty, sample);
+        let mut volume = Volume::mount(Mem(bytes), size as u64, true).unwrap();
+        assert!(!volume.read_only());
+        let root = volume.root();
+        let mut readme = volume.find(root, "readme.txt").unwrap();
+        let text: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        volume.write(&mut readme, 5, &text, now).unwrap();
+        // A write past the end leaves zeros between.
+        volume.write(&mut readme, 4000, b"tail", now).unwrap();
+        let docs = volume
+            .find(root, "Documents and Settings")
+            .unwrap()
+            .as_dir(root)
+            .unwrap();
+        let mut big = volume.find(docs, "A rather long file name.data").unwrap();
+        volume.truncate(&mut big, 600, now).unwrap();
+        volume.truncate(&mut big, 700, now).unwrap();
+        volume.unmount().unwrap();
+        let mut bytes = volume_bytes(volume);
+        let readme = fatfs_read(&mut bytes, "readme.txt");
+        assert_eq!(readme.len(), 4004);
+        assert_eq!(&readme[..5], b"hello");
+        assert_eq!(&readme[5..3005], &text[..]);
+        assert!(readme[3005..4000].iter().all(|&b| b == 0));
+        assert_eq!(&readme[4000..], b"tail");
+        let big = fatfs_read(
+            &mut bytes,
+            "Documents and Settings/A rather long file name.data",
+        );
+        let expected: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
+        assert_eq!(big.len(), 700);
+        assert_eq!(&big[..600], &expected[..]);
+        assert!(big[600..].iter().all(|&b| b == 0));
     }
 }

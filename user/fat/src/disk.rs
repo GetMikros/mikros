@@ -1,5 +1,5 @@
 //! The device under a volume, with a cache of the sectors that hold its
-//! metadata.
+//! metadata. Writes go through to the device at once.
 
 use crate::{Device, Error};
 use alloc::collections::BTreeMap;
@@ -53,8 +53,25 @@ impl<D: Device> Disk<D> {
         Ok(())
     }
 
+    /// Writes `data` at `at`, through the cache and on to the device.
+    pub(crate) fn write(&mut self, at: u64, data: &[u8]) -> Result<(), Error> {
+        let mut done = 0;
+        while done < data.len() {
+            let pos = at + done as u64;
+            let start = pos - pos % self.sector;
+            let within = (pos - start) as usize;
+            let n = (self.sector as usize - within).min(data.len() - done);
+            let sector = self.cached(start)?;
+            sector[within..within + n].copy_from_slice(&data[done..done + n]);
+            let copy = sector.clone();
+            self.device.write(start, &copy)?;
+            done += n;
+        }
+        Ok(())
+    }
+
     /// Reads whole sectors at `at` straight from the device, for file
-    /// data.
+    /// data, taking cached sectors into account.
     pub(crate) fn read_direct(&mut self, at: u64, buf: &mut [u8]) -> Result<(), Error> {
         self.device.read(at, buf)?;
         let end = at + buf.len() as u64;
@@ -63,6 +80,17 @@ impl<D: Device> Disk<D> {
             buf[from..from + sector.len()].copy_from_slice(sector);
         }
         Ok(())
+    }
+
+    /// Writes whole sectors at `at` straight to the device, for file
+    /// data, dropping the cached sectors it covers.
+    pub(crate) fn write_direct(&mut self, at: u64, data: &[u8]) -> Result<(), Error> {
+        let end = at + data.len() as u64;
+        let stale: Vec<u64> = self.cache.range(at..end).map(|(&k, _)| k).collect();
+        for key in stale {
+            self.cache.remove(&key);
+        }
+        self.device.write(at, data)
     }
 
     /// The sector size of the disk's I/O.
