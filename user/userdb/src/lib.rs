@@ -1,16 +1,19 @@
 //! The user records of the accounts service: their IDs, names, full
 //! names, kinds and password hashes, the checks made when they change,
-//! and the file that holds them.
+//! the file that holds them, and the delays of failed attempts.
 
 #![no_std]
 
 extern crate alloc;
 
+mod attempts;
 mod file;
+pub mod hash;
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 
+pub use attempts::Attempts;
 pub use file::{Corrupt, decode, encode};
 
 /// The ID of the first user.

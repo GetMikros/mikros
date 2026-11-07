@@ -1,4 +1,5 @@
 use super::*;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 fn hash(n: u32) -> String {
@@ -183,4 +184,77 @@ fn duplicate_names_are_refused() {
     let at = bytes.windows(3).rposition(|w| w == b"bob").unwrap();
     bytes[at..at + 3].copy_from_slice(b"ann");
     assert_eq!(decode(&bytes), Err(Corrupt));
+}
+
+#[test]
+fn attempts_are_delayed_after_five_failures() {
+    let mut attempts = Attempts::new();
+    let mut delays = Vec::new();
+    for _ in 0..16 {
+        delays.push(attempts.delay("ann"));
+        attempts.failed("ann");
+    }
+    assert_eq!(
+        delays,
+        [0, 0, 0, 0, 0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300]
+    );
+    assert_eq!(attempts.delay("bob"), 0);
+    attempts.succeeded("ann");
+    assert_eq!(attempts.delay("ann"), 0);
+}
+
+#[test]
+fn delays_stay_at_the_longest() {
+    let mut attempts = Attempts::new();
+    for _ in 0..200 {
+        attempts.failed("ann");
+    }
+    assert_eq!(attempts.delay("ann"), 300);
+}
+
+#[test]
+fn hashes_are_argon2id_phc_strings() {
+    let salt = [7u8; hash::SALT_LEN];
+    let phc = hash::hash(b"correct horse", &salt).unwrap();
+    let fields: Vec<&str> = phc.split('$').collect();
+    assert_eq!(fields[..4], ["", "argon2id", "v=19", "m=65536,t=3,p=4"]);
+    // 16 and 32 bytes in unpadded base64.
+    assert_eq!(fields[4].len(), 22);
+    assert_eq!(fields[5].len(), 43);
+    assert_eq!(fields.len(), 6);
+    assert!(hash::verify(b"correct horse", &phc));
+    assert!(!hash::verify(b"correct horse!", &phc));
+    assert!(!hash::verify(b"", &phc));
+}
+
+#[test]
+fn salts_change_hashes() {
+    let a = hash::hash(b"pw", &[1; hash::SALT_LEN]).unwrap();
+    let b = hash::hash(b"pw", &[2; hash::SALT_LEN]).unwrap();
+    assert_ne!(a, b);
+    assert!(hash::verify(b"pw", &b));
+}
+
+#[test]
+fn hashes_with_other_parameters_never_match() {
+    let params = argon2::Params::new(8, 1, 1, Some(32)).unwrap();
+    let weak = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    use argon2::PasswordHasher;
+    let phc = weak
+        .hash_password_with_salt(b"pw", &[3; 16])
+        .unwrap()
+        .to_string();
+    assert!(!hash::verify(b"pw", &phc));
+    assert!(!hash::verify(b"pw", "not a hash"));
+}
+
+/// From the reference implementation's `argon2` command:
+/// `echo -n "correct horse" | argon2 saltsaltsaltsalt -id -t 3 -m 16 -p 4 -l 32 -e`.
+#[test]
+fn hashes_match_the_reference_implementation() {
+    let phc = hash::hash(b"correct horse", b"saltsaltsaltsalt").unwrap();
+    assert_eq!(
+        phc,
+        "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0c2FsdA$LeZbD3UAKvUcACx9il4XPtXtFiDX3/ScRE4eQjOYNyM"
+    );
 }
