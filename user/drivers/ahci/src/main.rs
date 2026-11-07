@@ -221,7 +221,15 @@ async fn start(
         let _ = port.start(reactor).await;
     }
     let ports: Vec<Rc<Port>> = ports.into_iter().map(Rc::new).collect();
-    interrupts(&device, &mmio, &ports, reactor, spawner).await?;
+    interrupts(
+        &device,
+        &mmio,
+        &ports,
+        caps.staggered_spin_up,
+        reactor,
+        spawner,
+    )
+    .await?;
     hba::enable_interrupts(&mmio);
     let page = memory.contiguous(PAGE)?;
     let mut disks = Vec::new();
@@ -250,13 +258,14 @@ async fn start(
 
 /// Takes the HBA's interrupt through `EnableMsi`, or else the INTx
 /// event. On each one, each port that reports something has its `PxIS`
-/// and then its bit of `IS` cleared, and the interrupt is then
-/// acknowledged. The task keeps the
-/// interrupt and the bus channel for as long as the driver runs.
+/// and then its bit of `IS` cleared, a port that reported an error is
+/// recovered, and the interrupt is then acknowledged. The task keeps
+/// the interrupt and the bus channel for as long as the driver runs.
 async fn interrupts(
     device: &Rc<DeviceAsyncClient>,
     mmio: &Rc<Mmio>,
     ports: &[Rc<Port>],
+    spin_up: bool,
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(), Status> {
@@ -269,15 +278,20 @@ async fn interrupts(
     };
     let raw = handle.raw();
     let (device, mmio, ports) = (device.clone(), mmio.clone(), ports.to_vec());
-    let reactor = reactor.clone();
+    let (reactor, tasks) = (reactor.clone(), spawner.clone());
     spawner.spawn(async move {
         let _handle = handle;
         while reactor.signals(raw, SIGNALED).await.is_ok() {
             for port in &ports {
-                if matches!(port.interrupt(), Event::None) {
+                let event = port.interrupt();
+                if matches!(event, Event::None) {
                     continue;
                 }
                 mmio.write32(hba::IS, 1 << port.number);
+                if matches!(event, Event::Error) {
+                    let (port, reactor) = (port.clone(), reactor.clone());
+                    tasks.spawn(async move { port.recover(&reactor, spin_up).await });
+                }
             }
             if msi {
                 // SAFETY: the call takes no pointers.

@@ -1,5 +1,6 @@
 //! A port: its command list, received-FIS area and command tables, setting
-//! it up, issuing commands in its slots, and taking their completions.
+//! it up, issuing commands in its slots, taking their completions, and
+//! recovering from errors with COMRESET.
 
 use crate::hba::{TimedOut, wait};
 use alloc::rc::Rc;
@@ -12,7 +13,7 @@ use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::sys;
-use mikros_storage::{Contiguous, MS, Mmio};
+use mikros_storage::{Contiguous, MS, Mmio, now};
 
 /// The port registers, from the port's base.
 const CLB: u64 = 0x00;
@@ -23,6 +24,7 @@ const CMD: u64 = 0x18;
 const TFD: u64 = 0x20;
 const SIG: u64 = 0x24;
 const SSTS: u64 = 0x28;
+const SCTL: u64 = 0x2C;
 const SERR: u64 = 0x30;
 const SACT: u64 = 0x34;
 const CI: u64 = 0x38;
@@ -81,7 +83,8 @@ pub enum Event {
     None,
     /// Commands completed.
     Handled,
-    /// It reported an error, and its commands have failed.
+    /// It reported an error; its commands have failed and it must be
+    /// recovered.
     Error,
 }
 
@@ -90,8 +93,10 @@ struct State {
     /// complete.
     held: u32,
     outstanding: u32,
-    /// Set while a command that is not queued holds the port.
+    /// Set while a command that is not queued holds the port, and while
+    /// it is being recovered.
     exclusive: bool,
+    recovering: bool,
     results: [Option<Result<(), Status>>; 32],
     wakers: [Option<Waker>; 32],
     waiting: Vec<Waker>,
@@ -137,6 +142,7 @@ impl Port {
                 held: 0,
                 outstanding: 0,
                 exclusive: false,
+                recovering: false,
                 results: [None; 32],
                 wakers: Default::default(),
                 waiting: Vec::new(),
@@ -223,7 +229,7 @@ impl Port {
         }
         let slot = poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
-            let free = if state.exclusive {
+            let free = if state.recovering || state.exclusive {
                 None
             } else if queued {
                 (0..self.depth.get()).find(|s| state.held & 1 << s == 0)
@@ -353,7 +359,35 @@ impl Port {
             }
         }
         state.outstanding &= !done;
-        if failed { Event::Error } else { Event::Handled }
+        if failed {
+            state.recovering = true;
+            Event::Error
+        } else {
+            Event::Handled
+        }
+    }
+
+    /// Recovers the port after an error: stops it, resets it with
+    /// COMRESET through `PxSCTL`, and sets it up and starts it again.
+    pub async fn recover(&self, reactor: &Reactor, spin_up: bool) {
+        self.write(CMD, self.read(CMD) & !CMD_ST);
+        let _ = wait(reactor, STOP_LIMIT, || self.read(CMD) & CMD_CR == 0).await;
+        let sctl = self.read(SCTL) & !0xF;
+        self.write(SCTL, sctl | 1);
+        let _ = reactor.sleep_until(now() + 2 * MS).await;
+        self.write(SCTL, sctl);
+        let _ = wait(reactor, LINK_LIMIT, || self.linked()).await;
+        if self.set_up(reactor, spin_up).await.is_ok() {
+            let _ = self.start(reactor).await;
+        }
+        let waiting = {
+            let mut state = self.state.borrow_mut();
+            state.recovering = false;
+            core::mem::take(&mut state.waiting)
+        };
+        for waker in waiting {
+            waker.wake();
+        }
     }
 }
 
