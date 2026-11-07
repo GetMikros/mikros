@@ -2,6 +2,7 @@
 
 use crate::file::{Failed, File};
 use crate::fs::{self, Fs};
+use crate::watch::event;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -64,6 +65,7 @@ pub async fn serve(
         }
     }
     connection.fs.unlock(node, owner, (0, u64::MAX));
+    connection.fs.watches.end(owner);
     connection.fs.close(node);
 }
 
@@ -161,8 +163,8 @@ impl Connection {
                 self.unlock(q.start, q.length)
                     .map(|()| NodeUnlockResponse {}),
             ),
-            R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Unwatch(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::Watch(q, r) => r.reply(s, self.watch(q).map(|()| NodeWatchResponse {})),
+            R::Unwatch(q, r) => r.reply(s, self.unwatch(q.cookie).map(|()| NodeUnwatchResponse {})),
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::ConnectSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
         };
@@ -216,6 +218,8 @@ impl Connection {
             node.times.modified = q.modified;
         }
         node.times.changed = fs::now();
+        drop(tree);
+        self.fs.changed(self.node, WatchKind::Attributes);
         Ok(NodeSetAttributesResponse {})
     }
 
@@ -315,6 +319,25 @@ impl Connection {
         Ok(())
     }
 
+    /// Watches this node for the changes `q.mask` selects, sending events
+    /// with `q.cookie` to `q.watcher`.
+    fn watch(&self, q: NodeWatchRequest) -> Result<(), Error> {
+        self.require(Rights::READ)?;
+        self.fs
+            .watches
+            .add(self.owner, self.node, q.mask, q.cookie, q.watcher);
+        Ok(())
+    }
+
+    /// Ends this connection's watches with `cookie`: `NOT_FOUND` without
+    /// one.
+    fn unwatch(&self, cookie: u64) -> Result<(), Error> {
+        match self.fs.watches.remove(self.owner, cookie) {
+            true => Ok(()),
+            false => Err(Error::NotFound),
+        }
+    }
+
     fn read_next(&mut self, count: u32) -> Result<NodeReadNextResponse, Error> {
         let data = self.read(self.cursor, count)?;
         self.cursor += data.len() as u64;
@@ -336,6 +359,7 @@ impl Connection {
             file.write(at, data).map(|()| at).map_err(failed)
         })?;
         self.modified();
+        self.fs.changed(self.node, WatchKind::Modified);
         Ok(at)
     }
 
@@ -355,6 +379,7 @@ impl Connection {
         }
         self.with_file(|file| file.truncate(size).map_err(failed))?;
         self.modified();
+        self.fs.changed(self.node, WatchKind::Modified);
         Ok(())
     }
 
@@ -411,8 +436,13 @@ impl Connection {
                 };
                 let mode = q.mode & MODE_BITS;
                 let mut tree = self.fs.tree.borrow_mut();
-                tree.create(parent, &name, kind, mode, self.user, fs::now())
-                    .map_err(fs::error)?
+                let id = tree
+                    .create(parent, &name, kind, mode, self.user, fs::now())
+                    .map_err(fs::error)?;
+                drop(tree);
+                let created = event(WatchKind::Created, 0, &name);
+                self.fs.watches.notify(parent, &[created]);
+                id
             }
             Resolved::Missing { .. } => return Err(Error::NotFound),
             Resolved::Node(_) if q.flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) => {
@@ -433,6 +463,8 @@ impl Connection {
             if let Some(Kind::File(file)) = tree.get_mut(id).map(|n| &mut n.kind) {
                 file.truncate(0).map_err(failed)?;
             }
+            drop(tree);
+            self.fs.changed(id, WatchKind::Modified);
         }
         let append = q.flags.contains(OpenFlags::APPEND);
         self.fs.serve(q.node, id, q.rights, self.user, append);
@@ -475,7 +507,13 @@ impl Connection {
             .borrow_mut()
             .unlink(self.node, name, directory, fs::now());
         let removed = removed.map_err(fs::error)?;
+        self.fs
+            .watches
+            .notify(self.node, &[event(WatchKind::Removed, 0, name)]);
         if removed.last {
+            self.fs
+                .watches
+                .notify(removed.id, &[event(WatchKind::SelfRemoved, 0, "")]);
             self.fs.unnamed(removed.id);
         }
         Ok(())
@@ -494,14 +532,36 @@ impl Connection {
     fn rename(&self, q: NodeRenameRequest) -> Result<(), Error> {
         self.require(Rights::WRITE)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        let moved = self
+            .fs
+            .tree
+            .borrow()
+            .lookup(self.node, &q.name)
+            .map_err(fs::error)?;
         let renamed =
             self.fs
                 .tree
                 .borrow_mut()
                 .rename(self.node, &q.name, to, &q.new_name, fs::now());
-        if let Some(replaced) = renamed.map_err(fs::error)?
+        let replaced = renamed.map_err(fs::error)?;
+        let cookie = self.fs.watches.move_cookie();
+        let from = event(WatchKind::MovedFrom, cookie, &q.name);
+        let into = event(WatchKind::MovedTo, cookie, &q.new_name);
+        if to == self.node {
+            self.fs.watches.notify(to, &[from, into]);
+        } else {
+            self.fs.watches.notify(self.node, &[from]);
+            self.fs.watches.notify(to, &[into]);
+        }
+        self.fs
+            .watches
+            .notify(moved, &[event(WatchKind::SelfMoved, 0, "")]);
+        if let Some(replaced) = replaced
             && replaced.last
         {
+            self.fs
+                .watches
+                .notify(replaced.id, &[event(WatchKind::SelfRemoved, 0, "")]);
             self.fs.unnamed(replaced.id);
         }
         Ok(())
@@ -515,7 +575,12 @@ impl Connection {
             .tree
             .borrow_mut()
             .link(self.node, &q.name, to, &q.new_name, fs::now());
-        linked.map(|_| ()).map_err(fs::error)
+        let id = linked.map_err(fs::error)?;
+        self.fs
+            .watches
+            .notify(to, &[event(WatchKind::Created, 0, &q.new_name)]);
+        self.fs.changed(id, WatchKind::Attributes);
+        Ok(())
     }
 
     fn create_symlink(&self, name: &str, target: String) -> Result<(), Error> {
@@ -532,7 +597,12 @@ impl Connection {
             self.user,
             fs::now(),
         );
-        created.map(|_| ()).map_err(fs::error)
+        drop(tree);
+        created.map_err(fs::error)?;
+        self.fs
+            .watches
+            .notify(self.node, &[event(WatchKind::Created, 0, name)]);
+        Ok(())
     }
 
     fn read_link(&self) -> Result<NodeReadLinkResponse, Error> {

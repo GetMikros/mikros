@@ -3,6 +3,7 @@
 
 use crate::file::File;
 use crate::node;
+use crate::watch::{Watches, event};
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -13,7 +14,7 @@ use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{
     Error, Filesystem, FilesystemAsyncServer, FilesystemGetRootResponse, FilesystemInfo,
-    FilesystemQueryFilesystemResponse, FilesystemRequest, Node, Rights,
+    FilesystemQueryFilesystemResponse, FilesystemRequest, Node, Rights, WatchKind,
 };
 use mikros_rt::sys;
 
@@ -50,6 +51,7 @@ pub struct Fs {
     /// The byte-range locks of files, and the next owner of locks.
     locks: RefCell<BTreeMap<Id, Locks>>,
     next_owner: Cell<u64>,
+    pub watches: Watches,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -88,6 +90,7 @@ impl Fs {
             tokens: RefCell::new(BTreeMap::new()),
             locks: RefCell::new(BTreeMap::new()),
             next_owner: Cell::new(1),
+            watches: Watches::default(),
             reactor,
             spawner,
         }
@@ -127,6 +130,21 @@ impl Fs {
     pub fn unnamed(&self, node: Id) {
         if !self.refs.borrow().contains_key(&node) {
             self.tree.borrow_mut().forget(node);
+        }
+    }
+
+    /// Tells the watches of `node` and of the directories that name it
+    /// that its contents or attributes changed, as `kind` says.
+    pub fn changed(&self, node: Id, kind: WatchKind) {
+        self.watches.notify(node, &[event(kind, 0, "")]);
+        let names = self
+            .tree
+            .borrow()
+            .get(node)
+            .map(|n| n.names.clone())
+            .unwrap_or_default();
+        for (dir, name) in names {
+            self.watches.notify(dir, &[event(kind, 0, &name)]);
         }
     }
 

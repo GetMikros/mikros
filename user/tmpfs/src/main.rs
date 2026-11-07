@@ -10,6 +10,7 @@ extern crate alloc;
 mod file;
 mod fs;
 mod node;
+mod watch;
 
 use alloc::rc::Rc;
 use fs::Fs;

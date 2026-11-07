@@ -1,9 +1,9 @@
 //! A program that the service manager starts as a boot service after the
 //! temporary file system, to drive it as a client. It connects to
 //! `mikros.fs.Filesystem` through its directory and checks files,
-//! directories, links, names, memory objects and locks on the root it
-//! gets. It exits with 0
-//! when every check passed, or with the number of the first that failed.
+//! directories, links, names, memory objects, locks and watches on the
+//! root it gets. It exits with 0 when every check passed, or with the
+//! number of the first that failed.
 
 #![no_std]
 #![no_main]
@@ -16,7 +16,7 @@ use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
     Error, Filesystem, FilesystemClient, LockKind, MemoryFlags, Node, NodeClient, NodeType,
-    OpenFlags, Rights,
+    OpenFlags, Rights, WatchKind, WatchMask, Watcher, WatcherRequest, WatcherServer,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -56,7 +56,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let checked = check(&root)
         .and_then(|()| memory(&root, process))
-        .and_then(|()| locks(&root));
+        .and_then(|()| locks(&root))
+        .and_then(|()| watches(&root));
     match checked {
         Ok(()) => 0,
         Err(failed) => failed,
@@ -300,6 +301,57 @@ fn locks(root: &NodeClient) -> Result<(), i64> {
     let (reader, _) = clone(&file, Rights::READ).ok_or(28)?;
     let exclusive = reader.lock(LockKind::Exclusive, 100, 1, false, FOREVER);
     expect(err(exclusive) == Some(Error::AccessDenied), 28)?;
+    Ok(())
+}
+
+/// Whether a watch of a directory gets the events of a file created in
+/// it, written, renamed and removed, each change in a message of its own
+/// and the rename's two halves with one cookie, and ends with Unwatch.
+fn watches(root: &NodeClient) -> Result<(), i64> {
+    use OpenFlags as F;
+    let (dir, _, _) = open(root, "w", flags(&[F::CREATE, F::DIRECTORY]), RW).map_err(|_| 29)?;
+    let (client, server) = endpoints::<Watcher>().map_err(|_| 29)?;
+    let mask =
+        WatchMask::CREATED.0 | WatchMask::REMOVED.0 | WatchMask::MODIFIED.0 | WatchMask::MOVED.0;
+    expect(
+        ok(dir.watch(WatchMask(mask), 7, client, FOREVER)).is_some(),
+        29,
+    )?;
+    let (file, _, _) = open(&dir, "x", F::CREATE, RW).map_err(|_| 30)?;
+    expect(ok(file.write(0, b"1".to_vec(), FOREVER)).is_some(), 30)?;
+    let token = ok(dir.get_token(FOREVER)).ok_or(30)?.token;
+    expect(
+        ok(dir.rename("x".into(), token, "y".into(), FOREVER)).is_some(),
+        30,
+    )?;
+    expect(ok(dir.unlink("y".into(), false, FOREVER)).is_some(), 30)?;
+    let server = WatcherServer::new(server);
+    let mut changes = Vec::new();
+    for _ in 0..4 {
+        let Ok(WatcherRequest::OnEvents(message)) = server.next(FOREVER) else {
+            return Err(31);
+        };
+        expect(message.cookie == 7, 31)?;
+        let events: Vec<(WatchKind, u32, String)> = message
+            .events
+            .into_iter()
+            .map(|e| (e.kind, e.move_cookie, e.name))
+            .collect();
+        changes.push(events);
+    }
+    let moved = changes[2].first().map_or(0, |e| e.1);
+    let expected = [
+        alloc::vec![(WatchKind::Created, 0, String::from("x"))],
+        alloc::vec![(WatchKind::Modified, 0, String::from("x"))],
+        alloc::vec![
+            (WatchKind::MovedFrom, moved, String::from("x")),
+            (WatchKind::MovedTo, moved, String::from("y")),
+        ],
+        alloc::vec![(WatchKind::Removed, 0, String::from("y"))],
+    ];
+    expect(moved != 0 && changes == expected, 32)?;
+    expect(ok(dir.unwatch(7, FOREVER)).is_some(), 33)?;
+    expect(err(dir.unwatch(7, FOREVER)) == Some(Error::NotFound), 33)?;
     Ok(())
 }
 
