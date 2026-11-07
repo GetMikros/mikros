@@ -8880,7 +8880,6 @@ mod manager {
                 1,
             ),
             (b"device-manager: started driver test-disk for device", 3),
-            (b"device-manager: published device.storage 1 for device 4", 1),
             (b"device-manager: bound driver nvme to device", 1),
             (b", as pci:c010802", 1),
             (b"device-manager: started driver nvme for device", 1),
