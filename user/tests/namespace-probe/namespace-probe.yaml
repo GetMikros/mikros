@@ -1,0 +1,13 @@
+# The manifest of the probe of namespaces built from the boot image, a
+# boot service of the namespaces test image.
+name: namespace-probe
+binary: /usr/bin/namespace-probe
+start: boot
+after: [tmpfs]
+namespace:
+  - path: /usr/share/probe
+    rights: r
+  - path: /var/lib/namespace-probe
+    rights: rw
+  - path: /etc
+    rights: r

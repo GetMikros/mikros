@@ -497,6 +497,38 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", tmpfs_image.display());
+            // The namespace test serves this image, with root=bootfs: the
+            // service manager, the broker, the temporary file system and a
+            // probe of its namespace, with their manifests, and files in
+            // /etc and /usr that the probe reads.
+            let namespace_probe = user_build("namespace-probe", kind)?;
+            println!("built    {}", namespace_probe.display());
+            let probe_dir = crate::workspace_root().join("user/tests/namespace-probe");
+            let namespace_probe_manifest = probe_dir.join("namespace-probe.yaml");
+            let probe_conf = probe_dir.join("probe.conf");
+            let probe_data = probe_dir.join("data.txt");
+            let namespaces_image = boot_image(
+                kind,
+                "namespaces.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/tmpfs", tmpfs.as_path()),
+                    ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
+                    ("usr/bin/namespace-probe", namespace_probe.as_path()),
+                    (
+                        "usr/lib/services/namespace-probe.yaml",
+                        namespace_probe_manifest.as_path(),
+                    ),
+                    ("usr/share/probe/data.txt", probe_data.as_path()),
+                    ("etc/probe.conf", probe_conf.as_path()),
+                ],
+            )?;
+            println!("built    {}", namespaces_image.display());
             // The device manager tests serve these images. Each holds the
             // service manager, the broker and the device manager with
             // their manifests, and test drivers: their manifests from
@@ -632,6 +664,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/broker.img", broker_image.as_path()),
                 ("tests/services.img", services_image.as_path()),
                 ("tests/tmpfs.img", tmpfs_image.as_path()),
+                ("tests/namespaces.img", namespaces_image.as_path()),
                 ("tests/devices.img", devices_image.as_path()),
                 ("tests/failing.img", failing_image.as_path()),
                 ("tests/pci.img", pci_image.as_path()),
