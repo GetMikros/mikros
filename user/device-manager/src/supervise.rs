@@ -1,17 +1,25 @@
-//! Supervising drivers: starting the driver bound to a device, and
-//! handling a `Start` that fails and a driver process that terminates
-//! without being stopped.
+//! Supervising drivers: starting the driver bound to a device, handling
+//! a `Start` that fails and a driver process that terminates without
+//! being stopped, and removing devices.
 
 use crate::devices::Devices;
+use crate::serve;
 use crate::start::{Started, Starter};
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::format;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use mikros_manifest::Driver;
-use mikros_rt::exec::Reactor;
-use mikros_rt::interfaces::__midl::OwnedHandle;
+use core::future::{Future, poll_fn};
+use core::pin::{Pin, pin};
+use core::task::Poll;
+use mikros_manifest::{Driver, Need};
+use mikros_rt::exec::{Reactor, Spawner};
+use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::driver::DeviceManager;
 use mikros_rt::sys;
 
 /// A driver is restarted at most this many times within `WINDOW`, as a
@@ -21,27 +29,37 @@ const WINDOW: i64 = 60_000_000_000;
 const TERMINATED: u32 = 1 << 4;
 const INFO_PROCESS: u32 = 2;
 const INFO_PROCESS_SIZE: usize = 0x28;
+/// How long a driver that is called `Stop` has before it is terminated.
+const STOP_LIMIT: i64 = 5_000_000_000;
 
 /// What the supervising tasks share: the devices, the drivers of the
-/// valid manifests, and what starting them takes.
+/// valid manifests, what starting them takes, and the executor's
+/// reactor and spawner.
 pub struct Manager {
     pub devices: RefCell<Devices>,
     pub drivers: Vec<Driver>,
     pub starter: Starter,
     pub reactor: Reactor,
+    pub spawner: Spawner,
 }
 
 /// Starts the driver bound to device `id`, and handles its end.
 ///
+/// A device with a parent gets a new bus channel for each start: the
+/// parent's driver is given one end with `ConnectChild`, and `Start`
+/// the other. When `ConnectChild` fails, the device fails. The
+/// `DeviceManager` channel that `Start` gives the driver is served from
+/// before the call.
+///
 /// When `Start` fails with a status, the driver declined the device: its
 /// process is terminated and the device fails. When the `Driver` channel
 /// fails before `Start` replies, the process is terminated, and that
-/// counts as a termination. Each time the process terminates, it is
-/// logged and the driver is started again, after the devices below this
-/// one are removed and, for a device with a parent, the parent's driver
-/// reset it with `ResetChild`, which may fail with `NOT_SUPPORTED`. After
-/// `RESTARTS_MAX` restarts within `WINDOW`, or when `ResetChild` fails
-/// otherwise, the device fails.
+/// counts as a termination. Each time the process terminates, unless the
+/// device is being removed, it is logged and the driver is started
+/// again, after the devices below this one are removed and, for a device
+/// with a parent, the parent's driver reset it with `ResetChild`, which
+/// may fail with `NOT_SUPPORTED`. After `RESTARTS_MAX` restarts within
+/// `WINDOW`, or when `ResetChild` fails otherwise, the device fails.
 pub async fn supervise(m: Rc<Manager>, id: u64) {
     let mut restarts = VecDeque::new();
     loop {
@@ -49,34 +67,66 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             return;
         };
         let name = &driver.name;
-        let prepared = match m.devices.borrow().get(id) {
-            Some(device) => m.starter.prepare(device, driver),
+        let (prepared, parent) = match m.devices.borrow().get(id) {
+            Some(device) => (m.starter.prepare(device, driver), device.parent),
             None => return,
         };
-        let spawned = match prepared {
-            Ok(prepared) => m.starter.start(prepared, driver).await,
-            Err(why) => Err(why),
+        let did_not_start = |why: &str| {
+            mikros_rt::log!(
+                Error,
+                "device-manager: driver {name} for device {id} did not start: {why}"
+            );
         };
-        let spawned = match spawned {
-            Ok(spawned) => spawned,
-            Err(why) => {
-                mikros_rt::log!(
-                    Error,
-                    "device-manager: driver {name} for device {id} did not start: {why}"
-                );
-                return;
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(why) => return did_not_start(&why),
+        };
+        let bus = match parent {
+            None => None,
+            Some(parent) => {
+                let dma = driver.needs.contains(&Need::Dma);
+                match connect_child(&m, parent, id, dma).await {
+                    Ok(bus) => Some(bus),
+                    Err(why) => {
+                        did_not_start(&format!("ConnectChild failed: {why}"));
+                        m.devices.borrow_mut().fail(id);
+                        return;
+                    }
+                }
             }
         };
+        let spawned = match m.starter.spawn(driver).await {
+            Ok(spawned) => spawned,
+            Err(why) => return did_not_start(&why),
+        };
         let pid = spawned.pid;
-        match spawned.started {
+        let removing = match m.devices.borrow_mut().get_mut(id) {
+            Some(device) => {
+                device.pid = Some(pid);
+                device.client = Some(spawned.driver.clone());
+                device.removing
+            }
+            None => true,
+        };
+        if removing {
+            m.starter.kill(pid).await;
+            return;
+        }
+        let Ok((manager, manager_server)) = endpoints::<DeviceManager>() else {
+            m.starter.kill(pid).await;
+            return did_not_start("creating its DeviceManager channel failed");
+        };
+        m.spawner.spawn(serve::serve(m.clone(), id, manager_server));
+        let started = m
+            .starter
+            .start(&spawned.driver, prepared, bus, manager)
+            .await;
+        match started {
             Started::Yes => {
                 mikros_rt::log!(
                     Info,
                     "device-manager: started driver {name} for device {id} as pid {pid}"
                 );
-                if let Some(device) = m.devices.borrow_mut().get_mut(id) {
-                    device.client = Some(spawned.driver.clone());
-                }
             }
             Started::Declined(status) => {
                 mikros_rt::log!(
@@ -96,8 +146,20 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             }
         }
         let ended = exited(&m.reactor, &spawned.process).await;
-        if let Some(device) = m.devices.borrow_mut().get_mut(id) {
-            device.client = None;
+        let removing = match m.devices.borrow_mut().get_mut(id) {
+            Some(device) => {
+                device.pid = None;
+                device.client = None;
+                device.removing
+            }
+            None => true,
+        };
+        if removing {
+            mikros_rt::log!(
+                Info,
+                "device-manager: stopped driver {name} for device {id}"
+            );
+            return;
         }
         match ended {
             Some((code, signal)) => mikros_rt::log!(
@@ -117,7 +179,10 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             m.devices.borrow_mut().fail(id);
             return;
         }
-        m.devices.borrow_mut().remove_descendants(id);
+        let children = m.devices.borrow().children(id);
+        for child in children {
+            remove(m.clone(), child).await;
+        }
         if !reset(&m, id).await {
             m.devices.borrow_mut().fail(id);
             return;
@@ -127,6 +192,78 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             "device-manager: restarting driver {name} for device {id}"
         );
     }
+}
+
+/// Removes device `id`: first the devices below it, deepest first, then
+/// the device itself. Its driver, when it has one, is called `Stop` and
+/// terminated when `Stop` replies, when the channel fails, or after
+/// `STOP_LIMIT`, and it is not started again.
+pub fn remove(m: Rc<Manager>, id: u64) -> Pin<Box<dyn Future<Output = ()>>> {
+    Box::pin(async move {
+        let children = m.devices.borrow().children(id);
+        for child in children {
+            remove(m.clone(), child).await;
+        }
+        let (client, pid) = match m.devices.borrow_mut().get_mut(id) {
+            Some(device) => {
+                device.removing = true;
+                (device.client.clone(), device.pid)
+            }
+            None => return,
+        };
+        if let Some(client) = client {
+            let deadline = now().saturating_add(STOP_LIMIT);
+            first(client.stop(), m.reactor.sleep_until(deadline)).await;
+        }
+        if let Some(pid) = pid {
+            m.starter.kill(pid).await;
+        }
+        m.devices.borrow_mut().remove(id);
+    })
+}
+
+/// Waits until `a` or `b` is done.
+async fn first(a: impl Future, b: impl Future) {
+    let (mut a, mut b) = (pin!(a), pin!(b));
+    poll_fn(|cx| {
+        let done = a.as_mut().poll(cx).is_ready() || b.as_mut().poll(cx).is_ready();
+        if done { Poll::Ready(()) } else { Poll::Pending }
+    })
+    .await
+}
+
+/// Has the driver of device `parent` serve its bus for its child `id`
+/// on a new channel, with `ConnectChild`, and returns the other end.
+async fn connect_child(
+    m: &Manager,
+    parent: u64,
+    id: u64,
+    dma: bool,
+) -> Result<OwnedHandle, String> {
+    let client = m
+        .devices
+        .borrow()
+        .get(parent)
+        .and_then(|p| p.client.clone());
+    let client = client.ok_or_else(|| String::from("its parent has no driver"))?;
+    let (ours, theirs) = channel()?;
+    match client.connect_child(id, theirs, dma).await {
+        Ok(Ok(_)) => Ok(ours),
+        Ok(Err(status)) => Err(format!("{status:?}")),
+        Err(e) => Err(format!("{e:?}")),
+    }
+}
+
+/// A new channel's two ends.
+fn channel() -> Result<(OwnedHandle, OwnedHandle), String> {
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    let status = unsafe { sys::channel_create(0, &mut a, &mut b) };
+    if status != mikros_rt::OK {
+        return Err(format!("creating a channel: {status}"));
+    }
+    // SAFETY: the kernel just created the handles for us.
+    Ok(unsafe { (OwnedHandle::from_raw(a), OwnedHandle::from_raw(b)) })
 }
 
 /// The driver bound to device `id`, if it has one.

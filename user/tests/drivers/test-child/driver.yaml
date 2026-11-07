@@ -1,0 +1,6 @@
+# A driver for the device that the host bridge's test driver adds, for
+# the device manager tests.
+name: test-child
+binary: /usr/lib/drivers/test-child/test-child
+match: [test:child]
+needs: [dma]

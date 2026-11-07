@@ -11,8 +11,10 @@ use mikros_rt::interfaces::mikros::driver::DriverAsyncClient;
 /// A device: its ID, name, hardware IDs from the most specific to the
 /// least, properties, parent, unless it is a root device, the
 /// resources of its hardware, the name of its driver once one is bound,
-/// whether it failed, which leaves it without a driver for good, and
-/// the client of its driver's `Driver` channel while the driver runs.
+/// whether it failed, which leaves it without a driver for good, the
+/// process ID of its driver and the client of the driver's `Driver`
+/// channel once the driver was spawned, and whether it is being
+/// removed, which stops its driver for good.
 pub struct Device {
     pub id: u64,
     pub name: String,
@@ -22,7 +24,9 @@ pub struct Device {
     pub resources: Vec<OwnedHandle>,
     pub driver: Option<String>,
     pub failed: bool,
+    pub pid: Option<u32>,
     pub client: Option<Rc<DriverAsyncClient>>,
+    pub removing: bool,
 }
 
 /// The devices, with the ID the next one gets.
@@ -60,7 +64,9 @@ impl Devices {
             resources,
             driver: None,
             failed: false,
+            pid: None,
             client: None,
+            removing: false,
         };
         mikros_rt::log!(Info, "device-manager: added {}", describe(&device));
         self.list.push(device);
@@ -88,6 +94,7 @@ impl Devices {
         if let Some(device) = self.get_mut(id) {
             device.failed = true;
             device.driver = None;
+            device.pid = None;
             device.client = None;
             mikros_rt::log!(
                 Error,
@@ -97,37 +104,43 @@ impl Devices {
         }
     }
 
-    /// Removes the devices below device `id`, and logs each one.
-    pub fn remove_descendants(&mut self, id: u64) {
-        let mut parents = alloc::vec![id];
-        while let Some(parent) = parents.pop() {
-            while let Some(at) = self.list.iter().position(|d| d.parent == Some(parent)) {
-                let child = self.list.remove(at);
-                mikros_rt::log!(
-                    Info,
-                    "device-manager: removed device {}, {}",
-                    child.id,
-                    child.name
-                );
-                parents.push(child.id);
-            }
+    /// The IDs of the children of device `id`, in the order they were
+    /// added.
+    pub fn children(&self, id: u64) -> Vec<u64> {
+        let children = self.list.iter().filter(|d| d.parent == Some(id));
+        children.map(|d| d.id).collect()
+    }
+
+    /// Removes device `id` from the list, and logs it.
+    pub fn remove(&mut self, id: u64) {
+        if let Some(at) = self.list.iter().position(|d| d.id == id) {
+            let device = self.list.remove(at);
+            mikros_rt::log!(Info, "device-manager: removed device {id}, {}", device.name);
         }
     }
 
     /// Binds a driver of `drivers` to each device without one that has
-    /// not failed, and logs which, or that none matches. A device that
-    /// several drivers match equally gets the first by name, with a
-    /// warning.
+    /// not failed, as `bind_device` does.
     pub fn bind(&mut self, drivers: &[Driver]) {
-        let unbound = self
-            .list
-            .iter_mut()
-            .filter(|d| d.driver.is_none() && !d.failed);
-        for device in unbound {
-            let (id, name) = (device.id, &device.name);
+        let unbound = self.list.iter().filter(|d| d.driver.is_none() && !d.failed);
+        let ids: Vec<u64> = unbound.map(|d| d.id).collect();
+        for id in ids {
+            self.bind_device(id, drivers);
+        }
+    }
+
+    /// Binds a driver of `drivers` to device `id`, and logs which, or
+    /// that none matches. When several drivers match it equally, it gets
+    /// the first by name, with a warning. Returns whether one was bound.
+    pub fn bind_device(&mut self, id: u64, drivers: &[Driver]) -> bool {
+        let Some(device) = self.get_mut(id) else {
+            return false;
+        };
+        let name = &device.name;
+        {
             let Some(choice) = mikros_manifest::choose(drivers, &device.hardware_ids) else {
                 mikros_rt::log!(Info, "device-manager: no driver for device {id}, {name}");
-                continue;
+                return false;
             };
             let (driver, matched) = (&choice.driver.name, choice.hardware_id);
             if !choice.passed_over.is_empty() {
@@ -143,6 +156,7 @@ impl Devices {
             );
             device.driver = Some(driver.clone());
         }
+        true
     }
 }
 

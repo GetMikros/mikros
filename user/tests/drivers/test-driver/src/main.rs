@@ -1,28 +1,46 @@
 //! The test drivers of the device manager tests, which do as their app
 //! ID says.
 //!
-//! Each serves `Driver` on its `PROVIDER` startup handle. `Stop` ends
-//! the driver, and `ResetChild` fails with `NOT_SUPPORTED`, as it adds
-//! no devices. `Start` depends on the app ID:
-//! - As `system.driver.test-host`, it succeeds when the driver is
-//!   started for the q35 host bridge, `pci-host-0`, as
+//! Each serves `Driver` on its `PROVIDER` startup handle, and `Stop`
+//! ends the driver. `Start` depends on the app ID:
+//! - As `system.driver.test-host`, a bus driver, it succeeds when the
+//!   driver is started for the q35 host bridge, `pci-host-0`, as
 //!   `platform:pci-host-ecam`, with its properties, no bus channel, and
 //!   an `MMIO` and a `DMA` resource in that order, and fails with
+//!   `INVALID_ARGS` otherwise. Once it succeeded, the driver checks that
+//!   the device manager refuses to add a device with an invalid hardware
+//!   ID, with `INVALID_ARGS`, and to remove its own device, with
+//!   `ACCESS_DENIED`, or one that does not exist, with `NOT_FOUND`. It
+//!   then adds a device `test-child` as `test:child` with a property
+//!   `slot` of `0`, or `checks-failed` when a check failed. It accepts
+//!   `ConnectChild`, and once the child's driver has written on the bus
+//!   channel, it removes the child, when `ConnectChild` said that the
+//!   child's driver needs `dma`. `ResetChild` succeeds.
+//! - As `system.driver.test-child`, it succeeds when it has a bus
+//!   channel, after writing a message on it, and fails with
 //!   `INVALID_ARGS` otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver ends without replying.
 //! - As any other, it fails with `INVALID_ARGS`.
+//!
+//! Drivers other than `test-host` fail `ResetChild` and `ConnectChild`
+//! with `NOT_SUPPORTED`.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
-use mikros_rt::exec::Executor;
+use alloc::rc::Rc;
+use alloc::vec;
+use core::cell::RefCell;
+use mikros_rt::exec::{Executor, Reactor};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DriverAsyncServer, DriverRequest, DriverStartRequest, DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
+    DriverResetChildResponse, DriverStartRequest, DriverStartResponse, DriverStopResponse,
+    Property,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -30,18 +48,21 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 mikros_rt::raw_main!(main);
 
 const HOST: &str = "system.driver.test-host";
+const CHILD: &str = "system.driver.test-child";
 const DECLINE: &str = "system.driver.test-decline";
 const CLOSE: &str = "system.driver.test-close";
 const KIND_MMIO: u32 = 1;
 const KIND_DMA: u32 = 4;
 const INFO_RESOURCE: u32 = 5;
 const INFO_RESOURCE_SIZE: usize = 0x18;
+const READABLE: u32 = 1 << 0;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
         return PANIC_EXIT_CODE;
     };
     let reactor = executor.reactor().clone();
+    let spawner = executor.spawner().clone();
     let received = executor.block_on(managed::receive_async(bootstrap, reactor.clone(), |_| {}));
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
@@ -55,31 +76,104 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let end = ServerEnd::new(managed.handles.remove(at).handle);
-    let server = DriverAsyncServer::new(end, reactor);
+    let server = DriverAsyncServer::new(end, reactor.clone());
+    let manager: Rc<RefCell<Option<Rc<DeviceManagerAsyncClient>>>> = Rc::default();
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
+            let host = app_id == HOST;
             let _ = match request {
                 DriverRequest::Start(request, responder) => {
                     let result = match app_id.as_str() {
                         HOST if expected(&request) => Ok(DriverStartResponse {}),
+                        CHILD => signal(request.bus.as_ref()).map(|()| DriverStartResponse {}),
                         DECLINE => Err(Status::NotSupported),
                         CLOSE => return 0,
                         _ => Err(Status::InvalidArgs),
                     };
-                    responder.reply(s, result)
+                    let started = result.is_ok();
+                    let replied = responder.reply(s, result);
+                    if host && started {
+                        let client =
+                            DeviceManagerAsyncClient::new(request.manager, reactor.clone());
+                        let client = Rc::new(client);
+                        *manager.borrow_mut() = Some(client.clone());
+                        spawner.spawn(add_child(client));
+                    }
+                    replied
                 }
                 DriverRequest::Stop(_, responder) => {
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                DriverRequest::ResetChild(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
+                DriverRequest::ResetChild(_, responder) => match host {
+                    true => responder.reply(s, Ok(DriverResetChildResponse {})),
+                    false => responder.reply(s, Err(Status::NotSupported)),
+                },
+                DriverRequest::ConnectChild(request, responder) => {
+                    let client = manager.borrow().clone();
+                    match (host, client) {
+                        (true, Some(client)) => {
+                            let replied = responder.reply(s, Ok(DriverConnectChildResponse {}));
+                            let (device, bus, dma) = (request.device, request.bus, request.dma);
+                            spawner.spawn(remove_child(client, reactor.clone(), device, bus, dma));
+                            replied
+                        }
+                        _ => responder.reply(s, Err(Status::NotSupported)),
+                    }
                 }
             };
         }
         0
     })
+}
+
+/// As the host bridge's driver: checks that the device manager refuses
+/// requests it should, and adds the child device, named after the
+/// outcome.
+async fn add_child(manager: Rc<DeviceManagerAsyncClient>) {
+    let bad = manager
+        .add_device("bad".into(), vec!["Bad:1".into()], vec![], vec![])
+        .await;
+    let own = manager.remove_device(1).await;
+    let unknown = manager.remove_device(999).await;
+    let checked = matches!(bad, Ok(Err(Status::InvalidArgs)))
+        && matches!(own, Ok(Err(Status::AccessDenied)))
+        && matches!(unknown, Ok(Err(Status::NotFound)));
+    let name = if checked {
+        "test-child"
+    } else {
+        "checks-failed"
+    };
+    let slot = Property {
+        key: "slot".into(),
+        value: "0".into(),
+    };
+    let _ = manager
+        .add_device(name.into(), vec!["test:child".into()], vec![slot], vec![])
+        .await;
+}
+
+/// As the host bridge's driver: once the driver of the child `device`
+/// wrote on its bus channel `bus`, removes the child, when `dma` says
+/// that its driver needs `dma`.
+async fn remove_child(
+    manager: Rc<DeviceManagerAsyncClient>,
+    reactor: Reactor,
+    device: u64,
+    bus: OwnedHandle,
+    dma: bool,
+) {
+    if reactor.signals(bus.raw(), READABLE).await.is_ok() && dma {
+        let _ = manager.remove_device(device).await;
+    }
+    drop(bus);
+}
+
+/// As the child's driver: writes a message on the bus channel `bus`.
+fn signal(bus: Option<&OwnedHandle>) -> Result<(), Status> {
+    let bus = bus.ok_or(Status::InvalidArgs)?;
+    mikros_rt::midl::channel_write(bus.raw(), b"started", &[]).map_err(|_| Status::Internal)
 }
 
 /// Whether `Start` describes the q35 host bridge with the resources

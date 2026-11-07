@@ -8707,7 +8707,13 @@ mod manager {
     /// manifest has no kind, which makes it normal, rather than the
     /// fallback one. It starts that driver as `system.driver.test-host`,
     /// whose `Start` succeeds only for the host bridge with its ECAM
-    /// range and a `DMA` resource. It says all of it in the log.
+    /// range and a `DMA` resource. That driver adds a child device, once
+    /// the device manager refused its invalid requests, and the device
+    /// manager starts the child's driver, after `ConnectChild` gave the
+    /// host's driver a bus channel for it. Once the child's driver wrote
+    /// on that channel, the host's driver removes the child: the device
+    /// manager stops its driver and removes the device. It says all of
+    /// it in the log.
     pub fn device_manager_adds_platform_devices(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -8724,6 +8730,23 @@ mod manager {
                 b"device-manager: started driver test-host for device 1 as pid",
                 1,
             ),
+            (
+                b"device-manager: added device 2, test-child, as test:child, under 1, with 0 resources, slot 0",
+                1,
+            ),
+            (
+                b"device-manager: bound driver test-child to device 2, test-child, as test:child",
+                1,
+            ),
+            (
+                b"device-manager: started driver test-child for device 2 as pid",
+                1,
+            ),
+            (
+                b"device-manager: stopped driver test-child for device 2",
+                1,
+            ),
+            (b"device-manager: removed device 2, test-child", 1),
         ];
         const FAILED: &[&[u8]] = &[
             b"no MCFG table",
@@ -8732,6 +8755,9 @@ mod manager {
             b"driver test-host declined",
             b"driver test-host for device 1 closed its channel",
             b"driver test-host for device 1 terminated",
+            b"checks-failed",
+            b"driver test-child for device 2 did not start",
+            b"driver test-child for device 2 terminated",
         ];
         let logged = device_manager_logs(s, b"tests/devices.img", false, EXPECTED, FAILED)?;
         ensure(

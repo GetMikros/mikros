@@ -20,6 +20,7 @@ extern crate alloc;
 mod acpi;
 mod devices;
 mod drivers;
+mod serve;
 mod start;
 mod supervise;
 
@@ -133,6 +134,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         drivers,
         starter,
         reactor,
+        spawner: spawner.clone(),
     });
     let bound = manager.devices.borrow().bound();
     for id in bound {

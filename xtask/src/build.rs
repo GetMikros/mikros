@@ -452,6 +452,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             };
             let drivers = [
                 ("test-host", true),
+                ("test-child", true),
                 ("test-fallback", false),
                 ("test-invalid", false),
             ];
