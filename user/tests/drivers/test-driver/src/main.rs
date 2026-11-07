@@ -45,13 +45,12 @@
 //!   `BAD_STATE`; after `DisableMsi`, `GetInterrupt` gives an event with
 //!   `WAIT` and without `SIGNAL`, and `AckInterrupt` succeeds. It fails
 //!   with `INVALID_ARGS` otherwise.
-//! - As `system.driver.test-disk`, the driver of each of the test
-//!   machine's disks, it succeeds when its bus channel serves `Block` for
-//!   it: `GetInfo` reports 512-byte blocks, the model `virtio-blk`,
-//!   `QEMU NVMe Ctrl` or `QEMU HARDDISK`, the serial `mikros` and a
-//!   writable disk; reads find the protective MBR's
-//!   signature in block 0 and the GPT header in block 1; requests of no
-//!   blocks or at an offset that is not a multiple of 4 fail with
+//! - As `system.driver.test-disk`, the driver of each partition on the
+//!   test machine's disks, it succeeds when its bus channel serves
+//!   `Block` for it: `GetInfo` reports 512-byte blocks, the model of a
+//!   disk, `virtio-blk`, `QEMU NVMe Ctrl` or `QEMU HARDDISK`, a partition
+//!   GUID as the serial and a writable partition; block 0 reads; requests
+//!   of no blocks or at an offset that is not a multiple of 4 fail with
 //!   `INVALID_ARGS`, and requests beyond the disk with `OUT_OF_RANGE`; a
 //!   buffer above 64 MiB succeeds, as bus connections have no limit;
 //!   `LockWritable` succeeds again after `UnlockWritable`; and the last
@@ -408,10 +407,10 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
         return false;
     };
     let described = info.block_size == 512
-        && info.block_count > 34
+        && info.block_count > 0
         && info.max_transfer_blocks > 0
         && MODELS.contains(&info.model.as_str())
-        && info.serial == "mikros"
+        && is_guid(&info.serial)
         && info.flags.0 & BlockFlags::READ_ONLY.0 == 0;
     let Ok(Ok(created)) = disk.create_buffer(8192).await else {
         return false;
@@ -438,8 +437,7 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
     fn ok<T, E>(reply: Result<Result<T, Status>, E>) -> bool {
         matches!(reply, Ok(Ok(_)))
     }
-    let mbr = ok(disk.read(id, 0, 0, 1).await) && bytes[510..512] == [0x55, 0xAA];
-    let gpt = ok(disk.read(id, 512, 1, 1).await) && &bytes[512..520] == b"EFI PART";
+    let first = ok(disk.read(id, 0, 0, 1).await);
     let none = disk.read(id, 0, 0, 0).await;
     let unaligned = disk.read(id, 2, 0, 1).await;
     let beyond = disk.read(id, 0, info.block_count, 1).await;
@@ -459,8 +457,7 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
         ok(disk.read(id, 4096, last, 1).await) && bytes[4096..4608] == bytes[2048..2560];
     let restored = ok(disk.write(id, 1024, last, 1, false).await) && ok(disk.flush().await);
     described
-        && mbr
-        && gpt
+        && first
         && matches!(none, Ok(Err(Status::InvalidArgs)))
         && matches!(unaligned, Ok(Err(Status::InvalidArgs)))
         && matches!(beyond, Ok(Err(Status::OutOfRange)))
@@ -471,6 +468,15 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
         && written
         && read_back
         && restored
+}
+
+/// Whether `text` is a GUID in lowercase with hyphens.
+fn is_guid(text: &str) -> bool {
+    text.len() == 36
+        && text.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        })
 }
 
 /// Maps the first page of the BAR at `base` from its `resource`.

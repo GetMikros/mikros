@@ -1,7 +1,7 @@
 //! `cargo xtask image`: creates a bootable GPT disk image.
 
 mod esp;
-mod gpt;
+pub(crate) mod gpt;
 mod root;
 
 use crate::build::{self, Kind};

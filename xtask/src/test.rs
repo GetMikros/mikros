@@ -141,22 +141,45 @@ fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
 
 /// The scratch disks of the test machine, in the directory of its serial
 /// log: one behind an NVMe controller and one on port 2 of the q35
-/// machine's AHCI controller.
-const SCRATCH_DISKS: [&str; 2] = ["nvme.img", "ahci.img"];
-/// The size of a scratch disk.
-const SCRATCH_SIZE: usize = 1 << 20;
+/// machine's AHCI controller, each with the GUIDs of its table and of
+/// its one partition.
+const SCRATCH_DISKS: [(&str, &str, &str); 2] = [
+    (
+        "nvme.img",
+        "4e564d65-0000-4000-8000-0000000000d1",
+        "4e564d65-0000-4000-8000-000000000001",
+    ),
+    (
+        "ahci.img",
+        "41484349-0000-4000-8000-0000000000d2",
+        "41484349-0000-4000-8000-000000000002",
+    ),
+];
+/// The size of a scratch disk, in sectors.
+const SCRATCH_SECTORS: u64 = 2048;
+/// The type of a scratch disk's partition: Linux file system data.
+const SCRATCH_TYPE: &str = "0fc63daf-8483-4772-8e79-3d69d8477de4";
 
-/// Creates the scratch disks next to `log`, each holding the protective
-/// MBR's signature in block 0 and a GPT header's signature in block 1,
-/// as the test disk driver expects of every disk, and zeros otherwise.
+/// Creates the scratch disks next to `log`. Each is a GPT disk of 1 MiB
+/// whose one partition, named `scratch`, spans every usable block, LBA
+/// 34 to 2014, and holds zeros.
 pub fn scratch_disks(log: &Path) -> Result<()> {
+    use crate::image::gpt;
     let dir = log.parent().unwrap_or(Path::new("."));
-    let mut image = vec![0u8; SCRATCH_SIZE];
-    image[510..512].copy_from_slice(&[0x55, 0xAA]);
-    image[512..520].copy_from_slice(b"EFI PART");
-    for name in SCRATCH_DISKS {
+    for (name, disk_guid, partition_guid) in SCRATCH_DISKS {
+        let mut image = std::io::Cursor::new(vec![0u8; (SCRATCH_SECTORS * gpt::SECTOR) as usize]);
+        let partition = gpt::Partition {
+            type_guid: uuid::Uuid::parse_str(SCRATCH_TYPE)?,
+            guid: uuid::Uuid::parse_str(partition_guid)?,
+            name: "scratch",
+            first_lba: 34,
+            last_lba: SCRATCH_SECTORS - 34,
+        };
+        let disk_guid = uuid::Uuid::parse_str(disk_guid)?;
+        gpt::write(&mut image, SCRATCH_SECTORS, disk_guid, &[partition])?;
         let path = dir.join(name);
-        fs::write(&path, &image).with_context(|| format!("writing {}", path.display()))?;
+        fs::write(&path, image.into_inner())
+            .with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
 }
@@ -184,11 +207,11 @@ pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
             "-device",
             "edu,dma_mask=0xffffffff",
             "-drive",
-            &drive("scratch-nvme", SCRATCH_DISKS[0]),
+            &drive("scratch-nvme", SCRATCH_DISKS[0].0),
             "-device",
             "nvme,drive=scratch-nvme,serial=mikros",
             "-drive",
-            &drive("scratch-ahci", SCRATCH_DISKS[1]),
+            &drive("scratch-ahci", SCRATCH_DISKS[1].0),
             "-device",
             "ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros",
             "-no-reboot",
@@ -445,6 +468,32 @@ ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
             code_ranges(symbols, &IDLE_FUNCTIONS),
             Err("kernel_core::sched::halt_until_interrupt")
         );
+    }
+
+    #[test]
+    fn scratch_disks_hold_one_partition_over_every_usable_block() {
+        let dir = std::env::temp_dir().join(format!("scratch-disks-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        scratch_disks(&dir.join("serial.log")).unwrap();
+        for (name, _, partition_guid) in SCRATCH_DISKS {
+            let d = fs::read(dir.join(name)).unwrap();
+            assert_eq!(d.len(), 1 << 20);
+            let u64_at = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+            assert_eq!(&d[510..512], &[0x55, 0xaa]);
+            assert_eq!(&d[512..520], b"EFI PART");
+            assert_eq!(&d[2047 * 512..2047 * 512 + 8], b"EFI PART");
+            // The primary header's last usable LBA, and the one entry.
+            assert_eq!(u64_at(512 + 48), 2014);
+            let entry = &d[1024..1024 + 128];
+            let guid = uuid::Uuid::from_bytes_le(entry[16..32].try_into().unwrap());
+            assert_eq!(guid.to_string(), partition_guid);
+            let ty = uuid::Uuid::from_bytes_le(entry[0..16].try_into().unwrap());
+            assert_eq!(ty.to_string(), SCRATCH_TYPE);
+            assert_eq!(u64_at(1024 + 32), 34);
+            assert_eq!(u64_at(1024 + 40), 2014);
+            assert!(d[1024 + 128..1024 + 256].iter().all(|&b| b == 0));
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

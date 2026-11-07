@@ -141,6 +141,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let ahci = user_build("ahci", kind)?;
             println!("built    {}", ahci.display());
             let ahci_manifest = crate::workspace_root().join("user/drivers/ahci/driver.yaml");
+            let partition = user_build("partition", kind)?;
+            println!("built    {}", partition.display());
+            let partition_manifest =
+                crate::workspace_root().join("user/drivers/partition/driver.yaml");
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let devices_manifest =
@@ -177,6 +181,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/lib/drivers/nvme/driver.yaml", nvme_manifest.as_path()),
                 ("usr/lib/drivers/ahci/ahci", ahci.as_path()),
                 ("usr/lib/drivers/ahci/driver.yaml", ahci_manifest.as_path()),
+                ("usr/lib/drivers/partition/partition", partition.as_path()),
+                (
+                    "usr/lib/drivers/partition/driver.yaml",
+                    partition_manifest.as_path(),
+                ),
             ];
             boot_image(kind, "boot.img", &members)?
         }
@@ -455,6 +464,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", nvme.display());
             let ahci = user_build("ahci", kind)?;
             println!("built    {}", ahci.display());
+            let partition = user_build("partition", kind)?;
+            println!("built    {}", partition.display());
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let device_image = |file: &str,
@@ -508,7 +519,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", failing_image.display());
             // The PCI bus driver tests serve this image, with the bus
             // driver and test drivers for the host bridge's function, for
-            // QEMU's edu device and for the e1000e function.
+            // QEMU's edu device and for the e1000e function, and the
+            // storage drivers, with the partition driver and a test driver
+            // for each partition.
             let pci_bus_files = [
                 (
                     "usr/lib/drivers/pci-bus/pci-bus".to_owned(),
@@ -535,6 +548,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "usr/lib/drivers/ahci/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/ahci/driver.yaml"),
+                ),
+                (
+                    "usr/lib/drivers/partition/partition".to_owned(),
+                    partition.clone(),
+                ),
+                (
+                    "usr/lib/drivers/partition/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/partition/driver.yaml"),
                 ),
             ];
             let pci_image = device_image(

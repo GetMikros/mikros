@@ -8850,12 +8850,18 @@ mod manager {
     /// manager has the bus driver reset the function before each of its
     /// five restarts. The virtio-blk driver drives the test machine's
     /// disk, adds it as `disk-0`, publishes its raw access service, and
-    /// serves `Block` to the test driver for the disk, whose `Start`
-    /// succeeds only when reads, writes, flushes and refusals work as
-    /// they should. The NVMe driver does the same for the scratch disk
+    /// serves `Block` to the partition driver for the disk. The NVMe
+    /// driver does the same for the scratch disk
     /// behind the NVMe controller, as `disk-1`, and the AHCI driver for
-    /// the one on port 2 of the AHCI controller, as `disk-2`. The device
-    /// manager says all of it in the log.
+    /// the one on port 2 of the AHCI controller, as `disk-2`. The
+    /// partition driver reads each disk's GPT and adds its partitions:
+    /// the scratch partition `part-1` of each scratch disk, and the EFI
+    /// system partition `part-1` and root partition `part-2` of the test
+    /// machine's disk. Each publishes its raw access service and serves
+    /// `Block` to the test driver for the partition, whose `Start`
+    /// succeeds only when reads, writes, flushes, the writable lock and
+    /// refusals work as they should. The device manager says all of it
+    /// in the log.
     pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -8879,7 +8885,21 @@ mod manager {
                 b", disk-0, as storage:disk, under 4, with 0 resources",
                 1,
             ),
-            (b"device-manager: started driver test-disk for device", 3),
+            (b"device-manager: started driver test-disk for device", 4),
+            (b"device-manager: bound driver partition to device", 3),
+            (b"device-manager: started driver partition for device", 3),
+            (
+                b", part-1, as gpt:0fc63daf-8483-4772-8e79-3d69d8477de4, under",
+                2,
+            ),
+            (
+                b", part-1, as gpt:c12a7328-f81f-11d2-ba4b-00a0c93ec93b, under",
+                1,
+            ),
+            (
+                b", part-2, as gpt:fa730af6-8ba3-42d9-b155-466909d08135, under",
+                1,
+            ),
             (b"device-manager: bound driver nvme to device", 1),
             (b", as pci:c010802", 1),
             (b"device-manager: started driver nvme for device", 1),
@@ -8888,7 +8908,7 @@ mod manager {
             (b", pci-0000:00:1f.2, as pci:c010601", 1),
             (b"device-manager: started driver ahci for device", 1),
             (b", disk-2, as storage:disk, under", 1),
-            (b"device-manager: published device.storage ", 3),
+            (b"device-manager: published device.storage ", 7),
             (
                 b"device-manager: driver test-reset for device 3 failed after 5 restarts",
                 1,
@@ -8905,6 +8925,7 @@ mod manager {
             b"driver test-disk declined",
             b"driver nvme declined",
             b"driver ahci declined",
+            b"driver partition declined",
         ];
         let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
         ensure("adding the PCI functions and starting their driver", logged)
