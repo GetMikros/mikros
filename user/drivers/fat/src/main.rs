@@ -4,9 +4,10 @@
 //! basic data types, reads and writes the partition through the `Block`
 //! channel that `Start` gives it as `bus`, and publishes the volume as a
 //! service of class `filesystem` that serves `mikros.fs.Filesystem`.
-//! The volume is served read-only for now. `Start` fails with
-//! `NOT_SUPPORTED` for a partition that does not hold a valid FAT
-//! volume. `ResetChild` and `ConnectChild` fail with `NOT_SUPPORTED`.
+//! `Start` fails with `NOT_SUPPORTED` for a partition that does not hold
+//! a valid FAT volume. `Stop` writes what remains and marks the volume as
+//! shut down cleanly. `ResetChild` and `ConnectChild` fail with
+//! `NOT_SUPPORTED`.
 
 #![no_std]
 #![no_main]
@@ -30,7 +31,7 @@ use mikros_rt::interfaces::mikros::driver::{
     DriverStartResponse, DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
-use mikros_rt::interfaces::mikros::service::Provider;
+use mikros_rt::interfaces::mikros::service::{DirectoryClient, Provider};
 use mikros_rt::interfaces::mikros::storage::BlockClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
@@ -58,6 +59,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let end = ServerEnd::new(managed.handles.remove(at).handle);
     let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
     let process = managed.header.process.raw();
+    let directory = DirectoryClient::new(managed.header.directory);
     let mut served: Option<Rc<Fs>> = None;
     executor.block_on(async {
         while let Ok(request) = server.next().await {
@@ -67,7 +69,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     responder.reply(s, Err(Status::BadState))
                 }
                 DriverRequest::Start(request, responder) => {
-                    match start(request, process, &reactor, &spawner) {
+                    match start(request, process, &directory, &reactor, &spawner) {
                         Ok((fs, manager)) => {
                             served = Some(fs.clone());
                             let replied = responder.reply(s, Ok(DriverStartResponse {}));
@@ -78,6 +80,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     }
                 }
                 DriverRequest::Stop(_, responder) => {
+                    if let Some(fs) = &served {
+                        fs.unmount();
+                    }
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
@@ -94,7 +99,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 }
 
 /// Mounts the volume on the partition behind the `bus` channel of
-/// `request`, read-only, and returns it
+/// `request`, for writing unless the disk is read-only, and returns it
 /// and the device manager. Fails with `INVALID_ARGS` without a bus
 /// channel, with `NO_RESOURCES` when the disk gives no buffer, with
 /// `NOT_SUPPORTED` when the partition holds no valid FAT volume, and with
@@ -102,18 +107,20 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 fn start(
     request: DriverStartRequest,
     process: sys::Handle,
+    directory: &DirectoryClient,
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(Rc<Fs>, DeviceManagerAsyncClient), Status> {
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let block = BlockClient::new(ClientEnd::new(bus));
     let device = BlockDevice::new(block, process).ok_or(Status::NoResources)?;
-    let size = device.size();
-    let volume = Volume::mount(device, size, false).map_err(|e| match e {
+    let (size, writable) = (device.size(), !device.read_only());
+    let volume = Volume::mount(device, size, writable).map_err(|e| match e {
         mikros_fat::Error::Invalid => Status::NotSupported,
         _ => Status::Internal,
     })?;
-    let fs = Rc::new(Fs::new(volume, reactor.clone(), spawner.clone()));
+    let utc = time::Utc::new(directory, process);
+    let fs = Rc::new(Fs::new(volume, utc, reactor.clone(), spawner.clone()));
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     Ok((fs, manager))
 }

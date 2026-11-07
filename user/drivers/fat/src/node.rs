@@ -1,10 +1,12 @@
 //! One connection to a node of the volume.
 
 use crate::fs::{self, Fs, Target};
+use crate::time;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
+use mikros_fat::{Dir, FILE_MAX};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;
 
@@ -54,6 +56,7 @@ impl Connection {
                     attributes.map(|attributes| NodeGetAttributesResponse { attributes }),
                 )
             }
+            R::SetAttributes(q, r) => r.reply(s, self.set_attributes(q)),
             R::Clone(q, r) => r.reply(s, self.clone(q)),
             R::Sync(_, r) => {
                 let synced = self.fs.volume.borrow_mut().sync().map_err(fs::error);
@@ -71,20 +74,32 @@ impl Connection {
                     .map(|data| NodeReadResponse { data }),
             ),
             R::ReadNext(q, r) => r.reply(s, self.read_next(q.count)),
+            R::Write(q, r) => {
+                let written = self
+                    .write(Some(q.offset), &q.data)
+                    .map(|_| q.data.len() as u32);
+                r.reply(s, written.map(|written| NodeWriteResponse { written }))
+            }
+            R::Append(q, r) => r.reply(
+                s,
+                self.write(None, &q.data)
+                    .map(|offset| NodeAppendResponse { offset }),
+            ),
+            R::WriteNext(q, r) => r.reply(s, self.write_next(&q.data)),
+            R::Truncate(q, r) => {
+                r.reply(s, self.truncate(q.size).map(|()| NodeTruncateResponse {}))
+            }
             R::Seek(q, r) => r.reply(s, self.seek(q.offset, q.origin)),
             R::Open(q, r) => r.reply(s, self.open(q)),
             R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes)),
+            R::Unlink(q, r) => r.reply(
+                s,
+                self.unlink(&q.name, q.directory)
+                    .map(|()| NodeUnlinkResponse {}),
+            ),
+            R::GetToken(_, r) => r.reply(s, self.token()),
+            R::Rename(q, r) => r.reply(s, self.rename(q).map(|()| NodeRenameResponse {})),
             R::ReadLink(_, r) => r.reply(s, Err(Error::Invalid)),
-            // Everything that would change the volume, which is served
-            // read-only.
-            R::SetAttributes(_, r) => r.reply(s, Err(self.write_denied())),
-            R::Write(_, r) => r.reply(s, Err(self.write_denied())),
-            R::Append(_, r) => r.reply(s, Err(self.write_denied())),
-            R::WriteNext(_, r) => r.reply(s, Err(self.write_denied())),
-            R::Truncate(_, r) => r.reply(s, Err(self.write_denied())),
-            R::Unlink(_, r) => r.reply(s, Err(self.write_denied())),
-            R::GetToken(_, r) => r.reply(s, Err(self.write_denied())),
-            R::Rename(_, r) => r.reply(s, Err(self.write_denied())),
             // What FAT cannot hold.
             R::CloneRange(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Link(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -108,12 +123,13 @@ impl Connection {
         }
     }
 
-    /// The error of an operation that would change the volume: without
-    /// `WRITE` the right is missing, and with it the volume is read-only.
-    fn write_denied(&self) -> Error {
-        match self.rights.contains(Rights::WRITE) {
-            true => Error::ReadOnly,
-            false => Error::AccessDenied,
+    /// Checks that the connection may change the file system: it needs
+    /// `WRITE`, and the volume must be writable.
+    fn require_write(&self) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        match self.fs.read_only() {
+            true => Err(Error::ReadOnly),
+            false => Ok(()),
         }
     }
 
@@ -126,6 +142,31 @@ impl Connection {
                 false => Ok(id),
             },
         }
+    }
+
+    fn set_attributes(
+        &self,
+        q: NodeSetAttributesRequest,
+    ) -> Result<NodeSetAttributesResponse, Error> {
+        if q.mask.contains(AttributeMask::MODE) {
+            return Err(Error::NotSupported);
+        }
+        self.require_write()?;
+        let Target::Node(id) = self.target else {
+            return Err(Error::NotSupported);
+        };
+        let accessed = q
+            .mask
+            .contains(AttributeMask::ACCESSED)
+            .then(|| time::to_stamp(q.accessed));
+        let modified = q
+            .mask
+            .contains(AttributeMask::MODIFIED)
+            .then(|| time::to_stamp(q.modified));
+        self.fs.with_node(id, |volume, node| {
+            volume.set_times(node, accessed, modified)
+        })?;
+        Ok(NodeSetAttributesResponse {})
     }
 
     fn clone(&self, q: NodeCloneRequest) -> Result<NodeCloneResponse, Error> {
@@ -150,6 +191,40 @@ impl Connection {
         let data = self.read(self.cursor, count)?;
         self.cursor += data.len() as u64;
         Ok(NodeReadNextResponse { data })
+    }
+
+    /// Writes `data` at `offset`, or at the end without one, and returns
+    /// where it went.
+    fn write(&self, offset: Option<u64>, data: &[u8]) -> Result<u64, Error> {
+        self.require_write()?;
+        let id = self.file()?;
+        let now = self.fs.now();
+        self.fs
+            .with_node(id, |volume, node| {
+                let at = offset.unwrap_or(node.size());
+                volume.write(node, at, data, now).map(|()| at)
+            })
+            .map_err(|e| too_big(offset, data.len(), e))
+    }
+
+    fn write_next(&mut self, data: &[u8]) -> Result<NodeWriteNextResponse, Error> {
+        let offset = if self.append { None } else { Some(self.cursor) };
+        let at = self.write(offset, data)?;
+        self.cursor = at + data.len() as u64;
+        Ok(NodeWriteNextResponse {
+            written: data.len() as u32,
+        })
+    }
+
+    fn truncate(&self, size: u64) -> Result<(), Error> {
+        self.require_write()?;
+        if size > FILE_MAX {
+            return Err(Error::TooBig);
+        }
+        let id = self.file()?;
+        let now = self.fs.now();
+        self.fs
+            .with_node(id, |volume, node| volume.truncate(node, size, now))
     }
 
     fn seek(&mut self, offset: i64, origin: SeekOrigin) -> Result<NodeSeekResponse, Error> {
@@ -197,7 +272,14 @@ impl Connection {
             Ok(node) if want_dir && !node.is_directory() => return Err(Error::NotDirectory),
             Ok(node) => node,
             Err(mikros_fat::Error::NotFound) if q.flags.contains(OpenFlags::CREATE) => {
-                return Err(self.write_denied());
+                self.require_write()?;
+                let directory = q.flags.contains(OpenFlags::DIRECTORY);
+                let now = self.fs.now();
+                self.fs
+                    .volume
+                    .borrow_mut()
+                    .create(dir, last, directory, now)
+                    .map_err(fs::error)?
             }
             Err(e) => return Err(fs::error(e)),
         };
@@ -208,7 +290,13 @@ impl Connection {
         };
         let target = self.fs.target(node);
         if q.flags.contains(OpenFlags::TRUNCATE) && r#type == NodeType::File {
-            return Err(self.write_denied());
+            self.require_write()?;
+            let Target::Node(id) = target else {
+                return Err(Error::Io);
+            };
+            let now = self.fs.now();
+            self.fs
+                .with_node(id, |volume, node| volume.truncate(node, 0, now))?;
         }
         let append = q.flags.contains(OpenFlags::APPEND);
         self.fs.serve(q.node, target, q.rights, append);
@@ -248,6 +336,63 @@ impl Connection {
             next: u64::from(next),
         })
     }
+
+    fn unlink(&self, name: &str, directory: bool) -> Result<(), Error> {
+        self.require_write()?;
+        let dir = self.fs.dir(self.target)?;
+        check_component(name)?;
+        let mut volume = self.fs.volume.borrow_mut();
+        let node = volume.find(dir, name).map_err(fs::error)?;
+        volume.remove(dir, name, directory).map_err(fs::error)?;
+        self.fs.removed(node.parent, node.slot);
+        Ok(())
+    }
+
+    fn token(&self) -> Result<NodeGetTokenResponse, Error> {
+        self.require(Rights::WRITE)?;
+        let dir = self.fs.dir(self.target)?;
+        Ok(NodeGetTokenResponse {
+            token: self.fs.token(dir)?,
+        })
+    }
+
+    fn rename(&self, q: NodeRenameRequest) -> Result<(), Error> {
+        self.require_write()?;
+        let from = self.fs.dir(self.target)?;
+        check_component(&q.name)?;
+        check_component(&q.new_name)?;
+        let to: Dir = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        let mut volume = self.fs.volume.borrow_mut();
+        let node = volume.find(from, &q.name).map_err(fs::error)?;
+        // An entry that the rename replaces is gone; its slots may take
+        // the moved entry.
+        if let Ok(existing) = volume.find(to, &q.new_name)
+            && (existing.parent, existing.slot) != (node.parent, node.slot)
+        {
+            let moved = volume
+                .rename(from, &q.name, to, &q.new_name)
+                .map_err(fs::error)?;
+            self.fs.removed(existing.parent, existing.slot);
+            self.fs.moved(node.parent, node.slot, &moved);
+            return Ok(());
+        }
+        let moved = volume
+            .rename(from, &q.name, to, &q.new_name)
+            .map_err(fs::error)?;
+        self.fs.moved(node.parent, node.slot, &moved);
+        Ok(())
+    }
+}
+
+/// `TOO_BIG` for a write that would take the file past what FAT holds,
+/// and `e` otherwise.
+fn too_big(offset: Option<u64>, len: usize, e: Error) -> Error {
+    let past = offset.is_some_and(|at| at.saturating_add(len as u64) > FILE_MAX);
+    if past && e == Error::NoSpace {
+        Error::TooBig
+    } else {
+        e
+    }
 }
 
 /// The components of the path of `Open`, without `.`, and whether it
@@ -269,4 +414,14 @@ fn components(path: &str) -> Result<(Vec<&str>, bool), Error> {
         }
     }
     Ok((parts, trailing))
+}
+
+/// Checks a name that `Unlink` or `Rename` gets.
+fn check_component(name: &str) -> Result<(), Error> {
+    match name {
+        "" | "." | ".." => Err(Error::Invalid),
+        n if n.contains('/') => Err(Error::Invalid),
+        n if n.len() > NAME_MAX => Err(Error::NameTooLong),
+        _ => Ok(()),
+    }
 }

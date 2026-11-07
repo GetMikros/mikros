@@ -2,7 +2,7 @@
 //! mapped into the server, with sync calls.
 
 use mikros_fat::{Device, Error};
-use mikros_rt::interfaces::mikros::storage::{BlockClient, BlockInfo};
+use mikros_rt::interfaces::mikros::storage::{BlockClient, BlockFlags, BlockInfo};
 use mikros_rt::sys;
 
 const PERM_READ: u32 = 1 << 0;
@@ -61,6 +61,10 @@ impl BlockDevice {
     /// The size of the partition in bytes.
     pub fn size(&self) -> u64 {
         self.info.block_count * self.block_size
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.info.flags.0 & BlockFlags::READ_ONLY.0 != 0
     }
 
     fn buffer(&mut self) -> &mut [u8] {
