@@ -1,7 +1,8 @@
 //! The accounts service: a system service that keeps the users in the
 //! file `users` of `/var/lib/accounts/` and provides
 //! `mikros.session.Accounts`. It asks the permission broker about its
-//! clients' permissions through its directory.
+//! clients' permissions, and the session manager for administrators'
+//! authorizations, through its directory.
 
 #![no_std]
 #![no_main]
@@ -31,8 +32,10 @@ mikros_rt::raw_main!(main);
 
 /// The protocol the service provides.
 const PROTOCOL: &str = "mikros.session.Accounts";
-/// The directory of the service's data.
+/// The directory of the service's data, and that of users' home
+/// folders.
 const DATA: &str = "/var/lib/accounts";
+const HOMES: &str = "/Users";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -60,9 +63,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     drop(fs);
+    let homes = managed::take_entry(&mut managed.namespace, HOMES)
+        .filter(|(_, at)| *at == ".")
+        .map(|(homes, _)| NodeAsyncClient::new(homes, reactor.clone()));
     let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
     let checks = Checks::new(directory, reactor.clone());
-    let service = Rc::new(Service::new(store, checks, reactor.clone()));
+    let service = Rc::new(Service::new(store, checks, homes, reactor.clone()));
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {

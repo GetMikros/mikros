@@ -1,17 +1,17 @@
-//! Serving one client's `Accounts` connection. Each request but
-//! `ListUsers` runs as a task of its own, so that one that waits, such
-//! as a delayed attempt, does not hold up the others. Changes are not
-//! served yet.
+//! Serving one client's `Accounts` connection. Each request runs as a
+//! task of its own, so that one that waits, such as a delayed attempt
+//! or an administrator's authorization, does not hold up the others.
 
 use crate::service::{Secret, Service};
 use alloc::rc::Rc;
 use mikros_rt::exec::Spawner;
 use mikros_rt::interfaces::__midl::ServerEnd;
-use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::interfaces::mikros::session::{
-    Accounts, AccountsAsyncServer, AccountsAuthenticateResponse, AccountsListUsersResponse,
-    AccountsRequest, User, UserKind,
+    Accounts, AccountsAsyncServer, AccountsAuthenticateResponse, AccountsCreateUserResponse,
+    AccountsDeleteUserResponse, AccountsListUsersResponse, AccountsRequest,
+    AccountsSetFullNameResponse, AccountsSetKindResponse, AccountsSetPasswordResponse, User,
+    UserKind,
 };
 use mikros_userdb::{Kind, Record};
 
@@ -39,11 +39,30 @@ pub async fn serve(
                     let user = v.authenticate(c, &q.name, password).await;
                     r.reply(s, user.map(|user| AccountsAuthenticateResponse { user }))
                 }
-                AccountsRequest::CreateUser(_, r) => r.reply(s, Err(Status::NotSupported)),
-                AccountsRequest::DeleteUser(_, r) => r.reply(s, Err(Status::NotSupported)),
-                AccountsRequest::SetPassword(_, r) => r.reply(s, Err(Status::NotSupported)),
-                AccountsRequest::SetKind(_, r) => r.reply(s, Err(Status::NotSupported)),
-                AccountsRequest::SetFullName(_, r) => r.reply(s, Err(Status::NotSupported)),
+                AccountsRequest::CreateUser(q, r) => {
+                    let password = Secret(q.password);
+                    let created = v
+                        .create_user(c, &q.name, &q.full_name, q.kind, password)
+                        .await;
+                    r.reply(s, created.map(|user| AccountsCreateUserResponse { user }))
+                }
+                AccountsRequest::DeleteUser(q, r) => {
+                    let deleted = v.delete_user(c, q.user, q.delete_home).await;
+                    r.reply(s, deleted.map(|()| AccountsDeleteUserResponse {}))
+                }
+                AccountsRequest::SetPassword(q, r) => {
+                    let (old, new) = (Secret(q.old_password), Secret(q.new_password));
+                    let set = v.set_password(c, q.user, old, new).await;
+                    r.reply(s, set.map(|()| AccountsSetPasswordResponse {}))
+                }
+                AccountsRequest::SetKind(q, r) => {
+                    let set = v.set_kind(c, q.user, q.kind).await;
+                    r.reply(s, set.map(|()| AccountsSetKindResponse {}))
+                }
+                AccountsRequest::SetFullName(q, r) => {
+                    let set = v.set_full_name(c, q.user, &q.full_name).await;
+                    r.reply(s, set.map(|()| AccountsSetFullNameResponse {}))
+                }
             };
         });
     }

@@ -8,4 +8,6 @@ provides:
 namespace:
   - path: /var/lib/accounts
     rights: rw
-permissions: [permissions.check]
+  - path: /Users
+    rights: rw
+permissions: [permissions.check, session.authorize]
