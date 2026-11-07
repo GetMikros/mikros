@@ -241,3 +241,30 @@ fn places_buses_devices_and_functions_in_the_ecam_range() {
         (1 << 20) | (31 << 15) | (7 << 12) | 0xFFC
     );
 }
+
+#[test]
+fn walks_capabilities_and_finds_the_msi_registers() {
+    let mut fake = Fake::default();
+    let f = at(0, 2, 0);
+    let function = fake.add(f, &VIRTIO_BLOCK, 0);
+    let mut put = |offset: usize, bytes: &[u8]| {
+        function.space[offset..offset + bytes.len()].copy_from_slice(bytes);
+    };
+    put(usize::from(STATUS), &(1u16 << 4).to_le_bytes());
+    put(usize::from(CAPABILITIES), &[0x40]);
+    // Power management, then MSI with 64-bit addresses and masking,
+    // then MSI-X, whose next pointer leads back to MSI.
+    put(0x40, &[0x01, 0x50]);
+    put(0x50, &[CAP_MSI, 0x70]);
+    put(0x52, &((1u16 << 7) | (1 << 8)).to_le_bytes());
+    put(0x70, &[CAP_MSIX, 0x50]);
+    assert_eq!(
+        capabilities(&fake, f),
+        [(0x01, 0x40), (CAP_MSI, 0x50), (CAP_MSIX, 0x70)]
+    );
+    assert_eq!(msi_registers(&fake, f), [0x50..0x68, 0x70..0x7C]);
+    // Without the status bit there is no list.
+    let plain = at(0, 3, 0);
+    fake.add(plain, &VIRTIO_BLOCK, 0);
+    assert!(capabilities(&fake, plain).is_empty());
+}

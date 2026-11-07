@@ -1,6 +1,6 @@
 //! PCI configuration space, for the PCI bus driver: finding the
-//! functions behind a host bridge, their hardware IDs, and the sizes of
-//! their BARs.
+//! functions behind a host bridge, their hardware IDs, the sizes of
+//! their BARs, and their capabilities.
 //!
 //! The configuration space is reached through `Config`, which the bus
 //! driver implements over its ECAM range and the tests over memory.
@@ -12,6 +12,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 #[cfg(test)]
 mod tests;
@@ -20,6 +21,7 @@ mod tests;
 pub const VENDOR_ID: u16 = 0x00;
 pub const DEVICE_ID: u16 = 0x02;
 pub const COMMAND: u16 = 0x04;
+pub const STATUS: u16 = 0x06;
 pub const REVISION: u16 = 0x08;
 pub const PROG_IF: u16 = 0x09;
 pub const SUBCLASS: u16 = 0x0A;
@@ -28,11 +30,25 @@ pub const HEADER_TYPE: u16 = 0x0E;
 pub const BAR0: u16 = 0x10;
 pub const SUBSYSTEM_VENDOR_ID: u16 = 0x2C;
 pub const SUBSYSTEM_ID: u16 = 0x2E;
+pub const CAPABILITIES: u16 = 0x34;
 pub const INTERRUPT_PIN: u16 = 0x3D;
 
-/// The command register's memory and I/O decoding bits.
+/// The command register's memory and I/O decoding bits, and its bus
+/// mastering bit.
 pub const COMMAND_IO: u16 = 1 << 0;
 pub const COMMAND_MEMORY: u16 = 1 << 1;
+pub const COMMAND_BUS_MASTER: u16 = 1 << 2;
+/// The status register's bit for a capability list.
+const STATUS_CAPABILITIES: u16 = 1 << 4;
+/// The IDs of the MSI and MSI-X capabilities.
+pub const CAP_MSI: u8 = 0x05;
+pub const CAP_MSIX: u8 = 0x11;
+/// The bits of the MSI message control register that make the
+/// capability longer: 64-bit addresses and per-vector masking.
+const MSI_64: u16 = 1 << 7;
+const MSI_MASKING: u16 = 1 << 8;
+/// The most capabilities a function's list is followed for.
+const CAPABILITIES_MAX: usize = 48;
 /// The vendor ID that no function has.
 const NO_VENDOR: u16 = 0xFFFF;
 /// The header type bit of a device with more than one function, and
@@ -226,4 +242,43 @@ pub fn size_bars(config: &mut impl Config, at: Address) -> Vec<Bar> {
     }
     config.write(at, COMMAND, 2, command);
     bars
+}
+
+/// The capabilities of the function at `at`, by ID and offset, in the
+/// order of its list. A list that loops, or points below the header, is
+/// followed no further.
+pub fn capabilities(config: &impl Config, at: Address) -> Vec<(u8, u16)> {
+    let mut found = Vec::new();
+    if config.read(at, STATUS, 2) as u16 & STATUS_CAPABILITIES == 0 {
+        return found;
+    }
+    let mut next = config.read(at, CAPABILITIES, 1) as u16 & 0xFC;
+    while next >= 0x40 && found.len() < CAPABILITIES_MAX {
+        let id = config.read(at, next, 1) as u8;
+        if found.iter().any(|&(_, offset)| offset == next) {
+            break;
+        }
+        found.push((id, next));
+        next = config.read(at, next + 1, 1) as u16 & 0xFC;
+    }
+    found
+}
+
+/// The registers of the MSI and MSI-X capabilities of the function at
+/// `at`, which only the bus driver writes.
+pub fn msi_registers(config: &impl Config, at: Address) -> Vec<Range<u16>> {
+    let mut ranges = Vec::new();
+    for (id, offset) in capabilities(config, at) {
+        let len = match id {
+            CAP_MSI => {
+                let control = config.read(at, offset + 2, 2) as u16;
+                let address = if control & MSI_64 != 0 { 14 } else { 10 };
+                address + if control & MSI_MASKING != 0 { 10 } else { 0 }
+            }
+            CAP_MSIX => 12,
+            _ => continue,
+        };
+        ranges.push(offset..offset + len);
+    }
+    ranges
 }
