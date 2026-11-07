@@ -4,7 +4,7 @@ members = ["device-manager", "drivers/ahci", "drivers/fat", "drivers/nvme", "dri
 # Built here as a dependency, and host-tested in the root workspace,
 # except `std`, a workspace of its own for programs that use the
 # standard library.
-exclude = ["bootfs", "fat", "gpt", "manifest", "memfs", "pci", "permissions", "std", "ustar", "yaml"]
+exclude = ["bootfs", "fat", "gpt", "manifest", "memfs", "pci", "permissions", "std", "userdb", "ustar", "yaml"]
 
 [workspace.package]
 version = "0.0.0"
