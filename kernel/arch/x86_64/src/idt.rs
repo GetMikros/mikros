@@ -645,12 +645,33 @@ fn defer_debug() -> bool {
     use crate::thread_arch::ThreadX86;
     let dr6 = crate::cpu::read_dr(6);
     match crate::sched::current() {
-        Some(thread) if thread.x86().has_breakpoints() && dr6 & 0xF != 0 => {
+        Some(thread) if thread.x86().has_breakpoints() && from_breakpoints(dr6) => {
+            if dr6 & DR6_BREAKPOINTS == 0 {
+                crate::log::log!(
+                    Warning,
+                    "a debug exception in kernel mode with DR6 {dr6:#x}, which names no cause, is taken as a breakpoint of the running thread"
+                );
+            }
             thread.x86().defer_debug(dr6);
             true
         }
         _ => false,
     }
+}
+
+/// The DR6 bits of breakpoints 0 to 3 that hit, and of the other causes
+/// of a debug exception: a debug register access, a single step and a
+/// task switch.
+const DR6_BREAKPOINTS: u64 = 0xF;
+const DR6_OTHER_CAUSES: u64 = 1 << 13 | 1 << 14 | 1 << 15;
+
+/// Whether a debug exception in kernel mode, while the running user thread
+/// has breakpoints enabled, was raised by one of them, as DR6 `dr6` says:
+/// it names one of them, or names no cause at all. The kernel uses
+/// neither breakpoints nor single steps itself, and some hypervisors
+/// deliver the debug exception of a breakpoint without its DR6 bit.
+fn from_breakpoints(dr6: u64) -> bool {
+    dr6 & DR6_BREAKPOINTS != 0 || dr6 & DR6_OTHER_CAUSES == 0
 }
 
 #[cfg(test)]
@@ -673,6 +694,18 @@ mod tests {
         assert_eq!(&types[10..22], &[8, 8, 8, 8, 2, 1, 5, 9, 1, 5, 1, 8]);
         assert_eq!(types[31], kind::GENERAL);
         assert!(fatal(2) && fatal(8) && fatal(18) && !fatal(14));
+    }
+
+    #[test]
+    fn takes_debug_exceptions_without_another_cause_as_breakpoints() {
+        // DR6 with its reserved bits set: breakpoint 1 hit; no cause; a
+        // single step; a debug register access; a task switch.
+        assert!(from_breakpoints(0xFFFF_0FF2));
+        assert!(from_breakpoints(0xFFFF_0FF0));
+        assert!(!from_breakpoints(0xFFFF_4FF0));
+        assert!(!from_breakpoints(0xFFFF_2FF0));
+        assert!(!from_breakpoints(0xFFFF_8FF0));
+        assert!(from_breakpoints(0xFFFF_4FF1));
     }
 
     #[test]

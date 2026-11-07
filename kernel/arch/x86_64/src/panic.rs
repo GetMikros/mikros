@@ -249,6 +249,8 @@ pub fn exception(frame: &Frame) -> ! {
         ("cr4", cr4),
         ("cs", f.cs),
         ("ss", f.ss),
+        ("dr6", crate::cpu::read_dr(6)),
+        ("dr7", crate::cpu::read_dr(7)),
     ];
     stop(&Exception(frame), &registers, f.rbp)
 }
