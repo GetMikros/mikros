@@ -69,6 +69,7 @@ pub fn read(fd: i64, buf: *mut u8, len: u64) -> i64 {
             }
         }
         Description::Directory(..) => -EISDIR,
+        Description::Epoll(_) => -EINVAL,
     }
 }
 
@@ -121,6 +122,7 @@ pub fn write(fd: i64, buf: *const u8, len: u64) -> i64 {
             Err(_) => -EIO,
         },
         Description::Directory(..) => -EISDIR,
+        Description::Epoll(_) => -EINVAL,
     }
 }
 
@@ -144,7 +146,7 @@ pub fn pread(fd: i64, buf: *mut u8, len: u64, offset: i64) -> i64 {
             }
         }
         Description::Directory(..) => -EISDIR,
-        Description::Stream(_) => -ESPIPE,
+        Description::Stream(_) | Description::Epoll(_) => -ESPIPE,
     }
 }
 
@@ -163,7 +165,7 @@ pub fn pwrite(fd: i64, buf: *const u8, len: u64, offset: i64) -> i64 {
             Err(_) => -EIO,
         },
         Description::Directory(..) => -EISDIR,
-        Description::Stream(_) => -ESPIPE,
+        Description::Stream(_) | Description::Epoll(_) => -ESPIPE,
     }
 }
 
@@ -184,7 +186,7 @@ pub fn lseek(fd: i64, offset: i64, whence: i64) -> i64 {
             Err(_) => -EIO,
         },
         Description::Directory(_, listing) => crate::dir::seek(listing, offset, whence),
-        Description::Stream(_) => -ESPIPE,
+        Description::Stream(_) | Description::Epoll(_) => -ESPIPE,
     }
 }
 

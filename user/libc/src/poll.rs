@@ -300,6 +300,11 @@ fn wait(fds: &mut [Pollfd], deadline: i64, mut mask: Option<u64>) -> i64 {
                 entry.revents = entry.events & (INPUT | OUTPUT);
                 ready |= entry.revents != 0;
             }
+            // An epoll instance is not waited on.
+            Description::Epoll(_) => {
+                entry.revents = POLLNVAL;
+                ready = true;
+            }
         }
     }
     // The first packet is waited for until the deadline, unless a

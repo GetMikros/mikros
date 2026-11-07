@@ -114,6 +114,13 @@ pub fn fstat(fd: i64, out: *mut Kstat) -> i64 {
             blksize: BLOCK_SIZE,
             ..Kstat::default()
         }),
+        // An anonymous file, as on Linux.
+        Description::Epoll(_) => Ok(Kstat {
+            mode: 0o600,
+            nlink: 1,
+            blksize: BLOCK_SIZE,
+            ..Kstat::default()
+        }),
     };
     store(out, st)
 }

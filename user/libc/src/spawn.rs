@@ -163,7 +163,9 @@ unsafe fn apply(descriptors: &mut Descriptors, actions: *const Fdop) -> Result<(
 fn handles(descriptors: &Descriptors) -> Result<Vec<StartupHandle>, i64> {
     let mut out = Vec::new();
     for (&fd, (description, cloexec)) in descriptors {
-        if *cloexec {
+        // An epoll instance leaves the descriptor closed in the new
+        // program.
+        if *cloexec || !fd::passed(description) {
             continue;
         }
         if out.len() == HANDLES_MAX || fd > fd::ID_FD as usize {
