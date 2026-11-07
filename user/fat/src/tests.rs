@@ -181,6 +181,10 @@ fn reads_volumes_of_each_type() {
         let mut big = volume.find(docs, "a rather long file name.DATA").unwrap();
         let expected: Vec<u8> = (0..5000u32).map(|i| i as u8).collect();
         assert_eq!(read_all(&mut volume, &mut big), expected);
+        assert_eq!(volume.allocated(big.cluster()).unwrap(), 5120);
+        assert_eq!(volume.allocated(0).unwrap(), 0);
+        let offset = volume.entry_offset(&big).unwrap();
+        assert!(offset >= volume.layout().data_start && offset % 32 == 0);
         let mut part = [0u8; 700];
         assert_eq!(volume.read(&mut big, 4600, &mut part).unwrap(), 400);
         assert_eq!(&part[..400], &expected[4600..]);

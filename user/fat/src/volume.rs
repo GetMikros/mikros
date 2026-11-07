@@ -368,6 +368,37 @@ impl<D: Device> Volume<D> {
         Ok(())
     }
 
+    /// Where the short entry of `node` lies on the volume, in bytes.
+    pub fn entry_offset(&mut self, node: &Node) -> Result<u64, Error> {
+        self.slot_at(node.parent, node.slot)?.ok_or(Error::Io)
+    }
+
+    /// How many bytes the clusters of `dir` take: those of its chain, and
+    /// none for the fixed root directory.
+    pub fn allocated_dir(&mut self, dir: Dir) -> Result<u64, Error> {
+        match dir {
+            Dir::Root => Ok(0),
+            Dir::Cluster(first) => self.allocated(first),
+        }
+    }
+
+    /// How many bytes the chain of clusters that starts at `first` takes,
+    /// 0 for none.
+    pub fn allocated(&mut self, first: u32) -> Result<u64, Error> {
+        if first == 0 {
+            return Ok(0);
+        }
+        let (mut count, mut cluster) = (1u64, first);
+        while let Some(next) = table::next(&mut self.disk, &self.layout, cluster)? {
+            cluster = next;
+            count += 1;
+            if count > u64::from(self.layout.clusters) {
+                return Err(Error::Io);
+            }
+        }
+        Ok(count * u64::from(self.layout.cluster_size))
+    }
+
     /// Reads the entry of `node` again, from where it lies.
     pub fn reload(&mut self, node: &mut Node) -> Result<(), Error> {
         let at = self
