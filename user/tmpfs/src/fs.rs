@@ -14,7 +14,8 @@ use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{
     Error, Filesystem, FilesystemAsyncServer, FilesystemGetRootResponse, FilesystemInfo,
-    FilesystemQueryFilesystemResponse, FilesystemRequest, Node, Rights, WatchKind,
+    FilesystemQueryFilesystemResponse, FilesystemRequest, Node, Rights, SocketListenerClient,
+    WatchKind,
 };
 use mikros_rt::sys;
 
@@ -23,7 +24,13 @@ const INFO_BASIC: u32 = 1;
 const TOKEN_RIGHTS: u32 = 1 << 0 | 1 << 1 | 1 << 9;
 const PAGE: u32 = 4096;
 
-pub type Nodes = Tree<File, ()>;
+pub type Nodes = Tree<File, Socket>;
+
+/// What a socket node refers to: the listener that its connections go
+/// to.
+pub struct Socket {
+    pub listener: SocketListenerClient,
+}
 
 /// A byte-range lock: its owner, a connection, whether it is exclusive,
 /// and its range, `end` excluded.

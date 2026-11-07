@@ -1,8 +1,8 @@
 //! A program that the service manager starts as a boot service after the
 //! temporary file system, to drive it as a client. It connects to
 //! `mikros.fs.Filesystem` through its directory and checks files,
-//! directories, links, names, memory objects, locks and watches on the
-//! root it gets. It exits with 0 when every check passed, or with the
+//! directories, links, names, memory objects, locks, watches and
+//! sockets on the root it gets. It exits with 0 when every check passed, or with the
 //! number of the first that failed.
 
 #![no_std]
@@ -16,7 +16,8 @@ use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
     Error, Filesystem, FilesystemClient, LockKind, MemoryFlags, Node, NodeClient, NodeType,
-    OpenFlags, Rights, WatchKind, WatchMask, Watcher, WatcherRequest, WatcherServer,
+    OpenFlags, Rights, SocketListener, SocketListenerRequest, SocketListenerServer, SocketType,
+    WatchKind, WatchMask, Watcher, WatcherRequest, WatcherServer,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -57,7 +58,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let checked = check(&root)
         .and_then(|()| memory(&root, process))
         .and_then(|()| locks(&root))
-        .and_then(|()| watches(&root));
+        .and_then(|()| watches(&root))
+        .and_then(|()| sockets(&root));
     match checked {
         Ok(()) => 0,
         Err(failed) => failed,
@@ -352,6 +354,58 @@ fn watches(root: &NodeClient) -> Result<(), i64> {
     expect(moved != 0 && changes == expected, 32)?;
     expect(ok(dir.unwatch(7, FOREVER)).is_some(), 33)?;
     expect(err(dir.unwatch(7, FOREVER)) == Some(Error::NotFound), 33)?;
+    Ok(())
+}
+
+/// Whether socket nodes behave: a connection reaches the listener with
+/// its type, a name taken or of another kind is refused, opening a
+/// socket fails, and once the listener has closed, connecting is
+/// refused.
+fn sockets(root: &NodeClient) -> Result<(), i64> {
+    let (client, server) = endpoints::<SocketListener>().map_err(|_| 34)?;
+    expect(
+        ok(root.bind_socket("sock".into(), 0o600, client, FOREVER)).is_some(),
+        34,
+    )?;
+    let (again, _) = endpoints::<SocketListener>().map_err(|_| 34)?;
+    let taken = root.bind_socket("sock".into(), 0o600, again, FOREVER);
+    expect(err(taken) == Some(Error::Exists), 34)?;
+    let (ours, theirs) = mikros_rt::midl::channel_create().map_err(|_| 35)?;
+    // SAFETY: the channel was just created for us.
+    let (_ours, theirs) = unsafe {
+        (
+            mikros_rt::interfaces::__midl::OwnedHandle::from_raw(ours),
+            mikros_rt::interfaces::__midl::OwnedHandle::from_raw(theirs),
+        )
+    };
+    expect(
+        ok(root.connect_socket("sock".into(), SocketType::Stream, theirs, FOREVER)).is_some(),
+        35,
+    )?;
+    let listener = SocketListenerServer::new(server);
+    let Ok(SocketListenerRequest::Accept(accepted)) = listener.next(FOREVER) else {
+        return Err(36);
+    };
+    expect(accepted.r#type == SocketType::Stream, 36)?;
+    let (_, other) = mikros_rt::midl::channel_create().map_err(|_| 37)?;
+    // SAFETY: the channel end was just created for us.
+    let other = unsafe { mikros_rt::interfaces::__midl::OwnedHandle::from_raw(other) };
+    let not_socket = root.connect_socket("m".into(), SocketType::Stream, other, FOREVER);
+    expect(err(not_socket) == Some(Error::Invalid), 37)?;
+    expect(
+        matches!(
+            open(root, "sock", OpenFlags(0), RW),
+            Err(Some(Error::Invalid))
+        ),
+        38,
+    )?;
+    drop(listener);
+    let (_, late) = mikros_rt::midl::channel_create().map_err(|_| 39)?;
+    // SAFETY: the channel end was just created for us.
+    let late = unsafe { mikros_rt::interfaces::__midl::OwnedHandle::from_raw(late) };
+    let refused = root.connect_socket("sock".into(), SocketType::Stream, late, FOREVER);
+    expect(err(refused) == Some(Error::Refused), 39)?;
+    expect(ok(root.unlink("sock".into(), false, FOREVER)).is_some(), 40)?;
     Ok(())
 }
 

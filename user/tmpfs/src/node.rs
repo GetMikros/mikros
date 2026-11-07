@@ -1,7 +1,7 @@
 //! One connection to a node of the file system.
 
 use crate::file::{Failed, File};
-use crate::fs::{self, Fs};
+use crate::fs::{self, Fs, Socket};
 use crate::watch::event;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::future::poll_fn;
 use core::task::Poll;
 use mikros_memfs::{Directory, Id, Kind, Resolved};
-use mikros_rt::interfaces::__midl::ServerEnd;
+use mikros_rt::interfaces::__midl::{Error as MidlError, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::*;
 
 /// The most bytes one read returns, the limit of its reply.
@@ -165,8 +165,13 @@ impl Connection {
             ),
             R::Watch(q, r) => r.reply(s, self.watch(q).map(|()| NodeWatchResponse {})),
             R::Unwatch(q, r) => r.reply(s, self.unwatch(q.cookie).map(|()| NodeUnwatchResponse {})),
-            R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::ConnectSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::BindSocket(q, r) => {
+                r.reply(s, self.bind_socket(q).map(|()| NodeBindSocketResponse {}))
+            }
+            R::ConnectSocket(q, r) => {
+                let connected = self.connect_socket(q);
+                r.reply(s, connected.map(|()| NodeConnectSocketResponse {}))
+            }
         };
     }
 
@@ -317,6 +322,49 @@ impl Connection {
         self.with_file(|_| Ok(()))?;
         self.fs.unlock(self.node, self.owner, range(start, length)?);
         Ok(())
+    }
+
+    /// Adds a socket node `q.name` with the mode `q.mode` to this
+    /// directory, referring to `q.listener`.
+    fn bind_socket(&self, q: NodeBindSocketRequest) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        let socket = Socket {
+            listener: SocketListenerClient::new(q.listener),
+        };
+        let mode = q.mode & MODE_BITS;
+        let mut tree = self.fs.tree.borrow_mut();
+        let created = tree.create(
+            self.node,
+            &q.name,
+            Kind::Socket(socket),
+            mode,
+            self.user,
+            fs::now(),
+        );
+        drop(tree);
+        created.map_err(fs::error)?;
+        self.fs
+            .watches
+            .notify(self.node, &[event(WatchKind::Created, 0, &q.name)]);
+        Ok(())
+    }
+
+    /// Sends `Accept` with `q.connection` and `q.type` to the listener of
+    /// the socket node `q.name` of this directory: `INVALID` for a node
+    /// that is not a socket, `REFUSED` once the listener has closed, and
+    /// `WOULD_BLOCK` when it cannot take the message.
+    fn connect_socket(&self, q: NodeConnectSocketRequest) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        let tree = self.fs.tree.borrow();
+        let id = tree.lookup(self.node, &q.name).map_err(fs::error)?;
+        let Some(Kind::Socket(socket)) = tree.get(id).map(|n| &n.kind) else {
+            return Err(Error::Invalid);
+        };
+        match socket.listener.accept(q.connection, q.r#type) {
+            Ok(()) => Ok(()),
+            Err(MidlError::Closed) => Err(Error::Refused),
+            Err(_) => Err(Error::WouldBlock),
+        }
     }
 
     /// Watches this node for the changes `q.mask` selects, sending events
