@@ -127,8 +127,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", services.display());
             let broker = user_build("permissions-broker", kind)?;
             println!("built    {}", broker.display());
+            let devices = user_build("device-manager", kind)?;
+            println!("built    {}", devices.display());
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
+            let devices_manifest =
+                crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let members = [
                 ("init", init.as_path()),
                 ("usr/bin/process-manager", manager.as_path()),
@@ -137,6 +141,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "usr/lib/services/permissions.yaml",
                     broker_manifest.as_path(),
+                ),
+                ("usr/bin/device-manager", devices.as_path()),
+                (
+                    "usr/lib/services/device-manager.yaml",
+                    devices_manifest.as_path(),
                 ),
             ];
             boot_image(kind, "boot.img", &members)?
@@ -399,9 +408,32 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", services_image.display());
+            // The device manager tests serve this image, which holds the
+            // service manager, the broker and the device manager with
+            // their manifests.
+            let devices = user_build("device-manager", kind)?;
+            println!("built    {}", devices.display());
+            let devices_manifest =
+                crate::workspace_root().join("user/device-manager/device-manager.yaml");
+            let devices_members = [
+                ("usr/bin/service-manager", services.as_path()),
+                ("usr/bin/permissions-broker", broker.as_path()),
+                (
+                    "usr/lib/services/permissions.yaml",
+                    broker_manifest.as_path(),
+                ),
+                ("usr/bin/device-manager", devices.as_path()),
+                (
+                    "usr/lib/services/device-manager.yaml",
+                    devices_manifest.as_path(),
+                ),
+            ];
+            let devices_image = boot_image(kind, "devices.img", &devices_members)?;
+            println!("built    {}", devices_image.display());
             let members = [
                 ("tests/broker.img", broker_image.as_path()),
                 ("tests/services.img", services_image.as_path()),
+                ("tests/devices.img", devices_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),

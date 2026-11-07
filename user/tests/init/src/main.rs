@@ -8518,37 +8518,8 @@ mod manager {
             b"service directory-probe exited",
             b"service directory-probe ended",
         ];
-        let image = boot_file(s, b"tests/services.img")?;
-        let mut mem = 0;
-        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
-        // SAFETY: the out pointer is valid for the call.
-        check("creating the image", unsafe {
-            sys::mem_create(size, 0, &mut mem)
-        })?;
-        // SAFETY: the handle was just created for us.
-        let mem = unsafe { OwnedHandle::from_raw(mem) };
-        // SAFETY: the pointer describes `image`.
-        check("writing the image", unsafe {
-            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
-        })?;
-        let mut reader = 0;
-        // SAFETY: the out pointer is valid for the call.
-        check("creating a log reader", unsafe {
-            sys::log_reader_create(s.log, 0, &mut reader)
-        })?;
-        // SAFETY: the handle was just created for us.
-        let reader = unsafe { OwnedHandle::from_raw(reader) };
-        let mut m = start(s)?;
-        let (mut startup, init) = start_message(s, &m, 1)?;
-        startup.boot_image = mem;
-        m.send(startup, false)?;
-        // Starting it while the last test's processes are torn down can
-        // take seconds when emulated.
+        let (m, init, reader) = serving(s, b"tests/services.img")?;
         let deadline = super::within(super::PROBE_SECONDS);
-        ensure(
-            "registering init",
-            matches!(init.register(deadline), Ok(Ok(_))),
-        )?;
         let log = StartupHandle {
             role: HandleRole::User,
             id: 2,
@@ -8634,6 +8605,132 @@ mod manager {
             "passing every check, restarting five times, and starting on demand",
             outcome == Some(true),
         )
+    }
+
+    /// A process manager serving the boot image member `image` as its
+    /// boot file system, with init registered, the client of its
+    /// `InitBootstrap` endpoint, and a reader of the log from before it
+    /// started.
+    fn serving(s: &Startup, image: &[u8]) -> Result<(Manager, InitBootstrapClient, OwnedHandle)> {
+        let image = boot_file(s, image)?;
+        let mut mem = 0;
+        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the image", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `image`.
+        check("writing the image", unsafe {
+            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
+        })?;
+        let mut reader = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating a log reader", unsafe {
+            sys::log_reader_create(s.log, 0, &mut reader)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let reader = unsafe { OwnedHandle::from_raw(reader) };
+        let mut m = start(s)?;
+        let (mut startup, init) = start_message(s, &m, 1)?;
+        startup.boot_image = mem;
+        m.send(startup, false)?;
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        Ok((m, init, reader))
+    }
+
+    /// From a boot image with the service manager, the permission
+    /// broker, the device manager and their manifests, the service
+    /// manager starts the device manager with the root resource, the log
+    /// and init's own platform information. The device manager adds a
+    /// PCI host bridge from the MCFG table of the q35 machine, with its
+    /// ECAM range as its one resource, and says so in the log.
+    pub fn device_manager_adds_platform_devices(s: &Startup) -> Result {
+        const EXPECTED: [&[u8]; 1] = [
+            b"device-manager: added device 1, pci-host-0, as platform:pci-host-ecam, with 1 resource, segment 0, bus_start 0, bus_end 255",
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service device-manager exited",
+            b"service device-manager ended",
+            b"no MCFG table",
+        ];
+        let (m, init, reader) = serving(s, b"tests/devices.img")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let message = s.message();
+        let mut info = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the platform information", unsafe {
+            sys::mem_create(
+                (message.len() as u64).next_multiple_of(super::PAGE_SIZE),
+                0,
+                &mut info,
+            )
+        })?;
+        // SAFETY: the kernel just created the handle for us.
+        let info = unsafe { OwnedHandle::from_raw(info) };
+        // SAFETY: the pointer and length describe `message`.
+        check("writing the platform information", unsafe {
+            sys::mem_write(info.raw(), 0, message.as_ptr(), message.len() as u64)
+        })?;
+        let user = |id, handle| StartupHandle {
+            role: HandleRole::User,
+            id,
+            handle,
+        };
+        let handles = alloc::vec![
+            user(1, copy(s.root_resource, SAME_RIGHTS)?),
+            user(2, copy(s.log, SAME_RIGHTS)?),
+            user(5, info),
+        ];
+        let reply = init.start_service_manager(handles, deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        let mut seen = [false; EXPECTED.len()];
+        let outcome = loop {
+            if seen.iter().all(|&s| s) {
+                break Some(true);
+            }
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            for (seen, expected) in seen.iter_mut().zip(EXPECTED) {
+                *seen |= super::contains(message, expected);
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        if outcome.is_none() {
+            mikros_rt::log!(Error, "device manager lines seen: {seen:?}");
+        }
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("adding the host bridge", outcome == Some(true))
     }
 
     /// The process manager ends without serving init when `Start` has
@@ -8938,6 +9035,7 @@ mod bootfs {
                         "call-server",
                         "channel-echo",
                         "debuggee",
+                        "devices.img",
                         "launcher.img",
                         "managed",
                         "pie",
@@ -9123,7 +9221,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 131] = [
+const TESTS: [(&str, Test); 132] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9189,6 +9287,10 @@ const TESTS: [(&str, Test); 131] = [
     (
         "service_manager_starts_boot_services",
         manager::service_manager_starts_boot_services,
+    ),
+    (
+        "device_manager_adds_platform_devices",
+        manager::device_manager_adds_platform_devices,
     ),
     (
         "executor_waits_on_objects",

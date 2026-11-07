@@ -1,0 +1,7 @@
+# The service manifest of the device manager, installed as
+# usr/lib/services/device-manager.yaml.
+name: device-manager
+binary: /usr/bin/device-manager
+start: boot
+boot_handles: [root_resource, log_manage, framebuffer, platform_info]
+permissions: [process.set_identity, permissions.check, permissions.grant_system, services.register]

@@ -40,6 +40,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "device-manager"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "directory-probe"
 version = "0.0.0"
 dependencies = [
