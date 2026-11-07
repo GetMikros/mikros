@@ -1,11 +1,9 @@
 //! What a file holds: a resizable anonymous memory object, made on the
-//! first write, and the file's size, which the object covers rounded up
-//! to a page.
-//!
-//! TODO: the object's pages are charged to the server's own budget, not
-//! to the process that writes the data (MIKSPEC-0050.R9,
-//! MIKSPEC-0021.R15).
+//! first write and charged to the budget of the nearest directory above
+//! the file that has one, or the server's own, and the file's size,
+//! which the object covers rounded up to a page.
 
+use alloc::rc::Rc;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::sys;
 
@@ -16,6 +14,8 @@ const PAGE: u64 = 4096;
 pub struct File {
     pub mem: Option<OwnedHandle>,
     pub size: u64,
+    /// The budget to charge the object to when it is made.
+    pub charge: Option<Rc<OwnedHandle>>,
 }
 
 /// Why changing a file failed.
@@ -52,8 +52,16 @@ impl File {
         match &self.mem {
             None => {
                 let mut raw = 0;
-                // SAFETY: the out pointer is valid for the call.
-                if unsafe { sys::mem_create(capacity, RESIZABLE, &mut raw) } != mikros_rt::OK {
+                // SAFETY: the out pointer is valid for the calls.
+                let status = unsafe {
+                    match self.charge.take() {
+                        Some(budget) => {
+                            sys::mem_create_charged(budget.raw(), capacity, RESIZABLE, &mut raw)
+                        }
+                        None => sys::mem_create(capacity, RESIZABLE, &mut raw),
+                    }
+                };
+                if status != mikros_rt::OK {
                     return Err(Failed::NoSpace);
                 }
                 // SAFETY: the kernel just created the handle for us.

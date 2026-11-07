@@ -1,12 +1,14 @@
 //! The temporary file system: a system service that keeps a file system
-//! in memory and provides it as `mikros.fs.Filesystem`. The directory
-//! connects to it only clients with the protocol's permission.
+//! in memory and provides it as `mikros.fs.Filesystem`, and the budgets
+//! that its files are charged to as `mikros.fs.TemporaryFilesystem`. The
+//! directory connects to it only clients with the protocols' permission.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod budget;
 mod file;
 mod fs;
 mod node;
@@ -22,8 +24,9 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
 
-/// The protocol the service provides.
+/// The protocols the service provides.
 const PROTOCOL: &str = "mikros.fs.Filesystem";
+const TEMPORARY: &str = "mikros.fs.TemporaryFilesystem";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -49,9 +52,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
             // Other protocols and named instances are not ours; dropping
             // the server end closes the connection.
-            if c.protocol == PROTOCOL && c.instance.is_none() {
+            if c.instance.is_some() {
+                continue;
+            }
+            if c.protocol == PROTOCOL {
                 let end = ServerEnd::new(c.server);
                 spawner.spawn(fs::serve_filesystem(fs.clone(), end, c.client.user));
+            } else if c.protocol == TEMPORARY {
+                spawner.spawn(budget::serve(fs.clone(), ServerEnd::new(c.server)));
             }
         }
     });

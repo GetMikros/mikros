@@ -183,3 +183,17 @@ fn lists_in_a_stable_order() {
     );
     assert!(t.list(ROOT, next, 10).unwrap().0.is_empty());
 }
+
+#[test]
+fn ancestors_lead_to_the_root() {
+    let mut t = T::new(0o755, 0, 1);
+    let a = mkdir(&mut t, ROOT, "a");
+    let b = mkdir(&mut t, a, "b");
+    let f = file(&mut t, b, "f");
+    assert_eq!(t.ancestors(f), vec![b, a, ROOT]);
+    assert_eq!(t.ancestors(a), vec![ROOT]);
+    assert_eq!(t.ancestors(ROOT), Vec::<Id>::new());
+    // A file with a second name keeps its first directory.
+    t.link(b, "f", ROOT, "g", 2).unwrap();
+    assert_eq!(t.ancestors(f), vec![b, a, ROOT]);
+}

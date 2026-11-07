@@ -8724,10 +8724,11 @@ mod manager {
     /// their manifests, the service manager starts the temporary file
     /// system and the union server, and then the probes, which hold the
     /// permissions to connect to them. The tmpfs probe drives files,
-    /// directories, links, names, memory objects, locks, watches and
-    /// sockets, and the union probe views of two layers on the temporary
-    /// file system. Each exits with 0 once every check passed, as the
-    /// service manager logs.
+    /// directories, links, names, memory objects, locks, watches, sockets
+    /// and the budgets of directories, with a budget under the one that
+    /// init gives, and the union probe views of two layers on the
+    /// temporary file system. Each exits with 0 once every check passed,
+    /// as the service manager logs.
     pub fn tmpfs_serves_its_clients(s: &Startup) -> Result {
         const PASSED: [&[u8]; 2] = [
             b"service tmpfs-probe exited with code 0",
@@ -8757,7 +8758,12 @@ mod manager {
             id: 1,
             handle: copy(s.root_resource, SAME_RIGHTS)?,
         };
-        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
+        let budget = StartupHandle {
+            role: HandleRole::User,
+            id: 3,
+            handle: copy(s.budget, SAME_RIGHTS)?,
+        };
+        let reply = init.start_service_manager(alloc::vec![root, log, budget], deadline);
         let Ok(Ok(started)) = reply else {
             mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
             return Err(Failure {

@@ -370,6 +370,23 @@ impl<C, S> Tree<C, S> {
         }
     }
 
+    /// The directories above `id`, nearest first, by the first name of
+    /// each: its directory, that directory's, and so on to the root.
+    pub fn ancestors(&self, id: Id) -> Vec<Id> {
+        let mut out = Vec::new();
+        let mut current = id;
+        for _ in 0..self.nodes.len() {
+            match self.nodes.get(&current).and_then(|n| n.names.first()) {
+                Some((parent, _)) => {
+                    out.push(*parent);
+                    current = *parent;
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
     /// Whether the directory `dir` is `ancestor` or lies below it.
     fn is_within(&self, dir: Id, ancestor: Id) -> bool {
         let mut current = dir;

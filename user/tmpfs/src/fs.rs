@@ -1,5 +1,5 @@
 //! The file system's tree, the connections open to its nodes, the
-//! tokens of directories, and the `Filesystem` service.
+//! tokens and budgets of directories, and the `Filesystem` service.
 
 use crate::file::File;
 use crate::node;
@@ -58,6 +58,9 @@ pub struct Fs {
     /// The byte-range locks of files, and the next owner of locks.
     locks: RefCell<BTreeMap<Id, Locks>>,
     next_owner: Cell<u64>,
+    /// The budgets that directories charge the memory of the files below
+    /// them to.
+    pub budgets: RefCell<BTreeMap<Id, Rc<OwnedHandle>>>,
     pub watches: Watches,
     pub reactor: Reactor,
     pub spawner: Spawner,
@@ -97,6 +100,7 @@ impl Fs {
             tokens: RefCell::new(BTreeMap::new()),
             locks: RefCell::new(BTreeMap::new()),
             next_owner: Cell::new(1),
+            budgets: RefCell::new(BTreeMap::new()),
             watches: Watches::default(),
             reactor,
             spawner,
@@ -127,7 +131,7 @@ impl Fs {
             if *count == 0 {
                 refs.remove(&node);
                 drop(refs);
-                self.tree.borrow_mut().forget(node);
+                self.forget(node);
             }
         }
     }
@@ -136,7 +140,15 @@ impl Fs {
     /// still holds it.
     pub fn unnamed(&self, node: Id) {
         if !self.refs.borrow().contains_key(&node) {
-            self.tree.borrow_mut().forget(node);
+            self.forget(node);
+        }
+    }
+
+    /// Lets go of `node`, and of the budget it had, once nothing names
+    /// it.
+    fn forget(&self, node: Id) {
+        if self.tree.borrow_mut().forget(node).is_some() {
+            self.budgets.borrow_mut().remove(&node);
         }
     }
 

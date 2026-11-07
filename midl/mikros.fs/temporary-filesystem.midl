@@ -1,0 +1,7 @@
+// MIKSPEC-0050.R27
+
+library mikros.fs;
+
+protocol TemporaryFilesystem {
+    @1 SetBudget(path string<1024>, budget handle<Budget>) -> () error Error;
+};

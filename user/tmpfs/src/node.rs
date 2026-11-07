@@ -235,11 +235,22 @@ impl Connection {
         Ok(NodeCloneResponse {})
     }
 
-    /// Runs `f` on the file of this connection.
+    /// Runs `f` on the file of this connection. A file without memory yet
+    /// learns the budget to charge it to.
     fn with_file<R>(&self, f: impl FnOnce(&mut File) -> Result<R, Error>) -> Result<R, Error> {
+        let new = matches!(
+            self.fs.tree.borrow().get(self.node).map(|n| &n.kind),
+            Some(Kind::File(file)) if file.mem.is_none()
+        );
+        let budget = new.then(|| self.fs.budget_of(self.node)).flatten();
         let mut tree = self.fs.tree.borrow_mut();
         match &mut tree.get_mut(self.node).ok_or(Error::NotFound)?.kind {
-            Kind::File(file) => f(file),
+            Kind::File(file) => {
+                if file.mem.is_none() {
+                    file.charge = budget;
+                }
+                f(file)
+            }
             Kind::Directory(_) => Err(Error::IsDirectory),
             _ => Err(Error::Invalid),
         }
