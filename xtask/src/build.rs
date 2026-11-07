@@ -129,10 +129,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", broker.display());
             let devices = user_build("device-manager", kind)?;
             println!("built    {}", devices.display());
+            let pci_bus = user_build("pci-bus", kind)?;
+            println!("built    {}", pci_bus.display());
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
+            let pci_bus_manifest = crate::workspace_root().join("user/drivers/pci-bus/driver.yaml");
             let members = [
                 ("init", init.as_path()),
                 ("usr/bin/process-manager", manager.as_path()),
@@ -146,6 +149,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "usr/lib/services/device-manager.yaml",
                     devices_manifest.as_path(),
+                ),
+                ("usr/lib/drivers/pci-bus/pci-bus", pci_bus.as_path()),
+                (
+                    "usr/lib/drivers/pci-bus/driver.yaml",
+                    pci_bus_manifest.as_path(),
                 ),
             ];
             boot_image(kind, "boot.img", &members)?
@@ -417,9 +425,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", devices.display());
             let test_driver = user_build("test-driver", kind)?;
             println!("built    {}", test_driver.display());
+            let pci_bus = user_build("pci-bus", kind)?;
+            println!("built    {}", pci_bus.display());
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
-            let device_image = |file: &str, drivers: &[(&str, bool)]| -> Result<PathBuf> {
+            let device_image = |file: &str,
+                                drivers: &[(&str, bool)],
+                                more: &[(String, PathBuf)]|
+             -> Result<PathBuf> {
                 let mut members: Vec<(String, PathBuf)> = vec![
                     ("usr/bin/service-manager".into(), services.clone()),
                     ("usr/bin/permissions-broker".into(), broker.clone()),
@@ -444,6 +457,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         members.push((binary, test_driver.clone()));
                     }
                 }
+                members.extend_from_slice(more);
                 let members: Vec<(&str, &Path)> = members
                     .iter()
                     .map(|(name, path)| (name.as_str(), path.as_path()))
@@ -456,18 +470,34 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("test-fallback", false),
                 ("test-invalid", false),
             ];
-            let devices_image = device_image("devices.img", &drivers)?;
+            let devices_image = device_image("devices.img", &drivers, &[])?;
             println!("built    {}", devices_image.display());
             let failing_image = device_image(
                 "failing.img",
                 &[("test-decline", true), ("test-close", true)],
+                &[],
             )?;
             println!("built    {}", failing_image.display());
+            // The PCI bus driver tests serve this image, with the bus
+            // driver and a test driver for the host bridge's function.
+            let pci_bus_files = [
+                (
+                    "usr/lib/drivers/pci-bus/pci-bus".to_owned(),
+                    pci_bus.clone(),
+                ),
+                (
+                    "usr/lib/drivers/pci-bus/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/pci-bus/driver.yaml"),
+                ),
+            ];
+            let pci_image = device_image("pci.img", &[("test-pci", true)], &pci_bus_files)?;
+            println!("built    {}", pci_image.display());
             let members = [
                 ("tests/broker.img", broker_image.as_path()),
                 ("tests/services.img", services_image.as_path()),
                 ("tests/devices.img", devices_image.as_path()),
                 ("tests/failing.img", failing_image.as_path()),
+                ("tests/pci.img", pci_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),

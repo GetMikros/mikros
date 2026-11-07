@@ -27,6 +27,15 @@
 //!   `bus`, an `MMIO` resource with `ACCESS_DENIED`, after writing a
 //!   message on the bus channel, and fails with `INVALID_ARGS`
 //!   otherwise.
+//! - As `system.driver.test-pci`, the driver of the q35 host bridge's
+//!   function 00:00.0, it succeeds when its bus channel serves
+//!   `mikros.pci.Device` for that function: `GetInfo` reports it, a
+//!   `ReadConfig` of the vendor ID reads 0x8086 and a misaligned one
+//!   fails with `INVALID_ARGS`, a `WriteConfig` of the command register
+//!   fails with `ACCESS_DENIED`, and, as its manifest does not need
+//!   `dma`, `GetBti` and `SetBusMaster(true)` fail with `ACCESS_DENIED`
+//!   while `SetBusMaster(false)` succeeds. It fails with `INVALID_ARGS`
+//!   otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver publishes a `storage`
 //!   service and ends without replying.
@@ -44,13 +53,14 @@ use alloc::rc::Rc;
 use alloc::vec;
 use core::cell::RefCell;
 use mikros_rt::exec::{Executor, Reactor};
-use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceManagerAsyncClient, DeviceManagerRequestResourceResponse, DriverAsyncServer,
     DriverConnectChildResponse, DriverRequest, DriverResetChildResponse, DriverStartRequest,
     DriverStartResponse, DriverStopResponse, Property,
 };
+use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::Provider;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -59,6 +69,7 @@ mikros_rt::raw_main!(main);
 
 const HOST: &str = "system.driver.test-host";
 const CHILD: &str = "system.driver.test-child";
+const PCI: &str = "system.driver.test-pci";
 const DECLINE: &str = "system.driver.test-decline";
 const CLOSE: &str = "system.driver.test-close";
 const KIND_MMIO: u32 = 1;
@@ -113,6 +124,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                                 client.request_resource(KIND_MMIO, 0xFE00_0000, 0x1000, false);
                             match matches!(refused.await, Ok(Err(Status::AccessDenied))) {
                                 true => signal(bus.as_ref()).map(|()| DriverStartResponse {}),
+                                false => Err(Status::InvalidArgs),
+                            }
+                        }
+                        PCI => {
+                            let works = match bus {
+                                Some(bus) => pci_device_works(bus, &reactor).await,
+                                None => false,
+                            };
+                            match works {
+                                true => Ok(DriverStartResponse {}),
                                 false => Err(Status::InvalidArgs),
                             }
                         }
@@ -228,6 +249,30 @@ async fn publish(manager: &DeviceManagerAsyncClient, class: &str) -> Result<u64,
         Ok(Err(status)) => Err(status),
         Err(_) => Err(Status::PeerClosed),
     }
+}
+
+/// As the driver of PCI function 00:00.0 of q35, without `dma`: whether
+/// `bus` serves `mikros.pci.Device` for that function as it should.
+async fn pci_device_works(bus: OwnedHandle, reactor: &Reactor) -> bool {
+    let device = DeviceAsyncClient::new(ClientEnd::new(bus), reactor.clone());
+    let Ok(info) = device.get_info().await.map(|r| r.info) else {
+        return false;
+    };
+    let at_host_bridge = (info.bus, info.device, info.function) == (0, 0, 0)
+        && (info.vendor_id, info.device_id) == (0x8086, 0x29c0);
+    let vendor = device.read_config(0, 2).await;
+    let misaligned = device.read_config(1, 2).await;
+    let command = device.write_config(0x04, 2, 0).await;
+    let bti = device.get_bti().await;
+    let master = device.set_bus_master(true).await;
+    let no_master = device.set_bus_master(false).await;
+    at_host_bridge
+        && matches!(vendor, Ok(Ok(r)) if r.value == 0x8086)
+        && matches!(misaligned, Ok(Err(Status::InvalidArgs)))
+        && matches!(command, Ok(Err(Status::AccessDenied)))
+        && matches!(bti, Ok(Err(Status::AccessDenied)))
+        && matches!(master, Ok(Err(Status::AccessDenied)))
+        && matches!(no_master, Ok(Ok(_)))
 }
 
 /// As the child's driver: writes a message on the bus channel `bus`.

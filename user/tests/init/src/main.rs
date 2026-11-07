@@ -8835,6 +8835,37 @@ mod manager {
         )
     }
 
+    /// From a boot image with the service manager, the broker, the
+    /// device manager, the PCI bus driver and a test driver for the q35
+    /// host bridge's function 00:00.0, with their manifests, the device
+    /// manager starts the bus driver for the host bridge. The bus driver
+    /// adds the functions it finds, among them 00:00.0 and the LPC bridge
+    /// at 00:1f.0, with their hardware IDs, and the device manager
+    /// starts the test driver for 00:00.0. Its `Start` succeeds only when
+    /// its bus channel serves that function as `mikros.pci.Device`. The
+    /// device manager says all of it in the log.
+    pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: bound driver pci-bus to device 1, pci-host-0, as platform:pci-host-ecam",
+                1,
+            ),
+            (b"device-manager: started driver pci-bus for device 1 as pid", 1),
+            (b", pci-0000:00:00.0, as pci:v8086d29c0sv", 1),
+            (b", pci-0000:00:1f.0, as pci:v8086d2918sv", 1),
+            (b"device-manager: bound driver test-pci to device", 1),
+            (b"device-manager: started driver test-pci for device", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"driver pci-bus declined",
+            b"driver pci-bus for device 1 terminated",
+            b"driver pci-bus for device 1 did not start",
+            b"driver test-pci declined",
+        ];
+        let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
+        ensure("adding the PCI functions and starting their driver", logged)
+    }
+
     /// Starts the service manager from the boot image member `image`,
     /// giving it the root resource, the log and init's platform
     /// information, which the device manager gets, after skipping what
@@ -9259,6 +9290,7 @@ mod bootfs {
                         "failing.img",
                         "launcher.img",
                         "managed",
+                        "pci.img",
                         "pie",
                         "ports.img",
                         "services.img",
@@ -9442,7 +9474,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 134] = [
+const TESTS: [(&str, Test); 135] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9666,6 +9698,12 @@ const TESTS: [(&str, Test); 134] = [
     ("processes_and_channels", processes_and_channels),
     ("init_segments_as_loaded", init_segments_as_loaded),
     ("boot_memory_reclaimed", boot_memory_reclaimed),
+    // Next to last, as its bus driver outlives the test and keeps
+    // exclusive resources: the BTI range of segment 0 and the BARs of q35.
+    (
+        "device_manager_starts_the_pci_bus_driver",
+        manager::device_manager_starts_the_pci_bus_driver,
+    ),
     // Runs last: it closes the boot image.
     ("boot_image_object", boot_image_object),
 ];
