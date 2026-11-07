@@ -1,22 +1,30 @@
 //! The accounts service: a system service that keeps the users in the
 //! file `users` of `/var/lib/accounts/` and provides
-//! `mikros.session.Accounts`.
+//! `mikros.session.Accounts`. It asks the permission broker about its
+//! clients' permissions through its directory.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod checks;
+mod lock;
 mod serve;
+mod service;
 mod store;
 
 use alloc::rc::Rc;
+use checks::Checks;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
-use mikros_rt::interfaces::mikros::service::{ProviderAsyncServer, ProviderRequest};
+use mikros_rt::interfaces::mikros::service::{
+    DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
+};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
+use service::Service;
 use store::Store;
 
 mikros_rt::raw_main!(main);
@@ -52,7 +60,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     drop(fs);
-    let store = Rc::new(store);
+    let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
+    let checks = Checks::new(directory, reactor.clone());
+    let service = Rc::new(Service::new(store, checks, reactor.clone()));
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
@@ -60,7 +70,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             // the server end closes the connection.
             if c.protocol == PROTOCOL && c.instance.is_none() {
                 let end = ServerEnd::new(c.server);
-                spawner.spawn(serve::serve(store.clone(), end, reactor.clone()));
+                let serving = serve::serve(service.clone(), end, c.client, spawner.clone());
+                spawner.spawn(serving);
             }
         }
     });

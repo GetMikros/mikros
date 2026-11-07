@@ -8,3 +8,4 @@ provides:
 namespace:
   - path: /var/lib/accounts
     rights: rw
+permissions: [permissions.check]
