@@ -74,7 +74,12 @@ fn checks() -> Result<(), u8> {
     // A C program's output and status.
     let hello = Command::new(HELLO).arg("world").output();
     match &hello {
-        Ok(o) if !o.status.success() => println!("{HELLO} ended with {}", o.status),
+        Ok(o) if !o.status.success() => {
+            println!("{HELLO} ended with {}", o.status);
+            for line in String::from_utf8_lossy(&o.stderr).lines() {
+                println!("{HELLO} printed to stderr: {line}");
+            }
+        }
         Err(e) => println!("starting {HELLO} failed: {e}"),
         Ok(_) => {}
     }

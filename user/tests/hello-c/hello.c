@@ -931,11 +931,17 @@ static int spawn_and_wait(int search, int exec)
 	while (r == 0 && (n = read(p[0], buf + got, sizeof buf - got)) > 0)
 		got += n;
 	close(p[0]);
-	return r == 0 && running && pid > 0 && got == 13
-		&& memcmp(buf, "child output\n", 13) == 0
-		&& waitpid(pid, &status, 0) == pid && WIFEXITED(status)
-		&& WEXITSTATUS(status) == 7 && waitpid(pid, &status, 0) == -1
-		&& errno == ECHILD;
+	status = -1;
+	pid_t waited = r == 0 ? waitpid(pid, &status, 0) : -1;
+	int ok = r == 0 && running && pid > 0 && got == 13
+		&& memcmp(buf, "child output\n", 13) == 0 && waited == pid
+		&& WIFEXITED(status) && WEXITSTATUS(status) == 7
+		&& waitpid(pid, &status, 0) == -1 && errno == ECHILD;
+	if (!ok)
+		fprintf(stderr, "spawn_and_wait(%d, %d): spawn %d, running %d, read %zu, "
+			"waited %d for %d, status %#x\n", search, exec, r, running, got,
+			(int)waited, (int)pid, status);
+	return ok;
 }
 
 /* Programs are started by path and by search, and replace themselves,
@@ -956,12 +962,21 @@ static int programs_are_spawned(void)
 	int masked = posix_spawn(&pid, "/usr/bin/spawn-child", 0, &attr, args, 0);
 	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
 	int grouped = posix_spawn(&pid, "/usr/bin/spawn-child", 0, &attr, args, 0);
-	return spawn_and_wait(0, 0) && spawn_and_wait(0, 1)
-		&& setenv("PATH", "/nowhere:/usr/bin", 1) == 0 && spawn_and_wait(1, 0)
-		&& posix_spawn(&pid, "/usr/bin/missing", 0, 0, args, 0) == ENOENT
-		&& posix_spawnp(&pid, "missing", 0, 0, args, 0) == ENOENT
-		&& masked == ENOSYS && grouped == ENOSYS
-		&& waitpid(-1, &status, WNOHANG) == -1 && errno == ECHILD;
+	const char *failed = !spawn_and_wait(0, 0) ? "spawning by path"
+		: !spawn_and_wait(0, 1) ? "spawning a program that replaces itself"
+		: setenv("PATH", "/nowhere:/usr/bin", 1) != 0 || !spawn_and_wait(1, 0)
+			? "spawning by search"
+		: posix_spawn(&pid, "/usr/bin/missing", 0, 0, args, 0) != ENOENT
+			? "refusing a missing program"
+		: posix_spawnp(&pid, "missing", 0, 0, args, 0) != ENOENT
+			? "refusing a missing program by search"
+		: masked != ENOSYS || grouped != ENOSYS ? "refusing attributes"
+		: waitpid(-1, &status, WNOHANG) != -1 || errno != ECHILD
+			? "having no child left"
+		: 0;
+	if (failed)
+		fprintf(stderr, "programs_are_spawned: %s failed\n", failed);
+	return !failed;
 }
 
 int main(int argc, char **argv)
