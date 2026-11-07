@@ -148,6 +148,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let fat = user_build("fat", kind)?;
             println!("built    {}", fat.display());
             let fat_manifest = crate::workspace_root().join("user/drivers/fat/driver.yaml");
+            let tmpfs = user_build("tmpfs", kind)?;
+            println!("built    {}", tmpfs.display());
+            let tmpfs_manifest = crate::workspace_root().join("user/tmpfs/tmpfs.yaml");
+            let union = user_build("union", kind)?;
+            println!("built    {}", union.display());
+            let union_manifest = crate::workspace_root().join("user/union/union.yaml");
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let devices_manifest =
@@ -162,6 +168,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/services/permissions.yaml",
                     broker_manifest.as_path(),
                 ),
+                ("usr/bin/tmpfs", tmpfs.as_path()),
+                ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
+                ("usr/bin/union", union.as_path()),
+                ("usr/lib/services/union.yaml", union_manifest.as_path()),
                 ("usr/bin/device-manager", devices.as_path()),
                 (
                     "usr/lib/services/device-manager.yaml",
