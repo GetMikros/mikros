@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -982,6 +983,82 @@ static int programs_are_spawned(void)
 	return !failed;
 }
 
+/* An epoll instance reports a pipe's ends: a level-triggered entry for
+   as long as it is ready, an edge-triggered one once per change, and a
+   closed peer as a hang-up. An entry goes with its description. It
+   refuses what it cannot watch, a signal ends its waits, also through
+   epoll_pwait's mask, and a spawned program does not get it. */
+static int epolls_report_streams(void)
+{
+	int p[2];
+	char c;
+	struct epoll_event ev = {.events = EPOLLIN, .data.u64 = 1}, got[4];
+	int ep = epoll_create1(EPOLL_CLOEXEC);
+	if (ep < 0 || pipe(p))
+		return 0;
+	int ok = (fcntl(ep, F_GETFD) & FD_CLOEXEC) && epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev) == 0
+		&& epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev) == -1 && errno == EEXIST
+		&& epoll_wait(ep, got, 4, 0) == 0 && write(p[1], "ab", 2) == 2
+		&& epoll_wait(ep, got, 4, -1) == 1 && got[0].events == EPOLLIN && got[0].data.u64 == 1
+		&& epoll_wait(ep, got, 4, 0) == 1 && read(p[0], &c, 1) == 1
+		&& epoll_wait(ep, got, 4, 0) == 1 && read(p[0], &c, 1) == 1
+		&& epoll_wait(ep, got, 4, 0) == 0;
+	ev = (struct epoll_event){.events = EPOLLIN | EPOLLET, .data.u64 = 2};
+	ok = ok && epoll_ctl(ep, EPOLL_CTL_MOD, p[0], &ev) == 0 && write(p[1], "c", 1) == 1
+		&& epoll_wait(ep, got, 4, 0) == 1 && got[0].data.u64 == 2 && epoll_wait(ep, got, 4, 0) == 0
+		&& read(p[0], &c, 1) == 1;
+	ev = (struct epoll_event){.events = EPOLLOUT, .data.u64 = 3};
+	ok = ok && epoll_ctl(ep, EPOLL_CTL_ADD, p[1], &ev) == 0 && epoll_wait(ep, got, 4, 0) == 1
+		&& got[0].events == EPOLLOUT && got[0].data.u64 == 3
+		&& epoll_ctl(ep, EPOLL_CTL_DEL, p[1], 0) == 0
+		&& epoll_ctl(ep, EPOLL_CTL_DEL, p[1], 0) == -1 && errno == ENOENT;
+	ev = (struct epoll_event){.events = EPOLLIN | EPOLLRDHUP, .data.u64 = 4};
+	ok = ok && epoll_ctl(ep, EPOLL_CTL_MOD, p[0], &ev) == 0 && close(p[1]) == 0
+		&& epoll_wait(ep, got, 4, -1) == 1 && got[0].events == (EPOLLHUP | EPOLLRDHUP)
+		&& got[0].data.u64 == 4 && close(p[0]) == 0 && epoll_wait(ep, got, 4, 0) == 0;
+	int file = open(GREETING, O_RDONLY);
+	ev.events = EPOLLIN;
+	ok = ok && file >= 0 && epoll_ctl(ep, EPOLL_CTL_ADD, file, &ev) == -1 && errno == EPERM
+		&& epoll_ctl(ep, EPOLL_CTL_ADD, ep, &ev) == -1 && errno == EINVAL
+		&& epoll_ctl(ep, EPOLL_CTL_ADD, 999, &ev) == -1 && errno == EBADF
+		&& epoll_ctl(file, EPOLL_CTL_ADD, ep, &ev) == -1 && errno == EINVAL
+		&& epoll_wait(ep, got, 0, 0) == -1 && errno == EINVAL
+		&& read(ep, &c, 1) == -1 && errno == EINVAL;
+	close(file);
+	/* With nothing to report, only a signal ends the waits. */
+	struct sigaction sa = {.sa_handler = on_wake}, old;
+	sigset_t usr2, before, empty;
+	sigemptyset(&usr2);
+	sigaddset(&usr2, SIGUSR2);
+	sigemptyset(&empty);
+	sigaction(SIGUSR2, &sa, &old);
+	pthread_t self = pthread_self(), waker;
+	for (int masked = 0; masked < 2; masked++) {
+		if (masked)
+			sigprocmask(SIG_BLOCK, &usr2, &before);
+		atomic_store(&waited, 0);
+		if (pthread_create(&waker, 0, wake_main, &self))
+			return 0;
+		int r = masked ? epoll_pwait(ep, got, 4, -1, &empty) : epoll_wait(ep, got, 4, -1);
+		int e = errno;
+		atomic_store(&waited, 1);
+		pthread_join(waker, 0);
+		if (masked)
+			sigprocmask(SIG_SETMASK, &before, 0);
+		ok = ok && r == -1 && e == EINTR;
+	}
+	sigaction(SIGUSR2, &old, 0);
+	char *args[] = { "spawn-child", "closed", "9", 0 };
+	pid_t pid;
+	int status;
+	ok = ok && dup2(ep, 9) == 9
+		&& posix_spawn(&pid, "/usr/bin/spawn-child", 0, 0, args, 0) == 0
+		&& waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 7;
+	close(9);
+	close(ep);
+	return ok;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -1051,6 +1128,8 @@ int main(int argc, char **argv)
 		return 32;
 	if (!masks_apply_to_waits())
 		return 33;
+	if (!epolls_report_streams())
+		return 35;
 	char *copy = malloc(64);
 	if (!copy)
 		return 34;

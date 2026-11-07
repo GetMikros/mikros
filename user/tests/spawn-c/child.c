@@ -37,6 +37,10 @@ int main(int argc, char **argv)
 	char buf[64];
 	if (argc == 2 && strcmp(argv[1], "exec") == 0)
 		return exec_again();
+	/* Started with "closed" and a descriptor, it exits with 7 when that
+	   descriptor is not open. */
+	if (argc == 3 && strcmp(argv[1], "closed") == 0)
+		return fcntl(atoi(argv[2]), F_GETFD) == -1 && errno == EBADF ? 7 : 8;
 	/* After exec the process ID is the one before, and descriptor 7
 	   closed. */
 	if (argc == 4 && (atoi(argv[3]) != getpid() || fcntl(7, F_GETFD) != -1
