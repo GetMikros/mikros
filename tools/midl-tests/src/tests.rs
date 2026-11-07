@@ -418,6 +418,50 @@ fn async_calls_overlap_on_one_channel() {
 }
 
 #[test]
+fn async_replies_and_events_outlast_a_closed_peer() {
+    let _s = serial();
+    let (client_end, server_end) = rt::endpoints::<Calc>().unwrap();
+    // The server replies to both calls, sends an event and closes.
+    let server = std::thread::spawn(move || {
+        let server = CalcServer::new(server_end);
+        for _ in 0..2 {
+            match server.next(i64::MAX).unwrap() {
+                CalcRequest::Add(r, responder) => responder
+                    .reply(&server, CalcAddResponse { sum: r.a + r.b })
+                    .unwrap(),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        server.send_noted("done".into()).unwrap();
+    });
+    let client = CalcAsyncClient::new(client_end, mock::Reactor);
+    let (first, second, event) = mock::block_on(async {
+        let mut a = std::pin::pin!(client.add(1, 2));
+        let mut b = std::pin::pin!(client.add(10, 20));
+        // Each call sends its request when it is first polled.
+        std::future::poll_fn(|cx| {
+            assert!(a.as_mut().poll(cx).is_pending());
+            assert!(b.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        server.join().unwrap();
+        // The second call reads both replies and the event, and then
+        // finds the channel closed.
+        let second = b.as_mut().await;
+        (a.as_mut().await, second, client.next_event().await)
+    });
+    assert_eq!(first.unwrap(), CalcAddResponse { sum: 3 });
+    assert_eq!(second.unwrap(), CalcAddResponse { sum: 30 });
+    assert_eq!(
+        event.unwrap(),
+        CalcEvent::Noted(CalcNotedEvent {
+            text: "done".into()
+        })
+    );
+}
+
+#[test]
 fn async_server_serves_a_client() {
     let _s = serial();
     let (client_end, server_end) = rt::endpoints::<Calc>().unwrap();

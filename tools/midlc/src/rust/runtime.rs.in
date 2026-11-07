@@ -697,9 +697,9 @@ impl AsyncChannel {
         }
         let mut wait = None;
         let reply = core::future::poll_fn(|cx| loop {
-            if let Err(e) = self.drain() {
-                return Poll::Ready(Err(e));
-            }
+            // A reply that another call already read is taken even when
+            // the channel failed after it.
+            let drained = self.drain();
             {
                 let mut calls = self.calls.borrow_mut();
                 match calls.get_mut(&txid) {
@@ -712,6 +712,9 @@ impl AsyncChannel {
                     Some(Pending::Waiting(waker)) => *waker = Some(cx.waker().clone()),
                     _ => return Poll::Ready(Err(Error::Closed)),
                 }
+            }
+            if let Err(e) = drained {
+                return Poll::Ready(Err(e));
             }
             match self.poll_readable(&mut wait, cx) {
                 Poll::Ready(Ok(())) => {}
@@ -733,11 +736,13 @@ impl AsyncChannel {
         use core::task::Poll;
         let mut wait = None;
         core::future::poll_fn(|cx| loop {
-            if let Err(e) = self.drain() {
-                return Poll::Ready(Err(e));
-            }
+            // Events that came before the channel failed are taken first.
+            let drained = self.drain();
             if let Some(message) = self.events.borrow_mut().pop_front() {
                 return Poll::Ready(Ok(message));
+            }
+            if let Err(e) = drained {
+                return Poll::Ready(Err(e));
             }
             self.event_waiters.borrow_mut().push(cx.waker().clone());
             match self.poll_readable(&mut wait, cx) {
