@@ -60,6 +60,23 @@ pub fn parse_program(file_name: &str, bytes: &[u8]) -> Result<ProgramManifest, E
     if !is_under_usr(binary) {
         return Err(error(binary_node, ErrorKind::BadBinary));
     }
+    let namespace = namespace(map, &mut unknown)?;
+    let program = Program {
+        app_id: app_id.into(),
+        binary: binary.into(),
+        permissions: strings(map, "permissions")?,
+        namespace,
+        spawned_by: strings(map, "spawned_by")?,
+    };
+    Ok(ProgramManifest { program, unknown })
+}
+
+/// The entries of `namespace` in `map`, none when it is absent, adding
+/// the keys of entries it does not know to `unknown`.
+pub(crate) fn namespace(
+    map: mikros_yaml::Map<'_>,
+    unknown: &mut Vec<Unknown>,
+) -> Result<Vec<NamespaceEntry>, Error> {
     let mut namespace = Vec::new();
     for item in list(map, "namespace")? {
         let entry = item.map()?;
@@ -75,12 +92,5 @@ pub fn parse_program(file_name: &str, bytes: &[u8]) -> Result<ProgramManifest, E
             rights: field("rights")?.into(),
         });
     }
-    let program = Program {
-        app_id: app_id.into(),
-        binary: binary.into(),
-        permissions: strings(map, "permissions")?,
-        namespace,
-        spawned_by: strings(map, "spawned_by")?,
-    };
-    Ok(ProgramManifest { program, unknown })
+    Ok(namespace)
 }

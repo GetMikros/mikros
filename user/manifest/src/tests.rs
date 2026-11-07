@@ -1,6 +1,7 @@
 extern crate std;
 
 use crate::*;
+use alloc::format;
 use alloc::string::ToString;
 use alloc::vec;
 
@@ -275,4 +276,145 @@ fn refuses_program_manifests_that_break_the_rules() {
         Err(ErrorKind::Missing("binary"))
     );
     assert_eq!(kind("system.x.yaml", &with("system.x")), Ok(()));
+}
+
+#[test]
+fn reads_a_driver_manifest() {
+    let text = "name: pci-bus\nbinary: /usr/lib/drivers/pci-bus/pci-bus\n\
+                match: [platform:pci-host-ecam]\nkind: normal\nneeds: [bus, dma]\n\
+                permissions: [device.registry]\npriority: 20\nfoo: 1\n";
+    let dir = "pci-bus";
+    let m = parse_driver(dir, text.as_bytes()).unwrap();
+    let d = &m.driver;
+    assert_eq!(
+        (d.name.as_str(), d.binary.as_str()),
+        ("pci-bus", "/usr/lib/drivers/pci-bus/pci-bus")
+    );
+    assert_eq!(d.matches, ["platform:pci-host-ecam"]);
+    assert_eq!(
+        (d.kind, d.needs.as_slice()),
+        (DriverKind::Normal, &[Need::Bus, Need::Dma][..])
+    );
+    assert_eq!(
+        (d.permissions.as_slice(), d.priority),
+        (&["device.registry".into()][..], 20)
+    );
+    assert_eq!(m.unknown.len(), 1);
+    let fallback = parse_driver("a", b"name: a\nbinary: /usr/a\nkind: fallback\n").unwrap();
+    assert_eq!(fallback.driver.kind, DriverKind::Fallback);
+    let minimal = parse_driver("a", b"name: a\nbinary: /usr/a\n")
+        .unwrap()
+        .driver;
+    assert_eq!(
+        (minimal.kind, minimal.priority),
+        (DriverKind::Normal, PRIORITY_DEFAULT)
+    );
+    assert!(minimal.matches.is_empty() && minimal.needs.is_empty());
+    assert!(minimal.permissions.is_empty() && minimal.namespace.is_empty());
+}
+
+#[test]
+fn refuses_driver_manifests_that_break_the_rules() {
+    let dir = "a";
+    let kind_of = |text: &str| parse_driver(dir, text.as_bytes()).unwrap_err().kind;
+    let base = "name: a\nbinary: /usr/a\nkind: normal\n";
+    assert_eq!(
+        kind_of(&format!("{base}start: boot\n")),
+        ErrorKind::ServiceKey("start")
+    );
+    assert_eq!(
+        kind_of(&format!("{base}provides: []\n")),
+        ErrorKind::ServiceKey("provides")
+    );
+    assert_eq!(
+        kind_of("name: a\nbinary: /usr/a\nkind: odd\n"),
+        ErrorKind::BadKind
+    );
+    assert_eq!(
+        kind_of(&format!("{base}needs: [gpu]\n")),
+        ErrorKind::BadNeed
+    );
+    assert_eq!(
+        kind_of(&format!("{base}match: [Pci:1]\n")),
+        ErrorKind::BadHardwareId
+    );
+    assert_eq!(kind_of("binary: /usr/a\n"), ErrorKind::Missing("name"));
+    assert_eq!(kind_of("name: a\n"), ErrorKind::Missing("binary"));
+    assert_eq!(
+        kind_of("name: a\nbinary: /bin/a\nkind: normal\n"),
+        ErrorKind::BadBinary
+    );
+    assert_eq!(
+        kind_of("name: b\nbinary: /usr/b\nkind: normal\n"),
+        ErrorKind::FileName
+    );
+}
+
+#[test]
+fn checks_hardware_ids() {
+    assert!(is_hardware_id("pci:8086:100e"));
+    assert!(is_hardware_id("platform:pci-host-ecam"));
+    assert!(is_hardware_id("usb:class_08"));
+    assert!(!is_hardware_id("pci"));
+    assert!(!is_hardware_id(":100e"));
+    assert!(!is_hardware_id("pci:8086:100E"));
+    assert!(!is_hardware_id("pci bus:1"));
+}
+
+fn driver(name: &str, kind: DriverKind, matches: &[&str]) -> Driver {
+    Driver {
+        name: name.into(),
+        binary: format!("/usr/lib/drivers/{name}/{name}"),
+        permissions: vec![],
+        namespace: vec![],
+        priority: PRIORITY_DEFAULT,
+        matches: matches.iter().map(ToString::to_string).collect(),
+        kind,
+        needs: vec![],
+    }
+}
+
+#[test]
+fn chooses_drivers_by_hardware_id_kind_and_name() {
+    use DriverKind::{Fallback, Normal};
+    let drivers = [
+        driver("vga", Fallback, &["pci:class_0300"]),
+        driver("virtio-gpu", Normal, &["pci:1af4:1050"]),
+        driver("bochs", Normal, &["pci:1234:1111", "pci:class_0300"]),
+        driver("any-vga", Normal, &["pci:class_0300"]),
+        driver("generic", Fallback, &["pci:1af4:1050"]),
+    ];
+    let ids = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let chosen = |hardware_ids: &[String]| {
+        choose(&drivers, hardware_ids).map(|c| {
+            (
+                c.driver.name.clone(),
+                c.hardware_id.to_string(),
+                c.passed_over.len(),
+            )
+        })
+    };
+    // A normal driver for a later ID beats a fallback for the first.
+    let gpu = ids(&["pci:1af4:1050", "pci:class_0300"]);
+    assert_eq!(
+        chosen(&gpu),
+        Some(("virtio-gpu".into(), "pci:1af4:1050".into(), 0))
+    );
+    // The most specific ID wins over a less specific one.
+    let bochs = ids(&["pci:1234:1111", "pci:class_0300"]);
+    assert_eq!(
+        chosen(&bochs),
+        Some(("bochs".into(), "pci:1234:1111".into(), 0))
+    );
+    // Of two normal drivers for one ID, the first by name.
+    let vga = ids(&["pci:8086:0001", "pci:class_0300"]);
+    let choice = choose(&drivers, &vga).unwrap();
+    assert_eq!(
+        (choice.driver.name.as_str(), choice.passed_over),
+        ("any-vga", vec!["bochs"])
+    );
+    // A fallback when no normal driver matches, none when nothing does.
+    let only_fallback = [driver("vga", Fallback, &["pci:class_0300"])];
+    assert_eq!(choose(&only_fallback, &vga).unwrap().driver.name, "vga");
+    assert_eq!(chosen(&ids(&["usb:1:2"])), None);
 }

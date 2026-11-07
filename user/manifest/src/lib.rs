@@ -1,9 +1,10 @@
-//! Reading service and program manifests, and choosing the order in
-//! which the boot services start.
+//! Reading service, program and driver manifests, and choosing the order
+//! in which the boot services start.
 //!
-//! `parse` reads one service manifest file into a `Service`, and
-//! `parse_program` one program manifest file into a `Program`, or says
-//! why the file is invalid and where. `order` takes the services of the
+//! `parse` reads one service manifest file into a `Service`,
+//! `parse_program` one program manifest file into a `Program` and
+//! `parse_driver` one driver manifest into a `Driver`, or says why the
+//! file is invalid and where. `order` takes the services of the
 //! valid files and returns the boot services in an order that starts
 //! each one after those it waits for, with the services that cannot
 //! start and why.
@@ -12,11 +13,15 @@
 
 extern crate alloc;
 
+mod driver;
 mod order;
 mod program;
 #[cfg(test)]
 mod tests;
 
+pub use driver::{
+    Choice, Driver, DriverKind, DriverManifest, Need, choose, is_hardware_id, parse_driver,
+};
 pub use order::{Blocked, Order, order};
 pub use program::{NamespaceEntry, Program, ProgramManifest, parse_program};
 
@@ -120,7 +125,8 @@ pub enum ErrorKind {
     Missing(&'static str),
     /// `name` is not lowercase kebab-case.
     BadName,
-    /// The file is not named after `name`.
+    /// The file, or a driver manifest's directory, is not named after
+    /// `name`.
     FileName,
     /// `binary` is not an absolute path under `/usr`.
     BadBinary,
@@ -133,6 +139,14 @@ pub enum ErrorKind {
     /// A program's `app_id` does not start with `system.`, or is one that
     /// no program manifest may name.
     BadAppId,
+    /// A driver manifest has this key of service manifests.
+    ServiceKey(&'static str),
+    /// A driver's `kind` is neither `normal` nor `fallback`.
+    BadKind,
+    /// `needs` holds a value other than `dma`, `ioports` and `bus`.
+    BadNeed,
+    /// `match` holds a string that is not a hardware ID.
+    BadHardwareId,
 }
 
 impl From<mikros_yaml::Error> for Error {
