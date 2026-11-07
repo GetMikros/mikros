@@ -21,8 +21,8 @@ use kernel_core::object::handles::Handle;
 use kernel_core::object::handles::{Entry, HANDLE_INVALID, HandleTable};
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{
-    KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_MSI, KIND_POLICY, KIND_PRIORITY,
-    KIND_ROOT, Request, Resource,
+    INFO_RESOURCE, KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_MSI, KIND_POLICY,
+    KIND_PRIORITY, KIND_ROOT, Request, Resource,
 };
 use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
@@ -166,6 +166,9 @@ pub fn object_get_info(
         }
         INFO_MEMORY if kind == ObjectType::MemoryObject => {
             copy(&mut record, &object::<MemoryObject>(handle).info())
+        }
+        INFO_RESOURCE if kind == ObjectType::Resource => {
+            copy(&mut record, &object::<Resource>(handle).info())
         }
         crate::process::INFO_PROCESS if kind == ObjectType::Process => {
             copy(&mut record, &object::<Process>(handle).info())

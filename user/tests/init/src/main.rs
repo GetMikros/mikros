@@ -2435,6 +2435,57 @@ fn reserved_hardware_refused(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(resource) })
 }
 
+/// The `RESOURCE` information topic reports a resource's kind, options,
+/// base and size, for the root too, and refuses other objects.
+fn resources_report_their_ranges(s: &Startup) -> Result {
+    const INFO_RESOURCE: u32 = 5;
+    const KIND_MMIO: u32 = 1;
+    const SHARED: u32 = 1 << 0;
+    let record = |handle| {
+        info::<0x18>(handle, INFO_RESOURCE).map(|r| {
+            (
+                u32_at(&r, 0),
+                u32_at(&r, 4),
+                u64_at(&r, 8),
+                u64_at(&r, 0x10),
+            )
+        })
+    };
+    ensure(
+        "describing the root",
+        record(s.root_resource)? == (0, 0, 0, 0),
+    )?;
+    let mut mmio = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a shared MMIO resource", unsafe {
+        sys::resource_create(
+            s.root_resource,
+            KIND_MMIO,
+            0xFE00_0000,
+            0x2000,
+            SHARED,
+            &mut mmio,
+        )
+    })?;
+    let ports = grant(s, mikros_test::KIND_IOPORT, 0x80, 1)?;
+    let dma = grant(s, KIND_DMA, 0, 0)?;
+    let described = [
+        record(mmio)? == (KIND_MMIO, SHARED, 0xFE00_0000, 0x2000),
+        record(ports)? == (mikros_test::KIND_IOPORT, 0, 0x80, 1),
+        record(dma)? == (KIND_DMA, 0, 0, 0),
+    ];
+    ensure("describing each kind", described == [true; 3])?;
+    let mut out = [0u8; 0x18];
+    let mut len = 0;
+    // SAFETY: the pointers describe `out` and `len`.
+    let refused =
+        unsafe { sys::object_get_info(s.process, INFO_RESOURCE, out.as_mut_ptr(), 0x18, &mut len) };
+    ensure("refusing another object", refused == WRONG_TYPE)?;
+    close(mmio)?;
+    close(ports)?;
+    close(dma)
+}
+
 fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
     // SAFETY: the pointer and length describe `bytes`.
     check("writing", unsafe {
@@ -9232,7 +9283,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 132] = [
+const TESTS: [(&str, Test); 133] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9341,6 +9392,10 @@ const TESTS: [(&str, Test); 132] = [
     ("undefined_options_refused", undefined_options_refused),
     ("syscall_clears_flags", syscall_clears_flags),
     ("reserved_hardware_refused", reserved_hardware_refused),
+    (
+        "resources_report_their_ranges",
+        resources_report_their_ranges,
+    ),
     ("clones", clones),
     ("pagers", pagers),
     ("pager_operations", pager_operations),
