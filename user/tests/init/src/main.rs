@@ -8705,13 +8705,16 @@ mod manager {
     /// the q35 machine, with its ECAM range as its one resource, leaves
     /// out the invalid driver manifest, and binds the test driver whose
     /// manifest has no kind, which makes it normal, rather than the
-    /// fallback one. It says all of it in the log.
+    /// fallback one. It starts that driver as `system.driver.test-host`,
+    /// whose `Start` succeeds only for the host bridge with its ECAM
+    /// range and a `DMA` resource. It says all of it in the log.
     pub fn device_manager_adds_platform_devices(s: &Startup) -> Result {
-        const EXPECTED: [&[u8]; 4] = [
+        const EXPECTED: [&[u8]; 5] = [
             b"device-manager: added device 1, pci-host-0, as platform:pci-host-ecam, with 1 resource, segment 0, bus_start 0, bus_end 255",
             b"test-invalid/driver.yaml:6:",
             b"ServiceKey(\"start\")",
             b"device-manager: bound driver test-host to device 1, pci-host-0, as platform:pci-host-ecam",
+            b"device-manager: started driver test-host for device 1 as pid",
         ];
         const FAILED: &[&[u8]] = &[
             b"did not start",
@@ -8721,6 +8724,7 @@ mod manager {
             b"no MCFG table",
             b"no driver for device",
             b"bound driver test-fallback",
+            b"failed Start",
         ];
         let (m, init, reader) = serving(s, b"tests/devices.img")?;
         let deadline = super::within(super::PROBE_SECONDS);

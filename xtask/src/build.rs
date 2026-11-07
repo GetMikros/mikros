@@ -410,9 +410,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", services_image.display());
             // The device manager tests serve this image, which holds the
             // service manager, the broker and the device manager with
-            // their manifests, and the manifests of test drivers.
+            // their manifests, and test drivers: their manifests and the
+            // binary of the one that starts.
             let devices = user_build("device-manager", kind)?;
             println!("built    {}", devices.display());
+            let test_host = user_build("test-host", kind)?;
+            println!("built    {}", test_host.display());
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let test_drivers = ["test-host", "test-fallback", "test-invalid"].map(|name| {
@@ -433,6 +436,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/services/device-manager.yaml",
                     devices_manifest.as_path(),
                 ),
+                ("usr/lib/drivers/test-host/test-host", test_host.as_path()),
             ];
             devices_members.extend(test_drivers.iter().map(|(n, p)| (n.as_str(), p.as_path())));
             let devices_image = boot_image(kind, "devices.img", &devices_members)?;

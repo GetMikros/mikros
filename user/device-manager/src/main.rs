@@ -9,8 +9,8 @@
 //! hexadecimal with `0x`, and a shared `MMIO` resource covering the
 //! configuration space of its buses.
 //!
-//! It then reads the driver manifests and binds a driver to each device
-//! that one matches.
+//! It then reads the driver manifests, binds a driver to each device
+//! that one matches, and starts the bound drivers.
 
 #![no_std]
 #![no_main]
@@ -20,6 +20,7 @@ extern crate alloc;
 mod acpi;
 mod devices;
 mod drivers;
+mod start;
 
 use alloc::format;
 use alloc::string::String;
@@ -28,9 +29,14 @@ use alloc::vec::Vec;
 use devices::Devices;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
+use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
+use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerAsyncClient};
+use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
+use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
+use start::Starter;
 
 mikros_rt::raw_main!(main);
 
@@ -50,6 +56,8 @@ const KIND_MMIO: u32 = 1;
 const SHARED: u32 = 1 << 0;
 /// The configuration space of one bus, in an ECAM range.
 const BUS_SIZE: u64 = 1 << 20;
+/// The permission broker's protocol.
+const BROKER: &str = "mikros.permissions.Broker";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -110,10 +118,50 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         }
     };
     devices.bind(&drivers);
-    // The handles, the framebuffer's among them, stay open.
+    let header = managed.header;
+    let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
+    let broker = executor.block_on(connect_broker(&directory, &reactor));
+    let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
+    let starter = Starter::new(launcher, broker, root, reactor.clone());
+    executor.block_on(devices.start(&drivers, &starter));
+    // The handles, the framebuffer's and the process's among them, stay
+    // open.
     executor.block_on(core::future::pending::<()>());
-    drop((log, framebuffer));
+    drop((
+        log,
+        framebuffer,
+        header.process,
+        directory,
+        devices,
+        starter,
+    ));
     PANIC_EXIT_CODE
+}
+
+/// A connection to the permission broker through `directory`, or none
+/// when the directory refuses it, which is logged.
+async fn connect_broker(
+    directory: &DirectoryAsyncClient,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Option<BrokerAsyncClient> {
+    let (client, server) = endpoints::<Broker>().ok()?;
+    match directory
+        .connect(BROKER.into(), None, server.into_handle())
+        .await
+    {
+        Ok(Ok(_)) => Some(BrokerAsyncClient::new(client, reactor.clone())),
+        Ok(Err(status)) => {
+            mikros_rt::log!(
+                Error,
+                "device-manager: connecting to the broker: {status:?}"
+            );
+            None
+        }
+        Err(e) => {
+            mikros_rt::log!(Error, "device-manager: connecting to the broker: {e:?}");
+            None
+        }
+    }
 }
 
 /// Adds a `platform:pci-host-ecam` root device for each entry of `mcfg`,

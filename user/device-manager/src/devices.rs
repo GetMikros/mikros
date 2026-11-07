@@ -1,5 +1,6 @@
 //! The tree of devices, and the drivers bound to them.
 
+use crate::start::{Running, Starter};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -8,8 +9,8 @@ use mikros_rt::interfaces::__midl::OwnedHandle;
 
 /// A device: its ID, name, hardware IDs from the most specific to the
 /// least, properties, parent, unless it is a root device, the
-/// resources of its hardware, and the name of its driver once one is
-/// bound.
+/// resources of its hardware, the name of its driver once one is bound,
+/// and that driver once it was spawned.
 pub struct Device {
     pub id: u64,
     pub name: String,
@@ -18,6 +19,7 @@ pub struct Device {
     pub parent: Option<u64>,
     pub resources: Vec<OwnedHandle>,
     pub driver: Option<String>,
+    pub running: Option<Running>,
 }
 
 /// The devices, with the ID the next one gets.
@@ -54,6 +56,7 @@ impl Devices {
             parent,
             resources,
             driver: None,
+            running: None,
         };
         mikros_rt::log!(Info, "device-manager: added {}", describe(&device));
         self.list.push(device);
@@ -83,6 +86,28 @@ impl Devices {
                 "device-manager: bound driver {driver} to device {id}, {name}, as {matched}"
             );
             device.driver = Some(driver.clone());
+        }
+    }
+
+    /// Starts the driver of `drivers` bound to each device whose driver
+    /// was not spawned, in the order the devices were added, and logs
+    /// each one that does not start.
+    pub async fn start(&mut self, drivers: &[Driver], starter: &Starter) {
+        for device in self.list.iter_mut().filter(|d| d.running.is_none()) {
+            let Some(bound) = &device.driver else {
+                continue;
+            };
+            let Some(driver) = drivers.iter().find(|d| &d.name == bound) else {
+                continue;
+            };
+            match starter.start(device, driver).await {
+                Ok(running) => device.running = Some(running),
+                Err(why) => mikros_rt::log!(
+                    Error,
+                    "device-manager: driver {bound} for device {} did not start: {why}",
+                    device.id
+                ),
+            }
         }
     }
 }

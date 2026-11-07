@@ -300,6 +300,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-host"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "test-init"
 version = "0.0.0"
 dependencies = [
