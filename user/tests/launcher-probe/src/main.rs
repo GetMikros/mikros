@@ -314,10 +314,14 @@ async fn run_with(
     .map_or(0, |(pid, _)| pid);
     let ended = wait(l, pid as i32).await;
     let code = ended.and_then(|(p, code, signal)| (p == pid && signal == 0).then_some(code));
+    let printed = read_all(&output);
     if code != Some(0) {
         mikros_rt::log!(Error, "launcher probe: {path} ended with {ended:?}");
+        for line in String::from_utf8_lossy(&printed).lines() {
+            mikros_rt::log!(Error, "launcher probe: {path} printed: {line}");
+        }
     }
-    (read_all(&output), code)
+    (printed, code)
 }
 
 /// A new stream: the end the probe reads, and the end it gives away.

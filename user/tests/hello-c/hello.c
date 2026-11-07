@@ -16,6 +16,7 @@
 #include <setjmp.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -674,11 +675,20 @@ static void on_wake(int signo)
 	(void)signo;
 }
 
+/* Set once the wait that wake_main interrupts has ended. */
+static atomic_int waited;
+
+/* Sends SIGUSR2 to the thread `arg` every 5 ms until its wait has ended:
+   a signal that comes before the wait begins, as on a slow machine, is
+   handled without ending it. The caller clears `waited` before it
+   starts the thread and sets it once the wait ended. */
 static void *wake_main(void *arg)
 {
 	struct timespec t = {0, 5000000};
-	nanosleep(&t, 0);
-	pthread_kill(*(pthread_t *)arg, SIGUSR2);
+	while (!atomic_load(&waited)) {
+		nanosleep(&t, 0);
+		pthread_kill(*(pthread_t *)arg, SIGUSR2);
+	}
 	return 0;
 }
 
@@ -704,10 +714,12 @@ static int sleeps_end_in_time(void)
 	sigaction(SIGUSR2, &sa, &old);
 	pthread_t self = pthread_self(), waker;
 	struct timespec second = {1, 0}, left = {0, 0};
+	atomic_store(&waited, 0);
 	if (pthread_create(&waker, 0, wake_main, &self))
 		return 0;
 	int r = nanosleep(&second, &left);
 	int e = errno;
+	atomic_store(&waited, 1);
 	pthread_join(waker, 0);
 	sigaction(SIGUSR2, &old, 0);
 	return ok && r == -1 && e == EINTR && left.tv_sec == 0 && left.tv_nsec > 0;
@@ -824,10 +836,16 @@ static int masks_apply_to_waits(void)
 	sa.sa_flags = SA_RESTART;
 	sigaction(SIGUSR2, &sa, 0);
 	pthread_t self = pthread_self(), waker;
+	atomic_store(&waited, 0);
 	if (pthread_create(&waker, 0, wake_main, &self))
 		return 0;
-	ok = ok && pause() == -1 && errno == EINTR && woken == 4;
+	int r = pause();
+	int e = errno;
+	atomic_store(&waited, 1);
 	pthread_join(waker, 0);
+	/* A signal sent again before the waker saw the wait end may have run
+	   the handler once more. */
+	ok = ok && r == -1 && e == EINTR && woken >= 4;
 	sigaction(SIGUSR2, &old, 0);
 	return ok;
 }
@@ -887,10 +905,13 @@ static int spawn_and_wait(int search, int exec)
 		return 0;
 	posix_spawn_file_actions_t fa;
 	posix_spawn_file_actions_init(&fa);
+	/* The actions run in order: descriptor 5 may be one of the pipes'
+	   ends, as when this program starts with 0, 1 and 2 open, so the
+	   ends are moved before the greeting is opened there. */
 	posix_spawn_file_actions_adddup2(&fa, p[1], 1);
+	posix_spawn_file_actions_adddup2(&fa, hold[0], 8);
 	posix_spawn_file_actions_addclose(&fa, p[0]);
 	posix_spawn_file_actions_addopen(&fa, 5, GREETING, O_RDONLY, 0);
-	posix_spawn_file_actions_adddup2(&fa, hold[0], 8);
 	char *args[] = { "spawn-child", "one", "two", 0 };
 	char *exec_args[] = { "spawn-child", "exec", 0 };
 	char *env[] = { "SPAWN_TEST=yes", 0 };
@@ -913,11 +934,17 @@ static int spawn_and_wait(int search, int exec)
 	while (r == 0 && (n = read(p[0], buf + got, sizeof buf - got)) > 0)
 		got += n;
 	close(p[0]);
-	return r == 0 && running && pid > 0 && got == 13
-		&& memcmp(buf, "child output\n", 13) == 0
-		&& waitpid(pid, &status, 0) == pid && WIFEXITED(status)
-		&& WEXITSTATUS(status) == 7 && waitpid(pid, &status, 0) == -1
-		&& errno == ECHILD;
+	status = -1;
+	pid_t waited = r == 0 ? waitpid(pid, &status, 0) : -1;
+	int ok = r == 0 && running && pid > 0 && got == 13
+		&& memcmp(buf, "child output\n", 13) == 0 && waited == pid
+		&& WIFEXITED(status) && WEXITSTATUS(status) == 7
+		&& waitpid(pid, &status, 0) == -1 && errno == ECHILD;
+	if (!ok)
+		fprintf(stderr, "spawn_and_wait(%d, %d): spawn %d, running %d, read %zu, "
+			"waited %d for %d, status %#x\n", search, exec, r, running, got,
+			(int)waited, (int)pid, status);
+	return ok;
 }
 
 /* Programs are started by path and by search, and replace themselves,
@@ -938,12 +965,21 @@ static int programs_are_spawned(void)
 	int masked = posix_spawn(&pid, "/usr/bin/spawn-child", 0, &attr, args, 0);
 	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
 	int grouped = posix_spawn(&pid, "/usr/bin/spawn-child", 0, &attr, args, 0);
-	return spawn_and_wait(0, 0) && spawn_and_wait(0, 1)
-		&& setenv("PATH", "/nowhere:/usr/bin", 1) == 0 && spawn_and_wait(1, 0)
-		&& posix_spawn(&pid, "/usr/bin/missing", 0, 0, args, 0) == ENOENT
-		&& posix_spawnp(&pid, "missing", 0, 0, args, 0) == ENOENT
-		&& masked == ENOSYS && grouped == ENOSYS
-		&& waitpid(-1, &status, WNOHANG) == -1 && errno == ECHILD;
+	const char *failed = !spawn_and_wait(0, 0) ? "spawning by path"
+		: !spawn_and_wait(0, 1) ? "spawning a program that replaces itself"
+		: setenv("PATH", "/nowhere:/usr/bin", 1) != 0 || !spawn_and_wait(1, 0)
+			? "spawning by search"
+		: posix_spawn(&pid, "/usr/bin/missing", 0, 0, args, 0) != ENOENT
+			? "refusing a missing program"
+		: posix_spawnp(&pid, "missing", 0, 0, args, 0) != ENOENT
+			? "refusing a missing program by search"
+		: masked != ENOSYS || grouped != ENOSYS ? "refusing attributes"
+		: waitpid(-1, &status, WNOHANG) != -1 || errno != ECHILD
+			? "having no child left"
+		: 0;
+	if (failed)
+		fprintf(stderr, "programs_are_spawned: %s failed\n", failed);
+	return !failed;
 }
 
 int main(int argc, char **argv)
