@@ -1,8 +1,13 @@
-//! A port: its command list, received-FIS area and command tables,
-//! setting it up, starting it, and taking its interrupts.
+//! A port: its command list, received-FIS area and command tables, setting
+//! it up, issuing commands in its slots, and taking their completions.
 
 use crate::hba::{TimedOut, wait};
 use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
+use core::future::poll_fn;
+use core::sync::atomic::{Ordering, fence};
+use core::task::{Poll, Waker};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -16,8 +21,11 @@ const IS: u64 = 0x10;
 const IE: u64 = 0x14;
 const CMD: u64 = 0x18;
 const TFD: u64 = 0x20;
+const SIG: u64 = 0x24;
 const SSTS: u64 = 0x28;
 const SERR: u64 = 0x30;
+const SACT: u64 = 0x34;
+const CI: u64 = 0x38;
 /// `PxCMD`: start, spin-up device, FIS receive enable, FIS receive
 /// running, and command list running.
 const CMD_ST: u32 = 1 << 0;
@@ -33,27 +41,71 @@ const TFD_BUSY: u32 = 1 << 7 | 1 << 3;
 /// setup FIS, a set device bits FIS, and a descriptor processed.
 const IS_FATAL: u32 = 1 << 30 | 1 << 29 | 1 << 28 | 1 << 27;
 const IE_ALL: u32 = IS_FATAL | 1 << 5 | 1 << 3 | 1 << 2 | 1 << 1 | 1 << 0;
-/// `PxSSTS`: an established connection.
+/// `PxSSTS`: an established connection, and the active state.
 const DET_ESTABLISHED: u32 = 3;
+const IPM_ACTIVE: u32 = 1 << 8;
+/// The signature of a SATA disk.
+const SIG_SATA: u32 = 0x0000_0101;
 /// Where the command list, the received-FIS area and the command tables
 /// lie in the port's memory; a command table's size; and the most PRD
 /// entries in one table.
 const COMMAND_LIST: u64 = 0;
 const RECEIVED_FIS: u64 = 1024;
 const TABLES: u64 = 2048;
-const PRD_MAX: usize = 264;
+pub const PRD_MAX: usize = 264;
 const TABLE_SIZE: u64 = 0x80 + 16 * PRD_MAX as u64;
 /// How long a port may take to stop, a link to come up, and the device
 /// to stop being busy.
 const STOP_LIMIT: i64 = 500 * MS;
 const LINK_LIMIT: i64 = 1000 * MS;
 const BUSY_LIMIT: i64 = 1000 * MS;
+/// The type and command bit of a host to device register FIS, and the
+/// LBA mode bit of its device field.
+const FIS_H2D: u8 = 0x27;
+const FIS_COMMAND: u8 = 0x80;
+pub const DEVICE_LBA: u8 = 1 << 6;
+
+/// An ATA command for a host to device register FIS.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Ata {
+    pub command: u8,
+    pub features: u16,
+    pub lba: u64,
+    pub count: u16,
+    pub device: u8,
+}
+
+/// What an interrupt found on a port.
+pub enum Event {
+    /// Nothing; its `PxIS` was clear.
+    None,
+    /// Commands completed.
+    Handled,
+    /// It reported an error, and its commands have failed.
+    Error,
+}
+
+struct State {
+    /// The slots that tasks hold, and those issued to the HBA and not
+    /// complete.
+    held: u32,
+    outstanding: u32,
+    /// Set while a command that is not queued holds the port.
+    exclusive: bool,
+    results: [Option<Result<(), Status>>; 32],
+    wakers: [Option<Waker>; 32],
+    waiting: Vec<Waker>,
+}
 
 pub struct Port {
     pub number: u32,
     hba: Rc<Mmio>,
     base: u64,
     memory: Contiguous,
+    slots: u32,
+    /// How many slots queued commands may use.
+    depth: Cell<u32>,
+    state: RefCell<State>,
 }
 
 impl Port {
@@ -79,6 +131,16 @@ impl Port {
             hba,
             base: 0x100 + 0x80 * u64::from(number),
             memory,
+            slots,
+            depth: Cell::new(1),
+            state: RefCell::new(State {
+                held: 0,
+                outstanding: 0,
+                exclusive: false,
+                results: [None; 32],
+                wakers: Default::default(),
+                waiting: Vec::new(),
+            }),
         })
     }
 
@@ -131,14 +193,167 @@ impl Port {
         Ok(())
     }
 
-    /// Takes what the port reports: clears `PxIS`, and says whether it
-    /// had anything set.
-    pub fn interrupt(&self) -> bool {
-        let is = self.read(IS);
-        if is != 0 {
-            self.write(IS, is);
+    /// Whether the port has a SATA disk: an established connection in the
+    /// active state, with the signature of a disk.
+    pub fn has_disk(&self) -> bool {
+        let ssts = self.read(SSTS);
+        ssts & 0xF == DET_ESTABLISHED && ssts & 0xF00 == IPM_ACTIVE && self.read(SIG) == SIG_SATA
+    }
+
+    /// Lets queued commands use `depth` slots.
+    pub fn set_depth(&self, depth: u32) {
+        self.depth.set(depth.clamp(1, self.slots));
+    }
+
+    /// Issues `ata`, which moves the bytes at the physical addresses and
+    /// lengths `data` to the device when `write` is true and from it
+    /// otherwise, and waits until it completes. A `queued` command, of
+    /// native command queuing, gets its tag in the FIS's count field and
+    /// runs alongside other queued commands; any other command runs on
+    /// its own.
+    pub async fn issue(
+        &self,
+        ata: Ata,
+        data: &[(u64, u32)],
+        write: bool,
+        queued: bool,
+    ) -> Result<(), Status> {
+        if data.len() > PRD_MAX {
+            return Err(Status::InvalidArgs);
         }
-        is != 0
+        let slot = poll_fn(|cx| {
+            let mut state = self.state.borrow_mut();
+            let free = if state.exclusive {
+                None
+            } else if queued {
+                (0..self.depth.get()).find(|s| state.held & 1 << s == 0)
+            } else if state.held == 0 {
+                Some(0)
+            } else {
+                None
+            };
+            match free {
+                Some(slot) => {
+                    state.held |= 1 << slot;
+                    state.exclusive = !queued;
+                    state.results[slot as usize] = None;
+                    Poll::Ready(slot)
+                }
+                None => {
+                    state.waiting.push(cx.waker().clone());
+                    Poll::Pending
+                }
+            }
+        })
+        .await;
+        self.fill(slot, ata, data, write, queued);
+        {
+            let mut state = self.state.borrow_mut();
+            state.outstanding |= 1 << slot;
+            fence(Ordering::SeqCst);
+            if queued {
+                self.write(SACT, 1 << slot);
+            }
+            self.write(CI, 1 << slot);
+        }
+        let result = poll_fn(|cx| {
+            let mut state = self.state.borrow_mut();
+            match state.results[slot as usize] {
+                Some(result) => Poll::Ready(result),
+                None => {
+                    state.wakers[slot as usize] = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            }
+        })
+        .await;
+        let waiting = {
+            let mut state = self.state.borrow_mut();
+            state.held &= !(1 << slot);
+            if !queued {
+                state.exclusive = false;
+            }
+            core::mem::take(&mut state.waiting)
+        };
+        for waker in waiting {
+            waker.wake();
+        }
+        result
+    }
+
+    /// Writes the command header and table of `slot`.
+    fn fill(&self, slot: u32, ata: Ata, data: &[(u64, u32)], write: bool, queued: bool) {
+        let m = &self.memory;
+        let header = COMMAND_LIST + 32 * u64::from(slot);
+        // The FIS is 5 dwords.
+        let dw0 = 5 | u32::from(write) << 6 | (data.len() as u32) << 16;
+        m.write32(header, dw0);
+        m.write32(header + 4, 0);
+        let table = TABLES + TABLE_SIZE * u64::from(slot);
+        let count = if queued {
+            (slot as u16) << 3
+        } else {
+            ata.count
+        };
+        let fis = [
+            FIS_H2D,
+            FIS_COMMAND,
+            ata.command,
+            ata.features as u8,
+            ata.lba as u8,
+            (ata.lba >> 8) as u8,
+            (ata.lba >> 16) as u8,
+            ata.device,
+            (ata.lba >> 24) as u8,
+            (ata.lba >> 32) as u8,
+            (ata.lba >> 40) as u8,
+            (ata.features >> 8) as u8,
+            count as u8,
+            (count >> 8) as u8,
+            0,
+            0,
+        ];
+        for (i, byte) in fis.iter().enumerate() {
+            m.write8(table + i as u64, *byte);
+        }
+        for i in fis.len() as u64..20 {
+            m.write8(table + i, 0);
+        }
+        for (i, (address, len)) in data.iter().enumerate() {
+            let entry = table + 0x80 + 16 * i as u64;
+            m.write64(entry, *address);
+            m.write32(entry + 8, 0);
+            m.write32(entry + 12, len - 1);
+        }
+    }
+
+    /// Takes what the port reports: clears `PxIS`, and completes the
+    /// commands that are done, or fails all outstanding ones when the
+    /// port reports an error.
+    pub fn interrupt(&self) -> Event {
+        let is = self.read(IS);
+        if is == 0 {
+            return Event::None;
+        }
+        self.write(IS, is);
+        let mut state = self.state.borrow_mut();
+        let failed = is & IS_FATAL != 0;
+        let done = match failed {
+            true => state.outstanding,
+            false => state.outstanding & !(self.read(CI) | self.read(SACT)),
+        };
+        for slot in (0..32).filter(|s| done & 1 << s != 0) {
+            state.results[slot] = Some(if failed {
+                Err(Status::Internal)
+            } else {
+                Ok(())
+            });
+            if let Some(waker) = state.wakers[slot].take() {
+                waker.wake();
+            }
+        }
+        state.outstanding &= !done;
+        if failed { Event::Error } else { Event::Handled }
     }
 }
 

@@ -1,31 +1,43 @@
 //! The AHCI driver.
 //!
-//! `Start` takes the HBA over from the firmware, resets it, and sets up
-//! and starts each implemented port. It has no child devices yet, so
-//! `ConnectChild` fails with `NOT_FOUND`, and `ResetChild` fails with
-//! `NOT_SUPPORTED`.
+//! `Start` takes the HBA over from the firmware, resets it, sets up and
+//! starts each implemented port, and identifies the SATA disks on them.
+//! It adds each disk with 48-bit addressing as a child device
+//! `disk-<port>`, `storage:disk`, serves `Block` for it on the bus channel
+//! that `ConnectChild` gives it, and publishes its raw access service, of
+//! class `storage`. `ResetChild` fails with `NOT_SUPPORTED`.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod disk;
 mod hba;
 mod port;
 
+use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::rc::Rc;
+use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
+use core::future::poll_fn;
+use core::task::{Poll, Waker};
+use disk::{Disk, Memory};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
-use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DriverAsyncServer, DriverRequest, DriverStartRequest, DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
+    DriverStartRequest, DriverStartResponse, DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
+use mikros_rt::interfaces::mikros::service::Provider;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
-use mikros_storage::Mmio;
-use port::Port;
+use mikros_storage::{Mmio, PAGE};
+use port::{Event, Port};
 
 mikros_rt::raw_main!(main);
 
@@ -34,7 +46,37 @@ const INFO_RESOURCE: u32 = 5;
 const INFO_RESOURCE_SIZE: usize = 0x18;
 /// The BAR of the HBA's registers.
 const ABAR: u8 = 5;
+const DISK_ID: &str = "storage:disk";
+const SERVICE_CLASS: &str = "storage";
 const SIGNALED: u32 = 1 << 3;
+
+/// The disks by the IDs of their devices, once all are added.
+#[derive(Default)]
+struct Devices {
+    added: RefCell<Option<BTreeMap<u64, Rc<Disk>>>>,
+    waiting: RefCell<Vec<Waker>>,
+}
+
+impl Devices {
+    fn set(&self, added: BTreeMap<u64, Rc<Disk>>) {
+        *self.added.borrow_mut() = Some(added);
+        for waker in self.waiting.borrow_mut().drain(..) {
+            waker.wake();
+        }
+    }
+
+    /// The disk of device `id`, once the devices are added.
+    async fn get(&self, id: u64) -> Option<Rc<Disk>> {
+        poll_fn(|cx| match &*self.added.borrow() {
+            Some(added) => Poll::Ready(added.get(&id).cloned()),
+            None => {
+                self.waiting.borrow_mut().push(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -56,13 +98,29 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let end = ServerEnd::new(managed.handles.remove(at).handle);
     let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
     let process = managed.header.process.raw();
+    let mut started = false;
+    let devices = Rc::new(Devices::default());
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
             let _ = match request {
                 DriverRequest::Start(request, responder) => {
-                    let started = start(request, process, &reactor, &spawner).await;
-                    responder.reply(s, started.map(|()| DriverStartResponse {}))
+                    match start(request, process, &reactor, &spawner).await {
+                        Ok((disks, manager)) => {
+                            started = true;
+                            let replied = responder.reply(s, Ok(DriverStartResponse {}));
+                            let task = add_disks(
+                                disks,
+                                manager,
+                                devices.clone(),
+                                reactor.clone(),
+                                spawner.clone(),
+                            );
+                            spawner.spawn(task);
+                            replied
+                        }
+                        Err(status) => responder.reply(s, Err(status)),
+                    }
                 }
                 DriverRequest::Stop(_, responder) => {
                     let _ = responder.reply(s, DriverStopResponse {});
@@ -71,8 +129,23 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
                 }
-                DriverRequest::ConnectChild(_, responder) => {
-                    responder.reply(s, Err(Status::NotFound))
+                DriverRequest::ConnectChild(request, responder) => {
+                    if !started {
+                        let _ = responder.reply(s, Err(Status::BadState));
+                        continue;
+                    }
+                    let (devices, server) = (devices.clone(), server.clone());
+                    let (reactor, spawner2) = (reactor.clone(), spawner.clone());
+                    spawner.spawn(async move {
+                        let Some(disk) = devices.get(request.device).await else {
+                            let _ = responder.reply(server.server(), Err(Status::NotFound));
+                            return;
+                        };
+                        let _ = responder.reply(server.server(), Ok(DriverConnectChildResponse {}));
+                        mikros_storage::serve(disk, request.bus, true, reactor, spawner2, || {})
+                            .await;
+                    });
+                    Ok(())
                 }
             };
         }
@@ -90,16 +163,17 @@ fn bus<T>(
     }
 }
 
-/// Brings up the HBA that `request` gives, with its `DMA` resource.
-/// Fails with `INVALID_ARGS` without a bus channel or a `DMA` resource,
-/// with the status of the bus driver when it refused a request, and
-/// with `INTERNAL` when the HBA could not be brought up.
+/// Brings up the HBA that `request` gives, with its `DMA` resource, and
+/// identifies its disks. Returns the disks and the device manager. Fails
+/// with `INVALID_ARGS` without a bus channel or a `DMA` resource, with
+/// the status of the bus driver when it refused a request, and with
+/// `INTERNAL` when the HBA could not be brought up.
 async fn start(
     request: DriverStartRequest,
     process: sys::Handle,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<(), Status> {
+) -> Result<(Vec<Rc<Disk>>, DeviceManagerAsyncClient), Status> {
     let bus_end = request.bus.ok_or(Status::InvalidArgs)?;
     let dma = request
         .resources
@@ -119,17 +193,22 @@ async fn start(
         .await
         .map_err(|_| Status::Internal)?;
     let caps = hba::capabilities(&mmio);
-    let below_4g = !caps.addressing_64;
+    let memory = Rc::new(Memory {
+        dma,
+        bti,
+        process,
+        below_4g: !caps.addressing_64,
+    });
     let mut ports = Vec::new();
     for number in hba::ports(&mmio) {
         let port = Port::new(
             number,
             mmio.clone(),
             caps.slots,
-            &dma,
-            &bti,
+            &memory.dma,
+            &memory.bti,
             process,
-            below_4g,
+            memory.below_4g,
         )?;
         port.set_up(reactor, caps.staggered_spin_up)
             .await
@@ -138,13 +217,34 @@ async fn start(
     }
     port::wait_for_links(&ports, reactor).await;
     for port in &ports {
-        // A port whose device stays busy is left stopped.
+        // A port that cannot start has no disk to identify.
         let _ = port.start(reactor).await;
     }
     let ports: Vec<Rc<Port>> = ports.into_iter().map(Rc::new).collect();
     interrupts(&device, &mmio, &ports, reactor, spawner).await?;
     hba::enable_interrupts(&mmio);
-    Ok(())
+    let page = memory.contiguous(PAGE)?;
+    let mut disks = Vec::new();
+    for port in ports.iter().filter(|p| p.has_disk()) {
+        let Ok(identity) = disk::identify(port, &page).await else {
+            continue;
+        };
+        if !identity.lba48 {
+            continue;
+        }
+        let queued = caps.ncq && identity.ncq;
+        if queued {
+            port.set_depth(identity.queue_depth);
+        }
+        disks.push(Rc::new(Disk {
+            port: port.clone(),
+            identity,
+            queued,
+            memory: memory.clone(),
+        }));
+    }
+    let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
+    Ok((disks, manager))
 }
 
 /// Takes the HBA's interrupt through `EnableMsi`, or else the INTx
@@ -173,9 +273,10 @@ async fn interrupts(
         let _handle = handle;
         while reactor.signals(raw, SIGNALED).await.is_ok() {
             for port in &ports {
-                if port.interrupt() {
-                    mmio.write32(hba::IS, 1 << port.number);
+                if matches!(port.interrupt(), Event::None) {
+                    continue;
                 }
+                mmio.write32(hba::IS, 1 << port.number);
             }
             if msi {
                 // SAFETY: the call takes no pointers.
@@ -186,6 +287,40 @@ async fn interrupts(
         }
     });
     Ok(())
+}
+
+/// Adds each disk's device, as `disk-<port>` and `storage:disk`, and
+/// publishes and serves its raw access service. Keeps the device
+/// manager's channel open for as long as the driver runs.
+async fn add_disks(
+    disks: Vec<Rc<Disk>>,
+    manager: DeviceManagerAsyncClient,
+    devices: Rc<Devices>,
+    reactor: Reactor,
+    spawner: Spawner,
+) {
+    let mut added = BTreeMap::new();
+    for disk in &disks {
+        let name = format!("disk-{}", disk.port.number);
+        let device = manager
+            .add_device(name, vec![DISK_ID.into()], vec![], vec![])
+            .await;
+        if let Ok(Ok(device)) = device {
+            added.insert(device.id, disk.clone());
+        }
+    }
+    devices.set(added);
+    for disk in disks {
+        if let Ok((client, server)) = endpoints::<Provider>()
+            && let Ok(Ok(_)) = manager.publish_service(SERVICE_CLASS.into(), client).await
+        {
+            let task =
+                mikros_storage::serve_provider(disk, server, reactor.clone(), spawner.clone());
+            spawner.spawn(task);
+        }
+    }
+    core::future::pending::<()>().await;
+    drop(manager);
 }
 
 /// The kind of `resource`, if it is one.

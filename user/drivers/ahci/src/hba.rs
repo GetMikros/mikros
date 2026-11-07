@@ -10,9 +10,10 @@ pub const IS: u64 = 0x08;
 const PI: u64 = 0x0C;
 const CAP2: u64 = 0x24;
 const BOHC: u64 = 0x28;
-/// `CAP`: 64-bit addressing, staggered spin-up, and the number of
-/// command slots minus 1.
+/// `CAP`: 64-bit addressing, native command queuing, staggered spin-up,
+/// and the number of command slots minus 1.
 const CAP_S64A: u32 = 1 << 31;
+const CAP_SNCQ: u32 = 1 << 30;
 const CAP_SSS: u32 = 1 << 27;
 const CAP_NCS_SHIFT: u32 = 8;
 /// `GHC`: AHCI enable, interrupt enable, and HBA reset.
@@ -35,6 +36,7 @@ pub struct TimedOut;
 #[derive(Clone, Copy, Debug)]
 pub struct Capabilities {
     pub addressing_64: bool,
+    pub ncq: bool,
     pub staggered_spin_up: bool,
     pub slots: u32,
 }
@@ -58,6 +60,7 @@ pub fn capabilities(mmio: &Mmio) -> Capabilities {
     let cap = mmio.read32(CAP);
     Capabilities {
         addressing_64: cap & CAP_S64A != 0,
+        ncq: cap & CAP_SNCQ != 0,
         staggered_spin_up: cap & CAP_SSS != 0,
         slots: ((cap >> CAP_NCS_SHIFT) & 0x1F) + 1,
     }
