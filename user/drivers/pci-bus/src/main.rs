@@ -9,8 +9,8 @@
 //! it serves `Device` on the bus channel that `ConnectChild` gives it;
 //! `ConnectChild` for a device it did not add fails with `NOT_FOUND`.
 //! It holds the INTx lines that the functions use and shares each one
-//! between the functions on it. `ResetChild` fails with
-//! `NOT_SUPPORTED`.
+//! between the functions on it. `ResetChild` resets a function before
+//! its driver is started again.
 
 #![no_std]
 #![no_main]
@@ -21,6 +21,7 @@ mod bus;
 mod device;
 mod ecam;
 mod interrupts;
+mod reset;
 
 use alloc::rc::Rc;
 use bus::{Bus, KIND_BTI, KIND_MMIO};
@@ -30,7 +31,7 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
-    DriverStartRequest, DriverStartResponse, DriverStopResponse,
+    DriverResetChildResponse, DriverStartRequest, DriverStartResponse, DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
@@ -91,8 +92,21 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                DriverRequest::ResetChild(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
+                DriverRequest::ResetChild(request, responder) => {
+                    let Some(bus) = bus.clone() else {
+                        let _ = responder.reply(s, Err(Status::BadState));
+                        continue;
+                    };
+                    let server = server.clone();
+                    spawner.spawn(async move {
+                        let reset = match bus.function(request.device).await {
+                            Some(function) => reset::reset(&bus, &function).await,
+                            None => Err(Status::NotFound),
+                        };
+                        let reset = reset.map(|()| DriverResetChildResponse {});
+                        let _ = responder.reply(server.server(), reset);
+                    });
+                    Ok(())
                 }
                 DriverRequest::ConnectChild(request, responder) => {
                     let Some(bus) = bus.clone() else {

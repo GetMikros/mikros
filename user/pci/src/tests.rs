@@ -268,3 +268,57 @@ fn walks_capabilities_and_finds_the_msi_registers() {
     fake.add(plain, &VIRTIO_BLOCK, 0);
     assert!(capabilities(&fake, plain).is_empty());
 }
+
+#[test]
+fn chooses_how_to_reset_a_function() {
+    let mut fake = Fake::default();
+    let put = |function: &mut Function, offset: usize, bytes: &[u8]| {
+        function.space[offset..offset + bytes.len()].copy_from_slice(bytes);
+    };
+    let list = |function: &mut Function, caps: &[(u8, usize)]| {
+        put(function, usize::from(STATUS), &(1u16 << 4).to_le_bytes());
+        put(function, usize::from(CAPABILITIES), &[caps[0].1 as u8]);
+        for (i, &(id, offset)) in caps.iter().enumerate() {
+            let next = caps.get(i + 1).map_or(0, |c| c.1 as u8);
+            put(function, offset, &[id, next]);
+        }
+    };
+    // A PCI Express function level reset comes first.
+    let flr = at(0, 1, 0);
+    let f = fake.add(flr, &VIRTIO_BLOCK, 0);
+    list(f, &[(CAP_PM, 0x40), (CAP_PCIE, 0x60)]);
+    put(f, 0x64, &(1u32 << 28).to_le_bytes());
+    assert_eq!(reset_method(&fake, flr, 0, 1), Some(Reset::PcieFlr(0x60)));
+    // Then the Advanced Features one.
+    let af = at(0, 2, 0);
+    let f = fake.add(af, &VIRTIO_BLOCK, 0);
+    list(f, &[(CAP_PCIE, 0x40), (CAP_AF, 0x50)]);
+    put(f, 0x53, &[1 << 1]);
+    assert_eq!(reset_method(&fake, af, 0, 1), Some(Reset::AfFlr(0x50)));
+    // Then D3hot to D0, unless No_Soft_Reset is set.
+    let pm = at(0, 3, 0);
+    let f = fake.add(pm, &VIRTIO_BLOCK, 0);
+    list(f, &[(CAP_PM, 0x40)]);
+    assert_eq!(reset_method(&fake, pm, 0, 1), Some(Reset::PowerCycle(0x40)));
+    put(
+        fake.functions.get_mut(&pm).unwrap(),
+        0x44,
+        &(1u32 << 3).to_le_bytes(),
+    );
+    assert_eq!(reset_method(&fake, pm, 0, 1), None);
+    // Then the secondary bus reset of the bridge above, for the only
+    // device on that bus, but not for one of two.
+    let bridge = at(0, 5, 0);
+    let f = fake.add(bridge, &VIRTIO_BLOCK, 1);
+    put(f, usize::from(SECONDARY_BUS), &[1]);
+    let alone = at(1, 0, 0);
+    fake.add(alone, &VIRTIO_BLOCK, 0);
+    assert_eq!(
+        reset_method(&fake, alone, 0, 1),
+        Some(Reset::SecondaryBus(bridge))
+    );
+    fake.add(at(1, 1, 0), &VIRTIO_BLOCK, 0);
+    assert_eq!(reset_method(&fake, alone, 0, 1), None);
+    // A function on the root bus has no bridge above it.
+    assert_eq!(reset_method(&fake, at(0, 3, 0), 0, 1), None);
+}

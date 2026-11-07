@@ -479,8 +479,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", failing_image.display());
             // The PCI bus driver tests serve this image, with the bus
-            // driver and test drivers for the host bridge's function and
-            // for QEMU's edu device.
+            // driver and test drivers for the host bridge's function, for
+            // QEMU's edu device and for the e1000e function.
             let pci_bus_files = [
                 (
                     "usr/lib/drivers/pci-bus/pci-bus".to_owned(),
@@ -493,7 +493,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             ];
             let pci_image = device_image(
                 "pci.img",
-                &[("test-pci", true), ("test-edu", true)],
+                &[("test-pci", true), ("test-edu", true), ("test-reset", true)],
                 &pci_bus_files,
             )?;
             println!("built    {}", pci_image.display());

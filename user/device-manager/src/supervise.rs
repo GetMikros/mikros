@@ -329,15 +329,15 @@ fn may_restart(restarts: &mut VecDeque<i64>) -> bool {
 /// a root device, or `ResetChild` succeeded or failed with
 /// `NOT_SUPPORTED`.
 async fn reset(m: &Manager, id: u64) -> bool {
-    let parent = {
+    let (parent, client) = {
         let devices = m.devices.borrow();
         let Some(parent) = devices.get(id).and_then(|d| d.parent) else {
             return true;
         };
-        devices.get(parent).and_then(|p| p.client.clone())
+        (parent, devices.get(parent).and_then(|p| p.client.clone()))
     };
-    let reset = match parent {
-        Some(parent) => parent.reset_child(id).await,
+    let reset = match client {
+        Some(client) => client.reset_child(id).await,
         None => {
             mikros_rt::log!(
                 Error,
@@ -347,7 +347,20 @@ async fn reset(m: &Manager, id: u64) -> bool {
         }
     };
     match reset {
-        Ok(Ok(_)) | Ok(Err(Status::NotSupported)) => true,
+        Ok(Ok(_)) => {
+            mikros_rt::log!(
+                Info,
+                "device-manager: the driver of device {parent} reset device {id}"
+            );
+            true
+        }
+        Ok(Err(Status::NotSupported)) => {
+            mikros_rt::log!(
+                Info,
+                "device-manager: the driver of device {parent} cannot reset device {id}"
+            );
+            true
+        }
         failed => {
             mikros_rt::log!(
                 Error,

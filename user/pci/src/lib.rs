@@ -1,6 +1,6 @@
 //! PCI configuration space, for the PCI bus driver: finding the
 //! functions behind a host bridge, their hardware IDs, the sizes of
-//! their BARs, and their capabilities.
+//! their BARs, their capabilities, and how they can be reset.
 //!
 //! The configuration space is reached through `Config`, which the bus
 //! driver implements over its ECAM range and the tests over memory.
@@ -27,6 +27,9 @@ pub const PROG_IF: u16 = 0x09;
 pub const SUBCLASS: u16 = 0x0A;
 pub const CLASS: u16 = 0x0B;
 pub const HEADER_TYPE: u16 = 0x0E;
+/// A bridge's secondary bus number and bridge control register.
+pub const SECONDARY_BUS: u16 = 0x19;
+pub const BRIDGE_CONTROL: u16 = 0x3E;
 pub const BAR0: u16 = 0x10;
 pub const SUBSYSTEM_VENDOR_ID: u16 = 0x2C;
 pub const SUBSYSTEM_ID: u16 = 0x2E;
@@ -40,9 +43,20 @@ pub const COMMAND_MEMORY: u16 = 1 << 1;
 pub const COMMAND_BUS_MASTER: u16 = 1 << 2;
 /// The status register's bit for a capability list.
 const STATUS_CAPABILITIES: u16 = 1 << 4;
-/// The IDs of the MSI and MSI-X capabilities.
+/// The IDs of the power management, MSI, PCI Express, MSI-X and
+/// Advanced Features capabilities.
+pub const CAP_PM: u8 = 0x01;
 pub const CAP_MSI: u8 = 0x05;
+pub const CAP_PCIE: u8 = 0x10;
 pub const CAP_MSIX: u8 = 0x11;
+pub const CAP_AF: u8 = 0x13;
+/// The bits that report a function level reset: in the PCI Express
+/// capability's Device Capabilities, and in the Advanced Features
+/// capability's capabilities byte.
+const PCIE_FLR: u32 = 1 << 28;
+const AF_FLR: u32 = 1 << 1;
+/// The `No_Soft_Reset` bit of the power management control register.
+const PM_NO_SOFT_RESET: u32 = 1 << 3;
 /// The bits of the MSI message control register that make the
 /// capability longer: 64-bit addresses and per-vector masking.
 const MSI_64: u16 = 1 << 7;
@@ -281,4 +295,79 @@ pub fn msi_registers(config: &impl Config, at: Address) -> Vec<Range<u16>> {
         ranges.push(offset..offset + len);
     }
     ranges
+}
+
+/// A way to reset a function, with the offset of the capability it
+/// uses, or the address of the bridge whose secondary bus it resets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reset {
+    /// A function level reset through the PCI Express capability.
+    PcieFlr(u16),
+    /// A function level reset through the Advanced Features capability.
+    AfFlr(u16),
+    /// A transition from D3hot to D0 through the power management
+    /// capability.
+    PowerCycle(u16),
+    /// A reset of the secondary bus of this bridge.
+    SecondaryBus(Address),
+}
+
+/// The first way of resetting the function at `at` that applies: a
+/// function level reset when its PCI Express or Advanced Features
+/// capability reports one, a transition from D3hot to D0 when its power
+/// management capability does not set `No_Soft_Reset`, or a reset of
+/// the secondary bus of the bridge above it, when that bridge is on one
+/// of the buses from `bus_start` to `bus_end` and the function's device
+/// is the only one on its bus.
+pub fn reset_method(
+    config: &impl Config,
+    at: Address,
+    bus_start: u8,
+    bus_end: u8,
+) -> Option<Reset> {
+    let caps = capabilities(config, at);
+    let find = |id| {
+        caps.iter()
+            .find(|(c, _)| *c == id)
+            .map(|&(_, offset)| offset)
+    };
+    if let Some(cap) = find(CAP_PCIE)
+        && config.read(at, cap + 4, 4) & PCIE_FLR != 0
+    {
+        return Some(Reset::PcieFlr(cap));
+    }
+    if let Some(cap) = find(CAP_AF)
+        && config.read(at, cap + 3, 1) & AF_FLR != 0
+    {
+        return Some(Reset::AfFlr(cap));
+    }
+    if let Some(cap) = find(CAP_PM)
+        && config.read(at, cap + 4, 4) & PM_NO_SOFT_RESET == 0
+    {
+        return Some(Reset::PowerCycle(cap));
+    }
+    let bridge = (bus_start..=bus_end).find_map(|bus| {
+        (0..32u8)
+            .flat_map(|device| {
+                (0..8u8).map(move |function| Address {
+                    bus,
+                    device,
+                    function,
+                })
+            })
+            .find(|&b| {
+                config.read(b, VENDOR_ID, 2) as u16 != NO_VENDOR
+                    && config.read(b, HEADER_TYPE, 1) as u8 & HEADER_LAYOUT == 1
+                    && config.read(b, SECONDARY_BUS, 1) as u8 == at.bus
+            })
+    })?;
+    let alone = (0..32u8).filter(|&d| d != at.device).all(|device| {
+        let other = Address {
+            bus: at.bus,
+            device,
+            function: 0,
+        };
+        config.read(other, VENDOR_ID, 2) as u16 == NO_VENDOR
+    });
+    alone.then_some(Reset::SecondaryBus(bridge))
 }

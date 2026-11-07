@@ -8845,8 +8845,10 @@ mod manager {
     /// its bus channel serves that function as `mikros.pci.Device`. It
     /// also starts the test driver for QEMU's edu device, whose `Start`
     /// succeeds only when the device's message-signaled interrupt
-    /// arrives and INTx is handed out as it should be. The device manager
-    /// says all of it in the log.
+    /// arrives and INTx is handed out as it should be. The test driver for
+    /// the e1000e function at 00:01.0 ends at each start, and the device
+    /// manager has the bus driver reset the function before each of its
+    /// five restarts. The device manager says all of it in the log.
     pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -8860,6 +8862,11 @@ mod manager {
             (b"device-manager: started driver test-pci for device", 1),
             (b"device-manager: bound driver test-edu to device", 1),
             (b"device-manager: started driver test-edu for device", 1),
+            (b"device-manager: the driver of device 1 ", 5),
+            (
+                b"device-manager: driver test-reset for device 3 failed after 5 restarts",
+                1,
+            ),
         ];
         const FAILED: &[&[u8]] = &[
             b"driver pci-bus declined",
