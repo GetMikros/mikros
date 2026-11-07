@@ -479,7 +479,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", failing_image.display());
             // The PCI bus driver tests serve this image, with the bus
-            // driver and a test driver for the host bridge's function.
+            // driver and test drivers for the host bridge's function and
+            // for QEMU's edu device.
             let pci_bus_files = [
                 (
                     "usr/lib/drivers/pci-bus/pci-bus".to_owned(),
@@ -490,7 +491,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     crate::workspace_root().join("user/drivers/pci-bus/driver.yaml"),
                 ),
             ];
-            let pci_image = device_image("pci.img", &[("test-pci", true)], &pci_bus_files)?;
+            let pci_image = device_image(
+                "pci.img",
+                &[("test-pci", true), ("test-edu", true)],
+                &pci_bus_files,
+            )?;
             println!("built    {}", pci_image.display());
             let members = [
                 ("tests/broker.img", broker_image.as_path()),

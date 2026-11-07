@@ -37,6 +37,14 @@
 //!   while `SetBusMaster(false)` succeeds, and `GetInterrupt` fails with
 //!   `NOT_SUPPORTED`, as the function has no INTx pin. It fails with
 //!   `INVALID_ARGS` otherwise.
+//! - As `system.driver.test-edu`, the driver of QEMU's `edu` device,
+//!   whose manifest needs `dma`, it succeeds when its bus channel gives
+//!   it the device's interrupts: `EnableMsi` gives one interrupt with
+//!   `WAIT`, `WRITE` and `INSPECT`, which the device triggers when told
+//!   to raise one through BAR 0, while `GetInterrupt` fails with
+//!   `BAD_STATE`; after `DisableMsi`, `GetInterrupt` gives an event with
+//!   `WAIT` and without `SIGNAL`, and `AckInterrupt` succeeds. It fails
+//!   with `INVALID_ARGS` otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver publishes a `storage`
 //!   service and ends without replying.
@@ -71,6 +79,7 @@ mikros_rt::raw_main!(main);
 const HOST: &str = "system.driver.test-host";
 const CHILD: &str = "system.driver.test-child";
 const PCI: &str = "system.driver.test-pci";
+const EDU: &str = "system.driver.test-edu";
 const DECLINE: &str = "system.driver.test-decline";
 const CLOSE: &str = "system.driver.test-close";
 const KIND_MMIO: u32 = 1;
@@ -79,6 +88,23 @@ const KIND_BTI: u32 = 8;
 const INFO_RESOURCE: u32 = 5;
 const INFO_RESOURCE_SIZE: usize = 0x18;
 const READABLE: u32 = 1 << 0;
+const SIGNALED: u32 = 1 << 3;
+/// Handle rights, and where the basic information record holds them.
+const WRITE: u32 = 1 << 3;
+const WAIT: u32 = 1 << 6;
+const SIGNAL: u32 = 1 << 7;
+const INSPECT: u32 = 1 << 9;
+const INFO_BASIC: u32 = 1;
+const INFO_BASIC_SIZE: usize = 24;
+/// The registers of `edu` that raise and acknowledge its interrupt.
+const EDU_RAISE: u64 = 0x60;
+const EDU_ACK: u64 = 0x64;
+const UNCACHED_DEVICE: u32 = 2;
+const PERM_READ: u32 = 1 << 0;
+const PERM_WRITE: u32 = 1 << 1;
+const PAGE_SIZE: u64 = 4096;
+/// How long the device has to raise its interrupt.
+const RAISE_LIMIT: i64 = 5_000_000_000;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -91,6 +117,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let app_id = managed.header.app_id.clone();
+    let process = managed.header.process.raw();
     let Some(at) = managed
         .handles
         .iter()
@@ -131,6 +158,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         PCI => {
                             let works = match bus {
                                 Some(bus) => pci_device_works(bus, &reactor).await,
+                                None => false,
+                            };
+                            match works {
+                                true => Ok(DriverStartResponse {}),
+                                false => Err(Status::InvalidArgs),
+                            }
+                        }
+                        EDU => {
+                            let works = match bus {
+                                Some(bus) => edu_interrupts_work(bus, &reactor, process).await,
                                 None => false,
                             };
                             match works {
@@ -276,6 +313,110 @@ async fn pci_device_works(bus: OwnedHandle, reactor: &Reactor) -> bool {
         && matches!(master, Ok(Err(Status::AccessDenied)))
         && matches!(no_master, Ok(Ok(_)))
         && matches!(no_intx, Ok(Err(Status::NotSupported)))
+}
+
+/// As the driver of `edu`, with `dma`: whether `bus` gives it the
+/// device's interrupts as it should, and its message-signaled interrupt
+/// arrives when the device raises it.
+async fn edu_interrupts_work(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -> bool {
+    let device = DeviceAsyncClient::new(ClientEnd::new(bus), reactor.clone());
+    let Ok(Ok(bar)) = device.get_bar(0).await.map(|r| r.map(|r| r.bar)) else {
+        return false;
+    };
+    let Some(registers) = map(&bar.resource, bar.base, process) else {
+        return false;
+    };
+    let master = device.set_bus_master(true).await;
+    let Ok(Ok(enabled)) = device.enable_msi(4).await else {
+        return false;
+    };
+    let busy = device.get_interrupt().await;
+    let interrupt = &enabled.interrupts[0];
+    let msi_rights = rights(interrupt);
+    let write = |offset: u64, value: u32| {
+        // SAFETY: the register lies in the mapped page of BAR 0.
+        unsafe { core::ptr::write_volatile((registers + offset) as *mut u32, value) };
+    };
+    write(EDU_RAISE, 1);
+    let mut observed = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let raised = unsafe {
+        sys::object_wait_one(
+            interrupt.raw(),
+            SIGNALED,
+            now() + RAISE_LIMIT,
+            &mut observed,
+        )
+    };
+    write(EDU_ACK, 1);
+    // SAFETY: the call takes no pointers.
+    let acked = unsafe { sys::interrupt_ack(interrupt.raw()) };
+    let disabled = device.disable_msi().await;
+    let intx = device.get_interrupt().await;
+    let event_rights = match &intx {
+        Ok(Ok(r)) => rights(&r.event),
+        _ => None,
+    };
+    let intx_acked = device.ack_interrupt().await;
+    matches!(master, Ok(Ok(_)))
+        && enabled.interrupts.len() == 1
+        && matches!(busy, Ok(Err(Status::BadState)))
+        && msi_rights.is_some_and(|r| r & (WAIT | WRITE | INSPECT) == WAIT | WRITE | INSPECT)
+        && raised == mikros_rt::OK
+        && acked == mikros_rt::OK
+        && matches!(disabled, Ok(Ok(_)))
+        && event_rights.is_some_and(|r| r & WAIT != 0 && r & SIGNAL == 0)
+        && matches!(intx_acked, Ok(Ok(_)))
+}
+
+/// Maps the first page of the BAR at `base` from its `resource`.
+fn map(resource: &OwnedHandle, base: u64, process: sys::Handle) -> Option<u64> {
+    let mut mem = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe {
+        sys::mem_create_physical(resource.raw(), base, PAGE_SIZE, UNCACHED_DEVICE, &mut mem)
+    };
+    if status != mikros_rt::OK {
+        return None;
+    }
+    let mut at = 0;
+    // SAFETY: the out pointer is valid; the kernel picks a free range.
+    let status = unsafe {
+        sys::vm_map(
+            process,
+            PERM_READ | PERM_WRITE,
+            0,
+            mem,
+            0,
+            PAGE_SIZE,
+            &mut at,
+        )
+    };
+    (status == mikros_rt::OK).then_some(at)
+}
+
+/// The rights of `handle`.
+fn rights(handle: &OwnedHandle) -> Option<u32> {
+    let mut info = [0u8; INFO_BASIC_SIZE];
+    let mut len = 0;
+    // SAFETY: the pointers describe `info` and `len`.
+    let status = unsafe {
+        sys::object_get_info(
+            handle.raw(),
+            INFO_BASIC,
+            info.as_mut_ptr(),
+            info.len() as u64,
+            &mut len,
+        )
+    };
+    (status == mikros_rt::OK).then(|| u32::from_le_bytes([info[20], info[21], info[22], info[23]]))
+}
+
+fn now() -> i64 {
+    let mut now = 0;
+    // SAFETY: the out pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    now
 }
 
 /// As the child's driver: writes a message on the bus channel `bus`.

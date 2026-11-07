@@ -8842,8 +8842,11 @@ mod manager {
     /// adds the functions it finds, among them 00:00.0 and the LPC bridge
     /// at 00:1f.0, with their hardware IDs, and the device manager
     /// starts the test driver for 00:00.0. Its `Start` succeeds only when
-    /// its bus channel serves that function as `mikros.pci.Device`. The
-    /// device manager says all of it in the log.
+    /// its bus channel serves that function as `mikros.pci.Device`. It
+    /// also starts the test driver for QEMU's edu device, whose `Start`
+    /// succeeds only when the device's message-signaled interrupt
+    /// arrives and INTx is handed out as it should be. The device manager
+    /// says all of it in the log.
     pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -8855,12 +8858,15 @@ mod manager {
             (b", pci-0000:00:1f.0, as pci:v8086d2918sv", 1),
             (b"device-manager: bound driver test-pci to device", 1),
             (b"device-manager: started driver test-pci for device", 1),
+            (b"device-manager: bound driver test-edu to device", 1),
+            (b"device-manager: started driver test-edu for device", 1),
         ];
         const FAILED: &[&[u8]] = &[
             b"driver pci-bus declined",
             b"driver pci-bus for device 1 terminated",
             b"driver pci-bus for device 1 did not start",
             b"driver test-pci declined",
+            b"driver test-edu declined",
         ];
         let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
         ensure("adding the PCI functions and starting their driver", logged)

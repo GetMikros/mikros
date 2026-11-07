@@ -2,7 +2,7 @@
 //! bus channel.
 
 use crate::bus::{Bus, Function};
-use crate::interrupts;
+use crate::interrupts::{self, Msi};
 use alloc::rc::Rc;
 use mikros_pci::{
     BarKind, COMMAND, COMMAND_BUS_MASTER, COMMAND_IO, COMMAND_MEMORY, Config, msi_registers,
@@ -10,9 +10,10 @@ use mikros_pci::{
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::pci::{
-    self, Device, DeviceAckInterruptResponse, DeviceAsyncServer, DeviceGetBarResponse,
-    DeviceGetBtiResponse, DeviceGetInfoResponse, DeviceGetInterruptResponse, DeviceInfo,
-    DeviceReadConfigResponse, DeviceRequest, DeviceSetBusMasterResponse, DeviceWriteConfigResponse,
+    self, Device, DeviceAckInterruptResponse, DeviceAsyncServer, DeviceDisableMsiResponse,
+    DeviceEnableMsiResponse, DeviceGetBarResponse, DeviceGetBtiResponse, DeviceGetInfoResponse,
+    DeviceGetInterruptResponse, DeviceInfo, DeviceReadConfigResponse, DeviceRequest,
+    DeviceSetBusMasterResponse, DeviceWriteConfigResponse,
 };
 use mikros_rt::sys;
 
@@ -25,11 +26,21 @@ const WRITABLE_FROM: u16 = 0x40;
 /// Serves `Device` for `function` of `bus` on the bus channel `end` of
 /// its driver, whose manifest needs `dma` when `dma` is true, until the
 /// channel closes. The function decodes memory and I/O meanwhile; once
-/// the channel closes, bus mastering and decoding are disabled and the
-/// quarantine of its bus transaction initiator is released.
+/// the channel closes, its message-signaled interrupts are disabled,
+/// bus mastering and decoding are disabled and the quarantine of its
+/// bus transaction initiator is released. `process` is the bus
+/// driver's, into which MSI-X tables are mapped.
 ///
-/// `EnableMsi` and `DisableMsi` fail with `NOT_SUPPORTED`.
-pub async fn serve(bus: Rc<Bus>, function: Rc<Function>, end: OwnedHandle, dma: bool) {
+/// While message-signaled interrupts are enabled, `GetInterrupt` and
+/// `EnableMsi` fail with `BAD_STATE`, and so does `DisableMsi` while
+/// they are not.
+pub async fn serve(
+    bus: Rc<Bus>,
+    function: Rc<Function>,
+    end: OwnedHandle,
+    dma: bool,
+    process: sys::Handle,
+) {
     use DeviceRequest as R;
     let at = function.at;
     let command = |change: &dyn Fn(u32) -> u32| {
@@ -39,6 +50,7 @@ pub async fn serve(bus: Rc<Bus>, function: Rc<Function>, end: OwnedHandle, dma: 
     };
     command(&|c| c | u32::from(COMMAND_IO | COMMAND_MEMORY));
     let server = DeviceAsyncServer::new(ServerEnd::<Device>::new(end), bus.reactor.clone());
+    let mut msi: Option<Msi> = None;
     while let Ok(request) = server.next().await {
         let s = server.server();
         let _ = match request {
@@ -76,15 +88,40 @@ pub async fn serve(bus: Rc<Bus>, function: Rc<Function>, end: OwnedHandle, dma: 
                 r.reply(s, set)
             }
             R::GetInterrupt(_, r) => {
-                let event = interrupts::get_interrupt(&bus, &function).await;
+                let event = match msi {
+                    Some(_) => Err(Status::BadState),
+                    None => interrupts::get_interrupt(&bus, &function).await,
+                };
                 r.reply(s, event.map(|event| DeviceGetInterruptResponse { event }))
             }
             R::AckInterrupt(_, r) => {
                 let acked = interrupts::ack_interrupt(&bus, &function);
                 r.reply(s, acked.map(|()| DeviceAckInterruptResponse {}))
             }
-            R::EnableMsi(_, r) => r.reply(s, Err(Status::NotSupported)),
-            R::DisableMsi(_, r) => r.reply(s, Err(Status::NotSupported)),
+            R::EnableMsi(q, r) => {
+                let enabled = match msi {
+                    Some(_) => Err(Status::BadState),
+                    None => interrupts::enable_msi(&bus, &function, process, q.count).await,
+                };
+                let reply = match enabled {
+                    Ok((state, interrupts)) => {
+                        msi = Some(state);
+                        Ok(DeviceEnableMsiResponse { interrupts })
+                    }
+                    Err(status) => Err(status),
+                };
+                r.reply(s, reply)
+            }
+            R::DisableMsi(_, r) => {
+                let disabled = match msi.take() {
+                    Some(state) => {
+                        interrupts::disable(&bus, process, state);
+                        Ok(DeviceDisableMsiResponse {})
+                    }
+                    None => Err(Status::BadState),
+                };
+                r.reply(s, disabled)
+            }
             R::GetBti(_, r) => {
                 let bti = match (dma, &function.bti) {
                     (false, _) => Err(Status::AccessDenied),
@@ -94,6 +131,9 @@ pub async fn serve(bus: Rc<Bus>, function: Rc<Function>, end: OwnedHandle, dma: 
                 r.reply(s, bti)
             }
         };
+    }
+    if let Some(state) = msi.take() {
+        interrupts::disable(&bus, process, state);
     }
     let off = u32::from(COMMAND_IO | COMMAND_MEMORY | COMMAND_BUS_MASTER);
     command(&|c| c & !off);

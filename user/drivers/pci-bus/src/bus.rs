@@ -38,8 +38,8 @@ pub struct Function {
 
 /// The host bridge's buses: their configuration space, segment, the
 /// device manager, the driver's directory, the `BTI` resource of their
-/// requester IDs, the INTx lines in use by global system interrupt, the
-/// executor, and the
+/// requester IDs, the `MSI` resource once one was needed, the INTx
+/// lines in use by global system interrupt, the executor, and the
 /// functions found, by the ID of their device, with whether they have
 /// all been added.
 pub struct Bus {
@@ -48,6 +48,7 @@ pub struct Bus {
     pub manager: DeviceManagerAsyncClient,
     pub directory: DirectoryAsyncClient,
     pub bti_resource: Result<OwnedHandle, Status>,
+    pub msi_resource: RefCell<Option<OwnedHandle>>,
     pub lines: RefCell<BTreeMap<u32, Rc<Line>>>,
     pub reactor: Reactor,
     pub spawner: Spawner,
@@ -73,6 +74,7 @@ impl Bus {
             manager,
             directory,
             bti_resource,
+            msi_resource: RefCell::new(None),
             lines: RefCell::new(BTreeMap::new()),
             spawner,
             functions: RefCell::new(BTreeMap::new()),

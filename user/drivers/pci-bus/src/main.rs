@@ -107,7 +107,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         };
                         let connected = Ok(DriverConnectChildResponse {});
                         let _ = responder.reply(server.server(), connected);
-                        device::serve(bus, function, request.bus, request.dma).await;
+                        device::serve(bus, function, request.bus, request.dma, process).await;
                     });
                     Ok(())
                 }

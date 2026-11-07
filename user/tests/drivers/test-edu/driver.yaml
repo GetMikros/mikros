@@ -1,0 +1,6 @@
+# A driver for QEMU's edu device, for the PCI bus driver tests. It
+# needs dma, to let the device write its messages.
+name: test-edu
+binary: /usr/lib/drivers/test-edu/test-edu
+match: [pci:v1234d11e8]
+needs: [dma]
