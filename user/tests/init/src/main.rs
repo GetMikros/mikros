@@ -8729,11 +8729,66 @@ mod manager {
             b"no MCFG table",
             b"no driver for device",
             b"bound driver test-fallback",
-            b"driver test-host failed Start",
+            b"driver test-host declined",
+            b"driver test-host for device 1 closed its channel",
+            b"driver test-host for device 1 terminated",
         ];
         let logged = device_manager_logs(s, b"tests/devices.img", false, EXPECTED, FAILED)?;
         ensure(
             "adding the host bridge and starting the normal driver",
+            logged,
+        )
+    }
+
+    /// From a boot image like that of
+    /// `device_manager_adds_platform_devices` with other test drivers,
+    /// and a stand-in for the boot framebuffer, the device manager adds
+    /// the framebuffer as device 1 and the host bridge as device 2. The
+    /// host bridge's driver fails `Start`: the device manager terminates
+    /// it, and the device fails without a restart. The framebuffer's
+    /// driver ends without replying: the device manager terminates and
+    /// restarts it, five times, and then the device fails. It says all
+    /// of it in the log.
+    pub fn device_manager_handles_failing_drivers(s: &Startup) -> Result {
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: driver test-decline declined device 2: NotSupported",
+                1,
+            ),
+            (
+                b"device-manager: device 2, pci-host-0, failed; it is left without a driver",
+                1,
+            ),
+            (
+                b"device-manager: driver test-close for device 1 closed its channel before Start replied",
+                6,
+            ),
+            (
+                b"device-manager: driver test-close for device 1 terminated",
+                6,
+            ),
+            (
+                b"device-manager: restarting driver test-close for device 1",
+                5,
+            ),
+            (
+                b"device-manager: driver test-close for device 1 failed after 5 restarts within 60 s",
+                1,
+            ),
+            (
+                b"device-manager: device 1, boot-framebuffer, failed; it is left without a driver",
+                1,
+            ),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"started driver test-decline",
+            b"started driver test-close",
+            b"ResetChild",
+            b"restarting driver test-decline",
+        ];
+        let logged = device_manager_logs(s, b"tests/failing.img", true, EXPECTED, FAILED)?;
+        ensure(
+            "failing the declined device, and the other after five restarts",
             logged,
         )
     }
@@ -9156,6 +9211,7 @@ mod bootfs {
                         "channel-echo",
                         "debuggee",
                         "devices.img",
+                        "failing.img",
                         "launcher.img",
                         "managed",
                         "pie",
@@ -9341,7 +9397,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 133] = [
+const TESTS: [(&str, Test); 134] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9411,6 +9467,10 @@ const TESTS: [(&str, Test); 133] = [
     (
         "device_manager_adds_platform_devices",
         manager::device_manager_adds_platform_devices,
+    ),
+    (
+        "device_manager_handles_failing_drivers",
+        manager::device_manager_handles_failing_drivers,
     ),
     (
         "executor_waits_on_objects",

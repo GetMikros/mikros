@@ -457,10 +457,16 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             ];
             let devices_image = device_image("devices.img", &drivers)?;
             println!("built    {}", devices_image.display());
+            let failing_image = device_image(
+                "failing.img",
+                &[("test-decline", true), ("test-close", true)],
+            )?;
+            println!("built    {}", failing_image.display());
             let members = [
                 ("tests/broker.img", broker_image.as_path()),
                 ("tests/services.img", services_image.as_path()),
                 ("tests/devices.img", devices_image.as_path()),
+                ("tests/failing.img", failing_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),

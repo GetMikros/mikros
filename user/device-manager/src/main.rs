@@ -10,7 +10,7 @@
 //! configuration space of its buses.
 //!
 //! It then reads the driver manifests, binds a driver to each device
-//! that one matches, and starts the bound drivers.
+//! that one matches, and starts and supervises the bound drivers.
 
 #![no_std]
 #![no_main]
@@ -21,11 +21,14 @@ mod acpi;
 mod devices;
 mod drivers;
 mod start;
+mod supervise;
 
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use devices::Devices;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -37,6 +40,7 @@ use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 use start::Starter;
+use supervise::Manager;
 
 mikros_rt::raw_main!(main);
 
@@ -64,6 +68,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let reactor = executor.reactor().clone();
+    let spawner = executor.spawner().clone();
     let received = executor.block_on(managed::receive_async(bootstrap, reactor.clone(), |_| {}));
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
@@ -123,18 +128,20 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let broker = executor.block_on(connect_broker(&directory, &reactor));
     let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
     let starter = Starter::new(launcher, broker, root, reactor.clone());
-    executor.block_on(devices.start(&drivers, &starter));
+    let manager = Rc::new(Manager {
+        devices: RefCell::new(devices),
+        drivers,
+        starter,
+        reactor,
+    });
+    let bound = manager.devices.borrow().bound();
+    for id in bound {
+        spawner.spawn(supervise::supervise(manager.clone(), id));
+    }
     // The handles, the framebuffer's and the process's among them, stay
     // open.
     executor.block_on(core::future::pending::<()>());
-    drop((
-        log,
-        framebuffer,
-        header.process,
-        directory,
-        devices,
-        starter,
-    ));
+    drop((log, framebuffer, header.process, directory, manager));
     PANIC_EXIT_CODE
 }
 

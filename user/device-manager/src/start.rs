@@ -5,12 +5,14 @@
 
 use crate::devices::Device;
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use mikros_manifest::{Driver, Need};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceDescription, DeviceManager, Driver as DriverProtocol, DriverAsyncClient, Property,
 };
@@ -22,6 +24,8 @@ use mikros_rt::sys;
 
 /// `user` in a Spawn request: the caller's own user.
 const CALLER_USER: u32 = u32::MAX;
+/// The signal that terminates a process.
+const KILL: u32 = 9;
 const SAME_RIGHTS: u32 = 1 << 31;
 const PAGE_SIZE: u64 = 4096;
 /// Resource kinds, and the `object_get_info` topic that tells them.
@@ -45,13 +49,31 @@ pub struct Starter {
     pub reactor: Reactor,
 }
 
-/// A driver that was spawned, with the handles that stay open while it
-/// runs: its process, the client of its `Driver` channel, and the device
-/// manager's end of the `DeviceManager` channel that `Start` gave it.
-pub struct Running {
-    _process: OwnedHandle,
-    _driver: DriverAsyncClient,
-    _manager: ServerEnd<DeviceManager>,
+/// What `Start` gets for a device: its description and copies of the
+/// resources its driver may have.
+pub struct Prepared {
+    description: DeviceDescription,
+    resources: Vec<OwnedHandle>,
+}
+
+/// A driver that was spawned: its process ID and process, the client of
+/// its `Driver` channel, the device manager's end of the `DeviceManager`
+/// channel that `Start` gave it, and how `Start` ended.
+pub struct Spawned {
+    pub pid: u32,
+    pub process: OwnedHandle,
+    pub driver: Rc<DriverAsyncClient>,
+    pub _manager: ServerEnd<DeviceManager>,
+    pub started: Started,
+}
+
+/// How `Start` ended.
+pub enum Started {
+    Yes,
+    /// It failed with this status.
+    Declined(Status),
+    /// The `Driver` channel failed before `Start` replied.
+    Closed,
 }
 
 impl Starter {
@@ -79,11 +101,35 @@ impl Starter {
         }
     }
 
-    /// Starts `driver` for `device` with app ID `system.driver.<name>`,
-    /// after registering its permissions with the broker, and calls
-    /// `Start` with the device's description and resources. A `Start`
-    /// that fails is logged, and the driver counts as spawned.
-    pub async fn start(&self, device: &Device, driver: &Driver) -> Result<Running, String> {
+    /// What `Start` gets for `device` when `driver` drives it: the
+    /// device's ID, name, hardware IDs and properties, and its resources
+    /// as `resources` chooses them.
+    pub fn prepare(&self, device: &Device, driver: &Driver) -> Result<Prepared, String> {
+        let description = DeviceDescription {
+            id: device.id,
+            name: device.name.clone(),
+            hardware_ids: device.hardware_ids.clone(),
+            properties: device
+                .properties
+                .iter()
+                .map(|(key, value)| Property {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        };
+        let resources = self.resources(device, driver)?;
+        Ok(Prepared {
+            description,
+            resources,
+        })
+    }
+
+    /// Starts `driver` with app ID `system.driver.<name>`, after
+    /// registering its permissions with the broker, and calls `Start`
+    /// with `prepared`. Fails when the driver could not be registered or
+    /// spawned; how `Start` ended is in the result.
+    pub async fn start(&self, prepared: Prepared, driver: &Driver) -> Result<Spawned, String> {
         let app_id = format!("system.driver.{}", driver.name);
         let broker = self
             .broker
@@ -97,7 +143,6 @@ impl Starter {
             Ok(Err(status)) => return Err(format!("registering its permissions: {status:?}")),
             Err(e) => return Err(format!("registering its permissions: {e:?}")),
         }
-        let resources = self.resources(device, driver)?;
         let (client, server) = endpoints::<DriverProtocol>().map_err(|e| format!("{e:?}"))?;
         let mut handles = vec![StartupHandle {
             role: HandleRole::Provider,
@@ -122,42 +167,36 @@ impl Starter {
         let driver_client = DriverAsyncClient::new(client, self.reactor.clone());
         let (manager, manager_server) =
             endpoints::<DeviceManager>().map_err(|e| format!("{e:?}"))?;
-        let description = DeviceDescription {
-            id: device.id,
-            name: device.name.clone(),
-            hardware_ids: device.hardware_ids.clone(),
-            properties: device
-                .properties
-                .iter()
-                .map(|(key, value)| Property {
-                    key: key.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
-        };
         let started = driver_client
-            .start(description, resources, None, manager)
+            .start(prepared.description, prepared.resources, None, manager)
             .await;
-        let (id, name, pid) = (device.id, &driver.name, spawned.pid);
-        match started {
-            Ok(Ok(_)) => mikros_rt::log!(
-                Info,
-                "device-manager: started driver {name} for device {id} as pid {pid}"
-            ),
-            Ok(Err(status)) => mikros_rt::log!(
-                Error,
-                "device-manager: driver {name} failed Start for device {id}: {status:?}"
-            ),
-            Err(e) => mikros_rt::log!(
-                Error,
-                "device-manager: driver {name} failed Start for device {id}: {e:?}"
-            ),
-        }
-        Ok(Running {
-            _process: spawned.process,
-            _driver: driver_client,
+        let started = match started {
+            Ok(Ok(_)) => Started::Yes,
+            Ok(Err(status)) => Started::Declined(status),
+            Err(_) => Started::Closed,
+        };
+        Ok(Spawned {
+            pid: spawned.pid,
+            process: spawned.process,
+            driver: Rc::new(driver_client),
             _manager: manager_server,
+            started,
         })
+    }
+
+    /// Terminates the driver process `pid`, a child of the device
+    /// manager, through the process manager. A process that already
+    /// terminated, which `BAD_STATE` says, is left as it is.
+    pub async fn kill(&self, pid: u32) {
+        let killed = self.launcher.kill(pid, KILL).await;
+        if let Ok(Err(status)) = killed
+            && status != Status::BadState
+        {
+            mikros_rt::log!(
+                Error,
+                "device-manager: terminating driver pid {pid} failed: {status:?}"
+            );
+        }
     }
 
     /// The resources `driver` gets in `Start` for `device`: copies of the

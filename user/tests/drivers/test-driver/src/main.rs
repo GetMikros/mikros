@@ -1,12 +1,17 @@
-//! A driver for PCI host bridges, for the device manager tests.
+//! The test drivers of the device manager tests, which do as their app
+//! ID says.
 //!
-//! It serves `Driver` on its `PROVIDER` startup handle. `Start` succeeds
-//! when the driver runs as `system.driver.test-host` and is started for
-//! the q35 host bridge, `pci-host-0`, as `platform:pci-host-ecam`, with
-//! its properties, no bus channel, and an `MMIO` and a `DMA` resource in
-//! that order; it fails with `INVALID_ARGS` otherwise. `Stop` ends the
-//! driver, and `ResetChild` fails with `NOT_SUPPORTED`, as it adds no
-//! devices.
+//! Each serves `Driver` on its `PROVIDER` startup handle. `Stop` ends
+//! the driver, and `ResetChild` fails with `NOT_SUPPORTED`, as it adds
+//! no devices. `Start` depends on the app ID:
+//! - As `system.driver.test-host`, it succeeds when the driver is
+//!   started for the q35 host bridge, `pci-host-0`, as
+//!   `platform:pci-host-ecam`, with its properties, no bus channel, and
+//!   an `MMIO` and a `DMA` resource in that order, and fails with
+//!   `INVALID_ARGS` otherwise.
+//! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
+//! - As `system.driver.test-close`, the driver ends without replying.
+//! - As any other, it fails with `INVALID_ARGS`.
 
 #![no_std]
 #![no_main]
@@ -24,7 +29,9 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
 
-const APP_ID: &str = "system.driver.test-host";
+const HOST: &str = "system.driver.test-host";
+const DECLINE: &str = "system.driver.test-decline";
+const CLOSE: &str = "system.driver.test-close";
 const KIND_MMIO: u32 = 1;
 const KIND_DMA: u32 = 4;
 const INFO_RESOURCE: u32 = 5;
@@ -39,7 +46,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
-    let as_driver = managed.header.app_id == APP_ID;
+    let app_id = managed.header.app_id.clone();
     let Some(at) = managed
         .handles
         .iter()
@@ -54,9 +61,11 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             let s = server.server();
             let _ = match request {
                 DriverRequest::Start(request, responder) => {
-                    let result = match as_driver && expected(&request) {
-                        true => Ok(DriverStartResponse {}),
-                        false => Err(Status::InvalidArgs),
+                    let result = match app_id.as_str() {
+                        HOST if expected(&request) => Ok(DriverStartResponse {}),
+                        DECLINE => Err(Status::NotSupported),
+                        CLOSE => return 0,
+                        _ => Err(Status::InvalidArgs),
                     };
                     responder.reply(s, result)
                 }

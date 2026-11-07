@@ -1,0 +1,5 @@
+# A driver for the boot framebuffer that ends without replying to Start,
+# for the device manager tests.
+name: test-close
+binary: /usr/lib/drivers/test-close/test-close
+match: [platform:boot-framebuffer]

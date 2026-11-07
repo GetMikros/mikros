@@ -1,16 +1,18 @@
 //! The tree of devices, and the drivers bound to them.
 
-use crate::start::{Running, Starter};
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 use mikros_manifest::Driver;
 use mikros_rt::interfaces::__midl::OwnedHandle;
+use mikros_rt::interfaces::mikros::driver::DriverAsyncClient;
 
 /// A device: its ID, name, hardware IDs from the most specific to the
 /// least, properties, parent, unless it is a root device, the
 /// resources of its hardware, the name of its driver once one is bound,
-/// and that driver once it was spawned.
+/// whether it failed, which leaves it without a driver for good, and
+/// the client of its driver's `Driver` channel while the driver runs.
 pub struct Device {
     pub id: u64,
     pub name: String,
@@ -19,7 +21,8 @@ pub struct Device {
     pub parent: Option<u64>,
     pub resources: Vec<OwnedHandle>,
     pub driver: Option<String>,
-    pub running: Option<Running>,
+    pub failed: bool,
+    pub client: Option<Rc<DriverAsyncClient>>,
 }
 
 /// The devices, with the ID the next one gets.
@@ -56,18 +59,71 @@ impl Devices {
             parent,
             resources,
             driver: None,
-            running: None,
+            failed: false,
+            client: None,
         };
         mikros_rt::log!(Info, "device-manager: added {}", describe(&device));
         self.list.push(device);
         id
     }
 
-    /// Binds a driver of `drivers` to each device without one, and
-    /// logs which, or that none matches. A device that several drivers
-    /// match equally gets the first by name, with a warning.
+    pub fn get(&self, id: u64) -> Option<&Device> {
+        self.list.iter().find(|d| d.id == id)
+    }
+
+    pub fn get_mut(&mut self, id: u64) -> Option<&mut Device> {
+        self.list.iter_mut().find(|d| d.id == id)
+    }
+
+    /// The IDs of the devices that have a driver bound, in the order
+    /// they were added.
+    pub fn bound(&self) -> Vec<u64> {
+        let bound = self.list.iter().filter(|d| d.driver.is_some());
+        bound.map(|d| d.id).collect()
+    }
+
+    /// Marks device `id` as failed and leaves it without a driver, and
+    /// logs it.
+    pub fn fail(&mut self, id: u64) {
+        if let Some(device) = self.get_mut(id) {
+            device.failed = true;
+            device.driver = None;
+            device.client = None;
+            mikros_rt::log!(
+                Error,
+                "device-manager: device {id}, {}, failed; it is left without a driver",
+                device.name
+            );
+        }
+    }
+
+    /// Removes the devices below device `id`, and logs each one.
+    pub fn remove_descendants(&mut self, id: u64) {
+        let mut parents = alloc::vec![id];
+        while let Some(parent) = parents.pop() {
+            while let Some(at) = self.list.iter().position(|d| d.parent == Some(parent)) {
+                let child = self.list.remove(at);
+                mikros_rt::log!(
+                    Info,
+                    "device-manager: removed device {}, {}",
+                    child.id,
+                    child.name
+                );
+                parents.push(child.id);
+            }
+        }
+    }
+
+    /// Binds a driver of `drivers` to each device without one that has
+    /// not failed, and logs which, or that none matches. A device that
+    /// several drivers match equally gets the first by name, with a
+    /// warning.
     pub fn bind(&mut self, drivers: &[Driver]) {
-        for device in self.list.iter_mut().filter(|d| d.driver.is_none()) {
+        let unbound = self
+            .list
+            .iter_mut()
+            .filter(|d| d.driver.is_none() && !d.failed);
+        for device in unbound {
             let (id, name) = (device.id, &device.name);
             let Some(choice) = mikros_manifest::choose(drivers, &device.hardware_ids) else {
                 mikros_rt::log!(Info, "device-manager: no driver for device {id}, {name}");
@@ -86,28 +142,6 @@ impl Devices {
                 "device-manager: bound driver {driver} to device {id}, {name}, as {matched}"
             );
             device.driver = Some(driver.clone());
-        }
-    }
-
-    /// Starts the driver of `drivers` bound to each device whose driver
-    /// was not spawned, in the order the devices were added, and logs
-    /// each one that does not start.
-    pub async fn start(&mut self, drivers: &[Driver], starter: &Starter) {
-        for device in self.list.iter_mut().filter(|d| d.running.is_none()) {
-            let Some(bound) = &device.driver else {
-                continue;
-            };
-            let Some(driver) = drivers.iter().find(|d| &d.name == bound) else {
-                continue;
-            };
-            match starter.start(device, driver).await {
-                Ok(running) => device.running = Some(running),
-                Err(why) => mikros_rt::log!(
-                    Error,
-                    "device-manager: driver {bound} for device {} did not start: {why}",
-                    device.id
-                ),
-            }
         }
     }
 }
