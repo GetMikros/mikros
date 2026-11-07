@@ -137,6 +137,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-gpt"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-libc"
 version = "0.0.0"
 dependencies = [
@@ -210,6 +214,14 @@ version = "0.0.0"
 dependencies = [
  "mikros-rt",
  "mikros-storage",
+]
+
+[[package]]
+name = "partition"
+version = "0.0.0"
+dependencies = [
+ "mikros-gpt",
+ "mikros-rt",
 ]
 
 [[package]]
