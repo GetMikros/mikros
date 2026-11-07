@@ -14,6 +14,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use mikros_manifest::path;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -24,6 +25,10 @@ use mikros_rt::interfaces::mikros::process::NamespaceEntry;
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use process_manager::bootfs::{Fs, ItemKind};
 
+/// The accounts service's data directory, which no other process's
+/// manifest entry may be, lie in, or hold.
+const ACCOUNTS_DATA: &str = "/var/lib/accounts";
+const ACCOUNTS_APP: &str = "system.accounts";
 /// The protocol of the temporary file system.
 const TMPFS: &str = "mikros.fs.Filesystem";
 /// How long to wait before asking again for tmpfs.
@@ -227,6 +232,11 @@ impl Namespaces {
                         0 => continue,
                         _ => return Err(Status::NotSupported),
                     }
+                }
+                let path = path::normalize(&path).ok_or(Status::NotFound)?;
+                // Only the accounts service reaches its data.
+                if app_id != ACCOUNTS_APP && path::overlaps(&path, ACCOUNTS_DATA) {
+                    return Err(Status::AccessDenied);
                 }
                 let rights = rights(&text).ok_or(Status::InvalidArgs)?;
                 entries.push(self.entry(shared, &ready, &path, rights).await?);

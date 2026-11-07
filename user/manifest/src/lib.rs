@@ -15,6 +15,7 @@ extern crate alloc;
 
 mod driver;
 mod order;
+pub mod path;
 mod program;
 #[cfg(test)]
 mod tests;
