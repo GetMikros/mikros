@@ -387,6 +387,20 @@ pub fn mem_create(size: u64, options: u32, out: UserOut<Handle>) -> Result<(), E
     give(mem, ObjectType::MemoryObject, out)
 }
 
+/// Like `mem_create`, with the object, and the frames allocated for it,
+/// charged to `budget` rather than to the caller's budget.
+pub fn mem_create_charged(
+    budget: Checked,
+    size: u64,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    page_aligned(&[size])?;
+    let budget = object::<Budget>(budget);
+    let mem = MemoryObject::new(Some(&budget), size, options)?;
+    give(mem, ObjectType::MemoryObject, out)
+}
+
 /// `BELOW_4G` of `mem_create_contiguous` and `mem_create_pinned`.
 const BELOW_4G: u32 = 1 << 0;
 

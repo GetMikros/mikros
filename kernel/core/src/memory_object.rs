@@ -34,9 +34,10 @@ const CHUNK: usize = 256;
 
 pub struct MemoryObject {
     header: Header,
-    /// The budget of the creating process, which the object and its
-    /// frames are charged to, or `None` for an object the kernel made at
-    /// boot, which charges nothing. A paged object always has one.
+    /// The budget that the object and its frames are charged to: that of
+    /// the creating process, or the one it named, or `None` for an object
+    /// the kernel made at boot, which charges nothing. A paged object
+    /// always has one.
     budget: Option<Arc<Budget>>,
     /// Kernel memory charged to the budget for the object itself.
     charged: u64,

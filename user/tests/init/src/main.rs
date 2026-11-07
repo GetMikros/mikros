@@ -7464,6 +7464,66 @@ fn budget_creation_and_thresholds(s: &Startup) -> Result {
     check("closing the budget", unsafe { sys::handle_close(child) })
 }
 
+/// A memory object made with `mem_create_charged` charges itself and
+/// its frames to the budget given, which needs `WRITE`, and runs into
+/// that budget's page limit rather than the caller's, which has none.
+/// Closing it releases the charges.
+fn memory_charged_to_a_budget(s: &Startup) -> Result {
+    const PAGE: u64 = 4096;
+    const NO_RESOURCES: i64 = -3;
+    let mut child = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a budget", unsafe {
+        sys::budget_create(s.budget, 1 << 20, 2, &mut child)
+    })?;
+    let mut no_write = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("copying it without WRITE", unsafe {
+        sys::handle_duplicate(child, right::DUPLICATE | right::INSPECT, &mut no_write)
+    })?;
+    let mut mem = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let refused = unsafe { sys::mem_create_charged(no_write, 4 * PAGE, 0, &mut mem) };
+    ensure("needing WRITE", refused == ACCESS_DENIED)?;
+    let pages = budget_pages(s)?;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a charged object", unsafe {
+        sys::mem_create_charged(child, 4 * PAGE, 0, &mut mem)
+    })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure("charging the object", u64_at(&r, 0x08) > 0)?;
+    let byte = [1u8];
+    for page in 0..2 {
+        // SAFETY: the pointer describes `byte`.
+        check("writing a page", unsafe {
+            sys::mem_write(mem, page * PAGE, byte.as_ptr(), 1)
+        })?;
+    }
+    ensure(
+        "charging its frames to the budget",
+        u64_at(&info::<0x38>(child, 6)?, 0x18) == 2,
+    )?;
+    // The budget lies under the caller's, which sees the same pages.
+    ensure(
+        "charging the caller through the budget only",
+        budget_pages(s)? == pages + 2,
+    )?;
+    // SAFETY: the pointer describes `byte`.
+    let over = unsafe { sys::mem_write(mem, 2 * PAGE, byte.as_ptr(), 1) };
+    ensure("failing with the budget's limit", over == NO_RESOURCES)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the object", unsafe { sys::handle_close(mem) })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure(
+        "releasing the charges",
+        u64_at(&r, 0x08) == 0 && u64_at(&r, 0x18) == 0,
+    )?;
+    // SAFETY: the calls take no pointers.
+    check("closing the copy", unsafe { sys::handle_close(no_write) })?;
+    // SAFETY: the call takes no pointers.
+    check("closing the budget", unsafe { sys::handle_close(child) })
+}
+
 /// The monotonic clock never goes back and resolves less than a
 /// microsecond, and the clock page that init gets
 /// has its rights and header: version 1, an even sequence, and the
@@ -9794,7 +9854,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 138] = [
+const TESTS: [(&str, Test); 139] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -10003,6 +10063,7 @@ const TESTS: [(&str, Test); 138] = [
         "budget_creation_and_thresholds",
         budget_creation_and_thresholds,
     ),
+    ("memory_charged_to_a_budget", memory_charged_to_a_budget),
     ("monotonic_clock_and_page", monotonic_clock_and_page),
     ("mappings_outlive_handles", mappings_outlive_handles),
     ("signal_frame", signal_frame),
