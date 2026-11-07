@@ -509,8 +509,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", tmpfs_image.display());
             // The namespace test serves this image, with root=bootfs: the
             // service manager, the broker, the temporary file system and a
-            // probe of its namespace, with their manifests, and files in
-            // /etc and /usr that the probe reads.
+            // probe of its namespace, with their manifests, files in /etc,
+            // /usr and /Libraries that the probe reads, and a native app's
+            // bundle with the dynamic linker it needs.
             let namespace_probe = user_build("namespace-probe", kind)?;
             println!("built    {}", namespace_probe.display());
             let probe_dir = crate::workspace_root().join("user/tests/namespace-probe");
@@ -536,6 +537,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ),
                     ("usr/share/probe/data.txt", probe_data.as_path()),
                     ("etc/probe.conf", probe_conf.as_path()),
+                    ("Libraries/probe.txt", probe_data.as_path()),
+                    ("Apps/test.native/bin/hello", hello_dynamic.as_path()),
+                    ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
                 ],
             )?;
             println!("built    {}", namespaces_image.display());

@@ -35,6 +35,8 @@ const ACCOUNTS_DATA: &str = "/var/lib/accounts";
 const ACCOUNTS_APP: &str = "system.accounts";
 /// The app ID of the temporary file system service.
 const TMPFS_APP: &str = "system.tmpfs";
+/// The app ID of command-line tools.
+const CLI_APP: &str = "system.cli";
 /// The protocol of the temporary file system.
 const TMPFS: &str = "mikros.fs.Filesystem";
 /// How long to wait before asking again for tmpfs.
@@ -243,8 +245,27 @@ impl Namespaces {
         if service_manager {
             entries.push(self.entry(shared, &ready, "/usr", RX).await?);
             entries.push(self.entry(shared, &ready, "/etc", Rights::READ).await?);
-        } else if app_id == "system.cli" || !app_id.starts_with("system.") {
-            // Their profiles name the user, whose name is not known yet.
+        } else if app_id == CLI_APP {
+            if user != 0 {
+                // The profile names the user, whose name is not known yet.
+                return Err(Status::NotSupported);
+            }
+            // User 0 has no folder in /Users, so /Libraries is only the
+            // system's.
+            entries.push(self.entry(shared, &ready, "/usr", RX).await?);
+            entries.push(self.entry(shared, &ready, "/etc", Rights::READ).await?);
+            entries.push(self.entry(shared, &ready, "/Apps", Rights::READ).await?);
+            entries.push(
+                self.entry(shared, &ready, "/Libraries", Rights::READ)
+                    .await?,
+            );
+            entries.push(tmp(&ready, &format!("cli/{user}"), reactor).await?);
+        } else if !app_id.starts_with("system.") {
+            // A native app.
+            if user == 0 {
+                return Err(Status::AccessDenied);
+            }
+            // Its profile names the user, whose name is not known yet.
             return Err(Status::NotSupported);
         } else {
             let (program, listed) = manifest_entries(&shared.fs, app_id);
@@ -252,15 +273,7 @@ impl Namespaces {
                 entries.push(self.entry(shared, &ready, "/usr", RX).await?);
                 entries.push(self.entry(shared, &ready, "/etc", Rights::READ).await?);
                 let path = format!("apps/{user}/{app_id}");
-                let tmp = directories(&ready.tmpfs, &path, reactor)
-                    .await
-                    .map_err(status)?;
-                let (directory, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
-                flat(tmp.clone(server, RW).await).map_err(status)?;
-                entries.push(NamespaceEntry {
-                    path: "/tmp".into(),
-                    directory,
-                });
+                entries.push(tmp(&ready, &path, reactor).await?);
                 if user != 0 {
                     // The folders of the user's app need the user's name.
                     return Err(Status::NotSupported);
@@ -360,6 +373,20 @@ impl Namespaces {
             directory: client,
         })
     }
+}
+
+/// A `/tmp` entry for the directory `path` of tmpfs, made if missing,
+/// with read and write rights.
+async fn tmp(ready: &Ready, path: &str, reactor: &Reactor) -> Result<NamespaceEntry, Status> {
+    let dir = directories(&ready.tmpfs, path, reactor)
+        .await
+        .map_err(status)?;
+    let (directory, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
+    flat(dir.clone(server, RW).await).map_err(status)?;
+    Ok(NamespaceEntry {
+        path: "/tmp".into(),
+        directory,
+    })
 }
 
 /// The root of tmpfs, read and write, once it serves.

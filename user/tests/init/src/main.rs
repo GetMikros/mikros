@@ -8739,12 +8739,15 @@ mod manager {
 
     /// With `root=bootfs` on the command line, from a boot image with the
     /// service manager, the permission broker, the temporary file system,
-    /// a probe of namespaces with their manifests, and files in `/etc` and
-    /// `/usr`, the process manager makes tmpfs's `boot/` directories,
-    /// fills them from the image, and gives each process started after
-    /// tmpfs the namespace of its profile. The probe gets exactly the
-    /// entries of its manifest and `/dev`, with the rights given, and
-    /// exits with 0 once every check passed, as the service manager logs.
+    /// a probe of namespaces with their manifests, files in `/etc`, `/usr`
+    /// and `/Libraries`, and a native app's bundle, the process manager
+    /// makes tmpfs's `boot/` directories, fills them from the image, and
+    /// gives each process started after tmpfs the namespace of its
+    /// profile. The probe gets exactly the entries of its manifest and
+    /// `/dev`, with the rights given; a command-line tool of user 0 that
+    /// it starts gets its profile without a folder in `/Users`; a native
+    /// app of user 0 does not start. The probe exits with 0 once every
+    /// check passed, as the service manager logs.
     pub fn process_manager_builds_namespaces_from_the_boot_image(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service namespace-probe exited with code 0";
         const FAILED: &[&[u8]] = &[

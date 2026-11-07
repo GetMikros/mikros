@@ -11,3 +11,5 @@ namespace:
     rights: rw
   - path: /etc
     rights: r
+# To start a copy of itself as a command-line tool, and as a native app.
+permissions: [process.set_identity]
