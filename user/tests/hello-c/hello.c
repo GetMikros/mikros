@@ -905,10 +905,13 @@ static int spawn_and_wait(int search, int exec)
 		return 0;
 	posix_spawn_file_actions_t fa;
 	posix_spawn_file_actions_init(&fa);
+	/* The actions run in order: descriptor 5 may be one of the pipes'
+	   ends, as when this program starts with 0, 1 and 2 open, so the
+	   ends are moved before the greeting is opened there. */
 	posix_spawn_file_actions_adddup2(&fa, p[1], 1);
+	posix_spawn_file_actions_adddup2(&fa, hold[0], 8);
 	posix_spawn_file_actions_addclose(&fa, p[0]);
 	posix_spawn_file_actions_addopen(&fa, 5, GREETING, O_RDONLY, 0);
-	posix_spawn_file_actions_adddup2(&fa, hold[0], 8);
 	char *args[] = { "spawn-child", "one", "two", 0 };
 	char *exec_args[] = { "spawn-child", "exec", 0 };
 	char *env[] = { "SPAWN_TEST=yes", 0 };
