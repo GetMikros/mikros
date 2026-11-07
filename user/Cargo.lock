@@ -167,6 +167,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-storage"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "mikros-test"
 version = "0.0.0"
 dependencies = [
