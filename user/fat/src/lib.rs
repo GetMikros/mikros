@@ -1,14 +1,24 @@
 //! Reading and writing FAT12, FAT16 and FAT32 volumes with long file
 //! names, for the FAT server: the boot sector, the FAT, directories with
 //! their long and short names, and files.
+//!
+//! The volume lies on a `Device`. Metadata sectors are cached and
+//! written through at once, so that the device always holds what the
+//! volume has done; `Device::flush` makes it durable.
 
 #![no_std]
 
 extern crate alloc;
 
 mod bpb;
+mod dir;
+mod disk;
+mod table;
+mod volume;
 
 pub use bpb::{FatType, Layout};
+pub use dir::{ARCHIVE, DIRECTORY, HIDDEN, READ_ONLY, SYSTEM, Stamp};
+pub use volume::{Dir, Node, Volume};
 
 /// Why an operation failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

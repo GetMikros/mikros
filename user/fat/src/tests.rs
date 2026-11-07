@@ -4,6 +4,7 @@ extern crate std;
 
 use super::*;
 use std::io::Cursor;
+use std::string::String;
 use std::vec;
 use std::vec::Vec;
 
@@ -64,4 +65,73 @@ fn refuses_invalid_boot_sectors() {
     assert_eq!(parse(&broken, size), Err(Error::Invalid));
     // A volume larger than its partition.
     assert_eq!(parse(&bytes, size / 2), Err(Error::Invalid));
+}
+
+// Directories with short names.
+
+struct Mem(Vec<u8>);
+
+impl Device for Mem {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        assert!(offset % 512 == 0 && buf.len() % 512 == 0, "unaligned read");
+        let at = offset as usize;
+        let src = self.0.get(at..at + buf.len()).ok_or(Error::Io)?;
+        buf.copy_from_slice(src);
+        Ok(())
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), Error> {
+        assert!(
+            offset % 512 == 0 && data.len() % 512 == 0,
+            "unaligned write"
+        );
+        let at = offset as usize;
+        let dst = self.0.get_mut(at..at + data.len()).ok_or(Error::Io)?;
+        dst.copy_from_slice(data);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+fn names<D: Device>(volume: &mut Volume<D>, dir: Dir) -> Vec<String> {
+    let mut names: Vec<String> = volume
+        .list(dir, 0, 1000)
+        .unwrap()
+        .0
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn lists_and_finds_short_names() {
+    for (size, ty, _) in TYPES {
+        let bytes = image(size, ty, |root| {
+            root.create_file("README.TXT").unwrap();
+            root.create_dir("DOCS")
+                .unwrap()
+                .create_file("NOTES.TXT")
+                .unwrap();
+        });
+        let mut volume = Volume::mount(Mem(bytes), size as u64, false).unwrap();
+        let root = volume.root();
+        assert_eq!(names(&mut volume, root), ["DOCS", "README.TXT"]);
+        let docs = volume.find(root, "docs").unwrap();
+        assert!(docs.is_directory());
+        let docs = docs.as_dir(root).unwrap();
+        assert_eq!(names(&mut volume, docs), ["NOTES.TXT"]);
+        assert!(!volume.find(docs, "Notes.txt").unwrap().is_directory());
+        assert_eq!(volume.find(root, "missing"), Err(Error::NotFound));
+    }
+}
+
+#[test]
+fn stamps_round_trip() {
+    let stamp = Stamp::new(2026, 11, 7, 13, 30, 41, 250);
+    assert_eq!(stamp.parts(), (2026, 11, 7, 13, 30, 41, 250));
 }
