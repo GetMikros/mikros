@@ -41,10 +41,12 @@ impl Target for Port {
         self.queue.borrow().is_some()
     }
 
-    fn deliver(&self, bytes: [u8; PACKET_SIZE], origin: Origin) {
+    fn deliver(&self, bytes: [u8; PACKET_SIZE], origin: Origin) -> Option<(u64, u32)> {
         if let Some(q) = self.queue.borrow_mut().as_mut() {
             q.queue_registered(bytes, origin);
         }
+        // Nothing waits on the ports of this model.
+        None
     }
 }
 

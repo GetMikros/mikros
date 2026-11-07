@@ -90,7 +90,7 @@ pub const fn default_rights(t: ObjectType) -> u32 {
         MemoryObject => base | READ | WRITE | EXECUTE | MAP | INSPECT,
         Channel | Stream => base | READ | WRITE | WAIT | INSPECT,
         Event => base | WAIT | SIGNAL | INSPECT,
-        Port => base | READ | WRITE | INSPECT,
+        Port => base | READ | WRITE | WAIT | INSPECT,
         Timer | Interrupt => base | WRITE | WAIT | INSPECT,
         Resource | Pager | Bti => base | MANAGE | INSPECT,
         Log => base | READ | WRITE | MANAGE | INSPECT,
@@ -126,7 +126,7 @@ pub const fn allowed_signals(t: ObjectType) -> u32 {
     use signals::*;
     match t {
         Channel | Stream => READABLE | WRITABLE | PEER_CLOSED,
-        LogReader => READABLE,
+        LogReader | Port => READABLE,
         Event => SIGNALED | USER_ALL,
         Timer | Interrupt => SIGNALED,
         Process => TERMINATED | SUSPENDED | CONTINUED,
@@ -206,6 +206,29 @@ impl Header {
     /// Clears the signals in `clear`, then sets those in `set`, leaving
     /// out signals the object's type cannot have. Returns the new state.
     pub fn update_signals(&self, clear: u32, set: u32) -> u32 {
+        let (old, new) = self.change_signals(clear, set);
+        if new != old {
+            self.tell(new);
+        }
+        new
+    }
+
+    /// Changes the signals as `update_signals` does, without telling the
+    /// waits, which the caller does with `announce` once no lock it holds
+    /// comes after theirs. Returns whether the state changed.
+    pub fn update_signals_quietly(&self, clear: u32, set: u32) -> bool {
+        let (old, new) = self.change_signals(clear, set);
+        old != new
+    }
+
+    /// Tells the waits on the object its signal state, as `update_signals`
+    /// does when it changes the state.
+    pub fn announce(&self) {
+        self.tell(self.signals());
+    }
+
+    /// The state before and after clearing `clear` and setting `set`.
+    fn change_signals(&self, clear: u32, set: u32) -> (u32, u32) {
         let allowed = allowed_signals(self.kind);
         let update = |s: u32| (s & !clear) | (set & allowed);
         let mut old = self.signals.load(Ordering::Acquire);
@@ -215,19 +238,22 @@ impl Header {
                 .signals
                 .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => {
-                    if new != old && self.watchers.load(Ordering::Acquire) != 0 {
-                        let hook = SIGNAL_HOOK.load(Ordering::Acquire);
-                        if hook != 0 {
-                            // SAFETY: only `set_signal_hook` stores a
-                            // value, which is a `SignalHook`.
-                            let hook: SignalHook = unsafe { core::mem::transmute(hook) };
-                            hook(self, new);
-                        }
-                    }
-                    return new;
-                }
+                Ok(_) => return (old, new),
                 Err(current) => old = current,
+            }
+        }
+    }
+
+    /// Passes the state `signals` to the signal hook, when the object has
+    /// waits.
+    fn tell(&self, signals: u32) {
+        if self.watchers.load(Ordering::Acquire) != 0 {
+            let hook = SIGNAL_HOOK.load(Ordering::Acquire);
+            if hook != 0 {
+                // SAFETY: only `set_signal_hook` stores a value, which is
+                // a `SignalHook`.
+                let hook: SignalHook = unsafe { core::mem::transmute(hook) };
+                hook(self, signals);
             }
         }
     }
@@ -376,7 +402,10 @@ pub(crate) mod tests {
             signals::SIGNALED
         );
         assert_eq!(h.update_signals(signals::SIGNALED, 0), 0);
-        assert_eq!(Header::new(ObjectType::Port).update_signals(0, u32::MAX), 0);
+        let port = Header::new(ObjectType::Port);
+        assert_eq!(port.update_signals(0, u32::MAX), signals::READABLE);
+        assert!(port.update_signals_quietly(signals::READABLE, 0));
+        assert!(!port.update_signals_quietly(signals::READABLE, 0));
     }
 
     #[test]

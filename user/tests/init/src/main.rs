@@ -1050,6 +1050,67 @@ fn ports(_: &Startup) -> Result {
     ensure("limiting user packets", full == -22)
 }
 
+/// A port is `READABLE` while a packet is queued on it, which
+/// `object_wait_one` and the waits of other ports see: a user packet and a
+/// wait that fires on an event's signal make it readable, and reading the
+/// last packet makes it unreadable. Two ports wait on each other here.
+fn ports_are_readable(_: &Startup) -> Result {
+    const EDGE: u32 = 1;
+    let (mut port, mut watcher, mut event) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a port", sys::port_create(0, &mut port))?;
+        check("creating another", sys::port_create(0, &mut watcher))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    let readable = |p: Handle| {
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status = unsafe { sys::object_wait_one(p, READABLE, 0, &mut observed) };
+        (status, observed)
+    };
+    let key = |p: Handle| {
+        let (status, packet) = take_packet(p, soon());
+        (status == 0).then(|| u64_at(&packet, 0))
+    };
+    ensure("waiting on an empty port", readable(port) == (TIMED_OUT, 0))?;
+    wait_async(port, watcher, 1, READABLE, EDGE)?;
+    wait_async(watcher, port, 2, READABLE, EDGE)?;
+    ensure(
+        "queueing nothing for empty ports",
+        take_packet(watcher, 0).0 == TIMED_OUT,
+    )?;
+    let mut user = [0u8; 48];
+    user[..8].copy_from_slice(&9u64.to_le_bytes());
+    // SAFETY: the pointer describes `user`.
+    check("queueing", unsafe { sys::port_queue(port, user.as_ptr()) })?;
+    ensure("making it readable", readable(port) == (0, READABLE))?;
+    // The watcher's packet made it readable, so the port got one too.
+    ensure("telling the other port", key(watcher) == Some(1))?;
+    ensure(
+        "being told back",
+        key(port) == Some(9) && key(port) == Some(2),
+    )?;
+    ensure("emptying it", readable(port) == (TIMED_OUT, 0))?;
+    // A wait that fires on the event queues on the port, which the other
+    // port hears of as before.
+    wait_async(event, port, 3, USER0, 0)?;
+    signal(event, 0, USER0)?;
+    ensure("firing into it", readable(port) == (0, READABLE))?;
+    ensure("telling the other port again", key(watcher) == Some(1))?;
+    ensure(
+        "being told back again",
+        key(port) == Some(3) && key(port) == Some(2),
+    )?;
+    ensure("emptying it again", readable(port) == (TIMED_OUT, 0))?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("closing the event", sys::handle_close(event))?;
+        check("closing a port", sys::handle_close(watcher))?;
+        check("closing the other", sys::handle_close(port))
+    }
+}
+
 fn u64_at(record: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(record[at..at + 8].try_into().unwrap())
 }
@@ -9062,7 +9123,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 130] = [
+const TESTS: [(&str, Test); 131] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9146,6 +9207,7 @@ const TESTS: [(&str, Test); 130] = [
         reset_handler_discards_ignored,
     ),
     ("ports", ports),
+    ("ports_are_readable", ports_are_readable),
     ("port_registration_limit", port_registration_limit),
     ("log_readers", log_readers),
     ("memory_operations", memory_operations),

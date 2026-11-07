@@ -37,14 +37,20 @@ const fn record_cost<T>() -> u64 {
 }
 
 /// The signal hook: wakes the threads waiting for a signal now set on
-/// the object of `header`.
+/// the object of `header`, and fires the asynchronous waits on it.
 fn signals_changed(header: &Header, signals: u32) {
+    wake_waiters(header, signals);
+    crate::port::signals_changed(header, signals);
+}
+
+/// Wakes the threads waiting for a signal of `signals`, now set on the
+/// object of `header`. The asynchronous waits are the caller's.
+pub fn wake_waiters(header: &Header, signals: u32) {
     for w in WAITERS.lock().iter() {
         if w.koid == header.koid() && signals & w.mask != 0 {
             sched::wake_sleeper(&w.thread);
         }
     }
-    crate::port::signals_changed(header, signals);
 }
 
 /// Installs the signal hook.

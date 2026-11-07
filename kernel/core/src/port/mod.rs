@@ -2,13 +2,19 @@
 //! by user space. `queue` keeps the queues and the
 //! registrations of the waits; this adds the charges, the waiting threads
 //! and the watches of the objects waited on.
+//!
+//! A port is `READABLE` while a packet is queued on it, which changes
+//! with the queue under the port's lock. The waits on the port hear of
+//! it afterwards: from `announce` once the lock is released, or, for a
+//! packet that a registration queued while the registrations were
+//! locked, from the registrations' own walk.
 
 mod queue;
 pub use queue::*;
 
 use crate::object::budget::{Budget, Held};
 use crate::object::handles::Handle;
-use crate::object::{Header, Object, ObjectType};
+use crate::object::{Header, Object, ObjectType, signals::READABLE};
 use crate::process::Process;
 use crate::sched::{self, Thread};
 use crate::status::Error;
@@ -39,6 +45,16 @@ impl State {
     fn wake(&self) {
         for thread in &self.waiters {
             sched::wake_sleeper(thread);
+        }
+    }
+
+    /// Makes `READABLE` of `header`, the port's, follow whether a packet
+    /// is queued, without telling the waits on the port. Returns whether
+    /// it changed.
+    fn sync(&self, header: &Header) -> bool {
+        match self.queue.is_empty() {
+            true => header.update_signals_quietly(READABLE, 0),
+            false => header.update_signals_quietly(0, READABLE),
         }
     }
 }
@@ -75,7 +91,12 @@ impl Port {
         state
             .queue
             .queue_user(bytes, || budget.hold_kernel(USER_COST))?;
+        let changed = state.sync(&self.header);
         state.wake();
+        drop(state);
+        if changed {
+            self.header.announce();
+        }
         Ok(())
     }
 
@@ -90,7 +111,12 @@ impl Port {
         state
             .queue
             .queue_kernel(bytes, || budget.hold_kernel(USER_COST))?;
+        let changed = state.sync(&self.header);
         state.wake();
+        drop(state);
+        if changed {
+            self.header.announce();
+        }
         Ok(())
     }
 
@@ -129,10 +155,17 @@ impl Port {
     /// Removes the oldest packet, if any.
     pub fn take(&self) -> Option<[u8; PACKET_SIZE]> {
         // The packet's charge goes after the lock.
-        let packet = self.state.lock().queue.take()?;
+        let (packet, changed) = {
+            let mut state = self.state.lock();
+            let packet = state.queue.take()?;
+            (packet, state.sync(&self.header))
+        };
         if let Some(Origin { id, .. }) = packet.origin {
             // Its registration may queue again.
             REGISTRATIONS.lock().packet_read(id);
+        }
+        if changed {
+            self.header.announce();
         }
         Some(packet.bytes)
     }
@@ -164,17 +197,25 @@ impl Target for Kernel {
         self.port.strong_count() > 0
     }
 
-    fn deliver(&self, bytes: [u8; PACKET_SIZE], origin: Origin) {
-        let Some(port) = self.port.upgrade() else {
-            return;
-        };
+    fn deliver(&self, bytes: [u8; PACKET_SIZE], origin: Origin) -> Option<(u64, u32)> {
+        let port = self.port.upgrade()?;
         let mut state = port.state.lock();
         state.queue.queue_registered(bytes, origin);
+        let changed = state.sync(&port.header);
         state.wake();
         drop(state);
+        // The threads waiting on the port are woken here; its
+        // asynchronous waits fire in the caller's walk of the
+        // registrations, which it may hold locked.
+        let cascade = changed.then(|| {
+            let signals = port.header.signals();
+            crate::wait::wake_waiters(&port.header, signals);
+            (port.header.koid(), signals)
+        });
         // The port is not the last reference: the caller's handle or a
         // registration's queue holds it while the hook runs.
         drop(port);
+        cascade
     }
 }
 
@@ -234,6 +275,9 @@ fn purge() {
         return;
     }
     for r in remove(|r| r.is_done()) {
+        if r.watch_ends_later() {
+            r.extra.end_watch(&r.wait);
+        }
         r.extra.release();
     }
 }
@@ -242,7 +286,7 @@ fn purge() {
 /// and releases them all.
 fn finish(removed: Vec<Registration<Kernel>>) {
     for r in removed {
-        if !r.is_done() {
+        if !r.is_done() || r.watch_ends_later() {
             r.extra.end_watch(&r.wait);
         }
         r.extra.release();
@@ -300,6 +344,9 @@ pub fn wait_timeline(
     if current >= value {
         registration.queue(TIMELINE, &current.to_le_bytes());
         registration.extra.release();
+        if registration.take_cascade().is_some() {
+            port.header.announce();
+        }
         return Ok(());
     }
     let mut registrations = REGISTRATIONS.lock();
@@ -371,7 +418,14 @@ pub fn cancel(port: &Arc<Port>, process: usize, handle: Handle, key: u64) {
         ours && w.process == process && w.handle == handle && w.key == key
     });
     // Packets of one-shot registrations that already ended go too.
-    port.state.lock().queue.cancel(process, handle, key);
+    let changed = {
+        let mut state = port.state.lock();
+        state.queue.cancel(process, handle, key);
+        state.sync(&port.header)
+    };
     finish(removed);
     purge();
+    if changed {
+        port.header.announce();
+    }
 }

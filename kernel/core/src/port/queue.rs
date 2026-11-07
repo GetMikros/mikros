@@ -212,8 +212,10 @@ pub trait Target {
     /// Whether the port still exists.
     fn exists(&self) -> bool;
     /// Queues `bytes` of the registration `origin` on the port, for which
-    /// it keeps room, if the port still exists.
-    fn deliver(&self, bytes: [u8; PACKET_SIZE], origin: Origin);
+    /// it keeps room, if the port still exists. Returns the port's object
+    /// ID and signals when the packet changed them, for the waits on the
+    /// port, which the caller fires.
+    fn deliver(&self, bytes: [u8; PACKET_SIZE], origin: Origin) -> Option<(u64, u32)>;
 }
 
 /// An asynchronous wait, with `extra`, what the kernel keeps with it:
@@ -227,6 +229,12 @@ pub struct Registration<X> {
     /// Set once the wait has ended, and its watch with it, until the
     /// registration is removed.
     done: bool,
+    /// Set for a wait that ended while the waits on another object fired,
+    /// whose watch then ends when the registration is removed.
+    watch_ends_later: bool,
+    /// The object ID and signals of the port that the registration's
+    /// packet made readable, whose waits are still to fire.
+    cascade: Option<(u64, u32)>,
     pub extra: X,
 }
 
@@ -237,6 +245,8 @@ impl<X> Registration<X> {
             last: 0,
             queued: false,
             done: false,
+            watch_ends_later: false,
+            cascade: None,
             extra,
         }
     }
@@ -250,6 +260,18 @@ impl<X: Target> Registration<X> {
     /// Whether a packet of the registration is queued and unread.
     pub fn is_queued(&self) -> bool {
         self.queued
+    }
+
+    /// Whether the wait ended without ending its watch, which then ends
+    /// when the registration is removed.
+    pub fn watch_ends_later(&self) -> bool {
+        self.watch_ends_later
+    }
+
+    /// The port that the registration's packet made readable, if its
+    /// waits are still to fire.
+    pub fn take_cascade(&mut self) -> Option<(u64, u32)> {
+        self.cascade.take()
     }
 
     /// The signals of the mask last seen.
@@ -270,7 +292,9 @@ impl<X: Target> Registration<X> {
                 process: w.process,
                 handle: w.handle,
             };
-            self.extra.deliver(packet(w.key, kind, 0, payload), origin);
+            if let Some(cascade) = self.extra.deliver(packet(w.key, kind, 0, payload), origin) {
+                self.cascade = Some(cascade);
+            }
         }
         true
     }
@@ -344,13 +368,18 @@ impl<X: Target> Registrations<X> {
         registration.last = now;
         if now != 0 {
             registration.fire(signals);
-            if !registration.wait.edge {
-                registration.done = true;
-                return Some(registration);
-            }
         }
-        self.push(registration);
-        None
+        let cascade = registration.cascade.take();
+        let ended = now != 0 && !registration.wait.edge;
+        let back = if ended {
+            registration.done = true;
+            Some(registration)
+        } else {
+            self.push(registration);
+            None
+        };
+        self.cascade(cascade);
+        back
     }
 
     /// Fires the waits on the object with ID `koid`, whose signals are now
@@ -358,7 +387,18 @@ impl<X: Target> Registrations<X> {
     /// fires on each signal of its mask that is newly set, and ends once
     /// its port is gone. Returns how many watches of the object ended.
     /// Allocates and drops nothing.
+    /// Then fires the waits on the ports that their packets made readable,
+    /// as `cascade` does.
     pub fn signals_changed(&mut self, koid: u64, signals: u32) -> usize {
+        let ended = self.fire(koid, signals, false);
+        self.cascade(None);
+        ended
+    }
+
+    /// Fires the waits on the object `koid` as `signals_changed` does, and
+    /// returns how many ended, which with `later` end their watches only
+    /// when they are removed.
+    fn fire(&mut self, koid: u64, signals: u32, later: bool) -> usize {
         let mut ended = 0;
         for r in &mut self.list {
             if r.wait.koid != koid || r.done || r.wait.threshold.is_some() {
@@ -376,11 +416,29 @@ impl<X: Target> Registrations<X> {
             };
             if end {
                 r.done = true;
+                r.watch_ends_later = later;
                 ended += 1;
             }
         }
         self.ended += ended;
         ended
+    }
+
+    /// Fires the waits on the ports that queued packets made readable,
+    /// `first` and then those the registrations recorded, until none is
+    /// left. A registration queues at most one packet until it is read,
+    /// so this ends, also when ports wait on each other. Allocates and
+    /// drops nothing.
+    fn cascade(&mut self, mut next: Option<(u64, u32)>) {
+        loop {
+            let found = next
+                .take()
+                .or_else(|| self.list.iter_mut().find_map(|r| r.cascade.take()));
+            let Some((koid, signals)) = found else {
+                return;
+            };
+            self.fire(koid, signals, true);
+        }
     }
 
     /// Queues the packets of the waits on the timeline with object ID
@@ -394,6 +452,7 @@ impl<X: Target> Registrations<X> {
                 self.ended += 1;
             }
         }
+        self.cascade(None);
     }
 
     /// Lets the registration with `id` queue again, as its packet was
@@ -450,10 +509,13 @@ mod tests {
             self.0.borrow().is_some()
         }
 
-        fn deliver(&self, bytes: [u8; PACKET_SIZE], origin: Origin) {
-            if let Some(q) = self.0.borrow_mut().as_mut() {
-                q.queue_registered(bytes, origin);
-            }
+        fn deliver(&self, bytes: [u8; PACKET_SIZE], origin: Origin) -> Option<(u64, u32)> {
+            let mut q = self.0.borrow_mut();
+            let q = q.as_mut()?;
+            let was_empty = q.is_empty();
+            q.queue_registered(bytes, origin);
+            // The test ports have the object ID 9.
+            was_empty.then_some((9, 1))
         }
     }
 
@@ -508,6 +570,32 @@ mod tests {
         list.signals_changed(7, 0);
         list.signals_changed(7, 0b10);
         assert_eq!(keys(&port), [30]);
+    }
+
+    #[test]
+    fn fires_the_waits_on_the_ports_that_packets_make_readable() {
+        let (mut list, a, b) = (Registrations::new(), port(), port());
+        // Object 7 is waited on into port `a`. The test ports all have
+        // the object ID 9: an edge wait and a one-shot wait on it queue
+        // into `b`, and an edge wait on it into `a`, so the ports wait
+        // on each other.
+        let on_ports = |id, edge| Wait {
+            koid: 9,
+            ..wait(id, 1, edge)
+        };
+        assert!(register(&mut list, &a, wait(1, 1, true), 0));
+        assert!(register(&mut list, &b, on_ports(2, true), 0));
+        assert!(register(&mut list, &b, on_ports(3, false), 0));
+        assert!(register(&mut list, &a, on_ports(4, true), 0));
+        assert_eq!(list.signals_changed(7, 1), 0);
+        assert_eq!(keys(&a), [10, 40]);
+        assert_eq!(keys(&b), [20, 30]);
+        // The one-shot wait ended while the waits on 7 fired, so its
+        // watch of 9 ends later.
+        let ended: std::vec::Vec<_> = list.iter().filter(|r| r.is_done()).collect();
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].wait.id, 3);
+        assert!(ended[0].watch_ends_later());
     }
 
     #[test]
