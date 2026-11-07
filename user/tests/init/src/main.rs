@@ -8852,7 +8852,10 @@ mod manager {
     /// disk, adds it as `disk-0`, publishes its raw access service, and
     /// serves `Block` to the test driver for the disk, whose `Start`
     /// succeeds only when reads, writes, flushes and refusals work as
-    /// they should. The device manager says all of it in the log.
+    /// they should. The NVMe driver does the same for the scratch disk
+    /// behind the NVMe controller, as `disk-1`, and the AHCI driver for
+    /// the one on port 2 of the AHCI controller, as `disk-2`. The device
+    /// manager says all of it in the log.
     pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -8876,8 +8879,17 @@ mod manager {
                 b", disk-0, as storage:disk, under 4, with 0 resources",
                 1,
             ),
-            (b"device-manager: started driver test-disk for device", 1),
+            (b"device-manager: started driver test-disk for device", 3),
             (b"device-manager: published device.storage 1 for device 4", 1),
+            (b"device-manager: bound driver nvme to device", 1),
+            (b", as pci:c010802", 1),
+            (b"device-manager: started driver nvme for device", 1),
+            (b", disk-1, as storage:disk, under", 1),
+            (b"device-manager: bound driver ahci to device", 1),
+            (b", pci-0000:00:1f.2, as pci:c010601", 1),
+            (b"device-manager: started driver ahci for device", 1),
+            (b", disk-2, as storage:disk, under", 1),
+            (b"device-manager: published device.storage ", 3),
             (
                 b"device-manager: driver test-reset for device 3 failed after 5 restarts",
                 1,
@@ -8892,6 +8904,8 @@ mod manager {
             b"driver virtio-blk declined",
             b"driver virtio-blk for device 4 terminated",
             b"driver test-disk declined",
+            b"driver nvme declined",
+            b"driver ahci declined",
         ];
         let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
         ensure("adding the PCI functions and starting their driver", logged)

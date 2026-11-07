@@ -268,6 +268,7 @@ pub fn start(machine: &MachineArgs, dir: &Path, reboot: bool) -> Result<Child> {
     fs::copy(&firmware.vars, &vars)?;
     let mut machine = machine.clone();
     machine.gpu = qemu::Gpu::Basic;
+    crate::test::scratch_disks(&dir.join("serial.log"))?;
     let mut args = crate::test::test_args(
         qemu::args(
             &machine,

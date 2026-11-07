@@ -139,14 +139,42 @@ fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
     }
 }
 
+/// The scratch disks of the test machine, in the directory of its serial
+/// log: one behind an NVMe controller and one on port 2 of the q35
+/// machine's AHCI controller.
+const SCRATCH_DISKS: [&str; 2] = ["nvme.img", "ahci.img"];
+/// The size of a scratch disk.
+const SCRATCH_SIZE: usize = 1 << 20;
+
+/// Creates the scratch disks next to `log`, each holding the protective
+/// MBR's signature in block 0 and a GPT header's signature in block 1,
+/// as the test disk driver expects of every disk, and zeros otherwise.
+pub fn scratch_disks(log: &Path) -> Result<()> {
+    let dir = log.parent().unwrap_or(Path::new("."));
+    let mut image = vec![0u8; SCRATCH_SIZE];
+    image[510..512].copy_from_slice(&[0x55, 0xAA]);
+    image[512..520].copy_from_slice(b"EFI PART");
+    for name in SCRATCH_DISKS {
+        let path = dir.join(name);
+        fs::write(&path, &image).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// The arguments of `qemu::args` with the serial port written to `log`,
 /// no display, the debug exit device, QEMU's `edu` device for DMA tests,
-/// able to reach the first 4 GiB, and no reboot. The devices follow the
-/// IOMMU, which must come first.
+/// able to reach the first 4 GiB, the scratch disks of `scratch_disks`
+/// with the serial number `mikros`, and no reboot. The devices follow
+/// the IOMMU, which must come first.
 pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
     if let Some(i) = args.iter().position(|a| a == "-serial") {
         args[i + 1] = format!("file:{}", log.display());
     }
+    let dir = log.parent().unwrap_or(Path::new("."));
+    let drive = |id: &str, name: &str| {
+        let path = dir.join(name);
+        format!("if=none,id={id},format=raw,file={}", path.display())
+    };
     args.extend(
         [
             "-display",
@@ -155,6 +183,14 @@ pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
             "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-device",
             "edu,dma_mask=0xffffffff",
+            "-drive",
+            &drive("scratch-nvme", SCRATCH_DISKS[0]),
+            "-device",
+            "nvme,drive=scratch-nvme,serial=mikros",
+            "-drive",
+            &drive("scratch-ahci", SCRATCH_DISKS[1]),
+            "-device",
+            "ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros",
             "-no-reboot",
         ]
         .map(String::from),
@@ -200,6 +236,7 @@ fn boot(
     let vars = disk.with_extension("vars.fd");
     fs::copy(&firmware.vars, &vars)
         .with_context(|| format!("copying the firmware variables to {}", vars.display()))?;
+    scratch_disks(log)?;
     let qemu_args = test_args(
         qemu::args(&args.machine, processor, &firmware, &vars, disk),
         log,
@@ -417,6 +454,10 @@ ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
         assert_eq!(args[3], "file:/t/serial.log");
         assert!(args.contains(&"isa-debug-exit,iobase=0xf4,iosize=0x04".to_string()));
         assert!(args.contains(&"edu,dma_mask=0xffffffff".to_string()));
+        assert!(args.contains(&"if=none,id=scratch-nvme,format=raw,file=/t/nvme.img".to_string()));
+        assert!(args.contains(&"nvme,drive=scratch-nvme,serial=mikros".to_string()));
+        assert!(args.contains(&"if=none,id=scratch-ahci,format=raw,file=/t/ahci.img".to_string()));
+        assert!(args.contains(&"ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros".to_string()));
         assert!(args.contains(&"-no-reboot".to_string()));
     }
 }

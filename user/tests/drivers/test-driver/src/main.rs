@@ -45,10 +45,11 @@
 //!   `BAD_STATE`; after `DisableMsi`, `GetInterrupt` gives an event with
 //!   `WAIT` and without `SIGNAL`, and `AckInterrupt` succeeds. It fails
 //!   with `INVALID_ARGS` otherwise.
-//! - As `system.driver.test-disk`, the driver of the test machine's
-//!   disk, it succeeds when its bus channel serves `Block` for it:
-//!   `GetInfo` reports 512-byte blocks, the model `virtio-blk`, the
-//!   serial `mikros` and a writable disk; reads find the protective MBR's
+//! - As `system.driver.test-disk`, the driver of each of the test
+//!   machine's disks, it succeeds when its bus channel serves `Block` for
+//!   it: `GetInfo` reports 512-byte blocks, the model `virtio-blk`,
+//!   `QEMU NVMe Ctrl` or `QEMU HARDDISK`, the serial `mikros` and a
+//!   writable disk; reads find the protective MBR's
 //!   signature in block 0 and the GPT header in block 1; requests of no
 //!   blocks or beyond the disk fail with `INVALID_ARGS` and
 //!   `OUT_OF_RANGE`, and a buffer above the connection's limit with
@@ -93,6 +94,9 @@ const CHILD: &str = "system.driver.test-child";
 const PCI: &str = "system.driver.test-pci";
 const EDU: &str = "system.driver.test-edu";
 const DISK: &str = "system.driver.test-disk";
+/// The models of the test machine's disks: the virtio disk, and the
+/// scratch disks behind QEMU's NVMe and AHCI controllers.
+const MODELS: [&str; 3] = ["virtio-blk", "QEMU NVMe Ctrl", "QEMU HARDDISK"];
 const DECLINE: &str = "system.driver.test-decline";
 const CLOSE: &str = "system.driver.test-close";
 const RESET: &str = "system.driver.test-reset";
@@ -404,7 +408,7 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
     let described = info.block_size == 512
         && info.block_count > 34
         && info.max_transfer_blocks > 0
-        && info.model == "virtio-blk"
+        && MODELS.contains(&info.model.as_str())
         && info.serial == "mikros"
         && info.flags.0 & BlockFlags::READ_ONLY.0 == 0;
     let Ok(Ok(created)) = disk.create_buffer(8192).await else {

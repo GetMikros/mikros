@@ -135,6 +135,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", virtio_blk.display());
             let virtio_blk_manifest =
                 crate::workspace_root().join("user/drivers/virtio-blk/driver.yaml");
+            let nvme = user_build("nvme", kind)?;
+            println!("built    {}", nvme.display());
+            let nvme_manifest = crate::workspace_root().join("user/drivers/nvme/driver.yaml");
+            let ahci = user_build("ahci", kind)?;
+            println!("built    {}", ahci.display());
+            let ahci_manifest = crate::workspace_root().join("user/drivers/ahci/driver.yaml");
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let devices_manifest =
@@ -167,6 +173,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/drivers/virtio-blk/driver.yaml",
                     virtio_blk_manifest.as_path(),
                 ),
+                ("usr/lib/drivers/nvme/nvme", nvme.as_path()),
+                ("usr/lib/drivers/nvme/driver.yaml", nvme_manifest.as_path()),
+                ("usr/lib/drivers/ahci/ahci", ahci.as_path()),
+                ("usr/lib/drivers/ahci/driver.yaml", ahci_manifest.as_path()),
             ];
             boot_image(kind, "boot.img", &members)?
         }
@@ -441,6 +451,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", pci_bus.display());
             let virtio_blk = user_build("virtio-blk", kind)?;
             println!("built    {}", virtio_blk.display());
+            let nvme = user_build("nvme", kind)?;
+            println!("built    {}", nvme.display());
+            let ahci = user_build("ahci", kind)?;
+            println!("built    {}", ahci.display());
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let device_image = |file: &str,
@@ -511,6 +525,16 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "usr/lib/drivers/virtio-blk/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/virtio-blk/driver.yaml"),
+                ),
+                ("usr/lib/drivers/nvme/nvme".to_owned(), nvme.clone()),
+                (
+                    "usr/lib/drivers/nvme/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/nvme/driver.yaml"),
+                ),
+                ("usr/lib/drivers/ahci/ahci".to_owned(), ahci.clone()),
+                (
+                    "usr/lib/drivers/ahci/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/ahci/driver.yaml"),
                 ),
             ];
             let pci_image = device_image(
