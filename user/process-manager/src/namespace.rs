@@ -20,10 +20,11 @@ use core::future::poll_fn;
 use core::task::{Poll, Waker};
 use mikros_manifest::path;
 use mikros_rt::exec::Reactor;
-use mikros_rt::interfaces::__midl::endpoints;
+use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{
     Error, Filesystem, FilesystemAsyncClient, Node, NodeAsyncClient, OpenFlags, Rights,
+    TemporaryFilesystem, TemporaryFilesystemAsyncClient,
 };
 use mikros_rt::interfaces::mikros::process::NamespaceEntry;
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
@@ -37,8 +38,9 @@ const ACCOUNTS_APP: &str = "system.accounts";
 const TMPFS_APP: &str = "system.tmpfs";
 /// The app ID of command-line tools.
 const CLI_APP: &str = "system.cli";
-/// The protocol of the temporary file system.
+/// The protocols of the temporary file system.
 const TMPFS: &str = "mikros.fs.Filesystem";
+const TEMPORARY: &str = "mikros.fs.TemporaryFilesystem";
 /// How long to wait before asking again for tmpfs.
 const RETRY: i64 = 20_000_000;
 /// The most bytes one write moves.
@@ -50,6 +52,8 @@ const RWX: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0)
 /// The directories of tmpfs that profiles use.
 struct Ready {
     tmpfs: Rc<NodeAsyncClient>,
+    /// Where the budgets of tmpfs's directories are set.
+    temporary: TemporaryFilesystemAsyncClient,
     etc: Rc<NodeAsyncClient>,
     var: Rc<NodeAsyncClient>,
     users: Rc<NodeAsyncClient>,
@@ -185,9 +189,9 @@ impl Namespaces {
     /// them from the boot image, and from then on builds namespaces from
     /// profiles.
     pub async fn prepare(&self, directory: DirectoryAsyncClient, fs: Rc<Fs>, reactor: Reactor) {
-        let root = loop {
-            if let Some(root) = tmpfs_root(&directory, &reactor).await {
-                break root;
+        let (root, temporary) = loop {
+            if let Some(found) = tmpfs(&directory, &reactor).await {
+                break found;
             }
             let mut now = 0;
             // SAFETY: the out pointer is valid for the call.
@@ -199,6 +203,7 @@ impl Namespaces {
                 let tmpfs = Rc::new(root);
                 *self.ready.borrow_mut() = Some(Rc::new(Ready {
                     tmpfs,
+                    temporary,
                     etc,
                     var,
                     users,
@@ -259,7 +264,8 @@ impl Namespaces {
                 self.entry(shared, &ready, "/Libraries", Rights::READ)
                     .await?,
             );
-            entries.push(tmp(&ready, &format!("cli/{user}"), reactor).await?);
+            let budget = shared.user_budget(user)?;
+            entries.push(tmp(&ready, &format!("cli/{user}"), budget, reactor).await?);
         } else if !app_id.starts_with("system.") {
             // A native app.
             if user == 0 {
@@ -273,7 +279,8 @@ impl Namespaces {
                 entries.push(self.entry(shared, &ready, "/usr", RX).await?);
                 entries.push(self.entry(shared, &ready, "/etc", Rights::READ).await?);
                 let path = format!("apps/{user}/{app_id}");
-                entries.push(tmp(&ready, &path, reactor).await?);
+                let budget = shared.budget_of(user, app_id)?;
+                entries.push(tmp(&ready, &path, budget, reactor).await?);
                 if user != 0 {
                     // The folders of the user's app need the user's name.
                     return Err(Status::NotSupported);
@@ -376,11 +383,17 @@ impl Namespaces {
 }
 
 /// A `/tmp` entry for the directory `path` of tmpfs, made if missing,
-/// with read and write rights.
-async fn tmp(ready: &Ready, path: &str, reactor: &Reactor) -> Result<NamespaceEntry, Status> {
+/// with read and write rights, whose files are charged to `budget`.
+async fn tmp(
+    ready: &Ready,
+    path: &str,
+    budget: OwnedHandle,
+    reactor: &Reactor,
+) -> Result<NamespaceEntry, Status> {
     let dir = directories(&ready.tmpfs, path, reactor)
         .await
         .map_err(status)?;
+    flat(ready.temporary.set_budget(path.into(), budget).await).map_err(status)?;
     let (directory, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
     flat(dir.clone(server, RW).await).map_err(status)?;
     Ok(NamespaceEntry {
@@ -389,11 +402,12 @@ async fn tmp(ready: &Ready, path: &str, reactor: &Reactor) -> Result<NamespaceEn
     })
 }
 
-/// The root of tmpfs, read and write, once it serves.
-async fn tmpfs_root(
+/// The root of tmpfs, read and write, and its `TemporaryFilesystem`,
+/// once it serves.
+async fn tmpfs(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
-) -> Option<NodeAsyncClient> {
+) -> Option<(NodeAsyncClient, TemporaryFilesystemAsyncClient)> {
     let (client, server) = endpoints::<Filesystem>().ok()?;
     match directory
         .connect(TMPFS.into(), None, server.into_handle())
@@ -405,7 +419,16 @@ async fn tmpfs_root(
     let fs = FilesystemAsyncClient::new(client, reactor.clone());
     let (root, server) = endpoints::<Node>().ok()?;
     flat(fs.get_root(server, RWX).await).ok()?;
-    Some(NodeAsyncClient::new(root, reactor.clone()))
+    let (temporary, server) = endpoints::<TemporaryFilesystem>().ok()?;
+    match directory
+        .connect(TEMPORARY.into(), None, server.into_handle())
+        .await
+    {
+        Ok(Ok(_)) => {}
+        _ => return None,
+    }
+    let temporary = TemporaryFilesystemAsyncClient::new(temporary, reactor.clone());
+    Some((NodeAsyncClient::new(root, reactor.clone()), temporary))
 }
 
 type Dirs = (

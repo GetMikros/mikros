@@ -231,25 +231,29 @@ impl Shared {
 
     /// A handle to the budget of `user` and `app_id`, which is created
     /// with no limits on first use, like the user's budget above it.
-    fn budget_of(&self, user: u32, app_id: &str) -> Result<OwnedHandle, Status> {
+    pub fn budget_of(&self, user: u32, app_id: &str) -> Result<OwnedHandle, Status> {
         let mut apps = self.app_budgets.borrow_mut();
         let key = (user, String::from(app_id));
         if let Some(budget) = apps.get(&key) {
             return duplicate(budget.raw(), SAME_RIGHTS);
         }
-        let mut users = self.user_budgets.borrow_mut();
-        let user_budget = match users.get(&user) {
-            Some(budget) => budget.raw(),
-            None => {
-                let budget = create_budget(self.budget.raw())?;
-                let raw = budget.raw();
-                users.insert(user, budget);
-                raw
-            }
-        };
-        let budget = create_budget(user_budget)?;
+        let user_budget = self.user_budget(user)?;
+        let budget = create_budget(user_budget.raw())?;
         let handle = duplicate(budget.raw(), SAME_RIGHTS)?;
         apps.insert(key, budget);
+        Ok(handle)
+    }
+
+    /// A handle to the budget of `user`, which is created with no limits
+    /// on first use, under the root budget.
+    pub fn user_budget(&self, user: u32) -> Result<OwnedHandle, Status> {
+        let mut users = self.user_budgets.borrow_mut();
+        if let Some(budget) = users.get(&user) {
+            return duplicate(budget.raw(), SAME_RIGHTS);
+        }
+        let budget = create_budget(self.budget.raw())?;
+        let handle = duplicate(budget.raw(), SAME_RIGHTS)?;
+        users.insert(user, budget);
         Ok(handle)
     }
 
