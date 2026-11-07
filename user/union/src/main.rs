@@ -5,8 +5,9 @@
 //! Opens of what is not a directory go to the layer that holds it, so
 //! that the client talks to that layer's server. Changes go to the
 //! writable layer: what lower layers hold is copied up first, and names
-//! removed that they still hold are whited out. Revocable views are not
-//! there yet.
+//! removed that they still hold are whited out. Revocable views of one
+//! directory forward every request to it, and revoking their key closes
+//! every connection reached through them.
 
 #![no_std]
 #![no_main]
@@ -15,6 +16,7 @@ extern crate alloc;
 
 mod change;
 mod dir;
+mod revocable;
 mod view;
 
 use alloc::collections::BTreeMap;
@@ -25,7 +27,7 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::{
     Error, NodeAsyncClient, Union, UnionAsyncServer, UnionCreateRequest, UnionCreateResponse,
-    UnionRequest,
+    UnionCreateRevocableResponse, UnionRequest, UnionRevokeResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::{ProviderAsyncServer, ProviderRequest};
@@ -56,13 +58,15 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let provider = managed.handles.remove(at).handle;
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
+    let domains = Rc::new(revocable::Domains::default());
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
             // Other protocols and named instances are not ours; dropping
             // the server end closes the connection.
             if c.protocol == PROTOCOL && c.instance.is_none() {
                 let end = ServerEnd::new(c.server);
-                spawner.spawn(serve(end, reactor.clone(), spawner.clone()));
+                let task = serve(end, domains.clone(), reactor.clone(), spawner.clone());
+                spawner.spawn(task);
             }
         }
     });
@@ -70,14 +74,37 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 }
 
 /// Serves `Union` on `end`.
-async fn serve(end: ServerEnd<Union>, reactor: Reactor, spawner: Spawner) {
+async fn serve(
+    end: ServerEnd<Union>,
+    domains: Rc<revocable::Domains>,
+    reactor: Reactor,
+    spawner: Spawner,
+) {
     let server = UnionAsyncServer::new(end, reactor.clone());
     while let Ok(request) = server.next().await {
         let s = server.server();
         let _ = match request {
             UnionRequest::Create(q, r) => r.reply(s, create(q, &reactor, &spawner)),
-            UnionRequest::CreateRevocable(_, r) => r.reply(s, Err(Error::NotSupported)),
-            UnionRequest::Revoke(_, r) => r.reply(s, Err(Error::NotSupported)),
+            UnionRequest::CreateRevocable(q, r) => {
+                let created = domains.get(q.key).map(|domain| {
+                    let backing = NodeAsyncClient::new(q.directory, reactor.clone());
+                    let task = revocable::serve(
+                        domain,
+                        backing,
+                        q.view,
+                        q.rights,
+                        reactor.clone(),
+                        spawner.clone(),
+                    );
+                    spawner.spawn(task);
+                    UnionCreateRevocableResponse {}
+                });
+                r.reply(s, created)
+            }
+            UnionRequest::Revoke(q, r) => {
+                let revoked = domains.revoke(q.key).await;
+                r.reply(s, revoked.map(|()| UnionRevokeResponse {}))
+            }
         };
     }
 }
