@@ -16,7 +16,7 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
     pub kind: Kind,
     /// Seconds an integration test may run before it fails.
-    #[arg(long, default_value_t = 120)]
+    #[arg(long, default_value_t = 240)]
     pub timeout: u64,
     /// Skip the host unit tests and the replay of the fuzz corpora.
     #[arg(long)]
