@@ -3,19 +3,24 @@
 //! the first layer that holds it, unless a layer before that one holds a
 //! whiteout of it, and directories of a name merge across the layers.
 //! Opens of what is not a directory go to the layer that holds it, so
-//! that the client talks to that layer's server. Views change nothing
-//! yet, and revocable views are not there yet.
+//! that the client talks to that layer's server. Changes go to the
+//! writable layer: what lower layers hold is copied up first, and names
+//! removed that they still hold are whited out. Revocable views are not
+//! there yet.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod change;
 mod dir;
 mod view;
 
+use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::{
@@ -89,17 +94,19 @@ fn create(
         return Err(Error::Invalid);
     }
     let writable = q.layers[0].writable;
-    let view = Rc::new(View {
-        writable,
-        rights: q.rights,
-        reactor: reactor.clone(),
-        spawner: spawner.clone(),
-    });
-    let layers: Vec<Rc<NodeAsyncClient>> = q
+    let roots: Vec<Rc<NodeAsyncClient>> = q
         .layers
         .into_iter()
         .map(|l| Rc::new(NodeAsyncClient::new(l.directory, reactor.clone())))
         .collect();
-    spawner.spawn(dir::serve(Dir::root(view, layers), q.view, q.rights));
+    let view = Rc::new(View {
+        writable,
+        rights: q.rights,
+        roots,
+        tokens: RefCell::new(BTreeMap::new()),
+        reactor: reactor.clone(),
+        spawner: spawner.clone(),
+    });
+    spawner.spawn(dir::serve(Dir::root(view), q.view, q.rights));
     Ok(UnionCreateResponse {})
 }

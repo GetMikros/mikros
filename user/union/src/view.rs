@@ -1,34 +1,44 @@
 //! Views: their layers, and directories as the layers hold them, with
 //! lookup and listing from the first layer to the last.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::fs::{
     DirEntry, Error, Node, NodeAsyncClient, NodeType, OpenFlags, Rights,
 };
 
-/// The prefix of a whiteout's name.
+/// The prefix of a whiteout's name, and the marker of a directory that
+/// hides the directories of its name in the layers after it.
 pub const WHITEOUT: &str = ".wh.";
+pub const OPAQUE: &str = ".wh..wh..opq";
 
 /// A view: its layers, the first of which may be writable, and the most
 /// rights its connections may have.
 pub struct View {
     pub writable: bool,
     pub rights: Rights,
+    /// The root directory of each layer.
+    pub roots: Vec<Rc<NodeAsyncClient>>,
+    /// The directories that the view's tokens name, by the token's
+    /// object ID.
+    pub tokens: RefCell<BTreeMap<u64, Dir>>,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
 
-/// A directory of a view: the directory at its path in each layer that
-/// has one there and does not hide it, by layer.
+/// A directory of a view: its path from the view's root, and the
+/// directory at that path in each layer that has one there and does not
+/// hide it, by layer.
 #[derive(Clone)]
 pub struct Dir {
     pub view: Rc<View>,
+    pub path: Vec<String>,
     pub layers: Vec<Option<Rc<NodeAsyncClient>>>,
 }
 
@@ -67,7 +77,7 @@ pub async fn open_in(
 }
 
 /// Whether the directory `dir` of a layer holds `name`.
-async fn has(dir: &NodeAsyncClient, name: &str, reactor: &Reactor) -> Result<bool, Error> {
+pub async fn has(dir: &NodeAsyncClient, name: &str, reactor: &Reactor) -> Result<bool, Error> {
     match open_in(dir, name, reactor).await {
         Ok(_) => Ok(true),
         Err(Error::NotFound) => Ok(false),
@@ -76,11 +86,13 @@ async fn has(dir: &NodeAsyncClient, name: &str, reactor: &Reactor) -> Result<boo
 }
 
 impl Dir {
-    /// The root directory of a view of `layers`.
-    pub fn root(view: Rc<View>, layers: Vec<Rc<NodeAsyncClient>>) -> Dir {
+    /// The root directory of `view`.
+    pub fn root(view: Rc<View>) -> Dir {
+        let layers = view.roots.iter().cloned().map(Some).collect();
         Dir {
             view,
-            layers: layers.into_iter().map(Some).collect(),
+            path: Vec::new(),
+            layers,
         }
     }
 
@@ -111,8 +123,12 @@ impl Dir {
             };
             match open_in(dir, name, reactor).await {
                 Ok((node, NodeType::Directory)) => {
+                    let opaque = has(&node, OPAQUE, reactor).await?;
                     merged[i] = Some(Rc::new(node));
                     found_dir = true;
+                    if opaque {
+                        break;
+                    }
                 }
                 Ok(_) if found_dir => break,
                 Ok((_, kind)) => return Ok(Found::Other { layer: i, kind }),
@@ -124,10 +140,15 @@ impl Dir {
             }
         }
         match found_dir {
-            true => Ok(Found::Dir(Dir {
-                view: self.view.clone(),
-                layers: merged,
-            })),
+            true => {
+                let mut path = self.path.clone();
+                path.push(String::from(name));
+                Ok(Found::Dir(Dir {
+                    view: self.view.clone(),
+                    path,
+                    layers: merged,
+                }))
+            }
             false => Ok(Found::Missing),
         }
     }

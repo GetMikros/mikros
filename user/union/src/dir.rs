@@ -1,5 +1,6 @@
 //! One connection to a directory of a view.
 
+use crate::change::check_name;
 use crate::view::{Dir, Found, flat, open_in};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -40,7 +41,10 @@ enum Resolved {
         layer: usize,
         kind: NodeType,
     },
-    Missing,
+    Missing {
+        parent: Dir,
+        name: String,
+    },
     Redirect(String),
 }
 
@@ -69,15 +73,14 @@ impl Connection {
             R::Lock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::Unlock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::CloneRange(_, r) => r.reply(s, Err(Error::IsDirectory)),
-            // Changes to directories, which views do not make yet.
-            R::SetAttributes(_, r) => r.reply(s, Err(self.change_denied())),
-            R::Unlink(_, r) => r.reply(s, Err(self.change_denied())),
-            R::GetToken(_, r) => r.reply(s, Err(self.change_denied())),
-            R::Rename(_, r) => r.reply(s, Err(self.change_denied())),
-            R::Link(_, r) => r.reply(s, Err(self.change_denied())),
-            R::CreateSymlink(_, r) => r.reply(s, Err(self.change_denied())),
-            R::BindSocket(_, r) => r.reply(s, Err(self.change_denied())),
-            R::ConnectSocket(_, r) => r.reply(s, Err(self.change_denied())),
+            R::SetAttributes(q, r) => r.reply(s, self.set_attributes(q).await),
+            R::Unlink(q, r) => r.reply(s, self.unlink(&q.name, q.directory).await),
+            R::GetToken(_, r) => r.reply(s, self.token()),
+            R::Rename(q, r) => r.reply(s, self.rename(q).await),
+            R::Link(q, r) => r.reply(s, self.link(q).await),
+            R::CreateSymlink(q, r) => r.reply(s, self.create_symlink(q).await),
+            R::BindSocket(q, r) => r.reply(s, self.bind_socket(q).await),
+            R::ConnectSocket(q, r) => r.reply(s, self.connect_socket(q).await),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unwatch(_, r) => r.reply(s, Err(Error::NotSupported)),
         };
@@ -90,16 +93,102 @@ impl Connection {
         }
     }
 
-    /// The error of a change: without `WRITE` the right is missing, a
-    /// view without a writable layer is read-only, and views do not
-    /// change directories yet.
-    fn change_denied(&self) -> Error {
-        if !self.rights.contains(Rights::WRITE) {
-            Error::AccessDenied
-        } else if !self.dir.view.writable {
-            Error::ReadOnly
-        } else {
-            Error::NotSupported
+    /// Checks that the connection may change the view: it needs `WRITE`,
+    /// and the view a writable layer.
+    fn may_change(&self) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        match self.dir.view.writable {
+            true => Ok(()),
+            false => Err(Error::ReadOnly),
+        }
+    }
+
+    async fn set_attributes(
+        &self,
+        q: NodeSetAttributesRequest,
+    ) -> Result<NodeSetAttributesResponse, Error> {
+        self.may_change()?;
+        let upper = self.dir.upper().await?;
+        flat(
+            upper
+                .set_attributes(q.mask, q.mode, q.accessed, q.modified)
+                .await,
+        )
+    }
+
+    async fn unlink(&self, name: &str, directory: bool) -> Result<NodeUnlinkResponse, Error> {
+        self.may_change()?;
+        self.dir.remove(name, directory).await?;
+        Ok(NodeUnlinkResponse {})
+    }
+
+    fn token(&self) -> Result<NodeGetTokenResponse, Error> {
+        self.require(Rights::WRITE)?;
+        Ok(NodeGetTokenResponse {
+            token: self.dir.token()?,
+        })
+    }
+
+    async fn rename(&self, q: NodeRenameRequest) -> Result<NodeRenameResponse, Error> {
+        self.may_change()?;
+        let to = self.dir.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        self.dir.rename(&q.name, &to, &q.new_name).await?;
+        Ok(NodeRenameResponse {})
+    }
+
+    async fn link(&self, q: NodeLinkRequest) -> Result<NodeLinkResponse, Error> {
+        self.may_change()?;
+        let to = self.dir.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        self.dir.link(&q.name, &to, &q.new_name).await?;
+        Ok(NodeLinkResponse {})
+    }
+
+    async fn create_symlink(
+        &self,
+        q: NodeCreateSymlinkRequest,
+    ) -> Result<NodeCreateSymlinkResponse, Error> {
+        self.may_change()?;
+        check_name(&q.name)?;
+        if self.dir.shows(&q.name).await? {
+            return Err(Error::Exists);
+        }
+        let upper = self.dir.upper().await?;
+        self.dir.unwhite(&upper, &q.name).await?;
+        flat(upper.create_symlink(q.name, q.target).await)
+    }
+
+    async fn bind_socket(&self, q: NodeBindSocketRequest) -> Result<NodeBindSocketResponse, Error> {
+        self.may_change()?;
+        check_name(&q.name)?;
+        if self.dir.shows(&q.name).await? {
+            return Err(Error::Exists);
+        }
+        let upper = self.dir.upper().await?;
+        self.dir.unwhite(&upper, &q.name).await?;
+        flat(upper.bind_socket(q.name, q.mode, q.listener).await)
+    }
+
+    /// Connects to a socket of the writable layer; those of other layers
+    /// cannot be reached.
+    async fn connect_socket(
+        &self,
+        q: NodeConnectSocketRequest,
+    ) -> Result<NodeConnectSocketResponse, Error> {
+        self.may_change()?;
+        match self.dir.lookup(&q.name).await? {
+            Found::Missing => Err(Error::NotFound),
+            Found::Other {
+                layer: 0,
+                kind: NodeType::Socket,
+            } => {
+                let upper = self.dir.upper().await?;
+                flat(upper.connect_socket(q.name, q.r#type, q.connection).await)
+            }
+            Found::Other {
+                kind: NodeType::Socket,
+                ..
+            } => Err(Error::NotSupported),
+            _ => Err(Error::Invalid),
         }
     }
 
@@ -174,7 +263,9 @@ impl Connection {
             let at = stack.last().expect("the stack holds the directory").clone();
             match at.lookup(&name).await? {
                 Found::Dir(dir) => stack.push(dir),
-                Found::Missing if rest.is_empty() => return Ok(Resolved::Missing),
+                Found::Missing if rest.is_empty() => {
+                    return Ok(Resolved::Missing { parent: at, name });
+                }
                 Found::Missing => return Err(Error::NotFound),
                 Found::Other { layer, kind }
                     if kind != NodeType::Symlink || (rest.is_empty() && no_follow) =>
@@ -260,15 +351,17 @@ impl Connection {
                 layer,
                 kind,
             } => {
-                // A file of a lower layer must be copied up before it
-                // changes, which views do not do yet.
-                if changes && layer != 0 {
-                    return Err(Error::NotSupported);
-                }
-                // The client talks to the layer's server itself.
-                let holder = parent.layers[layer].as_ref().ok_or(Error::Io)?;
+                // A file of a lower layer is copied up before it changes,
+                // and the client then talks to the writable layer's server.
                 let rights = Rights(q.rights.0 & self.rights.0);
-                let opened = flat(holder.open(name, flags, q.mode, rights, q.node).await)?;
+                let opened = if changes {
+                    let upper = parent.copy_up(&name, layer, kind).await?;
+                    flat(upper.open(name, flags, q.mode, rights, q.node).await)?
+                } else {
+                    // The client talks to the layer's server itself.
+                    let holder = parent.layers[layer].as_ref().ok_or(Error::Io)?;
+                    flat(holder.open(name, flags, q.mode, rights, q.node).await)?
+                };
                 Ok(NodeOpenResponse {
                     r#type: if opened.redirect.is_some() {
                         opened.r#type
@@ -278,8 +371,29 @@ impl Connection {
                     redirect: opened.redirect,
                 })
             }
-            Resolved::Missing if flags.contains(OpenFlags::CREATE) => Err(Error::NotSupported),
-            Resolved::Missing => Err(Error::NotFound),
+            Resolved::Missing { parent, name } if flags.contains(OpenFlags::CREATE) => {
+                check_name(&name)?;
+                let rights = Rights(q.rights.0 & self.rights.0);
+                if flags.contains(OpenFlags::DIRECTORY) {
+                    parent.make_directory(&name, q.mode).await?;
+                    let Found::Dir(made) = parent.lookup(&name).await? else {
+                        return Err(Error::Io);
+                    };
+                    self.dir.view.spawner.spawn(serve(made, q.node, rights));
+                    return Ok(NodeOpenResponse {
+                        r#type: NodeType::Directory,
+                        redirect: None,
+                    });
+                }
+                let upper = parent.upper().await?;
+                parent.unwhite(&upper, &name).await?;
+                let opened = flat(upper.open(name, flags, q.mode, rights, q.node).await)?;
+                Ok(NodeOpenResponse {
+                    r#type: opened.r#type,
+                    redirect: opened.redirect,
+                })
+            }
+            Resolved::Missing { .. } => Err(Error::NotFound),
         }
     }
 }
