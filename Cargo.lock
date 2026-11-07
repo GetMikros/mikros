@@ -734,6 +734,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-fat"
+version = "0.0.0"
+dependencies = [
+ "fatfs",
+]
+
+[[package]]
 name = "mikros-gpt"
 version = "0.0.0"
 
