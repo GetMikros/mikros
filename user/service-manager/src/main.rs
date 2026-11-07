@@ -16,7 +16,6 @@ extern crate alloc;
 mod boot;
 mod broker;
 mod directory;
-mod files;
 mod launch;
 mod registrar;
 mod services;

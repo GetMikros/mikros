@@ -43,7 +43,9 @@ dependencies = [
 name = "device-manager"
 version = "0.0.0"
 dependencies = [
+ "mikros-manifest",
  "mikros-rt",
+ "mikros-yaml",
 ]
 
 [[package]]

@@ -3,7 +3,6 @@
 use crate::boot::BootHandles;
 use crate::broker;
 use crate::directory::{Dir, Initially};
-use crate::files::{self, Failure};
 use crate::supervisor::Supervisor;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
@@ -12,7 +11,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use mikros_manifest::{Service, order};
 use mikros_rt::exec::Reactor;
-use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient};
+use mikros_rt::files::{self, Failure};
+use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient, NodeType};
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 
@@ -106,7 +106,7 @@ pub async fn start(
 /// Files that cannot be read or are invalid are logged and left out,
 /// and so are the keys that a manifest does not have.
 async fn read_all(root: &NodeAsyncClient, reactor: &Reactor) -> Vec<(Service, Vec<u8>)> {
-    let names = match files::list(root, reactor, SERVICES, SUFFIX).await {
+    let names = match files::list(root, reactor, SERVICES, NodeType::File, SUFFIX).await {
         Ok(names) => names,
         Err(Failure::Fs(Error::NotFound)) => Vec::new(),
         Err(failure) => {

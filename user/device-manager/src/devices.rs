@@ -1,13 +1,15 @@
-//! The tree of devices.
+//! The tree of devices, and the drivers bound to them.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
+use mikros_manifest::Driver;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 
 /// A device: its ID, name, hardware IDs from the most specific to the
-/// least, properties, parent, unless it is a root device, and the
-/// resources of its hardware.
+/// least, properties, parent, unless it is a root device, the
+/// resources of its hardware, and the name of its driver once one is
+/// bound.
 pub struct Device {
     pub id: u64,
     pub name: String,
@@ -15,6 +17,7 @@ pub struct Device {
     pub properties: Vec<(String, String)>,
     pub parent: Option<u64>,
     pub resources: Vec<OwnedHandle>,
+    pub driver: Option<String>,
 }
 
 /// The devices, with the ID the next one gets.
@@ -50,10 +53,37 @@ impl Devices {
             properties,
             parent,
             resources,
+            driver: None,
         };
         mikros_rt::log!(Info, "device-manager: added {}", describe(&device));
         self.list.push(device);
         id
+    }
+
+    /// Binds a driver of `drivers` to each device without one, and
+    /// logs which, or that none matches. A device that several drivers
+    /// match equally gets the first by name, with a warning.
+    pub fn bind(&mut self, drivers: &[Driver]) {
+        for device in self.list.iter_mut().filter(|d| d.driver.is_none()) {
+            let (id, name) = (device.id, &device.name);
+            let Some(choice) = mikros_manifest::choose(drivers, &device.hardware_ids) else {
+                mikros_rt::log!(Info, "device-manager: no driver for device {id}, {name}");
+                continue;
+            };
+            let (driver, matched) = (&choice.driver.name, choice.hardware_id);
+            if !choice.passed_over.is_empty() {
+                mikros_rt::log!(
+                    Warning,
+                    "device-manager: drivers {:?} also match device {id} as {matched}",
+                    choice.passed_over
+                );
+            }
+            mikros_rt::log!(
+                Info,
+                "device-manager: bound driver {driver} to device {id}, {name}, as {matched}"
+            );
+            device.driver = Some(driver.clone());
+        }
     }
 }
 

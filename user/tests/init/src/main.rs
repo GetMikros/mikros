@@ -8647,14 +8647,20 @@ mod manager {
     }
 
     /// From a boot image with the service manager, the permission
-    /// broker, the device manager and their manifests, the service
-    /// manager starts the device manager with the root resource, the log
-    /// and init's own platform information. The device manager adds a
-    /// PCI host bridge from the MCFG table of the q35 machine, with its
-    /// ECAM range as its one resource, and says so in the log.
+    /// broker, the device manager, their manifests and the manifests of
+    /// test drivers, the service manager starts the device manager with
+    /// the root resource, the log and init's own platform information.
+    /// The device manager adds a PCI host bridge from the MCFG table of
+    /// the q35 machine, with its ECAM range as its one resource, leaves
+    /// out the invalid driver manifest, and binds the test driver whose
+    /// manifest has no kind, which makes it normal, rather than the
+    /// fallback one. It says all of it in the log.
     pub fn device_manager_adds_platform_devices(s: &Startup) -> Result {
-        const EXPECTED: [&[u8]; 1] = [
+        const EXPECTED: [&[u8]; 4] = [
             b"device-manager: added device 1, pci-host-0, as platform:pci-host-ecam, with 1 resource, segment 0, bus_start 0, bus_end 255",
+            b"test-invalid/driver.yaml:6:",
+            b"ServiceKey(\"start\")",
+            b"device-manager: bound driver test-host to device 1, pci-host-0, as platform:pci-host-ecam",
         ];
         const FAILED: &[&[u8]] = &[
             b"did not start",
@@ -8662,6 +8668,8 @@ mod manager {
             b"service device-manager exited",
             b"service device-manager ended",
             b"no MCFG table",
+            b"no driver for device",
+            b"bound driver test-fallback",
         ];
         let (m, init, reader) = serving(s, b"tests/devices.img")?;
         let deadline = super::within(super::PROBE_SECONDS);
@@ -8730,7 +8738,10 @@ mod manager {
             mikros_rt::log!(Error, "device manager lines seen: {seen:?}");
         }
         ensure("logging an outcome in time", outcome.is_some())?;
-        ensure("adding the host bridge", outcome == Some(true))
+        ensure(
+            "adding the host bridge and binding the normal driver",
+            outcome == Some(true),
+        )
     }
 
     /// The process manager ends without serving init when `Start` has

@@ -1,12 +1,10 @@
-//! Reading the manifest files of a directory over the `Node` protocol.
+//! Listing directories and reading files over the `Node` protocol.
 
+use crate::exec::Reactor;
+use crate::interfaces::__midl::endpoints;
+use crate::interfaces::mikros::fs::{Error, Node, NodeAsyncClient, NodeType, OpenFlags, Rights};
 use alloc::string::String;
 use alloc::vec::Vec;
-use mikros_rt::exec::Reactor;
-use mikros_rt::interfaces::__midl::endpoints;
-use mikros_rt::interfaces::mikros::fs::{
-    Error, Node, NodeAsyncClient, NodeType, OpenFlags, Rights,
-};
 
 /// The most bytes one `Read` returns.
 const READ_MAX: u32 = 32768;
@@ -37,12 +35,13 @@ async fn open(
     }
 }
 
-/// The names of the regular files in `path` under `root` that end in
-/// `suffix`, in name order.
+/// The names of the nodes of type `kind` in `path` under `root` that
+/// end in `suffix`, in the order the directory lists them.
 pub async fn list(
     root: &NodeAsyncClient,
     reactor: &Reactor,
     path: &str,
+    kind: NodeType,
     suffix: &str,
 ) -> Result<Vec<String>, Failure> {
     let dir = open(root, reactor, path, OpenFlags::DIRECTORY).await?;
@@ -61,7 +60,7 @@ pub async fn list(
             listed
                 .entries
                 .into_iter()
-                .filter(|e| e.r#type == NodeType::File && e.name.ends_with(suffix))
+                .filter(|e| e.r#type == kind && e.name.ends_with(suffix))
                 .map(|e| e.name),
         );
         cookie = listed.next;

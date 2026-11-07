@@ -8,6 +8,9 @@
 //! `segment`, `bus_start` and `bus_end` in decimal and `ecam_base` in
 //! hexadecimal with `0x`, and a shared `MMIO` resource covering the
 //! configuration space of its buses.
+//!
+//! It then reads the driver manifests and binds a driver to each device
+//! that one matches.
 
 #![no_std]
 #![no_main]
@@ -16,6 +19,7 @@ extern crate alloc;
 
 mod acpi;
 mod devices;
+mod drivers;
 
 use alloc::format;
 use alloc::string::String;
@@ -24,6 +28,7 @@ use alloc::vec::Vec;
 use devices::Devices;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
+use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
@@ -89,6 +94,22 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         Some(mcfg) => add_host_bridges(&mut devices, &root, &mcfg),
         None => mikros_rt::log!(Warning, "device-manager: no MCFG table, so no PCI"),
     }
+    let root_directory = managed
+        .namespace
+        .iter()
+        .position(|e| e.path == "/")
+        .map(|at| managed.namespace.swap_remove(at).directory);
+    let drivers = match root_directory {
+        Some(directory) => {
+            let directory = NodeAsyncClient::new(directory, reactor.clone());
+            executor.block_on(drivers::read_all(&directory, &reactor))
+        }
+        None => {
+            mikros_rt::log!(Error, "device-manager: the namespace has no root");
+            Vec::new()
+        }
+    };
+    devices.bind(&drivers);
     // The handles, the framebuffer's among them, stay open.
     executor.block_on(core::future::pending::<()>());
     drop((log, framebuffer));
