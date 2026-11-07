@@ -278,34 +278,27 @@ fn wait(fds: &mut [Pollfd], deadline: i64, mut mask: Option<u64>) -> i64 {
             ready = true;
             continue;
         };
-        match &*description {
-            Description::Stream(stream) => {
-                let key = i as u64 + 1;
-                // SAFETY: the call takes no pointers.
-                let status = unsafe {
-                    sys::object_wait_async(
-                        stream.raw(),
-                        waits.port.raw(),
-                        key,
-                        signals(entry.events),
-                        0,
-                    )
-                };
-                if status != mikros_rt::OK {
-                    return -errno::from_status(status);
-                }
-                waits.streams.push((description.clone(), key, true));
+        // A stream waits for its signals; an epoll instance for its port
+        // to become readable, which it is while it has events.
+        let (handle, signals) = match &*description {
+            Description::Stream(stream) => (stream.raw(), signals(entry.events)),
+            Description::Epoll(epoll) if entry.events & INPUT != 0 => {
+                (epoll.port().raw(), READABLE)
             }
+            Description::Epoll(_) => continue,
             Description::File(..) | Description::Directory(..) => {
                 entry.revents = entry.events & (INPUT | OUTPUT);
                 ready |= entry.revents != 0;
+                continue;
             }
-            // An epoll instance is not waited on.
-            Description::Epoll(_) => {
-                entry.revents = POLLNVAL;
-                ready = true;
-            }
+        };
+        let key = i as u64 + 1;
+        // SAFETY: the call takes no pointers.
+        let status = unsafe { sys::object_wait_async(handle, waits.port.raw(), key, signals, 0) };
+        if status != mikros_rt::OK {
+            return -errno::from_status(status);
         }
+        waits.streams.push((description.clone(), key, true));
     }
     // The first packet is waited for until the deadline, unless a
     // descriptor is ready already; those that arrived with it are taken
@@ -338,9 +331,9 @@ fn wait(fds: &mut [Pollfd], deadline: i64, mut mask: Option<u64>) -> i64 {
     fds.iter().filter(|e| e.revents != 0).count() as i64
 }
 
-/// The call's port and the streams it waits on, with their keys and
-/// whether each wait is still registered. The waits that did not end
-/// are cancelled before the port is closed.
+/// The call's port and the streams and epoll instances it waits on, with
+/// their keys and whether each wait is still registered. The waits that
+/// did not end are cancelled before the port is closed.
 struct Waits {
     port: OwnedHandle,
     streams: Vec<(Arc<Description>, u64, bool)>,
@@ -360,10 +353,15 @@ impl Waits {
 impl Drop for Waits {
     fn drop(&mut self) {
         for (description, key, pending) in &self.streams {
-            if let (Description::Stream(stream), true) = (&**description, *pending) {
+            let handle = match &**description {
+                Description::Stream(stream) => stream.raw(),
+                Description::Epoll(epoll) => epoll.port().raw(),
+                _ => continue,
+            };
+            if *pending {
                 // SAFETY: the call takes no pointers. A wait that ended
                 // meanwhile has nothing to cancel.
-                unsafe { sys::port_cancel(self.port.raw(), stream.raw(), *key) };
+                unsafe { sys::port_cancel(self.port.raw(), handle, *key) };
             }
         }
     }

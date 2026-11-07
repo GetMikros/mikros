@@ -1059,6 +1059,46 @@ static int epolls_report_streams(void)
 	return ok;
 }
 
+/* An epoll instance is ready for poll and for other instances while it
+   has an event, also after a wait reported a level-triggered entry that
+   is still ready. Instances may not watch each other in a loop. A
+   one-shot entry reports once until it is changed, EPOLLPRI is never
+   reported, and EPOLLEXCLUSIVE is accepted. */
+static int epolls_nest(void)
+{
+	int p[2];
+	char c;
+	struct epoll_event ev = {.events = EPOLLIN | EPOLLPRI | EPOLLEXCLUSIVE, .data.u64 = 1};
+	struct epoll_event got[2];
+	int inner = epoll_create1(0), outer = epoll_create1(0);
+	if (inner < 0 || outer < 0 || pipe(p))
+		return 0;
+	struct pollfd pf = {.fd = inner, .events = POLLIN};
+	int ok = epoll_ctl(inner, EPOLL_CTL_ADD, p[0], &ev) == 0 && poll(&pf, 1, 0) == 0;
+	ev = (struct epoll_event){.events = EPOLLIN, .data.u64 = 2};
+	ok = ok && epoll_ctl(outer, EPOLL_CTL_ADD, inner, &ev) == 0
+		&& epoll_ctl(inner, EPOLL_CTL_ADD, outer, &ev) == -1 && errno == ELOOP
+		&& epoll_wait(outer, got, 2, 0) == 0 && write(p[1], "x", 1) == 1
+		&& poll(&pf, 1, -1) == 1 && pf.revents == POLLIN
+		&& epoll_wait(outer, got, 2, -1) == 1 && got[0].events == EPOLLIN
+		&& got[0].data.u64 == 2
+		&& epoll_wait(inner, got, 2, 0) == 1 && got[0].events == EPOLLIN
+		&& got[0].data.u64 == 1
+		&& poll(&pf, 1, 0) == 1 && read(p[0], &c, 1) == 1
+		&& epoll_wait(inner, got, 2, 0) == 0 && poll(&pf, 1, 0) == 0;
+	ev = (struct epoll_event){.events = EPOLLIN | EPOLLONESHOT, .data.u64 = 3};
+	ok = ok && epoll_ctl(inner, EPOLL_CTL_MOD, p[0], &ev) == 0 && write(p[1], "y", 1) == 1
+		&& epoll_wait(inner, got, 2, 0) == 1 && got[0].data.u64 == 3
+		&& epoll_wait(inner, got, 2, 0) == 0
+		&& epoll_ctl(inner, EPOLL_CTL_MOD, p[0], &ev) == 0
+		&& epoll_wait(inner, got, 2, 0) == 1;
+	close(p[0]);
+	close(p[1]);
+	close(outer);
+	close(inner);
+	return ok;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -1130,6 +1170,8 @@ int main(int argc, char **argv)
 		return 33;
 	if (!epolls_report_streams())
 		return 35;
+	if (!epolls_nest())
+		return 36;
 	char *copy = malloc(64);
 	if (!copy)
 		return 34;
