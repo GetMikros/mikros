@@ -408,38 +408,54 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", services_image.display());
-            // The device manager tests serve this image, which holds the
+            // The device manager tests serve these images. Each holds the
             // service manager, the broker and the device manager with
-            // their manifests, and test drivers: their manifests and the
-            // binary of the one that starts.
+            // their manifests, and test drivers: their manifests from
+            // user/tests/drivers/, and the test driver's binary for those
+            // that start.
             let devices = user_build("device-manager", kind)?;
             println!("built    {}", devices.display());
-            let test_host = user_build("test-host", kind)?;
-            println!("built    {}", test_host.display());
+            let test_driver = user_build("test-driver", kind)?;
+            println!("built    {}", test_driver.display());
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
-            let test_drivers = ["test-host", "test-fallback", "test-invalid"].map(|name| {
-                (
-                    format!("usr/lib/drivers/{name}/driver.yaml"),
-                    crate::workspace_root().join(format!("user/tests/drivers/{name}/driver.yaml")),
-                )
-            });
-            let mut devices_members = vec![
-                ("usr/bin/service-manager", services.as_path()),
-                ("usr/bin/permissions-broker", broker.as_path()),
-                (
-                    "usr/lib/services/permissions.yaml",
-                    broker_manifest.as_path(),
-                ),
-                ("usr/bin/device-manager", devices.as_path()),
-                (
-                    "usr/lib/services/device-manager.yaml",
-                    devices_manifest.as_path(),
-                ),
-                ("usr/lib/drivers/test-host/test-host", test_host.as_path()),
+            let device_image = |file: &str, drivers: &[(&str, bool)]| -> Result<PathBuf> {
+                let mut members: Vec<(String, PathBuf)> = vec![
+                    ("usr/bin/service-manager".into(), services.clone()),
+                    ("usr/bin/permissions-broker".into(), broker.clone()),
+                    (
+                        "usr/lib/services/permissions.yaml".into(),
+                        broker_manifest.clone(),
+                    ),
+                    ("usr/bin/device-manager".into(), devices.clone()),
+                    (
+                        "usr/lib/services/device-manager.yaml".into(),
+                        devices_manifest.clone(),
+                    ),
+                ];
+                for &(name, starts) in drivers {
+                    let manifest = format!("user/tests/drivers/{name}/driver.yaml");
+                    members.push((
+                        format!("usr/lib/drivers/{name}/driver.yaml"),
+                        crate::workspace_root().join(manifest),
+                    ));
+                    if starts {
+                        let binary = format!("usr/lib/drivers/{name}/{name}");
+                        members.push((binary, test_driver.clone()));
+                    }
+                }
+                let members: Vec<(&str, &Path)> = members
+                    .iter()
+                    .map(|(name, path)| (name.as_str(), path.as_path()))
+                    .collect();
+                boot_image(kind, file, &members)
+            };
+            let drivers = [
+                ("test-host", true),
+                ("test-fallback", false),
+                ("test-invalid", false),
             ];
-            devices_members.extend(test_drivers.iter().map(|(n, p)| (n.as_str(), p.as_path())));
-            let devices_image = boot_image(kind, "devices.img", &devices_members)?;
+            let devices_image = device_image("devices.img", &drivers)?;
             println!("built    {}", devices_image.display());
             let members = [
                 ("tests/broker.img", broker_image.as_path()),

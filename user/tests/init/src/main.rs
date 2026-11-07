@@ -8709,51 +8709,96 @@ mod manager {
     /// whose `Start` succeeds only for the host bridge with its ECAM
     /// range and a `DMA` resource. It says all of it in the log.
     pub fn device_manager_adds_platform_devices(s: &Startup) -> Result {
-        const EXPECTED: [&[u8]; 5] = [
-            b"device-manager: added device 1, pci-host-0, as platform:pci-host-ecam, with 1 resource, segment 0, bus_start 0, bus_end 255",
-            b"test-invalid/driver.yaml:6:",
-            b"ServiceKey(\"start\")",
-            b"device-manager: bound driver test-host to device 1, pci-host-0, as platform:pci-host-ecam",
-            b"device-manager: started driver test-host for device 1 as pid",
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: added device 1, pci-host-0, as platform:pci-host-ecam, with 1 resource, segment 0, bus_start 0, bus_end 255",
+                1,
+            ),
+            (b"test-invalid/driver.yaml:6:", 1),
+            (b"ServiceKey(\"start\")", 1),
+            (
+                b"device-manager: bound driver test-host to device 1, pci-host-0, as platform:pci-host-ecam",
+                1,
+            ),
+            (
+                b"device-manager: started driver test-host for device 1 as pid",
+                1,
+            ),
         ];
         const FAILED: &[&[u8]] = &[
-            b"did not start",
-            b"will not start",
-            b"service device-manager exited",
-            b"service device-manager ended",
             b"no MCFG table",
             b"no driver for device",
             b"bound driver test-fallback",
-            b"failed Start",
+            b"driver test-host failed Start",
         ];
-        let (m, init, reader) = serving(s, b"tests/devices.img")?;
+        let logged = device_manager_logs(s, b"tests/devices.img", false, EXPECTED, FAILED)?;
+        ensure(
+            "adding the host bridge and starting the normal driver",
+            logged,
+        )
+    }
+
+    /// Starts the service manager from the boot image member `image`,
+    /// giving it the root resource, the log and init's platform
+    /// information, which the device manager gets. When `framebuffer`
+    /// is true, it also gets a memory object in place of a framebuffer,
+    /// and the platform information has its framebuffer flag set. Then
+    /// reads the log until each line of `expected` has appeared as many
+    /// times as it gives, or a line has appeared with a part of
+    /// `failed`, a failure to start the broker or the device manager, or
+    /// the device manager's end. Returns whether each line appeared
+    /// exactly as many times.
+    fn device_manager_logs(
+        s: &Startup,
+        image: &[u8],
+        framebuffer: bool,
+        expected: &[(&[u8], usize)],
+        failed: &[&[u8]],
+    ) -> Result<bool> {
+        // The processes of earlier tests may still log, so the lines
+        // name what they are about.
+        const ENDED: &[&[u8]] = &[
+            b"service permissions did not start",
+            b"service permissions will not start",
+            b"service device-manager did not start",
+            b"service device-manager will not start",
+            b"service device-manager exited",
+            b"service device-manager ended",
+        ];
+        let (m, init, reader) = serving(s, image)?;
         let deadline = super::within(super::PROBE_SECONDS);
-        let message = s.message();
-        let mut info = 0;
-        // SAFETY: the out pointer is valid for the call.
-        check("creating the platform information", unsafe {
-            sys::mem_create(
-                (message.len() as u64).next_multiple_of(super::PAGE_SIZE),
-                0,
-                &mut info,
-            )
-        })?;
-        // SAFETY: the kernel just created the handle for us.
-        let info = unsafe { OwnedHandle::from_raw(info) };
-        // SAFETY: the pointer and length describe `message`.
-        check("writing the platform information", unsafe {
-            sys::mem_write(info.raw(), 0, message.as_ptr(), message.len() as u64)
-        })?;
+        let mut message = s.message().to_vec();
+        if framebuffer {
+            message[0x04] |= 1;
+        }
+        let memory = |what, bytes: &[u8]| -> Result<OwnedHandle> {
+            let mut mem = 0;
+            let size = (bytes.len() as u64)
+                .max(1)
+                .next_multiple_of(super::PAGE_SIZE);
+            // SAFETY: the out pointer is valid for the call.
+            check(what, unsafe { sys::mem_create(size, 0, &mut mem) })?;
+            // SAFETY: the kernel just created the handle for us.
+            let mem = unsafe { OwnedHandle::from_raw(mem) };
+            // SAFETY: the pointer and length describe `bytes`.
+            check(what, unsafe {
+                sys::mem_write(mem.raw(), 0, bytes.as_ptr(), bytes.len() as u64)
+            })?;
+            Ok(mem)
+        };
         let user = |id, handle| StartupHandle {
             role: HandleRole::User,
             id,
             handle,
         };
-        let handles = alloc::vec![
+        let mut handles = alloc::vec![
             user(1, copy(s.root_resource, SAME_RIGHTS)?),
             user(2, copy(s.log, SAME_RIGHTS)?),
-            user(5, info),
+            user(5, memory("writing the platform information", &message)?),
         ];
+        if framebuffer {
+            handles.push(user(4, memory("making a framebuffer", &[])?));
+        }
         let reply = init.start_service_manager(handles, deadline);
         let Ok(Ok(started)) = reply else {
             mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
@@ -8763,9 +8808,13 @@ mod manager {
             });
         };
         let deadline = super::within(super::PROBE_SECONDS);
-        let mut seen = [false; EXPECTED.len()];
+        let mut seen = alloc::vec![0; expected.len()];
         let outcome = loop {
-            if seen.iter().all(|&s| s) {
+            if seen
+                .iter()
+                .zip(expected)
+                .all(|(&n, &(_, count))| n >= count)
+            {
                 break Some(true);
             }
             let (status, record) = super::read_record(reader.raw());
@@ -8778,10 +8827,14 @@ mod manager {
             check("reading the log", status)?;
             let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
             let message = &record[0x20..0x20 + len.min(256)];
-            for (seen, expected) in seen.iter_mut().zip(EXPECTED) {
-                *seen |= super::contains(message, expected);
+            for (seen, (line, _)) in seen.iter_mut().zip(expected) {
+                *seen += usize::from(super::contains(message, line));
             }
-            if FAILED.iter().any(|f| super::contains(message, f)) {
+            if failed
+                .iter()
+                .chain(ENDED)
+                .any(|f| super::contains(message, f))
+            {
                 mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
                 break Some(false);
             }
@@ -8789,14 +8842,15 @@ mod manager {
         // SAFETY: the call takes no pointers.
         unsafe { sys::task_kill(started.process.raw()) };
         drop(m);
-        if outcome.is_none() {
+        let exact = seen
+            .iter()
+            .zip(expected)
+            .all(|(&n, &(_, count))| n == count);
+        if outcome != Some(true) || !exact {
             mikros_rt::log!(Error, "device manager lines seen: {seen:?}");
         }
         ensure("logging an outcome in time", outcome.is_some())?;
-        ensure(
-            "adding the host bridge and binding the normal driver",
-            outcome == Some(true),
-        )
+        Ok(outcome == Some(true) && exact)
     }
 
     /// The process manager ends without serving init when `Start` has
