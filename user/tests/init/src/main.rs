@@ -8741,11 +8741,10 @@ mod manager {
     /// service manager, the permission broker, the temporary file system,
     /// a probe of namespaces with their manifests, and files in `/etc` and
     /// `/usr`, the process manager makes tmpfs's `boot/` directories,
-    /// fills them from the image, and from then on gives each process the
-    /// namespace of its profile. The probe, or the copy of itself that it
-    /// starts once that holds, gets exactly the entries of its manifest
-    /// and `/dev`, with the rights given, and exits with 0 once every
-    /// check passed, as the service manager logs.
+    /// fills them from the image, and gives each process started after
+    /// tmpfs the namespace of its profile. The probe gets exactly the
+    /// entries of its manifest and `/dev`, with the rights given, and
+    /// exits with 0 once every check passed, as the service manager logs.
     pub fn process_manager_builds_namespaces_from_the_boot_image(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service namespace-probe exited with code 0";
         const FAILED: &[&[u8]] = &[

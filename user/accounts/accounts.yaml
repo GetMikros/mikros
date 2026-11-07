@@ -2,7 +2,8 @@
 # usr/lib/services/accounts.yaml.
 name: accounts
 binary: /usr/bin/accounts
-start: on-demand
+start: boot
+after: [tmpfs]
 provides:
   - protocol: mikros.session.Accounts
 namespace:

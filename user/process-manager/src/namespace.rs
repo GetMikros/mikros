@@ -4,7 +4,9 @@
 //! and `/dev`. With `root=bootfs` on the command line, profiles apply
 //! once the process manager has made tmpfs's `boot/etc`, `boot/var` and
 //! `boot/Users` and filled them with the boot image's `etc`, `var` and
-//! `Users`. A profile's entries come from the root table: `/usr`, read
+//! `Users`. Once tmpfs has started, the namespace of every other new
+//! process waits for that, so that only the processes started before
+//! tmpfs, and tmpfs itself, go without their profiles. A profile's entries come from the root table: `/usr`, read
 //! only and executable, and `/Apps` and `/Libraries`, read only, from the
 //! boot image, and `/etc`, `/var` and `/Users` from those directories.
 
@@ -13,7 +15,9 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
+use core::future::poll_fn;
+use core::task::{Poll, Waker};
 use mikros_manifest::path;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::endpoints;
@@ -29,6 +33,8 @@ use process_manager::bootfs::{Fs, ItemKind};
 /// manifest entry may be, lie in, or hold.
 const ACCOUNTS_DATA: &str = "/var/lib/accounts";
 const ACCOUNTS_APP: &str = "system.accounts";
+/// The app ID of the temporary file system service.
+const TMPFS_APP: &str = "system.tmpfs";
 /// The protocol of the temporary file system.
 const TMPFS: &str = "mikros.fs.Filesystem";
 /// How long to wait before asking again for tmpfs.
@@ -50,6 +56,10 @@ struct Ready {
 pub struct Namespaces {
     bootfs: bool,
     ready: RefCell<Option<Rc<Ready>>>,
+    /// Whether tmpfs has started, and the tasks whose namespaces wait for
+    /// profiles to apply since.
+    tmpfs_started: Cell<bool>,
+    waiting: RefCell<Vec<Waker>>,
 }
 
 /// Where an entry of the root table comes from.
@@ -138,7 +148,29 @@ impl Namespaces {
         Namespaces {
             bootfs,
             ready: RefCell::new(None),
+            tmpfs_started: Cell::new(false),
+            waiting: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Records that a process of `app_id` has started: once it is tmpfs,
+    /// new namespaces wait for profiles to apply.
+    pub fn started(&self, app_id: &str) {
+        if app_id == TMPFS_APP {
+            self.tmpfs_started.set(true);
+        }
+    }
+
+    /// Completes once profiles apply.
+    async fn profiles(&self) {
+        poll_fn(|cx| match self.ready.borrow().is_some() {
+            true => Poll::Ready(()),
+            false => {
+                self.waiting.borrow_mut().push(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
     }
 
     /// Whether profiles apply to processes started under `root=bootfs`.
@@ -169,13 +201,18 @@ impl Namespaces {
                     var,
                     users,
                 }));
+                for waker in self.waiting.take() {
+                    waker.wake();
+                }
             }
             Err(e) => mikros_rt::log!(Error, "process-manager: filling tmpfs failed: {e:?}"),
         }
     }
 
     /// The namespace of a new process of `app_id` and `user`, the service
-    /// manager that init asked for when `service_manager`.
+    /// manager that init asked for when `service_manager`. Once tmpfs
+    /// has started, that of any other process waits for profiles to
+    /// apply.
     pub async fn of(
         &self,
         shared: &Shared,
@@ -187,6 +224,9 @@ impl Namespaces {
             path: "/dev".into(),
             directory: shared.dev.directory()?,
         };
+        if self.bootfs && self.tmpfs_started.get() && app_id != TMPFS_APP {
+            self.profiles().await;
+        }
         let ready = self.ready.borrow().clone();
         let Some(ready) = ready.filter(|_| self.bootfs) else {
             let root = crate::start::root(&shared.fs)?;
