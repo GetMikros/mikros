@@ -453,8 +453,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", services_image.display());
             // The temporary file system test serves this image: the
-            // service manager, the broker, the temporary file system and
-            // a probe that drives it, with their manifests.
+            // service manager, the broker, the temporary file system, the
+            // union server and probes that drive them, with their
+            // manifests.
             let tmpfs = user_build("tmpfs", kind)?;
             println!("built    {}", tmpfs.display());
             let tmpfs_probe = user_build("tmpfs-probe", kind)?;
@@ -462,6 +463,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let tmpfs_manifest = crate::workspace_root().join("user/tmpfs/tmpfs.yaml");
             let tmpfs_probe_manifest =
                 crate::workspace_root().join("user/tests/tmpfs-probe/tmpfs-probe.yaml");
+            let union = user_build("union", kind)?;
+            println!("built    {}", union.display());
+            let union_probe = user_build("union-probe", kind)?;
+            println!("built    {}", union_probe.display());
+            let union_manifest = crate::workspace_root().join("user/union/union.yaml");
+            let union_probe_manifest =
+                crate::workspace_root().join("user/tests/union-probe/union-probe.yaml");
             let tmpfs_image = boot_image(
                 kind,
                 "tmpfs.img",
@@ -478,6 +486,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     (
                         "usr/lib/services/tmpfs-probe.yaml",
                         tmpfs_probe_manifest.as_path(),
+                    ),
+                    ("usr/bin/union", union.as_path()),
+                    ("usr/lib/services/union.yaml", union_manifest.as_path()),
+                    ("usr/bin/union-probe", union_probe.as_path()),
+                    (
+                        "usr/lib/services/union-probe.yaml",
+                        union_probe_manifest.as_path(),
                     ),
                 ],
             )?;

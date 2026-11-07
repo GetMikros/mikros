@@ -52,7 +52,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let process = managed.header.process.raw();
     let directory = DirectoryClient::new(managed.header.directory);
-    let Some(root) = root(&directory) else {
+    // The probe works in a directory of its own, as other probes share
+    // the file system.
+    let Some(root) = root(&directory).and_then(|fs| own_directory(&fs)) else {
         return 1;
     };
     let checked = check(&root)
@@ -76,6 +78,14 @@ fn root(directory: &DirectoryClient) -> Option<NodeClient> {
     let (node, node_server) = endpoints::<Node>().ok()?;
     ok(fs.get_root(node_server, RW, FOREVER))?;
     Some(NodeClient::new(node))
+}
+
+/// The probe's own directory under `root`, read and write.
+fn own_directory(root: &NodeClient) -> Option<NodeClient> {
+    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::DIRECTORY.0 | OpenFlags::EXCLUSIVE.0);
+    open(root, "tmpfs-probe", flags, RW)
+        .ok()
+        .map(|(dir, _, _)| dir)
 }
 
 /// Opens `path` from `dir` with `flags` and `rights`.

@@ -416,6 +416,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "union-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "virtio-blk"
 version = "0.0.0"
 dependencies = [

@@ -8660,20 +8660,30 @@ mod manager {
     }
 
     /// From a boot image with the service manager, the permission broker,
-    /// the temporary file system and its probe, with their manifests, the
-    /// service manager starts the temporary file system and then the
-    /// probe, which holds the permission to connect to it. The probe drives
-    /// files, directories, links, names and rights through it and exits
-    /// with 0 once every check passed, as the service manager logs.
+    /// the temporary file system, the union server and their probes, with
+    /// their manifests, the service manager starts the temporary file
+    /// system and the union server, and then the probes, which hold the
+    /// permissions to connect to them. The tmpfs probe drives files,
+    /// directories, links, names, memory objects, locks, watches and
+    /// sockets, and the union probe views of two layers on the temporary
+    /// file system. Each exits with 0 once every check passed, as the
+    /// service manager logs.
     pub fn tmpfs_serves_its_clients(s: &Startup) -> Result {
-        const PASSED: &[u8] = b"service tmpfs-probe exited with code 0";
+        const PASSED: [&[u8]; 2] = [
+            b"service tmpfs-probe exited with code 0",
+            b"service union-probe exited with code 0",
+        ];
         const FAILED: &[&[u8]] = &[
             b"did not start",
             b"will not start",
             b"service tmpfs-probe exited",
             b"service tmpfs-probe ended",
+            b"service union-probe exited",
+            b"service union-probe ended",
             b"service tmpfs exited",
             b"service tmpfs ended",
+            b"service union exited",
+            b"service union ended",
         ];
         let (m, init, reader) = serving(s, b"tests/tmpfs.img")?;
         let deadline = super::within(super::PROBE_SECONDS);
@@ -8696,7 +8706,11 @@ mod manager {
             });
         };
         let deadline = super::within(super::PROBE_SECONDS);
+        let mut passed = [false; 2];
         let outcome = loop {
+            if passed.iter().all(|&p| p) {
+                break Some(true);
+            }
             let (status, record) = super::read_record(reader.raw());
             if status == super::SHOULD_WAIT {
                 if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
@@ -8707,8 +8721,9 @@ mod manager {
             check("reading the log", status)?;
             let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
             let message = &record[0x20..0x20 + len.min(256)];
-            if super::contains(message, PASSED) {
-                break Some(true);
+            if let Some(at) = PASSED.iter().position(|p| super::contains(message, p)) {
+                passed[at] = true;
+                continue;
             }
             if FAILED.iter().any(|f| super::contains(message, f)) {
                 mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
@@ -8719,7 +8734,7 @@ mod manager {
         unsafe { sys::task_kill(started.process.raw()) };
         drop(m);
         ensure("logging an outcome in time", outcome.is_some())?;
-        ensure("passing every check of the probe", outcome == Some(true))
+        ensure("passing every check of the probes", outcome == Some(true))
     }
 
     /// A process manager serving the boot image member `image` as its
