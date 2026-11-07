@@ -157,8 +157,9 @@ fn create_buffer(
 
 /// Reads or writes `count` blocks from `block` at `offset` in buffer
 /// `id`, after checking the request: `INVALID_ARGS` for no blocks, more
-/// than `max_transfer_blocks` or an unknown buffer, and `OUT_OF_RANGE`
-/// for blocks beyond the disk or bytes beyond the buffer.
+/// than `max_transfer_blocks`, an `offset` that is not a multiple of 4 or
+/// an unknown buffer, and `OUT_OF_RANGE` for blocks beyond the disk or
+/// bytes beyond the buffer.
 #[allow(clippy::too_many_arguments)]
 async fn transfer(
     disk: &impl Disk,
@@ -171,7 +172,7 @@ async fn transfer(
     fua: bool,
 ) -> Result<(), Status> {
     let info = disk.info();
-    if count == 0 || count > info.max_transfer_blocks {
+    if count == 0 || count > info.max_transfer_blocks || !offset.is_multiple_of(4) {
         return Err(Status::InvalidArgs);
     }
     let buffer = connection

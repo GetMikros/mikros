@@ -51,8 +51,8 @@
 //!   `QEMU NVMe Ctrl` or `QEMU HARDDISK`, the serial `mikros` and a
 //!   writable disk; reads find the protective MBR's
 //!   signature in block 0 and the GPT header in block 1; requests of no
-//!   blocks or beyond the disk fail with `INVALID_ARGS` and
-//!   `OUT_OF_RANGE`, and a buffer above the connection's limit with
+//!   blocks or at an offset that is not a multiple of 4 fail with
+//!   `INVALID_ARGS`, and requests beyond the disk with `OUT_OF_RANGE`, and a buffer above the connection's limit with
 //!   `NO_RESOURCES`; and the last block, written with `fua`, reads back
 //!   as written before it is written back as it was and flushed. It fails
 //!   with `INVALID_ARGS` otherwise.
@@ -439,6 +439,7 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
     let mbr = ok(disk.read(id, 0, 0, 1).await) && bytes[510..512] == [0x55, 0xAA];
     let gpt = ok(disk.read(id, 512, 1, 1).await) && &bytes[512..520] == b"EFI PART";
     let none = disk.read(id, 0, 0, 0).await;
+    let unaligned = disk.read(id, 2, 0, 1).await;
     let beyond = disk.read(id, 0, info.block_count, 1).await;
     let too_big = disk.create_buffer(65 << 20).await;
     let last = info.block_count - 1;
@@ -454,6 +455,7 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
         && mbr
         && gpt
         && matches!(none, Ok(Err(Status::InvalidArgs)))
+        && matches!(unaligned, Ok(Err(Status::InvalidArgs)))
         && matches!(beyond, Ok(Err(Status::OutOfRange)))
         && matches!(too_big, Ok(Err(Status::NoResources)))
         && saved
