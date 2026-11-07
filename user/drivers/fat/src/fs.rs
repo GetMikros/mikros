@@ -1,11 +1,13 @@
-//! The served volume and the `Filesystem` service.
+//! The served volume, the nodes that connections are open to, and the
+//! `Filesystem` service.
 
 use crate::device::BlockDevice;
 use crate::node;
 use crate::time;
+use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
-use core::cell::RefCell;
-use mikros_fat::{FatType, Node as FatNode, Stamp, Volume};
+use core::cell::{Cell, RefCell};
+use mikros_fat::{Dir, FatType, Node as FatNode, Stamp, Volume};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::{
@@ -17,8 +19,25 @@ use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, Prov
 /// The protocol of the published service.
 const PROTOCOL: &str = "device.filesystem";
 
+/// What a connection is open to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Root,
+    /// A node in `Fs::nodes`.
+    Node(u64),
+}
+
+/// A node that connections are open to: its entry as the volume has it
+/// now, and how many connections.
+struct Open {
+    node: FatNode,
+    refs: usize,
+}
+
 pub struct Fs {
     pub volume: RefCell<Volume<BlockDevice>>,
+    nodes: RefCell<BTreeMap<u64, Open>>,
+    next: Cell<u64>,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -44,6 +63,8 @@ impl Fs {
     pub fn new(volume: Volume<BlockDevice>, reactor: Reactor, spawner: Spawner) -> Fs {
         Fs {
             volume: RefCell::new(volume),
+            nodes: RefCell::new(BTreeMap::new()),
+            next: Cell::new(1),
             reactor,
             spawner,
         }
@@ -53,9 +74,81 @@ impl Fs {
         self.volume.borrow().read_only()
     }
 
-    /// Serves `end` as a connection to the root directory with `rights`.
-    pub fn serve(self: &Rc<Self>, end: ServerEnd<Node>, rights: Rights) {
-        self.spawner.spawn(node::serve(self.clone(), end, rights));
+    /// Serves `end` as a connection to `target` with `rights`, writing at
+    /// the end when `append`. The connection holds `target` until it
+    /// closes.
+    pub fn serve(
+        self: &Rc<Self>,
+        end: ServerEnd<Node>,
+        target: Target,
+        rights: Rights,
+        append: bool,
+    ) {
+        if let Target::Node(id) = target
+            && let Some(open) = self.nodes.borrow_mut().get_mut(&id)
+        {
+            open.refs += 1;
+        }
+        let task = node::serve(self.clone(), end, target, rights, append);
+        self.spawner.spawn(task);
+    }
+
+    /// Ends one connection's hold on `target`.
+    pub fn close(&self, target: Target) {
+        let Target::Node(id) = target else {
+            return;
+        };
+        let mut nodes = self.nodes.borrow_mut();
+        if let Some(open) = nodes.get_mut(&id) {
+            open.refs -= 1;
+            if open.refs == 0 {
+                nodes.remove(&id);
+            }
+        }
+    }
+
+    /// The target for `node`, the one connections to the same entry
+    /// share, which the caller then serves.
+    pub fn target(&self, node: FatNode) -> Target {
+        let mut nodes = self.nodes.borrow_mut();
+        let same = |o: &Open| o.node.parent == node.parent && o.node.slot == node.slot;
+        if let Some((&id, _)) = nodes.iter().find(|(_, o)| same(o)) {
+            return Target::Node(id);
+        }
+        let id = self.next.get();
+        self.next.set(id + 1);
+        nodes.insert(id, Open { node, refs: 0 });
+        Target::Node(id)
+    }
+
+    /// Runs `f` with the volume and the node of `id`.
+    pub fn with_node<R>(
+        &self,
+        id: u64,
+        f: impl FnOnce(&mut Volume<BlockDevice>, &mut FatNode) -> Result<R, mikros_fat::Error>,
+    ) -> Result<R, Error> {
+        let mut nodes = self.nodes.borrow_mut();
+        let open = nodes.get_mut(&id).ok_or(Error::NotFound)?;
+        f(&mut self.volume.borrow_mut(), &mut open.node).map_err(error)
+    }
+
+    /// The directory that `target` is, or `NOT_DIRECTORY`.
+    pub fn dir(&self, target: Target) -> Result<Dir, Error> {
+        let root = self.volume.borrow().root();
+        match target {
+            Target::Root => Ok(root),
+            Target::Node(id) => self
+                .with_node(id, |_, node| Ok(node.as_dir(root)))?
+                .ok_or(Error::NotDirectory),
+        }
+    }
+
+    /// Whether `target` is a directory.
+    pub fn is_directory(&self, target: Target) -> Result<bool, Error> {
+        match target {
+            Target::Root => Ok(true),
+            Target::Node(id) => self.with_node(id, |_, node| Ok(node.is_directory())),
+        }
     }
 
     /// What `QueryFilesystem` reports.
@@ -77,25 +170,30 @@ impl Fs {
         })
     }
 
-    /// The attributes of the root directory.
-    pub fn root_attributes(&self) -> Result<Attributes, Error> {
-        let mut volume = self.volume.borrow_mut();
-        let root = volume.root();
-        let allocated = volume.allocated_dir(root).map_err(error)?;
-        let epoch = time::to_utc(Stamp::default());
-        Ok(Attributes {
-            r#type: NodeType::Directory,
-            mode: 0o755,
-            owner: 0,
-            size: allocated,
-            allocated,
-            links: 1,
-            inode: 1,
-            created: epoch,
-            modified: epoch,
-            accessed: epoch,
-            changed: epoch,
-        })
+    /// The attributes of `target`.
+    pub fn attributes(&self, target: Target) -> Result<Attributes, Error> {
+        match target {
+            Target::Root => {
+                let mut volume = self.volume.borrow_mut();
+                let root = volume.root();
+                let allocated = volume.allocated_dir(root).map_err(error)?;
+                let epoch = time::to_utc(Stamp::default());
+                Ok(Attributes {
+                    r#type: NodeType::Directory,
+                    mode: 0o755,
+                    owner: 0,
+                    size: allocated,
+                    allocated,
+                    links: 1,
+                    inode: 1,
+                    created: epoch,
+                    modified: epoch,
+                    accessed: epoch,
+                    changed: epoch,
+                })
+            }
+            Target::Node(id) => self.with_node(id, |volume, node| node_attributes(volume, node)),
+        }
     }
 }
 
@@ -149,7 +247,7 @@ async fn serve_filesystem(fs: Rc<Fs>, end: ServerEnd<Filesystem>) {
                 if q.rights.contains(Rights::WRITE) && fs.read_only() {
                     r.reply(s, Err(Error::ReadOnly))
                 } else {
-                    fs.serve(q.node, q.rights);
+                    fs.serve(q.node, Target::Root, q.rights, false);
                     r.reply(s, Ok(FilesystemGetRootResponse {}))
                 }
             }
