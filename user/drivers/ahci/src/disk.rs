@@ -25,10 +25,12 @@ const DATA_SET_MANAGEMENT: u8 = 0x06;
 const TRIM: u16 = 1 << 0;
 const RANGE_SIZE: u64 = 8;
 const RANGE_SECTORS_MAX: u64 = 0xFFFF;
-/// The most sectors one read or write moves, and the most bytes, which
-/// a command table's PRD entries always cover.
+/// The most sectors one read or write moves.
 const COMMAND_SECTORS_MAX: u64 = 1 << 16;
-const TRANSFER_MAX: u64 = 1 << 20;
+/// The most bytes a command table's PRD entries cover at any offset that
+/// is a multiple of 4: such a transfer touches at most one page more
+/// than its length fills.
+const TRANSFER_MAX: u64 = (PRD_MAX as u64 - 1) * PAGE;
 /// The size of IDENTIFY DEVICE's data.
 const IDENTIFY_SIZE: u32 = 512;
 
@@ -121,7 +123,8 @@ impl Memory {
 }
 
 impl Disk {
-    /// The most blocks one request moves.
+    /// The most blocks one request moves: the smaller of 65536 sectors
+    /// and what one command table describes.
     pub fn max_transfer_blocks(&self) -> u32 {
         let size = u64::from(self.identity.sector_size);
         (TRANSFER_MAX / size).clamp(1, COMMAND_SECTORS_MAX) as u32
