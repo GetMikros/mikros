@@ -42,6 +42,9 @@ pub struct Regs {
     pub timeout: i64,
     /// The distance between doorbells, from `CAP.DSTRD`.
     stride: u64,
+    /// The smallest memory page size, from `CAP.MPSMIN`, in which
+    /// `MDTS` counts.
+    pub page_min: u64,
 }
 
 impl Regs {
@@ -51,6 +54,7 @@ impl Regs {
             mqes: cap as u16,
             timeout: ((cap >> 24) & 0xFF).max(1) as i64 * 500 * MS,
             stride: 4 << ((cap >> 32) & 0xF),
+            page_min: 4096 << ((cap >> 48) & 0xF),
             mmio,
         }
     }

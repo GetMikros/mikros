@@ -142,7 +142,7 @@ impl Controller {
         let (interrupts, io_vector) = interrupts(&device, &admin, &io, reactor, spawner).await?;
         enable(&regs, &admin, reactor).await?;
         let page = Contiguous::new(&dma, &bti, process, PAGE, false)?;
-        let identity = identify_controller(&admin, &page).await?;
+        let identity = identify_controller(&admin, &page, regs.page_min).await?;
         let controller = Rc::new(Controller {
             regs,
             admin,
@@ -276,14 +276,22 @@ async fn identify(admin: &QueuePair, page: &Contiguous, cns: u32, nsid: u32) -> 
     Ok(())
 }
 
-async fn identify_controller(admin: &QueuePair, page: &Contiguous) -> Result<Identity, Status> {
+/// Sends Identify Controller. The largest transfer is the smaller of
+/// 2 MiB and the `MDTS` limit, which counts in pages of `page_min`
+/// bytes; an `MDTS` of 0 sets no limit of its own.
+async fn identify_controller(
+    admin: &QueuePair,
+    page: &Contiguous,
+    page_min: u64,
+) -> Result<Identity, Status> {
     identify(admin, page, CNS_CONTROLLER, 0).await?;
     let mut bytes = [0u8; PAGE as usize];
     page.read_bytes(0, &mut bytes);
     let mdts = bytes[77];
     let transfer_max = match mdts {
         0 => TRANSFER_MAX,
-        n => (PAGE << n.min(20)).min(TRANSFER_MAX),
+        // 4 KiB << 9 is already 2 MiB, so larger shifts change nothing.
+        n => (page_min << n.min(9)).min(TRANSFER_MAX),
     };
     let oncs = u16::from_le_bytes([bytes[520], bytes[521]]);
     Ok(Identity {
