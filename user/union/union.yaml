@@ -1,0 +1,9 @@
+# The service manifest of the union server, installed as
+# usr/lib/services/union.yaml.
+name: union
+binary: /usr/bin/union
+start: boot
+after: [tmpfs]
+provides:
+  - protocol: mikros.fs.Union
+    permission: filesystem.compose
