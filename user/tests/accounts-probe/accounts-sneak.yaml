@@ -1,0 +1,12 @@
+# The manifest of a service of the accounts test image that asks for the
+# accounts service's data directory by a path through /etc, so that the
+# process manager refuses to start it. The probe connects to it on
+# demand.
+name: accounts-sneak
+binary: /usr/bin/accounts-probe
+start: on-demand
+provides:
+  - protocol: test.accounts.Sneak
+namespace:
+  - path: /etc/../var/lib/accounts
+    rights: r

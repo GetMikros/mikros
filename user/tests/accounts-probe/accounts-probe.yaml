@@ -1,0 +1,7 @@
+# The manifest of the probe of the accounts service, a boot service of
+# the accounts test image, which may authenticate and manage accounts.
+name: accounts-probe
+binary: /usr/bin/accounts-probe
+start: boot
+after: [tmpfs]
+permissions: [accounts.authenticate, accounts.manage]

@@ -1531,6 +1531,7 @@ dependencies = [
  "flate2",
  "libc",
  "lzma-rs",
+ "mikros-userdb",
  "serde_json",
  "sha2",
  "syscall-table",

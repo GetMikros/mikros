@@ -1,0 +1,11 @@
+# The manifest of a service of the accounts test image that asks for a
+# parent of the accounts service's data directory, so that the process
+# manager refuses to start it. The probe connects to it on demand.
+name: accounts-thief
+binary: /usr/bin/accounts-probe
+start: on-demand
+provides:
+  - protocol: test.accounts.Thief
+namespace:
+  - path: /var/lib
+    rights: r

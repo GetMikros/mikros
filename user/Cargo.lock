@@ -11,6 +11,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "accounts-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "ahci"
 version = "0.0.0"
 dependencies = [

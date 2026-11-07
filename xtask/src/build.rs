@@ -539,6 +539,65 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", namespaces_image.display());
+            // The accounts test serves this image, with root=bootfs: the
+            // service manager, the broker, the temporary file system and
+            // the accounts service, with their manifests, the probe's
+            // binary with the manifests of its five services, and a
+            // users file in /var/lib/accounts.
+            let accounts = user_build("accounts", kind)?;
+            println!("built    {}", accounts.display());
+            let accounts_probe = user_build("accounts-probe", kind)?;
+            println!("built    {}", accounts_probe.display());
+            let accounts_manifest = crate::workspace_root().join("user/accounts/accounts.yaml");
+            let probe_dir = crate::workspace_root().join("user/tests/accounts-probe");
+            let accounts_probe_manifest = probe_dir.join("accounts-probe.yaml");
+            let accounts_guest_manifest = probe_dir.join("accounts-guest.yaml");
+            let stub_manifest = probe_dir.join("authorization-stub.yaml");
+            let thief_manifest = probe_dir.join("accounts-thief.yaml");
+            let sneak_manifest = probe_dir.join("accounts-sneak.yaml");
+            let users = accounts_users(kind)?;
+            let accounts_image = boot_image(
+                kind,
+                "accounts.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/tmpfs", tmpfs.as_path()),
+                    ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
+                    ("usr/bin/accounts", accounts.as_path()),
+                    (
+                        "usr/lib/services/accounts.yaml",
+                        accounts_manifest.as_path(),
+                    ),
+                    ("usr/bin/accounts-probe", accounts_probe.as_path()),
+                    (
+                        "usr/lib/services/accounts-probe.yaml",
+                        accounts_probe_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/accounts-guest.yaml",
+                        accounts_guest_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/authorization-stub.yaml",
+                        stub_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/accounts-thief.yaml",
+                        thief_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/accounts-sneak.yaml",
+                        sneak_manifest.as_path(),
+                    ),
+                    ("var/lib/accounts/users", users.as_path()),
+                ],
+            )?;
+            println!("built    {}", accounts_image.display());
             // The device manager tests serve these images. Each holds the
             // service manager, the broker and the device manager with
             // their manifests, and test drivers: their manifests from
@@ -671,6 +730,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", pci_image.display());
             let members = [
+                ("tests/accounts.img", accounts_image.as_path()),
                 ("tests/broker.img", broker_image.as_path()),
                 ("tests/services.img", services_image.as_path()),
                 ("tests/tmpfs.img", tmpfs_image.as_path()),
@@ -710,6 +770,35 @@ pub fn live_boot_image(kind: Kind) -> Result<PathBuf> {
     let dirs = crate::image::live_dirs();
     let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
     archive(kind, "live-boot.img", &[("init", &init)], &dirs, &[])
+}
+
+/// Writes the users file of the accounts test for `kind` and returns its
+/// path: `ann`, an administrator, and `bob` and `cy`, standard users,
+/// each with the password `<name>-password`. Fixed salts keep the file
+/// the same from one build to the next.
+fn accounts_users(kind: Kind) -> Result<PathBuf> {
+    use mikros_userdb::{Kind as UserKind, Users, encode, hash};
+    let mut users = Users::new();
+    let people = [
+        ("ann", "Ann", UserKind::Admin),
+        ("bob", "Bob", UserKind::Standard),
+        ("cy", "Cy", UserKind::Standard),
+    ];
+    for (i, (name, full_name, user_kind)) in people.into_iter().enumerate() {
+        let salt = [i as u8 + 1; hash::SALT_LEN];
+        let password = format!("{name}-password");
+        let phc = hash::hash(password.as_bytes(), &salt).context("hashing a password")?;
+        users
+            .create(name, full_name, user_kind, phc)
+            .map_err(|r| anyhow::anyhow!("adding {name}: {r:?}"))?;
+    }
+    let dir = crate::workspace_root()
+        .join("target/boot")
+        .join(kind.name());
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("accounts-users");
+    fs::write(&path, encode(&users)).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
 }
 
 /// Writes the boot archive `file` with each of `members`, given by name

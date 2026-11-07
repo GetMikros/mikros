@@ -8802,6 +8802,89 @@ mod manager {
         ensure("passing every check of the probe", outcome == Some(true))
     }
 
+    /// With `root=bootfs` on the command line, from a boot image with the
+    /// service manager, the permission broker, the temporary file system,
+    /// the accounts service and a users file in `/var/lib/accounts`, the
+    /// accounts service lists, authenticates and changes those users. A
+    /// probe that holds its permissions and that an authorization stub
+    /// allows to manage accounts, and a guest without
+    /// `accounts.authenticate` that the stub turns down, each exit with 0
+    /// once every check of theirs passed, as the service manager logs. Two services whose
+    /// manifests ask for the accounts service's data never start.
+    pub fn accounts_service_serves_users(s: &Startup) -> Result {
+        // Under emulation, each Argon2id hash of 64 MiB takes seconds, and
+        // the probe makes about a dozen.
+        const ACCOUNTS_SECONDS: i64 = 360;
+        const PASSED: [&[u8]; 4] = [
+            b"service accounts-probe exited with code 0",
+            b"service accounts-guest exited with code 0",
+            b"service accounts-thief did not start: Spawn failed: AccessDenied",
+            b"service accounts-sneak did not start: Spawn failed: AccessDenied",
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"started service accounts-thief",
+            b"started service accounts-sneak",
+            b"did not start",
+            b"will not start",
+            b"service accounts-probe exited",
+            b"service accounts-probe ended",
+            b"service accounts-guest exited",
+            b"service accounts-guest ended",
+            b"service tmpfs exited",
+            b"service tmpfs ended",
+        ];
+        let (m, init, reader) = serving_with(s, b"tests/accounts.img", "root=bootfs")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let root = StartupHandle {
+            role: HandleRole::User,
+            id: 1,
+            handle: copy(s.root_resource, SAME_RIGHTS)?,
+        };
+        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(ACCOUNTS_SECONDS);
+        let mut passed = [false; 4];
+        let outcome = loop {
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if let Some(i) = PASSED.iter().position(|p| super::contains(message, p)) {
+                passed[i] = true;
+                if passed == [true; 4] {
+                    break Some(true);
+                }
+                continue;
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("passing every check of the probes", outcome == Some(true))
+    }
+
     /// A process manager serving the boot image member `image` as its
     /// boot file system, with init registered, the client of its
     /// `InitBootstrap` endpoint, and a reader of the log from before it
@@ -9513,6 +9596,7 @@ mod bootfs {
                 "listing a directory",
                 names
                     == [
+                        "accounts.img",
                         "broker.img",
                         "call-server",
                         "channel-echo",
@@ -9707,7 +9791,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 137] = [
+const TESTS: [(&str, Test); 138] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9781,6 +9865,10 @@ const TESTS: [(&str, Test); 137] = [
     (
         "process_manager_builds_namespaces_from_the_boot_image",
         manager::process_manager_builds_namespaces_from_the_boot_image,
+    ),
+    (
+        "accounts_service_serves_users",
+        manager::accounts_service_serves_users,
     ),
     (
         "device_manager_adds_platform_devices",
