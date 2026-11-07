@@ -5,7 +5,9 @@ use crate::file::File;
 use crate::node;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
-use core::cell::RefCell;
+use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
+use core::task::Waker;
 use mikros_memfs::{Id, ROOT, Tree};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
@@ -22,12 +24,32 @@ const PAGE: u32 = 4096;
 
 pub type Nodes = Tree<File, ()>;
 
+/// A byte-range lock: its owner, a connection, whether it is exclusive,
+/// and its range, `end` excluded.
+#[derive(Clone, Copy)]
+struct Lock {
+    owner: u64,
+    exclusive: bool,
+    start: u64,
+    end: u64,
+}
+
+/// The locks of a file, and the tasks that wait for one to go.
+#[derive(Default)]
+struct Locks {
+    held: Vec<Lock>,
+    waiting: Vec<Waker>,
+}
+
 pub struct Fs {
     pub tree: RefCell<Nodes>,
     /// How many connections each node has.
     refs: RefCell<BTreeMap<Id, usize>>,
     /// The directories that tokens name, by the token's object ID.
     tokens: RefCell<BTreeMap<u64, Id>>,
+    /// The byte-range locks of files, and the next owner of locks.
+    locks: RefCell<BTreeMap<Id, Locks>>,
+    next_owner: Cell<u64>,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -64,6 +86,8 @@ impl Fs {
             tree: RefCell::new(Tree::new(0o755, 0, now())),
             refs: RefCell::new(BTreeMap::new()),
             tokens: RefCell::new(BTreeMap::new()),
+            locks: RefCell::new(BTreeMap::new()),
+            next_owner: Cell::new(1),
             reactor,
             spawner,
         }
@@ -103,6 +127,61 @@ impl Fs {
     pub fn unnamed(&self, node: Id) {
         if !self.refs.borrow().contains_key(&node) {
             self.tree.borrow_mut().forget(node);
+        }
+    }
+
+    /// A new owner of locks, for a connection.
+    pub fn owner(&self) -> u64 {
+        let owner = self.next_owner.get();
+        self.next_owner.set(owner + 1);
+        owner
+    }
+
+    /// Takes the lock of `owner` on `start..end` of the file `id`,
+    /// replacing its own locks there, unless another owner's lock
+    /// conflicts: then false, and `waker`, when given, is woken once a
+    /// lock goes.
+    pub fn try_lock(
+        &self,
+        id: Id,
+        owner: u64,
+        exclusive: bool,
+        (start, end): (u64, u64),
+        waker: Option<&Waker>,
+    ) -> bool {
+        let mut locks = self.locks.borrow_mut();
+        let file = locks.entry(id).or_default();
+        let conflicts = file.held.iter().any(|l| {
+            l.owner != owner && l.start < end && start < l.end && (exclusive || l.exclusive)
+        });
+        if conflicts {
+            if let Some(waker) = waker {
+                file.waiting.push(waker.clone());
+            }
+            return false;
+        }
+        cut(&mut file.held, owner, start, end);
+        file.held.push(Lock {
+            owner,
+            exclusive,
+            start,
+            end,
+        });
+        true
+    }
+
+    /// Releases the locks of `owner` on `start..end` of the file `id`.
+    pub fn unlock(&self, id: Id, owner: u64, (start, end): (u64, u64)) {
+        let mut locks = self.locks.borrow_mut();
+        let Some(file) = locks.get_mut(&id) else {
+            return;
+        };
+        cut(&mut file.held, owner, start, end);
+        for waker in file.waiting.drain(..) {
+            waker.wake();
+        }
+        if file.held.is_empty() && file.waiting.is_empty() {
+            locks.remove(&id);
         }
     }
 
@@ -149,6 +228,25 @@ impl Fs {
             read_only: false,
         }
     }
+}
+
+/// Removes the parts of the locks of `owner` in `locks` that lie in
+/// `start..end`, keeping what lies outside.
+fn cut(locks: &mut Vec<Lock>, owner: u64, start: u64, end: u64) {
+    let mut kept = Vec::with_capacity(locks.len());
+    for lock in locks.drain(..) {
+        if lock.owner != owner || lock.end <= start || end <= lock.start {
+            kept.push(lock);
+            continue;
+        }
+        if lock.start < start {
+            kept.push(Lock { end: start, ..lock });
+        }
+        if end < lock.end {
+            kept.push(Lock { start: end, ..lock });
+        }
+    }
+    *locks = kept;
 }
 
 /// The object ID of `handle`.

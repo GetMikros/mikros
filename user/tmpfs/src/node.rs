@@ -6,6 +6,8 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::future::poll_fn;
+use core::task::Poll;
 use mikros_memfs::{Directory, Id, Kind, Resolved};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;
@@ -25,6 +27,8 @@ struct Connection {
     user: u32,
     cursor: u64,
     append: bool,
+    /// The owner of the connection's locks.
+    owner: u64,
 }
 
 /// Serves the connection on `end` to `node` until the client closes it or
@@ -38,6 +42,7 @@ pub async fn serve(
     append: bool,
 ) {
     let server = NodeAsyncServer::new(end, fs.reactor.clone());
+    let owner = fs.owner();
     let mut connection = Connection {
         fs,
         node,
@@ -45,10 +50,20 @@ pub async fn serve(
         user,
         cursor: 0,
         append,
+        owner,
     };
     while let Ok(request) = server.next().await {
-        connection.handle(request, server.server());
+        match request {
+            // A lock that waits holds up the connection's other requests,
+            // as a waiting `fcntl` does.
+            NodeRequest::Lock(q, r) => {
+                let locked = connection.lock(q).await;
+                let _ = r.reply(server.server(), locked.map(|()| NodeLockResponse {}));
+            }
+            request => connection.handle(request, server.server()),
+        }
     }
+    connection.fs.unlock(node, owner, (0, u64::MAX));
     connection.fs.close(node);
 }
 
@@ -57,6 +72,15 @@ pub async fn serve(
 fn memory_rights(write: bool, execute: bool) -> u32 {
     let base = 1 << 0 | 1 << 1 | 1 << 2 | 1 << 5 | 1 << 9;
     base | if write { 1 << 3 } else { 0 } | if execute { 1 << 4 } else { 0 }
+}
+
+/// The range of a lock from `start` with `length` bytes, 0 meaning to the
+/// end of the file, `end` excluded.
+fn range(start: u64, length: u64) -> Result<(u64, u64), Error> {
+    match length {
+        0 => Ok((start, u64::MAX)),
+        n => Ok((start, start.checked_add(n).ok_or(Error::Invalid)?)),
+    }
 }
 
 fn failed(e: Failed) -> Error {
@@ -131,8 +155,12 @@ impl Connection {
             R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags)),
             // Not there yet.
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
+            R::Unlock(q, r) => r.reply(
+                s,
+                self.unlock(q.start, q.length)
+                    .map(|()| NodeUnlockResponse {}),
+            ),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unwatch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -248,6 +276,43 @@ impl Connection {
             made.map_err(failed)
         })?;
         Ok(NodeGetMemoryObjectResponse { memory })
+    }
+
+    /// Takes a byte-range lock of the file, waiting for it when asked to
+    /// and otherwise failing with `WOULD_BLOCK` when it conflicts. A
+    /// shared lock needs `READ`, and an exclusive one `WRITE`, as `fcntl`
+    /// does.
+    async fn lock(&self, q: NodeLockRequest) -> Result<(), Error> {
+        self.with_file(|_| Ok(()))?;
+        let exclusive = match q.kind {
+            LockKind::Shared => false,
+            LockKind::Exclusive => true,
+            LockKind::Unknown(_) => return Err(Error::Invalid),
+        };
+        self.require(if exclusive {
+            Rights::WRITE
+        } else {
+            Rights::READ
+        })?;
+        let range = range(q.start, q.length)?;
+        poll_fn(|cx| {
+            let waker = q.wait.then_some(cx.waker());
+            match self
+                .fs
+                .try_lock(self.node, self.owner, exclusive, range, waker)
+            {
+                true => Poll::Ready(Ok(())),
+                false if q.wait => Poll::Pending,
+                false => Poll::Ready(Err(Error::WouldBlock)),
+            }
+        })
+        .await
+    }
+
+    fn unlock(&self, start: u64, length: u64) -> Result<(), Error> {
+        self.with_file(|_| Ok(()))?;
+        self.fs.unlock(self.node, self.owner, range(start, length)?);
+        Ok(())
     }
 
     fn read_next(&mut self, count: u32) -> Result<NodeReadNextResponse, Error> {

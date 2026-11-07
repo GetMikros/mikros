@@ -1,7 +1,8 @@
 //! A program that the service manager starts as a boot service after the
 //! temporary file system, to drive it as a client. It connects to
 //! `mikros.fs.Filesystem` through its directory and checks files,
-//! directories, links, names and memory objects on the root it gets. It exits with 0
+//! directories, links, names, memory objects and locks on the root it
+//! gets. It exits with 0
 //! when every check passed, or with the number of the first that failed.
 
 #![no_std]
@@ -14,7 +15,8 @@ use alloc::vec::Vec;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemClient, MemoryFlags, Node, NodeClient, NodeType, OpenFlags, Rights,
+    Error, Filesystem, FilesystemClient, LockKind, MemoryFlags, Node, NodeClient, NodeType,
+    OpenFlags, Rights,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -52,7 +54,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Some(root) = root(&directory) else {
         return 1;
     };
-    match check(&root).and_then(|()| memory(&root, process)) {
+    let checked = check(&root)
+        .and_then(|()| memory(&root, process))
+        .and_then(|()| locks(&root));
+    match checked {
         Ok(()) => 0,
         Err(failed) => failed,
     }
@@ -265,6 +270,36 @@ fn memory(root: &NodeClient, process: sys::Handle) -> Result<(), i64> {
     let (reader, _) = clone(&file, Rights::READ).ok_or(22)?;
     let writable = reader.get_memory_object(MemoryFlags::WRITE, FOREVER);
     expect(err(writable) == Some(Error::AccessDenied), 22)?;
+    Ok(())
+}
+
+/// Whether byte-range locks of a file's connection and a clone of it
+/// behave: they conflict, part of one is released, and closing the clone
+/// releases its lock, which a waiting lock then gets.
+fn locks(root: &NodeClient) -> Result<(), i64> {
+    let (file, _, _) = open(root, "m", OpenFlags(0), RW).map_err(|_| 23)?;
+    let (other, _) = clone(&file, RW).ok_or(23)?;
+    expect(
+        ok(file.lock(LockKind::Exclusive, 0, 0, false, FOREVER)).is_some(),
+        23,
+    )?;
+    let shared = other.lock(LockKind::Shared, 0, 4, false, FOREVER);
+    expect(err(shared) == Some(Error::WouldBlock), 24)?;
+    expect(ok(file.unlock(0, 4, FOREVER)).is_some(), 25)?;
+    expect(
+        ok(other.lock(LockKind::Shared, 0, 4, false, FOREVER)).is_some(),
+        25,
+    )?;
+    let mine = file.lock(LockKind::Exclusive, 2, 1, false, FOREVER);
+    expect(err(mine) == Some(Error::WouldBlock), 26)?;
+    drop(other);
+    expect(
+        ok(file.lock(LockKind::Exclusive, 0, 4, true, FOREVER)).is_some(),
+        27,
+    )?;
+    let (reader, _) = clone(&file, Rights::READ).ok_or(28)?;
+    let exclusive = reader.lock(LockKind::Exclusive, 100, 1, false, FOREVER);
+    expect(err(exclusive) == Some(Error::AccessDenied), 28)?;
     Ok(())
 }
 
