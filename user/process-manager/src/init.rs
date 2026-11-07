@@ -46,6 +46,8 @@ pub struct Manager {
     init: Option<ServerEnd<InitBootstrap>>,
     /// The process ID of the service manager, once its start began.
     service_manager: Option<u32>,
+    /// The kernel's command line, as init gave it.
+    _command_line: alloc::string::String,
 }
 
 impl Manager {
@@ -64,6 +66,7 @@ impl Manager {
             clock_page,
             log,
             init_bootstrap,
+            command_line,
             ..
         } = startup;
         let fs = Fs::new(process.raw(), &boot_image, reactor.clone(), spawner.clone())?;
@@ -74,6 +77,7 @@ impl Manager {
             init_process: Some(init_process),
             init: Some(init_bootstrap),
             service_manager: None,
+            _command_line: command_line,
         })
     }
 

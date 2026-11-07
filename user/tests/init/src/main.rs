@@ -8310,6 +8310,7 @@ mod manager {
             clock_page: copy(s.clock_page, SAME_RIGHTS)?,
             log: copy(s.log, SAME_RIGHTS)?,
             init_bootstrap: server,
+            command_line: "".into(),
         };
         Ok((startup, InitBootstrapClient::new(client)))
     }
@@ -8321,7 +8322,7 @@ mod manager {
     /// on.
     pub fn process_manager_serves_init(s: &Startup) -> Result {
         let mut m = start(s)?;
-        let (startup, init) = start_message(s, &m, 1)?;
+        let (startup, init) = start_message(s, &m, 2)?;
         m.send(startup, false)?;
         let deadline = super::in_time();
         ensure(
@@ -8395,7 +8396,7 @@ mod manager {
             sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
         })?;
         let mut m = start(s)?;
-        let (mut startup, init) = start_message(s, &m, 1)?;
+        let (mut startup, init) = start_message(s, &m, 2)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
         // Starting it while the last test's processes are torn down can
@@ -8456,7 +8457,7 @@ mod manager {
             sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
         })?;
         let mut m = start(s)?;
-        let (mut startup, init) = start_message(s, &m, 1)?;
+        let (mut startup, init) = start_message(s, &m, 2)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
         // Starting it while the last test's processes are torn down can
@@ -8516,7 +8517,7 @@ mod manager {
             sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
         })?;
         let mut m = start(s)?;
-        let (mut startup, init) = start_message(s, &m, 1)?;
+        let (mut startup, init) = start_message(s, &m, 2)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
         // Starting it while the last test's processes are torn down can
@@ -8747,7 +8748,7 @@ mod manager {
         // SAFETY: the handle was just created for us.
         let reader = unsafe { OwnedHandle::from_raw(reader) };
         let mut m = start(s)?;
-        let (mut startup, init) = start_message(s, &m, 1)?;
+        let (mut startup, init) = start_message(s, &m, 2)?;
         startup.boot_image = mem;
         m.send(startup, false)?;
         // Starting it while the last test's processes are torn down can
@@ -9127,15 +9128,15 @@ mod manager {
     /// another version or another message follows it.
     pub fn process_manager_refuses_bad_start(s: &Startup) -> Result {
         let mut m = start(s)?;
-        let (startup, _init) = start_message(s, &m, 2)?;
+        let (startup, _init) = start_message(s, &m, 1)?;
         m.send(startup, false)?;
         ensure(
             "refusing another version",
             exit_code(m.process)? == PANIC_EXIT_CODE,
         )?;
         let mut m = start(s)?;
-        let (first, _init) = start_message(s, &m, 1)?;
-        let (second, _other) = start_message(s, &m, 1)?;
+        let (first, _init) = start_message(s, &m, 2)?;
+        let (second, _other) = start_message(s, &m, 2)?;
         m.send(first, true)?;
         // The process manager may have ended before the second arrives.
         let _ = m.send(second, false);

@@ -26,7 +26,7 @@ use mikros_rt::{PANIC_EXIT_CODE, heap, log, sys};
 mikros_rt::raw_main!(main);
 
 /// The only version of `Start`.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Some(startup) = receive(bootstrap) else {
@@ -58,7 +58,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 
 /// Reads `Start` from `bootstrap` and waits until init closes it.
 /// Returns `None`, having dropped every handle received, when the
-/// message is not a valid version 1 `Start`, or when another message
+/// message is not a valid version 2 `Start`, or when another message
 /// follows it.
 fn receive(bootstrap: sys::Handle) -> Option<ManagerStartup> {
     // SAFETY: the kernel gave the program this handle, and nothing else

@@ -60,6 +60,17 @@ fn status(what: &'static str, s: i64) -> Result<()> {
     }
 }
 
+/// The kernel's command line, at most 4096 bytes of it, with what is not
+/// UTF-8 replaced.
+fn command_line(bytes: &[u8]) -> alloc::string::String {
+    let text = alloc::string::String::from_utf8_lossy(bytes);
+    let mut end = text.len().min(4096);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    alloc::string::String::from(&text[..end])
+}
+
 /// Starts the process manager, registers with it and asks it to start
 /// the service manager, giving the service manager the boot handles.
 pub fn start(s: &Startup) -> Result<()> {
@@ -71,7 +82,7 @@ pub fn start(s: &Startup) -> Result<()> {
     };
     let (init, init_bootstrap) = endpoints::<InitBootstrap>().map_err(channel)?;
     let startup = ManagerStartup {
-        version: 1,
+        version: 2,
         process,
         thread,
         init_process: duplicate(s.process)?,
@@ -80,6 +91,7 @@ pub fn start(s: &Startup) -> Result<()> {
         clock_page: duplicate(s.clock_page)?,
         log: duplicate(s.log)?,
         init_bootstrap,
+        command_line: command_line(s.cmdline),
     };
     // The channel closes when the client is dropped after `Start`.
     ManagerBootstrapClient::new(bootstrap)
