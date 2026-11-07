@@ -185,6 +185,9 @@ async fn start(
     for info in controller.namespaces().await? {
         let usable = matches!(info.block_size, 512 | 4096) && info.metadata == 0;
         if !usable {
+            // TODO(MIKSPEC-0047.R3): drivers get no Log handle, so this
+            // writes nothing. Write through mikros.log.Writer instead once
+            // the log service exists (MIKSPEC-0063.R1).
             log!(
                 Info,
                 "nvme: skipping namespace {}: {}-byte blocks with {} bytes of metadata",
