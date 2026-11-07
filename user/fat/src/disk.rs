@@ -52,4 +52,21 @@ impl<D: Device> Disk<D> {
         }
         Ok(())
     }
+
+    /// Reads whole sectors at `at` straight from the device, for file
+    /// data.
+    pub(crate) fn read_direct(&mut self, at: u64, buf: &mut [u8]) -> Result<(), Error> {
+        self.device.read(at, buf)?;
+        let end = at + buf.len() as u64;
+        for (&start, sector) in self.cache.range(at..end) {
+            let from = (start - at) as usize;
+            buf[from..from + sector.len()].copy_from_slice(sector);
+        }
+        Ok(())
+    }
+
+    /// The sector size of the disk's I/O.
+    pub(crate) fn sector(&self) -> u64 {
+        self.sector
+    }
 }

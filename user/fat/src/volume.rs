@@ -1,11 +1,12 @@
-//! A mounted volume: its directories.
+//! A mounted volume: its directories and files.
 
 use crate::bpb::{FatType, Layout};
-use crate::dir::{self, ENTRY, Short, Slot, Stamp, VOLUME_ID};
+use crate::dir::{self, ENTRY, LongName, Short, Slot, Stamp, VOLUME_ID};
 use crate::disk::Disk;
 use crate::table;
 use crate::{Device, Error};
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// A directory, by where its entries lie: the fixed root directory of
@@ -26,6 +27,8 @@ pub struct Node {
     pub slot: u32,
     pub first_slot: u32,
     pub(crate) entry: Short,
+    /// A cluster of the node's chain and its index, to start from.
+    pub(crate) near: (u32, u32),
 }
 
 impl Node {
@@ -127,6 +130,26 @@ impl<D: Device> Volume<D> {
 
     // Clusters.
 
+    /// The cluster at `index` in the chain that starts at `first`,
+    /// starting from `near`, a cluster of the chain and its index, when
+    /// that is not past `index`.
+    pub(crate) fn cluster_at(
+        &mut self,
+        first: u32,
+        index: u32,
+        near: (u32, u32),
+    ) -> Result<u32, Error> {
+        let (mut cluster, mut at) = match near {
+            (c, i) if c >= 2 && i <= index => (c, i),
+            _ => (first, 0),
+        };
+        while at < index {
+            cluster = table::next(&mut self.disk, &self.layout, cluster)?.ok_or(Error::Io)?;
+            at += 1;
+        }
+        Ok(cluster)
+    }
+
     // Directory slots.
 
     /// Where slot `slot` of `dir` lies, or None past the directory's
@@ -160,6 +183,7 @@ impl<D: Device> Volume<D> {
     /// `.`, `..` and the volume label, and the slot to continue from.
     pub fn list(&mut self, dir: Dir, from: u32, max: usize) -> Result<(Vec<Node>, u32), Error> {
         let mut nodes = Vec::new();
+        let mut long = LongName::default();
         let mut slot = from;
         while nodes.len() < max {
             let Some(at) = self.slot_at(dir, slot)? else {
@@ -167,18 +191,27 @@ impl<D: Device> Volume<D> {
             };
             match Slot::parse(&self.read_slot(at)?) {
                 Slot::End => break,
-                Slot::Free | Slot::Long => {}
+                Slot::Free => long.reset(),
+                Slot::Long {
+                    order,
+                    last,
+                    checksum,
+                    units,
+                } => long.push(slot, order, last, checksum, &units),
                 Slot::Short(short) => {
+                    let named = long.take(&short);
                     let label = short.attributes & VOLUME_ID != 0;
                     let dots = short.name[0] == b'.';
                     if !label && !dots {
-                        let name = short.display();
+                        let (name, first_slot) = named.unwrap_or_else(|| (short.display(), slot));
+                        let near = (short.cluster, 0);
                         nodes.push(Node {
                             name,
                             parent: dir,
                             slot,
-                            first_slot: slot,
+                            first_slot,
                             entry: short,
+                            near,
                         });
                     }
                 }
@@ -188,7 +221,8 @@ impl<D: Device> Volume<D> {
         Ok((nodes, slot))
     }
 
-    /// The entry of `dir` named `name`, without regard to case.
+    /// The entry of `dir` named `name`, by its long or short name,
+    /// without regard to case.
     pub fn find(&mut self, dir: Dir, name: &str) -> Result<Node, Error> {
         let mut from = 0;
         loop {
@@ -206,4 +240,71 @@ impl<D: Device> Volume<D> {
     }
 
     // Files.
+
+    /// Reads up to `buf.len()` bytes of the file `node` from `offset`,
+    /// and returns how many it read, 0 at the end.
+    pub fn read(&mut self, node: &mut Node, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
+        if node.is_directory() {
+            return Err(Error::IsDirectory);
+        }
+        let size = node.size();
+        if offset >= size || buf.is_empty() {
+            return Ok(0);
+        }
+        let len = (size - offset).min(buf.len() as u64) as usize;
+        let mut done = 0;
+        while done < len {
+            let (at, n) = self.extent(node, offset + done as u64, len - done)?;
+            self.read_bytes(at, &mut buf[done..done + n])?;
+            done += n;
+        }
+        Ok(len)
+    }
+
+    /// Where byte `offset` of the file `node` lies on the device, and how
+    /// many of `len` bytes from it lie in the same cluster.
+    pub(crate) fn extent(
+        &mut self,
+        node: &mut Node,
+        offset: u64,
+        len: usize,
+    ) -> Result<(u64, usize), Error> {
+        let size = u64::from(self.layout.cluster_size);
+        let index = (offset / size) as u32;
+        let cluster = self.cluster_at(node.entry.cluster, index, node.near)?;
+        node.near = (cluster, index);
+        let within = offset % size;
+        let n = ((size - within) as usize).min(len);
+        Ok((self.layout.cluster_start(cluster) + within, n))
+    }
+
+    /// Reads `buf.len()` bytes at `at`, whole sectors straight from the
+    /// device.
+    fn read_bytes(&mut self, at: u64, buf: &mut [u8]) -> Result<(), Error> {
+        let sector = self.disk.sector();
+        let start = at - at % sector;
+        let end = (at + buf.len() as u64).next_multiple_of(sector);
+        if start == at && end == at + buf.len() as u64 {
+            return self.disk.read_direct(at, buf);
+        }
+        let mut whole = vec![0u8; (end - start) as usize];
+        self.disk.read_direct(start, &mut whole)?;
+        let from = (at - start) as usize;
+        buf.copy_from_slice(&whole[from..from + buf.len()]);
+        Ok(())
+    }
+
+    /// Reads the entry of `node` again, from where it lies.
+    pub fn reload(&mut self, node: &mut Node) -> Result<(), Error> {
+        let at = self
+            .slot_at(node.parent, node.slot)?
+            .ok_or(Error::NotFound)?;
+        match Slot::parse(&self.read_slot(at)?) {
+            Slot::Short(short) => {
+                node.entry = short;
+                Ok(())
+            }
+            _ => Err(Error::NotFound),
+        }
+    }
 }

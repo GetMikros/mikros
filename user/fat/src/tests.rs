@@ -3,7 +3,7 @@
 extern crate std;
 
 use super::*;
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::string::String;
 use std::vec;
 use std::vec::Vec;
@@ -134,4 +134,56 @@ fn lists_and_finds_short_names() {
 fn stamps_round_trip() {
     let stamp = Stamp::new(2026, 11, 7, 13, 30, 41, 250);
     assert_eq!(stamp.parts(), (2026, 11, 7, 13, 30, 41, 250));
+}
+
+// Long names and file contents.
+
+fn sample(root: &fatfs::Dir<'_, Cursor<&mut Vec<u8>>>) {
+    root.create_file("readme.txt")
+        .unwrap()
+        .write_all(b"hello")
+        .unwrap();
+    let docs = root.create_dir("Documents and Settings").unwrap();
+    let big: Vec<u8> = (0..5000u32).map(|i| i as u8).collect();
+    docs.create_file("A rather long file name.data")
+        .unwrap()
+        .write_all(&big)
+        .unwrap();
+    docs.create_dir("empty").unwrap();
+}
+
+fn read_all<D: Device>(volume: &mut Volume<D>, node: &mut Node) -> Vec<u8> {
+    let mut data = vec![0u8; node.size() as usize + 10];
+    let n = volume.read(node, 0, &mut data).unwrap();
+    data.truncate(n);
+    data
+}
+
+#[test]
+fn reads_volumes_of_each_type() {
+    for (size, ty, expected) in TYPES {
+        let bytes = image(size, ty, sample);
+        let mut volume = Volume::mount(Mem(bytes), size as u64, false).unwrap();
+        assert_eq!(volume.layout().fat_type, expected);
+        let root = volume.root();
+        assert_eq!(
+            names(&mut volume, root),
+            ["Documents and Settings", "readme.txt"]
+        );
+        let mut readme = volume.find(root, "README.TXT").unwrap();
+        assert_eq!(read_all(&mut volume, &mut readme), b"hello");
+        let docs = volume.find(root, "documents AND settings").unwrap();
+        let docs = docs.as_dir(root).unwrap();
+        assert_eq!(
+            names(&mut volume, docs),
+            ["A rather long file name.data", "empty"]
+        );
+        let mut big = volume.find(docs, "a rather long file name.DATA").unwrap();
+        let expected: Vec<u8> = (0..5000u32).map(|i| i as u8).collect();
+        assert_eq!(read_all(&mut volume, &mut big), expected);
+        let mut part = [0u8; 700];
+        assert_eq!(volume.read(&mut big, 4600, &mut part).unwrap(), 400);
+        assert_eq!(&part[..400], &expected[4600..]);
+        assert_eq!(volume.find(root, "missing"), Err(Error::NotFound));
+    }
 }
