@@ -1,6 +1,6 @@
 //! One connection to a node of the file system.
 
-use crate::file::File;
+use crate::file::{Failed, File};
 use crate::fs::{self, Fs};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -51,6 +51,13 @@ pub async fn serve(
     connection.fs.close(node);
 }
 
+fn failed(e: Failed) -> Error {
+    match e {
+        Failed::NoSpace => Error::NoSpace,
+        Failed::Io => Error::Io,
+    }
+}
+
 impl Connection {
     fn handle(&mut self, request: NodeRequest, s: &NodeServer) {
         use NodeRequest as R;
@@ -64,6 +71,7 @@ impl Connection {
                     attributes.map(|attributes| NodeGetAttributesResponse { attributes }),
                 )
             }
+            R::SetAttributes(q, r) => r.reply(s, self.set_attributes(q)),
             R::Clone(q, r) => r.reply(s, self.clone(q)),
             // Nothing is ever more durable than memory.
             R::Sync(_, r) => r.reply(s, Ok(NodeSyncResponse {})),
@@ -79,6 +87,21 @@ impl Connection {
                     .map(|data| NodeReadResponse { data }),
             ),
             R::ReadNext(q, r) => r.reply(s, self.read_next(q.count)),
+            R::Write(q, r) => {
+                let written = self
+                    .write(Some(q.offset), &q.data)
+                    .map(|_| q.data.len() as u32);
+                r.reply(s, written.map(|written| NodeWriteResponse { written }))
+            }
+            R::Append(q, r) => r.reply(
+                s,
+                self.write(None, &q.data)
+                    .map(|offset| NodeAppendResponse { offset }),
+            ),
+            R::WriteNext(q, r) => r.reply(s, self.write_next(&q.data)),
+            R::Truncate(q, r) => {
+                r.reply(s, self.truncate(q.size).map(|()| NodeTruncateResponse {}))
+            }
             R::Seek(q, r) => r.reply(s, self.seek(q.offset, q.origin)),
             R::Open(q, r) => r.reply(s, self.open(q)),
             R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes)),
@@ -89,11 +112,6 @@ impl Connection {
             ),
             R::ReadLink(_, r) => r.reply(s, Err(Error::Invalid)),
             // Not there yet.
-            R::SetAttributes(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Write(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Append(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::WriteNext(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Truncate(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetToken(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Rename(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Link(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -142,6 +160,26 @@ impl Connection {
         })
     }
 
+    fn set_attributes(
+        &self,
+        q: NodeSetAttributesRequest,
+    ) -> Result<NodeSetAttributesResponse, Error> {
+        self.require(Rights::WRITE)?;
+        let mut tree = self.fs.tree.borrow_mut();
+        let node = tree.get_mut(self.node).ok_or(Error::NotFound)?;
+        if q.mask.contains(AttributeMask::MODE) {
+            node.mode = q.mode & MODE_BITS;
+        }
+        if q.mask.contains(AttributeMask::ACCESSED) {
+            node.times.accessed = q.accessed;
+        }
+        if q.mask.contains(AttributeMask::MODIFIED) {
+            node.times.modified = q.modified;
+        }
+        node.times.changed = fs::now();
+        Ok(NodeSetAttributesResponse {})
+    }
+
     fn clone(&self, q: NodeCloneRequest) -> Result<NodeCloneResponse, Error> {
         self.require(q.rights)?;
         self.fs
@@ -159,16 +197,62 @@ impl Connection {
         }
     }
 
+    /// Marks this connection's node modified now.
+    fn modified(&self) {
+        if let Some(node) = self.fs.tree.borrow_mut().get_mut(self.node) {
+            let now = fs::now();
+            node.times.modified = now;
+            node.times.changed = now;
+        }
+    }
+
     fn read(&self, offset: u64, count: u32) -> Result<Vec<u8>, Error> {
         self.require(Rights::READ)?;
         let count = count.min(READ_MAX) as usize;
-        self.with_file(|file| Ok(file.read(offset, count)))
+        self.with_file(|file| file.read(offset, count).map_err(failed))
     }
 
     fn read_next(&mut self, count: u32) -> Result<NodeReadNextResponse, Error> {
         let data = self.read(self.cursor, count)?;
         self.cursor += data.len() as u64;
         Ok(NodeReadNextResponse { data })
+    }
+
+    /// Writes `data` at `offset`, or at the end without one, and returns
+    /// where it went.
+    fn write(&self, offset: Option<u64>, data: &[u8]) -> Result<u64, Error> {
+        self.require(Rights::WRITE)?;
+        let at = self.with_file(|file| {
+            let at = offset.unwrap_or(file.size);
+            if at
+                .checked_add(data.len() as u64)
+                .is_none_or(|end| end > i64::MAX as u64)
+            {
+                return Err(Error::TooBig);
+            }
+            file.write(at, data).map(|()| at).map_err(failed)
+        })?;
+        self.modified();
+        Ok(at)
+    }
+
+    fn write_next(&mut self, data: &[u8]) -> Result<NodeWriteNextResponse, Error> {
+        let offset = if self.append { None } else { Some(self.cursor) };
+        let at = self.write(offset, data)?;
+        self.cursor = at + data.len() as u64;
+        Ok(NodeWriteNextResponse {
+            written: data.len() as u32,
+        })
+    }
+
+    fn truncate(&self, size: u64) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        if size > i64::MAX as u64 {
+            return Err(Error::TooBig);
+        }
+        self.with_file(|file| file.truncate(size).map_err(failed))?;
+        self.modified();
+        Ok(())
     }
 
     fn seek(&mut self, offset: i64, origin: SeekOrigin) -> Result<NodeSeekResponse, Error> {
@@ -241,7 +325,11 @@ impl Connection {
             return Err(Error::Invalid);
         }
         if q.flags.contains(OpenFlags::TRUNCATE) && r#type == NodeType::File {
-            return Err(Error::NotSupported);
+            self.require(Rights::WRITE)?;
+            let mut tree = self.fs.tree.borrow_mut();
+            if let Some(Kind::File(file)) = tree.get_mut(id).map(|n| &mut n.kind) {
+                file.truncate(0).map_err(failed)?;
+            }
         }
         let append = q.flags.contains(OpenFlags::APPEND);
         self.fs.serve(q.node, id, q.rights, self.user, append);
