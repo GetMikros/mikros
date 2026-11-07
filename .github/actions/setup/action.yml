@@ -1,0 +1,127 @@
+# The setup that the jobs of ci.yml share, after their host tools and
+# checkout: Rust, cargo-fuzz and the firmware, and the caches of earlier
+# runs. The job that saves the caches gives the same paths as here,
+# since a cache is only found again under the paths it was saved with.
+name: Set up the build
+description: Restore the caches, install Rust and cargo-fuzz, and fetch the firmware.
+
+outputs:
+  rustup-key:
+    description: The key of the Rust toolchain cache.
+    value: ${{ steps.rustup.outputs.cache-primary-key }}
+  rustup-hit:
+    description: Whether the Rust toolchain cache had that exact key.
+    value: ${{ steps.rustup.outputs.cache-hit }}
+  cargo-home-key:
+    description: The key of the cargo-fuzz and crate registry cache.
+    value: ${{ steps.cargo-home.outputs.cache-primary-key }}
+  cargo-home-hit:
+    description: Whether the cargo-fuzz and crate registry cache had that exact key.
+    value: ${{ steps.cargo-home.outputs.cache-hit }}
+  tools-key:
+    description: The key of the downloads and tool builds cache.
+    value: ${{ steps.tools.outputs.cache-primary-key }}
+  tools-hit:
+    description: Whether the downloads and tool builds cache had that exact key.
+    value: ${{ steps.tools.outputs.cache-hit }}
+  rust-build-key:
+    description: The key of the Rust build cache.
+    value: ${{ steps.rust-build.outputs.cache-primary-key }}
+  rust-build-hit:
+    description: Whether the Rust build cache had that exact key.
+    value: ${{ steps.rust-build.outputs.cache-hit }}
+  llvm-key:
+    description: The key of the LLVM build cache.
+    value: ${{ steps.llvm.outputs.cache-primary-key }}
+  llvm-hit:
+    description: Whether the LLVM build cache had that exact key.
+    value: ${{ steps.llvm.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    # The toolchain that rust-toolchain.toml names, which rustup would
+    # otherwise download at the first cargo command.
+    - name: Restore the Rust toolchain
+      id: rustup
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.rustup/toolchains
+          ~/.rustup/update-hashes
+        key: rustup-${{ hashFiles('rust-toolchain.toml') }}
+    # cargo-fuzz is pinned, so that a cached copy is not built again from
+    # source whenever a new release appears.
+    - name: Restore cargo-fuzz and the crate registry
+      id: cargo-home
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.cargo/bin/cargo-fuzz
+          ~/.cargo/.crates.toml
+          ~/.cargo/.crates2.json
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: cargo-home-fuzz-0.13.2-${{ hashFiles('Cargo.lock', 'user/Cargo.lock', 'user/std/Cargo.lock', 'kernel/fuzz/Cargo.lock', 'boot/mikrosboot/fuzz/Cargo.lock') }}
+        restore-keys: cargo-home-fuzz-0.13.2-
+    # Building Clang and LLD takes about an hour, so the LLVM directory,
+    # with its source and build tree, is kept between runs.
+    - name: Restore the LLVM build
+      id: llvm
+      uses: actions/cache/restore@v4
+      with:
+        path: target/llvm
+        key: llvm-${{ hashFiles('xtask/src/llvm.rs', 'tools/llvm/patches/**') }}
+        restore-keys: llvm-
+    # The firmware, the Meson, CMake, musl and port downloads with their
+    # patched sources, and the builds of CMake and musl. xtask extracts a
+    # source again when its patches change, and Ninja and make rebuild
+    # what changed in it.
+    - name: Restore the downloads and tool builds
+      id: tools
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          target/firmware
+          target/meson
+          target/cmake
+          target/musl
+          target/sources
+        key: tools-${{ hashFiles('xtask/src/firmware.rs', 'xtask/src/meson.rs', 'xtask/src/cmake.rs', 'xtask/src/musl.rs', 'xtask/src/ports.rs', 'tools/meson/patches/**', 'tools/cmake/patches/**', 'user/libc/patches/**', 'ports/*/patches/**') }}
+        restore-keys: tools-
+    # The target directories of every Rust build, and the standard library
+    # that user/std builds from the patched copy in target/rust-std. Cargo
+    # reuses the builds of the crates from the registry and of the
+    # standard library; the repository's own crates are built again,
+    # since the checkout gives their sources new times. An older entry is
+    # restored only for the same toolchain, whose change rebuilds all.
+    - name: Restore the Rust builds
+      id: rust-build
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          target/debug
+          target/release
+          target/fuzz
+          target/x86_64-unknown-none
+          target/x86_64-unknown-uefi
+          target/rust-std
+          user/target
+          user/std/target
+          kernel/fuzz/target
+          boot/mikrosboot/fuzz/target
+        key: rust-build-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'user/Cargo.lock', 'user/std/Cargo.lock', 'kernel/fuzz/Cargo.lock', 'boot/mikrosboot/fuzz/Cargo.lock', 'user/std/patches/**', 'xtask/src/rust_std.rs') }}
+        restore-keys: rust-build-${{ hashFiles('rust-toolchain.toml') }}-
+    - name: Install Rust
+      shell: sh
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --profile minimal --default-toolchain none
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+    - name: Install cargo-fuzz and fetch the firmware
+      shell: sh
+      run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        cargo install cargo-fuzz --version 0.13.2 --locked
+        cargo xtask setup
