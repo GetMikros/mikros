@@ -114,6 +114,42 @@ impl File {
         Ok(())
     }
 
+    /// A handle with `rights` to the file's memory object, made empty
+    /// when the file has none yet, which shows every later change and
+    /// whose changes are the file's.
+    pub fn shared(&mut self, rights: u32) -> Result<OwnedHandle, Failed> {
+        self.reserve(self.size)?;
+        let mem = self.mem.as_ref().ok_or(Failed::Io)?;
+        let mut out = 0;
+        // SAFETY: the out pointer is valid for the call.
+        match unsafe { sys::handle_duplicate(mem.raw(), rights, &mut out) } {
+            // SAFETY: the kernel just created the handle for us.
+            mikros_rt::OK => Ok(unsafe { OwnedHandle::from_raw(out) }),
+            _ => Err(Failed::Io),
+        }
+    }
+
+    /// A copy-on-write clone of the file's memory object, with `rights`,
+    /// whose changes stay its own.
+    pub fn private(&mut self, rights: u32) -> Result<OwnedHandle, Failed> {
+        self.reserve(self.size)?;
+        let mem = self.mem.as_ref().ok_or(Failed::Io)?;
+        let len = self.size.next_multiple_of(PAGE).max(PAGE);
+        let mut raw = 0;
+        // SAFETY: the out pointer is valid for the call.
+        if unsafe { sys::mem_clone(mem.raw(), 0, 0, len, &mut raw) } != mikros_rt::OK {
+            return Err(Failed::NoSpace);
+        }
+        let mut out = 0;
+        // SAFETY: the out pointer is valid for the call; the kernel closes
+        // the old handle.
+        match unsafe { sys::handle_replace(raw, rights, &mut out) } {
+            // SAFETY: the kernel just created the handle for us.
+            mikros_rt::OK => Ok(unsafe { OwnedHandle::from_raw(out) }),
+            _ => Err(Failed::Io),
+        }
+    }
+
     /// The bytes the object takes.
     pub fn allocated(&self) -> u64 {
         match &self.mem {

@@ -52,6 +52,13 @@ pub async fn serve(
     connection.fs.close(node);
 }
 
+/// The rights of a memory object handed out: DUPLICATE, TRANSFER, READ,
+/// MAP and INSPECT, with WRITE and EXECUTE only when asked for.
+fn memory_rights(write: bool, execute: bool) -> u32 {
+    let base = 1 << 0 | 1 << 1 | 1 << 2 | 1 << 5 | 1 << 9;
+    base | if write { 1 << 3 } else { 0 } | if execute { 1 << 4 } else { 0 }
+}
+
 fn failed(e: Failed) -> Error {
     match e {
         Failed::NoSpace => Error::NoSpace,
@@ -121,8 +128,8 @@ impl Connection {
             R::ReadLink(_, r) => r.reply(s, self.read_link()),
             // Memory cannot share data between files.
             R::CloneRange(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags)),
             // Not there yet.
-            R::GetMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -214,6 +221,33 @@ impl Connection {
         self.require(Rights::READ)?;
         let count = count.min(READ_MAX) as usize;
         self.with_file(|file| file.read(offset, count).map_err(failed))
+    }
+
+    /// A memory object with the file's contents: with `PRIVATE` a
+    /// copy-on-write clone of its own, and otherwise the file's own
+    /// object, writable when asked for. `WRITE` without `PRIVATE` needs
+    /// the right, as `EXECUTE` does.
+    fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
+        self.require(Rights::READ)?;
+        let execute = flags.contains(MemoryFlags::EXECUTE);
+        if execute {
+            self.require(Rights::EXECUTE)?;
+        }
+        let write = flags.contains(MemoryFlags::WRITE);
+        let private = flags.contains(MemoryFlags::PRIVATE);
+        if write && !private {
+            self.require(Rights::WRITE)?;
+        }
+        let rights = memory_rights(write, execute);
+        let memory = self.with_file(|file| {
+            let made = if private {
+                file.private(rights)
+            } else {
+                file.shared(rights)
+            };
+            made.map_err(failed)
+        })?;
+        Ok(NodeGetMemoryObjectResponse { memory })
     }
 
     fn read_next(&mut self, count: u32) -> Result<NodeReadNextResponse, Error> {

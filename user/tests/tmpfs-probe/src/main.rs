@@ -1,7 +1,7 @@
 //! A program that the service manager starts as a boot service after the
 //! temporary file system, to drive it as a client. It connects to
 //! `mikros.fs.Filesystem` through its directory and checks files,
-//! directories, links and names on the root it gets. It exits with 0
+//! directories, links, names and memory objects on the root it gets. It exits with 0
 //! when every check passed, or with the number of the first that failed.
 
 #![no_std]
@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemClient, Node, NodeClient, NodeType, OpenFlags, Rights,
+    Error, Filesystem, FilesystemClient, MemoryFlags, Node, NodeClient, NodeType, OpenFlags, Rights,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -24,6 +24,9 @@ mikros_rt::raw_main!(main);
 const FOREVER: i64 = i64::MAX;
 const PROTOCOL: &str = "mikros.fs.Filesystem";
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
+const PERM_READ: u32 = 1 << 0;
+const PERM_WRITE: u32 = 1 << 1;
+const PAGE: u64 = 4096;
 
 type Reply<T> = Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>;
 
@@ -44,11 +47,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    let process = managed.header.process.raw();
     let directory = DirectoryClient::new(managed.header.directory);
     let Some(root) = root(&directory) else {
         return 1;
     };
-    match check(&root) {
+    match check(&root).and_then(|()| memory(&root, process)) {
         Ok(()) => 0,
         Err(failed) => failed,
     }
@@ -225,6 +229,59 @@ fn check(root: &NodeClient) -> Result<(), i64> {
         17,
     )?;
     Ok(())
+}
+
+/// Whether the memory objects of a new file behave: a shared one shows a
+/// later write and writes back through a mapping, and a private one keeps
+/// its changes.
+fn memory(root: &NodeClient, process: sys::Handle) -> Result<(), i64> {
+    use OpenFlags as F;
+    let (file, _, _) = open(root, "m", F::CREATE, RW).map_err(|_| 18)?;
+    expect(ok(file.write(0, b"memory".to_vec(), FOREVER)).is_some(), 18)?;
+    let flags = MemoryFlags::WRITE;
+    let shared = ok(file.get_memory_object(flags, FOREVER)).ok_or(18)?.memory;
+    let view = map(shared.raw(), process, PERM_READ | PERM_WRITE).ok_or(18)?;
+    expect(bytes(view, 6) == b"memory", 18)?;
+    expect(ok(file.write(0, b"M".to_vec(), FOREVER)).is_some(), 19)?;
+    expect(bytes(view, 6) == b"Memory", 19)?;
+    // SAFETY: the object is mapped writable at `view` for a page.
+    unsafe { core::ptr::write_volatile((view + 1) as *mut u8, b'E') };
+    expect(
+        ok(file.read(0, 6, FOREVER)).ok_or(20)?.data == b"MEmory",
+        20,
+    )?;
+    let private = MemoryFlags(MemoryFlags::PRIVATE.0 | MemoryFlags::WRITE.0);
+    let copy = ok(file.get_memory_object(private, FOREVER))
+        .ok_or(21)?
+        .memory;
+    let copy = map(copy.raw(), process, PERM_READ | PERM_WRITE).ok_or(21)?;
+    // SAFETY: the copy is mapped writable at `copy` for a page.
+    unsafe { core::ptr::write_volatile(copy as *mut u8, b'x') };
+    expect(bytes(copy, 6) == b"xEmory", 21)?;
+    expect(
+        ok(file.read(0, 6, FOREVER)).ok_or(21)?.data == b"MEmory",
+        21,
+    )?;
+    let (reader, _) = clone(&file, Rights::READ).ok_or(22)?;
+    let writable = reader.get_memory_object(MemoryFlags::WRITE, FOREVER);
+    expect(err(writable) == Some(Error::AccessDenied), 22)?;
+    Ok(())
+}
+
+/// Maps a page of the memory object `mem` with `perms`.
+fn map(mem: sys::Handle, process: sys::Handle, perms: u32) -> Option<u64> {
+    let mut at = 0;
+    // SAFETY: the out pointer is valid; the kernel picks a free range.
+    let status = unsafe { sys::vm_map(process, perms, 0, mem, 0, PAGE, &mut at) };
+    (status == mikros_rt::OK).then_some(at)
+}
+
+/// The first `n` bytes mapped at `at`, read anew each time.
+fn bytes(at: u64, n: usize) -> Vec<u8> {
+    // SAFETY: a page is mapped at `at`, and `n` is at most a page.
+    (0..n)
+        .map(|i| unsafe { core::ptr::read_volatile((at as *const u8).add(i)) })
+        .collect()
 }
 
 /// A clone of `node` with `rights`.
