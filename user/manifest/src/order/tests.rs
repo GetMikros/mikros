@@ -14,6 +14,7 @@ fn service(name: &str, start: Start, after: &[&str]) -> Service {
         restart: Restart::Never,
         boot_handles: vec![],
         permissions: vec![],
+        namespace: vec![],
         priority: 16,
     }
 }

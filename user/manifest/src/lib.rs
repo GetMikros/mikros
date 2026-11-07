@@ -58,6 +58,7 @@ pub struct Service {
     pub restart: Restart,
     pub boot_handles: Vec<BootHandle>,
     pub permissions: Vec<String>,
+    pub namespace: Vec<NamespaceEntry>,
     pub priority: i64,
 }
 
@@ -242,6 +243,7 @@ pub fn parse(file_name: &str, bytes: &[u8]) -> Result<Manifest, Error> {
         restart,
         boot_handles,
         permissions: strings(map, "permissions")?,
+        namespace: program::namespace(map, &mut unknown)?,
         priority,
     };
     Ok(Manifest { service, unknown })

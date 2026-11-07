@@ -35,6 +35,7 @@ fn minimal_manifest_takes_defaults() {
             restart: Restart::Never,
             boot_handles: vec![],
             permissions: vec![],
+            namespace: vec![],
             priority: 16,
         }
     );
@@ -89,6 +90,13 @@ priority: 20
         ]
     );
     assert_eq!(s.permissions, ["device.registry"]);
+    assert_eq!(
+        s.namespace,
+        [NamespaceEntry {
+            path: "/dev".to_string(),
+            rights: "r".to_string(),
+        }]
+    );
     assert_eq!(s.priority, 20);
 }
 
