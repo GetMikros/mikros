@@ -142,7 +142,7 @@ pub fn args(
     push(&[
         "-device",
         match machine.disk {
-            Disk::Virtio => "virtio-blk-pci,drive=disk",
+            Disk::Virtio => "virtio-blk-pci,drive=disk,disable-legacy=on,serial=mikros",
             Disk::Nvme => "nvme,drive=disk,serial=mikros",
             Disk::Ahci => "ide-hd,drive=disk,bus=ide.0",
         },
@@ -247,7 +247,7 @@ mod tests {
             devices,
             [
                 "intel-iommu,intremap=on",
-                "virtio-blk-pci,drive=disk",
+                "virtio-blk-pci,drive=disk,disable-legacy=on,serial=mikros",
                 "virtio-gpu-pci"
             ]
         );
