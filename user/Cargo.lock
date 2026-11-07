@@ -197,6 +197,14 @@ name = "mikros-yaml"
 version = "0.0.0"
 
 [[package]]
+name = "nvme"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-storage",
+]
+
+[[package]]
 name = "pci-bus"
 version = "0.0.0"
 dependencies = [
