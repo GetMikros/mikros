@@ -1,7 +1,8 @@
 //! Serving the `DeviceManager` channel of each driver while it runs.
 
 use crate::devices::Device;
-use crate::supervise::{self, Manager};
+use crate::publish::{self, Published};
+use crate::supervise::{self, Done, Manager};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use mikros_manifest::Need;
@@ -9,8 +10,9 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceManager, DeviceManagerAddDeviceRequest, DeviceManagerAddDeviceResponse,
-    DeviceManagerAsyncServer, DeviceManagerRemoveDeviceResponse, DeviceManagerRequest,
-    DeviceManagerRequestResourceRequest, DeviceManagerRequestResourceResponse,
+    DeviceManagerAsyncServer, DeviceManagerPublishServiceResponse,
+    DeviceManagerRemoveDeviceResponse, DeviceManagerRequest, DeviceManagerRequestResourceRequest,
+    DeviceManagerRequestResourceResponse,
 };
 
 /// The resource kinds that `RequestResource` creates.
@@ -24,14 +26,15 @@ const KIND_BTI: u32 = 8;
 const HOST_BRIDGE: &str = "platform:pci-host-ecam";
 
 /// Serves the `DeviceManager` channel `end` of the driver of device
-/// `caller` until it closes. Each request runs as a task of its own, so
-/// that one that waits does not hold up the others. `PublishService`
-/// fails with `NOT_SUPPORTED`.
-pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>) {
+/// `caller` until it closes, then unregisters the services that the
+/// driver published and sets `done`. Each request runs as a task of its
+/// own, so that one that waits does not hold up the others.
+pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, done: Rc<Done>) {
     use DeviceManagerRequest as R;
     let server = Rc::new(DeviceManagerAsyncServer::new(end, m.reactor.clone()));
+    let published = Rc::new(Published::default());
     while let Ok(request) = server.next().await {
-        let (m, server) = (m.clone(), server.clone());
+        let (m, server, published) = (m.clone(), server.clone(), published.clone());
         m.spawner.clone().spawn(async move {
             let s = server.server();
             let _ = match request {
@@ -50,7 +53,11 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>) {
                     let removed = remove_device(&m, caller, request.id).await;
                     responder.reply(s, removed.map(|()| DeviceManagerRemoveDeviceResponse {}))
                 }
-                R::PublishService(_, responder) => responder.reply(s, Err(Status::NotSupported)),
+                R::PublishService(request, responder) => {
+                    let (class, provider) = (request.class, request.provider);
+                    let id = publish::publish(&m, &published, caller, class, provider).await;
+                    responder.reply(s, id.map(|id| DeviceManagerPublishServiceResponse { id }))
+                }
                 R::RequestResource(request, responder) => {
                     let resource = request_resource(&m, caller, &request);
                     let reply =
@@ -60,6 +67,8 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>) {
             };
         });
     }
+    publish::unregister_all(&m, &published).await;
+    done.set();
 }
 
 /// Adds the device of `request` as a child of device `caller`, and binds

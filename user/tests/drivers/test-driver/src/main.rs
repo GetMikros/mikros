@@ -14,9 +14,11 @@
 //!   checks that `RequestResource` gives it a shared `MMIO` resource in
 //!   its ECAM range and a `BTI` resource for requester IDs of bus 0, and
 //!   refuses a `DMA` resource with `INVALID_ARGS` and a `BTI` resource
-//!   for segment 1 with `ACCESS_DENIED`. It then adds a device
-//!   `test-child` as `test:child` with a property `slot` of `0`, or
-//!   `checks-failed` when a check failed. It accepts
+//!   for segment 1 with `ACCESS_DENIED`. It checks that it can publish
+//!   two `storage` services, which get consecutive IDs, but not one of
+//!   the reserved class `audio`, with `INVALID_ARGS`. It then adds a
+//!   device `test-child` as `test:child` with a property `slot` of `0`,
+//!   or `checks-failed` when a check failed. It accepts
 //!   `ConnectChild`, and once the child's driver has written on the bus
 //!   channel, it removes the child, when `ConnectChild` said that the
 //!   child's driver needs `dma`. `ResetChild` succeeds.
@@ -26,7 +28,8 @@
 //!   message on the bus channel, and fails with `INVALID_ARGS`
 //!   otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
-//! - As `system.driver.test-close`, the driver ends without replying.
+//! - As `system.driver.test-close`, the driver publishes a `storage`
+//!   service and ends without replying.
 //! - As any other, it fails with `INVALID_ARGS`.
 //!
 //! Drivers other than `test-host` fail `ResetChild` and `ConnectChild`
@@ -41,7 +44,7 @@ use alloc::rc::Rc;
 use alloc::vec;
 use core::cell::RefCell;
 use mikros_rt::exec::{Executor, Reactor};
-use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceManagerAsyncClient, DeviceManagerRequestResourceResponse, DriverAsyncServer,
@@ -49,6 +52,7 @@ use mikros_rt::interfaces::mikros::driver::{
     DriverStartResponse, DriverStopResponse, Property,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
+use mikros_rt::interfaces::mikros::service::Provider;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
@@ -113,7 +117,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             }
                         }
                         DECLINE => Err(Status::NotSupported),
-                        CLOSE => return 0,
+                        CLOSE => {
+                            let _ = publish(&client, "storage").await;
+                            return 0;
+                        }
                         _ => Err(Status::InvalidArgs),
                     };
                     let started = result.is_ok();
@@ -168,7 +175,13 @@ async fn add_child(manager: Rc<DeviceManagerAsyncClient>, ecam: u64) {
     let bti = granted(request(KIND_BTI, 0, 0x100, false).await, KIND_BTI);
     let dma = request(KIND_DMA, 0, 0, false).await;
     let other_segment = request(KIND_BTI, 0x1_0000, 1, false).await;
-    let checked = matches!(bad, Ok(Err(Status::InvalidArgs)))
+    let first = publish(&manager, "storage").await;
+    let second = publish(&manager, "storage").await;
+    let reserved = publish(&manager, "audio").await;
+    let published = matches!((first, second), (Ok(a), Ok(b)) if b == a + 1);
+    let checked = published
+        && reserved == Err(Status::InvalidArgs)
+        && matches!(bad, Ok(Err(Status::InvalidArgs)))
         && matches!(own, Ok(Err(Status::AccessDenied)))
         && matches!(unknown, Ok(Err(Status::NotFound)))
         && mmio
@@ -203,6 +216,18 @@ async fn remove_child(
         let _ = manager.remove_device(device).await;
     }
     drop(bus);
+}
+
+/// Publishes a service of `class`, whose provider channel stays open
+/// for as long as the driver runs, and returns its ID.
+async fn publish(manager: &DeviceManagerAsyncClient, class: &str) -> Result<u64, Status> {
+    let (client, server) = endpoints::<Provider>().map_err(|_| Status::NoResources)?;
+    core::mem::forget(server);
+    match manager.publish_service(class.into(), client).await {
+        Ok(Ok(published)) => Ok(published.id),
+        Ok(Err(status)) => Err(status),
+        Err(_) => Err(Status::PeerClosed),
+    }
 }
 
 /// As the child's driver: writes a message on the bus channel `bus`.

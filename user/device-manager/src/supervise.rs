@@ -3,6 +3,7 @@
 //! being stopped, and removing devices.
 
 use crate::devices::Devices;
+use crate::publish::ServiceIds;
 use crate::serve;
 use crate::start::{Started, Starter};
 use alloc::boxed::Box;
@@ -11,15 +12,17 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::cell::RefCell;
 use core::future::{Future, poll_fn};
 use core::pin::{Pin, pin};
-use core::task::Poll;
+use core::task::{Poll, Waker};
 use mikros_manifest::{Driver, Need};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::DeviceManager;
+use mikros_rt::interfaces::mikros::service::RegistrarAsyncClient;
 use mikros_rt::sys;
 
 /// A driver is restarted at most this many times within `WINDOW`, as a
@@ -33,14 +36,44 @@ const INFO_PROCESS_SIZE: usize = 0x28;
 const STOP_LIMIT: i64 = 5_000_000_000;
 
 /// What the supervising tasks share: the devices, the drivers of the
-/// valid manifests, what starting them takes, and the executor's
-/// reactor and spawner.
+/// valid manifests, what starting them takes, the service manager's
+/// `Registrar` and the service IDs given out, and the executor's reactor
+/// and spawner.
 pub struct Manager {
     pub devices: RefCell<Devices>,
     pub drivers: Vec<Driver>,
     pub starter: Starter,
+    pub registrar: Option<RegistrarAsyncClient>,
+    pub service_ids: ServiceIds,
     pub reactor: Reactor,
     pub spawner: Spawner,
+}
+
+/// Something that happens once, which tasks can wait for.
+#[derive(Default)]
+pub struct Done {
+    done: Cell<bool>,
+    waiters: RefCell<Vec<Waker>>,
+}
+
+impl Done {
+    pub fn set(&self) {
+        self.done.set(true);
+        for waker in self.waiters.borrow_mut().drain(..) {
+            waker.wake();
+        }
+    }
+
+    pub async fn wait(&self) {
+        poll_fn(|cx| match self.done.get() {
+            true => Poll::Ready(()),
+            false => {
+                self.waiters.borrow_mut().push(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
 }
 
 /// Starts the driver bound to device `id`, and handles its end.
@@ -49,7 +82,8 @@ pub struct Manager {
 /// parent's driver is given one end with `ConnectChild`, and `Start`
 /// the other. When `ConnectChild` fails, the device fails. The
 /// `DeviceManager` channel that `Start` gives the driver is served from
-/// before the call.
+/// before the call, and until the driver ends, when the services it
+/// published are unregistered before it is started again.
 ///
 /// When `Start` fails with a status, the driver declined the device: its
 /// process is terminated and the device fails. When the `Driver` channel
@@ -116,7 +150,9 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             m.starter.kill(pid).await;
             return did_not_start("creating its DeviceManager channel failed");
         };
-        m.spawner.spawn(serve::serve(m.clone(), id, manager_server));
+        let served = Rc::new(Done::default());
+        let serve = serve::serve(m.clone(), id, manager_server, served.clone());
+        m.spawner.spawn(serve);
         let started = m
             .starter
             .start(&spawned.driver, prepared, bus, manager)
@@ -146,6 +182,7 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             }
         }
         let ended = exited(&m.reactor, &spawned.process).await;
+        served.wait().await;
         let removing = match m.devices.borrow_mut().get_mut(id) {
             Some(device) => {
                 device.pid = None;

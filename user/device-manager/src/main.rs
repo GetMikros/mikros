@@ -20,6 +20,7 @@ extern crate alloc;
 mod acpi;
 mod devices;
 mod drivers;
+mod publish;
 mod serve;
 mod start;
 mod supervise;
@@ -33,12 +34,14 @@ use core::cell::RefCell;
 use devices::Devices;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
-use mikros_rt::interfaces::__midl::endpoints;
+use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerAsyncClient};
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
-use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
+use mikros_rt::interfaces::mikros::service::{
+    DirectoryAsyncClient, Registrar, RegistrarAsyncClient,
+};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 use start::Starter;
 use supervise::Manager;
@@ -61,8 +64,10 @@ const KIND_MMIO: u32 = 1;
 const SHARED: u32 = 1 << 0;
 /// The configuration space of one bus, in an ECAM range.
 const BUS_SIZE: u64 = 1 << 20;
-/// The permission broker's protocol.
+/// The protocols of the permission broker and the service manager's
+/// registrar.
 const BROKER: &str = "mikros.permissions.Broker";
+const REGISTRAR: &str = "mikros.service.Registrar";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -126,13 +131,18 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     devices.bind(&drivers);
     let header = managed.header;
     let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
-    let broker = executor.block_on(connect_broker(&directory, &reactor));
+    let broker = executor.block_on(connect::<Broker>(&directory, BROKER));
+    let broker = broker.map(|b| BrokerAsyncClient::new(b, reactor.clone()));
+    let registrar = executor.block_on(connect::<Registrar>(&directory, REGISTRAR));
+    let registrar = registrar.map(|r| RegistrarAsyncClient::new(r, reactor.clone()));
     let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
     let starter = Starter::new(launcher, broker, root, reactor.clone());
     let manager = Rc::new(Manager {
         devices: RefCell::new(devices),
         drivers,
         starter,
+        registrar,
+        service_ids: publish::ServiceIds::new(),
         reactor,
         spawner: spawner.clone(),
     });
@@ -147,27 +157,24 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     PANIC_EXIT_CODE
 }
 
-/// A connection to the permission broker through `directory`, or none
-/// when the directory refuses it, which is logged.
-async fn connect_broker(
-    directory: &DirectoryAsyncClient,
-    reactor: &mikros_rt::exec::Reactor,
-) -> Option<BrokerAsyncClient> {
-    let (client, server) = endpoints::<Broker>().ok()?;
+/// A connection to `protocol` through `directory`, or none when the
+/// directory refuses it, which is logged.
+async fn connect<P>(directory: &DirectoryAsyncClient, protocol: &str) -> Option<ClientEnd<P>> {
+    let (client, server) = endpoints::<P>().ok()?;
     match directory
-        .connect(BROKER.into(), None, server.into_handle())
+        .connect(protocol.into(), None, server.into_handle())
         .await
     {
-        Ok(Ok(_)) => Some(BrokerAsyncClient::new(client, reactor.clone())),
+        Ok(Ok(_)) => Some(client),
         Ok(Err(status)) => {
             mikros_rt::log!(
                 Error,
-                "device-manager: connecting to the broker: {status:?}"
+                "device-manager: connecting to {protocol}: {status:?}"
             );
             None
         }
         Err(e) => {
-            mikros_rt::log!(Error, "device-manager: connecting to the broker: {e:?}");
+            mikros_rt::log!(Error, "device-manager: connecting to {protocol}: {e:?}");
             None
         }
     }

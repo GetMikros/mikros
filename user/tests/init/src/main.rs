@@ -8707,8 +8707,10 @@ mod manager {
     /// manifest has no kind, which makes it normal, rather than the
     /// fallback one. It starts that driver as `system.driver.test-host`,
     /// whose `Start` succeeds only for the host bridge with its ECAM
-    /// range and a `DMA` resource. That driver adds a child device, once
-    /// the device manager refused its invalid requests, and the device
+    /// range and a `DMA` resource. That driver publishes two services,
+    /// which get the IDs 1 and 2, and adds a child device, once the
+    /// device manager refused its invalid requests and granted the
+    /// resources it asked for, and the device
     /// manager starts the child's driver, after `ConnectChild` gave the
     /// host's driver a bus channel for it. Once the child's driver wrote
     /// on that channel, the host's driver removes the child: the device
@@ -8747,6 +8749,14 @@ mod manager {
                 1,
             ),
             (b"device-manager: removed device 2, test-child", 1),
+            (
+                b"device-manager: published device.storage 1 for device 1",
+                1,
+            ),
+            (
+                b"device-manager: published device.storage 2 for device 1",
+                1,
+            ),
         ];
         const FAILED: &[&[u8]] = &[
             b"no MCFG table",
@@ -8772,9 +8782,10 @@ mod manager {
     /// the framebuffer as device 1 and the host bridge as device 2. The
     /// host bridge's driver fails `Start`: the device manager terminates
     /// it, and the device fails without a restart. The framebuffer's
-    /// driver ends without replying: the device manager terminates and
-    /// restarts it, five times, and then the device fails. It says all
-    /// of it in the log.
+    /// driver publishes a service and ends without replying: the device
+    /// manager unregisters the service, and terminates and restarts the
+    /// driver, five times, and then the device fails. The service gets
+    /// the same ID each time. It says all of it in the log.
     pub fn device_manager_handles_failing_drivers(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -8797,6 +8808,11 @@ mod manager {
                 b"device-manager: restarting driver test-close for device 1",
                 5,
             ),
+            (
+                b"device-manager: published device.storage 1 for device 1",
+                6,
+            ),
+            (b"device-manager: unregistered device.storage 1", 6),
             (
                 b"device-manager: driver test-close for device 1 failed after 5 restarts within 60 s",
                 1,
@@ -8821,7 +8837,8 @@ mod manager {
 
     /// Starts the service manager from the boot image member `image`,
     /// giving it the root resource, the log and init's platform
-    /// information, which the device manager gets. When `framebuffer`
+    /// information, which the device manager gets, after skipping what
+    /// the log already holds. When `framebuffer`
     /// is true, it also gets a memory object in place of a framebuffer,
     /// and the platform information has its framebuffer flag set. Then
     /// reads the log until each line of `expected` has appeared as many
@@ -8847,6 +8864,8 @@ mod manager {
             b"service device-manager ended",
         ];
         let (m, init, reader) = serving(s, image)?;
+        // The lines of earlier tests are skipped.
+        while super::read_record(reader.raw()).0 == 0 {}
         let deadline = super::within(super::PROBE_SECONDS);
         let mut message = s.message().to_vec();
         if framebuffer {
