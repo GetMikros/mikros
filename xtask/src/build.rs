@@ -131,6 +131,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", devices.display());
             let pci_bus = user_build("pci-bus", kind)?;
             println!("built    {}", pci_bus.display());
+            let virtio_blk = user_build("virtio-blk", kind)?;
+            println!("built    {}", virtio_blk.display());
+            let virtio_blk_manifest =
+                crate::workspace_root().join("user/drivers/virtio-blk/driver.yaml");
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let devices_manifest =
@@ -154,6 +158,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "usr/lib/drivers/pci-bus/driver.yaml",
                     pci_bus_manifest.as_path(),
+                ),
+                (
+                    "usr/lib/drivers/virtio-blk/virtio-blk",
+                    virtio_blk.as_path(),
+                ),
+                (
+                    "usr/lib/drivers/virtio-blk/driver.yaml",
+                    virtio_blk_manifest.as_path(),
                 ),
             ];
             boot_image(kind, "boot.img", &members)?
@@ -427,6 +439,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", test_driver.display());
             let pci_bus = user_build("pci-bus", kind)?;
             println!("built    {}", pci_bus.display());
+            let virtio_blk = user_build("virtio-blk", kind)?;
+            println!("built    {}", virtio_blk.display());
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let device_image = |file: &str,
@@ -490,10 +504,23 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/drivers/pci-bus/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/pci-bus/driver.yaml"),
                 ),
+                (
+                    "usr/lib/drivers/virtio-blk/virtio-blk".to_owned(),
+                    virtio_blk.clone(),
+                ),
+                (
+                    "usr/lib/drivers/virtio-blk/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/virtio-blk/driver.yaml"),
+                ),
             ];
             let pci_image = device_image(
                 "pci.img",
-                &[("test-pci", true), ("test-edu", true), ("test-reset", true)],
+                &[
+                    ("test-pci", true),
+                    ("test-edu", true),
+                    ("test-reset", true),
+                    ("test-disk", true),
+                ],
                 &pci_bus_files,
             )?;
             println!("built    {}", pci_image.display());

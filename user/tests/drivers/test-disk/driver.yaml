@@ -1,0 +1,5 @@
+# A driver for the disk that the virtio-blk driver adds, for the
+# storage tests.
+name: test-disk
+binary: /usr/lib/drivers/test-disk/test-disk
+match: [storage:disk]

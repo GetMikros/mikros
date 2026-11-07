@@ -8848,7 +8848,11 @@ mod manager {
     /// arrives and INTx is handed out as it should be. The test driver for
     /// the e1000e function at 00:01.0 ends at each start, and the device
     /// manager has the bus driver reset the function before each of its
-    /// five restarts. The device manager says all of it in the log.
+    /// five restarts. The virtio-blk driver drives the test machine's
+    /// disk, adds it as `disk-0`, publishes its raw access service, and
+    /// serves `Block` to the test driver for the disk, whose `Start`
+    /// succeeds only when reads, writes, flushes and refusals work as
+    /// they should. The device manager says all of it in the log.
     pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -8864,6 +8868,17 @@ mod manager {
             (b"device-manager: started driver test-edu for device", 1),
             (b"device-manager: the driver of device 1 ", 5),
             (
+                b"device-manager: bound driver virtio-blk to device 4, pci-0000:00:02.0, as pci:v1af4d1042",
+                1,
+            ),
+            (b"device-manager: started driver virtio-blk for device 4 as pid", 1),
+            (
+                b", disk-0, as storage:disk, under 4, with 0 resources",
+                1,
+            ),
+            (b"device-manager: started driver test-disk for device", 1),
+            (b"device-manager: published device.storage 1 for device 4", 1),
+            (
                 b"device-manager: driver test-reset for device 3 failed after 5 restarts",
                 1,
             ),
@@ -8874,6 +8889,9 @@ mod manager {
             b"driver pci-bus for device 1 did not start",
             b"driver test-pci declined",
             b"driver test-edu declined",
+            b"driver virtio-blk declined",
+            b"driver virtio-blk for device 4 terminated",
+            b"driver test-disk declined",
         ];
         let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
         ensure("adding the PCI functions and starting their driver", logged)

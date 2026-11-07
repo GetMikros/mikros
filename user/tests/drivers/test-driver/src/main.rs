@@ -45,6 +45,16 @@
 //!   `BAD_STATE`; after `DisableMsi`, `GetInterrupt` gives an event with
 //!   `WAIT` and without `SIGNAL`, and `AckInterrupt` succeeds. It fails
 //!   with `INVALID_ARGS` otherwise.
+//! - As `system.driver.test-disk`, the driver of the test machine's
+//!   disk, it succeeds when its bus channel serves `Block` for it:
+//!   `GetInfo` reports 512-byte blocks, the model `virtio-blk`, the
+//!   serial `mikros` and a writable disk; reads find the protective MBR's
+//!   signature in block 0 and the GPT header in block 1; requests of no
+//!   blocks or beyond the disk fail with `INVALID_ARGS` and
+//!   `OUT_OF_RANGE`, and a buffer above the connection's limit with
+//!   `NO_RESOURCES`; and the last block, written with `fua`, reads back
+//!   as written before it is written back as it was and flushed. It fails
+//!   with `INVALID_ARGS` otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver publishes a `storage`
 //!   service and ends without replying.
@@ -73,6 +83,7 @@ use mikros_rt::interfaces::mikros::driver::{
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::Provider;
+use mikros_rt::interfaces::mikros::storage::{BlockAsyncClient, BlockFlags};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
@@ -81,6 +92,7 @@ const HOST: &str = "system.driver.test-host";
 const CHILD: &str = "system.driver.test-child";
 const PCI: &str = "system.driver.test-pci";
 const EDU: &str = "system.driver.test-edu";
+const DISK: &str = "system.driver.test-disk";
 const DECLINE: &str = "system.driver.test-decline";
 const CLOSE: &str = "system.driver.test-close";
 const RESET: &str = "system.driver.test-reset";
@@ -170,6 +182,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         EDU => {
                             let works = match bus {
                                 Some(bus) => edu_interrupts_work(bus, &reactor, process).await,
+                                None => false,
+                            };
+                            match works {
+                                true => Ok(DriverStartResponse {}),
+                                false => Err(Status::InvalidArgs),
+                            }
+                        }
+                        DISK => {
+                            let works = match bus {
+                                Some(bus) => disk_works(bus, &reactor, process).await,
                                 None => false,
                             };
                             match works {
@@ -370,6 +392,70 @@ async fn edu_interrupts_work(bus: OwnedHandle, reactor: &Reactor, process: sys::
         && matches!(disabled, Ok(Ok(_)))
         && event_rights.is_some_and(|r| r & WAIT != 0 && r & SIGNAL == 0)
         && matches!(intx_acked, Ok(Ok(_)))
+}
+
+/// As the driver of the test machine's disk: whether `bus` serves
+/// `Block` for it as it should.
+async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -> bool {
+    let disk = BlockAsyncClient::new(ClientEnd::new(bus), reactor.clone());
+    let Ok(info) = disk.get_info().await.map(|r| r.info) else {
+        return false;
+    };
+    let described = info.block_size == 512
+        && info.block_count > 34
+        && info.max_transfer_blocks > 0
+        && info.model == "virtio-blk"
+        && info.serial == "mikros"
+        && info.flags.0 & BlockFlags::READ_ONLY.0 == 0;
+    let Ok(Ok(created)) = disk.create_buffer(8192).await else {
+        return false;
+    };
+    let mut at = 0;
+    // SAFETY: the out pointer is valid; the kernel picks a free range.
+    let mapped = unsafe {
+        sys::vm_map(
+            process,
+            PERM_READ | PERM_WRITE,
+            0,
+            created.memory.raw(),
+            0,
+            8192,
+            &mut at,
+        )
+    };
+    if mapped != mikros_rt::OK {
+        return false;
+    }
+    // SAFETY: the buffer's 8192 bytes are mapped at `at`.
+    let bytes = unsafe { core::slice::from_raw_parts_mut(at as *mut u8, 8192) };
+    let id = created.buffer;
+    fn ok<T, E>(reply: Result<Result<T, Status>, E>) -> bool {
+        matches!(reply, Ok(Ok(_)))
+    }
+    let mbr = ok(disk.read(id, 0, 0, 1).await) && bytes[510..512] == [0x55, 0xAA];
+    let gpt = ok(disk.read(id, 512, 1, 1).await) && &bytes[512..520] == b"EFI PART";
+    let none = disk.read(id, 0, 0, 0).await;
+    let beyond = disk.read(id, 0, info.block_count, 1).await;
+    let too_big = disk.create_buffer(65 << 20).await;
+    let last = info.block_count - 1;
+    let saved = ok(disk.read(id, 1024, last, 1).await);
+    for (i, byte) in bytes[2048..2560].iter_mut().enumerate() {
+        *byte = i as u8 ^ 0x5A;
+    }
+    let written = ok(disk.write(id, 2048, last, 1, true).await);
+    let read_back =
+        ok(disk.read(id, 4096, last, 1).await) && bytes[4096..4608] == bytes[2048..2560];
+    let restored = ok(disk.write(id, 1024, last, 1, false).await) && ok(disk.flush().await);
+    described
+        && mbr
+        && gpt
+        && matches!(none, Ok(Err(Status::InvalidArgs)))
+        && matches!(beyond, Ok(Err(Status::OutOfRange)))
+        && matches!(too_big, Ok(Err(Status::NoResources)))
+        && saved
+        && written
+        && read_back
+        && restored
 }
 
 /// Maps the first page of the BAR at `base` from its `resource`.
