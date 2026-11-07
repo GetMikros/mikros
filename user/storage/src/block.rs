@@ -1,7 +1,7 @@
 //! The `Block` protocol on one connection: its buffers, and its reads,
 //! writes, flushes and discards.
 
-use crate::{Disk, PAGE, pages, pinned};
+use crate::{Disk, PAGE, pages, pinned_with};
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -140,7 +140,7 @@ fn create_buffer(
     if total > BUFFERS_MAX {
         return Err(Status::NoResources);
     }
-    let (mem, pmt) = pinned(disk.dma(), disk.bti(), size)?;
+    let (mem, pmt) = pinned_with(disk.dma(), disk.bti(), size, disk.below_4g())?;
     let buffer = Buffer {
         size,
         pages: pages(&mem, size / PAGE)?,

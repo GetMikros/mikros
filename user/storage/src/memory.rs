@@ -7,10 +7,13 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::sys;
 
 pub const PAGE: u64 = 4096;
-const DEVICE_READ: u32 = 1 << 0;
-const DEVICE_WRITE: u32 = 1 << 1;
+pub(crate) const DEVICE_READ: u32 = 1 << 0;
+pub(crate) const DEVICE_WRITE: u32 = 1 << 1;
+/// The option of `mem_create_contiguous` and `mem_create_pinned` that
+/// keeps the memory below 4 GiB.
+pub(crate) const BELOW_4G: u32 = 1 << 0;
 
-fn kernel(status: i64) -> Result<(), Status> {
+pub(crate) fn kernel(status: i64) -> Result<(), Status> {
     match status {
         mikros_rt::OK => Ok(()),
         status => Err(Status::from_raw(status as i32)),
@@ -24,9 +27,20 @@ pub fn pinned(
     bti: &OwnedHandle,
     size: u64,
 ) -> Result<(OwnedHandle, OwnedHandle), Status> {
+    pinned_with(dma, bti, size, false)
+}
+
+/// As `pinned`, with the memory below 4 GiB when `below_4g` is true.
+pub fn pinned_with(
+    dma: &OwnedHandle,
+    bti: &OwnedHandle,
+    size: u64,
+    below_4g: bool,
+) -> Result<(OwnedHandle, OwnedHandle), Status> {
+    let options = if below_4g { BELOW_4G } else { 0 };
     let mut mem = 0;
     // SAFETY: the out pointer is valid for the call.
-    kernel(unsafe { sys::mem_create_pinned(dma.raw(), size, 0, &mut mem) })?;
+    kernel(unsafe { sys::mem_create_pinned(dma.raw(), size, options, &mut mem) })?;
     // SAFETY: the kernel just created the handle for us.
     let mem = unsafe { OwnedHandle::from_raw(mem) };
     let mut pmt = 0;
