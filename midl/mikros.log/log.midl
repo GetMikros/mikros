@@ -1,0 +1,26 @@
+// MIKSPEC-0063.R2
+
+library mikros.log;
+using mikros.base;
+
+type Severity = enum : u8 { DEBUG = 0; INFO = 1; WARNING = 2; ERROR = 3; };
+
+type Record = struct {
+    sequence u64;
+    timestamp base.MonotonicTime;
+    utc base.UtcTime;
+    pid u32;
+    app_id string<128>;
+    severity Severity;
+    message string<1024>;
+};
+
+protocol Writer {
+    @1 Write(severity Severity, message string<1024>);
+};
+
+protocol Reader {
+    @1 Read(after u64, max u32) -> (records vector<Record, 32>);
+    @2 Follow() -> () error base.Status;
+    @3 -> OnRecords(records vector<Record, 32>);
+};
