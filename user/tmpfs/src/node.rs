@@ -4,6 +4,7 @@ use crate::file::{Failed, File};
 use crate::fs::{self, Fs};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_memfs::{Directory, Id, Kind, Resolved};
 use mikros_rt::interfaces::__midl::ServerEnd;
@@ -110,14 +111,17 @@ impl Connection {
                 self.unlink(&q.name, q.directory)
                     .map(|()| NodeUnlinkResponse {}),
             ),
-            R::ReadLink(_, r) => r.reply(s, Err(Error::Invalid)),
-            // Not there yet.
-            R::GetToken(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Rename(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Link(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::CreateSymlink(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::GetToken(_, r) => r.reply(s, self.token()),
+            R::Rename(q, r) => r.reply(s, self.rename(q).map(|()| NodeRenameResponse {})),
+            R::Link(q, r) => r.reply(s, self.link(q).map(|()| NodeLinkResponse {})),
+            R::CreateSymlink(q, r) => {
+                let created = self.create_symlink(&q.name, q.target);
+                r.reply(s, created.map(|()| NodeCreateSymlinkResponse {}))
+            }
+            R::ReadLink(_, r) => r.reply(s, self.read_link()),
             // Memory cannot share data between files.
             R::CloneRange(_, r) => r.reply(s, Err(Error::NotSupported)),
+            // Not there yet.
             R::GetMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -376,5 +380,76 @@ impl Connection {
             self.fs.unnamed(removed.id);
         }
         Ok(())
+    }
+
+    fn token(&self) -> Result<NodeGetTokenResponse, Error> {
+        self.require(Rights::WRITE)?;
+        if !self.is_directory(self.node) {
+            return Err(Error::NotDirectory);
+        }
+        Ok(NodeGetTokenResponse {
+            token: self.fs.token(self.node)?,
+        })
+    }
+
+    fn rename(&self, q: NodeRenameRequest) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        let renamed =
+            self.fs
+                .tree
+                .borrow_mut()
+                .rename(self.node, &q.name, to, &q.new_name, fs::now());
+        if let Some(replaced) = renamed.map_err(fs::error)?
+            && replaced.last
+        {
+            self.fs.unnamed(replaced.id);
+        }
+        Ok(())
+    }
+
+    fn link(&self, q: NodeLinkRequest) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        let linked = self
+            .fs
+            .tree
+            .borrow_mut()
+            .link(self.node, &q.name, to, &q.new_name, fs::now());
+        linked.map(|_| ()).map_err(fs::error)
+    }
+
+    fn create_symlink(&self, name: &str, target: String) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        if target.is_empty() {
+            return Err(Error::Invalid);
+        }
+        let mut tree = self.fs.tree.borrow_mut();
+        let created = tree.create(
+            self.node,
+            name,
+            Kind::Symlink(target),
+            0o777,
+            self.user,
+            fs::now(),
+        );
+        created.map(|_| ()).map_err(fs::error)
+    }
+
+    fn read_link(&self) -> Result<NodeReadLinkResponse, Error> {
+        self.require(Rights::READ)?;
+        match &self
+            .fs
+            .tree
+            .borrow()
+            .get(self.node)
+            .ok_or(Error::NotFound)?
+            .kind
+        {
+            Kind::Symlink(target) => Ok(NodeReadLinkResponse {
+                target: target.clone(),
+            }),
+            _ => Err(Error::Invalid),
+        }
     }
 }
