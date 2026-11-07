@@ -151,6 +151,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-pci"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-permissions"
 version = "0.0.0"
 
@@ -177,6 +181,14 @@ version = "0.0.0"
 [[package]]
 name = "mikros-yaml"
 version = "0.0.0"
+
+[[package]]
+name = "pci-bus"
+version = "0.0.0"
+dependencies = [
+ "mikros-pci",
+ "mikros-rt",
+]
 
 [[package]]
 name = "permissions-broker"
