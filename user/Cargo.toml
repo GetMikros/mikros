@@ -4,7 +4,7 @@ members = ["device-manager", "init", "libc", "loader", "mikros-rt", "permissions
 # Built here as a dependency, and host-tested in the root workspace,
 # except `std`, a workspace of its own for programs that use the
 # standard library.
-exclude = ["bootfs", "manifest", "permissions", "std", "ustar", "yaml"]
+exclude = ["bootfs", "manifest", "pci", "permissions", "std", "ustar", "yaml"]
 
 [workspace.package]
 version = "0.0.0"
