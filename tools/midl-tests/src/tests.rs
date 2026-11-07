@@ -421,16 +421,21 @@ fn async_calls_overlap_on_one_channel() {
 fn async_replies_and_events_outlast_a_closed_peer() {
     let _s = serial();
     let (client_end, server_end) = rt::endpoints::<Calc>().unwrap();
-    // The server replies to both calls, sends an event and closes.
+    // Once both calls were sent, the server replies to both, sends an
+    // event and closes.
+    let (go, sent) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
         let server = CalcServer::new(server_end);
-        for _ in 0..2 {
+        let mut pending = Vec::new();
+        while pending.len() < 2 {
             match server.next(i64::MAX).unwrap() {
-                CalcRequest::Add(r, responder) => responder
-                    .reply(&server, CalcAddResponse { sum: r.a + r.b })
-                    .unwrap(),
+                CalcRequest::Add(r, responder) => pending.push((r.a + r.b, responder)),
                 other => panic!("unexpected {other:?}"),
             }
+        }
+        sent.recv().unwrap();
+        for (sum, responder) in pending {
+            responder.reply(&server, CalcAddResponse { sum }).unwrap();
         }
         server.send_noted("done".into()).unwrap();
     });
@@ -445,6 +450,7 @@ fn async_replies_and_events_outlast_a_closed_peer() {
             std::task::Poll::Ready(())
         })
         .await;
+        go.send(()).unwrap();
         server.join().unwrap();
         // The second call reads both replies and the event, and then
         // finds the channel closed.
