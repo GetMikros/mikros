@@ -11,9 +11,11 @@
 extern crate alloc;
 
 mod bpb;
+mod change;
 mod dir;
 mod disk;
 mod files;
+mod names;
 mod table;
 mod volume;
 

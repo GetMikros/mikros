@@ -4,7 +4,7 @@ extern crate std;
 
 use super::*;
 use std::io::{Cursor, Read, Write};
-use std::string::String;
+use std::string::{String, ToString};
 use std::vec;
 use std::vec::Vec;
 
@@ -267,4 +267,156 @@ fn writes_files_that_fatfs_reads() {
         assert_eq!(&big[..600], &expected[..]);
         assert!(big[600..].iter().all(|&b| b == 0));
     }
+}
+
+// Creating, removing and renaming.
+
+/// What `fatfs` finds in the directory `path` of `bytes`: the long
+/// names, sorted.
+fn fatfs_names(bytes: &mut Vec<u8>, path: &str) -> Vec<String> {
+    let fs = fatfs::FileSystem::new(Cursor::new(bytes), fatfs::FsOptions::new()).unwrap();
+    let dir = if path.is_empty() {
+        fs.root_dir()
+    } else {
+        fs.root_dir().open_dir(path).unwrap()
+    };
+    let mut names: Vec<String> = dir
+        .iter()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n != "." && n != "..")
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn writes_what_fatfs_reads() {
+    let now = Stamp::new(2026, 11, 7, 13, 30, 41, 250);
+    for (size, ty, _) in TYPES {
+        let bytes = image(size, ty, sample);
+        let mut volume = Volume::mount(Mem(bytes), size as u64, true).unwrap();
+        assert!(!volume.read_only());
+        let root = volume.root();
+        let mut notes = volume
+            .create(root, "Notes for Monday.txt", false, now)
+            .unwrap();
+        let text: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        volume.write(&mut notes, 0, &text, now).unwrap();
+        // A write past the end leaves zeros between.
+        volume.write(&mut notes, 4000, b"tail", now).unwrap();
+        let dir = volume
+            .create(root, "New Folder", true, now)
+            .unwrap()
+            .as_dir(root)
+            .unwrap();
+        for i in 0..40 {
+            let name = std::format!("entry number {i} with a long name");
+            volume.create(dir, &name, false, now).unwrap();
+        }
+        assert_eq!(
+            volume
+                .create(root, "notes FOR monday.TXT", false, now)
+                .map(|_| ()),
+            Err(Error::Exists)
+        );
+        assert_eq!(
+            volume.create(root, "bad:name", false, now).map(|_| ()),
+            Err(Error::Invalid)
+        );
+        let mut readme = volume.find(root, "readme.txt").unwrap();
+        volume.truncate(&mut readme, 2, now).unwrap();
+        volume
+            .rename(root, "readme.txt", dir, "Read Me First.txt")
+            .unwrap();
+        volume
+            .remove(dir, "entry number 3 with a long name", false)
+            .unwrap();
+        let docs = volume
+            .find(root, "Documents and Settings")
+            .unwrap()
+            .as_dir(root)
+            .unwrap();
+        assert_eq!(
+            volume.remove(root, "Documents and Settings", true),
+            Err(Error::NotEmpty)
+        );
+        volume.remove(docs, "empty", true).unwrap();
+        // Moving a directory updates its `..`.
+        volume
+            .rename(root, "Documents and Settings", dir, "Docs")
+            .unwrap();
+        assert_eq!(
+            volume.rename(dir, "Docs", docs, "inside").map(|_| ()),
+            Err(Error::Invalid)
+        );
+        // `..` of the moved directory names its new parent.
+        let Dir::Cluster(moved) = volume.find(dir, "docs").unwrap().as_dir(root).unwrap() else {
+            panic!("a directory has a cluster");
+        };
+        let at = volume.dot_dot_at(moved).unwrap();
+        let dot_dot = crate::dir::Short::parse(&volume.read_slot(at).unwrap());
+        assert_eq!(dot_dot.name, *b"..         ");
+        assert_eq!(Dir::Cluster(dot_dot.cluster), dir);
+        volume.unmount().unwrap();
+        let mut bytes = volume_bytes(volume);
+
+        let mut expected_root = vec!["New Folder".to_string(), "Notes for Monday.txt".to_string()];
+        expected_root.sort();
+        assert_eq!(fatfs_names(&mut bytes, ""), expected_root);
+        let listed = fatfs_names(&mut bytes, "New Folder");
+        assert_eq!(listed.len(), 39 + 2);
+        assert!(listed.contains(&"Read Me First.txt".to_string()));
+        assert!(listed.contains(&"Docs".to_string()));
+        assert!(!listed.contains(&"entry number 3 with a long name".to_string()));
+        let notes = fatfs_read(&mut bytes, "Notes for Monday.txt");
+        assert_eq!(notes.len(), 4004);
+        assert_eq!(&notes[..3000], &text[..]);
+        assert!(notes[3000..4000].iter().all(|&b| b == 0));
+        assert_eq!(&notes[4000..], b"tail");
+        assert_eq!(
+            fatfs_read(&mut bytes, "New Folder/Read Me First.txt"),
+            b"he"
+        );
+        assert_eq!(
+            fatfs_names(&mut bytes, "New Folder/Docs"),
+            ["A rather long file name.data"]
+        );
+    }
+}
+
+#[test]
+fn makes_unique_short_names() {
+    let size = 1 << 20;
+    let bytes = image(size, fatfs::FatType::Fat12, |_| {});
+    let now = Stamp::new(2026, 1, 1, 0, 0, 0, 0);
+    let mut volume = Volume::mount(Mem(bytes), size as u64, true).unwrap();
+    let root = volume.root();
+    for name in [
+        "readme.txt",
+        "Long File Name.txt",
+        "Long File Number.txt",
+        ".hidden",
+        "a+b.c",
+    ] {
+        volume.create(root, name, false, now).unwrap();
+    }
+    volume.unmount().unwrap();
+    let mut bytes = volume_bytes(volume);
+    let fs = fatfs::FileSystem::new(Cursor::new(&mut bytes), fatfs::FsOptions::new()).unwrap();
+    let mut shorts: Vec<String> = fs
+        .root_dir()
+        .iter()
+        .map(|e| e.unwrap().short_file_name())
+        .collect();
+    shorts.sort();
+    assert_eq!(
+        shorts,
+        [
+            "A_B~1.C",
+            "HIDDEN~1",
+            "LONGFI~1.TXT",
+            "LONGFI~2.TXT",
+            "README.TXT"
+        ]
+    );
 }
