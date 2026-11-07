@@ -1,38 +1,71 @@
 //! The controller: bringing it up, its admin and I/O queue pairs, its
-//! interrupts, and shutting it down.
+//! interrupts, identifying it and its namespaces, and shutting it down.
 
 use crate::queue::{Command, QueuePair};
 use crate::regs::Regs;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::sys;
-use mikros_storage::Mmio;
+use mikros_storage::{Contiguous, Mmio, PAGE};
 
 /// Admin opcodes.
 const CREATE_IO_SQ: u8 = 0x01;
 const CREATE_IO_CQ: u8 = 0x05;
+const IDENTIFY: u8 = 0x06;
 const SET_FEATURES: u8 = 0x09;
-/// The feature of the number of queues.
+/// Identify's CNS values, and the feature of the number of queues.
+const CNS_NAMESPACE: u32 = 0x00;
+const CNS_CONTROLLER: u32 = 0x01;
+const CNS_ACTIVE_NAMESPACES: u32 = 0x02;
 const FEATURE_QUEUES: u32 = 0x07;
 /// The admin queues' entries, and the most I/O queue entries.
 const ADMIN_ENTRIES: u16 = 32;
 const IO_ENTRIES_MAX: u32 = 1024;
 /// The ID of the I/O queue pair.
 const IO_QUEUE: u16 = 1;
+/// The largest transfer, which a PRP list of one page always covers.
+const TRANSFER_MAX: u64 = 2 << 20;
 const SIGNALED: u32 = 1 << 3;
+
+/// What Identify Controller says.
+pub struct Identity {
+    pub serial: String,
+    pub model: String,
+    /// The largest transfer in bytes.
+    pub transfer_max: u64,
+    /// Whether it has a volatile write cache, and supports Dataset
+    /// Management.
+    pub write_cache: bool,
+    pub dataset_management: bool,
+}
+
+/// An active namespace, from Identify Namespace.
+pub struct NamespaceInfo {
+    pub nsid: u32,
+    pub blocks: u64,
+    /// The data size of the current LBA format, and its metadata size.
+    pub block_size: u64,
+    pub metadata: u16,
+}
 
 pub struct Controller {
     pub regs: Rc<Regs>,
     pub admin: Rc<QueuePair>,
     pub io: Rc<QueuePair>,
+    pub identity: Identity,
     /// The interrupt vector of the I/O completion queue.
     io_vector: u16,
-    _dma: OwnedHandle,
-    _bti: OwnedHandle,
+    pub dma: OwnedHandle,
+    pub bti: OwnedHandle,
+    process: sys::Handle,
+    /// Pages for PRP lists and Dataset Management ranges.
+    pages: RefCell<Vec<Contiguous>>,
     _device: Rc<DeviceAsyncClient>,
     _interrupts: Vec<OwnedHandle>,
 }
@@ -47,11 +80,30 @@ fn bus<T>(
     }
 }
 
+/// The text of an identify string field: ASCII, padded with spaces.
+fn text(bytes: &[u8]) -> String {
+    let text: String = bytes
+        .iter()
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    String::from(text.trim())
+}
+
+fn le32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
 impl Controller {
     /// Brings up the controller behind the bus channel `device` with
     /// memory from the `DMA` resource `dma`: maps BAR 0, disables it, sets
-    /// up the admin queues, takes its interrupts, enables it, and creates
-    /// the I/O queues.
+    /// up the admin queues, enables it, takes its interrupts, identifies
+    /// it and creates the I/O queues.
     pub async fn start(
         device: DeviceAsyncClient,
         process: sys::Handle,
@@ -89,13 +141,18 @@ impl Controller {
         )?);
         let (interrupts, io_vector) = interrupts(&device, &admin, &io, reactor, spawner).await?;
         enable(&regs, &admin, reactor).await?;
+        let page = Contiguous::new(&dma, &bti, process, PAGE, false)?;
+        let identity = identify_controller(&admin, &page).await?;
         let controller = Rc::new(Controller {
             regs,
             admin,
             io,
+            identity,
             io_vector,
-            _dma: dma,
-            _bti: bti,
+            dma,
+            bti,
+            process,
+            pages: RefCell::new(alloc::vec![page]),
             _device: device,
             _interrupts: interrupts,
         });
@@ -133,6 +190,65 @@ impl Controller {
         Ok(())
     }
 
+    /// The active namespaces.
+    pub async fn namespaces(&self) -> Result<Vec<NamespaceInfo>, Status> {
+        let page = self.page()?;
+        let mut ids = Vec::new();
+        let mut after = 0;
+        loop {
+            identify(&self.admin, &page, CNS_ACTIVE_NAMESPACES, after).await?;
+            let mut bytes = [0u8; PAGE as usize];
+            page.read_bytes(0, &mut bytes);
+            let found: Vec<u32> = (0..1024)
+                .map(|i| le32(&bytes, 4 * i))
+                .take_while(|&nsid| nsid != 0)
+                .collect();
+            let full = found.len() == 1024;
+            ids.extend_from_slice(&found);
+            match found.last() {
+                Some(&last) if full => after = last,
+                _ => break,
+            }
+        }
+        let mut namespaces = Vec::new();
+        for nsid in ids {
+            identify(&self.admin, &page, CNS_NAMESPACE, nsid).await?;
+            let blocks = page.read64(0);
+            let flbas = page.read8(26);
+            let format = u64::from(flbas & 0xF | (flbas >> 1) & 0x30);
+            let lbaf = page.read32(128 + 4 * format);
+            namespaces.push(NamespaceInfo {
+                nsid,
+                blocks,
+                block_size: 1u64.checked_shl((lbaf >> 16) & 0xFF).unwrap_or(0),
+                metadata: lbaf as u16,
+            });
+        }
+        self.give_page(page);
+        Ok(namespaces)
+    }
+
+    /// A zeroed page for a PRP list or Dataset Management ranges.
+    pub fn page(&self) -> Result<Contiguous, Status> {
+        match self.pages.borrow_mut().pop() {
+            Some(page) => {
+                page.zero();
+                Ok(page)
+            }
+            None => Contiguous::new(&self.dma, &self.bti, self.process, PAGE, false),
+        }
+    }
+
+    /// Gives back a page from `page`.
+    pub fn give_page(&self, page: Contiguous) {
+        self.pages.borrow_mut().push(page);
+    }
+
+    /// The largest transfer in bytes.
+    pub fn transfer_max(&self) -> u64 {
+        self.identity.transfer_max
+    }
+
     /// Shuts the controller down normally, before the driver ends.
     pub async fn shutdown(&self, reactor: &Reactor) {
         let _ = self.regs.shutdown(reactor).await;
@@ -145,6 +261,38 @@ async fn enable(regs: &Regs, admin: &QueuePair, reactor: &Reactor) -> Result<(),
     regs.enable(reactor, admin.entries, sq, cq)
         .await
         .map_err(|_| Status::Internal)
+}
+
+/// Sends Identify with `cns` for `nsid`, into `page`.
+async fn identify(admin: &QueuePair, page: &Contiguous, cns: u32, nsid: u32) -> Result<(), Status> {
+    let command = Command {
+        opcode: IDENTIFY,
+        nsid,
+        prp1: page.physical(0),
+        cdw: [cns, 0, 0, 0, 0, 0],
+        ..Command::default()
+    };
+    admin.submit(command).await?;
+    Ok(())
+}
+
+async fn identify_controller(admin: &QueuePair, page: &Contiguous) -> Result<Identity, Status> {
+    identify(admin, page, CNS_CONTROLLER, 0).await?;
+    let mut bytes = [0u8; PAGE as usize];
+    page.read_bytes(0, &mut bytes);
+    let mdts = bytes[77];
+    let transfer_max = match mdts {
+        0 => TRANSFER_MAX,
+        n => (PAGE << n.min(20)).min(TRANSFER_MAX),
+    };
+    let oncs = u16::from_le_bytes([bytes[520], bytes[521]]);
+    Ok(Identity {
+        serial: text(&bytes[4..24]),
+        model: text(&bytes[24..64]),
+        transfer_max,
+        write_cache: bytes[525] & 1 != 0,
+        dataset_management: oncs & 1 << 2 != 0,
+    })
 }
 
 /// Takes the controller's interrupts: one per completion queue through

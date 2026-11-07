@@ -1,8 +1,11 @@
 //! The NVMe driver.
 //!
 //! `Start` brings the controller up with one admin and one I/O queue
-//! pair. It has no child devices yet, so `ConnectChild` fails with
-//! `NOT_FOUND`. `ResetChild` fails with `NOT_SUPPORTED`, and `Stop` shuts
+//! pair, and adds each active namespace with 512- or 4096-byte blocks
+//! and no metadata as a child device `disk-<nsid>`, `storage:disk`. It
+//! serves `Block` for a namespace on the bus channel that `ConnectChild`
+//! gives it, and publishes each namespace's raw access service, of class
+//! `storage`. `ResetChild` fails with `NOT_SUPPORTED`, and `Stop` shuts
 //! the controller down.
 
 #![no_std]
@@ -11,26 +14,68 @@
 extern crate alloc;
 
 mod controller;
+mod namespace;
 mod queue;
 mod regs;
 
+use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::rc::Rc;
+use alloc::vec;
+use alloc::vec::Vec;
 use controller::Controller;
+use core::cell::RefCell;
+use core::future::poll_fn;
+use core::task::{Poll, Waker};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
-use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DriverAsyncServer, DriverRequest, DriverStartRequest, DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
+    DriverStartRequest, DriverStartResponse, DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
-use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
+use mikros_rt::interfaces::mikros::service::Provider;
+use mikros_rt::{PANIC_EXIT_CODE, log, managed, sys};
+use namespace::Namespace;
 
 mikros_rt::raw_main!(main);
 
 const KIND_DMA: u32 = 4;
 const INFO_RESOURCE: u32 = 5;
 const INFO_RESOURCE_SIZE: usize = 0x18;
+const DISK_ID: &str = "storage:disk";
+const SERVICE_CLASS: &str = "storage";
+
+/// The namespaces by the IDs of their devices, once all are added.
+#[derive(Default)]
+struct Devices {
+    added: RefCell<Option<BTreeMap<u64, Rc<Namespace>>>>,
+    waiting: RefCell<Vec<Waker>>,
+}
+
+impl Devices {
+    fn set(&self, added: BTreeMap<u64, Rc<Namespace>>) {
+        *self.added.borrow_mut() = Some(added);
+        for waker in self.waiting.borrow_mut().drain(..) {
+            waker.wake();
+        }
+    }
+
+    /// The namespace of device `id`, once the devices are added.
+    async fn get(&self, id: u64) -> Option<Rc<Namespace>> {
+        poll_fn(|cx| match &*self.added.borrow() {
+            Some(added) => Poll::Ready(added.get(&id).cloned()),
+            None => {
+                self.waiting.borrow_mut().push(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
         return PANIC_EXIT_CODE;
@@ -52,15 +97,25 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
     let process = managed.header.process.raw();
     let mut controller: Option<Rc<Controller>> = None;
+    let devices = Rc::new(Devices::default());
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
             let _ = match request {
                 DriverRequest::Start(request, responder) => {
                     match start(request, process, &reactor, &spawner).await {
-                        Ok(started) => {
+                        Ok((started, namespaces, manager)) => {
                             controller = Some(started);
-                            responder.reply(s, Ok(DriverStartResponse {}))
+                            let replied = responder.reply(s, Ok(DriverStartResponse {}));
+                            let task = add_disks(
+                                namespaces,
+                                manager,
+                                devices.clone(),
+                                reactor.clone(),
+                                spawner.clone(),
+                            );
+                            spawner.spawn(task);
+                            replied
                         }
                         Err(status) => responder.reply(s, Err(status)),
                     }
@@ -75,8 +130,30 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
                 }
-                DriverRequest::ConnectChild(_, responder) => {
-                    responder.reply(s, Err(Status::NotFound))
+                DriverRequest::ConnectChild(request, responder) => {
+                    if controller.is_none() {
+                        let _ = responder.reply(s, Err(Status::BadState));
+                        continue;
+                    }
+                    let (devices, server) = (devices.clone(), server.clone());
+                    let (reactor, spawner2) = (reactor.clone(), spawner.clone());
+                    spawner.spawn(async move {
+                        let Some(namespace) = devices.get(request.device).await else {
+                            let _ = responder.reply(server.server(), Err(Status::NotFound));
+                            return;
+                        };
+                        let _ = responder.reply(server.server(), Ok(DriverConnectChildResponse {}));
+                        mikros_storage::serve(
+                            namespace,
+                            request.bus,
+                            true,
+                            reactor,
+                            spawner2,
+                            || {},
+                        )
+                        .await;
+                    });
+                    Ok(())
                 }
             };
         }
@@ -85,16 +162,17 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 }
 
 /// Brings up the controller that `request` gives, with its `DMA`
-/// resource. Fails with `INVALID_ARGS` without a bus channel or a `DMA`
-/// resource, with the status of the bus driver when it refused a
-/// request, and with `INTERNAL` when the controller could not be brought
-/// up.
+/// resource, and finds its namespaces. Returns the controller, the
+/// namespaces it serves and the device manager. Fails with
+/// `INVALID_ARGS` without a bus channel or a `DMA` resource, with the
+/// status of the bus driver when it refused a request, and with
+/// `INTERNAL` when the controller could not be brought up.
 async fn start(
     request: DriverStartRequest,
     process: sys::Handle,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<Rc<Controller>, Status> {
+) -> Result<(Rc<Controller>, Vec<Rc<Namespace>>, DeviceManagerAsyncClient), Status> {
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let dma = request
         .resources
@@ -102,7 +180,63 @@ async fn start(
         .find(|r| kind(r) == Some(KIND_DMA))
         .ok_or(Status::InvalidArgs)?;
     let device = DeviceAsyncClient::new(ClientEnd::new(bus), reactor.clone());
-    Controller::start(device, process, dma, reactor, spawner).await
+    let controller = Controller::start(device, process, dma, reactor, spawner).await?;
+    let mut namespaces = Vec::new();
+    for info in controller.namespaces().await? {
+        let usable = matches!(info.block_size, 512 | 4096) && info.metadata == 0;
+        if !usable {
+            log!(
+                Info,
+                "nvme: skipping namespace {}: {}-byte blocks with {} bytes of metadata",
+                info.nsid,
+                info.block_size,
+                info.metadata
+            );
+            continue;
+        }
+        namespaces.push(Rc::new(Namespace {
+            nsid: info.nsid,
+            block_size: info.block_size as u32,
+            blocks: info.blocks,
+            controller: controller.clone(),
+        }));
+    }
+    let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
+    Ok((controller, namespaces, manager))
+}
+
+/// Adds each namespace's device, as `disk-<nsid>` and `storage:disk`,
+/// and publishes and serves its raw access service. Keeps the device
+/// manager's channel open for as long as the driver runs.
+async fn add_disks(
+    namespaces: Vec<Rc<Namespace>>,
+    manager: DeviceManagerAsyncClient,
+    devices: Rc<Devices>,
+    reactor: Reactor,
+    spawner: Spawner,
+) {
+    let mut added = BTreeMap::new();
+    for namespace in &namespaces {
+        let name = format!("disk-{}", namespace.nsid);
+        let device = manager
+            .add_device(name, vec![DISK_ID.into()], vec![], vec![])
+            .await;
+        if let Ok(Ok(device)) = device {
+            added.insert(device.id, namespace.clone());
+        }
+    }
+    devices.set(added);
+    for namespace in namespaces {
+        if let Ok((client, server)) = endpoints::<Provider>()
+            && let Ok(Ok(_)) = manager.publish_service(SERVICE_CLASS.into(), client).await
+        {
+            let task =
+                mikros_storage::serve_provider(namespace, server, reactor.clone(), spawner.clone());
+            spawner.spawn(task);
+        }
+    }
+    core::future::pending::<()>().await;
+    drop(manager);
 }
 
 /// The kind of `resource`, if it is one.
