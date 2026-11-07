@@ -163,10 +163,7 @@ impl Port {
     /// and received-FIS area; clears its errors and interrupts; and
     /// enables FIS reception and its interrupts.
     pub async fn set_up(&self, reactor: &Reactor, spin_up: bool) -> Result<(), TimedOut> {
-        self.write(CMD, self.read(CMD) & !CMD_ST);
-        wait(reactor, STOP_LIMIT, || self.read(CMD) & CMD_CR == 0).await?;
-        self.write(CMD, self.read(CMD) & !CMD_FRE);
-        wait(reactor, STOP_LIMIT, || self.read(CMD) & CMD_FR == 0).await?;
+        self.stop(reactor).await?;
         let (list, fis) = (
             self.memory.physical(COMMAND_LIST),
             self.memory.physical(RECEIVED_FIS),
@@ -182,6 +179,15 @@ impl Port {
         }
         self.write(CMD, cmd);
         Ok(())
+    }
+
+    /// Stops the port: clears `PxCMD.ST` and waits for `PxCMD.CR` to
+    /// clear, then clears `PxCMD.FRE` and waits for `PxCMD.FR` to clear.
+    pub async fn stop(&self, reactor: &Reactor) -> Result<(), TimedOut> {
+        self.write(CMD, self.read(CMD) & !CMD_ST);
+        wait(reactor, STOP_LIMIT, || self.read(CMD) & CMD_CR == 0).await?;
+        self.write(CMD, self.read(CMD) & !CMD_FRE);
+        wait(reactor, STOP_LIMIT, || self.read(CMD) & CMD_FR == 0).await
     }
 
     /// Whether the link has a connection established.

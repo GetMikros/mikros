@@ -5,7 +5,8 @@
 //! It adds each disk with 48-bit addressing as a child device
 //! `disk-<port>`, `storage:disk`, serves `Block` for it on the bus channel
 //! that `ConnectChild` gives it, and publishes its raw access service, of
-//! class `storage`. `ResetChild` fails with `NOT_SUPPORTED`.
+//! class `storage`. `ResetChild` fails with `NOT_SUPPORTED`. `Stop`
+//! flushes the disks with a volatile write cache and stops the ports.
 
 #![no_std]
 #![no_main]
@@ -49,6 +50,9 @@ const ABAR: u8 = 5;
 const DISK_ID: &str = "storage:disk";
 const SERVICE_CLASS: &str = "storage";
 const SIGNALED: u32 = 1 << 3;
+
+/// The ports and disks of a started HBA.
+type Started = (Vec<Rc<Port>>, Vec<Rc<Disk>>);
 
 /// The disks by the IDs of their devices, once all are added.
 #[derive(Default)]
@@ -98,7 +102,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let end = ServerEnd::new(managed.handles.remove(at).handle);
     let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
     let process = managed.header.process.raw();
-    let mut started = false;
+    let mut started: Option<Started> = None;
     let devices = Rc::new(Devices::default());
     executor.block_on(async {
         while let Ok(request) = server.next().await {
@@ -106,8 +110,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             let _ = match request {
                 DriverRequest::Start(request, responder) => {
                     match start(request, process, &reactor, &spawner).await {
-                        Ok((disks, manager)) => {
-                            started = true;
+                        Ok((ports, disks, manager)) => {
+                            started = Some((ports, disks.clone()));
                             let replied = responder.reply(s, Ok(DriverStartResponse {}));
                             let task = add_disks(
                                 disks,
@@ -123,6 +127,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     }
                 }
                 DriverRequest::Stop(_, responder) => {
+                    if let Some((ports, disks)) = &started {
+                        stop(ports, disks, &reactor).await;
+                    }
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
@@ -130,7 +137,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     responder.reply(s, Err(Status::NotSupported))
                 }
                 DriverRequest::ConnectChild(request, responder) => {
-                    if !started {
+                    if started.is_none() {
                         let _ = responder.reply(s, Err(Status::BadState));
                         continue;
                     }
@@ -164,7 +171,8 @@ fn bus<T>(
 }
 
 /// Brings up the HBA that `request` gives, with its `DMA` resource, and
-/// identifies its disks. Returns the disks and the device manager. Fails
+/// identifies its disks. Returns the ports, the disks and the device
+/// manager. Fails
 /// with `INVALID_ARGS` without a bus channel or a `DMA` resource, with
 /// the status of the bus driver when it refused a request, and with
 /// `INTERNAL` when the HBA could not be brought up.
@@ -173,7 +181,7 @@ async fn start(
     process: sys::Handle,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<(Vec<Rc<Disk>>, DeviceManagerAsyncClient), Status> {
+) -> Result<(Vec<Rc<Port>>, Vec<Rc<Disk>>, DeviceManagerAsyncClient), Status> {
     let bus_end = request.bus.ok_or(Status::InvalidArgs)?;
     let dma = request
         .resources
@@ -253,7 +261,18 @@ async fn start(
         }));
     }
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
-    Ok((disks, manager))
+    Ok((ports, disks, manager))
+}
+
+/// Before the driver ends: flushes each disk with a volatile write cache
+/// with FLUSH CACHE EXT, waiting for it, and then stops every port.
+async fn stop(ports: &[Rc<Port>], disks: &[Rc<Disk>], reactor: &Reactor) {
+    for disk in disks.iter().filter(|d| d.identity.write_cache) {
+        let _ = disk.flush().await;
+    }
+    for port in ports {
+        let _ = port.stop(reactor).await;
+    }
 }
 
 /// Takes the HBA's interrupt through `EnableMsi`, or else the INTx
