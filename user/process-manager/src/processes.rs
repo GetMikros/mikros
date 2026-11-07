@@ -1,6 +1,7 @@
 //! The state that serving init and every `Launcher` endpoint share, and
 //! starting a process with its whole startup transfer.
 
+use crate::broker::Permissions;
 use crate::launcher;
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, Transfer, duplicate};
@@ -58,6 +59,8 @@ pub struct Shared {
     /// one record allowed to set identities until the permission broker
     /// serves requests.
     pub identity_setter: Cell<Option<u32>>,
+    /// What the permission broker says about permissions.
+    pub permissions: Permissions,
     /// How many times a process terminated, stopped or was continued.
     changes: Cell<u64>,
     /// The tasks waiting for a process to terminate, stop or be
@@ -101,6 +104,7 @@ impl Shared {
             app_budgets: RefCell::new(BTreeMap::new()),
             control: RefCell::new(None),
             identity_setter: Cell::new(None),
+            permissions: Permissions::default(),
             changes: Cell::new(0),
             waiters: RefCell::new(Vec::new()),
         })

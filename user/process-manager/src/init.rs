@@ -46,8 +46,6 @@ pub struct Manager {
     init: Option<ServerEnd<InitBootstrap>>,
     /// The process ID of the service manager, once its start began.
     service_manager: Option<u32>,
-    /// The process manager's own directory, once it is bound.
-    directory: Option<ClientEnd<Directory>>,
 }
 
 impl Manager {
@@ -76,7 +74,6 @@ impl Manager {
             init_process: Some(init_process),
             init: Some(init_bootstrap),
             service_manager: None,
-            directory: None,
         })
     }
 
@@ -189,7 +186,14 @@ impl Manager {
                 return Err(status);
             }
         };
-        self.directory = Some(own);
+        let shared = self.shared.clone();
+        self.shared.spawner.spawn(async move {
+            let reactor = shared.reactor.clone();
+            shared
+                .permissions
+                .connect(own, &reactor, own_identity())
+                .await;
+        });
         Ok(InitBootstrapStartServiceManagerResponse { pid, process })
     }
 }
@@ -200,11 +204,15 @@ async fn bind_own_directory(
     control: &ProcessDirectoryAsyncClient,
 ) -> Result<ClientEnd<Directory>, Status> {
     let (own, own_end) = endpoints::<Directory>().map_err(|_| Status::NoResources)?;
-    let identity = ClientIdentity {
+    bind(control, own_identity(), own_end).await?;
+    Ok(own)
+}
+
+/// The identity of the process manager's own directory.
+fn own_identity() -> ClientIdentity {
+    ClientIdentity {
         pid: 0,
         user: 0,
         app_id: PROCESS_MANAGER_APP.into(),
-    };
-    bind(control, identity, own_end).await?;
-    Ok(own)
+    }
 }

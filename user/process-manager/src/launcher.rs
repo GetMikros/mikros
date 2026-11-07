@@ -6,6 +6,7 @@
 //! `SetProcessGroup` and `KillGroup` are served; every other method fails
 //! with `NOT_SUPPORTED`.
 
+use crate::broker::{FULL_DISK, SET_IDENTITY};
 use crate::processes::{NewProcess, Shared};
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, duplicate};
@@ -20,6 +21,7 @@ use mikros_rt::interfaces::mikros::process::{
     LauncherRequest, LauncherSetProcessGroupResponse, LauncherSpawnResponse, LauncherWaitResponse,
     ProcessInfo, SpawnRequest, StatusKind, WaitOptions,
 };
+use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::sys;
 
 /// Handle rights.
@@ -33,6 +35,10 @@ const INSPECT: u32 = 1 << 9;
 const CALLER_USER: u32 = u32::MAX;
 /// App IDs that need no bundle.
 const SYSTEM_PREFIX: &str = "system.";
+/// The app ID that `files.full_disk` lets a caller name, for programs
+/// in `CLI_PROGRAMS`.
+const CLI: &str = "system.cli";
+const CLI_PROGRAMS: &str = "usr/bin";
 
 /// Serves the `Launcher` endpoint `end` of process `pid` until it
 /// closes. `Spawn`, `Exec` and `Wait` run as tasks of their own, so that one
@@ -97,7 +103,7 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
 
 /// The process that `request` of process `caller` starts with the
 /// parent `parent`, and whether it keeps the caller's user and app ID.
-fn new_process(
+async fn new_process(
     shared: &Shared,
     caller: u32,
     parent: impl FnOnce(&Record) -> u32,
@@ -111,12 +117,13 @@ fn new_process(
     if request.user != CALLER_USER || request.login_session {
         return Err(Status::AccessDenied);
     }
+    let named = match &request.app_id {
+        None => None,
+        Some(app_id) => Some(named_app(shared, caller, app_id, program).await?),
+    };
     let records = shared.records.borrow();
     let from = records.get(caller).ok_or(Status::BadState)?;
-    let app_id = match &request.app_id {
-        None => from.app_id.clone(),
-        Some(app_id) => named_app(shared, caller, app_id, program)?,
-    };
+    let app_id = named.unwrap_or_else(|| from.app_id.clone());
     let same = app_id == from.app_id;
     let new = NewProcess {
         program: program.into(),
@@ -139,7 +146,7 @@ async fn spawn(
     caller: u32,
     request: SpawnRequest,
 ) -> Result<LauncherSpawnResponse, Status> {
-    let (new_app, same) = new_process(shared, caller, |_| caller, request)?;
+    let (new_app, same) = new_process(shared, caller, |_| caller, request).await?;
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
     let pid = shared
         .records
@@ -164,7 +171,7 @@ async fn exec(
     caller: u32,
     request: SpawnRequest,
 ) -> Result<LauncherExecResponse, Status> {
-    let (new, _) = new_process(shared, caller, |from| from.parent, request)?;
+    let (new, _) = new_process(shared, caller, |from| from.parent, request).await?;
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
     shared.replace(caller, new, &control).await?;
     Ok(LauncherExecResponse {})
@@ -172,16 +179,38 @@ async fn exec(
 
 /// Checks that process `caller` may give the new process of `program`, a
 /// path relative to the boot file system's root, `app_id`, and returns
-/// it. An app ID outside `system.` needs the program to lie in the app's
-/// bundle under `/Apps`. A `system.` app ID with a program manifest needs
-/// a manifest that is valid, the program to be its `binary`, and the
-/// caller's app ID in its `spawned_by`; one whose manifest cannot be used
-/// is refused.
-fn named_app(shared: &Shared, caller: u32, app_id: &str, program: &str) -> Result<String, Status> {
-    // Until the permission broker serves requests, only the service
-    // manager that init asked for holds `process.set_identity`, and no
-    // process holds `files.full_disk`, which `system.cli` needs.
-    if shared.identity_setter.get() != Some(caller) {
+/// it. A caller with `files.full_disk` may name `system.cli` for a
+/// program under `/usr/bin`. Any other app ID needs
+/// `process.set_identity`, and one outside `system.` needs the program
+/// to lie in the app's bundle under `/Apps`. A `system.` app ID with a
+/// program manifest needs a manifest that is valid, the program to be
+/// its `binary`, and the caller's app ID in its `spawned_by`; one whose
+/// manifest cannot be used is refused.
+async fn named_app(
+    shared: &Shared,
+    caller: u32,
+    app_id: &str,
+    program: &str,
+) -> Result<String, Status> {
+    let client = {
+        let records = shared.records.borrow();
+        let from = records.get(caller).ok_or(Status::BadState)?;
+        ClientIdentity {
+            pid: caller,
+            user: from.user,
+            app_id: from.app_id.clone(),
+        }
+    };
+    let bootstrap = shared.identity_setter.get() == Some(caller);
+    let holds = |permission| {
+        shared
+            .permissions
+            .holds(clone(&client), bootstrap, permission)
+    };
+    if app_id == CLI && shared.fs.lies_in(program, CLI_PROGRAMS) && holds(FULL_DISK).await {
+        return Ok(app_id.into());
+    }
+    if !holds(SET_IDENTITY).await {
         return Err(Status::AccessDenied);
     }
     let Some(name) = app_id.strip_prefix(SYSTEM_PREFIX) else {
@@ -209,11 +238,9 @@ fn named_app(shared: &Shared, caller: u32, app_id: &str, program: &str) -> Resul
     let program_manifest = manifest.program;
     let service = shared.fs.exists(&format!("usr/lib/services/{name}.yaml"));
     let binary = program_manifest.binary.trim_start_matches('/');
-    let records = shared.records.borrow();
-    let from = records.get(caller).ok_or(Status::BadState)?;
     let allowed = !service
         && shared.fs.same_file(program, binary)
-        && program_manifest.spawned_by.contains(&from.app_id);
+        && program_manifest.spawned_by.contains(&client.app_id);
     match allowed {
         true => Ok(app_id.into()),
         false => Err(Status::AccessDenied),
@@ -435,4 +462,12 @@ fn set_process_group(
         .ok_or(Status::BadState)?
         .process_group = group;
     Ok(LauncherSetProcessGroupResponse {})
+}
+
+fn clone(identity: &ClientIdentity) -> ClientIdentity {
+    ClientIdentity {
+        pid: identity.pid,
+        user: identity.user,
+        app_id: identity.app_id.clone(),
+    }
 }
