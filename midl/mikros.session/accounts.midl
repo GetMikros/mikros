@@ -1,0 +1,25 @@
+// MIKSPEC-0056.R3
+
+library mikros.session;
+using mikros.base;
+
+type UserKind = enum : u32 { STANDARD = 1; ADMIN = 2; };
+
+type User = struct {
+    id u32;
+    name string<32>;
+    full_name string<128>;
+    kind UserKind;
+};
+
+protocol Accounts {
+    @1 ListUsers(after u32) -> (users vector<User, 64>);
+    @2 Authenticate(name string<32>, password string<1024>) -> (user u32) error base.Status;
+    @3 CreateUser(name string<32>, full_name string<128>, kind UserKind,
+                  password string<1024>) -> (user u32) error base.Status;
+    @4 DeleteUser(user u32, delete_home bool) -> () error base.Status;
+    @5 SetPassword(user u32, old_password string<1024>,
+                   new_password string<1024>) -> () error base.Status;
+    @6 SetKind(user u32, kind UserKind) -> () error base.Status;
+    @7 SetFullName(user u32, full_name string<128>) -> () error base.Status;
+};
