@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "ahci"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-storage",
+]
+
+[[package]]
 name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
