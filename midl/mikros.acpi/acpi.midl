@@ -1,0 +1,18 @@
+// MIKSPEC-0038.R7
+
+library mikros.acpi;
+using mikros.base;
+
+type PciRoute = struct {
+    gsi u32;
+    level bool;
+    active_low bool;
+};
+
+protocol Acpi {
+    @1 GetPciRoute(segment u16, bus u8, device u8,
+                   pin u8) -> (route PciRoute) error base.Status;
+    @2 PowerOff() -> () error base.Status;
+    @3 Restart() -> () error base.Status;
+    @4 -> OnPowerButton();
+};
