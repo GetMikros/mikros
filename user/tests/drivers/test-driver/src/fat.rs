@@ -6,7 +6,8 @@ use crate::now;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemAsyncClient, Node, NodeAsyncClient, NodeType, OpenFlags, Rights,
+    Error, Filesystem, FilesystemAsyncClient, LockKind, Node, NodeAsyncClient, NodeType, OpenFlags,
+    Rights,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 
@@ -73,10 +74,12 @@ async fn open(
 /// Whether the volume behaves: it is FAT32 and writable; the root lists
 /// the `EFI` directory; the boot configuration reads by a name in
 /// another case; a file created in a new directory is written, read back
-/// and appended to; bad names and `..` are refused; a rename into the
-/// root moves the file, whose open connection follows it; and the
-/// file and directory are removed again, after which that connection
-/// finds its file gone.
+/// and appended to; bad names and `..` are refused; byte-range locks of
+/// two connections conflict, part of one is released, and a waiting
+/// lock is granted once the other connection closes; a rename into the
+/// root moves the file, whose open connection follows it; and the file
+/// and directory are removed again, after which that connection finds
+/// its file gone.
 pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
     check(directory, reactor).await.is_some()
 }
@@ -120,6 +123,8 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     let up = open(&folder, "../EFI", OpenFlags(0), reactor).await;
     expect(matches!(up, Err(Some(Error::AccessDenied))))?;
 
+    locks(&file, reactor).await?;
+
     let token = ok(root.get_token().await)?.token;
     ok(folder
         .rename("A long file name.txt".into(), token, "Moved.txt".into())
@@ -133,6 +138,31 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     expect(failed(file.get_attributes().await) == Some(Error::NotFound))?;
     ok(root.unlink("Test Folder".into(), true).await)?;
     ok(root.sync().await)?;
+    Some(())
+}
+
+/// Whether the locks of `file` and of a clone of it behave.
+async fn locks(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+    let (other, server) = endpoints::<Node>().ok()?;
+    ok(file
+        .clone(server, Rights(Rights::READ.0 | Rights::WRITE.0))
+        .await)?;
+    let other = NodeAsyncClient::new(other, reactor.clone());
+    ok(file.lock(LockKind::Exclusive, 0, 0, false).await)?;
+    let shared = other.lock(LockKind::Shared, 0, 4, false).await;
+    expect(failed(shared) == Some(Error::WouldBlock))?;
+    // The exclusive lock reaches to the end of the file.
+    let past = other.lock(LockKind::Exclusive, 1000, 1, false).await;
+    expect(failed(past) == Some(Error::WouldBlock))?;
+    ok(file.unlock(0, 4).await)?;
+    ok(other.lock(LockKind::Shared, 0, 4, false).await)?;
+    let mine = file.lock(LockKind::Exclusive, 2, 1, false).await;
+    expect(failed(mine) == Some(Error::WouldBlock))?;
+    // Closing the other connection releases its lock, which this one
+    // waits for.
+    drop(other);
+    ok(file.lock(LockKind::Exclusive, 0, 4, true).await)?;
+    ok(file.unlock(0, 0).await)?;
     Some(())
 }
 

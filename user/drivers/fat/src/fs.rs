@@ -6,7 +6,9 @@ use crate::node;
 use crate::time::{self, Utc};
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
+use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::task::Waker;
 use mikros_fat::{Dir, FatType, Node as FatNode, Stamp, Volume};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
@@ -32,11 +34,24 @@ pub enum Target {
 }
 
 /// A node that connections are open to: its entry as the volume has it
-/// now, how many connections, and whether it has been removed.
+/// now, how many connections, whether it has been removed, the byte-range
+/// locks of its connections, and the tasks that wait for one.
 struct Open {
     node: FatNode,
     refs: usize,
     removed: bool,
+    locks: Vec<Lock>,
+    waiting: Vec<Waker>,
+}
+
+/// A byte-range lock: its owner, a connection, whether it is exclusive,
+/// and its range, `end` excluded.
+#[derive(Clone, Copy)]
+struct Lock {
+    owner: u64,
+    exclusive: bool,
+    start: u64,
+    end: u64,
 }
 
 pub struct Fs {
@@ -108,11 +123,13 @@ impl Fs {
         self.spawner.spawn(task);
     }
 
-    /// Ends one connection's hold on `target`.
-    pub fn close(&self, target: Target) {
+    /// Ends the hold of a connection, the lock owner `owner`, on
+    /// `target`, releasing its locks.
+    pub fn close(&self, target: Target, owner: u64) {
         let Target::Node(id) = target else {
             return;
         };
+        self.unlock(id, owner, (0, u64::MAX));
         let mut nodes = self.nodes.borrow_mut();
         if let Some(open) = nodes.get_mut(&id) {
             open.refs -= 1;
@@ -139,6 +156,8 @@ impl Fs {
                 node,
                 refs: 0,
                 removed: false,
+                locks: Vec::new(),
+                waiting: Vec::new(),
             },
         );
         Target::Node(id)
@@ -175,6 +194,58 @@ impl Fs {
         match target {
             Target::Root => Ok(true),
             Target::Node(id) => self.with_node(id, |_, node| Ok(node.is_directory())),
+        }
+    }
+
+    /// A new owner of locks, for a connection.
+    pub fn owner(&self) -> u64 {
+        let owner = self.next.get();
+        self.next.set(owner + 1);
+        owner
+    }
+
+    /// Takes the lock of `owner` on `start..end` of node `id`, replacing
+    /// its own locks there, unless another owner's lock conflicts: then
+    /// false, and `waker`, when given, is woken once a lock goes.
+    pub fn try_lock(
+        &self,
+        id: u64,
+        owner: u64,
+        exclusive: bool,
+        (start, end): (u64, u64),
+        waker: Option<&Waker>,
+    ) -> Result<bool, Error> {
+        let mut nodes = self.nodes.borrow_mut();
+        let open = nodes.get_mut(&id).ok_or(Error::NotFound)?;
+        if open.removed {
+            return Err(Error::NotFound);
+        }
+        let conflicts = open.locks.iter().any(|l| {
+            l.owner != owner && l.start < end && start < l.end && (exclusive || l.exclusive)
+        });
+        if conflicts {
+            if let Some(waker) = waker {
+                open.waiting.push(waker.clone());
+            }
+            return Ok(false);
+        }
+        cut(&mut open.locks, owner, start, end);
+        open.locks.push(Lock {
+            owner,
+            exclusive,
+            start,
+            end,
+        });
+        Ok(true)
+    }
+
+    /// Releases the locks of `owner` on `start..end` of node `id`.
+    pub fn unlock(&self, id: u64, owner: u64, (start, end): (u64, u64)) {
+        if let Some(open) = self.nodes.borrow_mut().get_mut(&id) {
+            cut(&mut open.locks, owner, start, end);
+            for waker in open.waiting.drain(..) {
+                waker.wake();
+            }
         }
     }
 
@@ -277,6 +348,25 @@ impl Fs {
             mikros_rt::log!(Error, "fat: unmounting failed: {e:?}");
         }
     }
+}
+
+/// Removes the parts of the locks of `owner` in `locks` that lie in
+/// `start..end`, keeping what lies outside.
+fn cut(locks: &mut Vec<Lock>, owner: u64, start: u64, end: u64) {
+    let mut kept = Vec::with_capacity(locks.len());
+    for lock in locks.drain(..) {
+        if lock.owner != owner || lock.end <= start || end <= lock.start {
+            kept.push(lock);
+            continue;
+        }
+        if lock.start < start {
+            kept.push(Lock { end: start, ..lock });
+        }
+        if end < lock.end {
+            kept.push(Lock { start: end, ..lock });
+        }
+    }
+    *locks = kept;
 }
 
 /// The attributes of the entry `node`.

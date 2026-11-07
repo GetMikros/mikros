@@ -6,6 +6,8 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::future::poll_fn;
+use core::task::Poll;
 use mikros_fat::{Dir, FILE_MAX};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;
@@ -23,6 +25,8 @@ struct Connection {
     rights: Rights,
     cursor: u64,
     append: bool,
+    /// The owner of the connection's locks.
+    owner: u64,
 }
 
 /// Serves the connection on `end` to `target` with `rights` until the
@@ -30,17 +34,27 @@ struct Connection {
 /// `target`.
 pub async fn serve(fs: Rc<Fs>, end: ServerEnd<Node>, target: Target, rights: Rights, append: bool) {
     let server = NodeAsyncServer::new(end, fs.reactor.clone());
+    let owner = fs.owner();
     let mut connection = Connection {
         fs,
         target,
         rights,
         cursor: 0,
         append,
+        owner,
     };
     while let Ok(request) = server.next().await {
-        connection.handle(request, server.server());
+        match request {
+            // A lock that waits holds up the connection's other requests,
+            // as a waiting `fcntl` does.
+            NodeRequest::Lock(q, r) => {
+                let locked = connection.lock(q).await;
+                let _ = r.reply(server.server(), locked.map(|()| NodeLockResponse {}));
+            }
+            request => connection.handle(request, server.server()),
+        }
     }
-    connection.fs.close(connection.target);
+    connection.fs.close(connection.target, owner);
 }
 
 impl Connection {
@@ -107,8 +121,12 @@ impl Connection {
             // What this server does not provide.
             R::GetMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
+            R::Unlock(q, r) => r.reply(
+                s,
+                self.unlock(q.start, q.length)
+                    .map(|()| NodeUnlockResponse {}),
+            ),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unwatch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -240,6 +258,41 @@ impl Connection {
         Ok(NodeSeekResponse {
             position: self.cursor,
         })
+    }
+
+    /// Takes a byte-range lock of the file, waiting for it when asked to
+    /// and otherwise failing with `WOULD_BLOCK` when it conflicts. A
+    /// shared lock needs `READ`, and an exclusive one `WRITE`, as
+    /// `fcntl` does.
+    async fn lock(&self, q: NodeLockRequest) -> Result<(), Error> {
+        let id = self.file()?;
+        let exclusive = match q.kind {
+            LockKind::Shared => false,
+            LockKind::Exclusive => true,
+            LockKind::Unknown(_) => return Err(Error::Invalid),
+        };
+        self.require(if exclusive {
+            Rights::WRITE
+        } else {
+            Rights::READ
+        })?;
+        let range = range(q.start, q.length)?;
+        poll_fn(|cx| {
+            let waker = q.wait.then_some(cx.waker());
+            match self.fs.try_lock(id, self.owner, exclusive, range, waker) {
+                Ok(true) => Poll::Ready(Ok(())),
+                Ok(false) if q.wait => Poll::Pending,
+                Ok(false) => Poll::Ready(Err(Error::WouldBlock)),
+                Err(e) => Poll::Ready(Err(e)),
+            }
+        })
+        .await
+    }
+
+    fn unlock(&self, start: u64, length: u64) -> Result<(), Error> {
+        let id = self.file()?;
+        self.fs.unlock(id, self.owner, range(start, length)?);
+        Ok(())
     }
 
     fn open(&self, q: NodeOpenRequest) -> Result<NodeOpenResponse, Error> {
@@ -392,6 +445,15 @@ fn too_big(offset: Option<u64>, len: usize, e: Error) -> Error {
         Error::TooBig
     } else {
         e
+    }
+}
+
+/// The range of a lock from `start` with `length` bytes, 0 meaning to the
+/// end of the file, `end` excluded.
+fn range(start: u64, length: u64) -> Result<(u64, u64), Error> {
+    match length {
+        0 => Ok((start, u64::MAX)),
+        n => Ok((start, start.checked_add(n).ok_or(Error::Invalid)?)),
     }
 }
 
