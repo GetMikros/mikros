@@ -32,6 +32,7 @@ const PAGE_SIZE: u64 = 4096;
 const KIND_IOPORT: u32 = 2;
 const KIND_DMA: u32 = 4;
 const KIND_PRIORITY: u32 = 5;
+const SHARED: u32 = 1 << 0;
 const INFO_RESOURCE: u32 = 5;
 const INFO_RESOURCE_SIZE: usize = 0x18;
 /// The priorities that a driver's `priority` may reach beyond 16.
@@ -82,7 +83,7 @@ impl Starter {
         root: OwnedHandle,
         reactor: Reactor,
     ) -> Starter {
-        let priority = resource(&root, KIND_PRIORITY, PRIORITY_FIRST as u64, 15);
+        let priority = resource(&root, KIND_PRIORITY, PRIORITY_FIRST as u64, 15, 0);
         if let Err(status) = &priority {
             mikros_rt::log!(
                 Error,
@@ -185,6 +186,19 @@ impl Starter {
         }
     }
 
+    /// A new resource of `kind` covering `size` from `base`, made from the
+    /// root resource, with `SHARED` when `shared`, for `RequestResource`.
+    pub fn request(
+        &self,
+        kind: u32,
+        base: u64,
+        size: u64,
+        shared: bool,
+    ) -> Result<OwnedHandle, Status> {
+        let options = if shared { SHARED } else { 0 };
+        resource(&self.root, kind, base, size, options).map_err(|s| Status::from_raw(s as i32))
+    }
+
     /// Terminates the driver process `pid`, a child of the device
     /// manager, through the process manager. A process that already
     /// terminated, which `BAD_STATE` says, is left as it is.
@@ -213,7 +227,7 @@ impl Starter {
             }
         }
         if needs(Need::Dma) {
-            let dma = resource(&self.root, KIND_DMA, 0, 0)
+            let dma = resource(&self.root, KIND_DMA, 0, 0, 0)
                 .map_err(|s| format!("creating its DMA resource: {s}"))?;
             resources.push(dma);
         }
@@ -236,7 +250,7 @@ impl Starter {
             .as_ref()
             .ok_or_else(|| String::from("there is no PRIORITY resource for its priority"))?;
         let size = (priority - PRIORITY_FIRST + 1) as u64;
-        let handle = resource(own, KIND_PRIORITY, PRIORITY_FIRST as u64, size)
+        let handle = resource(own, KIND_PRIORITY, PRIORITY_FIRST as u64, size, 0)
             .map_err(|status| format!("creating its PRIORITY resource: {status}"))?;
         Ok(Some(StartupHandle {
             role: HandleRole::Priority,
@@ -247,16 +261,17 @@ impl Starter {
 }
 
 /// A new resource of `kind` covering `size` from `base`, made from
-/// `parent`.
+/// `parent` with `options`.
 fn resource(
     parent: &OwnedHandle,
     kind: u32,
     base: u64,
     size: u64,
+    options: u32,
 ) -> Result<OwnedHandle, sys::Status> {
     let mut out = 0;
     // SAFETY: the out pointer is valid for the call.
-    let status = unsafe { sys::resource_create(parent.raw(), kind, base, size, 0, &mut out) };
+    let status = unsafe { sys::resource_create(parent.raw(), kind, base, size, options, &mut out) };
     if status != mikros_rt::OK {
         return Err(status);
     }

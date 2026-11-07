@@ -11,14 +11,20 @@
 //!   the device manager refuses to add a device with an invalid hardware
 //!   ID, with `INVALID_ARGS`, and to remove its own device, with
 //!   `ACCESS_DENIED`, or one that does not exist, with `NOT_FOUND`. It
-//!   then adds a device `test-child` as `test:child` with a property
-//!   `slot` of `0`, or `checks-failed` when a check failed. It accepts
+//!   checks that `RequestResource` gives it a shared `MMIO` resource in
+//!   its ECAM range and a `BTI` resource for requester IDs of bus 0, and
+//!   refuses a `DMA` resource with `INVALID_ARGS` and a `BTI` resource
+//!   for segment 1 with `ACCESS_DENIED`. It then adds a device
+//!   `test-child` as `test:child` with a property `slot` of `0`, or
+//!   `checks-failed` when a check failed. It accepts
 //!   `ConnectChild`, and once the child's driver has written on the bus
 //!   channel, it removes the child, when `ConnectChild` said that the
 //!   child's driver needs `dma`. `ResetChild` succeeds.
 //! - As `system.driver.test-child`, it succeeds when it has a bus
-//!   channel, after writing a message on it, and fails with
-//!   `INVALID_ARGS` otherwise.
+//!   channel and `RequestResource` refuses it, which does not need
+//!   `bus`, an `MMIO` resource with `ACCESS_DENIED`, after writing a
+//!   message on the bus channel, and fails with `INVALID_ARGS`
+//!   otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver ends without replying.
 //! - As any other, it fails with `INVALID_ARGS`.
@@ -38,9 +44,9 @@ use mikros_rt::exec::{Executor, Reactor};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
-    DriverResetChildResponse, DriverStartRequest, DriverStartResponse, DriverStopResponse,
-    Property,
+    DeviceManagerAsyncClient, DeviceManagerRequestResourceResponse, DriverAsyncServer,
+    DriverConnectChildResponse, DriverRequest, DriverResetChildResponse, DriverStartRequest,
+    DriverStartResponse, DriverStopResponse, Property,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -53,6 +59,7 @@ const DECLINE: &str = "system.driver.test-decline";
 const CLOSE: &str = "system.driver.test-close";
 const KIND_MMIO: u32 = 1;
 const KIND_DMA: u32 = 4;
+const KIND_BTI: u32 = 8;
 const INFO_RESOURCE: u32 = 5;
 const INFO_RESOURCE_SIZE: usize = 0x18;
 const READABLE: u32 = 1 << 0;
@@ -84,9 +91,27 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             let host = app_id == HOST;
             let _ = match request {
                 DriverRequest::Start(request, responder) => {
+                    let ecam = request
+                        .device
+                        .properties
+                        .iter()
+                        .find(|p| p.key == "ecam_base");
+                    let ecam = ecam.and_then(|p| p.value.strip_prefix("0x"));
+                    let ecam = ecam.and_then(|b| u64::from_str_radix(b, 16).ok());
+                    let as_expected = host && expected(&request);
+                    let bus = request.bus;
+                    let client = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
+                    let client = Rc::new(client);
                     let result = match app_id.as_str() {
-                        HOST if expected(&request) => Ok(DriverStartResponse {}),
-                        CHILD => signal(request.bus.as_ref()).map(|()| DriverStartResponse {}),
+                        HOST if as_expected => Ok(DriverStartResponse {}),
+                        CHILD => {
+                            let refused =
+                                client.request_resource(KIND_MMIO, 0xFE00_0000, 0x1000, false);
+                            match matches!(refused.await, Ok(Err(Status::AccessDenied))) {
+                                true => signal(bus.as_ref()).map(|()| DriverStartResponse {}),
+                                false => Err(Status::InvalidArgs),
+                            }
+                        }
                         DECLINE => Err(Status::NotSupported),
                         CLOSE => return 0,
                         _ => Err(Status::InvalidArgs),
@@ -94,11 +119,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let started = result.is_ok();
                     let replied = responder.reply(s, result);
                     if host && started {
-                        let client =
-                            DeviceManagerAsyncClient::new(request.manager, reactor.clone());
-                        let client = Rc::new(client);
                         *manager.borrow_mut() = Some(client.clone());
-                        spawner.spawn(add_child(client));
+                        spawner.spawn(add_child(client, ecam.unwrap_or(0)));
                     }
                     replied
                 }
@@ -128,18 +150,31 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     })
 }
 
-/// As the host bridge's driver: checks that the device manager refuses
-/// requests it should, and adds the child device, named after the
-/// outcome.
-async fn add_child(manager: Rc<DeviceManagerAsyncClient>) {
+/// As the host bridge's driver, with its ECAM range at `ecam`: checks
+/// that the device manager refuses the requests it should and grants
+/// the others, and adds the child device, named after the outcome.
+async fn add_child(manager: Rc<DeviceManagerAsyncClient>, ecam: u64) {
     let bad = manager
         .add_device("bad".into(), vec!["Bad:1".into()], vec![], vec![])
         .await;
     let own = manager.remove_device(1).await;
     let unknown = manager.remove_device(999).await;
+    let request = |kind, base, size, shared| manager.request_resource(kind, base, size, shared);
+    let granted = |reply: Result<Result<DeviceManagerRequestResourceResponse, Status>, _>,
+                   wanted| {
+        matches!(reply, Ok(Ok(r)) if kind(&r.resource) == Some(wanted))
+    };
+    let mmio = granted(request(KIND_MMIO, ecam, 0x1000, true).await, KIND_MMIO);
+    let bti = granted(request(KIND_BTI, 0, 0x100, false).await, KIND_BTI);
+    let dma = request(KIND_DMA, 0, 0, false).await;
+    let other_segment = request(KIND_BTI, 0x1_0000, 1, false).await;
     let checked = matches!(bad, Ok(Err(Status::InvalidArgs)))
         && matches!(own, Ok(Err(Status::AccessDenied)))
-        && matches!(unknown, Ok(Err(Status::NotFound)));
+        && matches!(unknown, Ok(Err(Status::NotFound)))
+        && mmio
+        && bti
+        && matches!(dma, Ok(Err(Status::InvalidArgs)))
+        && matches!(other_segment, Ok(Err(Status::AccessDenied)));
     let name = if checked {
         "test-child"
     } else {
