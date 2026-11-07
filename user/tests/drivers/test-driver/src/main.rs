@@ -57,6 +57,10 @@
 //!   block, written with `fua`, reads back as written before it is
 //!   written back as it was and flushed. It fails with `INVALID_ARGS`
 //!   otherwise.
+//! - As `system.driver.test-fat`, the driver of the root partition of
+//!   the test machine's disk, it succeeds when the FAT server serves
+//!   the disk's EFI system partition through its `filesystem` service as
+//!   `fat::works` checks. It fails with `INVALID_ARGS` otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver publishes a `storage`
 //!   service and ends without replying.
@@ -71,6 +75,8 @@
 
 extern crate alloc;
 
+mod fat;
+
 use alloc::rc::Rc;
 use alloc::vec;
 use core::cell::RefCell;
@@ -84,7 +90,7 @@ use mikros_rt::interfaces::mikros::driver::{
 };
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
-use mikros_rt::interfaces::mikros::service::Provider;
+use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, Provider};
 use mikros_rt::interfaces::mikros::storage::{BlockAsyncClient, BlockFlags};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
@@ -95,6 +101,7 @@ const CHILD: &str = "system.driver.test-child";
 const PCI: &str = "system.driver.test-pci";
 const EDU: &str = "system.driver.test-edu";
 const DISK: &str = "system.driver.test-disk";
+const FAT: &str = "system.driver.test-fat";
 /// The models of the test machine's disks: the virtio disk, and the
 /// scratch disks behind QEMU's NVMe and AHCI controllers.
 const MODELS: [&str; 3] = ["virtio-blk", "QEMU NVMe Ctrl", "QEMU HARDDISK"];
@@ -137,6 +144,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let app_id = managed.header.app_id.clone();
     let process = managed.header.process.raw();
+    let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
     let Some(at) = managed
         .handles
         .iter()
@@ -204,6 +212,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                                 false => Err(Status::InvalidArgs),
                             }
                         }
+                        FAT => match fat::works(&directory, &reactor).await {
+                            true => Ok(DriverStartResponse {}),
+                            false => Err(Status::InvalidArgs),
+                        },
                         DECLINE => Err(Status::NotSupported),
                         RESET => return 0,
                         CLOSE => {

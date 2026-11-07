@@ -8858,10 +8858,14 @@ mod manager {
     /// the scratch partition `part-1` of each scratch disk, and the EFI
     /// system partition `part-1` and root partition `part-2` of the test
     /// machine's disk. Each publishes its raw access service and serves
-    /// `Block` to the test driver for the partition, whose `Start`
-    /// succeeds only when reads, writes, flushes, the writable lock and
-    /// refusals work as they should. The device manager says all of it
-    /// in the log.
+    /// `Block` to the driver for the partition. For the scratch
+    /// partitions that is the test driver, whose `Start` succeeds only
+    /// when reads, writes, flushes, the writable lock and refusals work
+    /// as they should. For the EFI system partition it is the FAT server,
+    /// which publishes the volume's `filesystem` service, and the test
+    /// driver for the root partition succeeds only when that service
+    /// reads, writes, renames and removes as it should. The device
+    /// manager says all of it in the log.
     pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -8885,7 +8889,12 @@ mod manager {
                 b", disk-0, as storage:disk, under 4, with 0 resources",
                 1,
             ),
-            (b"device-manager: started driver test-disk for device", 4),
+            (b"device-manager: started driver test-disk for device", 2),
+            (b"device-manager: bound driver fat to device", 1),
+            (b"device-manager: started driver fat for device", 1),
+            (b"device-manager: bound driver test-fat to device", 1),
+            (b"device-manager: started driver test-fat for device", 1),
+            (b"device-manager: published device.filesystem ", 1),
             (b"device-manager: bound driver partition to device", 3),
             (b"device-manager: started driver partition for device", 3),
             (
@@ -8926,6 +8935,8 @@ mod manager {
             b"driver nvme declined",
             b"driver ahci declined",
             b"driver partition declined",
+            b"driver fat declined",
+            b"driver test-fat declined",
         ];
         let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
         ensure("adding the PCI functions and starting their driver", logged)

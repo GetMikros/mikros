@@ -1,0 +1,6 @@
+# A driver for the root partition of the test machine's disk, which
+# checks the FAT server's file system of the EFI system partition.
+name: test-fat
+binary: /usr/lib/drivers/test-fat/test-fat
+match: [gpt:fa730af6-8ba3-42d9-b155-466909d08135]
+permissions: [filesystem.mount]

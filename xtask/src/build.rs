@@ -145,6 +145,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", partition.display());
             let partition_manifest =
                 crate::workspace_root().join("user/drivers/partition/driver.yaml");
+            let fat = user_build("fat", kind)?;
+            println!("built    {}", fat.display());
+            let fat_manifest = crate::workspace_root().join("user/drivers/fat/driver.yaml");
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let devices_manifest =
@@ -186,6 +189,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/drivers/partition/driver.yaml",
                     partition_manifest.as_path(),
                 ),
+                ("usr/lib/drivers/fat/fat", fat.as_path()),
+                ("usr/lib/drivers/fat/driver.yaml", fat_manifest.as_path()),
             ];
             boot_image(kind, "boot.img", &members)?
         }
@@ -466,6 +471,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", ahci.display());
             let partition = user_build("partition", kind)?;
             println!("built    {}", partition.display());
+            let fat = user_build("fat", kind)?;
+            println!("built    {}", fat.display());
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let device_image = |file: &str,
@@ -520,8 +527,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // The PCI bus driver tests serve this image, with the bus
             // driver and test drivers for the host bridge's function, for
             // QEMU's edu device and for the e1000e function, and the
-            // storage drivers, with the partition driver and a test driver
-            // for each partition.
+            // storage drivers, with the partition driver, the FAT server for
+            // the EFI system partition, a test driver for the root partition
+            // that checks it, and one for each scratch partition.
             let pci_bus_files = [
                 (
                     "usr/lib/drivers/pci-bus/pci-bus".to_owned(),
@@ -557,6 +565,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/drivers/partition/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/partition/driver.yaml"),
                 ),
+                ("usr/lib/drivers/fat/fat".to_owned(), fat.clone()),
+                (
+                    "usr/lib/drivers/fat/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/fat/driver.yaml"),
+                ),
             ];
             let pci_image = device_image(
                 "pci.img",
@@ -565,6 +578,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("test-edu", true),
                     ("test-reset", true),
                     ("test-disk", true),
+                    ("test-fat", true),
                 ],
                 &pci_bus_files,
             )?;
