@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["device-manager", "drivers/pci-bus", "storage", "virtio", "init", "libc", "loader", "mikros-rt", "permissions-broker", "process-manager", "service-manager", "tests/broker-probe", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/directory-probe", "tests/drivers/test-driver", "tests/init", "tests/launcher-probe", "tests/managed", "tests/pie", "tests/port-tests", "tests/support"]
+members = ["device-manager", "drivers/pci-bus", "drivers/virtio-blk", "storage", "virtio", "init", "libc", "loader", "mikros-rt", "permissions-broker", "process-manager", "service-manager", "tests/broker-probe", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/directory-probe", "tests/drivers/test-driver", "tests/init", "tests/launcher-probe", "tests/managed", "tests/pie", "tests/port-tests", "tests/support"]
 # Built here as a dependency, and host-tested in the root workspace,
 # except `std`, a workspace of its own for programs that use the
 # standard library.
