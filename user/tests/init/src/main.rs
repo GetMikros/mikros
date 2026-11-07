@@ -9711,8 +9711,10 @@ const TESTS: [(&str, Test); 135] = [
     ("processes_and_channels", processes_and_channels),
     ("init_segments_as_loaded", init_segments_as_loaded),
     ("boot_memory_reclaimed", boot_memory_reclaimed),
-    // Next to last, as its bus driver outlives the test and keeps
-    // exclusive resources: the BTI range of segment 0 and the BARs of q35.
+    // Next to last, and after the fuzz build's hook tests, as its bus
+    // driver outlives the test and keeps exclusive resources, the BTI
+    // range of segment 0 and the BARs of q35, and its processes keep
+    // allocating.
     (
         "device_manager_starts_the_pci_bus_driver",
         manager::device_manager_starts_the_pci_bus_driver,
@@ -9722,7 +9724,9 @@ const TESTS: [(&str, Test); 135] = [
 ];
 
 /// The tests of the fuzz build's test hooks, which run before the last
-/// test, as they start programs from the boot image.
+/// two tests: they start programs from the boot image, which the last
+/// test closes, and count charges, which the processes that outlive the
+/// next to last test would change.
 #[cfg(feature = "fuzz")]
 const HOOK_TESTS: &[(&str, Test)] = &hooks::TESTS;
 #[cfg(not(feature = "fuzz"))]
@@ -9822,8 +9826,8 @@ fn main(s: &Startup) -> i64 {
         return 1;
     }
     let (mut failed, mut left_out) = (0, 0);
-    let (last, first) = TESTS.split_last().expect("there are tests");
-    for (name, test) in first.iter().chain(HOOK_TESTS).chain([last]) {
+    let (first, last) = TESTS.split_at(TESTS.len() - 2);
+    for (name, test) in first.iter().chain(HOOK_TESTS).chain(last) {
         if skipped(s).any(|n| n == *name) {
             left_out += 1;
             log!(Info, "TEST {name} SKIPPED");
