@@ -241,6 +241,7 @@ async fn start(
             identity,
             queued,
             memory: memory.clone(),
+            spare: RefCell::new(Vec::new()),
         }));
     }
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());

@@ -5,6 +5,7 @@ use crate::port::{Ata, DEVICE_LBA, PRD_MAX, Port};
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockFlags, BlockInfo};
@@ -18,6 +19,12 @@ const READ_FPDMA_QUEUED: u8 = 0x60;
 const WRITE_FPDMA_QUEUED: u8 = 0x61;
 const FLUSH_CACHE_EXT: u8 = 0xEA;
 const IDENTIFY_DEVICE: u8 = 0xEC;
+const DATA_SET_MANAGEMENT: u8 = 0x06;
+/// DATA SET MANAGEMENT's TRIM bit, the size of one LBA range entry and
+/// the most sectors in one.
+const TRIM: u16 = 1 << 0;
+const RANGE_SIZE: u64 = 8;
+const RANGE_SECTORS_MAX: u64 = 0xFFFF;
 /// The most sectors one read or write moves, and the most bytes, which
 /// a command table's PRD entries always cover.
 const COMMAND_SECTORS_MAX: u64 = 1 << 16;
@@ -35,6 +42,7 @@ pub struct Identity {
     /// Native command queuing, and its queue depth.
     pub ncq: bool,
     pub queue_depth: u32,
+    pub trim: bool,
     pub write_cache: bool,
 }
 
@@ -80,6 +88,7 @@ pub async fn identify(port: &Port, page: &Contiguous) -> Result<Identity, Status
         sector_size,
         ncq: w[76] & 1 << 8 != 0,
         queue_depth: u32::from(w[75] & 0x1F) + 1,
+        trim: w[169] & 1 != 0,
         write_cache: w[85] & 1 << 5 != 0,
     })
 }
@@ -89,8 +98,10 @@ pub struct Disk {
     pub identity: Identity,
     /// Whether reads and writes use native command queuing.
     pub queued: bool,
-    /// Where the driver's DMA memory comes from.
+    /// Where pages for the LBA ranges of discards come from, and those
+    /// that are free.
     pub memory: Rc<Memory>,
+    pub spare: RefCell<Vec<Contiguous>>,
 }
 
 /// Where the driver's DMA memory comes from: the `DMA` resource, the
@@ -184,6 +195,49 @@ impl Disk {
         };
         self.port.issue(ata, &[], false, false).await
     }
+
+    /// Trims the `count` blocks from `block`, with as many DATA SET
+    /// MANAGEMENT commands as their LBA ranges need.
+    pub async fn discard(&self, mut block: u64, mut count: u64) -> Result<(), Status> {
+        let page = match self.spare.borrow_mut().pop() {
+            Some(page) => page,
+            None => self.memory.contiguous(PAGE)?,
+        };
+        let done = self.trim(&page, &mut block, &mut count).await;
+        self.spare.borrow_mut().push(page);
+        done
+    }
+
+    async fn trim(
+        &self,
+        page: &Contiguous,
+        block: &mut u64,
+        count: &mut u64,
+    ) -> Result<(), Status> {
+        while *count > 0 {
+            page.zero();
+            let mut ranges = 0;
+            while *count > 0 && ranges < PAGE / RANGE_SIZE {
+                let n = (*count).min(RANGE_SECTORS_MAX);
+                page.write64(RANGE_SIZE * ranges, *block | n << 48);
+                *block += n;
+                *count -= n;
+                ranges += 1;
+            }
+            let ata = Ata {
+                command: DATA_SET_MANAGEMENT,
+                features: TRIM,
+                // In 512-byte blocks of range entries.
+                count: (PAGE / 512) as u16,
+                device: DEVICE_LBA,
+                ..Ata::default()
+            };
+            self.port
+                .issue(ata, &[(page.physical(0), PAGE as u32)], true, false)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 impl mikros_storage::Disk for Disk {
@@ -191,6 +245,9 @@ impl mikros_storage::Disk for Disk {
         let mut flags = 0;
         if self.identity.write_cache {
             flags |= BlockFlags::FLUSH.0;
+        }
+        if self.identity.trim {
+            flags |= BlockFlags::DISCARD.0;
         }
         BlockInfo {
             block_size: self.identity.sector_size,
@@ -230,7 +287,7 @@ impl mikros_storage::Disk for Disk {
         Disk::flush(self).await
     }
 
-    async fn discard(&self, _block: u64, _count: u64) -> Result<(), Status> {
-        Err(Status::NotSupported)
+    async fn discard(&self, block: u64, count: u64) -> Result<(), Status> {
+        Disk::discard(self, block, count).await
     }
 }
