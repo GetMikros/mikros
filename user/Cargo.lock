@@ -179,6 +179,13 @@ name = "mikros-ustar"
 version = "0.0.0"
 
 [[package]]
+name = "mikros-virtio"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "mikros-yaml"
 version = "0.0.0"
 
