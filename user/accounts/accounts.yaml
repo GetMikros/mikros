@@ -1,0 +1,10 @@
+# The service manifest of the accounts service, installed as
+# usr/lib/services/accounts.yaml.
+name: accounts
+binary: /usr/bin/accounts
+start: on-demand
+provides:
+  - protocol: mikros.session.Accounts
+namespace:
+  - path: /var/lib/accounts
+    rights: rw

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["device-manager", "drivers/ahci", "drivers/fat", "drivers/nvme", "drivers/partition", "drivers/pci-bus", "drivers/virtio-blk", "storage", "virtio", "init", "libc", "loader", "mikros-rt", "permissions-broker", "process-manager", "service-manager", "tmpfs", "union", "tests/broker-probe", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/directory-probe", "tests/drivers/test-driver", "tests/init", "tests/launcher-probe", "tests/managed", "tests/namespace-probe", "tests/tmpfs-probe", "tests/union-probe", "tests/pie", "tests/port-tests", "tests/support"]
+members = ["accounts", "device-manager", "drivers/ahci", "drivers/fat", "drivers/nvme", "drivers/partition", "drivers/pci-bus", "drivers/virtio-blk", "storage", "virtio", "init", "libc", "loader", "mikros-rt", "permissions-broker", "process-manager", "service-manager", "tmpfs", "union", "tests/broker-probe", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/directory-probe", "tests/drivers/test-driver", "tests/init", "tests/launcher-probe", "tests/managed", "tests/namespace-probe", "tests/tmpfs-probe", "tests/union-probe", "tests/pie", "tests/port-tests", "tests/support"]
 # Built here as a dependency, and host-tested in the root workspace,
 # except `std`, a workspace of its own for programs that use the
 # standard library.
@@ -13,6 +13,12 @@ edition = "2024"
 # Programs built without the standard library abort on panic.
 [profile.dev]
 panic = "abort"
+
+# Unoptimized, one password hash takes many seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 panic = "abort"
