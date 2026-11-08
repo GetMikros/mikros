@@ -781,6 +781,10 @@ name = "mikros-btrfs"
 version = "0.0.0"
 
 [[package]]
+name = "mikros-casefold"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-fat"
 version = "0.0.0"
 dependencies = [

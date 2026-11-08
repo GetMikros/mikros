@@ -4,6 +4,7 @@ mod boot_menu;
 mod btrfs;
 mod build;
 mod build_systems;
+mod casefold;
 mod check;
 mod cmake;
 mod debug;
@@ -50,6 +51,8 @@ enum Command {
     Btrfs(btrfs::Args),
     /// Build the system components.
     Build(build::Args),
+    /// Generate the case folding table of mikros-casefold.
+    Casefold(casefold::Args),
     /// Check formatting, lints and the commits since the base branch.
     Check(check::Args),
     /// Boot the disk image in QEMU halted and attach GDB to the kernel.
@@ -84,6 +87,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Btrfs(args) => btrfs::run(&args),
         Command::Build(args) => build::run(&args),
+        Command::Casefold(args) => casefold::run(&args),
         Command::Check(args) => check::run(&args),
         Command::Debug(args) => debug::run(&args),
         Command::Fuzz(args) => fuzz::run(&args),
