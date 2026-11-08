@@ -1,6 +1,7 @@
 //! Development tasks for the Mikros repository, run with `cargo xtask`.
 
 mod boot_menu;
+mod btrfs;
 mod build;
 mod build_systems;
 mod check;
@@ -45,6 +46,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Build Linux's btrfs code on the btrfs shim into a static library.
+    Btrfs(btrfs::Args),
     /// Build the system components.
     Build(build::Args),
     /// Check formatting, lints and the commits since the base branch.
@@ -79,6 +82,7 @@ pub fn workspace_root() -> PathBuf {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
+        Command::Btrfs(args) => btrfs::run(&args),
         Command::Build(args) => build::run(&args),
         Command::Check(args) => check::run(&args),
         Command::Debug(args) => debug::run(&args),
