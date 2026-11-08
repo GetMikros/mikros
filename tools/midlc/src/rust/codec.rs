@@ -58,6 +58,11 @@ impl Gen<'_> {
                 element,
                 max,
                 optional: false,
+            } if is_byte(element) => format!("e.bytes({at}, &{value}, {max})?;\n"),
+            Type::Vector {
+                element,
+                max,
+                optional: false,
             } => {
                 let (v, base, i, x) = (
                     self.fresh("v"),
@@ -131,6 +136,11 @@ impl Gen<'_> {
             Type::F32 => get("f32", 4),
             Type::F64 => get("f64", 8),
             Type::String { max, optional } => need(format!("d.string({at}, {max})?"), *optional),
+            Type::Vector {
+                element,
+                max,
+                optional,
+            } if is_byte(element) => need(format!("d.bytes({at}, {max})?"), *optional),
             Type::Vector {
                 element,
                 max,
@@ -209,6 +219,12 @@ impl Gen<'_> {
             }
         }
     }
+}
+
+/// Whether vectors of `element` are vectors of bytes, which are copied
+/// at once rather than an element at a time.
+fn is_byte(element: &Type) -> bool {
+    matches!(element, Type::Int(Int::U8))
 }
 
 /// `ty` without its `?`.

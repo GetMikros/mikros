@@ -201,9 +201,18 @@ impl Encoder {
     }
 
     pub fn string(&mut self, at: usize, s: &str, max: u64) -> Result<(), Error> {
-        self.vector(at, s.len(), max)?;
-        let o = self.alloc(s.len());
-        self.put(o, s.as_bytes());
+        self.bytes(at, s.as_bytes(), max)
+    }
+
+    /// A present vector of bytes, at most `max` of them, copied at once:
+    /// appended to the message, whose end `alloc` keeps at a multiple of
+    /// 8, and padded with zeros, rather than allocated zeroed and then
+    /// overwritten.
+    pub fn bytes(&mut self, at: usize, data: &[u8], max: u64) -> Result<(), Error> {
+        self.vector(at, data.len(), max)?;
+        self.bytes.extend_from_slice(data);
+        let end = self.bytes.len().next_multiple_of(8);
+        self.bytes.resize(end, 0);
         Ok(())
     }
 
@@ -347,6 +356,19 @@ impl<'a> Decoder<'a> {
         let o = self.claim(len)?;
         let text = core::str::from_utf8(&self.bytes[o..o + len]).map_err(|_| Error::Invalid)?;
         Ok(Some(String::from(text)))
+    }
+
+    /// The vector of bytes at `at`, copied at once, or `None` when it is
+    /// absent.
+    pub fn bytes(&mut self, at: usize, max: u64) -> Result<Option<Vec<u8>>, Error> {
+        let Some(len) = self.vector(at, max)? else {
+            return Ok(None);
+        };
+        let o = self.claim(len)?;
+        let mut v = Vec::new();
+        v.try_reserve_exact(len).map_err(|_| Error::Invalid)?;
+        v.extend_from_slice(&self.bytes[o..o + len]);
+        Ok(Some(v))
     }
 
     /// The handle whose marker is at `at`, or `None` when it is absent.

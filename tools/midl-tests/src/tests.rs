@@ -161,6 +161,54 @@ fn refuses_to_send_values_over_their_bounds() {
     );
 }
 
+fn encode_bytes(value: Bytes) -> Result<Vec<u8>, Error> {
+    let mut e = Encoder::new(HEADER, Bytes::__SIZE);
+    value.__encode(&mut e, rt::HEADER_SIZE)?;
+    Ok(e.finish().0)
+}
+
+fn decode_bytes(bytes: &[u8]) -> Result<Bytes, Error> {
+    let mut d = Decoder::new(bytes, Vec::new());
+    d.header()?;
+    let at = d.claim(Bytes::__SIZE)?;
+    let value = Bytes::__decode(&mut d, at)?;
+    d.finish()?;
+    Ok(value)
+}
+
+#[test]
+fn lays_out_vectors_of_bytes_as_other_vectors() {
+    let _s = serial();
+    let value = || Bytes {
+        data: vec![1, 2, 3, 4, 5],
+        maybe: None,
+    };
+    let bytes = encode_bytes(value()).unwrap();
+    let mut expected = vec![0, 0, 0, 0, 9, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+    expected.extend(5u64.to_le_bytes());
+    expected.extend(u64::MAX.to_le_bytes());
+    expected.extend([0; 16]);
+    expected.extend([1, 2, 3, 4, 5, 0, 0, 0]);
+    assert_eq!(bytes, expected);
+    assert_eq!(decode_bytes(&bytes), Ok(value()));
+    let full = || Bytes {
+        data: vec![],
+        maybe: Some(vec![9; 6]),
+    };
+    assert_eq!(decode_bytes(&encode_bytes(full()).unwrap()), Ok(full()));
+    let too_long = Bytes {
+        data: vec![0; 7],
+        maybe: None,
+    };
+    assert_eq!(encode_bytes(too_long), Err(Error::TooLong));
+    let mut padded = bytes.clone();
+    *padded.last_mut().unwrap() = 1;
+    assert_eq!(decode_bytes(&padded), Err(Error::Invalid), "padding");
+    let mut longer = bytes.clone();
+    longer[rt::HEADER_SIZE] = 7;
+    assert_eq!(decode_bytes(&longer), Err(Error::Invalid), "over the bound");
+}
+
 #[test]
 fn skips_unknown_members_of_flexible_unions_and_tables() {
     let _s = serial();

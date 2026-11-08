@@ -55,6 +55,11 @@ type Holder = struct {
     events vector<handle<Event>, 2>;
 };
 
+type Bytes = struct {
+    data vector<u8, 6>;
+    maybe vector<u8, 6>?;
+};
+
 type Wrap = struct {
     s Strict;
 };
