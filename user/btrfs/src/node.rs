@@ -8,6 +8,12 @@ use core::marker::PhantomData;
 
 unsafe extern "C" {
     fn mikros_btrfs_root(mount: *mut c_void, node: *mut *mut c_void) -> i32;
+    fn mikros_btrfs_share(node: *mut c_void, cookie: u64) -> i32;
+    fn mikros_btrfs_lend_page(node: *mut c_void, index: u64, page: *mut *mut u8) -> i32;
+    fn mikros_btrfs_lent(node: *mut c_void);
+    fn mikros_btrfs_harvest(node: *mut c_void);
+    fn mikros_btrfs_unchangeable(node: *mut c_void) -> bool;
+    fn mikros_btrfs_unshare(node: *mut c_void);
     fn mikros_btrfs_lookup(
         dir: *mut c_void,
         name: *const c_char,
@@ -414,5 +420,86 @@ impl Drop for Node<'_> {
     fn drop(&mut self) {
         // SAFETY: the node is alive, and nothing uses it after this.
         unsafe { mikros_btrfs_put(self.node) }
+    }
+}
+
+/// A file whose page cache the program shares with a paged memory object
+/// of the host's, by lending the frames of its folios (`shim/share.c`):
+/// a handle to its node that any thread may use, as long as the node is
+/// alive.
+#[derive(Clone, Copy, Debug)]
+pub struct Shared(*mut c_void);
+
+// SAFETY: the shim's calls on a node may come from any thread.
+unsafe impl Send for Shared {}
+unsafe impl Sync for Shared {}
+
+impl Node<'_> {
+    /// Shares the page cache of this file with the host's paged memory
+    /// object `cookie`, which the host's `mikros_host_share_` calls name,
+    /// for as long as the program runs. Fails with `EINVAL` for a node
+    /// that is not a file, and `EEXIST` for one shared already.
+    pub fn share(&self, cookie: u64) -> Result<Shared, i32> {
+        // SAFETY: as for `create()`.
+        result(unsafe { mikros_btrfs_share(self.node, cookie) })?;
+        Ok(Shared(self.node))
+    }
+
+    /// Whether the node can never change: it is on a read-only mount or
+    /// in a read-only subvolume.
+    pub fn unchangeable(&self) -> bool {
+        // SAFETY: as for `create()`.
+        unsafe { mikros_btrfs_unchangeable(self.node) }
+    }
+}
+
+impl Shared {
+    /// Gets page `index` of the file ready to lend: reads it, and returns
+    /// its address in the shim's memory, which stays the page cache's
+    /// while lent. `lent()` must follow once the host has lent it or
+    /// given up. Fails with `ENXIO` past the end of the file.
+    ///
+    /// # Safety
+    ///
+    /// The node that shared the file must be alive.
+    pub unsafe fn lend_page(&self, index: u64) -> Result<*mut u8, i32> {
+        let mut page = core::ptr::null_mut();
+        // SAFETY: the caller vouches for the node; the out pointer is
+        // valid for the call.
+        result(unsafe { mikros_btrfs_lend_page(self.0, index, &mut page) })?;
+        Ok(page)
+    }
+
+    /// Ends a lend that `lend_page()` got ready.
+    ///
+    /// # Safety
+    ///
+    /// As for `lend_page()`.
+    pub unsafe fn lent(&self) {
+        // SAFETY: the caller vouches for the node.
+        unsafe { mikros_btrfs_lent(self.0) }
+    }
+
+    /// Stops sharing the file, once no page is lent any more nor a lend
+    /// under way: the folios of the pages lent go back to the page
+    /// cache's care, and the inode may go.
+    ///
+    /// # Safety
+    ///
+    /// As for `lend_page()`, and the pages lent must no longer be used.
+    pub unsafe fn unshare(&self) {
+        // SAFETY: the caller vouches for the node and the pages.
+        unsafe { mikros_btrfs_unshare(self.0) }
+    }
+
+    /// Marks the folios of the object's dirty pages dirty, so that btrfs
+    /// writes back what clients wrote through mappings.
+    ///
+    /// # Safety
+    ///
+    /// As for `lend_page()`.
+    pub unsafe fn harvest(&self) {
+        // SAFETY: the caller vouches for the node.
+        unsafe { mikros_btrfs_harvest(self.0) }
     }
 }

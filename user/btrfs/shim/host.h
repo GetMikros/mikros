@@ -46,6 +46,16 @@ int mikros_host_disk_write(void *disk, u64 offset, const void *buf, unsigned lon
 int mikros_host_disk_flush(void *disk);
 int mikros_host_disk_discard(void *disk, u64 offset, u64 len);
 
+/* Runs the pager op `op` on `count` pages from `first` of the paged memory
+ * object that the host names `cookie`, the object of a shared file
+ * (share.c): 0, -EBUSY while a writeback of the pages is outstanding, or
+ * another negative errno. */
+int mikros_host_share_op(u64 cookie, u32 op, u64 first, u64 count);
+/* Stores up to `cap` ranges of dirty pages of the object `cookie` among
+ * the `count` pages from `first`, as pairs of the first page and the
+ * number of pages, in `ranges`: how many, or a negative errno. */
+long mikros_host_share_dirty(u64 cookie, u64 first, u64 count, u64 *ranges, long cap);
+
 /* Writes a line of the log, without its newline. */
 void mikros_host_log(const char *text, unsigned long len);
 

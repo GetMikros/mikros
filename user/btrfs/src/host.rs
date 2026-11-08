@@ -253,3 +253,64 @@ extern "C" fn mikros_host_abort(line: *const u8, len: usize) -> ! {
     mikros_host_log(line, len);
     std::process::abort();
 }
+
+/// What the tests' stand-in for the paged memory object of a shared file
+/// was asked to do, as pager ops with their first page and page count,
+/// and the pages that a test calls dirty, as written through a mapping.
+#[derive(Default)]
+pub struct Object {
+    pub ops: std::vec::Vec<(u32, u64, u64)>,
+    pub dirty: std::collections::BTreeSet<u64>,
+}
+
+/// The stand-ins, by cookie.
+pub static OBJECTS: std::sync::Mutex<std::collections::BTreeMap<u64, Object>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+const OP_WRITEBACK_END: u32 = 4;
+const OP_DISCARD: u32 = 6;
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_share_op(cookie: u64, op: u32, first: u64, count: u64) -> c_int {
+    let mut objects = OBJECTS.lock().unwrap();
+    let object = objects.entry(cookie).or_default();
+    object.ops.push((op, first, count));
+    // As in the kernel, ending a writeback cleans its pages, and
+    // discarding removes them.
+    if op == OP_WRITEBACK_END || op == OP_DISCARD {
+        object
+            .dirty
+            .retain(|page| !(first..first + count).contains(page));
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_share_dirty(
+    cookie: u64,
+    first: u64,
+    count: u64,
+    ranges: *mut u64,
+    cap: c_long,
+) -> c_long {
+    let objects = OBJECTS.lock().unwrap();
+    let Some(object) = objects.get(&cookie) else {
+        return 0;
+    };
+    let mut found: std::vec::Vec<(u64, u64)> = std::vec::Vec::new();
+    for &page in object.dirty.range(first..first + count) {
+        match found.last_mut() {
+            Some((start, n)) if *start + *n == page => *n += 1,
+            _ => found.push((page, 1)),
+        }
+    }
+    found.truncate(cap as usize);
+    for (i, (start, n)) in found.iter().enumerate() {
+        // SAFETY: the shim's buffer holds `cap` pairs.
+        unsafe {
+            ranges.add(2 * i).write(*start);
+            ranges.add(2 * i + 1).write(*n);
+        }
+    }
+    found.len() as c_long
+}

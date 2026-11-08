@@ -2,6 +2,7 @@
 //! The btrfs code on the shim, run on the build host.
 
 mod reads;
+mod shares;
 mod writes;
 
 use crate::host::Disk;
