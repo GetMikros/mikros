@@ -8384,23 +8384,24 @@ mod manager {
         let mut m = start(s)?;
         let (startup, init) = start_message(s, &m, 2)?;
         m.send(startup, false)?;
-        let deadline = super::in_time();
+        // Each call gets its own deadline: under emulation, starting the
+        // service manager alone can take seconds.
         ensure(
             "refusing the service manager before Register",
             matches!(
-                init.start_service_manager(alloc::vec![], deadline),
+                init.start_service_manager(alloc::vec![], super::in_time()),
                 Ok(Err(Status::BadState))
             ),
         )?;
         ensure(
             "registering init",
-            matches!(init.register(deadline), Ok(Ok(_))),
+            matches!(init.register(super::in_time()), Ok(Ok(_))),
         )?;
         ensure(
             "refusing a second Register",
-            matches!(init.register(deadline), Ok(Err(Status::BadState))),
+            matches!(init.register(super::in_time()), Ok(Err(Status::BadState))),
         )?;
-        let first = init.start_service_manager(alloc::vec![], deadline);
+        let first = init.start_service_manager(alloc::vec![], super::within(super::PROBE_SECONDS));
         let Ok(Ok(started)) = first else {
             mikros_rt::log!(Error, "StartServiceManager: {:?}", first.map(|r| r.err()));
             return Err(Failure {
@@ -8426,7 +8427,7 @@ mod manager {
         ensure(
             "refusing a second StartServiceManager",
             matches!(
-                init.start_service_manager(alloc::vec![], deadline),
+                init.start_service_manager(alloc::vec![], super::in_time()),
                 Ok(Err(Status::BadState))
             ),
         )?;
