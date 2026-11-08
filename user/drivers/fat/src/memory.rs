@@ -66,15 +66,24 @@ impl Fs {
         Ok(mem)
     }
 
-    /// A private copy of the file of node `id`, given `rights`.
+    /// A private copy of the file of node `id`, given `rights`: a
+    /// copy-on-write clone of a copy that the server makes and drops
+    /// again, so that the client's object is a clone as `PRIVATE` asks.
     pub fn private_memory(&self, id: u64, rights: u32) -> Result<OwnedHandle, Error> {
         let size = self.with_node(id, |_, node| Ok(node.size()))?;
-        let mem = self.contents(id, 0, size.next_multiple_of(PAGE).max(PAGE))?;
+        let len = size.next_multiple_of(PAGE).max(PAGE);
+        let copy = self.contents(id, 0, len)?;
+        let mut raw = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let clone = owned(
+            unsafe { sys::mem_clone(copy.raw(), 0, 0, len, &mut raw) },
+            raw,
+        )?;
         let mut out = 0;
         // SAFETY: the out pointer is valid for the call; the kernel closes
         // the old handle.
         owned(
-            unsafe { sys::handle_replace(mem.into_raw(), rights, &mut out) },
+            unsafe { sys::handle_replace(clone.into_raw(), rights, &mut out) },
             out,
         )
     }
