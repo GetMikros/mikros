@@ -107,11 +107,15 @@ impl Connection {
                 self.unlink(&q.name, q.directory)
                     .map(|()| NodeUnlinkResponse {}),
             ),
+            R::GetToken(_, r) => r.reply(s, self.token()),
+            R::Rename(q, r) => r.reply(s, self.rename(q).map(|()| NodeRenameResponse {})),
+            R::Link(q, r) => r.reply(s, self.link(q).map(|()| NodeLinkResponse {})),
+            R::CreateSymlink(q, r) => r.reply(
+                s,
+                self.create_symlink(&q.name, &q.target)
+                    .map(|()| NodeCreateSymlinkResponse {}),
+            ),
             // What this server does not provide yet.
-            R::GetToken(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Rename(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Link(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::CreateSymlink(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),

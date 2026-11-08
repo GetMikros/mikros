@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The served file system: the nodes that connections are open to, which
-//! connections to the same node share, and the `Filesystem` service
+//! connections to the same node share, the tokens of directories, and
+//! the `Filesystem` service
 //! (MIKSPEC-0049.R13), whose root is the top-level subvolume
 //! (MIKSPEC-0053.R4).
 
@@ -48,6 +49,8 @@ pub struct Fs {
     pub mount: &'static Mount,
     pub root: Rc<Open>,
     opens: RefCell<BTreeMap<Key, Weak<Open>>>,
+    /// The directories that tokens name, by the token's object ID.
+    pub(crate) tokens: RefCell<BTreeMap<u64, Rc<Open>>>,
     pub read_only: bool,
     pub reactor: Reactor,
     pub spawner: Spawner,
@@ -130,6 +133,7 @@ impl Fs {
             mount,
             root,
             opens: RefCell::new(opens),
+            tokens: RefCell::new(BTreeMap::new()),
             read_only,
             reactor,
             spawner,

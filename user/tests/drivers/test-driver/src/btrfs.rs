@@ -7,6 +7,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
+use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient, NodeType, OpenFlags};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 
@@ -19,9 +20,11 @@ const MANY: usize = 70;
 /// is a link to a system version, which is followed to a directory of
 /// a system image; `..` and missing names are refused; a file made in a
 /// new directory is written, appended to and read back, with its
-/// attributes; a directory of more entries than one reply holds lists
-/// each once; names taken and paths through files are refused; and what
-/// was made is removed again.
+/// attributes; a link within the directory is followed, one that leads
+/// out of it comes back as a redirect, and both read as their targets; a
+/// hard link names the same node and can be renamed; a directory of more
+/// entries than one reply holds lists each once; names taken and paths
+/// through files are refused; and what was made is removed again.
 pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
     check(directory, reactor).await.is_some()
 }
@@ -80,6 +83,8 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     expect(ok(file.read(0, 100).await)?.data == b"hello btrfs!")?;
     expect(ok(file.read(6, 5).await)?.data == b"btrfs")?;
     ok(file.sync().await)?;
+
+    links(&dir, reactor).await?;
 
     let (many, _) = open(&dir, "many", create_dir, reactor).await.ok()?;
     for i in 0..MANY {
@@ -155,4 +160,43 @@ async fn names(dir: &NodeAsyncClient) -> Option<Vec<(String, NodeType)>> {
         }
         cookie = read.next;
     }
+}
+
+/// Whether symbolic and hard links in `dir`, which holds `file`, behave,
+/// and renaming one.
+async fn links(dir: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+    ok(dir.create_symlink("near".into(), "file".into()).await)?;
+    ok(dir.create_symlink("far".into(), "../etc".into()).await)?;
+    let (near, kind) = open(dir, "near", OpenFlags(0), reactor).await.ok()?;
+    expect(kind == NodeType::File)?;
+    expect(ok(near.read(0, 100).await)?.data == b"hello btrfs!")?;
+    let (link, kind) = open(dir, "near", OpenFlags::NO_FOLLOW, reactor)
+        .await
+        .ok()?;
+    expect(kind == NodeType::Symlink && ok(link.read_link().await)?.target == "file")?;
+    // A link that leads out of the directory comes back for the client
+    // to follow, with the rest of the path.
+    let (endpoint, server) = endpoints::<mikros_rt::interfaces::mikros::fs::Node>().ok()?;
+    drop(endpoint);
+    let rights = mikros_rt::interfaces::mikros::fs::Rights::READ;
+    let far = ok(dir
+        .open("far/passwd".into(), OpenFlags(0), 0, rights, server)
+        .await)?;
+    expect(far.r#type == NodeType::Symlink && far.redirect.as_deref() == Some("../etc/passwd"))?;
+
+    let token = ok(dir.get_token().await)?.token;
+    ok(dir.link("file".into(), token, "hard".into()).await)?;
+    let (hard, _) = open(dir, "hard", OpenFlags(0), reactor).await.ok()?;
+    let a = ok(hard.get_attributes().await)?.attributes;
+    expect(a.links == 2 && ok(hard.read(0, 100).await)?.data == b"hello btrfs!")?;
+    let token = ok(dir.get_token().await)?.token;
+    ok(dir.rename("hard".into(), token, "moved".into()).await)?;
+    let old = open(dir, "hard", OpenFlags(0), reactor).await;
+    expect(matches!(old, Err(Some(Error::NotFound))))?;
+    let (moved, _) = open(dir, "moved", OpenFlags(0), reactor).await.ok()?;
+    expect(ok(moved.read(0, 100).await)?.data == b"hello btrfs!")?;
+    for name in ["near", "far", "moved"] {
+        ok(dir.unlink(name.into(), false).await)?;
+    }
+    Some(())
 }

@@ -1,11 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The requests of a connection that change the entries of directories:
-//! removing them.
+//! removing them, renaming and linking them through tokens
+//! (MIKSPEC-0049.R8), and creating symbolic links.
 
-use crate::fs::error;
-use crate::node::{Connection, NAME_MAX};
-use mikros_btrfs::node::Changes;
+use crate::fs::{Fs, Open, error};
+use crate::node::{Connection, NAME_MAX, TARGET_MAX};
+use alloc::rc::Rc;
+use mikros_btrfs::node::{Changes, Kind};
+use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::*;
+use mikros_rt::sys;
+
+const INFO_BASIC: u32 = 1;
+/// The rights of a token: DUPLICATE, TRANSFER and INSPECT.
+const TOKEN_RIGHTS: u32 = 1 << 0 | 1 << 1 | 1 << 9;
 
 impl Connection {
     /// Makes the connection's user the owner of a node it created.
@@ -26,9 +34,58 @@ impl Connection {
             .remove(name.as_bytes(), directory)
             .map_err(error)
     }
+
+    pub(crate) fn token(&self) -> Result<NodeGetTokenResponse, Error> {
+        self.require(Rights::WRITE)?;
+        self.directory()?;
+        Ok(NodeGetTokenResponse {
+            token: self.fs.token(self.open.clone())?,
+        })
+    }
+
+    pub(crate) fn rename(&self, q: NodeRenameRequest) -> Result<(), Error> {
+        self.require_write()?;
+        self.directory()?;
+        check_component(&q.name)?;
+        check_component(&q.new_name)?;
+        let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        self.open
+            .node
+            .rename(q.name.as_bytes(), &to.node, q.new_name.as_bytes(), 0)
+            .map_err(error)
+    }
+
+    pub(crate) fn link(&self, q: NodeLinkRequest) -> Result<(), Error> {
+        self.require_write()?;
+        self.directory()?;
+        check_component(&q.name)?;
+        check_component(&q.new_name)?;
+        let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        let node = self.lookup(&self.open, &q.name)?.ok_or(Error::NotFound)?;
+        node.node
+            .link(&to.node, q.new_name.as_bytes())
+            .map_err(error)
+    }
+
+    pub(crate) fn create_symlink(&self, name: &str, target: &str) -> Result<(), Error> {
+        self.require_write()?;
+        self.directory()?;
+        check_component(name)?;
+        if target.is_empty() || target.len() > TARGET_MAX || target.contains('\0') {
+            return Err(Error::Invalid);
+        }
+        let target = alloc::ffi::CString::new(target).map_err(|_| Error::Invalid)?;
+        let node = self
+            .open
+            .node
+            .create(name.as_bytes(), Kind::Symlink(target.as_c_str()), 0o777)
+            .map_err(error)?;
+        self.own(&node)
+    }
 }
 
-/// Checks a name that `Unlink` gets.
+/// Checks a name that `Unlink`, `Rename`, `Link` or `CreateSymlink`
+/// gets.
 fn check_component(name: &str) -> Result<(), Error> {
     match name {
         "" | "." | ".." => Err(Error::Invalid),
@@ -36,4 +93,54 @@ fn check_component(name: &str) -> Result<(), Error> {
         n if n.len() > NAME_MAX => Err(Error::NameTooLong),
         _ => Ok(()),
     }
+}
+
+impl Fs {
+    /// A new token that names the directory `dir`.
+    pub fn token(&self, dir: Rc<Open>) -> Result<OwnedHandle, Error> {
+        let mut raw = 0;
+        // SAFETY: the out pointer is valid for the call.
+        if unsafe { sys::event_create(0, &mut raw) } != mikros_rt::OK {
+            return Err(Error::Io);
+        }
+        // SAFETY: the kernel just created the handle for us.
+        let event = unsafe { OwnedHandle::from_raw(raw) };
+        let koid = koid(&event).ok_or(Error::Io)?;
+        let mut token = 0;
+        // SAFETY: the out pointer is valid for the call.
+        if unsafe { sys::handle_duplicate(event.raw(), TOKEN_RIGHTS, &mut token) } != mikros_rt::OK
+        {
+            return Err(Error::Io);
+        }
+        // The server keeps the event, so that its object ID stays its own.
+        core::mem::forget(event);
+        self.tokens.borrow_mut().insert(koid, dir);
+        // SAFETY: the kernel just created the handle for us.
+        Ok(unsafe { OwnedHandle::from_raw(token) })
+    }
+
+    /// The directory that the token `handle` names, when it is one of
+    /// this file system's.
+    pub fn token_dir(&self, handle: &OwnedHandle) -> Option<Rc<Open>> {
+        let koid = koid(handle)?;
+        self.tokens.borrow().get(&koid).cloned()
+    }
+}
+
+/// The object ID of `handle`.
+fn koid(handle: &OwnedHandle) -> Option<u64> {
+    let mut record = [0u8; 24];
+    let mut len = 0;
+    // SAFETY: the pointers describe `record` and `len`.
+    let status = unsafe {
+        sys::object_get_info(
+            handle.raw(),
+            INFO_BASIC,
+            record.as_mut_ptr(),
+            record.len() as u64,
+            &mut len,
+        )
+    };
+    let id = u64::from_le_bytes(record[..8].try_into().ok()?);
+    (status == mikros_rt::OK).then_some(id)
 }
