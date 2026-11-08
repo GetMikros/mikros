@@ -334,6 +334,8 @@ fn integration(
 
 pub fn run(args: &Args) -> Result<()> {
     if !args.no_host {
+        // The btrfs crate's tests link the host's library of the shim.
+        crate::btrfs::build(crate::btrfs::Flavor::Host)?;
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         let status = Command::new(cargo)
             .current_dir(crate::workspace_root())

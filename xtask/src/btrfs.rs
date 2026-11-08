@@ -368,6 +368,14 @@ pub fn build(flavor: Flavor) -> Result<PathBuf> {
         .args(["--wildcard", "--keep-global-symbol=mikros_*"])
         .arg(&object);
     crate::port::run(&mut localize)?;
+    let missing = unprovided(&fs::read(&object)?)?;
+    if !missing.is_empty() {
+        bail!(
+            "the shim leaves {} symbols undefined: {}",
+            missing.len(),
+            missing.join(" ")
+        );
+    }
     let mut ar = Command::new(crate::llvm::tool("llvm-ar"));
     ar.arg("rcs").arg(&library).arg(&object);
     crate::port::run(&mut ar)?;
@@ -638,6 +646,33 @@ fn offsets(source: &Path, flags: &[String], file: &str, out: &Path) -> Result<()
     fs::create_dir_all(out.parent().unwrap())?;
     fs::write(out, header)?;
     Ok(())
+}
+
+/// The symbols that the object `elf` refers to but neither defines nor
+/// may take from the program that links it: memcpy, memmove, memset and
+/// memcmp, the host layer's `mikros_host_` functions, and the linker's
+/// start and stop symbols of the shim's sections and of the program's
+/// ELF header.
+fn unprovided(elf: &[u8]) -> Result<Vec<String>> {
+    use object::{Object, ObjectSymbol};
+    let file = object::File::parse(elf).context("reading the shim's object")?;
+    let mut missing: Vec<String> = file
+        .symbols()
+        .filter(|s| s.is_undefined() && s.is_global())
+        .filter_map(|s| s.name().ok().map(str::to_owned))
+        .filter(|name| !provided(name))
+        .collect();
+    missing.sort();
+    missing.dedup();
+    Ok(missing)
+}
+
+fn provided(name: &str) -> bool {
+    matches!(name, "memcpy" | "memmove" | "memset" | "memcmp")
+        || name.starts_with("mikros_host_")
+        || name.starts_with("__start_mikros_")
+        || name.starts_with("__stop_mikros_")
+        || name == "__ehdr_start"
 }
 
 /// The `#define`s of the `->NAME VALUE` markers in `assembly`.

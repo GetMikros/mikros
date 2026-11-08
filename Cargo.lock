@@ -777,6 +777,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-btrfs"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-fat"
 version = "0.0.0"
 dependencies = [
@@ -1532,6 +1536,7 @@ dependencies = [
  "libc",
  "lzma-rs",
  "mikros-userdb",
+ "object",
  "serde_json",
  "sha2",
  "syscall-table",

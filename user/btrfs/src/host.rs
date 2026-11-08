@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: GPL-2.0
+//! The shim's host layer on the build host, for the tests: memory from
+//! mmap, threads of std, futexes, and the host's clocks.
+
+use core::ffi::{c_int, c_long, c_void};
+use std::boxed::Box;
+use std::fs::File;
+use std::io::{self, Write};
+use std::os::unix::fs::FileExt;
+
+unsafe extern "C" {
+    fn mmap(
+        addr: *mut c_void,
+        len: usize,
+        prot: c_int,
+        flags: c_int,
+        fd: c_int,
+        off: i64,
+    ) -> *mut c_void;
+    fn syscall(number: c_long, ...) -> c_long;
+    fn clock_gettime(clock: c_int, ts: *mut Timespec) -> c_int;
+    fn getrandom(buf: *mut c_void, len: usize, flags: u32) -> isize;
+}
+
+#[repr(C)]
+struct Timespec {
+    sec: i64,
+    nsec: i64,
+}
+
+const PROT_READ_WRITE: c_int = 0x1 | 0x2;
+const MAP_PRIVATE_ANONYMOUS_NORESERVE: c_int = 0x02 | 0x20 | 0x4000;
+const MAP_FAILED: *mut c_void = !0 as *mut c_void;
+const SYS_FUTEX: c_long = 202;
+const FUTEX_WAIT_BITSET_PRIVATE: c_int = 9 | 128;
+const FUTEX_WAKE_PRIVATE: c_int = 1 | 128;
+const FUTEX_BITSET_MATCH_ANY: u32 = !0;
+const CLOCK_REALTIME: c_int = 0;
+const CLOCK_MONOTONIC: c_int = 1;
+const FOREVER: i64 = -1;
+/// The stack of each thread: kernel code keeps frames small, but its
+/// call chains are deep.
+const STACK_SIZE: usize = 4 << 20;
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_reserve(size: usize) -> *mut c_void {
+    // SAFETY: an anonymous mapping that nothing else refers to.
+    let addr = unsafe {
+        mmap(
+            core::ptr::null_mut(),
+            size,
+            PROT_READ_WRITE,
+            MAP_PRIVATE_ANONYMOUS_NORESERVE,
+            -1,
+            0,
+        )
+    };
+    if addr == MAP_FAILED {
+        core::ptr::null_mut()
+    } else {
+        addr
+    }
+}
+
+/// The tests' budget of memory.
+const MEMORY: usize = 1 << 30;
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_memory() -> usize {
+    MEMORY
+}
+
+struct Start(extern "C" fn(*mut c_void), *mut c_void);
+// SAFETY: the shim passes its argument to the thread it starts.
+unsafe impl Send for Start {}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_thread(entry: extern "C" fn(*mut c_void), arg: *mut c_void) -> c_int {
+    let start = Start(entry, arg);
+    let spawned = std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+            let start = start;
+            (start.0)(start.1);
+        });
+    match spawned {
+        Ok(_) => 0,
+        Err(_) => -12,
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_wait(word: *mut u32, value: u32, deadline: i64) {
+    let ts = Timespec {
+        sec: deadline / 1_000_000_000,
+        nsec: deadline % 1_000_000_000,
+    };
+    let timeout = if deadline == FOREVER {
+        core::ptr::null()
+    } else {
+        &ts as *const Timespec
+    };
+    // SAFETY: the shim's word lives as long as anything waits on it.
+    unsafe {
+        syscall(
+            SYS_FUTEX,
+            word,
+            FUTEX_WAIT_BITSET_PRIVATE,
+            value,
+            timeout,
+            core::ptr::null::<u32>(),
+            FUTEX_BITSET_MATCH_ANY,
+        );
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_wake(word: *mut u32, count: c_int) {
+    // SAFETY: as for waiting.
+    unsafe {
+        syscall(SYS_FUTEX, word, FUTEX_WAKE_PRIVATE, count);
+    }
+}
+
+fn clock(id: c_int) -> i64 {
+    let mut ts = Timespec { sec: 0, nsec: 0 };
+    // SAFETY: the pointer is valid for the call.
+    unsafe { clock_gettime(id, &mut ts) };
+    ts.sec * 1_000_000_000 + ts.nsec
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_monotonic() -> i64 {
+    clock(CLOCK_MONOTONIC)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_realtime() -> i64 {
+    clock(CLOCK_REALTIME)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_random(buf: *mut c_void, len: usize) {
+    let mut done = 0;
+    while done < len {
+        // SAFETY: the shim's buffer holds `len` bytes.
+        let got = unsafe { getrandom(buf.cast::<u8>().add(done).cast(), len - done, 0) };
+        if got > 0 {
+            done += got as usize;
+        }
+    }
+}
+
+/// A disk of the host: a file, which the shim's handle points to.
+pub struct Disk(pub File);
+
+/// The negative errno of a failed call.
+fn errno(error: io::Error) -> c_int {
+    -error.raw_os_error().unwrap_or(5)
+}
+
+/// The disk of a handle that `Disk::add()` gave the shim.
+fn disk(handle: *mut c_void) -> &'static File {
+    // SAFETY: the shim passes back the handle, which points to a disk
+    // that stays for the rest of the program.
+    unsafe { &(*handle.cast::<Disk>()).0 }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_disk_read(
+    handle: *mut c_void,
+    offset: u64,
+    buf: *mut u8,
+    len: usize,
+) -> c_int {
+    // SAFETY: the shim's buffer holds `len` bytes, which nothing else
+    // touches during the call.
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    match disk(handle).read_exact_at(buf, offset) {
+        Ok(()) => 0,
+        Err(error) => errno(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_disk_write(
+    handle: *mut c_void,
+    offset: u64,
+    buf: *const u8,
+    len: usize,
+) -> c_int {
+    match disk(handle).write_all_at(text(buf, len), offset) {
+        Ok(()) => 0,
+        Err(error) => errno(error),
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_disk_flush(handle: *mut c_void) -> c_int {
+    match disk(handle).sync_data() {
+        Ok(()) => 0,
+        Err(error) => errno(error),
+    }
+}
+
+impl Disk {
+    /// Gives the shim the disk `file` as /dev/`name`, for the rest of the
+    /// program.
+    pub fn add(name: &core::ffi::CStr, file: File, read_only: bool) -> Result<(), i32> {
+        let size = file.metadata().map_err(errno)?.len();
+        let handle = Box::into_raw(Box::new(Disk(file)));
+        // SAFETY: the handle points to a disk that is never freed.
+        unsafe { crate::add_disk(name, handle.cast(), size, 512, read_only) }
+    }
+}
+
+fn text(text: *const u8, len: usize) -> &'static [u8] {
+    // SAFETY: the shim passes a pointer and length of its text.
+    unsafe { core::slice::from_raw_parts(text, len) }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_log(line: *const u8, len: usize) {
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(text(line, len));
+    let _ = err.write_all(b"\n");
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_abort(line: *const u8, len: usize) -> ! {
+    mikros_host_log(line, len);
+    std::process::abort();
+}
