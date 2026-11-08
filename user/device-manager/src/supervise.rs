@@ -404,7 +404,7 @@ async fn exited(reactor: &Reactor, process: &OwnedHandle) -> Option<(i64, u32)> 
     Some((code, signal))
 }
 
-fn now() -> i64 {
+pub fn now() -> i64 {
     let mut now = 0;
     // SAFETY: the out pointer is valid for the call.
     unsafe { sys::clock_get_monotonic(&mut now) };

@@ -37,6 +37,7 @@ fn minimal_manifest_takes_defaults() {
             permissions: vec![],
             namespace: vec![],
             priority: 16,
+            stop_timeout: 10,
         }
     );
     assert!(m.unknown.is_empty());
@@ -61,6 +62,7 @@ namespace:
   - path: /dev
     rights: r
 priority: 20
+stop_timeout: 600
 ";
     let s = manifest("net-stack.yaml", text).service;
     assert_eq!(s.start, Start::OnDemand);
@@ -98,6 +100,7 @@ priority: 20
         }]
     );
     assert_eq!(s.priority, 20);
+    assert_eq!(s.stop_timeout, 600);
 }
 
 #[test]
@@ -224,6 +227,19 @@ fn errors_say_where() {
     assert_eq!((e.line, e.column), (1, 1));
     let e = parse("log.yaml", b"name: [log\n").unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Yaml(_)));
+}
+
+#[test]
+fn stop_timeout_must_be_a_positive_integer() {
+    let with = |extra: &str| std::format!("{MINIMAL}{extra}\n");
+    let out_of_range = ErrorKind::Yaml(mikros_yaml::ErrorKind::OutOfRange);
+    let wrong = ErrorKind::Yaml(mikros_yaml::ErrorKind::WrongType);
+    assert_eq!(kind("log.yaml", &with("stop_timeout: 0")), out_of_range);
+    assert_eq!(kind("log.yaml", &with("stop_timeout: -5")), out_of_range);
+    assert_eq!(kind("log.yaml", &with("stop_timeout: '5'")), wrong);
+    assert_eq!(kind("log.yaml", &with("stop_timeout: 1.5")), wrong);
+    let s = manifest("log.yaml", &with("stop_timeout: 1")).service;
+    assert_eq!(s.stop_timeout, 1);
 }
 
 #[test]

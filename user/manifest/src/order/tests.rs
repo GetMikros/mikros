@@ -16,6 +16,7 @@ fn service(name: &str, start: Start, after: &[&str]) -> Service {
         permissions: vec![],
         namespace: vec![],
         priority: 16,
+        stop_timeout: 10,
     }
 }
 

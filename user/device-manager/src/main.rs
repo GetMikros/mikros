@@ -23,6 +23,7 @@ mod drivers;
 mod publish;
 mod removal;
 mod serve;
+mod shutdown;
 mod start;
 mod supervise;
 
@@ -71,6 +72,9 @@ const BROKER: &str = "mikros.permissions.Broker";
 const REGISTRAR: &str = "mikros.service.Registrar";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
+    // A `TERM` that arrives before the devices are known stays pending
+    // until `shutdown::watch` takes it.
+    shutdown::block_term();
     let Ok(mut executor) = Executor::new() else {
         return PANIC_EXIT_CODE;
     };
@@ -151,6 +155,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         reactor,
         spawner: spawner.clone(),
     });
+    spawner.spawn(shutdown::watch(manager.clone()));
     match provider {
         Some(end) => spawner.spawn(removal::serve(manager.clone(), ServerEnd::new(end))),
         None => mikros_rt::log!(

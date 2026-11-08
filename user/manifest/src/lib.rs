@@ -42,11 +42,14 @@ const KEYS: &[&str] = &[
     "permissions",
     "namespace",
     "priority",
+    "stop_timeout",
 ];
 /// The keys of an item of `provides`.
 const PROVIDES_KEYS: &[&str] = &["protocol", "permission"];
 /// `priority` when the manifest leaves it out.
 pub const PRIORITY_DEFAULT: i64 = 16;
+/// `stop_timeout`, in seconds, when the manifest leaves it out.
+pub const STOP_TIMEOUT_DEFAULT: u64 = 10;
 const SUFFIX: &str = ".yaml";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +64,8 @@ pub struct Service {
     pub permissions: Vec<String>,
     pub namespace: Vec<NamespaceEntry>,
     pub priority: i64,
+    /// How long the service has to end after `TERM`, in seconds.
+    pub stop_timeout: u64,
 }
 
 /// A protocol that a service serves.
@@ -235,6 +240,11 @@ pub fn parse(file_name: &str, bytes: &[u8]) -> Result<Manifest, Error> {
         None => PRIORITY_DEFAULT,
         Some(node) => node.integer(i64::MIN, i64::MAX)?,
     };
+    // A positive integer.
+    let stop_timeout = match map.get("stop_timeout") {
+        None => STOP_TIMEOUT_DEFAULT,
+        Some(node) => node.integer(1, i64::MAX)? as u64,
+    };
     let service = Service {
         name: name.into(),
         binary: binary.into(),
@@ -246,6 +256,7 @@ pub fn parse(file_name: &str, bytes: &[u8]) -> Result<Manifest, Error> {
         permissions: strings(map, "permissions")?,
         namespace: program::namespace(map, &mut unknown)?,
         priority,
+        stop_timeout,
     };
     Ok(Manifest { service, unknown })
 }
