@@ -352,3 +352,31 @@ fn writes_more_than_the_dirty_limit() {
         |_| {},
     );
 }
+
+/// A file that was synced survives a crash just after, which a copy of
+/// the image made while it is still mounted stands for: mounting the
+/// copy replays the log tree that the sync wrote.
+#[test]
+fn syncs_files_through_crashes() {
+    start();
+    let image = Image::new("syncs", 256 << 20, &[]);
+    Disk::add(c"syncs", image.open(), false).unwrap();
+    let crashed = Image::new("syncs-crashed", 256 << 20, &[]);
+    let mount = Mount::new(c"/dev/syncs", false, None).unwrap();
+    {
+        let root = mount.root().unwrap();
+        let d = root.create(b"d", Kind::Directory, 0o755).unwrap();
+        let a = d.create(b"a", Kind::File, 0o644).unwrap();
+        write_all(&a, 0, &noise(20, 200_000));
+        a.sync().unwrap();
+        std::fs::copy(&image.0, &crashed.0).unwrap();
+    }
+    drop(mount);
+    Disk::add(c"syncs-crashed", crashed.open(), false).unwrap();
+    {
+        let mount = Mount::new(c"/dev/syncs-crashed", false, None).unwrap();
+        let root = mount.root().unwrap();
+        assert!(read_all(&walk(&root, "d/a")) == noise(20, 200_000));
+    }
+    crashed.check();
+}
