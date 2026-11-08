@@ -715,3 +715,190 @@ void *krealloc_node_align_noprof(const void *p, size_t new_size, unsigned long a
 	}
 	return new;
 }
+
+/* Without an MMU, vmalloc is kmalloc, as in the release's mm/nommu.c. */
+void *__kvmalloc_node_noprof(DECL_BUCKET_PARAMS(size, b), unsigned long align, gfp_t flags,
+			     int node)
+{
+	return __kmalloc_noprof(size, flags);
+}
+
+void *vmalloc_noprof(unsigned long size)
+{
+	return __kmalloc_noprof(size, GFP_KERNEL);
+}
+
+void *vzalloc_noprof(unsigned long size)
+{
+	return __kmalloc_noprof(size, GFP_KERNEL | __GFP_ZERO);
+}
+
+void *__vmalloc_noprof(unsigned long size, gfp_t gfp)
+{
+	return __kmalloc_noprof(size, gfp);
+}
+
+void vfree(const void *addr)
+{
+	kfree(addr);
+}
+
+void kvfree(const void *addr)
+{
+	kfree(addr);
+}
+
+struct page *vmalloc_to_page(const void *addr)
+{
+	return virt_to_page(addr);
+}
+
+long copy_to_user_nofault(void __user *dst, const void *src, size_t size)
+{
+	memcpy((void __force *)dst, src, size);
+	return 0;
+}
+
+/* Without an MMU every address of the program can be read, so these do
+ * what their callers would do if no fault came. */
+long copy_from_kernel_nofault(void *dst, const void *src, size_t size)
+{
+	memcpy(dst, src, size);
+	return 0;
+}
+
+long strncpy_from_kernel_nofault(char *dst, const void *unsafe_addr, long count)
+{
+	long len;
+
+	if (count <= 0)
+		return 0;
+	len = strnlen(unsafe_addr, count - 1);
+	memcpy(dst, unsafe_addr, len);
+	dst[len] = '\0';
+	return len + 1;
+}
+
+size_t fault_in_readable(const char __user *uaddr, size_t size)
+{
+	return 0;
+}
+
+size_t fault_in_safe_writeable(const char __user *uaddr, size_t size)
+{
+	return 0;
+}
+
+size_t fault_in_subpage_writeable(char __user *uaddr, size_t size)
+{
+	return 0;
+}
+
+/* Memory is not reclaimed under pressure yet: shrinkers never run. */
+struct shrinker *shrinker_alloc(unsigned int flags, const char *fmt, ...)
+{
+	return kzalloc(sizeof(struct shrinker), GFP_KERNEL);
+}
+
+void shrinker_register(struct shrinker *shrinker)
+{
+}
+
+void shrinker_free(struct shrinker *shrinker)
+{
+	kfree(shrinker);
+}
+
+/* Per-CPU memory: a unit of each CPU, which starts with a copy of the
+ * static per-CPU variables. A per-CPU pointer is an address of the static
+ * section, which each CPU's offset turns into one of its unit. */
+#define UNIT_SIZE	(256UL << 10)
+
+extern char __start_mikros_percpu[], __stop_mikros_percpu[];
+/* So that the section exists. */
+static DEFINE_PER_CPU(int, mikros_percpu_anchor) __used;
+unsigned long __per_cpu_offset[NR_CPUS];
+static char *units;
+static unsigned long static_size, dynamic_end;
+static DEFINE_SPINLOCK(percpu_lock);
+
+/* The per-CPU chunks in use and freed, the latter for reuse by size. */
+struct chunk {
+	struct list_head list;
+	unsigned long offset, size;
+};
+static LIST_HEAD(used_chunks);
+static LIST_HEAD(free_chunks);
+
+void mikros_percpu_init(void)
+{
+	unsigned int cpu;
+
+	static_size = __stop_mikros_percpu - __start_mikros_percpu;
+	units = mikros_host_reserve(UNIT_SIZE * NR_CPUS);
+	if (!units || static_size > UNIT_SIZE)
+		panic("no address space for per-CPU memory");
+	for (cpu = 0; cpu < NR_CPUS; cpu++) {
+		char *unit = units + cpu * UNIT_SIZE;
+
+		memcpy(unit, __start_mikros_percpu, static_size);
+		__per_cpu_offset[cpu] = (unsigned long)unit - (unsigned long)__start_mikros_percpu;
+	}
+	dynamic_end = ALIGN(static_size, PAGE_SIZE);
+}
+
+void __percpu *pcpu_alloc_noprof(size_t size, size_t align, bool reserved, gfp_t gfp)
+{
+	struct chunk *c, *found = NULL;
+	unsigned long offset;
+	unsigned int cpu;
+
+	size = ALIGN(size, 8);
+	align = max_t(size_t, align, 8);
+	spin_lock(&percpu_lock);
+	list_for_each_entry(c, &free_chunks, list) {
+		if (c->size == size && IS_ALIGNED(c->offset, align)) {
+			found = c;
+			list_del(&c->list);
+			break;
+		}
+	}
+	if (!found) {
+		spin_unlock(&percpu_lock);
+		found = kmalloc(sizeof(*found), gfp);
+		if (!found)
+			return NULL;
+		spin_lock(&percpu_lock);
+		found->offset = ALIGN(dynamic_end, align);
+		found->size = size;
+		if (found->offset + size > UNIT_SIZE) {
+			spin_unlock(&percpu_lock);
+			kfree(found);
+			return NULL;
+		}
+		dynamic_end = found->offset + size;
+	}
+	list_add(&found->list, &used_chunks);
+	offset = found->offset;
+	spin_unlock(&percpu_lock);
+	for (cpu = 0; cpu < NR_CPUS; cpu++)
+		memset(units + cpu * UNIT_SIZE + offset, 0, size);
+	return (void __percpu *)(__start_mikros_percpu + offset);
+}
+
+void free_percpu(void __percpu *ptr)
+{
+	unsigned long offset = (char __force *)ptr - __start_mikros_percpu;
+	struct chunk *c;
+
+	if (!ptr)
+		return;
+	spin_lock(&percpu_lock);
+	list_for_each_entry(c, &used_chunks, list) {
+		if (c->offset == offset) {
+			list_move(&c->list, &free_chunks);
+			break;
+		}
+	}
+	spin_unlock(&percpu_lock);
+}
