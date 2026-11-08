@@ -7,7 +7,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
-use mikros_rt::interfaces::__midl::endpoints;
+use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
     Error, Node, NodeAsyncClient, NodeType, OpenFlags, Rights, WatchKind, WatchMask, Watcher,
     WatcherRequest, WatcherServer,
@@ -289,17 +289,31 @@ async fn links(dir: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
 
 /// Whether `CloneRange` makes a new file in `dir` share the data of
 /// `file`, which holds 12 bytes, through a connection to it that only
-/// reads, and refuses a source that is no connection of the server's.
+/// reads, with a length of 12 and with 0, which reaches to the end; and
+/// refuses an offset out of line with the blocks and a source that is no
+/// connection of the server's.
 async fn clones(dir: &NodeAsyncClient, file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
     let (copy, _) = open(dir, "copy", create, reactor).await.ok()?;
-    let (source, server) = endpoints::<Node>().ok()?;
-    ok(file.clone(server, Rights::READ).await)?;
-    ok(copy.clone_range(source, 0, 0, 12).await)?;
+    ok(copy.clone_range(reader(file).await?, 0, 0, 12).await)?;
     expect(ok(copy.read(0, 100).await)?.data == b"hello btrfs!")?;
+    let (whole, _) = open(dir, "whole", create, reactor).await.ok()?;
+    ok(whole.clone_range(reader(file).await?, 0, 0, 0).await)?;
+    expect(ok(whole.read(0, 100).await)?.data == b"hello btrfs!")?;
+    let unaligned = whole.clone_range(reader(file).await?, 0, 100, 12).await;
+    expect(failed(unaligned) == Some(Error::Invalid))?;
+    ok(dir.unlink("whole".into(), false).await)?;
     let (stranger, _server) = endpoints::<Node>().ok()?;
     let refused = copy.clone_range(stranger, 0, 0, 12).await;
     expect(failed(refused) == Some(Error::CrossDevice))?;
     ok(dir.unlink("copy".into(), false).await)?;
     Some(())
+}
+
+/// A new connection to `file` that only reads, as the source of a
+/// `CloneRange`.
+async fn reader(file: &NodeAsyncClient) -> Option<ClientEnd<Node>> {
+    let (source, server) = endpoints::<Node>().ok()?;
+    ok(file.clone(server, Rights::READ).await)?;
+    Some(source)
 }

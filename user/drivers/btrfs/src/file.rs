@@ -2,7 +2,7 @@
 //! The requests of a connection about a node's contents and attributes:
 //! reading and writing files at an offset or the cursor
 //! (MIKSPEC-0049.R14), truncating them, making ranges of them share data
-//! (MIKSPEC-0049.R9, MIKSPEC-0053.R5), setting attributes, cloning the
+//! (MIKSPEC-0049.R18, MIKSPEC-0053.R5), setting attributes, cloning the
 //! connection, and reading symbolic links.
 
 use crate::change::koids;
