@@ -92,6 +92,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
+                // The driver does not take a new bus channel yet.
+                DriverRequest::Reconnect(_, responder) => {
+                    responder.reply(s, Err(Status::NotSupported))
+                }
                 DriverRequest::ResetChild(request, responder) => {
                     let Some(bus) = bus.clone() else {
                         let _ = responder.reply(s, Err(Status::BadState));
