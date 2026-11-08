@@ -20,6 +20,7 @@ const ENOTDIR: i32 = -20;
 const EACCES: i32 = -13;
 const EISDIR: i32 = -21;
 const EINVAL: i32 = -22;
+const EAGAIN: i32 = -11;
 
 /// The most a read of the file protocol asks for.
 const CHUNK: usize = 32768;
@@ -221,6 +222,31 @@ fn reads_files_of_subvolumes() {
             assert_eq!(dir.attributes().unwrap().inode, 256);
         },
     );
+}
+
+/// A read that must not wait reads only what the page cache holds: none
+/// or some of a file not read yet, whose reading it starts, and all of
+/// it once a read that waits has read it.
+#[test]
+fn reads_without_waiting() {
+    reads("reads-nowait", &[], |root| {
+        let large = walk(root, "large");
+        let data = noise(4, 5 << 20);
+        let at = 3 << 20;
+        let mut buf = std::vec![0; CHUNK];
+        match large.read_nowait(at as u64, &mut buf) {
+            Err(EAGAIN) => {}
+            Ok(n) => assert!(buf[..n] == data[at..at + n]),
+            Err(e) => panic!("reading without waiting failed with {e}"),
+        }
+        assert_eq!(large.read(at as u64, &mut buf), Ok(CHUNK));
+        assert!(buf == data[at..at + CHUNK]);
+        buf.fill(0);
+        assert_eq!(large.read_nowait(at as u64, &mut buf), Ok(CHUNK));
+        assert!(buf == data[at..at + CHUNK]);
+        let end = data.len() as u64;
+        assert_eq!(large.read_nowait(end, &mut buf), Ok(0));
+    });
 }
 
 #[test]

@@ -14,6 +14,8 @@
 #include <linux/mount.h>
 #include <linux/stat.h>
 #include <linux/slab.h>
+#include <linux/uio.h>
+#include <linux/fsnotify.h>
 #include <linux/err.h>
 #include "file.h"
 #include "shim.h"
@@ -179,9 +181,37 @@ out:
 	return file;
 }
 
+/* Reads up to `count` bytes of `file` at `pos` into `buf`, as
+ * kernel_read() does, without waiting for the disk when `nowait`. */
+static ssize_t read_at(struct file *file, void *buf, size_t count, loff_t pos, bool nowait)
+{
+	struct kvec iov = { .iov_base = buf, .iov_len = min_t(size_t, count, MAX_RW_COUNT) };
+	struct iov_iter iter;
+	struct kiocb kiocb;
+	ssize_t ret;
+
+	if (!(file->f_mode & FMODE_READ) || !(file->f_mode & FMODE_CAN_READ))
+		return -EINVAL;
+	ret = rw_verify_area(READ, file, &pos, iov.iov_len);
+	if (ret)
+		return ret;
+	init_sync_kiocb(&kiocb, file);
+	kiocb.ki_pos = pos;
+	if (nowait)
+		kiocb.ki_flags |= IOCB_NOWAIT;
+	iov_iter_kvec(&iter, ITER_DEST, &iov, 1, iov.iov_len);
+	ret = file->f_op->read_iter(&kiocb, &iter);
+	if (ret > 0)
+		fsnotify_access(file);
+	return ret;
+}
+
 /* Reads up to `count` bytes of a file from `offset` into `buf`: how many
- * it read, 0 at the end, or a negative errno, -EISDIR for a directory. */
-long mikros_btrfs_read(struct mikros_node *node, u64 offset, void *buf, unsigned long count)
+ * it read, 0 at the end, or a negative errno, -EISDIR for a directory.
+ * When `nowait`, it reads only what the page cache holds, starting
+ * readahead for the rest: fewer bytes, or -EAGAIN for none. */
+long mikros_btrfs_read(struct mikros_node *node, u64 offset, void *buf, unsigned long count,
+		       bool nowait)
 {
 	bool adopted = mikros_task_adopt("read");
 	loff_t pos = offset;
@@ -195,7 +225,7 @@ long mikros_btrfs_read(struct mikros_node *node, u64 offset, void *buf, unsigned
 	file = mikros_node_file(node);
 	ret = PTR_ERR_OR_ZERO(file);
 	if (!ret)
-		ret = kernel_read(file, buf, count, &pos);
+		ret = read_at(file, buf, count, pos, nowait);
 out:
 	if (adopted)
 		mikros_task_exit();

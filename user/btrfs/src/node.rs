@@ -22,7 +22,13 @@ unsafe extern "C" {
     ) -> i32;
     fn mikros_btrfs_put(node: *mut c_void);
     fn mikros_btrfs_get_attributes(node: *mut c_void, attributes: *mut Attributes) -> i32;
-    fn mikros_btrfs_read(node: *mut c_void, offset: u64, buf: *mut u8, count: usize) -> c_long;
+    fn mikros_btrfs_read(
+        node: *mut c_void,
+        offset: u64,
+        buf: *mut u8,
+        count: usize,
+        nowait: bool,
+    ) -> c_long;
     fn mikros_btrfs_read_link(node: *mut c_void, buf: *mut u8, size: c_int) -> i32;
     fn mikros_btrfs_read_dir(
         dir: *mut c_void,
@@ -212,9 +218,22 @@ impl<'m> Node<'m> {
     /// Reads a file from `offset` into `buf`: how many bytes it read, 0 at
     /// the end.
     pub fn read(&self, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        self.read_at(offset, buf, false)
+    }
+
+    /// Reads what the page cache holds of a file from `offset` into
+    /// `buf`, as `read()` does, without waiting for the disk, whose
+    /// reading it starts for the rest: fewer bytes than asked, or
+    /// `EAGAIN` when it would have waited before reading any.
+    pub fn read_nowait(&self, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        self.read_at(offset, buf, true)
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8], nowait: bool) -> Result<usize, i32> {
         // SAFETY: as for `lookup()`; the shim writes at most `buf.len()`
         // bytes.
-        let read = unsafe { mikros_btrfs_read(self.node, offset, buf.as_mut_ptr(), buf.len()) };
+        let read =
+            unsafe { mikros_btrfs_read(self.node, offset, buf.as_mut_ptr(), buf.len(), nowait) };
         usize::try_from(read).map_err(|_| read as i32)
     }
 
