@@ -23,7 +23,9 @@ struct mikros_attributes {
 	u32 mode;
 	u32 owner;
 	u32 group;
-	u32 unused;
+	/* The device of the node's file system, which a subvolume of btrfs
+	 * has one of its own of, as its inode numbers repeat others'. */
+	u32 device;
 	u64 size;
 	u64 allocated;
 	u64 links;
@@ -134,6 +136,7 @@ int mikros_btrfs_get_attributes(struct mikros_node *node, struct mikros_attribut
 		out->mode = st.mode;
 		out->owner = from_kuid(&init_user_ns, st.uid);
 		out->group = from_kgid(&init_user_ns, st.gid);
+		out->device = st.dev;
 		out->size = st.size;
 		out->allocated = st.blocks * 512;
 		out->links = st.nlink;

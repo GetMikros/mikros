@@ -112,7 +112,9 @@ pub struct Attributes {
     pub mode: u32,
     pub owner: u32,
     pub group: u32,
-    unused: u32,
+    /// The device of the node's file system, which each subvolume has
+    /// one of its own of: with `inode`, what tells nodes apart.
+    pub device: u32,
     pub size: u64,
     /// The bytes of the disk that the node takes.
     pub allocated: u64,

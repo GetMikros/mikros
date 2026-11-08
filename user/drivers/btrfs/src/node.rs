@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 //! One connection to a node (MIKSPEC-0049.R1): its requests, which the
-//! other modules do, through the nodes of the shim.
+//! other modules do, through the nodes of the shim, which look names up
+//! one at a time, so that the server resolves paths as MIKSPEC-0049.R4
+//! and R5 have them.
 
 use crate::fs::{self, Fs, Open, error};
 use alloc::rc::Rc;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;
+
+/// The longest path component, in bytes.
+pub(crate) const NAME_MAX: usize = 255;
+/// The longest target of a symbolic link.
+pub(crate) const TARGET_MAX: usize = 4096;
 
 pub(crate) struct Connection {
     pub(crate) fs: Rc<Fs>,
@@ -66,6 +73,9 @@ impl Connection {
                     .info()
                     .map(|info| NodeQueryFilesystemResponse { info }),
             ),
+            R::ReadLink(_, r) => r.reply(s, self.read_link()),
+            R::Open(q, r) => r.reply(s, self.open(q)),
+            R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes)),
             // What this server does not provide yet.
             R::SetAttributes(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Read(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -75,9 +85,6 @@ impl Connection {
             R::WriteNext(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Truncate(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Seek(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::ReadLink(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Open(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::ReadDirectory(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlink(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetToken(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Rename(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -99,6 +106,13 @@ impl Connection {
         match self.rights.contains(rights) {
             true => Ok(()),
             false => Err(Error::AccessDenied),
+        }
+    }
+
+    pub(crate) fn directory(&self) -> Result<(), Error> {
+        match self.open.is_directory()? {
+            true => Ok(()),
+            false => Err(Error::NotDirectory),
         }
     }
 }

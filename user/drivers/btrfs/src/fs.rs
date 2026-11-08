@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
-//! The served file system: the nodes that connections are open to, and
-//! the `Filesystem` service (MIKSPEC-0049.R13), whose root is the
-//! top-level subvolume (MIKSPEC-0053.R4).
+//! The served file system: the nodes that connections are open to, which
+//! connections to the same node share, and the `Filesystem` service
+//! (MIKSPEC-0049.R13), whose root is the top-level subvolume
+//! (MIKSPEC-0053.R4).
 
 use crate::node;
-use alloc::rc::Rc;
+use alloc::collections::BTreeMap;
+use alloc::rc::{Rc, Weak};
+use core::cell::RefCell;
 use mikros_btrfs::Mount;
 use mikros_btrfs::node::{
     Attributes as BtrfsAttributes, MODE_DIRECTORY, MODE_SYMLINK, MODE_TYPE, Node as BtrfsNode, Time,
@@ -22,6 +25,10 @@ const PROTOCOL: &str = "device.filesystem";
 
 const NS: i64 = 1_000_000_000;
 
+/// What tells nodes apart: the device of their subvolume and their inode
+/// number.
+pub type Key = (u32, u64);
+
 /// A node that connections are open to.
 pub struct Open {
     pub node: BtrfsNode<'static>,
@@ -31,11 +38,16 @@ impl Open {
     pub fn attributes(&self) -> Result<BtrfsAttributes, Error> {
         self.node.attributes().map_err(error)
     }
+
+    pub fn is_directory(&self) -> Result<bool, Error> {
+        Ok(self.attributes()?.mode & MODE_TYPE == MODE_DIRECTORY)
+    }
 }
 
 pub struct Fs {
     pub mount: &'static Mount,
     pub root: Rc<Open>,
+    opens: RefCell<BTreeMap<Key, Weak<Open>>>,
     pub read_only: bool,
     pub reactor: Reactor,
     pub spawner: Spawner,
@@ -106,13 +118,30 @@ impl Fs {
         spawner: Spawner,
     ) -> Result<Fs, Error> {
         let node = mount.root().map_err(error)?;
+        let key = key(&node)?;
+        let root = Rc::new(Open { node });
+        let opens = BTreeMap::from([(key, Rc::downgrade(&root))]);
         Ok(Fs {
             mount,
-            root: Rc::new(Open { node }),
+            root,
+            opens: RefCell::new(opens),
             read_only,
             reactor,
             spawner,
         })
+    }
+
+    /// The open node for `node`: the one that connections to the same
+    /// node share, if there is one.
+    pub fn open(&self, node: BtrfsNode<'static>) -> Result<Rc<Open>, Error> {
+        let key = key(&node)?;
+        let mut opens = self.opens.borrow_mut();
+        if let Some(open) = opens.get(&key).and_then(Weak::upgrade) {
+            return Ok(open);
+        }
+        let open = Rc::new(Open { node });
+        opens.insert(key, Rc::downgrade(&open));
+        Ok(open)
     }
 
     /// Serves `end` as a connection to `open` with `rights` for the user
@@ -140,6 +169,11 @@ impl Fs {
             read_only: self.read_only,
         })
     }
+}
+
+fn key(node: &BtrfsNode<'_>) -> Result<Key, Error> {
+    let a = node.attributes().map_err(error)?;
+    Ok((a.device, a.inode))
 }
 
 /// Serves the provider `end` of the published `filesystem` service until

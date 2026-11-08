@@ -17,6 +17,7 @@
 
 extern crate alloc;
 
+mod dir;
 mod disk;
 mod file;
 mod fs;
