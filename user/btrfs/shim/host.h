@@ -16,6 +16,10 @@
  * written and take memory only once touched; NULL when there are none. */
 void *mikros_host_reserve(unsigned long size);
 
+/* How many bytes of memory the shim may hold, which it sizes its caches
+ * and the page cache's dirty limits by. */
+unsigned long mikros_host_memory(void);
+
 /* Starts a thread that runs `entry(arg)`; 0, or a negative errno. */
 int mikros_host_thread(void (*entry)(void *arg), void *arg);
 
