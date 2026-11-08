@@ -29,17 +29,18 @@ use core::cell::RefCell;
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
-use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
-    DriverStartRequest, DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse,
+    DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
+    DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::log::Severity;
-use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, Provider};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
+use mikros_storage::PciBus;
 use namespace::Namespace;
 
 mikros_rt::raw_main!(main);
@@ -130,10 +131,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                // The driver does not take a new bus channel yet.
-                DriverRequest::Reconnect(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
+                // A restarted PCI bus driver gives a new bus channel.
+                DriverRequest::Reconnect(request, responder) => match &controller {
+                    Some(controller) => {
+                        controller.pci.reconnect(request.bus);
+                        responder.reply(s, Ok(DriverReconnectResponse {}))
+                    }
+                    None => responder.reply(s, Err(Status::BadState)),
+                },
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
                 }
@@ -188,8 +193,8 @@ async fn start(
         .into_iter()
         .find(|r| kind(r) == Some(KIND_DMA))
         .ok_or(Status::InvalidArgs)?;
-    let device = DeviceAsyncClient::new(ClientEnd::new(bus), reactor.clone());
-    let controller = Controller::start(device, process, dma, reactor, spawner).await?;
+    let pci = PciBus::new(bus, reactor);
+    let controller = Controller::start(pci, process, dma, reactor, spawner).await?;
     let mut namespaces = Vec::new();
     for info in controller.namespaces().await? {
         let usable = matches!(info.block_size, 512 | 4096) && info.metadata == 0;

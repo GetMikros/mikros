@@ -12,6 +12,7 @@
 extern crate alloc;
 
 mod block;
+mod bus;
 mod dma;
 mod memory;
 mod mmio;
@@ -19,6 +20,7 @@ mod service;
 mod writer;
 
 pub use block::serve_bus;
+pub use bus::PciBus;
 pub use dma::Contiguous;
 pub use memory::{PAGE, pages, pinned, pinned_with};
 pub use mmio::Mmio;

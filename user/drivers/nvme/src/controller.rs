@@ -11,9 +11,8 @@ use core::cell::{Cell, RefCell};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::sys;
-use mikros_storage::{Contiguous, MS, Mmio, PAGE, now};
+use mikros_storage::{Contiguous, MS, Mmio, PAGE, PciBus, now};
 
 /// Admin opcodes.
 const CREATE_IO_SQ: u8 = 0x01;
@@ -75,7 +74,8 @@ pub struct Controller {
     resetting: Cell<bool>,
     /// Set when a reset could not bring the I/O queues back.
     pub failed: Cell<bool>,
-    _device: Rc<DeviceAsyncClient>,
+    /// The bus channel, which `Reconnect` replaces.
+    pub pci: Rc<PciBus>,
     _interrupts: Vec<OwnedHandle>,
 }
 
@@ -109,18 +109,18 @@ fn le32(bytes: &[u8], at: usize) -> u32 {
 }
 
 impl Controller {
-    /// Brings up the controller behind the bus channel `device` with
-    /// memory from the `DMA` resource `dma`: maps BAR 0, disables it, sets
-    /// up the admin queues, enables it, takes its interrupts, identifies
-    /// it and creates the I/O queues.
+    /// Brings up the controller behind the bus channel `pci` with memory
+    /// from the `DMA` resource `dma`: maps BAR 0, disables it, sets up the
+    /// admin queues, enables it, takes its interrupts, identifies it and
+    /// creates the I/O queues.
     pub async fn start(
-        device: DeviceAsyncClient,
+        pci: Rc<PciBus>,
         process: sys::Handle,
         dma: OwnedHandle,
         reactor: &Reactor,
         spawner: &Spawner,
     ) -> Result<Rc<Controller>, Status> {
-        let device = Rc::new(device);
+        let device = pci.get();
         let bar = bus(device.get_bar(0).await)?.bar;
         let regs = Rc::new(Regs::new(Mmio::map(
             process,
@@ -148,7 +148,7 @@ impl Controller {
             &bti,
             process,
         )?);
-        let (interrupts, io_vector) = interrupts(&device, &admin, &io, reactor, spawner).await?;
+        let (interrupts, io_vector) = interrupts(&pci, &admin, &io, reactor, spawner).await?;
         enable(&regs, &admin, reactor).await?;
         let page = Contiguous::new(&dma, &bti, process, PAGE, false)?;
         let identity = identify_controller(&admin, &page, regs.page_min).await?;
@@ -164,7 +164,7 @@ impl Controller {
             pages: RefCell::new(alloc::vec![page]),
             resetting: Cell::new(false),
             failed: Cell::new(false),
-            _device: device,
+            pci,
             _interrupts: interrupts,
         });
         controller.create_io_queues().await?;
@@ -343,15 +343,17 @@ async fn identify_controller(
 /// Takes the controller's interrupts: one per completion queue through
 /// `EnableMsi`, the I/O queue sharing the admin queue's when there is
 /// only one, or else the INTx event. Each interrupt processes its
-/// completion queues and is then acknowledged. Returns the handles to
-/// keep and the I/O queue's vector.
+/// completion queues and is then acknowledged, an INTx event on the bus
+/// channel of the moment. Returns the handles to keep and the I/O
+/// queue's vector.
 async fn interrupts(
-    device: &Rc<DeviceAsyncClient>,
+    pci: &Rc<PciBus>,
     admin: &Rc<QueuePair>,
     io: &Rc<QueuePair>,
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(Vec<OwnedHandle>, u16), Status> {
+    let device = pci.get();
     if let Ok(Ok(enabled)) = device.enable_msi(2).await {
         let list = enabled.interrupts;
         let io_vector = list.len().min(2) as u16 - 1;
@@ -378,7 +380,7 @@ async fn interrupts(
         return Ok((list, io_vector));
     }
     let event = bus(device.get_interrupt().await)?.event;
-    let (device, queues) = (device.clone(), [admin.clone(), io.clone()]);
+    let (pci, queues) = (pci.clone(), [admin.clone(), io.clone()]);
     let raw = event.raw();
     let reactor = reactor.clone();
     spawner.spawn(async move {
@@ -386,9 +388,9 @@ async fn interrupts(
             for queue in &queues {
                 queue.process();
             }
-            if device.ack_interrupt().await.is_err() {
-                return;
-            }
+            // A failure leaves the event signaled; a `Reconnect` brings a
+            // channel that acknowledges it.
+            let _ = pci.get().ack_interrupt().await;
         }
     });
     Ok((alloc::vec![event], 0))

@@ -27,17 +27,17 @@ use core::future::poll_fn;
 use core::task::{Poll, Waker};
 use disk::{Disk, Memory};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
-use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
-    DriverStartRequest, DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse,
+    DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
+    DriverStopResponse,
 };
-use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::Provider;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
-use mikros_storage::{Mmio, PAGE};
+use mikros_storage::{Mmio, PAGE, PciBus};
 use port::{Event, Port};
 
 mikros_rt::raw_main!(main);
@@ -51,8 +51,12 @@ const DISK_ID: &str = "storage:disk";
 const SERVICE_CLASS: &str = "storage";
 const SIGNALED: u32 = 1 << 3;
 
-/// The ports and disks of a started HBA.
-type Started = (Vec<Rc<Port>>, Vec<Rc<Disk>>);
+/// The ports and disks of a started HBA, and its bus channel.
+struct Started {
+    ports: Vec<Rc<Port>>,
+    disks: Vec<Rc<Disk>>,
+    pci: Rc<PciBus>,
+}
 
 /// The disks by the IDs of their devices, once all are added.
 #[derive(Default)]
@@ -110,8 +114,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             let _ = match request {
                 DriverRequest::Start(request, responder) => {
                     match start(request, process, &reactor, &spawner).await {
-                        Ok((ports, disks, manager)) => {
-                            started = Some((ports, disks.clone()));
+                        Ok((hba, manager)) => {
+                            let disks = hba.disks.clone();
+                            started = Some(hba);
                             let replied = responder.reply(s, Ok(DriverStartResponse {}));
                             let task = add_disks(
                                 disks,
@@ -127,16 +132,20 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     }
                 }
                 DriverRequest::Stop(_, responder) => {
-                    if let Some((ports, disks)) = &started {
-                        stop(ports, disks, &reactor).await;
+                    if let Some(hba) = &started {
+                        stop(&hba.ports, &hba.disks, &reactor).await;
                     }
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                // The driver does not take a new bus channel yet.
-                DriverRequest::Reconnect(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
+                // A restarted PCI bus driver gives a new bus channel.
+                DriverRequest::Reconnect(request, responder) => match &started {
+                    Some(hba) => {
+                        hba.pci.reconnect(request.bus);
+                        responder.reply(s, Ok(DriverReconnectResponse {}))
+                    }
+                    None => responder.reply(s, Err(Status::BadState)),
+                },
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
                 }
@@ -186,17 +195,15 @@ async fn start(
     process: sys::Handle,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<(Vec<Rc<Port>>, Vec<Rc<Disk>>, DeviceManagerAsyncClient), Status> {
+) -> Result<(Started, DeviceManagerAsyncClient), Status> {
     let bus_end = request.bus.ok_or(Status::InvalidArgs)?;
     let dma = request
         .resources
         .into_iter()
         .find(|r| kind(r) == Some(KIND_DMA))
         .ok_or(Status::InvalidArgs)?;
-    let device = Rc::new(DeviceAsyncClient::new(
-        ClientEnd::new(bus_end),
-        reactor.clone(),
-    ));
+    let pci = PciBus::new(bus_end, reactor);
+    let device = pci.get();
     let bar = bus(device.get_bar(ABAR).await)?.bar;
     let mmio = Rc::new(Mmio::map(process, &bar.resource, bar.base, bar.size)?);
     bus(device.set_bus_master(true).await)?;
@@ -235,7 +242,7 @@ async fn start(
     }
     let ports: Vec<Rc<Port>> = ports.into_iter().map(Rc::new).collect();
     interrupts(
-        &device,
+        &pci,
         &mmio,
         &ports,
         caps.staggered_spin_up,
@@ -267,7 +274,7 @@ async fn start(
         }));
     }
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
-    Ok((ports, disks, manager))
+    Ok((Started { ports, disks, pci }, manager))
 }
 
 /// Before the driver ends: flushes each disk with a volatile write cache
@@ -284,16 +291,18 @@ async fn stop(ports: &[Rc<Port>], disks: &[Rc<Disk>], reactor: &Reactor) {
 /// Takes the HBA's interrupt through `EnableMsi`, or else the INTx
 /// event. On each one, each port that reports something has its `PxIS`
 /// and then its bit of `IS` cleared, a port that reported an error is
-/// recovered, and the interrupt is then acknowledged. The task keeps
-/// the interrupt and the bus channel for as long as the driver runs.
+/// recovered, and the interrupt is then acknowledged, an INTx event on
+/// the bus channel of the moment. The task keeps the interrupt and the
+/// bus channel for as long as the driver runs.
 async fn interrupts(
-    device: &Rc<DeviceAsyncClient>,
+    pci: &Rc<PciBus>,
     mmio: &Rc<Mmio>,
     ports: &[Rc<Port>],
     spin_up: bool,
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(), Status> {
+    let device = pci.get();
     let (handle, msi) = match device.enable_msi(1).await {
         Ok(Ok(enabled)) => match enabled.interrupts.into_iter().next() {
             Some(interrupt) => (interrupt, true),
@@ -302,7 +311,7 @@ async fn interrupts(
         _ => (bus(device.get_interrupt().await)?.event, false),
     };
     let raw = handle.raw();
-    let (device, mmio, ports) = (device.clone(), mmio.clone(), ports.to_vec());
+    let (pci, mmio, ports) = (pci.clone(), mmio.clone(), ports.to_vec());
     let (reactor, tasks) = (reactor.clone(), spawner.clone());
     spawner.spawn(async move {
         let _handle = handle;
@@ -321,8 +330,10 @@ async fn interrupts(
             if msi {
                 // SAFETY: the call takes no pointers.
                 unsafe { sys::interrupt_ack(raw) };
-            } else if device.ack_interrupt().await.is_err() {
-                return;
+            } else {
+                // A failure leaves the event signaled; a `Reconnect`
+                // brings a channel that acknowledges it.
+                let _ = pci.get().ack_interrupt().await;
             }
         }
     });
