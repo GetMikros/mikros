@@ -380,3 +380,46 @@ fn syncs_files_through_crashes() {
     }
     crashed.check();
 }
+
+/// The bytes of the host's disk that an image's file takes.
+fn allocated(image: &Image) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(&image.0).unwrap().blocks() * 512
+}
+
+/// Removing a file from a mount that discards frees the disk's blocks
+/// under its data once the removal is committed, which the image's file
+/// shows as holes. A mount with the options of the btrfs server, which
+/// discards in the background, works too.
+#[test]
+fn discards_what_is_freed() {
+    const MIB: u64 = 32;
+    start();
+    let image = Image::new("discards", 256 << 20, &[]);
+    Disk::add(c"discards", image.open(), false).unwrap();
+    {
+        let mount = Mount::new(c"/dev/discards", false, Some(c"discard=sync")).unwrap();
+        let root = mount.root().unwrap();
+        let file = root.create(b"big", Kind::File, 0o644).unwrap();
+        let mut buf = noise(9, 1 << 20);
+        for i in 0..MIB {
+            tag(&mut buf, i);
+            write_all(&file, i << 20, &buf);
+        }
+        file.sync().unwrap();
+        drop(file);
+        let before = allocated(&image);
+        root.remove(b"big", false).unwrap();
+        mount.sync().unwrap();
+        let freed = before.saturating_sub(allocated(&image));
+        assert!(freed >= (MIB - 4) << 20, "{freed} bytes were discarded");
+    }
+    image.check();
+    let options = c"space_cache=v2,compress=zstd,discard=async";
+    let mount = Mount::new(c"/dev/discards", false, Some(options)).unwrap();
+    let root = mount.root().unwrap();
+    let file = root.create(b"small", Kind::File, 0o644).unwrap();
+    write_all(&file, 0, &text(1 << 20));
+    file.sync().unwrap();
+    assert!(read_all(&walk(&root, "small")) == text(1 << 20));
+}

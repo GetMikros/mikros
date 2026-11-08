@@ -6,6 +6,7 @@ use core::ffi::{c_int, c_long, c_void};
 use std::boxed::Box;
 use std::fs::File;
 use std::io::{self, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 
 unsafe extern "C" {
@@ -20,6 +21,7 @@ unsafe extern "C" {
     fn syscall(number: c_long, ...) -> c_long;
     fn clock_gettime(clock: c_int, ts: *mut Timespec) -> c_int;
     fn getrandom(buf: *mut c_void, len: usize, flags: u32) -> isize;
+    fn fallocate(fd: c_int, mode: c_int, offset: i64, len: i64) -> c_int;
 }
 
 #[repr(C)]
@@ -203,14 +205,34 @@ extern "C" fn mikros_host_disk_flush(handle: *mut c_void) -> c_int {
     }
 }
 
+/// The modes of `fallocate` that free a range of a file but keep its
+/// size.
+const FALLOC_FL_KEEP_SIZE: c_int = 1;
+const FALLOC_FL_PUNCH_HOLE: c_int = 2;
+
+/// Discards a range of the disk by punching a hole in its file.
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_disk_discard(handle: *mut c_void, offset: u64, len: u64) -> c_int {
+    let (Ok(offset), Ok(len)) = (i64::try_from(offset), i64::try_from(len)) else {
+        return -22;
+    };
+    let fd = disk(handle).as_raw_fd();
+    let mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+    // SAFETY: the call takes no pointers.
+    match unsafe { fallocate(fd, mode, offset, len) } {
+        0 => 0,
+        _ => errno(io::Error::last_os_error()),
+    }
+}
+
 impl Disk {
     /// Gives the shim the disk `file` as /dev/`name`, for the rest of the
-    /// program.
+    /// program. It discards by punching holes in the file.
     pub fn add(name: &core::ffi::CStr, file: File, read_only: bool) -> Result<(), i32> {
         let size = file.metadata().map_err(errno)?.len();
         let handle = Box::into_raw(Box::new(Disk(file)));
         // SAFETY: the handle points to a disk that is never freed.
-        unsafe { crate::add_disk(name, handle.cast(), size, 512, read_only) }
+        unsafe { crate::add_disk(name, handle.cast(), size, 512, read_only, true) }
     }
 }
 

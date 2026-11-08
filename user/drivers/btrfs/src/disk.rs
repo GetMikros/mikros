@@ -79,6 +79,11 @@ impl Disk {
         self.info.flags.0 & BlockFlags::READ_ONLY.0 != 0
     }
 
+    /// Whether the disk takes `Discard`.
+    pub fn discards(&self) -> bool {
+        self.info.flags.0 & BlockFlags::DISCARD.0 != 0
+    }
+
     /// A free slot, once there is one.
     fn take(&self) -> usize {
         loop {
@@ -162,6 +167,22 @@ impl Disk {
             _ => -EIO,
         }
     }
+
+    /// Discards `len` bytes at `offset`, whole blocks: 0, or a negative
+    /// errno.
+    fn discard(&self, offset: u64, len: u64) -> c_int {
+        let block_size = u64::from(self.info.block_size);
+        if !offset.is_multiple_of(block_size) || !len.is_multiple_of(block_size) {
+            return -EINVAL;
+        }
+        match self
+            .block
+            .discard(offset / block_size, len / block_size, FOREVER)
+        {
+            Ok(Ok(_)) => 0,
+            _ => -EIO,
+        }
+    }
 }
 
 /// The disk of a handle that `main` gave the shim.
@@ -194,4 +215,9 @@ extern "C" fn mikros_host_disk_write(
 #[unsafe(no_mangle)]
 extern "C" fn mikros_host_disk_flush(handle: *mut c_void) -> c_int {
     disk(handle).flush()
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_disk_discard(handle: *mut c_void, offset: u64, len: u64) -> c_int {
+    disk(handle).discard(offset, len)
 }

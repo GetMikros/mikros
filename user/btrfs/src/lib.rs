@@ -26,6 +26,7 @@ unsafe extern "C" {
         size: u64,
         block_size: u32,
         read_only: bool,
+        discard: bool,
     ) -> i32;
     fn mikros_btrfs_mount(
         source: *const c_char,
@@ -56,7 +57,8 @@ pub fn start() -> Result<(), i32> {
 /// Adds the host's disk `handle`, of `size` bytes in blocks of
 /// `block_size`, as /dev/`name`, once the shim has started. The shim
 /// reads and writes it with the host layer's `mikros_host_disk_`
-/// functions, and keeps it for the rest of the program.
+/// functions, and discards it too when `discard`, and keeps it for the
+/// rest of the program.
 ///
 /// # Safety
 ///
@@ -68,9 +70,12 @@ pub unsafe fn add_disk(
     size: u64,
     block_size: u32,
     read_only: bool,
+    discard: bool,
 ) -> Result<(), i32> {
     // SAFETY: the name is a C string, and the caller vouches for the handle.
-    result(unsafe { mikros_btrfs_add_disk(name.as_ptr(), handle, size, block_size, read_only) })
+    result(unsafe {
+        mikros_btrfs_add_disk(name.as_ptr(), handle, size, block_size, read_only, discard)
+    })
 }
 
 /// The statistics of a mounted file system.

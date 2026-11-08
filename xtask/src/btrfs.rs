@@ -149,6 +149,7 @@ const LINUX: &[&str] = &[
     "mm/workingset.c",
     "block/bdev.c",
     "block/bio.c",
+    "block/blk-lib.c",
     "block/fops.c",
     "drivers/base/map.c",
     "fs/attr.c",

@@ -5,7 +5,8 @@
 //! It binds to partitions of the Mikros root file system type, and on
 //! `Start` gives the shim the partition behind the `bus` channel, which
 //! it reads and writes through `mikros.storage.Block`, mounts the btrfs
-//! on it, for writing unless the partition is read-only, and publishes it
+//! on it, for writing unless the partition is read-only, with the options
+//! of `OPTIONS` (MIKSPEC-0053.R3), and publishes it
 //! as a service of class `filesystem` that serves `mikros.fs.Filesystem`
 //! (MIKSPEC-0049.R13). `Start` fails with `NOT_SUPPORTED` for a partition
 //! that holds no btrfs. `Stop` writes what has changed to stable storage
@@ -30,7 +31,7 @@ mod watch;
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use core::ffi::c_void;
+use core::ffi::{CStr, c_void};
 use disk::Disk;
 use fs::Fs;
 use mikros_btrfs::Mount;
@@ -50,6 +51,12 @@ mikros_rt::raw_main!(main);
 
 const EINVAL: i32 = -22;
 const SERVICE_CLASS: &str = "filesystem";
+/// The options of the mount: the free space tree, which a writable mount
+/// builds when the file system has none yet, and data compressed with
+/// zstd; and with them, on a partition that takes `Discard`, discarding
+/// what is freed in the background.
+const OPTIONS: &CStr = c"space_cache=v2,compress=zstd";
+const OPTIONS_DISCARD: &CStr = c"space_cache=v2,compress=zstd,discard=async";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -157,10 +164,15 @@ fn start(
             disk.size(),
             disk.info.block_size,
             read_only,
+            disk.discards(),
         )
     }
     .map_err(|_| Status::Internal)?;
-    let mount = Mount::new(c"/dev/partition", read_only, None).map_err(|e| match e {
+    let options = match disk.discards() {
+        true => OPTIONS_DISCARD,
+        false => OPTIONS,
+    };
+    let mount = Mount::new(c"/dev/partition", read_only, Some(options)).map_err(|e| match e {
         EINVAL => Status::NotSupported,
         _ => Status::Internal,
     })?;

@@ -187,19 +187,6 @@ int blkdev_issue_flush(struct block_device *bdev)
 	return submit_bio_wait(&bio);
 }
 
-/* The shim's disks can neither discard nor write zeroes. */
-int blkdev_issue_discard(struct block_device *bdev, sector_t sector, sector_t nr_sects,
-			 gfp_t gfp_mask)
-{
-	return -EOPNOTSUPP;
-}
-
-int blkdev_issue_zeroout(struct block_device *bdev, sector_t sector, sector_t nr_sects,
-			 gfp_t gfp_mask, unsigned flags)
-{
-	return -EOPNOTSUPP;
-}
-
 /* Disks have no events, nor ioctls of their own. */
 void disk_block_events(struct gendisk *disk)
 {
@@ -277,6 +264,8 @@ static void disk_io(struct work_struct *work)
 		}
 		if (!ret && run)
 			ret = transfer(disk, write, offset, run, len);
+	} else if (!ret && bio_op(bio) == REQ_OP_DISCARD) {
+		ret = mikros_host_disk_discard(disk, offset, bio->bi_iter.bi_size);
 	} else if (!ret) {
 		ret = -EOPNOTSUPP;
 	}
@@ -303,7 +292,7 @@ static void disk_release(struct device *dev)
 {
 }
 
-static void set_limits(struct queue_limits *lim, unsigned int block_size)
+static void set_limits(struct queue_limits *lim, unsigned int block_size, bool discard)
 {
 	lim->features = BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA;
 	lim->seg_boundary_mask = BLK_SEG_BOUNDARY_MASK;
@@ -317,17 +306,26 @@ static void set_limits(struct queue_limits *lim, unsigned int block_size)
 	lim->physical_block_size = block_size;
 	lim->io_min = block_size;
 	lim->dma_alignment = SECTOR_SIZE - 1;
+	/* A discard of any length in whole blocks is one call of the host. */
+	if (discard) {
+		lim->max_hw_discard_sectors = UINT_MAX;
+		lim->max_user_discard_sectors = UINT_MAX;
+		lim->max_discard_sectors = UINT_MAX;
+		lim->max_discard_segments = 1;
+		lim->discard_granularity = block_size;
+	}
 }
 
 /* Makes the disk, as the release's block/genhd.c makes one for a driver. */
-static struct gendisk *alloc_disk(const char *name, void *handle, unsigned int block_size)
+static struct gendisk *alloc_disk(const char *name, void *handle, unsigned int block_size,
+				  bool discard)
 {
 	struct request_queue *q = kzalloc(sizeof(*q), GFP_KERNEL);
 	struct gendisk *disk = kzalloc(sizeof(*disk), GFP_KERNEL);
 
 	if (!q || !disk)
 		goto free;
-	set_limits(&q->limits, block_size);
+	set_limits(&q->limits, block_size, discard);
 	mutex_init(&q->limits_lock);
 	q->disk = disk;
 	disk->fops = &disk_fops;
@@ -366,9 +364,10 @@ free:
 }
 
 /* Adds the host's disk `handle` of `size` bytes, as /dev/<name>, with
- * blocks of `block_size` bytes. 0, or a negative errno. */
+ * blocks of `block_size` bytes, which the host discards when `discard`.
+ * 0, or a negative errno. */
 int mikros_btrfs_add_disk(const char *name, void *handle, u64 size, unsigned int block_size,
-			  bool read_only)
+			  bool read_only, bool discard)
 {
 	char path[sizeof("/dev/") + DISK_NAME_LEN];
 	bool adopted = mikros_task_adopt("add_disk");
@@ -381,7 +380,7 @@ int mikros_btrfs_add_disk(const char *name, void *handle, u64 size, unsigned int
 	    block_size < SECTOR_SIZE || block_size > PAGE_SIZE)
 		goto out;
 	ret = -ENOMEM;
-	disk = alloc_disk(name, handle, block_size);
+	disk = alloc_disk(name, handle, block_size, discard);
 	if (!disk)
 		goto out;
 	dev = MKDEV(DISK_MAJOR, atomic_inc_return(&next_minor) - 1);
