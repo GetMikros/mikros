@@ -27,7 +27,6 @@ const FS_BASE: u32 = 0;
 /// call chains are deep.
 const STACK_SIZE: u64 = 1 << 20;
 const ENOMEM: c_int = 12;
-const EIO: c_int = 5;
 
 /// The process, whose address space the host maps memory into.
 static PROCESS: AtomicU32 = AtomicU32::new(0);
@@ -335,22 +334,6 @@ extern "C" fn mikros_host_log(line: *const u8, len: u64) {
 extern "C" fn mikros_host_abort(line: *const u8, len: u64) -> ! {
     log::write(Severity::Error, format_args!("{}", text(line, len)));
     mikros_rt::exit(mikros_rt::PANIC_EXIT_CODE)
-}
-
-/// The server cannot read partitions yet: every disk call fails.
-#[unsafe(no_mangle)]
-extern "C" fn mikros_host_disk_read(_: *mut c_void, _: u64, _: *mut u8, _: usize) -> c_int {
-    -EIO
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn mikros_host_disk_write(_: *mut c_void, _: u64, _: *const u8, _: usize) -> c_int {
-    -EIO
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn mikros_host_disk_flush(_: *mut c_void) -> c_int {
-    -EIO
 }
 
 /// A spinning lock for what the host layer keeps between threads, which

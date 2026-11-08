@@ -362,7 +362,7 @@ pub fn run(args: &Args) -> Result<()> {
     fs::create_dir_all(&dir)?;
     let disk = dir.join("disk.img");
     let cmdline = test_cmdline(args.kind, &built.kernel)?;
-    image::create_with(args.kind, &built, &disk, &cmdline, &[])?;
+    image::create_for_tests(args.kind, &built, &disk, &cmdline)?;
     let log = dir.join("serial.log");
     let processor = qemu::Processor::available();
     integration(args, processor, args.timeout, &disk, &log, "", "")?;
@@ -373,7 +373,7 @@ pub fn run(args: &Args) -> Result<()> {
         let isolation_disk = dir.join("isolation-disk.img");
         let isolation_cmdline = [cmdline.as_str(), SKIP_PORTED].join(" ");
         let isolation_cmdline = isolation_cmdline.trim();
-        image::create_with(args.kind, &built, &isolation_disk, isolation_cmdline, &[])?;
+        image::create_for_tests(args.kind, &built, &isolation_disk, isolation_cmdline)?;
         let timeout = match processor {
             qemu::Processor::Host => args.timeout * 5,
             _ => args.timeout,
@@ -393,7 +393,7 @@ pub fn run(args: &Args) -> Result<()> {
     // linked addresses.
     let gdb_disk = dir.join("gdb-disk.img");
     let gdb_cmdline = [cmdline.as_str(), image::KASLR_OFF].join(" ");
-    image::create_with(args.kind, &built, &gdb_disk, gdb_cmdline.trim(), &[])?;
+    image::create_for_tests(args.kind, &built, &gdb_disk, gdb_cmdline.trim())?;
     let gdb_log = dir.join("gdb-serial.log");
     let timeout = Duration::from_secs(args.timeout);
     crate::debug::check_scripts(&args.machine, &built.kernel, &gdb_disk, &gdb_log, timeout)?;

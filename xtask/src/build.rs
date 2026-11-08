@@ -148,6 +148,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let fat = user_build("fat", kind)?;
             println!("built    {}", fat.display());
             let fat_manifest = crate::workspace_root().join("user/drivers/fat/driver.yaml");
+            let btrfs = btrfs_build(kind)?;
+            let btrfs_manifest = crate::workspace_root().join("user/drivers/btrfs/driver.yaml");
             let tmpfs = user_build("tmpfs", kind)?;
             println!("built    {}", tmpfs.display());
             let tmpfs_manifest = crate::workspace_root().join("user/tmpfs/tmpfs.yaml");
@@ -201,6 +203,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ),
                 ("usr/lib/drivers/fat/fat", fat.as_path()),
                 ("usr/lib/drivers/fat/driver.yaml", fat_manifest.as_path()),
+                ("usr/lib/drivers/btrfs/btrfs", btrfs.as_path()),
+                (
+                    "usr/lib/drivers/btrfs/driver.yaml",
+                    btrfs_manifest.as_path(),
+                ),
             ];
             boot_image(kind, "boot.img", &members)?
         }
@@ -623,6 +630,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", partition.display());
             let fat = user_build("fat", kind)?;
             println!("built    {}", fat.display());
+            let btrfs = btrfs_build(kind)?;
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let device_image = |file: &str,
@@ -719,6 +727,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "usr/lib/drivers/fat/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/fat/driver.yaml"),
+                ),
+                ("usr/lib/drivers/btrfs/btrfs".to_owned(), btrfs.clone()),
+                (
+                    "usr/lib/drivers/btrfs/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/btrfs/driver.yaml"),
                 ),
             ];
             let pci_image = device_image(
@@ -873,6 +886,15 @@ pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
 
 /// The target user-space programs are built for.
 pub const USER_TARGET: &str = "targets/x86_64-unknown-mikros.json";
+
+/// Builds the btrfs server, after the library of Linux's btrfs code on
+/// the shim for Mikros that it links, and returns its path.
+fn btrfs_build(kind: Kind) -> Result<PathBuf> {
+    crate::btrfs::build(crate::btrfs::Flavor::Mikros)?;
+    let btrfs = user_build("btrfs", kind)?;
+    println!("built    {}", btrfs.display());
+    Ok(btrfs)
+}
 
 /// Builds the user-space program `bin`, a package of the `user`
 /// workspace of the same name, and returns its path.
