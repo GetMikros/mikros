@@ -28,6 +28,9 @@ struct Connection {
     user: u32,
     cursor: u64,
     append: bool,
+    /// Whether the connection looks names up case-insensitively, as it was
+    /// opened with `CASE_INSENSITIVE` (MIKSPEC-0071.R16).
+    folded: bool,
     /// The owner of the connection's locks.
     owner: u64,
 }
@@ -41,6 +44,7 @@ pub async fn serve(
     rights: Rights,
     user: u32,
     append: bool,
+    folded: bool,
 ) {
     let server = NodeAsyncServer::new(end, fs.reactor.clone());
     let owner = fs.owner();
@@ -51,6 +55,7 @@ pub async fn serve(
         user,
         cursor: 0,
         append,
+        folded,
         owner,
     };
     while let Ok(request) = server.next().await {
@@ -230,8 +235,14 @@ impl Connection {
 
     fn clone(&self, q: NodeCloneRequest) -> Result<NodeCloneResponse, Error> {
         self.require(q.rights)?;
-        self.fs
-            .serve(q.node, self.node, q.rights, self.user, self.append);
+        self.fs.serve(
+            q.node,
+            self.node,
+            q.rights,
+            self.user,
+            self.append,
+            self.folded,
+        );
         Ok(NodeCloneResponse {})
     }
 
@@ -339,6 +350,7 @@ impl Connection {
     /// directory, referring to `q.listener`.
     fn bind_socket(&self, q: NodeBindSocketRequest) -> Result<(), Error> {
         self.require(Rights::WRITE)?;
+        self.free_folded(self.node, &q.name)?;
         let socket = Socket {
             listener: SocketListenerClient::new(q.listener),
         };
@@ -366,8 +378,8 @@ impl Connection {
     /// `WOULD_BLOCK` when it cannot take the message.
     fn connect_socket(&self, q: NodeConnectSocketRequest) -> Result<(), Error> {
         self.require(Rights::WRITE)?;
+        let (_, id) = self.find(self.node, &q.name)?.ok_or(Error::NotFound)?;
         let tree = self.fs.tree.borrow();
-        let id = tree.lookup(self.node, &q.name).map_err(fs::error)?;
         let Some(Kind::Socket(socket)) = tree.get(id).map(|n| &n.kind) else {
             return Err(Error::Invalid);
         };
@@ -473,12 +485,14 @@ impl Connection {
             return Err(Error::NotDirectory);
         }
         let no_follow = q.flags.contains(OpenFlags::NO_FOLLOW);
+        let folded = q.flags.contains(OpenFlags::CASE_INSENSITIVE);
+        let create = q.flags.contains(OpenFlags::CREATE);
         let want_dir = q.flags.contains(OpenFlags::DIRECTORY) || q.path.ends_with('/');
         let resolved = self
             .fs
             .tree
             .borrow()
-            .resolve(self.node, &q.path, no_follow)
+            .resolve_with(self.node, &q.path, no_follow, folded, create)
             .map_err(fs::error)?;
         let id = match resolved {
             Resolved::Redirect(target) => {
@@ -526,7 +540,8 @@ impl Connection {
             self.fs.changed(id, WatchKind::Modified);
         }
         let append = q.flags.contains(OpenFlags::APPEND);
-        self.fs.serve(q.node, id, q.rights, self.user, append);
+        self.fs
+            .serve(q.node, id, q.rights, self.user, append, folded);
         Ok(NodeOpenResponse {
             r#type,
             redirect: None,
@@ -560,6 +575,11 @@ impl Connection {
 
     fn unlink(&self, name: &str, directory: bool) -> Result<(), Error> {
         self.require(Rights::WRITE)?;
+        let name = match self.find(self.node, name)? {
+            Some((own, _)) => own,
+            None => String::from(name),
+        };
+        let name = name.as_str();
         let removed = self
             .fs
             .tree
@@ -591,12 +611,19 @@ impl Connection {
     fn rename(&self, q: NodeRenameRequest) -> Result<(), Error> {
         self.require(Rights::WRITE)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
-        let moved = self
-            .fs
-            .tree
-            .borrow()
-            .lookup(self.node, &q.name)
-            .map_err(fs::error)?;
+        let (name, moved) = self.find(self.node, &q.name)?.ok_or(Error::NotFound)?;
+        // An entry equal to the new name under case folding is replaced as
+        // one of exactly that name, under its own name; the moved entry
+        // itself only changes its case.
+        let new_name = match self.find(to, &q.new_name)? {
+            Some((own, id)) if !(id == moved && to == self.node) => own,
+            _ => q.new_name.clone(),
+        };
+        let q = NodeRenameRequest {
+            name,
+            new_name,
+            ..q
+        };
         let renamed =
             self.fs
                 .tree
@@ -629,6 +656,9 @@ impl Connection {
     fn link(&self, q: NodeLinkRequest) -> Result<(), Error> {
         self.require(Rights::WRITE)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        let (name, _) = self.find(self.node, &q.name)?.ok_or(Error::NotFound)?;
+        self.free_folded(to, &q.new_name)?;
+        let q = NodeLinkRequest { name, ..q };
         let linked = self
             .fs
             .tree
@@ -647,6 +677,7 @@ impl Connection {
         if target.is_empty() {
             return Err(Error::Invalid);
         }
+        self.free_folded(self.node, name)?;
         let mut tree = self.fs.tree.borrow_mut();
         let created = tree.create(
             self.node,
@@ -662,6 +693,25 @@ impl Connection {
             .watches
             .notify(self.node, &[event(WatchKind::Created, 0, name)]);
         Ok(())
+    }
+
+    /// The entry `name` of the directory `dir` and its own name: on a
+    /// case-insensitive connection, as `Open` with `CASE_INSENSITIVE`
+    /// finds it, and otherwise exactly.
+    fn find(&self, dir: Id, name: &str) -> Result<Option<(String, Id)>, Error> {
+        let tree = self.fs.tree.borrow();
+        tree.find(dir, name, self.folded).map_err(fs::error)
+    }
+
+    /// Fails with `EXISTS` on a case-insensitive connection when the
+    /// directory `dir` holds an entry equal to the new name `name` under
+    /// case folding.
+    fn free_folded(&self, dir: Id, name: &str) -> Result<(), Error> {
+        let tree = self.fs.tree.borrow();
+        match self.folded && tree.find(dir, name, true).map_err(fs::error)?.is_some() {
+            true => Err(Error::Exists),
+            false => Ok(()),
+        }
     }
 
     fn read_link(&self) -> Result<NodeReadLinkResponse, Error> {

@@ -805,6 +805,9 @@ dependencies = [
 [[package]]
 name = "mikros-memfs"
 version = "0.0.0"
+dependencies = [
+ "mikros-casefold",
+]
 
 [[package]]
 name = "mikros-pci"

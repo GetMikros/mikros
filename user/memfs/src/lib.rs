@@ -70,6 +70,20 @@ impl Directory {
         self.entries.get(cookie).map(|(_, id)| *id)
     }
 
+    /// The entry `name`, with its own name: the one of exactly that name,
+    /// or else the first in listing order whose name equals `name` under
+    /// simple case folding (MIKSPEC-0071.R16).
+    pub fn get_folded(&self, name: &str) -> Option<(&str, Id)> {
+        if let Some(id) = self.get(name) {
+            let cookie = self.names.get(name)?;
+            return Some((self.entries.get(cookie)?.0.as_str(), id));
+        }
+        self.entries
+            .values()
+            .find(|(entry, _)| mikros_casefold::equal(entry, name))
+            .map(|(entry, id)| (entry.as_str(), *id))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -197,6 +211,19 @@ impl<C, S> Tree<C, S> {
         self.dir(dir)?.get(name).ok_or(Error::NotFound)
     }
 
+    /// The entry `name` of the directory `dir` and its own name: exactly,
+    /// or when `folded` also under case folding, as
+    /// `Directory::get_folded` finds it.
+    pub fn find(&self, dir: Id, name: &str, folded: bool) -> Result<Option<(String, Id)>, Error> {
+        let directory = self.dir(dir)?;
+        Ok(match folded {
+            true => directory
+                .get_folded(name)
+                .map(|(own, id)| (String::from(own), id)),
+            false => directory.get(name).map(|id| (String::from(name), id)),
+        })
+    }
+
     /// The link count of `id`: 2 plus its subdirectories for a
     /// directory, and its names otherwise.
     pub fn links(&self, id: Id) -> u64 {
@@ -224,6 +251,21 @@ impl<C, S> Tree<C, S> {
     /// `..` with `AccessDenied`, and a component over 255 bytes with
     /// `NameTooLong`. More than 40 links fail with `Loop`.
     pub fn resolve(&self, dir: Id, path: &str, no_follow: bool) -> Result<Resolved, Error> {
+        self.resolve_with(dir, path, no_follow, false, false)
+    }
+
+    /// Resolves `path` as `resolve` does, looking up a component that no
+    /// entry has exactly under case folding when `folded`, as
+    /// `Directory::get_folded` does; with `create` too, a last component
+    /// found that way fails with `Exists`.
+    pub fn resolve_with(
+        &self,
+        dir: Id,
+        path: &str,
+        no_follow: bool,
+        folded: bool,
+        create: bool,
+    ) -> Result<Resolved, Error> {
         if path.is_empty() || path.starts_with('/') {
             return Err(Error::Invalid);
         }
@@ -253,7 +295,14 @@ impl<C, S> Tree<C, S> {
                 _ => {}
             }
             let directory = self.dir(at)?;
-            let Some(node) = directory.get(&name) else {
+            let found = match directory.get(&name) {
+                None if folded => match directory.get_folded(&name) {
+                    Some(_) if rest.is_empty() && create => return Err(Error::Exists),
+                    found => found.map(|(_, id)| id),
+                },
+                found => found,
+            };
+            let Some(node) = found else {
                 if rest.is_empty() {
                     return Ok(Resolved::Missing { parent: at, name });
                 }

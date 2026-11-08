@@ -108,7 +108,8 @@ impl Fs {
     }
 
     /// Serves `end` as a connection to `node` with `rights` for the user
-    /// `user`, writing at the end when `append`.
+    /// `user`, writing at the end when `append`, and looking names up
+    /// case-insensitively when `folded` (MIKSPEC-0071.R16).
     pub fn serve(
         self: &Rc<Self>,
         end: ServerEnd<Node>,
@@ -116,9 +117,10 @@ impl Fs {
         rights: Rights,
         user: u32,
         append: bool,
+        folded: bool,
     ) {
         *self.refs.borrow_mut().entry(node).or_default() += 1;
-        let task = node::serve(self.clone(), end, node, rights, user, append);
+        let task = node::serve(self.clone(), end, node, rights, user, append, folded);
         self.spawner.spawn(task);
     }
 
@@ -312,7 +314,7 @@ pub async fn serve_filesystem(fs: Rc<Fs>, end: ServerEnd<Filesystem>, user: u32)
         let s = server.server();
         let _ = match request {
             FilesystemRequest::GetRoot(q, r) => {
-                fs.serve(q.node, ROOT, q.rights, user, false);
+                fs.serve(q.node, ROOT, q.rights, user, false, false);
                 r.reply(s, Ok(FilesystemGetRootResponse {}))
             }
             FilesystemRequest::QueryFilesystem(_, r) => {

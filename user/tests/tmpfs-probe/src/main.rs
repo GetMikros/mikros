@@ -72,6 +72,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         .and_then(|()| locks(&root))
         .and_then(|()| watches(&root))
         .and_then(|()| sockets(&root))
+        .and_then(|()| case_insensitive(&root))
         .and_then(|()| budgets(&root, &directory, budget));
     match checked {
         Ok(()) => 0,
@@ -428,6 +429,62 @@ fn sockets(root: &NodeClient) -> Result<(), i64> {
     expect(err(refused) == Some(Error::Refused), 39)?;
     expect(ok(root.unlink("sock".into(), false, FOREVER)).is_some(), 40)?;
     Ok(())
+}
+
+/// The names of the entries of `dir`.
+fn names(dir: &NodeClient) -> Option<Vec<String>> {
+    let read = ok(dir.read_directory(0, false, FOREVER))?;
+    Some(read.entries.into_iter().map(|e| e.name).collect())
+}
+
+/// Whether names that differ in case behave: `CASE_INSENSITIVE` finds
+/// them, also on the way, and `CREATE` of such a name fails with
+/// `EXISTS`; and a directory opened with the flag, and its clones, stay
+/// case-insensitive: `CreateSymlink`, `BindSocket` and `Link` refuse new
+/// names taken in another case, `Link`, `Rename` and `Unlink` find their
+/// entries in another case, and `Rename` changes the case of a name or
+/// replaces an entry that differs in case, keeping its name.
+fn case_insensitive(root: &NodeClient) -> Result<(), i64> {
+    use OpenFlags as F;
+    let folded = F::CASE_INSENSITIVE;
+    let made = flags(&[F::CREATE, F::DIRECTORY, F::EXCLUSIVE]);
+    let (dir, _, _) = open(root, "Case", made, RW).map_err(|_| 70)?;
+    let file = flags(&[F::CREATE, F::EXCLUSIVE]);
+    open(&dir, "Straße", file, RW).map_err(|_| 70)?;
+    expect(open(root, "CASE/STRAẞE", folded, RW).is_ok(), 71)?;
+    let exact = open(root, "case/STRAẞE", OpenFlags(0), RW);
+    expect(matches!(exact, Err(Some(Error::NotFound))), 71)?;
+    let taken = open(&dir, "straße", flags(&[F::CREATE, folded]), RW);
+    expect(matches!(taken, Err(Some(Error::Exists))), 72)?;
+
+    let opened = open(root, "CASE", flags(&[F::DIRECTORY, folded]), RW);
+    let (ci, _, _) = opened.map_err(|_| 73)?;
+    let symlink = ci.create_symlink("STRAẞE".into(), "x".into(), FOREVER);
+    expect(err(symlink) == Some(Error::Exists), 73)?;
+    let (client, _server) = endpoints::<SocketListener>().map_err(|_| 74)?;
+    let bound = ci.bind_socket("straße".into(), 0o600, client, FOREVER);
+    expect(err(bound) == Some(Error::Exists), 74)?;
+    let token = ok(ci.get_token(FOREVER)).ok_or(75)?.token;
+    let linked = ci.link("STRAẞE".into(), token, "Linked".into(), FOREVER);
+    expect(ok(linked).is_some(), 75)?;
+    let token = ok(ci.get_token(FOREVER)).ok_or(75)?.token;
+    let taken = ci.link("STRAẞE".into(), token, "LINKED".into(), FOREVER);
+    expect(err(taken) == Some(Error::Exists), 75)?;
+    let token = ok(ci.get_token(FOREVER)).ok_or(76)?.token;
+    let renamed = ci.rename("linked".into(), token, "LinkeD".into(), FOREVER);
+    expect(ok(renamed).is_some(), 76)?;
+    open(&dir, "other", file, RW).map_err(|_| 76)?;
+    let token = ok(ci.get_token(FOREVER)).ok_or(76)?.token;
+    let renamed = ci.rename("OTHER".into(), token, "linked".into(), FOREVER);
+    expect(ok(renamed).is_some(), 76)?;
+    let mut listed = names(&dir).ok_or(77)?;
+    listed.sort();
+    expect(listed == ["LinkeD", "Straße"], 77)?;
+    let (clone, _) = clone(&ci, RW).ok_or(78)?;
+    for name in ["STRAẞE", "linked"] {
+        expect(ok(clone.unlink(name.into(), false, FOREVER)).is_some(), 78)?;
+    }
+    expect(ok(root.unlink("Case".into(), true, FOREVER)).is_some(), 79)
 }
 
 /// The pages charged to `budget`.

@@ -197,3 +197,36 @@ fn ancestors_lead_to_the_root() {
     t.link(b, "f", ROOT, "g", 2).unwrap();
     assert_eq!(t.ancestors(f), vec![b, a, ROOT]);
 }
+
+#[test]
+fn finds_names_case_insensitively() {
+    let mut t = T::new(0o755, 0, 0);
+    let a = mkdir(&mut t, ROOT, "Dir");
+    let f = file(&mut t, a, "Straße");
+    let second = file(&mut t, a, "dup");
+    let third = file(&mut t, a, "DUP");
+    assert_eq!(
+        t.resolve_with(ROOT, "DIR/STRAẞE", false, true, false),
+        Ok(Resolved::Node(f))
+    );
+    assert_eq!(t.resolve(ROOT, "DIR/STRAẞE", false), Err(Error::NotFound));
+    // A sharp s has no simple folding to two letters.
+    assert_eq!(
+        t.resolve_with(ROOT, "dir/STRASSE", false, true, false),
+        Ok(Resolved::Missing {
+            parent: a,
+            name: "STRASSE".to_string()
+        })
+    );
+    assert_eq!(
+        t.resolve_with(ROOT, "dir/straße", false, true, true),
+        Err(Error::Exists)
+    );
+    // The first in listing order, unless one has exactly the name.
+    assert_eq!(
+        t.find(a, "Dup", true),
+        Ok(Some(("dup".to_string(), second)))
+    );
+    assert_eq!(t.find(a, "DUP", true), Ok(Some(("DUP".to_string(), third))));
+    assert_eq!(t.find(a, "Dup", false), Ok(None));
+}
