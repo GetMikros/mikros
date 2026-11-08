@@ -1,7 +1,8 @@
 //! Linux's btrfs code on the btrfs shim (MIKSPEC-0053.R1): the pinned
 //! Linux release, fetched once and extracted in the parts the shim
 //! builds from, and compiled, for Mikros or for the build host, against
-//! the Mikros architecture in `user/btrfs/linux` into a static library.
+//! the Mikros architecture in `user/btrfs/linux` into a static library,
+//! with the shim's own files in `user/btrfs/shim`.
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -26,6 +27,35 @@ const PARTS: &[&str] = &[
     "fs/btrfs/",
     "lib/",
     "crypto/",
+];
+
+/// The sections that the shim walks, renamed from the release's to names
+/// that the linker gives start and stop symbols: the initcalls of each
+/// level, and the static per-CPU variables.
+const RENAMES: &[(&str, &str)] = &[
+    (".initcallearly.init", "mikros_initcall_early"),
+    (".initcall0.init", "mikros_initcall0"),
+    (".initcall0s.init", "mikros_initcall0"),
+    (".initcall1.init", "mikros_initcall1"),
+    (".initcall1s.init", "mikros_initcall1"),
+    (".initcall2.init", "mikros_initcall2"),
+    (".initcall2s.init", "mikros_initcall2"),
+    (".initcall3.init", "mikros_initcall3"),
+    (".initcall3s.init", "mikros_initcall3"),
+    (".initcall4.init", "mikros_initcall4"),
+    (".initcall4s.init", "mikros_initcall4"),
+    (".initcall5.init", "mikros_initcall5"),
+    (".initcall5s.init", "mikros_initcall5"),
+    (".initcall6.init", "mikros_initcall6"),
+    (".initcall6s.init", "mikros_initcall6"),
+    (".initcall7.init", "mikros_initcall7"),
+    (".initcall7s.init", "mikros_initcall7"),
+    (".initcallrootfs.init", "mikros_initcall5"),
+    (".data..percpu", "mikros_percpu"),
+    (".data..percpu..first", "mikros_percpu"),
+    (".data..percpu..page_aligned", "mikros_percpu"),
+    (".data..percpu..read_mostly", "mikros_percpu"),
+    (".data..percpu..shared_aligned", "mikros_percpu"),
 ];
 
 #[derive(clap::Args)]
@@ -112,10 +142,12 @@ pub fn build(flavor: Flavor) -> Result<PathBuf> {
     let out = crate::workspace_root()
         .join("target/btrfs")
         .join(flavor.name());
+    let shim = crate::workspace_root().join("user/btrfs/shim");
     let library = out.join("libbtrfs.a");
-    let files = btrfs_files(&source)?;
+    let mut files = btrfs_files(&source)?;
+    files.extend(shim_files(&shim)?);
     let flags = flags(flavor, &source, &linux, &out);
-    let stamp = digest(&flags, &files, &linux)?;
+    let stamp = digest(&flags, &files, &[&linux, &shim])?;
     let stamp_file = out.join(".stamp");
     if library.exists() && fs::read_to_string(&stamp_file).ok().as_deref() == Some(&stamp) {
         return Ok(library);
@@ -131,8 +163,30 @@ pub fn build(flavor: Flavor) -> Result<PathBuf> {
         &out.join("include/generated/bounds.h"),
     )?;
     let objects = compile(&source, &flags, &files, &out.join("obj"))?;
+    let mut objcopy = Command::new(crate::llvm::tool("llvm-objcopy"));
+    for (from, to) in RENAMES {
+        objcopy.arg(format!("--rename-section={from}={to}"));
+    }
+    for object in &objects {
+        crate::port::run(
+            Command::new(objcopy.get_program())
+                .args(objcopy.get_args())
+                .arg(object),
+        )?;
+    }
+    // One object, whose only global symbols are the shim's, so that the
+    // release's names, such as strlen and snprintf, stay its own.
+    let object = out.join("btrfs.o");
+    let mut ld = Command::new(crate::llvm::tool("ld.lld"));
+    ld.arg("-r").arg("-o").arg(&object).args(&objects);
+    crate::port::run(&mut ld)?;
+    let mut localize = Command::new(crate::llvm::tool("llvm-objcopy"));
+    localize
+        .args(["--wildcard", "--keep-global-symbol=mikros_*"])
+        .arg(&object);
+    crate::port::run(&mut localize)?;
     let mut ar = Command::new(crate::llvm::tool("llvm-ar"));
-    ar.arg("rcs").arg(&library).args(&objects);
+    ar.arg("rcs").arg(&library).arg(&object);
     crate::port::run(&mut ar)?;
     fs::write(&stamp_file, stamp)?;
     Ok(library)
@@ -169,6 +223,19 @@ fn btrfs_y(makefile: &str) -> Vec<String> {
         }
     }
     files
+}
+
+/// The shim's C files in `dir`, by their absolute paths.
+fn shim_files(dir: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "c") {
+            files.push(path.display().to_string());
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 /// The compiler's flags for every file: the target, the include paths
@@ -237,16 +304,20 @@ fn flags(flavor: Flavor, source: &Path, linux: &Path, out: &Path) -> Vec<String>
 }
 
 /// A digest of everything a build depends on that the source's own
-/// stamp does not cover: the flags, the files, and the Mikros
-/// architecture's files.
-fn digest(flags: &[String], files: &[String], linux: &Path) -> Result<String> {
+/// stamp does not cover: how it is built, the flags, the files, and the
+/// files in `dirs`, the Mikros architecture's and the shim's.
+fn digest(flags: &[String], files: &[String], dirs: &[&Path]) -> Result<String> {
     let mut hasher = Sha256::new();
+    // The steps of the build are this file's.
+    hasher.update(include_str!("btrfs.rs"));
     for item in flags.iter().chain(files) {
         hasher.update(item.as_bytes());
         hasher.update([0]);
     }
     let mut paths = Vec::new();
-    collect(linux, &mut paths)?;
+    for dir in dirs {
+        collect(dir, &mut paths)?;
+    }
     paths.sort();
     for path in paths {
         hasher.update(path.as_os_str().as_encoded_bytes());
@@ -348,7 +419,17 @@ fn compile(source: &Path, flags: &[String], files: &[String], dir: &Path) -> Res
     fs::create_dir_all(dir)?;
     let objects: Vec<PathBuf> = files
         .iter()
-        .map(|f| dir.join(f.replace('/', "_")).with_extension("o"))
+        .map(|f| {
+            // The shim's files come by absolute paths, the tree's relative.
+            let name = match Path::new(f).strip_prefix("/") {
+                Ok(_) => format!(
+                    "shim_{}",
+                    Path::new(f).file_name().unwrap().to_string_lossy()
+                ),
+                Err(_) => f.replace('/', "_"),
+            };
+            dir.join(name).with_extension("o")
+        })
         .collect();
     let next = AtomicUsize::new(0);
     let failures = Mutex::new(Vec::new());
