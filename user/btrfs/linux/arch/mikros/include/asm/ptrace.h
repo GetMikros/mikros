@@ -14,6 +14,7 @@ struct pt_regs {
 #define user_stack_pointer(regs)	((regs)->sp)
 #define profile_pc(regs)		instruction_pointer(regs)
 #define current_pt_regs()		((struct pt_regs *)NULL)
+#define task_pt_regs(tsk)		((struct pt_regs *)NULL)
 #endif
 
 #endif

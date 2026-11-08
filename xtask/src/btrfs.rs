@@ -2,7 +2,8 @@
 //! Linux release, fetched once and extracted in the parts the shim
 //! builds from, and compiled, for Mikros or for the build host, against
 //! the Mikros architecture in `user/btrfs/linux` into a static library,
-//! with the shim's own files in `user/btrfs/shim`.
+//! with the library code of the release that btrfs uses and the shim's
+//! own files in `user/btrfs/shim`.
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -23,10 +24,190 @@ const PARTS: &[&str] = &[
     "COPYING",
     "LICENSES/",
     "include/",
-    "kernel/bounds.c",
-    "fs/btrfs/",
+    "init/",
+    "kernel/",
+    "mm/",
+    "block/",
+    "fs/",
+    "drivers/base/map.c",
     "lib/",
     "crypto/",
+    "security/",
+];
+
+/// The files of the release, beside btrfs's own, that the shim builds
+/// as they are: library code, locking, the VFS, the page cache and the
+/// generic block code, credentials, and the crypto API with the hashes
+/// btrfs checksums with.
+const LINUX: &[&str] = &[
+    "lib/bitmap.c",
+    "lib/bitrev.c",
+    "lib/bsearch.c",
+    "lib/cmdline.c",
+    "lib/crc/crc32-main.c",
+    "lib/crypto/sha256.c",
+    "lib/crypto/utils.c",
+    "lib/ctype.c",
+    "lib/errseq.c",
+    "lib/find_bit.c",
+    "lib/flex_proportions.c",
+    "lib/hexdump.c",
+    "lib/hweight.c",
+    "lib/idr.c",
+    "lib/iov_iter.c",
+    "lib/kasprintf.c",
+    "lib/kobject.c",
+    "lib/kstrtox.c",
+    "lib/list_sort.c",
+    "lib/lockref.c",
+    "lib/lzo/lzo1x_compress.c",
+    "lib/lzo/lzo1x_compress_safe.c",
+    "lib/lzo/lzo1x_decompress_safe.c",
+    "lib/maple_tree.c",
+    "lib/percpu_counter.c",
+    "lib/radix-tree.c",
+    "lib/ratelimit.c",
+    "lib/rbtree.c",
+    "lib/rcuref.c",
+    "lib/refcount.c",
+    "lib/siphash.c",
+    "lib/sort.c",
+    "lib/string.c",
+    "lib/string_helpers.c",
+    "lib/strncpy_from_user.c",
+    "lib/strnlen_user.c",
+    "lib/usercopy.c",
+    "lib/uuid.c",
+    "lib/vsprintf.c",
+    "lib/xarray.c",
+    "lib/xxhash.c",
+    "lib/zlib_deflate/deflate.c",
+    "lib/zlib_deflate/deflate_syms.c",
+    "lib/zlib_deflate/deftree.c",
+    "lib/zlib_inflate/inffast.c",
+    "lib/zlib_inflate/inflate.c",
+    "lib/zlib_inflate/inflate_syms.c",
+    "lib/zlib_inflate/inftrees.c",
+    "lib/zlib_inflate/infutil.c",
+    "lib/zstd/common/debug.c",
+    "lib/zstd/common/entropy_common.c",
+    "lib/zstd/common/error_private.c",
+    "lib/zstd/common/fse_decompress.c",
+    "lib/zstd/common/zstd_common.c",
+    "lib/zstd/compress/fse_compress.c",
+    "lib/zstd/compress/hist.c",
+    "lib/zstd/compress/huf_compress.c",
+    "lib/zstd/compress/zstd_compress.c",
+    "lib/zstd/compress/zstd_compress_literals.c",
+    "lib/zstd/compress/zstd_compress_sequences.c",
+    "lib/zstd/compress/zstd_compress_superblock.c",
+    "lib/zstd/compress/zstd_double_fast.c",
+    "lib/zstd/compress/zstd_fast.c",
+    "lib/zstd/compress/zstd_lazy.c",
+    "lib/zstd/compress/zstd_ldm.c",
+    "lib/zstd/compress/zstd_opt.c",
+    "lib/zstd/compress/zstd_preSplit.c",
+    "lib/zstd/decompress/huf_decompress.c",
+    "lib/zstd/decompress/zstd_ddict.c",
+    "lib/zstd/decompress/zstd_decompress.c",
+    "lib/zstd/decompress/zstd_decompress_block.c",
+    "lib/zstd/zstd_common_module.c",
+    "lib/zstd/zstd_compress_module.c",
+    "lib/zstd/zstd_decompress_module.c",
+    "kernel/capability.c",
+    "kernel/cred.c",
+    "kernel/groups.c",
+    "kernel/locking/mutex.c",
+    "kernel/locking/osq_lock.c",
+    "kernel/locking/percpu-rwsem.c",
+    "kernel/locking/rwsem.c",
+    "kernel/locking/semaphore.c",
+    "kernel/locking/spinlock.c",
+    "kernel/notifier.c",
+    "kernel/nscommon.c",
+    "kernel/nsproxy.c",
+    "kernel/nstree.c",
+    "kernel/pid.c",
+    "kernel/rcu/sync.c",
+    "kernel/time/timeconv.c",
+    "kernel/ucount.c",
+    "kernel/user.c",
+    "init/init_task.c",
+    "mm/backing-dev.c",
+    "mm/filemap.c",
+    "mm/folio-compat.c",
+    "mm/init-mm.c",
+    "mm/list_lru.c",
+    "mm/mempool.c",
+    "mm/mmzone.c",
+    "mm/page-writeback.c",
+    "mm/readahead.c",
+    "mm/swap.c",
+    "mm/truncate.c",
+    "mm/util.c",
+    "mm/vmstat.c",
+    "mm/workingset.c",
+    "block/bdev.c",
+    "block/bio.c",
+    "block/fops.c",
+    "drivers/base/map.c",
+    "fs/attr.c",
+    "fs/bad_inode.c",
+    "fs/char_dev.c",
+    "fs/d_path.c",
+    "fs/dcache.c",
+    "fs/fcntl.c",
+    "fs/file.c",
+    "fs/file_attr.c",
+    "fs/file_table.c",
+    "fs/filesystems.c",
+    "fs/fs-writeback.c",
+    "fs/fs_context.c",
+    "fs/fs_parser.c",
+    "fs/fs_pin.c",
+    "fs/fs_struct.c",
+    "fs/fs_types.c",
+    "fs/init.c",
+    "fs/inode.c",
+    "fs/ioctl.c",
+    "fs/iomap/buffered-io.c",
+    "fs/iomap/direct-io.c",
+    "fs/iomap/fiemap.c",
+    "fs/iomap/ioend.c",
+    "fs/iomap/iter.c",
+    "fs/iomap/seek.c",
+    "fs/libfs.c",
+    "fs/locks.c",
+    "fs/mnt_idmapping.c",
+    "fs/namei.c",
+    "fs/namespace.c",
+    "fs/nsfs.c",
+    "fs/open.c",
+    "fs/pipe.c",
+    "fs/pnode.c",
+    "fs/ramfs/file-nommu.c",
+    "fs/ramfs/inode.c",
+    "fs/read_write.c",
+    "fs/readdir.c",
+    "fs/remap_range.c",
+    "fs/seq_file.c",
+    "fs/splice.c",
+    "fs/stack.c",
+    "fs/stat.c",
+    "fs/statfs.c",
+    "fs/super.c",
+    "fs/sync.c",
+    "fs/utimes.c",
+    "fs/xattr.c",
+    "security/commoncap.c",
+    "crypto/algapi.c",
+    "crypto/api.c",
+    "crypto/blake2b_generic.c",
+    "crypto/crc32c.c",
+    "crypto/sha256.c",
+    "crypto/shash.c",
+    "crypto/xor.c",
+    "crypto/xxhash_generic.c",
 ];
 
 /// The sections that the shim walks, renamed from the release's to names
@@ -145,6 +326,7 @@ pub fn build(flavor: Flavor) -> Result<PathBuf> {
     let shim = crate::workspace_root().join("user/btrfs/shim");
     let library = out.join("libbtrfs.a");
     let mut files = btrfs_files(&source)?;
+    files.extend(LINUX.iter().map(|f| f.to_string()));
     files.extend(shim_files(&shim)?);
     let flags = flags(flavor, &source, &linux, &out);
     let stamp = digest(&flags, &files, &[&linux, &shim])?;
@@ -162,6 +344,7 @@ pub fn build(flavor: Flavor) -> Result<PathBuf> {
         "kernel/bounds.c",
         &out.join("include/generated/bounds.h"),
     )?;
+    crc32_table(&source, &linux, &out)?;
     let objects = compile(&source, &flags, &files, &out.join("obj"))?;
     let mut objcopy = Command::new(crate::llvm::tool("llvm-objcopy"));
     for (from, to) in RENAMES {
@@ -238,6 +421,44 @@ fn shim_files(dir: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
+/// Writes `crc32table.h`, which the release generates with a program of
+/// its own for the build host. The program includes the configuration
+/// by a path from its own directory, so it is built in a directory laid
+/// out as the tree is.
+fn crc32_table(source: &Path, linux: &Path, out: &Path) -> Result<()> {
+    let tree = out.join("crc32");
+    for dir in ["lib/crc", "include/linux", "include/generated"] {
+        fs::create_dir_all(tree.join(dir))?;
+    }
+    for (from, to) in [
+        (
+            source.join("lib/crc/gen_crc32table.c"),
+            "lib/crc/gen_crc32table.c",
+        ),
+        (
+            source.join("include/linux/crc32poly.h"),
+            "include/linux/crc32poly.h",
+        ),
+        (
+            linux.join("include/generated/autoconf.h"),
+            "include/generated/autoconf.h",
+        ),
+    ] {
+        fs::copy(&from, tree.join(to)).with_context(|| format!("copying {}", from.display()))?;
+    }
+    let generator = tree.join("gen_crc32table");
+    crate::port::run(
+        Command::new("cc")
+            .arg("-O2")
+            .arg("-o")
+            .arg(&generator)
+            .arg(tree.join("lib/crc/gen_crc32table.c")),
+    )?;
+    let table = crate::port::output(&mut Command::new(&generator))?;
+    fs::write(out.join("include/crc32table.h"), table)?;
+    Ok(())
+}
+
 /// The compiler's flags for every file: the target, the include paths
 /// in Kbuild's order with the Mikros architecture's in place of an
 /// architecture of the tree, the headers Kbuild includes first, and the
@@ -258,6 +479,18 @@ fn flags(flavor: Flavor, source: &Path, linux: &Path, out: &Path) -> Vec<String>
         source.join("include/uapi"),
     ] {
         flags.push(format!("-I{}", path(&dir)));
+    }
+    // The compiler's own headers, such as the intrinsics that zstd uses,
+    // come after the tree's.
+    let resource = crate::llvm::bin().join("../lib/clang");
+    let builtin = fs::read_dir(&resource)
+        .ok()
+        .and_then(|mut d| d.next())
+        .and_then(|e| e.ok())
+        .map(|e| e.path().join("include"));
+    if let Some(builtin) = builtin {
+        flags.push("-isystem".into());
+        flags.push(path(&builtin));
     }
     for header in [
         "linux/compiler-version.h",
@@ -297,6 +530,18 @@ fn flags(flavor: Flavor, source: &Path, linux: &Path, out: &Path) -> Vec<String>
             "-Wno-unused-but-set-variable",
             "-Wno-initializer-overrides",
             "-Wno-format-zero-length",
+            // Kbuild's, for clang, from scripts/Makefile.extrawarn.
+            "-Wno-gnu",
+            "-Wno-format-overflow-non-kprintf",
+            "-Wno-format-truncation-non-kprintf",
+            "-Wno-default-const-init-unsafe",
+            "-Wno-unused-const-variable",
+            "-Wno-format-overflow",
+            "-Wno-pointer-to-enum-cast",
+            "-Wno-tautological-constant-out-of-range-compare",
+            "-Wno-unaligned-access",
+            "-Wno-enum-compare-conditional",
+            "-Wno-enum-enum-conversion",
         ]
         .map(String::from),
     );
