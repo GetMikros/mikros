@@ -82,7 +82,10 @@ impl Connection {
                     attributes: fs::attributes(&a),
                 }),
             ),
-            R::SetAttributes(q, r) => r.reply(s, self.set_attributes(q)),
+            R::SetAttributes(q, r) => {
+                let set = self.set_attributes(q);
+                r.reply(s, self.fs.durable(set).await)
+            }
             R::Clone(q, r) => r.reply(s, self.clone(q)),
             R::Sync(_, r) => r.reply(s, self.sync().await.map(|()| NodeSyncResponse {})),
             R::QueryFilesystem(_, r) => r.reply(
@@ -98,42 +101,100 @@ impl Connection {
                     .map(|data| NodeReadResponse { data }),
             ),
             R::ReadNext(q, r) => r.reply(s, self.read_next(q.count).await),
-            R::Write(q, r) => r.reply(
-                s,
-                self.write(Some(q.offset), q.data)
-                    .await
-                    .map(|(written, _)| NodeWriteResponse { written }),
-            ),
-            R::Append(q, r) => r.reply(
-                s,
-                self.write(None, q.data)
-                    .await
-                    .map(|(_, offset)| NodeAppendResponse { offset }),
-            ),
-            R::WriteNext(q, r) => r.reply(s, self.write_next(q.data).await),
+            R::Write(q, r) => {
+                let written = self.write(Some(q.offset), q.data).await;
+                r.reply(
+                    s,
+                    self.fs
+                        .durable(written)
+                        .await
+                        .map(|(written, _)| NodeWriteResponse { written }),
+                )
+            }
+            R::Append(q, r) => {
+                let written = self.write(None, q.data).await;
+                r.reply(
+                    s,
+                    self.fs
+                        .durable(written)
+                        .await
+                        .map(|(_, offset)| NodeAppendResponse { offset }),
+                )
+            }
+            R::WriteNext(q, r) => {
+                let written = self.write_next(q.data).await;
+                r.reply(s, self.fs.durable(written).await)
+            }
             R::Truncate(q, r) => {
-                r.reply(s, self.truncate(q.size).map(|()| NodeTruncateResponse {}))
+                let truncated = self.truncate(q.size);
+                r.reply(
+                    s,
+                    self.fs
+                        .durable(truncated)
+                        .await
+                        .map(|()| NodeTruncateResponse {}),
+                )
             }
             R::Seek(q, r) => r.reply(s, self.seek(q.offset, q.origin)),
             R::ReadLink(_, r) => r.reply(s, self.read_link()),
             R::CloneRange(q, r) => {
-                r.reply(s, self.clone_range(q).map(|()| NodeCloneRangeResponse {}))
+                let cloned = self.clone_range(q);
+                r.reply(
+                    s,
+                    self.fs
+                        .durable(cloned)
+                        .await
+                        .map(|()| NodeCloneRangeResponse {}),
+                )
             }
-            R::Open(q, r) => r.reply(s, self.open(q)),
+            R::Open(q, r) => {
+                let changes =
+                    q.flags.contains(OpenFlags::CREATE) || q.flags.contains(OpenFlags::TRUNCATE);
+                let opened = self.open(q);
+                match changes {
+                    true => r.reply(s, self.fs.durable(opened).await),
+                    false => r.reply(s, opened),
+                }
+            }
             R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes)),
-            R::Unlink(q, r) => r.reply(
-                s,
-                self.unlink(&q.name, q.directory)
-                    .map(|()| NodeUnlinkResponse {}),
-            ),
+            R::Unlink(q, r) => {
+                let unlinked = self.unlink(&q.name, q.directory);
+                r.reply(
+                    s,
+                    self.fs
+                        .durable(unlinked)
+                        .await
+                        .map(|()| NodeUnlinkResponse {}),
+                )
+            }
             R::GetToken(_, r) => r.reply(s, self.token()),
-            R::Rename(q, r) => r.reply(s, self.rename(q).map(|()| NodeRenameResponse {})),
-            R::Link(q, r) => r.reply(s, self.link(q).map(|()| NodeLinkResponse {})),
-            R::CreateSymlink(q, r) => r.reply(
-                s,
-                self.create_symlink(&q.name, &q.target)
-                    .map(|()| NodeCreateSymlinkResponse {}),
-            ),
+            R::Rename(q, r) => {
+                let renamed = self.rename(q);
+                r.reply(
+                    s,
+                    self.fs
+                        .durable(renamed)
+                        .await
+                        .map(|()| NodeRenameResponse {}),
+                )
+            }
+            R::Link(q, r) => {
+                let linked = self.link(q);
+                r.reply(
+                    s,
+                    self.fs.durable(linked).await.map(|()| NodeLinkResponse {}),
+                )
+            }
+            R::CreateSymlink(q, r) => {
+                let made = self.create_symlink(&q.name, &q.target);
+                r.reply(
+                    s,
+                    self.fs
+                        .durable(made)
+                        .await
+                        .map(|()| NodeCreateSymlinkResponse {}),
+                )
+            }
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
                 s,

@@ -45,22 +45,26 @@ async fn serve(fs: Rc<Fs>, end: ServerEnd<Subvolumes>) {
         let _ = match request {
             SubvolumesRequest::Create(q, r) => r.reply(
                 s,
-                fs.create_subvolume(&q.path)
+                fs.durable(fs.create_subvolume(&q.path))
+                    .await
                     .map(|()| SubvolumesCreateResponse {}),
             ),
             SubvolumesRequest::Snapshot(q, r) => r.reply(
                 s,
-                fs.snapshot(&q.source, &q.path, q.read_only)
+                fs.durable(fs.snapshot(&q.source, &q.path, q.read_only))
+                    .await
                     .map(|()| SubvolumesSnapshotResponse {}),
             ),
             SubvolumesRequest::Delete(q, r) => r.reply(
                 s,
-                fs.delete_subvolume(&q.path)
+                fs.durable(fs.delete_subvolume(&q.path))
+                    .await
                     .map(|()| SubvolumesDeleteResponse {}),
             ),
             SubvolumesRequest::SetReadOnly(q, r) => r.reply(
                 s,
-                fs.set_read_only(&q.path, q.read_only)
+                fs.durable(fs.set_read_only(&q.path, q.read_only))
+                    .await
                     .map(|()| SubvolumesSetReadOnlyResponse {}),
             ),
             SubvolumesRequest::List(q, r) => r.reply(s, fs.list_subvolumes(q.cursor)),

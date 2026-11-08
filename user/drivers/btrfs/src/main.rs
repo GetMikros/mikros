@@ -9,9 +9,11 @@
 //! of `OPTIONS` (MIKSPEC-0053.R3), and publishes it
 //! as a service of class `filesystem` that serves `mikros.fs.Filesystem`
 //! (MIKSPEC-0049.R13). `Start` fails with `NOT_SUPPORTED` for a partition
-//! that holds no btrfs. `Stop` writes what has changed to stable storage
-//! and ends the server. `ResetChild` and `ConnectChild` fail with
-//! `NOT_SUPPORTED`.
+//! that holds no btrfs. Changes are durable when their calls return if
+//! the partition's `cache` property is `quick-disconnect`, and are
+//! written back otherwise (MIKSPEC-0049.R20). `Stop` writes what has
+//! changed to stable storage, flushes the partition and ends the server.
+//! `ResetChild` and `ConnectChild` fail with `NOT_SUPPORTED`.
 
 #![no_std]
 #![no_main]
@@ -62,6 +64,11 @@ const SUBVOLUMES_CLASS: &str = "subvolumes";
 /// what is freed in the background.
 const OPTIONS: &CStr = c"space_cache=v2,compress=zstd";
 const OPTIONS_DISCARD: &CStr = c"space_cache=v2,compress=zstd,discard=async";
+/// The property of the partition that says how its changes may be
+/// cached (MIKSPEC-0025.R33), and the value that has them durable at
+/// once; any other value, or none, lets them be written back.
+const CACHE: &str = "cache";
+const QUICK_DISCONNECT: &str = "quick-disconnect";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -105,11 +112,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     }
                 }
                 DriverRequest::Stop(_, responder) => {
-                    // The connections still hold the mount, so what has
-                    // changed is written out rather than unmounted.
                     if let Some(fs) = &served {
-                        fs.shares.harvest();
-                        let _ = fs.mount.sync();
+                        fs.write_out();
                     }
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
@@ -149,6 +153,11 @@ fn start(
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(Rc<Fs>, DeviceManagerAsyncClient), Status> {
+    let quick_disconnect = request
+        .device
+        .properties
+        .iter()
+        .any(|p| p.key == CACHE && p.value == QUICK_DISCONNECT);
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let block = BlockClient::new(ClientEnd::new(bus));
     let disk = Disk::new(block, process).ok_or(Status::NoResources)?;
@@ -185,8 +194,15 @@ fn start(
     })?;
     // The mount stays for the rest of the program, as its nodes do.
     let mount: &'static Mount = Box::leak(Box::new(mount));
-    let fs = Fs::new(mount, read_only, reactor.clone(), spawner.clone())
-        .map_err(|_| Status::Internal)?;
+    let fs = Fs::new(
+        mount,
+        read_only,
+        disk,
+        quick_disconnect,
+        reactor.clone(),
+        spawner.clone(),
+    )
+    .map_err(|_| Status::Internal)?;
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     Ok((Rc::new(fs), manager))
 }

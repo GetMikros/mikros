@@ -8,10 +8,12 @@
 //! (MIKSPEC-0053.R4, MIKSPEC-0053.R9).
 
 use crate::change::koids;
+use crate::disk::Disk;
 use crate::lock::Lock;
 use crate::node;
 use crate::share::Shares;
 use crate::watch::{Watches, event};
+use crate::work::{self, blocking};
 use alloc::collections::BTreeMap;
 use alloc::rc::{Rc, Weak};
 use alloc::string::String;
@@ -85,6 +87,12 @@ pub struct Fs {
     pub shares: Shares,
     next_owner: Cell<u64>,
     pub read_only: bool,
+    /// The partition, and whether its `cache` property is
+    /// `quick-disconnect` (MIKSPEC-0025.R33), which has every change
+    /// durable when its call returns rather than when it is written back
+    /// (MIKSPEC-0049.R20).
+    disk: &'static Disk,
+    quick_disconnect: bool,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -155,6 +163,8 @@ impl Fs {
     pub fn new(
         mount: &'static Mount,
         read_only: bool,
+        disk: &'static Disk,
+        quick_disconnect: bool,
         reactor: Reactor,
         spawner: Spawner,
     ) -> Result<Fs, Error> {
@@ -179,6 +189,8 @@ impl Fs {
             shares: Shares::default(),
             next_owner: Cell::new(1),
             read_only,
+            disk,
+            quick_disconnect,
             reactor,
             spawner,
         })
@@ -265,6 +277,35 @@ impl Fs {
                 fs.connections.borrow_mut().remove(&id);
             }
         });
+    }
+
+    /// `result`, that of a call that may have changed the file system,
+    /// once a change is durable, with `quick-disconnect`: the call's
+    /// success commits the file system, which writes what changed with
+    /// the metadata it needs and flushes the partition. A commit that
+    /// fails fails the call.
+    pub async fn durable<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
+        if result.is_err() || !self.quick_disconnect {
+            return result;
+        }
+        let mount = self.mount;
+        blocking(&self.reactor, move || mount.sync())
+            .await
+            .map_err(error)?;
+        result
+    }
+
+    /// Writes out every change that the server holds and flushes the
+    /// partition, for its driver's `Stop` (MIKSPEC-0049.R20): once the
+    /// calls on other threads have returned, the pages that clients
+    /// wrote through mappings are marked dirty, and the file system is
+    /// committed. The connections still hold the mount, which stays
+    /// mounted.
+    pub fn write_out(&self) {
+        work::wait_idle();
+        self.shares.harvest();
+        let _ = self.mount.sync();
+        self.disk.flush();
     }
 
     /// A new owner of locks and watches, for a connection.

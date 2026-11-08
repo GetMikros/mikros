@@ -161,7 +161,7 @@ impl Disk {
         ret
     }
 
-    fn flush(&self) -> c_int {
+    pub fn flush(&self) -> c_int {
         match self.block.flush(FOREVER) {
             Ok(Ok(_)) => 0,
             _ => -EIO,
