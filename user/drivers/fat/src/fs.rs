@@ -9,7 +9,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
-use mikros_fat::{Dir, FatType, Node as FatNode, Stamp, Volume};
+use mikros_fat::{Device, Dir, FatType, Node as FatNode, Stamp, Volume};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{
@@ -65,6 +65,10 @@ pub struct Fs {
     pub pager: OwnedHandle,
     pub paged: RefCell<BTreeMap<u64, (OwnedHandle, u64)>>,
     pub utc: Utc,
+    /// Whether the partition's `cache` property is `quick-disconnect`
+    /// (MIKSPEC-0025.R33), which has every change durable when its call
+    /// returns (MIKSPEC-0049.R20).
+    quick_disconnect: bool,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -91,6 +95,7 @@ impl Fs {
         volume: Volume<BlockDevice>,
         utc: Utc,
         pager: OwnedHandle,
+        quick_disconnect: bool,
         reactor: Reactor,
         spawner: Spawner,
     ) -> Fs {
@@ -102,9 +107,21 @@ impl Fs {
             pager,
             paged: RefCell::new(BTreeMap::new()),
             utc,
+            quick_disconnect,
             reactor,
             spawner,
         }
+    }
+
+    /// `result`, that of a call that may have changed the volume, once a
+    /// change is durable, with `quick-disconnect`: the volume writes what
+    /// changes through at once, so the call's success flushes the
+    /// partition. A flush that fails fails the call.
+    pub fn durable<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
+        if result.is_ok() && self.quick_disconnect {
+            self.volume.borrow_mut().device().flush().map_err(error)?;
+        }
+        result
     }
 
     pub fn read_only(&self) -> bool {

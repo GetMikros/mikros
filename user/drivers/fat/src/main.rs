@@ -39,6 +39,11 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 mikros_rt::raw_main!(main);
 
 const SERVICE_CLASS: &str = "filesystem";
+/// The property of the partition that says how its changes may be
+/// cached (MIKSPEC-0025.R33), and the value that has them durable at
+/// once; any other value, or none, lets them wait for `Sync` or `Stop`.
+const CACHE: &str = "cache";
+const QUICK_DISCONNECT: &str = "quick-disconnect";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -112,6 +117,11 @@ fn start(
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(Rc<Fs>, DeviceManagerAsyncClient), Status> {
+    let quick_disconnect = request
+        .device
+        .properties
+        .iter()
+        .any(|p| p.key == CACHE && p.value == QUICK_DISCONNECT);
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let block = BlockClient::new(ClientEnd::new(bus));
     let device = BlockDevice::new(block, process).ok_or(Status::NoResources)?;
@@ -126,6 +136,7 @@ fn start(
         volume,
         utc,
         pager,
+        quick_disconnect,
         reactor.clone(),
         spawner.clone(),
     ));

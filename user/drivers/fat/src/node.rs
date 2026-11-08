@@ -71,7 +71,10 @@ impl Connection {
                     attributes.map(|attributes| NodeGetAttributesResponse { attributes }),
                 )
             }
-            R::SetAttributes(q, r) => r.reply(s, self.set_attributes(q)),
+            R::SetAttributes(q, r) => {
+                let set = self.set_attributes(q);
+                r.reply(s, self.fs.durable(set))
+            }
             R::Clone(q, r) => r.reply(s, self.clone(q)),
             R::Sync(_, r) => {
                 let synced = self.fs.volume.borrow_mut().sync().map_err(fs::error);
@@ -93,27 +96,49 @@ impl Connection {
                 let written = self
                     .write(Some(q.offset), &q.data)
                     .map(|_| q.data.len() as u32);
+                let written = self.fs.durable(written);
                 r.reply(s, written.map(|written| NodeWriteResponse { written }))
             }
-            R::Append(q, r) => r.reply(
-                s,
-                self.write(None, &q.data)
-                    .map(|offset| NodeAppendResponse { offset }),
-            ),
-            R::WriteNext(q, r) => r.reply(s, self.write_next(&q.data)),
+            R::Append(q, r) => {
+                let written = self.write(None, &q.data);
+                r.reply(
+                    s,
+                    self.fs
+                        .durable(written)
+                        .map(|offset| NodeAppendResponse { offset }),
+                )
+            }
+            R::WriteNext(q, r) => {
+                let written = self.write_next(&q.data);
+                r.reply(s, self.fs.durable(written))
+            }
             R::Truncate(q, r) => {
-                r.reply(s, self.truncate(q.size).map(|()| NodeTruncateResponse {}))
+                let truncated = self.truncate(q.size);
+                r.reply(
+                    s,
+                    self.fs.durable(truncated).map(|()| NodeTruncateResponse {}),
+                )
             }
             R::Seek(q, r) => r.reply(s, self.seek(q.offset, q.origin)),
-            R::Open(q, r) => r.reply(s, self.open(q)),
+            R::Open(q, r) => {
+                let changes =
+                    q.flags.contains(OpenFlags::CREATE) || q.flags.contains(OpenFlags::TRUNCATE);
+                let opened = self.open(q);
+                match changes {
+                    true => r.reply(s, self.fs.durable(opened)),
+                    false => r.reply(s, opened),
+                }
+            }
             R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes)),
-            R::Unlink(q, r) => r.reply(
-                s,
-                self.unlink(&q.name, q.directory)
-                    .map(|()| NodeUnlinkResponse {}),
-            ),
+            R::Unlink(q, r) => {
+                let unlinked = self.unlink(&q.name, q.directory);
+                r.reply(s, self.fs.durable(unlinked).map(|()| NodeUnlinkResponse {}))
+            }
             R::GetToken(_, r) => r.reply(s, self.token()),
-            R::Rename(q, r) => r.reply(s, self.rename(q).map(|()| NodeRenameResponse {})),
+            R::Rename(q, r) => {
+                let renamed = self.rename(q);
+                r.reply(s, self.fs.durable(renamed).map(|()| NodeRenameResponse {}))
+            }
             R::ReadLink(_, r) => r.reply(s, Err(Error::Invalid)),
             // What FAT cannot hold.
             R::CloneRange(_, r) => r.reply(s, Err(Error::NotSupported)),
