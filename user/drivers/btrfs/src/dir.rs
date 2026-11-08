@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Resolving paths (MIKSPEC-0049.R4, R5), opening and creating nodes
-//! (MIKSPEC-0049.R6), and listing directories (MIKSPEC-0049.R12).
+//! Resolving paths (MIKSPEC-0049.R4, R5), also case-insensitively
+//! (MIKSPEC-0071.R15), opening and creating nodes (MIKSPEC-0049.R6), and
+//! listing directories (MIKSPEC-0049.R12).
 
 use crate::fs::{self, Open, error};
 use crate::node::{Connection, MODE_BITS, NAME_MAX, TARGET_MAX};
@@ -51,12 +52,55 @@ impl Connection {
         }
     }
 
-    /// Resolves `path` from this directory, following a symbolic link
-    /// last in the path unless `no_follow`. Links whose relative targets
-    /// stay at or below this directory are followed; for any other, the
-    /// link's target joined with the rest of the path comes back as a
-    /// redirect.
-    fn resolve(&self, path: &str, no_follow: bool) -> Result<Resolved, Error> {
+    /// The first entry of the directory `dir`, in the order in which
+    /// `ReadDirectory` lists them, whose name equals `name` under simple
+    /// case folding (MIKSPEC-0071.R15), as the open node that connections
+    /// share. Names that are not UTF-8 equal none.
+    fn lookup_folded(&self, dir: &Rc<Open>, name: &str) -> Result<Option<Rc<Open>>, Error> {
+        let usr = dir.key == self.fs.root.key && self.fs.usr.is_some();
+        if usr && mikros_casefold::equal(fs::USR, name) {
+            return self.lookup(dir, fs::USR);
+        }
+        let mut cookie = 0;
+        loop {
+            let mut found = None;
+            let mut seen = false;
+            dir.node
+                .read_dir(&mut cookie, |entry, _, _| {
+                    seen = true;
+                    let hidden = usr && entry == fs::USR.as_bytes();
+                    if entry != b"."
+                        && entry != b".."
+                        && !hidden
+                        && let Ok(entry) = core::str::from_utf8(entry)
+                        && mikros_casefold::equal(entry, name)
+                    {
+                        found = Some(String::from(entry));
+                        return false;
+                    }
+                    true
+                })
+                .map_err(error)?;
+            if let Some(entry) = found {
+                return self.lookup(dir, &entry);
+            }
+            if !seen {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// Resolves `path` from this directory with the flags `flags` of
+    /// `Open`: following a symbolic link last in the path unless
+    /// `NO_FOLLOW`. Links whose relative targets stay at or below this
+    /// directory are followed; for any other, the link's target joined
+    /// with the rest of the path comes back as a redirect. With
+    /// `CASE_INSENSITIVE`, a component that no entry has exactly is
+    /// looked up under case folding, and with `CREATE` too, a last
+    /// component found that way fails with `EXISTS`.
+    fn resolve(&self, path: &str, flags: OpenFlags) -> Result<Resolved, Error> {
+        let no_follow = flags.contains(OpenFlags::NO_FOLLOW);
+        let folded = flags.contains(OpenFlags::CASE_INSENSITIVE);
         let mut rest: Vec<String> = components(path)?.into_iter().rev().collect();
         let mut stack = vec![self.open.clone()];
         let mut followed = 0;
@@ -77,7 +121,16 @@ impl Connection {
             if !at.is_directory()? {
                 return Err(Error::NotDirectory);
             }
-            let Some(node) = self.lookup(&at, &name)? else {
+            let found = match self.lookup(&at, &name)? {
+                None if folded => match self.lookup_folded(&at, &name)? {
+                    Some(_) if rest.is_empty() && flags.contains(OpenFlags::CREATE) => {
+                        return Err(Error::Exists);
+                    }
+                    found => found,
+                },
+                found => found,
+            };
+            let Some(node) = found else {
                 if rest.is_empty() {
                     return Ok(Resolved::Missing { parent: at, name });
                 }
@@ -120,12 +173,9 @@ impl Connection {
         if q.rights.contains(Rights::WRITE) && self.fs.read_only {
             return Err(Error::ReadOnly);
         }
-        if q.flags.contains(OpenFlags::CASE_INSENSITIVE) {
-            return Err(Error::NotSupported);
-        }
         self.directory()?;
         let want_dir = q.flags.contains(OpenFlags::DIRECTORY) || q.path.ends_with('/');
-        let open = match self.resolve(&q.path, q.flags.contains(OpenFlags::NO_FOLLOW))? {
+        let open = match self.resolve(&q.path, q.flags)? {
             Resolved::Redirect(target) => {
                 return Ok(NodeOpenResponse {
                     r#type: NodeType::Symlink,

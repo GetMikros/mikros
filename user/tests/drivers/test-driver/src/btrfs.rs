@@ -29,10 +29,11 @@ const MANY: usize = 70;
 /// file made, written, renamed and removed; a link within the directory
 /// is followed, one that leads out of it comes back as a redirect, and
 /// both read as their targets; a hard link names the same node and can be
-/// renamed; a new file shares the data of a range of another; byte-range
-/// locks of two connections behave; a directory of more entries than one
-/// reply holds lists each once; names taken and paths through files are
-/// refused; and what was made is removed again.
+/// renamed; a new file shares the data of a range of another; names that
+/// differ in case are found case-insensitively, and taken for CREATE;
+/// byte-range locks of two connections behave; a directory of more
+/// entries than one reply holds lists each once; names taken and paths
+/// through files are refused; and what was made is removed again.
 pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
     check(directory, reactor).await.is_some()
 }
@@ -98,6 +99,7 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     links(&dir, reactor).await?;
     locks(&file, reactor).await?;
     clones(&dir, &file, reactor).await?;
+    case_insensitive(&root, &dir, reactor).await?;
 
     let (many, _) = open(&dir, "many", create_dir, reactor).await.ok()?;
     for i in 0..MANY {
@@ -316,4 +318,56 @@ async fn reader(file: &NodeAsyncClient) -> Option<ClientEnd<Node>> {
     let (source, server) = endpoints::<Node>().ok()?;
     ok(file.clone(server, Rights::READ).await)?;
     Some(source)
+}
+
+/// Whether `CASE_INSENSITIVE` finds an entry of `dir`, a directory of
+/// `root` named `btrfs-test`, whose name differs in case, also on the way
+/// to another and for the root's `usr`, and of two such entries the first
+/// that `ReadDirectory` lists; whether `CREATE` of such a name fails with
+/// `EXISTS`; and whether names that differ more, or differ in case
+/// without the flag, are not found.
+async fn case_insensitive(
+    root: &NodeAsyncClient,
+    dir: &NodeAsyncClient,
+    reactor: &Reactor,
+) -> Option<()> {
+    let folded = OpenFlags::CASE_INSENSITIVE;
+    let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
+    open(dir, "Straße", create, reactor).await.ok()?;
+    let (found, kind) = open(dir, "STRAẞE", folded, reactor).await.ok()?;
+    expect(kind == NodeType::File && ok(found.get_attributes().await)?.attributes.size == 0)?;
+    let exact = open(dir, "STRAẞE", OpenFlags(0), reactor).await;
+    expect(matches!(exact, Err(Some(Error::NotFound))))?;
+    // A sharp s has no simple folding to two letters.
+    let other = open(dir, "STRASSE", folded, reactor).await;
+    expect(matches!(other, Err(Some(Error::NotFound))))?;
+    let taken = open(
+        dir,
+        "straße",
+        OpenFlags(OpenFlags::CREATE.0 | folded.0),
+        reactor,
+    )
+    .await;
+    expect(matches!(taken, Err(Some(Error::Exists))))?;
+    let (_, kind) = open(root, "BTRFS-TEST/STRAßE", folded, reactor)
+        .await
+        .ok()?;
+    expect(kind == NodeType::File)?;
+    let (_, kind) = open(root, "USR/LIB", folded, reactor).await.ok()?;
+    expect(kind == NodeType::Directory)?;
+
+    for name in ["dup", "DUP"] {
+        open(dir, name, create, reactor).await.ok()?;
+    }
+    let listed = names(dir).await?;
+    let (first, _) = listed.iter().find(|(n, _)| n == "dup" || n == "DUP")?;
+    let (want, _) = open(dir, first, OpenFlags(0), reactor).await.ok()?;
+    let (got, _) = open(dir, "Dup", folded, reactor).await.ok()?;
+    let inode =
+        async |node: &NodeAsyncClient| Some(ok(node.get_attributes().await)?.attributes.inode);
+    expect(inode(&got).await? == inode(&want).await?)?;
+    for name in ["Straße", "dup", "DUP"] {
+        ok(dir.unlink(name.into(), false).await)?;
+    }
+    Some(())
 }

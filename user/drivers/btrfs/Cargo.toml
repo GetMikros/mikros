@@ -7,4 +7,5 @@ publish = false
 
 [dependencies]
 mikros-btrfs = { path = "../../btrfs" }
+mikros-casefold = { path = "../../casefold" }
 mikros-rt = { path = "../../mikros-rt" }
