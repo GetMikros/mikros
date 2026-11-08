@@ -82,13 +82,14 @@ fn check_trailers(values: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// The value of the `Tested` trailer, which a commit carries once the whole
-/// of `cargo xtask test`, with its QEMU runs, passed on its tree.
+/// The value of the `Tested` trailer, which the last commit of a range
+/// carries once the whole of `cargo xtask test`, with its QEMU runs, passed
+/// on its tree.
 const TESTED: &str = "cargo xtask test";
 
-/// Whether a commit that changes `paths` needs the `Tested` trailer: every
-/// commit does unless it changes only Markdown files and the specification
-/// submodule.
+/// Whether a commit that changes `paths` makes its range need the `Tested`
+/// trailer on its last commit: every commit does unless it changes only
+/// Markdown files and the specification submodule.
 fn needs_tested(paths: &[&str]) -> bool {
     paths
         .iter()
@@ -152,11 +153,15 @@ fn generated_paths(commit: &str) -> Result<Vec<String>> {
         .collect())
 }
 
-/// Checks the commits since `base`, returning a description of each problem.
+/// Checks the commits since `base`, returning a description of each problem:
+/// each commit's `Spec` trailer and size, and the `Tested` trailer of the
+/// last one, unless every commit of the range changes only Markdown files
+/// and the specification submodule.
 fn check_commits(base: &str) -> Result<Vec<String>> {
     let range = format!("{base}..HEAD");
     let commits = git(&["rev-list", "--no-merges", "--reverse", &range])?;
     let mut problems = Vec::new();
+    let mut range_needs_tested = false;
     for commit in commits.lines() {
         let subject = git(&["log", "-1", "--format=%h %s", commit])?;
         let subject = subject.trim();
@@ -177,18 +182,7 @@ fn check_commits(base: &str) -> Result<Vec<String>> {
         }
 
         let changed: Vec<&str> = paths.lines().collect();
-        if needs_tested(&changed) {
-            let tested = git(&[
-                "log",
-                "-1",
-                "--format=%(trailers:key=Tested,valueonly,unfold)",
-                commit,
-            ])?;
-            let values: Vec<&str> = tested.lines().filter(|l| !l.trim().is_empty()).collect();
-            if let Err(problem) = check_tested(&values) {
-                problems.push(format!("{subject}: {problem}"));
-            }
-        }
+        range_needs_tested |= needs_tested(&changed);
 
         let generated = generated_paths(commit)?;
         let numstat = git(&["show", "--numstat", "--format=", commit])?;
@@ -199,6 +193,21 @@ fn check_commits(base: &str) -> Result<Vec<String>> {
             ));
         } else if lines > SOFT_MAX_LINES {
             println!("warning  {subject}: changes {lines} lines, more than {SOFT_MAX_LINES}");
+        }
+    }
+    if let Some(last) = commits.lines().last()
+        && range_needs_tested
+    {
+        let subject = git(&["log", "-1", "--format=%h %s", last])?;
+        let tested = git(&[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Tested,valueonly,unfold)",
+            last,
+        ])?;
+        let values: Vec<&str> = tested.lines().filter(|l| !l.trim().is_empty()).collect();
+        if let Err(problem) = check_tested(&values) {
+            problems.push(format!("{}: {problem}", subject.trim()));
         }
     }
     Ok(problems)
