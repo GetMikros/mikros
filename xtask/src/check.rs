@@ -82,6 +82,30 @@ fn check_trailers(values: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// The value of the `Tested` trailer, which a commit carries once the whole
+/// of `cargo xtask test`, with its QEMU runs, passed on its tree.
+const TESTED: &str = "cargo xtask test";
+
+/// Whether a commit that changes `paths` needs the `Tested` trailer: every
+/// commit does unless it changes only Markdown files and the specification
+/// submodule.
+fn needs_tested(paths: &[&str]) -> bool {
+    paths
+        .iter()
+        .any(|path| *path != "spec" && !path.ends_with(".md"))
+}
+
+/// Checks the values of a commit's `Tested` trailers.
+fn check_tested(values: &[&str]) -> Result<(), String> {
+    if values.iter().any(|value| value.trim() == TESTED) {
+        Ok(())
+    } else if values.is_empty() {
+        Err(format!("has no `Tested: {TESTED}` trailer"))
+    } else {
+        Err(format!("has a Tested: trailer other than `{TESTED}`"))
+    }
+}
+
 /// Whether a path holds a lock file, which does not count towards the size
 /// of a commit.
 fn is_lock_file(path: &str) -> bool {
@@ -150,6 +174,20 @@ fn check_commits(base: &str) -> Result<Vec<String>> {
             && let Err(problem) = check_trailers(&values)
         {
             problems.push(format!("{subject}: {problem}"));
+        }
+
+        let changed: Vec<&str> = paths.lines().collect();
+        if needs_tested(&changed) {
+            let tested = git(&[
+                "log",
+                "-1",
+                "--format=%(trailers:key=Tested,valueonly,unfold)",
+                commit,
+            ])?;
+            let values: Vec<&str> = tested.lines().filter(|l| !l.trim().is_empty()).collect();
+            if let Err(problem) = check_tested(&values) {
+                problems.push(format!("{subject}: {problem}"));
+            }
         }
 
         let generated = generated_paths(commit)?;
@@ -303,6 +341,24 @@ mod tests {
         assert!(check_trailers(&[]).unwrap_err().contains("no Spec"));
         assert!(check_trailers(&["MIKSPEC-0023.R7 MIKSPEC-0045.R5"]).is_err());
         assert!(check_trailers(&["none"]).is_err());
+    }
+
+    #[test]
+    fn needs_the_tested_trailer_unless_only_markdown_and_spec_change() {
+        assert!(!needs_tested(&["spec"]));
+        assert!(!needs_tested(&["README.md", "docs/build.md", "spec"]));
+        assert!(!needs_tested(&[]));
+        assert!(needs_tested(&["README.md", "xtask/src/check.rs"]));
+        assert!(needs_tested(&[".github/workflows/ci.yml"]));
+    }
+
+    #[test]
+    fn checks_tested_trailer_values() {
+        assert_eq!(check_tested(&["cargo xtask test"]), Ok(()));
+        assert_eq!(check_tested(&[" cargo xtask test "]), Ok(()));
+        assert!(check_tested(&[]).unwrap_err().contains("no `Tested"));
+        assert!(check_tested(&["cargo xtask test --host"]).is_err());
+        assert!(check_tested(&["yes"]).is_err());
     }
 
     #[test]
