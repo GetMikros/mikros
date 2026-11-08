@@ -37,6 +37,12 @@ s64 mikros_host_realtime(void);
 
 void mikros_host_random(void *buf, unsigned long len);
 
+/* Reads, writes or flushes the host's disk `disk`, a handle that the host
+ * gave mikros_btrfs_add_disk(), before returning: 0, or a negative errno. */
+int mikros_host_disk_read(void *disk, u64 offset, void *buf, unsigned long len);
+int mikros_host_disk_write(void *disk, u64 offset, const void *buf, unsigned long len);
+int mikros_host_disk_flush(void *disk);
+
 /* Writes a line of the log, without its newline. */
 void mikros_host_log(const char *text, unsigned long len);
 
