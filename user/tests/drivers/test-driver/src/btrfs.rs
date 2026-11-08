@@ -20,17 +20,18 @@ const MANY: usize = 70;
 
 /// Whether the file system behaves: it is a writable btrfs whose root,
 /// which can be synced, holds the top-level directories of the system's
-/// layout, each listed with its attributes when asked; `@system/current`
-/// is a link to a system version, which is followed to a directory of a
-/// system image; `..` and missing names are refused; a file made in a new
-/// directory is written, appended to and read back, with its attributes;
-/// a watch of the directory hears of a file made, written, renamed and
-/// removed; a link within the directory is followed, one that leads out
-/// of it comes back as a redirect, and both read as their targets; a hard
-/// link names the same node and can be renamed; byte-range locks of two
-/// connections behave; a directory of more entries than one reply holds
-/// lists each once; names taken and paths through files are refused; and
-/// what was made is removed again.
+/// layout and `usr`, the current system version, which cannot be written,
+/// created, removed or renamed, each listed with its attributes when
+/// asked; `@system/current` is a link to a system version, which is
+/// followed to a directory of a system image; `..` and missing names are
+/// refused; a file made in a new directory is written, appended to and
+/// read back, with its attributes; a watch of the directory hears of a
+/// file made, written, renamed and removed; a link within the directory
+/// is followed, one that leads out of it comes back as a redirect, and
+/// both read as their targets; a hard link names the same node and can be
+/// renamed; byte-range locks of two connections behave; a directory of
+/// more entries than one reply holds lists each once; names taken and
+/// paths through files are refused; and what was made is removed again.
 pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
     check(directory, reactor).await.is_some()
 }
@@ -43,6 +44,7 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     expect(attributes.r#type == NodeType::Directory)?;
     let top = names(&root).await?;
     for dir in [
+        "usr",
         "@system",
         "etc",
         "var",
@@ -64,6 +66,7 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     }
 
     system(&root, reactor).await?;
+    usr(&root, reactor).await?;
 
     let (etc, _) = open(&root, "etc", OpenFlags::DIRECTORY, reactor)
         .await
@@ -149,6 +152,36 @@ async fn system(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
         .await
         .ok()?;
     expect(kind == NodeType::Directory)?;
+    Some(())
+}
+
+/// Whether the root's `usr` behaves: it is the current system version,
+/// with the directories of a system image, which cannot be written, and
+/// it cannot be created, removed or renamed.
+async fn usr(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+    let (usr, kind) = open(root, "usr", OpenFlags(0), reactor).await.ok()?;
+    expect(kind == NodeType::Directory)?;
+    let listed = names(&usr).await?;
+    for dir in ["bin", "lib", "include", "share"] {
+        expect(
+            listed
+                .iter()
+                .any(|(n, t)| n == dir && *t == NodeType::Directory),
+        )?;
+    }
+    let (_, kind) = open(root, "usr/lib/drivers", OpenFlags(0), reactor)
+        .await
+        .ok()?;
+    expect(kind == NodeType::Directory)?;
+    let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
+    let written = open(root, "usr/new", create, reactor).await;
+    expect(matches!(written, Err(Some(Error::ReadOnly))))?;
+    let made = open(root, "usr", create, reactor).await;
+    expect(matches!(made, Err(Some(Error::AccessDenied))))?;
+    expect(failed(root.unlink("usr".into(), true).await) == Some(Error::AccessDenied))?;
+    let token = ok(root.get_token().await)?.token;
+    let renamed = root.rename("usr".into(), token, "old".into()).await;
+    expect(failed(renamed) == Some(Error::AccessDenied))?;
     Some(())
 }
 

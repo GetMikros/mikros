@@ -2,8 +2,10 @@
 //! The served file system: the nodes that connections are open to, which
 //! connections to the same node share, the tokens of directories, the
 //! byte-range locks and watches of connections, and the `Filesystem`
-//! service (MIKSPEC-0049.R13), whose root is the top-level subvolume
-//! (MIKSPEC-0053.R4).
+//! service (MIKSPEC-0049.R13). Its root is the top-level subvolume with
+//! an entry `usr` of its own, the root of the system version that
+//! `@system/current` names when the file system is mounted
+//! (MIKSPEC-0053.R4, MIKSPEC-0053.R9).
 
 use crate::lock::Lock;
 use crate::node;
@@ -31,6 +33,11 @@ use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, Prov
 const PROTOCOL: &str = "device.filesystem";
 
 const NS: i64 = 1_000_000_000;
+/// The entry of the root that the server adds, and where its target is.
+pub const USR: &str = "usr";
+const SYSTEM: &[u8] = b"@system";
+const CURRENT: &[u8] = b"current";
+
 /// What tells nodes apart: the device of their subvolume and their inode
 /// number.
 pub type Key = (u32, u64);
@@ -59,6 +66,9 @@ impl Open {
 pub struct Fs {
     pub mount: &'static Mount,
     pub root: Rc<Open>,
+    /// The root of the current system version, which the root's `usr`
+    /// names; none when there is no `@system/current`.
+    pub usr: Option<Rc<Open>>,
     opens: RefCell<BTreeMap<Key, Weak<Open>>>,
     /// The directories that tokens name, by the token's object ID.
     pub(crate) tokens: RefCell<BTreeMap<u64, Rc<Open>>>,
@@ -141,10 +151,17 @@ impl Fs {
         let node = mount.root().map_err(error)?;
         let key = key(&node)?;
         let root = Rc::new(Open::new(node, key));
-        let opens = BTreeMap::from([(key, Rc::downgrade(&root))]);
+        let mut opens = BTreeMap::from([(key, Rc::downgrade(&root))]);
+        let usr = current_version(&root.node).map(|node| {
+            let usr = Rc::new(Open::new(node.0, node.1));
+            usr.names.borrow_mut().push((key, String::from(USR)));
+            opens.insert(usr.key, Rc::downgrade(&usr));
+            usr
+        });
         Ok(Fs {
             mount,
             root,
+            usr,
             opens: RefCell::new(opens),
             tokens: RefCell::new(BTreeMap::new()),
             watches: Watches::default(),
@@ -153,6 +170,12 @@ impl Fs {
             reactor,
             spawner,
         })
+    }
+
+    /// Whether `name` in `dir` is the root's `usr`, which the server
+    /// keeps from being created, removed or renamed.
+    pub fn is_usr(&self, dir: &Open, name: &str) -> bool {
+        dir.key == self.root.key && name == USR
     }
 
     /// The open node for `node`, found as `name` in `dir`: the one that
@@ -247,6 +270,22 @@ impl Open {
             waiting: RefCell::new(Vec::new()),
         }
     }
+}
+
+/// The root of the system version that `@system/current` in `root`
+/// names, and its key, when there is one.
+fn current_version(root: &BtrfsNode<'static>) -> Option<(BtrfsNode<'static>, Key)> {
+    let system = root.lookup(SYSTEM).ok()?;
+    let current = system.lookup(CURRENT).ok()?;
+    let mut target = [0u8; 256];
+    let len = current.read_link(&mut target).ok()?;
+    let name = &target[..len];
+    if name.is_empty() || name.contains(&b'/') {
+        return None;
+    }
+    let version = system.lookup(name).ok()?;
+    let key = key(&version).ok()?;
+    Some((version, key))
 }
 
 fn key(node: &BtrfsNode<'_>) -> Result<Key, Error> {

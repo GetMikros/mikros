@@ -30,6 +30,9 @@ impl Connection {
         self.require_write()?;
         self.directory()?;
         check_component(name)?;
+        if self.fs.is_usr(&self.open, name) {
+            return Err(Error::AccessDenied);
+        }
         let removed = self.lookup(&self.open, name)?;
         self.open
             .node
@@ -65,6 +68,9 @@ impl Connection {
         check_component(&q.name)?;
         check_component(&q.new_name)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        if self.fs.is_usr(&self.open, &q.name) || self.fs.is_usr(&to, &q.new_name) {
+            return Err(Error::AccessDenied);
+        }
         let moved = self.lookup(&self.open, &q.name)?.ok_or(Error::NotFound)?;
         let replaced = self.lookup(&to, &q.new_name)?;
         self.open
@@ -102,6 +108,9 @@ impl Connection {
         check_component(&q.name)?;
         check_component(&q.new_name)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        if self.fs.is_usr(&to, &q.new_name) {
+            return Err(Error::AccessDenied);
+        }
         let node = self.lookup(&self.open, &q.name)?.ok_or(Error::NotFound)?;
         node.node
             .link(&to.node, q.new_name.as_bytes())
@@ -117,6 +126,9 @@ impl Connection {
         self.require_write()?;
         self.directory()?;
         check_component(name)?;
+        if self.fs.is_usr(&self.open, name) {
+            return Err(Error::AccessDenied);
+        }
         if target.is_empty() || target.len() > TARGET_MAX || target.contains('\0') {
             return Err(Error::Invalid);
         }

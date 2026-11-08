@@ -36,8 +36,14 @@ enum Resolved {
 
 impl Connection {
     /// Looks `name` up in the directory `dir`, as the open node that
-    /// connections share.
+    /// connections share. The root's `usr` is the current system
+    /// version's root.
     pub(crate) fn lookup(&self, dir: &Rc<Open>, name: &str) -> Result<Option<Rc<Open>>, Error> {
+        if self.fs.is_usr(dir, name)
+            && let Some(usr) = &self.fs.usr
+        {
+            return Ok(Some(usr.clone()));
+        }
         match dir.node.lookup(name.as_bytes()) {
             Ok(node) => Ok(Some(self.fs.open(node, dir.key, name)?)),
             Err(-2) => Ok(None),
@@ -128,6 +134,9 @@ impl Connection {
             }
             Resolved::Missing { parent, name } if q.flags.contains(OpenFlags::CREATE) => {
                 self.require_write()?;
+                if self.fs.is_usr(&parent, &name) {
+                    return Err(Error::AccessDenied);
+                }
                 let kind = match q.flags.contains(OpenFlags::DIRECTORY) {
                     true => Kind::Directory,
                     false => Kind::File,
@@ -143,8 +152,13 @@ impl Connection {
                 self.fs.open(node, parent.key, &name)?
             }
             Resolved::Missing { .. } => return Err(Error::NotFound),
-            Resolved::Node(_) if q.flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) => {
-                return Err(Error::Exists);
+            Resolved::Node(open) if q.flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) => {
+                let usr = self.fs.usr.as_ref().is_some_and(|u| u.key == open.key);
+                return Err(if usr {
+                    Error::AccessDenied
+                } else {
+                    Error::Exists
+                });
             }
             Resolved::Node(open) => open,
         };
@@ -177,13 +191,22 @@ impl Connection {
         self.directory()?;
         let mut found: Vec<(String, u64, u32)> = Vec::new();
         let mut next = cookie;
+        let root = self.open.key == self.fs.root.key;
+        // The root's `usr` comes first, and hides any of the subvolume's.
+        if root
+            && cookie == 0
+            && let Some(usr) = &self.fs.usr
+        {
+            found.push((String::from(fs::USR), usr.key.1, DT_DIR));
+        }
         self.open
             .node
             .read_dir(&mut next, |name, inode, kind| {
                 if found.len() == ENTRIES_MAX {
                     return false;
                 }
-                if name != b"." && name != b".." {
+                let hidden = root && self.fs.usr.is_some() && name == fs::USR.as_bytes();
+                if name != b"." && name != b".." && !hidden {
                     let name = String::from_utf8_lossy(name).into_owned();
                     found.push((name, inode, kind));
                 }
