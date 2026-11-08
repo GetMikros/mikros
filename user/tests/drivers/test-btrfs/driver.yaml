@@ -3,4 +3,4 @@
 name: test-btrfs
 binary: /usr/lib/drivers/test-btrfs/test-btrfs
 match: [gpt:38a2aae9-c051-4fe5-a24a-441d4a220d2a]
-permissions: [filesystem.mount]
+permissions: [filesystem.mount, filesystem.manage]

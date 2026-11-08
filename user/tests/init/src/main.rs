@@ -9437,6 +9437,7 @@ mod manager {
             (b"device-manager: bound driver test-fat to device", 1),
             (b"device-manager: started driver test-fat for device", 1),
             (b"device-manager: published device.filesystem ", 2),
+            (b"device-manager: published device.subvolumes ", 1),
             (b"device-manager: bound driver btrfs to device", 1),
             (b"device-manager: started driver btrfs for device", 1),
             (b"device-manager: bound driver test-btrfs to device", 1),

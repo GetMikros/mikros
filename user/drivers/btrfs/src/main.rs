@@ -27,6 +27,7 @@ mod host;
 mod lock;
 mod node;
 mod share;
+mod subvolumes;
 mod time;
 mod watch;
 
@@ -52,6 +53,8 @@ mikros_rt::raw_main!(main);
 
 const EINVAL: i32 = -22;
 const SERVICE_CLASS: &str = "filesystem";
+/// The class of the service that manages the file system's subvolumes.
+const SUBVOLUMES_CLASS: &str = "subvolumes";
 /// The options of the mount: the free space tree, which a writable mount
 /// builds when the file system has none yet, and data compressed with
 /// zstd; and with them, on a partition that takes `Discard`, discarding
@@ -187,14 +190,23 @@ fn start(
     Ok((Rc::new(fs), manager))
 }
 
-/// Publishes the file system as a `filesystem` service and serves it.
-/// Keeps the device manager's channel open for as long as the server
-/// runs.
+/// Publishes the file system as a `filesystem` service and then the
+/// management of its subvolumes as a `subvolumes` service
+/// (MIKSPEC-0053.R10), and serves them. Keeps the device manager's channel
+/// open for as long as the server runs.
 async fn publish(fs: Rc<Fs>, manager: DeviceManagerAsyncClient) {
     if let Ok((client, server)) = endpoints::<Provider>()
         && let Ok(Ok(_)) = manager.publish_service(SERVICE_CLASS.into(), client).await
     {
         fs.spawner.spawn(fs::serve_provider(fs.clone(), server));
+        if let Ok((client, server)) = endpoints::<Provider>()
+            && let Ok(Ok(_)) = manager
+                .publish_service(SUBVOLUMES_CLASS.into(), client)
+                .await
+        {
+            fs.spawner
+                .spawn(subvolumes::serve_provider(fs.clone(), server));
+        }
     }
     core::future::pending::<()>().await;
     drop(manager);

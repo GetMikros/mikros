@@ -157,7 +157,8 @@ impl Connection {
         let rights = crate::share::rights(write, execute);
         let memory = match private {
             true if write || !self.open.node.unchangeable() => file.clone_private(rights)?,
-            _ => file.handle(rights)?,
+            true => file.handle_pinned(rights)?,
+            false => file.handle(rights)?,
         };
         Ok(NodeGetMemoryObjectResponse { memory })
     }

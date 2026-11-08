@@ -77,9 +77,19 @@ pub struct File {
     /// The file, which stays open as long as the server runs, as the
     /// object does.
     open: Rc<Open>,
+    /// Whether a client got the object itself for a copy, as the file
+    /// could never change, which it then must not.
+    pinned: Cell<bool>,
 }
 
 impl File {
+    /// A handle with `rights` to the object, for a client that asked for
+    /// a copy of a file that can never change, which must stay so.
+    pub fn handle_pinned(&self, rights: u32) -> Result<OwnedHandle, Error> {
+        self.pinned.set(true);
+        self.handle(rights)
+    }
+
     /// A handle with `rights` to the object.
     pub fn handle(&self, rights: u32) -> Result<OwnedHandle, Error> {
         let mut out = 0;
@@ -145,6 +155,16 @@ impl Shares {
         self.files.borrow().get(&key).cloned()
     }
 
+    /// Whether a client got the object itself of a file of the subvolume
+    /// with the device `device` for a copy, so that the subvolume must
+    /// stay read-only.
+    pub fn pins(&self, device: u32) -> bool {
+        self.files
+            .borrow()
+            .values()
+            .any(|f| f.pinned.get() && f.open.key.0 == device)
+    }
+
     /// Marks the pages that clients wrote dirty in the page cache, for
     /// every shared file.
     pub fn harvest(&self) {
@@ -196,6 +216,7 @@ impl Fs {
             shared,
             len: Cell::new(len),
             open: open.clone(),
+            pinned: Cell::new(false),
         });
         self.shares
             .files

@@ -8,14 +8,20 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
+use mikros_rt::interfaces::mikros::fs::btrfs::{SubvolumeInfo, Subvolumes, SubvolumesAsyncClient};
 use mikros_rt::interfaces::mikros::fs::{
-    Error, MemoryFlags, Node, NodeAsyncClient, NodeType, OpenFlags, Rights, WatchKind, WatchMask,
-    Watcher, WatcherRequest, WatcherServer,
+    Error, Filesystem, FilesystemAsyncClient, MemoryFlags, Node, NodeAsyncClient, NodeType,
+    OpenFlags, Rights, WatchKind, WatchMask, Watcher, WatcherRequest, WatcherServer,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::sys;
 
 const FOREVER: i64 = i64::MAX;
+/// The protocols of the file system's services, and how long the second
+/// may take to appear after the first.
+const FILESYSTEM: &str = "device.filesystem";
+const SUBVOLUMES: &str = "device.subvolumes";
+const PUBLISH_LIMIT: i64 = 60_000_000_000;
 /// More entries than one `ReadDirectory` returns.
 const MANY: usize = 70;
 
@@ -33,9 +39,10 @@ const MANY: usize = 70;
 /// their targets; a hard link names the same node and can be renamed; a
 /// new file shares the data of a range of another; names that differ in
 /// case are found case-insensitively, and taken for CREATE; byte-range
-/// locks of two connections behave; a directory of more entries than one
-/// reply holds lists each once; names taken and paths through files are
-/// refused; and what was made is removed again.
+/// locks of two connections behave; its subvolumes are listed, made,
+/// snapshotted, made writable and removed; a directory of more entries
+/// than one reply holds lists each once; names taken and paths through
+/// files are refused; and what was made is removed again.
 pub async fn works(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
@@ -111,6 +118,7 @@ async fn check(
     locks(&file, reactor).await?;
     clones(&dir, &file, reactor).await?;
     case_insensitive(&root, &dir, reactor).await?;
+    subvolumes(directory, reactor).await?;
 
     let (many, _) = open(&dir, "many", create_dir, reactor).await.ok()?;
     for i in 0..MANY {
@@ -411,5 +419,108 @@ async fn case_insensitive(
     for name in ["Straße", "dup", "DUP"] {
         ok(dir.unlink(name.into(), false).await)?;
     }
+    Some(())
+}
+
+/// A connection to the `subvolumes` service of the btrfs file system,
+/// whose instance is named as the file system's `filesystem` service is,
+/// once it appears.
+async fn connect_subvolumes(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+) -> Option<SubvolumesAsyncClient> {
+    let deadline = crate::now() + PUBLISH_LIMIT;
+    let Ok(Ok(listed)) = directory.list(FILESYSTEM.into()).await else {
+        return None;
+    };
+    for instance in listed.instances {
+        let (client, server) = endpoints::<Filesystem>().ok()?;
+        let connected = directory
+            .connect(
+                FILESYSTEM.into(),
+                Some(instance.clone()),
+                server.into_handle(),
+            )
+            .await;
+        if !matches!(connected, Ok(Ok(_))) {
+            continue;
+        }
+        let fs = FilesystemAsyncClient::new(ClientEnd::new(client.into_handle()), reactor.clone());
+        if !ok(fs.query_filesystem().await).is_some_and(|q| q.info.r#type == "btrfs") {
+            continue;
+        }
+        loop {
+            let (client, server) = endpoints::<Subvolumes>().ok()?;
+            let connected = directory
+                .connect(
+                    SUBVOLUMES.into(),
+                    Some(instance.clone()),
+                    server.into_handle(),
+                )
+                .await;
+            if matches!(connected, Ok(Ok(_))) {
+                return Some(SubvolumesAsyncClient::new(
+                    ClientEnd::new(client.into_handle()),
+                    reactor.clone(),
+                ));
+            }
+            if crate::now() > deadline {
+                return None;
+            }
+            let _ = reactor.sleep_until(crate::now() + 20_000_000).await;
+        }
+    }
+    None
+}
+
+/// Every subvolume, over as many replies as it takes.
+async fn list_all(subvolumes: &SubvolumesAsyncClient) -> Option<Vec<SubvolumeInfo>> {
+    let mut all = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let listed = ok(subvolumes.list(cursor).await)?;
+        if listed.subvolumes.is_empty() {
+            return Some(all);
+        }
+        all.extend(listed.subvolumes);
+        cursor = listed.next;
+    }
+}
+
+/// Whether the `subvolumes` service of the file system behaves: it lists
+/// the subvolumes of the system's layout with their paths from the top,
+/// and the current system version read-only; a subvolume made is listed,
+/// and a read-only snapshot of it, which can be made writable; both can
+/// be removed; and bad paths are refused.
+async fn subvolumes(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()> {
+    let subvolumes = connect_subvolumes(directory, reactor).await?;
+    let has = |all: &[SubvolumeInfo], path: &str, read_only: bool| {
+        all.iter()
+            .any(|s| s.path == path && s.read_only == read_only)
+    };
+    let listed = list_all(&subvolumes).await?;
+    for path in ["@system", "etc", "var", "Libraries"] {
+        expect(has(&listed, path, false))?;
+    }
+    expect(
+        listed
+            .iter()
+            .any(|s| s.path.starts_with("@system/") && s.read_only),
+    )?;
+
+    ok(subvolumes.create("btrfs-subvol".into()).await)?;
+    let snapshot = subvolumes.snapshot("btrfs-subvol".into(), "btrfs-snap".into(), true);
+    ok(snapshot.await)?;
+    let listed = list_all(&subvolumes).await?;
+    expect(has(&listed, "btrfs-subvol", false) && has(&listed, "btrfs-snap", true))?;
+    ok(subvolumes.set_read_only("btrfs-snap".into(), false).await)?;
+    expect(has(&list_all(&subvolumes).await?, "btrfs-snap", false))?;
+    expect(failed(subvolumes.create("../x".into()).await) == Some(Error::Invalid))?;
+    expect(failed(subvolumes.delete("missing".into()).await) == Some(Error::NotFound))?;
+    for path in ["btrfs-snap", "btrfs-subvol"] {
+        ok(subvolumes.delete(path.into()).await)?;
+    }
+    let listed = list_all(&subvolumes).await?;
+    expect(!listed.iter().any(|s| s.path.starts_with("btrfs-")))?;
     Some(())
 }
