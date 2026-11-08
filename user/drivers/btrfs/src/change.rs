@@ -5,6 +5,7 @@
 
 use crate::fs::{Fs, Open, error};
 use crate::node::{Connection, NAME_MAX, TARGET_MAX};
+use crate::watch::event;
 use alloc::rc::Rc;
 use mikros_btrfs::node::{Changes, Kind};
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -29,10 +30,25 @@ impl Connection {
         self.require_write()?;
         self.directory()?;
         check_component(name)?;
+        let removed = self.lookup(&self.open, name)?;
         self.open
             .node
             .remove(name.as_bytes(), directory)
-            .map_err(error)
+            .map_err(error)?;
+        self.fs.renamed(self.open.key, name, None);
+        self.fs
+            .watches
+            .notify(self.open.key, &[event(WatchKind::Removed, 0, name)]);
+        if let Some(removed) = removed
+            && removed
+                .attributes()
+                .map_or(true, |a| a.links == 0 || directory)
+        {
+            self.fs
+                .watches
+                .notify(removed.key, &[event(WatchKind::SelfRemoved, 0, "")]);
+        }
+        Ok(())
     }
 
     pub(crate) fn token(&self) -> Result<NodeGetTokenResponse, Error> {
@@ -49,10 +65,35 @@ impl Connection {
         check_component(&q.name)?;
         check_component(&q.new_name)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        let moved = self.lookup(&self.open, &q.name)?.ok_or(Error::NotFound)?;
+        let replaced = self.lookup(&to, &q.new_name)?;
         self.open
             .node
             .rename(q.name.as_bytes(), &to.node, q.new_name.as_bytes(), 0)
-            .map_err(error)
+            .map_err(error)?;
+        if let Some(replaced) = &replaced
+            && replaced.key != moved.key
+        {
+            self.fs.renamed(to.key, &q.new_name, None);
+            self.fs
+                .watches
+                .notify(replaced.key, &[event(WatchKind::SelfRemoved, 0, "")]);
+        }
+        self.fs
+            .renamed(self.open.key, &q.name, Some((to.key, &q.new_name)));
+        let cookie = self.fs.watches.move_cookie();
+        let from = event(WatchKind::MovedFrom, cookie, &q.name);
+        let into = event(WatchKind::MovedTo, cookie, &q.new_name);
+        if to.key == self.open.key {
+            self.fs.watches.notify(to.key, &[from, into]);
+        } else {
+            self.fs.watches.notify(self.open.key, &[from]);
+            self.fs.watches.notify(to.key, &[into]);
+        }
+        self.fs
+            .watches
+            .notify(moved.key, &[event(WatchKind::SelfMoved, 0, "")]);
+        Ok(())
     }
 
     pub(crate) fn link(&self, q: NodeLinkRequest) -> Result<(), Error> {
@@ -64,7 +105,12 @@ impl Connection {
         let node = self.lookup(&self.open, &q.name)?.ok_or(Error::NotFound)?;
         node.node
             .link(&to.node, q.new_name.as_bytes())
-            .map_err(error)
+            .map_err(error)?;
+        self.fs
+            .watches
+            .notify(to.key, &[event(WatchKind::Created, 0, &q.new_name)]);
+        self.fs.changed(&node, WatchKind::Attributes);
+        Ok(())
     }
 
     pub(crate) fn create_symlink(&self, name: &str, target: &str) -> Result<(), Error> {
@@ -80,7 +126,11 @@ impl Connection {
             .node
             .create(name.as_bytes(), Kind::Symlink(target.as_c_str()), 0o777)
             .map_err(error)?;
-        self.own(&node)
+        self.own(&node)?;
+        self.fs
+            .watches
+            .notify(self.open.key, &[event(WatchKind::Created, 0, name)]);
+        Ok(())
     }
 }
 

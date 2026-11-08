@@ -8,21 +8,26 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::endpoints;
-use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient, NodeType, OpenFlags};
+use mikros_rt::interfaces::mikros::fs::{
+    Error, NodeAsyncClient, NodeType, OpenFlags, WatchKind, WatchMask, Watcher, WatcherRequest,
+    WatcherServer,
+};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 
+const FOREVER: i64 = i64::MAX;
 /// More entries than one `ReadDirectory` returns.
 const MANY: usize = 70;
 
 /// Whether the file system behaves: it is a writable btrfs whose root,
 /// which can be synced, holds the top-level directories of the system's
 /// layout, each listed with its attributes when asked; `@system/current`
-/// is a link to a system version, which is followed to a directory of
-/// a system image; `..` and missing names are refused; a file made in a
-/// new directory is written, appended to and read back, with its
-/// attributes; a link within the directory is followed, one that leads
-/// out of it comes back as a redirect, and both read as their targets; a
-/// hard link names the same node and can be renamed; a directory of more
+/// is a link to a system version, which is followed to a directory of a
+/// system image; `..` and missing names are refused; a file made in a new
+/// directory is written, appended to and read back, with its attributes;
+/// a watch of the directory hears of a file made, written, renamed and
+/// removed; a link within the directory is followed, one that leads out
+/// of it comes back as a redirect, and both read as their targets; a hard
+/// link names the same node and can be renamed; a directory of more
 /// entries than one reply holds lists each once; names taken and paths
 /// through files are refused; and what was made is removed again.
 pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
@@ -84,6 +89,7 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     expect(ok(file.read(6, 5).await)?.data == b"btrfs")?;
     ok(file.sync().await)?;
 
+    watches(&dir, reactor).await?;
     links(&dir, reactor).await?;
 
     let (many, _) = open(&dir, "many", create_dir, reactor).await.ok()?;
@@ -160,6 +166,49 @@ async fn names(dir: &NodeAsyncClient) -> Option<Vec<(String, NodeType)>> {
         }
         cookie = read.next;
     }
+}
+
+/// Whether a watch of `dir` hears of a file made, written, renamed and
+/// removed, a change to a message, in order.
+async fn watches(dir: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+    let (client, server) = endpoints::<Watcher>().ok()?;
+    let mask =
+        WatchMask::CREATED.0 | WatchMask::REMOVED.0 | WatchMask::MODIFIED.0 | WatchMask::MOVED.0;
+    ok(dir.watch(WatchMask(mask), 7, client).await)?;
+    let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
+    let (x, _) = open(dir, "x", create, reactor).await.ok()?;
+    ok(x.write(0, b"1".to_vec()).await)?;
+    let token = ok(dir.get_token().await)?.token;
+    ok(dir.rename("x".into(), token, "y".into()).await)?;
+    ok(dir.unlink("y".into(), false).await)?;
+    let server = WatcherServer::new(server);
+    let mut changes = Vec::new();
+    for _ in 0..4 {
+        let Ok(WatcherRequest::OnEvents(message)) = server.next(FOREVER) else {
+            return None;
+        };
+        expect(message.cookie == 7)?;
+        let events: Vec<(WatchKind, u32, String)> = message
+            .events
+            .into_iter()
+            .map(|e| (e.kind, e.move_cookie, e.name))
+            .collect();
+        changes.push(events);
+    }
+    let moved = changes[2].first().map_or(0, |e| e.1);
+    let expected = [
+        alloc::vec![(WatchKind::Created, 0, String::from("x"))],
+        alloc::vec![(WatchKind::Modified, 0, String::from("x"))],
+        alloc::vec![
+            (WatchKind::MovedFrom, moved, String::from("x")),
+            (WatchKind::MovedTo, moved, String::from("y")),
+        ],
+        alloc::vec![(WatchKind::Removed, 0, String::from("y"))],
+    ];
+    expect(moved != 0 && changes == expected)?;
+    ok(dir.unwatch(7).await)?;
+    expect(failed(dir.unwatch(7).await) == Some(Error::NotFound))?;
+    Some(())
 }
 
 /// Whether symbolic and hard links in `dir`, which holds `file`, behave,

@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The served file system: the nodes that connections are open to, which
-//! connections to the same node share, the tokens of directories, and
-//! the `Filesystem` service
+//! connections to the same node share, the tokens of directories, the
+//! watches of connections, and the `Filesystem` service
 //! (MIKSPEC-0049.R13), whose root is the top-level subvolume
 //! (MIKSPEC-0053.R4).
 
 use crate::node;
+use crate::watch::{Watches, event};
 use alloc::collections::BTreeMap;
 use alloc::rc::{Rc, Weak};
-use core::cell::RefCell;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
 use mikros_btrfs::Mount;
 use mikros_btrfs::node::{
     Attributes as BtrfsAttributes, MODE_DIRECTORY, MODE_SYMLINK, MODE_TYPE, Node as BtrfsNode, Time,
@@ -18,6 +21,7 @@ use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::{
     Attributes, Error, Filesystem, FilesystemAsyncServer, FilesystemGetRootResponse,
     FilesystemInfo, FilesystemQueryFilesystemResponse, FilesystemRequest, Node, NodeType, Rights,
+    WatchKind,
 };
 use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, ProviderRequest};
 
@@ -25,7 +29,6 @@ use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, Prov
 const PROTOCOL: &str = "device.filesystem";
 
 const NS: i64 = 1_000_000_000;
-
 /// What tells nodes apart: the device of their subvolume and their inode
 /// number.
 pub type Key = (u32, u64);
@@ -33,6 +36,10 @@ pub type Key = (u32, u64);
 /// A node that connections are open to.
 pub struct Open {
     pub node: BtrfsNode<'static>,
+    pub key: Key,
+    /// The directories and names that the node was found under, which the
+    /// watches of those directories hear of its changes by.
+    names: RefCell<Vec<(Key, String)>>,
 }
 
 impl Open {
@@ -51,6 +58,8 @@ pub struct Fs {
     opens: RefCell<BTreeMap<Key, Weak<Open>>>,
     /// The directories that tokens name, by the token's object ID.
     pub(crate) tokens: RefCell<BTreeMap<u64, Rc<Open>>>,
+    pub watches: Watches,
+    next_owner: Cell<u64>,
     pub read_only: bool,
     pub reactor: Reactor,
     pub spawner: Spawner,
@@ -127,30 +136,67 @@ impl Fs {
     ) -> Result<Fs, Error> {
         let node = mount.root().map_err(error)?;
         let key = key(&node)?;
-        let root = Rc::new(Open { node });
+        let root = Rc::new(Open::new(node, key));
         let opens = BTreeMap::from([(key, Rc::downgrade(&root))]);
         Ok(Fs {
             mount,
             root,
             opens: RefCell::new(opens),
             tokens: RefCell::new(BTreeMap::new()),
+            watches: Watches::default(),
+            next_owner: Cell::new(1),
             read_only,
             reactor,
             spawner,
         })
     }
 
-    /// The open node for `node`: the one that connections to the same
-    /// node share, if there is one.
-    pub fn open(&self, node: BtrfsNode<'static>) -> Result<Rc<Open>, Error> {
+    /// The open node for `node`, found as `name` in `dir`: the one that
+    /// connections to the same node share, if there is one.
+    pub fn open(&self, node: BtrfsNode<'static>, dir: Key, name: &str) -> Result<Rc<Open>, Error> {
         let key = key(&node)?;
         let mut opens = self.opens.borrow_mut();
-        if let Some(open) = opens.get(&key).and_then(Weak::upgrade) {
-            return Ok(open);
+        let open = match opens.get(&key).and_then(Weak::upgrade) {
+            Some(open) => open,
+            None => {
+                let open = Rc::new(Open::new(node, key));
+                opens.insert(key, Rc::downgrade(&open));
+                open
+            }
+        };
+        drop(opens);
+        let mut names = open.names.borrow_mut();
+        if !names.iter().any(|(d, n)| *d == dir && n == name) {
+            names.push((dir, String::from(name)));
         }
-        let open = Rc::new(Open { node });
-        opens.insert(key, Rc::downgrade(&open));
+        drop(names);
         Ok(open)
+    }
+
+    /// Forgets that a node is named `name` in `dir`, which it no longer
+    /// is, and gives it `to` instead if it was moved there.
+    pub fn renamed(&self, dir: Key, name: &str, to: Option<(Key, &str)>) {
+        for open in self.opens.borrow().values().filter_map(Weak::upgrade) {
+            let mut names = open.names.borrow_mut();
+            if let Some(at) = names.iter().position(|(d, n)| *d == dir && n == name) {
+                match to {
+                    Some((d, n)) => names[at] = (d, String::from(n)),
+                    None => {
+                        names.swap_remove(at);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Tells the watches of `open` and of the directories that name it
+    /// that its contents or attributes changed, as `kind` says.
+    pub fn changed(&self, open: &Open, kind: WatchKind) {
+        self.watches.notify(open.key, &[event(kind, 0, "")]);
+        let names = open.names.borrow().clone();
+        for (dir, name) in names {
+            self.watches.notify(dir, &[event(kind, 0, &name)]);
+        }
     }
 
     /// Serves `end` as a connection to `open` with `rights` for the user
@@ -167,6 +213,13 @@ impl Fs {
         self.spawner.spawn(task);
     }
 
+    /// A new owner of watches, for a connection.
+    pub fn owner(&self) -> u64 {
+        let owner = self.next_owner.get();
+        self.next_owner.set(owner + 1);
+        owner
+    }
+
     /// What `QueryFilesystem` reports.
     pub fn info(&self) -> Result<FilesystemInfo, Error> {
         let statfs = self.mount.statfs().map_err(error)?;
@@ -177,6 +230,16 @@ impl Fs {
             free_bytes: statfs.blocks_available * statfs.block_size,
             read_only: self.read_only,
         })
+    }
+}
+
+impl Open {
+    fn new(node: BtrfsNode<'static>, key: Key) -> Open {
+        Open {
+            node,
+            key,
+            names: RefCell::new(Vec::new()),
+        }
     }
 }
 

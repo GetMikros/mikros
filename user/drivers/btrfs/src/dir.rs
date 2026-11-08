@@ -4,6 +4,7 @@
 
 use crate::fs::{self, Open, error};
 use crate::node::{Connection, MODE_BITS, NAME_MAX, TARGET_MAX};
+use crate::watch::event;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -38,7 +39,7 @@ impl Connection {
     /// connections share.
     pub(crate) fn lookup(&self, dir: &Rc<Open>, name: &str) -> Result<Option<Rc<Open>>, Error> {
         match dir.node.lookup(name.as_bytes()) {
-            Ok(node) => Ok(Some(self.fs.open(node)?)),
+            Ok(node) => Ok(Some(self.fs.open(node, dir.key, name)?)),
             Err(-2) => Ok(None),
             Err(e) => Err(error(e)),
         }
@@ -136,7 +137,10 @@ impl Connection {
                     .create(name.as_bytes(), kind, q.mode & MODE_BITS)
                     .map_err(error)?;
                 self.own(&node)?;
-                self.fs.open(node)?
+                self.fs
+                    .watches
+                    .notify(parent.key, &[event(WatchKind::Created, 0, &name)]);
+                self.fs.open(node, parent.key, &name)?
             }
             Resolved::Missing { .. } => return Err(Error::NotFound),
             Resolved::Node(_) if q.flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) => {
@@ -154,6 +158,7 @@ impl Connection {
         if q.flags.contains(OpenFlags::TRUNCATE) && r#type == NodeType::File {
             self.require_write()?;
             open.node.truncate(0).map_err(error)?;
+            self.fs.changed(&open, WatchKind::Modified);
         }
         let append = q.flags.contains(OpenFlags::APPEND);
         self.fs.serve(q.node, open, q.rights, self.user, append);

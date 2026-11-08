@@ -38,6 +38,7 @@ impl Connection {
             group: None,
         };
         self.open.node.set_attributes(&changes).map_err(error)?;
+        self.fs.changed(&self.open, WatchKind::Attributes);
         Ok(NodeSetAttributesResponse {})
     }
 
@@ -85,6 +86,7 @@ impl Connection {
                 break;
             }
         }
+        self.fs.changed(&self.open, WatchKind::Modified);
         Ok((done as u32, start.unwrap_or(offset.unwrap_or(0))))
     }
 
@@ -99,6 +101,7 @@ impl Connection {
         self.require_write()?;
         self.file()?;
         self.open.node.truncate(size).map_err(error)?;
+        self.fs.changed(&self.open, WatchKind::Modified);
         Ok(())
     }
 

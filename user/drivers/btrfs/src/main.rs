@@ -25,6 +25,7 @@ mod fs;
 mod host;
 mod node;
 mod time;
+mod watch;
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;

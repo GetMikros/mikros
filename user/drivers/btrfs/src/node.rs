@@ -24,10 +24,12 @@ pub(crate) struct Connection {
     pub(crate) user: u32,
     pub(crate) cursor: u64,
     pub(crate) append: bool,
+    /// The owner of the connection's watches.
+    pub(crate) owner: u64,
 }
 
 /// Serves the connection on `end` to `open` until the client closes it
-/// or sends an invalid message.
+/// or sends an invalid message, and then ends its watches.
 pub async fn serve(
     fs: Rc<Fs>,
     end: ServerEnd<Node>,
@@ -37,6 +39,7 @@ pub async fn serve(
     append: bool,
 ) {
     let server = NodeAsyncServer::new(end, fs.reactor.clone());
+    let owner = fs.owner();
     let mut connection = Connection {
         fs,
         open,
@@ -44,10 +47,12 @@ pub async fn serve(
         user,
         cursor: 0,
         append,
+        owner,
     };
     while let Ok(request) = server.next().await {
         connection.handle(request, server.server());
     }
+    connection.fs.watches.end(owner);
 }
 
 impl Connection {
@@ -115,11 +120,11 @@ impl Connection {
                 self.create_symlink(&q.name, &q.target)
                     .map(|()| NodeCreateSymlinkResponse {}),
             ),
+            R::Watch(q, r) => r.reply(s, self.watch(q).map(|()| NodeWatchResponse {})),
+            R::Unwatch(q, r) => r.reply(s, self.unwatch(q.cookie).map(|()| NodeUnwatchResponse {})),
             // What this server does not provide yet.
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Unwatch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::CloneRange(_, r) => r.reply(s, Err(Error::NotSupported)),
