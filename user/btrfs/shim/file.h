@@ -8,8 +8,9 @@
 
 struct mikros_node {
 	struct path path;
-	/* Opened at the first read or listing, under the lock, which also
-	 * keeps listings of the node from moving each other's position. */
+	/* Opened at the first read, write or listing, under the lock,
+	 * which also keeps listings of the node from moving each other's
+	 * position. */
 	struct file *file;
 	struct mutex lock;
 };
@@ -23,5 +24,10 @@ struct mikros_time {
 
 /* A node for `dentry` of `mnt`, whose reference it takes over. */
 struct mikros_node *mikros_node_new(struct vfsmount *mnt, struct dentry *dentry);
+
+/* The node's file, opened for reading, and for writing too where the
+ * mount and the file allow, unless it is: a regular file or a
+ * directory, as nothing else can be read, written or listed. */
+struct file *mikros_node_file(struct mikros_node *node);
 
 #endif

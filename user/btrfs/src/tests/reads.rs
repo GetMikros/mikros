@@ -2,7 +2,7 @@
 //! Reading the files, links and directories of an image that mkfs.btrfs
 //! made from a tree of the host, and comparing them with the tree.
 
-use super::{image, start};
+use super::{image, noise, start, text};
 use crate::host::Disk;
 use crate::node::{
     ENTRY_DIRECTORY, ENTRY_FILE, ENTRY_SYMLINK, MODE_DIRECTORY, MODE_FILE, MODE_SYMLINK, MODE_TYPE,
@@ -23,31 +23,6 @@ const EINVAL: i32 = -22;
 
 /// The most a read of the file protocol asks for.
 const CHUNK: usize = 32768;
-
-/// Bytes that do not compress, from xorshift64 seeded with `seed`.
-fn noise(seed: u64, len: usize) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            x as u8
-        })
-        .collect()
-}
-
-/// Text that compresses well.
-fn text(len: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(len);
-    let mut line = 0;
-    while out.len() < len {
-        out.extend_from_slice(format!("line {line} of a file that compresses well\n").as_bytes());
-        line += 1;
-    }
-    out.truncate(len);
-    out
-}
 
 /// The files of the tree, by their paths.
 fn files() -> Vec<(String, Vec<u8>)> {

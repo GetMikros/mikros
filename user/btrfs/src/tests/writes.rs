@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Changing a btrfs through the shim, which the host's btrfs check must
-//! find sound once it is unmounted, and which a read-only mount that
-//! follows must read as it was made.
+//! Changing a btrfs through the shim: entries, links, file contents and
+//! attributes, which the host's btrfs check must find sound once it is
+//! unmounted, and which a read-only mount that follows must read as they
+//! were made.
 
-use super::{Image, start};
+use super::{Image, noise, start};
 use crate::Mount;
 use crate::host::Disk;
 use crate::node::{
-    Kind, MODE_DIRECTORY, MODE_FILE, MODE_SYMLINK, MODE_TYPE, Node, RENAME_EXCHANGE,
-    RENAME_NOREPLACE,
+    Changes, Kind, MODE_DIRECTORY, MODE_FILE, MODE_SYMLINK, MODE_TYPE, Node, RENAME_EXCHANGE,
+    RENAME_NOREPLACE, Time,
 };
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
@@ -23,6 +24,9 @@ const EISDIR: i32 = -21;
 const EINVAL: i32 = -22;
 const EROFS: i32 = -30;
 const ENOTEMPTY: i32 = -39;
+
+/// The most a read or write of the file protocol carries.
+const CHUNK: usize = 32768;
 
 /// Makes a btrfs of `size` bytes, gives it to the shim as /dev/`name`,
 /// mounts it with `options`, and calls `change` with its root and then
@@ -179,6 +183,99 @@ fn renames_and_links() {
                 .map(|n| n.to_vec())
                 .collect();
             assert_eq!(names(root), expected);
+        },
+        |_| {},
+    );
+}
+
+fn read_all(file: &Node<'_>) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut buf = std::vec![0; CHUNK];
+    loop {
+        let len = file.read(data.len() as u64, &mut buf).unwrap();
+        if len == 0 {
+            return data;
+        }
+        data.extend_from_slice(&buf[..len]);
+    }
+}
+
+/// Writes `data` at `offset` in the file protocol's pieces.
+fn write_all(file: &Node<'_>, offset: u64, data: &[u8]) {
+    for (i, piece) in data.chunks(CHUNK).enumerate() {
+        let written = file.write(offset + (i * CHUNK) as u64, piece).unwrap();
+        assert_eq!(written, piece.len());
+    }
+}
+
+/// What `writes_files` leaves in "a": written, overwritten in the
+/// middle, appended to, truncated and extended with zeros.
+fn contents() -> Vec<u8> {
+    let mut data = noise(1, 300_000);
+    data[100_000..150_000].copy_from_slice(&noise(2, 50_000));
+    data.extend_from_slice(&noise(3, 10_000));
+    data.truncate(250_000);
+    data.resize(260_000, 0);
+    data
+}
+
+const TIMES: (Time, Time) = (
+    Time::new(1_000_000_000, 123),
+    Time::new(1_500_000_000, 456_789),
+);
+
+#[test]
+fn writes_files() {
+    changes(
+        "writes-files",
+        256 << 20,
+        None,
+        |root| {
+            let a = root.create(b"a", Kind::File, 0o644).unwrap();
+            write_all(&a, 0, &noise(1, 300_000));
+            write_all(&a, 100_000, &noise(2, 50_000));
+            assert_eq!(a.append(&noise(3, 10_000)), Ok((10_000, 300_000)));
+            a.truncate(250_000).unwrap();
+            a.truncate(260_000).unwrap();
+            a.set_attributes(&Changes {
+                mode: Some(0o600),
+                accessed: Some(TIMES.0),
+                modified: Some(TIMES.1),
+                owner: Some(1000),
+                group: Some(1001),
+            })
+            .unwrap();
+            let attributes = a.attributes().unwrap();
+            assert_eq!((attributes.accessed, attributes.modified), TIMES);
+            a.sync().unwrap();
+            // Small enough to be inline in the file system's metadata.
+            let small = root.create(b"small", Kind::File, 0o644).unwrap();
+            write_all(&small, 0, &noise(4, 50));
+            small.sync().unwrap();
+            let m = root.create(b"m", Kind::Directory, 0o755).unwrap();
+            for (i, name) in many().iter().enumerate() {
+                let f = m.create(name, Kind::File, 0o644).unwrap();
+                write_all(&f, 0, &noise(10 + i as u64, 100 + i));
+            }
+            let d = root.create(b"d", Kind::Directory, 0o755).unwrap();
+            assert_eq!(d.write(0, b"x").err(), Some(EISDIR));
+        },
+        |root| {
+            let a = walk(root, "a");
+            let attributes = a.attributes().unwrap();
+            assert_eq!(attributes.mode, MODE_FILE | 0o600);
+            // Reads move the access time on, as it is older than the
+            // modification time.
+            assert_eq!(attributes.modified, TIMES.1);
+            assert_eq!((attributes.owner, attributes.group), (1000, 1001));
+            assert_eq!(attributes.size, 260_000);
+            assert!(read_all(&a) == contents());
+            assert_eq!(read_all(&walk(root, "small")), noise(4, 50));
+            let m = walk(root, "m");
+            for (i, name) in many().iter().enumerate() {
+                let f = m.lookup(name).unwrap();
+                assert_eq!(read_all(&f), noise(10 + i as u64, 100 + i));
+            }
         },
         |_| {},
     );

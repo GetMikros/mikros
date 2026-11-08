@@ -7,6 +7,7 @@ mod writes;
 use crate::host::Disk;
 use std::format;
 use std::sync::OnceLock;
+use std::vec::Vec;
 
 /// Starts the shim, once for all the tests, which share it.
 fn start() {
@@ -28,6 +29,31 @@ fn adds_disks() {
     std::fs::remove_file(&path).unwrap();
     file.set_len(1 << 20).unwrap();
     assert_eq!(Disk::add(c"adds-disks", file, false), Ok(()));
+}
+
+/// Bytes that do not compress, from xorshift64 seeded with `seed`.
+fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// Text that compresses well.
+fn text(len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    let mut line = 0;
+    while out.len() < len {
+        out.extend_from_slice(format!("line {line} of a file that compresses well\n").as_bytes());
+        line += 1;
+    }
+    out.truncate(len);
+    out
 }
 
 /// A fresh btrfs of `size` bytes from the host's mkfs.btrfs, with its

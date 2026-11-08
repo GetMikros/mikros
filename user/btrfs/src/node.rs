@@ -50,6 +50,24 @@ unsafe extern "C" {
         new_name: *const c_char,
         new_len: u32,
     ) -> i32;
+    fn mikros_btrfs_write(node: *mut c_void, offset: u64, buf: *const u8, count: usize) -> c_long;
+    fn mikros_btrfs_append(
+        node: *mut c_void,
+        buf: *const u8,
+        count: usize,
+        offset: *mut u64,
+    ) -> c_long;
+    fn mikros_btrfs_truncate(node: *mut c_void, size: u64) -> i32;
+    fn mikros_btrfs_set_attributes(
+        node: *mut c_void,
+        mask: u32,
+        mode: u32,
+        accessed: *const Time,
+        modified: *const Time,
+        owner: u32,
+        group: u32,
+    ) -> i32;
+    fn mikros_btrfs_sync(node: *mut c_void) -> i32;
 }
 
 /// A time, in seconds and nanoseconds since 1970 in UTC.
@@ -60,6 +78,31 @@ pub struct Time {
     pub nanoseconds: u32,
     unused: u32,
 }
+
+impl Time {
+    pub const fn new(seconds: i64, nanoseconds: u32) -> Self {
+        Time {
+            seconds,
+            nanoseconds,
+            unused: 0,
+        }
+    }
+}
+
+/// The attributes that `Node::set_attributes()` sets, with their values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    /// The permission bits.
+    pub mode: Option<u32>,
+    pub accessed: Option<Time>,
+    pub modified: Option<Time>,
+    pub owner: Option<u32>,
+    pub group: Option<u32>,
+}
+
+/// Flags of `Node::rename()`, as Linux's `RENAME_` flags.
+pub const RENAME_NOREPLACE: u32 = 1;
+pub const RENAME_EXCHANGE: u32 = 2;
 
 /// The attributes of a node.
 #[repr(C)]
@@ -81,10 +124,6 @@ pub struct Attributes {
     pub accessed: Time,
     pub changed: Time,
 }
-
-/// Flags of `Node::rename()`, as Linux's `RENAME_` flags.
-pub const RENAME_NOREPLACE: u32 = 1;
-pub const RENAME_EXCHANGE: u32 = 2;
 
 /// The type bits of `Attributes::mode`.
 pub const MODE_TYPE: u32 = 0o170000;
@@ -282,6 +321,67 @@ impl<'m> Node<'m> {
                 name_len(new_name)?,
             )
         })
+    }
+
+    /// Writes `data` to a file at `offset`: how many bytes it wrote.
+    pub fn write(&self, offset: u64, data: &[u8]) -> Result<usize, i32> {
+        // SAFETY: as for `create()`; the shim reads at most `data.len()`
+        // bytes.
+        let written = unsafe { mikros_btrfs_write(self.node, offset, data.as_ptr(), data.len()) };
+        usize::try_from(written).map_err(|_| written as i32)
+    }
+
+    /// Writes `data` at the end of a file: how many bytes it wrote, and
+    /// where.
+    pub fn append(&self, data: &[u8]) -> Result<(usize, u64), i32> {
+        let mut offset = 0;
+        // SAFETY: as for `write()`.
+        let written =
+            unsafe { mikros_btrfs_append(self.node, data.as_ptr(), data.len(), &mut offset) };
+        let written = usize::try_from(written).map_err(|_| written as i32)?;
+        Ok((written, offset))
+    }
+
+    pub fn truncate(&self, size: u64) -> Result<(), i32> {
+        // SAFETY: as for `create()`.
+        result(unsafe { mikros_btrfs_truncate(self.node, size) })
+    }
+
+    /// Sets the attributes that `changes` holds; the change time becomes
+    /// the present.
+    pub fn set_attributes(&self, changes: &Changes) -> Result<(), i32> {
+        let mut mask = 0;
+        let mut set = |bit: u32, present: bool| {
+            if present {
+                mask |= bit;
+            }
+        };
+        set(0x1, changes.mode.is_some());
+        set(0x2, changes.accessed.is_some());
+        set(0x4, changes.modified.is_some());
+        set(0x8, changes.owner.is_some());
+        set(0x10, changes.group.is_some());
+        let accessed = changes.accessed.unwrap_or_default();
+        let modified = changes.modified.unwrap_or_default();
+        // SAFETY: as for `create()`.
+        result(unsafe {
+            mikros_btrfs_set_attributes(
+                self.node,
+                mask,
+                changes.mode.unwrap_or(0),
+                &accessed,
+                &modified,
+                changes.owner.unwrap_or(0),
+                changes.group.unwrap_or(0),
+            )
+        })
+    }
+
+    /// Puts the node's data and attributes, and the entries that name
+    /// it, on stable storage.
+    pub fn sync(&self) -> Result<(), i32> {
+        // SAFETY: as for `create()`.
+        result(unsafe { mikros_btrfs_sync(self.node) })
     }
 }
 

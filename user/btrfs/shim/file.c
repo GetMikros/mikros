@@ -3,9 +3,10 @@
  * Nodes of a mounted file system, which the program walks one name at a
  * time: looking a name up in a directory, a node's attributes, reading a
  * file, reading a symbolic link and listing a directory. A node is a path
- * of the VFS, with a file that is opened for reading the first time the
- * node is read or listed. Each call runs as a task of the shim while it
- * lasts, unless its thread runs as one already.
+ * of the VFS, with a file that is opened the first time the node is read,
+ * written or listed: for reading, and for writing too where it can be.
+ * Each call runs as a task of the shim while it lasts, unless its thread
+ * runs as one already.
  */
 #include <linux/fs.h>
 #include <linux/file.h>
@@ -148,9 +149,7 @@ int mikros_btrfs_get_attributes(struct mikros_node *node, struct mikros_attribut
 	return ret;
 }
 
-/* The node's file, opened for reading unless it is: a regular file or
- * a directory, as nothing else can be read or listed. */
-static struct file *node_file(struct mikros_node *node)
+struct file *mikros_node_file(struct mikros_node *node)
 {
 	struct inode *inode = d_inode(node->path.dentry);
 	struct file *file;
@@ -159,12 +158,20 @@ static struct file *node_file(struct mikros_node *node)
 		return ERR_PTR(-EINVAL);
 	mutex_lock(&node->lock);
 	file = node->file;
-	if (!file) {
+	if (!file && S_ISREG(inode->i_mode) && !__mnt_is_readonly(node->path.mnt)) {
+		/* Writable unless the file is immutable or append-only. */
+		file = dentry_open(&node->path, O_RDWR | O_LARGEFILE, current_cred());
+		if (IS_ERR(file) && PTR_ERR(file) != -EPERM)
+			goto out;
+		if (IS_ERR(file))
+			file = NULL;
+	}
+	if (!file)
 		file = dentry_open(&node->path, O_RDONLY | O_LARGEFILE |
 				   (S_ISDIR(inode->i_mode) ? O_DIRECTORY : 0), current_cred());
-		if (!IS_ERR(file))
-			node->file = file;
-	}
+	if (!IS_ERR(file))
+		node->file = file;
+out:
 	mutex_unlock(&node->lock);
 	return file;
 }
@@ -182,7 +189,7 @@ long mikros_btrfs_read(struct mikros_node *node, u64 offset, void *buf, unsigned
 		ret = -EISDIR;
 		goto out;
 	}
-	file = node_file(node);
+	file = mikros_node_file(node);
 	ret = PTR_ERR_OR_ZERO(file);
 	if (!ret)
 		ret = kernel_read(file, buf, count, &pos);
@@ -238,7 +245,7 @@ int mikros_btrfs_read_dir(struct mikros_node *dir, u64 *cookie, mikros_entry_fn 
 	ret = -ENOTDIR;
 	if (!d_is_dir(dir->path.dentry))
 		goto out;
-	file = node_file(dir);
+	file = mikros_node_file(dir);
 	ret = PTR_ERR_OR_ZERO(file);
 	if (ret)
 		goto out;
