@@ -153,7 +153,7 @@ pub const ENTRY_SYMLINK: u32 = 10;
 
 /// A node of a mount, which it cannot outlive.
 pub struct Node<'m> {
-    node: *mut c_void,
+    pub(crate) node: *mut c_void,
     mount: PhantomData<&'m Mount>,
 }
 

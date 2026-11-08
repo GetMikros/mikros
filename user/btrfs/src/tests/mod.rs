@@ -3,6 +3,7 @@
 
 mod reads;
 mod shares;
+mod subvolumes;
 mod writes;
 
 use crate::host::Disk;

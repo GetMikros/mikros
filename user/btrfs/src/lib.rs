@@ -10,6 +10,7 @@
 extern crate std;
 
 pub mod node;
+pub mod subvol;
 
 #[cfg(test)]
 mod host;
