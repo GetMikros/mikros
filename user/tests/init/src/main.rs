@@ -9502,6 +9502,8 @@ mod manager {
             (b"device-manager: published device.filesystem partuuid-", 2),
             (b"device-manager: published device.filesystem root for device", 1),
             (b"device-manager: published device.filesystem esp for device", 1),
+            (b"process-manager: namespaces come from the root file system", 1),
+            (b"process-manager: serving the EFI system partition as /boot/efi", 1),
             (b"device-manager: published device.subvolumes ", 1),
             (b"device-manager: bound driver btrfs to device", 1),
             (b"device-manager: started driver btrfs for device", 1),

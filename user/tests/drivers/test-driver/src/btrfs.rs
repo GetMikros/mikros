@@ -197,6 +197,12 @@ async fn usr(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
         .await
         .ok()?;
     expect(kind == NodeType::Directory)?;
+    // The system image holds the boot image's system.
+    let (manager, kind) = open(root, "usr/bin/process-manager", OpenFlags(0), reactor)
+        .await
+        .ok()?;
+    expect(kind == NodeType::File)?;
+    expect(ok(manager.get_attributes().await)?.attributes.size > 0)?;
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
     let written = open(root, "usr/new", create, reactor).await;
     expect(matches!(written, Err(Some(Error::ReadOnly))))?;
