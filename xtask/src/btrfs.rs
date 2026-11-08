@@ -477,6 +477,8 @@ fn flags(flavor: Flavor, source: &Path, linux: &Path, out: &Path) -> Vec<String>
         arch.join("uapi"),
         generated.join("uapi"),
         source.join("include/uapi"),
+        // Last, for the shim's files that include the tree's.
+        source.to_owned(),
     ] {
         flags.push(format!("-I{}", path(&dir)));
     }
