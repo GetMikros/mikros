@@ -1,4 +1,6 @@
-# Checks, builds and tests every change with the xtask commands only.
+# Checks, builds and runs the host tests on every change, with the xtask
+# commands only. The QEMU integration tests run locally before a commit,
+# and on GitHub only when started by hand, in vm-tests.yml.
 name: CI
 
 on:
@@ -15,10 +17,7 @@ jobs:
   ci:
     runs-on: ubuntu-24.04
     # Debian trixie has the btrfs-progs and QEMU versions the tools need.
-    # QEMU runs with KVM, which the runner passes into the container.
-    container:
-      image: debian:trixie
-      options: --device /dev/kvm
+    container: debian:trixie
     steps:
       - name: Install the host tools
         run: |
@@ -43,11 +42,7 @@ jobs:
             cargo xtask build --kind "$kind"
           done
       - name: Test
-        run: cargo xtask test
-      # Some integration tests, such as the coverage test, exist only in
-      # fuzz builds. The host tests ran in the step above.
-      - name: Test the fuzz build
-        run: cargo xtask test --kind fuzz --no-host
+        run: cargo xtask test --host
       # The caches are saved even when the tests fail, once the build
       # succeeded, under the keys and paths that the setup restored them
       # with. A cache whose exact key was found is not saved again.
@@ -116,29 +111,3 @@ jobs:
         with:
           path: target/llvm
           key: ${{ steps.setup.outputs.llvm-key }}
-
-  # The integration tests once more, without KVM, after the job above
-  # passed. QEMU then emulates every instruction, and threads run much
-  # later than with KVM, which shows tests that depend on timing. It
-  # builds from the caches the job above saved, and saves none itself.
-  emulated:
-    needs: ci
-    runs-on: ubuntu-24.04
-    container: debian:trixie
-    steps:
-      - name: Install the host tools
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git \
-            qemu-system-x86 gdb btrfs-progs \
-            cmake ninja-build clang lld python3 zstd bison
-      - uses: actions/checkout@v4
-      - name: Set up the build
-        uses: ./.github/actions/setup
-      # Without KVM, the first integration run took about 150 s on the
-      # runner, and the test suites of ported projects add some 5 minutes
-      # to it, so the limit leaves room well above xtask's default of
-      # 240 s. The host tests ran in the job above.
-      - name: Test without KVM
-        run: cargo xtask test --no-host --timeout 1200
