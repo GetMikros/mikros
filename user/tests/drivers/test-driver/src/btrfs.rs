@@ -2,18 +2,26 @@
 //! whether the btrfs server serves the root partition of the same disk
 //! through its `filesystem` service as it should.
 
-use crate::fat::{expect, ok, open, root};
+use crate::fat::{expect, failed, ok, open, root};
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient, NodeType, OpenFlags};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 
+/// More entries than one `ReadDirectory` returns.
+const MANY: usize = 70;
+
 /// Whether the file system behaves: it is a writable btrfs whose root,
 /// which can be synced, holds the top-level directories of the system's
 /// layout, each listed with its attributes when asked; `@system/current`
 /// is a link to a system version, which is followed to a directory of
-/// a system image; and `..` and missing names are refused.
+/// a system image; `..` and missing names are refused; a file made in a
+/// new directory is written, appended to and read back, with its
+/// attributes; a directory of more entries than one reply holds lists
+/// each once; names taken and paths through files are refused; and what
+/// was made is removed again.
 pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
     check(directory, reactor).await.is_some()
 }
@@ -57,6 +65,48 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     expect(matches!(missing, Err(Some(Error::NotFound))))?;
     let deeper = open(&root, "missing/x", OpenFlags(0), reactor).await;
     expect(matches!(deeper, Err(Some(Error::NotFound))))?;
+
+    let create_dir = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::DIRECTORY.0);
+    let (dir, kind) = open(&root, "btrfs-test", create_dir, reactor).await.ok()?;
+    expect(kind == NodeType::Directory)?;
+    let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
+    let (file, _) = open(&dir, "file", create, reactor).await.ok()?;
+    expect(ok(file.write(0, b"hello btrfs".to_vec()).await)?.written == 11)?;
+    expect(ok(file.append(b"!".to_vec()).await)?.offset == 11)?;
+    let attributes = ok(file.get_attributes().await)?.attributes;
+    expect(
+        attributes.size == 12 && attributes.mode == 0o644 && attributes.r#type == NodeType::File,
+    )?;
+    expect(ok(file.read(0, 100).await)?.data == b"hello btrfs!")?;
+    expect(ok(file.read(6, 5).await)?.data == b"btrfs")?;
+    ok(file.sync().await)?;
+
+    let (many, _) = open(&dir, "many", create_dir, reactor).await.ok()?;
+    for i in 0..MANY {
+        open(&many, &format!("f{i:02}"), create, reactor)
+            .await
+            .ok()?;
+    }
+    let listed = names(&many).await?;
+    expect(listed.len() == MANY)?;
+    for i in 0..MANY {
+        expect(listed.iter().any(|(n, _)| *n == format!("f{i:02}")))?;
+    }
+    for i in 0..MANY {
+        ok(many.unlink(format!("f{i:02}"), false).await)?;
+    }
+
+    let again = open(&dir, "file", create, reactor).await;
+    expect(matches!(again, Err(Some(Error::Exists))))?;
+    let into = open(&dir, "file/x", OpenFlags(0), reactor).await;
+    expect(matches!(into, Err(Some(Error::NotDirectory))))?;
+    expect(failed(dir.unlink("many".into(), false).await) == Some(Error::IsDirectory))?;
+
+    ok(dir.unlink("many".into(), true).await)?;
+    ok(dir.unlink("file".into(), false).await)?;
+    ok(root.unlink("btrfs-test".into(), true).await)?;
+    let gone = open(&root, "btrfs-test", OpenFlags(0), reactor).await;
+    expect(matches!(gone, Err(Some(Error::NotFound))))?;
     ok(root.sync().await)?;
     Some(())
 }

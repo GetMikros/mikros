@@ -13,6 +13,8 @@ use mikros_rt::interfaces::mikros::fs::*;
 pub(crate) const NAME_MAX: usize = 255;
 /// The longest target of a symbolic link.
 pub(crate) const TARGET_MAX: usize = 4096;
+/// The permission bits of a mode.
+pub(crate) const MODE_BITS: u32 = 0o7777;
 
 pub(crate) struct Connection {
     pub(crate) fs: Rc<Fs>,
@@ -20,6 +22,7 @@ pub(crate) struct Connection {
     pub(crate) rights: Rights,
     /// The user of the connection, whom new nodes belong to.
     pub(crate) user: u32,
+    pub(crate) cursor: u64,
     pub(crate) append: bool,
 }
 
@@ -34,11 +37,12 @@ pub async fn serve(
     append: bool,
 ) {
     let server = NodeAsyncServer::new(end, fs.reactor.clone());
-    let connection = Connection {
+    let mut connection = Connection {
         fs,
         open,
         rights,
         user,
+        cursor: 0,
         append,
     };
     while let Ok(request) = server.next().await {
@@ -47,7 +51,7 @@ pub async fn serve(
 }
 
 impl Connection {
-    pub(crate) fn handle(&self, request: NodeRequest, s: &NodeServer) {
+    pub(crate) fn handle(&mut self, request: NodeRequest, s: &NodeServer) {
         use NodeRequest as R;
         // A reply that cannot be sent means that the client went away,
         // which the next read finds.
@@ -58,6 +62,7 @@ impl Connection {
                     attributes: fs::attributes(&a),
                 }),
             ),
+            R::SetAttributes(q, r) => r.reply(s, self.set_attributes(q)),
             R::Clone(q, r) => r.reply(s, self.clone(q)),
             R::Sync(_, r) => r.reply(
                 s,
@@ -73,19 +78,36 @@ impl Connection {
                     .info()
                     .map(|info| NodeQueryFilesystemResponse { info }),
             ),
+            R::Read(q, r) => r.reply(
+                s,
+                self.read(q.offset, q.count)
+                    .map(|data| NodeReadResponse { data }),
+            ),
+            R::ReadNext(q, r) => r.reply(s, self.read_next(q.count)),
+            R::Write(q, r) => r.reply(
+                s,
+                self.write(Some(q.offset), &q.data)
+                    .map(|(written, _)| NodeWriteResponse { written }),
+            ),
+            R::Append(q, r) => r.reply(
+                s,
+                self.write(None, &q.data)
+                    .map(|(_, offset)| NodeAppendResponse { offset }),
+            ),
+            R::WriteNext(q, r) => r.reply(s, self.write_next(&q.data)),
+            R::Truncate(q, r) => {
+                r.reply(s, self.truncate(q.size).map(|()| NodeTruncateResponse {}))
+            }
+            R::Seek(q, r) => r.reply(s, self.seek(q.offset, q.origin)),
             R::ReadLink(_, r) => r.reply(s, self.read_link()),
             R::Open(q, r) => r.reply(s, self.open(q)),
             R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes)),
+            R::Unlink(q, r) => r.reply(
+                s,
+                self.unlink(&q.name, q.directory)
+                    .map(|()| NodeUnlinkResponse {}),
+            ),
             // What this server does not provide yet.
-            R::SetAttributes(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Read(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::ReadNext(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Write(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Append(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::WriteNext(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Truncate(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Seek(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::Unlink(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetToken(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Rename(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Link(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -106,6 +128,24 @@ impl Connection {
         match self.rights.contains(rights) {
             true => Ok(()),
             false => Err(Error::AccessDenied),
+        }
+    }
+
+    /// Checks that the connection may change the file system: it needs
+    /// `WRITE`, and the file system must be writable.
+    pub(crate) fn require_write(&self) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        match self.fs.read_only {
+            true => Err(Error::ReadOnly),
+            false => Ok(()),
+        }
+    }
+
+    /// Fails for a directory, which cannot be read or written as a file.
+    pub(crate) fn file(&self) -> Result<(), Error> {
+        match self.open.is_directory()? {
+            true => Err(Error::IsDirectory),
+            false => Ok(()),
         }
     }
 

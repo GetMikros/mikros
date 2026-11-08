@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Resolving paths (MIKSPEC-0049.R4, R5), opening nodes
+//! Resolving paths (MIKSPEC-0049.R4, R5), opening and creating nodes
 //! (MIKSPEC-0049.R6), and listing directories (MIKSPEC-0049.R12).
 
 use crate::fs::{self, Open, error};
-use crate::node::{Connection, NAME_MAX, TARGET_MAX};
+use crate::node::{Connection, MODE_BITS, NAME_MAX, TARGET_MAX};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use mikros_btrfs::node::{MODE_SYMLINK, MODE_TYPE};
+use mikros_btrfs::node::{Kind, MODE_SYMLINK, MODE_TYPE};
 use mikros_rt::interfaces::mikros::fs::*;
 
 /// The most entries one directory read returns, the limit of its reply.
@@ -25,7 +25,10 @@ const DT_SOCK: u32 = 12;
 enum Resolved {
     Node(Rc<Open>),
     /// Nothing, as the last component of a path in the directory.
-    Missing,
+    Missing {
+        parent: Rc<Open>,
+        name: String,
+    },
     /// A link to follow from elsewhere, with what remains of the path.
     Redirect(String),
 }
@@ -69,7 +72,7 @@ impl Connection {
             }
             let Some(node) = self.lookup(&at, &name)? else {
                 if rest.is_empty() {
-                    return Ok(Resolved::Missing);
+                    return Ok(Resolved::Missing { parent: at, name });
                 }
                 return Err(Error::NotFound);
             };
@@ -122,11 +125,20 @@ impl Connection {
                     redirect: Some(target),
                 });
             }
-            // Creating comes later.
-            Resolved::Missing if q.flags.contains(OpenFlags::CREATE) => {
-                return Err(Error::NotSupported);
+            Resolved::Missing { parent, name } if q.flags.contains(OpenFlags::CREATE) => {
+                self.require_write()?;
+                let kind = match q.flags.contains(OpenFlags::DIRECTORY) {
+                    true => Kind::Directory,
+                    false => Kind::File,
+                };
+                let node = parent
+                    .node
+                    .create(name.as_bytes(), kind, q.mode & MODE_BITS)
+                    .map_err(error)?;
+                self.own(&node)?;
+                self.fs.open(node)?
             }
-            Resolved::Missing => return Err(Error::NotFound),
+            Resolved::Missing { .. } => return Err(Error::NotFound),
             Resolved::Node(_) if q.flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) => {
                 return Err(Error::Exists);
             }
@@ -140,7 +152,8 @@ impl Connection {
             return Err(Error::Invalid);
         }
         if q.flags.contains(OpenFlags::TRUNCATE) && r#type == NodeType::File {
-            return Err(Error::NotSupported);
+            self.require_write()?;
+            open.node.truncate(0).map_err(error)?;
         }
         let append = q.flags.contains(OpenFlags::APPEND);
         self.fs.serve(q.node, open, q.rights, self.user, append);

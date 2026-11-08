@@ -83,6 +83,11 @@ pub fn utc(time: Time) -> i64 {
         .saturating_add(i64::from(time.nanoseconds))
 }
 
+/// The shim's time for nanoseconds since 1970.
+pub fn time(utc: i64) -> Time {
+    Time::new(utc.div_euclid(NS), utc.rem_euclid(NS) as u32)
+}
+
 /// The protocol's type of a node of `mode`.
 pub fn node_type(mode: u32) -> NodeType {
     match mode & MODE_TYPE {
