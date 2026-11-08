@@ -6,9 +6,18 @@
 //! `boot/Users` and filled them with the boot image's `etc`, `var` and
 //! `Users`. Once tmpfs has started, the namespace of every other new
 //! process waits for that, so that only the processes started before
-//! tmpfs, and tmpfs itself, go without their profiles. A profile's entries come from the root table: `/usr`, read
-//! only and executable, and `/Apps` and `/Libraries`, read only, from the
-//! boot image, and `/etc`, `/var` and `/Users` from those directories.
+//! tmpfs, and tmpfs itself, go without their profiles. A profile's
+//! entries come from the root table: `/usr`, read only and executable,
+//! and `/Apps` and `/Libraries`, read only, from the boot image, and
+//! `/etc`, `/var` and `/Users` from those directories.
+//!
+//! Otherwise profiles apply once the process manager has connected to
+//! the root file system, the instance `root` of `device.filesystem`
+//! (MIKSPEC-0050.R8, MIKSPEC-0050.R29), and to tmpfs: the root table's
+//! entries then come from the root file system, and `/tmp` from tmpfs.
+//! Processes started before go without their profiles. An entry that is
+//! the root file system's root or lies in `@system` fails the start with
+//! `ACCESS_DENIED` (MIKSPEC-0050.R28).
 
 use crate::processes::Shared;
 use alloc::format;
@@ -27,7 +36,7 @@ use mikros_rt::interfaces::mikros::fs::{
     TemporaryFilesystem, TemporaryFilesystemAsyncClient,
 };
 use mikros_rt::interfaces::mikros::process::NamespaceEntry;
-use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
+use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, DirectoryEvent};
 use process_manager::bootfs::{Fs, ItemKind};
 
 /// The accounts service's data directory, which no other process's
@@ -41,6 +50,12 @@ const CLI_APP: &str = "system.cli";
 /// The protocols of the temporary file system.
 const TMPFS: &str = "mikros.fs.Filesystem";
 const TEMPORARY: &str = "mikros.fs.TemporaryFilesystem";
+/// The protocol of the file systems of partitions, and the instance of
+/// the root file system.
+const DEVICE_FILESYSTEM: &str = "device.filesystem";
+const ROOT_INSTANCE: &str = "root";
+/// The subvolume of system versions, which no namespace may reach.
+const SYSTEM: &str = "/@system";
 /// How long to wait before asking again for tmpfs.
 const RETRY: i64 = 20_000_000;
 /// The most bytes one write moves.
@@ -49,14 +64,25 @@ const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 const RX: Rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
 const RWX: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0);
 
-/// The directories of tmpfs that profiles use.
+/// What profiles take their entries from: tmpfs, for `/tmp`, and the
+/// sources of the root table.
 struct Ready {
     tmpfs: Rc<NodeAsyncClient>,
     /// Where the budgets of tmpfs's directories are set.
     temporary: TemporaryFilesystemAsyncClient,
-    etc: Rc<NodeAsyncClient>,
-    var: Rc<NodeAsyncClient>,
-    users: Rc<NodeAsyncClient>,
+    roots: Roots,
+}
+
+enum Roots {
+    /// Running from the boot image: tmpfs's directories for `/etc`,
+    /// `/var` and `/Users`, and the boot image for the rest.
+    Boot {
+        etc: Rc<NodeAsyncClient>,
+        var: Rc<NodeAsyncClient>,
+        users: Rc<NodeAsyncClient>,
+    },
+    /// The root directory of the root file system.
+    Root(Rc<NodeAsyncClient>),
 }
 
 pub struct Namespaces {
@@ -68,10 +94,11 @@ pub struct Namespaces {
     waiting: RefCell<Vec<Waker>>,
 }
 
-/// Where an entry of the root table comes from.
+/// Where an entry of the root table comes from: a directory of the boot
+/// image, or a directory and the path below it.
 enum Source {
     Boot(&'static str),
-    Tmpfs(Rc<NodeAsyncClient>),
+    Dir(Rc<NodeAsyncClient>, &'static str),
 }
 
 type Reply<T> = Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>;
@@ -189,30 +216,45 @@ impl Namespaces {
     /// them from the boot image, and from then on builds namespaces from
     /// profiles.
     pub async fn prepare(&self, directory: DirectoryAsyncClient, fs: Rc<Fs>, reactor: Reactor) {
-        let (root, temporary) = loop {
-            if let Some(found) = tmpfs(&directory, &reactor).await {
-                break found;
-            }
-            let mut now = 0;
-            // SAFETY: the out pointer is valid for the call.
-            unsafe { mikros_rt::sys::clock_get_monotonic(&mut now) };
-            let _ = reactor.sleep_until(now + RETRY).await;
-        };
+        let (root, temporary) = tmpfs_once_served(&directory, &reactor).await;
         match fill(&root, &fs, &reactor).await {
             Ok((etc, var, users)) => {
                 let tmpfs = Rc::new(root);
-                *self.ready.borrow_mut() = Some(Rc::new(Ready {
+                let roots = Roots::Boot { etc, var, users };
+                self.apply(Ready {
                     tmpfs,
                     temporary,
-                    etc,
-                    var,
-                    users,
-                }));
-                for waker in self.waiting.take() {
-                    waker.wake();
-                }
+                    roots,
+                });
             }
             Err(e) => mikros_rt::log!(Error, "process-manager: filling tmpfs failed: {e:?}"),
+        }
+    }
+
+    /// Connects through `directory`, the process manager's own, to the
+    /// root file system once it is published, and to tmpfs once it
+    /// serves, and from then on builds namespaces from profiles.
+    pub async fn prepare_root(&self, directory: DirectoryAsyncClient, reactor: Reactor) {
+        let root = match root_filesystem(&directory, &reactor).await {
+            Ok(root) => root,
+            Err(e) => {
+                mikros_rt::log!(Error, "process-manager: no root file system: {e:?}");
+                return;
+            }
+        };
+        let (tmpfs, temporary) = tmpfs_once_served(&directory, &reactor).await;
+        self.apply(Ready {
+            tmpfs: Rc::new(tmpfs),
+            temporary,
+            roots: Roots::Root(Rc::new(root)),
+        });
+    }
+
+    /// Makes profiles apply, from `ready`.
+    fn apply(&self, ready: Ready) {
+        *self.ready.borrow_mut() = Some(Rc::new(ready));
+        for waker in self.waiting.take() {
+            waker.wake();
         }
     }
 
@@ -235,7 +277,7 @@ impl Namespaces {
             self.profiles().await;
         }
         let ready = self.ready.borrow().clone();
-        let Some(ready) = ready.filter(|_| self.bootfs) else {
+        let Some(ready) = ready else {
             let root = crate::start::root(&shared.fs)?;
             return Ok(alloc::vec![
                 NamespaceEntry {
@@ -317,15 +359,34 @@ impl Namespaces {
         path: &str,
         rights: Rights,
     ) -> Result<NamespaceEntry, Status> {
-        let table: [(&str, Source, Rights); 6] = [
-            ("/usr", Source::Boot("usr"), RX),
-            ("/Apps", Source::Boot("Apps"), Rights::READ),
-            ("/Libraries", Source::Boot("Libraries"), Rights::READ),
-            ("/etc", Source::Tmpfs(ready.etc.clone()), RWX),
-            ("/var", Source::Tmpfs(ready.var.clone()), RWX),
-            ("/Users", Source::Tmpfs(ready.users.clone()), RWX),
-        ];
         let normal = path.trim_end_matches('/');
+        let table: [(&str, Source, Rights); 6] = match &ready.roots {
+            Roots::Boot { etc, var, users } => [
+                ("/usr", Source::Boot("usr"), RX),
+                ("/Apps", Source::Boot("Apps"), Rights::READ),
+                ("/Libraries", Source::Boot("Libraries"), Rights::READ),
+                ("/etc", Source::Dir(etc.clone(), ""), RWX),
+                ("/var", Source::Dir(var.clone(), ""), RWX),
+                ("/Users", Source::Dir(users.clone(), ""), RWX),
+            ],
+            Roots::Root(root) => {
+                if normal.is_empty() || path::overlaps(normal, SYSTEM) {
+                    return Err(Status::AccessDenied);
+                }
+                [
+                    ("/usr", Source::Dir(root.clone(), "usr"), RX),
+                    ("/Apps", Source::Dir(root.clone(), "Apps"), Rights::READ),
+                    (
+                        "/Libraries",
+                        Source::Dir(root.clone(), "Libraries"),
+                        Rights::READ,
+                    ),
+                    ("/etc", Source::Dir(root.clone(), "etc"), RWX),
+                    ("/var", Source::Dir(root.clone(), "var"), RWX),
+                    ("/Users", Source::Dir(root.clone(), "Users"), RWX),
+                ]
+            }
+        };
         let (source, most, rest) = table
             .into_iter()
             .find_map(|(root, source, most)| {
@@ -348,7 +409,12 @@ impl Namespaces {
                     return Err(Status::NotFound);
                 }
             }
-            Source::Tmpfs(dir) => {
+            Source::Dir(dir, top) => {
+                let rest = match (top.is_empty(), rest.is_empty()) {
+                    (true, _) => rest,
+                    (false, true) => String::from(top),
+                    (false, false) => format!("{top}/{rest}"),
+                };
                 let target = match rest.is_empty() {
                     true => String::from("."),
                     false => rest.clone(),
@@ -400,6 +466,69 @@ async fn tmp(
         path: "/tmp".into(),
         directory,
     })
+}
+
+/// The root of tmpfs and its `TemporaryFilesystem`, asking again until
+/// it serves.
+async fn tmpfs_once_served(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+) -> (NodeAsyncClient, TemporaryFilesystemAsyncClient) {
+    loop {
+        if let Some(found) = tmpfs(directory, reactor).await {
+            return found;
+        }
+        let mut now = 0;
+        // SAFETY: the out pointer is valid for the call.
+        unsafe { mikros_rt::sys::clock_get_monotonic(&mut now) };
+        let _ = reactor.sleep_until(now + RETRY).await;
+    }
+}
+
+/// The root directory of the root file system, with read, write and
+/// execute rights, once its `filesystem` service is published as the
+/// instance `root`, which a watch of `device.filesystem` waits for.
+async fn root_filesystem(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+) -> Result<NodeAsyncClient, Status> {
+    let midl = |_| Status::PeerClosed;
+    directory
+        .watch(DEVICE_FILESYSTEM.into())
+        .await
+        .map_err(midl)??;
+    loop {
+        let listed = directory
+            .list(DEVICE_FILESYSTEM.into())
+            .await
+            .map_err(midl)??;
+        if listed.instances.iter().any(|i| i == ROOT_INSTANCE) {
+            break;
+        }
+        loop {
+            match directory.next_event().await.map_err(midl)? {
+                DirectoryEvent::OnInstanceAdded(added)
+                    if added.protocol == DEVICE_FILESYSTEM && added.instance == ROOT_INSTANCE =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    let (client, server) = endpoints::<Filesystem>().map_err(|_| Status::NoResources)?;
+    directory
+        .connect(
+            DEVICE_FILESYSTEM.into(),
+            Some(ROOT_INSTANCE.into()),
+            server.into_handle(),
+        )
+        .await
+        .map_err(midl)??;
+    let fs = FilesystemAsyncClient::new(client, reactor.clone());
+    let (root, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
+    flat(fs.get_root(server, RWX).await).map_err(status)?;
+    Ok(NodeAsyncClient::new(root, reactor.clone()))
 }
 
 /// The root of tmpfs, read and write, and its `TemporaryFilesystem`,
