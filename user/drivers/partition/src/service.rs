@@ -4,6 +4,7 @@
 //! open across all partitions of the disk, while no partition's `bus`
 //! connection holds a writable lock and the driver holds the disk's.
 
+use crate::link::Link;
 use crate::partition::{self, Access, Partition};
 use crate::writers::Writers;
 use alloc::rc::Rc;
@@ -12,8 +13,7 @@ use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, ProviderRequest};
 use mikros_rt::interfaces::mikros::storage::{
-    BlockAsyncClient, BlockDevice, BlockDeviceAsyncServer, BlockDeviceOpenResponse,
-    BlockDeviceRequest,
+    BlockDevice, BlockDeviceAsyncServer, BlockDeviceOpenResponse, BlockDeviceRequest,
 };
 
 /// The protocol of the published service.
@@ -23,7 +23,7 @@ const PROTOCOL: &str = "device.storage";
 /// closes: each connection to `device.storage` gets `BlockDevice`.
 /// `writers` are those of the disk's partitions.
 pub async fn serve_provider(
-    disk: Rc<BlockAsyncClient>,
+    disk: Rc<Link>,
     partition: Rc<Partition>,
     end: ServerEnd<Provider>,
     writers: Rc<Writers>,
@@ -53,7 +53,7 @@ pub async fn serve_provider(
 /// gets, failing with `ALREADY_EXISTS` for a writable one when `writers`
 /// refuse it.
 async fn open(
-    disk: Rc<BlockAsyncClient>,
+    disk: Rc<Link>,
     partition: Rc<Partition>,
     end: ServerEnd<BlockDevice>,
     writers: Rc<Writers>,

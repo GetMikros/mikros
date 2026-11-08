@@ -6,14 +6,17 @@
 //! entry's 1-based index in the table, and publishes the partition's raw
 //! access service, of class `storage`. On the bus channel that
 //! `ConnectChild` gives it for a partition it serves `Block` for that
-//! partition, forwarded to the disk. `ResetChild` fails with
-//! `NOT_SUPPORTED`. The driver never writes the table.
+//! partition, forwarded to the disk, whose requests outlive the disk
+//! driver's restarts: `Reconnect` gives the driver a new channel to the
+//! disk, on which they go again (MIKSPEC-0044.R19). `ResetChild` fails
+//! with `NOT_SUPPORTED`. The driver never writes the table.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod link;
 mod log;
 mod partition;
 mod service;
@@ -28,13 +31,15 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
+use link::Link;
 use mikros_gpt::guid_string;
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
-    DriverStartRequest, DriverStartResponse, DriverStopResponse, Property,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse,
+    DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
+    DriverStopResponse, Property,
 };
 use mikros_rt::interfaces::mikros::log::Severity;
 use mikros_rt::interfaces::mikros::process::HandleRole;
@@ -54,9 +59,9 @@ const FLAGS: BlockFlags = BlockFlags(
 );
 const SERVICE_CLASS: &str = "storage";
 
-/// The disk and its partitions, read by `Start`.
+/// The disk's link and its partitions, read by `Start`.
 struct Disk {
-    block: Rc<BlockAsyncClient>,
+    link: Rc<Link>,
     partitions: Vec<(mikros_gpt::Partition, Rc<Partition>)>,
 }
 
@@ -65,7 +70,7 @@ struct Disk {
 /// them is over.
 #[derive(Default)]
 struct Children {
-    disk: RefCell<Option<(Rc<BlockAsyncClient>, Rc<Writers>)>>,
+    disk: RefCell<Option<(Rc<Link>, Rc<Writers>)>>,
     added: RefCell<Vec<(u64, Rc<Partition>)>>,
     done: Cell<bool>,
     waiting: RefCell<Vec<Waker>>,
@@ -81,7 +86,7 @@ impl Children {
 
     /// The disk, its partitions' writers and the partition of device `id`,
     /// once adding is over.
-    async fn get(&self, id: u64) -> Option<(Rc<BlockAsyncClient>, Rc<Writers>, Rc<Partition>)> {
+    async fn get(&self, id: u64) -> Option<(Rc<Link>, Rc<Writers>, Rc<Partition>)> {
         poll_fn(|cx| match self.done.get() {
             true => Poll::Ready(()),
             false => {
@@ -131,12 +136,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     responder.reply(s, Err(Status::BadState))
                 }
                 DriverRequest::Start(request, responder) => {
-                    match start(request, process, &directory, &reactor).await {
+                    match start(request, process, &directory, &reactor, &spawner).await {
                         Ok((disk, manager)) => {
                             started = true;
-                            let writers = Rc::new(Writers::new(disk.block.clone()));
+                            let writers = Rc::new(Writers::new(disk.link.clone()));
                             *children.disk.borrow_mut() =
-                                Some((disk.block.clone(), writers.clone()));
+                                Some((disk.link.clone(), writers.clone()));
                             let replied = responder.reply(s, Ok(DriverStartResponse {}));
                             let (children, reactor, tasks) =
                                 (children.clone(), reactor.clone(), spawner.clone());
@@ -149,12 +154,38 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     }
                 }
                 DriverRequest::Stop(_, responder) => {
+                    // Requests that wait for a new channel fail, and
+                    // their replies go out before the driver ends.
+                    let link = children
+                        .disk
+                        .borrow()
+                        .as_ref()
+                        .map(|(link, _)| link.clone());
+                    if let Some(link) = link {
+                        link.fail();
+                        settle(&reactor).await;
+                    }
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                // The driver does not take a new bus channel yet.
-                DriverRequest::Reconnect(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
+                DriverRequest::Reconnect(request, responder) => {
+                    let link = children
+                        .disk
+                        .borrow()
+                        .as_ref()
+                        .map(|(link, _)| link.clone());
+                    match link {
+                        None => responder.reply(s, Err(Status::BadState)),
+                        Some(link) => {
+                            let server = server.clone();
+                            spawner.spawn(async move {
+                                let reconnected = link.reconnect(request.bus).await;
+                                let reply = reconnected.map(|()| DriverReconnectResponse {});
+                                let _ = responder.reply(server.server(), reply);
+                            });
+                            Ok(())
+                        }
+                    }
                 }
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
@@ -204,6 +235,7 @@ async fn start(
     process: sys::Handle,
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
+    spawner: &Spawner,
 ) -> Result<(Disk, DeviceManagerAsyncClient), Status> {
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let block = BlockAsyncClient::new(ClientEnd::new(bus), reactor.clone());
@@ -245,8 +277,15 @@ async fn start(
         })
         .collect();
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
-    let block = Rc::new(block);
-    Ok((Disk { block, partitions }, manager))
+    let block_size = u64::from(info.block_size);
+    let link = Link::new(
+        Rc::new(block),
+        block_size,
+        process,
+        reactor.clone(),
+        spawner.clone(),
+    );
+    Ok((Disk { link, partitions }, manager))
 }
 
 /// Adds a device for each partition of `disk` and publishes its raw
@@ -284,7 +323,7 @@ async fn add_partitions(
         };
         if let Ok(Ok(_)) = manager.publish_service(SERVICE_CLASS.into(), client).await {
             spawner.spawn(service::serve_provider(
-                disk.block.clone(),
+                disk.link.clone(),
                 partition.clone(),
                 server,
                 writers.clone(),
@@ -309,4 +348,15 @@ fn properties(entry: &mikros_gpt::Partition) -> Vec<Property> {
         property("first_lba", format!("{}", entry.first_lba)),
         property("last_lba", format!("{}", entry.last_lba)),
     ]
+}
+
+/// How long a stopping driver lets the replies of failed requests go.
+const SETTLE_NS: i64 = 10_000_000;
+
+/// Lets the driver's other tasks run for `SETTLE_NS`.
+async fn settle(reactor: &Reactor) {
+    let mut now = 0;
+    // SAFETY: the out pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    let _ = reactor.sleep_until(now + SETTLE_NS).await;
 }

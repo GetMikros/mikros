@@ -3,15 +3,15 @@
 //! connections. While any exists, the driver holds the disk's writable
 //! lock on its own `bus` connection to the disk.
 
+use crate::link::Link;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
-use mikros_rt::interfaces::mikros::storage::BlockAsyncClient;
 
 pub struct Writers {
-    disk: Rc<BlockAsyncClient>,
+    disk: Rc<Link>,
     open: Cell<bool>,
     locks: Cell<u32>,
     /// Whether the driver holds the disk's lock, and whether it is
@@ -23,7 +23,7 @@ pub struct Writers {
 }
 
 impl Writers {
-    pub fn new(disk: Rc<BlockAsyncClient>) -> Writers {
+    pub fn new(disk: Rc<Link>) -> Writers {
         Writers {
             disk,
             open: Cell::new(false),
@@ -89,7 +89,7 @@ impl Writers {
         if !self.held.get() {
             self.asking.set(true);
             let locked = self.disk.lock_writable().await;
-            self.held.set(matches!(locked, Ok(Ok(_))));
+            self.held.set(locked.is_ok());
             self.asking.set(false);
             for waker in self.waiting.borrow_mut().drain(..) {
                 waker.wake();
@@ -103,7 +103,7 @@ impl Writers {
         let none = !self.open.get() && self.locks.get() == 0;
         if none && self.held.get() && !self.asking.get() {
             self.held.set(false);
-            let _ = self.disk.unlock_writable();
+            self.disk.unlock_writable();
         }
     }
 }

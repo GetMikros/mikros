@@ -1,17 +1,19 @@
 //! `Block` for one partition, forwarded to the disk's `Block` on the bus
-//! channel: block numbers are moved by the partition's first block, and
-//! buffers are the disk's own.
+//! channel through the link, which keeps requests across the disk
+//! driver's restarts: block numbers are moved by the partition's first
+//! block, and buffers are the disk's own, under numbers of the link's.
 
+use crate::link::Link;
 use crate::writers::Writers;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 use mikros_rt::exec::{Reactor, Spawner};
-use mikros_rt::interfaces::__midl::{Error, OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{
-    Block, BlockAsyncClient, BlockAsyncServer, BlockCreateBufferResponse, BlockDiscardResponse,
-    BlockFlags, BlockFlushResponse, BlockGetInfoResponse, BlockInfo, BlockLockWritableResponse,
+    Block, BlockAsyncServer, BlockCreateBufferResponse, BlockDiscardResponse, BlockFlags,
+    BlockFlushResponse, BlockGetInfoResponse, BlockInfo, BlockLockWritableResponse,
     BlockReadResponse, BlockRequest, BlockWriteResponse,
 };
 
@@ -48,12 +50,11 @@ struct Connection {
 /// Serves `Block` for `partition` on `end`, made with `access`, until it
 /// closes. Then destroys the buffers the connection left, releases its
 /// lock and calls `closed`. Each request runs as a task of its own.
-/// Requests that would reach the disk fail with `PEER_CLOSED` once its
-/// channel has closed. `LockWritable` takes a lock in `writers` on a
+/// `LockWritable` takes a lock in `writers` on a
 /// `bus` connection, and fails with `ACCESS_DENIED` on any other.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve(
-    disk: Rc<BlockAsyncClient>,
+    disk: Rc<Link>,
     partition: Rc<Partition>,
     end: OwnedHandle,
     access: Access,
@@ -88,14 +89,14 @@ pub async fn serve(
                 R::DestroyBuffer(q) => {
                     if let Some(size) = connection.buffers.borrow_mut().remove(&q.buffer) {
                         connection.total.set(connection.total.get() - size);
-                        let _ = disk.destroy_buffer(q.buffer);
+                        disk.destroy_buffer(q.buffer);
                     }
                     Ok(())
                 }
                 R::Read(q, r) => {
                     let read = match check(p, &connection, q.buffer, q.block, q.count) {
                         Err(status) => Err(status),
-                        Ok(block) => flatten(disk.read(q.buffer, q.offset, block, q.count).await),
+                        Ok(block) => disk.read(q.buffer, q.offset, block, q.count).await,
                     };
                     r.reply(s, read.map(|_| BlockReadResponse {}))
                 }
@@ -103,21 +104,15 @@ pub async fn serve(
                     let written = match check(p, &connection, q.buffer, q.block, q.count) {
                         _ if !may_write => Err(Status::AccessDenied),
                         Err(status) => Err(status),
-                        Ok(block) => {
-                            let written = disk.write(q.buffer, q.offset, block, q.count, q.fua);
-                            flatten(written.await)
-                        }
+                        Ok(block) => disk.write(q.buffer, q.offset, block, q.count, q.fua).await,
                     };
                     r.reply(s, written.map(|_| BlockWriteResponse {}))
                 }
-                R::Flush(_, r) => r.reply(
-                    s,
-                    flatten(disk.flush().await).map(|_| BlockFlushResponse {}),
-                ),
+                R::Flush(_, r) => r.reply(s, disk.flush().await.map(|_| BlockFlushResponse {})),
                 R::Discard(q, r) => {
                     let discarded = match discard_range(p, may_write, q.block, q.count) {
                         Err(status) => Err(status),
-                        Ok(block) => flatten(disk.discard(block, q.count).await),
+                        Ok(block) => disk.discard(block, q.count).await,
                     };
                     r.reply(s, discarded.map(|_| BlockDiscardResponse {}))
                 }
@@ -138,7 +133,7 @@ pub async fn serve(
         });
     }
     for (buffer, _) in connection.buffers.take() {
-        let _ = disk.destroy_buffer(buffer);
+        disk.destroy_buffer(buffer);
     }
     if connection.locked.replace(false) {
         writers.unlock();
@@ -167,7 +162,7 @@ async fn lock(connection: &Connection, writers: &Writers) -> Result<(), Status> 
 /// `limited` and its buffers would exceed 64 MiB, and otherwise as the
 /// disk's `CreateBuffer` does.
 async fn create_buffer(
-    disk: &BlockAsyncClient,
+    disk: &Rc<Link>,
     connection: &Connection,
     size: u64,
     limited: bool,
@@ -179,10 +174,10 @@ async fn create_buffer(
     if over(connection.total.get()) {
         return Err(Status::NoResources);
     }
-    let created = flatten(disk.create_buffer(size).await)?;
+    let created = disk.create_buffer(size).await?;
     // The total is checked again: other requests ran while this one waited.
     if over(connection.total.get()) {
-        let _ = disk.destroy_buffer(created.buffer);
+        disk.destroy_buffer(created.buffer);
         return Err(Status::NoResources);
     }
     connection
@@ -249,10 +244,4 @@ pub fn copy(info: &BlockInfo) -> BlockInfo {
         model: info.model.clone(),
         serial: info.serial.clone(),
     }
-}
-
-/// The result of a call to the disk, with `PEER_CLOSED` when its channel
-/// failed.
-fn flatten<T>(result: Result<Result<T, Status>, Error>) -> Result<T, Status> {
-    result.unwrap_or(Err(Status::PeerClosed))
 }
