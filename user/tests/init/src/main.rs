@@ -9397,7 +9397,10 @@ mod manager {
     /// behind the NVMe controller, as `disk-1`, and the AHCI driver for
     /// the one on port 2 of the AHCI controller, as `disk-2`. Each disk
     /// device has the properties `serial`, here `mikros`, and
-    /// `removable`, here `false`. The
+    /// `removable`, here `false`, and the device manager gives each disk
+    /// and partition the property `cache`, here `write-back`, since the
+    /// root partition's file system, which the device manager connects
+    /// to once it is published, has no storage profiles. The
     /// partition driver reads each disk's GPT and adds its partitions:
     /// the scratch partition `part-1` of each scratch disk, and the EFI
     /// system partition `part-1` and root partition `part-2` of the test
@@ -9478,6 +9481,15 @@ mod manager {
             (b", disk-2, as storage:disk, under", 1),
             // The three disks, each with the serial number `mikros`.
             (b" resources, serial mikros, removable false", 3),
+            // The three disks and the six partitions on them, none of
+            // them removable.
+            (b", cache write-back", 9),
+            // The root partition's file system, which has no storage
+            // profiles, so the defaults above apply.
+            (
+                b"device-manager: reading storage profiles from the root file system",
+                1,
+            ),
             (b"device-manager: published device.storage ", 9),
             (
                 b"device-manager: driver test-reset for device 3 failed after 5 restarts",

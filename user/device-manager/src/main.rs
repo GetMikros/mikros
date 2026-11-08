@@ -18,6 +18,7 @@
 extern crate alloc;
 
 mod acpi;
+mod cache;
 mod devices;
 mod drivers;
 mod publish;
@@ -62,6 +63,11 @@ const INFO_HEADER_SIZE: usize = 0x68;
 const FIRMWARE_TABLE: usize = 0x08;
 const FLAGS: usize = 0x04;
 const HAS_FRAMEBUFFER: u32 = 1 << 0;
+/// Where the header gives the command line's offset and length, and the
+/// longest command line.
+const CMDLINE_OFFSET: usize = 0x48;
+const CMDLINE_LEN: usize = 0x4C;
+const CMDLINE_MAX: usize = 4096;
 const KIND_MMIO: u32 = 1;
 const SHARED: u32 = 1 << 0;
 /// The configuration space of one bus, in an ECAM range.
@@ -98,9 +104,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         .iter()
         .position(|h| h.role == HandleRole::Provider)
         .map(|at| managed.handles.remove(at).handle);
-    let info = take(&mut managed.handles, PLATFORM_INFO_ID)
-        .as_ref()
-        .and_then(platform_info);
+    let info_memory = take(&mut managed.handles, PLATFORM_INFO_ID);
+    let info = info_memory.as_ref().and_then(platform_info);
+    let command_line = match (&info_memory, &info) {
+        (Some(memory), Some(header)) => command_line(memory, header),
+        _ => String::new(),
+    };
     let mut devices = Devices::new();
     let has_framebuffer = info
         .as_ref()
@@ -152,6 +161,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         starter,
         registrar,
         service_ids: publish::ServiceIds::new(),
+        directory,
+        profiles: cache::Profiles::new(&command_line),
         reactor,
         spawner: spawner.clone(),
     });
@@ -170,7 +181,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     // The handles, the framebuffer's and the process's among them, stay
     // open.
     executor.block_on(core::future::pending::<()>());
-    drop((log, framebuffer, header.process, directory, manager));
+    drop((log, framebuffer, header.process, manager));
     PANIC_EXIT_CODE
 }
 
@@ -251,6 +262,21 @@ fn platform_info(mem: &OwnedHandle) -> Option<[u8; INFO_HEADER_SIZE]> {
     let status =
         unsafe { sys::mem_read(mem.raw(), 0, header.as_mut_ptr(), INFO_HEADER_SIZE as u64) };
     (status == mikros_rt::OK && u32_at(&header, 0) == 1).then_some(header)
+}
+
+/// The command line that the platform information `mem` with the header
+/// `header` holds, or an empty one when it cannot be read or is not
+/// UTF-8.
+fn command_line(mem: &OwnedHandle, header: &[u8; INFO_HEADER_SIZE]) -> String {
+    let offset = u32_at(header, CMDLINE_OFFSET) as u64;
+    let len = (u32_at(header, CMDLINE_LEN) as usize).min(CMDLINE_MAX);
+    let mut bytes = vec![0u8; len];
+    // SAFETY: the pointer describes `bytes`.
+    let status = unsafe { sys::mem_read(mem.raw(), offset, bytes.as_mut_ptr(), len as u64) };
+    if status != mikros_rt::OK {
+        return String::new();
+    }
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
 /// Removes the `USER` startup handle with `id` from `handles`.

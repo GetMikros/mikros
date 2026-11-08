@@ -2,6 +2,7 @@
 //! a `Start` that fails and a driver process that terminates without
 //! being stopped, and removing devices.
 
+use crate::cache::Profiles;
 use crate::devices::Devices;
 use crate::publish::ServiceIds;
 use crate::serve;
@@ -22,7 +23,7 @@ use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::DeviceManager;
-use mikros_rt::interfaces::mikros::service::RegistrarAsyncClient;
+use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, RegistrarAsyncClient};
 use mikros_rt::sys;
 
 /// A driver is restarted at most this many times within `WINDOW`, as a
@@ -39,14 +40,16 @@ pub const EJECT_STOP_LIMIT: i64 = 60_000_000_000;
 
 /// What the supervising tasks share: the devices, the drivers of the
 /// valid manifests, what starting them takes, the service manager's
-/// `Registrar` and the service IDs given out, and the executor's reactor
-/// and spawner.
+/// `Registrar` and the service IDs given out, the service directory,
+/// the storage profiles, and the executor's reactor and spawner.
 pub struct Manager {
     pub devices: RefCell<Devices>,
     pub drivers: Vec<Driver>,
     pub starter: Starter,
     pub registrar: Option<RegistrarAsyncClient>,
     pub service_ids: ServiceIds,
+    pub directory: DirectoryAsyncClient,
+    pub profiles: Profiles,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }

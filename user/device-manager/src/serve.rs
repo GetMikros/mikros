@@ -1,5 +1,6 @@
 //! Serving the `DeviceManager` channel of each driver while it runs.
 
+use crate::cache;
 use crate::devices::Device;
 use crate::publish::{self, Published};
 use crate::supervise::{self, Done, Manager};
@@ -39,7 +40,7 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
             let s = server.server();
             let _ = match request {
                 R::AddDevice(request, responder) => {
-                    let added = add_device(&m, caller, request);
+                    let added = add_device(&m, caller, request).await;
                     let reply = added.map(|(id, _)| DeviceManagerAddDeviceResponse { id });
                     let replied = responder.reply(s, reply);
                     // Its driver starts once the bus driver knows its ID,
@@ -55,7 +56,11 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
                 }
                 R::PublishService(request, responder) => {
                     let (class, provider) = (request.class, request.provider);
+                    let filesystem = class == "filesystem";
                     let id = publish::publish(&m, &published, caller, class, provider).await;
+                    if let (Ok(id), true) = (&id, filesystem) {
+                        root_file_system(&m, caller, *id);
+                    }
                     responder.reply(s, id.map(|id| DeviceManagerPublishServiceResponse { id }))
                 }
                 R::RequestResource(request, responder) => {
@@ -71,10 +76,12 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
     done.set();
 }
 
-/// Adds the device of `request` as a child of device `caller`, and binds
-/// a driver to it. Fails with `INVALID_ARGS` when a hardware ID does not
-/// have the form of one. Returns its ID and whether a driver is bound.
-fn add_device(
+/// Adds the device of `request` as a child of device `caller`, with the
+/// `cache` property when it is a disk or partition, from the storage
+/// profiles read again for it, and binds a driver to it. Fails with
+/// `INVALID_ARGS` when a hardware ID does not have the form of one.
+/// Returns its ID and whether a driver is bound.
+async fn add_device(
     m: &Manager,
     caller: u64,
     request: DeviceManagerAddDeviceRequest,
@@ -83,12 +90,17 @@ fn add_device(
     if !ids.iter().all(|id| mikros_manifest::is_hardware_id(id)) {
         return Err(Status::InvalidArgs);
     }
-    let properties: Vec<(alloc::string::String, alloc::string::String)> = request
+    let mut properties: Vec<(alloc::string::String, alloc::string::String)> = request
         .properties
         .into_iter()
         .map(|p| (p.key, p.value))
         .collect();
+    let profiles = match cache::applies(ids) {
+        true => m.profiles.load(&m.reactor).await.unwrap_or_default(),
+        false => Vec::new(),
+    };
     let mut devices = m.devices.borrow_mut();
+    cache::set(ids, &mut properties, devices.get(caller), &profiles);
     let id = devices.add(
         request.name,
         request.hardware_ids,
@@ -98,6 +110,29 @@ fn add_device(
     );
     let bound = devices.bind_device(id, &m.drivers);
     Ok((id, bound))
+}
+
+/// When the `filesystem` service with ID `id`, its instance name, that
+/// the driver of device `caller` just published is the root partition's,
+/// connects to it in a task of its own, for the storage profiles, so
+/// that the driver's reply does not wait for it.
+fn root_file_system(m: &Rc<Manager>, caller: u64, id: u64) {
+    let is_root = {
+        let devices = m.devices.borrow();
+        devices
+            .get(caller)
+            .is_some_and(|d| m.profiles.is_new_root(d))
+    };
+    if !is_root {
+        return;
+    }
+    let m2 = m.clone();
+    m.spawner.spawn(async move {
+        let instance = alloc::format!("{id}");
+        m2.profiles
+            .connect(&m2.directory, &m2.reactor, instance)
+            .await;
+    });
 }
 
 /// Removes device `id` for the driver of device `caller`, which must
