@@ -36,14 +36,64 @@ pub struct Buffer {
 
 /// What a queue keeps track of: the free descriptors, the next index of
 /// the available ring and the last seen of the used ring, the requests
-/// in flight by the head of their chain, with the length the device
-/// wrote once it is done, and the tasks waiting for free descriptors.
+/// in flight by the head of their chain, and the tasks waiting for free
+/// descriptors.
 struct State {
     free: Vec<u16>,
     avail_idx: u16,
     used_idx: u16,
-    in_flight: BTreeMap<u16, (Option<u32>, Option<Waker>)>,
+    in_flight: BTreeMap<u16, Flight>,
     waiting: Vec<Waker>,
+}
+
+/// A request in flight. Its descriptors stay taken until its task has
+/// the length the device wrote, so that no other request reuses its head
+/// meanwhile, or until the device returns it if its task went.
+struct Flight {
+    chain: Vec<u16>,
+    /// The length the device wrote, once it returned the request.
+    done: Option<u32>,
+    waker: Option<Waker>,
+    /// Whether its task went before the device returned it.
+    abandoned: bool,
+}
+
+impl State {
+    /// Gives `chain` back to the free descriptors, and wakes the tasks
+    /// that wait for some.
+    fn free_chain(&mut self, chain: &[u16], woken: &mut Vec<Waker>) {
+        self.free.extend_from_slice(chain);
+        woken.append(&mut self.waiting);
+    }
+}
+
+/// Lets go of a request whose task goes, whether or not the device has
+/// returned it.
+struct InFlight<'a> {
+    queue: &'a Queue,
+    head: u16,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        let mut state = self.queue.state.borrow_mut();
+        let Some(flight) = state.in_flight.get_mut(&self.head) else {
+            return;
+        };
+        if flight.done.is_none() {
+            // The device still has it: its descriptors go back when it
+            // returns it.
+            flight.abandoned = true;
+            return;
+        }
+        let flight = state.in_flight.remove(&self.head).expect("in flight");
+        let mut woken = Vec::new();
+        state.free_chain(&flight.chain, &mut woken);
+        drop(state);
+        for waker in woken {
+            waker.wake();
+        }
+    }
 }
 
 /// A split virtqueue of `size` entries.
@@ -190,7 +240,13 @@ impl Queue {
         let head = chain[0];
         {
             let mut state = self.state.borrow_mut();
-            state.in_flight.insert(head, (None, None));
+            let flight = Flight {
+                chain,
+                done: None,
+                waker: None,
+                abandoned: false,
+            };
+            state.in_flight.insert(head, flight);
             let slot = u64::from(state.avail_idx % self.size);
             // SAFETY: the ring entry lies in the mapped available ring.
             unsafe { core::ptr::write_volatile((self.avail + 4 + 2 * slot) as *mut u16, head) };
@@ -207,16 +263,16 @@ impl Queue {
         {
             structures.notify.write16(*offset, self.index);
         }
+        // The guard frees the descriptors once the length is taken, or
+        // when the task goes.
+        let _guard = InFlight { queue: self, head };
         poll_fn(|cx| {
             let mut state = self.state.borrow_mut();
             let entry = state.in_flight.get_mut(&head).expect("in flight");
-            match entry.0 {
-                Some(len) => {
-                    state.in_flight.remove(&head);
-                    Poll::Ready(len)
-                }
+            match entry.done {
+                Some(len) => Poll::Ready(len),
                 None => {
-                    entry.1 = Some(cx.waker().clone());
+                    entry.waker = Some(cx.waker().clone());
                     Poll::Pending
                 }
             }
@@ -224,8 +280,10 @@ impl Queue {
         .await
     }
 
-    /// Takes the requests that the device returned on the used ring,
-    /// frees their descriptors and wakes the tasks waiting for them.
+    /// Takes the requests that the device returned on the used ring and
+    /// wakes the tasks waiting for them, which free their descriptors
+    /// once they have the length; those of a request whose task went are
+    /// freed here.
     pub(crate) fn process_used(&self) {
         let mut state = self.state.borrow_mut();
         let mut woken = Vec::new();
@@ -246,28 +304,17 @@ impl Queue {
                 )
             };
             state.used_idx = state.used_idx.wrapping_add(1);
-            let mut desc = id;
-            loop {
-                state.free.push(desc);
-                let at = self.at + 16 * u64::from(desc);
-                // SAFETY: the descriptor lies in the mapped table.
-                let (flags, next) = unsafe {
-                    (
-                        core::ptr::read_volatile((at + 12) as *const u16),
-                        core::ptr::read_volatile((at + 14) as *const u16),
-                    )
-                };
-                if flags & DESC_NEXT == 0 {
-                    break;
-                }
-                desc = next;
+            let Some(flight) = state.in_flight.get_mut(&id) else {
+                continue;
+            };
+            if flight.abandoned {
+                let flight = state.in_flight.remove(&id).expect("in flight");
+                state.free_chain(&flight.chain, &mut woken);
+                continue;
             }
-            if let Some(waiting) = state.in_flight.get_mut(&id) {
-                waiting.0 = Some(len);
-                woken.extend(waiting.1.take());
-            }
+            flight.done = Some(len);
+            woken.extend(flight.waker.take());
         }
-        woken.append(&mut state.waiting);
         drop(state);
         for waker in woken {
             waker.wake();
