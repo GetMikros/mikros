@@ -37,6 +37,47 @@ fn read(file: &Node<'_>, len: usize) -> Vec<u8> {
     buf
 }
 
+/// Reclaim lets go of the folios of lent pages that the object no longer
+/// has once it evicted its clean pages: those it does not call dirty. A
+/// page let go of is lent anew when asked for again, and an object whose
+/// pages cannot be evicted keeps them all.
+#[test]
+fn lets_go_of_pages_the_object_evicted() {
+    const COOKIE: u64 = 43;
+    start();
+    let image = Image::new("unpins", 256 << 20, &[]);
+    Disk::add(c"unpins", image.open(), false).unwrap();
+    let data = noise(12, 4 * PAGE);
+    let mount = Mount::new(c"/dev/unpins", false, None).unwrap();
+    let root = mount.root().unwrap();
+    let file = root.create(b"f", Kind::File, 0o644).unwrap();
+    assert_eq!(file.write(0, &data), Ok(data.len()));
+    let shared = file.share(COOKIE).unwrap();
+    // SAFETY: the node lives until the end of the test.
+    unsafe {
+        for index in 0..3 {
+            shared.lend_page(index).unwrap();
+            shared.lent();
+        }
+        assert_eq!(shared.unpin(16), 0, "eviction failed");
+        {
+            let mut objects = OBJECTS.lock().unwrap();
+            let object = objects.get_mut(&COOKIE).unwrap();
+            object.evictable = true;
+            object.dirty.insert(1);
+        }
+        assert_eq!(shared.unpin(1), 1);
+        assert_eq!(shared.unpin(16), 1);
+        assert_eq!(shared.unpin(16), 0, "the dirty page stays lent");
+        assert!(ops(COOKIE).contains(&(EVICT, 0, 4)));
+        let page = shared.lend_page(0).unwrap();
+        shared.lent();
+        assert!(std::slice::from_raw_parts(page, PAGE) == &data[..PAGE]);
+        assert_eq!(shared.unpin(16), 1);
+        shared.unshare();
+    }
+}
+
 /// A lent page is the page cache's: it reads as the file, and writes
 /// through the node show in it. A write through it, which the object
 /// calls dirty, reaches the disk, after a writeback that evicts the

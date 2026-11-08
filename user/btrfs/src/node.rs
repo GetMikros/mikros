@@ -11,6 +11,8 @@ unsafe extern "C" {
     fn mikros_btrfs_share(node: *mut c_void, cookie: u64) -> i32;
     fn mikros_btrfs_lend_page(node: *mut c_void, index: u64, page: *mut *mut u8) -> i32;
     fn mikros_btrfs_lent(node: *mut c_void);
+    #[cfg(test)]
+    fn mikros_btrfs_unpin(node: *mut c_void, max: usize) -> usize;
     fn mikros_btrfs_harvest(node: *mut c_void);
     fn mikros_btrfs_unchangeable(node: *mut c_void) -> bool;
     fn mikros_btrfs_unshare(node: *mut c_void);
@@ -497,6 +499,19 @@ impl Shared {
     pub unsafe fn lent(&self) {
         // SAFETY: the caller vouches for the node.
         unsafe { mikros_btrfs_lent(self.0) }
+    }
+
+    /// Lets go of the folios of at most `max` lent pages that the object
+    /// no longer has after its clean pages are evicted, as reclaim does:
+    /// how many.
+    ///
+    /// # Safety
+    ///
+    /// As for `lend_page()`.
+    #[cfg(test)]
+    pub unsafe fn unpin(&self, max: usize) -> usize {
+        // SAFETY: the caller vouches for the node.
+        unsafe { mikros_btrfs_unpin(self.0, max) }
     }
 
     /// Stops sharing the file, once no page is lent any more nor a lend

@@ -258,18 +258,23 @@ extern "C" fn mikros_host_abort(line: *const u8, len: usize) -> ! {
 /// What the tests' stand-in for the paged memory object of a shared file
 /// was asked to do, as pager ops with their first page and page count,
 /// and the pages that a test calls dirty, as written through a mapping.
+/// Eviction fails unless the test lets it succeed: the tests' pointers to
+/// lent pages stand for mappings, which eviction would take away.
 #[derive(Default)]
 pub struct Object {
     pub ops: std::vec::Vec<(u32, u64, u64)>,
     pub dirty: std::collections::BTreeSet<u64>,
+    pub evictable: bool,
 }
 
 /// The stand-ins, by cookie.
 pub static OBJECTS: std::sync::Mutex<std::collections::BTreeMap<u64, Object>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
+const OP_EVICT: u32 = 2;
 const OP_WRITEBACK_END: u32 = 4;
 const OP_DISCARD: u32 = 6;
+const EIO: c_int = -5;
 
 #[unsafe(no_mangle)]
 extern "C" fn mikros_host_share_op(cookie: u64, op: u32, first: u64, count: u64) -> c_int {
@@ -282,6 +287,9 @@ extern "C" fn mikros_host_share_op(cookie: u64, op: u32, first: u64, count: u64)
         object
             .dirty
             .retain(|page| !(first..first + count).contains(page));
+    }
+    if op == OP_EVICT && !object.evictable {
+        return EIO;
     }
     0
 }

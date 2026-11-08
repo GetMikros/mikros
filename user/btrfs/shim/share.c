@@ -18,6 +18,11 @@
  *   their folios are marked dirty, btrfs writes every dirty folio and the
  *   shim waits for it, and the writeback ends.
  *
+ * Reclaim lets go of the folios of pages that the objects no longer have:
+ * a shrinker evicts the clean pages of each object it can lock without
+ * waiting, and drops the references of the lent pages that are not dirty,
+ * as the object then has only those.
+ *
  * Each call runs as a task of the shim while it lasts, unless its thread
  * runs as one already.
  */
@@ -29,6 +34,7 @@
 #include <linux/slab.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
+#include <linux/shrinker.h>
 #include <linux/err.h>
 #include "mm/internal.h"
 #include "file.h"
@@ -69,7 +75,10 @@ static DEFINE_XARRAY(shares);
 static DEFINE_XARRAY(lent_folios);
 static const struct address_space_operations *btrfs_ops;
 static struct address_space_operations shared_ops;
+/* Held while shares are added or removed, and while reclaim walks them. */
 static DEFINE_MUTEX(ops_lock);
+/* The lent pages whose folios the shares hold, for reclaim. */
+static atomic_long_t lent_pages = ATOMIC_LONG_INIT(0);
 
 void mikros_btrfs_lent(struct mikros_node *node);
 
@@ -144,7 +153,10 @@ static void shared_free_folio(struct folio *folio)
 		if (xa_load(&share->lent, index) != folio)
 			continue;
 		share_op(share, SHARE_DISCARD, index, 1);
-		xa_erase(&share->lent, index);
+		/* Reclaim may have let go of the page meanwhile. */
+		if (xa_cmpxchg(&share->lent, index, folio, NULL, 0) != folio)
+			continue;
+		atomic_long_dec(&lent_pages);
 		folio_put(folio);
 	}
 }
@@ -279,6 +291,7 @@ int mikros_btrfs_lend_page(struct mikros_node *node, u64 index, void **page)
 			folio_put(folio);
 			goto done;
 		}
+		atomic_long_inc(&lent_pages);
 		/* A folio that left the page cache since it was lent took its
 		 * reference with it in shared_free_folio(). */
 		WARN_ON_ONCE(old);
@@ -346,21 +359,156 @@ void mikros_btrfs_unshare(struct mikros_node *node)
 {
 	bool adopted = mikros_task_adopt("unshare");
 	struct address_space *mapping = d_inode(node->path.dentry)->i_mapping;
-	struct mikros_share *share = xa_erase(&shares, mapping_key(mapping));
+	struct mikros_share *share;
 	struct folio *folio;
 	unsigned long index;
 
+	mutex_lock(&ops_lock);
+	share = xa_erase(&shares, mapping_key(mapping));
 	if (!share)
-		goto out;
+		goto unlock;
 	WRITE_ONCE(mapping->a_ops, btrfs_ops);
 	xa_for_each(&share->lent, index, folio) {
 		xa_cmpxchg(&lent_folios, folio_pfn(folio), share, NULL, GFP_KERNEL);
+		atomic_long_dec(&lent_pages);
 		folio_put(folio);
 	}
 	xa_destroy(&share->lent);
 	iput(mapping->host);
 	kfree(share);
-out:
+unlock:
+	mutex_unlock(&ops_lock);
 	if (adopted)
 		mikros_task_exit();
+}
+
+/* The dirty ranges of a share's object from page 0 to `end`, fetched as a
+ * walk over the pages in order needs them. */
+struct dirty_walk {
+	struct mikros_share *share;
+	u64 ranges[2 * DIRTY_RANGES];
+	long n, at;
+	/* Where the next fetch starts. */
+	u64 next, end;
+};
+
+/* Whether page `index` of the object is dirty, for indices that do not
+ * decrease from one call to the next. A failed fetch counts every page
+ * after it as dirty. */
+static bool walk_dirty(struct dirty_walk *w, u64 index)
+{
+	for (;;) {
+		while (w->at < w->n) {
+			u64 start = w->ranges[2 * w->at], len = w->ranges[2 * w->at + 1];
+
+			if (index < start)
+				return false;
+			if (index < start + len)
+				return true;
+			w->at++;
+		}
+		if (w->next >= w->end)
+			return false;
+		w->n = mikros_host_share_dirty(w->share->cookie, w->next, w->end - w->next,
+					       w->ranges, DIRTY_RANGES);
+		w->at = 0;
+		if (w->n < 0) {
+			w->n = 0;
+			return true;
+		}
+		if (w->n < DIRTY_RANGES)
+			w->next = w->end;
+		else
+			w->next = w->ranges[2 * (w->n - 1)] + w->ranges[2 * (w->n - 1) + 1];
+	}
+}
+
+/* Lets go of the folios of at most `max` lent pages of `share` that its
+ * object no longer has, after evicting the object's clean pages: the
+ * pages that are not dirty, as the object keeps only those. It does
+ * nothing rather than wait for the share's lock, and nothing while lends
+ * are under way or a writeback window is open, as a writeback that ends
+ * meanwhile makes pages clean that the object still has. The lock keeps
+ * new lends and windows out while it works. How many it let go of. */
+static unsigned long unpin(struct mikros_share *share, unsigned long max)
+{
+	struct dirty_walk walk = { .share = share };
+	unsigned long index, freed = 0;
+	struct folio *folio;
+
+	if (!mutex_trylock(&share->lock))
+		return 0;
+	walk.end = DIV_ROUND_UP(i_size_read(share->mapping->host), PAGE_SIZE);
+	if (share->window || share->lending || xa_empty(&share->lent) || !walk.end)
+		goto out;
+	if (mikros_host_share_op(share->cookie, SHARE_EVICT, 0, walk.end))
+		goto out;
+	xa_for_each(&share->lent, index, folio) {
+		if (freed >= max)
+			break;
+		if (walk_dirty(&walk, index))
+			continue;
+		if (xa_cmpxchg(&share->lent, index, folio, NULL, 0) != folio)
+			continue;
+		atomic_long_dec(&lent_pages);
+		folio_put(folio);
+		freed++;
+	}
+out:
+	mutex_unlock(&share->lock);
+	return freed;
+}
+
+static unsigned long shares_count(struct shrinker *shrinker, struct shrink_control *sc)
+{
+	long count = atomic_long_read(&lent_pages);
+
+	return count > 0 ? count : SHRINK_EMPTY;
+}
+
+static unsigned long shares_scan(struct shrinker *shrinker, struct shrink_control *sc)
+{
+	struct mikros_share *share;
+	unsigned long key, freed = 0;
+
+	if (!mutex_trylock(&ops_lock))
+		return SHRINK_STOP;
+	xa_for_each(&shares, key, share) {
+		if (freed >= sc->nr_to_scan)
+			break;
+		freed += unpin(share, sc->nr_to_scan - freed);
+	}
+	mutex_unlock(&ops_lock);
+	return freed ? freed : SHRINK_STOP;
+}
+
+static int __init share_init(void)
+{
+	struct shrinker *shrinker = shrinker_alloc(0, "mikros-shares");
+
+	if (!shrinker)
+		return -ENOMEM;
+	shrinker->count_objects = shares_count;
+	shrinker->scan_objects = shares_scan;
+	shrinker_register(shrinker);
+	return 0;
+}
+device_initcall(share_init);
+
+/* Lets go of the folios of at most `max` lent pages of the shared file of
+ * `node` that its object no longer has, as reclaim does: how many. */
+unsigned long mikros_btrfs_unpin(struct mikros_node *node, unsigned long max)
+{
+	bool adopted = mikros_task_adopt("unpin");
+	struct mikros_share *share;
+	unsigned long freed = 0;
+
+	mutex_lock(&ops_lock);
+	share = share_of(d_inode(node->path.dentry)->i_mapping);
+	if (share)
+		freed = unpin(share, max);
+	mutex_unlock(&ops_lock);
+	if (adopted)
+		mikros_task_exit();
+	return freed;
 }
