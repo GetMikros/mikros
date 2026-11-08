@@ -24,6 +24,9 @@ pub const KIND_PINNED: u32 = 4;
 pub const KIND_PAGED: u32 = 5;
 /// The creation option of paged objects that enables dirty tracking.
 pub const TRACK_DIRTY: u32 = 1 << 1;
+/// The creation option of paged objects whose writes to pages being
+/// written back wait until the writeback ends. Needs `TRACK_DIRTY`.
+pub const STABLE: u32 = 1 << 2;
 
 /// The seals of `mem_seal`.
 pub const SEAL_SEAL: u32 = 1 << 0;

@@ -12,7 +12,7 @@ mod midl {
     include!(concat!(env!("OUT_DIR"), "/midl.rs"));
 }
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::{
@@ -2914,7 +2914,7 @@ fn pager_operations(s: &Startup) -> Result {
 
     check("beginning writeback", pager_op(pager, mem, 3, 0, size))?;
     ensure(
-        "allowing one writeback",
+        "refusing an overlapping writeback",
         pager_op(pager, mem, 3, 0, size) == BAD_STATE,
     )?;
     ensure(
@@ -2949,7 +2949,7 @@ fn pager_operations(s: &Startup) -> Result {
     )?;
     ensure(
         "refusing other ops",
-        pager_op(pager, mem, 6, 0, size) == -10,
+        pager_op(pager, mem, 7, 0, size) == -10,
     )?;
 
     // SAFETY: the call takes no pointers.
@@ -2990,6 +2990,151 @@ fn pager_operations(s: &Startup) -> Result {
     ensure(
         "failing without a pager",
         unsafe { sys::mem_read(mem, PAGE_SIZE, byte.as_mut_ptr(), 1) } == IO,
+    )
+}
+
+/// Whether the write of a writer thread of `writebacks_and_discards` is
+/// done, and the status of a system call that wrote.
+static STABLE_WRITTEN: AtomicU64 = AtomicU64::new(0);
+static STABLE_STATUS: AtomicI64 = AtomicI64::new(0);
+
+/// Writes `value` to the byte at `addr`, through a mapping, and records
+/// that it did.
+extern "sysv64" fn stable_writer(addr: u64, value: u64) -> ! {
+    // SAFETY: the address lies in a writable mapping.
+    unsafe { (addr as *mut u8).write_volatile(value as u8) };
+    STABLE_WRITTEN.store(1, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Writes a byte at `offset` of `mem` with `mem_write`, and records the
+/// call's status.
+extern "sysv64" fn stable_mem_writer(mem: u64, offset: u64) -> ! {
+    let byte = b"y";
+    // SAFETY: the pointer describes `byte`.
+    let status = unsafe { sys::mem_write(mem as Handle, offset, byte.as_ptr(), 1) };
+    STABLE_STATUS.store(status, Ordering::Release);
+    STABLE_WRITTEN.store(1, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Waits until the writer thread of `writebacks_and_discards` is done.
+fn stable_write_done() -> Result {
+    let deadline = in_time();
+    while STABLE_WRITTEN.load(Ordering::Acquire) == 0 {
+        ensure("letting the write go on", now() < deadline)?;
+        sleep_ms(1);
+    }
+    Ok(())
+}
+
+/// Several writebacks of one paged object are outstanding at once, but
+/// not over the same pages, and each ends by its own range; `DISCARD`
+/// removes dirty pages too, which are requested again, but not a page
+/// that a writeback records; and with `STABLE`, which needs dirty
+/// tracking, a write to a page being written back waits until the
+/// writeback ends, and fails once the pager goes.
+fn writebacks_and_discards(s: &Startup) -> Result {
+    let size = 4 * PAGE_SIZE;
+    let (mut pager, mut port, mut mem) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 6, size, 4, &mut mem);
+        ensure("needing dirty tracking for STABLE", status == -10)?;
+        sys::handle_close(port);
+        sys::handle_close(pager);
+    }
+    let (pager, mem) = paged_object(s, 4, 2 | 4)?;
+    ensure(
+        "reporting STABLE",
+        u32_at(&info::<0x18>(mem, 4)?, 0x0C) == 6,
+    )?;
+    let at = map(s.process, mem, size)?;
+    for page in 0..4 {
+        // SAFETY: the mapping is writable.
+        unsafe { ((at + page * PAGE_SIZE) as *mut u8).write_volatile(b'a' + page as u8) };
+    }
+
+    check(
+        "beginning a writeback of page 0",
+        pager_op(pager, mem, 3, 0, PAGE_SIZE),
+    )?;
+    check(
+        "beginning a writeback of page 2",
+        pager_op(pager, mem, 3, 2 * PAGE_SIZE, PAGE_SIZE),
+    )?;
+    ensure(
+        "refusing an overlapping writeback",
+        pager_op(pager, mem, 3, 0, 2 * PAGE_SIZE) == BAD_STATE,
+    )?;
+    ensure(
+        "refusing to discard pages being written back",
+        pager_op(pager, mem, 6, 0, size) == BAD_STATE,
+    )?;
+    let (ranges, count) = dirty(pager, mem, size)?;
+    ensure("keeping them", count == 1 && ranges[..2] == [0, size])?;
+
+    STABLE_WRITTEN.store(0, Ordering::Release);
+    spawn2(s, stable_writer, at, u64::from(b'z'))?;
+    sleep_ms(50);
+    ensure(
+        "making the write wait",
+        STABLE_WRITTEN.load(Ordering::Acquire) == 0,
+    )?;
+    check(
+        "ending the writeback of page 0",
+        pager_op(pager, mem, 4, 0, PAGE_SIZE),
+    )?;
+    stable_write_done()?;
+    ensure("writing then", mem_read_at::<1>(mem, 0)? == *b"z")?;
+    check(
+        "ending the writeback of page 2",
+        pager_op(pager, mem, 4, 2 * PAGE_SIZE, PAGE_SIZE),
+    )?;
+    // Page 0 was written again, and pages 1 and 3 were not written back.
+    let (ranges, count) = dirty(pager, mem, size)?;
+    ensure(
+        "cleaning only the pages written back",
+        count == 2 && ranges[..4] == [0, 2 * PAGE_SIZE, 3 * PAGE_SIZE, PAGE_SIZE],
+    )?;
+
+    let before = REQUESTS.load(Ordering::Acquire);
+    check("discarding", pager_op(pager, mem, 6, 0, size))?;
+    ensure(
+        "requesting discarded pages again",
+        mem_read_at::<6>(mem, PAGE_SIZE)? == *b"page 1",
+    )?;
+    ensure(
+        "counting the request",
+        REQUESTS.load(Ordering::Acquire) == before + 1,
+    )?;
+    ensure("forgetting their writes", dirty(pager, mem, size)?.1 == 0)?;
+
+    // A write that waits fails once the pager goes.
+    mem_write_at(mem, PAGE_SIZE, b"x")?;
+    check(
+        "beginning a writeback of page 1",
+        pager_op(pager, mem, 3, PAGE_SIZE, PAGE_SIZE),
+    )?;
+    STABLE_WRITTEN.store(0, Ordering::Release);
+    spawn2(s, stable_mem_writer, u64::from(mem), PAGE_SIZE)?;
+    sleep_ms(50);
+    ensure(
+        "making the system call wait",
+        STABLE_WRITTEN.load(Ordering::Acquire) == 0,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the pager", unsafe { sys::handle_close(pager) })?;
+    stable_write_done()?;
+    ensure(
+        "failing the write",
+        STABLE_STATUS.load(Ordering::Acquire) == IO,
     )
 }
 
@@ -9875,7 +10020,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 139] = [
+const TESTS: [(&str, Test); 140] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -10007,6 +10152,7 @@ const TESTS: [(&str, Test); 139] = [
     ("clones", clones),
     ("pagers", pagers),
     ("pager_operations", pager_operations),
+    ("writebacks_and_discards", writebacks_and_discards),
     ("large_pager_operations", large_pager_operations),
     ("paged_outputs", paged_outputs),
     ("access_flag_cleared_on_entry", access_flag_cleared_on_entry),

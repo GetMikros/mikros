@@ -11,7 +11,7 @@ use crate::object::budget::{Budget, Scratch};
 use crate::object::memory::{
     INFO_MEMORY_SIZE, KIND_ANONYMOUS, KIND_CONTIGUOUS, KIND_PAGED, KIND_PHYSICAL, KIND_PINNED,
     PAGE_ENTRY_COST, PAGE_SIZE, Pages, RESIZABLE, SEAL_GROW, SEAL_SEAL, SEAL_SHRINK, SEAL_WRITE,
-    SEALS, TRACK_DIRTY,
+    SEALS, STABLE, TRACK_DIRTY,
 };
 use crate::object::{Header, Object, ObjectType};
 use crate::paging::{Absent, Paging};
@@ -96,9 +96,9 @@ pub struct Paged {
     /// frame address: `None` for a frame of an object without a budget,
     /// which stays uncharged.
     charges: SpinLock<Map<u64, Option<Arc<Budget>>>>,
-    /// The byte range of the outstanding writeback, which its end must
-    /// name exactly. Locked after the pages.
-    writeback: SpinLock<Option<(u64, u64)>>,
+    /// The byte ranges of the outstanding writebacks, which their ends
+    /// must name exactly. Locked after the pages.
+    writebacks: SpinLock<Vec<(u64, u64)>>,
 }
 
 /// The ops of `pager_op`.
@@ -107,6 +107,7 @@ pub const OP_EVICT: u32 = 2;
 pub const OP_WRITEBACK_BEGIN: u32 = 3;
 pub const OP_WRITEBACK_END: u32 = 4;
 pub const OP_WRITEBACK_ABORT: u32 = 5;
+pub const OP_DISCARD: u32 = 6;
 
 /// The `PAGER` packet type and its `READ` command.
 const PACKET_PAGER: u32 = 3;
@@ -194,10 +195,16 @@ impl MemoryObject {
         size: u64,
         options: u32,
     ) -> Result<Arc<MemoryObject>, Error> {
-        if options & !(RESIZABLE | TRACK_DIRTY) != 0 {
+        if options & !(RESIZABLE | TRACK_DIRTY | STABLE) != 0
+            || (options & STABLE != 0 && options & TRACK_DIRTY == 0)
+        {
             return Err(Error::InvalidArgs);
         }
         let pages = Pages::new(size, options & RESIZABLE, max_size())?;
+        let mut state = Paging::new(options & TRACK_DIRTY != 0);
+        if options & STABLE != 0 {
+            state = state.stable();
+        }
         // With its entry in the pager's list of objects and that entry's
         // share of storage.
         let charged = (size_of::<MemoryObject>() + 2 * size_of::<Weak<MemoryObject>>()) as u64;
@@ -220,11 +227,11 @@ impl MemoryObject {
                 key,
                 state: SpinLock::new(
                     crate::lock_order::MEMORY_PAGING,
-                    Paging::new(options & TRACK_DIRTY != 0).charged_to(budget.clone()),
+                    state.charged_to(budget.clone()),
                 ),
                 revoked: AtomicBool::new(false),
                 charges: SpinLock::new(crate::lock_order::MEMORY_CHARGES, nodes::map()),
-                writeback: SpinLock::new(crate::lock_order::MEMORY_WRITEBACK, None),
+                writebacks: SpinLock::new(crate::lock_order::MEMORY_WRITEBACK, Vec::new()),
             }),
             fixed: None,
         })
@@ -350,6 +357,44 @@ impl MemoryObject {
         }
     }
 
+    /// Waits until page `index` of a paged object may be written, which
+    /// it may not while a writeback of a `STABLE` object records it.
+    /// Fails with `Io` when the pager is gone, as accesses fail after
+    /// `FAIL`, with `AccessDenied` once the object is revoked, with `Io`
+    /// when the thread is killed meanwhile, and with `NoResources` when
+    /// the wait cannot be charged.
+    pub fn wait_stable(&self, index: u64) -> Result<(), Error> {
+        let Some(paged) = &self.paged else {
+            return Ok(());
+        };
+        let koid = self.header.koid();
+        let _charge = crate::pager::charge_wait()?;
+        loop {
+            let pages = self.pages.lock();
+            let state = paged.state.lock();
+            if state.revoked() {
+                return Err(Error::AccessDenied);
+            }
+            if state.is_pager_gone() {
+                return Err(Error::Io);
+            }
+            if !state.write_waits(index) {
+                return Ok(());
+            }
+            // The end of the writeback needs the state, so its wake comes
+            // after the thread waits.
+            let thread = crate::pager::wait_for(koid, index)?;
+            drop(state);
+            drop(pages);
+            let slept = crate::sched::wait_for_signals(&thread, i64::MAX);
+            crate::pager::stop_waiting(koid, &thread);
+            slept?;
+            if thread.state() == crate::sched::DEAD {
+                return Err(Error::Io);
+            }
+        }
+    }
+
     /// Makes every unanswered and later page request fail, as the
     /// object's pager is gone.
     pub fn pager_gone(&self) {
@@ -380,7 +425,7 @@ impl MemoryObject {
     /// `offset` of a paged object.
     pub fn pager_op(&self, op: u32, offset: u64, len: u64) -> Result<(), Error> {
         let paged = self.paged.as_ref().ok_or(Error::NotSupported)?;
-        if !(OP_FAIL..=OP_WRITEBACK_ABORT).contains(&op) {
+        if !(OP_FAIL..=OP_DISCARD).contains(&op) {
             return Err(Error::InvalidArgs);
         }
         self.pages.lock().check_range(offset, len)?;
@@ -398,12 +443,46 @@ impl MemoryObject {
                 self.evict(paged, from, to);
                 Ok(())
             }),
-            OP_WRITEBACK_BEGIN => {
+            OP_DISCARD => {
+                // No page of the range is in a writeback, and none begins
+                // over it until every page of it is gone.
                 {
+                    let _pages = self.pages.lock();
+                    paged.state.lock().discard_begin(first, end)?;
+                }
+                let result = in_pieces(first, end, |from, to| {
+                    self.discard(paged, from, to);
+                    Ok(())
+                });
+                let _pages = self.pages.lock();
+                paged.state.lock().discard_done(first, end);
+                result
+            }
+            OP_WRITEBACK_BEGIN => {
+                // A writeback begins over pages being discarded once they
+                // are gone.
+                loop {
                     let pages = self.pages.lock();
                     pages.check_range(offset, len)?;
-                    paged.state.lock().writeback_open(first, end)?;
-                    *paged.writeback.lock() = Some((offset, len));
+                    let mut state = paged.state.lock();
+                    match state.writeback_open(first, end) {
+                        Ok(()) => {}
+                        Err(Error::ShouldWait) => {
+                            drop(state);
+                            drop(pages);
+                            let _ =
+                                crate::sched::sleep_until(crate::arch::monotonic_now() + 1_000_000);
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                    let mut ranges = paged.writebacks.lock();
+                    if ranges.try_reserve(1).is_err() {
+                        state.writeback_cancel(first, end);
+                        return Err(Error::NoMemory);
+                    }
+                    ranges.push((offset, len));
+                    break;
                 }
                 // The dirty pages are recorded in steps, each once no
                 // kernel copy holds the frames: a page being written must
@@ -416,10 +495,10 @@ impl MemoryObject {
                         continue;
                     }
                     let mut state = paged.state.lock();
-                    let (recorded, done) = match state.writeback_record(ITEM_STEP) {
+                    let (recorded, done) = match state.writeback_record(first, end, ITEM_STEP) {
                         Ok(step) => step,
                         Err(e) => {
-                            *paged.writeback.lock() = None;
+                            paged.writebacks.lock().retain(|&r| r != (offset, len));
                             return Err(e);
                         }
                     };
@@ -441,17 +520,20 @@ impl MemoryObject {
                 {
                     let mut state = paged.state.lock();
                     state.need_dirty_tracking()?;
-                    if *paged.writeback.lock() != Some((offset, len)) {
+                    if !paged.writebacks.lock().contains(&(offset, len)) {
                         return Err(Error::BadState);
                     }
                     state.writeback_close(first, end, op == OP_WRITEBACK_END)?;
                 }
                 // The recorded pages are handled in steps; the writeback
-                // stays outstanding until the last.
+                // stays outstanding until the last. Writes that waited for
+                // its pages go on once it has ended.
                 loop {
                     let mut state = paged.state.lock();
-                    if state.writeback_finish(ITEM_STEP) {
-                        *paged.writeback.lock() = None;
+                    if state.writeback_finish(first, end, ITEM_STEP) {
+                        paged.writebacks.lock().retain(|&r| r != (offset, len));
+                        drop(state);
+                        crate::pager::wake(self.header.koid(), first, end);
                         return Ok(());
                     }
                     drop(state);
@@ -466,6 +548,22 @@ impl MemoryObject {
     /// page being written must not go. Pages without room to record
     /// their frame stay.
     fn evict(&self, paged: &Paged, first: u64, end: u64) {
+        self.remove(paged, first, end, Paging::evictable);
+    }
+
+    /// Removes every present page from `first` to `end`, exclusive, dirty
+    /// or clean, as `pager_op` `DISCARD` does, once no kernel copy holds
+    /// the frames. No writeback involves any of them, which
+    /// `discard_begin` made sure of.
+    fn discard(&self, paged: &Paged, first: u64, end: u64) {
+        self.remove(paged, first, end, Paging::present);
+    }
+
+    /// Removes the pages from `first` to `end`, exclusive, that `which`
+    /// picks, once no kernel copy holds the frames, and frees their
+    /// frames once their translations are gone. Pages without room to
+    /// record their frame stay.
+    fn remove(&self, paged: &Paged, first: u64, end: u64, which: fn(&Paging, u64) -> bool) {
         let mut pages = loop {
             self.wait_unpinned();
             let pages = self.pages.lock();
@@ -479,7 +577,7 @@ impl MemoryObject {
         // the list goes, so those cover it.
         let mut freed = Vec::new();
         for index in first..end {
-            if !state.evictable(index) || freed.try_reserve(1).is_err() {
+            if !which(&state, index) || freed.try_reserve(1).is_err() {
                 continue;
             }
             if let Ok(taken) = pages.decommit(index, index + 1) {
@@ -1068,6 +1166,9 @@ impl MemoryObject {
             let Some(phys) = pages.frame(index) else {
                 return Fault::Absent(index);
             };
+            if write && state.write_waits(index) {
+                return Fault::Stable(index);
+            }
             // With dirty tracking, a page becomes writable through a
             // mapping only on a write, which marks it dirty.
             let writable =
@@ -1217,6 +1318,12 @@ impl MemoryObject {
                 self.obtain(index)?;
                 return Ok(None);
             };
+            if write && state.write_waits(index) {
+                drop(state);
+                drop(pages);
+                self.wait_stable(index)?;
+                return Ok(None);
+            }
             if write {
                 state.written(index)?;
             }
@@ -1519,6 +1626,12 @@ impl MemoryObject {
                         let Some(phys) = frame else {
                             continue;
                         };
+                        if state.write_waits(index) {
+                            drop(state);
+                            drop(pages);
+                            self.wait_stable(index)?;
+                            continue;
+                        }
                         state.written(index)?;
                         phys
                     }
@@ -1693,13 +1806,14 @@ impl MemoryObject {
             _ => KIND_ANONYMOUS,
         };
         // The pages keep only `RESIZABLE`; a paged object's paging state
-        // keeps whether it was created with `TRACK_DIRTY`.
-        let tracked = self
-            .paged
-            .as_ref()
-            .is_some_and(|p| p.state.lock().track_dirty());
+        // keeps whether it was created with `TRACK_DIRTY` and `STABLE`.
+        let paging = self.paged.as_ref().map_or(0, |p| {
+            let state = p.state.lock();
+            (if state.track_dirty() { TRACK_DIRTY } else { 0 })
+                | if state.is_stable() { STABLE } else { 0 }
+        });
         let pages = self.pages.lock();
-        let options = pages.options() | if tracked { TRACK_DIRTY } else { 0 };
+        let options = pages.options() | paging;
         pages.info(kind, options, self.seals())
     }
 }

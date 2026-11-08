@@ -802,7 +802,7 @@ syscalls:
     number: 78
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0006.R29]
+    spec: [MIKSPEC-0006.R46]
     args:
       - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
       - {name: port, type: Handle, dir: in, object: Port, rights: [WRITE]}
@@ -815,7 +815,7 @@ syscalls:
     number: 79
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0006.R36, MIKSPEC-0006.R38]
+    spec: [MIKSPEC-0006.R48, MIKSPEC-0006.R38]
     args:
       - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
       - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: []}
@@ -828,7 +828,7 @@ syscalls:
     number: 80
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0006.R36, MIKSPEC-0006.R37]
+    spec: [MIKSPEC-0006.R48, MIKSPEC-0006.R49]
     args:
       - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
       - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: []}
@@ -840,7 +840,7 @@ syscalls:
     number: 81
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0006.R37]
+    spec: [MIKSPEC-0006.R49]
     args:
       - {name: pager, type: Handle, dir: in, object: Pager, rights: [MANAGE]}
       - {name: mem, type: Handle, dir: in, object: MemoryObject, rights: []}

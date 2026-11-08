@@ -621,6 +621,9 @@ pub enum Fault {
     Changed(u64),
     /// The page is changing; the access waits until it has changed.
     Busy(u64),
+    /// A write to the page of a `STABLE` paged object waits until the
+    /// writeback that records it ends.
+    Stable(u64),
 }
 
 /// Resolves a page fault of the running thread at the user address
@@ -649,6 +652,11 @@ pub fn resolve_fault(addr: u64, write: bool, fetch: bool) -> Fault {
             },
             Fault::Changed(index) => mem.settle_page(index),
             Fault::Busy(index) => match mem.wait_settled(index) {
+                Ok(()) => {}
+                Err(Error::NoResources) => return Fault::OutOfMemory,
+                Err(_) => return Fault::Denied,
+            },
+            Fault::Stable(index) => match mem.wait_stable(index) {
                 Ok(()) => {}
                 Err(Error::NoResources) => return Fault::OutOfMemory,
                 Err(_) => return Fault::Denied,

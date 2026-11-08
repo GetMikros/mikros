@@ -608,11 +608,13 @@ extern "sysv64" fn after_interrupt(frame: &mut Frame) {
                 Fault::Resolved => {}
                 _ if !user && crate::usercopy::recover(frame) => {}
                 _ if !user => crate::panic::exception(frame),
-                // `resolve_fault` waits for absent and changing pages
-                // itself.
-                Fault::Denied | Fault::Absent(_) | Fault::Changed(_) | Fault::Busy(_) => {
-                    crate::exception::raise(frame, kind::PAGE_FAULT, address)
-                }
+                // `resolve_fault` waits for absent, changing and stable
+                // pages itself.
+                Fault::Denied
+                | Fault::Absent(_)
+                | Fault::Changed(_)
+                | Fault::Busy(_)
+                | Fault::Stable(_) => crate::exception::raise(frame, kind::PAGE_FAULT, address),
                 Fault::OutOfMemory => {
                     crate::exception::raise(frame, kind::OUT_OF_MEMORY, frame.rip)
                 }
