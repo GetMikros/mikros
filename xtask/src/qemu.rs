@@ -26,13 +26,18 @@ pub enum Disk {
     Ahci,
 }
 
+/// The memory of a virtual machine, unless its command or options say
+/// otherwise.
+pub const DEFAULT_MEMORY: &str = "2G";
+
 /// The options for a virtual machine, shared by the commands that start
 /// one.
 #[derive(clap::Args, Clone, Debug)]
 pub struct MachineArgs {
-    /// Memory size, in QEMU's notation such as 2G.
-    #[arg(long, default_value = "2G")]
-    pub memory: String,
+    /// Memory size, in QEMU's notation such as 2G: 2G by default, and 3G
+    /// for `cargo xtask test`.
+    #[arg(long)]
+    pub memory: Option<String>,
     /// Number of processors.
     #[arg(long, default_value_t = 2)]
     pub cpus: u32,
@@ -117,13 +122,11 @@ pub fn args(
             Processor::EmulatedIntel => "max,vendor=GenuineIntel",
         },
     ]);
-    push(&["-smp", &machine.cpus.to_string(), "-m", &machine.memory]);
+    let memory = machine.memory.as_deref().unwrap_or(DEFAULT_MEMORY);
+    push(&["-smp", &machine.cpus.to_string(), "-m", memory]);
     if venus {
         // Blob resources need guest memory that can be shared with the host.
-        let backend = format!(
-            "memory-backend-memfd,id=ram,size={},share=on",
-            machine.memory
-        );
+        let backend = format!("memory-backend-memfd,id=ram,size={},share=on", memory);
         push(&["-object", &backend]);
     }
     if !machine.no_iommu {
@@ -153,10 +156,7 @@ pub fn args(
         Gpu::Basic => push(&["-device", "VGA"]),
         Gpu::Virtio => push(&["-device", "virtio-gpu-pci"]),
         Gpu::Venus => {
-            let hostmem = format!(
-                "virtio-gpu-gl-pci,venus=on,blob=on,hostmem={}",
-                machine.memory
-            );
+            let hostmem = format!("virtio-gpu-gl-pci,venus=on,blob=on,hostmem={}", memory);
             push(&["-device", &hostmem, "-display", "gtk,gl=on"]);
         }
     }
@@ -171,7 +171,7 @@ mod tests {
 
     fn machine() -> MachineArgs {
         MachineArgs {
-            memory: "2G".into(),
+            memory: Some("2G".into()),
             cpus: 4,
             gpu: Gpu::Virtio,
             disk: Disk::Virtio,

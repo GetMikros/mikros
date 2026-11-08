@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 pub struct Args {
     /// The build kind to test.
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
@@ -29,6 +29,10 @@ pub struct Args {
     #[command(flatten)]
     pub machine: MachineArgs,
 }
+
+/// The memory of the test machines unless `--memory` says otherwise:
+/// the test boot image holds the images of all the tests' systems.
+const TEST_MEMORY: &str = "3G";
 
 /// The value the test init writes to `isa-debug-exit` when every test
 /// passed; QEMU exits with twice the value plus one.
@@ -338,6 +342,11 @@ fn integration(
 }
 
 pub fn run(args: &Args) -> Result<()> {
+    let mut args = args.clone();
+    args.machine
+        .memory
+        .get_or_insert_with(|| TEST_MEMORY.to_owned());
+    let args = &args;
     if !args.no_host {
         // The btrfs crate's tests link the host's library of the shim.
         crate::btrfs::build(crate::btrfs::Flavor::Host)?;
