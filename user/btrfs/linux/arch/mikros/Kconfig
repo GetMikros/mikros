@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# The Mikros architecture of the btrfs shim: Linux's btrfs code built
+# for a Mikros user-space program, on a shim that provides the kernel
+# interfaces it uses. There is no MMU to manage, and each thread of the
+# program is a CPU of its own.
+
+config MIKROS
+	def_bool y
+	select GENERIC_HWEIGHT
+	select GENERIC_CSUM
+	select FLATMEM
+	select ARCH_THREAD_STACK_ALLOCATOR
+	select UACCESS_MEMCPY
+	select GENERIC_STRNCPY_FROM_USER
+	select GENERIC_STRNLEN_USER
+	select HAVE_PAGE_SIZE_4KB
+	select THREAD_INFO_IN_TASK
+	select HAVE_GENERIC_TIF_BITS
+
+config 64BIT
+	def_bool y
+
+config MMU
+	def_bool n
+
+config SMP
+	def_bool y
+
+config NR_CPUS
+	int
+	default 64
+
+config CPU_BIG_ENDIAN
+	def_bool n
+
+config GENERIC_CSUM
+	def_bool y
+
+config GENERIC_HWEIGHT
+	def_bool y
+
+config NO_IOPORT_MAP
+	def_bool y
+
+config ARCH_DMA_ADDR_T_64BIT
+	def_bool y
+
+config PHYS_ADDR_T_64BIT
+	def_bool y
+
+config HZ
+	int
+	default 100
+
+config PGTABLE_LEVELS
+	int
+	default 1
+
+config STACKTRACE_SUPPORT
+	def_bool n
+
+config GENERIC_BUG
+	def_bool n
+
+config ARCH_HAS_ILOG2_U32
+	def_bool n
+
+config ARCH_HAS_ILOG2_U64
+	def_bool n
