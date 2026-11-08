@@ -10,6 +10,7 @@
 use crate::change::koids;
 use crate::lock::Lock;
 use crate::node;
+use crate::share::Shares;
 use crate::watch::{Watches, event};
 use alloc::collections::BTreeMap;
 use alloc::rc::{Rc, Weak};
@@ -78,6 +79,8 @@ pub struct Fs {
     /// source's by.
     pub(crate) connections: RefCell<BTreeMap<u64, (Rc<Open>, Rights)>>,
     pub watches: Watches,
+    /// The files that clients have memory objects of.
+    pub shares: Shares,
     next_owner: Cell<u64>,
     pub read_only: bool,
     pub reactor: Reactor,
@@ -171,6 +174,7 @@ impl Fs {
             tokens: RefCell::new(BTreeMap::new()),
             connections: RefCell::new(BTreeMap::new()),
             watches: Watches::default(),
+            shares: Shares::default(),
             next_owner: Cell::new(1),
             read_only,
             reactor,

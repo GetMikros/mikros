@@ -19,8 +19,8 @@ const FILESYSTEM: &str = "device.filesystem";
 /// btrfs server takes seconds for when the processor is emulated.
 const PUBLISH_LIMIT: i64 = 60_000_000_000;
 const POLL: i64 = 20_000_000;
-const PERM_READ: u32 = 1 << 0;
-const PERM_WRITE: u32 = 1 << 1;
+pub const PERM_READ: u32 = 1 << 0;
+pub const PERM_WRITE: u32 = 1 << 1;
 const PAGE: u64 = 4096;
 
 type Reply<T> = Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>;
@@ -192,7 +192,7 @@ async fn memory(file: &NodeAsyncClient, process: sys::Handle) -> Option<()> {
 }
 
 /// Maps a page of the memory object `mem` with `perms`.
-fn map(mem: sys::Handle, process: sys::Handle, perms: u32) -> Option<u64> {
+pub fn map(mem: sys::Handle, process: sys::Handle, perms: u32) -> Option<u64> {
     let mut at = 0;
     // SAFETY: the out pointer is valid; the kernel picks a free range.
     let status = unsafe { sys::vm_map(process, perms, 0, mem, 0, PAGE, &mut at) };
@@ -200,7 +200,7 @@ fn map(mem: sys::Handle, process: sys::Handle, perms: u32) -> Option<u64> {
 }
 
 /// The first `n` bytes mapped at `at`, read anew each time.
-fn bytes(at: u64, n: usize) -> Vec<u8> {
+pub fn bytes(at: u64, n: usize) -> Vec<u8> {
     // SAFETY: a page is mapped at `at`, and `n` is at most a page.
     (0..n)
         .map(|i| unsafe { core::ptr::read_volatile((at as *const u8).add(i)) })

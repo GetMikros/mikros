@@ -218,7 +218,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             true => Ok(DriverStartResponse {}),
                             false => Err(Status::InvalidArgs),
                         },
-                        BTRFS => match btrfs::works(&directory, &reactor).await {
+                        BTRFS => match btrfs::works(&directory, &reactor, process).await {
                             true => Ok(DriverStartResponse {}),
                             false => Err(Status::InvalidArgs),
                         },

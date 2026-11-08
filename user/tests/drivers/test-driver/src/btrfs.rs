@@ -2,17 +2,18 @@
 //! whether the btrfs server serves the root partition of the same disk
 //! through its `filesystem` service as it should.
 
-use crate::fat::{expect, failed, locks, ok, open, root};
+use crate::fat::{PERM_READ, PERM_WRITE, bytes, expect, failed, locks, map, ok, open, root};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Node, NodeAsyncClient, NodeType, OpenFlags, Rights, WatchKind, WatchMask, Watcher,
-    WatcherRequest, WatcherServer,
+    Error, MemoryFlags, Node, NodeAsyncClient, NodeType, OpenFlags, Rights, WatchKind, WatchMask,
+    Watcher, WatcherRequest, WatcherServer,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
+use mikros_rt::sys;
 
 const FOREVER: i64 = i64::MAX;
 /// More entries than one `ReadDirectory` returns.
@@ -25,20 +26,29 @@ const MANY: usize = 70;
 /// asked; `@system/current` is a link to a system version, which is
 /// followed to a directory of a system image; `..` and missing names are
 /// refused; a file made in a new directory is written, appended to and
-/// read back, with its attributes; a watch of the directory hears of a
-/// file made, written, renamed and removed; a link within the directory
-/// is followed, one that leads out of it comes back as a redirect, and
-/// both read as their targets; a hard link names the same node and can be
-/// renamed; a new file shares the data of a range of another; names that
-/// differ in case are found case-insensitively, and taken for CREATE;
-/// byte-range locks of two connections behave; a directory of more
-/// entries than one reply holds lists each once; names taken and paths
-/// through files are refused; and what was made is removed again.
-pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
-    check(directory, reactor).await.is_some()
+/// read back, with its attributes; memory objects of the file share its
+/// pages, or copy them; a watch of the directory hears of a file made,
+/// written, renamed and removed; a link within the directory is followed,
+/// one that leads out of it comes back as a redirect, and both read as
+/// their targets; a hard link names the same node and can be renamed; a
+/// new file shares the data of a range of another; names that differ in
+/// case are found case-insensitively, and taken for CREATE; byte-range
+/// locks of two connections behave; a directory of more entries than one
+/// reply holds lists each once; names taken and paths through files are
+/// refused; and what was made is removed again.
+pub async fn works(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    process: sys::Handle,
+) -> bool {
+    check(directory, reactor, process).await.is_some()
 }
 
-async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()> {
+async fn check(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    process: sys::Handle,
+) -> Option<()> {
     let root = root(directory, reactor, "btrfs").await?;
     let info = ok(root.query_filesystem().await)?.info;
     expect(!info.read_only && info.free_bytes > 0 && info.block_size == 4096)?;
@@ -94,6 +104,7 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     expect(ok(file.read(0, 100).await)?.data == b"hello btrfs!")?;
     expect(ok(file.read(6, 5).await)?.data == b"btrfs")?;
     ok(file.sync().await)?;
+    memory(&file, process).await?;
 
     watches(&dir, reactor).await?;
     links(&dir, reactor).await?;
@@ -309,6 +320,37 @@ async fn clones(dir: &NodeAsyncClient, file: &NodeAsyncClient, reactor: &Reactor
     let refused = copy.clone_range(stranger, 0, 0, 12).await;
     expect(failed(refused) == Some(Error::CrossDevice))?;
     ok(dir.unlink("copy".into(), false).await)?;
+    Some(())
+}
+
+/// Whether memory objects of `file`, which holds "hello btrfs!", behave:
+/// a shared one shows what is written through the connection, and a
+/// writable one writes to the file what is written through a mapping,
+/// which a private one does not see; a sync writes it back; and
+/// `EXECUTE` needs the connection's right `EXECUTE`. `file` holds
+/// "hello btrfs!" again after.
+async fn memory(file: &NodeAsyncClient, process: sys::Handle) -> Option<()> {
+    let shared = ok(file.get_memory_object(MemoryFlags(0)).await)?.memory;
+    let view = map(shared.raw(), process, PERM_READ)?;
+    expect(bytes(view, 12) == b"hello btrfs!")?;
+    ok(file.write(0, b"HELLO".to_vec()).await)?;
+    expect(bytes(view, 12) == b"HELLO btrfs!")?;
+    let private = ok(file.get_memory_object(MemoryFlags::PRIVATE).await)?.memory;
+    let copy = map(private.raw(), process, PERM_READ)?;
+    let writable = ok(file.get_memory_object(MemoryFlags::WRITE).await)?.memory;
+    let window = map(writable.raw(), process, PERM_READ | PERM_WRITE)?;
+    // SAFETY: the object is mapped writable at `window` for a page.
+    unsafe { core::ptr::write_volatile(window as *mut u8, b'J') };
+    expect(ok(file.read(0, 12).await)?.data == b"JELLO btrfs!")?;
+    expect(bytes(view, 12) == b"JELLO btrfs!" && bytes(copy, 12) == b"HELLO btrfs!")?;
+    ok(file.sync().await)?;
+    let execute = file.get_memory_object(MemoryFlags::EXECUTE).await;
+    expect(failed(execute) == Some(Error::AccessDenied))?;
+    for at in [view, copy, window] {
+        // SAFETY: the call takes no pointers; a page is mapped at `at`.
+        unsafe { sys::vm_unmap(process, at, 4096) };
+    }
+    ok(file.write(0, b"hello".to_vec()).await)?;
     Some(())
 }
 

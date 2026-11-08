@@ -221,6 +221,7 @@ impl Connection {
         }
         if q.flags.contains(OpenFlags::TRUNCATE) && r#type == NodeType::File {
             self.require_write()?;
+            self.fs.resized(&open, Some(0));
             open.node.truncate(0).map_err(error)?;
             self.fs.changed(&open, WatchKind::Modified);
         }

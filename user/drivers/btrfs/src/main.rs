@@ -26,6 +26,7 @@ mod fs;
 mod host;
 mod lock;
 mod node;
+mod share;
 mod time;
 mod watch;
 
@@ -92,6 +93,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         Ok((fs, manager)) => {
                             served = Some(fs.clone());
                             let replied = responder.reply(s, Ok(DriverStartResponse {}));
+                            spawner.spawn(harvest(fs.clone()));
                             spawner.spawn(publish(fs, manager));
                             replied
                         }
@@ -102,6 +104,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     // The connections still hold the mount, so what has
                     // changed is written out rather than unmounted.
                     if let Some(fs) = &served {
+                        fs.shares.harvest();
                         let _ = fs.mount.sync();
                     }
                     let _ = responder.reply(s, DriverStopResponse {});
@@ -195,4 +198,22 @@ async fn publish(fs: Rc<Fs>, manager: DeviceManagerAsyncClient) {
     }
     core::future::pending::<()>().await;
     drop(manager);
+}
+
+/// How often what clients wrote through mappings of memory objects of
+/// files is marked dirty in the page cache, so that it is written back.
+const HARVEST_PERIOD: i64 = 5_000_000_000;
+
+/// Marks what clients wrote through mappings dirty every
+/// `HARVEST_PERIOD`, for as long as the server runs.
+async fn harvest(fs: Rc<Fs>) {
+    loop {
+        let mut now = 0;
+        // SAFETY: the out pointer is valid for the call.
+        unsafe { sys::clock_get_monotonic(&mut now) };
+        if fs.reactor.sleep_until(now + HARVEST_PERIOD).await.is_err() {
+            return;
+        }
+        fs.shares.harvest();
+    }
 }

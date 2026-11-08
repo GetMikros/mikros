@@ -88,6 +88,7 @@ impl Connection {
                 break;
             }
         }
+        self.fs.resized(&self.open, None);
         self.fs.changed(&self.open, WatchKind::Modified);
         Ok((done as u32, start.unwrap_or(offset.unwrap_or(0))))
     }
@@ -102,7 +103,10 @@ impl Connection {
     pub(crate) fn truncate(&self, size: u64) -> Result<(), Error> {
         self.require_write()?;
         self.file()?;
+        // A memory object of the file loses the pages cut off first.
+        self.fs.resized(&self.open, Some(size));
         self.open.node.truncate(size).map_err(error)?;
+        self.fs.resized(&self.open, None);
         self.fs.changed(&self.open, WatchKind::Modified);
         Ok(())
     }
@@ -124,8 +128,47 @@ impl Connection {
             .node
             .clone_range(q.offset, &source.node, q.source_offset, q.length)
             .map_err(error)?;
+        self.fs.resized(&self.open, None);
         self.fs.changed(&self.open, WatchKind::Modified);
         Ok(())
+    }
+
+    /// A memory object with the file's contents (MIKSPEC-0049.R7,
+    /// MIKSPEC-0049.R19, MIKSPEC-0053.R6): without `PRIVATE`, the file's
+    /// paged object, whose pages are those of the page cache, writable
+    /// with `WRITE`; with `PRIVATE`, a copy-on-write clone of it, or,
+    /// without `WRITE`, the paged object itself, read-only, for a file
+    /// that can never change. It needs `READ`, `EXECUTE` the right
+    /// `EXECUTE`, and `WRITE` without `PRIVATE` a connection that may
+    /// change the file system.
+    pub(crate) fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
+        self.require(Rights::READ)?;
+        self.file()?;
+        let private = flags.contains(MemoryFlags::PRIVATE);
+        let write = flags.contains(MemoryFlags::WRITE);
+        let execute = flags.contains(MemoryFlags::EXECUTE);
+        if execute {
+            self.require(Rights::EXECUTE)?;
+        }
+        if write && !private {
+            self.require_write()?;
+        }
+        let file = self.fs.shared(&self.open)?;
+        let rights = crate::share::rights(write, execute);
+        let memory = match private {
+            true if write || !self.open.node.unchangeable() => file.clone_private(rights)?,
+            _ => file.handle(rights)?,
+        };
+        Ok(NodeGetMemoryObjectResponse { memory })
+    }
+
+    /// Syncs the node, after marking the pages that clients wrote through
+    /// mappings of a memory object of it dirty.
+    pub(crate) fn sync(&self) -> Result<(), Error> {
+        if let Some(file) = self.fs.shares.get(self.open.key) {
+            file.harvest();
+        }
+        self.open.node.sync().map_err(error)
     }
 
     pub(crate) fn seek(

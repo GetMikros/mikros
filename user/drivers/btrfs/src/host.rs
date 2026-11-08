@@ -48,6 +48,10 @@ pub fn init(process: sys::Handle, memory: u64, time_page: u64) {
     unsafe { sys::thread_set_user_base(FS_BASE, tp) };
 }
 
+/// The memory objects mapped for the shim, with where they start and how
+/// long they are, which lending the pages of its page cache names.
+static MAPPED: Spin<Vec<(u64, u64, sys::Handle)>> = Spin::new(Vec::new());
+
 /// Maps `len` bytes, a whole number of pages, of a new memory object,
 /// which reads as zero and takes memory only once touched.
 fn map(len: u64) -> Option<u64> {
@@ -60,10 +64,30 @@ fn map(len: u64) -> Option<u64> {
     let process = PROCESS.load(Ordering::Relaxed);
     // SAFETY: the out pointer is valid; the kernel picks a free range.
     let status = unsafe { sys::vm_map(process, PERM_READ | PERM_WRITE, 0, mem, 0, len, &mut addr) };
-    // The mapping keeps the object alive.
-    // SAFETY: closing takes no pointers.
-    unsafe { sys::handle_close(mem) };
-    (status == mikros_rt::OK).then_some(addr)
+    if status != mikros_rt::OK {
+        // SAFETY: closing takes no pointers.
+        unsafe { sys::handle_close(mem) };
+        return None;
+    }
+    // The handle stays, for the lends of `backing`.
+    MAPPED.lock().push((addr, len, mem));
+    Some(addr)
+}
+
+/// The memory object that backs the address `addr` of the shim's memory,
+/// and the offset of `addr` in it.
+pub fn backing(addr: u64) -> Option<(sys::Handle, u64)> {
+    MAPPED
+        .lock()
+        .iter()
+        .find(|&&(start, len, _)| (start..start + len).contains(&addr))
+        .map(|&(start, _, mem)| (mem, addr - start))
+}
+
+/// Runs `entry` with `arg` on a thread of the shim's pool, which the
+/// shim's calls may be made from: false when no thread could be had.
+pub fn start_thread(entry: extern "C" fn(*mut c_void), arg: *mut c_void) -> bool {
+    mikros_host_thread(entry, arg) == 0
 }
 
 #[unsafe(no_mangle)]

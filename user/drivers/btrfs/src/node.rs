@@ -4,7 +4,7 @@
 //! one at a time, so that the server resolves paths as MIKSPEC-0049.R4
 //! and R5 have them.
 
-use crate::fs::{self, Fs, Open, error};
+use crate::fs::{self, Fs, Open};
 use alloc::rc::Rc;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;
@@ -79,14 +79,7 @@ impl Connection {
             ),
             R::SetAttributes(q, r) => r.reply(s, self.set_attributes(q)),
             R::Clone(q, r) => r.reply(s, self.clone(q)),
-            R::Sync(_, r) => r.reply(
-                s,
-                self.open
-                    .node
-                    .sync()
-                    .map(|()| NodeSyncResponse {})
-                    .map_err(error),
-            ),
+            R::Sync(_, r) => r.reply(s, self.sync().map(|()| NodeSyncResponse {})),
             R::QueryFilesystem(_, r) => r.reply(
                 s,
                 self.fs
@@ -142,7 +135,7 @@ impl Connection {
             R::Watch(q, r) => r.reply(s, self.watch(q).map(|()| NodeWatchResponse {})),
             R::Unwatch(q, r) => r.reply(s, self.unwatch(q.cookie).map(|()| NodeUnwatchResponse {})),
             // What this server does not provide yet.
-            R::GetMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::ConnectSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
