@@ -62,7 +62,7 @@ pub async fn serve(
                 let locked = connection.lock(q).await;
                 let _ = r.reply(server.server(), locked.map(|()| NodeLockResponse {}));
             }
-            request => connection.handle(request, server.server()),
+            request => connection.handle(request, server.server()).await,
         }
     }
     let Connection { fs, open, .. } = connection;
@@ -71,7 +71,7 @@ pub async fn serve(
 }
 
 impl Connection {
-    pub(crate) fn handle(&mut self, request: NodeRequest, s: &NodeServer) {
+    pub(crate) async fn handle(&mut self, request: NodeRequest, s: &NodeServer) {
         use NodeRequest as R;
         // A reply that cannot be sent means that the client went away,
         // which the next read finds.
@@ -84,7 +84,7 @@ impl Connection {
             ),
             R::SetAttributes(q, r) => r.reply(s, self.set_attributes(q)),
             R::Clone(q, r) => r.reply(s, self.clone(q)),
-            R::Sync(_, r) => r.reply(s, self.sync().map(|()| NodeSyncResponse {})),
+            R::Sync(_, r) => r.reply(s, self.sync().await.map(|()| NodeSyncResponse {})),
             R::QueryFilesystem(_, r) => r.reply(
                 s,
                 self.fs
@@ -94,20 +94,23 @@ impl Connection {
             R::Read(q, r) => r.reply(
                 s,
                 self.read(q.offset, q.count)
+                    .await
                     .map(|data| NodeReadResponse { data }),
             ),
-            R::ReadNext(q, r) => r.reply(s, self.read_next(q.count)),
+            R::ReadNext(q, r) => r.reply(s, self.read_next(q.count).await),
             R::Write(q, r) => r.reply(
                 s,
-                self.write(Some(q.offset), &q.data)
+                self.write(Some(q.offset), q.data)
+                    .await
                     .map(|(written, _)| NodeWriteResponse { written }),
             ),
             R::Append(q, r) => r.reply(
                 s,
-                self.write(None, &q.data)
+                self.write(None, q.data)
+                    .await
                     .map(|(_, offset)| NodeAppendResponse { offset }),
             ),
-            R::WriteNext(q, r) => r.reply(s, self.write_next(&q.data)),
+            R::WriteNext(q, r) => r.reply(s, self.write_next(q.data).await),
             R::Truncate(q, r) => {
                 r.reply(s, self.truncate(q.size).map(|()| NodeTruncateResponse {}))
             }

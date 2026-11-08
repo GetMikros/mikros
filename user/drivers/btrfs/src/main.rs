@@ -30,6 +30,7 @@ mod share;
 mod subvolumes;
 mod time;
 mod watch;
+mod work;
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;

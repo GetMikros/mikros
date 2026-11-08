@@ -9,6 +9,7 @@ use crate::change::koids;
 use crate::dir::link_target;
 use crate::fs::{self, error};
 use crate::node::{Connection, MODE_BITS};
+use crate::work::blocking;
 use alloc::vec;
 use alloc::vec::Vec;
 use mikros_btrfs::node::Changes;
@@ -16,6 +17,8 @@ use mikros_rt::interfaces::mikros::fs::*;
 
 /// The most bytes one read returns, the limit of its reply.
 const READ_MAX: u32 = 32768;
+/// What a read that must not wait fails with when it would.
+const EAGAIN: i32 = -11;
 
 impl Connection {
     pub(crate) fn set_attributes(
@@ -57,51 +60,81 @@ impl Connection {
         Ok(NodeCloneResponse {})
     }
 
-    /// The bytes of the file from `offset`, at most `count` of them.
-    pub(crate) fn read(&self, offset: u64, count: u32) -> Result<Vec<u8>, Error> {
+    /// The bytes of the file from `offset`, at most `count` of them: what
+    /// the page cache holds at once, and the rest on a thread of its own,
+    /// as reading it waits for the disk.
+    pub(crate) async fn read(&self, offset: u64, count: u32) -> Result<Vec<u8>, Error> {
         self.require(Rights::READ)?;
         self.file()?;
         let mut data = vec![0u8; count.min(READ_MAX) as usize];
-        let n = self.open.node.read(offset, &mut data).map_err(error)?;
-        data.truncate(n);
-        Ok(data)
+        let done = match self.open.node.read_nowait(offset, &mut data) {
+            Ok(n) if n == 0 || n == data.len() => {
+                data.truncate(n);
+                return Ok(data);
+            }
+            Ok(n) => n,
+            Err(EAGAIN) => 0,
+            Err(e) => return Err(error(e)),
+        };
+        let node = self.open.node.clone();
+        blocking(&self.fs.reactor, move || {
+            let n = node
+                .read(offset + done as u64, &mut data[done..])
+                .map_err(error)?;
+            data.truncate(done + n);
+            Ok(data)
+        })
+        .await
     }
 
-    pub(crate) fn read_next(&mut self, count: u32) -> Result<NodeReadNextResponse, Error> {
-        let data = self.read(self.cursor, count)?;
+    pub(crate) async fn read_next(&mut self, count: u32) -> Result<NodeReadNextResponse, Error> {
+        let data = self.read(self.cursor, count).await?;
         self.cursor += data.len() as u64;
         Ok(NodeReadNextResponse { data })
     }
 
-    /// Writes `data` at `offset`, or at the end without one: how many
-    /// bytes it wrote, and where.
-    pub(crate) fn write(&self, offset: Option<u64>, data: &[u8]) -> Result<(u32, u64), Error> {
+    /// Writes `data` at `offset`, or at the end without one, on a thread
+    /// of its own, as the writer may wait for writeback: how many bytes
+    /// it wrote, and where.
+    pub(crate) async fn write(
+        &self,
+        offset: Option<u64>,
+        data: Vec<u8>,
+    ) -> Result<(u32, u64), Error> {
         self.require_write()?;
         self.file()?;
-        let mut done = 0;
-        let mut at = offset;
-        let mut start = None;
-        // The shim writes a piece at a time; one request writes all.
-        while done < data.len() {
-            let (n, wrote_at) = match at {
-                Some(at) => (self.open.node.write(at, &data[done..]).map_err(error)?, at),
-                None => self.open.node.append(&data[done..]).map_err(error)?,
-            };
-            start.get_or_insert(wrote_at);
-            done += n;
-            at = Some(wrote_at + n as u64);
-            if n == 0 {
-                break;
+        let node = self.open.node.clone();
+        let written = blocking(&self.fs.reactor, move || {
+            let mut done = 0;
+            let mut at = offset;
+            let mut start = None;
+            // The shim writes a piece at a time; one request writes all.
+            while done < data.len() {
+                let (n, wrote_at) = match at {
+                    Some(at) => (node.write(at, &data[done..]).map_err(error)?, at),
+                    None => node.append(&data[done..]).map_err(error)?,
+                };
+                start.get_or_insert(wrote_at);
+                done += n;
+                at = Some(wrote_at + n as u64);
+                if n == 0 {
+                    break;
+                }
             }
-        }
+            Ok((done as u32, start.unwrap_or(offset.unwrap_or(0))))
+        })
+        .await?;
         self.fs.resized(&self.open, None);
         self.fs.changed(&self.open, WatchKind::Modified);
-        Ok((done as u32, start.unwrap_or(offset.unwrap_or(0))))
+        Ok(written)
     }
 
-    pub(crate) fn write_next(&mut self, data: &[u8]) -> Result<NodeWriteNextResponse, Error> {
+    pub(crate) async fn write_next(
+        &mut self,
+        data: Vec<u8>,
+    ) -> Result<NodeWriteNextResponse, Error> {
         let offset = if self.append { None } else { Some(self.cursor) };
-        let (written, at) = self.write(offset, data)?;
+        let (written, at) = self.write(offset, data).await?;
         self.cursor = at + u64::from(written);
         Ok(NodeWriteNextResponse { written })
     }
@@ -170,12 +203,14 @@ impl Connection {
     }
 
     /// Syncs the node, after marking the pages that clients wrote through
-    /// mappings of a memory object of it dirty.
-    pub(crate) fn sync(&self) -> Result<(), Error> {
+    /// mappings of a memory object of it dirty, on a thread of its own,
+    /// as syncing waits for the disk.
+    pub(crate) async fn sync(&self) -> Result<(), Error> {
         if let Some(file) = self.fs.shares.get(self.open.key) {
             file.harvest();
         }
-        self.open.node.sync().map_err(error)
+        let node = self.open.node.clone();
+        blocking(&self.fs.reactor, move || node.sync().map_err(error)).await
     }
 
     pub(crate) fn seek(

@@ -15,6 +15,7 @@ use crate::watch::{Watches, event};
 use alloc::collections::BTreeMap;
 use alloc::rc::{Rc, Weak};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
@@ -44,9 +45,10 @@ const CURRENT: &[u8] = b"current";
 /// number.
 pub type Key = (u32, u64);
 
-/// A node that connections are open to.
+/// A node that connections are open to. Calls that may wait long take
+/// the shim's node to a thread of their own, which the `Arc` lets them.
 pub struct Open {
-    pub node: BtrfsNode<'static>,
+    pub node: Arc<BtrfsNode<'static>>,
     pub key: Key,
     /// The directories and names that the node was found under, which the
     /// watches of those directories hear of its changes by.
@@ -288,7 +290,7 @@ impl Fs {
 impl Open {
     fn new(node: BtrfsNode<'static>, key: Key) -> Open {
         Open {
-            node,
+            node: Arc::new(node),
             key,
             names: RefCell::new(Vec::new()),
             locks: RefCell::new(Vec::new()),
