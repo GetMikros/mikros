@@ -190,8 +190,10 @@ async fn add_disk(
     reactor: Reactor,
     spawner: Spawner,
 ) {
+    let info = mikros_storage::Disk::info(&*disk);
+    let properties = mikros_storage::disk_properties(&info);
     let added = manager
-        .add_device(DISK_NAME.into(), vec![DISK_ID.into()], vec![], vec![])
+        .add_device(DISK_NAME.into(), vec![DISK_ID.into()], properties, vec![])
         .await;
     if let Ok(Ok(added)) = added {
         device.set(added.id);

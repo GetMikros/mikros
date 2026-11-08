@@ -338,8 +338,10 @@ async fn add_disks(
     let mut added = BTreeMap::new();
     for disk in &disks {
         let name = format!("disk-{}", disk.port.number);
+        let info = mikros_storage::Disk::info(&**disk);
+        let properties = mikros_storage::disk_properties(&info);
         let device = manager
-            .add_device(name, vec![DISK_ID.into()], vec![], vec![])
+            .add_device(name, vec![DISK_ID.into()], properties, vec![])
             .await;
         if let Ok(Ok(device)) = device {
             added.insert(device.id, disk.clone());

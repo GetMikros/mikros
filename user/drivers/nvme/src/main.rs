@@ -222,8 +222,10 @@ async fn add_disks(
     let mut added = BTreeMap::new();
     for namespace in &namespaces {
         let name = format!("disk-{}", namespace.nsid);
+        let info = mikros_storage::Disk::info(&**namespace);
+        let properties = mikros_storage::disk_properties(&info);
         let device = manager
-            .add_device(name, vec![DISK_ID.into()], vec![], vec![])
+            .add_device(name, vec![DISK_ID.into()], properties, vec![])
             .await;
         if let Ok(Ok(device)) = device {
             added.insert(device.id, namespace.clone());

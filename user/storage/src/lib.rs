@@ -28,6 +28,23 @@ pub use writer::Writer;
 /// One millisecond, in nanoseconds of the monotonic clock.
 pub const MS: i64 = 1_000_000;
 
+/// The properties a storage controller driver adds a disk device with:
+/// `serial`, the disk's serial number from `info`, and `removable`,
+/// `true` when `info` reports `REMOVABLE` and `false` otherwise.
+pub fn disk_properties(info: &BlockInfo) -> Vec<Property> {
+    let removable = info.flags.0 & BlockFlags::REMOVABLE.0 != 0;
+    vec![
+        Property {
+            key: "serial".into(),
+            value: info.serial.clone(),
+        },
+        Property {
+            key: "removable".into(),
+            value: if removable { "true" } else { "false" }.into(),
+        },
+    ]
+}
+
 /// The monotonic clock, in nanoseconds.
 pub fn now() -> i64 {
     let mut now = 0;
@@ -36,10 +53,13 @@ pub fn now() -> i64 {
     now
 }
 
+use alloc::vec;
+use alloc::vec::Vec;
 use core::future::Future;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::storage::BlockInfo;
+use mikros_rt::interfaces::mikros::driver::Property;
+use mikros_rt::interfaces::mikros::storage::{BlockFlags, BlockInfo};
 
 /// A disk that a storage driver drives.
 pub trait Disk: 'static {
