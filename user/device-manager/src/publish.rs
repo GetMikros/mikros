@@ -2,6 +2,7 @@
 //! of `device.<class>` that the device manager registers with the
 //! service manager's `Registrar`.
 
+use crate::start::duplicate;
 use crate::supervise::Manager;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -28,6 +29,10 @@ const CLASSES: [(&str, &str); 8] = [
 /// system's subvolumes, whose instance is named after the file system's.
 const FILESYSTEM: &str = "filesystem";
 const SUBVOLUMES: &str = "subvolumes";
+/// The property of a partition's GUID, and the instance name of the root
+/// partition's file system.
+const PARTITION_GUID: &str = "partition_guid";
+const ROOT: &str = "root";
 
 /// The service IDs given out during this boot, by device, class, and
 /// how many services of that class the device's driver published before
@@ -72,9 +77,12 @@ pub struct Published {
 /// device `caller`, which `published` keeps, and returns its ID. The
 /// instance is named after the ID, but a `subvolumes` service's after the
 /// ID of the last `filesystem` service of the same start of the driver.
-/// Fails with `INVALID_ARGS` for a class that drivers may not publish,
-/// and with `BAD_STATE` for a `subvolumes` service before any
-/// `filesystem` service.
+/// A `filesystem` service of a partition is also registered, through
+/// duplicates of `provider`, as `partuuid-<guid>`, the GUID in lowercase,
+/// and as `root` when the partition is the root partition. Fails with
+/// `INVALID_ARGS` for a class that drivers may not publish, and with
+/// `BAD_STATE` for a `subvolumes` service before any `filesystem`
+/// service.
 pub async fn publish(
     m: &Manager,
     published: &Published,
@@ -102,14 +110,73 @@ pub async fn publish(
     let instance = format!("{}", named.unwrap_or(id));
     let protocol = format!("device.{class}");
     let permission = Some(String::from(*permission));
+    let aliases = match class.as_str() {
+        FILESYSTEM => aliases(m, caller),
+        _ => Vec::new(),
+    };
+    let provider = provider.into_handle();
+    let mut copies = Vec::new();
+    for _ in &aliases {
+        copies.push(duplicate(&provider).map_err(|_| Status::NoResources)?);
+    }
     let registered = registrar
-        .register(protocol.clone(), instance.clone(), permission, provider)
+        .register(
+            protocol.clone(),
+            instance.clone(),
+            permission.clone(),
+            ClientEnd::new(provider),
+        )
         .await;
     match registered {
         Ok(Ok(_)) => {}
         Ok(Err(status)) => return Err(status),
         Err(_) => return Err(Status::PeerClosed),
     }
+    keep(m, published, caller, protocol.clone(), instance).await;
+    for (alias, copy) in aliases.into_iter().zip(copies) {
+        let registered = registrar
+            .register(
+                protocol.clone(),
+                alias.clone(),
+                permission.clone(),
+                ClientEnd::new(copy),
+            )
+            .await;
+        match registered {
+            Ok(Ok(_)) => keep(m, published, caller, protocol.clone(), alias).await,
+            failed => mikros_rt::log!(
+                Error,
+                "device-manager: publishing {protocol} {alias} for device {caller} failed: {:?}",
+                failed.map(|r| r.err())
+            ),
+        }
+    }
+    Ok(id)
+}
+
+/// The other instance names of a `filesystem` service of the driver of
+/// device `caller`: `partuuid-<guid>` for a partition, and `root` as well
+/// for the root partition.
+fn aliases(m: &Manager, caller: u64) -> Vec<String> {
+    let devices = m.devices.borrow();
+    let Some(device) = devices.get(caller) else {
+        return Vec::new();
+    };
+    let guid = device.properties.iter().find(|(k, _)| k == PARTITION_GUID);
+    let Some((_, guid)) = guid else {
+        return Vec::new();
+    };
+    let mut aliases = alloc::vec![format!("partuuid-{}", guid.to_ascii_lowercase())];
+    if m.profiles.claim_root(device) {
+        aliases.push(String::from(ROOT));
+    }
+    aliases
+}
+
+/// Logs that instance `instance` of `protocol` is published for device
+/// `caller`, and keeps it in `published` to unregister when the driver
+/// ends, or unregisters it at once when it already did.
+async fn keep(m: &Manager, published: &Published, caller: u64, protocol: String, instance: String) {
     mikros_rt::log!(
         Info,
         "device-manager: published {protocol} {instance} for device {caller}"
@@ -119,7 +186,6 @@ pub async fn publish(
     } else {
         published.instances.borrow_mut().push((protocol, instance));
     }
-    Ok(id)
 }
 
 /// Unregisters the services in `published`, once their driver ended,

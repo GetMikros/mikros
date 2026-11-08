@@ -299,7 +299,7 @@ fn kind(resource: &OwnedHandle) -> Result<u32, sys::Status> {
     Ok(u32::from_le_bytes([info[0], info[1], info[2], info[3]]))
 }
 
-fn duplicate(handle: &OwnedHandle) -> Result<OwnedHandle, sys::Status> {
+pub(crate) fn duplicate(handle: &OwnedHandle) -> Result<OwnedHandle, sys::Status> {
     let mut out = 0;
     // SAFETY: the out pointer is valid for the call.
     let status = unsafe { sys::handle_duplicate(handle.raw(), SAME_RIGHTS, &mut out) };

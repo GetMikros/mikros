@@ -40,11 +40,12 @@ enum Root {
     OfRootType,
 }
 
-/// The root file system, once its `filesystem` service is published and
-/// connected, from which the profiles are read.
+/// The root partition's device, once the first one that matches `root`
+/// publishes a file system, and its file system once connected, from
+/// which the profiles are read.
 pub struct Profiles {
     root: Root,
-    connecting: Cell<bool>,
+    root_device: Cell<Option<u64>>,
     fs: RefCell<Option<Rc<NodeAsyncClient>>>,
 }
 
@@ -66,36 +67,45 @@ impl Profiles {
         }
         Profiles {
             root,
-            connecting: Cell::new(false),
+            root_device: Cell::new(None),
             fs: RefCell::new(None),
         }
     }
 
-    /// Whether the `filesystem` service that the driver of `device`
-    /// published is the root file system's, and none was taken before.
-    pub fn is_new_root(&self, device: &Device) -> bool {
-        if self.connecting.get() {
-            return false;
+    /// Whether `device`, whose driver published a `filesystem` service,
+    /// is the root partition: the first device that publishes one and
+    /// matches the command line becomes it, and stays it.
+    pub fn claim_root(&self, device: &Device) -> bool {
+        if let Some(root) = self.root_device.get() {
+            return root == device.id;
         }
-        match &self.root {
+        let matches = match &self.root {
             Root::BootFs => false,
             Root::Guid(guid) => property(&device.properties, PARTITION_GUID)
                 .is_some_and(|ours| ours.eq_ignore_ascii_case(guid)),
             Root::OfRootType => device.hardware_ids.iter().any(|id| id == ROOT_TYPE),
+        };
+        if matches {
+            self.root_device.set(Some(device.id));
         }
+        matches
+    }
+
+    /// Whether device `id` is the root partition that `claim_root` chose.
+    pub fn is_root(&self, id: u64) -> bool {
+        self.root_device.get() == Some(id)
     }
 
     /// Connects to instance `instance` of the published file systems as
     /// the root file system, through `directory`, and keeps its root
-    /// directory to read the profiles from. A failure is logged, and
-    /// leaves the defaults.
+    /// directory to read the profiles from, in place of an earlier one.
+    /// A failure is logged, and leaves what was there.
     pub async fn connect(
         &self,
         directory: &DirectoryAsyncClient,
         reactor: &Reactor,
         instance: String,
     ) {
-        self.connecting.set(true);
         let Ok((client, server)) = endpoints::<mikros_rt::interfaces::mikros::fs::Filesystem>()
         else {
             return;

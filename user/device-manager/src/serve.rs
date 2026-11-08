@@ -115,15 +115,10 @@ async fn add_device(
 /// When the `filesystem` service with ID `id`, its instance name, that
 /// the driver of device `caller` just published is the root partition's,
 /// connects to it in a task of its own, for the storage profiles, so
-/// that the driver's reply does not wait for it.
+/// that the driver's reply does not wait for it. `publish` already chose
+/// the root partition.
 fn root_file_system(m: &Rc<Manager>, caller: u64, id: u64) {
-    let is_root = {
-        let devices = m.devices.borrow();
-        devices
-            .get(caller)
-            .is_some_and(|d| m.profiles.is_new_root(d))
-    };
-    if !is_root {
+    if !m.profiles.is_root(caller) {
         return;
     }
     let m2 = m.clone();
