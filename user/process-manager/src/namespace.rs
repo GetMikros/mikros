@@ -19,11 +19,11 @@
 //! the root file system's root or lies in `@system` fails the start with
 //! `ACCESS_DENIED` (MIKSPEC-0050.R28).
 //!
-//! With `esp=PARTUUID=<guid>` on the command line, the process manager
-//! also connects to the file system of that EFI system partition, the
-//! instance `partuuid-<guid>` of `device.filesystem`, and gives it as
-//! `/boot/efi` to the processes whose manifests list it, once it has
-//! (MIKSPEC-0064.R9).
+//! The process manager also connects to the file system of the EFI
+//! system partition that the system booted from, the instance `esp` of
+//! `device.filesystem`, once it is published, and from then on gives it
+//! as `/boot/efi` to the processes whose manifests list it
+//! (MIKSPEC-0064.R9, MIKSPEC-0064.R15).
 
 use crate::processes::Shared;
 use alloc::format;
@@ -62,11 +62,9 @@ const DEVICE_FILESYSTEM: &str = "device.filesystem";
 const ROOT_INSTANCE: &str = "root";
 /// The subvolume of system versions, which no namespace may reach.
 const SYSTEM: &str = "/@system";
-/// Where the EFI system partition is served, the command line option
-/// that names it, and the prefix of its instance.
+/// Where the EFI system partition is served, and its instance.
 const BOOT_EFI: &str = "/boot/efi";
-const ESP_OPTION: &str = "esp=PARTUUID=";
-const PARTUUID_INSTANCE: &str = "partuuid-";
+const ESP_INSTANCE: &str = "esp";
 /// How long to wait before asking again for tmpfs.
 const RETRY: i64 = 20_000_000;
 /// The most bytes one write moves.
@@ -98,9 +96,8 @@ enum Roots {
 
 pub struct Namespaces {
     bootfs: bool,
-    /// The GUID of the EFI system partition, in lowercase, and the root
-    /// of its file system, once connected.
-    esp_guid: Option<String>,
+    /// The root of the EFI system partition's file system, once
+    /// connected.
     esp: RefCell<Option<Rc<NodeAsyncClient>>>,
     ready: RefCell<Option<Rc<Ready>>>,
     /// Whether tmpfs has started, and the tasks whose namespaces wait for
@@ -193,13 +190,8 @@ impl Namespaces {
         let bootfs = command_line
             .split_whitespace()
             .any(|word| word == "root=bootfs");
-        let esp_guid = command_line
-            .split_whitespace()
-            .find_map(|word| word.strip_prefix(ESP_OPTION))
-            .map(str::to_ascii_lowercase);
         Namespaces {
             bootfs,
-            esp_guid,
             esp: RefCell::new(None),
             ready: RefCell::new(None),
             tmpfs_started: Cell::new(false),
@@ -258,6 +250,8 @@ impl Namespaces {
     pub async fn prepare_root(&self, directory: DirectoryAsyncClient, reactor: Reactor) {
         let root = match root_filesystem(&directory, &reactor).await {
             Ok(root) => root,
+            // The system ends before the root file system came.
+            Err(Status::PeerClosed) => return,
             Err(e) => {
                 mikros_rt::log!(Error, "process-manager: no root file system: {e:?}");
                 return;
@@ -269,27 +263,26 @@ impl Namespaces {
             temporary,
             roots: Roots::Root(Rc::new(root)),
         });
-    }
-
-    /// Whether the command line names an EFI system partition.
-    pub fn names_esp(&self) -> bool {
-        self.esp_guid.is_some()
+        mikros_rt::log!(
+            Info,
+            "process-manager: namespaces come from the root file system"
+        );
     }
 
     /// Connects through `directory`, the process manager's own, to the
-    /// file system of the EFI system partition that the command line
-    /// names, once it is published, to serve it as `/boot/efi`.
+    /// file system of the EFI system partition the system booted from,
+    /// once it is published, to serve it as `/boot/efi`.
     pub async fn prepare_esp(&self, directory: DirectoryAsyncClient, reactor: Reactor) {
-        let Some(guid) = &self.esp_guid else {
-            return;
-        };
-        let instance = format!("{PARTUUID_INSTANCE}{guid}");
-        match filesystem(&directory, &reactor, &instance, RW).await {
-            Ok(root) => *self.esp.borrow_mut() = Some(Rc::new(root)),
-            Err(e) => mikros_rt::log!(
-                Error,
-                "process-manager: no EFI system partition {guid}: {e:?}"
-            ),
+        match filesystem(&directory, &reactor, ESP_INSTANCE, RW).await {
+            Ok(root) => {
+                *self.esp.borrow_mut() = Some(Rc::new(root));
+                mikros_rt::log!(
+                    Info,
+                    "process-manager: serving the EFI system partition as /boot/efi"
+                );
+            }
+            Err(Status::PeerClosed) => {}
+            Err(e) => mikros_rt::log!(Error, "process-manager: no EFI system partition: {e:?}"),
         }
     }
 
