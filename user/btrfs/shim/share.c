@@ -30,6 +30,7 @@
 #include <linux/wait.h>
 #include <linux/sched.h>
 #include <linux/err.h>
+#include "mm/internal.h"
 #include "file.h"
 #include "shim.h"
 
@@ -41,6 +42,9 @@
 #define SHARE_DISCARD		6
 /* The most dirty ranges asked for at once. */
 #define DIRTY_RANGES		32
+/* The pages read together when a page to lend is not cached, from it on,
+ * which the host lends after it, as faults that come in order want. */
+#define LEND_WINDOW		16
 
 /* A shared file. */
 struct mikros_share {
@@ -250,6 +254,15 @@ int mikros_btrfs_lend_page(struct mikros_node *node, u64 index, void **page)
 	ret = -ENXIO;
 	if (index >= DIV_ROUND_UP(i_size_read(mapping->host), PAGE_SIZE))
 		goto done;
+	folio = filemap_get_folio(mapping, index);
+	if (IS_ERR(folio)) {
+		struct file_ra_state ra = { .ra_pages = LEND_WINDOW };
+		DEFINE_READAHEAD(ractl, NULL, &ra, mapping, index);
+
+		force_page_cache_ra(&ractl, LEND_WINDOW);
+	} else {
+		folio_put(folio);
+	}
 	folio = read_mapping_folio(mapping, index, NULL);
 	ret = PTR_ERR_OR_ZERO(folio);
 	if (ret)

@@ -22,6 +22,10 @@ use mikros_rt::interfaces::mikros::fs::Error;
 use mikros_rt::sys;
 
 const PAGE: u64 = 4096;
+/// The pages lent for a request: the one asked for and those after it,
+/// which the shim reads with it when it is not cached, so that a client
+/// that reads a mapping in order faults once for each of them.
+const WINDOW: u64 = 16;
 /// The options of the paged objects: `RESIZABLE`, `TRACK_DIRTY` and
 /// `STABLE`.
 const OPTIONS: u32 = 1 | 2 | 4;
@@ -270,20 +274,32 @@ extern "C" fn answer(_: *mut c_void) {
         let Some((mem, shared)) = OBJECTS.lock().get(&cookie).copied() else {
             continue;
         };
+        // The pages after those asked for, unless they are past the end,
+        // are lent first, so that the client finds them once it goes on,
+        // but never failed; lending skips those present.
+        let end = offset + len;
+        for at in (end..end + (WINDOW - 1) * PAGE).step_by(PAGE as usize) {
+            if !lend(pager, mem, shared, at) {
+                break;
+            }
+        }
         let mut at = offset;
-        while at < offset + len {
-            lend(pager, mem, shared, at);
+        while at < end {
+            if !lend(pager, mem, shared, at) {
+                // SAFETY: the call takes no pointers.
+                unsafe { sys::pager_op(pager, mem, OP_FAIL, at, PAGE) };
+            }
             at += PAGE;
         }
     }
 }
 
 /// Lends the page at `at` of the object `mem` of `shared` from the page
-/// cache, or fails it: past the end of the file, or when it cannot be
-/// read.
-fn lend(pager: sys::Handle, mem: sys::Handle, shared: Shared, at: u64) {
+/// cache: false past the end of the file, or when it cannot be read or
+/// lent.
+fn lend(pager: sys::Handle, mem: sys::Handle, shared: Shared, at: u64) -> bool {
     // SAFETY: the server keeps the nodes of shared files.
-    let lent = match unsafe { shared.lend_page(at / PAGE) } {
+    match unsafe { shared.lend_page(at / PAGE) } {
         Ok(page) => {
             let status = host::backing(page as u64).map(|(source, offset)| {
                 // SAFETY: the call takes no pointers.
@@ -294,10 +310,6 @@ fn lend(pager: sys::Handle, mem: sys::Handle, shared: Shared, at: u64) {
             status == Some(mikros_rt::OK)
         }
         Err(_) => false,
-    };
-    if !lent {
-        // SAFETY: the call takes no pointers.
-        unsafe { sys::pager_op(pager, mem, OP_FAIL, at, PAGE) };
     }
 }
 
