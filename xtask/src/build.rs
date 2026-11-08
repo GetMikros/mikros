@@ -724,9 +724,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", failing_image.display());
+            // test-kept-child runs test-crash-host's copy of the test
+            // driver, which keeps one copy of it in memory, not two.
             let restart_image = device_image(
                 "restart.img",
-                &[("test-crash-host", true), ("test-kept-child", true)],
+                &[("test-crash-host", true), ("test-kept-child", false)],
                 &[],
             )?;
             println!("built    {}", restart_image.display());

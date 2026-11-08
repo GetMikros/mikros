@@ -2,5 +2,6 @@
 # writes on its bus channel once and accepts a new one with Reconnect,
 # for the device manager test of children kept across a driver restart.
 name: test-kept-child
-binary: /usr/lib/drivers/test-kept-child/test-kept-child
+# The test driver's one copy in the image, which acts by app ID.
+binary: /usr/lib/drivers/test-crash-host/test-crash-host
 match: [test:kept]
