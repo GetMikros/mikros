@@ -95,8 +95,9 @@ impl Drop for Tree {
 }
 
 /// Mounts, read-only, an image of a tree made with the mkfs.btrfs
-/// options `options`, and checks what it reads against the tree.
-fn reads(name: &str, options: &[&OsStr]) {
+/// options `options`, checks what it reads against the tree, and calls
+/// `more` with the root for checks of its own.
+fn reads(name: &str, options: &[&OsStr], more: impl FnOnce(&Node<'_>)) {
     start();
     let tree = Tree::new(name);
     let mut all: Vec<&OsStr> = std::vec![OsStr::new("--rootdir"), tree.0.as_os_str()];
@@ -125,6 +126,7 @@ fn reads(name: &str, options: &[&OsStr]) {
     }
     check_lookups(&root);
     check_listing(&root);
+    more(&root);
 }
 
 /// The node at `path`, looked up one name at a time.
@@ -229,7 +231,21 @@ fn check_listing(root: &Node<'_>) {
 
 #[test]
 fn reads_files() {
-    reads("reads-files", &[]);
+    reads("reads-files", &[], |_| {});
+}
+
+/// With "dir" a subvolume, which lookups cross into.
+#[test]
+fn reads_files_of_subvolumes() {
+    reads(
+        "reads-subvolumes",
+        &[OsStr::new("--subvol"), OsStr::new("rw:dir")],
+        |root| {
+            // The root directory of every subvolume is inode 256.
+            let dir = root.lookup(b"dir").unwrap();
+            assert_eq!(dir.attributes().unwrap().inode, 256);
+        },
+    );
 }
 
 #[test]
@@ -237,5 +253,6 @@ fn reads_compressed_files() {
     reads(
         "reads-compressed",
         &[OsStr::new("--compress"), OsStr::new("zstd")],
+        |_| {},
     );
 }
