@@ -145,7 +145,7 @@ impl Fs {
 
     /// Makes the subvolume at `path` read-only or writable. One with files
     /// that clients hold memory objects of that can never change stays
-    /// read-only: making it writable fails with `BUSY`.
+    /// read-only: making it writable fails with `BUSY` (MIKSPEC-0053.R11).
     fn set_read_only(&self, path: &str, read_only: bool) -> Result<(), Error> {
         self.writable()?;
         let root = self.walk(&components(path)?)?;
