@@ -3,7 +3,7 @@
 //! time: the calls of `shim/file.c`.
 
 use crate::{Mount, result};
-use core::ffi::{c_char, c_long, c_void};
+use core::ffi::{c_char, c_int, c_long, c_void};
 use core::marker::PhantomData;
 
 unsafe extern "C" {
@@ -17,6 +17,13 @@ unsafe extern "C" {
     fn mikros_btrfs_put(node: *mut c_void);
     fn mikros_btrfs_get_attributes(node: *mut c_void, attributes: *mut Attributes) -> i32;
     fn mikros_btrfs_read(node: *mut c_void, offset: u64, buf: *mut u8, count: usize) -> c_long;
+    fn mikros_btrfs_read_link(node: *mut c_void, buf: *mut u8, size: c_int) -> i32;
+    fn mikros_btrfs_read_dir(
+        dir: *mut c_void,
+        cookie: *mut u64,
+        entry: extern "C" fn(*mut c_void, *const u8, c_int, u64, u32) -> bool,
+        arg: *mut c_void,
+    ) -> i32;
 }
 
 /// A time, in seconds and nanoseconds since 1970 in UTC.
@@ -55,6 +62,11 @@ pub const MODE_DIRECTORY: u32 = 0o040000;
 pub const MODE_FILE: u32 = 0o100000;
 pub const MODE_SYMLINK: u32 = 0o120000;
 
+/// The types of directory entries, as Linux's `DT_` values.
+pub const ENTRY_DIRECTORY: u32 = 4;
+pub const ENTRY_FILE: u32 = 8;
+pub const ENTRY_SYMLINK: u32 = 10;
+
 /// A node of a mount, which it cannot outlive.
 pub struct Node<'m> {
     node: *mut c_void,
@@ -76,6 +88,18 @@ impl Mount {
             node,
             mount: PhantomData,
         })
+    }
+}
+
+/// What `Node::read_dir()` hands its callback.
+type EntryFn<'f> = &'f mut dyn FnMut(&[u8], u64, u32) -> bool;
+
+extern "C" fn entry(arg: *mut c_void, name: *const u8, len: c_int, inode: u64, kind: u32) -> bool {
+    // SAFETY: `read_dir()` passes a pointer to its callback, and the shim
+    // the entry's name, both for the call.
+    unsafe {
+        let callback = &mut *arg.cast::<EntryFn<'_>>();
+        callback(core::slice::from_raw_parts(name, len as usize), inode, kind)
     }
 }
 
@@ -108,6 +132,37 @@ impl<'m> Node<'m> {
         // bytes.
         let read = unsafe { mikros_btrfs_read(self.node, offset, buf.as_mut_ptr(), buf.len()) };
         usize::try_from(read).map_err(|_| read as i32)
+    }
+
+    /// Copies the target of a symbolic link into `buf`: its length.
+    pub fn read_link(&self, buf: &mut [u8]) -> Result<usize, i32> {
+        let size = c_int::try_from(buf.len()).unwrap_or(c_int::MAX);
+        // SAFETY: as for `read()`.
+        let len = unsafe { mikros_btrfs_read_link(self.node, buf.as_mut_ptr(), size) };
+        usize::try_from(len).map_err(|_| len)
+    }
+
+    /// Lists the directory from position `cookie`, 0 at its start, "."
+    /// and ".." too, calling `entry(name, inode, type)` with an
+    /// `ENTRY_` type for each entry until it returns false, which leaves
+    /// that entry for the next call, or the directory ends. `cookie`
+    /// becomes the position to go on from.
+    pub fn read_dir(
+        &self,
+        cookie: &mut u64,
+        mut entry_fn: impl FnMut(&[u8], u64, u32) -> bool,
+    ) -> Result<(), i32> {
+        let mut callback: EntryFn<'_> = &mut entry_fn;
+        // SAFETY: as for `lookup()`; the shim calls `entry` with the
+        // callback only during the call.
+        result(unsafe {
+            mikros_btrfs_read_dir(
+                self.node,
+                cookie,
+                entry,
+                (&mut callback as *mut EntryFn<'_>).cast(),
+            )
+        })
     }
 }
 

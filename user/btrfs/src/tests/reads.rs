@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Reading the files and directories of an image that mkfs.btrfs made
-//! from a tree of the host, and comparing them with the tree.
+//! Reading the files, links and directories of an image that mkfs.btrfs
+//! made from a tree of the host, and comparing them with the tree.
 
 use super::{image, start};
 use crate::host::Disk;
-use crate::node::{MODE_DIRECTORY, MODE_FILE, MODE_TYPE, Node};
+use crate::node::{
+    ENTRY_DIRECTORY, ENTRY_FILE, ENTRY_SYMLINK, MODE_DIRECTORY, MODE_FILE, MODE_SYMLINK, MODE_TYPE,
+    Node,
+};
+use std::collections::BTreeSet;
 use std::ffi::{CString, OsStr};
 use std::format;
 use std::path::PathBuf;
@@ -15,6 +19,7 @@ const ENOENT: i32 = -2;
 const ENOTDIR: i32 = -20;
 const EACCES: i32 = -13;
 const EISDIR: i32 = -21;
+const EINVAL: i32 = -22;
 
 /// The most a read of the file protocol asks for.
 const CHUNK: usize = 32768;
@@ -61,7 +66,10 @@ fn files() -> Vec<(String, Vec<u8>)> {
     files
 }
 
-/// A tree of the host with `files()`, removed when dropped.
+/// The symbolic links of the tree, and their targets.
+const LINKS: &[(&str, &str)] = &[("link", "small"), ("dir/up", "../small")];
+
+/// A tree of the host with `files()` and `LINKS`, removed when dropped.
 struct Tree(PathBuf);
 
 impl Tree {
@@ -72,6 +80,9 @@ impl Tree {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, data).unwrap();
+        }
+        for (path, target) in LINKS {
+            std::os::unix::fs::symlink(target, root.join(path)).unwrap();
         }
         Tree(root)
     }
@@ -99,12 +110,21 @@ fn reads(name: &str, options: &[&OsStr]) {
     for (path, data) in files() {
         check_file(&walk(&root, &path), &path, &data);
     }
+    for (path, target) in LINKS {
+        let link = walk(&root, path);
+        assert_eq!(link.attributes().unwrap().mode & MODE_TYPE, MODE_SYMLINK);
+        let mut buf = [0; 64];
+        let len = link.read_link(&mut buf).unwrap();
+        assert_eq!(&buf[..len], target.as_bytes(), "{path}");
+        assert_eq!(link.read(0, &mut buf), Err(EINVAL));
+    }
     for path in ["dir", "dir/nested", "many"] {
         let dir = walk(&root, path);
         assert_eq!(dir.attributes().unwrap().mode & MODE_TYPE, MODE_DIRECTORY);
         assert_eq!(dir.read(0, &mut [0; 8]), Err(EISDIR));
     }
     check_lookups(&root);
+    check_listing(&root);
 }
 
 /// The node at `path`, looked up one name at a time.
@@ -147,6 +167,64 @@ fn check_lookups(root: &Node<'_>) {
     for name in [&b"."[..], b"..", b"a/b", b"a\0b"] {
         assert_eq!(root.lookup(name).err(), Some(EACCES), "{name:?}");
     }
+}
+
+/// The entries of `dir` but "." and "..", by name, taking at most
+/// `batch` entries from each call, as a client with a small buffer would.
+fn list(dir: &Node<'_>, batch: usize) -> Vec<(Vec<u8>, u64, u32)> {
+    let mut entries = Vec::new();
+    let mut cookie = 0;
+    loop {
+        let mut taken = 0;
+        dir.read_dir(&mut cookie, |name, inode, kind| {
+            if taken == batch {
+                return false;
+            }
+            taken += 1;
+            if name != b"." && name != b".." {
+                entries.push((name.to_vec(), inode, kind));
+            }
+            true
+        })
+        .unwrap();
+        if taken == 0 {
+            return entries;
+        }
+    }
+}
+
+fn check_listing(root: &Node<'_>) {
+    let names = |entries: &[(Vec<u8>, u64, u32)]| -> BTreeSet<Vec<u8>> {
+        entries.iter().map(|e| e.0.clone()).collect()
+    };
+    let top = list(root, 64);
+    let expected: BTreeSet<Vec<u8>> = [
+        "empty", "small", "page", "medium", "large", "text", "dir", "many", "link",
+    ]
+    .iter()
+    .map(|n| n.as_bytes().to_vec())
+    .collect();
+    assert_eq!(names(&top), expected);
+    for (name, inode, kind) in &top {
+        let node = root.lookup(name).unwrap();
+        let attributes = node.attributes().unwrap();
+        assert_eq!(*inode, attributes.inode);
+        let mode = match *kind {
+            ENTRY_FILE => MODE_FILE,
+            ENTRY_DIRECTORY => MODE_DIRECTORY,
+            ENTRY_SYMLINK => MODE_SYMLINK,
+            other => panic!("entry type {other}"),
+        };
+        assert_eq!(attributes.mode & MODE_TYPE, mode);
+    }
+    // A directory longer than any batch, listed a few entries at a time.
+    let many = walk(root, "many");
+    let entries = list(&many, 7);
+    assert_eq!(entries.len(), 300, "no entry twice");
+    let expected: BTreeSet<Vec<u8>> = (0..300).map(|i| format!("f{i:03}").into_bytes()).collect();
+    assert_eq!(names(&entries), expected);
+    // The same position gives the same entries again.
+    assert_eq!(list(&many, 300), list(&many, 300));
 }
 
 #[test]

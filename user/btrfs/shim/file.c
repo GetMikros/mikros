@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Nodes of a mounted file system, which the program walks one name at a
- * time: looking a name up in a directory, a node's attributes and reading
- * a file. A node is a path of the VFS, with a file that is opened for
- * reading the first time the node is read. Each call runs as a task of
- * the shim while it lasts, unless its thread runs as one already.
+ * time: looking a name up in a directory, a node's attributes, reading a
+ * file, reading a symbolic link and listing a directory. A node is a path
+ * of the VFS, with a file that is opened for reading the first time the
+ * node is read or listed. Each call runs as a task of the shim while it
+ * lasts, unless its thread runs as one already.
  */
 #include <linux/fs.h>
 #include <linux/file.h>
@@ -17,7 +18,8 @@
 
 struct mikros_node {
 	struct path path;
-	/* Opened at the first read, under the lock. */
+	/* Opened at the first read or listing, under the lock, which also
+	 * keeps listings of the node from moving each other's position. */
 	struct file *file;
 	struct mutex lock;
 };
@@ -160,19 +162,20 @@ int mikros_btrfs_get_attributes(struct mikros_node *node, struct mikros_attribut
 	return ret;
 }
 
-/* The node's file, opened for reading unless it is: a regular file, as
- * nothing else can be read. */
+/* The node's file, opened for reading unless it is: a regular file or
+ * a directory, as nothing else can be read or listed. */
 static struct file *node_file(struct mikros_node *node)
 {
 	struct inode *inode = d_inode(node->path.dentry);
 	struct file *file;
 
-	if (!S_ISREG(inode->i_mode))
+	if (!S_ISREG(inode->i_mode) && !S_ISDIR(inode->i_mode))
 		return ERR_PTR(-EINVAL);
 	mutex_lock(&node->lock);
 	file = node->file;
 	if (!file) {
-		file = dentry_open(&node->path, O_RDONLY | O_LARGEFILE, current_cred());
+		file = dentry_open(&node->path, O_RDONLY | O_LARGEFILE |
+				   (S_ISDIR(inode->i_mode) ? O_DIRECTORY : 0), current_cred());
 		if (!IS_ERR(file))
 			node->file = file;
 	}
@@ -197,6 +200,70 @@ long mikros_btrfs_read(struct mikros_node *node, u64 offset, void *buf, unsigned
 	ret = PTR_ERR_OR_ZERO(file);
 	if (!ret)
 		ret = kernel_read(file, buf, count, &pos);
+out:
+	if (adopted)
+		mikros_task_exit();
+	return ret;
+}
+
+/* Copies the target of a symbolic link, without a NUL, into the `size`
+ * bytes at `buf`: its length, or a negative errno, -EINVAL for a node
+ * that is not a link. */
+int mikros_btrfs_read_link(struct mikros_node *node, char *buf, int size)
+{
+	bool adopted = mikros_task_adopt("read_link");
+	int ret = vfs_readlink(node->path.dentry, (char __user *)buf, size);
+
+	if (adopted)
+		mikros_task_exit();
+	return ret;
+}
+
+typedef bool (*mikros_entry_fn)(void *arg, const char *name, int len, u64 inode,
+				unsigned int type);
+
+struct listing {
+	struct dir_context ctx;
+	mikros_entry_fn entry;
+	void *arg;
+};
+
+static bool fill(struct dir_context *ctx, const char *name, int len, loff_t pos, u64 inode,
+		 unsigned int type)
+{
+	struct listing *listing = container_of(ctx, struct listing, ctx);
+
+	return listing->entry(listing->arg, name, len, inode, type);
+}
+
+/* Lists the directory from position *cookie, 0 at its start, calling
+ * `entry(arg, name, len, inode, type)` for each entry, "." and ".." too,
+ * with the type as a DT_ value, until `entry` returns false for an entry,
+ * which is then not taken, or the directory ends. *cookie becomes the
+ * position to go on from. 0, or a negative errno. */
+int mikros_btrfs_read_dir(struct mikros_node *dir, u64 *cookie, mikros_entry_fn entry, void *arg)
+{
+	bool adopted = mikros_task_adopt("read_dir");
+	struct listing listing = { .ctx.actor = fill, .entry = entry, .arg = arg };
+	struct file *file;
+	loff_t pos;
+	int ret;
+
+	ret = -ENOTDIR;
+	if (!d_is_dir(dir->path.dentry))
+		goto out;
+	file = node_file(dir);
+	ret = PTR_ERR_OR_ZERO(file);
+	if (ret)
+		goto out;
+	mutex_lock(&dir->lock);
+	pos = vfs_llseek(file, *cookie, SEEK_SET);
+	ret = pos < 0 ? pos : 0;
+	if (!ret)
+		ret = iterate_dir(file, &listing.ctx);
+	if (!ret)
+		*cookie = file->f_pos;
+	mutex_unlock(&dir->lock);
 out:
 	if (adopted)
 		mikros_task_exit();
