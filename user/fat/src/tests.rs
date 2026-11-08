@@ -233,6 +233,37 @@ fn keeps_the_clean_shutdown_bit() {
     assert_ne!(fat(&bytes) & 0x8000, 0);
 }
 
+/// Mounted for quick disconnection, the volume is marked as in use only
+/// from the start of a change to its end, and a volume that was left in
+/// use is still mounted read-only.
+#[test]
+fn marks_changes_in_progress_for_quick_disconnection() {
+    let size = 8 << 20;
+    let bytes = image(size, fatfs::FatType::Fat16, |_| {});
+    let fat = |b: &[u8]| {
+        let reserved = u16::from_le_bytes([b[14], b[15]]) as usize * 512;
+        u16::from_le_bytes([b[reserved + 2], b[reserved + 3]])
+    };
+    let mut volume = Volume::mount_quick_disconnect(Mem(bytes), size as u64, true).unwrap();
+    assert!(!volume.read_only());
+    assert_ne!(fat(&volume_bytes_ref(&mut volume)) & 0x8000, 0);
+    volume.begin_change().unwrap();
+    let changing = volume_bytes_ref(&mut volume);
+    assert_eq!(fat(&changing) & 0x8000, 0);
+    let root = volume.root();
+    let now = Stamp::new(2026, 11, 8, 12, 0, 0, 0);
+    volume.create(root, "new.txt", false, now).unwrap();
+    volume.end_change().unwrap();
+    let between = volume_bytes_ref(&mut volume);
+    assert_ne!(fat(&between) & 0x8000, 0);
+    // Removed between changes: clean, and writable again.
+    let again = Volume::mount_quick_disconnect(Mem(between), size as u64, true).unwrap();
+    assert!(!again.read_only());
+    // Removed during a change: read-only.
+    let crashed = Volume::mount_quick_disconnect(Mem(changing), size as u64, true).unwrap();
+    assert!(crashed.read_only());
+}
+
 #[test]
 fn writes_files_that_fatfs_reads() {
     let now = Stamp::new(2026, 11, 7, 13, 30, 41, 250);

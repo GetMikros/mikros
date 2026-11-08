@@ -9,7 +9,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
-use mikros_fat::{Device, Dir, FatType, Node as FatNode, Stamp, Volume};
+use mikros_fat::{Dir, FatType, Node as FatNode, Stamp, Volume};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{
@@ -113,14 +113,19 @@ impl Fs {
         }
     }
 
-    /// `result`, that of a call that may have changed the volume, once a
-    /// change is durable, with `quick-disconnect`: the volume writes what
-    /// changes through at once, so the call's success flushes the
-    /// partition. A flush that fails fails the call.
-    pub fn durable<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
-        if result.is_ok() && self.quick_disconnect {
-            self.volume.borrow_mut().device().flush().map_err(error)?;
+    /// Makes `call`, which may change the volume, with `quick-disconnect`
+    /// as one change (MIKSPEC-0064.R14): the volume is marked as in use on
+    /// stable storage before it, and once it returns, as the volume
+    /// writes what changes through at once, the partition is flushed and
+    /// the volume marked as shut down cleanly again, on stable storage. A
+    /// marking or flush that fails fails the call.
+    pub fn change<T>(&self, call: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+        if !self.quick_disconnect {
+            return call();
         }
+        self.volume.borrow_mut().begin_change().map_err(error)?;
+        let result = call();
+        self.volume.borrow_mut().end_change().map_err(error)?;
         result
     }
 

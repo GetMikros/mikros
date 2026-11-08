@@ -87,6 +87,10 @@ pub struct Volume<D> {
     pub(crate) disk: Disk<D>,
     pub(crate) layout: Layout,
     pub(crate) writable: bool,
+    /// Whether the volume is marked as in use only while a change is in
+    /// progress, as `begin_change` and `end_change` mark it, rather than
+    /// from mounting to `unmount`.
+    pub(crate) quick: bool,
     /// The free clusters, once counted, and where to look for one next.
     pub(crate) free: Option<u32>,
     pub(crate) hint: u32,
@@ -98,6 +102,22 @@ impl<D: Device> Volume<D> {
     /// is mounted read-only. Mounting for writing marks the volume as
     /// in use until `unmount`.
     pub fn mount(device: D, size: u64, writable: bool) -> Result<Volume<D>, Error> {
+        Self::open(device, size, writable, false)
+    }
+
+    /// Mounts the volume as `mount` does, but leaves it marked as shut
+    /// down cleanly: `begin_change` and `end_change` mark it as in use
+    /// while each change is in progress, so that a device removed between
+    /// changes holds a volume that was shut down cleanly.
+    pub fn mount_quick_disconnect(
+        device: D,
+        size: u64,
+        writable: bool,
+    ) -> Result<Volume<D>, Error> {
+        Self::open(device, size, writable, true)
+    }
+
+    fn open(device: D, size: u64, writable: bool, quick: bool) -> Result<Volume<D>, Error> {
         let mut disk = Disk::new(device, 512);
         let mut boot = [0u8; 512];
         disk.read(0, &mut boot)?;
@@ -108,14 +128,37 @@ impl<D: Device> Volume<D> {
             disk,
             layout,
             writable,
+            quick,
             free: None,
             hint: 2,
         };
-        if writable {
+        if writable && !quick {
             table::set_clean(&mut volume.disk, &volume.layout, false)?;
             volume.disk.device.flush()?;
         }
         Ok(volume)
+    }
+
+    /// Marks a volume mounted with `mount_quick_disconnect` for writing
+    /// as in use, on stable storage, before a change.
+    pub fn begin_change(&mut self) -> Result<(), Error> {
+        if !self.writable || !self.quick {
+            return Ok(());
+        }
+        table::set_clean(&mut self.disk, &self.layout, false)?;
+        self.disk.device.flush()
+    }
+
+    /// Flushes the device after a change, and marks a volume mounted with
+    /// `mount_quick_disconnect` for writing as shut down cleanly again, on
+    /// stable storage.
+    pub fn end_change(&mut self) -> Result<(), Error> {
+        self.disk.device.flush()?;
+        if !self.writable || !self.quick {
+            return Ok(());
+        }
+        table::set_clean(&mut self.disk, &self.layout, true)?;
+        self.disk.device.flush()
     }
 
     /// Writes the free cluster count, marks the volume as shut down

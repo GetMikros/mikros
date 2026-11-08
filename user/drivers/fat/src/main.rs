@@ -126,7 +126,11 @@ fn start(
     let block = BlockClient::new(ClientEnd::new(bus));
     let device = BlockDevice::new(block, process).ok_or(Status::NoResources)?;
     let (size, writable) = (device.size(), !device.read_only());
-    let volume = Volume::mount(device, size, writable).map_err(|e| match e {
+    let mounted = match quick_disconnect {
+        true => Volume::mount_quick_disconnect(device, size, writable),
+        false => Volume::mount(device, size, writable),
+    };
+    let volume = mounted.map_err(|e| match e {
         mikros_fat::Error::Invalid => Status::NotSupported,
         _ => Status::Internal,
     })?;
