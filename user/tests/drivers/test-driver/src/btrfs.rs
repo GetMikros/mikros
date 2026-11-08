@@ -2,7 +2,7 @@
 //! whether the btrfs server serves the root partition of the same disk
 //! through its `filesystem` service as it should.
 
-use crate::fat::{expect, failed, ok, open, root};
+use crate::fat::{expect, failed, locks, ok, open, root};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,9 +27,10 @@ const MANY: usize = 70;
 /// a watch of the directory hears of a file made, written, renamed and
 /// removed; a link within the directory is followed, one that leads out
 /// of it comes back as a redirect, and both read as their targets; a hard
-/// link names the same node and can be renamed; a directory of more
-/// entries than one reply holds lists each once; names taken and paths
-/// through files are refused; and what was made is removed again.
+/// link names the same node and can be renamed; byte-range locks of two
+/// connections behave; a directory of more entries than one reply holds
+/// lists each once; names taken and paths through files are refused; and
+/// what was made is removed again.
 pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
     check(directory, reactor).await.is_some()
 }
@@ -91,6 +92,7 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
 
     watches(&dir, reactor).await?;
     links(&dir, reactor).await?;
+    locks(&file, reactor).await?;
 
     let (many, _) = open(&dir, "many", create_dir, reactor).await.ok()?;
     for i in 0..MANY {

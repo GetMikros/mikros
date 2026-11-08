@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The served file system: the nodes that connections are open to, which
 //! connections to the same node share, the tokens of directories, the
-//! watches of connections, and the `Filesystem` service
-//! (MIKSPEC-0049.R13), whose root is the top-level subvolume
+//! byte-range locks and watches of connections, and the `Filesystem`
+//! service (MIKSPEC-0049.R13), whose root is the top-level subvolume
 //! (MIKSPEC-0053.R4).
 
+use crate::lock::Lock;
 use crate::node;
 use crate::watch::{Watches, event};
 use alloc::collections::BTreeMap;
@@ -12,6 +13,7 @@ use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::task::Waker;
 use mikros_btrfs::Mount;
 use mikros_btrfs::node::{
     Attributes as BtrfsAttributes, MODE_DIRECTORY, MODE_SYMLINK, MODE_TYPE, Node as BtrfsNode, Time,
@@ -40,6 +42,8 @@ pub struct Open {
     /// The directories and names that the node was found under, which the
     /// watches of those directories hear of its changes by.
     names: RefCell<Vec<(Key, String)>>,
+    pub(crate) locks: RefCell<Vec<Lock>>,
+    pub(crate) waiting: RefCell<Vec<Waker>>,
 }
 
 impl Open {
@@ -213,7 +217,7 @@ impl Fs {
         self.spawner.spawn(task);
     }
 
-    /// A new owner of watches, for a connection.
+    /// A new owner of locks and watches, for a connection.
     pub fn owner(&self) -> u64 {
         let owner = self.next_owner.get();
         self.next_owner.set(owner + 1);
@@ -239,6 +243,8 @@ impl Open {
             node,
             key,
             names: RefCell::new(Vec::new()),
+            locks: RefCell::new(Vec::new()),
+            waiting: RefCell::new(Vec::new()),
         }
     }
 }

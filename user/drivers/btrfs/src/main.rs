@@ -23,6 +23,7 @@ mod disk;
 mod file;
 mod fs;
 mod host;
+mod lock;
 mod node;
 mod time;
 mod watch;
