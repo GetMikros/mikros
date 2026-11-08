@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //! Resolving paths (MIKSPEC-0049.R4, R5), also case-insensitively
-//! (MIKSPEC-0071.R15), opening and creating nodes (MIKSPEC-0049.R6), and
+//! (MIKSPEC-0071.R16), opening and creating nodes (MIKSPEC-0049.R6), and
 //! listing directories (MIKSPEC-0049.R12).
 
 use crate::fs::{self, Open, error};
@@ -54,12 +54,18 @@ impl Connection {
 
     /// The first entry of the directory `dir`, in the order in which
     /// `ReadDirectory` lists them, whose name equals `name` under simple
-    /// case folding (MIKSPEC-0071.R15), as the open node that connections
-    /// share. Names that are not UTF-8 equal none.
-    fn lookup_folded(&self, dir: &Rc<Open>, name: &str) -> Result<Option<Rc<Open>>, Error> {
+    /// case folding (MIKSPEC-0071.R16), as the open node that connections
+    /// share, with the entry's own name. Names that are not UTF-8 equal
+    /// none.
+    pub(crate) fn lookup_folded(
+        &self,
+        dir: &Rc<Open>,
+        name: &str,
+    ) -> Result<Option<(Rc<Open>, String)>, Error> {
         let usr = dir.key == self.fs.root.key && self.fs.usr.is_some();
         if usr && mikros_casefold::equal(fs::USR, name) {
-            return self.lookup(dir, fs::USR);
+            let found = self.lookup(dir, fs::USR)?;
+            return Ok(found.map(|open| (open, String::from(fs::USR))));
         }
         let mut cookie = 0;
         loop {
@@ -82,11 +88,37 @@ impl Connection {
                 })
                 .map_err(error)?;
             if let Some(entry) = found {
-                return self.lookup(dir, &entry);
+                let open = self.lookup(dir, &entry)?;
+                return Ok(open.map(|open| (open, entry)));
             }
             if !seen {
                 return Ok(None);
             }
+        }
+    }
+
+    /// The entry `name` of the directory `dir` and its own name: on a
+    /// case-insensitive connection, as `Open` with `CASE_INSENSITIVE`
+    /// finds it, and otherwise exactly.
+    pub(crate) fn find(
+        &self,
+        dir: &Rc<Open>,
+        name: &str,
+    ) -> Result<Option<(Rc<Open>, String)>, Error> {
+        match self.lookup(dir, name)? {
+            Some(open) => Ok(Some((open, String::from(name)))),
+            None if self.folded => self.lookup_folded(dir, name),
+            None => Ok(None),
+        }
+    }
+
+    /// Fails with `EXISTS` on a case-insensitive connection when the
+    /// directory `dir` holds an entry equal to the new name `name` under
+    /// case folding.
+    pub(crate) fn free_folded(&self, dir: &Rc<Open>, name: &str) -> Result<(), Error> {
+        match self.folded && self.lookup_folded(dir, name)?.is_some() {
+            true => Err(Error::Exists),
+            false => Ok(()),
         }
     }
 
@@ -126,7 +158,7 @@ impl Connection {
                     Some(_) if rest.is_empty() && flags.contains(OpenFlags::CREATE) => {
                         return Err(Error::Exists);
                     }
-                    found => found,
+                    found => found.map(|(open, _)| open),
                 },
                 found => found,
             };
@@ -226,7 +258,9 @@ impl Connection {
             self.fs.changed(&open, WatchKind::Modified);
         }
         let append = q.flags.contains(OpenFlags::APPEND);
-        self.fs.serve(q.node, open, q.rights, self.user, append);
+        let folded = q.flags.contains(OpenFlags::CASE_INSENSITIVE);
+        self.fs
+            .serve(q.node, open, q.rights, self.user, append, folded);
         Ok(NodeOpenResponse {
             r#type,
             redirect: None,

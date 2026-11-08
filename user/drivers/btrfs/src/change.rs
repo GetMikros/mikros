@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The requests of a connection that change the entries of directories:
 //! removing them, renaming and linking them through tokens
-//! (MIKSPEC-0049.R8), and creating symbolic links.
+//! (MIKSPEC-0049.R8), and creating symbolic links. On a case-insensitive
+//! connection, existing names are found as `Open` with `CASE_INSENSITIVE`
+//! finds them, and new names may not equal existing ones under case
+//! folding (MIKSPEC-0071.R16).
 
 use crate::fs::{Fs, Open, error};
 use crate::node::{Connection, NAME_MAX, TARGET_MAX};
 use crate::watch::event;
 use alloc::rc::Rc;
+use alloc::string::String;
 use mikros_btrfs::node::{Changes, Kind};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::*;
@@ -30,10 +34,14 @@ impl Connection {
         self.require_write()?;
         self.directory()?;
         check_component(name)?;
+        let (removed, name) = match self.find(&self.open, name)? {
+            Some((open, name)) => (Some(open), name),
+            None => (None, String::from(name)),
+        };
+        let name = name.as_str();
         if self.fs.is_usr(&self.open, name) {
             return Err(Error::AccessDenied);
         }
-        let removed = self.lookup(&self.open, name)?;
         self.open
             .node
             .remove(name.as_bytes(), directory)
@@ -68,10 +76,22 @@ impl Connection {
         check_component(&q.name)?;
         check_component(&q.new_name)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        let (moved, name) = self.find(&self.open, &q.name)?.ok_or(Error::NotFound)?;
+        // An entry equal to the new name under case folding is replaced as
+        // one of exactly that name, under its own name; the moved entry
+        // itself only changes its case.
+        let new_name = match self.find(&to, &q.new_name)? {
+            Some((found, own)) if !(found.key == moved.key && to.key == self.open.key) => own,
+            _ => q.new_name.clone(),
+        };
+        let q = NodeRenameRequest {
+            name,
+            new_name,
+            ..q
+        };
         if self.fs.is_usr(&self.open, &q.name) || self.fs.is_usr(&to, &q.new_name) {
             return Err(Error::AccessDenied);
         }
-        let moved = self.lookup(&self.open, &q.name)?.ok_or(Error::NotFound)?;
         let replaced = self.lookup(&to, &q.new_name)?;
         self.open
             .node
@@ -111,7 +131,8 @@ impl Connection {
         if self.fs.is_usr(&to, &q.new_name) {
             return Err(Error::AccessDenied);
         }
-        let node = self.lookup(&self.open, &q.name)?.ok_or(Error::NotFound)?;
+        let (node, _) = self.find(&self.open, &q.name)?.ok_or(Error::NotFound)?;
+        self.free_folded(&to, &q.new_name)?;
         node.node
             .link(&to.node, q.new_name.as_bytes())
             .map_err(error)?;
@@ -132,6 +153,7 @@ impl Connection {
         if target.is_empty() || target.len() > TARGET_MAX || target.contains('\0') {
             return Err(Error::Invalid);
         }
+        self.free_folded(&self.open, name)?;
         let target = alloc::ffi::CString::new(target).map_err(|_| Error::Invalid)?;
         let node = self
             .open

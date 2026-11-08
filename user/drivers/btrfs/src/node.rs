@@ -24,6 +24,9 @@ pub(crate) struct Connection {
     pub(crate) user: u32,
     pub(crate) cursor: u64,
     pub(crate) append: bool,
+    /// Whether the connection looks names up case-insensitively, as it was
+    /// opened with `CASE_INSENSITIVE` (MIKSPEC-0071.R16).
+    pub(crate) folded: bool,
     /// The owner of the connection's locks and watches.
     pub(crate) owner: u64,
 }
@@ -37,6 +40,7 @@ pub async fn serve(
     rights: Rights,
     user: u32,
     append: bool,
+    folded: bool,
 ) {
     let server = NodeAsyncServer::new(end, fs.reactor.clone());
     let owner = fs.owner();
@@ -47,6 +51,7 @@ pub async fn serve(
         user,
         cursor: 0,
         append,
+        folded,
         owner,
     };
     while let Ok(request) = server.next().await {

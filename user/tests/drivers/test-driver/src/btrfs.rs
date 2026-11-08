@@ -38,11 +38,12 @@ const MANY: usize = 70;
 /// one that leads out of it comes back as a redirect, and both read as
 /// their targets; a hard link names the same node and can be renamed; a
 /// new file shares the data of a range of another; names that differ in
-/// case are found case-insensitively, and taken for CREATE; byte-range
-/// locks of two connections behave; its subvolumes are listed, made,
-/// snapshotted, made writable and removed; a directory of more entries
-/// than one reply holds lists each once; names taken and paths through
-/// files are refused; and what was made is removed again.
+/// case are found case-insensitively, and taken for CREATE; a connection
+/// opened case-insensitively stays so; byte-range locks of two
+/// connections behave; its subvolumes are listed, made, snapshotted, made
+/// writable and removed; a directory of more entries than one reply holds
+/// lists each once; names taken and paths through files are refused; and
+/// what was made is removed again.
 pub async fn works(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
@@ -416,9 +417,54 @@ async fn case_insensitive(
     let inode =
         async |node: &NodeAsyncClient| Some(ok(node.get_attributes().await)?.attributes.inode);
     expect(inode(&got).await? == inode(&want).await?)?;
-    for name in ["Straße", "dup", "DUP"] {
+    for name in ["dup", "DUP"] {
         ok(dir.unlink(name.into(), false).await)?;
     }
+
+    // A connection opened with the flag, and its clones, stay
+    // case-insensitive for the names of its other requests.
+    let directory = OpenFlags(OpenFlags::DIRECTORY.0 | folded.0);
+    let (ci, _) = open(root, "BTRFS-TEST", directory, reactor).await.ok()?;
+    let symlink = ci.create_symlink("STRAẞE".into(), "x".into()).await;
+    expect(failed(symlink) == Some(Error::Exists))?;
+    let token = ok(ci.get_token().await)?.token;
+    let linked = ci.link("STRAẞE".into(), token, "LINKED".into()).await;
+    ok(linked)?;
+    let token = ok(ci.get_token().await)?.token;
+    let taken = ci.link("strasse".into(), token, "Linked".into()).await;
+    expect(failed(taken) == Some(Error::NotFound))?;
+    let token = ok(ci.get_token().await)?.token;
+    let taken = ci.link("straße".into(), token, "linked".into()).await;
+    expect(failed(taken) == Some(Error::Exists))?;
+    ok(ci.unlink("linked".into(), false).await)?;
+    // Renaming to another case of its own name changes the case; onto an
+    // entry that differs in case, it replaces that entry, keeping its name.
+    open(dir, "one", create, reactor).await.ok()?;
+    let token = ok(ci.get_token().await)?.token;
+    ok(ci.rename("ONE".into(), token, "One".into()).await)?;
+    let (two, _) = open(dir, "two", create, reactor).await.ok()?;
+    let moved = inode(&two).await?;
+    let token = ok(ci.get_token().await)?.token;
+    ok(ci.rename("TWO".into(), token, "one".into()).await)?;
+    let listed = names(dir).await?;
+    expect(
+        listed.iter().any(|(n, _)| n == "One")
+            && !listed
+                .iter()
+                .any(|(n, _)| n == "one" || n == "two" || n == "ONE"),
+    )?;
+    let (one, _) = open(dir, "One", OpenFlags(0), reactor).await.ok()?;
+    expect(inode(&one).await? == moved)?;
+    let (clone, server) = endpoints::<Node>().ok()?;
+    ok(ci
+        .clone(server, Rights(Rights::READ.0 | Rights::WRITE.0))
+        .await)?;
+    let clone = NodeAsyncClient::new(clone, reactor.clone());
+    for name in ["ONE", "straße"] {
+        ok(clone.unlink(name.into(), false).await)?;
+    }
+    let gone = open(dir, "Straße", OpenFlags(0), reactor).await;
+    expect(matches!(gone, Err(Some(Error::NotFound))))?;
     Some(())
 }
 

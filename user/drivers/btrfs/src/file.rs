@@ -46,8 +46,14 @@ impl Connection {
 
     pub(crate) fn clone(&self, q: NodeCloneRequest) -> Result<NodeCloneResponse, Error> {
         self.require(q.rights)?;
-        self.fs
-            .serve(q.node, self.open.clone(), q.rights, self.user, self.append);
+        self.fs.serve(
+            q.node,
+            self.open.clone(),
+            q.rights,
+            self.user,
+            self.append,
+            self.folded,
+        );
         Ok(NodeCloneResponse {})
     }
 
