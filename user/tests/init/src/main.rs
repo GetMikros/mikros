@@ -9464,8 +9464,9 @@ mod manager {
     /// driver for the root partition succeeds only when that service
     /// reads, writes, renames and removes as it should. Each partition's
     /// `filesystem` service is also published under `partuuid-<guid>`,
-    /// and the root partition's also as `root`. The device manager says
-    /// all of it in the log.
+    /// the root partition's also as `root`, and that of the EFI system
+    /// partition on the root partition's disk as `esp`. The device manager
+    /// says all of it in the log.
     pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -9495,10 +9496,12 @@ mod manager {
             (b"device-manager: bound driver test-fat to device", 1),
             (b"device-manager: started driver test-fat for device", 1),
             // The FAT and btrfs file systems, each under its service ID
-            // and its partition GUID, and btrfs also as the root.
-            (b"device-manager: published device.filesystem ", 5),
+            // and its partition GUID, btrfs also as the root, and FAT,
+            // the EFI system partition on the root's disk, as the ESP.
+            (b"device-manager: published device.filesystem ", 6),
             (b"device-manager: published device.filesystem partuuid-", 2),
             (b"device-manager: published device.filesystem root for device", 1),
+            (b"device-manager: published device.filesystem esp for device", 1),
             (b"device-manager: published device.subvolumes ", 1),
             (b"device-manager: bound driver btrfs to device", 1),
             (b"device-manager: started driver btrfs for device", 1),

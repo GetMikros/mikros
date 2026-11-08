@@ -33,6 +33,8 @@ const SUBVOLUMES: &str = "subvolumes";
 /// partition's file system.
 const PARTITION_GUID: &str = "partition_guid";
 const ROOT: &str = "root";
+/// The instance name of the file system of the boot's EFI system partition.
+const ESP: &str = "esp";
 
 /// The service IDs given out during this boot, by device, class, and
 /// how many services of that class the device's driver published before
@@ -79,7 +81,8 @@ pub struct Published {
 /// ID of the last `filesystem` service of the same start of the driver.
 /// A `filesystem` service of a partition is also registered, through
 /// duplicates of `provider`, as `partuuid-<guid>`, the GUID in lowercase,
-/// and as `root` when the partition is the root partition. Fails with
+/// as `root` when the partition is the root partition, and as `esp` when
+/// it is the boot's EFI system partition. Fails with
 /// `INVALID_ARGS` for a class that drivers may not publish, and with
 /// `BAD_STATE` for a `subvolumes` service before any `filesystem`
 /// service.
@@ -155,8 +158,9 @@ pub async fn publish(
 }
 
 /// The other instance names of a `filesystem` service of the driver of
-/// device `caller`: `partuuid-<guid>` for a partition, and `root` as well
-/// for the root partition.
+/// device `caller`: `partuuid-<guid>` for a partition, `root` as well
+/// for the root partition, and `esp` for the boot's EFI system
+/// partition.
 fn aliases(m: &Manager, caller: u64) -> Vec<String> {
     let devices = m.devices.borrow();
     let Some(device) = devices.get(caller) else {
@@ -169,6 +173,9 @@ fn aliases(m: &Manager, caller: u64) -> Vec<String> {
     let mut aliases = alloc::vec![format!("partuuid-{}", guid.to_ascii_lowercase())];
     if m.profiles.claim_root(device) {
         aliases.push(String::from(ROOT));
+    }
+    if m.profiles.is_esp(device, &devices) {
+        aliases.push(String::from(ESP));
     }
     aliases
 }

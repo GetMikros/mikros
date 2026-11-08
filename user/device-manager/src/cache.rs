@@ -2,7 +2,7 @@
 //! servers follow: from the storage profiles in the root file system
 //! when there is a matching one, and from defaults otherwise.
 
-use crate::devices::Device;
+use crate::devices::{Device, Devices};
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -14,10 +14,12 @@ use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{FilesystemAsyncClient, Node, NodeAsyncClient, Rights};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 
-/// The hardware IDs of disks, partitions, and the Mikros root partition.
+/// The hardware IDs of disks, partitions, the Mikros root partition, and
+/// EFI system partitions.
 const DISK: &str = "storage:disk";
 const PARTITION: &str = "storage:partition";
 const ROOT_TYPE: &str = "gpt:fa730af6-8ba3-42d9-b155-466909d08135";
+const ESP_TYPE: &str = "gpt:c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 /// The properties that choose a device's policy, and the one it gets.
 const CACHE: &str = "cache";
 const REMOVABLE: &str = "removable";
@@ -42,11 +44,13 @@ enum Root {
 
 /// The root partition's device, once the first one that matches `root`
 /// publishes a file system, and its file system once connected, from
-/// which the profiles are read.
+/// which the profiles are read, and the GUID of the EFI system partition
+/// that `esp=PARTUUID=` gives.
 pub struct Profiles {
     root: Root,
     root_device: Cell<Option<u64>>,
     fs: RefCell<Option<Rc<NodeAsyncClient>>>,
+    esp: Option<String>,
 }
 
 fn property<'a>(properties: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -58,17 +62,31 @@ impl Profiles {
     /// The profiles of a system started with `command_line`.
     pub fn new(command_line: &str) -> Profiles {
         let mut root = Root::OfRootType;
+        let mut esp = None;
         for word in command_line.split_ascii_whitespace() {
             if word == "root=bootfs" {
                 root = Root::BootFs;
             } else if let Some(guid) = word.strip_prefix("root=PARTUUID=") {
                 root = Root::Guid(guid.into());
+            } else if let Some(guid) = word.strip_prefix("esp=PARTUUID=") {
+                esp = Some(guid.into());
             }
         }
         Profiles {
             root,
             root_device: Cell::new(None),
             fs: RefCell::new(None),
+            esp,
+        }
+    }
+
+    /// Whether `device` matches the command line's root partition.
+    fn matches_root(&self, device: &Device) -> bool {
+        match &self.root {
+            Root::BootFs => false,
+            Root::Guid(guid) => property(&device.properties, PARTITION_GUID)
+                .is_some_and(|ours| ours.eq_ignore_ascii_case(guid)),
+            Root::OfRootType => device.hardware_ids.iter().any(|id| id == ROOT_TYPE),
         }
     }
 
@@ -79,16 +97,39 @@ impl Profiles {
         if let Some(root) = self.root_device.get() {
             return root == device.id;
         }
-        let matches = match &self.root {
-            Root::BootFs => false,
-            Root::Guid(guid) => property(&device.properties, PARTITION_GUID)
-                .is_some_and(|ours| ours.eq_ignore_ascii_case(guid)),
-            Root::OfRootType => device.hardware_ids.iter().any(|id| id == ROOT_TYPE),
-        };
+        let matches = self.matches_root(device);
         if matches {
             self.root_device.set(Some(device.id));
         }
         matches
+    }
+
+    /// Whether `device`, among `devices`, is the EFI system partition of
+    /// the boot: the one whose GUID `esp=PARTUUID=` gives, or else, unless
+    /// there is no root partition, the first EFI system partition on the
+    /// disk that holds the root partition, the one already chosen or else
+    /// one that matches the command line.
+    pub fn is_esp(&self, device: &Device, devices: &Devices) -> bool {
+        if let Some(guid) = &self.esp {
+            return property(&device.properties, PARTITION_GUID)
+                .is_some_and(|ours| ours.eq_ignore_ascii_case(guid));
+        }
+        if self.root == Root::BootFs || !device.hardware_ids.iter().any(|id| id == ESP_TYPE) {
+            return false;
+        }
+        let Some(disk) = device.parent else {
+            return false;
+        };
+        let on_disk = |d: &&Device| d.parent == Some(disk);
+        let root_here = match self.root_device.get() {
+            Some(root) => devices.get(root).is_some_and(|r| r.parent == Some(disk)),
+            None => devices.iter().filter(on_disk).any(|d| self.matches_root(d)),
+        };
+        let first_esp = devices
+            .iter()
+            .filter(on_disk)
+            .find(|d| d.hardware_ids.iter().any(|id| id == ESP_TYPE));
+        root_here && first_esp.is_some_and(|d| d.id == device.id)
     }
 
     /// Whether device `id` is the root partition that `claim_root` chose.
