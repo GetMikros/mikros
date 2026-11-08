@@ -4,7 +4,7 @@
 //! unmounted, and which a read-only mount that follows must read as they
 //! were made.
 
-use super::{Image, noise, start};
+use super::{Image, noise, start, text};
 use crate::Mount;
 use crate::host::Disk;
 use crate::node::{
@@ -275,6 +275,78 @@ fn writes_files() {
             for (i, name) in many().iter().enumerate() {
                 let f = m.lookup(name).unwrap();
                 assert_eq!(read_all(&f), noise(10 + i as u64, 100 + i));
+            }
+        },
+        |_| {},
+    );
+}
+
+/// The extents of an image's files that zstd compressed, by the host's
+/// btrfs inspect-internal.
+fn zstd_extents(image: &Image) -> usize {
+    let output = std::process::Command::new("btrfs")
+        .args(["inspect-internal", "dump-tree", "-t", "fs"])
+        .arg(&image.0)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    std::string::String::from_utf8_lossy(&output.stdout)
+        .matches("compression 3")
+        .count()
+}
+
+#[test]
+fn writes_compressed_files() {
+    let data = text(8 << 20);
+    changes(
+        "writes-compressed",
+        256 << 20,
+        Some(c"compress=zstd"),
+        |root| {
+            let file = root.create(b"text", Kind::File, 0o644).unwrap();
+            write_all(&file, 0, &data);
+        },
+        |root| assert!(read_all(&walk(root, "text")) == data),
+        |image| assert!(zstd_extents(image) > 0, "the file is compressed"),
+    );
+}
+
+/// Puts the number of MiB `i` of a file in each 4 KiB block of `buf`,
+/// whose other bytes stay as they are.
+fn tag(buf: &mut [u8], i: u64) {
+    for block in buf.chunks_mut(4096) {
+        block[..8].copy_from_slice(&i.to_le_bytes());
+    }
+}
+
+/// More than the page cache may hold dirty with the tests' memory, so
+/// that the writer waits for writeback.
+#[test]
+fn writes_more_than_the_dirty_limit() {
+    const MIB: u64 = 384;
+    changes(
+        "writes-dirty-limit",
+        1 << 30,
+        None,
+        |root| {
+            let file = root.create(b"big", Kind::File, 0o644).unwrap();
+            // The writer outpaces writeback only if making its data is
+            // cheap.
+            let mut buf = noise(7, 1 << 20);
+            for i in 0..MIB {
+                tag(&mut buf, i);
+                assert_eq!(file.write(i << 20, &buf), Ok(1 << 20));
+            }
+        },
+        |root| {
+            let file = walk(root, "big");
+            assert_eq!(file.attributes().unwrap().size, MIB << 20);
+            let mut expected = noise(7, 1 << 20);
+            let mut buf = std::vec![0; 1 << 20];
+            for i in 0..MIB {
+                tag(&mut expected, i);
+                assert_eq!(file.read(i << 20, &mut buf), Ok(1 << 20));
+                assert!(buf == expected, "MiB {i}");
             }
         },
         |_| {},
