@@ -18,6 +18,12 @@
 //! Processes started before go without their profiles. An entry that is
 //! the root file system's root or lies in `@system` fails the start with
 //! `ACCESS_DENIED` (MIKSPEC-0050.R28).
+//!
+//! With `esp=PARTUUID=<guid>` on the command line, the process manager
+//! also connects to the file system of that EFI system partition, the
+//! instance `partuuid-<guid>` of `device.filesystem`, and gives it as
+//! `/boot/efi` to the processes whose manifests list it, once it has
+//! (MIKSPEC-0064.R9).
 
 use crate::processes::Shared;
 use alloc::format;
@@ -56,6 +62,11 @@ const DEVICE_FILESYSTEM: &str = "device.filesystem";
 const ROOT_INSTANCE: &str = "root";
 /// The subvolume of system versions, which no namespace may reach.
 const SYSTEM: &str = "/@system";
+/// Where the EFI system partition is served, the command line option
+/// that names it, and the prefix of its instance.
+const BOOT_EFI: &str = "/boot/efi";
+const ESP_OPTION: &str = "esp=PARTUUID=";
+const PARTUUID_INSTANCE: &str = "partuuid-";
 /// How long to wait before asking again for tmpfs.
 const RETRY: i64 = 20_000_000;
 /// The most bytes one write moves.
@@ -87,6 +98,10 @@ enum Roots {
 
 pub struct Namespaces {
     bootfs: bool,
+    /// The GUID of the EFI system partition, in lowercase, and the root
+    /// of its file system, once connected.
+    esp_guid: Option<String>,
+    esp: RefCell<Option<Rc<NodeAsyncClient>>>,
     ready: RefCell<Option<Rc<Ready>>>,
     /// Whether tmpfs has started, and the tasks whose namespaces wait for
     /// profiles to apply since.
@@ -178,8 +193,14 @@ impl Namespaces {
         let bootfs = command_line
             .split_whitespace()
             .any(|word| word == "root=bootfs");
+        let esp_guid = command_line
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix(ESP_OPTION))
+            .map(str::to_ascii_lowercase);
         Namespaces {
             bootfs,
+            esp_guid,
+            esp: RefCell::new(None),
             ready: RefCell::new(None),
             tmpfs_started: Cell::new(false),
             waiting: RefCell::new(Vec::new()),
@@ -248,6 +269,28 @@ impl Namespaces {
             temporary,
             roots: Roots::Root(Rc::new(root)),
         });
+    }
+
+    /// Whether the command line names an EFI system partition.
+    pub fn names_esp(&self) -> bool {
+        self.esp_guid.is_some()
+    }
+
+    /// Connects through `directory`, the process manager's own, to the
+    /// file system of the EFI system partition that the command line
+    /// names, once it is published, to serve it as `/boot/efi`.
+    pub async fn prepare_esp(&self, directory: DirectoryAsyncClient, reactor: Reactor) {
+        let Some(guid) = &self.esp_guid else {
+            return;
+        };
+        let instance = format!("{PARTUUID_INSTANCE}{guid}");
+        match filesystem(&directory, &reactor, &instance, RW).await {
+            Ok(root) => *self.esp.borrow_mut() = Some(Rc::new(root)),
+            Err(e) => mikros_rt::log!(
+                Error,
+                "process-manager: no EFI system partition {guid}: {e:?}"
+            ),
+        }
     }
 
     /// Makes profiles apply, from `ready`.
@@ -360,8 +403,8 @@ impl Namespaces {
         rights: Rights,
     ) -> Result<NamespaceEntry, Status> {
         let normal = path.trim_end_matches('/');
-        let table: [(&str, Source, Rights); 6] = match &ready.roots {
-            Roots::Boot { etc, var, users } => [
+        let mut table: Vec<(&str, Source, Rights)> = match &ready.roots {
+            Roots::Boot { etc, var, users } => alloc::vec![
                 ("/usr", Source::Boot("usr"), RX),
                 ("/Apps", Source::Boot("Apps"), Rights::READ),
                 ("/Libraries", Source::Boot("Libraries"), Rights::READ),
@@ -373,7 +416,7 @@ impl Namespaces {
                 if normal.is_empty() || path::overlaps(normal, SYSTEM) {
                     return Err(Status::AccessDenied);
                 }
-                [
+                alloc::vec![
                     ("/usr", Source::Dir(root.clone(), "usr"), RX),
                     ("/Apps", Source::Dir(root.clone(), "Apps"), Rights::READ),
                     (
@@ -387,14 +430,25 @@ impl Namespaces {
                 ]
             }
         };
-        let (source, most, rest) = table
+        if let Some(esp) = self.esp.borrow().as_ref() {
+            table.push((BOOT_EFI, Source::Dir(esp.clone(), ""), RW));
+        }
+        let (top, source, most, rest) = table
             .into_iter()
             .find_map(|(root, source, most)| {
                 let rest = normal.strip_prefix(root)?;
-                (rest.is_empty() || rest.starts_with('/'))
-                    .then(|| (source, most, String::from(rest.trim_start_matches('/'))))
+                (rest.is_empty() || rest.starts_with('/')).then(|| {
+                    (
+                        root,
+                        source,
+                        most,
+                        String::from(rest.trim_start_matches('/')),
+                    )
+                })
             })
             .ok_or(Status::NotFound)?;
+        // Missing directories are made only where services keep state.
+        let creatable = matches!(top, "/etc" | "/var" | "/Users");
         if rights.0 & !most.0 != 0 {
             return Err(Status::AccessDenied);
         }
@@ -425,7 +479,7 @@ impl Namespaces {
                 );
                 match opened {
                     Ok(_) => {}
-                    Err(Error::NotFound) if rights.contains(Rights::WRITE) => {
+                    Err(Error::NotFound) if creatable && rights.contains(Rights::WRITE) => {
                         let made = directories(&dir, &rest, &shared.reactor)
                             .await
                             .map_err(status)?;
@@ -487,10 +541,22 @@ async fn tmpfs_once_served(
 
 /// The root directory of the root file system, with read, write and
 /// execute rights, once its `filesystem` service is published as the
-/// instance `root`, which a watch of `device.filesystem` waits for.
+/// instance `root`.
 async fn root_filesystem(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
+) -> Result<NodeAsyncClient, Status> {
+    filesystem(directory, reactor, ROOT_INSTANCE, RWX).await
+}
+
+/// The root directory, with `rights`, of the file system published as
+/// `instance` of `device.filesystem`, once it is, which a watch of the
+/// protocol waits for.
+async fn filesystem(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    instance: &str,
+    rights: Rights,
 ) -> Result<NodeAsyncClient, Status> {
     let midl = |_| Status::PeerClosed;
     directory
@@ -498,17 +564,23 @@ async fn root_filesystem(
         .await
         .map_err(midl)??;
     loop {
-        let listed = directory
+        // The protocol has no instances until a first one is registered.
+        let listed = match directory
             .list(DEVICE_FILESYSTEM.into())
             .await
-            .map_err(midl)??;
-        if listed.instances.iter().any(|i| i == ROOT_INSTANCE) {
+            .map_err(midl)?
+        {
+            Ok(listed) => listed.instances,
+            Err(Status::NotFound) => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        if listed.iter().any(|i| i == instance) {
             break;
         }
         loop {
             match directory.next_event().await.map_err(midl)? {
                 DirectoryEvent::OnInstanceAdded(added)
-                    if added.protocol == DEVICE_FILESYSTEM && added.instance == ROOT_INSTANCE =>
+                    if added.protocol == DEVICE_FILESYSTEM && added.instance == instance =>
                 {
                     break;
                 }
@@ -520,14 +592,14 @@ async fn root_filesystem(
     directory
         .connect(
             DEVICE_FILESYSTEM.into(),
-            Some(ROOT_INSTANCE.into()),
+            Some(instance.into()),
             server.into_handle(),
         )
         .await
         .map_err(midl)??;
     let fs = FilesystemAsyncClient::new(client, reactor.clone());
     let (root, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
-    flat(fs.get_root(server, RWX).await).map_err(status)?;
+    flat(fs.get_root(server, rights).await).map_err(status)?;
     Ok(NodeAsyncClient::new(root, reactor.clone()))
 }
 

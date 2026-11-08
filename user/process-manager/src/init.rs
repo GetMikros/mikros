@@ -209,6 +209,19 @@ impl Manager {
                 }
             });
         }
+        // The EFI system partition that the command line names comes as
+        // `/boot/efi` once its file system is published, through another
+        // directory of the process manager's own, which waits for it.
+        if self.shared.namespaces.names_esp()
+            && let Ok(directory) = bind_own_directory(&control).await
+        {
+            let shared = self.shared.clone();
+            self.shared.spawner.spawn(async move {
+                let reactor = shared.reactor.clone();
+                let directory = DirectoryAsyncClient::new(directory, reactor.clone());
+                shared.namespaces.prepare_esp(directory, reactor).await;
+            });
+        }
         let shared = self.shared.clone();
         self.shared.spawner.spawn(async move {
             let reactor = shared.reactor.clone();
