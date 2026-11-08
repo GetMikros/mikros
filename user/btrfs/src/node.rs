@@ -68,6 +68,13 @@ unsafe extern "C" {
         group: u32,
     ) -> i32;
     fn mikros_btrfs_sync(node: *mut c_void) -> i32;
+    fn mikros_btrfs_clone_range(
+        dst: *mut c_void,
+        dst_offset: u64,
+        src: *mut c_void,
+        src_offset: u64,
+        len: u64,
+    ) -> i64;
 }
 
 /// A time, in seconds and nanoseconds since 1970 in UTC.
@@ -347,6 +354,22 @@ impl<'m> Node<'m> {
     pub fn truncate(&self, size: u64) -> Result<(), i32> {
         // SAFETY: as for `create()`.
         result(unsafe { mikros_btrfs_truncate(self.node, size) })
+    }
+
+    /// Makes `len` bytes of this file from `offset` share the data of the
+    /// file `source` from `source_offset`, without copying it, a `len` of
+    /// 0 meaning to the end of `source`: how many bytes.
+    pub fn clone_range(
+        &self,
+        offset: u64,
+        source: &Node<'_>,
+        source_offset: u64,
+        len: u64,
+    ) -> Result<u64, i32> {
+        // SAFETY: as for `create()`, for both nodes.
+        let cloned =
+            unsafe { mikros_btrfs_clone_range(self.node, offset, source.node, source_offset, len) };
+        u64::try_from(cloned).map_err(|_| cloned as i32)
     }
 
     /// Sets the attributes that `changes` holds; the change time becomes

@@ -115,6 +115,9 @@ impl Connection {
             }
             R::Seek(q, r) => r.reply(s, self.seek(q.offset, q.origin)),
             R::ReadLink(_, r) => r.reply(s, self.read_link()),
+            R::CloneRange(q, r) => {
+                r.reply(s, self.clone_range(q).map(|()| NodeCloneRangeResponse {}))
+            }
             R::Open(q, r) => r.reply(s, self.open(q)),
             R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes)),
             R::Unlink(q, r) => r.reply(
@@ -141,7 +144,6 @@ impl Connection {
             // What this server does not provide yet.
             R::GetMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
-            R::CloneRange(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::ConnectSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
         };

@@ -7,6 +7,7 @@
 //! `@system/current` names when the file system is mounted
 //! (MIKSPEC-0053.R4, MIKSPEC-0053.R9).
 
+use crate::change::koids;
 use crate::lock::Lock;
 use crate::node;
 use crate::watch::{Watches, event};
@@ -72,6 +73,10 @@ pub struct Fs {
     opens: RefCell<BTreeMap<Key, Weak<Open>>>,
     /// The directories that tokens name, by the token's object ID.
     pub(crate) tokens: RefCell<BTreeMap<u64, Rc<Open>>>,
+    /// The nodes and rights of the connections being served, by the
+    /// object ID of their server end, which `CloneRange` finds its
+    /// source's by.
+    pub(crate) connections: RefCell<BTreeMap<u64, (Rc<Open>, Rights)>>,
     pub watches: Watches,
     next_owner: Cell<u64>,
     pub read_only: bool,
@@ -164,6 +169,7 @@ impl Fs {
             usr,
             opens: RefCell::new(opens),
             tokens: RefCell::new(BTreeMap::new()),
+            connections: RefCell::new(BTreeMap::new()),
             watches: Watches::default(),
             next_owner: Cell::new(1),
             read_only,
@@ -236,8 +242,21 @@ impl Fs {
         user: u32,
         append: bool,
     ) {
+        // Known from now on, before the task runs, so that a request
+        // that follows the one that made the connection finds it.
+        let id = koids(end.handle()).map(|(id, _)| id);
+        if let Some(id) = id {
+            let connection = (open.clone(), rights);
+            self.connections.borrow_mut().insert(id, connection);
+        }
+        let fs = self.clone();
         let task = node::serve(self.clone(), end, open, rights, user, append);
-        self.spawner.spawn(task);
+        self.spawner.spawn(async move {
+            task.await;
+            if let Some(id) = id {
+                fs.connections.borrow_mut().remove(&id);
+            }
+        });
     }
 
     /// A new owner of locks and watches, for a connection.

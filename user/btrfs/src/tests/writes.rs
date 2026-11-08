@@ -423,3 +423,39 @@ fn discards_what_is_freed() {
     file.sync().unwrap();
     assert!(read_all(&walk(&root, "small")) == text(1 << 20));
 }
+
+/// Ranges of files share data rather than copy it: a 16 MiB file cloned
+/// into another takes next to nothing of the disk, and both read the
+/// same; a range of a file can be cloned to elsewhere in it; and offsets
+/// out of line with the blocks and directories are refused.
+#[test]
+fn clones_ranges() {
+    const LEN: u64 = 16 << 20;
+    start();
+    let image = Image::new("clones", 256 << 20, &[]);
+    Disk::add(c"clones", image.open(), false).unwrap();
+    {
+        let mount = Mount::new(c"/dev/clones", false, None).unwrap();
+        let root = mount.root().unwrap();
+        let data = noise(13, LEN as usize);
+        let a = root.create(b"a", Kind::File, 0o644).unwrap();
+        write_all(&a, 0, &data);
+        mount.sync().unwrap();
+        let before = allocated(&image);
+        let b = root.create(b"b", Kind::File, 0o644).unwrap();
+        assert_eq!(b.clone_range(0, &a, 0, 0), Ok(LEN));
+        mount.sync().unwrap();
+        let taken = allocated(&image).saturating_sub(before);
+        assert!(taken < LEN / 4, "the clone took {taken} bytes");
+        assert!(read_all(&b) == data);
+
+        assert_eq!(a.clone_range(1 << 20, &a, 0, 1 << 20), Ok(1 << 20));
+        let mut expected = data.clone();
+        expected.copy_within(..1 << 20, 1 << 20);
+        assert!(read_all(&a) == expected);
+        assert!(read_all(&b) == data);
+        assert_eq!(b.clone_range(100, &a, 0, 4096), Err(EINVAL));
+        assert_eq!(root.clone_range(0, &a, 0, 0), Err(EISDIR));
+    }
+    image.check();
+}

@@ -167,7 +167,7 @@ impl Fs {
         }
         // SAFETY: the kernel just created the handle for us.
         let event = unsafe { OwnedHandle::from_raw(raw) };
-        let koid = koid(&event).ok_or(Error::Io)?;
+        let (koid, _) = koids(&event).ok_or(Error::Io)?;
         let mut token = 0;
         // SAFETY: the out pointer is valid for the call.
         if unsafe { sys::handle_duplicate(event.raw(), TOKEN_RIGHTS, &mut token) } != mikros_rt::OK
@@ -184,13 +184,14 @@ impl Fs {
     /// The directory that the token `handle` names, when it is one of
     /// this file system's.
     pub fn token_dir(&self, handle: &OwnedHandle) -> Option<Rc<Open>> {
-        let koid = koid(handle)?;
+        let (koid, _) = koids(handle)?;
         self.tokens.borrow().get(&koid).cloned()
     }
 }
 
-/// The object ID of `handle`.
-fn koid(handle: &OwnedHandle) -> Option<u64> {
+/// The object ID of `handle`, and that of the object related to it, such
+/// as the other end of a channel.
+pub(crate) fn koids(handle: &OwnedHandle) -> Option<(u64, u64)> {
     let mut record = [0u8; 24];
     let mut len = 0;
     // SAFETY: the pointers describe `record` and `len`.
@@ -204,5 +205,6 @@ fn koid(handle: &OwnedHandle) -> Option<u64> {
         )
     };
     let id = u64::from_le_bytes(record[..8].try_into().ok()?);
-    (status == mikros_rt::OK).then_some(id)
+    let related = u64::from_le_bytes(record[8..16].try_into().ok()?);
+    (status == mikros_rt::OK).then_some((id, related))
 }

@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::fs::{
-    Error, NodeAsyncClient, NodeType, OpenFlags, WatchKind, WatchMask, Watcher, WatcherRequest,
-    WatcherServer,
+    Error, Node, NodeAsyncClient, NodeType, OpenFlags, Rights, WatchKind, WatchMask, Watcher,
+    WatcherRequest, WatcherServer,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 
@@ -29,9 +29,10 @@ const MANY: usize = 70;
 /// file made, written, renamed and removed; a link within the directory
 /// is followed, one that leads out of it comes back as a redirect, and
 /// both read as their targets; a hard link names the same node and can be
-/// renamed; byte-range locks of two connections behave; a directory of
-/// more entries than one reply holds lists each once; names taken and
-/// paths through files are refused; and what was made is removed again.
+/// renamed; a new file shares the data of a range of another; byte-range
+/// locks of two connections behave; a directory of more entries than one
+/// reply holds lists each once; names taken and paths through files are
+/// refused; and what was made is removed again.
 pub async fn works(directory: &DirectoryAsyncClient, reactor: &Reactor) -> bool {
     check(directory, reactor).await.is_some()
 }
@@ -96,6 +97,7 @@ async fn check(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()
     watches(&dir, reactor).await?;
     links(&dir, reactor).await?;
     locks(&file, reactor).await?;
+    clones(&dir, &file, reactor).await?;
 
     let (many, _) = open(&dir, "many", create_dir, reactor).await.ok()?;
     for i in 0..MANY {
@@ -282,5 +284,22 @@ async fn links(dir: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     for name in ["near", "far", "moved"] {
         ok(dir.unlink(name.into(), false).await)?;
     }
+    Some(())
+}
+
+/// Whether `CloneRange` makes a new file in `dir` share the data of
+/// `file`, which holds 12 bytes, through a connection to it that only
+/// reads, and refuses a source that is no connection of the server's.
+async fn clones(dir: &NodeAsyncClient, file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+    let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
+    let (copy, _) = open(dir, "copy", create, reactor).await.ok()?;
+    let (source, server) = endpoints::<Node>().ok()?;
+    ok(file.clone(server, Rights::READ).await)?;
+    ok(copy.clone_range(source, 0, 0, 12).await)?;
+    expect(ok(copy.read(0, 100).await)?.data == b"hello btrfs!")?;
+    let (stranger, _server) = endpoints::<Node>().ok()?;
+    let refused = copy.clone_range(stranger, 0, 0, 12).await;
+    expect(failed(refused) == Some(Error::CrossDevice))?;
+    ok(dir.unlink("copy".into(), false).await)?;
     Some(())
 }

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The requests of a connection about a node's contents and attributes:
 //! reading and writing files at an offset or the cursor
-//! (MIKSPEC-0049.R14), truncating them, setting attributes, cloning the
+//! (MIKSPEC-0049.R14), truncating them, making ranges of them share data
+//! (MIKSPEC-0049.R9, MIKSPEC-0053.R5), setting attributes, cloning the
 //! connection, and reading symbolic links.
 
+use crate::change::koids;
 use crate::dir::link_target;
 use crate::fs::{self, error};
 use crate::node::{Connection, MODE_BITS};
@@ -101,6 +103,27 @@ impl Connection {
         self.require_write()?;
         self.file()?;
         self.open.node.truncate(size).map_err(error)?;
+        self.fs.changed(&self.open, WatchKind::Modified);
+        Ok(())
+    }
+
+    /// Makes the range of the file from `offset` share the data of the
+    /// range of the file that the connection `source` is open to, which
+    /// needs `READ`, without copying it, as btrfs reflinks do. A source
+    /// that is no connection of this server is on another file system.
+    pub(crate) fn clone_range(&self, q: NodeCloneRangeRequest) -> Result<(), Error> {
+        self.require_write()?;
+        self.file()?;
+        let (_, server_end) = koids(q.source.handle()).ok_or(Error::Invalid)?;
+        let connection = self.fs.connections.borrow().get(&server_end).cloned();
+        let (source, rights) = connection.ok_or(Error::CrossDevice)?;
+        if !rights.contains(Rights::READ) {
+            return Err(Error::AccessDenied);
+        }
+        self.open
+            .node
+            .clone_range(q.offset, &source.node, q.source_offset, q.length)
+            .map_err(error)?;
         self.fs.changed(&self.open, WatchKind::Modified);
         Ok(())
     }

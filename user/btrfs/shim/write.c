@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Changing nodes: writing and appending to files, truncating them,
- * setting attributes, and syncing a node to stable storage. Each call
+ * making ranges of them share data, setting attributes, and syncing a
+ * node to stable storage. Each call
  * runs as a task of the shim while it lasts, unless its thread runs as
  * one already.
  */
@@ -93,6 +94,42 @@ int mikros_btrfs_truncate(struct mikros_node *node, u64 size)
 	bool adopted = mikros_task_adopt("truncate");
 	int ret = size > LLONG_MAX ? -EFBIG : vfs_truncate(&node->path, size);
 
+	if (adopted)
+		mikros_task_exit();
+	return ret;
+}
+
+/* Makes `len` bytes of the file `dst` from `dst_offset` share the data of
+ * the file `src` from `src_offset`, as the FICLONERANGE ioctl does, a
+ * `len` of 0 meaning to the end of `src`: how many bytes, or a negative
+ * errno. */
+long long mikros_btrfs_clone_range(struct mikros_node *dst, u64 dst_offset,
+				   struct mikros_node *src, u64 src_offset, u64 len)
+{
+	bool adopted = mikros_task_adopt("clone_range");
+	struct file *in, *out;
+	loff_t ret;
+
+	ret = -EISDIR;
+	if (d_is_dir(dst->path.dentry) || d_is_dir(src->path.dentry))
+		goto out;
+	ret = -EINVAL;
+	if (dst_offset > LLONG_MAX || src_offset > LLONG_MAX || len > LLONG_MAX)
+		goto out;
+	in = mikros_node_file(src);
+	ret = PTR_ERR_OR_ZERO(in);
+	if (ret)
+		goto out;
+	out = mikros_node_file(dst);
+	ret = PTR_ERR_OR_ZERO(out);
+	if (ret)
+		goto out;
+	if (!(out->f_mode & FMODE_WRITE)) {
+		ret = __mnt_is_readonly(out->f_path.mnt) ? -EROFS : -EPERM;
+		goto out;
+	}
+	ret = vfs_clone_file_range(in, src_offset, out, dst_offset, len, 0);
+out:
 	if (adopted)
 		mikros_task_exit();
 	return ret;
