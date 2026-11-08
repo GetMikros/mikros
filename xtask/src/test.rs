@@ -1,5 +1,6 @@
 //! `cargo xtask test`: runs the host unit tests, replays the host fuzz
-//! corpora and runs the integration tests in QEMU.
+//! corpora and runs the integration tests in QEMU. With `--host`, it runs
+//! only the host unit tests and the replays.
 
 use crate::build::{self, BootImage, Kind};
 use crate::qemu::{self, MachineArgs};
@@ -21,6 +22,10 @@ pub struct Args {
     /// Skip the host unit tests and the replay of the fuzz corpora.
     #[arg(long)]
     pub no_host: bool,
+    /// Run only the host unit tests and the replay of the fuzz corpora,
+    /// without building the test image or starting QEMU.
+    #[arg(long, conflicts_with = "no_host")]
+    pub host: bool,
     #[command(flatten)]
     pub machine: MachineArgs,
 }
@@ -347,6 +352,9 @@ pub fn run(args: &Args) -> Result<()> {
         }
         crate::fuzz::replay_corpora()?;
     }
+    if args.host {
+        return Ok(());
+    }
 
     let built = build::build_for(args.kind, BootImage::Test)?;
     crate::port_tests::run_on_host(&crate::ports::XKBCOMMON, &built.xkbcommon)?;
@@ -413,6 +421,24 @@ pub fn run(args: &Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    /// The arguments of `cargo xtask test`, parsed on their own.
+    #[derive(Parser)]
+    struct TestCommand {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    #[test]
+    fn takes_host_only_without_no_host() {
+        let parsed = TestCommand::try_parse_from(["test", "--host"]).unwrap();
+        assert!(parsed.args.host);
+        assert!(!parsed.args.no_host);
+        let full = TestCommand::try_parse_from(["test"]).unwrap();
+        assert!(!full.args.host);
+        assert!(TestCommand::try_parse_from(["test", "--host", "--no-host"]).is_err());
+    }
 
     #[test]
     fn passes_only_on_the_exit_code_without_a_panic() {
