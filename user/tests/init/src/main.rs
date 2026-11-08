@@ -3138,6 +3138,95 @@ fn writebacks_and_discards(s: &Startup) -> Result {
     )
 }
 
+/// `pager_lend` makes absent pages of a paged object use the frames of an
+/// anonymous object, which keeps them: writes through either show in
+/// both, lent pages are clean, a clone copies them, the frames stay while
+/// lent even when the source goes, eviction ends the lend so that the
+/// page is requested again, and a sealed source or a revoked object is
+/// refused.
+fn lending_frames(s: &Startup) -> Result {
+    let (pager, mem) = paged_object(s, 2, 2)?;
+    let source = create_memory(2 * PAGE_SIZE)?;
+    mem_write_at(source, 0, b"lent 0")?;
+    mem_write_at(source, PAGE_SIZE, b"lent 1")?;
+    let before = REQUESTS.load(Ordering::Acquire);
+    // SAFETY: the call takes no pointers.
+    check("lending", unsafe {
+        sys::pager_lend(pager, mem, 0, 2 * PAGE_SIZE, source, 0)
+    })?;
+    ensure(
+        "reading the source's frames",
+        mem_read_at::<6>(mem, 0)? == *b"lent 0" && mem_read_at::<6>(mem, PAGE_SIZE)? == *b"lent 1",
+    )?;
+    ensure(
+        "requesting no page",
+        REQUESTS.load(Ordering::Acquire) == before,
+    )?;
+    ensure(
+        "lending clean pages",
+        dirty(pager, mem, 2 * PAGE_SIZE)?.1 == 0,
+    )?;
+    mem_write_at(mem, 0, b"L")?;
+    ensure(
+        "showing writes to the paged object in the source",
+        mem_read_at::<6>(source, 0)? == *b"Lent 0",
+    )?;
+    let at = map(s.process, source, PAGE_SIZE)?;
+    // SAFETY: the mapping is writable.
+    unsafe { ((at + 1) as *mut u8).write_volatile(b'E') };
+    ensure(
+        "showing writes to the source in the paged object",
+        mem_read_at::<6>(mem, 0)? == *b"LEnt 0",
+    )?;
+    let (ranges, count) = dirty(pager, mem, 2 * PAGE_SIZE)?;
+    ensure(
+        "tracking writes to the paged object",
+        count == 1 && ranges[..2] == [0, PAGE_SIZE],
+    )?;
+
+    let mut clone = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("cloning", unsafe {
+        sys::mem_clone(mem, 0, 0, 2 * PAGE_SIZE, &mut clone)
+    })?;
+    // SAFETY: the mapping is writable.
+    unsafe { (at as *mut u8).write_volatile(b'X') };
+    ensure(
+        "copying lent pages into the clone",
+        mem_read_at::<6>(clone, 0)? == *b"LEnt 0",
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE);
+        check("closing the source", sys::handle_close(source))?;
+    }
+    ensure(
+        "keeping lent frames once the source is gone",
+        mem_read_at::<6>(mem, 0)? == *b"XEnt 0" && mem_read_at::<6>(mem, PAGE_SIZE)? == *b"lent 1",
+    )?;
+    check("evicting", pager_op(pager, mem, 2, PAGE_SIZE, PAGE_SIZE))?;
+    ensure(
+        "requesting a page whose lend ended",
+        mem_read_at::<6>(mem, PAGE_SIZE)? == *b"page 1",
+    )?;
+
+    let sealed = create_memory(PAGE_SIZE)?;
+    check("sealing a source", seal(sealed, 8))?;
+    check("discarding", pager_op(pager, mem, 6, 0, 2 * PAGE_SIZE))?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        ensure(
+            "refusing a sealed source",
+            sys::pager_lend(pager, mem, 0, PAGE_SIZE, sealed, 0) == -13,
+        )?;
+        check("revoking", sys::pager_revoke(pager, mem))?;
+        ensure(
+            "refusing a revoked object",
+            sys::pager_lend(pager, mem, 0, PAGE_SIZE, create_memory(PAGE_SIZE)?, 0) == -13,
+        )
+    }
+}
+
 const RESUME: u32 = 0;
 const DEBUG_EVENTS: u32 = 1 << 0;
 const UNDEFINED_INSTRUCTION: u32 = 3;
@@ -10020,7 +10109,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 140] = [
+const TESTS: [(&str, Test); 141] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -10153,6 +10242,7 @@ const TESTS: [(&str, Test); 140] = [
     ("pagers", pagers),
     ("pager_operations", pager_operations),
     ("writebacks_and_discards", writebacks_and_discards),
+    ("lending_frames", lending_frames),
     ("large_pager_operations", large_pager_operations),
     ("paged_outputs", paged_outputs),
     ("access_flag_cleared_on_entry", access_flag_cleared_on_entry),

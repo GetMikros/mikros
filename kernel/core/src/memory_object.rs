@@ -92,13 +92,22 @@ pub struct Paged {
     /// Set with the state's revocation, for checks that hold locks that
     /// come before the state's, such as an address space's regions.
     revoked: AtomicBool,
-    /// The budgets that frames supplied to the object stay charged to, by
-    /// frame address: `None` for a frame of an object without a budget,
-    /// which stays uncharged.
-    charges: SpinLock<Map<u64, Option<Arc<Budget>>>>,
+    /// The frames that the object has from elsewhere, by frame address:
+    /// supplied or lent ones.
+    charges: SpinLock<Map<u64, Charge>>,
     /// The byte ranges of the outstanding writebacks, which their ends
     /// must name exactly. Locked after the pages.
     writebacks: SpinLock<Vec<(u64, u64)>>,
+}
+
+/// A frame of a paged object from elsewhere.
+enum Charge {
+    /// Supplied to it, and charged to the budget it came with: `None` for
+    /// a frame of an object without a budget, which stays uncharged.
+    Supplied(Option<Arc<Budget>>),
+    /// Lent to it as many times, by an object that keeps the frame and
+    /// its charge (`crate::lend`).
+    Lent(u64),
 }
 
 /// The ops of `pager_op`.
@@ -724,7 +733,14 @@ impl MemoryObject {
                 let mut pages = self.pages.lock();
                 let mut state = paged.state.lock();
                 let mut charges = paged.charges.lock();
-                for (index, phys) in (from..).zip(moved) {
+                for (index, taken) in (from..).zip(moved) {
+                    // A frame that pages use as a lent frame stays with
+                    // them, and a copy moves instead.
+                    let Some(phys) = source.movable(taken) else {
+                        leftover.push(taken);
+                        refused = Err(Error::NoMemory);
+                        continue;
+                    };
                     let fits = index < pages.count() && pages.frame(index).is_none();
                     let claims = fits
                         .then(|| Some((nodes::claim_insert().ok()?, nodes::claim_insert().ok()?)))
@@ -741,7 +757,7 @@ impl MemoryObject {
                         _ => None,
                     };
                     if let Some((charge, page)) = supplied {
-                        charges.insert(phys, source.budget.clone());
+                        charges.insert(phys, Charge::Supplied(source.budget.clone()));
                         drop(charge);
                         pages.insert(index, phys, page);
                     } else {
@@ -753,6 +769,152 @@ impl MemoryObject {
             crate::pager::wake(self.header.koid(), from, to);
             refused
         })
+    }
+
+    /// Makes the pages of the `len` bytes from `offset` that are not
+    /// present use the frames of the `len` bytes from `source_offset` of
+    /// `source`, which keeps them and their charges, as `pager_lend`
+    /// does: the source's pages get frames first, and the frames stay
+    /// allocated while a page uses them (`crate::lend`). Lent pages are
+    /// clean, and their requests answered. Fails with `AccessDenied` when
+    /// the source has the `WRITE` seal or this object is revoked, as for
+    /// `supply`, whose seal and revocation checks this shares.
+    pub fn lend(
+        &self,
+        offset: u64,
+        len: u64,
+        source: &MemoryObject,
+        source_offset: u64,
+    ) -> Result<(), Error> {
+        let Some(paged) = &self.paged else {
+            return Err(Error::NotSupported);
+        };
+        if !source.is_anonymous() {
+            return Err(Error::NotSupported);
+        }
+        let _out_of = Supplying::begin(source, || source.check_writable())?;
+        let _into = Supplying::begin(self, || self.check_revoked())?;
+        let aligned = [offset, len, source_offset]
+            .iter()
+            .all(|v| v.is_multiple_of(PAGE_SIZE));
+        if !aligned {
+            return Err(Error::InvalidArgs);
+        }
+        self.check_range(offset, len)?;
+        source.check_range(source_offset, len)?;
+        let (first, source_first) = (offset / PAGE_SIZE, source_offset / PAGE_SIZE);
+        in_pieces(0, len / PAGE_SIZE, |from, to| {
+            let count = (to - from) as usize;
+            let mut frames = Vec::new();
+            frames
+                .try_reserve_exact(count)
+                .map_err(|_| Error::NoMemory)?;
+            let mut unused = Vec::new();
+            unused
+                .try_reserve_exact(count)
+                .map_err(|_| Error::NoMemory)?;
+            // The frames are recorded as lent with the source's pages
+            // locked, so that the source frees none of them before.
+            loop {
+                source.commit((source_first + from) * PAGE_SIZE, (to - from) * PAGE_SIZE)?;
+                let pages = source.pages.lock();
+                let found: Option<Vec<u64>> = (source_first + from..source_first + to)
+                    .map(|index| pages.frame(index))
+                    .collect();
+                // A page decommitted since the commit gets a frame again.
+                let Some(found) = found else {
+                    continue;
+                };
+                for phys in found {
+                    if let Err(e) = crate::lend::lend(phys) {
+                        drop(pages);
+                        frames.into_iter().for_each(crate::lend::end);
+                        return Err(e);
+                    }
+                    frames.push(phys);
+                }
+                break;
+            }
+            let (from, to) = (first + from, first + to);
+            // Once the object's budget refuses to record a page, the rest
+            // of the piece is not lent and the call fails, as for supply.
+            let mut refused = Ok(());
+            {
+                let mut pages = self.pages.lock();
+                let mut state = paged.state.lock();
+                let mut charges = paged.charges.lock();
+                for (index, phys) in (from..).zip(frames) {
+                    let fits = index < pages.count() && pages.frame(index).is_none();
+                    let claims = fits
+                        .then(|| Some((nodes::claim_insert().ok()?, nodes::claim_insert().ok()?)))
+                        .flatten();
+                    let lent = match claims {
+                        Some(claims) if refused.is_ok() => match state.supply(index) {
+                            Ok(true) => Some(claims),
+                            Err(Error::NoResources) => {
+                                refused = Err(Error::NoResources);
+                                None
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let Some((charge, page)) = lent else {
+                        unused.push(phys);
+                        continue;
+                    };
+                    match charges.get_mut(&phys) {
+                        Some(Charge::Lent(n)) => *n += 1,
+                        _ => {
+                            charges.insert(phys, Charge::Lent(1));
+                        }
+                    }
+                    drop(charge);
+                    pages.insert(index, phys, page);
+                }
+            }
+            unused.into_iter().for_each(crate::lend::end);
+            crate::pager::wake(self.header.koid(), from, to);
+            refused
+        })
+    }
+
+    /// The frame to move in place of the frame `phys`, taken out of this
+    /// anonymous object: itself, unless pages of paged objects use it as
+    /// a lent frame. Then it stays with them, with its charge, and a copy
+    /// charged to this object's budget moves instead. `None` without a
+    /// frame or a charge for the copy.
+    fn movable(&self, phys: u64) -> Option<u64> {
+        if !crate::lend::is_lent(phys) {
+            return Some(phys);
+        }
+        if let Some(budget) = &self.budget {
+            budget.charge_pages(1).ok()?;
+            if budget.charge_kernel(PAGE_ENTRY_COST).is_err() {
+                budget.release_pages(1);
+                return None;
+            }
+        }
+        let Some(copy) = crate::frames::alloc_frame() else {
+            self.release(1);
+            return None;
+        };
+        // SAFETY: the copy was just allocated, and the lent frame stays
+        // allocated while lent. Writes through the pages that use it may
+        // change it meanwhile, which only changes the bytes copied.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                crate::arch::frame_address(phys) as *const u8,
+                crate::arch::frame_address(copy) as *mut u8,
+                PAGE_SIZE as usize,
+            );
+        }
+        if !crate::lend::orphan(phys, self.budget.as_ref()) {
+            // The last lend ended meanwhile, so the frame is this
+            // object's to free.
+            self.free([phys]);
+        }
+        Some(copy)
     }
 
     /// Takes the frames of the `len` bytes from `offset`, all present,
@@ -1561,19 +1723,46 @@ impl MemoryObject {
                 break;
             }
             since_check += len;
-            let batch = &batch[..len];
+            // The frames that stay: lent to this object, they go back to
+            // the object that lent them; and those of this object that
+            // pages of others still use as lent frames stay until those
+            // let go of them, with their charges.
+            let mut stays = [false; BATCH];
+            let mut supplied: [Option<Option<Arc<Budget>>>; BATCH] = [const { None }; BATCH];
+            for (i, &phys) in batch[..len].iter().enumerate() {
+                if let Some(paged) = &self.paged {
+                    let mut charges = paged.charges.lock();
+                    if let Some(Charge::Lent(n)) = charges.get_mut(&phys) {
+                        if *n > 1 {
+                            *n -= 1;
+                        } else {
+                            charges.remove(&phys);
+                        }
+                        drop(charges);
+                        crate::lend::end(phys);
+                        stays[i] = true;
+                        continue;
+                    }
+                    if let Some(Charge::Supplied(budget)) = charges.remove(&phys) {
+                        supplied[i] = Some(budget);
+                    }
+                }
+                let budget = supplied[i].as_ref().unwrap_or(&self.budget);
+                stays[i] = crate::lend::orphan(phys, budget.as_ref());
+            }
             if let Some(allocator) = FRAMES.lock().as_mut() {
-                for &phys in batch {
-                    allocator.free(phys, 1);
+                for (&phys, &stays) in batch[..len].iter().zip(&stays) {
+                    if !stays {
+                        allocator.free(phys, 1);
+                    }
                 }
             }
-            for &phys in batch {
+            for (supplied, &stays) in supplied.iter_mut().zip(&stays).take(len) {
+                if stays {
+                    continue;
+                }
                 // A supplied frame's charge goes back to its own budget.
-                match self
-                    .paged
-                    .as_ref()
-                    .and_then(|p| p.charges.lock().remove(&phys))
-                {
+                match supplied.take() {
                     Some(Some(budget)) => {
                         budget.release_pages(1);
                         budget.release_kernel(PAGE_ENTRY_COST);

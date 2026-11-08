@@ -2200,6 +2200,19 @@ pub fn pager_supply(
     mem.supply(offset, len, &source, source_offset)
 }
 
+pub fn pager_lend(
+    pager: Checked,
+    mem: Checked,
+    offset: u64,
+    len: u64,
+    source: Checked,
+    source_offset: u64,
+) -> Result<(), Error> {
+    let mem = paged_of(pager, mem)?;
+    let source = object::<MemoryObject>(source);
+    mem.lend(offset, len, &source, source_offset)
+}
+
 pub fn pager_op(pager: Checked, mem: Checked, op: u32, offset: u64, len: u64) -> Result<(), Error> {
     page_aligned(&[offset, len])?;
     paged_of(pager, mem)?.pager_op(op, offset, len)
