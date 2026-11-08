@@ -286,7 +286,10 @@ fn negotiate(structures: &Structures, wanted: u64) -> Result<u64, Error> {
 
 /// Takes the device's interrupts: on each one, processes the used rings
 /// of the queues it belongs to and counts a configuration change, and
-/// then acknowledges it. Returns the handles to keep.
+/// then acknowledges it. Returns the handles to keep. An MSI that arrives
+/// while its object is still signaled adds no signal, so after the
+/// acknowledgement the used rings are processed once more, for requests
+/// that the device returned in between.
 fn watch(
     device: &Rc<DeviceAsyncClient>,
     structures: &Rc<Structures>,
@@ -318,6 +321,9 @@ fn watch(
                         }
                         // SAFETY: the call takes no pointers.
                         unsafe { sys::interrupt_ack(raw) };
+                        for queue in &mine {
+                            queue.process_used();
+                        }
                     }
                 });
             }
