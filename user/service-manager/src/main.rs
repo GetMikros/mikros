@@ -80,13 +80,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     match managed::take_entry(&mut managed.namespace, services::SERVICES) {
         Some((fs, at)) => {
             let fs = NodeAsyncClient::new(fs, reactor.clone());
-            let header = managed.header;
+            // Only these fields leave the header: the rest of it, the
+            // process handle that the allocator maps memory with among
+            // them, stays open with `managed` while the program runs.
+            let header = &mut managed.header;
             let me = ClientIdentity {
                 pid: header.pid,
                 user: header.user,
-                app_id: header.app_id,
+                app_id: core::mem::take(&mut header.app_id),
             };
-            let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
+            let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());
             spawner.spawn(services::start(
                 fs,
                 at,
