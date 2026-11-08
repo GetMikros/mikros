@@ -14,7 +14,7 @@ use mikros_rt::interfaces::mikros::service::Provider;
 
 /// The classes of services that drivers may publish, and the permission
 /// that connecting to each one's instances needs.
-const CLASSES: [(&str, &str); 7] = [
+const CLASSES: [(&str, &str); 8] = [
     ("gpu", "gpu.render"),
     ("input", "input.seat"),
     ("acpi", "device.registry"),
@@ -22,7 +22,12 @@ const CLASSES: [(&str, &str); 7] = [
     ("filesystem", "filesystem.mount"),
     ("rtc", "time.set"),
     ("hid", "input.hid_raw"),
+    ("subvolumes", "filesystem.manage"),
 ];
+/// The class of file systems, and that of the management of a file
+/// system's subvolumes, whose instance is named after the file system's.
+const FILESYSTEM: &str = "filesystem";
+const SUBVOLUMES: &str = "subvolumes";
 
 /// The service IDs given out during this boot, by device, class, and
 /// how many services of that class the device's driver published before
@@ -52,18 +57,24 @@ impl ServiceIds {
 }
 
 /// The services that one start of a driver published: how many of each
-/// class, the registered instances by protocol and name, and whether
-/// the driver has ended, after which they are unregistered.
+/// class, the registered instances by protocol and name, the ID of the
+/// last `filesystem` service, and whether the driver has ended, after
+/// which they are unregistered.
 #[derive(Default)]
 pub struct Published {
     counts: RefCell<BTreeMap<String, usize>>,
     instances: RefCell<Vec<(String, String)>>,
+    filesystem: Cell<Option<u64>>,
     ended: Cell<bool>,
 }
 
 /// Registers `provider` as the next service of `class` of the driver of
-/// device `caller`, which `published` keeps, and returns its ID. Fails
-/// with `INVALID_ARGS` for a class that drivers may not publish.
+/// device `caller`, which `published` keeps, and returns its ID. The
+/// instance is named after the ID, but a `subvolumes` service's after the
+/// ID of the last `filesystem` service of the same start of the driver.
+/// Fails with `INVALID_ARGS` for a class that drivers may not publish,
+/// and with `BAD_STATE` for a `subvolumes` service before any
+/// `filesystem` service.
 pub async fn publish(
     m: &Manager,
     published: &Published,
@@ -74,6 +85,10 @@ pub async fn publish(
     let permission = CLASSES.iter().find(|(c, _)| *c == class);
     let (_, permission) = permission.ok_or(Status::InvalidArgs)?;
     let registrar = m.registrar.as_ref().ok_or(Status::BadState)?;
+    let named = match class.as_str() {
+        SUBVOLUMES => Some(published.filesystem.get().ok_or(Status::BadState)?),
+        _ => None,
+    };
     let nth = {
         let mut counts = published.counts.borrow_mut();
         let count = counts.entry(class.clone()).or_default();
@@ -81,7 +96,11 @@ pub async fn publish(
         *count - 1
     };
     let id = m.service_ids.get(caller, &class, nth);
-    let (protocol, instance) = (format!("device.{class}"), format!("{id}"));
+    if class == FILESYSTEM {
+        published.filesystem.set(Some(id));
+    }
+    let instance = format!("{}", named.unwrap_or(id));
+    let protocol = format!("device.{class}");
     let permission = Some(String::from(*permission));
     let registered = registrar
         .register(protocol.clone(), instance.clone(), permission, provider)
