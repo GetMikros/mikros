@@ -238,7 +238,7 @@ impl Fs {
 
     /// Serves `end` as a connection to `open` with `rights` for the user
     /// `user`, writing at the end when `append`, and looking names up
-    /// case-insensitively when `folded` (MIKSPEC-0071.R16).
+    /// case-insensitively when `folded` (MIKSPEC-0071.R17).
     pub fn serve(
         self: &Rc<Self>,
         end: ServerEnd<Node>,

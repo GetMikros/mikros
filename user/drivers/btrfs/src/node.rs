@@ -25,7 +25,7 @@ pub(crate) struct Connection {
     pub(crate) cursor: u64,
     pub(crate) append: bool,
     /// Whether the connection looks names up case-insensitively, as it was
-    /// opened with `CASE_INSENSITIVE` (MIKSPEC-0071.R16).
+    /// opened with `CASE_INSENSITIVE` (MIKSPEC-0071.R17).
     pub(crate) folded: bool,
     /// The owner of the connection's locks and watches.
     pub(crate) owner: u64,

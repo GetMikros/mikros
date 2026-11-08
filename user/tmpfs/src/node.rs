@@ -29,7 +29,7 @@ struct Connection {
     cursor: u64,
     append: bool,
     /// Whether the connection looks names up case-insensitively, as it was
-    /// opened with `CASE_INSENSITIVE` (MIKSPEC-0071.R16).
+    /// opened with `CASE_INSENSITIVE` (MIKSPEC-0071.R17).
     folded: bool,
     /// The owner of the connection's locks.
     owner: u64,
@@ -613,23 +613,25 @@ impl Connection {
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
         let (name, moved) = self.find(self.node, &q.name)?.ok_or(Error::NotFound)?;
         // An entry equal to the new name under case folding is replaced as
-        // one of exactly that name, under its own name; the moved entry
-        // itself only changes its case.
-        let new_name = match self.find(to, &q.new_name)? {
-            Some((own, id)) if !(id == moved && to == self.node) => own,
-            _ => q.new_name.clone(),
+        // one of exactly that name: the moved entry takes that entry's own
+        // name, which replaces it, and then the new name as given. The
+        // moved entry itself only changes its case.
+        let replacing = match self.find(to, &q.new_name)? {
+            Some((own, id)) if own != q.new_name && !(id == moved && to == self.node) => Some(own),
+            _ => None,
         };
-        let q = NodeRenameRequest {
-            name,
-            new_name,
-            ..q
-        };
-        let renamed =
-            self.fs
-                .tree
-                .borrow_mut()
-                .rename(self.node, &q.name, to, &q.new_name, fs::now());
-        let replaced = renamed.map_err(fs::error)?;
+        let q = NodeRenameRequest { name, ..q };
+        let target = replacing.as_deref().unwrap_or(&q.new_name);
+        let mut tree = self.fs.tree.borrow_mut();
+        let replaced = tree
+            .rename(self.node, &q.name, to, target, fs::now())
+            .map_err(fs::error)?;
+        if let Some(own) = &replacing {
+            // Nothing is named `new_name` exactly, so this replaces none.
+            tree.rename(to, own, to, &q.new_name, fs::now())
+                .map_err(fs::error)?;
+        }
+        drop(tree);
         let cookie = self.fs.watches.move_cookie();
         let from = event(WatchKind::MovedFrom, cookie, &q.name);
         let into = event(WatchKind::MovedTo, cookie, &q.new_name);

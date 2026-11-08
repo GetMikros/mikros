@@ -72,7 +72,7 @@ impl Directory {
 
     /// The entry `name`, with its own name: the one of exactly that name,
     /// or else the first in listing order whose name equals `name` under
-    /// simple case folding (MIKSPEC-0071.R16).
+    /// simple case folding (MIKSPEC-0071.R17).
     pub fn get_folded(&self, name: &str) -> Option<(&str, Id)> {
         if let Some(id) = self.get(name) {
             let cookie = self.names.get(name)?;

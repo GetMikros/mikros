@@ -438,7 +438,8 @@ async fn case_insensitive(
     expect(failed(taken) == Some(Error::Exists))?;
     ok(ci.unlink("linked".into(), false).await)?;
     // Renaming to another case of its own name changes the case; onto an
-    // entry that differs in case, it replaces that entry, keeping its name.
+    // entry that differs in case, it replaces that entry, under the name
+    // given.
     open(dir, "one", create, reactor).await.ok()?;
     let token = ok(ci.get_token().await)?.token;
     ok(ci.rename("ONE".into(), token, "One".into()).await)?;
@@ -448,12 +449,12 @@ async fn case_insensitive(
     ok(ci.rename("TWO".into(), token, "one".into()).await)?;
     let listed = names(dir).await?;
     expect(
-        listed.iter().any(|(n, _)| n == "One")
+        listed.iter().any(|(n, _)| n == "one")
             && !listed
                 .iter()
-                .any(|(n, _)| n == "one" || n == "two" || n == "ONE"),
+                .any(|(n, _)| n == "One" || n == "two" || n == "ONE"),
     )?;
-    let (one, _) = open(dir, "One", OpenFlags(0), reactor).await.ok()?;
+    let (one, _) = open(dir, "one", OpenFlags(0), reactor).await.ok()?;
     expect(inode(&one).await? == moved)?;
     let (clone, server) = endpoints::<Node>().ok()?;
     ok(ci

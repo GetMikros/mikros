@@ -1,6 +1,6 @@
 //! Unicode simple case folding, the mappings of status C and S of
 //! `CaseFolding.txt` of Unicode 16.0.0, for the servers that look names
-//! up case-insensitively (MIKSPEC-0071.R16). `cargo xtask casefold`
+//! up case-insensitively (MIKSPEC-0071.R17). `cargo xtask casefold`
 //! generates the table.
 
 #![no_std]

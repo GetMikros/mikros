@@ -4,7 +4,7 @@
 //! (MIKSPEC-0049.R8), and creating symbolic links. On a case-insensitive
 //! connection, existing names are found as `Open` with `CASE_INSENSITIVE`
 //! finds them, and new names may not equal existing ones under case
-//! folding (MIKSPEC-0071.R16).
+//! folding (MIKSPEC-0071.R17).
 
 use crate::fs::{Fs, Open, error};
 use crate::node::{Connection, NAME_MAX, TARGET_MAX};
@@ -78,38 +78,53 @@ impl Connection {
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
         let (moved, name) = self.find(&self.open, &q.name)?.ok_or(Error::NotFound)?;
         // An entry equal to the new name under case folding is replaced as
-        // one of exactly that name, under its own name; the moved entry
-        // itself only changes its case.
-        let new_name = match self.find(&to, &q.new_name)? {
-            Some((found, own)) if !(found.key == moved.key && to.key == self.open.key) => own,
-            _ => q.new_name.clone(),
+        // one of exactly that name: the moved entry first takes that
+        // entry's own name, which replaces it atomically, and then the new
+        // name as given. The moved entry itself only changes its case.
+        let replacing = match self.find(&to, &q.new_name)? {
+            Some((found, own))
+                if own != q.new_name && !(found.key == moved.key && to.key == self.open.key) =>
+            {
+                Some(own)
+            }
+            _ => None,
         };
-        let q = NodeRenameRequest {
-            name,
-            new_name,
-            ..q
-        };
-        if self.fs.is_usr(&self.open, &q.name) || self.fs.is_usr(&to, &q.new_name) {
+        let q = NodeRenameRequest { name, ..q };
+        let target = replacing.as_deref().unwrap_or(&q.new_name);
+        let usr = self.fs.is_usr(&to, target) || self.fs.is_usr(&to, &q.new_name);
+        if self.fs.is_usr(&self.open, &q.name) || usr {
             return Err(Error::AccessDenied);
         }
-        let replaced = self.lookup(&to, &q.new_name)?;
+        let replaced = self.lookup(&to, target)?;
         self.open
             .node
-            .rename(q.name.as_bytes(), &to.node, q.new_name.as_bytes(), 0)
+            .rename(q.name.as_bytes(), &to.node, target.as_bytes(), 0)
             .map_err(error)?;
+        let renamed = match &replacing {
+            Some(own) => to
+                .node
+                .rename(own.as_bytes(), &to.node, q.new_name.as_bytes(), 0)
+                .map_err(error),
+            None => Ok(()),
+        };
+        // Should giving the new name fail, the entry keeps the other one.
+        let new_name = match renamed {
+            Ok(()) => q.new_name.as_str(),
+            Err(_) => target,
+        };
         if let Some(replaced) = &replaced
             && replaced.key != moved.key
         {
-            self.fs.renamed(to.key, &q.new_name, None);
+            self.fs.renamed(to.key, target, None);
             self.fs
                 .watches
                 .notify(replaced.key, &[event(WatchKind::SelfRemoved, 0, "")]);
         }
         self.fs
-            .renamed(self.open.key, &q.name, Some((to.key, &q.new_name)));
+            .renamed(self.open.key, &q.name, Some((to.key, new_name)));
         let cookie = self.fs.watches.move_cookie();
         let from = event(WatchKind::MovedFrom, cookie, &q.name);
-        let into = event(WatchKind::MovedTo, cookie, &q.new_name);
+        let into = event(WatchKind::MovedTo, cookie, new_name);
         if to.key == self.open.key {
             self.fs.watches.notify(to.key, &[from, into]);
         } else {
@@ -119,7 +134,7 @@ impl Connection {
         self.fs
             .watches
             .notify(moved.key, &[event(WatchKind::SelfMoved, 0, "")]);
-        Ok(())
+        renamed
     }
 
     pub(crate) fn link(&self, q: NodeLinkRequest) -> Result<(), Error> {

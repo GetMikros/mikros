@@ -443,7 +443,7 @@ fn names(dir: &NodeClient) -> Option<Vec<String>> {
 /// case-insensitive: `CreateSymlink`, `BindSocket` and `Link` refuse new
 /// names taken in another case, `Link`, `Rename` and `Unlink` find their
 /// entries in another case, and `Rename` changes the case of a name or
-/// replaces an entry that differs in case, keeping its name.
+/// replaces an entry that differs in case under the name given.
 fn case_insensitive(root: &NodeClient) -> Result<(), i64> {
     use OpenFlags as F;
     let folded = F::CASE_INSENSITIVE;
@@ -479,7 +479,7 @@ fn case_insensitive(root: &NodeClient) -> Result<(), i64> {
     expect(ok(renamed).is_some(), 76)?;
     let mut listed = names(&dir).ok_or(77)?;
     listed.sort();
-    expect(listed == ["LinkeD", "Straße"], 77)?;
+    expect(listed == ["Straße", "linked"], 77)?;
     let (clone, _) = clone(&ci, RW).ok_or(78)?;
     for name in ["STRAẞE", "linked"] {
         expect(ok(clone.unlink(name.into(), false, FOREVER)).is_some(), 78)?;

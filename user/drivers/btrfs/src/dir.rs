@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //! Resolving paths (MIKSPEC-0049.R4, R5), also case-insensitively
-//! (MIKSPEC-0071.R16), opening and creating nodes (MIKSPEC-0049.R6), and
+//! (MIKSPEC-0071.R17), opening and creating nodes (MIKSPEC-0049.R6), and
 //! listing directories (MIKSPEC-0049.R12).
 
 use crate::fs::{self, Open, error};
@@ -54,7 +54,7 @@ impl Connection {
 
     /// The first entry of the directory `dir`, in the order in which
     /// `ReadDirectory` lists them, whose name equals `name` under simple
-    /// case folding (MIKSPEC-0071.R16), as the open node that connections
+    /// case folding (MIKSPEC-0071.R17), as the open node that connections
     /// share, with the entry's own name. Names that are not UTF-8 equal
     /// none.
     pub(crate) fn lookup_folded(
