@@ -2,6 +2,7 @@
 //! The btrfs code on the shim, run on the build host.
 
 mod reads;
+mod writes;
 
 use crate::host::Disk;
 use std::format;
@@ -32,23 +33,61 @@ fn adds_disks() {
 /// A fresh btrfs of `size` bytes from the host's mkfs.btrfs, with its
 /// options `options`, as a file that is already unlinked.
 fn image(name: &str, size: u64, options: &[&std::ffi::OsStr]) -> std::fs::File {
-    let path = std::env::temp_dir().join(format!("mikros-btrfs-{name}-{}", std::process::id()));
-    let file = std::fs::File::create_new(&path).unwrap();
-    file.set_len(size).unwrap();
-    let status = std::process::Command::new("mkfs.btrfs")
-        .arg("--quiet")
-        .args(options)
-        .arg(&path)
-        .status()
-        .expect("the tests need mkfs.btrfs of btrfs-progs");
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .unwrap();
-    std::fs::remove_file(&path).unwrap();
-    assert!(status.success());
+    let image = Image::new(name, size, options);
+    let file = image.open();
+    drop(image);
     file
+}
+
+/// A fresh btrfs of the host's mkfs.btrfs in a file, which is removed
+/// when this is dropped.
+struct Image(std::path::PathBuf);
+
+impl Image {
+    fn new(name: &str, size: u64, options: &[&std::ffi::OsStr]) -> Self {
+        let path = std::env::temp_dir().join(format!("mikros-btrfs-{name}-{}", std::process::id()));
+        let image = Image(path);
+        let file = std::fs::File::create_new(&image.0).unwrap();
+        file.set_len(size).unwrap();
+        let status = std::process::Command::new("mkfs.btrfs")
+            .arg("--quiet")
+            .args(options)
+            .arg(&image.0)
+            .status()
+            .expect("the tests need mkfs.btrfs of btrfs-progs");
+        assert!(status.success());
+        image
+    }
+
+    fn open(&self) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.0)
+            .unwrap()
+    }
+
+    /// Asserts that the host's btrfs check finds nothing wrong with the
+    /// file system, its data's checksums included.
+    fn check(&self) {
+        let output = std::process::Command::new("btrfs")
+            .args(["check", "--readonly", "--check-data-csum"])
+            .arg(&self.0)
+            .output()
+            .expect("the tests need btrfs of btrfs-progs");
+        assert!(
+            output.status.success(),
+            "btrfs check: {}{}",
+            std::string::String::from_utf8_lossy(&output.stdout),
+            std::string::String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+impl Drop for Image {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// The magic number of btrfs.

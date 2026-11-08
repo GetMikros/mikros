@@ -24,6 +24,17 @@ unsafe extern "C" {
         entry: extern "C" fn(*mut c_void, *const u8, c_int, u64, u32) -> bool,
         arg: *mut c_void,
     ) -> i32;
+    fn mikros_btrfs_create(
+        dir: *mut c_void,
+        name: *const c_char,
+        len: u32,
+        kind: c_int,
+        mode: u32,
+        target: *const c_char,
+        node: *mut *mut c_void,
+    ) -> i32;
+    fn mikros_btrfs_remove(dir: *mut c_void, name: *const c_char, len: u32, directory: bool)
+    -> i32;
 }
 
 /// A time, in seconds and nanoseconds since 1970 in UTC.
@@ -162,6 +173,58 @@ impl<'m> Node<'m> {
                 entry,
                 (&mut callback as *mut EntryFn<'_>).cast(),
             )
+        })
+    }
+}
+
+/// What `Node::create()` makes.
+#[derive(Clone, Copy, Debug)]
+pub enum Kind<'t> {
+    File,
+    Directory,
+    /// A symbolic link to the target.
+    Symlink(&'t core::ffi::CStr),
+}
+
+fn name_len(name: &[u8]) -> Result<u32, i32> {
+    u32::try_from(name.len()).map_err(|_| -36)
+}
+
+impl<'m> Node<'m> {
+    /// Makes `name` in this directory, with the permission bits `mode`
+    /// for a file or a directory.
+    pub fn create(&self, name: &[u8], kind: Kind<'_>, mode: u32) -> Result<Node<'m>, i32> {
+        let (kind, target) = match kind {
+            Kind::File => (1, core::ptr::null()),
+            Kind::Directory => (2, core::ptr::null()),
+            Kind::Symlink(target) => (3, target.as_ptr()),
+        };
+        let mut node = core::ptr::null_mut();
+        // SAFETY: the node is alive, and the pointers are valid for the
+        // call.
+        result(unsafe {
+            mikros_btrfs_create(
+                self.node,
+                name.as_ptr().cast(),
+                name_len(name)?,
+                kind,
+                mode,
+                target,
+                &mut node,
+            )
+        })?;
+        Ok(Node {
+            node,
+            mount: PhantomData,
+        })
+    }
+
+    /// Removes `name` from this directory: an empty directory if
+    /// `directory`, anything else otherwise.
+    pub fn remove(&self, name: &[u8], directory: bool) -> Result<(), i32> {
+        // SAFETY: as for `create()`.
+        result(unsafe {
+            mikros_btrfs_remove(self.node, name.as_ptr().cast(), name_len(name)?, directory)
         })
     }
 }

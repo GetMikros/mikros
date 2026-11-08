@@ -14,22 +14,8 @@
 #include <linux/stat.h>
 #include <linux/slab.h>
 #include <linux/err.h>
+#include "file.h"
 #include "shim.h"
-
-struct mikros_node {
-	struct path path;
-	/* Opened at the first read or listing, under the lock, which also
-	 * keeps listings of the node from moving each other's position. */
-	struct file *file;
-	struct mutex lock;
-};
-
-/* A time, as the program sees it. */
-struct mikros_time {
-	s64 seconds;
-	u32 nanoseconds;
-	u32 unused;
-};
 
 /* The attributes of a node, as the program sees them. */
 struct mikros_attributes {
@@ -47,7 +33,7 @@ struct mikros_attributes {
 	struct mikros_time changed;
 };
 
-static struct mikros_node *new_node(struct vfsmount *mnt, struct dentry *dentry)
+struct mikros_node *mikros_node_new(struct vfsmount *mnt, struct dentry *dentry)
 {
 	struct mikros_node *node = kzalloc(sizeof(*node), GFP_KERNEL);
 
@@ -64,7 +50,7 @@ static struct mikros_node *new_node(struct vfsmount *mnt, struct dentry *dentry)
 int mikros_btrfs_root(struct vfsmount *mnt, struct mikros_node **nodep)
 {
 	bool adopted = mikros_task_adopt("root");
-	struct mikros_node *node = new_node(mnt, dget(mnt->mnt_root));
+	struct mikros_node *node = mikros_node_new(mnt, dget(mnt->mnt_root));
 
 	if (node)
 		*nodep = node;
@@ -98,7 +84,7 @@ int mikros_btrfs_lookup(struct mikros_node *dir, const char *name, unsigned int 
 	ret = PTR_ERR_OR_ZERO(dentry);
 	if (ret)
 		goto out;
-	node = new_node(dir->path.mnt, dentry);
+	node = mikros_node_new(dir->path.mnt, dentry);
 	ret = -ENOMEM;
 	if (!node) {
 		dput(dentry);
