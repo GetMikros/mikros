@@ -13,6 +13,9 @@
 //! the partition's `cache` property is `quick-disconnect`, and are
 //! written back otherwise (MIKSPEC-0049.R20). `Stop` writes what has
 //! changed to stable storage, flushes the partition and ends the server.
+//! The partition's channel outlives the partition driver's restarts:
+//! `Reconnect` gives a new one, on which unfinished requests go again
+//! (MIKSPEC-0044.R19).
 //! `ResetChild` and `ConnectChild` fail with `NOT_SUPPORTED`.
 
 #![no_std]
@@ -44,8 +47,8 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer, DriverRequest, DriverStartRequest,
-    DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverReconnectResponse, DriverRequest,
+    DriverStartRequest, DriverStartResponse, DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::{DirectoryClient, Provider};
@@ -118,10 +121,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                // The driver does not take a new bus channel yet.
-                DriverRequest::Reconnect(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
+                DriverRequest::Reconnect(request, responder) => match &served {
+                    Some(fs) => responder.reply(
+                        s,
+                        fs.reconnect(request.bus, process)
+                            .map(|()| DriverReconnectResponse {}),
+                    ),
+                    None => responder.reply(s, Err(Status::BadState)),
+                },
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
                 }

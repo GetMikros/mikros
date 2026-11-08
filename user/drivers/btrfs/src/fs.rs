@@ -26,13 +26,15 @@ use mikros_btrfs::node::{
     Attributes as BtrfsAttributes, MODE_DIRECTORY, MODE_SYMLINK, MODE_TYPE, Node as BtrfsNode, Time,
 };
 use mikros_rt::exec::{Reactor, Spawner};
-use mikros_rt::interfaces::__midl::ServerEnd;
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{
     Attributes, Error, Filesystem, FilesystemAsyncServer, FilesystemGetRootResponse,
     FilesystemInfo, FilesystemQueryFilesystemResponse, FilesystemRequest, Node, NodeType, Rights,
     WatchKind,
 };
 use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, ProviderRequest};
+use mikros_rt::sys;
 
 /// The protocol of the published service.
 const PROTOCOL: &str = "device.filesystem";
@@ -302,10 +304,18 @@ impl Fs {
     /// committed. The connections still hold the mount, which stays
     /// mounted.
     pub fn write_out(&self) {
+        // Requests that wait for a new channel to the partition fail now.
+        self.disk.fail();
         work::wait_idle();
         self.shares.harvest();
         let _ = self.mount.sync();
         self.disk.flush();
+    }
+
+    /// Continues on `bus`, the channel to the partition that `Reconnect`
+    /// gave, with its buffer mapped into `process`.
+    pub fn reconnect(&self, bus: OwnedHandle, process: sys::Handle) -> Result<(), Status> {
+        self.disk.reconnect(bus, process)
     }
 
     /// A new owner of locks and watches, for a connection.
