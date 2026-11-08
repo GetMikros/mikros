@@ -9405,7 +9405,9 @@ mod manager {
     /// `Block` to the driver for the partition. For the scratch
     /// partitions that is the test driver, whose `Start` succeeds only
     /// when reads, writes, flushes, the writable lock and refusals work
-    /// as they should. For the EFI system partition it is the FAT server,
+    /// as they should, and when the device manager's removal service,
+    /// once the driver has granted itself `files.removable`, lists no
+    /// removable disks and refuses to eject its partition. For the EFI system partition it is the FAT server,
     /// which publishes the volume's `filesystem` service, and the test
     /// driver for the root partition succeeds only when that service
     /// reads, writes, renames and removes as it should. The device

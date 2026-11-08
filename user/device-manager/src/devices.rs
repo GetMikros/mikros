@@ -77,6 +77,11 @@ impl Devices {
         self.list.iter().find(|d| d.id == id)
     }
 
+    /// The devices, in the order they were added.
+    pub fn iter(&self) -> impl Iterator<Item = &Device> {
+        self.list.iter()
+    }
+
     pub fn get_mut(&mut self, id: u64) -> Option<&mut Device> {
         self.list.iter_mut().find(|d| d.id == id)
     }

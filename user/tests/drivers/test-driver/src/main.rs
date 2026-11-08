@@ -77,6 +77,7 @@ extern crate alloc;
 
 mod btrfs;
 mod fat;
+mod removal;
 
 use alloc::rc::Rc;
 use alloc::vec;
@@ -145,6 +146,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let app_id = managed.header.app_id.clone();
+    let user = managed.header.user;
     let process = managed.header.process.raw();
     let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
     let Some(at) = managed
@@ -209,6 +211,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                                 Some(bus) => disk_works(bus, &reactor, process).await,
                                 None => false,
                             };
+                            let id = request.device.id;
+                            let works = works
+                                && removal::works(&directory, &reactor, user, &app_id, id).await;
                             match works {
                                 true => Ok(DriverStartResponse {}),
                                 false => Err(Status::InvalidArgs),

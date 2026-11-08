@@ -5,6 +5,9 @@ binary: /usr/bin/device-manager
 start: boot
 boot_handles: [root_resource, log_manage, framebuffer, platform_info]
 permissions: [process.set_identity, permissions.check, permissions.grant_system, services.register]
+provides:
+  - protocol: mikros.driver.Removal
+    permission: files.removable
 namespace:
   - path: /usr/lib/drivers
     rights: r

@@ -21,6 +21,7 @@ mod acpi;
 mod devices;
 mod drivers;
 mod publish;
+mod removal;
 mod serve;
 mod start;
 mod supervise;
@@ -34,7 +35,7 @@ use core::cell::RefCell;
 use devices::Devices;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
-use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
+use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerAsyncClient};
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
@@ -88,6 +89,11 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let framebuffer = take(&mut managed.handles, FRAMEBUFFER_ID);
+    let provider = managed
+        .handles
+        .iter()
+        .position(|h| h.role == HandleRole::Provider)
+        .map(|at| managed.handles.remove(at).handle);
     let info = take(&mut managed.handles, PLATFORM_INFO_ID)
         .as_ref()
         .and_then(platform_info);
@@ -145,6 +151,13 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         reactor,
         spawner: spawner.clone(),
     });
+    match provider {
+        Some(end) => spawner.spawn(removal::serve(manager.clone(), ServerEnd::new(end))),
+        None => mikros_rt::log!(
+            Warning,
+            "device-manager: no provider, so no removal service"
+        ),
+    }
     let bound = manager.devices.borrow().bound();
     for id in bound {
         spawner.spawn(supervise::supervise(manager.clone(), id));

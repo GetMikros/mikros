@@ -32,8 +32,10 @@ const WINDOW: i64 = 60_000_000_000;
 const TERMINATED: u32 = 1 << 4;
 const INFO_PROCESS: u32 = 2;
 const INFO_PROCESS_SIZE: usize = 0x28;
-/// How long a driver that is called `Stop` has before it is terminated.
+/// How long a driver that is called `Stop` has before it is terminated,
+/// and how long it has when its disk is ejected.
 const STOP_LIMIT: i64 = 5_000_000_000;
+pub const EJECT_STOP_LIMIT: i64 = 60_000_000_000;
 
 /// What the supervising tasks share: the devices, the drivers of the
 /// valid manifests, what starting them takes, the service manager's
@@ -236,10 +238,16 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
 /// terminated when `Stop` replies, when the channel fails, or after
 /// `STOP_LIMIT`, and it is not started again.
 pub fn remove(m: Rc<Manager>, id: u64) -> Pin<Box<dyn Future<Output = ()>>> {
+    remove_within(m, id, STOP_LIMIT)
+}
+
+/// Removes device `id` as `remove` does, but gives each driver `limit`
+/// nanoseconds after `Stop` before it is terminated.
+pub fn remove_within(m: Rc<Manager>, id: u64, limit: i64) -> Pin<Box<dyn Future<Output = ()>>> {
     Box::pin(async move {
         let children = m.devices.borrow().children(id);
         for child in children {
-            remove(m.clone(), child).await;
+            remove_within(m.clone(), child, limit).await;
         }
         let (client, pid) = match m.devices.borrow_mut().get_mut(id) {
             Some(device) => {
@@ -249,7 +257,7 @@ pub fn remove(m: Rc<Manager>, id: u64) -> Pin<Box<dyn Future<Output = ()>>> {
             None => return,
         };
         if let Some(client) = client {
-            let deadline = now().saturating_add(STOP_LIMIT);
+            let deadline = now().saturating_add(limit);
             first(client.stop(), m.reactor.sleep_until(deadline)).await;
         }
         if let Some(pid) = pid {
