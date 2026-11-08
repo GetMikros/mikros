@@ -13,8 +13,9 @@
 //!
 //! Otherwise profiles apply once the process manager has connected to
 //! the root file system, the instance `root` of `device.filesystem`
-//! (MIKSPEC-0050.R8, MIKSPEC-0050.R29), and to tmpfs: the root table's
-//! entries then come from the root file system, and `/tmp` from tmpfs.
+//! (MIKSPEC-0050.R8, MIKSPEC-0050.R29): the root table's entries then
+//! come from the root file system, and `/tmp` from tmpfs, for which an
+//! entry waits until tmpfs serves.
 //! Processes started before go without their profiles. An entry that is
 //! the root file system's root or lies in `@system` fails the start with
 //! `ACCESS_DENIED` (MIKSPEC-0050.R28).
@@ -73,13 +74,16 @@ const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 const RX: Rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
 const RWX: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0);
 
-/// What profiles take their entries from: tmpfs, for `/tmp`, and the
-/// sources of the root table.
+/// What profiles take the entries of the root table from.
 struct Ready {
-    tmpfs: Rc<NodeAsyncClient>,
-    /// Where the budgets of tmpfs's directories are set.
-    temporary: TemporaryFilesystemAsyncClient,
     roots: Roots,
+}
+
+/// The root of tmpfs, for `/tmp`, and where the budgets of its
+/// directories are set.
+struct Tmpfs {
+    root: NodeAsyncClient,
+    temporary: TemporaryFilesystemAsyncClient,
 }
 
 enum Roots {
@@ -104,6 +108,9 @@ pub struct Namespaces {
     /// profiles to apply since.
     tmpfs_started: Cell<bool>,
     waiting: RefCell<Vec<Waker>>,
+    /// tmpfs, once it serves, and the tasks that wait for it.
+    tmpfs: RefCell<Option<Rc<Tmpfs>>>,
+    tmpfs_waiting: RefCell<Vec<Waker>>,
 }
 
 /// Where an entry of the root table comes from: a directory of the boot
@@ -196,6 +203,8 @@ impl Namespaces {
             ready: RefCell::new(None),
             tmpfs_started: Cell::new(false),
             waiting: RefCell::new(Vec::new()),
+            tmpfs: RefCell::new(None),
+            tmpfs_waiting: RefCell::new(Vec::new()),
         }
     }
 
@@ -229,24 +238,42 @@ impl Namespaces {
     /// them from the boot image, and from then on builds namespaces from
     /// profiles.
     pub async fn prepare(&self, directory: DirectoryAsyncClient, fs: Rc<Fs>, reactor: Reactor) {
-        let (root, temporary) = tmpfs_once_served(&directory, &reactor).await;
-        match fill(&root, &fs, &reactor).await {
-            Ok((etc, var, users)) => {
-                let tmpfs = Rc::new(root);
-                let roots = Roots::Boot { etc, var, users };
-                self.apply(Ready {
-                    tmpfs,
-                    temporary,
-                    roots,
-                });
-            }
+        let tmpfs = self.serve_tmpfs(&directory, &reactor).await;
+        match fill(&tmpfs.root, &fs, &reactor).await {
+            Ok((etc, var, users)) => self.apply(Ready {
+                roots: Roots::Boot { etc, var, users },
+            }),
             Err(e) => mikros_rt::log!(Error, "process-manager: filling tmpfs failed: {e:?}"),
         }
     }
 
+    /// tmpfs, asking through `directory` again until it serves, which
+    /// the `/tmp` entries that wait for it get from then on.
+    async fn serve_tmpfs(&self, directory: &DirectoryAsyncClient, reactor: &Reactor) -> Rc<Tmpfs> {
+        let (root, temporary) = tmpfs_once_served(directory, reactor).await;
+        let tmpfs = Rc::new(Tmpfs { root, temporary });
+        *self.tmpfs.borrow_mut() = Some(tmpfs.clone());
+        for waker in self.tmpfs_waiting.take() {
+            waker.wake();
+        }
+        tmpfs
+    }
+
+    /// tmpfs, once it serves.
+    async fn tmpfs(&self) -> Rc<Tmpfs> {
+        poll_fn(|cx| match self.tmpfs.borrow().clone() {
+            Some(tmpfs) => Poll::Ready(tmpfs),
+            None => {
+                self.tmpfs_waiting.borrow_mut().push(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
     /// Connects through `directory`, the process manager's own, to the
-    /// root file system once it is published, and to tmpfs once it
-    /// serves, and from then on builds namespaces from profiles.
+    /// root file system once it is published, from then on builds
+    /// namespaces from profiles, and connects to tmpfs once it serves.
     pub async fn prepare_root(&self, directory: DirectoryAsyncClient, reactor: Reactor) {
         let root = match root_filesystem(&directory, &reactor).await {
             Ok(root) => root,
@@ -257,16 +284,14 @@ impl Namespaces {
                 return;
             }
         };
-        let (tmpfs, temporary) = tmpfs_once_served(&directory, &reactor).await;
         self.apply(Ready {
-            tmpfs: Rc::new(tmpfs),
-            temporary,
             roots: Roots::Root(Rc::new(root)),
         });
         mikros_rt::log!(
             Info,
             "process-manager: namespaces come from the root file system"
         );
+        self.serve_tmpfs(&directory, &reactor).await;
     }
 
     /// Connects through `directory`, the process manager's own, to the
@@ -343,7 +368,8 @@ impl Namespaces {
                     .await?,
             );
             let budget = shared.user_budget(user)?;
-            entries.push(tmp(&ready, &format!("cli/{user}"), budget, reactor).await?);
+            let tmpfs = self.tmpfs().await;
+            entries.push(tmp(&tmpfs, &format!("cli/{user}"), budget, reactor).await?);
         } else if !app_id.starts_with("system.") {
             // A native app.
             if user == 0 {
@@ -358,7 +384,8 @@ impl Namespaces {
                 entries.push(self.entry(shared, &ready, "/etc", Rights::READ).await?);
                 let path = format!("apps/{user}/{app_id}");
                 let budget = shared.budget_of(user, app_id)?;
-                entries.push(tmp(&ready, &path, budget, reactor).await?);
+                let tmpfs = self.tmpfs().await;
+                entries.push(tmp(&tmpfs, &path, budget, reactor).await?);
                 if user != 0 {
                     // The folders of the user's app need the user's name.
                     return Err(Status::NotSupported);
@@ -498,15 +525,15 @@ impl Namespaces {
 /// A `/tmp` entry for the directory `path` of tmpfs, made if missing,
 /// with read and write rights, whose files are charged to `budget`.
 async fn tmp(
-    ready: &Ready,
+    tmpfs: &Tmpfs,
     path: &str,
     budget: OwnedHandle,
     reactor: &Reactor,
 ) -> Result<NamespaceEntry, Status> {
-    let dir = directories(&ready.tmpfs, path, reactor)
+    let dir = directories(&tmpfs.root, path, reactor)
         .await
         .map_err(status)?;
-    flat(ready.temporary.set_budget(path.into(), budget).await).map_err(status)?;
+    flat(tmpfs.temporary.set_budget(path.into(), budget).await).map_err(status)?;
     let (directory, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
     flat(dir.clone(server, RW).await).map_err(status)?;
     Ok(NamespaceEntry {
