@@ -3,12 +3,13 @@
  * The memory node: the one node and zone that hold the arena, with the
  * counters and LRU lists of Linux's mm/ code, which the page cache keeps
  * up to date; the amount of memory, which the host gives and the page
- * cache's dirty limits and the VFS's hash tables are sized by; and what
- * that code asks of page reclaim.
+ * cache's dirty limits, the VFS's hash tables and the watermarks of
+ * reclaim are sized by.
  */
 #include <linux/mm.h>
 #include <linux/mmzone.h>
 #include <linux/memblock.h>
+#include <linux/math.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
 #include <linux/vmstat.h>
@@ -21,6 +22,39 @@ struct pglist_data contig_page_data;
 atomic_long_t _totalram_pages;
 unsigned long totalreserve_pages;
 s32 vm_committed_as_batch = 32;
+/* Reclaim's view of the page allocator's fragmentation avoidance, which
+ * the shim's does not have. */
+int defrag_mode;
+
+/* The zone's watermarks, as the release's mm/page_alloc.c sets those of a
+ * machine with one zone: the minimum, which allocations that may reclaim
+ * do not go below, the square root of 16 times the memory in KiB, in KiB,
+ * from 128 KiB to 256 MiB; the low and high marks, between which kswapd
+ * keeps the free memory, each a thousandth of the memory or a quarter of
+ * the minimum above the last. */
+static void set_watermarks(struct zone *zone, unsigned long pages)
+{
+	unsigned long kbytes = pages << (PAGE_SHIFT - 10);
+	unsigned long min = clamp(int_sqrt(kbytes * 16), 128UL, 262144UL) >> (PAGE_SHIFT - 10);
+	unsigned long step = max(min >> 2, mult_frac(pages, 10, 10000));
+
+	zone->watermark_boost = 0;
+	zone->_watermark[WMARK_MIN] = min;
+	zone->_watermark[WMARK_LOW] = min + step;
+	zone->_watermark[WMARK_HIGH] = min + 2 * step;
+	zone->_watermark[WMARK_PROMO] = min + 3 * step;
+}
+
+/* The node's one zone, which the zonelists of reclaim list. */
+static void set_zonelists(struct pglist_data *pgdat, struct zone *zone)
+{
+	struct zoneref *refs = pgdat->node_zonelists[ZONELIST_FALLBACK]._zonerefs;
+
+	refs[0].zone = zone;
+	refs[0].zone_idx = zone_idx(zone);
+	refs[1].zone = NULL;
+	refs[1].zone_idx = 0;
+}
 
 void mikros_node_init(void)
 {
@@ -55,6 +89,8 @@ void mikros_node_init(void)
 	if (!pgdat->per_cpu_nodestats || !zone->per_cpu_zonestats || !zone->per_cpu_pageset)
 		panic("no memory for the counters of the memory node");
 	zone_page_state_add(pages, zone, NR_FREE_PAGES);
+	set_watermarks(zone, pages);
+	set_zonelists(pgdat, zone);
 }
 
 void mikros_node_exact(void)
@@ -127,48 +163,32 @@ void *alloc_large_system_hash(const char *tablename, unsigned long bucketsize,
 	return table;
 }
 
-/* Takes a locked, clean folio that nothing else holds out of the page
- * cache, as the release's mm/vmscan.c does: the pages it freed. */
-long remove_mapping(struct address_space *mapping, struct folio *folio)
+/* Whether `free_pages` leave `mark` free pages after an allocation of
+ * `order`, as the release's mm/page_alloc.c reckons for order 0. The page
+ * allocator takes blocks of any order from the untouched arena when its
+ * lists have none, so that the free blocks of each order do not count;
+ * nor do the reserves of `alloc_flags`, which the shim's allocations do
+ * not draw on. */
+bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
+			 int highest_zoneidx, unsigned int alloc_flags, long free_pages)
 {
-	void (*free_folio)(struct folio *) = mapping->a_ops->free_folio;
-	int refcount = 1 + folio_nr_pages(folio);
-
-	BUG_ON(!folio_test_locked(folio));
-	BUG_ON(mapping != folio_mapping(folio));
-	spin_lock(&mapping->host->i_lock);
-	xa_lock_irq(&mapping->i_pages);
-	if (!folio_ref_freeze(folio, refcount))
-		goto busy;
-	if (unlikely(folio_test_dirty(folio))) {
-		folio_ref_unfreeze(folio, refcount);
-		goto busy;
-	}
-	__filemap_remove_folio(folio, NULL);
-	xa_unlock_irq(&mapping->i_pages);
-	if (mapping_shrinkable(mapping))
-		inode_add_lru(mapping->host);
-	spin_unlock(&mapping->host->i_lock);
-	if (free_folio)
-		free_folio(folio);
-	/* What remains is the page cache's reference, which goes so. */
-	folio_ref_unfreeze(folio, 1);
-	return folio_nr_pages(folio);
-
-busy:
-	xa_unlock_irq(&mapping->i_pages);
-	spin_unlock(&mapping->host->i_lock);
-	return 0;
+	free_pages -= (1L << order) - 1;
+	return free_pages > (long)(mark + z->lowmem_reserve[highest_zoneidx]);
 }
 
-/* Memory is not reclaimed yet, so a task that waits for reclaim to make
- * progress waits as long as the release's longest wait for writeback. */
-void reclaim_throttle(pg_data_t *pgdat, enum vmscan_throttle_state reason)
+bool zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
+		       int highest_zoneidx, unsigned int alloc_flags)
 {
-	schedule_timeout_uninterruptible(HZ / 10);
+	return __zone_watermark_ok(z, order, mark, highest_zoneidx, alloc_flags,
+				   zone_page_state(z, NR_FREE_PAGES));
 }
 
-/* Nothing counts throttled tasks, so this is never called. */
-void __acct_reclaim_writeback(pg_data_t *pgdat, struct folio *folio, int nr_throttled)
+/* The bytes of memory that the page allocator has given out, which may be
+ * more than the host gave. */
+u64 mikros_btrfs_memory_used(void)
 {
+	struct zone *zone = &NODE_DATA(0)->node_zones[ZONE_NORMAL];
+	long free = atomic_long_read(&zone->vm_stat[NR_FREE_PAGES]);
+
+	return (u64)(totalram_pages() - free) << PAGE_SHIFT;
 }

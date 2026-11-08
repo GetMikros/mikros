@@ -38,6 +38,7 @@ unsafe extern "C" {
     fn mikros_btrfs_unmount(mount: *mut c_void);
     fn mikros_btrfs_statfs(mount: *mut c_void, statfs: *mut Statfs) -> i32;
     fn mikros_btrfs_sync_mount(mount: *mut c_void) -> i32;
+    fn mikros_btrfs_memory_used() -> u64;
 }
 
 fn result(ret: i32) -> Result<(), i32> {
@@ -53,6 +54,14 @@ fn result(ret: i32) -> Result<(), i32> {
 pub fn start() -> Result<(), i32> {
     // SAFETY: the shim's entry takes no arguments.
     result(unsafe { mikros_btrfs_start() })
+}
+
+/// The bytes of memory that the shim holds. Reclaim keeps them below
+/// what the host layer's `mikros_host_memory` gives, unless the shim
+/// needs more than it can free.
+pub fn memory_used() -> u64 {
+    // SAFETY: the call takes no arguments.
+    unsafe { mikros_btrfs_memory_used() }
 }
 
 /// Adds the host's disk `handle`, of `size` bytes in blocks of

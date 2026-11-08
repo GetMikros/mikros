@@ -36,9 +36,9 @@ const PARTS: &[&str] = &[
 ];
 
 /// The files of the release, beside btrfs's own, that the shim builds
-/// as they are: library code, locking, the VFS, the page cache and the
-/// generic block code, credentials, and the crypto API with the hashes
-/// btrfs checksums with.
+/// as they are: library code, locking, the VFS, the page cache and its
+/// reclaim, the generic block code, credentials, and the crypto API with
+/// the hashes btrfs checksums with.
 const LINUX: &[&str] = &[
     "lib/bitmap.c",
     "lib/bitrev.c",
@@ -64,6 +64,8 @@ const LINUX: &[&str] = &[
     "lib/lzo/lzo1x_compress_safe.c",
     "lib/lzo/lzo1x_decompress_safe.c",
     "lib/maple_tree.c",
+    "lib/math/int_sqrt.c",
+    "lib/parser.c",
     "lib/percpu_counter.c",
     "lib/radix-tree.c",
     "lib/ratelimit.c",
@@ -142,9 +144,11 @@ const LINUX: &[&str] = &[
     "mm/mmzone.c",
     "mm/page-writeback.c",
     "mm/readahead.c",
+    "mm/shrinker.c",
     "mm/swap.c",
     "mm/truncate.c",
     "mm/util.c",
+    "mm/vmscan.c",
     "mm/vmstat.c",
     "mm/workingset.c",
     "block/bdev.c",

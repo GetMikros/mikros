@@ -494,6 +494,14 @@ bool kthread_should_stop_or_park(void)
 	return kthread_should_stop() || kthread_should_park();
 }
 
+/* Nothing freezes tasks: there is no suspend. */
+bool kthread_freezable_should_stop(bool *was_frozen)
+{
+	if (was_frozen)
+		*was_frozen = false;
+	return kthread_should_stop();
+}
+
 void kthread_parkme(void)
 {
 	struct mikros_task *mt = kthread_of(current);

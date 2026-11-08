@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The btrfs code on the shim, run on the build host.
 
+mod memory;
 mod reads;
 mod shares;
 mod subvolumes;

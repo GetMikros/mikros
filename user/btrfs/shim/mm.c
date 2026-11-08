@@ -12,7 +12,8 @@
 #include <linux/highmem.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
-#include <linux/shrinker.h>
+#include <linux/sched/mm.h>
+#include <linux/swap.h>
 #include <linux/writeback.h>
 #include "mm/internal.h"
 #include "shim.h"
@@ -150,10 +151,48 @@ void prep_compound_page(struct page *page, unsigned int order)
 	prep_compound_head(page, order);
 }
 
+/* Makes room for an allocation of `order` as the release's mm/page_alloc.c
+ * does, with the release's mm/vmscan.c: when the allocation would leave
+ * less free memory than the low watermark, it wakes kswapd, and when it
+ * would leave less than the minimum, an allocation that may reclaim
+ * reclaims first. The memory that the host gave is a goal, not a limit:
+ * an allocation that reclaim makes no room for takes more of the arena,
+ * which the host fills as it is touched. */
+static void make_room(gfp_t gfp, unsigned int order)
+{
+	struct zone *zone = &NODE_DATA(0)->node_zones[ZONE_NORMAL];
+	unsigned int noreclaim;
+	int tries;
+
+	/* Nothing reclaims until the node has its memory, nor for a thread
+	 * that is being made a task of the shim, which has no task yet. */
+	if (!managed_zone(zone) || !current ||
+	    zone_watermark_ok(zone, order, low_wmark_pages(zone), ZONE_NORMAL, 0))
+		return;
+	if (gfp & __GFP_KSWAPD_RECLAIM)
+		wakeup_kswapd(zone, gfp, order, ZONE_NORMAL);
+	gfp = current_gfp_context(gfp);
+	if (!(gfp & __GFP_DIRECT_RECLAIM) || (current->flags & PF_MEMALLOC))
+		return;
+	for (tries = 0; tries < MAX_RECLAIM_RETRIES; tries++) {
+		unsigned long progress;
+
+		if (zone_watermark_ok(zone, order, min_wmark_pages(zone), ZONE_NORMAL, 0))
+			return;
+		noreclaim = memalloc_noreclaim_save();
+		progress = try_to_free_pages(node_zonelist(numa_node_id(), gfp), order, gfp, NULL);
+		memalloc_noreclaim_restore(noreclaim);
+		if (!progress)
+			return;
+		cond_resched();
+	}
+}
+
 static struct page *alloc_block(gfp_t gfp, unsigned int order)
 {
 	struct page *page;
 
+	make_room(gfp, order);
 	spin_lock(&zone_lock);
 	page = order > MAX_PAGE_ORDER ? take_big(order) : take(order);
 	spin_unlock(&zone_lock);
@@ -792,21 +831,6 @@ size_t fault_in_safe_writeable(const char __user *uaddr, size_t size)
 size_t fault_in_subpage_writeable(char __user *uaddr, size_t size)
 {
 	return 0;
-}
-
-/* Memory is not reclaimed under pressure yet: shrinkers never run. */
-struct shrinker *shrinker_alloc(unsigned int flags, const char *fmt, ...)
-{
-	return kzalloc(sizeof(struct shrinker), GFP_KERNEL);
-}
-
-void shrinker_register(struct shrinker *shrinker)
-{
-}
-
-void shrinker_free(struct shrinker *shrinker)
-{
-	kfree(shrinker);
 }
 
 /* Per-CPU memory: a unit of each CPU, which starts with a copy of the

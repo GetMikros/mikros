@@ -64,8 +64,9 @@ extern "C" fn mikros_host_reserve(size: usize) -> *mut c_void {
     }
 }
 
-/// The tests' budget of memory.
-const MEMORY: usize = 1 << 30;
+/// The tests' budget of memory, which tests/memory.rs reads and writes
+/// more than.
+pub const MEMORY: usize = 512 << 20;
 
 #[unsafe(no_mangle)]
 extern "C" fn mikros_host_memory() -> usize {
