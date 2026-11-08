@@ -9,6 +9,8 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod node;
+
 #[cfg(test)]
 mod host;
 #[cfg(test)]

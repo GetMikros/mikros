@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The btrfs code on the shim, run on the build host.
 
+mod reads;
+
 use crate::host::Disk;
 use std::format;
 use std::sync::OnceLock;
@@ -27,14 +29,15 @@ fn adds_disks() {
     assert_eq!(Disk::add(c"adds-disks", file, false), Ok(()));
 }
 
-/// A fresh btrfs of `size` bytes from the host's mkfs.btrfs, as a
-/// file that is already unlinked.
-fn image(name: &str, size: u64) -> std::fs::File {
+/// A fresh btrfs of `size` bytes from the host's mkfs.btrfs, with its
+/// options `options`, as a file that is already unlinked.
+fn image(name: &str, size: u64, options: &[&std::ffi::OsStr]) -> std::fs::File {
     let path = std::env::temp_dir().join(format!("mikros-btrfs-{name}-{}", std::process::id()));
     let file = std::fs::File::create_new(&path).unwrap();
     file.set_len(size).unwrap();
     let status = std::process::Command::new("mkfs.btrfs")
         .arg("--quiet")
+        .args(options)
         .arg(&path)
         .status()
         .expect("the tests need mkfs.btrfs of btrfs-progs");
@@ -56,7 +59,7 @@ fn mounts_read_only() {
     start();
     Disk::add(
         c"mounts-read-only",
-        image("mounts-read-only", 256 << 20),
+        image("mounts-read-only", 256 << 20, &[]),
         true,
     )
     .unwrap();
