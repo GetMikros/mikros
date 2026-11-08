@@ -37,6 +37,9 @@ const INFO_PROCESS_SIZE: usize = 0x28;
 /// and how long it has when its disk is ejected.
 const STOP_LIMIT: i64 = 5_000_000_000;
 pub const EJECT_STOP_LIMIT: i64 = 60_000_000_000;
+/// How long after a restarted driver's `Start` the children it had
+/// before are kept for it to add again.
+const READD_LIMIT: i64 = 10_000_000_000;
 
 /// What the supervising tasks share: the devices, the drivers of the
 /// valid manifests, what starting them takes, the service manager's
@@ -95,10 +98,14 @@ impl Done {
 /// fails before `Start` replies, the process is terminated, and that
 /// counts as a termination. Each time the process terminates, unless the
 /// device is being removed, it is logged and the driver is started
-/// again, after the devices below this one are removed and, for a device
-/// with a parent, the parent's driver reset it with `ResetChild`, which
-/// may fail with `NOT_SUPPORTED`. After `RESTARTS_MAX` restarts within
-/// `WINDOW`, or when `ResetChild` fails otherwise, the device fails.
+/// again, after, for a device with a parent, the parent's driver reset
+/// it with `ResetChild`, which may fail with `NOT_SUPPORTED`. The
+/// devices that the driver added are kept, with their drivers, for the
+/// restarted driver to add again: those it has not added again
+/// `READD_LIMIT` after its `Start` are removed. After `RESTARTS_MAX`
+/// restarts within `WINDOW`, when `ResetChild` fails otherwise, or when
+/// the driver declines the device, the device fails and its children
+/// are removed.
 pub async fn supervise(m: Rc<Manager>, id: u64) {
     let mut restarts = VecDeque::new();
     loop {
@@ -158,6 +165,15 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
         let served = Rc::new(Done::default());
         let serve = serve::serve(m.clone(), id, manager_server, served.clone());
         m.spawner.spawn(serve);
+        let start = match m.devices.borrow_mut().get_mut(id) {
+            Some(device) => {
+                device.starts += 1;
+                device.starts
+            }
+            None => 0,
+        };
+        let deadline = now().saturating_add(READD_LIMIT);
+        m.spawner.spawn(forget_kept(m.clone(), id, start, deadline));
         let started = m
             .starter
             .start(&spawned.driver, prepared, bus, manager)
@@ -176,6 +192,7 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
                 );
                 m.starter.kill(pid).await;
                 m.devices.borrow_mut().fail(id);
+                remove_children(&m, id).await;
                 return;
             }
             Started::Closed => {
@@ -219,20 +236,88 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
                 "device-manager: driver {name} for device {id} failed after {RESTARTS_MAX} restarts within 60 s"
             );
             m.devices.borrow_mut().fail(id);
+            remove_children(&m, id).await;
             return;
         }
-        let children = m.devices.borrow().children(id);
-        for child in children {
-            remove(m.clone(), child).await;
+        {
+            let mut devices = m.devices.borrow_mut();
+            let next = devices.get(id).map_or(0, |d| d.starts + 1);
+            devices.keep_children(id, next);
         }
         if !reset(&m, id).await {
             m.devices.borrow_mut().fail(id);
+            remove_children(&m, id).await;
             return;
         }
         mikros_rt::log!(
             Info,
             "device-manager: restarting driver {name} for device {id}"
         );
+    }
+}
+
+/// Removes the children of device `id`, each with the devices below it.
+async fn remove_children(m: &Rc<Manager>, id: u64) {
+    let children = m.devices.borrow().children(id);
+    for child in children {
+        remove(m.clone(), child).await;
+    }
+}
+
+/// At `deadline`, removes the children of device `id` that are still
+/// kept for its driver's start `start`, because that driver did not add
+/// them again.
+async fn forget_kept(m: Rc<Manager>, id: u64, start: u64, deadline: i64) {
+    if m.devices.borrow().kept_children(id, start).is_empty() {
+        return;
+    }
+    let _ = m.reactor.sleep_until(deadline).await;
+    let kept = m.devices.borrow().kept_children(id, start);
+    for child in kept {
+        mikros_rt::log!(
+            Info,
+            "device-manager: device {child} was not added again in time"
+        );
+        remove(m.clone(), child).await;
+    }
+}
+
+/// Reconnects device `id`, which its parent's restarted driver just
+/// added again: has that driver serve its bus for it with
+/// `ConnectChild`, and gives the other end to the device's own driver
+/// with `Reconnect`. When either fails, the device's driver is
+/// terminated, which its supervision handles as a driver that ended.
+pub async fn reconnect(m: Rc<Manager>, id: u64) {
+    let (parent, client, pid, dma) = {
+        let devices = m.devices.borrow();
+        let Some(device) = devices.get(id) else {
+            return;
+        };
+        let dma = bound_driver(&m, id).is_some_and(|d| d.needs.contains(&Need::Dma));
+        (device.parent, device.client.clone(), device.pid, dma)
+    };
+    let (Some(parent), Some(client)) = (parent, client) else {
+        return;
+    };
+    let reconnected = match connect_child(&m, parent, id, dma).await {
+        Ok(bus) => match client.reconnect(bus).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(status)) => Err(format!("{status:?}")),
+            Err(e) => Err(format!("{e:?}")),
+        },
+        Err(why) => Err(format!("ConnectChild failed: {why}")),
+    };
+    match reconnected {
+        Ok(()) => mikros_rt::log!(Info, "device-manager: reconnected device {id}"),
+        Err(why) => {
+            mikros_rt::log!(
+                Error,
+                "device-manager: reconnecting device {id} failed: {why}"
+            );
+            if let Some(pid) = pid {
+                m.starter.kill(pid).await;
+            }
+        }
     }
 }
 

@@ -87,8 +87,8 @@ use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceManagerAsyncClient, DeviceManagerRequestResourceResponse, DriverAsyncServer,
-    DriverConnectChildResponse, DriverRequest, DriverResetChildResponse, DriverStartRequest,
-    DriverStartResponse, DriverStopResponse, Property,
+    DriverConnectChildResponse, DriverReconnectResponse, DriverRequest, DriverResetChildResponse,
+    DriverStartRequest, DriverStartResponse, DriverStopResponse, Property,
 };
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
@@ -100,6 +100,8 @@ mikros_rt::raw_main!(main);
 
 const HOST: &str = "system.driver.test-host";
 const CHILD: &str = "system.driver.test-child";
+const CRASH_HOST: &str = "system.driver.test-crash-host";
+const KEPT_CHILD: &str = "system.driver.test-kept-child";
 const PCI: &str = "system.driver.test-pci";
 const EDU: &str = "system.driver.test-edu";
 const DISK: &str = "system.driver.test-disk";
@@ -159,6 +161,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let end = ServerEnd::new(managed.handles.remove(at).handle);
     let server = DriverAsyncServer::new(end, reactor.clone());
     let manager: Rc<RefCell<Option<Rc<DeviceManagerAsyncClient>>>> = Rc::default();
+    // The bus channels the kept child was given, which stay open.
+    let kept: RefCell<alloc::vec::Vec<OwnedHandle>> = RefCell::default();
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
@@ -227,6 +231,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             true => Ok(DriverStartResponse {}),
                             false => Err(Status::InvalidArgs),
                         },
+                        CRASH_HOST => Ok(DriverStartResponse {}),
+                        KEPT_CHILD => {
+                            let signalled = signal(bus.as_ref());
+                            kept.borrow_mut().extend(bus);
+                            signalled.map(|()| DriverStartResponse {})
+                        }
                         DECLINE => Err(Status::NotSupported),
                         RESET => return 0,
                         CLOSE => {
@@ -240,6 +250,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     if host && started {
                         *manager.borrow_mut() = Some(client.clone());
                         spawner.spawn(add_child(client, ecam.unwrap_or(0)));
+                    } else if app_id == CRASH_HOST && started {
+                        *manager.borrow_mut() = Some(client.clone());
+                        spawner.spawn(add_kept_child(client));
                     }
                     replied
                 }
@@ -247,10 +260,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                // The driver does not take a new bus channel yet.
-                DriverRequest::Reconnect(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
+                // Only the kept child takes a new bus channel.
+                DriverRequest::Reconnect(request, responder) => match app_id == KEPT_CHILD {
+                    true => {
+                        kept.borrow_mut().push(request.bus);
+                        responder.reply(s, Ok(DriverReconnectResponse {}))
+                    }
+                    false => responder.reply(s, Err(Status::NotSupported)),
+                },
                 DriverRequest::ResetChild(_, responder) => match host {
                     true => responder.reply(s, Ok(DriverResetChildResponse {})),
                     false => responder.reply(s, Err(Status::NotSupported)),
@@ -262,6 +279,11 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             let replied = responder.reply(s, Ok(DriverConnectChildResponse {}));
                             let (device, bus, dma) = (request.device, request.bus, request.dma);
                             spawner.spawn(remove_child(client, reactor.clone(), device, bus, dma));
+                            replied
+                        }
+                        _ if app_id == CRASH_HOST => {
+                            let replied = responder.reply(s, Ok(DriverConnectChildResponse {}));
+                            spawner.spawn(crash_on_message(reactor.clone(), request.bus));
                             replied
                         }
                         _ => responder.reply(s, Err(Status::NotSupported)),
@@ -332,6 +354,29 @@ async fn remove_child(
         let _ = manager.remove_device(device).await;
     }
     drop(bus);
+}
+
+/// As the crashing host bridge driver: adds the device `kept-child` as
+/// `test:kept`.
+async fn add_kept_child(manager: Rc<DeviceManagerAsyncClient>) {
+    let _ = manager
+        .add_device(
+            "kept-child".into(),
+            vec!["test:kept".into()],
+            vec![],
+            vec![],
+        )
+        .await;
+}
+
+/// As the crashing host bridge driver: ends the process with code 3 as
+/// soon as the child's driver writes on its bus channel `bus`, which it
+/// does only once, at its first start.
+async fn crash_on_message(reactor: Reactor, bus: OwnedHandle) {
+    if reactor.signals(bus.raw(), READABLE).await.is_ok() {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::process_exit(3) };
+    }
 }
 
 /// Publishes a service of `class`, whose provider channel stays open

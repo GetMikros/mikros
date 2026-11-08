@@ -9377,6 +9377,55 @@ mod manager {
         )
     }
 
+    /// From a boot image with test drivers for the host bridge and its
+    /// child, the device manager starts the host bridge's driver, which
+    /// adds the device `kept-child`, and the child's driver, which writes
+    /// on its bus channel. The host bridge's driver then ends with code 3.
+    /// The device manager keeps the child and its driver running, starts
+    /// the host bridge's driver again, which adds the child again, and
+    /// gives the child its old ID. It connects it to the restarted driver
+    /// with `ConnectChild` and gives the child's driver the new channel
+    /// with `Reconnect`, which it accepts. It says all of it in the log.
+    pub fn device_manager_keeps_children_across_a_restart(s: &Startup) -> Result {
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: started driver test-crash-host for device 1 as pid",
+                2,
+            ),
+            (
+                b"device-manager: added device 2, kept-child, as test:kept, under 1",
+                1,
+            ),
+            (
+                b"device-manager: started driver test-kept-child for device 2 as pid",
+                1,
+            ),
+            (
+                b"device-manager: driver test-crash-host for device 1 terminated with code 3, signal 0",
+                1,
+            ),
+            (
+                b"device-manager: restarting driver test-crash-host for device 1",
+                1,
+            ),
+            (
+                b"device-manager: added device 2 again, kept-child, under 1",
+                1,
+            ),
+            (b"device-manager: reconnected device 2", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"device 2 was not added again in time",
+            b"removed device 2",
+            b"reconnecting device 2 failed",
+            b"driver test-kept-child for device 2 terminated",
+            b"declined",
+            b"did not start",
+        ];
+        let logged = device_manager_logs(s, b"tests/restart.img", false, EXPECTED, FAILED)?;
+        ensure("keeping the child across its parent's restart", logged)
+    }
+
     /// From a boot image with the service manager, the broker, the
     /// device manager, the PCI bus driver and a test driver for the q35
     /// host bridge's function 00:00.0, with their manifests, the device
@@ -9952,6 +10001,7 @@ mod bootfs {
                         "pci.img",
                         "pie",
                         "ports.img",
+                        "restart.img",
                         "services.img",
                         "tmpfs.img",
                     ],
@@ -10134,7 +10184,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 141] = [
+const TESTS: [(&str, Test); 142] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -10220,6 +10270,10 @@ const TESTS: [(&str, Test); 141] = [
     (
         "device_manager_handles_failing_drivers",
         manager::device_manager_handles_failing_drivers,
+    ),
+    (
+        "device_manager_keeps_children_across_a_restart",
+        manager::device_manager_keeps_children_across_a_restart,
     ),
     (
         "executor_waits_on_objects",

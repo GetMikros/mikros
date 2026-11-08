@@ -682,6 +682,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", failing_image.display());
+            let restart_image = device_image(
+                "restart.img",
+                &[("test-crash-host", true), ("test-kept-child", true)],
+                &[],
+            )?;
+            println!("built    {}", restart_image.display());
             // The PCI bus driver tests serve this image, with the bus
             // driver and test drivers for the host bridge's function, for
             // QEMU's edu device and for the e1000e function, and the
@@ -755,6 +761,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/namespaces.img", namespaces_image.as_path()),
                 ("tests/devices.img", devices_image.as_path()),
                 ("tests/failing.img", failing_image.as_path()),
+                ("tests/restart.img", restart_image.as_path()),
                 ("tests/pci.img", pci_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),

@@ -43,10 +43,17 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
                     let added = add_device(&m, caller, request).await;
                     let reply = added.map(|(id, _)| DeviceManagerAddDeviceResponse { id });
                     let replied = responder.reply(s, reply);
-                    // Its driver starts once the bus driver knows its ID,
+                    // Its driver starts, or a kept device's driver gets a
+                    // new bus channel, once the bus driver knows its ID,
                     // which it may need to serve `ConnectChild`.
-                    if let Ok((id, true)) = added {
-                        m.spawner.spawn(supervise::supervise(m.clone(), id));
+                    match added {
+                        Ok((id, Added::Bound)) => {
+                            m.spawner.spawn(supervise::supervise(m.clone(), id))
+                        }
+                        Ok((id, Added::Again)) => {
+                            m.spawner.spawn(supervise::reconnect(m.clone(), id))
+                        }
+                        _ => {}
                     }
                     replied
                 }
@@ -76,19 +83,37 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
     done.set();
 }
 
+/// What `add_device` did.
+#[derive(Clone, Copy)]
+enum Added {
+    /// Added a new device, and bound a driver to it.
+    Bound,
+    /// Added a new device, which has no driver.
+    Unbound,
+    /// Gave back a device that was kept for the restarted driver of its
+    /// parent, with its ID, driver and children.
+    Again,
+}
+
 /// Adds the device of `request` as a child of device `caller`, with the
 /// `cache` property when it is a disk or partition, from the storage
-/// profiles read again for it, and binds a driver to it. Fails with
-/// `INVALID_ARGS` when a hardware ID does not have the form of one.
-/// Returns its ID and whether a driver is bound.
+/// profiles read again for it, and binds a driver to it. A device that
+/// was kept for `caller`'s restarted driver, with the same name and
+/// hardware IDs, is given back instead. Fails with `INVALID_ARGS` when a
+/// hardware ID does not have the form of one. Returns its ID and what
+/// was done.
 async fn add_device(
     m: &Manager,
     caller: u64,
     request: DeviceManagerAddDeviceRequest,
-) -> Result<(u64, bool), Status> {
+) -> Result<(u64, Added), Status> {
     let ids = &request.hardware_ids;
     if !ids.iter().all(|id| mikros_manifest::is_hardware_id(id)) {
         return Err(Status::InvalidArgs);
+    }
+    let kept = m.devices.borrow_mut().take_kept(caller, &request.name, ids);
+    if let Some(id) = kept {
+        return Ok((id, Added::Again));
     }
     let mut properties: Vec<(alloc::string::String, alloc::string::String)> = request
         .properties
@@ -108,8 +133,11 @@ async fn add_device(
         Some(caller),
         request.resources,
     );
-    let bound = devices.bind_device(id, &m.drivers);
-    Ok((id, bound))
+    let added = match devices.bind_device(id, &m.drivers) {
+        true => Added::Bound,
+        false => Added::Unbound,
+    };
+    Ok((id, added))
 }
 
 /// When the `filesystem` service with ID `id`, its instance name, that

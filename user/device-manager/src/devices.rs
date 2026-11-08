@@ -13,8 +13,10 @@ use mikros_rt::interfaces::mikros::driver::DriverAsyncClient;
 /// resources of its hardware, the name of its driver once one is bound,
 /// whether it failed, which leaves it without a driver for good, the
 /// process ID of its driver and the client of the driver's `Driver`
-/// channel once the driver was spawned, and whether it is being
-/// removed, which stops its driver for good.
+/// channel once the driver was spawned, whether it is being removed,
+/// which stops its driver for good, how many times its driver was
+/// started, and, while it waits to be added again by its parent's
+/// restarted driver, the start of that driver it waits for.
 pub struct Device {
     pub id: u64,
     pub name: String,
@@ -27,6 +29,8 @@ pub struct Device {
     pub pid: Option<u32>,
     pub client: Option<Rc<DriverAsyncClient>>,
     pub removing: bool,
+    pub starts: u64,
+    pub kept: Option<u64>,
 }
 
 /// The devices, with the ID the next one gets.
@@ -67,6 +71,8 @@ impl Devices {
             pid: None,
             client: None,
             removing: false,
+            starts: 0,
+            kept: None,
         };
         mikros_rt::log!(Info, "device-manager: added {}", describe(&device));
         self.list.push(device);
@@ -80,6 +86,41 @@ impl Devices {
     /// The devices, in the order they were added.
     pub fn iter(&self) -> impl Iterator<Item = &Device> {
         self.list.iter()
+    }
+
+    /// Keeps the children of device `id` for its driver's next start,
+    /// `start`: until that driver adds them again or they are removed.
+    pub fn keep_children(&mut self, id: u64, start: u64) {
+        for child in self.list.iter_mut().filter(|d| d.parent == Some(id)) {
+            child.kept = Some(start);
+        }
+    }
+
+    /// The children of device `id` that are still kept for its driver's
+    /// start `start`.
+    pub fn kept_children(&self, id: u64, start: u64) -> Vec<u64> {
+        let kept = self
+            .list
+            .iter()
+            .filter(|d| d.parent == Some(id) && d.kept == Some(start));
+        kept.map(|d| d.id).collect()
+    }
+
+    /// The kept child of device `parent` named `name` with the hardware
+    /// IDs `ids`, which is no longer kept from then on, and logged as
+    /// added again.
+    pub fn take_kept(&mut self, parent: u64, name: &str, ids: &[String]) -> Option<u64> {
+        let child = self.list.iter_mut().find(|d| {
+            d.parent == Some(parent) && d.kept.is_some() && d.name == name && d.hardware_ids == ids
+        })?;
+        child.kept = None;
+        mikros_rt::log!(
+            Info,
+            "device-manager: added device {} again, {}, under {parent}",
+            child.id,
+            child.name
+        );
+        Some(child.id)
     }
 
     pub fn get_mut(&mut self, id: u64) -> Option<&mut Device> {
