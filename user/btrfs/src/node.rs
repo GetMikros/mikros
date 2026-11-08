@@ -35,6 +35,21 @@ unsafe extern "C" {
     ) -> i32;
     fn mikros_btrfs_remove(dir: *mut c_void, name: *const c_char, len: u32, directory: bool)
     -> i32;
+    fn mikros_btrfs_rename(
+        dir: *mut c_void,
+        name: *const c_char,
+        len: u32,
+        new_dir: *mut c_void,
+        new_name: *const c_char,
+        new_len: u32,
+        flags: u32,
+    ) -> i32;
+    fn mikros_btrfs_link(
+        node: *mut c_void,
+        new_dir: *mut c_void,
+        new_name: *const c_char,
+        new_len: u32,
+    ) -> i32;
 }
 
 /// A time, in seconds and nanoseconds since 1970 in UTC.
@@ -66,6 +81,10 @@ pub struct Attributes {
     pub accessed: Time,
     pub changed: Time,
 }
+
+/// Flags of `Node::rename()`, as Linux's `RENAME_` flags.
+pub const RENAME_NOREPLACE: u32 = 1;
+pub const RENAME_EXCHANGE: u32 = 2;
 
 /// The type bits of `Attributes::mode`.
 pub const MODE_TYPE: u32 = 0o170000;
@@ -225,6 +244,43 @@ impl<'m> Node<'m> {
         // SAFETY: as for `create()`.
         result(unsafe {
             mikros_btrfs_remove(self.node, name.as_ptr().cast(), name_len(name)?, directory)
+        })
+    }
+
+    /// Moves `name` of this directory to `new_name` in `new_dir`, with
+    /// `RENAME_` flags.
+    pub fn rename(
+        &self,
+        name: &[u8],
+        new_dir: &Node<'m>,
+        new_name: &[u8],
+        flags: u32,
+    ) -> Result<(), i32> {
+        // SAFETY: as for `create()`.
+        result(unsafe {
+            mikros_btrfs_rename(
+                self.node,
+                name.as_ptr().cast(),
+                name_len(name)?,
+                new_dir.node,
+                new_name.as_ptr().cast(),
+                name_len(new_name)?,
+                flags,
+            )
+        })
+    }
+
+    /// Names this node, which must not be a directory, `new_name` in
+    /// `new_dir` too.
+    pub fn link(&self, new_dir: &Node<'m>, new_name: &[u8]) -> Result<(), i32> {
+        // SAFETY: as for `create()`.
+        result(unsafe {
+            mikros_btrfs_link(
+                self.node,
+                new_dir.node,
+                new_name.as_ptr().cast(),
+                name_len(new_name)?,
+            )
         })
     }
 }

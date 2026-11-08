@@ -6,16 +6,21 @@
 use super::{Image, start};
 use crate::Mount;
 use crate::host::Disk;
-use crate::node::{Kind, MODE_DIRECTORY, MODE_FILE, MODE_SYMLINK, MODE_TYPE, Node};
+use crate::node::{
+    Kind, MODE_DIRECTORY, MODE_FILE, MODE_SYMLINK, MODE_TYPE, Node, RENAME_EXCHANGE,
+    RENAME_NOREPLACE,
+};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::format;
 use std::vec::Vec;
 
+const EPERM: i32 = -1;
 const ENOENT: i32 = -2;
 const EEXIST: i32 = -17;
 const ENOTDIR: i32 = -20;
 const EISDIR: i32 = -21;
+const EINVAL: i32 = -22;
 const EROFS: i32 = -30;
 const ENOTEMPTY: i32 = -39;
 
@@ -126,6 +131,54 @@ fn creates_and_removes_entries() {
                 assert_eq!(root.lookup(name.as_bytes()).err(), Some(ENOENT));
             }
             assert_eq!(names(&walk(root, "m")), many());
+        },
+        |_| {},
+    );
+}
+
+#[test]
+fn renames_and_links() {
+    changes(
+        "renames-and-links",
+        256 << 20,
+        None,
+        |root| {
+            let d = root.create(b"d", Kind::Directory, 0o755).unwrap();
+            let a = d.create(b"a", Kind::File, 0o644).unwrap();
+            root.create(b"b", Kind::File, 0o600).unwrap();
+            a.link(root, b"hard").unwrap();
+            assert_eq!(a.link(root, b"b").err(), Some(EEXIST));
+            assert_eq!(d.link(root, b"d2").err(), Some(EPERM));
+            root.rename(b"b", &d, b"b2", 0).unwrap();
+            assert_eq!(
+                d.rename(b"b2", root, b"hard", RENAME_NOREPLACE).err(),
+                Some(EEXIST)
+            );
+            // "hard" and "d/b2" swap their nodes.
+            root.rename(b"hard", &d, b"b2", RENAME_EXCHANGE).unwrap();
+            assert_eq!(
+                root.rename(b"hard", &d, b"none", RENAME_EXCHANGE).err(),
+                Some(ENOENT)
+            );
+            // A directory cannot move below itself, nor replace one that
+            // is not empty.
+            assert_eq!(root.rename(b"d", &d, b"x", 0).err(), Some(EINVAL));
+            root.create(b"empty", Kind::Directory, 0o755).unwrap();
+            assert_eq!(root.rename(b"empty", root, b"d", 0).err(), Some(ENOTEMPTY));
+        },
+        |root| {
+            let a = walk(root, "d/a").attributes().unwrap();
+            assert_eq!(a.links, 2);
+            // After the exchange, "d/b2" is the link to "d/a", and
+            // "hard" what was "b".
+            assert_eq!(walk(root, "d/b2").attributes().unwrap().inode, a.inode);
+            assert_eq!(mode(root, "hard"), MODE_FILE | 0o600);
+            assert_eq!(root.lookup(b"b").err(), Some(ENOENT));
+            let expected: BTreeSet<Vec<u8>> = [&b"d"[..], b"hard", b"empty"]
+                .iter()
+                .map(|n| n.to_vec())
+                .collect();
+            assert_eq!(names(root), expected);
         },
         |_| {},
     );
