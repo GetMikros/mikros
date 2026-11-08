@@ -742,6 +742,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("test-reset", true),
                     ("test-disk", true),
                     ("test-fat", true),
+                    ("test-btrfs", true),
                 ],
                 &pci_bus_files,
             )?;

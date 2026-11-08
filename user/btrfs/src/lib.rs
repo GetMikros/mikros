@@ -35,6 +35,7 @@ unsafe extern "C" {
     ) -> i32;
     fn mikros_btrfs_unmount(mount: *mut c_void);
     fn mikros_btrfs_statfs(mount: *mut c_void, statfs: *mut Statfs) -> i32;
+    fn mikros_btrfs_sync_mount(mount: *mut c_void) -> i32;
 }
 
 fn result(ret: i32) -> Result<(), i32> {
@@ -107,6 +108,13 @@ impl Mount {
         // for the call.
         result(unsafe { mikros_btrfs_mount(source.as_ptr(), read_only, options, &mut mount) })?;
         Ok(Mount(mount))
+    }
+
+    /// Writes everything that has changed to stable storage, as
+    /// `syncfs()` does.
+    pub fn sync(&self) -> Result<(), i32> {
+        // SAFETY: the mount is mounted.
+        result(unsafe { mikros_btrfs_sync_mount(self.0) })
     }
 
     pub fn statfs(&self) -> Result<Statfs, i32> {

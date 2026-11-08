@@ -13,10 +13,19 @@ use uuid::Uuid;
 
 const ESP_TYPE: Uuid = Uuid::from_u128(0xc12a7328_f81f_11d2_ba4b_00a0c93ec93b);
 const ROOT_TYPE: Uuid = Uuid::from_u128(0xfa730af6_8ba3_42d9_b155_466909d08135);
-/// The type of the small partition that the test machine's disk has
-/// after the root partition, for the test driver test-fat, which binds to
-/// it as nothing else matches it.
-const TEST_TYPE: Uuid = Uuid::from_u128(0xeb1f4cf2_5884_4f87_880c_3dd4d8286764);
+/// The types of the small partitions that the test machine's disk has
+/// after the root partition, for the test drivers test-fat and
+/// test-btrfs, which bind to them as nothing else matches them.
+const TEST_TYPES: [(Uuid, &str); 2] = [
+    (
+        Uuid::from_u128(0xeb1f4cf2_5884_4f87_880c_3dd4d8286764),
+        "test-fat",
+    ),
+    (
+        Uuid::from_u128(0x38a2aae9_c051_4fe5_a24a_441d4a220d2a),
+        "test-btrfs",
+    ),
+];
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -191,7 +200,7 @@ pub fn create_with(
 }
 
 /// Like `create_with`, for `cargo xtask test`: the disk also has the
-/// partition of `TEST_TYPE`.
+/// partitions of `TEST_TYPES`.
 pub fn create_for_tests(kind: Kind, built: &build::Built, out: &Path, extra: &str) -> Result<()> {
     create_parts(kind, built, out, extra, &[], true)
 }
@@ -237,12 +246,14 @@ fn create_parts(
     ];
     let test = [0; 4096];
     if test_partition {
-        parts.push(Part {
-            type_guid: TEST_TYPE,
-            guid: Uuid::new_v4(),
-            name: "tests",
-            data: Data::Bytes(&test),
-        });
+        for (type_guid, name) in TEST_TYPES {
+            parts.push(Part {
+                type_guid,
+                guid: Uuid::new_v4(),
+                name,
+                data: Data::Bytes(&test),
+            });
+        }
     }
     write_image(out, &parts)?;
     println!("created  {}", out.display());

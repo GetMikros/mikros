@@ -9202,9 +9202,11 @@ mod manager {
             (b"device-manager: started driver fat for device", 1),
             (b"device-manager: bound driver test-fat to device", 1),
             (b"device-manager: started driver test-fat for device", 1),
-            (b"device-manager: published device.filesystem ", 1),
+            (b"device-manager: published device.filesystem ", 2),
             (b"device-manager: bound driver btrfs to device", 1),
             (b"device-manager: started driver btrfs for device", 1),
+            (b"device-manager: bound driver test-btrfs to device", 1),
+            (b"device-manager: started driver test-btrfs for device", 1),
             (b"device-manager: bound driver partition to device", 3),
             (b"device-manager: started driver partition for device", 3),
             (
@@ -9223,6 +9225,10 @@ mod manager {
                 b", part-3, as gpt:eb1f4cf2-5884-4f87-880c-3dd4d8286764, under",
                 1,
             ),
+            (
+                b", part-4, as gpt:38a2aae9-c051-4fe5-a24a-441d4a220d2a, under",
+                1,
+            ),
             (b"device-manager: bound driver nvme to device", 1),
             (b", as pci:c010802", 1),
             (b"device-manager: started driver nvme for device", 1),
@@ -9231,7 +9237,7 @@ mod manager {
             (b", pci-0000:00:1f.2, as pci:c010601", 1),
             (b"device-manager: started driver ahci for device", 1),
             (b", disk-2, as storage:disk, under", 1),
-            (b"device-manager: published device.storage ", 8),
+            (b"device-manager: published device.storage ", 9),
             (
                 b"device-manager: driver test-reset for device 3 failed after 5 restarts",
                 1,
@@ -9252,6 +9258,7 @@ mod manager {
             b"driver fat declined",
             b"driver test-fat declined",
             b"driver btrfs declined",
+            b"driver test-btrfs declined",
         ];
         let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
         ensure("adding the PCI functions and starting their driver", logged)

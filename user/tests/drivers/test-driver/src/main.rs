@@ -75,6 +75,7 @@
 
 extern crate alloc;
 
+mod btrfs;
 mod fat;
 
 use alloc::rc::Rc;
@@ -102,6 +103,7 @@ const PCI: &str = "system.driver.test-pci";
 const EDU: &str = "system.driver.test-edu";
 const DISK: &str = "system.driver.test-disk";
 const FAT: &str = "system.driver.test-fat";
+const BTRFS: &str = "system.driver.test-btrfs";
 /// The models of the test machine's disks: the virtio disk, and the
 /// scratch disks behind QEMU's NVMe and AHCI controllers.
 const MODELS: [&str; 3] = ["virtio-blk", "QEMU NVMe Ctrl", "QEMU HARDDISK"];
@@ -213,6 +215,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             }
                         }
                         FAT => match fat::works(&directory, &reactor, process).await {
+                            true => Ok(DriverStartResponse {}),
+                            false => Err(Status::InvalidArgs),
+                        },
+                        BTRFS => match btrfs::works(&directory, &reactor).await {
                             true => Ok(DriverStartResponse {}),
                             false => Err(Status::InvalidArgs),
                         },

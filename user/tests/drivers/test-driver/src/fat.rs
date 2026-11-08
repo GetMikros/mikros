@@ -15,8 +15,9 @@ use mikros_rt::sys;
 
 /// The protocol of the service.
 const FILESYSTEM: &str = "device.filesystem";
-/// How long the FAT server has to publish the service.
-const PUBLISH_LIMIT: i64 = 10_000_000_000;
+/// How long a file system server has to publish its service, which the
+/// btrfs server takes seconds for when the processor is emulated.
+const PUBLISH_LIMIT: i64 = 60_000_000_000;
 const POLL: i64 = 20_000_000;
 const PERM_READ: u32 = 1 << 0;
 const PERM_WRITE: u32 = 1 << 1;
@@ -24,44 +25,54 @@ const PAGE: u64 = 4096;
 
 type Reply<T> = Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>;
 
-fn ok<T>(reply: Reply<T>) -> Option<T> {
+pub fn ok<T>(reply: Reply<T>) -> Option<T> {
     reply.ok()?.ok()
 }
 
-fn failed<T>(reply: Reply<T>) -> Option<Error> {
+pub fn failed<T>(reply: Reply<T>) -> Option<Error> {
     reply.ok()?.err()
 }
 
-/// A connection to the root of the first `filesystem` service, read and
-/// write, once it appears.
-async fn root(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<NodeAsyncClient> {
+/// A connection to the root of the `filesystem` service whose file
+/// system is of the type `kind`, read and write, once it appears.
+pub async fn root(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    kind: &str,
+) -> Option<NodeAsyncClient> {
     let deadline = now() + PUBLISH_LIMIT;
-    let instance = loop {
-        if let Ok(Ok(listed)) = directory.list(FILESYSTEM.into()).await
-            && let Some(instance) = listed.instances.into_iter().next()
-        {
-            break instance;
+    loop {
+        if let Ok(Ok(listed)) = directory.list(FILESYSTEM.into()).await {
+            for instance in listed.instances {
+                let (client, server) = endpoints::<Filesystem>().ok()?;
+                let connected = directory
+                    .connect(FILESYSTEM.into(), Some(instance), server.into_handle())
+                    .await;
+                if !matches!(connected, Ok(Ok(_))) {
+                    continue;
+                }
+                let fs = FilesystemAsyncClient::new(
+                    ClientEnd::new(client.into_handle()),
+                    reactor.clone(),
+                );
+                if ok(fs.query_filesystem().await).is_some_and(|q| q.info.r#type == kind) {
+                    let (node, node_server) = endpoints::<Node>().ok()?;
+                    ok(fs
+                        .get_root(node_server, Rights(Rights::READ.0 | Rights::WRITE.0))
+                        .await)?;
+                    return Some(NodeAsyncClient::new(node, reactor.clone()));
+                }
+            }
         }
         if now() > deadline {
             return None;
         }
         let _ = reactor.sleep_until(now() + POLL).await;
-    };
-    let (client, server) = endpoints::<Filesystem>().ok()?;
-    let connected = directory
-        .connect(FILESYSTEM.into(), Some(instance), server.into_handle())
-        .await;
-    connected.ok()?.ok()?;
-    let fs = FilesystemAsyncClient::new(ClientEnd::new(client.into_handle()), reactor.clone());
-    let (node, node_server) = endpoints::<Node>().ok()?;
-    ok(fs
-        .get_root(node_server, Rights(Rights::READ.0 | Rights::WRITE.0))
-        .await)?;
-    Some(NodeAsyncClient::new(node, reactor.clone()))
+    }
 }
 
 /// Opens `path` from `dir` with `flags` and read and write rights.
-async fn open(
+pub async fn open(
     dir: &NodeAsyncClient,
     path: &str,
     flags: OpenFlags,
@@ -100,7 +111,7 @@ async fn check(
     reactor: &Reactor,
     process: sys::Handle,
 ) -> Option<()> {
-    let root = root(directory, reactor).await?;
+    let root = root(directory, reactor, "fat32").await?;
     let info = ok(root.query_filesystem().await)?.info;
     expect(info.r#type == "fat32" && !info.read_only && info.free_bytes > 0)?;
     let listed = ok(root.read_directory(0, true).await)?.entries;
@@ -197,7 +208,7 @@ fn bytes(at: u64, n: usize) -> Vec<u8> {
 }
 
 /// Whether the locks of `file` and of a clone of it behave.
-async fn locks(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+pub async fn locks(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     let (other, server) = endpoints::<Node>().ok()?;
     ok(file
         .clone(server, Rights(Rights::READ.0 | Rights::WRITE.0))
@@ -221,7 +232,7 @@ async fn locks(file: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
     Some(())
 }
 
-fn expect(condition: bool) -> Option<()> {
+pub fn expect(condition: bool) -> Option<()> {
     condition.then_some(())
 }
 

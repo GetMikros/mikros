@@ -69,6 +69,22 @@ void mikros_btrfs_unmount(struct vfsmount *mnt)
 		mikros_task_exit();
 }
 
+/* Writes everything the mount holds that has changed to stable storage,
+ * as syncfs() does. 0, or a negative errno. */
+int mikros_btrfs_sync_mount(struct vfsmount *mnt)
+{
+	bool adopted = mikros_task_adopt("sync_mount");
+	struct super_block *sb = mnt->mnt_sb;
+	int ret;
+
+	down_read(&sb->s_umount);
+	ret = sync_filesystem(sb);
+	up_read(&sb->s_umount);
+	if (adopted)
+		mikros_task_exit();
+	return ret;
+}
+
 int mikros_btrfs_statfs(struct vfsmount *mnt, struct mikros_statfs *out)
 {
 	bool adopted = mikros_task_adopt("statfs");
