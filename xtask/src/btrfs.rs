@@ -318,6 +318,9 @@ pub fn source() -> Result<PathBuf> {
 /// Builds the library for `flavor` unless it is up to date, and returns
 /// its path.
 pub fn build(flavor: Flavor) -> Result<PathBuf> {
+    // The compiler and linker are xtask's LLVM, which a fresh checkout
+    // has yet to build; the flags name its headers too.
+    crate::llvm::build()?;
     let source = source()?;
     let linux = crate::workspace_root().join("user/btrfs/linux");
     let out = crate::workspace_root()
