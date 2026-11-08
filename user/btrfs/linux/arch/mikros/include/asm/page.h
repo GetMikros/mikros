@@ -1,0 +1,60 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * Pages of the program's memory arena, which every allocation of the
+ * shim comes from. Without an MMU, an address is its own physical
+ * address, and page frame numbers count from the arena's start.
+ */
+#ifndef _ASM_MIKROS_PAGE_H
+#define _ASM_MIKROS_PAGE_H
+
+#include <linux/const.h>
+
+#define PAGE_SHIFT	CONFIG_PAGE_SHIFT
+#define PAGE_SIZE	(_AC(1, UL) << PAGE_SHIFT)
+#define PAGE_MASK	(~(PAGE_SIZE - 1))
+
+#ifndef __ASSEMBLY__
+
+typedef struct { unsigned long pte; } pte_t;
+typedef struct { unsigned long pgd; } pgd_t;
+typedef struct { unsigned long pgprot; } pgprot_t;
+typedef struct page *pgtable_t;
+
+#define pte_val(x)	((x).pte)
+#define pgd_val(x)	((x).pgd)
+#define pgprot_val(x)	((x).pgprot)
+#define __pte(x)	((pte_t) { (x) })
+#define __pgd(x)	((pgd_t) { (x) })
+#define __pgprot(x)	((pgprot_t) { (x) })
+
+/* The arena: [mikros_memory_start, mikros_memory_end). */
+extern unsigned long mikros_memory_start;
+extern unsigned long mikros_memory_end;
+
+#define PAGE_OFFSET		(mikros_memory_start)
+#define ARCH_PFN_OFFSET		(mikros_memory_start >> PAGE_SHIFT)
+
+#define __pa(x)			((unsigned long)(x))
+#define __va(x)			((void *)(unsigned long)(x))
+#define __phys_addr_symbol(x)	__pa(x)
+
+#define virt_to_pfn(kaddr)	(__pa(kaddr) >> PAGE_SHIFT)
+#define pfn_to_virt(pfn)	__va((pfn) << PAGE_SHIFT)
+#define virt_to_page(addr)	pfn_to_page(virt_to_pfn(addr))
+#define page_to_virt(page)	pfn_to_virt(page_to_pfn(page))
+
+#define virt_addr_valid(kaddr)						\
+	((unsigned long)(kaddr) >= mikros_memory_start &&		\
+	 (unsigned long)(kaddr) < mikros_memory_end)
+
+#define clear_page(page)	__builtin_memset((page), 0, PAGE_SIZE)
+#define copy_page(to, from)	__builtin_memcpy((to), (from), PAGE_SIZE)
+#define clear_user_page(page, vaddr, pg)	clear_page(page)
+#define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
+
+#include <asm-generic/memory_model.h>
+#include <asm-generic/getorder.h>
+
+#endif
+
+#endif
