@@ -1,0 +1,10 @@
+[package]
+name = "btrfs"
+version.workspace = true
+edition.workspace = true
+license = "GPL-2.0-only"
+publish = false
+
+[dependencies]
+mikros-btrfs = { path = "../../btrfs" }
+mikros-rt = { path = "../../mikros-rt" }
