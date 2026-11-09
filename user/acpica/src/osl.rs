@@ -1,8 +1,9 @@
 //! The `AcpiOs` functions of ACPICA's operating system layer that need
 //! nothing of the hardware: memory, locks, mutexes and semaphores, time,
-//! signals from AML, the table overrides, and output.
+//! queued work, signals from AML, the table overrides, and output.
 
 use crate::sync::{FOREVER, Lock, Locked, Semaphore, now};
+use crate::threads::{self, Callback};
 use crate::{AE_BAD_PARAMETER, AE_LIMIT, AE_OK, AE_TIME, Status};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -17,6 +18,8 @@ const HEADER: usize = 16;
 /// The timeout that waits for ever.
 const WAIT_FOREVER: u16 = 0xFFFF;
 const NANOS_PER_MILLI: i64 = 1_000_000;
+/// The `AcpiOsExecute` type of notification handlers.
+const OSL_NOTIFY_HANDLER: u32 = 1;
 /// The `AcpiOsSignal` functions.
 const SIGNAL_FATAL: u32 = 0;
 const SIGNAL_BREAKPOINT: u32 = 1;
@@ -196,6 +199,25 @@ extern "C" fn AcpiOsSignalSemaphore(handle: *mut c_void, units: u32) -> Status {
     } else {
         AE_LIMIT
     }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsGetThreadId() -> u64 {
+    threads::current()
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsExecute(kind: u32, callback: Option<Callback>, context: *mut c_void) -> Status {
+    let Some(callback) = callback else {
+        return AE_BAD_PARAMETER;
+    };
+    threads::execute(kind == OSL_NOTIFY_HANDLER, callback, context);
+    AE_OK
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsWaitEventsComplete() {
+    threads::wait_complete();
 }
 
 /// The timer in units of 100 ns.

@@ -5,7 +5,8 @@
 //!
 //! The server gives the layer what only it has through a [`Host`]: the
 //! address of the RSDP, and the resources of the device manager. ACPICA
-//! may be called from the thread that called [`install`].
+//! may be called from the thread that called [`install`], and runs its
+//! own work on threads that the layer starts.
 
 #![no_std]
 
@@ -13,6 +14,7 @@ extern crate alloc;
 
 mod osl;
 mod sync;
+mod threads;
 
 pub use sync::{Guard, Locked};
 
@@ -51,8 +53,8 @@ static HOST: AtomicPtr<&'static dyn Host> = AtomicPtr::new(core::ptr::null_mut()
 static PROCESS: AtomicU32 = AtomicU32::new(0);
 
 /// Readies the operating system layer, for `host` and the process
-/// `process`: false when it was readied before. Must be called once,
-/// before anything else of the crate.
+/// `process`, and starts its threads: false when they did not start.
+/// Must be called once, before anything else of the crate.
 pub fn install(host: &'static dyn Host, process: sys::Handle) -> bool {
     let host = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(host));
     if HOST
@@ -69,7 +71,7 @@ pub fn install(host: &'static dyn Host, process: sys::Handle) -> bool {
         return false;
     }
     PROCESS.store(process, Ordering::Release);
-    true
+    threads::start(process)
 }
 
 fn host() -> &'static dyn Host {
