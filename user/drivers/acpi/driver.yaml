@@ -1,0 +1,10 @@
+# The manifest of the ACPI server, installed as
+# usr/lib/drivers/acpi/driver.yaml.
+name: acpi
+binary: /usr/lib/drivers/acpi/acpi
+match: [platform:acpi]
+kind: normal
+needs: [bus, ioports]
+# To ask the permission broker whether a client may power the machine
+# off or restart it.
+permissions: [permissions.check]

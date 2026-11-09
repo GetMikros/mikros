@@ -18,6 +18,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "acpi"
+version = "0.0.0"
+dependencies = [
+ "mikros-acpica",
+ "mikros-rt",
+]
+
+[[package]]
 name = "ahci"
 version = "0.0.0"
 dependencies = [

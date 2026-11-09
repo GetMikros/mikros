@@ -131,6 +131,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", devices.display());
             let pci_bus = user_build("pci-bus", kind)?;
             println!("built    {}", pci_bus.display());
+            let acpi = acpi_build(kind)?;
+            let acpi_manifest = crate::workspace_root().join("user/drivers/acpi/driver.yaml");
             let virtio_blk = user_build("virtio-blk", kind)?;
             println!("built    {}", virtio_blk.display());
             let virtio_blk_manifest =
@@ -201,6 +203,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/drivers/pci-bus/driver.yaml",
                     pci_bus_manifest.as_path(),
                 ),
+                ("usr/lib/drivers/acpi/acpi", acpi.as_path()),
+                ("usr/lib/drivers/acpi/driver.yaml", acpi_manifest.as_path()),
                 (
                     "usr/lib/drivers/virtio-blk/virtio-blk",
                     virtio_blk.as_path(),
@@ -1039,6 +1043,15 @@ fn btrfs_build(kind: Kind) -> Result<PathBuf> {
     let btrfs = user_build("btrfs", kind)?;
     println!("built    {}", btrfs.display());
     Ok(btrfs)
+}
+
+/// Builds the ACPI server, after the library of ACPICA and its glue that
+/// it links, and returns its path.
+fn acpi_build(kind: Kind) -> Result<PathBuf> {
+    crate::acpica::build(crate::acpica::Flavor::Mikros)?;
+    let acpi = user_build("acpi", kind)?;
+    println!("built    {}", acpi.display());
+    Ok(acpi)
 }
 
 /// Builds the user-space program `bin`, a package of the `user`
