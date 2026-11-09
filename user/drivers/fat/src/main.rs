@@ -6,8 +6,12 @@
 //! service of class `filesystem` that serves `mikros.fs.Filesystem`.
 //! `Start` fails with `NOT_SUPPORTED` for a partition that does not hold
 //! a valid FAT volume. `Stop` writes what remains and marks the volume as
-//! shut down cleanly. `ResetChild` and `ConnectChild` fail with
-//! `NOT_SUPPORTED`.
+//! shut down cleanly. `Reconnect`, `ResetChild` and `ConnectChild` fail
+//! with `NOT_SUPPORTED`.
+//!
+//! This thread serves the `Driver` channel until the volume is mounted,
+//! and the volume's clients after that; the driver's thread takes the
+//! channel then (see `driver`).
 
 #![no_std]
 #![no_main]
@@ -15,6 +19,7 @@
 extern crate alloc;
 
 mod device;
+mod driver;
 mod fs;
 mod memory;
 mod node;
@@ -28,8 +33,8 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer, DriverRequest, DriverStartRequest,
-    DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverRequest, DriverServer, DriverStartRequest, DriverStartResponse,
+    DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::{DirectoryClient, Provider};
@@ -44,6 +49,7 @@ const SERVICE_CLASS: &str = "filesystem";
 /// once; any other value, or none, lets them wait for `Sync` or `Stop`.
 const CACHE: &str = "cache";
 const QUICK_DISCONNECT: &str = "quick-disconnect";
+const FOREVER: i64 = i64::MAX;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -63,49 +69,57 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let end = ServerEnd::new(managed.handles.remove(at).handle);
-    let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
+    let server = DriverServer::new(end);
     let process = managed.header.process.raw();
     let directory = DirectoryClient::new(managed.header.directory);
-    let mut served: Option<Rc<Fs>> = None;
+    if !driver::END.init() {
+        return PANIC_EXIT_CODE;
+    }
+    let Some(thread) = driver::Thread::create(process) else {
+        return PANIC_EXIT_CODE;
+    };
+    let fs = loop {
+        let Ok(request) = server.next(FOREVER) else {
+            return 0;
+        };
+        let _ = match request {
+            DriverRequest::Start(request, responder) => {
+                match start(request, process, &directory, &reactor, &spawner) {
+                    Ok((fs, manager)) => {
+                        let _ = responder.reply(&server, Ok(DriverStartResponse {}));
+                        spawner.spawn(publish(fs.clone(), manager));
+                        break fs;
+                    }
+                    Err(status) => responder.reply(&server, Err(status)),
+                }
+            }
+            DriverRequest::Stop(_, responder) => {
+                let _ = responder.reply(&server, DriverStopResponse {});
+                return 0;
+            }
+            DriverRequest::Reconnect(_, responder) => {
+                responder.reply(&server, Err(Status::NotSupported))
+            }
+            DriverRequest::ResetChild(_, responder) => {
+                responder.reply(&server, Err(Status::NotSupported))
+            }
+            DriverRequest::ConnectChild(_, responder) => {
+                responder.reply(&server, Err(Status::NotSupported))
+            }
+        };
+    };
+    if !thread.start(server) {
+        mikros_rt::log!(Error, "fat: the driver's thread did not start");
+        return PANIC_EXIT_CODE;
+    }
     executor.block_on(async {
-        while let Ok(request) = server.next().await {
-            let s = server.server();
-            let _ = match request {
-                DriverRequest::Start(_, responder) if served.is_some() => {
-                    responder.reply(s, Err(Status::BadState))
-                }
-                DriverRequest::Start(request, responder) => {
-                    match start(request, process, &directory, &reactor, &spawner) {
-                        Ok((fs, manager)) => {
-                            served = Some(fs.clone());
-                            let replied = responder.reply(s, Ok(DriverStartResponse {}));
-                            spawner.spawn(publish(fs, manager));
-                            replied
-                        }
-                        Err(status) => responder.reply(s, Err(status)),
-                    }
-                }
-                DriverRequest::Stop(_, responder) => {
-                    if let Some(fs) = &served {
-                        fs.unmount();
-                    }
-                    let _ = responder.reply(s, DriverStopResponse {});
-                    return 0;
-                }
-                // The driver does not take a new bus channel yet.
-                DriverRequest::Reconnect(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
-                DriverRequest::ResetChild(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
-                DriverRequest::ConnectChild(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
-            };
-        }
-        0
-    })
+        let _ = reactor.signals(driver::END.event(), driver::ENDING).await;
+    });
+    if driver::END.how() == driver::STOPPED {
+        fs.unmount();
+        driver::END.unmounted();
+    }
+    0
 }
 
 /// Mounts the volume on the partition behind the `bus` channel of
