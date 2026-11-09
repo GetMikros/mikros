@@ -3813,17 +3813,54 @@ fn kernel_logged(s: &Startup, needle: &[u8]) -> Result<bool> {
     }
 }
 
+/// What the tests ask about what the kernel logged at boot, which they
+/// cannot find in the log later, as the tests' records push it out.
+const BOOT_LINES: [&[u8]; 3] = [b"DMA isolated", b"DMA is not isolated", b"VT-d units"];
+/// A bit for each of `BOOT_LINES` that the kernel logged before the first
+/// test, set by `keep_boot_log`.
+static BOOT_LOGGED: AtomicU32 = AtomicU32::new(0);
+
+/// Notes which of `BOOT_LINES` the kernel's own records in the log hold,
+/// without allocating, as the first test needs.
+fn keep_boot_log(s: &Startup) -> Result {
+    let mut after = 0;
+    loop {
+        let mut record = [0u8; 288];
+        // SAFETY: the pointer describes `record`.
+        let status = unsafe { sys::log_read(s.log, after, record.as_mut_ptr()) };
+        if status == SHOULD_WAIT {
+            return Ok(());
+        }
+        check("reading the log", status)?;
+        let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+        let message = &record[0x20..0x20 + len.min(256)];
+        for (i, line) in BOOT_LINES.iter().enumerate() {
+            if record[0x19] == 0 && contains(message, line) {
+                BOOT_LOGGED.fetch_or(1 << i, Ordering::Relaxed);
+            }
+        }
+        after = u64_at(&record, 0);
+    }
+}
+
+/// Whether the kernel logged `line`, one of `BOOT_LINES`, at boot.
+fn boot_logged(line: &[u8]) -> bool {
+    let i = BOOT_LINES.iter().position(|l| *l == line);
+    let i = i.expect("one of BOOT_LINES");
+    BOOT_LOGGED.load(Ordering::Relaxed) & (1 << i) != 0
+}
+
 /// The kernel says at boot whether DMA is isolated. When VT-d isolates
 /// it, the register page of QEMU's unit cannot be granted.
 fn dma_isolation_reported(s: &Startup) -> Result {
     const VTD_REGISTERS: u64 = 0xFED9_0000;
-    if !kernel_logged(s, b"DMA isolated")? {
+    if !boot_logged(b"DMA isolated") {
         return ensure(
             "reporting that DMA is not isolated",
-            kernel_logged(s, b"DMA is not isolated")?,
+            boot_logged(b"DMA is not isolated"),
         );
     }
-    if !kernel_logged(s, b"VT-d units")? {
+    if !boot_logged(b"VT-d units") {
         return Ok(());
     }
     let mut resource = 0;
@@ -3884,7 +3921,7 @@ fn bti_create_checks(s: &Startup) -> Result {
     check("creating a Bti", status)?;
     let (status, second) = bti_create(range, RID, 0);
     check("creating a second for the same device", status)?;
-    let isolated = kernel_logged(s, b"DMA isolated")?;
+    let isolated = boot_logged(b"DMA isolated");
     let (status, nowhere) = bti_create(s.root_resource, NOWHERE, 0);
     if isolated {
         ensure("refusing a device no IOMMU covers", status == OUT_OF_RANGE)?;
@@ -10547,6 +10584,10 @@ fn main(s: &Startup) -> i64 {
         return 1;
     }
     let (mut failed, mut left_out) = (0, 0);
+    if let Err(f) = keep_boot_log(s) {
+        log!(Error, "TEST setup FAILED: {} ({})", f.what, f.status);
+        return 1;
+    }
     let (first, last) = TESTS.split_at(TESTS.len() - 2);
     for (name, test) in first.iter().chain(HOOK_TESTS).chain(last) {
         if skipped(s).any(|n| n == *name) {
