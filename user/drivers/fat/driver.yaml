@@ -3,15 +3,8 @@
 name: fat
 binary: /usr/lib/drivers/fat/fat
 match:
+  # The EFI system partition.
   - gpt:c12a7328-f81f-11d2-ba4b-00a0c93ec93b
-  - gpt:ebd0a0a2-b9e5-4433-87c0-68b6b72699c7
-  # The FAT types of MBR partitions.
-  - mbr:01
-  - mbr:04
-  - mbr:06
-  - mbr:0b
-  - mbr:0c
-  - mbr:0e
-  # Any partition whose first bytes hold FAT.
+  # Any other partition whose first bytes hold FAT.
   - fs:fat
 kind: normal
