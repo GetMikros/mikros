@@ -237,6 +237,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
+name = "log-service"
+version = "0.0.0"
+dependencies = [
+ "mikros-logstore",
+ "mikros-rt",
+]
+
+[[package]]
 name = "managed"
 version = "0.0.0"
 dependencies = [
@@ -293,6 +301,10 @@ version = "0.0.0"
 dependencies = [
  "mikros-rt",
 ]
+
+[[package]]
+name = "mikros-logstore"
+version = "0.0.0"
 
 [[package]]
 name = "mikros-manifest"

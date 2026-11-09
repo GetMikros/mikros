@@ -1,0 +1,10 @@
+# The service manifest of the log service, installed as
+# usr/lib/services/log.yaml.
+name: log
+binary: /usr/bin/log-service
+start: boot
+boot_handles: [log_manage]
+provides:
+  - protocol: mikros.log.Writer
+  - protocol: mikros.log.Reader
+    permission: logs.read
