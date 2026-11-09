@@ -210,6 +210,8 @@ pub struct Transfer {
     pub launcher: ClientEnd<Launcher>,
     pub directory: ClientEnd<Directory>,
     pub clock_page: Handle,
+    /// The time page, when the time service gave it.
+    pub time_page: Option<Handle>,
     /// The namespace's entries.
     pub namespace: Vec<NamespaceEntry>,
 }
@@ -234,7 +236,10 @@ impl Started {
             thread: same(&self.thread)?,
             launcher: transfer.launcher,
             directory: transfer.directory,
-            time_page: None,
+            time_page: transfer
+                .time_page
+                .map(|page| duplicate(page, TRANSFER | READ | MAP | INSPECT))
+                .transpose()?,
             clock_page: duplicate(transfer.clock_page, TRANSFER | READ | MAP | INSPECT)?,
             program_base: self.base,
             program_phdr: self.phdr,
