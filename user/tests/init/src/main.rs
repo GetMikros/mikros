@@ -10210,8 +10210,9 @@ mod manager {
     /// The `bus-restart` scenario: serves `tests/bus.img`, whose drivers
     /// bring up the root file system from the boot disk, on whichever
     /// controller the runner put it, and whose restart probe kills the PCI
-    /// bus driver below it once the root is there; stops QEMU with
-    /// `PASSED` once the probe passed, or with `FAILED`.
+    /// bus driver below it once the root is there, and then the drivers of
+    /// the disk controllers; stops QEMU with `PASSED` once the probe
+    /// passed, or with `FAILED`.
     pub fn bus_restart_scenario(s: &Startup) -> i64 {
         // As the root disk's scenario, with the probe's restart.
         const SECONDS: i64 = 300;

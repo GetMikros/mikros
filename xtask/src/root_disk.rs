@@ -7,8 +7,9 @@
 //! - the bus restart runs, behind a virtio-blk, an NVMe and the AHCI
 //!   controller: the test init serves `tests/bus.img` with
 //!   `test=bus-restart`, whose restart probe kills the PCI bus driver
-//!   below the mounted root, until the probe finds the other drivers and
-//!   the root still working;
+//!   below the mounted root, and then the drivers of the disk
+//!   controllers, the root's among them, mid-write, until the probe finds
+//!   the other drivers still running and the writes on the root intact;
 //! - the ACPI restart run: the test init serves `tests/acpi-restart.img`
 //!   with `test=acpi-restart`, whose restart probe kills the ACPI server
 //!   below the real-time clock's driver, until the probe finds the other

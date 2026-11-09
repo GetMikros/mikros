@@ -7,9 +7,11 @@
 //!
 //! - As `system.restart-probe`, in the bus restart runs of `cargo xtask
 //!   test`, with the root file system on a disk behind a virtio-blk, NVMe
-//!   or AHCI controller, it kills the PCI bus driver. It writes and syncs
-//!   part of a file on the root before the kill and the rest after it,
-//!   and the file must read back as written.
+//!   or AHCI controller, it kills the PCI bus driver, and then every
+//!   driver of a disk controller, among them the one of the root's disk.
+//!   Around each kill it writes and syncs part of a file on the root
+//!   before the kill and the rest after it, and the file must read back
+//!   as written.
 //! - As `system.acpi-restart-probe`, in the ACPI restart run, it kills
 //!   the ACPI server once the real-time clock's driver has published its
 //!   service, which must still read the clock afterwards.
@@ -40,6 +42,14 @@ const LOG_ID: u32 = 2;
 const FILESYSTEM: &str = "device.filesystem";
 const RTC: &str = "device.rtc";
 const BUS_DRIVER: &str = "system.driver.pci-bus";
+/// The drivers of the disk controllers that the root's disk can be
+/// behind. The probe kills them all, as it cannot tell which process
+/// serves the root's disk.
+const DISK_DRIVERS: [&str; 3] = [
+    "system.driver.virtio-blk",
+    "system.driver.nvme",
+    "system.driver.ahci",
+];
 const ACPI_DRIVER: &str = "system.driver.acpi";
 /// The app ID that kills the ACPI server.
 const ACPI_PROBE: &str = "system.acpi-restart-probe";
@@ -61,7 +71,7 @@ const SETTLE: i64 = 3_000 * MS;
 /// ports of an empty controller.
 const STABLE: i64 = 3_000 * MS;
 const STARTING: i64 = 5_000 * MS;
-/// The file written across the restart, in pieces of `PIECE` bytes:
+/// The file written across each kill, in pieces of `PIECE` bytes:
 /// `BEFORE` before the kill and `AFTER` after it, each synced.
 const FILE: &str = "bus-restart";
 const PIECE: usize = 16384;
@@ -167,13 +177,13 @@ async fn root(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<Nod
 }
 
 /// Waits until the drivers have run unchanged for `STABLE` and then
-/// `STARTING` more, kills the one process of `app`, and gives the
-/// drivers that ran then and the process killed.
+/// `STARTING` more, kills every process of the apps `apps`, at least
+/// one, and gives the drivers that ran then and the processes killed.
 async fn kill(
     launcher: &LauncherAsyncClient,
     reactor: &Reactor,
-    app: &str,
-) -> Option<(BTreeSet<(String, u32)>, u32)> {
+    apps: &[&str],
+) -> Option<(BTreeSet<(String, u32)>, Vec<(String, u32)>)> {
     let mut before = drivers(launcher).await?;
     let mut since = now();
     while now() < since + STABLE {
@@ -185,35 +195,44 @@ async fn kill(
     }
     let _ = reactor.sleep_until(now() + STARTING).await;
     let before = drivers(launcher).await?;
-    let found: Vec<u32> = before
+    let found: Vec<(String, u32)> = before
         .iter()
-        .filter(|(a, _)| a == app)
-        .map(|&(_, pid)| pid)
+        .filter(|(a, _)| apps.contains(&a.as_str()))
+        .cloned()
         .collect();
-    let [pid] = found[..] else {
-        return failed("finding the one driver to kill");
-    };
-    if !matches!(launcher.kill(pid, KILL).await, Ok(Ok(_))) {
-        return failed("killing the driver");
+    if found.is_empty() {
+        return failed("finding a driver to kill");
     }
-    mikros_rt::log!(Info, "restart-probe: killed {app}, pid {pid}");
-    Some((before, pid))
+    for (app, pid) in &found {
+        if !matches!(launcher.kill(*pid, KILL).await, Ok(Ok(_))) {
+            return failed("killing the driver");
+        }
+        mikros_rt::log!(Info, "restart-probe: killed {app}, pid {pid}");
+    }
+    Some((before, found))
 }
 
-/// Waits until `app` runs again as another process than `killed`, and
-/// then `SETTLE` longer, and checks that every other driver of `before`
-/// still runs as the process it was.
+/// Waits until each app of `killed` runs again as many processes as
+/// were killed of it, none of them killed, and then `SETTLE` longer, and
+/// checks that every driver of `before` of another app still runs as the
+/// process it was.
 async fn restarted(
     launcher: &LauncherAsyncClient,
     reactor: &Reactor,
-    app: &str,
-    killed: u32,
+    killed: &[(String, u32)],
     before: &BTreeSet<(String, u32)>,
 ) -> Option<()> {
     let limit = now() + RESTART_LIMIT;
+    let is_killed = |app: &str| killed.iter().any(|(a, _)| a == app);
     loop {
         let running = drivers(launcher).await?;
-        if running.iter().any(|(a, pid)| a == app && *pid != killed) {
+        let again = |app: &String| {
+            let new = running
+                .iter()
+                .filter(|&(a, pid)| a == app && !killed.contains(&(a.clone(), *pid)));
+            new.count() >= killed.iter().filter(|(a, _)| a == app).count()
+        };
+        if killed.iter().all(|(app, _)| again(app)) {
             break;
         }
         if now() > limit {
@@ -223,7 +242,7 @@ async fn restarted(
     }
     let _ = reactor.sleep_until(now() + SETTLE).await;
     let after = drivers(launcher).await?;
-    for (other, pid) in before.iter().filter(|(a, _)| a != app) {
+    for (other, pid) in before.iter().filter(|(a, _)| !is_killed(a)) {
         if !after.contains(&(other.clone(), *pid)) {
             mikros_rt::log!(Error, "restart-probe: {other}, pid {pid}, no longer runs");
             return failed("keeping the other drivers");
@@ -240,8 +259,8 @@ async fn acpi(
     reactor: &Reactor,
 ) -> Option<()> {
     let rtc = rtc(directory, reactor).await?;
-    let (before, killed) = kill(launcher, reactor, ACPI_DRIVER).await?;
-    restarted(launcher, reactor, ACPI_DRIVER, killed, &before).await?;
+    let (before, killed) = kill(launcher, reactor, &[ACPI_DRIVER]).await?;
+    restarted(launcher, reactor, &killed, &before).await?;
     match rtc.get().await {
         Ok(Ok(_)) => Some(()),
         _ => failed("reading the clock after the ACPI server restarted"),
@@ -272,8 +291,9 @@ async fn rtc(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<RtcA
     Some(RtcAsyncClient::new(client, reactor.clone()))
 }
 
-/// Kills the PCI bus driver below the root file system, between writes
-/// to a file there that must read back as written.
+/// Kills the PCI bus driver below the root file system, and then the
+/// drivers of the disk controllers, each time between writes to a file
+/// there, which must read back as written after each restart.
 async fn bus(
     directory: &DirectoryAsyncClient,
     launcher: &LauncherAsyncClient,
@@ -301,33 +321,40 @@ async fn bus(
         }
         Some(())
     };
-    for i in 0..BEFORE {
-        write(i).await?;
-    }
-
-    let (before, killed) = kill(launcher, reactor, BUS_DRIVER).await?;
-    for i in BEFORE..BEFORE + AFTER {
-        write(i).await?;
-    }
-    restarted(launcher, reactor, BUS_DRIVER, killed, &before).await?;
-
-    for i in 0..BEFORE + AFTER {
-        let at = u64::from(i) * PIECE as u64;
-        let mut read = Vec::new();
-        while read.len() < PIECE {
-            let want = (PIECE - read.len()) as u32;
-            let data = match file.read(at + read.len() as u64, want).await {
-                Ok(Ok(r)) => r.data,
-                _ => return failed("reading the file back"),
-            };
-            if data.is_empty() {
-                return failed("reading the whole file back");
+    let read_back = async |pieces: u32| -> Option<()> {
+        for i in 0..pieces {
+            let at = u64::from(i) * PIECE as u64;
+            let mut read = Vec::new();
+            while read.len() < PIECE {
+                let want = (PIECE - read.len()) as u32;
+                let data = match file.read(at + read.len() as u64, want).await {
+                    Ok(Ok(r)) => r.data,
+                    _ => return failed("reading the file back"),
+                };
+                if data.is_empty() {
+                    return failed("reading the whole file back");
+                }
+                read.extend_from_slice(&data);
             }
-            read.extend_from_slice(&data);
+            if read != piece(i) {
+                return failed("finding what was written");
+            }
         }
-        if read != piece(i) {
-            return failed("finding what was written");
+        Some(())
+    };
+
+    let mut pieces = 0;
+    for apps in [&[BUS_DRIVER][..], &DISK_DRIVERS[..]] {
+        for i in pieces..pieces + BEFORE {
+            write(i).await?;
         }
+        let (before, killed) = kill(launcher, reactor, apps).await?;
+        for i in pieces + BEFORE..pieces + BEFORE + AFTER {
+            write(i).await?;
+        }
+        restarted(launcher, reactor, &killed, &before).await?;
+        pieces += BEFORE + AFTER;
+        read_back(pieces).await?;
     }
     if !matches!(root.unlink(FILE.into(), false).await, Ok(Ok(_))) {
         return failed("removing the file");
