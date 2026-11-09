@@ -2,10 +2,12 @@
 //! The served file system: the nodes that connections are open to, which
 //! connections to the same node share, the tokens of directories, the
 //! byte-range locks and watches of connections, and the `Filesystem`
-//! service (MIKSPEC-0049.R13). Its root is the top-level subvolume with
-//! an entry `usr` of its own, the root of the system version that
-//! `@system/current` names when the file system is mounted
-//! (MIKSPEC-0053.R4, MIKSPEC-0053.R9).
+//! service (MIKSPEC-0049.R13). Its root is the top-level subvolume. When
+//! that holds `@system` with a `current` link, the root has an entry
+//! `usr` of its own as well, the root of the system version that
+//! `current` names when the file system is mounted (MIKSPEC-0053.R4,
+//! MIKSPEC-0053.R9); any other file system's root is the top-level
+//! subvolume as it is.
 
 use crate::change::koids;
 use crate::disk::Disk;
@@ -202,10 +204,12 @@ impl Fs {
         })
     }
 
-    /// Whether `name` in `dir` is the root's `usr`, which the server
-    /// keeps from being created, removed or renamed.
+    /// Whether `name` in `dir` is the root's `usr` of the system layout,
+    /// which the server keeps from being created, removed or renamed. A
+    /// file system without `@system/current` has no such entry, and a
+    /// `usr` of its own is like any other.
     pub fn is_usr(&self, dir: &Open, name: &str) -> bool {
-        dir.key == self.root.key && name == USR
+        self.usr.is_some() && dir.key == self.root.key && name == USR
     }
 
     /// The open node for `node`, found as `name` in `dir`: the one that

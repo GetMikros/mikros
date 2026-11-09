@@ -4,4 +4,6 @@ name: btrfs
 binary: /usr/lib/drivers/btrfs/btrfs
 match:
   - gpt:fa730af6-8ba3-42d9-b155-466909d08135
+  # Any partition whose first bytes hold btrfs.
+  - fs:btrfs
 kind: normal
