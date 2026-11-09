@@ -17,7 +17,6 @@
 extern crate alloc;
 
 mod link;
-mod log;
 mod partition;
 mod service;
 mod table;
@@ -41,9 +40,8 @@ use mikros_rt::interfaces::mikros::driver::{
     DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
     DriverStopResponse, Property,
 };
-use mikros_rt::interfaces::mikros::log::Severity;
 use mikros_rt::interfaces::mikros::process::HandleRole;
-use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, Provider};
+use mikros_rt::interfaces::mikros::service::Provider;
 use mikros_rt::interfaces::mikros::storage::{BlockAsyncClient, BlockFlags, BlockInfo};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 use partition::{Access, Partition};
@@ -115,6 +113,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    // The driver has no log handle: its messages go to the log service.
+    mikros_rt::log::connect(&managed.header.directory);
     let Some(at) = managed
         .handles
         .iter()
@@ -125,7 +125,6 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let end = ServerEnd::new(managed.handles.remove(at).handle);
     let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
     let process = managed.header.process.raw();
-    let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
     let mut started = false;
     let children = Rc::new(Children::default());
     executor.block_on(async {
@@ -136,7 +135,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     responder.reply(s, Err(Status::BadState))
                 }
                 DriverRequest::Start(request, responder) => {
-                    match start(request, process, &directory, &reactor, &spawner).await {
+                    match start(request, process, &reactor, &spawner).await {
                         Ok((disk, manager)) => {
                             started = true;
                             let writers = Rc::new(Writers::new(disk.link.clone()));
@@ -233,7 +232,6 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 async fn start(
     request: DriverStartRequest,
     process: sys::Handle,
-    directory: &DirectoryAsyncClient,
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(Disk, DeviceManagerAsyncClient), Status> {
@@ -243,21 +241,21 @@ async fn start(
     let read = table::read(&block, &info, process).await;
     let partitions = match read {
         Some((table, partitions)) => {
-            let (severity, which) = match table {
-                Table::Primary => (Severity::Info, "primary"),
-                Table::Backup => (Severity::Warning, "backup"),
-            };
-            let message = format!(
-                "partition: {} has {} partitions in its {which} GPT",
-                request.device.name,
-                partitions.len()
-            );
-            log::write(directory, reactor, severity, message).await;
+            let (name, count) = (&request.device.name, partitions.len());
+            match table {
+                Table::Primary => mikros_rt::log!(
+                    Info,
+                    "partition: {name} has {count} partitions in its primary GPT"
+                ),
+                Table::Backup => mikros_rt::log!(
+                    Warning,
+                    "partition: {name} has {count} partitions in its backup GPT"
+                ),
+            }
             partitions
         }
         None => {
-            let message = format!("partition: {} has no valid GPT", request.device.name);
-            log::write(directory, reactor, Severity::Info, message).await;
+            mikros_rt::log!(Info, "partition: {} has no valid GPT", request.device.name);
             Vec::new()
         }
     };

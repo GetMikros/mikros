@@ -96,6 +96,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    // The driver has no log handle: its messages go to the log service.
+    mikros_rt::log::connect(&managed.header.directory);
     let Some(at) = managed
         .handles
         .iter()

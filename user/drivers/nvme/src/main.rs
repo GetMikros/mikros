@@ -14,7 +14,6 @@
 extern crate alloc;
 
 mod controller;
-mod log;
 mod namespace;
 mod queue;
 mod regs;
@@ -36,9 +35,8 @@ use mikros_rt::interfaces::mikros::driver::{
     DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
     DriverStopResponse,
 };
-use mikros_rt::interfaces::mikros::log::Severity;
 use mikros_rt::interfaces::mikros::process::HandleRole;
-use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, Provider};
+use mikros_rt::interfaces::mikros::service::Provider;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 use mikros_storage::PciBus;
 use namespace::Namespace;
@@ -89,6 +87,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    // The driver has no log handle: its messages go to the log service.
+    mikros_rt::log::connect(&managed.header.directory);
     let Some(at) = managed
         .handles
         .iter()
@@ -99,7 +99,6 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let end = ServerEnd::new(managed.handles.remove(at).handle);
     let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
     let process = managed.header.process.raw();
-    let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
     let mut controller: Option<Rc<Controller>> = None;
     let devices = Rc::new(Devices::default());
     executor.block_on(async {
@@ -107,7 +106,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             let s = server.server();
             let _ = match request {
                 DriverRequest::Start(request, responder) => {
-                    match start(request, process, &directory, &reactor, &spawner).await {
+                    match start(request, process, &reactor, &spawner).await {
                         Ok((started, namespaces, manager)) => {
                             controller = Some(started);
                             let replied = responder.reply(s, Ok(DriverStartResponse {}));
@@ -179,11 +178,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 /// `INVALID_ARGS` without a bus channel or a `DMA` resource, with the
 /// status of the bus driver when it refused a request, and with
 /// `INTERNAL` when the controller could not be brought up. Skipped
-/// namespaces are logged through `directory`.
+/// namespaces are logged.
 async fn start(
     request: DriverStartRequest,
     process: sys::Handle,
-    directory: &DirectoryAsyncClient,
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(Rc<Controller>, Vec<Rc<Namespace>>, DeviceManagerAsyncClient), Status> {
@@ -199,11 +197,13 @@ async fn start(
     for info in controller.namespaces().await? {
         let usable = matches!(info.block_size, 512 | 4096) && info.metadata == 0;
         if !usable {
-            let message = format!(
+            mikros_rt::log!(
+                Info,
                 "nvme: skipping namespace {}: {}-byte blocks with {} bytes of metadata",
-                info.nsid, info.block_size, info.metadata
+                info.nsid,
+                info.block_size,
+                info.metadata
             );
-            log::write(directory, reactor, Severity::Info, message).await;
             continue;
         }
         namespaces.push(Rc::new(Namespace {
