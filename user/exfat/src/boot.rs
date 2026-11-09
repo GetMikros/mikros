@@ -8,6 +8,8 @@ use crate::Error;
 pub const REGION_SECTORS: u64 = 12;
 /// Where the volume flags lie in the main boot sector.
 pub const FLAGS_AT: usize = 106;
+/// The volume flag that marks the volume as in use.
+pub const VOLUME_DIRTY: u16 = 1 << 1;
 const ACTIVE_FAT: u16 = 1 << 0;
 const PERCENT_IN_USE_AT: usize = 112;
 

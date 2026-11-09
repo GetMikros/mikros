@@ -1,17 +1,55 @@
-//! Tests against volumes that mkfs.exfat formats.
+//! Tests against volumes that mkfs.exfat formats and fsck.exfat checks.
 
 extern crate std;
 
 use super::*;
+use std::cell::Cell;
 use std::format;
 use std::path::PathBuf;
 use std::process::Command;
+use std::rc::Rc;
 use std::string::String;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::vec;
 use std::vec::Vec;
 
 const MIB: usize = 1 << 20;
+
+/// A volume in memory, which counts the writes to it.
+struct Mem(Vec<u8>, Rc<Cell<u32>>);
+
+impl Mem {
+    fn new(bytes: Vec<u8>) -> Mem {
+        Mem(bytes, Rc::new(Cell::new(0)))
+    }
+}
+
+impl Device for Mem {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        assert!(offset % 512 == 0 && buf.len() % 512 == 0, "unaligned read");
+        let at = offset as usize;
+        buf.copy_from_slice(self.0.get(at..at + buf.len()).ok_or(Error::Io)?);
+        Ok(())
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), Error> {
+        assert!(
+            offset % 512 == 0 && data.len() % 512 == 0,
+            "unaligned write"
+        );
+        let at = offset as usize;
+        self.0
+            .get_mut(at..at + data.len())
+            .ok_or(Error::Io)?
+            .copy_from_slice(data);
+        self.1.set(self.1.get() + 1);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+}
 
 /// A file of its own in the temporary directory.
 fn temp_path() -> PathBuf {
@@ -88,4 +126,111 @@ fn checks_the_boot_region_and_finds_its_backup() {
         Err(Error::Invalid)
     );
     assert_eq!(Layout::parse(&bytes[..100], 0, size), Err(Error::Invalid));
+}
+
+/// Checks the volume `bytes` with fsck.exfat, which must find it clean.
+fn fsck(bytes: &[u8]) {
+    let path = temp_path();
+    std::fs::write(&path, bytes).unwrap();
+    let out = Command::new("fsck.exfat")
+        .arg("-n")
+        .arg(&path)
+        .output()
+        .expect("fsck.exfat, from exfatprogs, runs");
+    std::fs::remove_file(&path).unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "fsck.exfat: {text}");
+}
+
+fn dirty(bytes: &[u8]) -> bool {
+    bytes[106] & 2 != 0
+}
+
+#[test]
+fn mounts_what_mkfs_formats() {
+    for (size, args) in [
+        (8 * MIB, &["-L", "STICK"][..]),
+        (64 * MIB, &["-c", "32K", "-L", "Big One"][..]),
+    ] {
+        let bytes = mkfs(size, args);
+        let mut volume = Volume::mount(Mem::new(bytes.clone()), size as u64, false).unwrap();
+        let layout = volume.layout().clone();
+        assert_eq!(layout.sector_size, 512);
+        assert_eq!(layout.region, 0);
+        assert_eq!(
+            volume.label().unwrap().as_deref(),
+            Some(args[args.len() - 1])
+        );
+        // Only the bitmap, the up-case table and the root are in use.
+        let used = layout.clusters - volume.free_clusters();
+        assert!((3..=6).contains(&used), "{used} clusters in use");
+        assert!(volume.read_only());
+    }
+    assert_eq!(
+        Volume::mount(Mem::new(vec![0u8; 8 * MIB]), 8 << 20, false).err(),
+        Some(Error::Invalid)
+    );
+}
+
+#[test]
+fn marks_the_volume_dirty_while_mounted_for_writing() {
+    let bytes = mkfs(8 * MIB, &[]);
+    let size = bytes.len() as u64;
+    let mut volume = Volume::mount(Mem::new(bytes), size, true).unwrap();
+    assert!(!volume.read_only());
+    assert!(dirty(&volume.device().0));
+    volume.unmount().unwrap();
+    assert!(volume.read_only());
+    let bytes = volume.into_device().0;
+    assert!(!dirty(&bytes));
+    fsck(&bytes);
+    // Quick disconnect marks it only between begin_change and end_change.
+    let mut volume = Volume::mount_quick_disconnect(Mem::new(bytes), size, true).unwrap();
+    assert!(!dirty(&volume.device().0));
+    volume.begin_change().unwrap();
+    assert!(dirty(&volume.device().0));
+    volume.end_change().unwrap();
+    assert!(!dirty(&volume.device().0));
+}
+
+#[test]
+fn mounts_a_dirty_volume_read_only_without_writing() {
+    let mut bytes = mkfs(8 * MIB, &[]);
+    bytes[106] |= 2;
+    let size = bytes.len() as u64;
+    let device = Mem::new(bytes.clone());
+    let writes = device.1.clone();
+    let mut volume = Volume::mount(device, size, true).unwrap();
+    assert!(volume.read_only());
+    volume.begin_change().unwrap();
+    volume.end_change().unwrap();
+    volume.unmount().unwrap();
+    assert_eq!(writes.get(), 0);
+    assert_eq!(volume.into_device().0, bytes);
+}
+
+#[test]
+fn falls_back_to_the_backup_boot_region_read_only() {
+    let mut bytes = mkfs(8 * MIB, &["-L", "BACKUP"]);
+    // A byte of the boot code, which the checksum covers.
+    bytes[200] ^= 0xFF;
+    let size = bytes.len() as u64;
+    let device = Mem::new(bytes.clone());
+    let writes = device.1.clone();
+    let mut volume = Volume::mount(device, size, true).unwrap();
+    assert_eq!(volume.layout().region, 12);
+    assert!(volume.read_only());
+    assert_eq!(volume.label().unwrap().as_deref(), Some("BACKUP"));
+    volume.unmount().unwrap();
+    assert_eq!(writes.get(), 0);
+    // Without a valid backup either, there is no volume.
+    bytes[12 * 512 + 200] ^= 0xFF;
+    assert_eq!(
+        Volume::mount(Mem::new(bytes), size, false).err(),
+        Some(Error::Invalid)
+    );
 }

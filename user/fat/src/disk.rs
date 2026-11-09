@@ -9,15 +9,16 @@ use alloc::vec::Vec;
 /// The most sectors the cache holds before it starts over.
 const CACHED_MAX: usize = 256;
 
-pub(crate) struct Disk<D> {
-    pub(crate) device: D,
+/// A device, and a cache of the sectors read and written through it.
+pub struct Disk<D> {
+    pub device: D,
     sector: u64,
     cache: BTreeMap<u64, Vec<u8>>,
 }
 
 impl<D: Device> Disk<D> {
     /// A disk whose I/O is in sectors of `sector` bytes.
-    pub(crate) fn new(device: D, sector: u32) -> Disk<D> {
+    pub fn new(device: D, sector: u32) -> Disk<D> {
         Disk {
             device,
             sector: u64::from(sector),
@@ -39,7 +40,7 @@ impl<D: Device> Disk<D> {
     }
 
     /// Reads `buf.len()` bytes at `at`, through the cache.
-    pub(crate) fn read(&mut self, at: u64, buf: &mut [u8]) -> Result<(), Error> {
+    pub fn read(&mut self, at: u64, buf: &mut [u8]) -> Result<(), Error> {
         let mut done = 0;
         while done < buf.len() {
             let pos = at + done as u64;
@@ -54,7 +55,7 @@ impl<D: Device> Disk<D> {
     }
 
     /// Writes `data` at `at`, through the cache and on to the device.
-    pub(crate) fn write(&mut self, at: u64, data: &[u8]) -> Result<(), Error> {
+    pub fn write(&mut self, at: u64, data: &[u8]) -> Result<(), Error> {
         let mut done = 0;
         while done < data.len() {
             let pos = at + done as u64;
@@ -72,7 +73,7 @@ impl<D: Device> Disk<D> {
 
     /// Reads whole sectors at `at` straight from the device, for file
     /// data, taking cached sectors into account.
-    pub(crate) fn read_direct(&mut self, at: u64, buf: &mut [u8]) -> Result<(), Error> {
+    pub fn read_direct(&mut self, at: u64, buf: &mut [u8]) -> Result<(), Error> {
         self.device.read(at, buf)?;
         let end = at + buf.len() as u64;
         for (&start, sector) in self.cache.range(at..end) {
@@ -84,7 +85,7 @@ impl<D: Device> Disk<D> {
 
     /// Writes whole sectors at `at` straight to the device, for file
     /// data, dropping the cached sectors it covers.
-    pub(crate) fn write_direct(&mut self, at: u64, data: &[u8]) -> Result<(), Error> {
+    pub fn write_direct(&mut self, at: u64, data: &[u8]) -> Result<(), Error> {
         let end = at + data.len() as u64;
         let stale: Vec<u64> = self.cache.range(at..end).map(|(&k, _)| k).collect();
         for key in stale {
@@ -94,7 +95,7 @@ impl<D: Device> Disk<D> {
     }
 
     /// The sector size of the disk's I/O.
-    pub(crate) fn sector(&self) -> u64 {
+    pub fn sector(&self) -> u64 {
         self.sector
     }
 }
