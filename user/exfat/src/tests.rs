@@ -1,8 +1,13 @@
 //! Tests against volumes that mkfs.exfat formats and fsck.exfat checks.
+//! Files are put on them through `Builder`, which writes entry sets,
+//! FAT chains and the bitmap as an exFAT implementation would; fsck.exfat
+//! checks what it wrote before the volume is read.
 
 extern crate std;
 
 use super::*;
+use crate::entry::{ALLOCATION_POSSIBLE, NO_FAT_CHAIN, Set};
+use crate::upcase::Upcase;
 use std::cell::Cell;
 use std::format;
 use std::path::PathBuf;
@@ -146,6 +151,180 @@ fn fsck(bytes: &[u8]) {
     assert!(out.status.success(), "fsck.exfat: {text}");
 }
 
+fn units(name: &str) -> Vec<u16> {
+    name.encode_utf16().collect()
+}
+
+/// A timestamp of 2024-05-06 07:08:10 local time, 2 hours ahead of UTC.
+fn stamp() -> Stamp {
+    let dos = (44 << 25) | (5 << 21) | (6 << 16) | (7 << 11) | (8 << 5) | 5;
+    Stamp {
+        timestamp: dos,
+        increment: 0,
+        utc_offset: 0x80 | 8,
+    }
+}
+
+/// Puts files and directories on a volume that mkfs.exfat formatted.
+struct Builder {
+    bytes: Vec<u8>,
+    layout: Layout,
+    upcase: Upcase,
+    /// Where the allocation bitmap starts.
+    bitmap: usize,
+}
+
+impl Builder {
+    fn new(bytes: Vec<u8>) -> Builder {
+        let layout = Layout::parse(&bytes[..12 * 4096], 0, bytes.len() as u64).unwrap();
+        let root = layout.cluster_start(layout.root_cluster) as usize;
+        let (mut bitmap, mut table) = (0, Vec::new());
+        for e in bytes[root..root + layout.cluster_size as usize].chunks(32) {
+            let (first, len) = entry::extent(e);
+            let at = layout.cluster_start(first.max(2)) as usize;
+            match e[0] {
+                entry::BITMAP => bitmap = at,
+                entry::UPCASE => table = bytes[at..at + len as usize].to_vec(),
+                _ => {}
+            }
+        }
+        Builder {
+            upcase: Upcase::parse(&table),
+            bytes,
+            layout,
+            bitmap,
+        }
+    }
+
+    fn used(&self, c: u32) -> bool {
+        let i = (c - 2) as usize;
+        self.bytes[self.bitmap + i / 8] & (1 << (i % 8)) != 0
+    }
+
+    fn mark(&mut self, c: u32) {
+        let i = (c - 2) as usize;
+        self.bytes[self.bitmap + i / 8] |= 1 << (i % 8);
+    }
+
+    /// Takes `count` free clusters, in a row when `step` is 0 and
+    /// otherwise each `step` on from the last one taken or further, and
+    /// marks them in the bitmap.
+    fn take(&mut self, count: usize, step: u32) -> Vec<u32> {
+        if step == 0 {
+            let first = (2..)
+                .find(|&c| (c..c + count as u32).all(|c| !self.used(c)))
+                .unwrap();
+            let taken: Vec<u32> = (first..first + count as u32).collect();
+            taken.iter().for_each(|&c| self.mark(c));
+            return taken;
+        }
+        let mut taken = Vec::new();
+        let mut c = 2;
+        while taken.len() < count {
+            if self.used(c) {
+                c += 1;
+                continue;
+            }
+            self.mark(c);
+            taken.push(c);
+            c += step;
+        }
+        taken
+    }
+
+    fn set_fat(&mut self, c: u32, value: u32) {
+        let at = self.layout.fat_start as usize + 4 * c as usize;
+        self.bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn cluster(&mut self, c: u32) -> &mut [u8] {
+        let at = self.layout.cluster_start(c) as usize;
+        &mut self.bytes[at..at + self.layout.cluster_size as usize]
+    }
+
+    /// Adds the entry set `set` to the directory whose single cluster, or
+    /// first one for the root, is `dir`, and gives the slot of its file
+    /// entry.
+    fn add(&mut self, dir: u32, set: &Set) -> u32 {
+        let encoded = set.encode(&self.upcase);
+        let entries = self.cluster(dir);
+        let slot = (0..entries.len() / 32)
+            .find(|&s| entries[s * 32] == entry::END)
+            .unwrap();
+        entries[slot * 32..slot * 32 + encoded.len()].copy_from_slice(&encoded);
+        slot as u32
+    }
+
+    /// Adds a vendor extension entry to the set whose file entry is at
+    /// `slot` of `dir`, the last set added there.
+    fn extend(&mut self, dir: u32, slot: u32) {
+        let entries = self.cluster(dir);
+        let at = slot as usize * 32;
+        let end = at + (usize::from(entries[at + 1]) + 1) * 32;
+        entries[end..end + 32].fill(0);
+        entries[end] = 0xE0;
+        entries[at + 1] += 1;
+        let sum = entry::set_checksum(&entries[at..end + 32]);
+        entries[at + 2..at + 4].copy_from_slice(&sum.to_le_bytes());
+    }
+
+    /// Puts a file named `name` holding `data`, of which `valid` bytes
+    /// are valid, in `dir`: in clusters in a row without a chain when
+    /// `step` is 0, and otherwise in a chain of clusters `step` apart.
+    fn file(&mut self, dir: u32, name: &str, data: &[u8], valid: usize, step: u32) -> u32 {
+        let size = self.layout.cluster_size as usize;
+        let clusters = self.take(data.len().div_ceil(size), step);
+        for (i, &c) in clusters.iter().enumerate() {
+            let part = &data[i * size..((i + 1) * size).min(data.len())];
+            self.cluster(c)[..part.len()].copy_from_slice(part);
+            if step > 0 {
+                let next = clusters.get(i + 1).copied().unwrap_or(volume::END_OF_CHAIN);
+                self.set_fat(c, next);
+            }
+        }
+        let set = Set {
+            attributes: ARCHIVE,
+            created: stamp(),
+            modified: stamp(),
+            accessed: stamp(),
+            // fsck.exfat wants an empty file to have no flag for clusters
+            // in a row.
+            flags: ALLOCATION_POSSIBLE
+                | if step == 0 && !data.is_empty() {
+                    NO_FAT_CHAIN
+                } else {
+                    0
+                },
+            valid_size: valid as u64,
+            first_cluster: clusters.first().copied().unwrap_or(0),
+            size: data.len() as u64,
+            name: units(name),
+        };
+        self.add(dir, &set)
+    }
+
+    /// Puts an empty directory of one cluster named `name` in `dir`, and
+    /// gives its cluster.
+    fn dir(&mut self, dir: u32, name: &str) -> u32 {
+        let c = self.take(1, 0)[0];
+        self.cluster(c).fill(0);
+        let size = u64::from(self.layout.cluster_size);
+        let set = Set {
+            attributes: DIRECTORY,
+            created: stamp(),
+            modified: stamp(),
+            accessed: stamp(),
+            flags: ALLOCATION_POSSIBLE | NO_FAT_CHAIN,
+            valid_size: size,
+            first_cluster: c,
+            size,
+            name: units(name),
+        };
+        self.add(dir, &set);
+        c
+    }
+}
+
 fn names<D: Device>(volume: &mut Volume<D>, dir: Dir) -> Vec<String> {
     volume
         .list(dir, 0, 1000)
@@ -259,4 +438,96 @@ fn finds_nothing_on_an_empty_volume() {
     assert_eq!(too_long.err(), Some(Error::NameTooLong));
     // A directory that no listing or finding gave is unknown.
     assert_eq!(volume.list(Dir::Sub(5), 0, 10).err(), Some(Error::NotFound));
+}
+
+#[test]
+fn finds_entries_in_subdirectories() {
+    let mut b = Builder::new(mkfs(8 * MIB, &[]));
+    let root = b.layout.root_cluster;
+    let sub = b.dir(root, "Sub Dir");
+    let deeper = b.dir(sub, "deeper");
+    b.file(deeper, "leaf.txt", b"leaf", 4, 0);
+    fsck(&b.bytes);
+    let size = b.bytes.len() as u64;
+    let mut volume = Volume::mount(Mem::new(b.bytes), size, false).unwrap();
+    let node = volume.find(Dir::Root, "SUB DIR").unwrap();
+    assert!(node.is_directory() && node.attributes() & DIRECTORY != 0);
+    assert_eq!((node.modified(), node.created()), (stamp(), stamp()));
+    let sub = node.as_dir().unwrap();
+    let cluster = u64::from(volume.layout().cluster_size);
+    assert_eq!(volume.allocated_dir(sub).unwrap(), cluster);
+    assert_eq!(names(&mut volume, sub), ["deeper"]);
+    let deeper = volume.find(sub, "Deeper").unwrap().as_dir().unwrap();
+    let leaf = volume.find(deeper, "LEAF.TXT").unwrap();
+    assert_eq!((leaf.name.as_str(), leaf.size()), ("leaf.txt", 4));
+    assert!(leaf.as_dir().is_none());
+    let Dir::Sub(first) = deeper else {
+        panic!("{deeper:?} is the root");
+    };
+    let offset = volume.entry_offset(&leaf).unwrap();
+    assert_eq!(offset, volume.layout().cluster_start(first));
+    assert_eq!(volume.find(deeper, "leaf").err(), Some(Error::NotFound));
+}
+
+#[test]
+fn compares_names_through_the_up_case_table() {
+    let mut b = Builder::new(mkfs(8 * MIB, &[]));
+    let root = b.layout.root_cluster;
+    let long = "A name that needs three file name entries.txt";
+    b.file(root, "Ärger über Öl.txt", b"1", 1, 0);
+    b.file(root, long, b"2", 1, 0);
+    fsck(&b.bytes);
+    let size = b.bytes.len() as u64;
+    let mut volume = Volume::mount(Mem::new(b.bytes), size, false).unwrap();
+    let node = volume.find(Dir::Root, "ärger ÜBER öl.TXT").unwrap();
+    assert_eq!(node.name, "Ärger über Öl.txt");
+    assert_eq!(
+        volume.find(Dir::Root, &long.to_lowercase()).unwrap().name,
+        long
+    );
+    // A name that a single unit of differs in is another name.
+    assert_eq!(
+        volume.find(Dir::Root, "Arger über Öl.txt").err(),
+        Some(Error::NotFound)
+    );
+    let too_long = "x".repeat(256);
+    assert_eq!(
+        volume.find(Dir::Root, &too_long).err(),
+        Some(Error::NameTooLong)
+    );
+    assert_eq!(
+        volume.find(Dir::Root, &too_long[..255]).err(),
+        Some(Error::NotFound)
+    );
+}
+
+#[test]
+fn lists_in_steps_and_leaves_out_damaged_sets() {
+    let mut b = Builder::new(mkfs(8 * MIB, &[]));
+    let root = b.layout.root_cluster;
+    let mut slots = Vec::new();
+    for i in 0..5 {
+        slots.push(b.file(root, &format!("file {i}"), b"x", 1, 0));
+        // The set of "file 1" holds one more secondary entry than its
+        // name needs, which fsck.exfat 1.2.0 does not take.
+        if i == 1 {
+            b.extend(root, slots[1]);
+        }
+    }
+    // A wrong checksum in the set of "file 2".
+    let at = b.layout.cluster_start(root) as usize + slots[2] as usize * 32;
+    b.bytes[at + 2] ^= 1;
+    let size = b.bytes.len() as u64;
+    let mut volume = Volume::mount(Mem::new(b.bytes), size, false).unwrap();
+    let (first, next) = volume.list(Dir::Root, 0, 2).unwrap();
+    let first: Vec<String> = first.into_iter().map(|n| n.name).collect();
+    assert_eq!(first, ["file 0", "file 1"]);
+    let (rest, end) = volume.list(Dir::Root, next, 10).unwrap();
+    let rest: Vec<String> = rest.into_iter().map(|n| n.name).collect();
+    assert_eq!(rest, ["file 3", "file 4"]);
+    assert!(volume.list(Dir::Root, end, 10).unwrap().0.is_empty());
+    assert_eq!(
+        volume.find(Dir::Root, "file 2").err(),
+        Some(Error::NotFound)
+    );
 }

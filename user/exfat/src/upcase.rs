@@ -52,4 +52,16 @@ impl Upcase {
     pub fn equal(&self, a: &[u16], b: &[u16]) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| self.up(x) == self.up(y))
     }
+
+    /// The hash of the name `name` that a stream extension holds.
+    #[cfg(test)]
+    pub fn hash(&self, name: &[u16]) -> u16 {
+        let mut hash = 0u16;
+        for &unit in name {
+            for byte in self.up(unit).to_le_bytes() {
+                hash = hash.rotate_right(1).wrapping_add(u16::from(byte));
+            }
+        }
+        hash
+    }
 }

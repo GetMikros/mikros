@@ -2,6 +2,8 @@
 //! entry, a stream extension and file name entries, with their checksum,
 //! and the critical primary entries of the root directory.
 
+#[cfg(test)]
+use crate::upcase::Upcase;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -23,8 +25,10 @@ pub const NAME_MAX: usize = 255;
 /// last archived.
 pub const DIRECTORY: u16 = 0x10;
 pub const ARCHIVE: u16 = 0x20;
-/// The stream extension's flag for clusters that lie in a row without
-/// FAT entries.
+/// The stream extension's flags: clusters may be allocated, and they lie
+/// in a row without FAT entries.
+#[cfg(test)]
+pub const ALLOCATION_POSSIBLE: u8 = 1 << 0;
 pub const NO_FAT_CHAIN: u8 = 1 << 1;
 
 fn u16_at(b: &[u8], at: usize) -> u16 {
@@ -99,6 +103,48 @@ impl Set {
 
     pub fn name(&self) -> String {
         String::from_utf16_lossy(&self.name)
+    }
+
+    /// How many entries the set takes.
+    #[cfg(test)]
+    pub fn entries(&self) -> usize {
+        entries_for(self.name.len())
+    }
+
+    /// The entries of the set, with its checksum and the name's hash.
+    #[cfg(test)]
+    pub fn encode(&self, upcase: &Upcase) -> Vec<u8> {
+        let count = self.entries();
+        let mut set = alloc::vec![0u8; count * ENTRY];
+        set[0] = FILE;
+        set[1] = (count - 1) as u8;
+        set[4..6].copy_from_slice(&self.attributes.to_le_bytes());
+        let stamps = [(8, 20, 22, self.created), (12, 21, 23, self.modified)];
+        for (at, increment_at, offset_at, stamp) in stamps {
+            set[at..at + 4].copy_from_slice(&stamp.timestamp.to_le_bytes());
+            set[increment_at] = stamp.increment;
+            set[offset_at] = stamp.utc_offset;
+        }
+        set[16..20].copy_from_slice(&self.accessed.timestamp.to_le_bytes());
+        set[24] = self.accessed.utc_offset;
+        let s = &mut set[ENTRY..2 * ENTRY];
+        s[0] = STREAM;
+        s[1] = self.flags;
+        s[3] = self.name.len() as u8;
+        s[4..6].copy_from_slice(&upcase.hash(&self.name).to_le_bytes());
+        s[8..16].copy_from_slice(&self.valid_size.to_le_bytes());
+        s[20..24].copy_from_slice(&self.first_cluster.to_le_bytes());
+        s[24..32].copy_from_slice(&self.size.to_le_bytes());
+        for (i, chunk) in self.name.chunks(NAME_UNITS).enumerate() {
+            let n = &mut set[(2 + i) * ENTRY..(3 + i) * ENTRY];
+            n[0] = NAME;
+            for (j, unit) in chunk.iter().enumerate() {
+                n[2 + 2 * j..4 + 2 * j].copy_from_slice(&unit.to_le_bytes());
+            }
+        }
+        let sum = set_checksum(&set);
+        set[2..4].copy_from_slice(&sum.to_le_bytes());
+        set
     }
 }
 
