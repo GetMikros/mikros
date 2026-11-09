@@ -5,14 +5,16 @@ use crate::broker;
 use crate::directory::{Dir, Initially};
 use crate::sources::Sources;
 use crate::supervisor::Supervisor;
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use mikros_manifest::{Service, order};
 use mikros_rt::exec::Reactor;
 use mikros_rt::files::{self, Failure};
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient, NodeType};
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
@@ -86,12 +88,24 @@ pub async fn start(
         restarts: RefCell::new(BTreeMap::new()),
         demanded: RefCell::new(VecDeque::new()),
         demand_waker: RefCell::new(None),
+        running: RefCell::new(Vec::new()),
+        stopping: Cell::new(false),
     });
     let weak = Rc::downgrade(&supervisor);
     supervisor.dir.set_demand(Rc::new(move |name: &str| {
         if let Some(supervisor) = weak.upgrade() {
             supervisor.demand(name);
         }
+    }));
+    let weak = Rc::downgrade(&supervisor);
+    supervisor.dir.set_shutdown(Rc::new(move |kind| {
+        let supervisor = weak.upgrade();
+        Box::pin(async move {
+            match supervisor {
+                Some(supervisor) => supervisor.shutdown(kind).await,
+                None => Err(Status::BadState),
+            }
+        })
     }));
     // `order` puts the broker first whenever anything starts; without
     // it, nothing else can.

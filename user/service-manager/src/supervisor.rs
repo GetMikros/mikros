@@ -1,5 +1,6 @@
 //! Starting the boot services, and restarting them as their manifests
-//! say.
+//! say; and stopping them all at shutdown, the last started first, before
+//! the machine is powered off or restarted through the ACPI server.
 
 use crate::boot::BootHandles;
 use crate::broker;
@@ -12,21 +13,33 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::future::Future;
 use core::future::poll_fn;
 use core::pin::Pin;
 use core::task::{Poll, Waker};
 use mikros_manifest::{Restart, Service, Start};
 use mikros_rt::exec::Reactor;
+use mikros_rt::interfaces::__midl::endpoints;
+use mikros_rt::interfaces::mikros::acpi::{Acpi, AcpiAsyncClient};
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::BrokerAsyncClient;
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
-use mikros_rt::interfaces::mikros::service::ClientIdentity;
+use mikros_rt::interfaces::mikros::service::{ClientIdentity, ShutdownKind};
 use mikros_rt::sys;
 
 /// A service is restarted at most this many times within `WINDOW`.
 const RESTARTS_MAX: usize = 5;
 const WINDOW: i64 = 60_000_000_000;
+/// The signals that stop a service, and how often a stop looks whether
+/// the service has terminated.
+const TERM: u32 = 15;
+const KILL: u32 = 9;
+const POLL: i64 = 10_000_000;
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+/// The ACPI server's service, which powers the machine off and restarts
+/// it.
+const ACPI: &str = "device.acpi";
 
 /// The boot services and what the service manager needs to start them.
 pub struct Supervisor {
@@ -48,6 +61,12 @@ pub struct Supervisor {
     /// The on-demand services that connections asked for, in order.
     pub demanded: RefCell<VecDeque<usize>>,
     pub demand_waker: RefCell<Option<Waker>>,
+    /// The running services and their process IDs, in the order they
+    /// started.
+    pub running: RefCell<Vec<(usize, u32)>>,
+    /// Set once `Shutdown` began: from then on, no service is started or
+    /// restarted.
+    pub stopping: Cell<bool>,
 }
 
 /// What happens to a service that ended.
@@ -78,6 +97,7 @@ impl Supervisor {
                 Ok(mut started) => {
                     mikros_rt::log!(Info, "started service {name} as pid {}", started.pid);
                     this.active.borrow_mut().insert(i);
+                    this.running.borrow_mut().push((i, started.pid));
                     let (pid, streams) = (started.pid, started.streams.take());
                     this.watch(i, started);
                     if let Some((output, error)) = streams {
@@ -165,6 +185,12 @@ impl Supervisor {
                 None => mikros_rt::log!(Error, "service {name} could not be watched"),
             }
             drop(process);
+            this.running.borrow_mut().retain(|&(j, _)| j != i);
+            if this.stopping.get() {
+                this.active.borrow_mut().remove(&i);
+                this.dir.never(&name);
+                return;
+            }
             let after = ended.map_or(After::Stop, |ended| this.after(i, ended));
             match after {
                 After::Restart => {
@@ -240,9 +266,105 @@ impl Supervisor {
                 }
             })
             .await;
-            if !self.active.borrow().contains(&i) {
+            if !self.stopping.get() && !self.active.borrow().contains(&i) {
                 self.start_with_after(i, Vec::new()).await;
             }
+        }
+    }
+
+    fn is_running(&self, i: usize) -> bool {
+        self.running.borrow().iter().any(|&(j, _)| j == i)
+    }
+
+    /// Waits until service `i` has terminated or `deadline` has passed:
+    /// whether it terminated.
+    async fn terminated(&self, i: usize, deadline: i64) -> bool {
+        while self.is_running(i) {
+            if now() >= deadline {
+                return false;
+            }
+            let _ = self.reactor.sleep_until(now().saturating_add(POLL)).await;
+        }
+        true
+    }
+
+    /// Stops service `i`, which runs as `pid`: sends it `TERM`, and
+    /// `KILL` once its stop timeout has passed, and returns once it has
+    /// terminated.
+    async fn stop(&self, i: usize, pid: u32) {
+        let service = &self.services[i];
+        let timeout = i64::try_from(service.stop_timeout)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(NANOS_PER_SECOND);
+        let _ = self.launcher.kill(pid, TERM).await;
+        if !self.terminated(i, now().saturating_add(timeout)).await {
+            mikros_rt::log!(
+                Warning,
+                "service {} did not end within {} s of TERM; killing it",
+                service.name,
+                service.stop_timeout
+            );
+            let _ = self.launcher.kill(pid, KILL).await;
+            self.terminated(i, i64::MAX).await;
+        }
+        mikros_rt::log!(Info, "stopped service {}", service.name);
+    }
+
+    /// Stops every running service, the last started first, each once
+    /// the one started after it has terminated.
+    async fn stop_all(&self) {
+        loop {
+            let last = self.running.borrow().last().copied();
+            let Some((i, pid)) = last else {
+                break;
+            };
+            self.stop(i, pid).await;
+        }
+    }
+
+    /// A connection to the ACPI server, under the service manager's own
+    /// identity: None when there is none.
+    async fn connect_acpi(&self) -> Option<AcpiAsyncClient> {
+        let listed = self.dir.list(&self.me, ACPI).await.ok()?;
+        let instance = listed.into_iter().next()?;
+        let (client, server) = endpoints::<Acpi>().ok()?;
+        let connected = self
+            .dir
+            .connect(&self.me, ACPI.into(), Some(instance), server.into_handle())
+            .await;
+        connected.ok()?;
+        Some(AcpiAsyncClient::new(client, self.reactor.clone()))
+    }
+
+    /// Shuts the machine down: connects to the ACPI server, stops every
+    /// service, and then powers the machine off or restarts it through
+    /// that connection, which returns only when that failed. Fails,
+    /// stopping nothing, with `INVALID_ARGS` for an unknown kind, with
+    /// `NOT_SUPPORTED` without an ACPI server, and with `BAD_STATE` once a
+    /// shutdown began.
+    pub async fn shutdown(&self, kind: ShutdownKind) -> Result<(), Status> {
+        let restart = match kind {
+            ShutdownKind::PowerOff => false,
+            ShutdownKind::Restart => true,
+            ShutdownKind::Unknown(_) => return Err(Status::InvalidArgs),
+        };
+        if self.stopping.replace(true) {
+            return Err(Status::BadState);
+        }
+        let Some(acpi) = self.connect_acpi().await else {
+            self.stopping.set(false);
+            return Err(Status::NotSupported);
+        };
+        mikros_rt::log!(Info, "shutting down: stopping the services");
+        self.stop_all().await;
+        let done = match restart {
+            false => acpi.power_off().await.map(|r| r.map(drop)),
+            true => acpi.restart().await.map(|r| r.map(drop)),
+        };
+        match done {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(status)) => Err(status),
+            Err(_) => Err(Status::PeerClosed),
         }
     }
 

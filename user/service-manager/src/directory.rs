@@ -8,17 +8,21 @@
 //! apart: the registrar adds them, and they go when they are
 //! unregistered, when their provider closes, or when the bound
 //! connection of the process that registered them closes. The service
-//! manager provides the registrar itself, as `mikros.service.Registrar`.
+//! manager provides the registrar itself, as `mikros.service.Registrar`,
+//! and `mikros.service.Control`, whose `Shutdown` it hands to the
+//! supervisor.
 //! When a protocol or instance has a permission, the caller must hold
 //! it, as the broker decides; without an answer from the broker, it
 //! does not.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
-use core::future::poll_fn;
+use core::future::{Future, poll_fn};
+use core::pin::Pin;
 use core::task::{Poll, Waker};
 use mikros_manifest::Service;
 use mikros_rt::exec::{Reactor, Spawner};
@@ -28,13 +32,17 @@ use mikros_rt::interfaces::mikros::permissions::{BrokerAsyncClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, DirectoryAsyncServer, DirectoryConnectResponse,
     DirectoryListResponse, DirectoryRequest, DirectoryWatchResponse, Provider as ProviderProtocol,
-    ProviderClient,
+    ProviderClient, ShutdownKind,
 };
 
 /// The protocol of the registrar, which the service manager provides,
 /// and the permission it needs.
 pub const REGISTRAR: &str = "mikros.service.Registrar";
 const REGISTER_PERMISSION: &str = "services.register";
+/// The protocol through which the machine is shut down, which the
+/// service manager provides, and the permission it needs.
+pub const CONTROL: &str = "mikros.service.Control";
+const CONTROL_PERMISSION: &str = "power.control";
 const PEER_CLOSED: u32 = 1 << 2;
 
 /// The directory's state, shared by every connection.
@@ -55,6 +63,7 @@ pub struct Dir {
     /// one apart from a later one of the same name.
     registered: Cell<u64>,
     demand: RefCell<Option<Demand>>,
+    shutdown: RefCell<Option<Shutdown>>,
 }
 
 /// A protocol that a manifest provides.
@@ -76,6 +85,8 @@ enum Provider {
     Idle,
     /// The service manager's own registrar.
     Registrar,
+    /// The service manager's own `Control`.
+    Control,
 }
 
 /// What the protocols of a service start as.
@@ -91,6 +102,9 @@ pub enum Initially {
 
 /// What starts an idle service, by name.
 type Demand = Rc<dyn Fn(&str)>;
+
+/// What shuts the machine down for `Shutdown`.
+pub type Shutdown = Rc<dyn Fn(ShutdownKind) -> Pin<Box<dyn Future<Output = Result<(), Status>>>>>;
 
 /// A named instance of a protocol.
 struct Instance {
@@ -121,6 +135,7 @@ impl Dir {
             watchers: RefCell::new(Vec::new()),
             registered: Cell::new(0),
             demand: RefCell::new(None),
+            shutdown: RefCell::new(None),
         })
     }
 
@@ -170,11 +185,13 @@ impl Dir {
                 },
             );
         }
-        if provided.contains_key(REGISTRAR) {
-            mikros_rt::log!(
-                Error,
-                "protocol {REGISTRAR} is the service manager's own, not a service's"
-            );
+        for own in [REGISTRAR, CONTROL] {
+            if provided.contains_key(own) {
+                mikros_rt::log!(
+                    Error,
+                    "protocol {own} is the service manager's own, not a service's"
+                );
+            }
         }
         let registrar = Provided {
             service: String::new(),
@@ -182,6 +199,12 @@ impl Dir {
             provider: Provider::Registrar,
         };
         provided.insert(REGISTRAR.into(), registrar);
+        let control = Provided {
+            service: String::new(),
+            permission: Some(CONTROL_PERMISSION.into()),
+            provider: Provider::Control,
+        };
+        provided.insert(CONTROL.into(), control);
         drop(provided);
         self.ready.set(true);
         for waker in self.waiting.take() {
@@ -216,6 +239,16 @@ impl Dir {
                 }
             }
         }
+    }
+
+    /// Calls `shutdown` for `Shutdown` on `Control`.
+    pub fn set_shutdown(&self, shutdown: Shutdown) {
+        *self.shutdown.borrow_mut() = Some(shutdown);
+    }
+
+    /// What shuts the machine down, once the supervisor set it.
+    pub fn shutdown(&self) -> Option<Shutdown> {
+        self.shutdown.borrow().clone()
     }
 
     /// Calls `demand` with the name of an idle service when a connection
@@ -272,7 +305,7 @@ impl Dir {
         allowed(broker, caller, permission).await
     }
 
-    async fn connect(
+    pub async fn connect(
         self: &Rc<Self>,
         caller: &ClientIdentity,
         protocol: String,
@@ -324,6 +357,11 @@ impl Dir {
                     crate::registrar::serve(self.clone(), server, clone(caller));
                     return Ok(());
                 }
+                Provider::Control => {
+                    drop(provided);
+                    crate::control::serve(self.clone(), ServerEnd::new(server));
+                    return Ok(());
+                }
             };
             if let Some(service) = demanded {
                 // Every protocol of the service waits for it now.
@@ -354,7 +392,11 @@ impl Dir {
     }
 
     /// The named instances of `protocol` that `caller` may connect to.
-    async fn list(&self, caller: &ClientIdentity, protocol: &str) -> Result<Vec<String>, Status> {
+    pub async fn list(
+        &self,
+        caller: &ClientIdentity,
+        protocol: &str,
+    ) -> Result<Vec<String>, Status> {
         if self.provided.borrow().contains_key(protocol) {
             return Err(Status::InvalidArgs);
         }
