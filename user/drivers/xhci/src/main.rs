@@ -5,8 +5,9 @@
 //! 0, which a message-signaled interrupt or else the INTx event serves.
 //! The USB core then enumerates the devices on the root hub ports and
 //! adds a device for each interface of their first configuration, named
-//! `usb-<port>-<interface>`. `Stop` stops the controller before the
-//! driver ends.
+//! `usb-<port>-<interface>`, whose driver gets `Interface` on the bus
+//! channel that `ConnectChild` gives. `Stop` stops the controller before
+//! the driver ends.
 
 #![no_std]
 #![no_main]
@@ -16,6 +17,7 @@ extern crate alloc;
 mod controller;
 mod descriptors;
 mod device;
+mod interface;
 mod regs;
 mod ring;
 mod transfer;
@@ -28,7 +30,7 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse,
     DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
     DriverStopResponse,
 };
@@ -104,8 +106,22 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotFound))
                 }
-                DriverRequest::ConnectChild(_, responder) => {
-                    responder.reply(s, Err(Status::NotFound))
+                DriverRequest::ConnectChild(request, responder) => {
+                    let Some(usb) = core.clone() else {
+                        let _ = responder.reply(s, Err(Status::BadState));
+                        continue;
+                    };
+                    let (server, tasks) = (server.clone(), spawner.clone());
+                    spawner.spawn(async move {
+                        let Some(interface) = usb.interface(request.device).await else {
+                            let _ = responder.reply(server.server(), Err(Status::NotFound));
+                            return;
+                        };
+                        let connected = Ok(DriverConnectChildResponse {});
+                        let _ = responder.reply(server.server(), connected);
+                        interface::serve(interface, request.bus, tasks).await;
+                    });
+                    Ok(())
                 }
             };
         }
