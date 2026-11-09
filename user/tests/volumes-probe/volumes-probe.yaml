@@ -1,0 +1,9 @@
+# The manifest of the probe of USB volumes, a boot service of the test
+# image of the USB volumes run.
+name: volumes-probe
+binary: /usr/bin/volumes-probe
+start: boot
+after: [device-manager, tmpfs]
+boot_handles: [log_manage]
+# To grant itself files.volumes, which its copy then holds.
+permissions: [permissions.manage]

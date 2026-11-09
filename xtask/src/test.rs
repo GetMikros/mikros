@@ -243,7 +243,7 @@ pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
             "-drive",
             &drive("scratch-usb", SCRATCH_DISKS[2].0),
             "-device",
-            "usb-storage,bus=usb.0,port=1,drive=scratch-usb,serial=mikros",
+            "usb-storage,id=stick,bus=usb.0,port=1,drive=scratch-usb,serial=mikros",
             "-device",
             "usb-hub,bus=usb.0,port=2",
             "-device",
@@ -463,6 +463,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("power-off run passed");
+    crate::volumes::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("volumes"),
+        timeout,
+    )?;
+    println!("USB volumes run passed");
     Ok(())
 }
 
@@ -595,11 +603,9 @@ ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
         assert!(args.contains(&"ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros".to_string()));
         assert!(args.contains(&"qemu-xhci,id=usb,addr=0x1d".to_string()));
         assert!(args.contains(&"if=none,id=scratch-usb,format=raw,file=/t/usb.img".to_string()));
-        assert!(
-            args.contains(
-                &"usb-storage,bus=usb.0,port=1,drive=scratch-usb,serial=mikros".to_string()
-            )
-        );
+        assert!(args.contains(
+            &"usb-storage,id=stick,bus=usb.0,port=1,drive=scratch-usb,serial=mikros".to_string()
+        ));
         assert!(args.contains(&"usb-hub,bus=usb.0,port=2".to_string()));
         assert!(args.contains(&"usb-kbd,bus=usb.0,port=2.1".to_string()));
         assert!(args.contains(&"-no-reboot".to_string()));

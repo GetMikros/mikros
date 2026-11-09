@@ -16,11 +16,22 @@ pub fn size_for(total: u64) -> u64 {
 /// Formats a FAT32 file system of `size` bytes holding `files`, given as
 /// paths with `/` separators and their contents, and returns its bytes.
 pub fn build(size: u64, files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
+    build_volume(size, fatfs::FatType::Fat32, *b"EFI SYSTEM ", files)
+}
+
+/// A FAT file system of `size` bytes and type `fat_type` with the volume
+/// label `label`, holding `files`, as `build` makes the ESP.
+pub fn build_volume(
+    size: u64,
+    fat_type: fatfs::FatType,
+    label: [u8; 11],
+    files: &[(&str, &[u8])],
+) -> Result<Vec<u8>> {
     let mut disk = Cursor::new(vec![0u8; usize::try_from(size)?]);
     let options = fatfs::FormatVolumeOptions::new()
-        .fat_type(fatfs::FatType::Fat32)
-        .volume_label(*b"EFI SYSTEM ");
-    fatfs::format_volume(&mut disk, options).context("formatting the ESP failed")?;
+        .fat_type(fat_type)
+        .volume_label(label);
+    fatfs::format_volume(&mut disk, options).context("formatting the volume failed")?;
     {
         let fs = fatfs::FileSystem::new(&mut disk, fatfs::FsOptions::new())?;
         for (path, data) in files {

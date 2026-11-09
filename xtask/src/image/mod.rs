@@ -1,6 +1,6 @@
 //! `cargo xtask image`: creates a bootable GPT disk image.
 
-mod esp;
+pub(crate) mod esp;
 pub(crate) mod gpt;
 mod root;
 

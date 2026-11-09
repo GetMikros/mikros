@@ -950,6 +950,36 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &pci_bus_files,
             )?;
             println!("built    {}", pci_image.display());
+            // The USB volumes run serves this image, with root=bootfs: the
+            // PCI bus, xHCI, USB mass storage, partition and FAT drivers
+            // from the PCI test's files, the temporary file system, and
+            // the volumes probe.
+            let volumes_probe = user_build("volumes-probe", kind)?;
+            println!("built    {}", volumes_probe.display());
+            let volume_drivers = ["pci-bus", "xhci", "usb-storage", "partition", "fat"];
+            let mut volumes_files: Vec<(String, PathBuf)> = pci_bus_files
+                .iter()
+                .filter(|(at, _)| {
+                    volume_drivers
+                        .iter()
+                        .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
+                })
+                .cloned()
+                .collect();
+            volumes_files.extend([
+                ("usr/bin/tmpfs".to_owned(), tmpfs.clone()),
+                (
+                    "usr/lib/services/tmpfs.yaml".to_owned(),
+                    tmpfs_manifest.clone(),
+                ),
+                ("usr/bin/volumes-probe".to_owned(), volumes_probe.clone()),
+                (
+                    "usr/lib/services/volumes-probe.yaml".to_owned(),
+                    crate::workspace_root().join("user/tests/volumes-probe/volumes-probe.yaml"),
+                ),
+            ]);
+            let volumes_image = device_image("volumes.img", &[], &volumes_files)?;
+            println!("built    {}", volumes_image.display());
             let members = [
                 ("tests/accounts.img", accounts_image.as_path()),
                 ("tests/broker.img", broker_image.as_path()),
@@ -964,6 +994,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/acpi.img", acpi_image.as_path()),
                 ("tests/power.img", power_image.as_path()),
                 ("tests/pci.img", pci_image.as_path()),
+                ("tests/volumes.img", volumes_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),

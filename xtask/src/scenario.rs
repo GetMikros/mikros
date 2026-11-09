@@ -257,6 +257,17 @@ pub fn monitor_socket(dir: &Path) -> PathBuf {
 /// device, the one the firmware gives a linear framebuffer for. A reset
 /// ends QEMU unless `reboot`.
 pub fn start(machine: &MachineArgs, dir: &Path, reboot: bool) -> Result<Child> {
+    start_with(machine, dir, reboot, &|_| Ok(()))
+}
+
+/// As `start`, calling `prepare` with `dir` after the scratch disks are
+/// written and before QEMU starts, so that it can replace them.
+pub fn start_with(
+    machine: &MachineArgs,
+    dir: &Path,
+    reboot: bool,
+    prepare: &dyn Fn(&Path) -> Result<()>,
+) -> Result<Child> {
     let disk = dir.join("disk.img");
     for name in ["serial.log", "screen.ppm", "console.ppm"] {
         let _ = fs::remove_file(dir.join(name));
@@ -269,6 +280,7 @@ pub fn start(machine: &MachineArgs, dir: &Path, reboot: bool) -> Result<Child> {
     let mut machine = machine.clone();
     machine.gpu = qemu::Gpu::Basic;
     crate::test::scratch_disks(&dir.join("serial.log"))?;
+    prepare(dir)?;
     let mut args = crate::test::test_args(
         qemu::args(
             &machine,

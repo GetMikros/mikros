@@ -9992,7 +9992,18 @@ mod manager {
         image: &[u8],
         framebuffer: bool,
     ) -> Result<(Manager, InitBootstrapClient, OwnedHandle, OwnedHandle)> {
-        let (m, init, reader) = serving(s, image)?;
+        services_from_with(s, image, framebuffer, "")
+    }
+
+    /// As `services_from`, with the kernel command line `command_line` in
+    /// the process manager's `Start`.
+    fn services_from_with(
+        s: &Startup,
+        image: &[u8],
+        framebuffer: bool,
+        command_line: &str,
+    ) -> Result<(Manager, InitBootstrapClient, OwnedHandle, OwnedHandle)> {
+        let (m, init, reader) = serving_with(s, image, command_line)?;
         // The lines of earlier tests are skipped.
         while super::read_record(reader.raw()).0 == 0 {}
         let deadline = super::within(super::PROBE_SECONDS);
@@ -10037,6 +10048,24 @@ mod manager {
             });
         };
         Ok((m, init, reader, started.process))
+    }
+
+    /// The `usb-volumes` scenario: serves `tests/volumes.img` with
+    /// `root=bootfs`, whose volumes probe uses the FAT volume on the USB
+    /// disk through `/Volumes` and sees it go once the runner unplugs the
+    /// disk, and runs until the runner stops the machine; it returns 1
+    /// only when the service manager did not start.
+    pub fn usb_volumes_scenario(s: &Startup) -> i64 {
+        match services_from_with(s, b"tests/volumes.img", false, "root=bootfs") {
+            // Everything stays as it is until the runner stops the machine.
+            Ok(_running) => loop {
+                super::sleep_ms(1000);
+            },
+            Err(failure) => {
+                mikros_rt::log!(Error, "SCENARIO usb-volumes: {} failed", failure.what);
+                1
+            }
+        }
     }
 
     /// The `power-off` scenario: serves `tests/power.img`, whose power
@@ -10450,6 +10479,7 @@ mod bootfs {
                         "services.img",
                         "time.img",
                         "tmpfs.img",
+                        "volumes.img",
                     ],
             )?;
 
@@ -10961,6 +10991,8 @@ fn scenario(s: &Startup) -> Option<i64> {
         "init-exit" => exit_after_painting(s),
         // The runner presses the power button once the power probe waits.
         "power-off" => manager::power_off_scenario(s),
+        // The runner unplugs the USB disk once the volumes probe used it.
+        "usb-volumes" => manager::usb_volumes_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.
         "wait" => {
             log!(Info, "SCENARIO waiting");
