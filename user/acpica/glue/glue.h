@@ -11,4 +11,9 @@
 #include "acpi.h"
 #include "accommon.h"
 
+/* The flags of an IRQ resource. */
+#define MIKROS_ACPI_LEVEL       (1u << 0)
+#define MIKROS_ACPI_ACTIVE_LOW  (1u << 1)
+#define MIKROS_ACPI_SHARED      (1u << 2)
+
 #endif
