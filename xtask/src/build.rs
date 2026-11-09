@@ -1035,6 +1035,20 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .collect();
             let root_image = device_image("root.img", &[], &root_files)?;
             println!("built    {}", root_image.display());
+            // The bus restart runs serve this image: the root disk runs'
+            // with the restart probe.
+            let restart_probe = user_build("restart-probe", kind)?;
+            println!("built    {}", restart_probe.display());
+            let mut bus_files = root_files.clone();
+            bus_files.extend([
+                ("usr/bin/restart-probe".to_owned(), restart_probe.clone()),
+                (
+                    "usr/lib/services/restart-probe.yaml".to_owned(),
+                    crate::workspace_root().join("user/tests/restart-probe/restart-probe.yaml"),
+                ),
+            ]);
+            let bus_image = device_image("bus.img", &[], &bus_files)?;
+            println!("built    {}", bus_image.display());
             let members = [
                 ("tests/accounts.img", accounts_image.as_path()),
                 ("tests/broker.img", broker_image.as_path()),
@@ -1051,6 +1065,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/pci.img", pci_image.as_path()),
                 ("tests/volumes.img", volumes_image.as_path()),
                 ("tests/root.img", root_image.as_path()),
+                ("tests/bus.img", bus_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),

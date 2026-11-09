@@ -545,6 +545,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "restart-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "rtc"
 version = "0.0.0"
 dependencies = [

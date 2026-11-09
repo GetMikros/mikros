@@ -1,0 +1,11 @@
+# The service manifest of the restart probe, the boot service of
+# tests/bus.img, installed as usr/lib/services/restart-probe.yaml. It
+# logs through the kernel log.
+name: restart-probe
+binary: /usr/bin/restart-probe
+start: boot
+after: [device-manager]
+boot_handles: [log_manage]
+# To reach the root file system's service, and to kill the PCI bus
+# driver.
+permissions: [filesystem.mount, process.signal_any]

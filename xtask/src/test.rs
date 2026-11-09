@@ -498,6 +498,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("root disk runs passed");
+    crate::root_disk::run_bus_restart(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("bus-restart"),
+        timeout,
+    )?;
+    println!("bus restart runs passed");
     Ok(())
 }
 

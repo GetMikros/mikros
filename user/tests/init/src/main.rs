@@ -10130,6 +10130,54 @@ mod manager {
         mikros_test::exit_qemu(mikros_test::FAILED)
     }
 
+    /// The `bus-restart` scenario: serves `tests/bus.img`, whose drivers
+    /// bring up the root file system from the boot disk, on whichever
+    /// controller the runner put it, and whose restart probe kills the PCI
+    /// bus driver below it once the root is there; stops QEMU with
+    /// `PASSED` once the probe passed, or with `FAILED`.
+    pub fn bus_restart_scenario(s: &Startup) -> i64 {
+        // As the root disk's scenario, with the probe's restart.
+        const SECONDS: i64 = 300;
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: published device.filesystem root for device",
+                1,
+            ),
+            (b"restart-probe: killed system.driver.pci-bus", 1),
+            (b"device-manager: restarting driver pci-bus for device", 1),
+            (b"restart-probe: PASSED", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"restart-probe: FAILED",
+            b"left without a driver",
+            b"did not start",
+            b"declined",
+        ];
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(
+                Error,
+                "SCENARIO bus-restart: {} failed ({})",
+                f.what,
+                f.status
+            );
+            return 1;
+        }
+        match device_manager_logs(s, b"tests/bus.img", false, SECONDS, EXPECTED, FAILED) {
+            Ok(true) => {
+                mikros_rt::log!(Info, "SCENARIO bus-restart PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO bus-restart FAILED"),
+            Err(f) => mikros_rt::log!(
+                Error,
+                "SCENARIO bus-restart FAILED: {} failed ({})",
+                f.what,
+                f.status
+            ),
+        }
+        mikros_test::exit_qemu(mikros_test::FAILED)
+    }
+
     /// The `power-off` scenario: serves `tests/power.img`, whose service
     /// manager shuts the machine down once the runner presses the power
     /// button, and waits for the machine to go off; it returns 1 only when
@@ -10524,6 +10572,7 @@ mod bootfs {
                         "accounts.img",
                         "acpi.img",
                         "broker.img",
+                        "bus.img",
                         "call-server",
                         "channel-echo",
                         "debuggee",
@@ -11059,6 +11108,9 @@ fn scenario(s: &Startup) -> Option<i64> {
         "usb-volumes" => manager::usb_volumes_scenario(s),
         // The runner puts the boot disk on an NVMe or an AHCI controller.
         "root-disk" => manager::root_disk_scenario(s),
+        // The runner puts the boot disk on a virtio-blk, NVMe or AHCI
+        // controller.
+        "bus-restart" => manager::bus_restart_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.
         "wait" => {
             log!(Info, "SCENARIO waiting");

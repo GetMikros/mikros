@@ -1,0 +1,283 @@
+//! The boot service of `tests/bus.img`, which the bus restart runs of
+//! `cargo xtask test` boot, with the root file system on a disk behind a
+//! virtio-blk, NVMe or AHCI controller. It kills the PCI bus driver below
+//! running drivers and checks that the device manager runs it again
+//! while every other driver goes on as the process it was, as a driver
+//! does that takes the restarted bus driver's channel through
+//! `Reconnect`. Before the kill it waits until the drivers have started.
+//! It writes and syncs part of a file on the root before the kill and the
+//! rest after it, and the file must read back as written. It logs
+//! `PASSED`, or `FAILED` with what failed.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
+use alloc::string::String;
+use alloc::vec::Vec;
+use mikros_rt::exec::{Executor, Reactor};
+use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
+use mikros_rt::interfaces::mikros::fs::{
+    Filesystem, FilesystemAsyncClient, Node, NodeAsyncClient, OpenFlags, Rights,
+};
+use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient};
+use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
+use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
+
+mikros_rt::raw_main!(main);
+
+/// The `id` of the `log_manage` boot handle among the `USER` startup
+/// handles.
+const LOG_ID: u32 = 2;
+const FILESYSTEM: &str = "device.filesystem";
+const BUS_DRIVER: &str = "system.driver.pci-bus";
+const DRIVER_PREFIX: &str = "system.driver.";
+const KILL: u32 = 9;
+const MS: i64 = 1_000_000;
+/// How long the root may take to be published, the processor emulated,
+/// and how long the bus driver may take to run again.
+const ROOT_LIMIT: i64 = 240_000 * MS;
+const RESTART_LIMIT: i64 = 30_000 * MS;
+/// How long the device manager has, once the bus driver runs again, to
+/// reconnect the drivers below it: the bus driver adds its functions at
+/// once.
+const SETTLE: i64 = 3_000 * MS;
+/// Before the kill, how long the drivers must run unchanged, and how long
+/// after that the probe waits for the last of them to complete `Start`:
+/// a driver whose bus channel closes during `Start` fails it, which the
+/// run is not about. The AHCI driver takes about a second to look at the
+/// ports of an empty controller.
+const STABLE: i64 = 3_000 * MS;
+const STARTING: i64 = 5_000 * MS;
+/// The file written across the restart, in pieces of `PIECE` bytes:
+/// `BEFORE` before the kill and `AFTER` after it, each synced.
+const FILE: &str = "bus-restart";
+const PIECE: usize = 16384;
+const BEFORE: u32 = 4;
+const AFTER: u32 = 8;
+
+fn now() -> i64 {
+    let mut now = 0;
+    // SAFETY: the out pointer is valid for the call.
+    unsafe { sys::clock_get_monotonic(&mut now) };
+    now
+}
+
+/// Logs what failed, and gives `None`.
+fn failed<T>(what: &str) -> Option<T> {
+    mikros_rt::log!(Error, "restart-probe: FAILED: {what}");
+    None
+}
+
+/// The bytes of piece `i` of the file.
+fn piece(i: u32) -> Vec<u8> {
+    (0..PIECE)
+        .map(|at| (at as u32 ^ i.wrapping_mul(0x9E37)) as u8)
+        .collect()
+}
+
+fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
+    let Ok(mut executor) = Executor::new() else {
+        return PANIC_EXIT_CODE;
+    };
+    let reactor = executor.reactor().clone();
+    let received = executor.block_on(managed::receive_async(bootstrap, reactor.clone(), |_| {}));
+    let Ok(managed) = received else {
+        return PANIC_EXIT_CODE;
+    };
+    let log = managed
+        .handles
+        .iter()
+        .find(|h| h.role == HandleRole::User && h.id == LOG_ID);
+    if let Some(log) = log {
+        mikros_rt::log::set_handle(log.handle.raw());
+    }
+    let header = managed.header;
+    let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
+    let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
+    let passed = executor.block_on(bus(&directory, &launcher, &reactor));
+    if passed.is_some() {
+        mikros_rt::log!(Info, "restart-probe: PASSED");
+    }
+    loop {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::thread_sleep(i64::MAX) };
+    }
+}
+
+/// The drivers that run, as their app IDs and process IDs.
+async fn drivers(launcher: &LauncherAsyncClient) -> Option<BTreeSet<(String, u32)>> {
+    let Ok(listed) = launcher.list().await else {
+        return failed("listing the processes");
+    };
+    let mut drivers = BTreeSet::new();
+    for pid in listed.pids {
+        if let Ok(Ok(info)) = launcher.get_info(pid).await
+            && info.info.app_id.starts_with(DRIVER_PREFIX)
+        {
+            drivers.insert((info.info.app_id, pid));
+        }
+    }
+    Some(drivers)
+}
+
+/// The root of the root file system, read and write, once it is
+/// published.
+async fn root(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<NodeAsyncClient> {
+    let limit = now() + ROOT_LIMIT;
+    loop {
+        let listed = directory.list(FILESYSTEM.into()).await;
+        if matches!(&listed, Ok(Ok(l)) if l.instances.iter().any(|i| i == "root")) {
+            break;
+        }
+        if now() > limit {
+            return failed("waiting for the root file system");
+        }
+        let _ = reactor.sleep_until(now() + 50 * MS).await;
+    }
+    let (client, server) = endpoints::<Filesystem>().ok()?;
+    let connected = directory
+        .connect(FILESYSTEM.into(), Some("root".into()), server.into_handle())
+        .await;
+    if !matches!(connected, Ok(Ok(_))) {
+        return failed("connecting to the root file system");
+    }
+    let fs = FilesystemAsyncClient::new(ClientEnd::new(client.into_handle()), reactor.clone());
+    let (node, node_server) = endpoints::<Node>().ok()?;
+    let rights = Rights(Rights::READ.0 | Rights::WRITE.0);
+    if !matches!(fs.get_root(node_server, rights).await, Ok(Ok(_))) {
+        return failed("opening the root");
+    }
+    Some(NodeAsyncClient::new(node, reactor.clone()))
+}
+
+/// Waits until the drivers have run unchanged for `STABLE` and then
+/// `STARTING` more, kills the one process of `app`, and gives the
+/// drivers that ran then and the process killed.
+async fn kill(
+    launcher: &LauncherAsyncClient,
+    reactor: &Reactor,
+    app: &str,
+) -> Option<(BTreeSet<(String, u32)>, u32)> {
+    let mut before = drivers(launcher).await?;
+    let mut since = now();
+    while now() < since + STABLE {
+        let _ = reactor.sleep_until(now() + 100 * MS).await;
+        let running = drivers(launcher).await?;
+        if running != before {
+            (before, since) = (running, now());
+        }
+    }
+    let _ = reactor.sleep_until(now() + STARTING).await;
+    let before = drivers(launcher).await?;
+    let found: Vec<u32> = before
+        .iter()
+        .filter(|(a, _)| a == app)
+        .map(|&(_, pid)| pid)
+        .collect();
+    let [pid] = found[..] else {
+        return failed("finding the one driver to kill");
+    };
+    if !matches!(launcher.kill(pid, KILL).await, Ok(Ok(_))) {
+        return failed("killing the driver");
+    }
+    mikros_rt::log!(Info, "restart-probe: killed {app}, pid {pid}");
+    Some((before, pid))
+}
+
+/// Waits until `app` runs again as another process than `killed`, and
+/// then `SETTLE` longer, and checks that every other driver of `before`
+/// still runs as the process it was.
+async fn restarted(
+    launcher: &LauncherAsyncClient,
+    reactor: &Reactor,
+    app: &str,
+    killed: u32,
+    before: &BTreeSet<(String, u32)>,
+) -> Option<()> {
+    let limit = now() + RESTART_LIMIT;
+    loop {
+        let running = drivers(launcher).await?;
+        if running.iter().any(|(a, pid)| a == app && *pid != killed) {
+            break;
+        }
+        if now() > limit {
+            return failed("waiting for the driver to run again");
+        }
+        let _ = reactor.sleep_until(now() + 100 * MS).await;
+    }
+    let _ = reactor.sleep_until(now() + SETTLE).await;
+    let after = drivers(launcher).await?;
+    for (other, pid) in before.iter().filter(|(a, _)| a != app) {
+        if !after.contains(&(other.clone(), *pid)) {
+            mikros_rt::log!(Error, "restart-probe: {other}, pid {pid}, no longer runs");
+            return failed("keeping the other drivers");
+        }
+    }
+    Some(())
+}
+
+/// Kills the PCI bus driver below the root file system, between writes
+/// to a file there that must read back as written.
+async fn bus(
+    directory: &DirectoryAsyncClient,
+    launcher: &LauncherAsyncClient,
+    reactor: &Reactor,
+) -> Option<()> {
+    let root = root(directory, reactor).await?;
+    let (file, server) = endpoints::<Node>().ok()?;
+    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
+    let rights = Rights(Rights::READ.0 | Rights::WRITE.0);
+    if !matches!(
+        root.open(FILE.into(), flags, 0o644, rights, server).await,
+        Ok(Ok(_))
+    ) {
+        return failed("creating the file");
+    }
+    let file = NodeAsyncClient::new(file, reactor.clone());
+    let write = async |i: u32| -> Option<()> {
+        let at = u64::from(i) * PIECE as u64;
+        let written = file.write(at, piece(i)).await;
+        if !matches!(written, Ok(Ok(w)) if w.written as usize == PIECE) {
+            return failed("writing");
+        }
+        if !matches!(file.sync().await, Ok(Ok(_))) {
+            return failed("syncing");
+        }
+        Some(())
+    };
+    for i in 0..BEFORE {
+        write(i).await?;
+    }
+
+    let (before, killed) = kill(launcher, reactor, BUS_DRIVER).await?;
+    for i in BEFORE..BEFORE + AFTER {
+        write(i).await?;
+    }
+    restarted(launcher, reactor, BUS_DRIVER, killed, &before).await?;
+
+    for i in 0..BEFORE + AFTER {
+        let at = u64::from(i) * PIECE as u64;
+        let mut read = Vec::new();
+        while read.len() < PIECE {
+            let want = (PIECE - read.len()) as u32;
+            let data = match file.read(at + read.len() as u64, want).await {
+                Ok(Ok(r)) => r.data,
+                _ => return failed("reading the file back"),
+            };
+            if data.is_empty() {
+                return failed("reading the whole file back");
+            }
+            read.extend_from_slice(&data);
+        }
+        if read != piece(i) {
+            return failed("finding what was written");
+        }
+    }
+    if !matches!(root.unlink(FILE.into(), false).await, Ok(Ok(_))) {
+        return failed("removing the file");
+    }
+    Some(())
+}

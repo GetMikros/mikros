@@ -1,8 +1,17 @@
-//! The runs of the test image that bring up the root file system from a
-//! boot disk behind an NVMe controller and behind the AHCI controller.
-//! The test init serves `tests/root.img` with `test=root-disk`, and once
-//! the process manager has switched to the root and serves `/boot/efi`,
-//! or once that failed, it stops QEMU through `isa-debug-exit`.
+//! The runs of the test image whose test init scenario stops QEMU when it
+//! passed or failed:
+//! - the root disk runs, behind an NVMe controller and behind the AHCI
+//!   controller: the test init serves `tests/root.img` with
+//!   `test=root-disk`, until the process manager has switched to the root
+//!   and serves `/boot/efi`;
+//! - the bus restart runs, behind a virtio-blk, an NVMe and the AHCI
+//!   controller: the test init serves `tests/bus.img` with
+//!   `test=bus-restart`, whose restart probe kills the PCI bus driver
+//!   below the mounted root, until the probe finds the other drivers and
+//!   the root still working.
+//!
+//! The test init stops QEMU through `isa-debug-exit` once the run passed
+//! or failed.
 
 use crate::build::{self, Kind};
 use crate::qemu::{Disk, MachineArgs};
@@ -12,17 +21,40 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// The controllers the boot disk is put on, with the name of each run.
-const DISKS: [(&str, Disk); 2] = [("nvme", Disk::Nvme), ("ahci", Disk::Ahci)];
-/// The line the test init logs once the root and the ESP are served.
-const PASSED_LINE: &str = "SCENARIO root-disk PASSED";
+/// A kind of run: its name, the test init's scenario, the line the
+/// test init logs once it passed, and the controllers the boot disk is
+/// put on, with the name of each run.
+struct Runs {
+    name: &'static str,
+    scenario: &'static str,
+    passed: &'static str,
+    disks: &'static [(&'static str, Disk)],
+}
 
-/// Why the run did not pass, if it did not, given QEMU's exit code and
-/// the serial output.
-fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
+const ROOT_DISK: Runs = Runs {
+    name: "root disk",
+    scenario: "test=root-disk",
+    passed: "SCENARIO root-disk PASSED",
+    disks: &[("nvme", Disk::Nvme), ("ahci", Disk::Ahci)],
+};
+
+const BUS_RESTART: Runs = Runs {
+    name: "bus restart",
+    scenario: "test=bus-restart",
+    passed: "SCENARIO bus-restart PASSED",
+    disks: &[
+        ("virtio", Disk::Virtio),
+        ("nvme", Disk::Nvme),
+        ("ahci", Disk::Ahci),
+    ],
+};
+
+/// Why a run that logs `passed` once it passes did not pass, if it did
+/// not, given QEMU's exit code and the serial output.
+fn verdict(code: Option<i32>, serial: &str, passed: &str) -> Result<(), String> {
     crate::test::verdict(code, serial)?;
-    if !serial.contains(PASSED_LINE) {
-        return Err(format!("{PASSED_LINE:?} is missing"));
+    if !serial.contains(passed) {
+        return Err(format!("{passed:?} is missing"));
     }
     Ok(())
 }
@@ -36,10 +68,33 @@ pub fn run(
     dir: &Path,
     timeout: Duration,
 ) -> Result<()> {
-    for (name, disk) in DISKS {
+    run_all(&ROOT_DISK, machine, kind, built, dir, timeout)
+}
+
+/// Boots the bus restart runs, as `run` does the root disk runs.
+pub fn run_bus_restart(
+    machine: &MachineArgs,
+    kind: Kind,
+    built: &build::Built,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    run_all(&BUS_RESTART, machine, kind, built, dir, timeout)
+}
+
+fn run_all(
+    runs: &Runs,
+    machine: &MachineArgs,
+    kind: Kind,
+    built: &build::Built,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    let what = runs.name;
+    for &(name, disk) in runs.disks {
         let dir = dir.join(name);
         fs::create_dir_all(&dir)?;
-        image::create_with(kind, built, &dir.join("disk.img"), "test=root-disk", &[])?;
+        image::create_with(kind, built, &dir.join("disk.img"), runs.scenario, &[])?;
         let mut machine = machine.clone();
         machine.disk = disk;
         let log = dir.join("serial.log");
@@ -58,18 +113,18 @@ pub fn run(
         let _ = qemu.wait();
         let Some(status) = status else {
             bail!(
-                "the {name} root disk run timed out; serial output in {}",
+                "the {name} {what} run timed out; serial output in {}",
                 log.display()
             );
         };
         let serial = String::from_utf8_lossy(&fs::read(&log).unwrap_or_default()).into_owned();
-        if let Err(why) = verdict(status.code(), &serial) {
+        if let Err(why) = verdict(status.code(), &serial, runs.passed) {
             bail!(
-                "the {name} root disk run failed: {why}; serial output in {}",
+                "the {name} {what} run failed: {why}; serial output in {}",
                 log.display()
             );
         }
-        println!("root disk run {name} passed");
+        println!("{what} run {name} passed");
     }
     Ok(())
 }
@@ -81,11 +136,14 @@ mod tests {
     #[test]
     fn needs_the_passed_code_and_line() {
         let passed = crate::test::PASSED;
-        assert_eq!(verdict(Some(passed), PASSED_LINE), Ok(()));
-        assert!(verdict(Some(passed), "SCENARIO root-disk FAILED").is_err());
-        assert!(verdict(Some(passed + 2), PASSED_LINE).is_err());
-        assert!(verdict(None, PASSED_LINE).is_err());
-        let panicked = format!("{PASSED_LINE}\nKERNEL PANIC: page fault");
-        assert!(verdict(Some(passed), &panicked).is_err());
+        for runs in [&ROOT_DISK, &BUS_RESTART] {
+            let line = runs.passed;
+            assert_eq!(verdict(Some(passed), line, line), Ok(()));
+            assert!(verdict(Some(passed), "SCENARIO root-disk FAILED", line).is_err());
+            assert!(verdict(Some(passed + 2), line, line).is_err());
+            assert!(verdict(None, line, line).is_err());
+            let panicked = format!("{line}\nKERNEL PANIC: page fault");
+            assert!(verdict(Some(passed), &panicked, line).is_err());
+        }
     }
 }
