@@ -5,9 +5,9 @@ use crate::queue::Queue;
 use crate::{Error, F_ACCESS_PLATFORM, F_RING_PACKED, F_VERSION_1, SharedMemory};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use mikros_rt::exec::{Reactor, Spawner};
-use mikros_rt::interfaces::__midl::OwnedHandle;
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::sys;
 
@@ -36,6 +36,9 @@ const FAILED: u8 = 128;
 /// The ISR status bits of a used ring update and a configuration change.
 const ISR_QUEUE: u8 = 1 << 0;
 const ISR_CONFIG: u8 = 1 << 1;
+/// How long the INTx task waits after an acknowledgement failed, for a
+/// `Reconnect` to bring a channel that takes it.
+const ACK_RETRY: i64 = 10 * 1_000_000;
 /// The largest queue the library sets up.
 const QUEUE_MAX: u16 = 256;
 const SIGNALED: u32 = 1 << 3;
@@ -43,12 +46,16 @@ const MS: i64 = 1_000_000;
 /// How long a reset may take.
 const RESET_LIMIT: i64 = 1000 * MS;
 
+/// The client of a device's bus channel now, which `reconnect` replaces.
+type Bus = Rc<RefCell<Rc<DeviceAsyncClient>>>;
+
 /// A device that the library initialized: the bus channel, its mapped
 /// structures, its virtqueues, the features accepted, its bus
 /// transaction initiator, its interrupts, and how many configuration
 /// changes it reported.
 pub struct Transport {
-    device: Rc<DeviceAsyncClient>,
+    device: Bus,
+    reactor: Reactor,
     bti: OwnedHandle,
     structures: Rc<Structures>,
     queues: Vec<Rc<Queue>>,
@@ -158,6 +165,7 @@ impl Transport {
             }
         };
         let config_changes = Rc::new(Cell::new(0));
+        let device = Rc::new(RefCell::new(device));
         let kept = watch(
             &device,
             &structures,
@@ -169,6 +177,7 @@ impl Transport {
         );
         let transport = Rc::new(Transport {
             device,
+            reactor: reactor.clone(),
             bti,
             structures,
             queues: made.clone(),
@@ -220,9 +229,18 @@ impl Transport {
         }
     }
 
-    /// The bus channel, for requests of the driver's own.
-    pub fn device(&self) -> &DeviceAsyncClient {
-        &self.device
+    /// The bus channel now, for requests of the driver's own.
+    pub fn device(&self) -> Rc<DeviceAsyncClient> {
+        self.device.borrow().clone()
+    }
+
+    /// Replaces the bus channel with `bus`, which `Reconnect` gives once
+    /// the bus driver has restarted. The mapped structures, the
+    /// interrupts and the bus transaction initiator do not use the
+    /// channel, and stay.
+    pub fn reconnect(&self, bus: OwnedHandle) {
+        let client = DeviceAsyncClient::new(ClientEnd::new(bus), self.reactor.clone());
+        *self.device.borrow_mut() = Rc::new(client);
     }
 
     /// Resets the device, before its queue memory is released.
@@ -286,12 +304,13 @@ fn negotiate(structures: &Structures, wanted: u64) -> Result<u64, Error> {
 
 /// Takes the device's interrupts: on each one, processes the used rings
 /// of the queues it belongs to and counts a configuration change, and
-/// then acknowledges it. Returns the handles to keep. An MSI that arrives
-/// while its object is still signaled adds no signal, so after the
-/// acknowledgement the used rings are processed once more, for requests
-/// that the device returned in between.
+/// then acknowledges it, an INTx event on the bus channel of the moment.
+/// Returns the handles to keep. An MSI that arrives while its object is
+/// still signaled adds no signal, so after the acknowledgement the used
+/// rings are processed once more, for requests that the device returned
+/// in between.
 fn watch(
-    device: &Rc<DeviceAsyncClient>,
+    device: &Bus,
     structures: &Rc<Structures>,
     interrupts: Interrupts,
     queues: &[Rc<Queue>],
@@ -345,8 +364,11 @@ fn watch(
                     if isr & ISR_CONFIG != 0 {
                         changes.set(changes.get() + 1);
                     }
-                    if device.ack_interrupt().await.is_err() {
-                        return;
+                    // While the bus driver restarts, the event stays signaled
+                    // until a new channel acknowledges it.
+                    let client = device.borrow().clone();
+                    if client.ack_interrupt().await.is_err() {
+                        let _ = reactor.sleep_until(now() + ACK_RETRY).await;
                     }
                 }
             });

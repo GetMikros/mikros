@@ -5,7 +5,8 @@
 //! driver adds the device's disk as a child device `disk-0`, as
 //! `storage:disk`, and serves `Block` for it on the bus channel that
 //! `ConnectChild` gives it. It also publishes the disk's raw access
-//! service, of class `storage`. `ResetChild` fails with
+//! service, of class `storage`. `Reconnect` replaces the device's bus
+//! channel once the PCI bus driver has restarted, `ResetChild` fails with
 //! `NOT_SUPPORTED`, and `Stop` resets the device.
 
 #![no_std]
@@ -25,8 +26,9 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
-    DriverStartRequest, DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse,
+    DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
+    DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
@@ -123,10 +125,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                // The driver does not take a new bus channel yet.
-                DriverRequest::Reconnect(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
+                // A restarted PCI bus driver gives a new bus channel.
+                DriverRequest::Reconnect(request, responder) => match &disk {
+                    Some(disk) => {
+                        disk.transport.reconnect(request.bus);
+                        responder.reply(s, Ok(DriverReconnectResponse {}))
+                    }
+                    None => responder.reply(s, Err(Status::BadState)),
+                },
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
                 }

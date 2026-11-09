@@ -21,8 +21,8 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer, DriverRequest, DriverStartRequest,
-    DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverReconnectResponse, DriverRequest,
+    DriverStartRequest, DriverStartResponse, DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, ProviderRequest};
@@ -65,20 +65,25 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let end = ServerEnd::new(managed.handles.remove(at).handle);
     let server = DriverAsyncServer::new(end, reactor.clone());
     let process = managed.header.process.raw();
-    // The ports' resource, which stays held while the driver runs.
+    // The ports' resource, which stays held while the driver runs, and
+    // the bus channel of the ACPI server, which the driver does not use
+    // but holds, and which `Reconnect` replaces.
     let mut ports: Option<OwnedHandle> = None;
+    let mut bus: Option<OwnedHandle> = None;
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
             let _ = match request {
-                DriverRequest::Start(request, responder) => {
+                DriverRequest::Start(mut request, responder) => {
                     if ports.is_some() {
                         let _ = responder.reply(s, Err(Status::BadState));
                         continue;
                     }
+                    let channel = request.bus.take();
                     match start(request, process, &reactor, &spawner).await {
                         Ok(resource) => {
                             ports = Some(resource);
+                            bus = channel;
                             responder.reply(s, Ok(DriverStartResponse {}))
                         }
                         Err(status) => responder.reply(s, Err(status)),
@@ -88,9 +93,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                DriverRequest::Reconnect(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
+                // A restarted ACPI server gives a new bus channel.
+                DriverRequest::Reconnect(request, responder) => match ports {
+                    Some(_) => {
+                        bus = Some(request.bus);
+                        responder.reply(s, Ok(DriverReconnectResponse {}))
+                    }
+                    None => responder.reply(s, Err(Status::BadState)),
+                },
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
                 }
