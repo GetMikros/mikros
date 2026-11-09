@@ -320,6 +320,9 @@ version = "0.0.0"
 [[package]]
 name = "mikros-gpt"
 version = "0.0.0"
+dependencies = [
+ "mikros-fat",
+]
 
 [[package]]
 name = "mikros-libc"

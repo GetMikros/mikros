@@ -805,6 +805,10 @@ dependencies = [
 [[package]]
 name = "mikros-gpt"
 version = "0.0.0"
+dependencies = [
+ "fatfs",
+ "mikros-fat",
+]
 
 [[package]]
 name = "mikros-logstore"

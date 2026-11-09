@@ -5,3 +5,9 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 workspace = "../.."
+
+[dependencies]
+mikros-fat = { path = "../fat" }
+
+[dev-dependencies]
+fatfs = "0.3.6"

@@ -1,9 +1,15 @@
-//! Reading GUID partition tables, for the partition driver: checking a
-//! header and its partition entry array, and listing the partitions.
+//! Reading partition tables, for the partition driver: checking a GUID
+//! partition table's header and its partition entry array and listing
+//! the partitions, reading master boot records and their extended boot
+//! records (`mbr`), and finding the file system a partition holds
+//! (`probe`).
 
 #![no_std]
 
 extern crate alloc;
+
+pub mod mbr;
+pub mod probe;
 
 use alloc::string::String;
 use alloc::vec::Vec;
