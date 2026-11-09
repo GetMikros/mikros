@@ -3,7 +3,10 @@
 //! `Start` takes the controller over from firmware, resets it and
 //! brings it up with its command ring and the event ring of interrupter
 //! 0, which a message-signaled interrupt or else the INTx event serves.
-//! `Stop` stops the controller before the driver ends.
+//! The USB core then enumerates the devices on the root hub ports and
+//! adds a device for each interface of their first configuration, named
+//! `usb-<port>-<interface>`. `Stop` stops the controller before the
+//! driver ends.
 
 #![no_std]
 #![no_main]
@@ -16,6 +19,7 @@ mod device;
 mod regs;
 mod ring;
 mod transfer;
+mod usb;
 mod wait;
 
 use alloc::rc::Rc;
@@ -24,13 +28,14 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DriverAsyncServer,
+    DeviceManagerAsyncClient, DriverAsyncServer,
     DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
     DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 use mikros_storage::PciBus;
+use usb::Usb;
 
 mikros_rt::raw_main!(main);
 
@@ -61,6 +66,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
     let process = managed.header.process.raw();
     let mut controller: Option<Rc<Controller>> = None;
+    let mut core: Option<Rc<Usb>> = None;
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
@@ -70,8 +76,11 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 }
                 DriverRequest::Start(request, responder) => {
                     match start(request, process, &reactor, &spawner).await {
-                        Ok(started) => {
+                        Ok((started, manager)) => {
+                            let usb = Usb::new(started.clone(), manager);
+                            spawner.spawn(usb.clone().run());
                             controller = Some(started);
+                            core = Some(usb);
                             responder.reply(s, Ok(DriverStartResponse {}))
                         }
                         Err(status) => responder.reply(s, Err(status)),
@@ -105,7 +114,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 }
 
 /// Brings up the controller that `request` gives, with its `DMA`
-/// resource. Fails with
+/// resource. Returns it and the device manager. Fails with
 /// `INVALID_ARGS` without a bus channel or a `DMA` resource, with the
 /// status of the bus driver when it refused a request, and with
 /// `INTERNAL` when the controller could not be brought up.
@@ -114,7 +123,7 @@ async fn start(
     process: sys::Handle,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<Rc<Controller>, Status> {
+) -> Result<(Rc<Controller>, DeviceManagerAsyncClient), Status> {
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let dma = request
         .resources
@@ -122,7 +131,9 @@ async fn start(
         .find(|r| kind(r) == Some(KIND_DMA))
         .ok_or(Status::InvalidArgs)?;
     let pci = PciBus::new(bus, reactor);
-    Controller::start(pci, process, dma, reactor, spawner).await
+    let controller = Controller::start(pci, process, dma, reactor, spawner).await?;
+    let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
+    Ok((controller, manager))
 }
 
 /// The kind of `resource`, if it is one.
