@@ -54,7 +54,6 @@ impl Upcase {
     }
 
     /// The hash of the name `name` that a stream extension holds.
-    #[cfg(test)]
     pub fn hash(&self, name: &[u16]) -> u16 {
         let mut hash = 0u16;
         for &unit in name {

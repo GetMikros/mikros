@@ -699,3 +699,101 @@ fn refuses_to_truncate_when_read_only_or_full() {
     assert_eq!(volume.free_clusters(), 0);
     remount(volume);
 }
+
+#[test]
+fn writes_files_and_zeroes_what_lies_before_their_data() {
+    let mut volume = mount_writable(mkfs(8 * MIB, &[]));
+    let cluster = volume.layout().cluster_size as usize;
+    let mut a = volume.create(Dir::Root, "a.bin", false, stamp()).unwrap();
+    let mut expected = pattern(2 * cluster + 10, 1);
+    volume.write(&mut a, 0, &expected, stamp()).unwrap();
+    let mut b = volume.create(Dir::Root, "b.bin", false, stamp()).unwrap();
+    volume
+        .write(&mut b, 0, &pattern(cluster, 3), stamp())
+        .unwrap();
+    // Past the end of a, across a chain that now starts.
+    let more = pattern(2 * cluster, 4);
+    volume
+        .write(&mut a, expected.len() as u64, &more, stamp())
+        .unwrap();
+    expected.extend_from_slice(&more);
+    assert!(!a.set.contiguous());
+    // Over bytes in the middle.
+    volume.write(&mut a, 5, b"middle", stamp()).unwrap();
+    expected[5..11].copy_from_slice(b"middle");
+    // Far past the valid data, after a truncate that left it short.
+    let mut c = volume.create(Dir::Root, "c", false, stamp()).unwrap();
+    volume.write(&mut c, 0, b"hello", stamp()).unwrap();
+    volume.truncate(&mut c, cluster as u64, stamp()).unwrap();
+    volume
+        .write(&mut c, 3 * cluster as u64 + 5, b"world", stamp())
+        .unwrap();
+    let mut volume = remount(volume);
+    let mut a = volume.find(Dir::Root, "a.bin").unwrap();
+    assert_eq!(read_all(&mut volume, &mut a), expected);
+    assert_eq!(a.modified(), stamp());
+    let mut b = volume.find(Dir::Root, "b.bin").unwrap();
+    assert_eq!(read_all(&mut volume, &mut b), pattern(cluster, 3));
+    let mut c = volume.find(Dir::Root, "c").unwrap();
+    let data = read_all(&mut volume, &mut c);
+    assert_eq!(data.len(), 3 * cluster + 10);
+    assert_eq!(
+        (&data[..5], &data[data.len() - 5..]),
+        (&b"hello"[..], &b"world"[..])
+    );
+    assert!(data[5..data.len() - 5].iter().all(|&x| x == 0));
+}
+
+#[test]
+fn creates_files_and_directories() {
+    let bytes = mkfs(8 * MIB, &[]);
+    let size = bytes.len() as u64;
+    let mut volume = Volume::mount(Mem::new(bytes), size, false).unwrap();
+    let refused = volume.create(Dir::Root, "f", false, stamp());
+    assert_eq!(refused.err(), Some(Error::ReadOnly));
+    let mut volume = mount_writable(volume.into_device().0);
+    let free = volume.free_clusters();
+    let docs = volume.create(Dir::Root, "Docs", true, stamp()).unwrap();
+    assert_eq!(volume.free_clusters(), free - 1);
+    let docs = docs.as_dir().unwrap();
+    let mut note = volume.create(docs, "note.txt", false, stamp()).unwrap();
+    volume.write(&mut note, 0, b"note", stamp()).unwrap();
+    let mut create = |name: &str| volume.create(Dir::Root, name, false, stamp()).err();
+    assert_eq!(create("docs"), Some(Error::Exists));
+    assert_eq!(create("bad:name"), Some(Error::Invalid));
+    assert_eq!(create("trailing."), Some(Error::Invalid));
+    assert_eq!(create(&"x".repeat(256)), Some(Error::NameTooLong));
+    assert_eq!(create(&"x".repeat(255)), None);
+    let mut volume = remount(volume);
+    let docs = volume.find(Dir::Root, "docs").unwrap();
+    assert_eq!(
+        (docs.created(), docs.attributes() & DIRECTORY),
+        (stamp(), DIRECTORY)
+    );
+    let docs = docs.as_dir().unwrap();
+    let mut note = volume.find(docs, "NOTE.TXT").unwrap();
+    assert_eq!(read_all(&mut volume, &mut note), b"note");
+}
+
+#[test]
+fn grows_directories_a_cluster_at_a_time() {
+    // With 512-byte clusters, a set of a long name takes more than one.
+    for (args, files) in [(&["-c", "512"][..], 3), (&[][..], 100)] {
+        let mut volume = mount_writable(mkfs(8 * MIB, args));
+        let sub = volume.create(Dir::Root, "sub", true, stamp()).unwrap();
+        let sub = sub.as_dir().unwrap();
+        let name = |i: usize| format!("{i:03}{}", " long name".repeat(25 - i % 25));
+        for dir in [Dir::Root, sub] {
+            for i in 0..files {
+                volume.create(dir, &name(i), false, stamp()).unwrap();
+            }
+        }
+        let cluster = u64::from(volume.layout().cluster_size);
+        assert!(volume.allocated_dir(sub).unwrap() > cluster);
+        let mut volume = remount(volume);
+        let sub = volume.find(Dir::Root, "sub").unwrap().as_dir().unwrap();
+        let expected: Vec<String> = (0..files).map(name).collect();
+        assert_eq!(names(&mut volume, sub), expected);
+        assert_eq!(names(&mut volume, Dir::Root)[1..], expected);
+    }
+}

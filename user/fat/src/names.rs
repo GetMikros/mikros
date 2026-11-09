@@ -31,7 +31,7 @@ pub(crate) fn long_entries(name: &str, checksum: u8) -> Vec<[u8; ENTRY]> {
 
 /// Whether `name` can be a long name: not empty, `.` or `..`, without
 /// control characters, `"*/:<>?\|`, or a trailing dot or space.
-pub(crate) fn valid_long(name: &str) -> bool {
+pub fn valid_long(name: &str) -> bool {
     let bad = |c: char| c < ' ' || c == '\u{7F}' || "\"*/:<>?\\|".contains(c);
     !name.is_empty()
         && name != "."

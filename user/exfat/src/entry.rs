@@ -2,7 +2,6 @@
 //! entry, a stream extension and file name entries, with their checksum,
 //! and the critical primary entries of the root directory.
 
-#[cfg(test)]
 use crate::upcase::Upcase;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -17,6 +16,8 @@ pub const LABEL: u8 = 0x83;
 pub const FILE: u8 = 0x85;
 pub const STREAM: u8 = 0xC0;
 pub const NAME: u8 = 0xC1;
+/// The bit of an entry type that marks the entry in use.
+pub const IN_USE: u8 = 0x80;
 /// The UTF-16 code units of a file name entry.
 pub const NAME_UNITS: usize = 15;
 /// The most UTF-16 code units of a name.
@@ -105,7 +106,6 @@ impl Set {
     }
 
     /// How many entries the set takes.
-    #[cfg(test)]
     pub fn entries(&self) -> usize {
         entries_for(self.name.len())
     }
@@ -130,7 +130,6 @@ impl Set {
     }
 
     /// The entries of the set, with its checksum and the name's hash.
-    #[cfg(test)]
     pub fn encode(&self, upcase: &Upcase) -> Vec<u8> {
         let count = self.entries();
         let mut set = alloc::vec![0u8; count * ENTRY];

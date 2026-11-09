@@ -14,10 +14,12 @@ pub enum Dir {
     Sub(u32),
 }
 
-/// Where a directory other than the root lies: whether its clusters lie
-/// in a row, and its size.
+/// Where a directory other than the root lies: the directory and slot
+/// of its file entry, whether its clusters lie in a row, and its size.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Place {
+    pub(crate) parent: Dir,
+    pub(crate) slot: u32,
     pub(crate) contiguous: bool,
     pub(crate) size: u64,
 }
@@ -190,6 +192,8 @@ impl<D: Device> Volume<D> {
     pub(crate) fn node(&mut self, dir: Dir, slot: u32, set: Set) -> Node {
         if set.is_directory() {
             let place = Place {
+                parent: dir,
+                slot,
                 contiguous: set.contiguous(),
                 size: set.size,
             };

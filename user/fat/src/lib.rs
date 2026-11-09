@@ -20,8 +20,9 @@ mod table;
 mod volume;
 
 pub use bpb::{FatType, Layout};
-pub use disk::Disk;
 pub use dir::{ARCHIVE, DIRECTORY, HIDDEN, READ_ONLY, SYSTEM, Stamp};
+pub use disk::Disk;
+pub use names::valid_long;
 pub use volume::{Dir, FILE_MAX, Node, Volume};
 
 /// Why an operation failed.

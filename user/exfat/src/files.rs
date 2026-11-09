@@ -71,6 +71,34 @@ impl<D: Device> Volume<D> {
         Ok(())
     }
 
+    /// Writes `data` at `at`, whole blocks straight to the device.
+    fn write_bytes(&mut self, at: u64, data: &[u8]) -> Result<(), Error> {
+        let start = at - at % BLOCK;
+        let end = (at + data.len() as u64).next_multiple_of(BLOCK);
+        if start == at && end == at + data.len() as u64 {
+            return self.disk.write_direct(at, data);
+        }
+        let mut whole = vec![0u8; (end - start) as usize];
+        self.disk.read_direct(start, &mut whole)?;
+        let from = (at - start) as usize;
+        whole[from..from + data.len()].copy_from_slice(data);
+        self.disk.write_direct(start, &whole)
+    }
+
+    /// Writes zeros over the bytes of the file `node` from `from` to `to`,
+    /// which its clusters hold.
+    fn zero_range(&mut self, node: &mut Node, from: u64, to: u64) -> Result<(), Error> {
+        let zeros = vec![0u8; self.layout.cluster_size as usize];
+        let mut at = from;
+        while at < to {
+            let len = ((to - at) as usize).min(zeros.len());
+            let (place, n) = self.extent(node, at, len)?;
+            self.write_bytes(place, &zeros[..n])?;
+            at += n as u64;
+        }
+        Ok(())
+    }
+
     /// Gives the file `node` `size` bytes, and the clusters they take, and
     /// writes its set. The clusters it no longer holds are freed after
     /// that.
@@ -86,6 +114,42 @@ impl<D: Device> Volume<D> {
         node.near = (node.set.first_cluster, 0);
         self.store(node)?;
         self.release(&freed)
+    }
+
+    /// Writes `data` to the file `node` at `offset`, growing it as
+    /// needed, with the bytes between its valid data and `offset` zero,
+    /// and marks it modified at `now`.
+    pub fn write(
+        &mut self,
+        node: &mut Node,
+        offset: u64,
+        data: &[u8],
+        now: Stamp,
+    ) -> Result<(), Error> {
+        self.check_writable()?;
+        if node.is_directory() {
+            return Err(Error::IsDirectory);
+        }
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or(Error::NoSpace)?;
+        if end > node.set.size {
+            self.resize(node, end)?;
+        }
+        let valid = node.set.valid_size;
+        if offset > valid {
+            self.zero_range(node, valid, offset)?;
+        }
+        let mut done = 0;
+        while done < data.len() {
+            let (at, n) = self.extent(node, offset + done as u64, data.len() - done)?;
+            self.write_bytes(at, &data[done..done + n])?;
+            done += n;
+        }
+        node.set.valid_size = valid.max(end);
+        node.set.modified = now;
+        node.set.attributes |= ARCHIVE;
+        self.store(node)
     }
 
     /// Sets the size of the file `node` to `size`, freeing the clusters
