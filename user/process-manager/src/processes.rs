@@ -49,8 +49,6 @@ pub struct Shared {
     /// The root budget.
     pub budget: OwnedHandle,
     pub clock_page: OwnedHandle,
-    /// The time service's time page, once it gave it.
-    pub time_page: RefCell<Option<OwnedHandle>>,
     pub reactor: Reactor,
     pub spawner: Spawner,
     pub records: RefCell<Records>,
@@ -106,7 +104,6 @@ impl Shared {
             namespaces,
             budget,
             clock_page,
-            time_page: RefCell::new(None),
             reactor,
             spawner,
             records: RefCell::new(Records::default()),
@@ -290,7 +287,6 @@ impl Shared {
             launcher,
             directory,
             clock_page: self.clock_page.raw(),
-            time_page: self.time_page.borrow().as_ref().map(|page| page.raw()),
             namespace,
         })?;
         bind(control, identity, directory_end).await?;

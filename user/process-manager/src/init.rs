@@ -17,14 +17,11 @@ use mikros_rt::interfaces::mikros::process::{
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, DirectoryAsyncClient, ProcessDirectory, ProcessDirectoryAsyncClient,
 };
-use mikros_rt::interfaces::mikros::time::{Clock, ClockAsyncClient};
 use mikros_rt::sys;
 use process_manager::bootfs::Fs;
 
 const SAME_RIGHTS: u32 = 1 << 31;
 /// The service manager's program, and its path in its own namespace.
-/// The time service's protocol.
-const CLOCK: &str = "mikros.time.Clock";
 const SERVICE_MANAGER: &str = "usr/bin/service-manager";
 const SERVICE_MANAGER_PATH: &str = "/usr/bin/service-manager";
 const SERVICE_MANAGER_APP: &str = "system.service-manager";
@@ -223,19 +220,6 @@ impl Manager {
                 shared.namespaces.prepare_esp(directory, reactor).await;
             });
         }
-        // Processes get the time page once the time service gives it,
-        // through another directory of the process manager's own; none
-        // waits for it.
-        if let Ok(directory) = bind_own_directory(&control).await {
-            let shared = self.shared.clone();
-            self.shared.spawner.spawn(async move {
-                let reactor = shared.reactor.clone();
-                let directory = DirectoryAsyncClient::new(directory, reactor.clone());
-                if let Some(page) = time_page(&directory, &reactor).await {
-                    *shared.time_page.borrow_mut() = Some(page);
-                }
-            });
-        }
         let shared = self.shared.clone();
         self.shared.spawner.spawn(async move {
             let reactor = shared.reactor.clone();
@@ -265,18 +249,4 @@ fn own_identity() -> ClientIdentity {
         user: 0,
         app_id: PROCESS_MANAGER_APP.into(),
     }
-}
-
-/// The time page of the time service's `mikros.time.Clock` through
-/// `directory`, once the service gives it; None without a time service.
-async fn time_page(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<OwnedHandle> {
-    let (client, server) = endpoints::<Clock>().ok()?;
-    let connected = directory
-        .connect(CLOCK.into(), None, server.into_handle())
-        .await;
-    if !matches!(connected, Ok(Ok(_))) {
-        return None;
-    }
-    let clock = ClockAsyncClient::new(client, reactor.clone());
-    Some(clock.get_time_page().await.ok()?.page)
 }
