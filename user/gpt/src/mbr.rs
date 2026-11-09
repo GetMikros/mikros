@@ -53,10 +53,14 @@ pub fn is_hidden(kind: u8) -> bool {
 }
 
 /// Whether `sector`, the first block of a disk, is a master boot record
-/// other than a GPT disk's protective one: it ends in `0x55 0xAA`, and no
-/// entry has the type `0xEE`.
+/// other than a GPT disk's protective one: it ends in `0x55 0xAA`, no
+/// entry has the type `0xEE`, and each entry's boot indicator is `0x00`
+/// or `0x80`.
 pub fn is_mbr(sector: &[u8]) -> bool {
-    is_boot_record(sector) && (0..4).all(|i| entry(sector, i).kind != PROTECTIVE)
+    // The length is checked first, before any entry is read.
+    is_boot_record(sector)
+        && (0..4).all(|i| matches!(sector[ENTRIES_AT + 16 * i], 0x00 | 0x80))
+        && (0..4).all(|i| entry(sector, i).kind != PROTECTIVE)
 }
 
 /// The disk signature of the master boot record `sector`.
@@ -259,6 +263,12 @@ mod tests {
     #[test]
     fn refuses_protective_and_unsigned_records() {
         assert!(!is_mbr(&record(&[(0xee, 1, 100)])));
+        // A boot indicator other than 0x00 or 0x80, as boot code may hold.
+        let mut sector = record(&[(0x0c, 2048, 1000)]);
+        sector[446 + 16] = 0x41;
+        assert!(!is_mbr(&sector));
+        sector[446 + 16] = 0x80;
+        assert!(is_mbr(&sector));
         let mut sector = record(&[(0x0c, 2048, 1000)]);
         sector[511] = 0;
         assert!(!is_mbr(&sector));

@@ -121,10 +121,12 @@ pub enum Layout {
 }
 
 /// What the disk behind `disk`, which `info` describes, holds: its GUID
-/// partition table when one is valid, and otherwise the master boot
-/// record at LBA 0 with the partitions of its extended boot records, and
-/// otherwise the file system at its start. Partitions that do not lie
-/// on the disk are left out.
+/// partition table when one is valid; otherwise, when LBA 0 is the boot
+/// sector of a FAT, exFAT or NTFS file system, that file system on the
+/// whole disk; otherwise the master boot record at LBA 0 with the
+/// partitions of its extended boot records; and otherwise the file
+/// system at its start. Partitions that do not lie on the disk are left
+/// out.
 pub async fn layout(disk: &BlockAsyncClient, info: &BlockInfo, process: sys::Handle) -> Layout {
     if let Some((table, partitions)) = read(disk, info, process).await {
         return Layout::Gpt(table, partitions);
@@ -133,6 +135,14 @@ pub async fn layout(disk: &BlockAsyncClient, info: &BlockInfo, process: sys::Han
     let Some(first) = read_bytes(disk, info, process, 0, size).await else {
         return Layout::None;
     };
+    let disk_bytes = info.block_count.saturating_mul(size);
+    let found = find(disk, info, process, 0, disk_bytes).await;
+    if let Some(found) = found
+        .as_ref()
+        .filter(|f| probe::BOOT_SECTOR_IDS.contains(&f.id))
+    {
+        return Layout::Whole(found.clone());
+    }
     if mbr::is_mbr(&first) {
         let (mut partitions, extended) = mbr::primaries(&first);
         if let Some(extended) = extended {
@@ -146,8 +156,7 @@ pub async fn layout(disk: &BlockAsyncClient, info: &BlockInfo, process: sys::Han
         partitions.retain(|p| p.last_lba < info.block_count);
         return Layout::Mbr(mbr::signature(&first), partitions);
     }
-    let disk_bytes = info.block_count.saturating_mul(size);
-    match find(disk, info, process, 0, disk_bytes).await {
+    match found {
         Some(found) => Layout::Whole(found),
         None => Layout::None,
     }

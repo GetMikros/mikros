@@ -8,6 +8,10 @@ use alloc::string::String;
 /// How many bytes from the start of a partition the signatures lie in.
 pub const PROBE_BYTES: usize = 128 * 1024;
 
+/// The hardware IDs of the file systems whose first sector is a boot
+/// sector, which a disk without a partition table may start with.
+pub const BOOT_SECTOR_IDS: [&str; 3] = ["fs:fat", "fs:exfat", "fs:ntfs"];
+
 /// A file system found by its signature: its hardware ID, such as
 /// `fs:btrfs`, and its identifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
