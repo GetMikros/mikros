@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+pub mod devices;
 mod interrupts;
 mod osl;
 mod pci;

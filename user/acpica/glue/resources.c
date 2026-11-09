@@ -102,8 +102,9 @@ static ACPI_STATUS take_resource(ACPI_RESOURCE *resource, void *context)
     }
     case ACPI_RESOURCE_TYPE_IRQ:
         for (UINT8 i = 0; i < d->Irq.InterruptCount; i++) {
-            add_resource(device, MIKROS_ACPI_IRQ, d->Irq.Interrupts[i], 1,
-                         irq_flags(d->Irq.Triggering, d->Irq.Polarity, d->Irq.Shareable));
+            UINT32 flags = irq_flags(d->Irq.Triggering, d->Irq.Polarity, d->Irq.Shareable);
+            UINT32 gsi = glue_isa_irq(d->Irq.Interrupts[i], &flags);
+            add_resource(device, MIKROS_ACPI_IRQ, gsi, 1, flags);
         }
         break;
     case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:

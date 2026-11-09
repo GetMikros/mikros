@@ -52,8 +52,13 @@ BOOLEAN glue_is_host_bridge(const char *id);
  * `value`: FALSE when it has none. */
 BOOLEAN glue_integer(ACPI_HANDLE handle, const char *name, UINT64 *value);
 
+/* The GSI of the ISA IRQ `irq`, the IRQ itself unless an interrupt
+ * source override of the MADT gives another, with `flags` changed where
+ * the override sets the trigger mode or polarity. */
+UINT32 glue_isa_irq(UINT8 irq, UINT32 *flags);
+
 /* Adds the I/O ports, memory and interrupts of the _CRS of `handle` to
- * `device`. */
+ * `device`, legacy IRQs as the GSIs that glue_isa_irq gives them. */
 void glue_current_resources(ACPI_HANDLE handle, struct mikros_acpi_device *device);
 
 #endif

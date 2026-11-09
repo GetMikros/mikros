@@ -4,7 +4,8 @@
 //! RSDP from the device's `rsdp` property, readies ACPICA's operating
 //! system layer with resources from the device manager's
 //! `RequestResource`, and starts ACPICA. The server then publishes the
-//! `acpi` service class. `ConnectChild` for a device the server added
+//! `acpi` service class and adds the devices of the namespace, as
+//! `devices` says. `ConnectChild` for a device the server added
 //! succeeds and keeps the channel, on which nothing is served; the
 //! server has no bus protocol for its children.
 
@@ -13,6 +14,7 @@
 
 extern crate alloc;
 
+mod devices;
 mod host;
 mod service;
 
@@ -154,7 +156,7 @@ async fn start(
     let task = service::serve_provider(acpi, server, reactor.clone(), spawner.clone());
     spawner.spawn(task);
     Ok(Started {
-        children: Vec::new(),
+        children: devices::add(host),
         buses: Vec::new(),
     })
 }
