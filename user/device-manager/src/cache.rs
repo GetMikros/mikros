@@ -21,7 +21,7 @@ const PARTITION: &str = "storage:partition";
 const ROOT_TYPE: &str = "gpt:fa730af6-8ba3-42d9-b155-466909d08135";
 const ESP_TYPE: &str = "gpt:c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 /// The properties that choose a device's policy, and the one it gets.
-const CACHE: &str = "cache";
+pub const CACHE: &str = "cache";
 const REMOVABLE: &str = "removable";
 const SERIAL: &str = "serial";
 const PARTITION_GUID: &str = "partition_guid";

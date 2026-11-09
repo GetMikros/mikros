@@ -9935,8 +9935,8 @@ mod manager {
             (b", disk-0, as storage:disk, under", 2),
             // The three fixed disks, each with the serial number
             // `mikros`, and the USB disk.
-            (b" resources, serial mikros, removable false", 3),
-            (b" resources, serial mikros, removable true", 1),
+            (b", serial mikros, removable false", 3),
+            (b", serial mikros, removable true", 1),
             // The three fixed disks and the six partitions on them, none
             // of them removable, and the USB disk and its partition.
             (b", cache write-back", 9),

@@ -207,7 +207,9 @@ impl Devices {
 }
 
 /// `device` in words: its ID, name, first hardware ID, the parent of a
-/// device that has one, its resource count and its properties.
+/// device that has one, its resource count and its properties, the
+/// device manager's own `cache` first, so that a log record, which holds
+/// 256 bytes, keeps it when a bus driver gives many properties.
 fn describe(device: &Device) -> String {
     let first = device.hardware_ids.first().map_or("", String::as_str);
     let mut text = alloc::format!("device {}, {}, as {first}", device.id, device.name);
@@ -217,7 +219,11 @@ fn describe(device: &Device) -> String {
     let count = device.resources.len();
     let plural = if count == 1 { "" } else { "s" };
     let _ = write!(text, ", with {count} resource{plural}");
-    for (key, value) in &device.properties {
+    let (own, given): (Vec<_>, Vec<_>) = device
+        .properties
+        .iter()
+        .partition(|(key, _)| key == crate::cache::CACHE);
+    for (key, value) in own.into_iter().chain(given) {
         let _ = write!(text, ", {key} {value}");
     }
     text
