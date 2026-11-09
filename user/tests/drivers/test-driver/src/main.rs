@@ -79,6 +79,7 @@ mod btrfs;
 mod crash;
 mod fat;
 mod removal;
+mod zone;
 
 use alloc::rc::Rc;
 use alloc::vec;
@@ -233,6 +234,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         },
                         BTRFS => {
                             let works = btrfs::works(&directory, &reactor, process).await
+                                && zone::set_on_root(&directory, &reactor).await.is_some()
                                 && crash::root_survives(&directory, &launcher, &reactor)
                                     .await
                                     .is_some();

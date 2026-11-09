@@ -9674,7 +9674,9 @@ mod manager {
     /// `filesystem` service is also published under `partuuid-<guid>`,
     /// the root partition's also as `root`, and that of the EFI system
     /// partition on the root partition's disk as `esp`. The btrfs test
-    /// driver then kills the virtio-blk driver while it writes a file on
+    /// driver sets the time zone through the time service, which makes
+    /// `etc/localtime` on the root a link to the zone's file of the root's
+    /// `usr/share/zoneinfo`. It then kills the virtio-blk driver while it writes a file on
     /// the root, and goes on writing and syncing: the device manager
     /// keeps the disk and its partitions, has the device reset and
     /// restarts the driver, which adds the disk again under its old ID,

@@ -825,6 +825,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 // root file system and the EFI system partition.
                 ("usr/bin/log-service".to_owned(), log_service.clone()),
                 ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                // The time service, which takes the time zone from the
+                // root file system.
+                ("usr/bin/time-service".to_owned(), time_service.clone()),
+                (
+                    "usr/lib/services/time.yaml".to_owned(),
+                    time_manifest.clone(),
+                ),
             ];
             let pci_image = device_image(
                 "pci.img",
@@ -862,6 +869,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/bin/process-manager", manager.as_path()),
                 ("usr/bin/service-manager", services.as_path()),
             ];
+            // The time zones, which the test machine's root partition
+            // gets with the rest of usr.
+            let zones = crate::tzdata::members(&crate::tzdata::zoneinfo()?)?;
+            let members: Vec<(&str, &Path)> = members
+                .into_iter()
+                .chain(zones.iter().map(|(at, path)| (at.as_str(), path.as_path())))
+                .collect();
             boot_image(kind, "test-boot.img", &members)?
         }
     };
