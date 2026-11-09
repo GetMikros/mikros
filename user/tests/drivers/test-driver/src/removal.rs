@@ -13,9 +13,9 @@ const BROKER: &str = "mikros.permissions.Broker";
 const REMOVAL: &str = "mikros.driver.Removal";
 /// The permission that `Removal` needs, which the driver grants itself
 /// for its own user and app ID through the broker.
-const REMOVABLE: &str = "files.removable";
+const VOLUMES: &str = "files.volumes";
 
-/// Grants this driver `files.removable` with the broker, then checks
+/// Grants this driver `files.volumes` with the broker, then checks
 /// that `Removal` lists at most one removable disk, the USB scratch disk
 /// with the serial number `mikros`, which may not have been added yet,
 /// and fails to eject `device`, the driver's own partition, with
@@ -40,7 +40,7 @@ pub async fn works(
     let grant = Grant {
         user,
         app_id: app_id.into(),
-        permission: REMOVABLE.into(),
+        permission: VOLUMES.into(),
         decision: Decision::Allowed,
     };
     if !matches!(broker.set_grant(grant).await, Ok(Ok(_))) {

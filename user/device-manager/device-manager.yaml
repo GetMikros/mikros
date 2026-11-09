@@ -9,7 +9,7 @@ permissions: [process.set_identity, permissions.check, permissions.grant_system,
 stop_timeout: 600
 provides:
   - protocol: mikros.driver.Removal
-    permission: files.removable
+    permission: files.volumes
 namespace:
   - path: /usr/lib/drivers
     rights: r

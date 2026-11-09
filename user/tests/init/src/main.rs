@@ -9694,7 +9694,7 @@ mod manager {
     /// partitions that is the test driver, whose `Start` succeeds only
     /// when reads, writes, flushes, the writable lock and refusals work
     /// as they should, and when the device manager's removal service,
-    /// once the driver has granted itself `files.removable`, lists at
+    /// once the driver has granted itself `files.volumes`, lists at
     /// most the USB disk as removable and refuses to eject its
     /// partition. For the EFI system partition it is the FAT server,
     /// which publishes the volume's `filesystem` service, and the test

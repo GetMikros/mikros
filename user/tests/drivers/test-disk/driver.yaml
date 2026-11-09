@@ -1,6 +1,6 @@
 # A driver for each partition that the partition driver adds on the
 # test machine's disks, for the storage tests. It grants itself
-# files.removable through the broker to reach the device manager's
+# files.volumes through the broker to reach the device manager's
 # removal service.
 name: test-disk
 binary: /usr/lib/drivers/test-disk/test-disk
