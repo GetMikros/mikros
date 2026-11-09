@@ -29,6 +29,8 @@ pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
     "process.set_identity",
     "permissions.check",
     "permissions.grant_system",
+    "device.registry",
+    "power.control",
 ];
 /// The most grants one `ListGrants` reply holds.
 pub const LIST_MAX: usize = 256;
