@@ -13,6 +13,8 @@
 extern crate alloc;
 
 mod osl;
+mod physical;
+mod ports;
 mod sync;
 mod threads;
 
@@ -82,6 +84,10 @@ fn host() -> &'static dyn Host {
     );
     // SAFETY: `install` stored a box that is never freed.
     unsafe { *host }
+}
+
+fn process() -> sys::Handle {
+    PROCESS.load(Ordering::Acquire)
 }
 
 unsafe extern "C" {
