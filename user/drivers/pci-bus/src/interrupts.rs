@@ -156,15 +156,16 @@ async fn route(bus: &Bus, function: &Function) -> Result<Route, Status> {
     })
 }
 
-/// The line of `route`, which the bus driver takes, from an `IRQ`
-/// resource, and watches, the first time a function is on it.
+/// The line of `route`, which the bus driver takes, from a shared `IRQ`
+/// resource, so that other holders such as the ACPI server can have it
+/// too, and watches, the first time a function is on it.
 async fn line(bus: &Rc<Bus>, route: &Route) -> Result<Rc<Line>, Status> {
     if let Some(line) = bus.lines.borrow().get(&route.gsi) {
         return Ok(line.clone());
     }
     let granted = bus
         .manager
-        .request_resource(KIND_IRQ, u64::from(route.gsi), 1, false)
+        .request_resource(KIND_IRQ, u64::from(route.gsi), 1, true)
         .await;
     let resource = match granted {
         Ok(Ok(granted)) => granted.resource,
