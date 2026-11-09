@@ -136,7 +136,7 @@ pub struct Tool {
 
 /// The host tools the development environment needs, with the minimum version
 /// of each.
-pub const TOOLS: [Tool; 4] = [
+pub const TOOLS: [Tool; 5] = [
     Tool {
         name: "QEMU",
         program: "qemu-system-x86_64",
@@ -154,6 +154,12 @@ pub const TOOLS: [Tool; 4] = [
         program: "mkfs.btrfs",
         min_version: Version(6, 12, 0),
         source: Source::Package("btrfs-progs"),
+    },
+    Tool {
+        name: "mkfs.exfat",
+        program: "mkfs.exfat",
+        min_version: Version(1, 2, 0),
+        source: Source::Package("exfatprogs"),
     },
     Tool {
         name: "cargo-fuzz",

@@ -796,6 +796,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-exfat"
+version = "0.0.0"
+dependencies = [
+ "mikros-fat",
+]
+
+[[package]]
 name = "mikros-fat"
 version = "0.0.0"
 dependencies = [

@@ -24,7 +24,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git \
-            qemu-system-x86 gdb btrfs-progs \
+            qemu-system-x86 gdb btrfs-progs exfatprogs \
             cmake ninja-build clang lld python3 zstd bison
       - uses: actions/checkout@v4
         with:

@@ -42,6 +42,7 @@ The host needs these tools, which `cargo xtask setup` checks:
 | QEMU (`qemu-system-x86_64`) | 8.2.0 |
 | GDB | 12.1.0 |
 | `mkfs.btrfs` (btrfs-progs) | 6.12.0 |
+| `mkfs.exfat` (exfatprogs) | 1.2.0 |
 
 `cargo xtask debug` boots the disk image in QEMU halted and starts GDB
 attached to the kernel, with the `mikros` commands of `kernel/gdb/mikros.py`
