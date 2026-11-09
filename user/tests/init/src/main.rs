@@ -8185,7 +8185,7 @@ fn load_and_start(
     s: &Startup,
     file: &[u8],
 ) -> core::result::Result<(Handle, u64, u64), mikros_loader::Error> {
-    let (process, base, top, bootstrap, thread) = load_and_start_keeping(s, file)?;
+    let (process, base, top, bootstrap, thread) = load_and_start_keeping(s.budget, file)?;
     for h in [bootstrap, thread] {
         // SAFETY: closing takes no pointers.
         unsafe { sys::handle_close(h) };
@@ -8193,10 +8193,11 @@ fn load_and_start(
     Ok((process, base, top))
 }
 
-/// Like `load_and_start`, but also returns this end of the program's
-/// bootstrap channel and its thread.
+/// Like `load_and_start`, with the process belonging to `budget`, and
+/// also returns this end of the program's bootstrap channel and its
+/// thread.
 fn load_and_start_keeping(
-    s: &Startup,
+    budget: Handle,
     file: &[u8],
 ) -> core::result::Result<(Handle, u64, u64, Handle, Handle), mikros_loader::Error> {
     use mikros_loader::Error;
@@ -8231,7 +8232,7 @@ fn load_and_start_keeping(
     let (mut process, mut thread) = (0, 0);
     let name = b"pie";
     // SAFETY: the pointers describe `name` and `process`.
-    status(unsafe { sys::process_create(s.budget, name.as_ptr(), 3, &mut process) })?;
+    status(unsafe { sys::process_create(budget, name.as_ptr(), 3, &mut process) })?;
     let loaded = mikros_loader::load(process, &image);
     // SAFETY: closing takes no pointers.
     unsafe { sys::handle_close(shared) };
@@ -8399,7 +8400,8 @@ mod managed {
                 _ => 0,
             },
         };
-        let (process, _, _, ours, thread) = load_and_start_keeping(s, &file).map_err(fail)?;
+        let (process, _, _, ours, thread) =
+            load_and_start_keeping(s.budget, &file).map_err(fail)?;
         // SAFETY: the handle is ours alone.
         let end = ClientEnd::<Bootstrap>::new(unsafe { OwnedHandle::from_raw(ours) });
         Ok(Child {
@@ -8665,8 +8667,10 @@ mod manager {
     /// rights `Start` declares.
     const SAME_RIGHTS: u32 = 1 << 31;
 
-    /// A started process manager waiting for `Start`.
+    /// A started process manager waiting for `Start`, with the budget
+    /// that it and everything it starts belong to.
     struct Manager {
+        budget: Handle,
         process: Handle,
         thread: Handle,
         client: Option<ManagerBootstrapClient>,
@@ -8689,12 +8693,16 @@ mod manager {
     }
 
     impl Drop for Manager {
+        /// Ends the process manager and every process it started, which
+        /// would otherwise run on and fault once their code, which the
+        /// manager pages in, is gone.
         fn drop(&mut self) {
             // SAFETY: the calls take no pointers.
             unsafe {
-                sys::task_kill(self.process);
+                sys::task_kill(self.budget);
                 sys::handle_close(self.process);
                 sys::handle_close(self.thread);
+                sys::handle_close(self.budget);
             }
         }
     }
@@ -8708,10 +8716,26 @@ mod manager {
                 _ => 0,
             },
         };
-        let (process, _, _, ours, thread) = load_and_start_keeping(s, &file).map_err(fail)?;
+        let mut budget = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating a budget", unsafe {
+            sys::budget_create(s.budget, u64::MAX, u64::MAX, &mut budget)
+        })?;
+        let (process, _, _, ours, thread) = match load_and_start_keeping(budget, &file) {
+            Ok(started) => started,
+            Err(e) => {
+                // SAFETY: the calls take no pointers.
+                unsafe {
+                    sys::task_kill(budget);
+                    sys::handle_close(budget);
+                }
+                return Err(fail(e));
+            }
+        };
         // SAFETY: the handle is ours alone.
         let end = ClientEnd::<ManagerBootstrap>::new(unsafe { OwnedHandle::from_raw(ours) });
         Ok(Manager {
+            budget,
             process,
             thread,
             client: Some(ManagerBootstrapClient::new(end)),
@@ -8743,7 +8767,7 @@ mod manager {
             process: copy(m.process, SAME_RIGHTS)?,
             thread: copy(m.thread, SAME_RIGHTS)?,
             init_process: copy(s.process, SAME_RIGHTS)?,
-            budget: copy(s.budget, SAME_RIGHTS)?,
+            budget: copy(m.budget, SAME_RIGHTS)?,
             boot_image: copy(s.boot_image, SAME_RIGHTS)?,
             clock_page: copy(s.clock_page, SAME_RIGHTS)?,
             log: copy(s.log, SAME_RIGHTS)?,
@@ -10362,9 +10386,8 @@ mod manager {
                 break Some(false);
             }
         };
-        // SAFETY: the call takes no pointers.
-        unsafe { sys::task_kill(process.raw()) };
-        drop(m);
+        // Ends the service manager and the device manager with the rest.
+        drop((m, process));
         let exact = seen
             .iter()
             .zip(expected)
