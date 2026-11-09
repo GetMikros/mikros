@@ -1,0 +1,3 @@
+name: time-guest
+binary: /usr/bin/time-probe
+start: boot

@@ -159,6 +159,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let log_service = user_build("log-service", kind)?;
             println!("built    {}", log_service.display());
             let log_manifest = crate::workspace_root().join("user/log-service/log.yaml");
+            let time_service = user_build("time-service", kind)?;
+            println!("built    {}", time_service.display());
+            let time_manifest = crate::workspace_root().join("user/time-service/time.yaml");
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let devices_manifest =
@@ -179,6 +182,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/lib/services/union.yaml", union_manifest.as_path()),
                 ("usr/bin/log-service", log_service.as_path()),
                 ("usr/lib/services/log.yaml", log_manifest.as_path()),
+                ("usr/bin/time-service", time_service.as_path()),
+                ("usr/lib/services/time.yaml", time_manifest.as_path()),
                 ("usr/bin/device-manager", devices.as_path()),
                 (
                     "usr/lib/services/device-manager.yaml",
@@ -556,6 +561,39 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", log_image.display());
+            // The time service test serves this image: the service manager,
+            // the broker, the time service and the time probe as two
+            // services, with their manifests.
+            let time_service = user_build("time-service", kind)?;
+            println!("built    {}", time_service.display());
+            let time_manifest = crate::workspace_root().join("user/time-service/time.yaml");
+            let time_probe = user_build("time-probe", kind)?;
+            println!("built    {}", time_probe.display());
+            let probe_dir = crate::workspace_root().join("user/tests/time-probe");
+            let time_image = boot_image(
+                kind,
+                "time.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/time-service", time_service.as_path()),
+                    ("usr/lib/services/time.yaml", time_manifest.as_path()),
+                    ("usr/bin/time-probe", time_probe.as_path()),
+                    (
+                        "usr/lib/services/time-probe.yaml",
+                        probe_dir.join("time-probe.yaml").as_path(),
+                    ),
+                    (
+                        "usr/lib/services/time-guest.yaml",
+                        probe_dir.join("time-guest.yaml").as_path(),
+                    ),
+                ],
+            )?;
+            println!("built    {}", time_image.display());
             // The namespace test serves this image, with root=bootfs: the
             // service manager, the broker, the temporary file system and a
             // probe of its namespace, with their manifests, files in /etc,
@@ -807,6 +845,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/services.img", services_image.as_path()),
                 ("tests/tmpfs.img", tmpfs_image.as_path()),
                 ("tests/log.img", log_image.as_path()),
+                ("tests/time.img", time_image.as_path()),
                 ("tests/namespaces.img", namespaces_image.as_path()),
                 ("tests/devices.img", devices_image.as_path()),
                 ("tests/failing.img", failing_image.as_path()),
