@@ -214,6 +214,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     btrfs_manifest.as_path(),
                 ),
             ];
+            // The time zones, which the root partition gets with the rest
+            // of usr.
+            let zones = crate::tzdata::members(&crate::tzdata::zoneinfo()?)?;
+            let members: Vec<(&str, &Path)> = members
+                .into_iter()
+                .chain(zones.iter().map(|(at, path)| (at.as_str(), path.as_path())))
+                .collect();
             boot_image(kind, "boot.img", &members)?
         }
         BootImage::Test => {

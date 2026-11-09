@@ -33,6 +33,7 @@ mod symbolize;
 mod sysroot;
 mod test;
 mod tools;
+mod tzdata;
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
