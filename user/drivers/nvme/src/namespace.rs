@@ -184,8 +184,8 @@ impl mikros_storage::Disk for Namespace {
         &self.controller.dma
     }
 
-    fn bti(&self) -> &OwnedHandle {
-        &self.controller.bti
+    fn bti(&self) -> Option<&OwnedHandle> {
+        Some(&self.controller.bti)
     }
 
     async fn transfer(

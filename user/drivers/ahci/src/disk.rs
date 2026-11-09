@@ -268,8 +268,8 @@ impl mikros_storage::Disk for Disk {
         &self.memory.dma
     }
 
-    fn bti(&self) -> &OwnedHandle {
-        &self.memory.bti
+    fn bti(&self) -> Option<&OwnedHandle> {
+        Some(&self.memory.bti)
     }
 
     fn below_4g(&self) -> bool {

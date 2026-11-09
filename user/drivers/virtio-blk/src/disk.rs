@@ -376,8 +376,8 @@ impl mikros_storage::Disk for Disk {
         &self.dma
     }
 
-    fn bti(&self) -> &OwnedHandle {
-        self.transport.bti()
+    fn bti(&self) -> Option<&OwnedHandle> {
+        Some(self.transport.bti())
     }
 
     /// One request, and for a `fua` write a flush after it.

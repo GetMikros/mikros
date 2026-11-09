@@ -68,9 +68,11 @@ pub trait Disk: 'static {
     /// What `GetInfo` reports.
     fn info(&self) -> BlockInfo;
     /// The `DMA` resource from which buffers are made, and the bus
-    /// transaction initiator through which they are pinned.
+    /// transaction initiator through which they are pinned, if the
+    /// driver has one. Without one, buffers are pinned memory objects
+    /// that the driver passes on, and `transfer_object` moves their data.
     fn dma(&self) -> &OwnedHandle;
-    fn bti(&self) -> &OwnedHandle;
+    fn bti(&self) -> Option<&OwnedHandle>;
     /// Whether buffers must lie below 4 GiB, for devices that cannot
     /// address memory above it.
     fn below_4g(&self) -> bool {
@@ -89,6 +91,20 @@ pub trait Disk: 'static {
         len: u64,
         fua: bool,
     ) -> impl Future<Output = Result<(), Status>>;
+    /// As `transfer`, for a disk without a bus transaction initiator:
+    /// the bytes are at `offset` in the pinned memory object `memory`.
+    fn transfer_object(
+        &self,
+        write: bool,
+        block: u64,
+        memory: &OwnedHandle,
+        offset: u64,
+        len: u64,
+        fua: bool,
+    ) -> impl Future<Output = Result<(), Status>> {
+        let _ = (write, block, memory, offset, len, fua);
+        core::future::ready(Err(Status::NotSupported))
+    }
     /// Puts every completed write on stable storage.
     fn flush(&self) -> impl Future<Output = Result<(), Status>>;
     /// Discards `count` blocks from `block`, which lie on the disk, on a
