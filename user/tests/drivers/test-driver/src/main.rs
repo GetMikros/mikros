@@ -63,7 +63,9 @@
 //!   `fat::works` checks. It fails with `INVALID_ARGS` otherwise.
 //! - As `system.driver.test-acpi`, the driver of the q35 host bridge in
 //!   the ACPI server test, it succeeds when the `acpi` service routes PCI
-//!   interrupt pins and refuses power control as `acpi::works` checks.
+//!   interrupt pins and refuses power control as `acpi::works` checks,
+//!   and the `rtc` service reads and sets the clock as `acpi::rtc_works`
+//!   checks.
 //!   It fails with `INVALID_ARGS` otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver publishes a `storage`
@@ -254,7 +256,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                                 false => Err(Status::InvalidArgs),
                             }
                         }
-                        ACPI => match acpi::works(&directory, &reactor).await {
+                        ACPI => match acpi::works(&directory, &reactor).await
+                            && acpi::rtc_works(&directory, &reactor).await
+                        {
                             true => Ok(DriverStartResponse {}),
                             false => Err(Status::InvalidArgs),
                         },

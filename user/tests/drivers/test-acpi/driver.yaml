@@ -1,7 +1,8 @@
 # A driver for the q35 host bridge, for the ACPI server test, which checks
-# the acpi service as its client. With no kind, it is a normal driver.
+# the acpi and rtc services as their client. With no kind, it is a normal
+# driver.
 name: test-acpi
 binary: /usr/lib/drivers/test-acpi/test-acpi
 match: [platform:pci-host-ecam]
-# To connect to the acpi service.
-permissions: [device.registry]
+# To connect to the acpi and rtc services.
+permissions: [device.registry, time.set]

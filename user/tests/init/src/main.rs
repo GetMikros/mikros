@@ -9720,8 +9720,11 @@ mod manager {
     /// the q35 host bridge: the device manager binds the server to the
     /// `platform:acpi` device, the server starts ACPICA on the machine's
     /// tables, publishes the `acpi` service and adds the devices of the
-    /// namespace, and `test-acpi` starts once it found the service routing
-    /// PCI interrupt pins and refusing power control.
+    /// namespace, among them the real-time clock, whose driver publishes
+    /// the `rtc` service, from which the time service takes UTC; and
+    /// `test-acpi` starts once it found the ACPI service routing PCI
+    /// interrupt pins and refusing power control, and the clock reading
+    /// and setting its time.
     pub fn device_manager_starts_the_acpi_server(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -9742,6 +9745,14 @@ mod manager {
                 b", i8042, as acpi:i8042, under 2, with 4 resources, path \\_SB.PCI0.",
                 1,
             ),
+            // The clock has the century register that QEMU's FADT names,
+            // and the RTC driver for it publishes its service, which the
+            // time service takes UTC from.
+            (b", path \\_SB.PCI0.SF8.RTC, century 0x32", 1),
+            (b"device-manager: bound driver rtc to device ", 1),
+            (b"device-manager: started driver rtc for device ", 1),
+            (b"device-manager: published device.rtc ", 1),
+            (b"time: UTC set from the real-time clock", 1),
             (
                 b"device-manager: bound driver test-acpi to device 1, pci-host-0, as platform:pci-host-ecam",
                 1,
@@ -9754,6 +9765,8 @@ mod manager {
             b"driver acpi for device 2 did not start",
             b"driver test-acpi declined",
             b"acpi: starting ACPICA failed",
+            b"driver rtc declined",
+            b"time: reading the real-time clock failed",
         ];
         let logged = device_manager_logs(s, b"tests/acpi.img", false, super::PROBE_SECONDS, EXPECTED, FAILED)?;
         ensure("starting the ACPI server and its service", logged)

@@ -742,6 +742,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", fat.display());
             let btrfs = btrfs_build(kind)?;
             let acpi = acpi_build(kind)?;
+            let rtc = user_build("rtc", kind)?;
+            println!("built    {}", rtc.display());
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let device_image = |file: &str,
@@ -802,8 +804,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", restart_image.display());
             // The ACPI server test serves this image, with the ACPI server
-            // for the platform:acpi device and a test driver for the host
-            // bridge that checks the server's service as its client.
+            // for the platform:acpi device, the RTC driver for the clock it
+            // adds, the time service, which takes UTC from the clock, and a
+            // test driver for the host bridge that checks the server's and
+            // the clock's services as their client.
             let acpi_image = device_image(
                 "acpi.img",
                 &[("test-acpi", true)],
@@ -817,6 +821,16 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     // reach the kernel log.
                     ("usr/bin/log-service".to_owned(), log_service.clone()),
                     ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                    ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
+                    (
+                        "usr/lib/drivers/rtc/driver.yaml".to_owned(),
+                        crate::workspace_root().join("user/drivers/rtc/driver.yaml"),
+                    ),
+                    ("usr/bin/time-service".to_owned(), time_service.clone()),
+                    (
+                        "usr/lib/services/time.yaml".to_owned(),
+                        time_manifest.clone(),
+                    ),
                 ],
             )?;
             println!("built    {}", acpi_image.display());
