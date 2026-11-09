@@ -9576,8 +9576,14 @@ mod manager {
     /// reads, writes, renames and removes as it should. Each partition's
     /// `filesystem` service is also published under `partuuid-<guid>`,
     /// the root partition's also as `root`, and that of the EFI system
-    /// partition on the root partition's disk as `esp`. The device manager
-    /// says all of it in the log.
+    /// partition on the root partition's disk as `esp`. The btrfs test
+    /// driver then kills the virtio-blk driver while it writes a file on
+    /// the root, and goes on writing and syncing: the device manager
+    /// keeps the disk and its partitions, has the device reset and
+    /// restarts the driver, which adds the disk again under its old ID,
+    /// and reconnects the partition driver, which sends the requests that
+    /// had not completed again, so that the file reads back whole. The
+    /// device manager says all of it in the log.
     pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
         const EXPECTED: &[(&[u8], usize)] = &[
             (
@@ -9591,12 +9597,22 @@ mod manager {
             (b"device-manager: started driver test-pci for device", 1),
             (b"device-manager: bound driver test-edu to device", 1),
             (b"device-manager: started driver test-edu for device", 1),
-            (b"device-manager: the driver of device 1 ", 5),
+            (b"device-manager: the driver of device 1 ", 6),
             (
                 b"device-manager: bound driver virtio-blk to device 4, pci-0000:00:02.0, as pci:v1af4d1042",
                 1,
             ),
-            (b"device-manager: started driver virtio-blk for device 4 as pid", 1),
+            (b"device-manager: started driver virtio-blk for device 4 as pid", 2),
+            // The btrfs test driver kills the disk's driver, which is
+            // restarted with the disk and its partitions kept; the disk is
+            // added again and the partition driver reconnected to it.
+            (
+                b"device-manager: driver virtio-blk for device 4 terminated with code -3, signal 9",
+                1,
+            ),
+            (b"device-manager: restarting driver virtio-blk for device 4", 1),
+            (b" again, disk-0, under 4", 1),
+            (b"device-manager: reconnected device ", 1),
             (
                 b", disk-0, as storage:disk, under 4, with 0 resources",
                 1,
@@ -9661,7 +9677,9 @@ mod manager {
                 b"device-manager: reading storage profiles from the root file system",
                 1,
             ),
-            (b"device-manager: published device.storage ", 9),
+            // The disks and partitions, and the disk of the restarted
+            // virtio-blk driver again, under its old ID.
+            (b"device-manager: published device.storage ", 10),
             (
                 b"device-manager: driver test-reset for device 3 failed after 5 restarts",
                 1,
@@ -9674,7 +9692,6 @@ mod manager {
             b"driver test-pci declined",
             b"driver test-edu declined",
             b"driver virtio-blk declined",
-            b"driver virtio-blk for device 4 terminated",
             b"driver test-disk declined",
             b"driver nvme declined",
             b"driver ahci declined",

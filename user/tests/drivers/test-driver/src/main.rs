@@ -76,6 +76,7 @@
 extern crate alloc;
 
 mod btrfs;
+mod crash;
 mod fat;
 mod removal;
 
@@ -91,7 +92,7 @@ use mikros_rt::interfaces::mikros::driver::{
     DriverStartRequest, DriverStartResponse, DriverStopResponse, Property,
 };
 use mikros_rt::interfaces::mikros::pci::DeviceAsyncClient;
-use mikros_rt::interfaces::mikros::process::HandleRole;
+use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient};
 use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, Provider};
 use mikros_rt::interfaces::mikros::storage::{BlockAsyncClient, BlockFlags};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -147,10 +148,13 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut managed) = received else {
         return PANIC_EXIT_CODE;
     };
+    // The driver has no log handle: its messages go to the log service.
+    mikros_rt::log::connect(&managed.header.directory);
     let app_id = managed.header.app_id.clone();
     let user = managed.header.user;
     let process = managed.header.process.raw();
     let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
+    let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());
     let Some(at) = managed
         .handles
         .iter()
@@ -227,10 +231,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             true => Ok(DriverStartResponse {}),
                             false => Err(Status::InvalidArgs),
                         },
-                        BTRFS => match btrfs::works(&directory, &reactor, process).await {
-                            true => Ok(DriverStartResponse {}),
-                            false => Err(Status::InvalidArgs),
-                        },
+                        BTRFS => {
+                            let works = btrfs::works(&directory, &reactor, process).await
+                                && crash::root_survives(&directory, &launcher, &reactor)
+                                    .await
+                                    .is_some();
+                            match works {
+                                true => Ok(DriverStartResponse {}),
+                                false => Err(Status::InvalidArgs),
+                            }
+                        }
                         CRASH_HOST => Ok(DriverStartResponse {}),
                         KEPT_CHILD => {
                             let signalled = signal(bus.as_ref());
