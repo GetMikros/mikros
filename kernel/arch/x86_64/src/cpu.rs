@@ -179,7 +179,7 @@ const IA32_EFER: u32 = 0xC000_0080;
 /// Sets up CR0, EFER, CR4 and XCR0. The required features must be
 /// present.
 pub fn init() {
-    use crate::control::{self, CR4_LA57, Optional};
+    use crate::control::{self, CR4_LA57, CR4_PCIDE, CR4_PGE, Optional};
     let features = Optional::read(|leaf, subleaf| {
         let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
         [r.eax, r.ebx, r.ecx, r.edx]
@@ -187,6 +187,15 @@ pub fn init() {
     // CR4.LA57 cannot change in long mode; the bootloader leaves it clear.
     if read_cr4() & CR4_LA57 != 0 {
         panic!("5-level paging is enabled");
+    }
+    crate::mitigations::init();
+    // With kernel page-table isolation, no translation of the kernel's
+    // may outlive a switch to the user's tables: there are no global
+    // pages, and no PCIDs, so that every load of CR3 flushes.
+    let isolation = crate::mitigations::isolation();
+    let mut cr4 = control::cr4(read_cr4(), features);
+    if isolation {
+        cr4 &= !(CR4_PGE | CR4_PCIDE);
     }
     // SAFETY: the new values keep paging, protected mode and long mode
     // on, and set only bits for features that are required or reported.
@@ -196,16 +205,41 @@ pub fn init() {
     unsafe {
         write_cr0(control::cr0(read_cr0()));
         write_msr(IA32_EFER, control::efer(read_msr(IA32_EFER)));
-        write_cr4(control::cr4(read_cr4(), features));
+        write_cr4(cr4);
         write_xcr(0, control::xcr0(features));
     }
-    INVPCID.store(features.pcid && features.invpcid, Ordering::Relaxed);
+    INVPCID.store(
+        features.pcid && features.invpcid && !isolation,
+        Ordering::Relaxed,
+    );
     SMAP.store(features.smap, Ordering::Relaxed);
 }
 
 /// Whether `invpcid_address` and `invpcid_context` may be used.
 pub fn has_invpcid() -> bool {
     INVPCID.load(Ordering::Relaxed)
+}
+
+/// Drops every cached translation, global ones included.
+pub fn flush_all() {
+    use crate::control::CR4_PGE;
+    let cr4 = read_cr4();
+    if cr4 & CR4_PGE != 0 {
+        // SAFETY: clearing and setting PGE again changes nothing but
+        // drops all translations.
+        unsafe {
+            write_cr4(cr4 & !CR4_PGE);
+            write_cr4(cr4);
+        }
+    } else {
+        let cr3: u64;
+        // SAFETY: reading CR3 has no side effects; writing it back
+        // reloads the same tables.
+        unsafe {
+            asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+            write_cr3(cr3);
+        }
+    }
 }
 
 /// Runs INVPCID of `kind` for `pcid` and `virt`.

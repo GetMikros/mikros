@@ -1,0 +1,9 @@
+# The manifest of the probe of the temporary file system, a boot service
+# of the tmpfs test image.
+name: tmpfs-probe
+binary: /usr/bin/tmpfs-probe
+start: boot
+after: [tmpfs]
+permissions: [filesystem.mount]
+# To make budgets for files below a directory.
+boot_handles: [root_budget]

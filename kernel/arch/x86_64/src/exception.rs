@@ -4,6 +4,7 @@
 use crate::idt::{self, Frame};
 use crate::process::Process;
 use crate::sched;
+use crate::thread_arch::ThreadX86;
 use alloc::vec::Vec;
 use kernel_core::exception::{EXIT_CODE, REPORT_SIZE, Report, kind};
 use kernel_core::object::channel::Message;
@@ -43,17 +44,20 @@ pub fn before_user_return(frame: &mut Frame) -> bool {
     let mut reported = false;
     // A thread that is to end exits without reporting what its
     // breakpoints recorded.
-    if thread.take_deferred_debug() && thread.state() != sched::DEAD && !thread.exit_requested() {
+    if thread.x86().take_deferred_debug()
+        && thread.state() != sched::DEAD
+        && !thread.exit_requested()
+    {
         let rip = frame.rip;
         raise_with_code(frame, kind::DEBUG, rip, u64::from(idt::DEBUG));
         reported = true;
     }
     reported |= end_if_requested(frame, &thread);
     if let Some(context) = thread.take_sigreturn() {
-        crate::signal::sigreturn(frame, context);
+        crate::signal_frame::sigreturn(frame, context);
         reported = true;
     }
-    reported |= crate::signal::deliver(frame);
+    reported |= crate::signal_frame::deliver(frame);
     // A stop may have held the thread when it was asked to end;
     // `stay_suspended` ends it first if so.
     reported | stay_suspended(frame, &thread)
@@ -66,11 +70,21 @@ pub fn before_user_return(frame: &mut Frame) -> bool {
 /// that `frame` may have changed.
 pub fn stay_suspended(frame: &mut Frame, thread: &alloc::sync::Arc<sched::Thread>) -> bool {
     let mut suspended = end_if_requested(frame, thread);
-    while sched::suspend(thread, frame) {
+    while suspend(thread, frame) {
         suspended = true;
-        crate::signal::deliver(frame);
+        crate::signal_frame::deliver(frame);
         end_if_requested(frame, thread);
     }
+    suspended
+}
+
+/// `sched::suspend` with the user registers of the running `thread` in
+/// `frame` recorded for `thread_read_state` and `thread_write_state`
+/// while it is suspended.
+pub fn suspend(thread: &alloc::sync::Arc<sched::Thread>, frame: &mut Frame) -> bool {
+    thread.x86().set_exception_frame(frame);
+    let suspended = sched::suspend(thread);
+    thread.x86().set_exception_frame(core::ptr::null_mut());
     suspended
 }
 
@@ -130,7 +144,9 @@ fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
         // Taken whether or not a kill cancels the report.
         report_id: thread.next_report_id(),
     };
-    if !sched::enter_exception(&thread, frame, kind) {
+    thread.x86().set_exception_frame(frame);
+    if !sched::enter_exception(&thread, kind) {
+        thread.x86().set_exception_frame(core::ptr::null_mut());
         return;
     }
     let (mut bytes, mut handles) = (Vec::new(), Vec::new());
@@ -150,10 +166,13 @@ fn raise_with_code(frame: &mut Frame, kind: u32, address: u64, arch_code: u64) {
     drop(channel);
     if queued.is_err() {
         sched::leave_exception(&thread);
+        thread.x86().set_exception_frame(core::ptr::null_mut());
         process.terminate(EXIT_CODE);
         return;
     }
-    match sched::wait_exception(&thread) {
+    let why = sched::wait_exception(&thread);
+    thread.x86().set_exception_frame(core::ptr::null_mut());
+    match why {
         sched::HANDLER_GONE => process.terminate(EXIT_CODE),
         sched::DELIVER_SIGNAL => crate::signal::exception_signal(&process, &thread, kind, address),
         _ => {}

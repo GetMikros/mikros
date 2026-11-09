@@ -1,0 +1,7 @@
+// MIKSPEC-0049.R17
+
+library mikros.fs;
+
+protocol MemoryRevocation {
+    @1 Revoke() -> () error Error;
+};

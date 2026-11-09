@@ -1,0 +1,5 @@
+# A driver for the q35 host bridge's function 00:00.0, for the PCI bus
+# driver tests. It does not need dma.
+name: test-pci
+binary: /usr/lib/drivers/test-pci/test-pci
+match: [pci:v8086d29c0]

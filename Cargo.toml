@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["boot/bootmenu", "boot/mikrosboot", "boot/protocol", "kernel/arch/x86_64", "kernel/core", "kernel/syscalls", "xtask"]
+members = ["boot/bootmenu", "boot/mikrosboot", "boot/protocol", "kernel/arch/x86_64", "kernel/core", "kernel/syscalls", "tools/midl-tests", "tools/midlc", "user/bootfs", "user/btrfs", "user/casefold", "user/fat", "user/gpt", "user/logstore", "user/manifest", "user/memfs", "user/pci", "user/permissions", "user/tz", "user/userdb", "user/ustar", "user/yaml", "xtask"]
 
 [workspace.package]
 version = "0.0.0"
@@ -20,4 +20,8 @@ inherits = "dev"
 # more than a kernel thread has, and the timer interrupt reseeds the
 # kernel's random number generator on the stack it interrupts.
 [profile.dev.package.blake2]
+opt-level = 3
+
+# Unoptimized, one password hash takes many seconds.
+[profile.dev.package.argon2]
 opt-level = 3

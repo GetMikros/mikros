@@ -1,0 +1,95 @@
+diff --color -ruN a2/ldso/dlstart.c b2/ldso/dlstart.c
+--- a2/ldso/dlstart.c
++++ b2/ldso/dlstart.c
+@@ -8,7 +8,42 @@
+ 
+ #define SHARED
+ 
+-#include "crt_arch.h"
++/* Mikros: the dynamic linker starts with the bootstrap channel in RDI
++ * and nothing on its stack. The entry keeps the channel for the Mikros
++ * layer, which receives the startup transfer in __dls3, and passes
++ * _dlstart_c a vector with no arguments and no environment, whose
++ * auxiliary vector holds the page size and the dynamic linker's base,
++ * the address of its ELF header. */
++hidden unsigned __mikros_bootstrap;
++
++__asm__(
++".text\n"
++".global " START "\n"
++".type " START ",@function\n"
++".hidden __ehdr_start\n"
++".hidden __mikros_bootstrap\n"
++".weak _DYNAMIC\n"
++".hidden _DYNAMIC\n"
++START ":\n"
++"	xor %ebp,%ebp\n"
++"	mov %edi,__mikros_bootstrap(%rip)\n"
++"	andq $-16,%rsp\n"
++"	push $0\n"
++"	push $0\n"
++"	push $4096\n"
++"	push $6\n"
++"	lea __ehdr_start(%rip),%rax\n"
++"	push %rax\n"
++"	push $7\n"
++"	push $0\n"
++"	push $0\n"
++"	push $0\n"
++"	mov %rsp,%rdi\n"
++"	lea _DYNAMIC(%rip),%rsi\n"
++"	andq $-16,%rsp\n"
++"	call " START "_c\n"
++"	ud2\n"
++);
+ 
+ #ifndef GETFUNCSYM
+ #define GETFUNCSYM(fp, sym, got) do { \
+diff --color -ruN a2/ldso/dynlink.c b2/ldso/dynlink.c
+--- a2/ldso/dynlink.c
++++ b2/ldso/dynlink.c
+@@ -1796,8 +1796,22 @@
+  * process dependencies and relocations for the main application and
+  * transfer control to its entry point. */
+ 
++/* Mikros: the Mikros layer receives and checks the whole startup
++ * transfer on the bootstrap channel, and returns a vector with the
++ * arguments, the environment and an auxiliary vector for the program,
++ * laid out as on the stack. */
++extern hidden unsigned __mikros_bootstrap;
++hidden size_t *__mikros_dynamic_start(unsigned bootstrap);
++/* Whether the process is a system component, which must not search
++ * LD_LIBRARY_PATH. */
++hidden int __mikros_system_process(void);
++
+ void __dls3(size_t *sp, size_t *auxv)
+ {
++	sp = __mikros_dynamic_start(__mikros_bootstrap);
++	for (auxv=sp+1+*sp+1; *auxv; auxv++);
++	auxv++;
++
+ 	static struct dso app, vdso;
+ 	size_t aux[AUX_CNT];
+ 	size_t i;
+@@ -1820,7 +1834,7 @@
+ 		|| aux[AT_GID]!=aux[AT_EGID] || aux[AT_SECURE]);
+ 
+ 	/* Only trust user/env if kernel says we're not suid/sgid */
+-	if (!libc.secure) {
++	if (!libc.secure && !__mikros_system_process()) {
+ 		env_path = getenv("LD_LIBRARY_PATH");
+ 		env_preload = getenv("LD_PRELOAD");
+ 	}
+@@ -2072,7 +2086,11 @@
+ 
+ 	errno = 0;
+ 
+-	CRTJMP((void *)aux[AT_ENTRY], argv-1);
++	/* Mikros: the program's entry runs on this stack. It gets no
++	 * bootstrap channel, since the transfer was received above. */
++	__asm__ __volatile__(
++		"and $-16,%%rsp ; xor %%ebp,%%ebp ; xor %%edi,%%edi ; jmp *%0"
++		: : "r"(aux[AT_ENTRY]) : "memory");
+ 	for(;;);
+ }
+ 

@@ -6,9 +6,14 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
+mikros-loader = { path = "../../loader" }
 mikros-rt = { path = "../../mikros-rt" }
 mikros-test = { path = "../support" }
+process-manager = { path = "../../process-manager" }
 
 [features]
 # Tests the system calls that exist only in fuzz builds.
 fuzz = ["mikros-rt/fuzz"]
+
+[build-dependencies]
+midlc = { path = "../../../tools/midlc" }

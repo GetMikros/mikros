@@ -39,7 +39,10 @@ pub struct Message {
 
 /// The device vectors, from the first, with what each is given to. A slot
 /// is taken when an object is created and freed when it is destroyed.
-static SLOTS: SpinLock<[Option<Slot>; VECTORS]> = SpinLock::new([const { None }; VECTORS]);
+static SLOTS: SpinLock<[Option<Slot>; VECTORS]> = SpinLock::new(
+    kernel_core::lock_order::INTERRUPT_SLOTS,
+    [const { None }; VECTORS],
+);
 
 pub struct Interrupt {
     header: Header,

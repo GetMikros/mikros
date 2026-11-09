@@ -48,6 +48,17 @@ pub fn copy(file: &[u8], kernel: &Kernel, layout: Layout, range: &mut [u8]) {
     }
 }
 
+/// Applies the relocations of `kernel` to `range`, the kernel image
+/// range of `layout` as `copy` filled it, for the image placed at the
+/// virtual address `base` instead of `layout.virt_base`.
+pub fn relocate(kernel: &Kernel, layout: Layout, base: u64, range: &mut [u8]) {
+    let slide = base.wrapping_sub(layout.virt_base);
+    for r in &kernel.relocations {
+        let at = (r.offset - layout.virt_base) as usize;
+        range[at..at + 8].copy_from_slice(&r.addend.wrapping_add(slide).to_le_bytes());
+    }
+}
+
 /// The number of pages in `size` bytes.
 pub fn pages(size: u64) -> u64 {
     size.div_ceil(PAGE_SIZE)
@@ -56,7 +67,7 @@ pub fn pages(size: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elf::{PF_W, PF_X, Segment};
+    use crate::elf::{PF_W, PF_X, Relocation, Segment};
     use alloc::vec;
 
     const START: u64 = boot_protocol::x86_64::KERNEL_RANGE_START;
@@ -81,6 +92,11 @@ mod tests {
                 },
             ],
             version: (1, 0),
+            relocatable: true,
+            relocations: vec![Relocation {
+                offset: START + 0x3010,
+                addend: START + 0x1008,
+            }],
         }
     }
 
@@ -108,5 +124,17 @@ mod tests {
         assert_eq!(&range[0x2008..0x200a], [5, 6]);
         let nonzero = range.iter().filter(|&&b| b != 0).count();
         assert_eq!(nonzero, 6);
+    }
+
+    #[test]
+    fn moves_relocated_addresses_with_the_image() {
+        let k = kernel();
+        let l = layout(&k);
+        let mut range = vec![0; l.size as usize];
+        let at = |range: &[u8]| u64::from_le_bytes(range[0x2010..0x2018].try_into().unwrap());
+        relocate(&k, l, l.virt_base, &mut range);
+        assert_eq!(at(&range), START + 0x1008);
+        relocate(&k, l, l.virt_base + 0x20_0000, &mut range);
+        assert_eq!(at(&range), START + 0x20_1008);
     }
 }

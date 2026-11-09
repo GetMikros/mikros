@@ -1,0 +1,4 @@
+app_id: system.mismatch
+binary: /usr/bin/hello
+spawned_by:
+  - system.service-manager

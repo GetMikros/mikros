@@ -5,7 +5,14 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+extern crate alloc;
+
+#[allow(clippy::all, unused)]
+mod midl {
+    include!(concat!(env!("OUT_DIR"), "/midl.rs"));
+}
+
+use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::{
@@ -490,7 +497,7 @@ fn processes_and_channels(s: &Startup) -> Result {
     ensure("checking the returned object", back == *text)?;
     // The process ends once it has answered.
     for _ in 0..1000 {
-        let info = info::<0x20>(process, 2)?;
+        let info = info::<0x28>(process, 2)?;
         if u32_at(&info, 0x08) == 2 {
             ensure(
                 "checking the exit code",
@@ -521,7 +528,7 @@ fn u32_at(record: &[u8], at: usize) -> u32 {
 
 /// The process and thread records describe the running test.
 fn info_topics(s: &Startup) -> Result {
-    let process = info::<0x20>(s.process, 2)?;
+    let process = info::<0x28>(s.process, 2)?;
     ensure("checking the process state", u32_at(&process, 0x08) == 1)?;
     ensure("checking the thread count", u32_at(&process, 0x0C) >= 1)?;
     ensure(
@@ -767,7 +774,8 @@ extern "sysv64" fn mark_started(_: u64, _: u64) -> ! {
 
 /// A thread that the queue would pick before the running one runs
 /// before the running one goes on: a new thread of priority 31, started
-/// by this one at 16, has run by the time `thread_start` returns.
+/// by this one at 16, runs while this one spins without blocking. On the
+/// same processor it must preempt this one; on another it runs at once.
 fn queued_thread_preempts(s: &Startup) -> Result {
     let stack_size = 16 * 1024;
     let stack = create_memory(stack_size)?;
@@ -791,8 +799,36 @@ fn queued_thread_preempts(s: &Startup) -> Result {
     // SAFETY: the call takes no pointers; the stack is mapped and unused.
     let status = unsafe { sys::thread_start(thread, entry, at + stack_size - 8, 0, 0) };
     check("starting it", status)?;
-    ensure("running it first", STARTED.load(Ordering::Acquire) == 1)?;
+    let deadline = in_time();
+    while STARTED.load(Ordering::Acquire) == 0 && now() < deadline {
+        core::hint::spin_loop();
+    }
+    ensure("running it", STARTED.load(Ordering::Acquire) == 1)?;
     ensure("ending it", wait(thread, TERMINATED, in_time()).0 == 0)
+}
+
+/// The processor count is between 1 and 256, a mask that selects no
+/// processor the kernel uses is refused, and this thread still runs once
+/// restricted to processor 0.
+fn cpu_count_and_affinity(s: &Startup) -> Result {
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    let status = unsafe { sys::system_get_cpu_count(&mut count) };
+    check("reading the processor count", status)?;
+    ensure("counting the processors", (1..=256).contains(&count))?;
+    let set = |mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(s.thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    ensure("refusing an empty mask", set(&[0; 4]) == -10)?;
+    if count < 256 {
+        let mut beyond = [0u8; 32];
+        beyond[count as usize / 8] = 1 << (count % 8);
+        ensure("refusing a processor not used", set(&beyond) == -10)?;
+    }
+    check("restricting to processor 0", set(&[1]))?;
+    sleep_ms(1);
+    check("allowing every processor", set(&[0xFF; 32]))
 }
 
 /// Waits for a packet on `port` until `deadline`. The buffer starts
@@ -808,11 +844,35 @@ fn soon() -> i64 {
     now() + 5_000_000
 }
 
+/// How many times longer things may take in a fuzz build, whose kernel
+/// checks every lock it takes and calls the coverage hook in every block,
+/// which is slow under emulation.
+#[cfg(feature = "fuzz")]
+const SLOWER: i64 = 10;
+#[cfg(not(feature = "fuzz"))]
+const SLOWER: i64 = 1;
+
 /// A deadline for something that must happen, far enough off that a
 /// slow or loaded machine still meets it.
 fn in_time() -> i64 {
-    now() + 1_000_000_000
+    within(1)
 }
+
+/// A deadline `seconds` from now for something that must happen, scaled
+/// by `SLOWER`.
+fn within(seconds: i64) -> i64 {
+    now() + SLOWER * seconds * 1_000_000_000
+}
+
+/// The seconds that the service manager, or a probe started in its
+/// place, has to finish what a test waits for. Emulated with page-table
+/// isolation, the launcher probe takes about half a minute on a fast
+/// machine.
+const PROBE_SECONDS: i64 = 120;
+
+/// The seconds that the runner of the ported projects' tests has to run
+/// them all, each of which it kills after its own timeout.
+const PORT_TESTS_SECONDS: i64 = 1200;
 
 /// Waits until `thread` is blocked, or fails after `in_time`.
 fn wait_until_blocked(thread: Handle) -> Result {
@@ -988,6 +1048,67 @@ fn ports(_: &Startup) -> Result {
     // SAFETY: the pointer describes `user`.
     let full = unsafe { sys::port_queue(port, user.as_ptr()) };
     ensure("limiting user packets", full == -22)
+}
+
+/// A port is `READABLE` while a packet is queued on it, which
+/// `object_wait_one` and the waits of other ports see: a user packet and a
+/// wait that fires on an event's signal make it readable, and reading the
+/// last packet makes it unreadable. Two ports wait on each other here.
+fn ports_are_readable(_: &Startup) -> Result {
+    const EDGE: u32 = 1;
+    let (mut port, mut watcher, mut event) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a port", sys::port_create(0, &mut port))?;
+        check("creating another", sys::port_create(0, &mut watcher))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    let readable = |p: Handle| {
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status = unsafe { sys::object_wait_one(p, READABLE, 0, &mut observed) };
+        (status, observed)
+    };
+    let key = |p: Handle| {
+        let (status, packet) = take_packet(p, soon());
+        (status == 0).then(|| u64_at(&packet, 0))
+    };
+    ensure("waiting on an empty port", readable(port) == (TIMED_OUT, 0))?;
+    wait_async(port, watcher, 1, READABLE, EDGE)?;
+    wait_async(watcher, port, 2, READABLE, EDGE)?;
+    ensure(
+        "queueing nothing for empty ports",
+        take_packet(watcher, 0).0 == TIMED_OUT,
+    )?;
+    let mut user = [0u8; 48];
+    user[..8].copy_from_slice(&9u64.to_le_bytes());
+    // SAFETY: the pointer describes `user`.
+    check("queueing", unsafe { sys::port_queue(port, user.as_ptr()) })?;
+    ensure("making it readable", readable(port) == (0, READABLE))?;
+    // The watcher's packet made it readable, so the port got one too.
+    ensure("telling the other port", key(watcher) == Some(1))?;
+    ensure(
+        "being told back",
+        key(port) == Some(9) && key(port) == Some(2),
+    )?;
+    ensure("emptying it", readable(port) == (TIMED_OUT, 0))?;
+    // A wait that fires on the event queues on the port, which the other
+    // port hears of as before.
+    wait_async(event, port, 3, USER0, 0)?;
+    signal(event, 0, USER0)?;
+    ensure("firing into it", readable(port) == (0, READABLE))?;
+    ensure("telling the other port again", key(watcher) == Some(1))?;
+    ensure(
+        "being told back again",
+        key(port) == Some(3) && key(port) == Some(2),
+    )?;
+    ensure("emptying it again", readable(port) == (TIMED_OUT, 0))?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("closing the event", sys::handle_close(event))?;
+        check("closing a port", sys::handle_close(watcher))?;
+        check("closing the other", sys::handle_close(port))
+    }
 }
 
 fn u64_at(record: &[u8], at: usize) -> u64 {
@@ -1644,6 +1765,143 @@ fn futex_wake(addr: u64, count: u32) -> Result<u32> {
     Ok(woken)
 }
 
+/// `STOP` sent to a process stops its thread, which spins in user mode,
+/// sets the process `STOPPED` and `SUSPENDED` on it, and records the
+/// signal and a stop; `CONT` lets the thread run again, clears both, sets
+/// `CONTINUED` and records a continuation; `TSTP` stops it again, records
+/// itself and clears `CONTINUED`; `KILL` ends a stopped process with exit
+/// code -3 and `KILL` as its signal.
+fn stop_continue_and_kill(s: &Startup) -> Result {
+    const SHARED: u64 = 0x10_0000_0000;
+    const SPECIFIC: u32 = 1 << 8;
+    const STOPPED: u32 = 3;
+    const RUNNING: u32 = 1;
+    const CONTINUED: u32 = 1 << 7;
+    let (stop, cont, kill, tstp) = (19, 18, 9, 20);
+    let mem = create_memory(PAGE_SIZE)?;
+    let here = map(s.process, mem, PAGE_SIZE)?;
+    let (process, _) = start_program_with(s, "debuggee", 10, |process| {
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("mapping into the debuggee", unsafe {
+            sys::vm_map(
+                process,
+                PERM_READ | PERM_WRITE | SPECIFIC,
+                SHARED,
+                mem,
+                0,
+                PAGE_SIZE,
+                &mut at,
+            )
+        })
+    })?;
+    // SAFETY: the page is mapped at `here` and the debuggee writes the
+    // counter with single stores.
+    let count = || unsafe { (here as *const u64).read_volatile() };
+    let counting = |what: &'static str| {
+        let (before, deadline) = (count(), in_time());
+        while count() == before {
+            ensure(what, now() < deadline)?;
+            sleep_ms(1);
+        }
+        Ok(())
+    };
+    let send = |signo: u32| {
+        // SAFETY: the call takes no pointers.
+        check("signalling the debuggee", unsafe {
+            sys::process_signal(process, signo, 0)
+        })
+    };
+    let state = || -> Result<u32> { Ok(u32_at(&info::<0x28>(process, 2)?, 0x08)) };
+    // The stop signal, and the stop and continue counts.
+    let record = || -> Result<(u32, u32, u32)> {
+        let info = info::<0x28>(process, 2)?;
+        Ok((
+            u32_at(&info, 0x14),
+            u32_at(&info, 0x20),
+            u32_at(&info, 0x24),
+        ))
+    };
+    ensure("having never stopped", record()? == (0, 0, 0))?;
+    counting("starting to count")?;
+    send(stop)?;
+    ensure(
+        "setting SUSPENDED",
+        wait(process, SUSPENDED, in_time()).0 == 0,
+    )?;
+    ensure("stopping the process", state()? == STOPPED)?;
+    ensure("recording the stop", record()? == (stop, 1, 0))?;
+    let before = count();
+    sleep_ms(20);
+    ensure("stopping the thread", count() == before)?;
+    send(cont)?;
+    ensure("running again", state()? == RUNNING)?;
+    ensure(
+        "clearing SUSPENDED and setting CONTINUED",
+        wait(process, SUSPENDED, now()).1 & (SUSPENDED | CONTINUED) == CONTINUED,
+    )?;
+    ensure("recording the continuation", record()? == (stop, 1, 1))?;
+    counting("counting again")?;
+    send(tstp)?;
+    ensure("stopping again", wait(process, SUSPENDED, in_time()).0 == 0)?;
+    ensure(
+        "clearing CONTINUED",
+        wait(process, CONTINUED, now()).1 & CONTINUED == 0,
+    )?;
+    ensure("recording the second stop", record()? == (tstp, 2, 1))?;
+    send(kill)?;
+    ensure("ending with exit code -3", exit_code(process)? == -3)?;
+    ensure(
+        "recording KILL",
+        u32_at(&info::<0x28>(process, 2)?, 0x10) == kill,
+    )
+}
+
+/// A wait that `STOP` ends runs no handler, so once `CONT` lets the
+/// process run, the wait goes on, and it returns 0 when the futex is
+/// woken.
+fn stopped_wait_goes_on(s: &Startup) -> Result {
+    const SHARED: u64 = 0x10_0000_0000;
+    const SPECIFIC: u32 = 1 << 8;
+    let mem = create_memory(PAGE_SIZE)?;
+    let here = map(s.process, mem, PAGE_SIZE)?;
+    let (process, _) = start_program_with(s, "debuggee", 8, |process| {
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("mapping into the debuggee", unsafe {
+            sys::vm_map(
+                process,
+                PERM_READ | SPECIFIC,
+                SHARED,
+                mem,
+                0,
+                PAGE_SIZE,
+                &mut at,
+            )
+        })
+    })?;
+    let send = |signo: u32| {
+        // SAFETY: the call takes no pointers.
+        check("signalling the debuggee", unsafe {
+            sys::process_signal(process, signo, 0)
+        })
+    };
+    sleep_ms(20);
+    send(19)?;
+    ensure(
+        "stopping the debuggee",
+        wait(process, SUSPENDED, in_time()).0 == 0,
+    )?;
+    send(18)?;
+    sleep_ms(20);
+    let deadline = in_time();
+    while futex_wake(here, 1)? == 0 {
+        ensure("waking the debuggee", now() < deadline)?;
+        sleep_ms(1);
+    }
+    ensure("completing its wait", exit_code(process)? == 0)
+}
+
 /// Threads of two processes that map the same memory object share its
 /// futexes: waking through this process's mapping ends the debuggee's
 /// wait through its own, at another address.
@@ -2177,6 +2435,57 @@ fn reserved_hardware_refused(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(resource) })
 }
 
+/// The `RESOURCE` information topic reports a resource's kind, options,
+/// base and size, for the root too, and refuses other objects.
+fn resources_report_their_ranges(s: &Startup) -> Result {
+    const INFO_RESOURCE: u32 = 5;
+    const KIND_MMIO: u32 = 1;
+    const SHARED: u32 = 1 << 0;
+    let record = |handle| {
+        info::<0x18>(handle, INFO_RESOURCE).map(|r| {
+            (
+                u32_at(&r, 0),
+                u32_at(&r, 4),
+                u64_at(&r, 8),
+                u64_at(&r, 0x10),
+            )
+        })
+    };
+    ensure(
+        "describing the root",
+        record(s.root_resource)? == (0, 0, 0, 0),
+    )?;
+    let mut mmio = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a shared MMIO resource", unsafe {
+        sys::resource_create(
+            s.root_resource,
+            KIND_MMIO,
+            0xFE00_0000,
+            0x2000,
+            SHARED,
+            &mut mmio,
+        )
+    })?;
+    let ports = grant(s, mikros_test::KIND_IOPORT, 0x80, 1)?;
+    let dma = grant(s, KIND_DMA, 0, 0)?;
+    let described = [
+        record(mmio)? == (KIND_MMIO, SHARED, 0xFE00_0000, 0x2000),
+        record(ports)? == (mikros_test::KIND_IOPORT, 0, 0x80, 1),
+        record(dma)? == (KIND_DMA, 0, 0, 0),
+    ];
+    ensure("describing each kind", described == [true; 3])?;
+    let mut out = [0u8; 0x18];
+    let mut len = 0;
+    // SAFETY: the pointers describe `out` and `len`.
+    let refused =
+        unsafe { sys::object_get_info(s.process, INFO_RESOURCE, out.as_mut_ptr(), 0x18, &mut len) };
+    ensure("refusing another object", refused == WRONG_TYPE)?;
+    close(mmio)?;
+    close(ports)?;
+    close(dma)
+}
+
 fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
     // SAFETY: the pointer and length describe `bytes`.
     check("writing", unsafe {
@@ -2605,7 +2914,7 @@ fn pager_operations(s: &Startup) -> Result {
 
     check("beginning writeback", pager_op(pager, mem, 3, 0, size))?;
     ensure(
-        "allowing one writeback",
+        "refusing an overlapping writeback",
         pager_op(pager, mem, 3, 0, size) == BAD_STATE,
     )?;
     ensure(
@@ -2640,7 +2949,7 @@ fn pager_operations(s: &Startup) -> Result {
     )?;
     ensure(
         "refusing other ops",
-        pager_op(pager, mem, 6, 0, size) == -10,
+        pager_op(pager, mem, 7, 0, size) == -10,
     )?;
 
     // SAFETY: the call takes no pointers.
@@ -2682,6 +2991,240 @@ fn pager_operations(s: &Startup) -> Result {
         "failing without a pager",
         unsafe { sys::mem_read(mem, PAGE_SIZE, byte.as_mut_ptr(), 1) } == IO,
     )
+}
+
+/// Whether the write of a writer thread of `writebacks_and_discards` is
+/// done, and the status of a system call that wrote.
+static STABLE_WRITTEN: AtomicU64 = AtomicU64::new(0);
+static STABLE_STATUS: AtomicI64 = AtomicI64::new(0);
+
+/// Writes `value` to the byte at `addr`, through a mapping, and records
+/// that it did.
+extern "sysv64" fn stable_writer(addr: u64, value: u64) -> ! {
+    // SAFETY: the address lies in a writable mapping.
+    unsafe { (addr as *mut u8).write_volatile(value as u8) };
+    STABLE_WRITTEN.store(1, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Writes a byte at `offset` of `mem` with `mem_write`, and records the
+/// call's status.
+extern "sysv64" fn stable_mem_writer(mem: u64, offset: u64) -> ! {
+    let byte = b"y";
+    // SAFETY: the pointer describes `byte`.
+    let status = unsafe { sys::mem_write(mem as Handle, offset, byte.as_ptr(), 1) };
+    STABLE_STATUS.store(status, Ordering::Release);
+    STABLE_WRITTEN.store(1, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Waits until the writer thread of `writebacks_and_discards` is done.
+fn stable_write_done() -> Result {
+    let deadline = in_time();
+    while STABLE_WRITTEN.load(Ordering::Acquire) == 0 {
+        ensure("letting the write go on", now() < deadline)?;
+        sleep_ms(1);
+    }
+    Ok(())
+}
+
+/// Several writebacks of one paged object are outstanding at once, but
+/// not over the same pages, and each ends by its own range; `DISCARD`
+/// removes dirty pages too, which are requested again, but not a page
+/// that a writeback records; and with `STABLE`, which needs dirty
+/// tracking, a write to a page being written back waits until the
+/// writeback ends, and fails once the pager goes.
+fn writebacks_and_discards(s: &Startup) -> Result {
+    let size = 4 * PAGE_SIZE;
+    let (mut pager, mut port, mut mem) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a pager", sys::pager_create(0, &mut pager))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        let status = sys::pager_create_memory(pager, port, 6, size, 4, &mut mem);
+        ensure("needing dirty tracking for STABLE", status == -10)?;
+        sys::handle_close(port);
+        sys::handle_close(pager);
+    }
+    let (pager, mem) = paged_object(s, 4, 2 | 4)?;
+    ensure(
+        "reporting STABLE",
+        u32_at(&info::<0x18>(mem, 4)?, 0x0C) == 6,
+    )?;
+    let at = map(s.process, mem, size)?;
+    for page in 0..4 {
+        // SAFETY: the mapping is writable.
+        unsafe { ((at + page * PAGE_SIZE) as *mut u8).write_volatile(b'a' + page as u8) };
+    }
+
+    check(
+        "beginning a writeback of page 0",
+        pager_op(pager, mem, 3, 0, PAGE_SIZE),
+    )?;
+    check(
+        "beginning a writeback of page 2",
+        pager_op(pager, mem, 3, 2 * PAGE_SIZE, PAGE_SIZE),
+    )?;
+    ensure(
+        "refusing an overlapping writeback",
+        pager_op(pager, mem, 3, 0, 2 * PAGE_SIZE) == BAD_STATE,
+    )?;
+    ensure(
+        "refusing to discard pages being written back",
+        pager_op(pager, mem, 6, 0, size) == BAD_STATE,
+    )?;
+    let (ranges, count) = dirty(pager, mem, size)?;
+    ensure("keeping them", count == 1 && ranges[..2] == [0, size])?;
+
+    STABLE_WRITTEN.store(0, Ordering::Release);
+    spawn2(s, stable_writer, at, u64::from(b'z'))?;
+    sleep_ms(50);
+    ensure(
+        "making the write wait",
+        STABLE_WRITTEN.load(Ordering::Acquire) == 0,
+    )?;
+    check(
+        "ending the writeback of page 0",
+        pager_op(pager, mem, 4, 0, PAGE_SIZE),
+    )?;
+    stable_write_done()?;
+    ensure("writing then", mem_read_at::<1>(mem, 0)? == *b"z")?;
+    check(
+        "ending the writeback of page 2",
+        pager_op(pager, mem, 4, 2 * PAGE_SIZE, PAGE_SIZE),
+    )?;
+    // Page 0 was written again, and pages 1 and 3 were not written back.
+    let (ranges, count) = dirty(pager, mem, size)?;
+    ensure(
+        "cleaning only the pages written back",
+        count == 2 && ranges[..4] == [0, 2 * PAGE_SIZE, 3 * PAGE_SIZE, PAGE_SIZE],
+    )?;
+
+    let before = REQUESTS.load(Ordering::Acquire);
+    check("discarding", pager_op(pager, mem, 6, 0, size))?;
+    ensure(
+        "requesting discarded pages again",
+        mem_read_at::<6>(mem, PAGE_SIZE)? == *b"page 1",
+    )?;
+    ensure(
+        "counting the request",
+        REQUESTS.load(Ordering::Acquire) == before + 1,
+    )?;
+    ensure("forgetting their writes", dirty(pager, mem, size)?.1 == 0)?;
+
+    // A write that waits fails once the pager goes.
+    mem_write_at(mem, PAGE_SIZE, b"x")?;
+    check(
+        "beginning a writeback of page 1",
+        pager_op(pager, mem, 3, PAGE_SIZE, PAGE_SIZE),
+    )?;
+    STABLE_WRITTEN.store(0, Ordering::Release);
+    spawn2(s, stable_mem_writer, u64::from(mem), PAGE_SIZE)?;
+    sleep_ms(50);
+    ensure(
+        "making the system call wait",
+        STABLE_WRITTEN.load(Ordering::Acquire) == 0,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("closing the pager", unsafe { sys::handle_close(pager) })?;
+    stable_write_done()?;
+    ensure(
+        "failing the write",
+        STABLE_STATUS.load(Ordering::Acquire) == IO,
+    )
+}
+
+/// `pager_lend` makes absent pages of a paged object use the frames of an
+/// anonymous object, which keeps them: writes through either show in
+/// both, lent pages are clean, a clone copies them, the frames stay while
+/// lent even when the source goes, eviction ends the lend so that the
+/// page is requested again, and a sealed source or a revoked object is
+/// refused.
+fn lending_frames(s: &Startup) -> Result {
+    let (pager, mem) = paged_object(s, 2, 2)?;
+    let source = create_memory(2 * PAGE_SIZE)?;
+    mem_write_at(source, 0, b"lent 0")?;
+    mem_write_at(source, PAGE_SIZE, b"lent 1")?;
+    let before = REQUESTS.load(Ordering::Acquire);
+    // SAFETY: the call takes no pointers.
+    check("lending", unsafe {
+        sys::pager_lend(pager, mem, 0, 2 * PAGE_SIZE, source, 0)
+    })?;
+    ensure(
+        "reading the source's frames",
+        mem_read_at::<6>(mem, 0)? == *b"lent 0" && mem_read_at::<6>(mem, PAGE_SIZE)? == *b"lent 1",
+    )?;
+    ensure(
+        "requesting no page",
+        REQUESTS.load(Ordering::Acquire) == before,
+    )?;
+    ensure(
+        "lending clean pages",
+        dirty(pager, mem, 2 * PAGE_SIZE)?.1 == 0,
+    )?;
+    mem_write_at(mem, 0, b"L")?;
+    ensure(
+        "showing writes to the paged object in the source",
+        mem_read_at::<6>(source, 0)? == *b"Lent 0",
+    )?;
+    let at = map(s.process, source, PAGE_SIZE)?;
+    // SAFETY: the mapping is writable.
+    unsafe { ((at + 1) as *mut u8).write_volatile(b'E') };
+    ensure(
+        "showing writes to the source in the paged object",
+        mem_read_at::<6>(mem, 0)? == *b"LEnt 0",
+    )?;
+    let (ranges, count) = dirty(pager, mem, 2 * PAGE_SIZE)?;
+    ensure(
+        "tracking writes to the paged object",
+        count == 1 && ranges[..2] == [0, PAGE_SIZE],
+    )?;
+
+    let mut clone = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("cloning", unsafe {
+        sys::mem_clone(mem, 0, 0, 2 * PAGE_SIZE, &mut clone)
+    })?;
+    // SAFETY: the mapping is writable.
+    unsafe { (at as *mut u8).write_volatile(b'X') };
+    ensure(
+        "copying lent pages into the clone",
+        mem_read_at::<6>(clone, 0)? == *b"LEnt 0",
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE);
+        check("closing the source", sys::handle_close(source))?;
+    }
+    ensure(
+        "keeping lent frames once the source is gone",
+        mem_read_at::<6>(mem, 0)? == *b"XEnt 0" && mem_read_at::<6>(mem, PAGE_SIZE)? == *b"lent 1",
+    )?;
+    check("evicting", pager_op(pager, mem, 2, PAGE_SIZE, PAGE_SIZE))?;
+    ensure(
+        "requesting a page whose lend ended",
+        mem_read_at::<6>(mem, PAGE_SIZE)? == *b"page 1",
+    )?;
+
+    let sealed = create_memory(PAGE_SIZE)?;
+    check("sealing a source", seal(sealed, 8))?;
+    check("discarding", pager_op(pager, mem, 6, 0, 2 * PAGE_SIZE))?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        ensure(
+            "refusing a sealed source",
+            sys::pager_lend(pager, mem, 0, PAGE_SIZE, sealed, 0) == -13,
+        )?;
+        check("revoking", sys::pager_revoke(pager, mem))?;
+        ensure(
+            "refusing a revoked object",
+            sys::pager_lend(pager, mem, 0, PAGE_SIZE, create_memory(PAGE_SIZE)?, 0) == -13,
+        )
+    }
 }
 
 const RESUME: u32 = 0;
@@ -3270,17 +3813,54 @@ fn kernel_logged(s: &Startup, needle: &[u8]) -> Result<bool> {
     }
 }
 
+/// What the tests ask about what the kernel logged at boot, which they
+/// cannot find in the log later, as the tests' records push it out.
+const BOOT_LINES: [&[u8]; 3] = [b"DMA isolated", b"DMA is not isolated", b"VT-d units"];
+/// A bit for each of `BOOT_LINES` that the kernel logged before the first
+/// test, set by `keep_boot_log`.
+static BOOT_LOGGED: AtomicU32 = AtomicU32::new(0);
+
+/// Notes which of `BOOT_LINES` the kernel's own records in the log hold,
+/// without allocating, as the first test needs.
+fn keep_boot_log(s: &Startup) -> Result {
+    let mut after = 0;
+    loop {
+        let mut record = [0u8; 288];
+        // SAFETY: the pointer describes `record`.
+        let status = unsafe { sys::log_read(s.log, after, record.as_mut_ptr()) };
+        if status == SHOULD_WAIT {
+            return Ok(());
+        }
+        check("reading the log", status)?;
+        let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+        let message = &record[0x20..0x20 + len.min(256)];
+        for (i, line) in BOOT_LINES.iter().enumerate() {
+            if record[0x19] == 0 && contains(message, line) {
+                BOOT_LOGGED.fetch_or(1 << i, Ordering::Relaxed);
+            }
+        }
+        after = u64_at(&record, 0);
+    }
+}
+
+/// Whether the kernel logged `line`, one of `BOOT_LINES`, at boot.
+fn boot_logged(line: &[u8]) -> bool {
+    let i = BOOT_LINES.iter().position(|l| *l == line);
+    let i = i.expect("one of BOOT_LINES");
+    BOOT_LOGGED.load(Ordering::Relaxed) & (1 << i) != 0
+}
+
 /// The kernel says at boot whether DMA is isolated. When VT-d isolates
 /// it, the register page of QEMU's unit cannot be granted.
 fn dma_isolation_reported(s: &Startup) -> Result {
     const VTD_REGISTERS: u64 = 0xFED9_0000;
-    if !kernel_logged(s, b"DMA isolated")? {
+    if !boot_logged(b"DMA isolated") {
         return ensure(
             "reporting that DMA is not isolated",
-            kernel_logged(s, b"DMA is not isolated")?,
+            boot_logged(b"DMA is not isolated"),
         );
     }
-    if !kernel_logged(s, b"VT-d units")? {
+    if !boot_logged(b"VT-d units") {
         return Ok(());
     }
     let mut resource = 0;
@@ -3341,7 +3921,7 @@ fn bti_create_checks(s: &Startup) -> Result {
     check("creating a Bti", status)?;
     let (status, second) = bti_create(range, RID, 0);
     check("creating a second for the same device", status)?;
-    let isolated = kernel_logged(s, b"DMA isolated")?;
+    let isolated = boot_logged(b"DMA isolated");
     let (status, nowhere) = bti_create(s.root_resource, NOWHERE, 0);
     if isolated {
         ensure("refusing a device no IOMMU covers", status == OUT_OF_RANGE)?;
@@ -3555,7 +4135,7 @@ fn exit_code(process: Handle) -> Result<i64> {
         "terminating the process",
         wait(process, TERMINATED, in_time()).0 == 0,
     )?;
-    Ok(u64_at(&info::<0x20>(process, 2)?, 0) as i64)
+    Ok(u64_at(&info::<0x28>(process, 2)?, 0) as i64)
 }
 
 /// A read of an unmapped address is reported as a `PAGE_FAULT` at that
@@ -3728,7 +4308,7 @@ fn start_refusals(s: &Startup) -> Result {
     ensure("keeping the argument handle", koid(event).is_ok())?;
     ensure(
         "keeping the process new",
-        u32_at(&info::<0x20>(process, 2)?, 0x08) == 0,
+        u32_at(&info::<0x28>(process, 2)?, 0x08) == 0,
     )?;
     ensure("keeping the thread new", thread_state(thread)? == 0)?;
     // SAFETY: the call takes no pointers.
@@ -4007,6 +4587,22 @@ fn channel_errors(s: &Startup) -> Result {
 /// toward each other are destroyed once their other handles are closed,
 /// and give back their kernel memory.
 fn endpoint_cycles_reclaimed(s: &Startup) -> Result {
+    // The root budget is also charged for the processes that earlier
+    // tests left running, which may make or close objects between two
+    // readings; a cycle that is not reclaimed shows in every attempt.
+    const ATTEMPTS: usize = 5;
+    for _ in 0..ATTEMPTS {
+        if endpoint_cycle_reclaimed(s)? {
+            return Ok(());
+        }
+    }
+    ensure("reclaiming the channels", false)
+}
+
+/// Makes a cycle of two channels, each held by a message in the other,
+/// closes the handles, and returns whether the kernel memory charged for
+/// them went back.
+fn endpoint_cycle_reclaimed(s: &Startup) -> Result<bool> {
     let (mut a, mut b, mut c, mut d) = (0, 0, 0, 0);
     // Handle table slots stay charged once made, so the four that the
     // test uses are made first.
@@ -4036,7 +4632,7 @@ fn endpoint_cycles_reclaimed(s: &Startup) -> Result {
         // SAFETY: the call takes no pointers.
         check("closing", unsafe { sys::handle_close(h) })?;
     }
-    ensure("reclaiming the channels", budget_kernel(s)? == before)
+    Ok(budget_kernel(s)? == before)
 }
 
 /// The thread state of a thread stopped in an exception.
@@ -5119,8 +5715,9 @@ fn read_process_memory(s: &Startup) -> Result {
 /// refused, and access to it cannot be granted.
 fn stack_guard_page_kept(s: &Startup) -> Result {
     const STACK_SIZE: u64 = 256 << 10;
-    /// The bytes of `xor ebp, ebp` and `call`, which `_start` begins with.
-    const FIRST_CALL_END: u64 = 7;
+    /// The bytes of the instructions of `_start` up to the end of the
+    /// call of its Rust entry, after the call that relocates the image.
+    const FIRST_CALL_END: u64 = 24;
     unsafe extern "C" {
         static _start: u8;
     }
@@ -5662,6 +6259,8 @@ fn user_bases_set_and_kept(_: &Startup) -> Result {
 static SIGNAL_ENTRY: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 static SIGNAL_ARGS: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static SIGNAL_MASK: AtomicU64 = AtomicU64::new(0);
+/// The signals pending as the last handler started.
+static SIGNAL_PENDING: AtomicU64 = AtomicU64::new(0);
 static HANDLED: AtomicU64 = AtomicU64::new(0);
 /// The signal frame `signal_handler` found, from 72 bytes below the
 /// context to its extended state: the restorer, the information record,
@@ -5698,6 +6297,10 @@ extern "sysv64" fn signal_handler(signo: u64, info: u64, context: u64) {
     // SAFETY: the pointer is valid; adding no signal only reads the mask.
     unsafe { sys::signal_set_mask(0, 0, &mut mask) };
     SIGNAL_MASK.store(mask, Ordering::Release);
+    let mut pending = 0;
+    // SAFETY: the pointer is valid for the call.
+    unsafe { sys::signal_get_pending(&mut pending) };
+    SIGNAL_PENDING.store(pending, Ordering::Release);
     for (slot, value) in SIGNAL_ARGS.iter().zip([signo, info, context]) {
         slot.store(value, Ordering::Release);
     }
@@ -5832,7 +6435,7 @@ fn signal_frame_reserved_bytes(s: &Startup) -> Result {
     ensure("refusing the context", exit_code(process)? == -3)?;
     ensure(
         "ending the process as SEGV",
-        u32_at(&info::<0x20>(process, 2)?, 0x10) == SEGV,
+        u32_at(&info::<0x28>(process, 2)?, 0x10) == SEGV,
     )
 }
 
@@ -5923,6 +6526,593 @@ fn syscall_clears_flags(_: &Startup) -> Result {
     // SAFETY: the call takes no pointers.
     let plain = unsafe { sys::handle_close(0) };
     ensure("making the call", status == plain)
+}
+
+/// Counts the loops of `spin_until_handled`.
+static SPINNER_LOOPS: AtomicU64 = AtomicU64::new(0);
+
+/// Spins in user mode, never entering the kernel, until the handler has
+/// run `rounds` times, then exits.
+extern "sysv64" fn spin_until_handled(rounds: u64, _: u64) -> ! {
+    while HANDLED.load(Ordering::Acquire) < rounds {
+        SPINNER_LOOPS.fetch_add(1, Ordering::Relaxed);
+        core::hint::spin_loop();
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A signal sent to a thread that spins in user mode on another processor
+/// runs its handler at once, not only when the thread's time slice ends.
+/// A slice of a thread alone lasts 4 ms. A first round is not timed: it
+/// also runs the handler's code and its return for the first time, which
+/// an emulator such as QEMU without KVM takes milliseconds to translate.
+/// Each round starts once the spinner spins again, and each of the ten
+/// rounds after the first must take less than 2 ms, half a slice, or
+/// `SLOWER` times that in a fuzz build, which only shows that the handler
+/// runs. The
+/// spinner ends and the action is restored whether the rounds passed or
+/// not, so that a failure leaves nothing behind for later tests.
+fn signal_reaches_other_processor(s: &Startup) -> Result {
+    const ROUNDS: u64 = 10;
+    const LIMIT: i64 = SLOWER * 2_000_000;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    if count < 2 {
+        return Ok(());
+    }
+    let set = |thread: Handle, mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    check("keeping this thread on processor 0", set(s.thread, &[1]))?;
+    let old = catch_usr1(0)?;
+    SPINNER_LOOPS.store(0, Ordering::Release);
+    let thread = spawn2(s, spin_until_handled, ROUNDS + 1, 0)?;
+    let rounds = (|| -> Result {
+        check("moving the spinner to processor 1", set(thread, &[2]))?;
+        let deadline = in_time();
+        while SPINNER_LOOPS.load(Ordering::Acquire) == 0 {
+            ensure("starting the spinner", now() < deadline)?;
+            sleep_ms(1);
+        }
+        sleep_ms(20);
+        for round in 1..=ROUNDS + 1 {
+            let sent = now();
+            // SAFETY: the call takes no pointers.
+            check("signalling the spinner", unsafe {
+                sys::thread_signal(thread, USR1, round)
+            })?;
+            let limit = if round == 1 { in_time() } else { sent + LIMIT };
+            while HANDLED.load(Ordering::Acquire) < round {
+                ensure("running the handler", now() < limit)?;
+                core::hint::spin_loop();
+            }
+            // The next round starts once the spinner has returned from
+            // the handler and spins again; after the last it ends.
+            let loops = SPINNER_LOOPS.load(Ordering::Acquire);
+            let deadline = in_time();
+            while round <= ROUNDS && SPINNER_LOOPS.load(Ordering::Acquire) == loops {
+                ensure("spinning again", now() < deadline)?;
+                core::hint::spin_loop();
+            }
+        }
+        Ok(())
+    })();
+    // The spinner ends once the count reaches its rounds, and the action
+    // is restored only then, so that no signal pending for it meets the
+    // default action.
+    HANDLED.fetch_max(ROUNDS + 1, Ordering::AcqRel);
+    let ended = wait(thread, TERMINATED, in_time()).0 == 0;
+    restore_usr1(&old)?;
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))?;
+    rounds?;
+    ensure("ending the spinner", ended)
+}
+
+/// Sleeps for a few microseconds again and again.
+extern "sysv64" fn sleep_again_and_again(_: u64, _: u64) -> ! {
+    loop {
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::thread_sleep(now() + 5_000) };
+    }
+}
+
+/// A thread on processor 1 that sleeps briefly again and again is killed
+/// from processor 0, many times and at moments that vary, so that some
+/// kills come while it is going to sleep. Each one ends, and none runs
+/// again on the stack it ended with, which would fault in the kernel.
+fn killed_as_it_sleeps(s: &Startup) -> Result {
+    const ROUNDS: i64 = 2000;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    if count < 2 {
+        return Ok(());
+    }
+    let set = |thread: Handle, mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    check("keeping this thread on processor 0", set(s.thread, &[1]))?;
+    // Each thread ends before the next starts, so they share a stack.
+    let stack_size = 16 * 1024;
+    let stack = create_memory(stack_size)?;
+    let at = map(s.process, stack, stack_size)?;
+    let name = b"sleeper";
+    for round in 0..ROUNDS {
+        let mut thread = 0;
+        // SAFETY: the pointers describe `name` and `thread`.
+        check("creating a sleeper", unsafe {
+            sys::thread_create(s.process, name.as_ptr(), name.len() as u64, &mut thread)
+        })?;
+        check("moving it to processor 1", set(thread, &[2]))?;
+        let entry = sleep_again_and_again as *const () as u64;
+        // SAFETY: the call takes no pointers; the stack is mapped and
+        // unused.
+        check("starting it", unsafe {
+            sys::thread_start(thread, entry, at + stack_size - 8, 0, 0)
+        })?;
+        let until = now() + 20_000 + round % 89 * 700;
+        while now() < until {
+            core::hint::spin_loop();
+        }
+        // SAFETY: the call takes no pointers.
+        check("killing it", unsafe { sys::task_kill(thread) })?;
+        ensure("ending it", wait(thread, TERMINATED, in_time()).0 == 0)?;
+        // SAFETY: the handle is ours and not used again.
+        check("closing it", unsafe { sys::handle_close(thread) })?;
+    }
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))
+}
+
+/// The turn of `futex_partner` and `futexes_across_processors`: odd for
+/// the partner, even for the test.
+static TURN: AtomicU32 = AtomicU32::new(0);
+/// How many waits of either side timed out, which a lost wake causes.
+static LOST_WAKES: AtomicU32 = AtomicU32::new(0);
+
+/// Waits on `TURN` until it is `turn`, counting waits that time out.
+fn wait_for_turn(turn: u32) {
+    loop {
+        let seen = TURN.load(Ordering::Acquire);
+        if seen == turn {
+            return;
+        }
+        // SAFETY: the word is a static of this program.
+        let status = unsafe { sys::futex_wait(TURN.as_ptr(), seen, in_time()) };
+        if status == TIMED_OUT {
+            LOST_WAKES.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Hands `TURN` to `turn` and wakes the other side.
+fn give_turn(turn: u32) {
+    TURN.store(turn, Ordering::Release);
+    let mut woken = 0;
+    // SAFETY: the pointers are valid for the call.
+    unsafe { sys::futex_wake(TURN.as_ptr(), 1, &mut woken) };
+}
+
+/// Takes `rounds` odd turns, each handed back as the next even one.
+extern "sysv64" fn futex_partner(rounds: u64, _: u64) -> ! {
+    for round in 0..rounds as u32 {
+        wait_for_turn(2 * round + 1);
+        give_turn(2 * round + 2);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread on processor 1 and this one on processor 0 hand a futex word
+/// back and forth many times, each waking the other as it changes the
+/// word. No wake is lost: each wait ends with its wake, not its
+/// deadline.
+fn futexes_across_processors(s: &Startup) -> Result {
+    const ROUNDS: u32 = 20_000;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    if count < 2 {
+        return Ok(());
+    }
+    let set = |thread: Handle, mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    check("keeping this thread on processor 0", set(s.thread, &[1]))?;
+    TURN.store(0, Ordering::Release);
+    LOST_WAKES.store(0, Ordering::Release);
+    let partner = spawn2(s, futex_partner, ROUNDS.into(), 0)?;
+    check("moving the partner to processor 1", set(partner, &[2]))?;
+    for round in 0..ROUNDS {
+        give_turn(2 * round + 1);
+        wait_for_turn(2 * round + 2);
+    }
+    ensure(
+        "ending the partner",
+        wait(partner, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure("losing no wake", LOST_WAKES.load(Ordering::Acquire) == 0)?;
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))
+}
+
+/// A temporary mask that `signal_set_wait_mask` gives applies to the next
+/// call when it is a wait: a pending signal it does not block ends
+/// `thread_sleep` at once with `ERR_INTERRUPTED`, even though the action
+/// has `RESTART`, the handler runs, and the thread's own mask, which
+/// blocks the signal, is back afterwards. Another call in between drops
+/// the temporary mask.
+fn temporary_mask_ends_a_wait(s: &Startup) -> Result {
+    const RESTART: u32 = 1 << 0;
+    let usr1 = 1u64 << (USR1 - 1);
+    let mut own = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking USR1", unsafe {
+        sys::signal_set_mask(0, usr1, &mut own)
+    })?;
+    let old = catch_usr1(RESTART)?;
+    // SAFETY: the call takes no pointers.
+    check("making USR1 pending", unsafe {
+        sys::thread_signal(s.thread, USR1, 1)
+    })?;
+    let soon = now() + 2_000_000;
+    // SAFETY: the calls take no pointers.
+    let status = unsafe {
+        sys::signal_set_wait_mask(0);
+        now();
+        sys::thread_sleep(soon)
+    };
+    ensure(
+        "dropping the temporary mask for another call",
+        status == 0 && HANDLED.load(Ordering::Acquire) == 0,
+    )?;
+    let deadline = in_time();
+    // SAFETY: the calls take no pointers.
+    let status = unsafe {
+        sys::signal_set_wait_mask(0);
+        sys::thread_sleep(deadline)
+    };
+    ensure(
+        "ending the sleep with ERR_INTERRUPTED",
+        status == INTERRUPTED,
+    )?;
+    ensure("running the handler", HANDLED.load(Ordering::Acquire) == 1)?;
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("reading the mask", unsafe {
+        sys::signal_set_mask(0, 0, &mut mask)
+    })?;
+    ensure("restoring the thread's mask", mask & usr1 != 0)?;
+    restore_usr1(&old)?;
+    // SAFETY: the old mask may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, own, core::ptr::null_mut())
+    })
+}
+
+/// The turn of `clock_partner` and `clock_agrees_across_processors`, the
+/// clock value the last one read, and how often a reading lay before the
+/// other processor's last one.
+static CLOCK_TURN: AtomicU64 = AtomicU64::new(0);
+static CLOCK_LAST: AtomicU64 = AtomicU64::new(0);
+static CLOCK_BACKWARDS: AtomicU64 = AtomicU64::new(0);
+
+/// Reads the clock on its turns, odd ones, and checks each value against
+/// the other side's last.
+fn clock_turn(turn: u64) {
+    while CLOCK_TURN.load(Ordering::Acquire) != turn {
+        core::hint::spin_loop();
+    }
+    let reading = now() as u64;
+    if reading < CLOCK_LAST.load(Ordering::Acquire) {
+        CLOCK_BACKWARDS.fetch_add(1, Ordering::AcqRel);
+    }
+    CLOCK_LAST.store(reading, Ordering::Release);
+    CLOCK_TURN.store(turn + 1, Ordering::Release);
+}
+
+extern "sysv64" fn clock_partner(rounds: u64, _: u64) -> ! {
+    for round in 0..rounds {
+        clock_turn(2 * round + 1);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread on processor 0 and one on processor 1 read the monotonic
+/// clock in turn, each after seeing the other's value, and no value lies
+/// before the other's last.
+fn clock_agrees_across_processors(s: &Startup) -> Result {
+    const ROUNDS: u64 = 10_000;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    if count < 2 {
+        return Ok(());
+    }
+    let set = |thread: Handle, mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    check("keeping this thread on processor 0", set(s.thread, &[1]))?;
+    CLOCK_TURN.store(0, Ordering::Release);
+    CLOCK_LAST.store(0, Ordering::Release);
+    CLOCK_BACKWARDS.store(0, Ordering::Release);
+    let partner = spawn2(s, clock_partner, ROUNDS, 0)?;
+    check("moving the partner to processor 1", set(partner, &[2]))?;
+    for round in 0..ROUNDS {
+        clock_turn(2 * round);
+    }
+    ensure(
+        "ending the partner",
+        wait(partner, TERMINATED, in_time()).0 == 0,
+    )?;
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))?;
+    ensure(
+        "never going back",
+        CLOCK_BACKWARDS.load(Ordering::Acquire) == 0,
+    )
+}
+
+/// The APIC IDs that `busy_on_processors` threads ran on, as bits, and
+/// how many of the threads still run.
+static SEEN_PROCESSORS: AtomicU64 = AtomicU64::new(0);
+static BUSY_LEFT: AtomicU64 = AtomicU64::new(0);
+
+/// The initial APIC ID of the processor that runs the caller.
+fn apic_id() -> u32 {
+    core::arch::x86_64::__cpuid(1).ebx >> 24
+}
+
+/// Spins until `deadline`, recording the processors it runs on, and
+/// stops early once `want` processors were seen.
+extern "sysv64" fn busy_on_processors(deadline: u64, want: u64) -> ! {
+    while (now() as u64) < deadline {
+        SEEN_PROCESSORS.fetch_or(1 << (apic_id() % 64), Ordering::AcqRel);
+        if u64::from(SEEN_PROCESSORS.load(Ordering::Acquire).count_ones()) >= want {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    BUSY_LEFT.fetch_sub(1, Ordering::AcqRel);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Busy threads that may run anywhere run on every processor: the
+/// scheduler places new threads and takes queued ones over to idle
+/// processors.
+fn threads_run_on_every_processor(s: &Startup) -> Result {
+    const THREADS: u64 = 4;
+    let mut count = 0u32;
+    // SAFETY: the pointer describes `count`.
+    check("reading the processor count", unsafe {
+        sys::system_get_cpu_count(&mut count)
+    })?;
+    SEEN_PROCESSORS.store(0, Ordering::Release);
+    BUSY_LEFT.store(THREADS, Ordering::Release);
+    let deadline = in_time() as u64;
+    for _ in 0..THREADS {
+        spawn2(s, busy_on_processors, deadline, count.into())?;
+    }
+    while BUSY_LEFT.load(Ordering::Acquire) != 0 {
+        ensure(
+            "ending the threads",
+            (now() as u64) < deadline + 1_000_000_000,
+        )?;
+        sleep_ms(1);
+    }
+    ensure(
+        "running on every processor",
+        SEEN_PROCESSORS.load(Ordering::Acquire).count_ones() == count,
+    )
+}
+
+/// What the waits of `waiter_with_index` returned, by index.
+static WAIT_STATUSES: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
+
+/// Waits for `USER0` on `event`, records the status at `index` and exits.
+extern "sysv64" fn waiter_with_index(event: u64, index: u64) -> ! {
+    let (status, _) = wait(event as Handle, USER0, in_time());
+    WAIT_STATUSES[index as usize].store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A signal sent to the process while two of its threads wait runs its
+/// handler on one of them, whose wait ends with `ERR_INTERRUPTED`; the
+/// other thread goes on waiting until the event is signalled.
+fn process_signal_interrupts_one_wait(s: &Startup) -> Result {
+    let usr1 = 1u64 << (USR1 - 1);
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking USR1 here", unsafe {
+        sys::signal_set_mask(0, usr1, &mut mask)
+    })?;
+    let old = catch_usr1(0)?;
+    let mut event = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let mut threads = [0; 2];
+    for (index, (thread, status)) in threads.iter_mut().zip(&WAIT_STATUSES).enumerate() {
+        status.store(u64::MAX, Ordering::Release);
+        *thread = spawn2(s, waiter_with_index, u64::from(event), index as u64)?;
+    }
+    for &thread in &threads {
+        wait_until_blocked(thread)?;
+    }
+    // SAFETY: the call takes no pointers.
+    check("signalling the process", unsafe {
+        sys::process_signal(s.process, USR1, 7)
+    })?;
+    let deadline = in_time();
+    while HANDLED.load(Ordering::Acquire) == 0 {
+        ensure("running the handler", now() < deadline)?;
+        sleep_ms(1);
+    }
+    sleep_ms(20);
+    let statuses = || {
+        WAIT_STATUSES
+            .each_ref()
+            .map(|s| s.load(Ordering::Acquire) as i64)
+    };
+    let ended = statuses();
+    ensure(
+        "ending one wait",
+        ended.contains(&INTERRUPTED) && ended.contains(&(u64::MAX as i64)),
+    )?;
+    signal(event, 0, USER0)?;
+    for &thread in &threads {
+        ensure(
+            "ending the waiter",
+            wait(thread, TERMINATED, in_time()).0 == 0,
+        )?;
+    }
+    let ended = statuses();
+    ensure(
+        "completing the other wait",
+        ended.contains(&INTERRUPTED) && ended.contains(&0),
+    )?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    restore_usr1(&old)?;
+    // SAFETY: the pointer may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, mask, core::ptr::null_mut())
+    })
+}
+
+/// Blocks real-time signal 40, then waits for `USER0` on `event` and
+/// exits with whatever is pending for it.
+extern "sysv64" fn block_40_and_wait(event: u64, _: u64) -> ! {
+    // SAFETY: the old mask is not wanted.
+    unsafe { sys::signal_set_mask(0, 1 << 39, core::ptr::null_mut()) };
+    STARTED.store(1, Ordering::Release);
+    wait(event as Handle, USER0, i64::MAX);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Real-time signals queued for a thread that ends stop counting toward
+/// the process's limit of 1024: once the thread is gone, the process can
+/// queue a signal again.
+fn queued_signals_of_ended_thread(s: &Startup) -> Result {
+    const RT: u32 = 40;
+    let bit = 1u64 << (RT - 1);
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking signal 40 here", unsafe {
+        sys::signal_set_mask(0, bit, &mut mask)
+    })?;
+    let mut event = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    STARTED.store(0, Ordering::Release);
+    let thread = spawn2(s, block_40_and_wait, u64::from(event), 0)?;
+    let deadline = in_time();
+    while STARTED.load(Ordering::Acquire) == 0 {
+        ensure("starting the thread", now() < deadline)?;
+        sleep_ms(1);
+    }
+    // SAFETY: the calls take no pointers.
+    let send = |to: Handle, process: bool| unsafe {
+        match process {
+            true => sys::process_signal(to, RT, 0),
+            false => sys::thread_signal(to, RT, 0),
+        }
+    };
+    for _ in 0..1024 {
+        check("queueing for the thread", send(thread, false))?;
+    }
+    ensure("reaching the limit", send(s.process, true) == SHOULD_WAIT)?;
+    signal(event, 0, USER0)?;
+    ensure(
+        "ending the thread",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    check("queueing for the process", send(s.process, true))?;
+    let mut info = [0u8; 40];
+    // SAFETY: the pointer describes `info`.
+    check("taking the signal", unsafe {
+        sys::signal_wait(bit, soon(), info.as_mut_ptr())
+    })?;
+    // SAFETY: the pointer may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, mask, core::ptr::null_mut())
+    })
+}
+
+/// When a handler of `CHLD` with `RESETHAND` runs, the action becomes
+/// the default one, which ignores `CHLD`, so the `CHLD` still pending for
+/// the process is discarded before the handler starts.
+fn reset_handler_discards_ignored(s: &Startup) -> Result {
+    const CHLD: u32 = 17;
+    const RESETHAND: u32 = 1 << 3;
+    let bit = 1u64 << (CHLD - 1);
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking CHLD", unsafe {
+        sys::signal_set_mask(0, bit, &mut mask)
+    })?;
+    let mut action = [0u8; 32];
+    action[0x00..0x08].copy_from_slice(&(signal_probe as *const () as u64).to_le_bytes());
+    action[0x10..0x18].copy_from_slice(&(signal_restorer as *const () as u64).to_le_bytes());
+    action[0x18..0x1C].copy_from_slice(&RESETHAND.to_le_bytes());
+    // SAFETY: the pointer describes `action`.
+    check("catching CHLD", unsafe {
+        sys::signal_set_action(CHLD, action.as_ptr(), core::ptr::null_mut())
+    })?;
+    HANDLED.store(0, Ordering::Release);
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check(
+            "sending CHLD to the thread",
+            sys::thread_signal(s.thread, CHLD, 0),
+        )?;
+        check(
+            "sending CHLD to the process",
+            sys::process_signal(s.process, CHLD, 0),
+        )?;
+    }
+    // SAFETY: the pointer may be null.
+    check("unblocking CHLD", unsafe {
+        sys::signal_set_mask(1, bit, core::ptr::null_mut())
+    })?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    ensure(
+        "discarding the other CHLD",
+        SIGNAL_PENDING.load(Ordering::Acquire) & bit == 0,
+    )?;
+    // SAFETY: the pointer may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, mask, core::ptr::null_mut())
+    })
 }
 
 /// Set by `signal_sleeper` with what its sleep returned and when.
@@ -6561,6 +7751,66 @@ fn budget_creation_and_thresholds(s: &Startup) -> Result {
     check("closing the budget", unsafe { sys::handle_close(child) })
 }
 
+/// A memory object made with `mem_create_charged` charges itself and
+/// its frames to the budget given, which needs `WRITE`, and runs into
+/// that budget's page limit rather than the caller's, which has none.
+/// Closing it releases the charges.
+fn memory_charged_to_a_budget(s: &Startup) -> Result {
+    const PAGE: u64 = 4096;
+    const NO_RESOURCES: i64 = -3;
+    let mut child = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a budget", unsafe {
+        sys::budget_create(s.budget, 1 << 20, 2, &mut child)
+    })?;
+    let mut no_write = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("copying it without WRITE", unsafe {
+        sys::handle_duplicate(child, right::DUPLICATE | right::INSPECT, &mut no_write)
+    })?;
+    let mut mem = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let refused = unsafe { sys::mem_create_charged(no_write, 4 * PAGE, 0, &mut mem) };
+    ensure("needing WRITE", refused == ACCESS_DENIED)?;
+    let pages = budget_pages(s)?;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a charged object", unsafe {
+        sys::mem_create_charged(child, 4 * PAGE, 0, &mut mem)
+    })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure("charging the object", u64_at(&r, 0x08) > 0)?;
+    let byte = [1u8];
+    for page in 0..2 {
+        // SAFETY: the pointer describes `byte`.
+        check("writing a page", unsafe {
+            sys::mem_write(mem, page * PAGE, byte.as_ptr(), 1)
+        })?;
+    }
+    ensure(
+        "charging its frames to the budget",
+        u64_at(&info::<0x38>(child, 6)?, 0x18) == 2,
+    )?;
+    // The budget lies under the caller's, which sees the same pages.
+    ensure(
+        "charging the caller through the budget only",
+        budget_pages(s)? == pages + 2,
+    )?;
+    // SAFETY: the pointer describes `byte`.
+    let over = unsafe { sys::mem_write(mem, 2 * PAGE, byte.as_ptr(), 1) };
+    ensure("failing with the budget's limit", over == NO_RESOURCES)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the object", unsafe { sys::handle_close(mem) })?;
+    let r = info::<0x38>(child, 6)?;
+    ensure(
+        "releasing the charges",
+        u64_at(&r, 0x08) == 0 && u64_at(&r, 0x18) == 0,
+    )?;
+    // SAFETY: the calls take no pointers.
+    check("closing the copy", unsafe { sys::handle_close(no_write) })?;
+    // SAFETY: the call takes no pointers.
+    check("closing the budget", unsafe { sys::handle_close(child) })
+}
+
 /// The monotonic clock never goes back and resolves less than a
 /// microsecond, and the clock page that init gets
 /// has its rights and header: version 1, an even sequence, and the
@@ -6677,7 +7927,2521 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const TESTS: [(&str, Test); 104] = [
+/// The global allocator serves small and large blocks of any common
+/// alignment, keeps their contents, and reuses freed memory.
+fn heap_allocates_and_frees(_: &Startup) -> Result {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    #[repr(align(256))]
+    struct Aligned([u8; 300]);
+    let mut blocks: Vec<Vec<u8>> = Vec::new();
+    for (i, size) in [1, 15, 16, 17, 100, 2048, 2049, 5000, 1 << 20]
+        .into_iter()
+        .enumerate()
+    {
+        let mut v = Vec::with_capacity(size);
+        v.resize(size, i as u8 + 1);
+        blocks.push(v);
+    }
+    for (i, v) in blocks.iter().enumerate() {
+        ensure(
+            "keeping block contents",
+            v.iter().all(|&b| b == i as u8 + 1),
+        )?;
+    }
+    let aligned = Box::new(Aligned([7; 300]));
+    ensure(
+        "aligning blocks",
+        (&*aligned as *const Aligned as usize).is_multiple_of(256),
+    )?;
+    ensure(
+        "keeping aligned contents",
+        aligned.0.iter().all(|&b| b == 7),
+    )?;
+    drop(blocks);
+    let first = Box::new([0u8; 64]);
+    let at = &*first as *const [u8; 64] as usize;
+    drop(first);
+    let again = Box::new([1u8; 64]);
+    ensure(
+        "reusing a freed block",
+        &*again as *const [u8; 64] as usize == at,
+    )?;
+    // Far more than the static arena, in blocks that are each freed.
+    for round in 0..64 {
+        let big: Vec<u64> = (0..64 * 1024).map(|n| n ^ round).collect();
+        ensure("filling a large block", big[4095] == 4095 ^ round)?;
+    }
+    Ok(())
+}
+
+/// Serves `Echo` on the server end `raw` until the client closes it.
+extern "sysv64" fn echo_server(raw: u64, _: u64) -> ! {
+    use midl::__midl::{OwnedHandle, ServerEnd};
+    use midl::test::kernel::*;
+    // SAFETY: the test hands this thread the server end.
+    let server = EchoServer::new(ServerEnd::new(unsafe {
+        OwnedHandle::from_raw(raw as Handle)
+    }));
+    while let Ok(request) = server.next(i64::MAX) {
+        if let EchoRequest::Twice(r, responder) = request {
+            let _ = responder.reply(&server, EchoTwiceResponse { value: r.value * 2 });
+        }
+    }
+    drop(server);
+    // SAFETY: thread_exit takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Generated MIDL bindings send one-way requests with handles, reduce
+/// handle rights, deliver events, and call a server on another thread.
+fn midl_bindings_on_channels(s: &Startup) -> Result {
+    use midl::__midl::{self as rt, OwnedHandle};
+    use midl::test::kernel::*;
+    let (client_end, server_end) = rt::endpoints::<Echo>().map_err(|_| mikros_test::Failure {
+        what: "creating endpoints",
+        status: 0,
+    })?;
+    let client = EchoClient::new(client_end);
+    let server = EchoServer::new(server_end);
+    let mem = create_memory(PAGE_SIZE)?;
+    // SAFETY: the handle is new, and `memory` is its only owner.
+    let memory = unsafe { OwnedHandle::from_raw(mem) };
+    let note = Note {
+        text: "over a channel".into(),
+        memory,
+    };
+    ensure("sending a note", client.send(note).is_ok())?;
+    let request = server.try_next();
+    let Ok(Some(EchoRequest::Send(r))) = request else {
+        return ensure("receiving the note", false);
+    };
+    ensure("keeping the text", r.note.text == "over a channel")?;
+    // Only READ is left: reading works, and writing or inspecting fails.
+    let mut byte = [0u8; 1];
+    let raw = r.note.memory.raw();
+    // SAFETY: the pointers describe `byte`.
+    check("reading the memory", unsafe {
+        sys::mem_read(raw, 0, byte.as_mut_ptr(), 1)
+    })?;
+    // SAFETY: the pointers describe `byte`.
+    let status = unsafe { sys::mem_write(raw, 0, byte.as_ptr(), 1) };
+    ensure("reducing the rights to READ", status == ACCESS_DENIED)?;
+    ensure(
+        "dropping INSPECT",
+        mikros_rt::midl::handle_info(raw).is_none(),
+    )?;
+    ensure(
+        "sending an event",
+        server.send_sent(r.note.text.clone(), PAGE_SIZE).is_ok(),
+    )?;
+    let event = client.next_event(in_time());
+    let ok = matches!(event, Ok(EchoEvent::Sent(ref e)) if e.text == "over a channel" && e.size == PAGE_SIZE);
+    ensure("receiving the event", ok)?;
+    drop((r, client, server));
+    let (client_end, server_end) = rt::endpoints::<Echo>().map_err(|_| mikros_test::Failure {
+        what: "creating endpoints",
+        status: 0,
+    })?;
+    let client = EchoClient::new(client_end);
+    let raw = server_end.into_handle().into_raw();
+    let thread = spawn(s, echo_server, u64::from(raw))?;
+    let reply = client.twice(21, in_time());
+    ensure(
+        "calling another thread",
+        matches!(reply, Ok(EchoTwiceResponse { value: 42 })),
+    )?;
+    drop(client);
+    ensure(
+        "ending the server",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    // SAFETY: closing takes no pointers.
+    check("closing the thread", unsafe { sys::handle_close(thread) })
+}
+
+/// The bytes of the boot image member `name`, copied out of the image.
+fn boot_file(s: &Startup, name: &[u8]) -> Result<alloc::vec::Vec<u8>> {
+    let image_size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("mapping the boot image", unsafe {
+        sys::vm_map(
+            s.process,
+            PERM_READ,
+            0,
+            s.boot_image,
+            0,
+            image_size,
+            &mut at,
+        )
+    })?;
+    // SAFETY: the boot image is mapped readable at `at`.
+    let image = unsafe { core::slice::from_raw_parts(at as *const u8, s.boot_image_size as usize) };
+    let file = ustar::find(image, name).map(<[u8]>::to_vec);
+    // SAFETY: the call takes no pointers.
+    check("unmapping the boot image", unsafe {
+        sys::vm_unmap(s.process, at, image_size)
+    })?;
+    ensure("finding the file", file.is_some())?;
+    Ok(file.unwrap_or_default())
+}
+
+/// Loads `file` into a new process with mikros-loader, starts it, and
+/// returns the process, its base address and its stack top.
+fn load_and_start(
+    s: &Startup,
+    file: &[u8],
+) -> core::result::Result<(Handle, u64, u64), mikros_loader::Error> {
+    let (process, base, top, bootstrap, thread) = load_and_start_keeping(s, file)?;
+    for h in [bootstrap, thread] {
+        // SAFETY: closing takes no pointers.
+        unsafe { sys::handle_close(h) };
+    }
+    Ok((process, base, top))
+}
+
+/// Like `load_and_start`, but also returns this end of the program's
+/// bootstrap channel and its thread.
+fn load_and_start_keeping(
+    s: &Startup,
+    file: &[u8],
+) -> core::result::Result<(Handle, u64, u64, Handle, Handle), mikros_loader::Error> {
+    use mikros_loader::Error;
+    let status = |st: i64| {
+        if st == 0 {
+            Ok(())
+        } else {
+            Err(Error::Status(st))
+        }
+    };
+    let size = (file.len() as u64).next_multiple_of(PAGE_SIZE);
+    let mut shared = 0;
+    // SAFETY: the out pointer is valid for the call.
+    status(unsafe { sys::mem_create(size, 0, &mut shared) })?;
+    // SAFETY: the pointer and length describe `file`.
+    status(unsafe { sys::mem_write(shared, 0, file.as_ptr(), file.len() as u64) })?;
+    let private = |offset: u64, len: u64| {
+        let mut copy = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let st = unsafe { sys::mem_clone(shared, 0, offset, len, &mut copy) };
+        if st == 0 {
+            Ok(copy)
+        } else {
+            Err(Error::Status(st))
+        }
+    };
+    let image = mikros_loader::Image {
+        file,
+        shared,
+        private: &private,
+    };
+    let (mut process, mut thread) = (0, 0);
+    let name = b"pie";
+    // SAFETY: the pointers describe `name` and `process`.
+    status(unsafe { sys::process_create(s.budget, name.as_ptr(), 3, &mut process) })?;
+    let loaded = mikros_loader::load(process, &image);
+    // SAFETY: closing takes no pointers.
+    unsafe { sys::handle_close(shared) };
+    let loaded = loaded?;
+    let top = mikros_loader::stack(process)?;
+    // SAFETY: the pointers describe `name` and `thread`.
+    status(unsafe { sys::thread_create(process, name.as_ptr(), 3, &mut thread) })?;
+    let (mut ours, mut theirs) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    status(unsafe { sys::channel_create(0, &mut ours, &mut theirs) })?;
+    // SAFETY: the call takes no pointers.
+    status(unsafe { sys::process_start(process, thread, loaded.entry, top, theirs, 0) })?;
+    Ok((process, loaded.base, top, ours, thread))
+}
+
+/// mikros-loader places a position-independent program at a new address
+/// each time, maps its segments and an 8 MiB stack with a reserved page
+/// below it, and the program relocates itself and runs.
+fn loader_runs_pie(s: &Startup) -> Result {
+    let file = boot_file(s, b"tests/pie")?;
+    let fail = |e| mikros_test::Failure {
+        what: "loading the program",
+        status: match e {
+            mikros_loader::Error::Status(st) => st,
+            _ => 0,
+        },
+    };
+    let (a, base_a, top) = load_and_start(s, &file).map_err(fail)?;
+    let guard = top - mikros_loader::STACK_SIZE - PAGE_SIZE;
+    ensure(
+        "reserving the page below the stack",
+        read_memory(a, guard, &mut [0u8; 1]) < 0,
+    )?;
+    ensure("exiting as relocated data says", exit_code(a)? == 10)?;
+    let (b, base_b, _) = load_and_start(s, &file).map_err(fail)?;
+    ensure("exiting again", exit_code(b)? == 10)?;
+    ensure(
+        "choosing new addresses",
+        base_a != base_b && base_a % PAGE_SIZE == 0,
+    )?;
+    for p in [a, b] {
+        // SAFETY: closing takes no pointers.
+        check("closing the process", unsafe { sys::handle_close(p) })?;
+    }
+    Ok(())
+}
+
+/// mikros-loader refuses images that are not ET_DYN, have a segment
+/// that is writable and executable, overlap, lie outside the file, name
+/// another dynamic linker, have no ABI note, or need a higher ABI level
+/// than the system's.
+fn loader_refuses_bad_images(s: &Startup) -> Result {
+    use mikros_loader::Error;
+    let file = boot_file(s, b"tests/pie")?;
+    let phoff = u64::from_le_bytes(file[32..40].try_into().unwrap_or_default()) as usize;
+    let phnum = usize::from(u16::from_le_bytes([file[56], file[57]]));
+    let header = |kind: u32| {
+        (0..phnum)
+            .map(|i| phoff + i * 56)
+            .find(|&h| file[h..h + 4] == kind.to_le_bytes())
+    };
+    let loads: alloc::vec::Vec<usize> = (0..phnum)
+        .map(|i| phoff + i * 56)
+        .filter(|&h| file[h..h + 4] == 1u32.to_le_bytes())
+        .collect();
+    let refused = |change: &dyn Fn(&mut [u8]), expected: Error| {
+        let mut bad = file.clone();
+        change(&mut bad);
+        match load_and_start(s, &bad) {
+            Err(e) => e == expected,
+            Ok(_) => false,
+        }
+    };
+    ensure(
+        "refusing ET_EXEC",
+        refused(&|f| f[16] = 2, Error::NotPositionIndependent),
+    )?;
+    let first = loads[0];
+    ensure(
+        "refusing W+X",
+        refused(&|f| f[first + 4] = 7, Error::WriteExecute),
+    )?;
+    let second = loads[1];
+    // Move the second segment onto the first page, keeping its address
+    // and file offset equal within a page.
+    let onto_first = |f: &mut [u8]| {
+        let offset = u64::from_le_bytes(f[second + 8..second + 16].try_into().unwrap_or_default());
+        f[second + 16..second + 24].copy_from_slice(&(offset % PAGE_SIZE).to_le_bytes());
+    };
+    ensure("refusing overlap", refused(&onto_first, Error::Overlap))?;
+    ensure(
+        "refusing a segment outside the file",
+        refused(
+            &|f| f[second + 32..second + 40].copy_from_slice(&u64::MAX.to_le_bytes()),
+            Error::OutsideFile,
+        ),
+    )?;
+    // Turn GNU_STACK into a PT_INTERP that names the ELF magic.
+    let stack = header(0x6474_e551);
+    ensure("finding GNU_STACK", stack.is_some())?;
+    let stack = stack.unwrap_or_default();
+    let interp = |f: &mut [u8]| {
+        f[stack..stack + 4].copy_from_slice(&3u32.to_le_bytes());
+        f[stack + 8..stack + 16].copy_from_slice(&0u64.to_le_bytes());
+        f[stack + 32..stack + 40].copy_from_slice(&4u64.to_le_bytes());
+    };
+    ensure(
+        "refusing another interpreter",
+        refused(&interp, Error::Interpreter),
+    )?;
+    let note = header(4);
+    ensure("finding the ABI note", note.is_some())?;
+    let note = note.unwrap_or_default();
+    ensure(
+        "refusing an image without the ABI note",
+        refused(
+            &|f| f[note..note + 4].copy_from_slice(&0u32.to_le_bytes()),
+            Error::NoAbiNote,
+        ),
+    )?;
+    // The minimum level is the first word of the note's descriptor, after
+    // its 12-byte header and the 8 bytes of "Mikros\0" padded.
+    let at = u64::from_le_bytes(file[note + 8..note + 16].try_into().unwrap_or_default()) as usize;
+    ensure(
+        "refusing an image for a newer system",
+        refused(
+            &|f| f[at + 20..at + 24].copy_from_slice(&1u32.to_le_bytes()),
+            Error::AbiLevel,
+        ),
+    )
+}
+
+mod managed {
+    //! The startup transfer of programs that the process manager starts,
+    //! with this test standing in for the process manager.
+
+    use super::{PAGE_SIZE, Result, boot_file, create_memory, exit_code, load_and_start_keeping};
+    use alloc::vec::Vec;
+    use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
+    use mikros_rt::interfaces::mikros::fs::Node;
+    use mikros_rt::interfaces::mikros::process::{
+        Bootstrap, BootstrapClient, HandleRole, Launcher, NamespaceEntry, StartupHandle,
+        StartupHeader,
+    };
+    use mikros_rt::interfaces::mikros::service::Directory;
+    use mikros_rt::sys::{self, Handle};
+    use mikros_rt::{PANIC_EXIT_CODE, Startup};
+    use mikros_test::{Failure, check, ensure};
+
+    const SAME_RIGHTS: u32 = 1 << 31;
+
+    /// A started copy of tests/managed waiting for its transfer.
+    struct Child {
+        process: Handle,
+        thread: Handle,
+        client: BootstrapClient,
+    }
+
+    fn start(s: &Startup) -> Result<Child> {
+        let file = boot_file(s, b"tests/managed")?;
+        let fail = |e| Failure {
+            what: "loading the program",
+            status: match e {
+                mikros_loader::Error::Status(st) => st,
+                _ => 0,
+            },
+        };
+        let (process, _, _, ours, thread) = load_and_start_keeping(s, &file).map_err(fail)?;
+        // SAFETY: the handle is ours alone.
+        let end = ClientEnd::<Bootstrap>::new(unsafe { OwnedHandle::from_raw(ours) });
+        Ok(Child {
+            process,
+            thread,
+            client: BootstrapClient::new(end),
+        })
+    }
+
+    fn copy(handle: Handle) -> Result<OwnedHandle> {
+        let mut out = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("duplicating a handle", unsafe {
+            sys::handle_duplicate(handle, SAME_RIGHTS, &mut out)
+        })?;
+        // SAFETY: the handle was just created for us.
+        Ok(unsafe { OwnedHandle::from_raw(out) })
+    }
+
+    fn memory() -> Result<OwnedHandle> {
+        // SAFETY: the handle was just created for us.
+        Ok(unsafe { OwnedHandle::from_raw(create_memory(PAGE_SIZE)?) })
+    }
+
+    fn header(s: &Startup, c: &Child, version: u32, counts: (u32, u32)) -> Result<StartupHeader> {
+        let failed = |_| Failure {
+            what: "creating a channel",
+            status: 0,
+        };
+        Ok(StartupHeader {
+            version,
+            pid: 7,
+            parent: 1,
+            user: 0,
+            app_id: "test.managed".into(),
+            bundle: None,
+            arguments: memory()?,
+            handle_count: counts.0,
+            namespace_count: counts.1,
+            process: copy(c.process)?,
+            thread: copy(c.thread)?,
+            launcher: endpoints::<Launcher>().map_err(failed)?.0,
+            directory: endpoints::<Directory>().map_err(failed)?.0,
+            time_page: None,
+            clock_page: copy(s.clock_page)?,
+            program_base: 0,
+            program_phdr: 0,
+            program_phnum: 3,
+            interpreter_base: 0,
+        })
+    }
+
+    fn handles(first: u32, n: u32) -> Result<Vec<StartupHandle>> {
+        (first..first + n)
+            .map(|id| {
+                Ok(StartupHandle {
+                    role: HandleRole::User,
+                    id,
+                    handle: memory()?,
+                })
+            })
+            .collect()
+    }
+
+    fn entries(n: usize) -> Vec<NamespaceEntry> {
+        (0..n)
+            .filter_map(|i| {
+                let (client, _) = endpoints::<Node>().ok()?;
+                let path = if i == 0 { "/data" } else { "/config" };
+                Some(NamespaceEntry {
+                    path: path.into(),
+                    directory: client,
+                })
+            })
+            .collect()
+    }
+
+    /// One message of a transfer.
+    enum Step {
+        Begin { version: u32, counts: (u32, u32) },
+        Handles { offset: u32, first: u32, n: u32 },
+        Namespace { offset: u32, n: usize },
+        Complete,
+    }
+
+    /// Starts tests/managed, sends it `steps`, closes the channel and
+    /// returns its exit code. A send may fail once the program has
+    /// refused the transfer and ended.
+    fn run(s: &Startup, steps: &[Step]) -> Result<i64> {
+        let c = start(s)?;
+        for step in steps {
+            let _ = match *step {
+                Step::Begin { version, counts } => c.client.begin(header(s, &c, version, counts)?),
+                Step::Handles { offset, first, n } => c.client.handles(offset, handles(first, n)?),
+                Step::Namespace { offset, n } => c.client.namespace(offset, entries(n)),
+                Step::Complete => c.client.complete(),
+            };
+        }
+        let Child {
+            process,
+            thread,
+            client,
+        } = c;
+        drop(client);
+        let code = exit_code(process);
+        for h in [process, thread] {
+            // SAFETY: closing takes no pointers.
+            unsafe { sys::handle_close(h) };
+        }
+        code
+    }
+
+    /// A complete transfer reaches the program's main function, with
+    /// the handles and namespace entries of every batch in order.
+    pub fn startup_transfer_accepted(s: &Startup) -> Result {
+        use Step::*;
+        let full = [
+            Begin {
+                version: 1,
+                counts: (3, 2),
+            },
+            Handles {
+                offset: 0,
+                first: 0,
+                n: 2,
+            },
+            Handles {
+                offset: 2,
+                first: 2,
+                n: 1,
+            },
+            Namespace { offset: 0, n: 2 },
+            Complete,
+        ];
+        ensure("receiving every batch", run(s, &full)? == 132)?;
+        let empty = [
+            Begin {
+                version: 1,
+                counts: (0, 0),
+            },
+            Complete,
+        ];
+        ensure("receiving no batches", run(s, &empty)? == 100)
+    }
+
+    /// A transfer out of order, of another version, over its counts,
+    /// with a misplaced or empty batch, or cut short ends the program
+    /// before its main function runs.
+    pub fn startup_transfer_refused(s: &Startup) -> Result {
+        use Step::*;
+        let begin = |handles, names| Begin {
+            version: 1,
+            counts: (handles, names),
+        };
+        let cases: [(&'static str, Vec<Step>); 10] = [
+            (
+                "refusing a batch before Begin",
+                alloc::vec![
+                    Handles {
+                        offset: 0,
+                        first: 0,
+                        n: 1
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing another version",
+                alloc::vec![
+                    Begin {
+                        version: 2,
+                        counts: (0, 0)
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing more than 32 handles",
+                alloc::vec![begin(33, 0), Complete],
+            ),
+            (
+                "refusing a second Begin",
+                alloc::vec![begin(0, 0), begin(0, 0), Complete],
+            ),
+            (
+                "refusing an early Complete",
+                alloc::vec![begin(1, 0), Complete],
+            ),
+            (
+                "refusing a batch at the wrong offset",
+                alloc::vec![
+                    begin(2, 0),
+                    Handles {
+                        offset: 1,
+                        first: 1,
+                        n: 1
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing an empty batch",
+                alloc::vec![
+                    begin(1, 0),
+                    Handles {
+                        offset: 0,
+                        first: 0,
+                        n: 0
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing a batch over its count",
+                alloc::vec![
+                    begin(1, 0),
+                    Handles {
+                        offset: 0,
+                        first: 0,
+                        n: 2
+                    },
+                    Complete,
+                ],
+            ),
+            (
+                "refusing handles after the namespace",
+                alloc::vec![
+                    begin(1, 1),
+                    Namespace { offset: 0, n: 1 },
+                    Handles {
+                        offset: 0,
+                        first: 0,
+                        n: 1
+                    },
+                    Complete,
+                ],
+            ),
+            ("refusing a closed channel", alloc::vec![begin(1, 0)]),
+        ];
+        for (what, steps) in cases {
+            ensure(what, run(s, &steps)? == PANIC_EXIT_CODE)?;
+        }
+        Ok(())
+    }
+}
+
+mod manager {
+    //! The process manager's start, with this test standing in for init.
+
+    use super::{TERMINATED, TIMED_OUT, boot_file, exit_code, load_and_start_keeping};
+    use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
+    use mikros_rt::interfaces::mikros::base::Status;
+    use mikros_rt::interfaces::mikros::process::{
+        HandleRole, InitBootstrap, InitBootstrapClient, ManagerBootstrap, ManagerBootstrapClient,
+        ManagerStartup, StartupHandle,
+    };
+    use mikros_rt::sys::{self, Handle};
+    use mikros_rt::{PANIC_EXIT_CODE, Startup};
+    use mikros_test::{Failure, Result, check, ensure};
+
+    /// Handles keep their rights, including `TRANSFER`, which sending
+    /// them needs. The process manager's bindings reduce them to the
+    /// rights `Start` declares.
+    const SAME_RIGHTS: u32 = 1 << 31;
+
+    /// A started process manager waiting for `Start`.
+    struct Manager {
+        process: Handle,
+        thread: Handle,
+        client: Option<ManagerBootstrapClient>,
+    }
+
+    impl Manager {
+        /// Sends `startup`, and closes the channel as init does unless
+        /// `keep_open`.
+        fn send(&mut self, startup: ManagerStartup, keep_open: bool) -> Result {
+            let client = self.client.as_ref().ok_or(Failure {
+                what: "sending on a closed channel",
+                status: 0,
+            })?;
+            ensure("sending Start", client.start(startup).is_ok())?;
+            if !keep_open {
+                self.client = None;
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for Manager {
+        fn drop(&mut self) {
+            // SAFETY: the calls take no pointers.
+            unsafe {
+                sys::task_kill(self.process);
+                sys::handle_close(self.process);
+                sys::handle_close(self.thread);
+            }
+        }
+    }
+
+    fn start(s: &Startup) -> Result<Manager> {
+        let file = boot_file(s, b"usr/bin/process-manager")?;
+        let fail = |e| Failure {
+            what: "loading the process manager",
+            status: match e {
+                mikros_loader::Error::Status(st) => st,
+                _ => 0,
+            },
+        };
+        let (process, _, _, ours, thread) = load_and_start_keeping(s, &file).map_err(fail)?;
+        // SAFETY: the handle is ours alone.
+        let end = ClientEnd::<ManagerBootstrap>::new(unsafe { OwnedHandle::from_raw(ours) });
+        Ok(Manager {
+            process,
+            thread,
+            client: Some(ManagerBootstrapClient::new(end)),
+        })
+    }
+
+    fn copy(handle: Handle, rights: u32) -> Result<OwnedHandle> {
+        let mut out = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("duplicating a handle", unsafe {
+            sys::handle_duplicate(handle, rights, &mut out)
+        })?;
+        // SAFETY: the handle was just created for us.
+        Ok(unsafe { OwnedHandle::from_raw(out) })
+    }
+
+    /// `Start` for `m` and the client of its `InitBootstrap` endpoint.
+    fn start_message(
+        s: &Startup,
+        m: &Manager,
+        version: u32,
+    ) -> Result<(ManagerStartup, InitBootstrapClient)> {
+        let (client, server) = endpoints::<InitBootstrap>().map_err(|_| Failure {
+            what: "creating a channel",
+            status: 0,
+        })?;
+        let startup = ManagerStartup {
+            version,
+            process: copy(m.process, SAME_RIGHTS)?,
+            thread: copy(m.thread, SAME_RIGHTS)?,
+            init_process: copy(s.process, SAME_RIGHTS)?,
+            budget: copy(s.budget, SAME_RIGHTS)?,
+            boot_image: copy(s.boot_image, SAME_RIGHTS)?,
+            clock_page: copy(s.clock_page, SAME_RIGHTS)?,
+            log: copy(s.log, SAME_RIGHTS)?,
+            init_bootstrap: server,
+            command_line: "".into(),
+        };
+        Ok((startup, InitBootstrapClient::new(client)))
+    }
+
+    /// After `Start`, the process manager registers init once, refuses
+    /// to start the service manager before that and a second time, and
+    /// starts it from the boot file system: its transfer, with the
+    /// directory bound over its control endpoint, completes and it runs
+    /// on.
+    pub fn process_manager_serves_init(s: &Startup) -> Result {
+        let mut m = start(s)?;
+        let (startup, init) = start_message(s, &m, 2)?;
+        m.send(startup, false)?;
+        // Each call gets its own deadline: under emulation, starting the
+        // service manager alone can take seconds.
+        ensure(
+            "refusing the service manager before Register",
+            matches!(
+                init.start_service_manager(alloc::vec![], super::in_time()),
+                Ok(Err(Status::BadState))
+            ),
+        )?;
+        ensure(
+            "registering init",
+            matches!(init.register(super::in_time()), Ok(Ok(_))),
+        )?;
+        ensure(
+            "refusing a second Register",
+            matches!(init.register(super::in_time()), Ok(Err(Status::BadState))),
+        )?;
+        let first = init.start_service_manager(alloc::vec![], super::within(super::PROBE_SECONDS));
+        let Ok(Ok(started)) = first else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", first.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        ensure("giving the service manager pid 2", started.pid == 2)?;
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let running = unsafe {
+            sys::object_wait_one(
+                started.process.raw(),
+                TERMINATED,
+                super::now() + 50_000_000,
+                &mut observed,
+            )
+        };
+        ensure(
+            "keeping the service manager running after its transfer",
+            running == TIMED_OUT,
+        )?;
+        ensure(
+            "refusing a second StartServiceManager",
+            matches!(
+                init.start_service_manager(alloc::vec![], super::in_time()),
+                Ok(Err(Status::BadState))
+            ),
+        )?;
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        Ok(())
+    }
+
+    /// From a boot image in which the launcher probe stands in for the
+    /// service manager, the process manager serves its `Launcher`
+    /// endpoint: the probe exits with 0 once every check of `Spawn`,
+    /// `Wait` and `Kill` passed, or with the number of the first that
+    /// failed.
+    pub fn process_manager_serves_launcher(s: &Startup) -> Result {
+        let image = boot_file(s, b"tests/launcher.img")?;
+        let mut mem = 0;
+        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the image", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `image`.
+        check("writing the image", unsafe {
+            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
+        })?;
+        let mut m = start(s)?;
+        let (mut startup, init) = start_message(s, &m, 2)?;
+        startup.boot_image = mem;
+        m.send(startup, false)?;
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        // The probe logs the checks that fail.
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![log], deadline) else {
+            return Err(Failure {
+                what: "starting the probe",
+                status: 0,
+            });
+        };
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let ended = unsafe {
+            sys::object_wait_one(
+                started.process.raw(),
+                TERMINATED,
+                super::within(super::PROBE_SECONDS),
+                &mut observed,
+            )
+        };
+        ensure("ending the probe", ended == 0)?;
+        let code = super::u64_at(&super::info::<0x28>(started.process.raw(), 2)?, 0) as i64;
+        if code != 0 {
+            mikros_rt::log!(Error, "the launcher probe failed check {code}");
+        }
+        ensure("passing every check of the probe", code == 0)?;
+        drop(m);
+        Ok(())
+    }
+
+    /// From a boot image in which the runner of the ported projects'
+    /// tests stands in for the service manager, every test of their
+    /// suites that it runs passes: the runner, which logs each result,
+    /// exits with the number that did not.
+    pub fn ported_software_passes_its_tests(s: &Startup) -> Result {
+        let image = boot_file(s, b"tests/ports.img")?;
+        let mut mem = 0;
+        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the image", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `image`.
+        check("writing the image", unsafe {
+            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
+        })?;
+        let mut m = start(s)?;
+        let (mut startup, init) = start_message(s, &m, 2)?;
+        startup.boot_image = mem;
+        m.send(startup, false)?;
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![log], deadline) else {
+            return Err(Failure {
+                what: "starting the runner",
+                status: 0,
+            });
+        };
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let ended = unsafe {
+            sys::object_wait_one(
+                started.process.raw(),
+                TERMINATED,
+                super::within(super::PORT_TESTS_SECONDS),
+                &mut observed,
+            )
+        };
+        ensure("ending the runner", ended == 0)?;
+        let code = super::u64_at(&super::info::<0x28>(started.process.raw(), 2)?, 0) as i64;
+        if code != 0 {
+            mikros_rt::log!(Error, "{code} tests of ported software did not pass");
+        }
+        ensure("passing every test of ported software", code == 0)?;
+        drop(m);
+        Ok(())
+    }
+
+    /// From a boot image in which the broker probe stands in for the
+    /// service manager, the permission broker starts from a sealed
+    /// manifest and serves its protocol: the probe exits with 0 once
+    /// every check passed, or with the number of the first that failed.
+    pub fn permission_broker_serves(s: &Startup) -> Result {
+        let image = boot_file(s, b"tests/broker.img")?;
+        let mut mem = 0;
+        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the image", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `image`.
+        check("writing the image", unsafe {
+            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
+        })?;
+        let mut m = start(s)?;
+        let (mut startup, init) = start_message(s, &m, 2)?;
+        startup.boot_image = mem;
+        m.send(startup, false)?;
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        let Ok(Ok(started)) = init.start_service_manager(alloc::vec![], deadline) else {
+            return Err(Failure {
+                what: "starting the probe",
+                status: 0,
+            });
+        };
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let ended = unsafe {
+            sys::object_wait_one(
+                started.process.raw(),
+                TERMINATED,
+                super::within(super::PROBE_SECONDS),
+                &mut observed,
+            )
+        };
+        ensure("ending the probe", ended == 0)?;
+        let code = super::u64_at(&super::info::<0x28>(started.process.raw(), 2)?, 0) as i64;
+        if code != 0 {
+            mikros_rt::log!(Error, "the broker probe failed check {code}");
+        }
+        ensure("passing every check of the probe", code == 0)?;
+        drop(m);
+        Ok(())
+    }
+
+    /// From a boot image with the service manager, the permission broker,
+    /// the directory probe and their manifests, the service manager
+    /// starts the broker, registers permissions with it, and starts the
+    /// probe, giving it the log and the platform information that init's
+    /// boot handles hold here, and no framebuffer, and a `PRIORITY`
+    /// resource made from the root resource for its priority 20. The probe drives its
+    /// directory and exits with 0 once every check passed. The restart
+    /// probe exits with 1 each time, and is restarted five times and then
+    /// given up on. The service manager says all of it in the log.
+    pub fn service_manager_starts_boot_services(s: &Startup) -> Result {
+        const PASSED: &[u8] = b"service directory-probe exited with code 0";
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service directory-probe exited",
+            b"service directory-probe ended",
+        ];
+        let (m, init, reader) = serving(s, b"tests/services.img")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        // Platform information that the probe reads back, and no
+        // framebuffer.
+        let mut info = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the platform information", unsafe {
+            sys::mem_create(super::PAGE_SIZE, 0, &mut info)
+        })?;
+        // SAFETY: the kernel just created the handle for us.
+        let info = unsafe { OwnedHandle::from_raw(info) };
+        // SAFETY: the pointer describes the bytes.
+        check("writing the platform information", unsafe {
+            sys::mem_write(info.raw(), 0, b"platform".as_ptr(), 8)
+        })?;
+        let info = StartupHandle {
+            role: HandleRole::User,
+            id: 5,
+            handle: info,
+        };
+        let root = StartupHandle {
+            role: HandleRole::User,
+            id: 1,
+            handle: copy(s.root_resource, SAME_RIGHTS)?,
+        };
+        let handles = alloc::vec![root, log, info];
+        let reply = init.start_service_manager(handles, deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        // The restart probe fails every time it runs: it is started once
+        // and restarted five times.
+        const RESTARTED: &[u8] = b"started service restart-probe";
+        const GAVE_UP: &[u8] = b"service restart-probe failed after 5 restarts";
+        // The demand probe starts twice, its dependency once, before it.
+        const DEMAND: &[u8] = b"started service demand-probe";
+        const DEMAND_DEP: &[u8] = b"started service demand-dep";
+        let (mut passed, mut starts, mut gave_up) = (false, 0, false);
+        let (mut demands, mut deps, mut dep_first) = (0, 0, false);
+        let outcome = loop {
+            if passed && gave_up {
+                break Some(starts == 6 && demands == 2 && deps == 1 && dep_first);
+            }
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if super::contains(message, PASSED) {
+                passed = true;
+                continue;
+            }
+            starts += usize::from(super::contains(message, RESTARTED));
+            if super::contains(message, DEMAND_DEP) {
+                deps += 1;
+                dep_first = demands == 0;
+            }
+            demands += usize::from(super::contains(message, DEMAND));
+            gave_up |= super::contains(message, GAVE_UP);
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure(
+            "passing every check, restarting five times, and starting on demand",
+            outcome == Some(true),
+        )
+    }
+
+    /// From a boot image with the service manager, the permission broker,
+    /// the temporary file system, the union server and their probes, with
+    /// their manifests, the service manager starts the temporary file
+    /// system and the union server, and then the probes, which hold the
+    /// permissions to connect to them. The tmpfs probe drives files,
+    /// directories, links, names, memory objects, locks, watches, sockets
+    /// and the budgets of directories, with a budget under the one that
+    /// init gives, and the union probe views of two layers on the
+    /// temporary file system. Each exits with 0 once every check passed,
+    /// as the service manager logs.
+    pub fn tmpfs_serves_its_clients(s: &Startup) -> Result {
+        const PASSED: [&[u8]; 2] = [
+            b"service tmpfs-probe exited with code 0",
+            b"service union-probe exited with code 0",
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service tmpfs-probe exited",
+            b"service tmpfs-probe ended",
+            b"service union-probe exited",
+            b"service union-probe ended",
+            b"service tmpfs exited",
+            b"service tmpfs ended",
+            b"service union exited",
+            b"service union ended",
+        ];
+        let (m, init, reader) = serving(s, b"tests/tmpfs.img")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let root = StartupHandle {
+            role: HandleRole::User,
+            id: 1,
+            handle: copy(s.root_resource, SAME_RIGHTS)?,
+        };
+        let budget = StartupHandle {
+            role: HandleRole::User,
+            id: 3,
+            handle: copy(s.budget, SAME_RIGHTS)?,
+        };
+        let reply = init.start_service_manager(alloc::vec![root, log, budget], deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        let mut passed = [false; 2];
+        let outcome = loop {
+            if passed.iter().all(|&p| p) {
+                break Some(true);
+            }
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if let Some(at) = PASSED.iter().position(|p| super::contains(message, p)) {
+                passed[at] = true;
+                continue;
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("passing every check of the probes", outcome == Some(true))
+    }
+
+    /// From a boot image with the service manager, the permission broker,
+    /// the log service and a probe, with their manifests, the service
+    /// manager starts the log service with the log, and the probe, which
+    /// holds `logs.read`. The probe writes records and reads them back
+    /// with the pid and app ID of its identity, numbered from 1, among the
+    /// kernel log's records, and gets a later one as an event after
+    /// `Follow`. It exits with 0 once every check passed, as the service
+    /// manager logs, and the log service copies the probe's first record
+    /// into the kernel log.
+    pub fn log_service_collects_records(s: &Startup) -> Result {
+        const PASSED: [&[u8]; 2] = [
+            b"service log-probe exited with code 0",
+            b"log-probe: the first record",
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service log-probe exited",
+            b"service log-probe ended",
+            b"service log exited",
+            b"service log ended",
+        ];
+        let (m, init, reader) = serving(s, b"tests/log.img")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let root = StartupHandle {
+            role: HandleRole::User,
+            id: 1,
+            handle: copy(s.root_resource, SAME_RIGHTS)?,
+        };
+        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        let mut passed = [false; 2];
+        let outcome = loop {
+            if passed.iter().all(|&p| p) {
+                break Some(true);
+            }
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if let Some(at) = PASSED.iter().position(|p| super::contains(message, p)) {
+                passed[at] = true;
+                continue;
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("passing every check of the probe", outcome == Some(true))
+    }
+
+    /// From a boot image with the service manager, the permission broker,
+    /// the time service and the time probe as two services, with their
+    /// manifests, the service manager starts the time service with init's
+    /// platform information, and the probes. The one that holds
+    /// `time.set` and gets the platform information finds UTC to be its
+    /// boot time plus the monotonic clock, as the time page says, which
+    /// it cannot write; sets the time and hears of it as a watcher; and,
+    /// without a root file system, finds the zone UTC and cannot set it.
+    /// The other cannot set the time or the zone. Each exits with 0 once
+    /// every check passed, as the service manager logs.
+    pub fn time_service_keeps_utc(s: &Startup) -> Result {
+        const PASSED: [&[u8]; 2] = [
+            b"service time-probe exited with code 0",
+            b"service time-guest exited with code 0",
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service time-probe exited",
+            b"service time-probe ended",
+            b"service time-guest exited",
+            b"service time-guest ended",
+            b"service time exited",
+            b"service time ended",
+        ];
+        let (m, init, reader) = serving(s, b"tests/time.img")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let mut info = 0;
+        let message = s.message();
+        let size = (message.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the platform information", unsafe {
+            sys::mem_create(size, 0, &mut info)
+        })?;
+        // SAFETY: the kernel just created the handle for us.
+        let info = unsafe { OwnedHandle::from_raw(info) };
+        // SAFETY: the pointer and length describe the message.
+        check("writing the platform information", unsafe {
+            sys::mem_write(info.raw(), 0, message.as_ptr(), message.len() as u64)
+        })?;
+        let handles = alloc::vec![
+            StartupHandle {
+                role: HandleRole::User,
+                id: 1,
+                handle: copy(s.root_resource, SAME_RIGHTS)?,
+            },
+            StartupHandle {
+                role: HandleRole::User,
+                id: 2,
+                handle: copy(s.log, SAME_RIGHTS)?,
+            },
+            StartupHandle {
+                role: HandleRole::User,
+                id: 5,
+                handle: info,
+            },
+        ];
+        let reply = init.start_service_manager(handles, deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        let mut passed = [false; 2];
+        let outcome = loop {
+            if passed.iter().all(|&p| p) {
+                break Some(true);
+            }
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if let Some(at) = PASSED.iter().position(|p| super::contains(message, p)) {
+                passed[at] = true;
+                continue;
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("passing every check of the probes", outcome == Some(true))
+    }
+
+    /// With `root=bootfs` on the command line, from a boot image with the
+    /// service manager, the permission broker, the temporary file system,
+    /// a probe of namespaces with their manifests, files in `/etc`, `/usr`
+    /// and `/Libraries`, and a native app's bundle, the process manager
+    /// makes tmpfs's `boot/` directories, fills them from the image, and
+    /// gives each process started after tmpfs the namespace of its
+    /// profile. The probe gets exactly the entries of its manifest and
+    /// `/dev`, with the rights given; a command-line tool of user 0 that
+    /// it starts gets its profile without a folder in `/Users`; a native
+    /// app of user 0 does not start. The probe exits with 0 once every
+    /// check passed, as the service manager logs.
+    pub fn process_manager_builds_namespaces_from_the_boot_image(s: &Startup) -> Result {
+        const PASSED: &[u8] = b"service namespace-probe exited with code 0";
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service namespace-probe exited",
+            b"service namespace-probe ended",
+            b"service tmpfs exited",
+            b"service tmpfs ended",
+        ];
+        let (m, init, reader) = serving_with(s, b"tests/namespaces.img", "root=bootfs")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let root = StartupHandle {
+            role: HandleRole::User,
+            id: 1,
+            handle: copy(s.root_resource, SAME_RIGHTS)?,
+        };
+        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        let outcome = loop {
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if super::contains(message, PASSED) {
+                break Some(true);
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("passing every check of the probe", outcome == Some(true))
+    }
+
+    /// With `root=bootfs` on the command line, from a boot image with the
+    /// service manager, the permission broker, the temporary file system,
+    /// the accounts service and a users file in `/var/lib/accounts`, the
+    /// accounts service lists, authenticates and changes those users. A
+    /// probe that holds its permissions and that an authorization stub
+    /// allows to manage accounts, and a guest without
+    /// `accounts.authenticate` that the stub turns down, each exit with 0
+    /// once every check of theirs passed, as the service manager logs. Two services whose
+    /// manifests ask for the accounts service's data never start.
+    pub fn accounts_service_serves_users(s: &Startup) -> Result {
+        // Under emulation, each Argon2id hash of 64 MiB takes seconds, and
+        // the probe makes about a dozen.
+        const ACCOUNTS_SECONDS: i64 = 360;
+        const PASSED: [&[u8]; 4] = [
+            b"service accounts-probe exited with code 0",
+            b"service accounts-guest exited with code 0",
+            b"service accounts-thief did not start: Spawn failed: AccessDenied",
+            b"service accounts-sneak did not start: Spawn failed: AccessDenied",
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"started service accounts-thief",
+            b"started service accounts-sneak",
+            b"did not start",
+            b"will not start",
+            b"service accounts-probe exited",
+            b"service accounts-probe ended",
+            b"service accounts-guest exited",
+            b"service accounts-guest ended",
+            b"service tmpfs exited",
+            b"service tmpfs ended",
+        ];
+        let (m, init, reader) = serving_with(s, b"tests/accounts.img", "root=bootfs")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let root = StartupHandle {
+            role: HandleRole::User,
+            id: 1,
+            handle: copy(s.root_resource, SAME_RIGHTS)?,
+        };
+        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(ACCOUNTS_SECONDS);
+        let mut passed = [false; 4];
+        let outcome = loop {
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if let Some(i) = PASSED.iter().position(|p| super::contains(message, p)) {
+                passed[i] = true;
+                if passed == [true; 4] {
+                    break Some(true);
+                }
+                continue;
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("passing every check of the probes", outcome == Some(true))
+    }
+
+    /// A process manager serving the boot image member `image` as its
+    /// boot file system, with init registered, the client of its
+    /// `InitBootstrap` endpoint, and a reader of the log from before it
+    /// started.
+    fn serving(s: &Startup, image: &[u8]) -> Result<(Manager, InitBootstrapClient, OwnedHandle)> {
+        serving_with(s, image, "")
+    }
+
+    /// As `serving`, with the kernel command line `command_line` in the
+    /// process manager's `Start`.
+    fn serving_with(
+        s: &Startup,
+        image: &[u8],
+        command_line: &str,
+    ) -> Result<(Manager, InitBootstrapClient, OwnedHandle)> {
+        let image = boot_file(s, image)?;
+        let mut mem = 0;
+        let size = (image.len() as u64).next_multiple_of(super::PAGE_SIZE);
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the image", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `image`.
+        check("writing the image", unsafe {
+            sys::mem_write(mem.raw(), 0, image.as_ptr(), image.len() as u64)
+        })?;
+        let mut reader = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating a log reader", unsafe {
+            sys::log_reader_create(s.log, 0, &mut reader)
+        })?;
+        // SAFETY: the handle was just created for us.
+        let reader = unsafe { OwnedHandle::from_raw(reader) };
+        let mut m = start(s)?;
+        let (mut startup, init) = start_message(s, &m, 2)?;
+        startup.boot_image = mem;
+        startup.command_line = command_line.into();
+        m.send(startup, false)?;
+        // Starting it while the last test's processes are torn down can
+        // take seconds when emulated.
+        let deadline = super::within(super::PROBE_SECONDS);
+        ensure(
+            "registering init",
+            matches!(init.register(deadline), Ok(Ok(_))),
+        )?;
+        Ok((m, init, reader))
+    }
+
+    /// From a boot image with the service manager, the permission
+    /// broker, the device manager, their manifests and the manifests of
+    /// test drivers, the service manager starts the device manager with
+    /// the root resource, the log and init's own platform information.
+    /// The device manager adds a PCI host bridge from the MCFG table of
+    /// the q35 machine, with its ECAM range as its one resource, then the
+    /// ACPI device with the RSDP's address, leaves out the invalid driver
+    /// manifest, and binds the test driver whose
+    /// manifest has no kind, which makes it normal, rather than the
+    /// fallback one. It starts that driver as `system.driver.test-host`,
+    /// whose `Start` succeeds only for the host bridge with its ECAM
+    /// range and a `DMA` resource. That driver publishes two services,
+    /// which get the IDs 1 and 2, and adds a child device, once the
+    /// device manager refused its invalid requests and granted the
+    /// resources it asked for, and the device
+    /// manager starts the child's driver, after `ConnectChild` gave the
+    /// host's driver a bus channel for it. Once the child's driver wrote
+    /// on that channel, the host's driver removes the child: the device
+    /// manager stops its driver and removes the device. It says all of
+    /// it in the log.
+    pub fn device_manager_adds_platform_devices(s: &Startup) -> Result {
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: added device 1, pci-host-0, as platform:pci-host-ecam, with 1 resource, segment 0, bus_start 0, bus_end 255",
+                1,
+            ),
+            (
+                b"device-manager: added device 2, acpi, as platform:acpi, with 0 resources, rsdp 0x",
+                1,
+            ),
+            (b"test-invalid/driver.yaml:6:", 1),
+            (b"ServiceKey(\"start\")", 1),
+            (
+                b"device-manager: bound driver test-host to device 1, pci-host-0, as platform:pci-host-ecam",
+                1,
+            ),
+            (
+                b"device-manager: started driver test-host for device 1 as pid",
+                1,
+            ),
+            (
+                b"device-manager: added device 3, test-child, as test:child, under 1, with 0 resources, slot 0",
+                1,
+            ),
+            (
+                b"device-manager: bound driver test-child to device 3, test-child, as test:child",
+                1,
+            ),
+            (
+                b"device-manager: started driver test-child for device 3 as pid",
+                1,
+            ),
+            (
+                b"device-manager: stopped driver test-child for device 3",
+                1,
+            ),
+            (b"device-manager: removed device 3, test-child", 1),
+            (
+                b"device-manager: published device.storage 1 for device 1",
+                1,
+            ),
+            (
+                b"device-manager: published device.storage 2 for device 1",
+                1,
+            ),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"no MCFG table",
+            // The ACPI device, 2, has no driver in this image.
+            b"no driver for device 1,",
+            b"no driver for device 3,",
+            b"bound driver test-fallback",
+            b"driver test-host declined",
+            b"driver test-host for device 1 closed its channel",
+            b"driver test-host for device 1 terminated",
+            b"checks-failed",
+            b"driver test-child for device 3 did not start",
+            b"driver test-child for device 3 terminated",
+        ];
+        let logged = device_manager_logs(s, b"tests/devices.img", false, EXPECTED, FAILED)?;
+        ensure(
+            "adding the host bridge and starting the normal driver",
+            logged,
+        )
+    }
+
+    /// From a boot image like that of
+    /// `device_manager_adds_platform_devices` with other test drivers,
+    /// and a stand-in for the boot framebuffer, the device manager adds
+    /// the framebuffer as device 1 and the host bridge as device 2. The
+    /// host bridge's driver fails `Start`: the device manager terminates
+    /// it, and the device fails without a restart. The framebuffer's
+    /// driver publishes a service and ends without replying: the device
+    /// manager unregisters the service, and terminates and restarts the
+    /// driver, five times, and then the device fails. The service gets
+    /// the same ID each time. It says all of it in the log.
+    pub fn device_manager_handles_failing_drivers(s: &Startup) -> Result {
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: driver test-decline declined device 2: NotSupported",
+                1,
+            ),
+            (
+                b"device-manager: device 2, pci-host-0, failed; it is left without a driver",
+                1,
+            ),
+            (
+                b"device-manager: driver test-close for device 1 closed its channel before Start replied",
+                6,
+            ),
+            (
+                b"device-manager: driver test-close for device 1 terminated",
+                6,
+            ),
+            (
+                b"device-manager: restarting driver test-close for device 1",
+                5,
+            ),
+            (
+                b"device-manager: published device.storage 1 for device 1",
+                6,
+            ),
+            (b"device-manager: unregistered device.storage 1", 6),
+            (
+                b"device-manager: driver test-close for device 1 failed after 5 restarts within 60 s",
+                1,
+            ),
+            (
+                b"device-manager: device 1, boot-framebuffer, failed; it is left without a driver",
+                1,
+            ),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"started driver test-decline",
+            b"started driver test-close",
+            b"ResetChild",
+            b"restarting driver test-decline",
+        ];
+        let logged = device_manager_logs(s, b"tests/failing.img", true, EXPECTED, FAILED)?;
+        ensure(
+            "failing the declined device, and the other after five restarts",
+            logged,
+        )
+    }
+
+    /// From a boot image with test drivers for the host bridge and its
+    /// child, the device manager starts the host bridge's driver, which
+    /// adds the device `kept-child`, and the child's driver, which writes
+    /// on its bus channel. The host bridge's driver then ends with code 3.
+    /// The device manager keeps the child and its driver running, starts
+    /// the host bridge's driver again, which adds the child again, and
+    /// gives the child its old ID. It connects it to the restarted driver
+    /// with `ConnectChild` and gives the child's driver the new channel
+    /// with `Reconnect`, which it accepts. It says all of it in the log.
+    pub fn device_manager_keeps_children_across_a_restart(s: &Startup) -> Result {
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: started driver test-crash-host for device 1 as pid",
+                2,
+            ),
+            (
+                b"device-manager: added device 3, kept-child, as test:kept, under 1",
+                1,
+            ),
+            (
+                b"device-manager: started driver test-kept-child for device 3 as pid",
+                1,
+            ),
+            (
+                b"device-manager: driver test-crash-host for device 1 terminated with code 3, signal 0",
+                1,
+            ),
+            (
+                b"device-manager: restarting driver test-crash-host for device 1",
+                1,
+            ),
+            (
+                b"device-manager: added device 3 again, kept-child, under 1",
+                1,
+            ),
+            (b"device-manager: reconnected device 3", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"device 3 was not added again in time",
+            b"removed device 3",
+            b"reconnecting device 3 failed",
+            b"driver test-kept-child for device 3 terminated",
+            b"declined",
+            b"did not start",
+        ];
+        let logged = device_manager_logs(s, b"tests/restart.img", false, EXPECTED, FAILED)?;
+        ensure("keeping the child across its parent's restart", logged)
+    }
+
+    /// From a boot image with the service manager, the broker, the
+    /// device manager, the PCI bus driver and a test driver for the q35
+    /// host bridge's function 00:00.0, with their manifests, the device
+    /// manager starts the bus driver for the host bridge. The bus driver
+    /// adds the functions it finds, among them 00:00.0 and the LPC bridge
+    /// at 00:1f.0, with their hardware IDs, and the device manager
+    /// starts the test driver for 00:00.0. Its `Start` succeeds only when
+    /// its bus channel serves that function as `mikros.pci.Device`. It
+    /// also starts the test driver for QEMU's edu device, whose `Start`
+    /// succeeds only when the device's message-signaled interrupt
+    /// arrives and INTx is handed out as it should be. The test driver for
+    /// the e1000e function at 00:01.0 ends at each start, and the device
+    /// manager has the bus driver reset the function before each of its
+    /// five restarts. The virtio-blk driver drives the test machine's
+    /// disk, adds it as `disk-0`, publishes its raw access service, and
+    /// serves `Block` to the partition driver for the disk. The NVMe
+    /// driver does the same for the scratch disk
+    /// behind the NVMe controller, as `disk-1`, and the AHCI driver for
+    /// the one on port 2 of the AHCI controller, as `disk-2`. Each disk
+    /// device has the properties `serial`, here `mikros`, and
+    /// `removable`, here `false`, and the device manager gives each disk
+    /// and partition the property `cache`, here `write-back`, since the
+    /// root partition's file system, which the device manager connects
+    /// to once it is published, has no storage profiles. The
+    /// partition driver reads each disk's GPT and adds its partitions:
+    /// the scratch partition `part-1` of each scratch disk, and the EFI
+    /// system partition `part-1` and root partition `part-2` of the test
+    /// machine's disk. Each publishes its raw access service and serves
+    /// `Block` to the driver for the partition. For the scratch
+    /// partitions that is the test driver, whose `Start` succeeds only
+    /// when reads, writes, flushes, the writable lock and refusals work
+    /// as they should, and when the device manager's removal service,
+    /// once the driver has granted itself `files.removable`, lists no
+    /// removable disks and refuses to eject its partition. For the EFI system partition it is the FAT server,
+    /// which publishes the volume's `filesystem` service, and the test
+    /// driver for the root partition succeeds only when that service
+    /// reads, writes, renames and removes as it should. Each partition's
+    /// `filesystem` service is also published under `partuuid-<guid>`,
+    /// the root partition's also as `root`, and that of the EFI system
+    /// partition on the root partition's disk as `esp`. The btrfs test
+    /// driver sets the time zone through the time service, which makes
+    /// `etc/localtime` on the root a link to the zone's file of the root's
+    /// `usr/share/zoneinfo`. It then kills the virtio-blk driver while it writes a file on
+    /// the root, and goes on writing and syncing: the device manager
+    /// keeps the disk and its partitions, has the device reset and
+    /// restarts the driver, which adds the disk again under its old ID,
+    /// and reconnects the partition driver, which sends the requests that
+    /// had not completed again, so that the file reads back whole. The
+    /// device manager says all of it in the log.
+    pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: bound driver pci-bus to device 1, pci-host-0, as platform:pci-host-ecam",
+                1,
+            ),
+            (b"device-manager: started driver pci-bus for device 1 as pid", 1),
+            (b", pci-0000:00:00.0, as pci:v8086d29c0sv", 1),
+            (b", pci-0000:00:1f.0, as pci:v8086d2918sv", 1),
+            (b"device-manager: bound driver test-pci to device", 1),
+            (b"device-manager: started driver test-pci for device", 1),
+            (b"device-manager: bound driver test-edu to device", 1),
+            (b"device-manager: started driver test-edu for device", 1),
+            (b"device-manager: the driver of device 1 ", 6),
+            (
+                b"device-manager: bound driver virtio-blk to device 5, pci-0000:00:02.0, as pci:v1af4d1042",
+                1,
+            ),
+            (b"device-manager: started driver virtio-blk for device 5 as pid", 2),
+            // The btrfs test driver kills the disk's driver, which is
+            // restarted with the disk and its partitions kept; the disk is
+            // added again and the partition driver reconnected to it.
+            (
+                b"device-manager: driver virtio-blk for device 5 terminated with code -3, signal 9",
+                1,
+            ),
+            (b"device-manager: restarting driver virtio-blk for device 5", 1),
+            (b" again, disk-0, under 5", 1),
+            (b"device-manager: reconnected device ", 1),
+            (
+                b", disk-0, as storage:disk, under 5, with 0 resources",
+                1,
+            ),
+            (b"device-manager: started driver test-disk for device", 2),
+            (b"device-manager: bound driver fat to device", 1),
+            (b"device-manager: started driver fat for device", 1),
+            (b"device-manager: bound driver test-fat to device", 1),
+            (b"device-manager: started driver test-fat for device", 1),
+            // The FAT and btrfs file systems, each under its service ID
+            // and its partition GUID, btrfs also as the root, and FAT,
+            // the EFI system partition on the root's disk, as the ESP.
+            (b"device-manager: published device.filesystem ", 6),
+            (b"device-manager: published device.filesystem partuuid-", 2),
+            (b"device-manager: published device.filesystem root for device", 1),
+            (b"device-manager: published device.filesystem esp for device", 1),
+            (b"process-manager: namespaces come from the root file system", 1),
+            (b"process-manager: serving the EFI system partition as /boot/efi", 1),
+            (b"device-manager: published device.subvolumes ", 1),
+            (b"device-manager: bound driver btrfs to device", 1),
+            (b"device-manager: started driver btrfs for device", 1),
+            (b"device-manager: bound driver test-btrfs to device", 1),
+            (b"device-manager: started driver test-btrfs for device", 1),
+            (b"device-manager: bound driver partition to device", 3),
+            (b"device-manager: started driver partition for device", 3),
+            (
+                b", part-1, as gpt:0fc63daf-8483-4772-8e79-3d69d8477de4, under",
+                2,
+            ),
+            (
+                b", part-1, as gpt:c12a7328-f81f-11d2-ba4b-00a0c93ec93b, under",
+                1,
+            ),
+            (
+                b", part-2, as gpt:fa730af6-8ba3-42d9-b155-466909d08135, under",
+                1,
+            ),
+            (
+                b", part-3, as gpt:eb1f4cf2-5884-4f87-880c-3dd4d8286764, under",
+                1,
+            ),
+            (
+                b", part-4, as gpt:38a2aae9-c051-4fe5-a24a-441d4a220d2a, under",
+                1,
+            ),
+            (b"device-manager: bound driver nvme to device", 1),
+            (b", as pci:c010802", 1),
+            (b"device-manager: started driver nvme for device", 1),
+            (b", disk-1, as storage:disk, under", 1),
+            (b"device-manager: bound driver ahci to device", 1),
+            (b", pci-0000:00:1f.2, as pci:c010601", 1),
+            (b"device-manager: started driver ahci for device", 1),
+            (b", disk-2, as storage:disk, under", 1),
+            // The three disks, each with the serial number `mikros`.
+            (b" resources, serial mikros, removable false", 3),
+            // The three disks and the six partitions on them, none of
+            // them removable.
+            (b", cache write-back", 9),
+            // The root partition's file system, which has no storage
+            // profiles, so the defaults above apply.
+            (
+                b"device-manager: reading storage profiles from the root file system",
+                1,
+            ),
+            // The disks and partitions, and the disk of the restarted
+            // virtio-blk driver again, under its old ID.
+            (b"device-manager: published device.storage ", 10),
+            (
+                b"device-manager: driver test-reset for device 4 failed after 5 restarts",
+                1,
+            ),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"driver pci-bus declined",
+            b"driver pci-bus for device 1 terminated",
+            b"driver pci-bus for device 1 did not start",
+            b"driver test-pci declined",
+            b"driver test-edu declined",
+            b"driver virtio-blk declined",
+            b"driver test-disk declined",
+            b"driver nvme declined",
+            b"driver ahci declined",
+            b"driver partition declined",
+            b"driver fat declined",
+            b"driver test-fat declined",
+            b"driver btrfs declined",
+            b"driver test-btrfs declined",
+        ];
+        let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
+        ensure("adding the PCI functions and starting their driver", logged)
+    }
+
+    /// Starts the service manager from the boot image member `image`,
+    /// giving it the root resource, the log and init's platform
+    /// information, which the device manager gets, after skipping what
+    /// the log already holds. When `framebuffer`
+    /// is true, it also gets a memory object in place of a framebuffer,
+    /// and the platform information has its framebuffer flag set. Then
+    /// reads the log until each line of `expected` has appeared as many
+    /// times as it gives, or a line has appeared with a part of
+    /// `failed`, a failure to start the broker or the device manager, or
+    /// the device manager's end. Returns whether each line appeared
+    /// exactly as many times.
+    fn device_manager_logs(
+        s: &Startup,
+        image: &[u8],
+        framebuffer: bool,
+        expected: &[(&[u8], usize)],
+        failed: &[&[u8]],
+    ) -> Result<bool> {
+        // The processes of earlier tests may still log, so the lines
+        // name what they are about.
+        const ENDED: &[&[u8]] = &[
+            b"service permissions did not start",
+            b"service permissions will not start",
+            b"service device-manager did not start",
+            b"service device-manager will not start",
+            b"service device-manager exited",
+            b"service device-manager ended",
+        ];
+        let (m, init, reader) = serving(s, image)?;
+        // The lines of earlier tests are skipped.
+        while super::read_record(reader.raw()).0 == 0 {}
+        let deadline = super::within(super::PROBE_SECONDS);
+        let mut message = s.message().to_vec();
+        if framebuffer {
+            message[0x04] |= 1;
+        }
+        let memory = |what, bytes: &[u8]| -> Result<OwnedHandle> {
+            let mut mem = 0;
+            let size = (bytes.len() as u64)
+                .max(1)
+                .next_multiple_of(super::PAGE_SIZE);
+            // SAFETY: the out pointer is valid for the call.
+            check(what, unsafe { sys::mem_create(size, 0, &mut mem) })?;
+            // SAFETY: the kernel just created the handle for us.
+            let mem = unsafe { OwnedHandle::from_raw(mem) };
+            // SAFETY: the pointer and length describe `bytes`.
+            check(what, unsafe {
+                sys::mem_write(mem.raw(), 0, bytes.as_ptr(), bytes.len() as u64)
+            })?;
+            Ok(mem)
+        };
+        let user = |id, handle| StartupHandle {
+            role: HandleRole::User,
+            id,
+            handle,
+        };
+        let mut handles = alloc::vec![
+            user(1, copy(s.root_resource, SAME_RIGHTS)?),
+            user(2, copy(s.log, SAME_RIGHTS)?),
+            user(5, memory("writing the platform information", &message)?),
+        ];
+        if framebuffer {
+            handles.push(user(4, memory("making a framebuffer", &[])?));
+        }
+        let reply = init.start_service_manager(handles, deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        let mut seen = alloc::vec![0; expected.len()];
+        let outcome = loop {
+            if seen
+                .iter()
+                .zip(expected)
+                .all(|(&n, &(_, count))| n >= count)
+            {
+                break Some(true);
+            }
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            for (seen, (line, _)) in seen.iter_mut().zip(expected) {
+                *seen += usize::from(super::contains(message, line));
+            }
+            if failed
+                .iter()
+                .chain(ENDED)
+                .any(|f| super::contains(message, f))
+            {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        let exact = seen
+            .iter()
+            .zip(expected)
+            .all(|(&n, &(_, count))| n == count);
+        if outcome != Some(true) || !exact {
+            mikros_rt::log!(Error, "device manager lines seen: {seen:?}");
+        }
+        ensure("logging an outcome in time", outcome.is_some())?;
+        Ok(outcome == Some(true) && exact)
+    }
+
+    /// The process manager ends without serving init when `Start` has
+    /// another version or another message follows it.
+    pub fn process_manager_refuses_bad_start(s: &Startup) -> Result {
+        let mut m = start(s)?;
+        let (startup, _init) = start_message(s, &m, 1)?;
+        m.send(startup, false)?;
+        ensure(
+            "refusing another version",
+            exit_code(m.process)? == PANIC_EXIT_CODE,
+        )?;
+        let mut m = start(s)?;
+        let (first, _init) = start_message(s, &m, 2)?;
+        let (second, _other) = start_message(s, &m, 2)?;
+        m.send(first, true)?;
+        // The process manager may have ended before the second arrives.
+        let _ = m.send(second, false);
+        ensure(
+            "refusing a second Start",
+            exit_code(m.process)? == PANIC_EXIT_CODE,
+        )
+    }
+}
+
+mod bootfs {
+    //! The process manager's boot file system, served on this thread's
+    //! executor and driven over a channel.
+
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicU32, Ordering};
+    use mikros_rt::Startup;
+    use mikros_rt::exec::Executor;
+    use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
+    use mikros_rt::interfaces::mikros::fs::*;
+    use mikros_rt::sys;
+    use mikros_test::{Failure, Result, check, ensure};
+    use process_manager::bootfs::Fs;
+
+    /// The first four bytes that the helper thread read from a paged
+    /// object, and its status.
+    static PAGED_HEAD: AtomicU32 = AtomicU32::new(0);
+    static PAGED_STATUS: AtomicU32 = AtomicU32::new(u32::MAX);
+
+    /// Reads the start of the memory object `mem`, which this thread's
+    /// process supplies pages for, then signals `event` and ends.
+    extern "sysv64" fn read_paged(mem: u64, event: u64) -> ! {
+        let mut head = [0u8; 4];
+        // SAFETY: the pointer describes `head`.
+        let status = unsafe { sys::mem_read(mem as sys::Handle, 0, head.as_mut_ptr(), 4) };
+        PAGED_HEAD.store(u32::from_le_bytes(head), Ordering::Release);
+        PAGED_STATUS.store(status as u32, Ordering::Release);
+        // SAFETY: the calls take no pointers.
+        unsafe {
+            sys::object_signal(event as sys::Handle, 0, super::USER0);
+            sys::thread_exit();
+        }
+        unreachable!("thread_exit returned");
+    }
+    const MANAGER: &str = "usr/bin/process-manager";
+
+    fn failed(what: &'static str) -> Failure {
+        Failure { what, status: 0 }
+    }
+
+    /// The reply to a call, or a failure naming `what`.
+    fn reply<T>(
+        what: &'static str,
+        r: core::result::Result<
+            core::result::Result<T, Error>,
+            mikros_rt::interfaces::__midl::Error,
+        >,
+    ) -> Result<core::result::Result<T, Error>> {
+        r.map_err(|_| failed(what))
+    }
+
+    /// Opens `path` from `dir` with `flags` and `rights`.
+    async fn open(
+        dir: &NodeAsyncClient,
+        reactor: &mikros_rt::exec::Reactor,
+        path: &str,
+        flags: OpenFlags,
+        rights: Rights,
+    ) -> Result<core::result::Result<(NodeOpenResponse, NodeAsyncClient), Error>> {
+        let (client, server) = endpoints::<Node>().map_err(|_| failed("creating a channel"))?;
+        let r = dir.open(path.into(), flags, 0, rights, server).await;
+        Ok(reply("opening", r)?
+            .map(|response| (response, NodeAsyncClient::new(client, reactor.clone()))))
+    }
+
+    /// Files open and read, with a cursor of their own, and give private
+    /// and paged memory objects with their contents; directories list in
+    /// name order; paths, flags and rights are checked; and every change
+    /// fails without `WRITE`.
+    /// A new memory object that holds the bytes of the boot image.
+    fn copy_of_boot_image(s: &Startup) -> Result<OwnedHandle> {
+        let size = s.boot_image_size.next_multiple_of(super::PAGE_SIZE);
+        let mut at = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("mapping the boot image", unsafe {
+            sys::vm_map(
+                s.process,
+                super::PERM_READ,
+                0,
+                s.boot_image,
+                0,
+                size,
+                &mut at,
+            )
+        })?;
+        let mut mem = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let created = check("creating the copy", unsafe {
+            sys::mem_create(size, 0, &mut mem)
+        });
+        // SAFETY: the boot image is mapped readable at `at` for `size`
+        // bytes.
+        let written = created.and_then(|()| {
+            check("writing the copy", unsafe {
+                sys::mem_write(mem, 0, at as *const u8, size)
+            })
+        });
+        // SAFETY: the call takes no pointers.
+        let unmapped = check("unmapping the boot image", unsafe {
+            sys::vm_unmap(s.process, at, size)
+        });
+        // SAFETY: the handle, when created, is ours alone.
+        let mem = (mem != 0).then(|| unsafe { OwnedHandle::from_raw(mem) });
+        written?;
+        unmapped?;
+        mem.ok_or(failed("creating the copy"))
+    }
+
+    pub fn bootfs_serves_the_boot_image(s: &Startup) -> Result {
+        let mut ex = Executor::new().map_err(|status| Failure {
+            what: "creating an executor",
+            status,
+        })?;
+        let reactor = ex.reactor().clone();
+        // Fs maps its image into this process for good, which would keep
+        // the boot image object alive past the close in
+        // boot_image_object, so it is given a copy.
+        let image = copy_of_boot_image(s)?;
+        let fs = Fs::new(s.process, &image, reactor.clone(), ex.spawner().clone()).map_err(
+            |status| Failure {
+                what: "serving the boot image",
+                status,
+            },
+        )?;
+        let (client, server) = endpoints::<Node>().map_err(|_| failed("creating a channel"))?;
+        fs.serve_root(server, Rights::READ | Rights::EXECUTE);
+        let root = NodeAsyncClient::new(client, reactor.clone());
+        let none = OpenFlags(0);
+        ex.block_on(async {
+            let attrs = reply("reading attributes", root.get_attributes().await)?;
+            ensure(
+                "describing the root",
+                attrs.is_ok_and(|a| a.attributes.r#type == NodeType::Directory),
+            )?;
+            let info = reply("querying", root.query_filesystem().await)?;
+            ensure(
+                "naming the file system",
+                info.is_ok_and(|i| i.info.r#type == "bootfs" && i.info.read_only),
+            )?;
+
+            // A file reads by offset and by cursor.
+            let rights = Rights::READ | Rights::EXECUTE;
+            let opened = open(&root, &reactor, MANAGER, none, rights).await?;
+            let Ok((response, file)) = opened else {
+                return Err(failed("opening a file"));
+            };
+            ensure("opening a file", response.r#type == NodeType::File)?;
+            let head = reply("reading", file.read(0, 8).await)?;
+            ensure(
+                "reading the start",
+                head.as_ref().is_ok_and(|r| r.data.starts_with(b"\x7fELF")),
+            )?;
+            let first = reply("reading next", file.read_next(4).await)?;
+            let second = reply("reading next", file.read_next(4).await)?;
+            ensure(
+                "reading at the cursor",
+                first.is_ok_and(|f| f.data == b"\x7fELF")
+                    && second.is_ok_and(|n| head.is_ok_and(|h| h.data[4..] == n.data[..])),
+            )?;
+            let size = reply("reading attributes", file.get_attributes().await)?
+                .map(|a| a.attributes.size)
+                .map_err(|_| failed("sizing the file"))?;
+            let end = reply("seeking", file.seek(-4, SeekOrigin::End).await)?;
+            ensure(
+                "seeking from the end",
+                end.is_ok_and(|e| e.position == size - 4),
+            )?;
+            let tail = reply("reading", file.read(size - 2, 100).await)?;
+            ensure("reading to the end", tail.is_ok_and(|t| t.data.len() == 2))?;
+            let write = reply("writing", file.write(0, Vec::from(*b"x")).await)?;
+            ensure("refusing to write", write == Err(Error::AccessDenied))?;
+            let token = reply("getting a token", root.get_token().await)?;
+            ensure(
+                "refusing a token",
+                token.is_err_and(|e| e == Error::AccessDenied),
+            )?;
+
+            // Memory objects hold the file's contents: a private copy, and
+            // a paged object whose pages this thread's executor supplies
+            // while another thread reads it.
+            let private = MemoryFlags::PRIVATE | MemoryFlags::WRITE;
+            let private = reply("getting memory", file.get_memory_object(private).await)?
+                .map_err(|_| failed("getting a private memory object"))?;
+            let mut head = [0u8; 4];
+            // SAFETY: the pointer describes `head`.
+            check("reading private memory", unsafe {
+                sys::mem_read(private.memory.raw(), 0, head.as_mut_ptr(), 4)
+            })?;
+            ensure("copying the file", head == *b"\x7fELF")?;
+            let flags = MemoryFlags::EXECUTE;
+            let paged = reply("getting memory", file.get_memory_object(flags).await)?
+                .map_err(|_| failed("getting a paged memory object"))?;
+            let mut event = 0;
+            // SAFETY: the out pointer is valid for the call.
+            check("creating an event", unsafe {
+                sys::event_create(0, &mut event)
+            })?;
+            let mem = paged.memory.raw();
+            super::spawn2(s, read_paged, u64::from(mem), u64::from(event))?;
+            let signalled = reactor.signals(event, super::USER0).await;
+            ensure("reading paged memory", signalled.is_ok())?;
+            ensure(
+                "supplying the file's pages",
+                PAGED_STATUS.load(Ordering::Acquire) == 0
+                    && PAGED_HEAD.load(Ordering::Acquire).to_le_bytes() == *b"\x7fELF",
+            )?;
+            let shared = MemoryFlags::WRITE;
+            let shared = reply("getting memory", file.get_memory_object(shared).await)?;
+            ensure(
+                "refusing shared writable memory",
+                shared.err() == Some(Error::AccessDenied),
+            )?;
+
+            // Rights, flags and paths are checked.
+            let refused = [
+                (
+                    MANAGER,
+                    none,
+                    Rights::READ | Rights::WRITE,
+                    Error::AccessDenied,
+                ),
+                ("missing", none, Rights::READ, Error::NotFound),
+                (
+                    "missing",
+                    OpenFlags::CREATE,
+                    Rights::READ,
+                    Error::AccessDenied,
+                ),
+                (
+                    MANAGER,
+                    OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
+                    Rights::READ,
+                    Error::Exists,
+                ),
+                (
+                    "init",
+                    OpenFlags::DIRECTORY,
+                    Rights::READ,
+                    Error::NotDirectory,
+                ),
+                ("init/x", none, Rights::READ, Error::NotDirectory),
+                ("/init", none, Rights::READ, Error::Invalid),
+                ("usr/../init", none, Rights::READ, Error::AccessDenied),
+            ];
+            for (path, flags, rights, error) in refused {
+                let opened = open(&root, &reactor, path, flags, rights).await?;
+                ensure("refusing to open", opened.err() == Some(error))?;
+            }
+            let existing = open(&root, &reactor, "usr", OpenFlags::CREATE, Rights::READ).await?;
+            ensure("opening an existing name to create", existing.is_ok())?;
+
+            // A directory lists in name order, in parts.
+            let Ok((_, tests)) = open(&root, &reactor, "tests", none, Rights::READ).await? else {
+                return Err(failed("opening a directory"));
+            };
+            let mut names: Vec<String> = Vec::new();
+            let mut cookie = 0;
+            loop {
+                let listed = reply("listing", tests.read_directory(cookie, true).await)?
+                    .map_err(|_| failed("listing a directory"))?;
+                if listed.entries.is_empty() {
+                    break;
+                }
+                ensure(
+                    "listing attributes",
+                    listed.entries.iter().all(|e| e.attributes.is_some()),
+                )?;
+                names.extend(listed.entries.into_iter().map(|e| e.name));
+                cookie = listed.next;
+            }
+            ensure(
+                "listing a directory",
+                names
+                    == [
+                        "accounts.img",
+                        "broker.img",
+                        "call-server",
+                        "channel-echo",
+                        "debuggee",
+                        "devices.img",
+                        "failing.img",
+                        "launcher.img",
+                        "log.img",
+                        "managed",
+                        "namespaces.img",
+                        "pci.img",
+                        "pie",
+                        "ports.img",
+                        "restart.img",
+                        "services.img",
+                        "time.img",
+                        "tmpfs.img",
+                    ],
+            )?;
+
+            // A clone gets no more rights than its connection.
+            let (_, server) = endpoints::<Node>().map_err(|_| failed("creating a channel"))?;
+            let clone = reply("cloning", root.clone(server, Rights::WRITE).await)?;
+            ensure(
+                "refusing more rights",
+                clone.is_err_and(|e| e == Error::AccessDenied),
+            )?;
+            Ok(())
+        })
+    }
+}
+
+mod executor {
+    //! The runtime's executor, waiting on one port.
+
+    use super::{USER0, now, spawn2};
+    use alloc::boxed::Box;
+    use alloc::rc::Rc;
+    use core::cell::Cell;
+    use core::future::{Future, poll_fn};
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::task::{Poll, Waker};
+    use mikros_rt::Startup;
+    use mikros_rt::exec::Executor;
+    use mikros_rt::sys::{self, Handle};
+    use mikros_test::{Failure, Result, check, ensure};
+
+    fn new_event() -> Result<Handle> {
+        let mut event = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating an event", unsafe {
+            sys::event_create(0, &mut event)
+        })?;
+        Ok(event)
+    }
+
+    fn close(handle: Handle) {
+        // SAFETY: closing takes no pointers.
+        unsafe { sys::handle_close(handle) };
+    }
+
+    static WOKEN_ELSEWHERE: AtomicBool = AtomicBool::new(false);
+
+    /// Wakes the boxed waker at `waker` from this thread, then ends.
+    extern "sysv64" fn wake_from_thread(waker: u64, _: u64) -> ! {
+        // SAFETY: the test boxed the waker for this thread alone.
+        let waker = unsafe { Box::from_raw(waker as *mut Waker) };
+        WOKEN_ELSEWHERE.store(true, Ordering::Release);
+        waker.wake();
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::thread_exit() };
+        unreachable!("thread_exit returned");
+    }
+
+    /// Futures for object signals, channel messages, timers and
+    /// timelines complete when their packets arrive; spawned tasks run
+    /// beside the main future; a waker used on another thread ends the
+    /// wait on the port; and a dropped wait is cancelled.
+    pub fn executor_waits_on_objects(s: &Startup) -> Result {
+        let mut ex = Executor::new().map_err(|status| Failure {
+            what: "creating an executor",
+            status,
+        })?;
+        let reactor = ex.reactor().clone();
+
+        // A spawned task waits for an event that the main future signals.
+        let event = new_event()?;
+        let done = Rc::new(Cell::new(false));
+        let (r, d) = (reactor.clone(), done.clone());
+        ex.spawner().spawn(async move {
+            let observed = r.signals(event, USER0).await;
+            d.set(observed.is_ok_and(|o| o & USER0 != 0));
+        });
+        let signalled = ex.block_on(async {
+            // SAFETY: the call takes no pointers.
+            unsafe { sys::object_signal(event, 0, USER0) };
+            reactor.signals(event, USER0).await
+        });
+        ensure(
+            "observing the event",
+            signalled.is_ok_and(|o| o & USER0 != 0),
+        )?;
+        ex.block_on(poll_fn(|cx| {
+            if done.get() {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }));
+        ensure("running the spawned task", done.get())?;
+
+        // A dropped wait leaves nothing behind that a later wait trips on.
+        let other = new_event()?;
+        drop(reactor.signals(other, USER0));
+        let mut pending = Box::pin(reactor.signals(other, USER0));
+        let first = ex.block_on(poll_fn(|cx| {
+            Poll::Ready(pending.as_mut().poll(cx).is_pending())
+        }));
+        drop(pending);
+        ensure("waiting before the signal", first)?;
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::object_signal(other, 0, USER0) };
+        ensure(
+            "waiting after a cancelled wait",
+            ex.block_on(reactor.signals(other, USER0)).is_ok(),
+        )?;
+
+        // A channel becomes readable.
+        let (mut a, mut b) = (0, 0);
+        // SAFETY: the out pointers are valid for the call.
+        check("creating a channel", unsafe {
+            sys::channel_create(0, &mut a, &mut b)
+        })?;
+        // SAFETY: the pointer describes one byte; no handles are sent.
+        check("writing", unsafe {
+            sys::channel_write(a, [1u8].as_ptr(), 1, core::ptr::null(), 0)
+        })?;
+        ensure(
+            "reading a message",
+            ex.block_on(reactor.readable(b)).is_ok(),
+        )?;
+
+        // A timer ends no earlier than its deadline.
+        let deadline = now() + 20_000_000;
+        ensure(
+            "sleeping",
+            ex.block_on(reactor.sleep_until(deadline)).is_ok(),
+        )?;
+        ensure("sleeping until the deadline", now() >= deadline)?;
+
+        // A timeline reaches a value.
+        let mut timeline = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating a timeline", unsafe {
+            sys::timeline_create(1, 0, &mut timeline)
+        })?;
+        // SAFETY: the call takes no pointers.
+        check("signalling the timeline", unsafe {
+            sys::timeline_signal(timeline, 3)
+        })?;
+        let value = ex.block_on(reactor.timeline(timeline, 2));
+        ensure("reaching the timeline value", value == Ok(3))?;
+
+        // A waker used on another thread ends the wait on the port.
+        WOKEN_ELSEWHERE.store(false, Ordering::Release);
+        let mut started = false;
+        let mut failed = None;
+        ex.block_on(poll_fn(|cx| {
+            if WOKEN_ELSEWHERE.load(Ordering::Acquire) {
+                return Poll::Ready(());
+            }
+            if !started {
+                started = true;
+                let waker = Box::into_raw(Box::new(cx.waker().clone())) as u64;
+                if let Err(e) = spawn2(s, wake_from_thread, waker, 0) {
+                    failed = Some(e);
+                    return Poll::Ready(());
+                }
+            }
+            Poll::Pending
+        }));
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        ensure(
+            "waking from another thread",
+            WOKEN_ELSEWHERE.load(Ordering::Acquire),
+        )?;
+
+        for h in [event, other, a, b, timeline] {
+            close(h);
+        }
+        Ok(())
+    }
+}
+
+const TESTS: [(&str, Test); 144] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6686,7 +10450,111 @@ const TESTS: [(&str, Test); 104] = [
     ("timers", timers),
     ("priorities", priorities),
     ("queued_thread_preempts", queued_thread_preempts),
+    ("cpu_count_and_affinity", cpu_count_and_affinity),
+    (
+        "signal_reaches_other_processor",
+        signal_reaches_other_processor,
+    ),
+    ("killed_as_it_sleeps", killed_as_it_sleeps),
+    ("futexes_across_processors", futexes_across_processors),
+    (
+        "clock_agrees_across_processors",
+        clock_agrees_across_processors,
+    ),
+    (
+        "threads_run_on_every_processor",
+        threads_run_on_every_processor,
+    ),
+    (
+        "process_signal_interrupts_one_wait",
+        process_signal_interrupts_one_wait,
+    ),
+    ("temporary_mask_ends_a_wait", temporary_mask_ends_a_wait),
+    ("stop_continue_and_kill", stop_continue_and_kill),
+    ("stopped_wait_goes_on", stopped_wait_goes_on),
+    ("heap_allocates_and_frees", heap_allocates_and_frees),
+    ("midl_bindings_on_channels", midl_bindings_on_channels),
+    ("loader_runs_pie", loader_runs_pie),
+    ("loader_refuses_bad_images", loader_refuses_bad_images),
+    (
+        "startup_transfer_accepted",
+        managed::startup_transfer_accepted,
+    ),
+    (
+        "startup_transfer_refused",
+        managed::startup_transfer_refused,
+    ),
+    (
+        "process_manager_serves_init",
+        manager::process_manager_serves_init,
+    ),
+    (
+        "process_manager_refuses_bad_start",
+        manager::process_manager_refuses_bad_start,
+    ),
+    (
+        "process_manager_serves_launcher",
+        manager::process_manager_serves_launcher,
+    ),
+    (
+        "ported_software_passes_its_tests",
+        manager::ported_software_passes_its_tests,
+    ),
+    (
+        "permission_broker_serves",
+        manager::permission_broker_serves,
+    ),
+    (
+        "service_manager_starts_boot_services",
+        manager::service_manager_starts_boot_services,
+    ),
+    (
+        "tmpfs_serves_its_clients",
+        manager::tmpfs_serves_its_clients,
+    ),
+    (
+        "log_service_collects_records",
+        manager::log_service_collects_records,
+    ),
+    ("time_service_keeps_utc", manager::time_service_keeps_utc),
+    (
+        "process_manager_builds_namespaces_from_the_boot_image",
+        manager::process_manager_builds_namespaces_from_the_boot_image,
+    ),
+    (
+        "accounts_service_serves_users",
+        manager::accounts_service_serves_users,
+    ),
+    (
+        "device_manager_adds_platform_devices",
+        manager::device_manager_adds_platform_devices,
+    ),
+    (
+        "device_manager_handles_failing_drivers",
+        manager::device_manager_handles_failing_drivers,
+    ),
+    (
+        "device_manager_keeps_children_across_a_restart",
+        manager::device_manager_keeps_children_across_a_restart,
+    ),
+    (
+        "executor_waits_on_objects",
+        executor::executor_waits_on_objects,
+    ),
+    (
+        "bootfs_serves_the_boot_image",
+        bootfs::bootfs_serves_the_boot_image,
+    ),
+    (
+        "queued_signals_of_ended_thread",
+        queued_signals_of_ended_thread,
+    ),
+    (
+        "reset_handler_discards_ignored",
+        reset_handler_discards_ignored,
+    ),
     ("ports", ports),
+    ("ports_are_readable", ports_are_readable),
     ("port_registration_limit", port_registration_limit),
     ("log_readers", log_readers),
     ("memory_operations", memory_operations),
@@ -6707,9 +10575,15 @@ const TESTS: [(&str, Test); 104] = [
     ("undefined_options_refused", undefined_options_refused),
     ("syscall_clears_flags", syscall_clears_flags),
     ("reserved_hardware_refused", reserved_hardware_refused),
+    (
+        "resources_report_their_ranges",
+        resources_report_their_ranges,
+    ),
     ("clones", clones),
     ("pagers", pagers),
     ("pager_operations", pager_operations),
+    ("writebacks_and_discards", writebacks_and_discards),
+    ("lending_frames", lending_frames),
     ("large_pager_operations", large_pager_operations),
     ("paged_outputs", paged_outputs),
     ("access_flag_cleared_on_entry", access_flag_cleared_on_entry),
@@ -6787,6 +10661,7 @@ const TESTS: [(&str, Test); 104] = [
         "budget_creation_and_thresholds",
         budget_creation_and_thresholds,
     ),
+    ("memory_charged_to_a_budget", memory_charged_to_a_budget),
     ("monotonic_clock_and_page", monotonic_clock_and_page),
     ("mappings_outlive_handles", mappings_outlive_handles),
     ("signal_frame", signal_frame),
@@ -6814,12 +10689,22 @@ const TESTS: [(&str, Test); 104] = [
     ("processes_and_channels", processes_and_channels),
     ("init_segments_as_loaded", init_segments_as_loaded),
     ("boot_memory_reclaimed", boot_memory_reclaimed),
+    // Next to last, and after the fuzz build's hook tests, as its bus
+    // driver outlives the test and keeps exclusive resources, the BTI
+    // range of segment 0 and the BARs of q35, and its processes keep
+    // allocating.
+    (
+        "device_manager_starts_the_pci_bus_driver",
+        manager::device_manager_starts_the_pci_bus_driver,
+    ),
     // Runs last: it closes the boot image.
     ("boot_image_object", boot_image_object),
 ];
 
 /// The tests of the fuzz build's test hooks, which run before the last
-/// test, as they start programs from the boot image.
+/// two tests: they start programs from the boot image, which the last
+/// test closes, and count charges, which the processes that outlive the
+/// next to last test would change.
 #[cfg(feature = "fuzz")]
 const HOOK_TESTS: &[(&str, Test)] = &hooks::TESTS;
 #[cfg(not(feature = "fuzz"))]
@@ -6894,6 +10779,17 @@ fn scenario(s: &Startup) -> Option<i64> {
     })
 }
 
+/// The tests that the command line names with `skip=`, separated by
+/// commas, which are left out. Nothing is allocated, so that the first
+/// test finds no heap memory charged.
+fn skipped(s: &Startup) -> impl Iterator<Item = &'static str> {
+    let cmdline: &'static str = core::str::from_utf8(s.cmdline).unwrap_or("");
+    cmdline
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("skip="))
+        .flat_map(|list| list.split(','))
+}
+
 fn main(s: &Startup) -> i64 {
     if let Some(code) = scenario(s) {
         return code;
@@ -6902,9 +10798,23 @@ fn main(s: &Startup) -> i64 {
         log!(Error, "TEST setup FAILED: {} ({})", f.what, f.status);
         return 1;
     }
-    let mut failed = 0;
-    let (last, first) = TESTS.split_last().expect("there are tests");
-    for (name, test) in first.iter().chain(HOOK_TESTS).chain([last]) {
+    let known = |name: &&str| TESTS.iter().chain(HOOK_TESTS).any(|(n, _)| n == name);
+    if let Some(name) = skipped(s).find(|name| !known(name)) {
+        log!(Error, "TEST setup FAILED: there is no test {name} to skip");
+        return 1;
+    }
+    let (mut failed, mut left_out) = (0, 0);
+    if let Err(f) = keep_boot_log(s) {
+        log!(Error, "TEST setup FAILED: {} ({})", f.what, f.status);
+        return 1;
+    }
+    let (first, last) = TESTS.split_at(TESTS.len() - 2);
+    for (name, test) in first.iter().chain(HOOK_TESTS).chain(last) {
+        if skipped(s).any(|n| n == *name) {
+            left_out += 1;
+            log!(Info, "TEST {name} SKIPPED");
+            continue;
+        }
         match test(s) {
             Ok(()) => log!(Info, "TEST {name} PASSED"),
             Err(f) => {
@@ -6913,10 +10823,14 @@ fn main(s: &Startup) -> i64 {
             }
         }
     }
-    log!(
-        Info,
-        "TESTS DONE: {} passed, {failed} failed",
-        TESTS.len() + HOOK_TESTS.len() - failed
-    );
+    let passed = TESTS.len() + HOOK_TESTS.len() - failed - left_out;
+    if left_out == 0 {
+        log!(Info, "TESTS DONE: {passed} passed, {failed} failed");
+    } else {
+        log!(
+            Info,
+            "TESTS DONE: {passed} passed, {failed} failed, {left_out} skipped"
+        );
+    }
     exit_qemu(if failed == 0 { PASSED } else { FAILED })
 }

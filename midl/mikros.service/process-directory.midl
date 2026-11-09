@@ -1,0 +1,9 @@
+// MIKSPEC-0036.R14
+
+library mikros.service;
+using mikros.base;
+
+protocol ProcessDirectory {
+    @1 Bind(client ClientIdentity, directory server_end<Directory>)
+        -> () error base.Status;
+};

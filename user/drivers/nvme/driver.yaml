@@ -1,0 +1,7 @@
+# The manifest of the NVMe driver, installed as
+# usr/lib/drivers/nvme/driver.yaml.
+name: nvme
+binary: /usr/lib/drivers/nvme/nvme
+match: [pci:c010802]
+kind: normal
+needs: [dma]

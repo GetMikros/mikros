@@ -7,15 +7,11 @@ use crate::clock::{
 use crate::cpu::{in8, in32, out8, rdtsc};
 use crate::log::log;
 use crate::memory::DirectMem;
-use crate::memory_object::MemoryObject;
-use alloc::sync::Arc;
 use boot_protocol::BootInfo;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
 use kernel_core::acpi::{self, Address, PmTimer, Tables};
 use kernel_core::clock::{Extender, quarter_wrap_ns, ticks_to_ns};
-use kernel_core::object::memory::PAGE_SIZE;
 use kernel_core::object::resource::KIND_IOPORT;
-use kernel_core::status::Error;
 
 const NONE: u8 = 0;
 const TSC: u8 = 1;
@@ -46,6 +42,14 @@ static EXTEND_64: Extender = Extender::new(64);
 static WIDTH: AtomicU8 = AtomicU8::new(64);
 /// The TSC frequency.
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+/// What the clock had reached when its source last changed, added to
+/// the time counted from `BASE`.
+static OFFSET: AtomicI64 = AtomicI64::new(0);
+/// The HPET's registers, period in femtoseconds and whether its counter
+/// is 64 bits wide, 0 for none, kept for a move away from the TSC.
+static HPET_ADDRESS: AtomicU64 = AtomicU64::new(0);
+static HPET_PERIOD: AtomicU64 = AtomicU64::new(0);
+static HPET_WIDE: AtomicBool = AtomicBool::new(false);
 
 /// The TSC frequency, once the clock is set up.
 pub fn tsc_hz() -> u64 {
@@ -118,12 +122,40 @@ pub fn now() -> i64 {
     let source = SOURCE.load(Ordering::Acquire);
     let ticks = counter().saturating_sub(BASE.load(Ordering::Relaxed));
     let rate = RATE.load(Ordering::Relaxed);
-    match source {
+    let counted = match source {
         TSC => scaled_ns(ticks, rate as u32, (rate >> 32) as u32),
         HPET => i64::try_from(u128::from(ticks) * u128::from(rate) / 1_000_000).unwrap_or(i64::MAX),
         NONE => 0,
         _ => ticks_to_ns(ticks, rate),
+    };
+    OFFSET.load(Ordering::Relaxed).saturating_add(counted)
+}
+
+/// Whether the monotonic clock comes from the TSC.
+pub fn from_tsc() -> bool {
+    SOURCE.load(Ordering::Acquire) == TSC
+}
+
+/// Moves the monotonic clock from the TSC to the HPET, going on from the
+/// time it has reached, and returns whether it moved: not without an
+/// HPET. No other processor may read the clock meanwhile.
+pub fn leave_tsc() -> bool {
+    let address = HPET_ADDRESS.load(Ordering::Relaxed);
+    if SOURCE.load(Ordering::Acquire) != TSC || address == 0 {
+        return false;
     }
+    let enabled = kernel_core::arch::interrupts_disable();
+    let reached = now();
+    ADDRESS.store(address, Ordering::Relaxed);
+    RATE.store(HPET_PERIOD.load(Ordering::Relaxed), Ordering::Relaxed);
+    let wide = HPET_WIDE.load(Ordering::Relaxed);
+    WIDTH.store(if wide { 64 } else { 32 }, Ordering::Relaxed);
+    SOURCE.store(HPET, Ordering::Release);
+    BASE.store(counter(), Ordering::Relaxed);
+    OFFSET.store(reached, Ordering::Release);
+    // SAFETY: the clock is consistent again.
+    unsafe { kernel_core::arch::interrupts_restore(enabled) };
+    true
 }
 
 /// Measures the frequency of `counter` while `reference`, running at
@@ -217,7 +249,11 @@ pub fn init(info: &BootInfo) {
         // SAFETY: setting the enable bit only starts the main counter.
         unsafe { ((virt + HPET_CONFIG) as *mut u64).write_volatile(config | HPET_ENABLE) };
         let capabilities = hpet_read(virt, HPET_CAPABILITIES);
-        (virt, capabilities >> 32, capabilities & HPET_64BIT != 0)
+        let (period, wide) = (capabilities >> 32, capabilities & HPET_64BIT != 0);
+        HPET_ADDRESS.store(virt, Ordering::Relaxed);
+        HPET_PERIOD.store(period, Ordering::Relaxed);
+        HPET_WIDE.store(wide, Ordering::Relaxed);
+        (virt, period, wide)
     });
 
     // The references, in order of preference.
@@ -285,21 +321,13 @@ pub fn init(info: &BootInfo) {
     log!(Info, "monotonic clock from {name}");
 }
 
-/// Creates the clock page at boot, charged to no budget. Its contents
-/// never change after boot, so `sequence` stays 0.
-pub fn create_clock_page() -> Result<Arc<MemoryObject>, Error> {
+/// The contents of the clock page. They never change after boot, so
+/// `sequence` stays 0.
+pub fn clock_page_header() -> [u8; crate::clock::CLOCK_PAGE_SIZE] {
     let tsc = (SOURCE.load(Ordering::Acquire) == TSC).then(|| {
         let rate = RATE.load(Ordering::Relaxed);
         let base = BASE.load(Ordering::Relaxed);
         (rate as u32, (rate >> 32) as u32, base, 0)
     });
-    let header = clock_page(tsc);
-    let page = MemoryObject::new(None, PAGE_SIZE, 0)?;
-    // This runs during boot, where no other thread could run.
-    let mut work = crate::publish::Work::new(|| {});
-    page.write(0, header.len() as u64, &mut work, |chunk| {
-        chunk.copy_from_slice(&header[..chunk.len()]);
-        Ok(())
-    })?;
-    Ok(page)
+    clock_page(tsc)
 }

@@ -6,8 +6,13 @@ license = "MPL-2.0"
 publish = false
 
 [features]
+default = ["entry"]
+# Defines `_start`, which runs the `__mikros_entry` of a `main!` macro.
+# Without it, another program entry, such as the C library's, is used.
+entry = []
 # Includes the bindings of the system calls that exist only for fuzzing.
 fuzz = []
 
 [build-dependencies]
+midlc = { path = "../../tools/midlc" }
 syscall-table = { path = "../../kernel/syscalls" }

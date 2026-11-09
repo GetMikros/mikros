@@ -26,13 +26,18 @@ pub enum Disk {
     Ahci,
 }
 
+/// The memory of a virtual machine, unless its command or options say
+/// otherwise.
+pub const DEFAULT_MEMORY: &str = "2G";
+
 /// The options for a virtual machine, shared by the commands that start
 /// one.
 #[derive(clap::Args, Clone, Debug)]
 pub struct MachineArgs {
-    /// Memory size, in QEMU's notation such as 2G.
-    #[arg(long, default_value = "2G")]
-    pub memory: String,
+    /// Memory size, in QEMU's notation such as 2G: 2G by default, and 3G
+    /// for `cargo xtask test`.
+    #[arg(long)]
+    pub memory: Option<String>,
     /// Number of processors.
     #[arg(long, default_value_t = 2)]
     pub cpus: u32,
@@ -56,11 +61,35 @@ pub fn kvm_available() -> bool {
         .is_ok()
 }
 
+/// The processor that a virtual machine has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Processor {
+    /// The host's, under KVM.
+    Host,
+    /// QEMU's emulated `max` processor.
+    Emulated,
+    /// The emulated processor with the vendor `GenuineIntel` and without
+    /// `RDCL_NO`, for which the kernel isolates its page tables.
+    EmulatedIntel,
+}
+
+impl Processor {
+    /// The host's processor when KVM can be used, and otherwise the
+    /// emulated one.
+    pub fn available() -> Processor {
+        if kvm_available() {
+            Processor::Host
+        } else {
+            Processor::Emulated
+        }
+    }
+}
+
 /// The QEMU arguments for a virtual machine booting `image` with the
 /// firmware code of `firmware` and the variable store `vars`.
 pub fn args(
     machine: &MachineArgs,
-    kvm: bool,
+    processor: Processor,
     firmware: &Firmware,
     vars: &Path,
     image: &Path,
@@ -68,7 +97,11 @@ pub fn args(
     let mut args: Vec<String> = Vec::new();
     let mut push = |items: &[&str]| args.extend(items.iter().map(|s| s.to_string()));
 
-    let accel = if kvm { "kvm" } else { "tcg" };
+    let accel = if processor == Processor::Host {
+        "kvm"
+    } else {
+        "tcg"
+    };
     // Interrupt remapping needs the I/O APIC to be emulated by QEMU.
     let irqchip = if machine.no_iommu {
         ""
@@ -83,19 +116,17 @@ pub fn args(
     ]);
     push(&[
         "-cpu",
-        if kvm {
-            "host,migratable=no,+invtsc"
-        } else {
-            "max"
+        match processor {
+            Processor::Host => "host,migratable=no,+invtsc",
+            Processor::Emulated => "max",
+            Processor::EmulatedIntel => "max,vendor=GenuineIntel",
         },
     ]);
-    push(&["-smp", &machine.cpus.to_string(), "-m", &machine.memory]);
+    let memory = machine.memory.as_deref().unwrap_or(DEFAULT_MEMORY);
+    push(&["-smp", &machine.cpus.to_string(), "-m", memory]);
     if venus {
         // Blob resources need guest memory that can be shared with the host.
-        let backend = format!(
-            "memory-backend-memfd,id=ram,size={},share=on",
-            machine.memory
-        );
+        let backend = format!("memory-backend-memfd,id=ram,size={},share=on", memory);
         push(&["-object", &backend]);
     }
     if !machine.no_iommu {
@@ -114,7 +145,7 @@ pub fn args(
     push(&[
         "-device",
         match machine.disk {
-            Disk::Virtio => "virtio-blk-pci,drive=disk",
+            Disk::Virtio => "virtio-blk-pci,drive=disk,disable-legacy=on,serial=mikros",
             Disk::Nvme => "nvme,drive=disk,serial=mikros",
             Disk::Ahci => "ide-hd,drive=disk,bus=ide.0",
         },
@@ -125,10 +156,7 @@ pub fn args(
         Gpu::Basic => push(&["-device", "VGA"]),
         Gpu::Virtio => push(&["-device", "virtio-gpu-pci"]),
         Gpu::Venus => {
-            let hostmem = format!(
-                "virtio-gpu-gl-pci,venus=on,blob=on,hostmem={}",
-                machine.memory
-            );
+            let hostmem = format!("virtio-gpu-gl-pci,venus=on,blob=on,hostmem={}", memory);
             push(&["-device", &hostmem, "-display", "gtk,gl=on"]);
         }
     }
@@ -143,7 +171,7 @@ mod tests {
 
     fn machine() -> MachineArgs {
         MachineArgs {
-            memory: "2G".into(),
+            memory: Some("2G".into()),
             cpus: 4,
             gpu: Gpu::Virtio,
             disk: Disk::Virtio,
@@ -168,14 +196,38 @@ mod tests {
     #[test]
     fn uses_the_host_processor_with_kvm_and_max_otherwise() {
         let image = Path::new("disk.img");
-        let with_kvm = args(&machine(), true, &firmware(), Path::new("v.fd"), image);
+        let with_kvm = args(
+            &machine(),
+            Processor::Host,
+            &firmware(),
+            Path::new("v.fd"),
+            image,
+        );
         assert_eq!(after(&with_kvm, "-cpu"), ["host,migratable=no,+invtsc"]);
         assert_eq!(
             after(&with_kvm, "-machine"),
             ["q35,accel=kvm,kernel-irqchip=split"]
         );
-        let without = args(&machine(), false, &firmware(), Path::new("v.fd"), image);
+        let without = args(
+            &machine(),
+            Processor::Emulated,
+            &firmware(),
+            Path::new("v.fd"),
+            image,
+        );
         assert_eq!(after(&without, "-cpu"), ["max"]);
+        let intel = args(
+            &machine(),
+            Processor::EmulatedIntel,
+            &firmware(),
+            Path::new("v.fd"),
+            image,
+        );
+        assert_eq!(after(&intel, "-cpu"), ["max,vendor=GenuineIntel"]);
+        assert_eq!(
+            after(&intel, "-machine"),
+            ["q35,accel=tcg,kernel-irqchip=split"]
+        );
         assert_eq!(after(&without, "-smp"), ["4"]);
         assert_eq!(after(&without, "-serial"), ["stdio"]);
     }
@@ -183,19 +235,31 @@ mod tests {
     #[test]
     fn puts_the_iommu_before_other_devices_unless_disabled() {
         let image = Path::new("disk.img");
-        let a = args(&machine(), false, &firmware(), Path::new("v.fd"), image);
+        let a = args(
+            &machine(),
+            Processor::Emulated,
+            &firmware(),
+            Path::new("v.fd"),
+            image,
+        );
         let devices = after(&a, "-device");
         assert_eq!(
             devices,
             [
                 "intel-iommu,intremap=on",
-                "virtio-blk-pci,drive=disk",
+                "virtio-blk-pci,drive=disk,disable-legacy=on,serial=mikros",
                 "virtio-gpu-pci"
             ]
         );
         let mut m = machine();
         m.no_iommu = true;
-        let a = args(&m, false, &firmware(), Path::new("v.fd"), image);
+        let a = args(
+            &m,
+            Processor::Emulated,
+            &firmware(),
+            Path::new("v.fd"),
+            image,
+        );
         assert!(
             !after(&a, "-device")
                 .iter()
@@ -210,14 +274,26 @@ mod tests {
         let mut m = machine();
         m.disk = Disk::Nvme;
         m.gpu = Gpu::Basic;
-        let a = args(&m, false, &firmware(), Path::new("v.fd"), image);
+        let a = args(
+            &m,
+            Processor::Emulated,
+            &firmware(),
+            Path::new("v.fd"),
+            image,
+        );
         assert_eq!(
             after(&a, "-device")[1..],
             ["nvme,drive=disk,serial=mikros", "VGA"]
         );
         m.disk = Disk::Ahci;
         m.gpu = Gpu::Venus;
-        let a = args(&m, false, &firmware(), Path::new("v.fd"), image);
+        let a = args(
+            &m,
+            Processor::Emulated,
+            &firmware(),
+            Path::new("v.fd"),
+            image,
+        );
         assert_eq!(
             after(&a, "-device")[1..],
             [

@@ -189,7 +189,7 @@ pub fn dma_through_pins(s: &Startup) -> Result {
     })?;
     mem_write_at(dst, 0, &[0; 8])?;
     edu.dma(BUFFER, dst_phys, 8, true)?;
-    let isolated = crate::kernel_logged(s, b"DMA isolated")?;
+    let isolated = crate::boot_logged(b"DMA isolated");
     let copied = mem_read_at::<8>(dst, 0)? == [0xA5; 8];
     ensure("blocking an unpinned page", copied != isolated)?;
     if isolated {

@@ -1,0 +1,157 @@
+diff --git a/mesonbuild/build.py b/mesonbuild/build.py
+index 6b502e8..439af70 100644
+--- a/mesonbuild/build.py
++++ b/mesonbuild/build.py
+@@ -167,6 +167,7 @@ DEFAULT_STATIC_LIBRARY_NAMES: T.Mapping[str, T.Tuple[str, str]] = {
+     'windows': ('', 'lib'),
+     'darwin': ('lib', 'a'),
+     'cygwin': ('lib', 'a'),
++    'mikros': ('lib', 'slib'),
+ }
+ 
+ DEFAULT_SHARED_LIBRARY_NAMES: T.Mapping[str, T.Tuple[str, str, str]] = {
+@@ -174,6 +175,7 @@ DEFAULT_SHARED_LIBRARY_NAMES: T.Mapping[str, T.Tuple[str, str, str]] = {
+     'windows': ('', 'dll', 'dll.lib'),
+     'darwin': ('lib', 'dylib', ''),
+     'cygwin': ('cyg', 'dll', 'dll.a'),
++    'mikros': ('lib', 'dlib', ''),
+ }
+ 
+ def _process_install_tag(install_tag: T.Optional[T.List[T.Optional[str]]],
+@@ -1780,6 +1782,11 @@ class BuildTarget(Target):
+                 if self.environment.machines[self.for_machine].is_darwin():
+                     raise MesonException(
+                         f'target {self.name} links against shared module {link_target.name}. This is not permitted on OSX')
++                elif self.environment.machines[self.for_machine].is_mikros():
++                    # A module has no soname with a major version, which a
++                    # library that is linked against needs on Mikros.
++                    raise MesonException(
++                        f'target {self.name} links against shared module {link_target.name}. This is not permitted on Mikros')
+                 elif self.environment.machines[self.for_machine].is_android() and isinstance(self, SharedModule):
+                     # Android requires shared modules that use symbols from other shared modules to
+                     # be linked before they can be dlopen()ed in the correct order. Not doing so
+@@ -1958,6 +1965,8 @@ class BuildTarget(Target):
+             return 'windows'
+         elif m.is_darwin():
+             return 'darwin'
++        elif m.is_mikros():
++            return 'mikros'
+         else:
+             return 'unix'
+ 
+@@ -2403,6 +2412,8 @@ class StaticLibrary(BuildTarget, LinkableTarget):
+                     suffix = 'a'
+             elif self.environment.machines[self.for_machine].is_os2() and self.environment.coredata.optstore.get_value_for(OptionKey('os2_emxomf')):
+                 suffix = 'lib'
++            elif self.environment.machines[self.for_machine].is_mikros():
++                suffix = 'slib'
+             else:
+                 suffix = 'a'
+                 if 'c' in self.compilers and self.compilers['c'].get_id() == 'tasking' and not self.prelink:
+@@ -2524,6 +2535,11 @@ class SharedLibrary(BuildTarget, LinkableTarget):
+             if self.darwin_versions is None and self.soversion is not None:
+                 # If unspecified, pick the soversion
+                 self.darwin_versions = (self.soversion, self.soversion)
++            # On Mikros, a shared library without a version has the major
++            # version 0. Loadable modules keep their names.
++            if (self.soversion is None and not isinstance(self, SharedModule)
++                    and self.environment.machines[self.for_machine].is_mikros()):
++                self.soversion = '0'
+ 
+         self.win_subsystem = kwargs.get('win_subsystem') or 'console'
+ 
+@@ -2665,6 +2681,19 @@ class SharedLibrary(BuildTarget, LinkableTarget):
+             else:
+                 # libfoo.dylib
+                 filename_tpl = '{0.prefix}{0.name}.{0.suffix}'
++        elif self.environment.machines[self.for_machine].is_mikros():
++            prefix = prefix if prefix is not None else 'lib'
++            suffix = suffix if suffix is not None else 'dlib'
++            # The versions come before the suffix.
++            if self.ltversion:
++                # libfoo.X[.Y[.Z]].dlib
++                filename_tpl = '{0.prefix}{0.name}.{0.ltversion}.{0.suffix}'
++            elif self.soversion:
++                # libfoo.X.dlib
++                filename_tpl = '{0.prefix}{0.name}.{0.soversion}.{0.suffix}'
++            else:
++                # libfoo.dlib
++                filename_tpl = '{0.prefix}{0.name}.{0.suffix}'
+         elif self.environment.machines[self.for_machine].is_android():
+             prefix = prefix if prefix is not None else 'lib'
+             suffix = suffix if suffix is not None else 'so'
+@@ -2762,13 +2791,14 @@ class SharedLibrary(BuildTarget, LinkableTarget):
+         aliases: T.List[T.Tuple[str, str, str]] = []
+         # Aliases are only useful with .so and .dylib libraries. Also if
+         # there's no self.soversion (no versioning), we don't need aliases.
+-        if self.suffix not in ('so', 'dylib') or not self.soversion:
++        if self.suffix not in ('so', 'dylib', 'dlib') or not self.soversion:
+             return aliases
+         # With .so libraries, the minor and micro versions are also in the
+         # filename. If ltversion != soversion we create an soversion alias:
+         # libfoo.so.0 -> libfoo.so.0.100.0
+         # Where libfoo.so.0.100.0 is the actual library
+-        if self.suffix == 'so' and self.ltversion and self.ltversion != self.soversion:
++        # The same holds for libfoo.0.dlib -> libfoo.0.100.0.dlib.
++        if self.suffix in ('so', 'dlib') and self.ltversion and self.ltversion != self.soversion:
+             alias_tpl = self.filename_tpl.replace('ltversion', 'soversion')
+             ltversion_filename = alias_tpl.format(self)
+             tag = self.install_tag[0] or 'runtime'
+diff --git a/mesonbuild/compilers/compilers.py b/mesonbuild/compilers/compilers.py
+index df624c8..d39aeb5 100644
+--- a/mesonbuild/compilers/compilers.py
++++ b/mesonbuild/compilers/compilers.py
+@@ -53,7 +53,7 @@ Also add corresponding autodetection code in detect.py."""
+ header_suffixes = {'h', 'hh', 'hpp', 'hxx', 'H', 'ipp', 'moc', 'vapi', 'di', 'pxd', 'pxi'}
+ obj_suffixes = {'o', 'obj', 'res'}
+ # To the emscripten compiler, .js files are libraries
+-lib_suffixes = {'a', 'lib', 'dll', 'dll.a', 'dylib', 'so', 'js'}
++lib_suffixes = {'a', 'lib', 'dll', 'dll.a', 'dylib', 'so', 'js', 'dlib', 'slib'}
+ # Mapping of language to suffixes of files that should always be in that language
+ # This means we can't include .h headers here since they could be C, C++, ObjC, etc.
+ # First suffix is the language's default.
+diff --git a/mesonbuild/compilers/mixins/clike.py b/mesonbuild/compilers/mixins/clike.py
+index bc6f619..75b3a3a 100644
+--- a/mesonbuild/compilers/mixins/clike.py
++++ b/mesonbuild/compilers/mixins/clike.py
+@@ -1039,6 +1039,9 @@ class CLikeCompiler(Compiler):
+                 shlibext = ['dll.a', 'lib', 'dll']
+             # Yep, static libraries can also be foo.lib
+             stlibext += ['lib']
++        elif self.info.is_mikros():
++            shlibext = ['dlib']
++            stlibext = ['slib']
+         elif self.info.is_cygwin():
+             shlibext = ['dll', 'dll.a']
+             prefixes = ['cyg'] + prefixes
+diff --git a/mesonbuild/envconfig.py b/mesonbuild/envconfig.py
+index 65d0823..eac0009 100644
+--- a/mesonbuild/envconfig.py
++++ b/mesonbuild/envconfig.py
+@@ -337,6 +337,12 @@ class MachineInfo(HoldableObject):
+         """
+         return self.system in {'darwin', 'ios', 'tvos', 'visionos', 'watchos'}
+ 
++    def is_mikros(self) -> bool:
++        """
++        Machine is Mikros?
++        """
++        return self.system == 'mikros'
++
+     def is_android(self) -> bool:
+         """
+         Machine is Android?
+diff --git a/mesonbuild/linkers/linkers.py b/mesonbuild/linkers/linkers.py
+index bc318a8..77207f3 100644
+--- a/mesonbuild/linkers/linkers.py
++++ b/mesonbuild/linkers/linkers.py
+@@ -744,6 +744,9 @@ class GnuLikeDynamicLinkerMixin(DynamicLinkerBase):
+             # For PE/COFF the soname argument has no effect
+             return []
+         sostr = '' if soversion is None else '.' + soversion
++        if m.is_mikros():
++            # libfoo.X.dlib
++            return self._apply_prefix(['-soname', f'{prefix}{shlib_name}{sostr}.{suffix}'])
+         return self._apply_prefix(['-soname', f'{prefix}{shlib_name}.{suffix}{sostr}'])
+ 
+     def build_rpath_args(self, build_dir: str, from_dir: str, target: BuildTarget,

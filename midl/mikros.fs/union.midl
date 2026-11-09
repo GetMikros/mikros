@@ -1,0 +1,16 @@
+// MIKSPEC-0051.R1
+
+library mikros.fs;
+
+type Layer = struct {
+    directory client_end<Node>;
+    writable bool;
+};
+
+protocol Union {
+    @1 Create(layers vector<Layer, 8>, rights Rights,
+              view server_end<Node>) -> () error Error;
+    @2 CreateRevocable(directory client_end<Node>, rights Rights, key u64,
+                       view server_end<Node>) -> () error Error;
+    @3 Revoke(key u64) -> () error Error;
+};

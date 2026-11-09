@@ -1,0 +1,7 @@
+# The manifest of the probe of the union server, a boot service of the
+# tmpfs test image.
+name: union-probe
+binary: /usr/bin/union-probe
+start: boot
+after: [tmpfs, union]
+permissions: [filesystem.mount, filesystem.compose]

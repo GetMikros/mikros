@@ -31,20 +31,14 @@ unsafe extern "C" {
 /// The direct map base, from BootInfo.
 static DIRECT_MAP_BASE: AtomicU64 = AtomicU64::new(0);
 /// The unused parts of the kernel dynamic region.
-static DYNAMIC: SpinLock<Ranges<DYNAMIC_RANGES>> =
-    SpinLock::new(Ranges::new(DYNAMIC_START, DYNAMIC_END));
+static DYNAMIC: SpinLock<Ranges<DYNAMIC_RANGES>> = SpinLock::new(
+    kernel_core::lock_order::SPACE_DYNAMIC,
+    Ranges::new(DYNAMIC_START, DYNAMIC_END),
+);
 /// The most free ranges the dynamic region keeps track of.
 const DYNAMIC_RANGES: usize = 256;
 /// The physical address of the kernel's top-level table.
 static ROOT: AtomicU64 = AtomicU64::new(0);
-/// The top of the stack the kernel moves to at boot.
-static STACK_TOP: AtomicU64 = AtomicU64::new(0);
-
-/// The top of the stack the kernel moved to at boot.
-pub fn stack_top() -> u64 {
-    STACK_TOP.load(Ordering::Relaxed)
-}
-
 /// The kernel's top-level table, once it runs on it.
 pub fn root() -> u64 {
     ROOT.load(Ordering::Relaxed)
@@ -58,7 +52,7 @@ pub fn direct(phys: u64) -> u64 {
 /// Page table frames from the frame allocator, reached through the direct
 /// map, which both the bootloader's and the kernel's tables contain at the
 /// same base.
-struct FrameTables;
+pub struct FrameTables;
 
 impl Tables for FrameTables {
     fn alloc(&mut self) -> Option<u64> {
@@ -93,18 +87,48 @@ pub fn release_dynamic(start: u64, size: u64) {
     }
 }
 
+/// The most removed kernel pages whose frames wait for a shootdown.
+const BATCH: usize = 32;
+
 /// Unmaps `size` bytes at `virt` in the kernel's tables, invalidates their
-/// translations, and calls `unmapped` with the physical address and size
-/// of each page.
+/// translations on every processor, and then calls `unmapped` with the
+/// physical address and size of each page.
 fn unmap(virt: u64, size: u64, mut unmapped: impl FnMut(u64, u64)) {
     let mut tables = FrameTables;
     let mut mapper = Mapper::existing(&mut tables, root(), gib_pages());
+    let mut batch = [(0u64, 0u64); BATCH];
+    let mut count = 0;
+    // The start of the range whose translations other processors may
+    // still hold.
+    let mut from = virt;
+    let mut flush = |to: u64, batch: &[(u64, u64)]| {
+        if to == from {
+            return;
+        }
+        crate::tlb::shootdown(
+            crate::tlb::KERNEL,
+            from,
+            to - from,
+            false,
+            &crate::tlb::RUNNING,
+        );
+        from = to;
+        for &(phys, page) in batch {
+            unmapped(phys, page);
+        }
+    };
     mapper
         .unmap(virt, size, |v, phys, page| {
             crate::cpu::invlpg(v);
-            unmapped(phys, page);
+            batch[count] = (phys, page);
+            count += 1;
+            if count == BATCH {
+                flush(v + page, &batch);
+                count = 0;
+            }
         })
         .unwrap_or_else(|e| panic!("unmapping kernel memory: {e}"));
+    flush(virt + size, &batch[..count]);
 }
 
 /// Maps `size` bytes of device memory at `phys` uncached into the dynamic
@@ -168,7 +192,6 @@ pub fn map_physical_page(phys: u64, policy: Policy) -> Option<u64> {
 /// Maps `frames` in order, writable and cached, into the dynamic region
 /// and returns the address of the first, or `None`, with nothing left
 /// reserved, when address space or page tables run out.
-#[cfg(feature = "fuzz")]
 pub fn map_frames(frames: &[u64]) -> Option<u64> {
     let len = frames.len() as u64 * PAGE_SIZE;
     let virt = DYNAMIC.lock().alloc(len + PAGE_SIZE, PAGE_SIZE)? + PAGE_SIZE;
@@ -194,7 +217,6 @@ pub fn map_frames(frames: &[u64]) -> Option<u64> {
 
 /// Removes a mapping of `len` bytes made by `map_frames` at `virt`,
 /// leaving the frames allocated.
-#[cfg(feature = "fuzz")]
 pub fn unmap_frames(virt: u64, len: u64) {
     unmap(virt, len, |_, _| {});
     release_dynamic(virt, len);
@@ -380,11 +402,15 @@ unsafe extern "sysv64" {
 
 /// The BootInfo values the kernel keeps, copied before boot memory is
 /// reclaimed.
-pub static BOOT_INFO: SpinLock<Option<BootInfo>> = SpinLock::new(None);
+pub static BOOT_INFO: SpinLock<Option<BootInfo>> =
+    SpinLock::new(kernel_core::lock_order::SPACE_BOOT_INFO, None);
 
 /// The command line, copied before boot memory is reclaimed: its bytes and
 /// their number.
-pub static CMDLINE: SpinLock<([u8; CMDLINE_MAX], usize)> = SpinLock::new(([0; CMDLINE_MAX], 0));
+pub static CMDLINE: SpinLock<([u8; CMDLINE_MAX], usize)> = SpinLock::new(
+    kernel_core::lock_order::SPACE_CMDLINE,
+    ([0; CMDLINE_MAX], 0),
+);
 
 fn copy_cmdline(info: &BootInfo) {
     let len = (info.cmdline_len as usize).min(CMDLINE_MAX);
@@ -399,16 +425,21 @@ fn copy_cmdline(info: &BootInfo) {
     copy.1 = len;
 }
 
-/// Builds the kernel's page tables, moves onto them and onto a new stack,
-/// and continues in `next`.
-pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
-    DIRECT_MAP_BASE.store(info.direct_map_base, Ordering::Relaxed);
-    copy_cmdline(&info);
+/// Sets this processor's PAT to the kernel's memory types.
+pub fn load_pat() {
     // SAFETY: IA32_PAT exists on every processor with PAT, which the
     // feature check requires. The new value keeps entries 0 to 3, which
     // the bootloader's tables can select, at the memory types of their
     // reset values.
     unsafe { crate::cpu::write_msr(IA32_PAT, PAT_VALUE) };
+}
+
+/// Builds the kernel's page tables, moves onto them and onto a new stack,
+/// and continues in `next`.
+pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
+    DIRECT_MAP_BASE.store(info.direct_map_base, Ordering::Relaxed);
+    copy_cmdline(&info);
+    load_pat();
 
     let mut tables = FrameTables;
     let mut mapper = Mapper::new(&mut tables, gib_pages())
@@ -417,7 +448,6 @@ pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
         .unwrap_or_else(|e| panic!("building the kernel page tables: {e}"));
     let root = mapper.root();
     ROOT.store(root, Ordering::Relaxed);
-    STACK_TOP.store(stack + STACK_SIZE, Ordering::Relaxed);
     crate::panic::set_stack(stack, stack + STACK_SIZE);
     *BOOT_INFO.lock() = Some(info);
     // SAFETY: the new tables map the kernel image at the same addresses,

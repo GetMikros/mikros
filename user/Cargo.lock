@@ -3,10 +3,85 @@
 version = 4
 
 [[package]]
+name = "accounts"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-userdb",
+]
+
+[[package]]
+name = "accounts-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "ahci"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-storage",
+]
+
+[[package]]
+name = "argon2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures",
+ "password-hash",
+]
+
+[[package]]
 name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
+name = "blake2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b5d4d889834ee8ecfc0f8426ad30faf7cdcb10f741a8e6d7224d95325479f6f"
+dependencies = [
+ "digest",
+]
+
+[[package]]
+name = "block-buffer"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
+name = "broker-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "btrfs"
+version = "0.0.0"
+dependencies = [
+ "mikros-btrfs",
+ "mikros-casefold",
+ "mikros-rt",
+]
 
 [[package]]
 name = "call-server"
@@ -25,11 +100,79 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmov"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
+
+[[package]]
+name = "cpufeatures"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "crypto-common"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
+name = "ctutils"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f"
+dependencies = [
+ "cmov",
+]
+
+[[package]]
 name = "debuggee"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
  "mikros-test",
+]
+
+[[package]]
+name = "device-manager"
+version = "0.0.0"
+dependencies = [
+ "mikros-manifest",
+ "mikros-rt",
+ "mikros-yaml",
+]
+
+[[package]]
+name = "digest"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
+ "ctutils",
+]
+
+[[package]]
+name = "directory-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "fat"
+version = "0.0.0"
+dependencies = [
+ "mikros-fat",
+ "mikros-rt",
 ]
 
 [[package]]
@@ -57,17 +200,154 @@ dependencies = [
 ]
 
 [[package]]
+name = "hybrid-array"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
+dependencies = [
+ "typenum",
+]
+
+[[package]]
 name = "init"
+version = "0.0.0"
+dependencies = [
+ "mikros-loader",
+ "mikros-rt",
+ "mikros-ustar",
+]
+
+[[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "launcher-probe"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
 ]
 
 [[package]]
+name = "libc"
+version = "0.2.191"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "log-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "log-service"
+version = "0.0.0"
+dependencies = [
+ "mikros-logstore",
+ "mikros-rt",
+]
+
+[[package]]
+name = "managed"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "midlc"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "mikros-bootfs"
+version = "0.0.0"
+dependencies = [
+ "mikros-ustar",
+]
+
+[[package]]
+name = "mikros-btrfs"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-casefold"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-fat"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-gpt"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-libc"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "syscall-table",
+]
+
+[[package]]
+name = "mikros-loader"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "mikros-logstore"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-manifest"
+version = "0.0.0"
+dependencies = [
+ "mikros-yaml",
+]
+
+[[package]]
+name = "mikros-memfs"
+version = "0.0.0"
+dependencies = [
+ "mikros-casefold",
+]
+
+[[package]]
+name = "mikros-pci"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-permissions"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-rt"
 version = "0.0.0"
 dependencies = [
+ "midlc",
  "syscall-table",
+]
+
+[[package]]
+name = "mikros-storage"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
 ]
 
 [[package]]
@@ -75,6 +355,197 @@ name = "mikros-test"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
+ "mikros-ustar",
+]
+
+[[package]]
+name = "mikros-tz"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-userdb"
+version = "0.0.0"
+dependencies = [
+ "argon2",
+]
+
+[[package]]
+name = "mikros-ustar"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-virtio"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "mikros-yaml"
+version = "0.0.0"
+
+[[package]]
+name = "namespace-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "nvme"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-storage",
+]
+
+[[package]]
+name = "partition"
+version = "0.0.0"
+dependencies = [
+ "mikros-gpt",
+ "mikros-rt",
+]
+
+[[package]]
+name = "password-hash"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b"
+dependencies = [
+ "phc",
+]
+
+[[package]]
+name = "pci-bus"
+version = "0.0.0"
+dependencies = [
+ "mikros-pci",
+ "mikros-rt",
+]
+
+[[package]]
+name = "permissions-broker"
+version = "0.0.0"
+dependencies = [
+ "mikros-manifest",
+ "mikros-permissions",
+ "mikros-rt",
+ "mikros-yaml",
+]
+
+[[package]]
+name = "phc"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892"
+dependencies = [
+ "base64ct",
+ "ctutils",
+]
+
+[[package]]
+name = "pie"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "port-tests"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "proc-macro2"
+version = "1.0.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+dependencies = [
+ "unicode-ident",
+]
+
+[[package]]
+name = "process-manager"
+version = "0.0.0"
+dependencies = [
+ "mikros-bootfs",
+ "mikros-loader",
+ "mikros-manifest",
+ "mikros-rt",
+]
+
+[[package]]
+name = "quote"
+version = "1.0.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
+dependencies = [
+ "proc-macro2",
+]
+
+[[package]]
+name = "serde"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "serde_core"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
+dependencies = [
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_derive"
+version = "1.0.229"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
+name = "service-manager"
+version = "0.0.0"
+dependencies = [
+ "mikros-manifest",
+ "mikros-rt",
+ "mikros-yaml",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -85,11 +556,87 @@ dependencies = [
 ]
 
 [[package]]
-name = "test-init"
+name = "test-driver"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
+]
+
+[[package]]
+name = "test-init"
+version = "0.0.0"
+dependencies = [
+ "midlc",
+ "mikros-loader",
+ "mikros-rt",
  "mikros-test",
+ "process-manager",
+]
+
+[[package]]
+name = "time-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "time-service"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-tz",
+ "mikros-yaml",
+]
+
+[[package]]
+name = "tmpfs"
+version = "0.0.0"
+dependencies = [
+ "mikros-memfs",
+ "mikros-rt",
+]
+
+[[package]]
+name = "tmpfs-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "typenum"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unicode-ident"
+version = "1.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "union"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "union-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
+name = "virtio-blk"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-storage",
+ "mikros-virtio",
 ]
 
 [[package]]
@@ -101,3 +648,9 @@ dependencies = [
  "arraydeque",
  "hashlink",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"

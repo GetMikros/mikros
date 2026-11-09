@@ -7,7 +7,7 @@ use boot_protocol::Framebuffer;
 use mikrosboot::display::{self, ModeInfo, Output, Pixels};
 use mikrosboot::elf::{self, Kernel};
 use mikrosboot::firmware::{self, RSDP_SIZE};
-use mikrosboot::{cmdline, load};
+use mikrosboot::{cmdline, load, placement};
 use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
 use uefi::fs::FileSystem;
 use uefi::proto::console::gop::{GraphicsOutput, Mode, PixelFormat};
@@ -35,6 +35,9 @@ pub struct Gathered {
     pub rsdp: u64,
     pub rng_seed: Option<[u8; 32]>,
     pub boot_time: Option<u64>,
+    /// Random words for placing the kernel and the direct map, none when
+    /// their placement is not randomized.
+    pub random: Vec<u64>,
 }
 
 fn read(fs: &mut FileSystem, path: &str, step: &'static str) -> Result<Vec<u8>, Failure> {
@@ -234,6 +237,47 @@ fn rng_seed() -> Option<[u8; 32]> {
     firmware::rng_seed(rng.map(UefiRng).as_mut())
 }
 
+/// Random words from `EFI_RNG_PROTOCOL`, or else from `RDRAND` when CPUID
+/// reports it, or none.
+fn random_words() -> Vec<u64> {
+    let mut bytes = [0u8; 8 * placement::WORDS];
+    let rng = boot::get_handle_for_protocol::<Rng>()
+        .ok()
+        .and_then(|handle| boot::open_protocol_exclusive::<Rng>(handle).ok());
+    if rng.is_some_and(|mut rng| rng.get_rng(None, &mut bytes).is_ok()) {
+        return bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
+            .collect();
+    }
+    if core::arch::x86_64::__cpuid(1).ecx & (1 << 30) == 0 {
+        return Vec::new();
+    }
+    // SAFETY: CPUID reports RDRAND.
+    unsafe { rdrand_words() }
+}
+
+/// `placement::WORDS` words from `RDRAND`, retrying a failed one ten times,
+/// or the words it gave until one failed.
+///
+/// # Safety
+///
+/// The processor must have `RDRAND`.
+#[target_feature(enable = "rdrand")]
+unsafe fn rdrand_words() -> Vec<u64> {
+    let mut words = Vec::new();
+    for _ in 0..placement::WORDS {
+        let mut word = 0;
+        if !(0..10).any(|_| core::arch::x86_64::_rdrand64_step(&mut word) == 1) {
+            break;
+        }
+        words.push(word);
+    }
+    words
+}
+
 fn boot_time() -> Option<u64> {
     let t = runtime::get_time().ok()?;
     firmware::unix_seconds(firmware::Time {
@@ -260,6 +304,10 @@ pub fn gather() -> Result<Gathered, Failure> {
     let cmdline = command_line(&mut fs)?;
     drop(fs);
     let framebuffer = framebuffer(&cmdline)?;
+    let random = match kernel.relocatable && !placement::kaslr_off(cmdline.as_bytes()) {
+        true => random_words(),
+        false => Vec::new(),
+    };
     Ok(Gathered {
         kernel_file,
         kernel,
@@ -270,5 +318,6 @@ pub fn gather() -> Result<Gathered, Failure> {
         rsdp: rsdp()?,
         rng_seed: rng_seed(),
         boot_time: boot_time(),
+        random,
     })
 }

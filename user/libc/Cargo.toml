@@ -1,0 +1,22 @@
+[package]
+name = "mikros-libc"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+# The Mikros layer of the C library, which musl's system call layer
+# calls. It is combined with musl into libc.slib.
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+# The variant of the shared library, libc.dlib, which is also the
+# dynamic linker.
+shared = []
+
+[dependencies]
+mikros-rt = { path = "../mikros-rt", default-features = false }
+
+[build-dependencies]
+syscall-table = { path = "../../kernel/syscalls" }

@@ -1,0 +1,7 @@
+# The manifest of the btrfs server, installed as
+# usr/lib/drivers/btrfs/driver.yaml.
+name: btrfs
+binary: /usr/lib/drivers/btrfs/btrfs
+match:
+  - gpt:fa730af6-8ba3-42d9-b155-466909d08135
+kind: normal

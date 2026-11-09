@@ -1,0 +1,784 @@
+//! What the generated bindings share: message buffers, handles and
+//! channels.
+//!
+//! The kernel module, named when the bindings are generated, provides:
+//!
+//! - `SHOULD_WAIT: i32` and `PEER_CLOSED: i32`, the statuses of an empty
+//!   channel and of a closed peer;
+//! - `handle_close(handle: u32)`;
+//! - `handle_info(handle: u32) -> Option<(u32, u32)>`: the object type
+//!   and rights of a handle;
+//! - `handle_replace(handle: u32, rights: u32) -> Result<u32, i32>`,
+//!   which consumes the handle;
+//! - `channel_create() -> Result<(u32, u32), i32>`;
+//! - `channel_write(channel: u32, bytes: &[u8], handles: &[u32]) ->
+//!   Result<(), i32>`, which consumes the handles even when it fails;
+//! - `channel_read(channel: u32) -> Result<(Vec<u8>, Vec<u32>), i32>`;
+//! - `channel_call(channel: u32, bytes: &[u8], handles: &[u32],
+//!   deadline: i64) -> Result<(Vec<u8>, Vec<u32>), i32>`, which consumes
+//!   the handles even when it fails;
+//! - `wait_readable(channel: u32, deadline: i64) -> Result<(), i32>`,
+//!   which returns once the channel is readable or its peer closed;
+//! - `Reactor`, a cloneable type through which asynchronous waits are
+//!   made, and `readable(reactor: &Reactor, channel: u32) -> impl
+//!   Future<Output = Result<(), i32>>`, which completes once the channel
+//!   is readable or its peer closed.
+
+use ::alloc::collections::{BTreeMap, VecDeque};
+use ::alloc::string::String;
+use ::alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
+use core::marker::PhantomData;
+
+pub use KERNEL as kernel;
+
+/// A handle value as the kernel passes it.
+pub type RawHandle = u32;
+
+/// Why sending or receiving a message failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// A received message was not valid. The channel has been closed.
+    Invalid,
+    /// A value to send does not fit its type, such as a string that is
+    /// too long.
+    TooLong,
+    /// A value to send is an unknown member of a flexible union.
+    UnknownMember,
+    /// The server does not implement the method.
+    UnknownMethod,
+    /// The channel is closed: by its peer, or after a protocol error.
+    Closed,
+    /// A system call failed with this status.
+    Status(i32),
+}
+
+/// A handle that is closed when it is dropped.
+pub struct OwnedHandle(RawHandle);
+
+impl OwnedHandle {
+    /// Takes ownership of `raw`.
+    ///
+    /// # Safety
+    ///
+    /// Nothing else may close or use `raw` afterwards.
+    pub unsafe fn from_raw(raw: RawHandle) -> OwnedHandle {
+        OwnedHandle(raw)
+    }
+
+    pub fn raw(&self) -> RawHandle {
+        self.0
+    }
+
+    /// Gives up ownership without closing the handle.
+    pub fn into_raw(self) -> RawHandle {
+        let raw = self.0;
+        core::mem::forget(self);
+        raw
+    }
+}
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        kernel::handle_close(self.0);
+    }
+}
+
+impl core::fmt::Debug for OwnedHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "OwnedHandle({:#x})", self.0)
+    }
+}
+
+impl PartialEq for OwnedHandle {
+    fn eq(&self, other: &OwnedHandle) -> bool {
+        self.0 == other.0
+    }
+}
+
+/// The client end of a channel that speaks protocol `P`.
+#[derive(Debug, PartialEq)]
+pub struct ClientEnd<P>(OwnedHandle, PhantomData<fn() -> P>);
+
+/// The server end of a channel that speaks protocol `P`.
+#[derive(Debug, PartialEq)]
+pub struct ServerEnd<P>(OwnedHandle, PhantomData<fn() -> P>);
+
+impl<P> ClientEnd<P> {
+    pub fn new(handle: OwnedHandle) -> Self {
+        ClientEnd(handle, PhantomData)
+    }
+
+    pub fn handle(&self) -> &OwnedHandle {
+        &self.0
+    }
+
+    pub fn into_handle(self) -> OwnedHandle {
+        self.0
+    }
+}
+
+impl<P> ServerEnd<P> {
+    pub fn new(handle: OwnedHandle) -> Self {
+        ServerEnd(handle, PhantomData)
+    }
+
+    pub fn handle(&self) -> &OwnedHandle {
+        &self.0
+    }
+
+    pub fn into_handle(self) -> OwnedHandle {
+        self.0
+    }
+}
+
+/// A new channel, as the two ends of protocol `P`.
+pub fn endpoints<P>() -> Result<(ClientEnd<P>, ServerEnd<P>), Error> {
+    let (a, b) = kernel::channel_create().map_err(Error::Status)?;
+    // SAFETY: the kernel just created both handles for us.
+    let (a, b) = unsafe { (OwnedHandle::from_raw(a), OwnedHandle::from_raw(b)) };
+    Ok((ClientEnd::new(a), ServerEnd::new(b)))
+}
+
+pub const HEADER_SIZE: usize = 16;
+pub const FLAG_UNKNOWN_METHOD: u16 = 1 << 0;
+pub const FLAG_FLEXIBLE: u16 = 1 << 1;
+const PRESENT: u64 = u64::MAX;
+const HANDLE_PRESENT: u32 = u32::MAX;
+
+/// A message header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Header {
+    pub txid: u32,
+    pub ordinal: u32,
+    pub flags: u16,
+}
+
+/// Builds one message.
+pub struct Encoder {
+    bytes: Vec<u8>,
+    handles: Vec<OwnedHandle>,
+}
+
+impl Encoder {
+    /// A message with `header` and room for a body whose inline part
+    /// takes `body` bytes, which starts at `HEADER_SIZE`.
+    pub fn new(header: Header, body: usize) -> Encoder {
+        let mut e = Encoder {
+            bytes: Vec::new(),
+            handles: Vec::new(),
+        };
+        e.alloc(HEADER_SIZE);
+        e.put(0, &header.txid.to_le_bytes());
+        e.put(4, &header.ordinal.to_le_bytes());
+        e.put(8, &1u16.to_le_bytes());
+        e.put(10, &header.flags.to_le_bytes());
+        e.alloc(body);
+        e
+    }
+
+    /// Appends a zeroed object of `size` bytes, padded to 8, and returns
+    /// its offset.
+    pub fn alloc(&mut self, size: usize) -> usize {
+        let at = self.bytes.len();
+        self.bytes.resize(at + size.next_multiple_of(8), 0);
+        at
+    }
+
+    pub fn put(&mut self, at: usize, data: &[u8]) {
+        self.bytes[at..at + data.len()].copy_from_slice(data);
+    }
+
+    /// The inline part of a present string or vector of `len` elements,
+    /// at most `max`.
+    pub fn vector(&mut self, at: usize, len: usize, max: u64) -> Result<(), Error> {
+        if len as u64 > max {
+            return Err(Error::TooLong);
+        }
+        self.put(at, &(len as u64).to_le_bytes());
+        self.put(at + 8, &PRESENT.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn string(&mut self, at: usize, s: &str, max: u64) -> Result<(), Error> {
+        self.bytes(at, s.as_bytes(), max)
+    }
+
+    /// A present vector of bytes, at most `max` of them, copied at once:
+    /// appended to the message, whose end `alloc` keeps at a multiple of
+    /// 8, and padded with zeros, rather than allocated zeroed and then
+    /// overwritten.
+    pub fn bytes(&mut self, at: usize, data: &[u8], max: u64) -> Result<(), Error> {
+        self.vector(at, data.len(), max)?;
+        self.bytes.extend_from_slice(data);
+        let end = self.bytes.len().next_multiple_of(8);
+        self.bytes.resize(end, 0);
+        Ok(())
+    }
+
+    /// The presence marker of an optional structure.
+    pub fn present(&mut self, at: usize) {
+        self.put(at, &PRESENT.to_le_bytes());
+    }
+
+    pub fn handle(&mut self, at: usize, handle: OwnedHandle) {
+        self.put(at, &HANDLE_PRESENT.to_le_bytes());
+        self.handles.push(handle);
+    }
+
+    /// Where an envelope's contents start, for `end_envelope`.
+    pub fn begin_envelope(&self) -> (usize, usize) {
+        (self.bytes.len(), self.handles.len())
+    }
+
+    /// Stores at `at` the byte and handle counts of what was added since
+    /// `start`.
+    pub fn end_envelope(&mut self, at: usize, start: (usize, usize)) {
+        let bytes = (self.bytes.len() - start.0) as u32;
+        let handles = (self.handles.len() - start.1) as u32;
+        self.put(at, &bytes.to_le_bytes());
+        self.put(at + 4, &handles.to_le_bytes());
+    }
+
+    /// The bytes and handles of the message.
+    pub fn finish(self) -> (Vec<u8>, Vec<RawHandle>) {
+        let handles = self.handles.into_iter().map(OwnedHandle::into_raw).collect();
+        (self.bytes, handles)
+    }
+}
+
+/// Reads and validates one message. Handles it does not hand out are
+/// closed when it is dropped.
+pub struct Decoder<'a> {
+    bytes: &'a [u8],
+    handles: Vec<Option<OwnedHandle>>,
+    next: usize,
+    next_handle: usize,
+}
+
+impl<'a> Decoder<'a> {
+    pub fn new(bytes: &'a [u8], handles: Vec<RawHandle>) -> Decoder<'a> {
+        Decoder {
+            bytes,
+            // SAFETY: the message's handles were given to us.
+            handles: handles.into_iter().map(|h| Some(unsafe { OwnedHandle::from_raw(h) })).collect(),
+            next: HEADER_SIZE,
+            next_handle: 0,
+        }
+    }
+
+    pub fn header(&self) -> Result<Header, Error> {
+        if self.bytes.len() < HEADER_SIZE {
+            return Err(Error::Invalid);
+        }
+        let flags = self.u16(10)?;
+        if self.u16(8)? != 1 || self.u32(12)? != 0 || flags & !(FLAG_UNKNOWN_METHOD | FLAG_FLEXIBLE) != 0 {
+            return Err(Error::Invalid);
+        }
+        Ok(Header {
+            txid: self.u32(0)?,
+            ordinal: self.u32(4)?,
+            flags,
+        })
+    }
+
+    /// Claims the next out-of-line object of `size` bytes, padded to 8
+    /// with zeros, and returns its offset.
+    pub fn claim(&mut self, size: usize) -> Result<usize, Error> {
+        let at = self.next;
+        let padded = size.checked_add(7).ok_or(Error::Invalid)? & !7;
+        let end = at.checked_add(padded).ok_or(Error::Invalid)?;
+        if end > self.bytes.len() {
+            return Err(Error::Invalid);
+        }
+        self.zeros(at + size, padded - size)?;
+        self.next = end;
+        Ok(at)
+    }
+
+    /// Fails unless the `len` bytes at `at` are zero.
+    pub fn zeros(&self, at: usize, len: usize) -> Result<(), Error> {
+        match self.bytes.get(at..at + len) {
+            Some(b) if b.iter().all(|&b| b == 0) => Ok(()),
+            _ => Err(Error::Invalid),
+        }
+    }
+
+    pub fn get<const N: usize>(&self, at: usize) -> Result<[u8; N], Error> {
+        let bytes = self.bytes.get(at..at + N).ok_or(Error::Invalid)?;
+        Ok(bytes.try_into().expect("the slice has N bytes"))
+    }
+
+    pub fn u16(&self, at: usize) -> Result<u16, Error> {
+        Ok(u16::from_le_bytes(self.get(at)?))
+    }
+
+    pub fn u32(&self, at: usize) -> Result<u32, Error> {
+        Ok(u32::from_le_bytes(self.get(at)?))
+    }
+
+    pub fn u64(&self, at: usize) -> Result<u64, Error> {
+        Ok(u64::from_le_bytes(self.get(at)?))
+    }
+
+    pub fn bool(&self, at: usize) -> Result<bool, Error> {
+        match self.get::<1>(at)?[0] {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Error::Invalid),
+        }
+    }
+
+    /// Whether the presence marker at `at` says present.
+    pub fn presence(&self, at: usize) -> Result<bool, Error> {
+        match self.u64(at)? {
+            0 => Ok(false),
+            PRESENT => Ok(true),
+            _ => Err(Error::Invalid),
+        }
+    }
+
+    /// The element count of the string or vector at `at`, or `None` when
+    /// it is absent.
+    pub fn vector(&self, at: usize, max: u64) -> Result<Option<usize>, Error> {
+        let len = self.u64(at)?;
+        match self.presence(at + 8)? {
+            false if len == 0 => Ok(None),
+            true if len <= max => usize::try_from(len).map(Some).map_err(|_| Error::Invalid),
+            _ => Err(Error::Invalid),
+        }
+    }
+
+    pub fn string(&mut self, at: usize, max: u64) -> Result<Option<String>, Error> {
+        let Some(len) = self.vector(at, max)? else {
+            return Ok(None);
+        };
+        let o = self.claim(len)?;
+        let text = core::str::from_utf8(&self.bytes[o..o + len]).map_err(|_| Error::Invalid)?;
+        Ok(Some(String::from(text)))
+    }
+
+    /// The vector of bytes at `at`, copied at once, or `None` when it is
+    /// absent.
+    pub fn bytes(&mut self, at: usize, max: u64) -> Result<Option<Vec<u8>>, Error> {
+        let Some(len) = self.vector(at, max)? else {
+            return Ok(None);
+        };
+        let o = self.claim(len)?;
+        let mut v = Vec::new();
+        v.try_reserve_exact(len).map_err(|_| Error::Invalid)?;
+        v.extend_from_slice(&self.bytes[o..o + len]);
+        Ok(Some(v))
+    }
+
+    /// The handle whose marker is at `at`, or `None` when it is absent.
+    /// When an object type or rights are declared, the handle is checked
+    /// to be of the object type `object` and to have at least `rights`,
+    /// and is then replaced with one that has exactly `rights`, or no
+    /// rights when none are declared.
+    pub fn handle(
+        &mut self,
+        at: usize,
+        object: Option<u32>,
+        rights: Option<u32>,
+    ) -> Result<Option<OwnedHandle>, Error> {
+        match self.u32(at)? {
+            0 => return Ok(None),
+            HANDLE_PRESENT => {}
+            _ => return Err(Error::Invalid),
+        }
+        let slot = self.handles.get_mut(self.next_handle).ok_or(Error::Invalid)?;
+        let handle = slot.take().ok_or(Error::Invalid)?;
+        self.next_handle += 1;
+        if object.is_none() && rights.is_none() {
+            return Ok(Some(handle));
+        }
+        let (kind, has) = kernel::handle_info(handle.raw()).ok_or(Error::Invalid)?;
+        if object.is_some_and(|o| o != kind) {
+            return Err(Error::Invalid);
+        }
+        let Some(rights) = rights else {
+            return Ok(Some(handle));
+        };
+        if has & rights != rights {
+            return Err(Error::Invalid);
+        }
+        let replaced = kernel::handle_replace(handle.into_raw(), rights).map_err(|_| Error::Invalid)?;
+        // SAFETY: the kernel just made the handle for us.
+        Ok(Some(unsafe { OwnedHandle::from_raw(replaced) }))
+    }
+
+    /// Where an envelope's contents start, for `end_envelope`.
+    pub fn begin_envelope(&self) -> (usize, usize) {
+        (self.next, self.next_handle)
+    }
+
+    /// Fails unless exactly `bytes` and `handles` were read since `start`.
+    pub fn end_envelope(&self, start: (usize, usize), bytes: u32, handles: u32) -> Result<(), Error> {
+        let read = (self.next - start.0, self.next_handle - start.1);
+        if read != (bytes as usize, handles as usize) {
+            return Err(Error::Invalid);
+        }
+        Ok(())
+    }
+
+    /// Skips an unknown envelope's `bytes` and closes its `handles`.
+    pub fn skip(&mut self, bytes: u32, handles: u32) -> Result<(), Error> {
+        if bytes % 8 != 0 {
+            return Err(Error::Invalid);
+        }
+        let at = self.next;
+        let end = at.checked_add(bytes as usize).ok_or(Error::Invalid)?;
+        if end > self.bytes.len() {
+            return Err(Error::Invalid);
+        }
+        self.next = end;
+        for _ in 0..handles {
+            let slot = self.handles.get_mut(self.next_handle).ok_or(Error::Invalid)?;
+            drop(slot.take());
+            self.next_handle += 1;
+        }
+        Ok(())
+    }
+
+    /// Fails unless the whole message was read.
+    pub fn finish(self) -> Result<(), Error> {
+        if self.next != self.bytes.len() || self.next_handle != self.handles.len() {
+            return Err(Error::Invalid);
+        }
+        Ok(())
+    }
+}
+
+/// A channel that a client or server owns, which it closes after a
+/// protocol error.
+pub struct Channel(Cell<Option<RawHandle>>);
+
+impl Channel {
+    pub fn new(handle: OwnedHandle) -> Channel {
+        Channel(Cell::new(Some(handle.into_raw())))
+    }
+
+    /// The channel's handle, unless it has been closed.
+    pub fn raw(&self) -> Result<RawHandle, Error> {
+        self.0.get().ok_or(Error::Closed)
+    }
+
+    pub fn close(&self) {
+        if let Some(h) = self.0.take() {
+            kernel::handle_close(h);
+        }
+    }
+
+    /// Gives up the channel's handle, unless it has been closed.
+    pub fn into_handle(self) -> Option<OwnedHandle> {
+        let raw = self.0.take();
+        // SAFETY: the channel owned the handle.
+        raw.map(|h| unsafe { OwnedHandle::from_raw(h) })
+    }
+
+    /// `result`, after closing the channel if it is a protocol error.
+    pub fn checked<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
+        if matches!(result, Err(Error::Invalid)) {
+            self.close();
+        }
+        result
+    }
+
+    fn status(status: i32) -> Error {
+        if status == kernel::PEER_CLOSED {
+            Error::Closed
+        } else {
+            Error::Status(status)
+        }
+    }
+
+    pub fn send(&self, message: Encoder) -> Result<(), Error> {
+        let raw = self.raw()?;
+        let (bytes, handles) = message.finish();
+        kernel::channel_write(raw, &bytes, &handles).map_err(Channel::status)
+    }
+
+    pub fn call(&self, message: Encoder, deadline: i64) -> Result<(Vec<u8>, Vec<RawHandle>), Error> {
+        let raw = self.raw()?;
+        let (bytes, handles) = message.finish();
+        kernel::channel_call(raw, &bytes, &handles, deadline).map_err(Channel::status)
+    }
+
+    /// The next message, if one is queued.
+    pub fn try_receive(&self) -> Result<Option<(Vec<u8>, Vec<RawHandle>)>, Error> {
+        match kernel::channel_read(self.raw()?) {
+            Ok(message) => Ok(Some(message)),
+            Err(s) if s == kernel::SHOULD_WAIT => Ok(None),
+            Err(s) => Err(Channel::status(s)),
+        }
+    }
+
+    /// The next message, waiting for one until `deadline`.
+    pub fn receive(&self, deadline: i64) -> Result<(Vec<u8>, Vec<RawHandle>), Error> {
+        loop {
+            if let Some(message) = self.try_receive()? {
+                return Ok(message);
+            }
+            kernel::wait_readable(self.raw()?, deadline).map_err(Channel::status)?;
+        }
+    }
+}
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// A received message: its bytes and its handles.
+pub type Message = (Vec<u8>, Vec<RawHandle>);
+
+/// What an asynchronous call is waiting for.
+enum Pending {
+    /// No reply yet; the waker of the task that waits for it.
+    Waiting(Option<core::task::Waker>),
+    Replied(Message),
+    /// The call was dropped; its reply is discarded.
+    Abandoned,
+}
+
+fn close_message((_, handles): Message) {
+    for h in handles {
+        kernel::handle_close(h);
+    }
+}
+
+/// A channel on which many calls may be outstanding at once. Calls get
+/// their own transaction IDs. Whichever task reads a message hands a
+/// reply to its call, or keeps an event for `next_event`, and wakes the
+/// task that waits for it.
+pub struct AsyncChannel {
+    channel: Channel,
+    reactor: kernel::Reactor,
+    next_txid: Cell<u32>,
+    calls: RefCell<BTreeMap<u32, Pending>>,
+    events: RefCell<VecDeque<Message>>,
+    event_waiters: RefCell<Vec<core::task::Waker>>,
+}
+
+/// Abandons a call that is dropped before its reply arrives.
+struct CallGuard<'a> {
+    channel: &'a AsyncChannel,
+    txid: u32,
+}
+
+impl Drop for CallGuard<'_> {
+    fn drop(&mut self) {
+        let mut calls = self.channel.calls.borrow_mut();
+        match calls.remove(&self.txid) {
+            Some(Pending::Waiting(_)) => {
+                calls.insert(self.txid, Pending::Abandoned);
+            }
+            Some(Pending::Replied(message)) => close_message(message),
+            _ => {}
+        }
+    }
+}
+
+type Wait = core::pin::Pin<::alloc::boxed::Box<dyn core::future::Future<Output = Result<(), i32>>>>;
+
+impl AsyncChannel {
+    pub fn new(handle: OwnedHandle, reactor: kernel::Reactor) -> AsyncChannel {
+        AsyncChannel {
+            channel: Channel::new(handle),
+            reactor,
+            next_txid: Cell::new(1),
+            calls: RefCell::new(BTreeMap::new()),
+            events: RefCell::new(VecDeque::new()),
+            event_waiters: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The channel's handle, unless it has been closed.
+    pub fn raw(&self) -> Result<RawHandle, Error> {
+        self.channel.raw()
+    }
+
+    pub fn checked<T>(&self, result: Result<T, Error>) -> Result<T, Error> {
+        self.channel.checked(result)
+    }
+
+    pub fn send(&self, message: Encoder) -> Result<(), Error> {
+        self.channel.send(message)
+    }
+
+    /// A transaction ID with bit 31 clear that no outstanding call uses.
+    fn txid(&self) -> u32 {
+        let calls = self.calls.borrow();
+        loop {
+            let txid = self.next_txid.get();
+            self.next_txid.set(if txid >= 0x7FFF_FFFF { 1 } else { txid + 1 });
+            if !calls.contains_key(&txid) {
+                return txid;
+            }
+        }
+    }
+
+    /// Reads the queued messages, handing replies to their calls and
+    /// keeping events, and wakes the tasks that wait for them. A reply
+    /// that no call waits for is a protocol error, which closes the
+    /// channel.
+    fn drain(&self) -> Result<(), Error> {
+        let result = self.drain_queued();
+        if result.is_err() {
+            // Every waiting task sees the error when it polls again.
+            for pending in self.calls.borrow_mut().values_mut() {
+                if let Pending::Waiting(waker) = pending {
+                    if let Some(w) = waker.take() {
+                        w.wake();
+                    }
+                }
+            }
+            for w in self.event_waiters.borrow_mut().drain(..) {
+                w.wake();
+            }
+        }
+        result
+    }
+
+    fn drain_queued(&self) -> Result<(), Error> {
+        while let Some(message) = self.channel.try_receive()? {
+            let Some(txid) = message.0.get(..4) else {
+                close_message(message);
+                self.channel.close();
+                return Err(Error::Invalid);
+            };
+            let txid = u32::from_le_bytes([txid[0], txid[1], txid[2], txid[3]]);
+            if txid == 0 {
+                self.events.borrow_mut().push_back(message);
+                for w in self.event_waiters.borrow_mut().drain(..) {
+                    w.wake();
+                }
+                continue;
+            }
+            let mut calls = self.calls.borrow_mut();
+            match calls.get_mut(&txid) {
+                Some(pending @ Pending::Waiting(_)) => {
+                    let Pending::Waiting(waker) = core::mem::replace(pending, Pending::Replied(message)) else {
+                        unreachable!("matched as waiting");
+                    };
+                    drop(calls);
+                    if let Some(w) = waker {
+                        w.wake();
+                    }
+                }
+                Some(Pending::Abandoned) => {
+                    calls.remove(&txid);
+                    close_message(message);
+                }
+                _ => {
+                    drop(calls);
+                    close_message(message);
+                    self.channel.close();
+                    return Err(Error::Invalid);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Polls `wait`, a wait for the channel to become readable that is
+    /// started when there is none. `Ready` once it completes.
+    fn poll_readable(&self, wait: &mut Option<Wait>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Result<(), Error>> {
+        use core::task::Poll;
+        if wait.is_none() {
+            let raw = match self.raw() {
+                Ok(raw) => raw,
+                Err(e) => return Poll::Ready(Err(e)),
+            };
+            let reactor = self.reactor.clone();
+            *wait = Some(::alloc::boxed::Box::pin(async move { kernel::readable(&reactor, raw).await }));
+        }
+        let polled = wait.as_mut().map(|w| w.as_mut().poll(cx));
+        match polled {
+            Some(Poll::Ready(result)) => {
+                *wait = None;
+                Poll::Ready(result.map_err(Channel::status))
+            }
+            _ => Poll::Pending,
+        }
+    }
+
+    /// Sends `message` as a call and returns its reply.
+    pub async fn call(&self, message: Encoder) -> Result<Message, Error> {
+        use core::task::Poll;
+        let raw = self.raw()?;
+        let txid = self.txid();
+        let (mut bytes, handles) = message.finish();
+        bytes[..4].copy_from_slice(&txid.to_le_bytes());
+        self.calls.borrow_mut().insert(txid, Pending::Waiting(None));
+        let guard = CallGuard { channel: self, txid };
+        if let Err(s) = kernel::channel_write(raw, &bytes, &handles) {
+            return Err(Channel::status(s));
+        }
+        let mut wait = None;
+        let reply = core::future::poll_fn(|cx| loop {
+            // A reply that another call already read is taken even when
+            // the channel failed after it.
+            let drained = self.drain();
+            {
+                let mut calls = self.calls.borrow_mut();
+                match calls.get_mut(&txid) {
+                    Some(Pending::Replied(_)) => {
+                        return Poll::Ready(match calls.remove(&txid) {
+                            Some(Pending::Replied(message)) => Ok(message),
+                            _ => Err(Error::Closed),
+                        });
+                    }
+                    Some(Pending::Waiting(waker)) => *waker = Some(cx.waker().clone()),
+                    _ => return Poll::Ready(Err(Error::Closed)),
+                }
+            }
+            if let Err(e) = drained {
+                return Poll::Ready(Err(e));
+            }
+            match self.poll_readable(&mut wait, cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        })
+        .await;
+        // The reply is taken, or the call failed; either way there is
+        // nothing left to abandon unless the reply is still outstanding.
+        if reply.is_ok() {
+            core::mem::forget(guard);
+        }
+        reply
+    }
+
+    /// The next event.
+    pub async fn next_event(&self) -> Result<Message, Error> {
+        use core::task::Poll;
+        let mut wait = None;
+        core::future::poll_fn(|cx| loop {
+            // Events that came before the channel failed are taken first.
+            let drained = self.drain();
+            if let Some(message) = self.events.borrow_mut().pop_front() {
+                return Poll::Ready(Ok(message));
+            }
+            if let Err(e) = drained {
+                return Poll::Ready(Err(e));
+            }
+            self.event_waiters.borrow_mut().push(cx.waker().clone());
+            match self.poll_readable(&mut wait, cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        })
+        .await
+    }
+
+    /// Completes once a message may be queued or the peer closed, for
+    /// servers.
+    pub async fn wait_readable(reactor: &kernel::Reactor, raw: RawHandle) -> Result<(), Error> {
+        kernel::readable(reactor, raw).await.map_err(Channel::status)
+    }
+}

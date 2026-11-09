@@ -1,0 +1,76 @@
+library test.wire;
+
+const LIMIT u32 = 4;
+
+type Color = strict enum : u8 { RED = 1; GREEN = 2; };
+type Level = enum : i32 { LOW = -1; HIGH = 1; };
+type Mode = strict bits : u16 { READ = 0x1; WRITE = 0x2; };
+type Loose = bits : u8 { A = 0x1; };
+
+type Inner = struct {
+    flag bool;
+    value u64;
+};
+
+type Everything = struct {
+    a u8;
+    b i32;
+    c u16;
+    f f64;
+    text string<16>;
+    maybe string<8>?;
+    numbers vector<u32, LIMIT>;
+    nested vector<Inner, 2>;
+    words vector<string<4>, 3>;
+    fixed array<u16, 3>;
+    inner Inner;
+    boxed Inner?;
+    color Color;
+    level Level;
+    mode Mode;
+    loose Loose;
+    choice Choice;
+    absent Choice?;
+    extra Extra;
+};
+
+type Choice = union {
+    1: number u32;
+    2: text string<8>;
+};
+
+type Strict = strict union {
+    1: number u32;
+};
+
+type Extra = table {
+    1: first u8;
+    3: third string<8>;
+};
+
+type Holder = struct {
+    any handle;
+    event handle<Event, READ | WRITE>;
+    maybe handle?;
+    events vector<handle<Event>, 2>;
+};
+
+type Bytes = struct {
+    data vector<u8, 6>;
+    maybe vector<u8, 6>?;
+};
+
+type Wrap = struct {
+    s Strict;
+};
+
+type Status = enum : i32 { OK = 0; FAILED = -5; };
+
+protocol Calc {
+    @1 Add(a u32, b u32) -> (sum u32);
+    @2 Divide(a u32, b u32) -> (quotient u32) error Status;
+    @3 Note(text string<16>);
+    @4 -> Noted(text string<16>);
+    @5 Pass(h handle) -> (h handle);
+    @6 Later(deadline i64, message u32, __message u32) -> (sum i64);
+};

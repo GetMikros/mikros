@@ -3,3 +3,4 @@
 .vscode/
 /user/target/
 .DS_Store
+/user/std/target/

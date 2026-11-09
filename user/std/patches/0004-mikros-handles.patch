@@ -1,0 +1,135 @@
+diff --git a/std/src/os/mikros/io.rs b/std/src/os/mikros/io.rs
+new file mode 100644
+index 0000000..3d61a29
+--- /dev/null
++++ b/std/src/os/mikros/io.rs
+@@ -0,0 +1,82 @@
++//! Mikros-specific handles: the kernel handles behind descriptors.
++
++#![unstable(feature = "mikros_handles", issue = "none")]
++
++use crate::ffi::c_int;
++use crate::os::fd::{AsFd, AsRawFd};
++use crate::{fmt, io, mem};
++
++/// The value of a kernel handle.
++pub type RawHandle = u32;
++
++unsafe extern "C" {
++    fn mikros_handle_close(handle: RawHandle) -> i64;
++    fn mikros_fd_handle(fd: c_int) -> i64;
++}
++
++/// A kernel handle that this value owns and closes when it is dropped.
++pub struct OwnedHandle {
++    raw: RawHandle,
++}
++
++impl OwnedHandle {
++    /// Takes ownership of the handle `raw`.
++    ///
++    /// # Safety
++    ///
++    /// `raw` must be an open handle of this process that nothing else
++    /// owns or closes.
++    pub unsafe fn from_raw_handle(raw: RawHandle) -> OwnedHandle {
++        OwnedHandle { raw }
++    }
++
++    /// The handle's value, which stays owned by `self`.
++    pub fn as_raw_handle(&self) -> RawHandle {
++        self.raw
++    }
++
++    /// The handle's value, which the caller owns from then on.
++    pub fn into_raw_handle(self) -> RawHandle {
++        let raw = self.raw;
++        mem::forget(self);
++        raw
++    }
++}
++
++impl Drop for OwnedHandle {
++    fn drop(&mut self) {
++        // SAFETY: the handle is owned, and closing takes no pointers.
++        unsafe { mikros_handle_close(self.raw) };
++    }
++}
++
++impl fmt::Debug for OwnedHandle {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("OwnedHandle").field("raw", &self.raw).finish()
++    }
++}
++
++/// The handle that a C library call returned, or the negated error
++/// number it returned instead.
++pub(super) fn owned(result: i64) -> io::Result<OwnedHandle> {
++    match RawHandle::try_from(result) {
++        // SAFETY: the C library gives the caller a handle it owns.
++        Ok(raw) => Ok(unsafe { OwnedHandle::from_raw_handle(raw) }),
++        Err(_) => Err(io::Error::from_raw_os_error(result.unsigned_abs() as i32)),
++    }
++}
++
++/// The kernel handles behind descriptors.
++pub trait AsHandleExt {
++    /// A new handle, which the caller owns, to the object behind the
++    /// descriptor: the stream of a pipe or of a standard stream, or the
++    /// connection to a file or directory.
++    fn handle(&self) -> io::Result<OwnedHandle>;
++}
++
++impl<T: AsFd + ?Sized> AsHandleExt for T {
++    fn handle(&self) -> io::Result<OwnedHandle> {
++        // SAFETY: the call takes no pointers.
++        owned(unsafe { mikros_fd_handle(self.as_fd().as_raw_fd()) })
++    }
++}
+diff --git a/std/src/os/mikros/mod.rs b/std/src/os/mikros/mod.rs
+index 6e8bba9..de3131c 100644
+--- a/std/src/os/mikros/mod.rs
++++ b/std/src/os/mikros/mod.rs
+@@ -4,4 +4,6 @@
+ #![forbid(unsafe_op_in_unsafe_fn)]
+ 
+ pub mod fs;
++pub mod io;
++pub mod process;
+ pub mod raw;
+diff --git a/std/src/os/mikros/process.rs b/std/src/os/mikros/process.rs
+new file mode 100644
+index 0000000..77fc545
+--- /dev/null
++++ b/std/src/os/mikros/process.rs
+@@ -0,0 +1,30 @@
++//! Mikros-specific extensions to primitives in the [`std::process`]
++//! module.
++//!
++//! [`std::process`]: crate::process
++
++#![unstable(feature = "mikros_handles", issue = "none")]
++
++use super::io::{OwnedHandle, owned};
++use crate::ffi::c_int;
++use crate::io;
++use crate::process::Child;
++
++unsafe extern "C" {
++    fn mikros_process_handle(pid: c_int) -> i64;
++}
++
++/// The kernel handle of a child process.
++pub trait ChildExt {
++    /// Takes the process handle that the process manager gave for the
++    /// child when it started it, which the caller then owns. It can be
++    /// taken once, until the child is waited for; later calls fail.
++    fn take_process_handle(&mut self) -> io::Result<OwnedHandle>;
++}
++
++impl ChildExt for Child {
++    fn take_process_handle(&mut self) -> io::Result<OwnedHandle> {
++        // SAFETY: the call takes no pointers.
++        owned(unsafe { mikros_process_handle(self.id() as c_int) })
++    }
++}

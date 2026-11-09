@@ -22,7 +22,7 @@ syscall-table = { path = "../../syscalls" }
 
 [features]
 # Builds the system calls that exist only for fuzzing.
-fuzz = []
+fuzz = ["kernel-core/fuzz"]
 
 # Every unsafe block, impl and function says why it is sound.
 [lints.clippy]

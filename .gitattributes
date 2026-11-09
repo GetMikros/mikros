@@ -1,2 +1,5 @@
 * text=auto eol=lf
 *.ttf binary
+user/btrfs/linux/include/generated/autoconf.h linguist-generated
+user/btrfs/linux/include/generated/timeconst.h linguist-generated
+user/casefold/src/table.rs linguist-generated

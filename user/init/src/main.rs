@@ -1,7 +1,13 @@
-//! The initial process.
+//! The initial process. It starts the process manager, registers with
+//! it as process ID 1, asks it to start the service manager, and keeps
+//! running.
 
 #![no_std]
 #![no_main]
+
+extern crate alloc;
+
+mod manager;
 
 use mikros_rt::{Startup, log, sys};
 
@@ -24,7 +30,10 @@ fn main(startup: &Startup) -> i64 {
             fb.phys_base
         );
     }
-    // There is nothing to start yet. init must not end, so it sleeps.
+    if let Err(failure) = manager::start(startup) {
+        log!(Error, "{failure}");
+    }
+    // init must not end, so it sleeps.
     loop {
         // SAFETY: thread_sleep takes no pointers.
         unsafe { sys::thread_sleep(i64::MAX) };

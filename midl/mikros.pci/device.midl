@@ -1,0 +1,44 @@
+// MIKSPEC-0026.R7
+
+library mikros.pci;
+using mikros.base;
+
+type BarKind = enum : u32 { MMIO = 1; IO = 2; };
+
+type Bar = struct {
+    index u8;
+    kind BarKind;
+    prefetchable bool;
+    base u64;
+    size u64;
+    resource handle<Resource>;
+};
+
+type DeviceInfo = struct {
+    segment u16;
+    bus u8;
+    device u8;
+    function u8;
+    vendor_id u16;
+    device_id u16;
+    subsystem_vendor_id u16;
+    subsystem_id u16;
+    revision u8;
+    class u8;
+    subclass u8;
+    prog_if u8;
+    interrupt_pin u8;
+};
+
+protocol Device {
+    @1 GetInfo() -> (info DeviceInfo);
+    @2 ReadConfig(offset u16, width u8) -> (value u32) error base.Status;
+    @3 WriteConfig(offset u16, width u8, value u32) -> () error base.Status;
+    @4 GetBar(index u8) -> (bar Bar) error base.Status;
+    @5 SetBusMaster(enabled bool) -> () error base.Status;
+    @6 GetInterrupt() -> (event handle<Event>) error base.Status;
+    @7 AckInterrupt() -> () error base.Status;
+    @8 EnableMsi(count u32) -> (interrupts vector<handle<Interrupt>, 32>) error base.Status;
+    @9 DisableMsi() -> () error base.Status;
+    @10 GetBti() -> (bti handle<Bti>) error base.Status;
+};

@@ -1,0 +1,7 @@
+# The manifest of the AHCI driver, installed as
+# usr/lib/drivers/ahci/driver.yaml.
+name: ahci
+binary: /usr/lib/drivers/ahci/ahci
+match: [pci:c010601]
+kind: normal
+needs: [dma]

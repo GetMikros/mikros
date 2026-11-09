@@ -1,0 +1,11 @@
+--- a/ldso/dynlink.c
++++ b/ldso/dynlink.c
+@@ -1710,6 +1710,8 @@
+ 	sp = __mikros_dynamic_start(__mikros_bootstrap);
+ 	for (auxv=sp+1+*sp+1; *auxv; auxv++);
+ 	auxv++;
++	/* Mikros: the thread's ID came with the startup transfer. */
++	__pthread_self()->tid = __syscall(SYS_set_tid_address, &__thread_list_lock);
+ 
+ 	static struct dso app, vdso;
+ 	size_t aux[AUX_CNT];

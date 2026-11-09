@@ -1,0 +1,6 @@
+# A driver for PCI host bridges, for the device manager tests. With no
+# kind, it is a normal driver.
+name: test-host
+binary: /usr/lib/drivers/test-host/test-host
+match: [platform:pci-host-ecam]
+needs: [bus, dma]

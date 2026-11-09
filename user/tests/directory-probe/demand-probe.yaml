@@ -1,0 +1,6 @@
+name: demand-probe
+binary: /usr/bin/directory-probe
+start: on-demand
+after: [demand-dep]
+provides:
+  - protocol: test.directory.Demand

@@ -1,0 +1,10 @@
+// MIKSPEC-0036.R10
+
+library mikros.service;
+using mikros.base;
+
+type ShutdownKind = enum : u32 { POWER_OFF = 1; RESTART = 2; };
+
+protocol Control {
+    @1 Shutdown(kind ShutdownKind) -> () error base.Status;
+};

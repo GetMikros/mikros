@@ -76,7 +76,7 @@ def needs_kernel(invoke):
         if boot is not None and boot != selected:
             boot.switch()
         try:
-            int(scalar(static("kernel::process::FIRST_PROCESS")))
+            int(scalar(static("kernel_core::process::FIRST_PROCESS")))
             return invoke(self, arg, from_tty)
         except gdb.MemoryError as e:
             raise gdb.GdbError(
@@ -128,7 +128,7 @@ def perms(bits):
 
 def processes():
     """Every process, newest first."""
-    pointer = scalar(static("kernel::process::FIRST_PROCESS"))
+    pointer = scalar(static("kernel_core::process::FIRST_PROCESS"))
     while int(pointer) != 0:
         process = pointer.dereference()
         yield process
@@ -157,10 +157,17 @@ def threads(process):
         yield int(inner), inner.dereference()["data"]
 
 
+def arch_thread(thread):
+    """The `ArchThread` behind the `ThreadData` of `thread`."""
+    pointer = int(thread["arch"]["__0"]["pointer"])
+    arch = gdb.lookup_type("kernel::thread_arch::ArchThread")
+    return gdb.Value(pointer).cast(arch.pointer()).dereference()
+
+
 def running_thread():
     """The address of the `ArcInner` of the thread running on the boot
     processor, or 0."""
-    sched = locked(static("kernel::percpu::BOOT_CPU")["sched"])
+    sched = locked(static("kernel_core::cpu::BOOT")["sched"])
     return word(int(sched["current"].address))
 
 
@@ -247,7 +254,8 @@ class Threads(gdb.Command):
                 f"thread {int(t['header']['koid'])} {text(t['name'])!r}: {state}, "
                 f"priority {int(scalar(t['priority']))}"
             )
-            rsp = int(t["rsp"]["value"])
+            arch = arch_thread(t)
+            rsp = int(arch["rsp"]["value"])
             if inner == running:
                 print("  running; its registers are GDB's")
             elif state == "DEAD" or int(scalar(t["stack_top"])) == 0:
@@ -260,7 +268,7 @@ class Threads(gdb.Command):
                 regs = " ".join(f"{n}={v:#x}" for n, v in zip(SWITCH_FRAME, saved))
                 print(f"  kernel rsp={rsp + 8 * len(SWITCH_FRAME):#x} {regs}")
             for field in ["exception_frame", "syscall_frame"]:
-                frame = scalar(t[field])
+                frame = scalar(arch[field])
                 if int(frame) != 0:
                     f = frame.dereference()
                     names = ["rip", "rsp", "rax", "rdi", "rsi", "rdx", "rflags"]
@@ -320,7 +328,7 @@ class Log(gdb.Command):
 
     @needs_kernel
     def invoke(self, arg, from_tty):
-        log = static("kernel::log::LOG")
+        log = static("kernel_core::log::kernel::LOG")
         slots = log["slots"]
         count = slots.type.strip_typedefs().range()[1] + 1
         wanted = count_argument(arg) if arg.strip() else count

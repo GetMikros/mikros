@@ -6,9 +6,10 @@ use super::{Checked, UserIn, UserOut, bytes_of, current_process};
 use crate::aspace::Piece;
 use crate::memory_object::{Held, MemoryObject};
 use crate::paging::Policy;
-use crate::process::Process;
+use crate::process::{AddHandle, Process};
 use crate::publish::{Outputs, Page, Work};
 use crate::sched::Thread;
+use crate::thread_arch::ThreadX86;
 use crate::thread_state::{self, DEBUG_SIZE, GENERAL_SIZE, General};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -16,12 +17,12 @@ use kernel_core::exception::{self, DEBUG_EVENTS};
 use kernel_core::log::{MESSAGE_MAX, RECORD_SIZE, Severity};
 use kernel_core::object::budget::{Budget, INFO_BUDGET, Scratch};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
-use kernel_core::object::handles::Entry;
 use kernel_core::object::handles::Handle;
+use kernel_core::object::handles::{Entry, HANDLE_INVALID, HandleTable};
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{
-    KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_MSI, KIND_POLICY, KIND_PRIORITY,
-    KIND_ROOT, Request, Resource,
+    INFO_RESOURCE, KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_MSI, KIND_POLICY,
+    KIND_PRIORITY, KIND_ROOT, Request, Resource,
 };
 use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
@@ -166,6 +167,9 @@ pub fn object_get_info(
         INFO_MEMORY if kind == ObjectType::MemoryObject => {
             copy(&mut record, &object::<MemoryObject>(handle).info())
         }
+        INFO_RESOURCE if kind == ObjectType::Resource => {
+            copy(&mut record, &object::<Resource>(handle).info())
+        }
         crate::process::INFO_PROCESS if kind == ObjectType::Process => {
             copy(&mut record, &object::<Process>(handle).info())
         }
@@ -271,21 +275,28 @@ pub fn process_start(
     arg2: u64,
 ) -> Result<(), Error> {
     let caller = current_process()?;
-    // The caller's table stays locked until `arg` is closed in it, so the
-    // handle cannot change in between.
-    let mut table = caller.handles().lock();
-    let moved = match &arg {
-        Some(arg) => Some(table.check(arg.value, &[], rights::TRANSFER)?.clone()),
-        None => None,
-    };
-    let (process, thread) = (object::<Process>(process), object::<Thread>(thread));
-    let budget = Some(caller.budget());
-    Process::start(&process, &thread, entry, stack, moved, arg2, budget)?;
-    if let Some(arg) = arg {
-        table.close(arg.value)?;
-        crate::wait::handle_closed(&caller, arg.value);
+    if let Some(arg) = &arg {
+        caller
+            .handles()
+            .lock()
+            .check(arg.value, &[], rights::TRANSFER)?;
     }
-    Ok(())
+    let (process, thread) = (object::<Process>(process), object::<Thread>(thread));
+    // The caller's table is locked until `arg` is closed in it, so the
+    // handle cannot change in between. Process::start documents why it
+    // may be locked within the new process's.
+    let mut move_arg = |target: &mut HandleTable| {
+        let arg = arg.as_ref().map_or(HANDLE_INVALID, |a| a.value);
+        let mut table = caller.handles().lock_nested();
+        let entry = table.check(arg, &[], rights::TRANSFER)?.clone();
+        let handle = target.insert(entry.object, entry.rights, Some(caller.budget()))?;
+        table.close(arg)?;
+        drop(table);
+        crate::wait::handle_closed(&caller, arg);
+        Ok(handle)
+    };
+    let arg = arg.is_some().then_some(&mut move_arg as &mut AddHandle);
+    Process::start(&process, &thread, entry, stack, arg, arg2)
 }
 
 pub fn thread_start(
@@ -300,14 +311,14 @@ pub fn thread_start(
 
 pub fn thread_set_user_base(which: u32, value: u64) -> Result<(), Error> {
     let base = match which {
-        0 => crate::sched::UserBase::Fs,
-        1 => crate::sched::UserBase::Gs,
+        0 => crate::thread_arch::UserBase::Fs,
+        1 => crate::thread_arch::UserBase::Gs,
         _ => return Err(Error::InvalidArgs),
     };
     if value != 0 && !crate::aspace::in_user_range(value, 1) {
         return Err(Error::InvalidArgs);
     }
-    crate::sched::set_user_base(base, value);
+    crate::thread_arch::set_user_base(base, value);
     Ok(())
 }
 
@@ -373,6 +384,20 @@ fn page_aligned(values: &[u64]) -> Result<(), Error> {
 pub fn mem_create(size: u64, options: u32, out: UserOut<Handle>) -> Result<(), Error> {
     page_aligned(&[size])?;
     let mem = MemoryObject::new(Some(current_process()?.budget()), size, options)?;
+    give(mem, ObjectType::MemoryObject, out)
+}
+
+/// Like `mem_create`, with the object, and the frames allocated for it,
+/// charged to `budget` rather than to the caller's budget.
+pub fn mem_create_charged(
+    budget: Checked,
+    size: u64,
+    options: u32,
+    out: UserOut<Handle>,
+) -> Result<(), Error> {
+    page_aligned(&[size])?;
+    let budget = object::<Budget>(budget);
+    let mem = MemoryObject::new(Some(&budget), size, options)?;
     give(mem, ObjectType::MemoryObject, out)
 }
 
@@ -683,7 +708,7 @@ fn send(
     let charge = process.budget().hold_kernel(Message::cost(len, count))?;
     let mut data = Vec::new();
     data.try_reserve_exact(len).map_err(|_| Error::NoMemory)?;
-    data.resize(len, 0);
+    fill_zeros(&mut data, len);
     bytes.read_bytes(&mut data)?;
     if let Some(id) = id {
         data[..4].copy_from_slice(&id.to_le_bytes());
@@ -1220,7 +1245,7 @@ pub fn thread_write_state(
     let mut bytes = Vec::new();
     let mut scratch = Scratch::new(Some(current_process()?.budget()));
     scratch.reserve_exact(&mut bytes, size as usize)?;
-    bytes.resize(size as usize, 0);
+    fill_zeros(&mut bytes, size as usize);
     buf.read_bytes(&mut bytes)?;
     if kind == STATE_DEBUG {
         let state: &[u8; DEBUG_SIZE] = bytes[..].try_into().expect("the DEBUG size");
@@ -1326,6 +1351,13 @@ pub fn signal_set_mask(how: u32, mask: u64, old: UserOut<u64>) -> Result<(), Err
     };
     drop(state);
     publish_optional(outputs, &old, bytes_of(&[previous]));
+    Ok(())
+}
+
+/// Gives the calling thread `mask`, without `KILL` and `STOP`, as the
+/// temporary mask of its next system call, replacing any earlier one.
+pub fn signal_set_wait_mask(mask: u64) -> Result<(), Error> {
+    current_thread()?.signals().lock().wait_mask = Some(mask & !UNBLOCKABLE);
     Ok(())
 }
 
@@ -1482,7 +1514,7 @@ pub fn clock_get_monotonic(out: UserOut<i64>) -> Result<(), Error> {
         return Err(Error::InvalidArgs);
     }
     let outputs = prepare(&current_process()?, &[out.range(1)])?;
-    publish(outputs, &[bytes_of(&[crate::time::now()])]);
+    publish(outputs, &[bytes_of(&[kernel_core::arch::monotonic_now()])]);
     Ok(())
 }
 
@@ -1737,6 +1769,18 @@ pub fn thread_set_priority(
     Ok(())
 }
 
+pub fn thread_set_affinity(thread: Checked, mask: UserIn<u8>, len: u64) -> Result<(), Error> {
+    if !mask.fits(len) {
+        return Err(Error::InvalidArgs);
+    }
+    // Bits past the last processor the kernel can use select nothing, so
+    // only the bytes before them are read.
+    let mut bytes = [0u8; kernel_core::smp::MAX_CPUS / 8];
+    let used = len.min(bytes.len() as u64) as usize;
+    mask.read_into(&mut bytes[..used])?;
+    crate::sched::set_affinity(&object::<Thread>(thread), &bytes[..used])
+}
+
 pub fn port_create(options: u32, out: UserOut<Handle>) -> Result<(), Error> {
     if options != 0 || !out.fits(1) {
         return Err(Error::InvalidArgs);
@@ -1827,6 +1871,16 @@ pub fn mem_op(mem: Checked, op: u32, offset: u64, len: u64) -> Result<(), Error>
         2 => mem.decommit(offset, len),
         _ => Err(Error::InvalidArgs),
     }
+}
+
+pub fn system_get_cpu_count(out: UserOut<u32>) -> Result<(), Error> {
+    if !out.fits(1) {
+        return Err(Error::InvalidArgs);
+    }
+    let outputs = prepare(&current_process()?, &[out.range(1)])?;
+    let count = kernel_core::cpu::count() as u32;
+    publish(outputs, &[bytes_of(&[count])]);
+    Ok(())
 }
 
 pub fn system_get_memory_info(out: UserOut<u8>) -> Result<(), Error> {
@@ -1982,8 +2036,21 @@ fn stream_buffer(len: u64, scratch: &mut Scratch) -> Result<Vec<u8>, Error> {
     let n = len.min(STREAM_QUEUE_BYTES as u64) as usize;
     let mut buf = Vec::new();
     scratch.reserve_exact(&mut buf, n)?;
-    buf.resize(n, 0);
+    fill_zeros(&mut buf, n);
     Ok(buf)
+}
+
+/// Makes the empty `buf`, which has room for `n` bytes, hold `n` zeros,
+/// written at once: `Vec::resize` writes them one at a time where the
+/// kernel is built without optimizations.
+fn fill_zeros(buf: &mut Vec<u8>, n: usize) {
+    assert!(buf.is_empty() && buf.capacity() >= n);
+    // SAFETY: the buffer has room for `n` bytes, which are written
+    // before its length covers them.
+    unsafe {
+        core::ptr::write_bytes(buf.as_mut_ptr(), 0, n);
+        buf.set_len(n);
+    }
 }
 
 pub fn stream_write(
@@ -2131,6 +2198,19 @@ pub fn pager_supply(
     let mem = paged_of(pager, mem)?;
     let source = object::<MemoryObject>(source);
     mem.supply(offset, len, &source, source_offset)
+}
+
+pub fn pager_lend(
+    pager: Checked,
+    mem: Checked,
+    offset: u64,
+    len: u64,
+    source: Checked,
+    source_offset: u64,
+) -> Result<(), Error> {
+    let mem = paged_of(pager, mem)?;
+    let source = object::<MemoryObject>(source);
+    mem.lend(offset, len, &source, source_offset)
 }
 
 pub fn pager_op(pager: Checked, mem: Checked, op: u32, offset: u64, len: u64) -> Result<(), Error> {

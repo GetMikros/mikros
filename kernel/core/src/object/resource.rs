@@ -21,13 +21,18 @@ pub const KIND_BTI: u32 = 8;
 /// The option that lets the range overlap other `SHARED` resources.
 pub const SHARED: u32 = 1 << 0;
 
+/// The `object_get_info` topic of resources, and the size of its record.
+pub const INFO_RESOURCE: u32 = 5;
+pub const INFO_RESOURCE_SIZE: usize = 0x18;
+
 /// The number of I/O ports.
 const IOPORT_COUNT: u64 = 0x1_0000;
 /// The end of the range of `PRIORITY` resources, exclusive.
 const PRIORITY_END: u64 = 32;
 
 /// Every live resource except the root, for the overlap rules.
-static LIVE: SpinLock<Vec<Weak<Resource>>> = SpinLock::new(Vec::new());
+static LIVE: SpinLock<Vec<Weak<Resource>>> =
+    SpinLock::new(crate::lock_order::RESOURCE_LIVE, Vec::new());
 
 /// What `resource_create` asks for: a kind, the `size` units from
 /// `base`, and options.
@@ -171,6 +176,17 @@ impl Resource {
 
     pub fn options(&self) -> u32 {
         self.options
+    }
+
+    /// The `RESOURCE` information record: the kind, the options, the base
+    /// and the size.
+    pub fn info(&self) -> [u8; INFO_RESOURCE_SIZE] {
+        let mut record = [0u8; INFO_RESOURCE_SIZE];
+        record[0x00..0x04].copy_from_slice(&self.kind.to_le_bytes());
+        record[0x04..0x08].copy_from_slice(&self.options.to_le_bytes());
+        record[0x08..0x10].copy_from_slice(&self.base.to_le_bytes());
+        record[0x10..0x18].copy_from_slice(&self.size.to_le_bytes());
+        record
     }
 
     /// Whether the range of this resource covers the `size` units from

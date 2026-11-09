@@ -1,0 +1,8 @@
+# The manifest of the FAT server, installed as
+# usr/lib/drivers/fat/driver.yaml.
+name: fat
+binary: /usr/lib/drivers/fat/fat
+match:
+  - gpt:c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+  - gpt:ebd0a0a2-b9e5-4433-87c0-68b6b72699c7
+kind: normal

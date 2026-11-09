@@ -53,11 +53,14 @@ impl StreamEnd {
             budget.charge_kernel(STREAM_COST)?;
         }
         // Shared releases the charge when it goes, also on failure here.
-        let shared = try_arc(SpinLock::new(Shared {
-            queues,
-            ends: [Weak::new(), Weak::new()],
-            charged: budget.cloned(),
-        }))?;
+        let shared = try_arc(SpinLock::new(
+            crate::lock_order::STREAM_SHARED,
+            Shared {
+                queues,
+                ends: [Weak::new(), Weak::new()],
+                charged: budget.cloned(),
+            },
+        ))?;
         let end = |side| {
             let header = Header::new(ObjectType::Stream);
             header.update_signals(0, signals::WRITABLE);

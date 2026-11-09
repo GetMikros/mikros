@@ -1,0 +1,61 @@
+// MIKSPEC-0034.R7
+
+library mikros.process;
+using mikros.base;
+
+type HandleRole = enum : u32 {
+    STDIN = 1; STDOUT = 2; STDERR = 3; PROVIDER = 4; PRIORITY = 5;
+    TERMINAL = 6; USER = 16;
+};
+
+type StartupHandle = struct {
+    role HandleRole;
+    id u32;
+    handle handle;
+};
+
+type SpawnRequest = struct {
+    path string<1024>;
+    arguments handle<MemoryObject>;
+    handles vector<StartupHandle, 32>;
+    app_id string<128>?;
+    user u32;
+    login_session bool;
+};
+
+type ProcessInfo = struct {
+    pid u32;
+    parent u32;
+    process_group u32;
+    session u32;
+    login_session u32;
+    user u32;
+    app_id string<128>;
+    path string<1024>;
+};
+
+type StatusKind = enum : u32 { EXITED = 1; STOPPED = 2; CONTINUED = 3; };
+
+type ExitStatus = struct {
+    kind StatusKind;
+    exit_code i64;
+    term_signal u32;
+    stop_signal u32;
+};
+
+type WaitOptions = bits : u32 { STOPPED = 0x1; CONTINUED = 0x2; };
+
+protocol Launcher {
+    @1 Spawn(request SpawnRequest) -> (pid u32, process handle<Process>) error base.Status;
+    @2 Exec(request SpawnRequest) -> () error base.Status;
+    @3 Kill(pid u32, signo u32) -> () error base.Status;
+    @4 Wait(selector i32, options WaitOptions,
+            deadline base.MonotonicTime) -> (pid u32, status ExitStatus) error base.Status;
+    @5 GetInfo(pid u32) -> (info ProcessInfo) error base.Status;
+    @6 List() -> (pids vector<u32, 4096>);
+    @7 CreateSession() -> (session u32) error base.Status;
+    @8 SetProcessGroup(pid u32, process_group u32) -> () error base.Status;
+    @9 KillGroup(process_group u32, signo u32) -> () error base.Status;
+    @10 Fork(entry u64, stack u64, arg u64) -> (pid u32, process handle<Process>) error base.Status;
+    @11 KillLoginSession(login_session u32, signo u32) -> () error base.Status;
+};

@@ -1,0 +1,4 @@
+name: restart-probe
+binary: /usr/bin/directory-probe
+start: boot
+restart: on-failure

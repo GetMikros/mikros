@@ -1,0 +1,85 @@
+//! The accounts service: a system service that keeps the users in the
+//! file `users` of `/var/lib/accounts/` and provides
+//! `mikros.session.Accounts`. It asks the permission broker about its
+//! clients' permissions, and the session manager for administrators'
+//! authorizations, through its directory.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+mod checks;
+mod lock;
+mod serve;
+mod service;
+mod store;
+
+use alloc::rc::Rc;
+use checks::Checks;
+use mikros_rt::exec::Executor;
+use mikros_rt::interfaces::__midl::ServerEnd;
+use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
+use mikros_rt::interfaces::mikros::process::HandleRole;
+use mikros_rt::interfaces::mikros::service::{
+    DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
+};
+use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
+use service::Service;
+use store::Store;
+
+mikros_rt::raw_main!(main);
+
+/// The protocol the service provides.
+const PROTOCOL: &str = "mikros.session.Accounts";
+/// The directory of the service's data, and that of users' home
+/// folders.
+const DATA: &str = "/var/lib/accounts";
+const HOMES: &str = "/Users";
+
+fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
+    let Ok(mut executor) = Executor::new() else {
+        return PANIC_EXIT_CODE;
+    };
+    let reactor = executor.reactor().clone();
+    let spawner = executor.spawner().clone();
+    let received = executor.block_on(managed::receive_async(bootstrap, reactor.clone(), |_| {}));
+    let Ok(mut managed) = received else {
+        return PANIC_EXIT_CODE;
+    };
+    let Some(at) = managed
+        .handles
+        .iter()
+        .position(|h| h.role == HandleRole::Provider)
+    else {
+        return PANIC_EXIT_CODE;
+    };
+    let provider = managed.handles.remove(at).handle;
+    let Some((fs, at)) = managed::take_entry(&mut managed.namespace, DATA) else {
+        return PANIC_EXIT_CODE;
+    };
+    let fs = NodeAsyncClient::new(fs, reactor.clone());
+    let Ok(store) = executor.block_on(Store::open(&fs, at, &reactor)) else {
+        return PANIC_EXIT_CODE;
+    };
+    drop(fs);
+    let homes = managed::take_entry(&mut managed.namespace, HOMES)
+        .filter(|(_, at)| *at == ".")
+        .map(|(homes, _)| NodeAsyncClient::new(homes, reactor.clone()));
+    let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
+    let checks = Checks::new(directory, reactor.clone());
+    let service = Rc::new(Service::new(store, checks, homes, reactor.clone()));
+    let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
+    executor.block_on(async {
+        while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
+            // Other protocols and named instances are not ours; dropping
+            // the server end closes the connection.
+            if c.protocol == PROTOCOL && c.instance.is_none() {
+                let end = ServerEnd::new(c.server);
+                let serving = serve::serve(service.clone(), end, c.client, spawner.clone());
+                spawner.spawn(serving);
+            }
+        }
+    });
+    PANIC_EXIT_CODE
+}

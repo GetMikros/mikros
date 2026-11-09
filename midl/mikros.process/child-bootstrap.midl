@@ -1,0 +1,17 @@
+// MIKSPEC-0034.R17
+
+library mikros.process;
+using mikros.service;
+
+type ChildBindings = struct {
+    pid u32;
+    parent u32;
+    process handle<Process>;
+    thread handle<Thread>;
+    launcher client_end<Launcher>;
+    directory client_end<mikros.service.Directory>;
+};
+
+protocol ChildBootstrap {
+    @1 Install(bindings ChildBindings) -> ();
+};

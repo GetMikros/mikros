@@ -1,0 +1,8 @@
+// MIKSPEC-0044.R9
+
+library mikros.storage;
+using mikros.base;
+
+protocol BlockDevice {
+    @1 Open(block server_end<Block>, writable bool) -> () error base.Status;
+};

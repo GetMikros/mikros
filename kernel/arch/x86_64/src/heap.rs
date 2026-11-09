@@ -24,7 +24,10 @@ impl Pages for DynamicPages {
 struct KernelHeap(SpinLock<Heap<DynamicPages>>);
 
 #[global_allocator]
-static HEAP: KernelHeap = KernelHeap(SpinLock::new(Heap::new(DynamicPages)));
+static HEAP: KernelHeap = KernelHeap(SpinLock::new(
+    kernel_core::lock_order::HEAP,
+    Heap::new(DynamicPages),
+));
 
 // SAFETY: blocks come from `Heap`, which hands each out once until it is
 // freed, with the size and alignment of the layout, and `dealloc` passes

@@ -1,0 +1,5 @@
+name: time-probe
+binary: /usr/bin/time-probe
+start: boot
+boot_handles: [platform_info]
+permissions: [time.set]

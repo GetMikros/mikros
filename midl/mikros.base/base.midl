@@ -1,0 +1,32 @@
+// MIKSPEC-0024.R7, MIKSPEC-0010.R2
+
+library mikros.base;
+
+type Status = enum : i32 {
+    OK = 0;
+    INTERNAL = -1;
+    NOT_SUPPORTED = -2;
+    NO_RESOURCES = -3;
+    NO_MEMORY = -4;
+    BAD_SYSCALL = -5;
+    INVALID_ARGS = -10;
+    BAD_HANDLE = -11;
+    WRONG_TYPE = -12;
+    ACCESS_DENIED = -13;
+    OUT_OF_RANGE = -14;
+    BUFFER_TOO_SMALL = -15;
+    BAD_STATE = -20;
+    TIMED_OUT = -21;
+    SHOULD_WAIT = -22;
+    CANCELED = -23;
+    PEER_CLOSED = -24;
+    NOT_FOUND = -25;
+    ALREADY_EXISTS = -26;
+    INTERRUPTED = -27;
+    IO = -28;
+};
+
+alias MonotonicTime = i64;
+alias UtcTime = i64;
+alias Duration = i64;
+alias Token = handle<Event, DUPLICATE | TRANSFER | INSPECT>;

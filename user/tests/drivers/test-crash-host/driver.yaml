@@ -1,0 +1,7 @@
+# A driver for PCI host bridges that adds a child and ends once the
+# child's driver writes on its bus channel, for the device manager test
+# of children kept across a driver restart.
+name: test-crash-host
+binary: /usr/lib/drivers/test-crash-host/test-crash-host
+match: [platform:pci-host-ecam]
+needs: [bus]

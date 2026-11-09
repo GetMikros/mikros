@@ -1,0 +1,6 @@
+# An invalid driver manifest: drivers do not say when they start.
+name: test-invalid
+binary: /usr/lib/drivers/test-invalid/test-invalid
+match: [platform:pci-host-ecam]
+kind: normal
+start: boot

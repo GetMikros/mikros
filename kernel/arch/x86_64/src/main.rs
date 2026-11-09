@@ -9,8 +9,7 @@ extern crate alloc;
 #[cfg(target_os = "none")]
 mod apic;
 #[cfg(target_os = "none")]
-#[expect(dead_code, reason = "nothing creates processes yet")]
-mod aspace;
+use kernel_core::aspace;
 #[cfg(any(target_os = "none", test))]
 mod backtrace;
 #[cfg(target_os = "none")]
@@ -25,9 +24,13 @@ mod context;
 #[cfg_attr(test, allow(dead_code))]
 mod control;
 #[cfg(all(target_os = "none", feature = "fuzz"))]
-mod coverage;
+use kernel_core::coverage;
+#[cfg(all(target_os = "none", feature = "fuzz"))]
+mod coverage_hook;
 #[cfg(target_os = "none")]
 mod cpu;
+#[cfg(target_os = "none")]
+mod entropy;
 #[cfg(target_os = "none")]
 mod entry;
 #[cfg(target_os = "none")]
@@ -35,7 +38,7 @@ mod exception;
 #[cfg(any(target_os = "none", test))]
 mod features;
 #[cfg(all(target_os = "none", feature = "fuzz"))]
-mod fuzz;
+use kernel_core::fuzz;
 #[cfg(any(target_os = "none", test))]
 #[cfg_attr(test, allow(dead_code))]
 mod gdt;
@@ -45,23 +48,29 @@ mod heap;
 #[cfg_attr(test, allow(dead_code))]
 mod idt;
 #[cfg(target_os = "none")]
-mod init;
+mod interface;
 #[cfg(target_os = "none")]
 mod interrupt;
 #[cfg(target_os = "none")]
 mod iommu;
 #[cfg(target_os = "none")]
-mod ktimer;
+use kernel_core::ktimer;
 #[cfg(target_os = "none")]
-mod log;
+use kernel_core::log;
 #[cfg(target_os = "none")]
 mod memory;
 #[cfg(target_os = "none")]
-mod memory_object;
-#[cfg(any(target_os = "none", test))]
-mod output;
+use kernel_core::memory_object;
 #[cfg(target_os = "none")]
-mod pager;
+use kernel_core::output;
+#[cfg(target_os = "none")]
+mod page_tables;
+#[cfg(target_os = "none")]
+use kernel_core::pager;
+#[cfg(target_os = "none")]
+mod isolation;
+#[cfg(any(target_os = "none", test))]
+mod mitigations;
 #[cfg(any(target_os = "none", test))]
 mod paging;
 #[cfg(target_os = "none")]
@@ -69,37 +78,47 @@ mod panic;
 #[cfg(target_os = "none")]
 mod percpu;
 #[cfg(target_os = "none")]
-mod port;
+use kernel_core::port;
 #[cfg(target_os = "none")]
-mod process;
-#[cfg(any(target_os = "none", test))]
-mod publish;
+use kernel_core::process;
 #[cfg(target_os = "none")]
-mod random;
+use kernel_core::publish;
+#[cfg(target_os = "none")]
+use kernel_core::random;
 #[cfg(target_os = "none")]
 mod reserved;
 #[cfg(target_os = "none")]
-mod sched;
+use kernel_core::sched;
 #[cfg(target_os = "none")]
 mod serial;
 #[cfg(target_os = "none")]
-mod signal;
+use kernel_core::signal;
+#[cfg(target_os = "none")]
+mod signal_frame;
+#[cfg(target_os = "none")]
+mod smp;
 #[cfg(target_os = "none")]
 mod space;
 #[cfg(target_os = "none")]
 mod syscall;
+#[cfg(target_os = "none")]
+mod thread_arch;
 #[cfg(any(target_os = "none", test))]
 mod thread_state;
 #[cfg(target_os = "none")]
 mod time;
 #[cfg(target_os = "none")]
-mod timeline;
+use kernel_core::timeline;
 #[cfg(target_os = "none")]
 mod timer;
 #[cfg(target_os = "none")]
+mod tlb;
+#[cfg(target_os = "none")]
+use kernel_core::user;
+#[cfg(target_os = "none")]
 mod usercopy;
 #[cfg(target_os = "none")]
-mod wait;
+use kernel_core::wait;
 
 /// The kernel only runs on its own target. This lets the workspace build
 /// on the host.

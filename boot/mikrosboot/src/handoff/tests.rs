@@ -2,6 +2,7 @@ use super::*;
 use crate::paging::direct_runs;
 use alloc::vec;
 use alloc::vec::Vec;
+use boot_protocol::x86_64::DIRECT_MAP_BASE;
 use boot_protocol::{CMDLINE_MAX, flags};
 
 const P: u64 = PAGE_SIZE;
@@ -16,6 +17,8 @@ fn prepared() -> Prepared {
             entry: 0xffff_ffff_8000_0000,
             segments: Vec::new(),
             version: (VERSION_MAJOR, VERSION_MINOR),
+            relocatable: false,
+            relocations: Vec::new(),
         },
         layout: Layout {
             virt_base: 0xffff_ffff_8000_0000,
@@ -44,6 +47,7 @@ fn prepared() -> Prepared {
         system_table: 0x7f0_0000,
         rng_seed: None,
         boot_time: None,
+        direct_map_base: DIRECT_MAP_BASE,
     }
 }
 

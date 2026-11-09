@@ -9,7 +9,7 @@
 pub const MAGIC: [u8; 8] = *b"MIKROSBI";
 /// The protocol version this crate describes.
 pub const VERSION_MAJOR: u16 = 1;
-pub const VERSION_MINOR: u16 = 0;
+pub const VERSION_MINOR: u16 = 1;
 
 /// The name and type of the ELF note that gives the protocol version a
 /// kernel was built for. Its descriptor is a `u16` major version followed
@@ -73,6 +73,9 @@ pub struct BootInfo {
     pub boot_time: i64,
     pub arch_data0: u64,
     pub arch_data1: u64,
+    /// Added in version 1.1: `boot_time` in nanoseconds, or zero when
+    /// `BOOT_TIME_VALID` is clear.
+    pub boot_time_ns: i64,
 }
 
 impl BootInfo {
@@ -84,7 +87,13 @@ impl BootInfo {
 }
 
 /// The value of `BootInfo::size` for this version.
-pub const BOOT_INFO_SIZE: u32 = 0xE8;
+pub const BOOT_INFO_SIZE: u32 = 0xF0;
+/// The size of a version 1.0 `BootInfo`, which ends before
+/// `boot_time_ns`.
+pub const BOOT_INFO_SIZE_1_0: u32 = 0xE8;
+
+/// Nanoseconds in a second, for `boot_time_ns`.
+pub const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -204,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_info_has_the_version_1_0_layout() {
+    fn boot_info_has_the_version_1_1_layout() {
         assert_eq!(size_of::<BootInfo>(), BOOT_INFO_SIZE as usize);
         assert_eq!(align_of::<BootInfo>(), 8);
         let offsets = [
@@ -232,6 +241,7 @@ mod tests {
             (offset_of!(BootInfo, boot_time), 0xD0),
             (offset_of!(BootInfo, arch_data0), 0xD8),
             (offset_of!(BootInfo, arch_data1), 0xE0),
+            (offset_of!(BootInfo, boot_time_ns), 0xE8),
         ];
         for (i, (actual, expected)) in offsets.into_iter().enumerate() {
             assert_eq!(actual, expected, "field {i}");

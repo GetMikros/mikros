@@ -1,0 +1,373 @@
+// SPDX-License-Identifier: GPL-2.0
+//! Resolving paths (MIKSPEC-0049.R4, R5), also case-insensitively
+//! (MIKSPEC-0071.R17), opening and creating nodes (MIKSPEC-0049.R6), and
+//! listing directories (MIKSPEC-0049.R12).
+
+use crate::fs::{self, Open, error};
+use crate::node::{Connection, MODE_BITS, NAME_MAX, TARGET_MAX};
+use crate::watch::event;
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use mikros_btrfs::node::{Kind, MODE_SYMLINK, MODE_TYPE};
+use mikros_rt::interfaces::mikros::fs::*;
+
+/// The most entries one directory read returns, the limit of its reply.
+const ENTRIES_MAX: usize = 64;
+/// The most symbolic links one `Open` follows.
+const LINKS_MAX: usize = 40;
+/// The `DT_` types of directory entries.
+const DT_DIR: u32 = 4;
+const DT_LNK: u32 = 10;
+const DT_SOCK: u32 = 12;
+
+/// What a path names.
+enum Resolved {
+    Node(Rc<Open>),
+    /// Nothing, as the last component of a path in the directory.
+    Missing {
+        parent: Rc<Open>,
+        name: String,
+    },
+    /// A link to follow from elsewhere, with what remains of the path.
+    Redirect(String),
+}
+
+impl Connection {
+    /// Looks `name` up in the directory `dir`, as the open node that
+    /// connections share. The root's `usr` is the current system
+    /// version's root.
+    pub(crate) fn lookup(&self, dir: &Rc<Open>, name: &str) -> Result<Option<Rc<Open>>, Error> {
+        if self.fs.is_usr(dir, name)
+            && let Some(usr) = &self.fs.usr
+        {
+            return Ok(Some(usr.clone()));
+        }
+        match dir.node.lookup(name.as_bytes()) {
+            Ok(node) => Ok(Some(self.fs.open(node, dir.key, name)?)),
+            Err(-2) => Ok(None),
+            Err(e) => Err(error(e)),
+        }
+    }
+
+    /// The first entry of the directory `dir`, in the order in which
+    /// `ReadDirectory` lists them, whose name equals `name` under simple
+    /// case folding (MIKSPEC-0071.R17), as the open node that connections
+    /// share, with the entry's own name. Names that are not UTF-8 equal
+    /// none.
+    pub(crate) fn lookup_folded(
+        &self,
+        dir: &Rc<Open>,
+        name: &str,
+    ) -> Result<Option<(Rc<Open>, String)>, Error> {
+        let usr = dir.key == self.fs.root.key && self.fs.usr.is_some();
+        if usr && mikros_casefold::equal(fs::USR, name) {
+            let found = self.lookup(dir, fs::USR)?;
+            return Ok(found.map(|open| (open, String::from(fs::USR))));
+        }
+        let mut cookie = 0;
+        loop {
+            let mut found = None;
+            let mut seen = false;
+            dir.node
+                .read_dir(&mut cookie, |entry, _, _| {
+                    seen = true;
+                    let hidden = usr && entry == fs::USR.as_bytes();
+                    if entry != b"."
+                        && entry != b".."
+                        && !hidden
+                        && let Ok(entry) = core::str::from_utf8(entry)
+                        && mikros_casefold::equal(entry, name)
+                    {
+                        found = Some(String::from(entry));
+                        return false;
+                    }
+                    true
+                })
+                .map_err(error)?;
+            if let Some(entry) = found {
+                let open = self.lookup(dir, &entry)?;
+                return Ok(open.map(|open| (open, entry)));
+            }
+            if !seen {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// The entry `name` of the directory `dir` and its own name: on a
+    /// case-insensitive connection, as `Open` with `CASE_INSENSITIVE`
+    /// finds it, and otherwise exactly.
+    pub(crate) fn find(
+        &self,
+        dir: &Rc<Open>,
+        name: &str,
+    ) -> Result<Option<(Rc<Open>, String)>, Error> {
+        match self.lookup(dir, name)? {
+            Some(open) => Ok(Some((open, String::from(name)))),
+            None if self.folded => self.lookup_folded(dir, name),
+            None => Ok(None),
+        }
+    }
+
+    /// Fails with `EXISTS` on a case-insensitive connection when the
+    /// directory `dir` holds an entry equal to the new name `name` under
+    /// case folding.
+    pub(crate) fn free_folded(&self, dir: &Rc<Open>, name: &str) -> Result<(), Error> {
+        match self.folded && self.lookup_folded(dir, name)?.is_some() {
+            true => Err(Error::Exists),
+            false => Ok(()),
+        }
+    }
+
+    /// Resolves `path` from this directory with the flags `flags` of
+    /// `Open`: following a symbolic link last in the path unless
+    /// `NO_FOLLOW`. Links whose relative targets stay at or below this
+    /// directory are followed; for any other, the link's target joined
+    /// with the rest of the path comes back as a redirect. With
+    /// `CASE_INSENSITIVE`, a component that no entry has exactly is
+    /// looked up under case folding, and with `CREATE` too, a last
+    /// component found that way fails with `EXISTS`.
+    fn resolve(&self, path: &str, flags: OpenFlags) -> Result<Resolved, Error> {
+        let no_follow = flags.contains(OpenFlags::NO_FOLLOW);
+        let folded = flags.contains(OpenFlags::CASE_INSENSITIVE);
+        let mut rest: Vec<String> = components(path)?.into_iter().rev().collect();
+        let mut stack = vec![self.open.clone()];
+        let mut followed = 0;
+        while let Some(name) = rest.pop() {
+            let at = stack
+                .last()
+                .expect("the stack holds this directory")
+                .clone();
+            match name.as_str() {
+                "." => continue,
+                // Only the targets of links that stay within get here.
+                ".." => {
+                    stack.pop();
+                    continue;
+                }
+                _ => {}
+            }
+            if !at.is_directory()? {
+                return Err(Error::NotDirectory);
+            }
+            let found = match self.lookup(&at, &name)? {
+                None if folded => match self.lookup_folded(&at, &name)? {
+                    Some(_) if rest.is_empty() && flags.contains(OpenFlags::CREATE) => {
+                        return Err(Error::Exists);
+                    }
+                    found => found.map(|(open, _)| open),
+                },
+                found => found,
+            };
+            let Some(node) = found else {
+                if rest.is_empty() {
+                    return Ok(Resolved::Missing { parent: at, name });
+                }
+                return Err(Error::NotFound);
+            };
+            if node.attributes()?.mode & MODE_TYPE != MODE_SYMLINK || (rest.is_empty() && no_follow)
+            {
+                stack.push(node);
+                continue;
+            }
+            followed += 1;
+            if followed > LINKS_MAX {
+                return Err(Error::Loop);
+            }
+            let target = link_target(&node)?;
+            if stays_within(stack.len() - 1, &target) {
+                rest.extend(
+                    target
+                        .split('/')
+                        .filter(|c| !c.is_empty())
+                        .rev()
+                        .map(String::from),
+                );
+                continue;
+            }
+            let mut redirect = target;
+            for c in rest.iter().rev() {
+                redirect.push('/');
+                redirect.push_str(c);
+            }
+            return Ok(Resolved::Redirect(redirect));
+        }
+        Ok(Resolved::Node(
+            stack.pop().expect("the stack holds this directory"),
+        ))
+    }
+
+    pub(crate) fn open(&self, q: NodeOpenRequest) -> Result<NodeOpenResponse, Error> {
+        self.require(q.rights)?;
+        if q.rights.contains(Rights::WRITE) && self.fs.read_only {
+            return Err(Error::ReadOnly);
+        }
+        self.directory()?;
+        let want_dir = q.flags.contains(OpenFlags::DIRECTORY) || q.path.ends_with('/');
+        let open = match self.resolve(&q.path, q.flags)? {
+            Resolved::Redirect(target) => {
+                return Ok(NodeOpenResponse {
+                    r#type: NodeType::Symlink,
+                    redirect: Some(target),
+                });
+            }
+            Resolved::Missing { parent, name } if q.flags.contains(OpenFlags::CREATE) => {
+                self.require_write()?;
+                if self.fs.is_usr(&parent, &name) {
+                    return Err(Error::AccessDenied);
+                }
+                let kind = match q.flags.contains(OpenFlags::DIRECTORY) {
+                    true => Kind::Directory,
+                    false => Kind::File,
+                };
+                let node = parent
+                    .node
+                    .create(name.as_bytes(), kind, q.mode & MODE_BITS)
+                    .map_err(error)?;
+                self.own(&node)?;
+                self.fs
+                    .watches
+                    .notify(parent.key, &[event(WatchKind::Created, 0, &name)]);
+                self.fs.open(node, parent.key, &name)?
+            }
+            Resolved::Missing { .. } => return Err(Error::NotFound),
+            Resolved::Node(open) if q.flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) => {
+                let usr = self.fs.usr.as_ref().is_some_and(|u| u.key == open.key);
+                return Err(if usr {
+                    Error::AccessDenied
+                } else {
+                    Error::Exists
+                });
+            }
+            Resolved::Node(open) => open,
+        };
+        let r#type = fs::node_type(open.attributes()?.mode);
+        if want_dir && r#type != NodeType::Directory {
+            return Err(Error::NotDirectory);
+        }
+        if r#type == NodeType::Socket {
+            return Err(Error::Invalid);
+        }
+        if q.flags.contains(OpenFlags::TRUNCATE) && r#type == NodeType::File {
+            self.require_write()?;
+            self.fs.resized(&open, Some(0));
+            open.node.truncate(0).map_err(error)?;
+            self.fs.changed(&open, WatchKind::Modified);
+        }
+        let append = q.flags.contains(OpenFlags::APPEND);
+        let folded = q.flags.contains(OpenFlags::CASE_INSENSITIVE);
+        self.fs
+            .serve(q.node, open, q.rights, self.user, append, folded);
+        Ok(NodeOpenResponse {
+            r#type,
+            redirect: None,
+        })
+    }
+
+    pub(crate) fn read_directory(
+        &self,
+        cookie: u64,
+        attributes: bool,
+    ) -> Result<NodeReadDirectoryResponse, Error> {
+        self.require(Rights::READ)?;
+        self.directory()?;
+        let mut found: Vec<(String, u64, u32)> = Vec::new();
+        let mut next = cookie;
+        let root = self.open.key == self.fs.root.key;
+        // The root's `usr` comes first, and hides any of the subvolume's.
+        if root
+            && cookie == 0
+            && let Some(usr) = &self.fs.usr
+        {
+            found.push((String::from(fs::USR), usr.key.1, DT_DIR));
+        }
+        self.open
+            .node
+            .read_dir(&mut next, |name, inode, kind| {
+                if found.len() == ENTRIES_MAX {
+                    return false;
+                }
+                let hidden = root && self.fs.usr.is_some() && name == fs::USR.as_bytes();
+                if name != b"." && name != b".." && !hidden {
+                    let name = String::from_utf8_lossy(name).into_owned();
+                    found.push((name, inode, kind));
+                }
+                true
+            })
+            .map_err(error)?;
+        let mut entries = Vec::with_capacity(found.len());
+        for (name, inode, kind) in found {
+            let attrs = match attributes {
+                true => match self.lookup(&self.open, &name)? {
+                    Some(open) => Some(Box::new(fs::attributes(&open.attributes()?))),
+                    // Removed since it was listed.
+                    None => continue,
+                },
+                false => None,
+            };
+            entries.push(DirEntry {
+                name,
+                r#type: match kind {
+                    DT_DIR => NodeType::Directory,
+                    DT_LNK => NodeType::Symlink,
+                    DT_SOCK => NodeType::Socket,
+                    _ => NodeType::File,
+                },
+                inode,
+                attributes: attrs,
+            });
+        }
+        Ok(NodeReadDirectoryResponse { entries, next })
+    }
+}
+
+/// The target of the symbolic link `open`.
+pub(crate) fn link_target(open: &Open) -> Result<String, Error> {
+    let mut buf = vec![0u8; TARGET_MAX];
+    let len = open.node.read_link(&mut buf).map_err(error)?;
+    buf.truncate(len);
+    String::from_utf8(buf).map_err(|_| Error::Invalid)
+}
+
+/// Whether the relative `target` of a link at `depth` below the directory
+/// that `Open` was called on stays at or below it.
+fn stays_within(depth: usize, target: &str) -> bool {
+    if target.is_empty() || target.starts_with('/') {
+        return false;
+    }
+    let mut depth = depth as isize;
+    for c in target.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => depth += 1,
+        }
+    }
+    true
+}
+
+/// The components of the path of `Open` (MIKSPEC-0049.R4).
+fn components(path: &str) -> Result<Vec<String>, Error> {
+    if path.is_empty() || path.starts_with('/') {
+        return Err(Error::Invalid);
+    }
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" => return Err(Error::Invalid),
+            ".." => return Err(Error::AccessDenied),
+            p if p.len() > NAME_MAX => return Err(Error::NameTooLong),
+            p => parts.push(String::from(p)),
+        }
+    }
+    Ok(parts)
+}

@@ -82,40 +82,29 @@ extern "sysv64" fn _start(info: *const u8) -> ! {
     space::enter(info, on_kernel_tables)
 }
 
-/// Continues boot on the kernel's page tables and stack.
+/// Continues boot on the kernel's page tables and stack, in the core.
 extern "sysv64" fn on_kernel_tables() -> ! {
-    let Some(mut info) = *space::BOOT_INFO.lock() else {
+    let Some(info) = *space::BOOT_INFO.lock() else {
         panic!("BootInfo was not kept");
     };
+    kernel_core::boot::start(info)
+}
+
+/// The boot processor's setup for `kernel_core::arch::early_setup`.
+pub fn early_setup(info: &mut BootInfo) {
     let ist = || space::new_stack(gdt::IST_STACK_SIZE);
-    gdt::init(space::stack_top(), ist(), ist(), ist(), ist());
+    gdt::init(ist(), ist(), ist(), ist());
     crate::idt::init();
     // A framebuffer that fails the checks is treated as absent from here
     // on: no console, no panic screen and nothing for init.
     if info.flags & flags::FRAMEBUFFER_PRESENT != 0
         && let Err(e) =
-            bootinfo::check_framebuffer(&info.framebuffer, crate::memory::memory_map(&info))
+            bootinfo::check_framebuffer(&info.framebuffer, crate::memory::memory_map(info))
     {
         log!(Warning, "not using the framebuffer: {e}");
         info.flags &= !flags::FRAMEBUFFER_PRESENT;
     }
-    crate::console::init(&info);
-    crate::reserved::init(&info);
+    crate::console::init(info);
+    crate::reserved::init(info);
     crate::syscall::init();
-    crate::wait::init();
-    kernel_core::sync::set_preempt_hook(crate::sched::preempt_point);
-    crate::apic::init(&info);
-    crate::time::init(&info);
-    crate::timer::init();
-    crate::random::init(&info);
-    crate::sched::start_maintenance();
-    crate::iommu::init(&info);
-    crate::init::start(&info);
-    let free = space::reclaim_boot_memory(&info);
-    log!(
-        Info,
-        "kernel page tables active, {} MiB of memory free",
-        (free * 4096) >> 20
-    );
-    crate::sched::run()
 }

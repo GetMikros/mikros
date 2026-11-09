@@ -1,7 +1,7 @@
 //! `cargo xtask image`: creates a bootable GPT disk image.
 
 mod esp;
-mod gpt;
+pub(crate) mod gpt;
 mod root;
 
 use crate::build::{self, Kind};
@@ -13,6 +13,19 @@ use uuid::Uuid;
 
 const ESP_TYPE: Uuid = Uuid::from_u128(0xc12a7328_f81f_11d2_ba4b_00a0c93ec93b);
 const ROOT_TYPE: Uuid = Uuid::from_u128(0xfa730af6_8ba3_42d9_b155_466909d08135);
+/// The types of the small partitions that the test machine's disk has
+/// after the root partition, for the test drivers test-fat and
+/// test-btrfs, which bind to them as nothing else matches them.
+const TEST_TYPES: [(Uuid, &str); 2] = [
+    (
+        Uuid::from_u128(0xeb1f4cf2_5884_4f87_880c_3dd4d8286764),
+        "test-fat",
+    ),
+    (
+        Uuid::from_u128(0x38a2aae9_c051_4fe5_a24a_441d4a220d2a),
+        "test-btrfs",
+    ),
+];
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -167,9 +180,15 @@ pub fn create(kind: Kind, built: &build::Built, out: &Path) -> Result<()> {
     create_with(kind, built, out, "", &[])
 }
 
+/// The command line word that makes the bootloader place the kernel at
+/// its linked addresses.
+pub const KASLR_OFF: &str = "kaslr=off";
+
 /// Like `create`, with `extra` added to the kernel command line and
 /// `more` files, given as paths and contents, on the EFI system
-/// partition.
+/// partition. A fuzz build always boots with `KASLR_OFF`, so that the
+/// addresses its coverage records are those of the kernel image as
+/// linked.
 pub fn create_with(
     kind: Kind,
     built: &build::Built,
@@ -177,10 +196,30 @@ pub fn create_with(
     extra: &str,
     more: &[(&str, &[u8])],
 ) -> Result<()> {
+    create_parts(kind, built, out, extra, more, false)
+}
+
+/// Like `create_with`, for `cargo xtask test`: the disk also has the
+/// partitions of `TEST_TYPES`.
+pub fn create_for_tests(kind: Kind, built: &build::Built, out: &Path, extra: &str) -> Result<()> {
+    create_parts(kind, built, out, extra, &[], true)
+}
+
+fn create_parts(
+    kind: Kind,
+    built: &build::Built,
+    out: &Path,
+    extra: &str,
+    more: &[(&str, &[u8])],
+    test_partition: bool,
+) -> Result<()> {
     let root_guid = Uuid::new_v4();
     let mut command_line = format!("root=PARTUUID={root_guid}");
     if !extra.is_empty() {
         command_line = format!("{command_line} {extra}");
+    }
+    if kind == Kind::Fuzz && !extra.split(' ').any(|w| w == KASLR_OFF) {
+        command_line = format!("{command_line} {KASLR_OFF}");
     }
     let contents = esp_files(built, &built.boot_image, command_line)?;
     let files: Vec<(&str, &[u8])> = contents
@@ -190,25 +229,33 @@ pub fn create_with(
         .collect();
     let total = files.iter().map(|(_, d)| d.len() as u64).sum();
     let esp = esp::build(esp::size_for(total), &files)?;
-    let root = root::create(kind)?;
-
-    write_image(
-        out,
-        &[
-            Part {
-                type_guid: ESP_TYPE,
+    let root = root::create(kind, &built.boot_image)?;
+    let mut parts = vec![
+        Part {
+            type_guid: ESP_TYPE,
+            guid: Uuid::new_v4(),
+            name: "EFI system partition",
+            data: Data::Bytes(&esp),
+        },
+        Part {
+            type_guid: ROOT_TYPE,
+            guid: root_guid,
+            name: "Mikros",
+            data: Data::File(&root),
+        },
+    ];
+    let test = [0; 4096];
+    if test_partition {
+        for (type_guid, name) in TEST_TYPES {
+            parts.push(Part {
+                type_guid,
                 guid: Uuid::new_v4(),
-                name: "EFI system partition",
-                data: Data::Bytes(&esp),
-            },
-            Part {
-                type_guid: ROOT_TYPE,
-                guid: root_guid,
-                name: "Mikros",
-                data: Data::File(&root),
-            },
-        ],
-    )?;
+                name,
+                data: Data::Bytes(&test),
+            });
+        }
+    }
+    write_image(out, &parts)?;
     println!("created  {}", out.display());
     Ok(())
 }

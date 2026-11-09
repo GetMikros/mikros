@@ -7,7 +7,7 @@
 use mikros_rt::sys::{self, Handle, Status};
 
 pub mod elf;
-pub mod ustar;
+pub use mikros_ustar as ustar;
 
 /// The `isa-debug-exit` port the test boot image is run with.
 pub const DEBUG_EXIT_PORT: u16 = 0xF4;

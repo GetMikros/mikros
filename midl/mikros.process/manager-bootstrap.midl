@@ -1,0 +1,20 @@
+// MIKSPEC-0034.R26
+
+library mikros.process;
+
+type ManagerStartup = struct {
+    version u32;
+    process handle<Process>;
+    thread handle<Thread>;
+    init_process handle<Process>;
+    budget handle<Budget>;
+    boot_image handle<MemoryObject, DUPLICATE | TRANSFER | READ | MAP | INSPECT>;
+    clock_page handle<MemoryObject, DUPLICATE | TRANSFER | READ | MAP | INSPECT>;
+    log handle<Log, WRITE>;
+    init_bootstrap server_end<InitBootstrap>;
+    command_line string<4096>;
+};
+
+protocol ManagerBootstrap {
+    @1 Start(startup ManagerStartup);
+};

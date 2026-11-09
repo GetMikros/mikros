@@ -1,7 +1,35 @@
 //! The physical frame allocator: a bitmap with one bit per 4 KiB frame,
 //! set while the frame is free.
 
+use crate::sync::SpinLock;
 use boot_protocol::{Kind, MemoryMapEntry, PAGE_SIZE};
+
+/// The frame allocator, set up by `init`.
+pub static FRAMES: SpinLock<Option<Frames<'static>>> =
+    SpinLock::new(crate::lock_order::FRAMES, None);
+
+/// A frame from the frame allocator, or `None` when none is free.
+pub fn alloc_frame() -> Option<u64> {
+    #[cfg(feature = "fuzz")]
+    if crate::fuzz::alloc_fails(crate::fuzz::FRAMES) {
+        return None;
+    }
+    FRAMES.lock().as_mut()?.alloc()
+}
+
+/// `count` contiguous frames, aligned to `align` frames and ending at or
+/// below the physical address `limit`, as `Frames::alloc_contiguous`
+/// takes them, or `None` when there is no such run.
+pub fn alloc_contiguous(count: u64, align: u64, limit: u64) -> Option<u64> {
+    #[cfg(feature = "fuzz")]
+    if crate::fuzz::alloc_fails(crate::fuzz::FRAMES) {
+        return None;
+    }
+    FRAMES
+        .lock()
+        .as_mut()?
+        .alloc_contiguous(count, align, limit)
+}
 
 /// The largest alignment of a contiguous run, in frames (2 MiB).
 pub const MAX_ALIGN: u64 = 512;

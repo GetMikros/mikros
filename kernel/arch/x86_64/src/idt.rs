@@ -121,7 +121,7 @@ pub struct Frame {
 // handler would have.
 #[cfg(target_os = "none")]
 global_asm!(
-    ".pushsection .text.interrupt_stubs, \"ax\"",
+    ".pushsection .text.entry, \"ax\"",
     ".balign 16",
     ".global interrupt_stubs",
     "interrupt_stubs:",
@@ -140,21 +140,50 @@ global_asm!(
     ".set vector, vector + 1",
     ".endr",
     "interrupt_common:",
+    // Swap to the kernel GS base when the interrupted code ran in user
+    // mode, as its saved CS shows, and back before returning to it. The
+    // processor pushed the frame on the entry stack then; it moves to
+    // the thread's kernel stack, which handling may switch away from.
+    "test byte ptr [rsp + 24], 3",
+    "jz 2f",
+    "swapgs",
+    "mov gs:[{scratch}], rdi",
+    // With kernel page-table isolation, the kernel's tables come first.
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 15f",
+    "mov rdi, gs:[{kernel_cr3}]",
+    "mov cr3, rdi",
+    "15:",
+    "mov rdi, rsp",
+    "mov rsp, gs:[{kernel_stack}]",
+    "push qword ptr [rdi + 48]",
+    "push qword ptr [rdi + 40]",
+    "push qword ptr [rdi + 32]",
+    "push qword ptr [rdi + 24]",
+    "push qword ptr [rdi + 16]",
+    "push qword ptr [rdi + 8]",
+    "push qword ptr [rdi]",
+    "mov rdi, gs:[{scratch}]",
+    "2:",
     "cmp byte ptr [rip + {smap}], 0",
     "je 7f",
     "clac",
     "7:",
-    // Swap to the kernel GS base when the interrupted code ran in user
-    // mode, as its saved CS shows, and back before returning to it.
-    "test byte ptr [rsp + 24], 3",
-    "jz 2f",
-    "swapgs",
-    "2:",
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
     "interrupt_saved:",
     "cld",
+    // An entry from user mode restricts indirect branch predictions.
+    "test byte ptr [rsp + 18*8], 3",
+    "jz 11f",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 11f",
+    "mov ecx, {spec_ctrl}",
+    "mov eax, 1",
+    "xor edx, edx",
+    "wrmsr",
+    "11:",
     // In the fuzz build, the depth of hardware interrupt handling is
     // counted, so that coverage leaves it out.
     ".if {fuzz}",
@@ -174,12 +203,40 @@ global_asm!(
     "test al, al",
     "jnz interrupt_left",
     "interrupt_restore:",
+    "test byte ptr [rsp + 18*8], 3",
+    "jz 12f",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 12f",
+    "mov ecx, {spec_ctrl}",
+    "xor eax, eax",
+    "xor edx, edx",
+    "wrmsr",
+    "12:",
     "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10",
     "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
     "pop rcx", "pop rbx", "pop rax",
     "add rsp, 16",
     "test byte ptr [rsp + 8], 3",
     "jz 3f",
+    // A return to user mode leaves from the entry stack.
+    "mov gs:[{scratch}], rdi",
+    "mov rdi, rsp",
+    "mov rsp, gs:[{entry_stack_top}]",
+    "push qword ptr [rdi + 32]",
+    "push qword ptr [rdi + 24]",
+    "push qword ptr [rdi + 16]",
+    "push qword ptr [rdi + 8]",
+    "push qword ptr [rdi]",
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 16f",
+    "mov rdi, gs:[{user_cr3}]",
+    "mov cr3, rdi",
+    "16:",
+    "mov rdi, gs:[{scratch}]",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 9f",
+    "verw word ptr [rip + {verw_selector}]",
+    "9:",
     "swapgs",
     "3:",
     "iretq",
@@ -197,20 +254,40 @@ global_asm!(
     "call {after_interrupt}",
     "jmp interrupt_restore",
     "ist_common:",
-    "cmp byte ptr [rip + {smap}], 0",
-    "je 8f",
-    "clac",
-    "8:",
     "push rax", "push rbx", "push rcx", "push rdx", "push rsi", "push rdi",
     "push rbp", "push r8", "push r9", "push r10", "push r11", "push r12",
     "push r13", "push r14", "push r15",
     "cld",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 13f",
+    "mov ecx, {spec_ctrl}",
+    "mov eax, 1",
+    "xor edx, edx",
+    "wrmsr",
+    "13:",
+    // These interrupts arrive whatever tables are loaded, user mode's
+    // too. With kernel page-table isolation, they run on the kernel's
+    // tables of the processor, from its data, and leave with the tables
+    // they found, which R12 keeps.
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 17f",
+    "mov r12, cr3",
+    "mov rax, [rsp + 22*8]",
+    "mov rax, [rax + {kernel_cr3}]",
+    "mov cr3, rax",
+    "17:",
+    "cmp byte ptr [rip + {smap}], 0",
+    "je 8f",
+    "clac",
+    "8:",
     "mov ecx, {gs_msr}",
     "rdmsr",
     "mov ebx, eax",
     "shl rdx, 32",
     "or rbx, rdx",
-    "lea rax, [rip + {percpu}]",
+    // The stack's first word, above the 22 saved, holds this processor's
+    // data.
+    "mov rax, [rsp + 22*8]",
     "mov rdx, rax",
     "shr rdx, 32",
     "wrmsr",
@@ -238,10 +315,29 @@ global_asm!(
     "mov rdx, rbx",
     "shr rdx, 32",
     "wrmsr",
+    "test byte ptr [rsp + 18*8], 3",
+    "jz 14f",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 14f",
+    "mov ecx, {spec_ctrl}",
+    "xor eax, eax",
+    "xor edx, edx",
+    "wrmsr",
+    "14:",
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 18f",
+    "mov cr3, r12",
+    "18:",
     "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10",
     "pop r9", "pop r8", "pop rbp", "pop rdi", "pop rsi", "pop rdx",
     "pop rcx", "pop rbx", "pop rax",
     "add rsp, 16",
+    "test byte ptr [rsp + 8], 3",
+    "jz 10f",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 10f",
+    "verw word ptr [rip + {verw_selector}]",
+    "10:",
     "iretq",
     ".popsection",
     debug = const DEBUG,
@@ -250,8 +346,9 @@ global_asm!(
     machine_check = const MACHINE_CHECK,
     gs_msr = const crate::percpu::IA32_GS_BASE,
     kernel_gs_msr = const crate::percpu::IA32_KERNEL_GS_BASE,
-    percpu = sym crate::percpu::BOOT_CPU,
     kernel_stack = const crate::percpu::KERNEL_STACK_OFFSET,
+    scratch = const crate::percpu::SCRATCH_OFFSET,
+    entry_stack_top = const crate::percpu::ENTRY_STACK_TOP_OFFSET,
     mask = const ERROR_CODE_VECTORS,
     interrupt = sym interrupt,
     after_interrupt = sym after_interrupt,
@@ -262,6 +359,13 @@ global_asm!(
     fuzz = const cfg!(feature = "fuzz") as u8,
     interrupts = const crate::percpu::INTERRUPTS_OFFSET,
     smap = sym crate::cpu::SMAP,
+    verw = sym crate::mitigations::VERW,
+    verw_selector = sym crate::mitigations::VERW_SELECTOR,
+    ibrs = sym crate::mitigations::IBRS_ON_ENTRY,
+    spec_ctrl = const 0x48,
+    isolation = sym crate::mitigations::ISOLATION,
+    kernel_cr3 = const crate::percpu::KERNEL_CR3_OFFSET,
+    user_cr3 = const crate::percpu::USER_CR3_OFFSET,
 );
 
 #[cfg(target_os = "none")]
@@ -323,12 +427,31 @@ pub fn dpl(vector: u8) -> u8 {
     if vector == BREAKPOINT { 3 } else { 0 }
 }
 
+/// The IDT, in a page of its own, which kernel page-table isolation also
+/// maps for user mode.
 #[cfg(target_os = "none")]
-static mut IDT: [Gate; 256] = [Gate::EMPTY; 256];
+#[repr(C, align(4096))]
+struct Table([Gate; 256]);
+
+#[cfg(target_os = "none")]
+static mut IDT: Table = Table([Gate::EMPTY; 256]);
+
+/// The address of the IDT.
+#[cfg(target_os = "none")]
+pub fn table() -> u64 {
+    (&raw const IDT) as u64
+}
 
 /// Fills the IDT and loads it. The GDT and the TSS must be loaded.
 #[cfg(target_os = "none")]
 pub fn init() {
+    fill();
+    load();
+}
+
+/// Fills the IDT, which every processor shares.
+#[cfg(target_os = "none")]
+fn fill() {
     let stubs = (&raw const interrupt_stubs) as u64;
     let idt = (&raw mut IDT).cast::<Gate>();
     for vector in 0..=255u8 {
@@ -340,9 +463,14 @@ pub fn init() {
                 .write(Gate::new(handler, ist(vector), dpl(vector)))
         };
     }
+}
+
+/// Loads the IDT on this processor. The GDT and the TSS must be loaded.
+#[cfg(target_os = "none")]
+pub fn load() {
     let pointer = Pointer {
         limit: (size_of::<[Gate; 256]>() - 1) as u16,
-        base: idt as u64,
+        base: (&raw const IDT) as u64,
     };
     // SAFETY: every gate points at its entry stub in the kernel code
     // segment, and the IST entries they name are set in the TSS.
@@ -426,12 +554,38 @@ extern "sysv64" fn interrupt(frame: &mut Frame) -> bool {
         v if (PIC_BASE..PIC_BASE + 16).contains(&v) || v == SPURIOUS_VECTOR => {}
         TIMER_VECTOR => crate::timer::interrupt(),
         crate::apic::IOMMU_FAULT_VECTOR => crate::iommu::fault_interrupt(),
+        // The interrupt itself is the request: the thread it interrupted
+        // looks at the reschedule flag as the handling ends, and an idle
+        // processor at its run queue.
+        crate::apic::RESCHEDULE_VECTOR => crate::apic::eoi(),
+        crate::tlb::SHOOTDOWN_VECTOR => {
+            crate::tlb::service();
+            crate::apic::eoi();
+        }
         v if crate::apic::DEVICE_VECTORS.contains(&v) => crate::interrupt::deliver(v),
         // Nothing handles the vectors reserved for the kernel yet.
         _ => crate::apic::eoi(),
     }
     handling.fetch_sub(1, Ordering::Relaxed);
     user || vector == PAGE_FAULT
+}
+
+const FAULT_WRITE: u64 = 1 << 1;
+const FAULT_RESERVED: u64 = 1 << 3;
+const FAULT_FETCH: u64 = 1 << 4;
+
+/// Resolves the page fault at `address` with its registers in `frame`:
+/// one raised by user code, or by the user copy routine, that a region
+/// allows.
+#[cfg(target_os = "none")]
+fn resolve_fault(frame: &Frame, address: u64) -> crate::aspace::Fault {
+    if frame.error & FAULT_RESERVED != 0 || (frame.cs & 3 == 0 && !crate::usercopy::in_copy(frame))
+    {
+        return crate::aspace::Fault::Denied;
+    }
+    let write = frame.error & FAULT_WRITE != 0;
+    let fetch = frame.error & FAULT_FETCH != 0;
+    crate::aspace::resolve_fault(address, write, fetch)
 }
 
 /// Does the work that `interrupt` left to the thread it interrupted,
@@ -450,15 +604,17 @@ extern "sysv64" fn after_interrupt(frame: &mut Frame) {
     match vector {
         PAGE_FAULT => {
             let address = crate::percpu::this().fault_address.load(Ordering::Relaxed);
-            match crate::aspace::resolve_fault(frame, address) {
+            match resolve_fault(frame, address) {
                 Fault::Resolved => {}
                 _ if !user && crate::usercopy::recover(frame) => {}
                 _ if !user => crate::panic::exception(frame),
-                // `resolve_fault` waits for absent and changing pages
-                // itself.
-                Fault::Denied | Fault::Absent(_) | Fault::Changed(_) | Fault::Busy(_) => {
-                    crate::exception::raise(frame, kind::PAGE_FAULT, address)
-                }
+                // `resolve_fault` waits for absent, changing and stable
+                // pages itself.
+                Fault::Denied
+                | Fault::Absent(_)
+                | Fault::Changed(_)
+                | Fault::Busy(_)
+                | Fault::Stable(_) => crate::exception::raise(frame, kind::PAGE_FAULT, address),
                 Fault::OutOfMemory => {
                     crate::exception::raise(frame, kind::OUT_OF_MEMORY, frame.rip)
                 }
@@ -488,14 +644,36 @@ pub fn handling() -> bool {
 /// running user thread. Returns whether it was one.
 #[cfg(target_os = "none")]
 fn defer_debug() -> bool {
+    use crate::thread_arch::ThreadX86;
     let dr6 = crate::cpu::read_dr(6);
     match crate::sched::current() {
-        Some(thread) if thread.has_breakpoints() && dr6 & 0xF != 0 => {
-            thread.defer_debug(dr6);
+        Some(thread) if thread.x86().has_breakpoints() && from_breakpoints(dr6) => {
+            if dr6 & DR6_BREAKPOINTS == 0 {
+                crate::log::log!(
+                    Warning,
+                    "a debug exception in kernel mode with DR6 {dr6:#x}, which names no cause, is taken as a breakpoint of the running thread"
+                );
+            }
+            thread.x86().defer_debug(dr6);
             true
         }
         _ => false,
     }
+}
+
+/// The DR6 bits of breakpoints 0 to 3 that hit, and of the other causes
+/// of a debug exception: a debug register access, a single step and a
+/// task switch.
+const DR6_BREAKPOINTS: u64 = 0xF;
+const DR6_OTHER_CAUSES: u64 = 1 << 13 | 1 << 14 | 1 << 15;
+
+/// Whether a debug exception in kernel mode, while the running user thread
+/// has breakpoints enabled, was raised by one of them, as DR6 `dr6` says:
+/// it names one of them, or names no cause at all. The kernel uses
+/// neither breakpoints nor single steps itself, and some hypervisors
+/// deliver the debug exception of a breakpoint without its DR6 bit.
+fn from_breakpoints(dr6: u64) -> bool {
+    dr6 & DR6_BREAKPOINTS != 0 || dr6 & DR6_OTHER_CAUSES == 0
 }
 
 #[cfg(test)]
@@ -518,6 +696,18 @@ mod tests {
         assert_eq!(&types[10..22], &[8, 8, 8, 8, 2, 1, 5, 9, 1, 5, 1, 8]);
         assert_eq!(types[31], kind::GENERAL);
         assert!(fatal(2) && fatal(8) && fatal(18) && !fatal(14));
+    }
+
+    #[test]
+    fn takes_debug_exceptions_without_another_cause_as_breakpoints() {
+        // DR6 with its reserved bits set: breakpoint 1 hit; no cause; a
+        // single step; a debug register access; a task switch.
+        assert!(from_breakpoints(0xFFFF_0FF2));
+        assert!(from_breakpoints(0xFFFF_0FF0));
+        assert!(!from_breakpoints(0xFFFF_4FF0));
+        assert!(!from_breakpoints(0xFFFF_2FF0));
+        assert!(!from_breakpoints(0xFFFF_8FF0));
+        assert!(from_breakpoints(0xFFFF_4FF1));
     }
 
     #[test]

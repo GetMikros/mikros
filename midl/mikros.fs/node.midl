@@ -1,0 +1,130 @@
+// MIKSPEC-0049.R1, MIKSPEC-0049.R17
+
+library mikros.fs;
+using mikros.base;
+
+type Error = enum : i32 {
+    NOT_FOUND = 1; EXISTS = 2; NOT_DIRECTORY = 3; IS_DIRECTORY = 4;
+    NOT_EMPTY = 5; NO_SPACE = 6; READ_ONLY = 7; ACCESS_DENIED = 8;
+    INVALID = 9; NAME_TOO_LONG = 10; CROSS_DEVICE = 11; LOOP = 12;
+    IO = 13; NOT_SUPPORTED = 14; BUSY = 15; TOO_BIG = 16; WOULD_BLOCK = 17;
+    REFUSED = 18;
+};
+
+type Rights = bits : u32 { READ = 0x1; WRITE = 0x2; EXECUTE = 0x4; };
+
+type OpenFlags = bits : u32 {
+    CREATE = 0x1; EXCLUSIVE = 0x2; TRUNCATE = 0x4; DIRECTORY = 0x8;
+    APPEND = 0x10; NO_FOLLOW = 0x20; CASE_INSENSITIVE = 0x40;
+};
+
+type NodeType = enum : u32 { FILE = 1; DIRECTORY = 2; SYMLINK = 3; SOCKET = 4; };
+
+type Attributes = struct {
+    type NodeType;
+    mode u32;
+    owner u32;
+    size u64;
+    allocated u64;
+    links u64;
+    inode u64;
+    created base.UtcTime;
+    modified base.UtcTime;
+    accessed base.UtcTime;
+    changed base.UtcTime;
+};
+
+type AttributeMask = bits : u32 { MODE = 0x1; ACCESSED = 0x2; MODIFIED = 0x4; };
+
+type DirEntry = struct {
+    name string<255>;
+    type NodeType;
+    inode u64;
+    attributes Attributes?;
+};
+
+type MemoryFlags = bits : u32 { WRITE = 0x1; EXECUTE = 0x2; PRIVATE = 0x4; };
+
+type LockKind = enum : u32 { SHARED = 1; EXCLUSIVE = 2; };
+
+type SeekOrigin = enum : u32 { START = 0; CURRENT = 1; END = 2; };
+
+type FilesystemInfo = struct {
+    type string<32>;
+    block_size u32;
+    total_bytes u64;
+    free_bytes u64;
+    read_only bool;
+};
+
+type WatchMask = bits : u32 {
+    CREATED = 0x1; REMOVED = 0x2; MODIFIED = 0x4; ATTRIBUTES = 0x8;
+    MOVED = 0x10; SELF = 0x20;
+};
+
+type WatchKind = enum : u32 {
+    CREATED = 1; REMOVED = 2; MODIFIED = 3; ATTRIBUTES = 4;
+    MOVED_FROM = 5; MOVED_TO = 6; SELF_REMOVED = 7; SELF_MOVED = 8;
+    OVERFLOW = 9;
+};
+
+type WatchEvent = struct {
+    kind WatchKind;
+    move_cookie u32;
+    name string<255>;
+};
+
+protocol Watcher {
+    @1 OnEvents(cookie u64, events vector<WatchEvent, 64>);
+};
+
+type SocketType = enum : u32 { STREAM = 1; DATAGRAM = 2; SEQPACKET = 3; };
+
+protocol SocketListener {
+    @1 Accept(connection handle<Channel>, type SocketType);
+};
+
+protocol Node {
+    @1 GetAttributes() -> (attributes Attributes) error Error;
+    @2 SetAttributes(mask AttributeMask, mode u32, accessed base.UtcTime,
+                     modified base.UtcTime) -> () error Error;
+    @3 Clone(node server_end<Node>, rights Rights) -> () error Error;
+    @4 Sync() -> () error Error;
+    @5 QueryFilesystem() -> (info FilesystemInfo) error Error;
+
+    @10 Read(offset u64, count u32) -> (data vector<u8, 32768>) error Error;
+    @11 Write(offset u64, data vector<u8, 32768>) -> (written u32) error Error;
+    @12 Append(data vector<u8, 32768>) -> (offset u64) error Error;
+    @13 Truncate(size u64) -> () error Error;
+    @14 GetMemoryObject(flags MemoryFlags) -> (memory handle<MemoryObject>) error Error;
+    @15 CloneRange(source client_end<Node>, source_offset u64, offset u64,
+                   length u64) -> () error Error;
+    @16 Lock(kind LockKind, start u64, length u64, wait bool) -> () error Error;
+    @17 Unlock(start u64, length u64) -> () error Error;
+    @18 ReadLink() -> (target string<4096>) error Error;
+    @19 Seek(offset i64, origin SeekOrigin) -> (position u64) error Error;
+    @27 ReadNext(count u32) -> (data vector<u8, 32768>) error Error;
+    @28 WriteNext(data vector<u8, 32768>) -> (written u32) error Error;
+
+    @20 Open(path string<4096>, flags OpenFlags, mode u32, rights Rights,
+             node server_end<Node>) -> (type NodeType,
+                                        redirect string<4096>?) error Error;
+    @21 ReadDirectory(cookie u64, attributes bool) -> (entries vector<DirEntry, 64>,
+                                      next u64) error Error;
+    @22 Unlink(name string<255>, directory bool) -> () error Error;
+    @23 GetToken() -> (token base.Token) error Error;
+    @24 Rename(name string<255>, target base.Token,
+               new_name string<255>) -> () error Error;
+    @25 Link(name string<255>, target base.Token,
+             new_name string<255>) -> () error Error;
+    @26 CreateSymlink(name string<255>, target string<4096>) -> () error Error;
+    @29 Watch(mask WatchMask, cookie u64,
+              watcher client_end<Watcher>) -> () error Error;
+    @30 Unwatch(cookie u64) -> () error Error;
+    @31 BindSocket(name string<255>, mode u32,
+                   listener client_end<SocketListener>) -> () error Error;
+    @32 ConnectSocket(name string<255>, type SocketType,
+                      connection handle<Channel>) -> () error Error;
+    @33 GetRevocableMemoryObject(flags MemoryFlags) ->
+        (memory handle<MemoryObject>, control client_end<MemoryRevocation>) error Error;
+};

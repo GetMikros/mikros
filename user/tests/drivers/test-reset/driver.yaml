@@ -1,0 +1,5 @@
+# A driver for the q35 machine's e1000e function that ends at every
+# start, for the PCI bus driver tests of ResetChild.
+name: test-reset
+binary: /usr/lib/drivers/test-reset/test-reset
+match: [pci:v8086d10d3]

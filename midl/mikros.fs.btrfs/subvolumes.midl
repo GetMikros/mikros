@@ -1,0 +1,20 @@
+// MIKSPEC-0053.R8
+
+library mikros.fs.btrfs;
+using mikros.fs;
+
+type SubvolumeInfo = struct {
+    path string<1024>;
+    id u64;
+    read_only bool;
+};
+
+protocol Subvolumes {
+    @1 Create(path string<1024>) -> () error mikros.fs.Error;
+    @2 Snapshot(source string<1024>, path string<1024>,
+                read_only bool) -> () error mikros.fs.Error;
+    @3 Delete(path string<1024>) -> () error mikros.fs.Error;
+    @4 SetReadOnly(path string<1024>, read_only bool) -> () error mikros.fs.Error;
+    @5 List(cursor u64) -> (subvolumes vector<SubvolumeInfo, 32>,
+                            next u64) error mikros.fs.Error;
+};

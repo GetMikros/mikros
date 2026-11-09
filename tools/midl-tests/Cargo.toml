@@ -1,0 +1,9 @@
+[package]
+name = "midl-tests"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[build-dependencies]
+midlc = { path = "../midlc" }

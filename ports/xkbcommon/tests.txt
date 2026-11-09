@@ -1,0 +1,28 @@
+# What each test of xkbcommon's suite, as Meson lists it, is expected to
+# do: `pass` on Mikros, `host` to pass on the build host, or
+# `expected-fail` or `excluded`, with the IDs of the requirements that say
+# why.
+keysym pass
+keysym-unicode excluded MIKSPEC-0033.R8, MIKSPEC-0033.R17
+keymap pass
+filecomp pass
+context expected-fail MIKSPEC-0050.R9, MIKSPEC-0033.R17
+rules-file pass
+rules-file-includes pass
+stringcomp pass
+buffercomp pass
+extensions-directories pass
+introspection pass
+log pass
+atom pass
+utf8 pass
+state pass
+keyseq pass
+rulescomp pass
+compose pass
+utils pass
+symbols-leak-test host
+modifiers pass
+messages pass
+tool-option-parsing excluded MIKSPEC-0033.R17
+keysym-test-XF86Macro23 excluded MIKSPEC-0033.R17

@@ -1,0 +1,5 @@
+# A driver for PCI host bridges whose Start always fails, for the
+# device manager tests.
+name: test-decline
+binary: /usr/lib/drivers/test-decline/test-decline
+match: [platform:pci-host-ecam]

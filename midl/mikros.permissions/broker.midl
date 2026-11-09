@@ -1,0 +1,33 @@
+// MIKSPEC-0037.R5
+
+library mikros.permissions;
+using mikros.base;
+using mikros.service;
+
+type Decision = enum : u32 { UNDETERMINED = 0; ALLOWED = 1; DENIED = 2; };
+
+type Grant = struct {
+    user u32;
+    app_id string<128>;
+    permission string<64>;
+    decision Decision;
+};
+
+protocol Broker {
+    @1 Check(client mikros.service.ClientIdentity,
+             permission string<64>) -> (decision Decision) error base.Status;
+    @2 Request(client mikros.service.ClientIdentity, permission string<64>,
+               reason string<256>) -> (decision Decision) error base.Status;
+    @3 Watch(permission string<64>) -> () error base.Status;
+    @4 -> OnRevoked(user u32, app_id string<128>, permission string<64>);
+    @5 SetGrant(grant Grant) -> () error base.Status;
+    @6 ListGrants(user u32) -> (grants vector<Grant, 256>) error base.Status;
+    @7 GrantSystem(app_id string<128>,
+                   permissions vector<string<64>, 32>) -> () error base.Status;
+    @8 RegisterPrompter(prompter client_end<Prompter>) -> () error base.Status;
+};
+
+protocol Prompter {
+    @1 Ask(user u32, app_id string<128>, permission string<64>,
+           reason string<256>) -> (allowed bool);
+};

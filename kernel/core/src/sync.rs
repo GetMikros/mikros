@@ -1,20 +1,18 @@
 //! A spin lock.
 //!
-//! The lock does not disable interrupts. Code that takes it must not be
-//! interrupted by code that takes it too.
+//! The lock does not disable interrupts itself: kernel code runs with
+//! interrupts disabled, and enables them only at preemption points and
+//! while idle, where no lock is held. So every lock, including one that
+//! interrupt handlers take, is held with interrupts disabled. A thread
+//! never switches away with a lock held; `sched` asserts both.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// The number of spin locks held. The kernel runs one thread at a time on
-/// one processor and switches threads only where no lock is held, so
-/// this counts the locks of the running thread.
-static HELD: AtomicUsize = AtomicUsize::new(0);
-
-/// Whether no spin lock is held.
+/// Whether the running thread holds no spin lock.
 pub fn none_held() -> bool {
-    HELD.load(Ordering::Relaxed) == 0
+    crate::cpu::this().locks_held.load(Ordering::Relaxed) == 0
 }
 
 /// The number of objects destroyed between reschedule checks.
@@ -22,8 +20,6 @@ pub const DESTROY_STEP: usize = 512;
 
 /// The scheduler's preemption point, as a `fn()`, or 0 before it is set.
 static PREEMPT_HOOK: AtomicUsize = AtomicUsize::new(0);
-/// The objects destroyed since the last reschedule check.
-static DESTROYED: AtomicUsize = AtomicUsize::new(0);
 
 /// Installs `hook`, which checks for a pending reschedule and lets other
 /// threads run, as the preemption point of `destroyed`.
@@ -32,16 +28,17 @@ pub fn set_preempt_hook(hook: fn()) {
 }
 
 /// Accounts for destroying `count` objects. Once `DESTROY_STEP` have been
-/// destroyed since the last check, checks for a reschedule through the
-/// preemption point when no lock is held. The count is shared by nested
-/// destruction, so a chain of objects that each destroy a few more is
-/// checked too.
+/// destroyed on this processor since the last check, checks for a
+/// reschedule through the preemption point when no lock is held. The
+/// count is shared by nested destruction, so a chain of objects that each
+/// destroy a few more is checked too.
 pub fn destroyed(count: usize) {
-    let total = DESTROYED.fetch_add(count, Ordering::Relaxed) + count;
+    let cpu = crate::cpu::this();
+    let total = cpu.destroyed.fetch_add(count, Ordering::Relaxed) + count;
     if total < DESTROY_STEP || !none_held() {
         return;
     }
-    DESTROYED.store(0, Ordering::Relaxed);
+    cpu.destroyed.store(0, Ordering::Relaxed);
     let hook = PREEMPT_HOOK.load(Ordering::Acquire);
     if hook != 0 {
         // SAFETY: only `set_preempt_hook` stores a nonzero value, which
@@ -53,6 +50,9 @@ pub fn destroyed(count: usize) {
 
 pub struct SpinLock<T> {
     locked: AtomicBool,
+    /// The class that orders the lock among the kernel's locks.
+    #[cfg_attr(not(lock_check), allow(dead_code))]
+    class: crate::lock_order::Class,
     value: UnsafeCell<T>,
 }
 
@@ -61,22 +61,42 @@ pub struct SpinLock<T> {
 unsafe impl<T: Send> Sync for SpinLock<T> {}
 
 impl<T> SpinLock<T> {
-    pub const fn new(value: T) -> Self {
+    /// A lock of class `class` around `value`.
+    pub const fn new(class: crate::lock_order::Class, value: T) -> Self {
         SpinLock {
             locked: AtomicBool::new(false),
+            class,
             value: UnsafeCell::new(value),
         }
     }
 
     pub fn lock(&self) -> Guard<'_, T> {
+        #[cfg(lock_check)]
+        crate::lock_order::acquire(self.class, crate::lock_order::Check::Order);
+        self.spin()
+    }
+
+    /// Takes the lock while another lock of its class may be held. The
+    /// caller documents the order among the locks of the class that makes
+    /// this safe.
+    pub fn lock_nested(&self) -> Guard<'_, T> {
+        #[cfg(lock_check)]
+        crate::lock_order::acquire(self.class, crate::lock_order::Check::Nested);
+        self.spin()
+    }
+
+    fn spin(&self) -> Guard<'_, T> {
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            crate::arch::spin_wait();
             core::hint::spin_loop();
         }
-        HELD.fetch_add(1, Ordering::Relaxed);
+        crate::cpu::this()
+            .locks_held
+            .fetch_add(1, Ordering::Relaxed);
         Guard { lock: self }
     }
 
@@ -92,7 +112,13 @@ impl<T> SpinLock<T> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .ok()
             .map(|_| {
-                HELD.fetch_add(1, Ordering::Relaxed);
+                // Trying cannot deadlock, but what is taken while it is
+                // held must still come after it.
+                #[cfg(lock_check)]
+                crate::lock_order::acquire(self.class, crate::lock_order::Check::None);
+                crate::cpu::this()
+                    .locks_held
+                    .fetch_add(1, Ordering::Relaxed);
                 Guard { lock: self }
             })
     }
@@ -119,8 +145,12 @@ impl<T> DerefMut for Guard<'_, T> {
 
 impl<T> Drop for Guard<'_, T> {
     fn drop(&mut self) {
+        #[cfg(lock_check)]
+        crate::lock_order::release(self.lock.class);
         self.lock.locked.store(false, Ordering::Release);
-        HELD.fetch_sub(1, Ordering::Relaxed);
+        crate::cpu::this()
+            .locks_held
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -130,7 +160,7 @@ mod tests {
 
     #[test]
     fn serializes_access() {
-        let counter = SpinLock::new(0u64);
+        let counter = SpinLock::new(crate::lock_order::TEST, 0u64);
         std::thread::scope(|s| {
             for _ in 0..4 {
                 s.spawn(|| {

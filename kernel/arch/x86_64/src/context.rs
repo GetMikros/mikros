@@ -7,7 +7,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 // Saves the callee-saved registers on the current stack, stores the stack
 // pointer at RDI, loads RSI as the stack pointer, and restores the
-// registers saved there. Returns on the new stack.
+// registers saved there. Returns on the new stack, after filling the
+// return stack buffer with 32 entries that lead to speculation traps, so
+// that no return in the thread switched to is predicted from another
+// thread's calls.
 global_asm!(
     ".global context_switch",
     "context_switch:",
@@ -19,6 +22,24 @@ global_asm!(
     "push r15",
     "mov [rdi], rsp",
     "mov rsp, rsi",
+    "mov ecx, 16",
+    "2:",
+    "call 3f",
+    "4:",
+    "pause",
+    "lfence",
+    "jmp 4b",
+    "3:",
+    "call 5f",
+    "6:",
+    "pause",
+    "lfence",
+    "jmp 6b",
+    "5:",
+    "add rsp, 16",
+    "dec ecx",
+    "jnz 2b",
+    "lfence",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -39,10 +60,13 @@ global_asm!(
 
 // Enters user mode at RDI with stack pointer RSI, RDX and RCX as the
 // first two arguments, RFLAGS 0x202 and every other general-purpose
-// register zero. The user GS base must be in IA32_KERNEL_GS_BASE.
+// register zero, after clearing CPU buffers when the processor needs it.
+// The user GS base must be in IA32_KERNEL_GS_BASE.
 global_asm!(
+    ".pushsection .text.entry, \"ax\"",
     ".global context_enter_user",
     "context_enter_user:",
+    "mov rsp, gs:[{entry_stack_top}]",
     "push {user_data}",
     "push rsi",
     "push 0x202",
@@ -50,6 +74,19 @@ global_asm!(
     "push rdi",
     "mov rdi, rdx",
     "mov rsi, rcx",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 3f",
+    "mov ecx, {spec_ctrl}",
+    "xor eax, eax",
+    "xor edx, edx",
+    "wrmsr",
+    "3:",
+    // With kernel page-table isolation, user mode runs on its own tables.
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 4f",
+    "mov rax, gs:[{user_cr3}]",
+    "mov cr3, rax",
+    "4:",
     "xor eax, eax",
     "xor ebx, ebx",
     "xor ecx, ecx",
@@ -63,17 +100,38 @@ global_asm!(
     "xor r13d, r13d",
     "xor r14d, r14d",
     "xor r15d, r15d",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 2f",
+    "verw word ptr [rip + {verw_selector}]",
+    "2:",
     "swapgs",
     "iretq",
+    ".popsection",
     user_data = const crate::gdt::USER_DATA as u64 | 3,
     user_code = const crate::gdt::USER_CODE as u64 | 3,
+    verw = sym crate::mitigations::VERW,
+    verw_selector = sym crate::mitigations::VERW_SELECTOR,
+    ibrs = sym crate::mitigations::IBRS_ON_ENTRY,
+    spec_ctrl = const 0x48,
+    entry_stack_top = const crate::percpu::ENTRY_STACK_TOP_OFFSET,
+    isolation = sym crate::mitigations::ISOLATION,
+    user_cr3 = const crate::percpu::USER_CR3_OFFSET,
 );
 
 // Leaves for user mode with every register taken from the interrupt
-// frame at RDI. The user GS base must be in IA32_KERNEL_GS_BASE.
+// frame at RDI, after clearing CPU buffers when the processor needs it.
+// The user GS base must be in IA32_KERNEL_GS_BASE.
 global_asm!(
+    ".pushsection .text.entry, \"ax\"",
     ".global context_enter_user_frame",
     "context_enter_user_frame:",
+    "cmp byte ptr [rip + {ibrs}], 0",
+    "je 3f",
+    "mov ecx, {spec_ctrl}",
+    "xor eax, eax",
+    "xor edx, edx",
+    "wrmsr",
+    "3:",
     "mov rsp, rdi",
     "pop r15",
     "pop r14",
@@ -91,8 +149,38 @@ global_asm!(
     "pop rbx",
     "pop rax",
     "add rsp, 16",
+    // The return leaves from the entry stack.
+    "mov gs:[{scratch}], rdi",
+    "mov rdi, rsp",
+    "mov rsp, gs:[{entry_stack_top}]",
+    "push qword ptr [rdi + 32]",
+    "push qword ptr [rdi + 24]",
+    "push qword ptr [rdi + 16]",
+    "push qword ptr [rdi + 8]",
+    "push qword ptr [rdi]",
+    "mov rdi, gs:[{scratch}]",
+    "cmp byte ptr [rip + {isolation}], 0",
+    "je 4f",
+    "mov gs:[{scratch}], rdi",
+    "mov rdi, gs:[{user_cr3}]",
+    "mov cr3, rdi",
+    "mov rdi, gs:[{scratch}]",
+    "4:",
+    "cmp byte ptr [rip + {verw}], 0",
+    "je 2f",
+    "verw word ptr [rip + {verw_selector}]",
+    "2:",
     "swapgs",
     "iretq",
+    ".popsection",
+    scratch = const crate::percpu::SCRATCH_OFFSET,
+    entry_stack_top = const crate::percpu::ENTRY_STACK_TOP_OFFSET,
+    isolation = sym crate::mitigations::ISOLATION,
+    user_cr3 = const crate::percpu::USER_CR3_OFFSET,
+    verw = sym crate::mitigations::VERW,
+    verw_selector = sym crate::mitigations::VERW_SELECTOR,
+    ibrs = sym crate::mitigations::IBRS_ON_ENTRY,
+    spec_ctrl = const 0x48,
 );
 
 unsafe extern "sysv64" {
@@ -110,6 +198,12 @@ unsafe extern "sysv64" {
 /// `load` must be a stack pointer saved by `context_switch` or prepared
 /// by `prepare`, whose stack is mapped and used by nothing else.
 pub unsafe fn switch(save: *mut u64, load: u64) {
+    // RFLAGS.AC is not switched, so a thread that kept it would let the
+    // next one reach user pages past SMAP.
+    debug_assert!(
+        crate::cpu::rflags() & crate::cpu::RFLAGS_AC == 0,
+        "switching threads with RFLAGS.AC set"
+    );
     // SAFETY: the caller guarantees `load` is a switchable stack.
     unsafe { context_switch(save, load) };
 }
@@ -212,16 +306,12 @@ unsafe impl Send for ExtendedState {}
 unsafe impl Sync for ExtendedState {}
 
 impl ExtendedState {
-    /// An area in the initial state. Its header marks every component as
-    /// initial, so XRSTOR loads their initial values, except MXCSR, which
-    /// XRSTOR always takes from the area and which is set to its reset
-    /// value.
+    /// An area in the initial state, as `init_area` sets it.
     pub fn new() -> Option<ExtendedState> {
         // SAFETY: the layout has a nonzero size.
         let area = NonNull::new(unsafe { alloc_zeroed(xsave_layout()) })?;
-        // SAFETY: MXCSR is at offset 24 of the legacy region, inside the
-        // area and aligned.
-        unsafe { area.add(MXCSR_OFFSET).cast::<u32>().write(MXCSR_RESET) };
+        // SAFETY: the area is zeroed and has the XSAVE layout.
+        unsafe { init_area(area.as_ptr()) };
         Some(ExtendedState(area))
     }
 
@@ -246,21 +336,59 @@ impl ExtendedState {
 
     /// Saves the processor's extended state here.
     pub fn save(&self) {
-        // SAFETY: the area is 64-byte aligned and large enough for every
-        // enabled component; EDX:EAX selects all of them.
-        unsafe {
-            asm!("xsave64 [{}]", in(reg) self.0.as_ptr(), in("eax") u32::MAX, in("edx") u32::MAX, options(nostack, preserves_flags))
-        };
+        // SAFETY: the area has the XSAVE layout.
+        unsafe { save_area(self.0.as_ptr()) };
     }
 
     /// Loads the extended state saved here, or the initial state.
     pub fn restore(&self) {
-        // SAFETY: as for `save`; the area holds a valid XSAVE image or
-        // zeros.
-        unsafe {
-            asm!("xrstor64 [{}]", in(reg) self.0.as_ptr(), in("eax") u32::MAX, in("edx") u32::MAX, options(nostack, preserves_flags, readonly))
-        };
+        // SAFETY: the area holds an initial or saved XSAVE image.
+        unsafe { restore_area(self.0.as_ptr()) };
     }
+}
+
+/// The layout of an XSAVE area for the enabled state components.
+pub fn area_layout() -> Layout {
+    xsave_layout()
+}
+
+/// Puts the initial state in the zeroed XSAVE area `area`. Its header
+/// marks every component as initial, so XRSTOR loads their initial
+/// values, except MXCSR, which XRSTOR always takes from the area and
+/// which is set to its reset value.
+///
+/// # Safety
+///
+/// `area` must be zeroed and have the layout `area_layout` gives.
+pub unsafe fn init_area(area: *mut u8) {
+    // SAFETY: MXCSR is at offset 24 of the legacy region, inside the area
+    // and aligned.
+    unsafe { area.add(MXCSR_OFFSET).cast::<u32>().write(MXCSR_RESET) };
+}
+
+/// Saves the processor's extended state in `area`.
+///
+/// # Safety
+///
+/// `area` must have the layout `area_layout` gives.
+pub unsafe fn save_area(area: *mut u8) {
+    // SAFETY: the area is 64-byte aligned and large enough for every
+    // enabled component; EDX:EAX selects all of them.
+    unsafe {
+        asm!("xsave64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX, options(nostack, preserves_flags))
+    };
+}
+
+/// Loads the extended state in `area`.
+///
+/// # Safety
+///
+/// `area` must hold an initial or saved XSAVE image.
+pub unsafe fn restore_area(area: *const u8) {
+    // SAFETY: as for `save_area`; the area holds a valid XSAVE image.
+    unsafe {
+        asm!("xrstor64 [{}]", in(reg) area, in("eax") u32::MAX, in("edx") u32::MAX, options(nostack, preserves_flags, readonly))
+    };
 }
 
 impl Drop for ExtendedState {

@@ -20,6 +20,7 @@ enum Op {
     Write(u8),
     Begin(u8, u8),
     End(u8, u8, bool),
+    Discard(u8, u8),
     PagerGone,
     Revoke,
 }
@@ -37,18 +38,25 @@ struct Page {
 #[derive(Arbitrary, Debug)]
 struct Input {
     track_dirty: bool,
+    /// Whether writes to pages being written back wait, which needs dirty
+    /// tracking.
+    stable: bool,
     ops: Vec<Op>,
 }
 
 fuzz_target!(|input: Input| {
     let track = input.track_dirty;
+    let stable = track && input.stable;
     let mut p = Paging::new(track);
+    if stable {
+        p = p.stable();
+    }
     let mut pages = [Page::default(); PAGES as usize];
     let mut generation = 0;
     let (mut revoked, mut gone) = (false, false);
-    // The outstanding writeback: its range, recorded generations, and
-    // the recorded pages written since.
-    let mut writeback: Option<(u64, u64, BTreeMap<u64, u64>, BTreeSet<u64>)> = None;
+    // The outstanding writebacks, which never overlap: their ranges,
+    // recorded generations, and the recorded pages written since.
+    let mut writebacks: Vec<(u64, u64, BTreeMap<u64, u64>, BTreeSet<u64>)> = Vec::new();
     let range = |a: u8, b: u8| {
         let first = u64::from(a) % PAGES;
         (first, (first + u64::from(b) % 8).min(PAGES))
@@ -103,7 +111,7 @@ fuzz_target!(|input: Input| {
                     continue;
                 }
                 p.removed(i);
-                let recorded = writeback.as_ref().is_some_and(|w| w.2.contains_key(&i));
+                let recorded = writebacks.iter().any(|w| w.2.contains_key(&i));
                 let m = &mut pages[i as usize];
                 m.present = false;
                 m.dirty &= recorded;
@@ -116,9 +124,7 @@ fuzz_target!(|input: Input| {
                 assert_eq!(p.written(i), Ok(()));
                 if track {
                     pages[i as usize].dirty = true;
-                    if let Some(w) = &mut writeback
-                        && w.2.contains_key(&i)
-                    {
+                    if let Some(w) = writebacks.iter_mut().find(|w| w.2.contains_key(&i)) {
                         w.3.insert(i);
                     }
                 }
@@ -128,7 +134,10 @@ fuzz_target!(|input: Input| {
                 let result = p.writeback_begin(first, end);
                 if !track {
                     assert_eq!(result, Err(Error::NotSupported));
-                } else if writeback.is_some() {
+                } else if writebacks
+                    .iter()
+                    .any(|w| (w.0 < end && first < w.1) || (w.0, w.1) == (first, end))
+                {
                     assert_eq!(result, Err(Error::BadState));
                 } else {
                     let recorded: BTreeMap<u64, u64> = (first..end)
@@ -136,20 +145,18 @@ fuzz_target!(|input: Input| {
                         .map(|i| (i, pages[i as usize].generation))
                         .collect();
                     assert_eq!(result.unwrap(), recorded.keys().copied().collect::<Vec<_>>());
-                    writeback = Some((first, end, recorded, BTreeSet::new()));
+                    writebacks.push((first, end, recorded, BTreeSet::new()));
                 }
             }
             Op::End(a, b, persisted) => {
                 let (first, end) = range(a, b);
                 let result = p.writeback_end(first, end, persisted);
-                let matches = writeback.as_ref().is_some_and(|w| w.0 == first && w.1 == end);
+                let at = writebacks.iter().position(|w| w.0 == first && w.1 == end);
                 if !track {
                     assert_eq!(result, Err(Error::NotSupported));
-                } else if !matches {
-                    assert_eq!(result, Err(Error::BadState));
-                } else {
+                } else if let Some(at) = at {
                     assert_eq!(result, Ok(()));
-                    let (_, _, recorded, written) = writeback.take().unwrap();
+                    let (_, _, recorded, written) = writebacks.remove(at);
                     if persisted {
                         for (i, g) in recorded {
                             let m = &mut pages[i as usize];
@@ -158,7 +165,27 @@ fuzz_target!(|input: Input| {
                             }
                         }
                     }
+                } else {
+                    assert_eq!(result, Err(Error::BadState));
                 }
+            }
+            Op::Discard(a, b) => {
+                let (first, end) = range(a, b);
+                let result = p.discard_begin(first, end);
+                if writebacks.iter().any(|w| w.2.range(first..end).next().is_some()) {
+                    assert_eq!(result, Err(Error::BadState));
+                    continue;
+                }
+                assert_eq!(result, Ok(()));
+                for i in first..end {
+                    let m = &mut pages[i as usize];
+                    if m.present {
+                        p.removed(i);
+                        m.present = false;
+                        m.dirty = false;
+                    }
+                }
+                p.discard_done(first, end);
             }
             Op::PagerGone => {
                 p.pager_gone();
@@ -179,10 +206,11 @@ fuzz_target!(|input: Input| {
         for (i, m) in pages.iter().enumerate() {
             let i = i as u64;
             assert_eq!(p.present(i), m.present);
-            let in_writeback = writeback.as_ref().is_some_and(|w| w.2.contains_key(&i));
-            assert_eq!(p.evictable(i), m.present && !m.dirty && !in_writeback);
+            let recording = writebacks.iter().find(|w| w.2.contains_key(&i));
+            assert_eq!(p.evictable(i), m.present && !m.dirty && recording.is_none());
+            assert_eq!(p.write_waits(i), stable && recording.is_some());
             if track {
-                let pending = in_writeback && !writeback.as_ref().unwrap().3.contains(&i);
+                let pending = recording.is_some_and(|w| !w.3.contains(&i));
                 assert_eq!(p.writable_without_fault(i), m.dirty && !pending);
             }
         }

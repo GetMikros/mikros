@@ -1,0 +1,10 @@
+# The service manifest of the temporary file system, installed as
+# usr/lib/services/tmpfs.yaml.
+name: tmpfs
+binary: /usr/bin/tmpfs
+start: boot
+provides:
+  - protocol: mikros.fs.Filesystem
+    permission: filesystem.mount
+  - protocol: mikros.fs.TemporaryFilesystem
+    permission: filesystem.mount

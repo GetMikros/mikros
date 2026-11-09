@@ -1,0 +1,40 @@
+// MIKSPEC-0025.R34
+
+library mikros.driver;
+using mikros.base;
+using mikros.service;
+
+type Property = struct {
+    key string<64>;
+    value string<256>;
+};
+
+type DeviceDescription = struct {
+    id u64;
+    name string<64>;
+    hardware_ids vector<string<128>, 16>;
+    properties vector<Property, 32>;
+};
+
+protocol Driver {
+    @1 Start(device DeviceDescription,
+             resources vector<handle<Resource>, 16>,
+             bus handle<Channel>?,
+             manager client_end<DeviceManager>) -> () error base.Status;
+    @2 Stop() -> ();
+    @3 ResetChild(device u64) -> () error base.Status;
+    @4 ConnectChild(device u64, bus handle<Channel>, dma bool) -> () error base.Status;
+    @5 Reconnect(bus handle<Channel>) -> () error base.Status;
+};
+
+protocol DeviceManager {
+    @1 AddDevice(name string<64>,
+                 hardware_ids vector<string<128>, 16>,
+                 properties vector<Property, 32>,
+                 resources vector<handle<Resource>, 16>) -> (id u64) error base.Status;
+    @2 RemoveDevice(id u64) -> () error base.Status;
+    @3 PublishService(class string<32>,
+                      provider client_end<mikros.service.Provider>) -> (id u64) error base.Status;
+    @4 RequestResource(kind u32, base u64, size u64,
+                       shared bool) -> (resource handle<Resource>) error base.Status;
+};

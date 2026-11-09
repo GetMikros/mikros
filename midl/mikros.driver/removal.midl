@@ -1,0 +1,15 @@
+// MIKSPEC-0025.R31
+
+library mikros.driver;
+using mikros.base;
+
+type RemovableDisk = struct {
+    id u64;
+    name string<64>;
+    serial string<64>;
+};
+
+protocol Removal {
+    @1 List() -> (disks vector<RemovableDisk, 32>);
+    @2 Eject(id u64) -> () error base.Status;
+};

@@ -97,6 +97,34 @@ fn control_registers() -> [u64; 4] {
 
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
+/// The processors that stopped for another's panic.
+static STOPPED: crate::tlb::CpuMask = crate::tlb::CpuMask::new();
+
+/// How many times the panicking processor checks for the others to stop
+/// before it writes its report anyway.
+const STOP_WAIT_TURNS: u32 = 50_000_000;
+
+/// Stops every other running processor with an NMI, and waits until they
+/// have stopped or the wait runs out.
+fn stop_others() {
+    if !crate::percpu::READY.load(Ordering::Acquire) {
+        return;
+    }
+    let me = crate::percpu::index() as usize;
+    let others = || crate::tlb::RUNNING.iter().filter(move |&cpu| cpu != me);
+    for cpu in others() {
+        if let Some(data) = crate::percpu::of(cpu) {
+            crate::apic::send_ipi(data.apic_id.load(Ordering::Relaxed), crate::apic::ICR_NMI);
+        }
+    }
+    for _ in 0..STOP_WAIT_TURNS {
+        if others().all(|cpu| STOPPED.iter().any(|s| s == cpu)) {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 /// The bounds of the stack the kernel runs on, once it has left the boot
 /// stack.
 static STACK_START: AtomicU64 = AtomicU64::new(0);
@@ -109,13 +137,31 @@ pub fn set_stack(start: u64, end: u64) {
 }
 
 /// Writes the panic report and stops. `rbp` starts the backtrace.
+/// The lowest address of the image's loadable segments as linked, where
+/// link.ld places it.
+const LINKED_BASE: u64 = boot_protocol::x86_64::KERNEL_RANGE_START;
+
+/// The linked address of the kernel image address `address`, wherever the
+/// bootloader placed the image: `__kernel_start` is the start of the
+/// image's lowest segment, `kernel_virt_base`, where it runs.
+fn linked(address: u64) -> u64 {
+    let base = (&raw const __kernel_start) as u64;
+    address.wrapping_sub(base).wrapping_add(LINKED_BASE)
+}
+
 fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> ! {
     // SAFETY: disabling interrupts touches no memory.
     unsafe { asm!("cli", options(nomem, nostack)) };
-    // A panic while writing the report stops without a second one.
-    if PANICKING.swap(true, Ordering::Relaxed) {
+    // Only the first processor to panic writes a report. The others,
+    // stopped by its NMI or panicking themselves, stop without one, as
+    // does a panic while the report is written.
+    if PANICKING.swap(true, Ordering::AcqRel) {
+        if crate::percpu::READY.load(Ordering::Acquire) {
+            STOPPED.insert(crate::percpu::index() as usize);
+        }
         crate::cpu::halt();
     }
+    stop_others();
     // The chain is followed on the stack that holds its first frame: the
     // running thread's, the kernel's own, or the boot stack.
     let boot = (&raw const __kernel_start) as u64;
@@ -149,7 +195,7 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
             build_id: build_id(),
             cpu: crate::percpu::index(),
             registers,
-            frames: backtrace::frames(rbp, stack, read),
+            frames: backtrace::frames(rbp, stack, read).map(linked),
         },
     );
     crate::console::panic_screen(|mut screen| {
@@ -161,7 +207,7 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
                 build_id: build_id(),
                 cpu: crate::percpu::index(),
                 registers,
-                frames: backtrace::frames(rbp, stack, read),
+                frames: backtrace::frames(rbp, stack, read).map(linked),
             },
         );
     });
@@ -203,6 +249,8 @@ pub fn exception(frame: &Frame) -> ! {
         ("cr4", cr4),
         ("cs", f.cs),
         ("ss", f.ss),
+        ("dr6", crate::cpu::read_dr(6)),
+        ("dr7", crate::cpu::read_dr(7)),
     ];
     stop(&Exception(frame), &registers, f.rbp)
 }

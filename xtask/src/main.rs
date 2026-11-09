@@ -1,25 +1,39 @@
 //! Development tasks for the Mikros repository, run with `cargo xtask`.
 
 mod boot_menu;
+mod btrfs;
 mod build;
+mod build_systems;
+mod casefold;
 mod check;
+mod cmake;
 mod debug;
 mod debug_build;
 mod debuginfo;
 mod entry_state;
 mod extended;
+mod fetch;
 mod firmware;
 mod fuzz;
 mod image;
+mod llvm;
 mod loader_check;
 mod machine_state;
+mod meson;
+mod musl;
+mod port;
+mod port_tests;
+mod ports;
 mod qemu;
 mod run;
+mod rust_std;
 mod scenario;
 mod setup;
 mod symbolize;
+mod sysroot;
 mod test;
 mod tools;
+mod tzdata;
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -34,8 +48,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Build Linux's btrfs code on the btrfs shim into a static library.
+    Btrfs(btrfs::Args),
     /// Build the system components.
     Build(build::Args),
+    /// Generate the case folding table of mikros-casefold.
+    Casefold(casefold::Args),
     /// Check formatting, lints and the commits since the base branch.
     Check(check::Args),
     /// Boot the disk image in QEMU halted and attach GDB to the kernel.
@@ -51,6 +69,8 @@ enum Command {
     /// Replace the backtrace addresses in the panic reports of a serial
     /// log with their functions, files and lines.
     Symbolize(symbolize::Args),
+    /// Build the sysroot that C and C++ programs are built against.
+    Sysroot(sysroot::Args),
     /// Run the host unit tests and the integration tests in QEMU.
     Test(test::Args),
 }
@@ -66,7 +86,9 @@ pub fn workspace_root() -> PathBuf {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
+        Command::Btrfs(args) => btrfs::run(&args),
         Command::Build(args) => build::run(&args),
+        Command::Casefold(args) => casefold::run(&args),
         Command::Check(args) => check::run(&args),
         Command::Debug(args) => debug::run(&args),
         Command::Fuzz(args) => fuzz::run(&args),
@@ -74,6 +96,7 @@ fn main() -> ExitCode {
         Command::Run(args) => run::run(&args),
         Command::Setup(args) => setup::run(&args),
         Command::Symbolize(args) => symbolize::run(&args),
+        Command::Sysroot(args) => sysroot::run(&args),
         Command::Test(args) => test::run(&args),
     };
     match result {

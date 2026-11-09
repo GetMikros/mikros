@@ -1,0 +1,205 @@
+diff --git a/std/src/sys/fd/unix.rs b/std/src/sys/fd/unix.rs
+index 6ebbc6a..13cf2e5 100644
+--- a/std/src/sys/fd/unix.rs
++++ b/std/src/sys/fd/unix.rs
+@@ -576,6 +576,7 @@ impl FileDesc {
+         target_os = "linux",
+         target_os = "cygwin",
+         target_os = "haiku",
++        target_os = "mikros",
+         target_os = "redox",
+         target_os = "vxworks",
+         target_os = "nto",
+@@ -601,6 +602,7 @@ impl FileDesc {
+         target_os = "linux",
+         target_os = "cygwin",
+         target_os = "haiku",
++        target_os = "mikros",
+         target_os = "redox",
+         target_os = "vxworks",
+         target_os = "nto",
+diff --git a/std/src/sys/pipe/unix.rs b/std/src/sys/pipe/unix.rs
+index 86397ec..5a0648b 100644
+--- a/std/src/sys/pipe/unix.rs
++++ b/std/src/sys/pipe/unix.rs
+@@ -19,6 +19,7 @@ pub fn pipe() -> io::Result<(Pipe, Pipe)> {
+             target_os = "hurd",
+             target_os = "illumos",
+             target_os = "linux",
++            target_os = "mikros",
+             target_os = "netbsd",
+             target_os = "openbsd",
+             target_os = "cygwin",
+diff --git a/std/src/sys/process/unix/unix.rs b/std/src/sys/process/unix/unix.rs
+index d1262ba..fde9815 100644
+--- a/std/src/sys/process/unix/unix.rs
++++ b/std/src/sys/process/unix/unix.rs
+@@ -74,6 +74,11 @@ impl Command {
+             return Ok((ret, ours));
+         }
+ 
++        // Mikros starts processes only through `posix_spawn`.
++        if cfg!(target_os = "mikros") {
++            return Err(Self::ERR_MIKROS_NO_FORK);
++        }
++
+         #[cfg(target_os = "linux")]
+         let (input, output) = sys::net::Socket::new_pair(libc::AF_UNIX, libc::SOCK_SEQPACKET)?;
+ 
+@@ -181,6 +186,16 @@ impl Command {
+         return Err(Self::ERR_APPLE_TV_WATCH_NO_FORK_EXEC);
+     }
+ 
++    #[cfg(target_os = "mikros")]
++    const ERR_MIKROS_NO_FORK: io::Error = io::const_error!(
++        ErrorKind::Unsupported,
++        "these process options need `fork`, which Mikros does not have",
++    );
++    #[cfg(not(target_os = "mikros"))]
++    #[allow(dead_code)]
++    const ERR_MIKROS_NO_FORK: io::Error =
++        io::const_error!(ErrorKind::Unsupported, "unused on this target");
++
+     // Attempts to fork the process. If successful, returns Ok((0, -1))
+     // in the child, and Ok((child_pid, -1)) in the parent.
+     #[cfg(not(any(
+@@ -432,6 +447,7 @@ impl Command {
+         target_os = "qnx",
+         target_vendor = "apple",
+         target_os = "cygwin",
++        target_os = "mikros",
+     )))]
+     fn posix_spawn(
+         &mut self,
+@@ -452,6 +468,7 @@ impl Command {
+         target_os = "qnx",
+         target_vendor = "apple",
+         target_os = "cygwin",
++        target_os = "mikros",
+     ))]
+     fn posix_spawn(
+         &mut self,
+@@ -468,11 +485,25 @@ impl Command {
+ 
+         if self.get_gid().is_some()
+             || self.get_uid().is_some()
+-            || (self.env_saw_path() && !self.program_is_path())
+             || !self.get_closures().is_empty()
+             || self.get_groups().is_some()
+             || self.get_chroot().is_some()
+         {
++            return if cfg!(target_os = "mikros") { Err(Self::ERR_MIKROS_NO_FORK) } else { Ok(None) };
++        }
++
++        // A program found through a `PATH` that the child has and this
++        // process does not is looked up by `exec` after `fork`, except on
++        // Mikros, which tries each directory of the child's `PATH` with
++        // `posix_spawn`.
++        #[cfg(target_os = "mikros")]
++        let search_path = if self.env_saw_path() && !self.program_is_path() {
++            Some(self.env_mut().capture().remove(crate::ffi::OsStr::new("PATH")))
++        } else {
++            None
++        };
++        #[cfg(not(target_os = "mikros"))]
++        if self.env_saw_path() && !self.program_is_path() {
+             return Ok(None);
+         }
+ 
+@@ -612,7 +643,11 @@ impl Command {
+         /// Some platforms can set a new working directory for a spawned process in the
+         /// `posix_spawn` path. This function looks up the function pointer for adding
+         /// such an action to a `posix_spawn_file_actions_t` struct.
+-        #[cfg(not(any(all(target_os = "linux", target_env = "musl"), target_os = "cygwin")))]
++        #[cfg(not(any(
++            all(target_os = "linux", target_env = "musl"),
++            target_os = "cygwin",
++            target_os = "mikros"
++        )))]
+         fn get_posix_spawn_addchdir() -> Option<PosixSpawnAddChdirFn> {
+             use crate::sys::weak::weak;
+ 
+@@ -648,7 +683,11 @@ impl Command {
+         /// of the symbol at compile time or know about it upfront.
+         ///
+         /// Cygwin doesn't support weak symbol, so just link it.
+-        #[cfg(any(all(target_os = "linux", target_env = "musl"), target_os = "cygwin"))]
++        #[cfg(any(
++            all(target_os = "linux", target_env = "musl"),
++            target_os = "cygwin",
++            target_os = "mikros"
++        ))]
+         fn get_posix_spawn_addchdir() -> Option<PosixSpawnAddChdirFn> {
+             // Our minimum required musl supports this function, so we can just use it.
+             Some(libc::posix_spawn_file_actions_addchdir_np)
+@@ -767,6 +806,9 @@ impl Command {
+                     all(target_os = "linux", target_env = "gnu") => {
+                         flags |= libc::POSIX_SPAWN_SETSID as i32;
+                     }
++                    target_os = "mikros" => {
++                        return Err(Self::ERR_MIKROS_NO_FORK);
++                    }
+                     _ => {
+                         return Ok(None);
+                     }
+@@ -829,6 +871,20 @@ impl Command {
+             // Safety: -1 indicates we don't have a pidfd.
+             let mut p = Process::new(0, -1);
+ 
++            #[cfg(target_os = "mikros")]
++            if let Some(path) = &search_path {
++                cvt_nz(spawn_in_path(
++                    &mut p.pid,
++                    path.as_deref(),
++                    self.get_program_cstr(),
++                    file_actions.0.get(),
++                    attrs.0.get(),
++                    self.get_argv().as_ptr() as *const _,
++                    envp as *const _,
++                ))?;
++                return Ok(Some(p));
++            }
++
+             let spawn_res = spawn_fn(
+                 &mut p.pid,
+                 self.get_program_cstr().as_ptr(),
+@@ -957,6 +1013,39 @@ impl Command {
+     }
+ }
+ 
++/// Spawns `program` from the first directory of `path`, the child's
++/// `PATH`, or of the C library's default when it has none, that holds it,
++/// with `posix_spawn`, going on past directories that do not have it or
++/// may not be searched, as `execvp` does.
++#[cfg(target_os = "mikros")]
++unsafe fn spawn_in_path(
++    pid: *mut pid_t,
++    path: Option<&crate::ffi::OsStr>,
++    program: &crate::ffi::CStr,
++    file_actions: *const libc::posix_spawn_file_actions_t,
++    attrs: *const libc::posix_spawnattr_t,
++    argv: *const *mut libc::c_char,
++    envp: *const *mut libc::c_char,
++) -> c_int {
++    use crate::os::unix::ffi::OsStrExt;
++    let path = path.map_or(&b"/usr/local/bin:/bin:/usr/bin"[..], |p| p.as_bytes());
++    let mut error = libc::ENOENT;
++    for dir in path.split(|&b| b == b':') {
++        let dir = if dir.is_empty() { &b"."[..] } else { dir };
++        let mut candidate = Vec::with_capacity(dir.len() + program.count_bytes() + 1);
++        candidate.extend_from_slice(dir);
++        candidate.push(b'/');
++        candidate.extend_from_slice(program.to_bytes());
++        let Ok(candidate) = crate::ffi::CString::new(candidate) else { continue };
++        match unsafe { libc::posix_spawn(pid, candidate.as_ptr(), file_actions, attrs, argv, envp) } {
++            libc::ENOENT | libc::ENOTDIR => {}
++            libc::EACCES => error = libc::EACCES,
++            r => return r,
++        }
++    }
++    error
++}
++
+ ////////////////////////////////////////////////////////////////////////////////
+ // Processes
+ ////////////////////////////////////////////////////////////////////////////////

@@ -1,0 +1,11 @@
+// MIKSPEC-0036.R12
+
+library mikros.service;
+using mikros.base;
+
+protocol Registrar {
+    @1 Register(protocol string<128>, instance string<64>,
+                permission string<64>?,
+                provider client_end<Provider>) -> () error base.Status;
+    @2 Unregister(protocol string<128>, instance string<64>) -> () error base.Status;
+};

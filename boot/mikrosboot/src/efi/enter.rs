@@ -11,9 +11,10 @@ use core::ptr::NonNull;
 use mikrosboot::cpu;
 use mikrosboot::exit::{self, FinalMap};
 use mikrosboot::handoff::{CMDLINE_OFFSET, INFO_PAGES, Prepared};
-use mikrosboot::load::{self, PHYS_ALIGN};
+use mikrosboot::load::{self, Layout, PHYS_ALIGN};
 use mikrosboot::memmap::{Map, Region};
 use mikrosboot::paging::{self, BOOT_STACK_SIZE, Frames, Placement};
+use mikrosboot::placement;
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::mem::memory_map::MemoryMap;
 use uefi::{Status, table};
@@ -139,7 +140,16 @@ fn current_runs(step: &'static str) -> Result<(alloc::vec::Vec<(u64, u64)>, usiz
     Ok((runs, map.len()))
 }
 
-fn prepare(g: Gathered) -> Result<Prepared, Failure> {
+/// Random words for placing the direct map, kept where nothing allocates
+/// or frees them once boot services have ended.
+struct Words {
+    words: [u64; placement::WORDS],
+    len: usize,
+}
+
+/// Allocates and fills what the kernel is given, and returns it with the
+/// random words left for placing the direct map.
+fn prepare(g: Gathered) -> Result<(Prepared, Words), Failure> {
     let step = "allocating memory for the kernel";
     let kernel_pages = load::pages(g.layout.size);
     let kernel_phys = allocate_aligned(kernel_pages, step)?;
@@ -147,6 +157,16 @@ fn prepare(g: Gathered) -> Result<Prepared, Failure> {
     let range =
         unsafe { core::slice::from_raw_parts_mut(kernel_phys as *mut u8, g.layout.size as usize) };
     load::copy(&g.kernel_file, &g.kernel, g.layout, range);
+    // Without random words, a position-independent kernel runs at its
+    // linked addresses. The words left over place the direct map.
+    let mut random = g.random.into_iter();
+    let base = placement::kernel_base(g.layout.size, &mut random).unwrap_or(g.layout.virt_base);
+    load::relocate(&g.kernel, g.layout, base, range);
+    let kernel = g.kernel.moved(base.wrapping_sub(g.layout.virt_base));
+    let layout = Layout {
+        virt_base: base,
+        size: g.layout.size,
+    };
 
     let step = "allocating memory for the boot image";
     let boot_image_size = g.boot_image.len() as u64;
@@ -197,8 +217,7 @@ fn prepare(g: Gathered) -> Result<Prepared, Failure> {
 
     let step = "allocating memory for page tables";
     let (runs, descriptors) = current_runs(step)?;
-    let tables =
-        paging::table_bound(&g.kernel, switch_code().1, runs.iter().copied()) + TABLE_SLACK;
+    let tables = paging::table_bound(&kernel, switch_code().1, runs.iter().copied()) + TABLE_SLACK;
     let tables_phys = allocate(AllocateType::AnyPages, tables, step)?;
     drop(runs);
 
@@ -214,9 +233,9 @@ fn prepare(g: Gathered) -> Result<Prepared, Failure> {
     let entries_size = (entries_capacity * size_of::<MemoryMapEntry>()) as u64;
     let entries_phys = allocate(AllocateType::AnyPages, load::pages(entries_size), step)?;
 
-    Ok(Prepared {
-        kernel: g.kernel,
-        layout: g.layout,
+    let prepared = Prepared {
+        kernel,
+        layout,
         kernel_phys,
         boot_image_phys,
         boot_image_size,
@@ -235,7 +254,17 @@ fn prepare(g: Gathered) -> Result<Prepared, Failure> {
         system_table: table::system_table_raw().map_or(0, |st| st.as_ptr() as u64),
         rng_seed: g.rng_seed,
         boot_time: g.boot_time,
-    })
+        direct_map_base: DIRECT_MAP_BASE,
+    };
+    let mut left = Words {
+        words: [0; placement::WORDS],
+        len: 0,
+    };
+    for (slot, word) in left.words.iter_mut().zip(random) {
+        *slot = word;
+        left.len += 1;
+    }
+    Ok((prepared, left))
 }
 
 /// The boot services used to exit them, with the buffer for the memory map.
@@ -318,7 +347,7 @@ impl Frames for Pool {
 
 /// Builds the kernel memory map and page tables, fills `BootInfo` and
 /// enters the kernel. Runs after boot services have ended.
-fn enter(p: &Prepared, fw: &FinalMap) -> Option<core::convert::Infallible> {
+fn enter(p: &mut Prepared, fw: &FinalMap, random: &Words) -> Option<core::convert::Infallible> {
     // SAFETY: the buffer was allocated for `entries_capacity` entries.
     let buf = unsafe {
         core::slice::from_raw_parts_mut(p.entries_phys as *mut MemoryMapEntry, p.entries_capacity)
@@ -331,6 +360,12 @@ fn enter(p: &Prepared, fw: &FinalMap) -> Option<core::convert::Infallible> {
         (d.phys_start, d.page_count, d.ty.0)
     });
     p.memory_map(&mut map, firmware).ok()?;
+    // With random words, the direct map goes where it still covers the
+    // final map.
+    let mut words = random.words[..random.len].iter().copied();
+    if let Some(base) = placement::direct_map_base(map.direct_map_end(), &mut words) {
+        p.direct_map_base = base;
+    }
 
     let tables_end = p.tables_phys + p.tables * PAGE_SIZE;
     let mut pool = Pool {
@@ -343,7 +378,7 @@ fn enter(p: &Prepared, fw: &FinalMap) -> Option<core::convert::Infallible> {
         kernel_phys: p.kernel_phys,
         stack_phys: p.stack_phys,
         memory_map: map.entries(),
-        direct_map_base: DIRECT_MAP_BASE,
+        direct_map_base: p.direct_map_base,
         switch_code: switch_code(),
     };
     let cr3 = paging::build(&mut pool, gib_pages_supported(), &placement).ok()?;
@@ -368,22 +403,22 @@ fn enter(p: &Prepared, fw: &FinalMap) -> Option<core::convert::Infallible> {
     let rsp = paging::stack_virt(p.layout) + BOOT_STACK_SIZE - 8;
     // SAFETY: the tables map the kernel, the stack, BootInfo in the direct
     // map, and mikros_enter at its physical address.
-    unsafe { mikros_enter(cr3, rsp, DIRECT_MAP_BASE + p.info_phys, p.kernel.entry) }
+    unsafe { mikros_enter(cr3, rsp, p.direct_map_base + p.info_phys, p.kernel.entry) }
 }
 
 pub fn boot(g: Gathered) -> Failure {
     if five_level_paging() {
         return Failure::new("checking the paging mode", "5-level paging is enabled");
     }
-    let prepared = match prepare(g) {
-        Ok(p) => p,
+    let (mut prepared, random) = match prepare(g) {
+        Ok(prepared) => prepared,
         Err(failure) => return failure,
     };
     match exit_boot_services(&prepared) {
         Ok(fw) => {
             // SAFETY: boot services have ended; nothing may interrupt now.
             unsafe { asm!("cli", options(nomem, nostack)) };
-            enter(&prepared, &fw);
+            enter(&mut prepared, &fw, &random);
             halt()
         }
         Err(Some(failure)) => failure,

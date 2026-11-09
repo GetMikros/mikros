@@ -1,0 +1,9 @@
+# The manifest of the authorization stub of the accounts test image:
+# the probe's binary, which authorizes the probe's requests to manage
+# accounts and nothing else.
+name: authorization-stub
+binary: /usr/bin/accounts-probe
+start: on-demand
+provides:
+  - protocol: mikros.session.Authorization
+    permission: session.authorize

@@ -55,9 +55,15 @@ pub struct Startup {
     pub boot_time: Option<i64>,
     pub cmdline: &'static [u8],
     memory_map: &'static [u8],
+    message: &'static [u8],
 }
 
 impl Startup {
+    /// The bytes of the startup message.
+    pub fn message(&self) -> &'static [u8] {
+        self.message
+    }
+
     /// The ranges of the boot memory map.
     pub fn memory_map(&self) -> impl Iterator<Item = MemoryRange> + '_ {
         self.memory_map
@@ -132,6 +138,7 @@ fn decode(bytes: &'static [u8], handles: &[Handle]) -> Option<Startup> {
         boot_time: (flags & BOOT_TIME_VALID != 0).then(|| u64_at(bytes, 0x60) as i64),
         cmdline,
         memory_map,
+        message: bytes,
     })
 }
 
@@ -194,5 +201,6 @@ pub(crate) fn receive(bootstrap: Handle) -> Option<&'static Startup> {
         return None;
     };
     crate::log::set_handle(decoded.log);
+    crate::heap::set_process(decoded.process);
     Some(startup.write(decoded))
 }

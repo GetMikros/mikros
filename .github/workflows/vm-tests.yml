@@ -1,0 +1,62 @@
+# The whole of cargo xtask test, with its QEMU integration tests, on
+# GitHub. It runs only when started by hand from the Actions tab: CI on
+# every change runs the host tests alone, and the QEMU runs happen locally
+# before each commit. It builds from the caches that ci.yml saves.
+name: VM tests
+
+on:
+  workflow_dispatch:
+
+env:
+  # Incremental compilation data is of no use to a fresh checkout.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  kvm:
+    runs-on: ubuntu-24.04
+    # Debian trixie has the btrfs-progs and QEMU versions the tools need.
+    # QEMU runs with KVM, which the runner passes into the container.
+    container:
+      image: debian:trixie
+      options: --device /dev/kvm
+    steps:
+      - name: Install the host tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git \
+            qemu-system-x86 gdb btrfs-progs \
+            cmake ninja-build clang lld python3 zstd bison
+      - uses: actions/checkout@v4
+      - name: Set up the build
+        uses: ./.github/actions/setup
+      - name: Test
+        run: cargo xtask test
+      # Some integration tests, such as the coverage test, exist only in
+      # fuzz builds. The host tests ran in the step above.
+      - name: Test the fuzz build
+        run: cargo xtask test --kind fuzz --no-host
+
+  # The integration tests once more, without KVM, after the job above
+  # passed. QEMU then emulates every instruction, and threads run much
+  # later than with KVM, which shows tests that depend on timing.
+  emulated:
+    needs: kvm
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    steps:
+      - name: Install the host tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git \
+            qemu-system-x86 gdb btrfs-progs \
+            cmake ninja-build clang lld python3 zstd bison
+      - uses: actions/checkout@v4
+      - name: Set up the build
+        uses: ./.github/actions/setup
+      # Without KVM, the first integration run takes several minutes with
+      # the test suites of ported projects, so the limit leaves room well
+      # above xtask's default. The host tests ran in the job above.
+      - name: Test without KVM
+        run: cargo xtask test --no-host --timeout 1200

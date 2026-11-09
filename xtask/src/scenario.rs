@@ -70,6 +70,9 @@ const PAINTED: &str = "SCENARIO framebuffer painted";
 const PAINT: [u8; 3] = [0x12, 0x34, 0x56];
 const PANIC_LINE: &str = "KERNEL PANIC: ";
 const PANIC_END: &str = "END KERNEL PANIC";
+/// How long the screen may take to show a panic report after the serial
+/// port did.
+const SETTLE: Duration = Duration::from_secs(60);
 
 /// Sends `command` to the QEMU monitor listening on `socket`.
 pub fn monitor(socket: &Path, command: &str) -> Result<()> {
@@ -265,8 +268,15 @@ pub fn start(machine: &MachineArgs, dir: &Path, reboot: bool) -> Result<Child> {
     fs::copy(&firmware.vars, &vars)?;
     let mut machine = machine.clone();
     machine.gpu = qemu::Gpu::Basic;
+    crate::test::scratch_disks(&dir.join("serial.log"))?;
     let mut args = crate::test::test_args(
-        qemu::args(&machine, qemu::kvm_available(), &firmware, &vars, &disk),
+        qemu::args(
+            &machine,
+            qemu::Processor::available(),
+            &firmware,
+            &vars,
+            &disk,
+        ),
         &dir.join("serial.log"),
     );
     if reboot {
@@ -306,9 +316,17 @@ fn boot(
         }
         let serial = wait_for_line(&log, PANIC_END, &mut qemu, deadline)?;
         if scenario.screen && serial.contains(PAINTED) {
-            // The report goes to the serial port before the screen.
-            std::thread::sleep(Duration::from_millis(500));
-            problem = screen_problem(&screen_dump(&socket, &screen)?);
+            // The report goes to the serial port before the screen, which
+            // an emulated machine may draw seconds later, so the screen is
+            // looked at until it shows no problem or `SETTLE` has passed.
+            let settled = (Instant::now() + SETTLE).min(deadline);
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                problem = screen_problem(&screen_dump(&socket, &screen)?);
+                if problem.is_none() || Instant::now() >= settled {
+                    break;
+                }
+            }
         } else if scenario.screen {
             println!(
                 "scenario {}: no framebuffer, screen not checked",

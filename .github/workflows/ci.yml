@@ -1,10 +1,17 @@
-# Checks, builds and tests every change with the xtask commands only.
+# Checks, builds and runs the host tests on every change, with the xtask
+# commands only. The QEMU integration tests run locally before a commit,
+# and on GitHub only when started by hand, in vm-tests.yml.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+
+env:
+  # Incremental compilation data is of no use to a fresh checkout, and
+  # would only grow the caches.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   ci:
@@ -17,31 +24,90 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git \
-            qemu-system-x86 gdb btrfs-progs
+            qemu-system-x86 gdb btrfs-progs \
+            cmake ninja-build clang lld python3 zstd bison
       - uses: actions/checkout@v4
         with:
           # The commit checks look at every commit since the base branch.
           fetch-depth: 0
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain none
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Install cargo-fuzz and fetch the firmware
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cargo install cargo-fuzz --locked
-          cargo xtask setup
+      - name: Set up the build
+        id: setup
+        uses: ./.github/actions/setup
       - name: Check
         run: cargo xtask check --base "origin/${{ github.base_ref || 'main' }}"
       - name: Build
+        id: build
         run: |
           for kind in production debug fuzz; do
             cargo xtask build --kind "$kind"
           done
       - name: Test
-        run: cargo xtask test
-      # Some integration tests, such as the coverage test, exist only in
-      # fuzz builds. The host tests ran in the step above.
-      - name: Test the fuzz build
-        run: cargo xtask test --kind fuzz --no-host
+        run: cargo xtask test --host
+      # The caches are saved even when the tests fail, once the build
+      # succeeded, under the keys and paths that the setup restored them
+      # with. A cache whose exact key was found is not saved again.
+      - name: Save the Rust toolchain
+        if: >-
+          always() && steps.build.outcome == 'success' &&
+          steps.setup.outputs.rustup-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+          key: ${{ steps.setup.outputs.rustup-key }}
+      - name: Save cargo-fuzz and the crate registry
+        if: >-
+          always() && steps.build.outcome == 'success' &&
+          steps.setup.outputs.cargo-home-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-fuzz
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ steps.setup.outputs.cargo-home-key }}
+      - name: Save the downloads and tool builds
+        if: >-
+          always() && steps.build.outcome == 'success' &&
+          steps.setup.outputs.tools-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/firmware
+            target/meson
+            target/cmake
+            target/musl
+            target/sources
+          key: ${{ steps.setup.outputs.tools-key }}
+      - name: Save the Rust builds
+        if: >-
+          always() && steps.build.outcome == 'success' &&
+          steps.setup.outputs.rust-build-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/debug
+            target/release
+            target/fuzz
+            target/x86_64-unknown-none
+            target/x86_64-unknown-uefi
+            target/rust-std
+            user/target
+            user/std/target
+            kernel/fuzz/target
+            boot/mikrosboot/fuzz/target
+          key: ${{ steps.setup.outputs.rust-build-key }}
+      # The LLVM build is saved only once it is whole: the compiler-rt
+      # builtins are the last thing it installs.
+      - name: Save the LLVM build
+        if: >-
+          always() && steps.setup.outputs.llvm-hit != 'true' &&
+          hashFiles('target/llvm/install/lib/clang/*/lib/x86_64-unknown-mikros/libclang_rt.builtins.a') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: target/llvm
+          key: ${{ steps.setup.outputs.llvm-key }}

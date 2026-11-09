@@ -25,7 +25,7 @@ impl Kind {
     }
 
     /// The Cargo profile used for this kind.
-    fn profile(self) -> &'static str {
+    pub fn profile(self) -> &'static str {
         match self {
             Kind::Production => "release",
             Kind::Debug => "dev",
@@ -34,7 +34,7 @@ impl Kind {
     }
 
     /// The directory Cargo writes the profile's output to.
-    fn profile_dir(self) -> &'static str {
+    pub fn profile_dir(self) -> &'static str {
         match self {
             Kind::Production => "release",
             Kind::Debug => "debug",
@@ -56,6 +56,8 @@ pub struct Built {
     pub bootloader: PathBuf,
     pub kernel: PathBuf,
     pub boot_image: PathBuf,
+    /// Where xkbcommon was built.
+    pub xkbcommon: crate::ports::Built,
 }
 
 /// The boot images that can be built.
@@ -101,11 +103,130 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         let dir = syzkaller_descriptions()?;
         println!("built    {}", dir.display());
     }
+    let xkbcommon = crate::ports::build(&crate::ports::XKBCOMMON)?;
+    crate::build_systems::check_installed(
+        &xkbcommon.install,
+        &[
+            "lib/libxkbcommon.0.13.2.dlib",
+            "include/xkbcommon/xkbcommon.h",
+            "bin/xkbcli",
+        ],
+        &[
+            ("lib/libxkbcommon.0.dlib", "libxkbcommon.0.13.2.dlib"),
+            ("lib/libxkbcommon.dlib", "libxkbcommon.0.dlib"),
+        ],
+    )?;
+    println!("built    {}", xkbcommon.install.display());
     let boot_image = match boot {
         BootImage::System => {
             let init = user_build("init", kind)?;
             println!("built    {}", init.display());
-            boot_image(kind, "boot.img", &[("init", &init)])?
+            let manager = user_build("process-manager", kind)?;
+            println!("built    {}", manager.display());
+            let services = user_build("service-manager", kind)?;
+            println!("built    {}", services.display());
+            let broker = user_build("permissions-broker", kind)?;
+            println!("built    {}", broker.display());
+            let devices = user_build("device-manager", kind)?;
+            println!("built    {}", devices.display());
+            let pci_bus = user_build("pci-bus", kind)?;
+            println!("built    {}", pci_bus.display());
+            let virtio_blk = user_build("virtio-blk", kind)?;
+            println!("built    {}", virtio_blk.display());
+            let virtio_blk_manifest =
+                crate::workspace_root().join("user/drivers/virtio-blk/driver.yaml");
+            let nvme = user_build("nvme", kind)?;
+            println!("built    {}", nvme.display());
+            let nvme_manifest = crate::workspace_root().join("user/drivers/nvme/driver.yaml");
+            let ahci = user_build("ahci", kind)?;
+            println!("built    {}", ahci.display());
+            let ahci_manifest = crate::workspace_root().join("user/drivers/ahci/driver.yaml");
+            let partition = user_build("partition", kind)?;
+            println!("built    {}", partition.display());
+            let partition_manifest =
+                crate::workspace_root().join("user/drivers/partition/driver.yaml");
+            let fat = user_build("fat", kind)?;
+            println!("built    {}", fat.display());
+            let fat_manifest = crate::workspace_root().join("user/drivers/fat/driver.yaml");
+            let btrfs = btrfs_build(kind)?;
+            let btrfs_manifest = crate::workspace_root().join("user/drivers/btrfs/driver.yaml");
+            let tmpfs = user_build("tmpfs", kind)?;
+            println!("built    {}", tmpfs.display());
+            let tmpfs_manifest = crate::workspace_root().join("user/tmpfs/tmpfs.yaml");
+            let union = user_build("union", kind)?;
+            println!("built    {}", union.display());
+            let union_manifest = crate::workspace_root().join("user/union/union.yaml");
+            let log_service = user_build("log-service", kind)?;
+            println!("built    {}", log_service.display());
+            let log_manifest = crate::workspace_root().join("user/log-service/log.yaml");
+            let time_service = user_build("time-service", kind)?;
+            println!("built    {}", time_service.display());
+            let time_manifest = crate::workspace_root().join("user/time-service/time.yaml");
+            let broker_manifest =
+                crate::workspace_root().join("user/permissions-broker/permissions.yaml");
+            let devices_manifest =
+                crate::workspace_root().join("user/device-manager/device-manager.yaml");
+            let pci_bus_manifest = crate::workspace_root().join("user/drivers/pci-bus/driver.yaml");
+            let members = [
+                ("init", init.as_path()),
+                ("usr/bin/process-manager", manager.as_path()),
+                ("usr/bin/service-manager", services.as_path()),
+                ("usr/bin/permissions-broker", broker.as_path()),
+                (
+                    "usr/lib/services/permissions.yaml",
+                    broker_manifest.as_path(),
+                ),
+                ("usr/bin/tmpfs", tmpfs.as_path()),
+                ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
+                ("usr/bin/union", union.as_path()),
+                ("usr/lib/services/union.yaml", union_manifest.as_path()),
+                ("usr/bin/log-service", log_service.as_path()),
+                ("usr/lib/services/log.yaml", log_manifest.as_path()),
+                ("usr/bin/time-service", time_service.as_path()),
+                ("usr/lib/services/time.yaml", time_manifest.as_path()),
+                ("usr/bin/device-manager", devices.as_path()),
+                (
+                    "usr/lib/services/device-manager.yaml",
+                    devices_manifest.as_path(),
+                ),
+                ("usr/lib/drivers/pci-bus/pci-bus", pci_bus.as_path()),
+                (
+                    "usr/lib/drivers/pci-bus/driver.yaml",
+                    pci_bus_manifest.as_path(),
+                ),
+                (
+                    "usr/lib/drivers/virtio-blk/virtio-blk",
+                    virtio_blk.as_path(),
+                ),
+                (
+                    "usr/lib/drivers/virtio-blk/driver.yaml",
+                    virtio_blk_manifest.as_path(),
+                ),
+                ("usr/lib/drivers/nvme/nvme", nvme.as_path()),
+                ("usr/lib/drivers/nvme/driver.yaml", nvme_manifest.as_path()),
+                ("usr/lib/drivers/ahci/ahci", ahci.as_path()),
+                ("usr/lib/drivers/ahci/driver.yaml", ahci_manifest.as_path()),
+                ("usr/lib/drivers/partition/partition", partition.as_path()),
+                (
+                    "usr/lib/drivers/partition/driver.yaml",
+                    partition_manifest.as_path(),
+                ),
+                ("usr/lib/drivers/fat/fat", fat.as_path()),
+                ("usr/lib/drivers/fat/driver.yaml", fat_manifest.as_path()),
+                ("usr/lib/drivers/btrfs/btrfs", btrfs.as_path()),
+                (
+                    "usr/lib/drivers/btrfs/driver.yaml",
+                    btrfs_manifest.as_path(),
+                ),
+            ];
+            // The time zones, which the root partition gets with the rest
+            // of usr.
+            let zones = crate::tzdata::members(&crate::tzdata::zoneinfo()?)?;
+            let members: Vec<(&str, &Path)> = members
+                .into_iter()
+                .chain(zones.iter().map(|(at, path)| (at.as_str(), path.as_path())))
+                .collect();
+            boot_image(kind, "boot.img", &members)?
         }
         BootImage::Test => {
             let init = user_build("test-init", kind)?;
@@ -116,12 +237,645 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", server.display());
             let debuggee = user_build("debuggee", kind)?;
             println!("built    {}", debuggee.display());
+            let pie = user_build("pie", kind)?;
+            println!("built    {}", pie.display());
+            let managed = user_build("managed", kind)?;
+            println!("built    {}", managed.display());
+            let manager = user_build("process-manager", kind)?;
+            println!("built    {}", manager.display());
+            let services = user_build("service-manager", kind)?;
+            println!("built    {}", services.display());
+            let probe = user_build("launcher-probe", kind)?;
+            println!("built    {}", probe.display());
+            let hello = c_build(
+                "hello-c",
+                &["user/tests/hello-c/hello.c"],
+                Linking::Static,
+                &[],
+            )?;
+            println!("built    {}", hello.display());
+            let hello_dynamic = c_build(
+                "hello-c-dynamic",
+                &["user/tests/hello-c/hello.c"],
+                Linking::Dynamic,
+                &[],
+            )?;
+            println!("built    {}", hello_dynamic.display());
+            let raw_syscall = c_build(
+                "raw-syscall",
+                &["user/tests/gate-c/raw-syscall.c"],
+                Linking::Dynamic,
+                &[],
+            )?;
+            println!("built    {}", raw_syscall.display());
+            let spawn_child = c_build(
+                "spawn-child",
+                &["user/tests/spawn-c/child.c"],
+                Linking::Static,
+                &[],
+            )?;
+            println!("built    {}", spawn_child.display());
+            let greet = c_build(
+                "libgreet",
+                &["user/tests/library-c/greet.c"],
+                Linking::Shared("libgreet.1.dlib"),
+                &[],
+            )?;
+            println!("built    {}", greet.display());
+            let decoy = c_build(
+                "libgreet-decoy",
+                &["user/tests/library-c/decoy.c"],
+                Linking::Shared("libgreet.1.dlib"),
+                &[],
+            )?;
+            println!("built    {}", decoy.display());
+            // Without the start files, the library has no ABI note.
+            let no_note = c_build(
+                "libnonote",
+                &["user/tests/library-c/decoy.c"],
+                Linking::Shared("libnonote.1.dlib"),
+                &["-nostartfiles".to_owned()],
+            )?;
+            println!("built    {}", no_note.display());
+            // The program names the decoy's directory in a DT_RPATH,
+            // which the dynamic linker ignores.
+            let library_user = c_build(
+                "library-user",
+                &["user/tests/library-c/main.c"],
+                Linking::Dynamic,
+                &[
+                    format!("-L{}", c_dir("libgreet").display()),
+                    "-lgreet".to_owned(),
+                    "-Wl,--disable-new-dtags,-rpath,/usr/share/decoy".to_owned(),
+                ],
+            )?;
+            println!("built    {}", library_user.display());
+            // The same project built with CMake and with Meson, through
+            // the sysroot's toolchain files.
+            let tally_source = crate::workspace_root().join("user/tests/build-systems");
+            let cmake_tree = crate::build_systems::cmake("tally-cmake", &tally_source, &[])?;
+            let meson_tree = crate::build_systems::meson("tally-meson", &tally_source, &[])?;
+            for (tree, system) in [(&cmake_tree, "cmake"), (&meson_tree, "meson")] {
+                let real = format!("libtally-{system}.1.2.3.dlib");
+                let major = format!("libtally-{system}.1.dlib");
+                // The library without a version has the major version 0.
+                let base = format!("libbase-{system}.0.dlib");
+                crate::build_systems::check_installed(
+                    tree,
+                    &[
+                        &format!("bin/tally-{system}-user"),
+                        &format!("lib/{real}"),
+                        &format!("lib/{base}"),
+                        &format!("lib/libcount-{system}.slib"),
+                    ],
+                    &[
+                        (&format!("lib/{major}"), &real),
+                        (&format!("lib/libtally-{system}.dlib"), &major),
+                        (&format!("lib/libbase-{system}.dlib"), &base),
+                    ],
+                )?;
+                println!("built    {}", tree.display());
+            }
+            let hello_std = crate::rust_std::build("hello-std", kind)?;
+            println!("built    {}", hello_std.display());
+            let spawn_std = crate::rust_std::build("spawn-std", kind)?;
+            println!("built    {}", spawn_std.display());
+            let programs = crate::workspace_root().join("user/tests/launcher-probe/programs");
+            let (prog, closed, bad) = (
+                programs.join("system.prog.yaml"),
+                programs.join("system.closed.yaml"),
+                programs.join("system.bad.yaml"),
+            );
+            let dynamic_linker = crate::sysroot::dir().join("lib/ld-mikros.dlib");
+            let greeting = crate::workspace_root().join("user/tests/hello-c/greeting.txt");
+            // The process manager tests serve this image, in which the
+            // probe takes the service manager's place.
+            let launcher = archive(
+                kind,
+                "launcher.img",
+                &[
+                    ("usr/bin/service-manager", probe.as_path()),
+                    ("usr/bin/probe", probe.as_path()),
+                    ("usr/bin/hello", hello.as_path()),
+                    ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
+                    ("usr/bin/raw-syscall", raw_syscall.as_path()),
+                    // Applications that the boot image provides.
+                    ("Apps/test/bin/hello", hello.as_path()),
+                    ("Apps/test/bin/hello-dynamic", hello_dynamic.as_path()),
+                    ("Apps/test/bin/raw-syscall", raw_syscall.as_path()),
+                    // An app's bundle, and program manifests.
+                    ("Apps/test.app/bin/hello", hello_dynamic.as_path()),
+                    ("usr/lib/programs/system.prog.yaml", prog.as_path()),
+                    ("usr/lib/programs/system.closed.yaml", closed.as_path()),
+                    ("usr/lib/programs/system.bad.yaml", bad.as_path()),
+                    ("usr/bin/hello-std", hello_std.as_path()),
+                    ("usr/bin/spawn-std", spawn_std.as_path()),
+                    ("usr/bin/spawn-child", spawn_child.as_path()),
+                    ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
+                    ("usr/bin/library-user", library_user.as_path()),
+                    ("usr/lib/libgreet.1.dlib", greet.as_path()),
+                    ("usr/share/decoy/libgreet.1.dlib", decoy.as_path()),
+                    ("usr/lib/libnonote.1.dlib", no_note.as_path()),
+                    (
+                        "usr/bin/tally-cmake-user",
+                        &cmake_tree.join("bin/tally-cmake-user"),
+                    ),
+                    (
+                        "usr/lib/libtally-cmake.1.dlib",
+                        &cmake_tree.join("lib/libtally-cmake.1.dlib"),
+                    ),
+                    (
+                        "usr/lib/libbase-cmake.0.dlib",
+                        &cmake_tree.join("lib/libbase-cmake.0.dlib"),
+                    ),
+                    (
+                        "usr/bin/tally-meson-user",
+                        &meson_tree.join("bin/tally-meson-user"),
+                    ),
+                    (
+                        "usr/lib/libtally-meson.1.dlib",
+                        &meson_tree.join("lib/libtally-meson.1.dlib"),
+                    ),
+                    (
+                        "usr/lib/libbase-meson.0.dlib",
+                        &meson_tree.join("lib/libbase-meson.0.dlib"),
+                    ),
+                    ("usr/share/hello/greeting.txt", greeting.as_path()),
+                ],
+                &[],
+                &[
+                    ("usr/share/hello/near", "greeting.txt"),
+                    ("usr/share/hello/far", "/usr/share/hello/greeting.txt"),
+                    ("usr/bin/app-hello", "../../Apps/test/bin/hello"),
+                ],
+            )?;
+            println!("built    {}", launcher.display());
+            let runner = user_build("port-tests", kind)?;
+            println!("built    {}", runner.display());
+            // The ported software test serves this image, in which the
+            // runner of the ported projects' tests takes the service
+            // manager's place.
+            let plan = crate::workspace_root().join("target/ported/port-tests.plan");
+            let mut members =
+                crate::port_tests::members(&crate::ports::XKBCOMMON, &xkbcommon, &plan)?;
+            members.push(("usr/bin/service-manager".into(), runner));
+            members.push(("usr/lib/ld-mikros.dlib".into(), dynamic_linker.clone()));
+            let members: Vec<(&str, &Path)> = members
+                .iter()
+                .map(|(n, p)| (n.as_str(), p.as_path()))
+                .collect();
+            let ports_image = boot_image(kind, "ports.img", &members)?;
+            println!("built    {}", ports_image.display());
+            let broker = user_build("permissions-broker", kind)?;
+            println!("built    {}", broker.display());
+            let broker_probe = user_build("broker-probe", kind)?;
+            println!("built    {}", broker_probe.display());
+            // The broker tests serve this image, in which the broker
+            // probe takes the service manager's place.
+            let broker_image = boot_image(
+                kind,
+                "broker.img",
+                &[
+                    ("usr/bin/service-manager", broker_probe.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                ],
+            )?;
+            println!("built    {}", broker_image.display());
+            let directory_probe = user_build("directory-probe", kind)?;
+            println!("built    {}", directory_probe.display());
+            let directory_probe_manifest =
+                crate::workspace_root().join("user/tests/directory-probe/directory-probe.yaml");
+            let restart_probe_manifest =
+                crate::workspace_root().join("user/tests/directory-probe/restart-probe.yaml");
+            let demand_probe_manifest =
+                crate::workspace_root().join("user/tests/directory-probe/demand-probe.yaml");
+            let demand_dep_manifest =
+                crate::workspace_root().join("user/tests/directory-probe/demand-dep.yaml");
+            // The service manager tests serve this image, which holds the
+            // system's services and their manifests, and a probe that
+            // starts as a boot service.
+            let broker_manifest =
+                crate::workspace_root().join("user/permissions-broker/permissions.yaml");
+            let services_image = boot_image(
+                kind,
+                "services.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/directory-probe", directory_probe.as_path()),
+                    (
+                        "usr/lib/services/directory-probe.yaml",
+                        directory_probe_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/restart-probe.yaml",
+                        restart_probe_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/demand-probe.yaml",
+                        demand_probe_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/demand-dep.yaml",
+                        demand_dep_manifest.as_path(),
+                    ),
+                ],
+            )?;
+            println!("built    {}", services_image.display());
+            // The temporary file system test serves this image: the
+            // service manager, the broker, the temporary file system, the
+            // union server and probes that drive them, with their
+            // manifests.
+            let tmpfs = user_build("tmpfs", kind)?;
+            println!("built    {}", tmpfs.display());
+            let tmpfs_probe = user_build("tmpfs-probe", kind)?;
+            println!("built    {}", tmpfs_probe.display());
+            let tmpfs_manifest = crate::workspace_root().join("user/tmpfs/tmpfs.yaml");
+            let tmpfs_probe_manifest =
+                crate::workspace_root().join("user/tests/tmpfs-probe/tmpfs-probe.yaml");
+            let union = user_build("union", kind)?;
+            println!("built    {}", union.display());
+            let union_probe = user_build("union-probe", kind)?;
+            println!("built    {}", union_probe.display());
+            let union_manifest = crate::workspace_root().join("user/union/union.yaml");
+            let union_probe_manifest =
+                crate::workspace_root().join("user/tests/union-probe/union-probe.yaml");
+            let tmpfs_image = boot_image(
+                kind,
+                "tmpfs.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/tmpfs", tmpfs.as_path()),
+                    ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
+                    ("usr/bin/tmpfs-probe", tmpfs_probe.as_path()),
+                    (
+                        "usr/lib/services/tmpfs-probe.yaml",
+                        tmpfs_probe_manifest.as_path(),
+                    ),
+                    ("usr/bin/union", union.as_path()),
+                    ("usr/lib/services/union.yaml", union_manifest.as_path()),
+                    ("usr/bin/union-probe", union_probe.as_path()),
+                    (
+                        "usr/lib/services/union-probe.yaml",
+                        union_probe_manifest.as_path(),
+                    ),
+                ],
+            )?;
+            println!("built    {}", tmpfs_image.display());
+            // The log service test serves this image: the service manager,
+            // the broker, the log service and a probe that writes and reads
+            // the log, with their manifests.
+            let log_service = user_build("log-service", kind)?;
+            println!("built    {}", log_service.display());
+            let log_manifest = crate::workspace_root().join("user/log-service/log.yaml");
+            let log_probe = user_build("log-probe", kind)?;
+            println!("built    {}", log_probe.display());
+            let log_probe_manifest =
+                crate::workspace_root().join("user/tests/log-probe/log-probe.yaml");
+            let log_image = boot_image(
+                kind,
+                "log.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/log-service", log_service.as_path()),
+                    ("usr/lib/services/log.yaml", log_manifest.as_path()),
+                    ("usr/bin/log-probe", log_probe.as_path()),
+                    (
+                        "usr/lib/services/log-probe.yaml",
+                        log_probe_manifest.as_path(),
+                    ),
+                ],
+            )?;
+            println!("built    {}", log_image.display());
+            // The time service test serves this image: the service manager,
+            // the broker, the time service and the time probe as two
+            // services, with their manifests.
+            let time_service = user_build("time-service", kind)?;
+            println!("built    {}", time_service.display());
+            let time_manifest = crate::workspace_root().join("user/time-service/time.yaml");
+            let time_probe = user_build("time-probe", kind)?;
+            println!("built    {}", time_probe.display());
+            let probe_dir = crate::workspace_root().join("user/tests/time-probe");
+            let time_image = boot_image(
+                kind,
+                "time.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/time-service", time_service.as_path()),
+                    ("usr/lib/services/time.yaml", time_manifest.as_path()),
+                    ("usr/bin/time-probe", time_probe.as_path()),
+                    (
+                        "usr/lib/services/time-probe.yaml",
+                        probe_dir.join("time-probe.yaml").as_path(),
+                    ),
+                    (
+                        "usr/lib/services/time-guest.yaml",
+                        probe_dir.join("time-guest.yaml").as_path(),
+                    ),
+                ],
+            )?;
+            println!("built    {}", time_image.display());
+            // The namespace test serves this image, with root=bootfs: the
+            // service manager, the broker, the temporary file system and a
+            // probe of its namespace, with their manifests, files in /etc,
+            // /usr and /Libraries that the probe reads, and a native app's
+            // bundle with the dynamic linker it needs.
+            let namespace_probe = user_build("namespace-probe", kind)?;
+            println!("built    {}", namespace_probe.display());
+            let probe_dir = crate::workspace_root().join("user/tests/namespace-probe");
+            let namespace_probe_manifest = probe_dir.join("namespace-probe.yaml");
+            let probe_conf = probe_dir.join("probe.conf");
+            let probe_data = probe_dir.join("data.txt");
+            let namespaces_image = boot_image(
+                kind,
+                "namespaces.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/tmpfs", tmpfs.as_path()),
+                    ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
+                    ("usr/bin/namespace-probe", namespace_probe.as_path()),
+                    (
+                        "usr/lib/services/namespace-probe.yaml",
+                        namespace_probe_manifest.as_path(),
+                    ),
+                    ("usr/share/probe/data.txt", probe_data.as_path()),
+                    ("etc/probe.conf", probe_conf.as_path()),
+                    ("Libraries/probe.txt", probe_data.as_path()),
+                    ("Apps/test.native/bin/hello", hello_dynamic.as_path()),
+                    ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
+                ],
+            )?;
+            println!("built    {}", namespaces_image.display());
+            // The accounts test serves this image, with root=bootfs: the
+            // service manager, the broker, the temporary file system and
+            // the accounts service, with their manifests, the probe's
+            // binary with the manifests of its five services, and a
+            // users file in /var/lib/accounts.
+            let accounts = user_build("accounts", kind)?;
+            println!("built    {}", accounts.display());
+            let accounts_probe = user_build("accounts-probe", kind)?;
+            println!("built    {}", accounts_probe.display());
+            let accounts_manifest = crate::workspace_root().join("user/accounts/accounts.yaml");
+            let probe_dir = crate::workspace_root().join("user/tests/accounts-probe");
+            let accounts_probe_manifest = probe_dir.join("accounts-probe.yaml");
+            let accounts_guest_manifest = probe_dir.join("accounts-guest.yaml");
+            let stub_manifest = probe_dir.join("authorization-stub.yaml");
+            let thief_manifest = probe_dir.join("accounts-thief.yaml");
+            let sneak_manifest = probe_dir.join("accounts-sneak.yaml");
+            let users = accounts_users(kind)?;
+            let accounts_image = boot_image(
+                kind,
+                "accounts.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/tmpfs", tmpfs.as_path()),
+                    ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
+                    ("usr/bin/accounts", accounts.as_path()),
+                    (
+                        "usr/lib/services/accounts.yaml",
+                        accounts_manifest.as_path(),
+                    ),
+                    ("usr/bin/accounts-probe", accounts_probe.as_path()),
+                    (
+                        "usr/lib/services/accounts-probe.yaml",
+                        accounts_probe_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/accounts-guest.yaml",
+                        accounts_guest_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/authorization-stub.yaml",
+                        stub_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/accounts-thief.yaml",
+                        thief_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/services/accounts-sneak.yaml",
+                        sneak_manifest.as_path(),
+                    ),
+                    ("var/lib/accounts/users", users.as_path()),
+                ],
+            )?;
+            println!("built    {}", accounts_image.display());
+            // The device manager tests serve these images. Each holds the
+            // service manager, the broker and the device manager with
+            // their manifests, and test drivers: their manifests from
+            // user/tests/drivers/, and the test driver's binary for those
+            // that start.
+            let devices = user_build("device-manager", kind)?;
+            println!("built    {}", devices.display());
+            let test_driver = user_build("test-driver", kind)?;
+            println!("built    {}", test_driver.display());
+            let pci_bus = user_build("pci-bus", kind)?;
+            println!("built    {}", pci_bus.display());
+            let virtio_blk = user_build("virtio-blk", kind)?;
+            println!("built    {}", virtio_blk.display());
+            let nvme = user_build("nvme", kind)?;
+            println!("built    {}", nvme.display());
+            let ahci = user_build("ahci", kind)?;
+            println!("built    {}", ahci.display());
+            let partition = user_build("partition", kind)?;
+            println!("built    {}", partition.display());
+            let fat = user_build("fat", kind)?;
+            println!("built    {}", fat.display());
+            let btrfs = btrfs_build(kind)?;
+            let devices_manifest =
+                crate::workspace_root().join("user/device-manager/device-manager.yaml");
+            let device_image = |file: &str,
+                                drivers: &[(&str, bool)],
+                                more: &[(String, PathBuf)]|
+             -> Result<PathBuf> {
+                let mut members: Vec<(String, PathBuf)> = vec![
+                    ("usr/bin/service-manager".into(), services.clone()),
+                    ("usr/bin/permissions-broker".into(), broker.clone()),
+                    (
+                        "usr/lib/services/permissions.yaml".into(),
+                        broker_manifest.clone(),
+                    ),
+                    ("usr/bin/device-manager".into(), devices.clone()),
+                    (
+                        "usr/lib/services/device-manager.yaml".into(),
+                        devices_manifest.clone(),
+                    ),
+                ];
+                for &(name, starts) in drivers {
+                    let manifest = format!("user/tests/drivers/{name}/driver.yaml");
+                    members.push((
+                        format!("usr/lib/drivers/{name}/driver.yaml"),
+                        crate::workspace_root().join(manifest),
+                    ));
+                    if starts {
+                        let binary = format!("usr/lib/drivers/{name}/{name}");
+                        members.push((binary, test_driver.clone()));
+                    }
+                }
+                members.extend_from_slice(more);
+                let members: Vec<(&str, &Path)> = members
+                    .iter()
+                    .map(|(name, path)| (name.as_str(), path.as_path()))
+                    .collect();
+                boot_image(kind, file, &members)
+            };
+            let drivers = [
+                ("test-host", true),
+                ("test-child", true),
+                ("test-fallback", false),
+                ("test-invalid", false),
+            ];
+            let devices_image = device_image("devices.img", &drivers, &[])?;
+            println!("built    {}", devices_image.display());
+            let failing_image = device_image(
+                "failing.img",
+                &[("test-decline", true), ("test-close", true)],
+                &[],
+            )?;
+            println!("built    {}", failing_image.display());
+            // test-kept-child runs test-crash-host's copy of the test
+            // driver, which keeps one copy of it in memory, not two.
+            let restart_image = device_image(
+                "restart.img",
+                &[("test-crash-host", true), ("test-kept-child", false)],
+                &[],
+            )?;
+            println!("built    {}", restart_image.display());
+            // The PCI bus driver tests serve this image, with the bus
+            // driver and test drivers for the host bridge's function, for
+            // QEMU's edu device and for the e1000e function, and the
+            // storage drivers, with the partition driver, the FAT server for
+            // the EFI system partition, a test driver for the root partition
+            // that checks it, and one for each scratch partition.
+            let pci_bus_files = [
+                (
+                    "usr/lib/drivers/pci-bus/pci-bus".to_owned(),
+                    pci_bus.clone(),
+                ),
+                (
+                    "usr/lib/drivers/pci-bus/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/pci-bus/driver.yaml"),
+                ),
+                (
+                    "usr/lib/drivers/virtio-blk/virtio-blk".to_owned(),
+                    virtio_blk.clone(),
+                ),
+                (
+                    "usr/lib/drivers/virtio-blk/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/virtio-blk/driver.yaml"),
+                ),
+                ("usr/lib/drivers/nvme/nvme".to_owned(), nvme.clone()),
+                (
+                    "usr/lib/drivers/nvme/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/nvme/driver.yaml"),
+                ),
+                ("usr/lib/drivers/ahci/ahci".to_owned(), ahci.clone()),
+                (
+                    "usr/lib/drivers/ahci/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/ahci/driver.yaml"),
+                ),
+                (
+                    "usr/lib/drivers/partition/partition".to_owned(),
+                    partition.clone(),
+                ),
+                (
+                    "usr/lib/drivers/partition/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/partition/driver.yaml"),
+                ),
+                ("usr/lib/drivers/fat/fat".to_owned(), fat.clone()),
+                (
+                    "usr/lib/drivers/fat/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/fat/driver.yaml"),
+                ),
+                ("usr/lib/drivers/btrfs/btrfs".to_owned(), btrfs.clone()),
+                (
+                    "usr/lib/drivers/btrfs/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/btrfs/driver.yaml"),
+                ),
+                // The log service, which keeps the log in files on the
+                // root file system and the EFI system partition.
+                ("usr/bin/log-service".to_owned(), log_service.clone()),
+                ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                // The time service, which takes the time zone from the
+                // root file system.
+                ("usr/bin/time-service".to_owned(), time_service.clone()),
+                (
+                    "usr/lib/services/time.yaml".to_owned(),
+                    time_manifest.clone(),
+                ),
+            ];
+            let pci_image = device_image(
+                "pci.img",
+                &[
+                    ("test-pci", true),
+                    ("test-edu", true),
+                    ("test-reset", true),
+                    ("test-disk", true),
+                    ("test-fat", true),
+                    ("test-btrfs", true),
+                ],
+                &pci_bus_files,
+            )?;
+            println!("built    {}", pci_image.display());
             let members = [
+                ("tests/accounts.img", accounts_image.as_path()),
+                ("tests/broker.img", broker_image.as_path()),
+                ("tests/services.img", services_image.as_path()),
+                ("tests/tmpfs.img", tmpfs_image.as_path()),
+                ("tests/log.img", log_image.as_path()),
+                ("tests/time.img", time_image.as_path()),
+                ("tests/namespaces.img", namespaces_image.as_path()),
+                ("tests/devices.img", devices_image.as_path()),
+                ("tests/failing.img", failing_image.as_path()),
+                ("tests/restart.img", restart_image.as_path()),
+                ("tests/pci.img", pci_image.as_path()),
                 ("init", init.as_path()),
+                ("tests/launcher.img", launcher.as_path()),
+                ("tests/ports.img", ports_image.as_path()),
                 ("tests/channel-echo", echo.as_path()),
                 ("tests/call-server", server.as_path()),
                 ("tests/debuggee", debuggee.as_path()),
+                ("tests/pie", pie.as_path()),
+                ("tests/managed", managed.as_path()),
+                ("usr/bin/process-manager", manager.as_path()),
+                ("usr/bin/service-manager", services.as_path()),
             ];
+            // The time zones, which the test machine's root partition
+            // gets with the rest of usr.
+            let zones = crate::tzdata::members(&crate::tzdata::zoneinfo()?)?;
+            let members: Vec<(&str, &Path)> = members
+                .into_iter()
+                .chain(zones.iter().map(|(at, path)| (at.as_str(), path.as_path())))
+                .collect();
             boot_image(kind, "test-boot.img", &members)?
         }
     };
@@ -131,6 +885,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         bootloader,
         kernel,
         boot_image,
+        xkbcommon,
     })
 }
 
@@ -141,17 +896,53 @@ pub fn live_boot_image(kind: Kind) -> Result<PathBuf> {
     let init = user_build("init", kind)?;
     let dirs = crate::image::live_dirs();
     let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
-    archive(kind, "live-boot.img", &[("init", &init)], &dirs)
+    archive(kind, "live-boot.img", &[("init", &init)], &dirs, &[])
+}
+
+/// Writes the users file of the accounts test for `kind` and returns its
+/// path: `ann`, an administrator, and `bob` and `cy`, standard users,
+/// each with the password `<name>-password`. Fixed salts keep the file
+/// the same from one build to the next.
+fn accounts_users(kind: Kind) -> Result<PathBuf> {
+    use mikros_userdb::{Kind as UserKind, Users, encode, hash};
+    let mut users = Users::new();
+    let people = [
+        ("ann", "Ann", UserKind::Admin),
+        ("bob", "Bob", UserKind::Standard),
+        ("cy", "Cy", UserKind::Standard),
+    ];
+    for (i, (name, full_name, user_kind)) in people.into_iter().enumerate() {
+        let salt = [i as u8 + 1; hash::SALT_LEN];
+        let password = format!("{name}-password");
+        let phc = hash::hash(password.as_bytes(), &salt).context("hashing a password")?;
+        users
+            .create(name, full_name, user_kind, phc)
+            .map_err(|r| anyhow::anyhow!("adding {name}: {r:?}"))?;
+    }
+    let dir = crate::workspace_root()
+        .join("target/boot")
+        .join(kind.name());
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("accounts-users");
+    fs::write(&path, encode(&users)).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
 }
 
 /// Writes the boot archive `file` with each of `members`, given by name
 /// and the path of its contents, as a regular file.
 fn boot_image(kind: Kind, file: &str, members: &[(&str, &Path)]) -> Result<PathBuf> {
-    archive(kind, file, members, &[])
+    archive(kind, file, members, &[], &[])
 }
 
-/// Like `boot_image`, with the directories `dirs` after the files.
-fn archive(kind: Kind, file: &str, members: &[(&str, &Path)], dirs: &[&str]) -> Result<PathBuf> {
+/// Like `boot_image`, with the directories `dirs` after the files, and
+/// the symbolic links `links`, given by name and target, after those.
+fn archive(
+    kind: Kind,
+    file: &str,
+    members: &[(&str, &Path)],
+    dirs: &[&str],
+    links: &[(&str, &str)],
+) -> Result<PathBuf> {
     let dir = crate::workspace_root()
         .join("target/boot")
         .join(kind.name());
@@ -178,6 +969,15 @@ fn archive(kind: Kind, file: &str, members: &[(&str, &Path)], dirs: &[&str]) -> 
             .append_data(&mut header, dir_name(dir), std::io::empty())
             .with_context(|| format!("adding {dir} to the boot archive"))?;
     }
+    for &(name, target) in links {
+        let mut header = tar::Header::new_ustar();
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_entry_type(tar::EntryType::Symlink);
+        archive
+            .append_link(&mut header, name, target)
+            .with_context(|| format!("adding {name} to the boot archive"))?;
+    }
     archive.finish().context("finishing the boot archive")?;
     Ok(path)
 }
@@ -196,6 +996,15 @@ pub const KERNEL_TARGET: &str = "x86_64-unknown-none";
 
 /// The target user-space programs are built for.
 pub const USER_TARGET: &str = "targets/x86_64-unknown-mikros.json";
+
+/// Builds the btrfs server, after the library of Linux's btrfs code on
+/// the shim for Mikros that it links, and returns its path.
+fn btrfs_build(kind: Kind) -> Result<PathBuf> {
+    crate::btrfs::build(crate::btrfs::Flavor::Mikros)?;
+    let btrfs = user_build("btrfs", kind)?;
+    println!("built    {}", btrfs.display());
+    Ok(btrfs)
+}
 
 /// Builds the user-space program `bin`, a package of the `user`
 /// workspace of the same name, and returns its path.
@@ -222,6 +1031,58 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
         .join("user/target/x86_64-unknown-mikros")
         .join(kind.profile_dir())
         .join(bin))
+}
+
+/// How a C program is linked with the C library.
+#[derive(Clone, Copy, PartialEq)]
+enum Linking {
+    Static,
+    Dynamic,
+    /// A shared library `<name>.dlib` with this `DT_SONAME`.
+    Shared(&'static str),
+}
+
+/// Builds the C program or library `name` from `sources`, paths relative
+/// to the repository, against the sysroot, with the further arguments
+/// `args`, and returns its path, in `target/c/<name>/`.
+fn c_build(name: &str, sources: &[&str], linking: Linking, args: &[String]) -> Result<PathBuf> {
+    let root = crate::workspace_root();
+    let sysroot = crate::sysroot::build()?;
+    let dir = c_dir(name);
+    fs::create_dir_all(&dir)?;
+    let mut command = Command::new(crate::llvm::tool("clang"));
+    command.arg(format!(
+        "--config={}",
+        crate::sysroot::config(&sysroot).display()
+    ));
+    command.arg("-O2");
+    let program = match linking {
+        Linking::Static => {
+            command.arg("-static-pie");
+            dir.join(name)
+        }
+        Linking::Dynamic => dir.join(name),
+        Linking::Shared(soname) => {
+            command.args(["-shared", "-fPIC", &format!("-Wl,-soname,{soname}")]);
+            dir.join(format!("{name}.dlib"))
+        }
+    };
+    let status = command
+        .arg("-o")
+        .arg(&program)
+        .args(sources.iter().map(|s| root.join(s)))
+        .args(args)
+        .status()
+        .context("failed to run clang")?;
+    if !status.success() {
+        bail!("building {name} failed");
+    }
+    Ok(program)
+}
+
+/// The directory that `c_build` builds `name` in.
+fn c_dir(name: &str) -> PathBuf {
+    crate::workspace_root().join("target/c").join(name)
 }
 
 /// Writes the syzkaller descriptions and constants generated from the

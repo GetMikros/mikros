@@ -1,0 +1,10 @@
+// MIKSPEC-0034.R23
+
+library mikros.process;
+using mikros.base;
+
+protocol InitBootstrap {
+    @1 Register() -> () error base.Status;
+    @2 StartServiceManager(handles vector<StartupHandle, 32>)
+        -> (pid u32, process handle<Process>) error base.Status;
+};

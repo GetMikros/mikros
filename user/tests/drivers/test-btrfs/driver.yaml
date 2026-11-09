@@ -1,0 +1,8 @@
+# A driver for a partition of the test machine's disk that is there for
+# it, which checks the btrfs server's file system of the root partition,
+# also across a restart of the disk's driver, which it kills, and the
+# time service's time zone on it.
+name: test-btrfs
+binary: /usr/lib/drivers/test-btrfs/test-btrfs
+match: [gpt:38a2aae9-c051-4fe5-a24a-441d4a220d2a]
+permissions: [filesystem.mount, filesystem.manage, process.signal_any, time.set]

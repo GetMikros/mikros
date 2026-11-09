@@ -1,5 +1,6 @@
 //! `cargo xtask test`: runs the host unit tests, replays the host fuzz
-//! corpora and runs the integration tests in QEMU.
+//! corpora and runs the integration tests in QEMU. With `--host`, it runs
+//! only the host unit tests and the replays.
 
 use crate::build::{self, BootImage, Kind};
 use crate::qemu::{self, MachineArgs};
@@ -10,20 +11,28 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 pub struct Args {
     /// The build kind to test.
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
     pub kind: Kind,
     /// Seconds an integration test may run before it fails.
-    #[arg(long, default_value_t = 120)]
+    #[arg(long, default_value_t = 240)]
     pub timeout: u64,
     /// Skip the host unit tests and the replay of the fuzz corpora.
     #[arg(long)]
     pub no_host: bool,
+    /// Run only the host unit tests and the replay of the fuzz corpora,
+    /// without building the test image or starting QEMU.
+    #[arg(long, conflicts_with = "no_host")]
+    pub host: bool,
     #[command(flatten)]
     pub machine: MachineArgs,
 }
+
+/// The memory of the test machines unless `--memory` says otherwise:
+/// the test boot image holds the images of all the tests' systems.
+const TEST_MEMORY: &str = "3G";
 
 /// The value the test init writes to `isa-debug-exit` when every test
 /// passed; QEMU exits with twice the value plus one.
@@ -38,16 +47,16 @@ const PANIC_LINE: &str = "KERNEL PANIC:";
 const INTERRUPT_FUNCTIONS: [&str; 6] = [
     "kernel::idt::interrupt",
     "kernel::timer::interrupt",
-    "kernel::sched::timer_interrupt",
-    "kernel::sched::maintain",
+    "kernel_core::sched::timer_interrupt",
+    "kernel_core::sched::maintain",
     "kernel::time::maintain",
-    "<kernel::ktimer::Armed>::fire",
+    "<kernel_core::ktimer::Armed>::fire",
 ];
 
 /// The kernel function that only the idle loop runs. The fuzz build's
 /// coverage must record none of its code, as the idle loop runs on behalf
 /// of no thread.
-const IDLE_FUNCTIONS: [&str; 1] = ["kernel::sched::halt_until_interrupt"];
+const IDLE_FUNCTIONS: [&str; 1] = ["kernel_core::sched::halt_until_interrupt"];
 
 /// The address ranges, start and end, of the functions `names` and
 /// their closures in `symbols`, which `llvm-nm -S -C` printed, or the
@@ -87,8 +96,14 @@ fn code_arg(key: &str, ranges: &[(u64, u64)]) -> String {
     format!("{key}={}", list.join(","))
 }
 
+/// The command line word that has the test init leave out the test of
+/// ported software, whose suites take minutes when emulated. Only the
+/// first run of a build kind other than fuzz runs it.
+const SKIP_PORTED: &str = "skip=ported_software_passes_its_tests";
+
 /// What the integration tests of `kind` add to the kernel command line:
-/// for the fuzz build, the interrupt code and the idle code of `kernel`.
+/// for the fuzz build, the interrupt code and the idle code of `kernel`,
+/// and `SKIP_PORTED`.
 fn test_cmdline(kind: Kind, kernel: &Path) -> Result<String> {
     if kind != Kind::Fuzz {
         return Ok(String::new());
@@ -109,6 +124,7 @@ fn test_cmdline(kind: Kind, kernel: &Path) -> Result<String> {
             Err(name) => bail!("{} has no function {name}", kernel.display()),
         }
     }
+    args.push(SKIP_PORTED.to_owned());
     Ok(args.join(" "))
 }
 
@@ -132,14 +148,65 @@ fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
     }
 }
 
+/// The scratch disks of the test machine, in the directory of its serial
+/// log: one behind an NVMe controller and one on port 2 of the q35
+/// machine's AHCI controller, each with the GUIDs of its table and of
+/// its one partition.
+const SCRATCH_DISKS: [(&str, &str, &str); 2] = [
+    (
+        "nvme.img",
+        "4e564d65-0000-4000-8000-0000000000d1",
+        "4e564d65-0000-4000-8000-000000000001",
+    ),
+    (
+        "ahci.img",
+        "41484349-0000-4000-8000-0000000000d2",
+        "41484349-0000-4000-8000-000000000002",
+    ),
+];
+/// The size of a scratch disk, in sectors.
+const SCRATCH_SECTORS: u64 = 2048;
+/// The type of a scratch disk's partition: Linux file system data.
+const SCRATCH_TYPE: &str = "0fc63daf-8483-4772-8e79-3d69d8477de4";
+
+/// Creates the scratch disks next to `log`. Each is a GPT disk of 1 MiB
+/// whose one partition, named `scratch`, spans every usable block, LBA
+/// 34 to 2014, and holds zeros.
+pub fn scratch_disks(log: &Path) -> Result<()> {
+    use crate::image::gpt;
+    let dir = log.parent().unwrap_or(Path::new("."));
+    for (name, disk_guid, partition_guid) in SCRATCH_DISKS {
+        let mut image = std::io::Cursor::new(vec![0u8; (SCRATCH_SECTORS * gpt::SECTOR) as usize]);
+        let partition = gpt::Partition {
+            type_guid: uuid::Uuid::parse_str(SCRATCH_TYPE)?,
+            guid: uuid::Uuid::parse_str(partition_guid)?,
+            name: "scratch",
+            first_lba: 34,
+            last_lba: SCRATCH_SECTORS - 34,
+        };
+        let disk_guid = uuid::Uuid::parse_str(disk_guid)?;
+        gpt::write(&mut image, SCRATCH_SECTORS, disk_guid, &[partition])?;
+        let path = dir.join(name);
+        fs::write(&path, image.into_inner())
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// The arguments of `qemu::args` with the serial port written to `log`,
 /// no display, the debug exit device, QEMU's `edu` device for DMA tests,
-/// able to reach the first 4 GiB, and no reboot. The devices follow the
-/// IOMMU, which must come first.
+/// able to reach the first 4 GiB, the scratch disks of `scratch_disks`
+/// with the serial number `mikros`, and no reboot. The devices follow
+/// the IOMMU, which must come first.
 pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
     if let Some(i) = args.iter().position(|a| a == "-serial") {
         args[i + 1] = format!("file:{}", log.display());
     }
+    let dir = log.parent().unwrap_or(Path::new("."));
+    let drive = |id: &str, name: &str| {
+        let path = dir.join(name);
+        format!("if=none,id={id},format=raw,file={}", path.display())
+    };
     args.extend(
         [
             "-display",
@@ -148,6 +215,14 @@ pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
             "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-device",
             "edu,dma_mask=0xffffffff",
+            "-drive",
+            &drive("scratch-nvme", SCRATCH_DISKS[0].0),
+            "-device",
+            "nvme,drive=scratch-nvme,serial=mikros",
+            "-drive",
+            &drive("scratch-ahci", SCRATCH_DISKS[1].0),
+            "-device",
+            "ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros",
             "-no-reboot",
         ]
         .map(String::from),
@@ -155,9 +230,37 @@ pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
     args
 }
 
-/// Boots the test image and returns QEMU's exit code, or fails when the
-/// run takes longer than `timeout`.
-fn boot(args: &Args, disk: &Path, log: &Path) -> Result<Option<i32>> {
+/// How many of the last serial lines a timed-out run prints.
+const TAIL_LINES: usize = 40;
+
+/// What a timed-out run prints of its serial output: the `TEST` lines,
+/// as a finished run prints them, then the last `TAIL_LINES` lines, which
+/// show where the run stopped.
+fn timeout_report(serial: &str) -> String {
+    let mut report = String::new();
+    for line in serial.lines().filter(|l| l.contains("TEST")) {
+        report.push_str(line);
+        report.push('\n');
+    }
+    let lines: Vec<&str> = serial.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
+    report.push_str(&format!("last {} serial lines:\n", tail.len()));
+    for line in tail {
+        report.push_str(line);
+        report.push('\n');
+    }
+    report
+}
+
+/// Boots the test image `disk` on `processor` and returns QEMU's exit
+/// code, or fails when the run takes longer than `timeout` seconds.
+fn boot(
+    args: &Args,
+    processor: qemu::Processor,
+    timeout: u64,
+    disk: &Path,
+    log: &Path,
+) -> Result<Option<i32>> {
     let firmware = firmware::paths();
     if !firmware.code.exists() {
         bail!("the firmware is missing; fetch it with `cargo xtask setup`");
@@ -165,13 +268,16 @@ fn boot(args: &Args, disk: &Path, log: &Path) -> Result<Option<i32>> {
     let vars = disk.with_extension("vars.fd");
     fs::copy(&firmware.vars, &vars)
         .with_context(|| format!("copying the firmware variables to {}", vars.display()))?;
-    let kvm = qemu::kvm_available();
-    let qemu_args = test_args(qemu::args(&args.machine, kvm, &firmware, &vars, disk), log);
+    scratch_disks(log)?;
+    let qemu_args = test_args(
+        qemu::args(&args.machine, processor, &firmware, &vars, disk),
+        log,
+    );
     let mut child = Command::new(qemu::QEMU)
         .args(qemu_args)
         .spawn()
         .with_context(|| format!("failed to start {}", qemu::QEMU))?;
-    let deadline = Instant::now() + Duration::from_secs(args.timeout);
+    let deadline = Instant::now() + Duration::from_secs(timeout);
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(status.code());
@@ -179,14 +285,71 @@ fn boot(args: &Args, disk: &Path, log: &Path) -> Result<Option<i32>> {
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("the integration tests timed out after {} s", args.timeout);
+            let serial = fs::read(log).unwrap_or_default();
+            print!("{}", timeout_report(&String::from_utf8_lossy(&serial)));
+            bail!(
+                "the integration tests timed out after {timeout} s; serial output in {}",
+                log.display()
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
 
+/// Runs the integration tests of `disk` on `processor`, prints their
+/// results and fails unless they passed and the kernel logged `expected`.
+/// `what` tells the run apart in the messages.
+fn integration(
+    args: &Args,
+    processor: qemu::Processor,
+    timeout: u64,
+    disk: &Path,
+    log: &Path,
+    what: &str,
+    expected: &str,
+) -> Result<()> {
+    let code = boot(args, processor, timeout, disk, log)?;
+    let serial = fs::read(log).with_context(|| format!("reading {}", log.display()))?;
+    let serial = String::from_utf8_lossy(&serial);
+    for line in serial.lines().filter(|l| l.contains("TEST")) {
+        println!("{line}");
+    }
+    if let Err(why) = verdict(code, &serial) {
+        // What the tests logged as errors besides their results tells why
+        // one failed.
+        for line in serial
+            .lines()
+            .filter(|l| l.contains("] E ") && !l.contains("TEST"))
+        {
+            println!("{line}");
+        }
+        bail!(
+            "integration tests{what} failed: {why}; serial output in {}",
+            log.display()
+        );
+    }
+    if !serial.contains(expected) {
+        bail!(
+            "integration tests{what} ran without the kernel logging \"{expected}\"; serial output in {}",
+            log.display()
+        );
+    }
+    println!(
+        "integration tests{what} passed; serial output in {}",
+        log.display()
+    );
+    Ok(())
+}
+
 pub fn run(args: &Args) -> Result<()> {
+    let mut args = args.clone();
+    args.machine
+        .memory
+        .get_or_insert_with(|| TEST_MEMORY.to_owned());
+    let args = &args;
     if !args.no_host {
+        // The btrfs crate's tests link the host's library of the shim.
+        crate::btrfs::build(crate::btrfs::Flavor::Host)?;
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         let status = Command::new(cargo)
             .current_dir(crate::workspace_root())
@@ -198,36 +361,54 @@ pub fn run(args: &Args) -> Result<()> {
         }
         crate::fuzz::replay_corpora()?;
     }
+    if args.host {
+        return Ok(());
+    }
 
     let built = build::build_for(args.kind, BootImage::Test)?;
+    crate::port_tests::run_on_host(&crate::ports::XKBCOMMON, &built.xkbcommon)?;
     let dir = test_dir(args.kind);
     fs::create_dir_all(&dir)?;
     let disk = dir.join("disk.img");
     let cmdline = test_cmdline(args.kind, &built.kernel)?;
-    image::create_with(args.kind, &built, &disk, &cmdline, &[])?;
+    image::create_for_tests(args.kind, &built, &disk, &cmdline)?;
     let log = dir.join("serial.log");
-    let code = boot(args, &disk, &log)?;
-    let serial = fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
-    let serial = String::from_utf8_lossy(&serial);
-    for line in serial.lines().filter(|l| l.contains("TEST")) {
-        println!("{line}");
+    let processor = qemu::Processor::available();
+    integration(args, processor, args.timeout, &disk, &log, "", "")?;
+    // Kernel page-table isolation applies only to Intel processors that do
+    // not report RDCL_NO, as QEMU's emulated processor does not when it
+    // names that vendor. Emulation takes about five times as long as KVM.
+    if args.kind != Kind::Fuzz {
+        let isolation_disk = dir.join("isolation-disk.img");
+        let isolation_cmdline = [cmdline.as_str(), SKIP_PORTED].join(" ");
+        let isolation_cmdline = isolation_cmdline.trim();
+        image::create_for_tests(args.kind, &built, &isolation_disk, isolation_cmdline)?;
+        let timeout = match processor {
+            qemu::Processor::Host => args.timeout * 5,
+            _ => args.timeout,
+        };
+        let isolation_log = dir.join("isolation-serial.log");
+        integration(
+            args,
+            qemu::Processor::EmulatedIntel,
+            timeout,
+            &isolation_disk,
+            &isolation_log,
+            " with kernel page-table isolation",
+            "page-table isolation on",
+        )?;
     }
-    if let Err(why) = verdict(code, &serial) {
-        bail!(
-            "integration tests failed: {why}; serial output in {}",
-            log.display()
-        );
-    }
-    println!(
-        "integration tests passed; serial output in {}",
-        log.display()
-    );
+    // The debugger checks boot as cargo xtask debug does, at the kernel's
+    // linked addresses.
+    let gdb_disk = dir.join("gdb-disk.img");
+    let gdb_cmdline = [cmdline.as_str(), image::KASLR_OFF].join(" ");
+    image::create_for_tests(args.kind, &built, &gdb_disk, gdb_cmdline.trim())?;
     let gdb_log = dir.join("gdb-serial.log");
     let timeout = Duration::from_secs(args.timeout);
-    crate::debug::check_scripts(&args.machine, &built.kernel, &disk, &gdb_log, timeout)?;
+    crate::debug::check_scripts(&args.machine, &built.kernel, &gdb_disk, &gdb_log, timeout)?;
     println!("kernel debugger scripts passed");
     let entry_log = dir.join("entry-serial.log");
-    crate::entry_state::check(&args.machine, &built.kernel, &disk, &entry_log, timeout)?;
+    crate::entry_state::check(&args.machine, &built.kernel, &gdb_disk, &entry_log, timeout)?;
     println!("kernel entry state checked");
     crate::machine_state::run(
         &args.machine,
@@ -249,6 +430,24 @@ pub fn run(args: &Args) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    /// The arguments of `cargo xtask test`, parsed on their own.
+    #[derive(Parser)]
+    struct TestCommand {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    #[test]
+    fn takes_host_only_without_no_host() {
+        let parsed = TestCommand::try_parse_from(["test", "--host"]).unwrap();
+        assert!(parsed.args.host);
+        assert!(!parsed.args.no_host);
+        let full = TestCommand::try_parse_from(["test"]).unwrap();
+        assert!(!full.args.host);
+        assert!(TestCommand::try_parse_from(["test", "--host", "--no-host"]).is_err());
+    }
 
     #[test]
     fn passes_only_on_the_exit_code_without_a_panic() {
@@ -259,17 +458,35 @@ mod tests {
     }
 
     #[test]
+    fn reports_the_tests_and_the_end_of_a_timed_out_run() {
+        let mut serial = String::from("TEST a PASSED\n");
+        for i in 0..TAIL_LINES + 5 {
+            serial.push_str(&format!("line {i}\n"));
+        }
+        let report = timeout_report(&serial);
+        let lines: Vec<&str> = report.lines().collect();
+        assert_eq!(lines[0], "TEST a PASSED");
+        assert_eq!(lines[1], format!("last {TAIL_LINES} serial lines:"));
+        assert_eq!(lines[2], "line 5");
+        assert_eq!(
+            lines.last(),
+            Some(&format!("line {}", TAIL_LINES + 4).as_str())
+        );
+        assert_eq!(timeout_report(""), "last 0 serial lines:\n");
+    }
+
+    #[test]
     fn finds_the_interrupt_code_and_its_closures() {
         let symbols = "\
 ffffffff8006b040 0000000000000219 t kernel::idt::interrupt
 ffffffff8006aa30 00000000000001c3 t kernel::idt::after_interrupt
 ffffffff800929f0 0000000000000015 t kernel::timer::interrupt
-ffffffff8006fc40 00000000000003fb t kernel::sched::timer_interrupt
-ffffffff80070a30 0000000000000140 t kernel::sched::maintain
-ffffffff800cc860 0000000000000054 t kernel::sched::maintain::{closure#0}
-ffffffff800f9690 000000000000007a t <core::option::Option<i64>>::map_or::<i64, kernel::sched::maintain::{closure#0}>
+ffffffff8006fc40 00000000000003fb t kernel_core::sched::timer_interrupt
+ffffffff80070a30 0000000000000140 t kernel_core::sched::maintain
+ffffffff800cc860 0000000000000054 t kernel_core::sched::maintain::{closure#0}
+ffffffff800f9690 000000000000007a t <core::option::Option<i64>>::map_or::<i64, kernel_core::sched::maintain::{closure#0}>
 ffffffff8005be30 0000000000000010 t kernel::time::maintain
-ffffffff800ccff0 000000000000008b t <kernel::ktimer::Armed>::fire
+ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
 ";
         let ranges = code_ranges(symbols, &INTERRUPT_FUNCTIONS).unwrap();
         assert_eq!(ranges.len(), 7);
@@ -286,8 +503,34 @@ ffffffff800ccff0 000000000000008b t <kernel::ktimer::Armed>::fire
         );
         assert_eq!(
             code_ranges(symbols, &IDLE_FUNCTIONS),
-            Err("kernel::sched::halt_until_interrupt")
+            Err("kernel_core::sched::halt_until_interrupt")
         );
+    }
+
+    #[test]
+    fn scratch_disks_hold_one_partition_over_every_usable_block() {
+        let dir = std::env::temp_dir().join(format!("scratch-disks-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        scratch_disks(&dir.join("serial.log")).unwrap();
+        for (name, _, partition_guid) in SCRATCH_DISKS {
+            let d = fs::read(dir.join(name)).unwrap();
+            assert_eq!(d.len(), 1 << 20);
+            let u64_at = |o: usize| u64::from_le_bytes(d[o..o + 8].try_into().unwrap());
+            assert_eq!(&d[510..512], &[0x55, 0xaa]);
+            assert_eq!(&d[512..520], b"EFI PART");
+            assert_eq!(&d[2047 * 512..2047 * 512 + 8], b"EFI PART");
+            // The primary header's last usable LBA, and the one entry.
+            assert_eq!(u64_at(512 + 48), 2014);
+            let entry = &d[1024..1024 + 128];
+            let guid = uuid::Uuid::from_bytes_le(entry[16..32].try_into().unwrap());
+            assert_eq!(guid.to_string(), partition_guid);
+            let ty = uuid::Uuid::from_bytes_le(entry[0..16].try_into().unwrap());
+            assert_eq!(ty.to_string(), SCRATCH_TYPE);
+            assert_eq!(u64_at(1024 + 32), 34);
+            assert_eq!(u64_at(1024 + 40), 2014);
+            assert!(d[1024 + 128..1024 + 256].iter().all(|&b| b == 0));
+        }
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -297,6 +540,10 @@ ffffffff800ccff0 000000000000008b t <kernel::ktimer::Armed>::fire
         assert_eq!(args[3], "file:/t/serial.log");
         assert!(args.contains(&"isa-debug-exit,iobase=0xf4,iosize=0x04".to_string()));
         assert!(args.contains(&"edu,dma_mask=0xffffffff".to_string()));
+        assert!(args.contains(&"if=none,id=scratch-nvme,format=raw,file=/t/nvme.img".to_string()));
+        assert!(args.contains(&"nvme,drive=scratch-nvme,serial=mikros".to_string()));
+        assert!(args.contains(&"if=none,id=scratch-ahci,format=raw,file=/t/ahci.img".to_string()));
+        assert!(args.contains(&"ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros".to_string()));
         assert!(args.contains(&"-no-reboot".to_string()));
     }
 }

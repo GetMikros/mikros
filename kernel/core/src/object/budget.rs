@@ -18,7 +18,7 @@ pub const INFO_BUDGET_SIZE: usize = 0x38;
 /// Serializes every change to usage, limits and thresholds, so that a
 /// charge sees the usage of each budget on its path as it is, without
 /// parts of other charges that are about to be undone.
-static ACCOUNTS: SpinLock<()> = SpinLock::new(());
+static ACCOUNTS: SpinLock<()> = SpinLock::new(crate::lock_order::BUDGET_ACCOUNTS, ());
 
 /// One kind of usage. The fields change only under `ACCOUNTS`; they are
 /// atomic so that they can be read without it.
