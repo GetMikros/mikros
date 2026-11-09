@@ -4,17 +4,20 @@
 //! watch.
 
 use crate::page::Page;
+use crate::root::{self, Zone};
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
 use mikros_rt::interfaces::mikros::permissions::{BrokerAsyncClient, Decision};
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::interfaces::mikros::time::{
     Clock, ClockAsyncServer, ClockGetTimePageResponse, ClockGetTimezoneResponse,
-    ClockGetUtcResponse, ClockRequest, ClockSetUtcResponse, ClockWatchResponse,
+    ClockGetUtcResponse, ClockRequest, ClockSetTimezoneResponse, ClockSetUtcResponse,
+    ClockWatchResponse,
 };
 use mikros_rt::sys;
 
@@ -22,6 +25,7 @@ use mikros_rt::sys;
 const TIME_SET: &str = "time.set";
 /// The time zone while no other is known.
 pub const UTC: &str = "UTC";
+pub const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
 pub fn now() -> i64 {
     let mut now = 0;
@@ -34,20 +38,60 @@ pub fn now() -> i64 {
 pub struct Time {
     pub page: Page,
     broker: Option<BrokerAsyncClient>,
+    /// The boot time of the platform information, in seconds, when it
+    /// is valid.
+    boot_time: Option<i64>,
     /// The connections that called `Watch`.
     watchers: RefCell<Vec<Weak<ClockAsyncServer>>>,
     /// Whether `SetUtc` changed the time since boot.
-    pub set_since_boot: Cell<bool>,
+    set_since_boot: Cell<bool>,
+    /// The root file system, once it is available, the system time zone,
+    /// UTC until then, and whether the real-time clock keeps local time.
+    root: RefCell<Option<Rc<NodeAsyncClient>>>,
+    zone: RefCell<Zone>,
+    rtc_local: Cell<bool>,
 }
 
 impl Time {
-    pub fn new(page: Page, broker: Option<BrokerAsyncClient>) -> Time {
+    pub fn new(page: Page, broker: Option<BrokerAsyncClient>, boot_time: Option<i64>) -> Time {
         Time {
             page,
             broker,
+            boot_time,
             watchers: RefCell::new(Vec::new()),
             set_since_boot: Cell::new(false),
+            root: RefCell::new(None),
+            zone: RefCell::new(Zone::utc()),
+            rtc_local: Cell::new(false),
         }
+    }
+
+    /// Takes the root file system `root`, where the real-time clock was
+    /// found to keep local time when `rtc_local`, in `zone`. With local
+    /// time, and when `SetUtc` did not set the time since boot, the boot
+    /// time counts as local time from now on, and the watchers are told.
+    pub fn root_available(&self, root: Rc<NodeAsyncClient>, rtc_local: bool, zone: Zone) {
+        let offset = match (rtc_local, self.set_since_boot.get(), self.boot_time) {
+            (true, false, Some(boot_time)) => root::local_offset(&zone, boot_time),
+            _ => None,
+        };
+        *self.root.borrow_mut() = Some(root);
+        *self.zone.borrow_mut() = zone;
+        self.rtc_local.set(rtc_local);
+        if let Some(offset) = offset {
+            self.page.set(offset);
+            self.changed();
+        }
+    }
+
+    /// Makes `name` the system time zone, once the root file system is
+    /// available, and tells the watchers.
+    async fn set_timezone(&self, name: &str, reactor: &Reactor) -> Result<(), Status> {
+        let root = self.root.borrow().clone().ok_or(Status::BadState)?;
+        let zone = root::set_zone(&root, name, reactor).await?;
+        *self.zone.borrow_mut() = zone;
+        self.changed();
+        Ok(())
     }
 
     /// UTC now, in nanoseconds since 1970-01-01T00:00:00.
@@ -93,7 +137,7 @@ pub async fn serve(
     reactor: Reactor,
     client: ClientIdentity,
 ) {
-    let server = Rc::new(ClockAsyncServer::new(end, reactor));
+    let server = Rc::new(ClockAsyncServer::new(end, reactor.clone()));
     while let Ok(request) = server.next().await {
         let s = server.server();
         let _ = match request {
@@ -118,16 +162,15 @@ pub async fn serve(
                 responder.reply(s, result)
             }
             ClockRequest::GetTimezone(_, responder) => {
-                responder.reply(s, ClockGetTimezoneResponse { name: UTC.into() })
+                let name = time.zone.borrow().name.clone();
+                responder.reply(s, ClockGetTimezoneResponse { name })
             }
-            ClockRequest::SetTimezone(_, responder) => {
+            ClockRequest::SetTimezone(set, responder) => {
                 let result = match time.may_set(&client).await {
-                    // No time zone can be set before the root file system
-                    // is available.
-                    true => Err(Status::BadState),
+                    true => time.set_timezone(&set.name, &reactor).await,
                     false => Err(Status::AccessDenied),
                 };
-                responder.reply(s, result)
+                responder.reply(s, result.map(|()| ClockSetTimezoneResponse {}))
             }
             ClockRequest::Watch(_, responder) => {
                 time.watchers.borrow_mut().push(Rc::downgrade(&server));

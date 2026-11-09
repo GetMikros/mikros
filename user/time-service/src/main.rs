@@ -5,7 +5,9 @@
 //! At start, UTC at monotonic time 0 is the boot time of the platform
 //! information that the `platform_info` boot handle holds, when it says
 //! that time is valid, and 0 otherwise. The page is made before the
-//! first connection is served, so that no client gets it unset.
+//! first connection is served, so that no client gets it unset. Once the
+//! root file system is published, the system time zone and whether the
+//! real-time clock keeps local time come from there (see `root`).
 
 #![no_std]
 #![no_main]
@@ -14,6 +16,7 @@ extern crate alloc;
 
 mod clock;
 mod page;
+mod root;
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -40,7 +43,6 @@ const PLATFORM_INFO_ID: u32 = 5;
 const FLAGS: u64 = 0x04;
 const BOOT_TIME_VALID: u32 = 1 << 1;
 const BOOT_TIME: u64 = 0x60;
-const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -60,7 +62,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let info = take(&mut managed.handles, |h| {
         h.role == HandleRole::User && h.id == PLATFORM_INFO_ID
     });
-    let offset = match info.as_ref().and_then(|info| boot_time(info.raw())) {
+    let boot = info.as_ref().and_then(|info| boot_time(info.raw()));
+    let offset = match boot.and_then(|seconds| seconds.checked_mul(clock::NANOS_PER_SECOND)) {
         Some(offset) => offset,
         None => {
             mikros_rt::log!(
@@ -82,7 +85,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             .await;
         matches!(connected, Ok(Ok(_))).then(|| BrokerAsyncClient::new(client, reactor.clone()))
     });
-    let time = Rc::new(Time::new(page, broker));
+    let time = Rc::new(Time::new(page, broker, boot));
+    spawner.spawn(root::watch(time.clone(), directory, reactor.clone()));
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
@@ -97,9 +101,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     PANIC_EXIT_CODE
 }
 
-/// The offset of UTC from the monotonic clock that makes UTC at
-/// monotonic time 0 the boot time of the platform information `info`,
-/// when it says that time is valid.
+/// The boot time of the platform information `info`, in seconds since
+/// 1970-01-01T00:00:00, when it says that time is valid.
 fn boot_time(info: sys::Handle) -> Option<i64> {
     let read = |at: u64, buf: &mut [u8]| {
         // SAFETY: the pointer and length describe `buf`.
@@ -113,7 +116,7 @@ fn boot_time(info: sys::Handle) -> Option<i64> {
     }
     let mut seconds = [0u8; 8];
     read(BOOT_TIME, &mut seconds)?;
-    i64::from_le_bytes(seconds).checked_mul(NANOS_PER_SECOND)
+    Some(i64::from_le_bytes(seconds))
 }
 
 /// Takes the first startup handle that `wanted` picks out of `handles`.

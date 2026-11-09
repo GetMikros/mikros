@@ -359,6 +359,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-tz"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-userdb"
 version = "0.0.0"
 dependencies = [
@@ -574,6 +578,8 @@ name = "time-service"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
+ "mikros-tz",
+ "mikros-yaml",
 ]
 
 [[package]]
