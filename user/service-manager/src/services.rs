@@ -107,6 +107,11 @@ pub async fn start(
             }
         })
     }));
+    supervisor
+        .dir
+        .spawner()
+        .clone()
+        .spawn(supervisor.clone().watch_power_button());
     // `order` puts the broker first whenever anything starts; without
     // it, nothing else can.
     let Some((&first, rest)) = start.split_first() else {

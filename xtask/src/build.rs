@@ -837,8 +837,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", acpi_image.display());
             // The power-off run serves this image, with the ACPI server, the
-            // log service and the power probe, which shuts the machine down
-            // once the power button is pressed.
+            // log service and the power probe, a boot service that the
+            // service manager stops when the power button shuts the
+            // machine down.
             let power_image = device_image(
                 "power.img",
                 &[],

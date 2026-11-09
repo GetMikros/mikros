@@ -1,9 +1,9 @@
 //! The run of the test image that ends with the machine powered off: the
-//! test init serves `tests/power.img` with `test=power-off`, and once its
-//! power probe waits for the power button, the runner presses it through
-//! QEMU's monitor. The probe then has the service manager stop every
-//! service and power the machine off through the ACPI server, after which
-//! QEMU exits by itself.
+//! test init serves `tests/power.img` with `test=power-off`, and once the
+//! service manager watches the power button and the power probe runs,
+//! the runner presses the button through QEMU's monitor. The service
+//! manager then stops every service and powers the machine off through
+//! the ACPI server, after which QEMU exits by itself.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -13,13 +13,18 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// The line the power probe logs once it waits for the power button.
-const WAITING: &str = "power-probe: waiting for the power button";
+/// The lines that the service manager logs once it watches the power
+/// button, and the power probe once it runs, before the button is
+/// pressed.
+const READY: [&str; 2] = [
+    "watching the power button",
+    "power-probe: running until it is stopped",
+];
 /// The lines the serial port must show, in this order, before QEMU exits:
 /// the services stop in the reverse of their start order, the probe
 /// first and the permission broker last.
 const SHUTDOWN: [&str; 5] = [
-    "power-probe: the power button was pressed",
+    "the power button was pressed: shutting down",
     "shutting down: stopping the services",
     "stopped service power-probe",
     "stopped service device-manager",
@@ -62,7 +67,9 @@ pub fn run(
     let mut qemu = scenario::start(machine, dir, false)?;
     let deadline = Instant::now() + timeout;
     let ended = (|| {
-        scenario::wait_for_line(&log, WAITING, &mut qemu, deadline)?;
+        for line in READY {
+            scenario::wait_for_line(&log, line, &mut qemu, deadline)?;
+        }
         scenario::monitor(&socket, "system_powerdown")?;
         // QEMU exits by itself once the machine is off.
         loop {

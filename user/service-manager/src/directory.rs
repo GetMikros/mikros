@@ -59,6 +59,9 @@ pub struct Dir {
     instances: RefCell<BTreeMap<String, BTreeMap<String, Instance>>>,
     /// The connections that watch each protocol.
     watchers: RefCell<Vec<Watcher>>,
+    /// The service manager's own tasks that wait for a protocol to get a
+    /// named instance.
+    awaiting: RefCell<Vec<Waker>>,
     /// The number of instances registered so far, which tells each
     /// one apart from a later one of the same name.
     registered: Cell<u64>,
@@ -133,6 +136,7 @@ impl Dir {
             provided: RefCell::new(BTreeMap::new()),
             instances: RefCell::new(BTreeMap::new()),
             watchers: RefCell::new(Vec::new()),
+            awaiting: RefCell::new(Vec::new()),
             registered: Cell::new(0),
             demand: RefCell::new(None),
             shutdown: RefCell::new(None),
@@ -420,6 +424,19 @@ impl Dir {
 }
 
 impl Dir {
+    /// Completes once `protocol` has a named instance.
+    pub async fn published(&self, protocol: &str) {
+        poll_fn(|cx| {
+            let instances = self.instances.borrow();
+            if instances.get(protocol).is_some_and(|i| !i.is_empty()) {
+                return Poll::Ready(());
+            }
+            self.awaiting.borrow_mut().push(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
+    }
+
     /// Adds `instance` of `protocol` for `owner`, forwarded to
     /// `provider` and protected by `permission`, and tells the watchers.
     pub async fn register(
@@ -451,6 +468,9 @@ impl Dir {
             .or_default()
             .insert(instance.clone(), added);
         self.tell(&protocol, &instance, permission, true);
+        for waker in self.awaiting.take() {
+            waker.wake();
+        }
         // The instance goes when its provider closes. The channel stays
         // open while the instance is kept, and a later instance of the
         // same name has another number.

@@ -21,7 +21,7 @@ use core::task::{Poll, Waker};
 use mikros_manifest::{Restart, Service, Start};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::endpoints;
-use mikros_rt::interfaces::mikros::acpi::{Acpi, AcpiAsyncClient};
+use mikros_rt::interfaces::mikros::acpi::{Acpi, AcpiAsyncClient, AcpiEvent};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::permissions::BrokerAsyncClient;
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
@@ -334,6 +334,37 @@ impl Supervisor {
             .await;
         connected.ok()?;
         Some(AcpiAsyncClient::new(client, self.reactor.clone()))
+    }
+
+    /// Watches the power button: once the ACPI server publishes
+    /// `device.acpi`, connects to it and keeps the connection, and each
+    /// time the button is pressed shuts the machine down and powers it
+    /// off, as `Shutdown` with `POWER_OFF` does, unless a shutdown is in
+    /// progress already. It stops watching when the connection fails or
+    /// closes.
+    pub async fn watch_power_button(self: Rc<Self>) {
+        self.dir.published(ACPI).await;
+        let Some(acpi) = self.connect_acpi().await else {
+            mikros_rt::log!(
+                Warning,
+                "connecting to the ACPI server for the power button failed"
+            );
+            return;
+        };
+        mikros_rt::log!(Info, "watching the power button");
+        while let Ok(event) = acpi.next_event().await {
+            if !matches!(event, AcpiEvent::OnPowerButton(_)) || self.stopping.get() {
+                continue;
+            }
+            mikros_rt::log!(Info, "the power button was pressed: shutting down");
+            // A shutdown returns only when it failed.
+            if let Err(status) = self.shutdown(ShutdownKind::PowerOff).await {
+                mikros_rt::log!(
+                    Error,
+                    "shutting down for the power button failed: {status:?}"
+                );
+            }
+        }
     }
 
     /// Shuts the machine down: connects to the ACPI server, stops every

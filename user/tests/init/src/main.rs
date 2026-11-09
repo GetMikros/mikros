@@ -10130,8 +10130,8 @@ mod manager {
         mikros_test::exit_qemu(mikros_test::FAILED)
     }
 
-    /// The `power-off` scenario: serves `tests/power.img`, whose power
-    /// probe shuts the machine down once the runner presses the power
+    /// The `power-off` scenario: serves `tests/power.img`, whose service
+    /// manager shuts the machine down once the runner presses the power
     /// button, and waits for the machine to go off; it returns 1 only when
     /// the service manager did not start.
     pub fn power_off_scenario(s: &Startup) -> i64 {
@@ -11052,7 +11052,8 @@ fn scenario(s: &Startup) -> Option<i64> {
         .find_map(|word| word.strip_prefix("test="))?;
     Some(match name {
         "init-exit" => exit_after_painting(s),
-        // The runner presses the power button once the power probe waits.
+        // The runner presses the power button once the service manager
+        // watches it.
         "power-off" => manager::power_off_scenario(s),
         // The runner unplugs the USB disk once the volumes probe used it.
         "usb-volumes" => manager::usb_volumes_scenario(s),
