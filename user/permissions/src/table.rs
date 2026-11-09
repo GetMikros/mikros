@@ -41,6 +41,7 @@ pub const PERMISSIONS: &[(&str, Kind)] = &[
     ("input.monitoring", Kind::User),
     ("input.seat", Kind::System),
     ("location", Kind::User),
+    ("logs.add_source", Kind::System),
     ("logs.read", Kind::System),
     ("microphone", Kind::User),
     ("nearby.bluetooth", Kind::User),

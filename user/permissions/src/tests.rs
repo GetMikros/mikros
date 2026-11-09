@@ -31,11 +31,12 @@ fn grant(user: u32, permission: &str, decision: Decision) -> Grant {
 #[test]
 fn table_is_sorted_and_unique() {
     assert!(PERMISSIONS.windows(2).all(|w| w[0].0 < w[1].0));
-    assert_eq!(PERMISSIONS.len(), 50);
+    assert_eq!(PERMISSIONS.len(), 51);
     assert_eq!(kind("camera"), Some(Kind::User));
     assert_eq!(kind("network"), Some(Kind::Default));
     assert_eq!(kind("permissions.check"), Some(Kind::System));
     assert_eq!(kind("gpu.high_priority"), Some(Kind::System));
+    assert_eq!(kind("logs.add_source"), Some(Kind::System));
     assert_eq!(kind("nope"), None);
 }
 
