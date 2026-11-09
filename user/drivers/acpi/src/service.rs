@@ -1,7 +1,7 @@
 //! The `acpi` service: the routes of PCI interrupt pins, powering the
 //! machine off and restarting it for clients that hold `power.control`,
-//! and `OnPowerButton` to every client each time the power button is
-//! pressed.
+//! as the broker says once for each connection, and `OnPowerButton` to
+//! every client each time the power button is pressed.
 
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
@@ -98,6 +98,10 @@ async fn serve(
     reactor: Reactor,
     client: ClientIdentity,
 ) {
+    // Asked once, when the connection is made, and kept for it: the
+    // service manager's connection keeps it after the broker stops at
+    // shutdown.
+    let may_control = acpi.may_control(&client).await;
     let server = Rc::new(AcpiAsyncServer::new(end, reactor));
     acpi.connections.borrow_mut().push(Rc::downgrade(&server));
     while let Ok(request) = server.next().await {
@@ -115,7 +119,7 @@ async fn serve(
                 responder.reply(s, routed)
             }
             AcpiRequest::PowerOff(_, responder) => {
-                if !acpi.may_control(&client).await {
+                if !may_control {
                     responder.reply(s, Err(Status::AccessDenied))
                 } else {
                     let failed = mikros_acpica::power::power_off();
@@ -124,7 +128,7 @@ async fn serve(
                 }
             }
             AcpiRequest::Restart(_, responder) => {
-                if !acpi.may_control(&client).await {
+                if !may_control {
                     responder.reply(s, Err(Status::AccessDenied))
                 } else {
                     let failed = mikros_acpica::power::restart();
