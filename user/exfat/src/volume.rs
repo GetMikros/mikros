@@ -3,9 +3,11 @@
 //! of an allocation, in a row or in a chain in the FAT.
 
 use crate::boot::{self, Layout};
+use crate::dir::Place;
 use crate::entry::{self, ENTRY};
-use crate::upcase;
+use crate::upcase::{self, Upcase};
 use crate::{Device, Error};
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -14,12 +16,13 @@ use mikros_fat::Disk;
 /// The value of a FAT entry that ends a chain.
 pub(crate) const END_OF_CHAIN: u32 = 0xFFFF_FFFF;
 /// The unit of the device's I/O, and of the cache.
-const BLOCK: u64 = 512;
+pub(crate) const BLOCK: u64 = 512;
 
 /// A mounted volume on `D`.
 pub struct Volume<D> {
     pub(crate) disk: Disk<D>,
     pub(crate) layout: Layout,
+    pub(crate) upcase: Upcase,
     /// How many clusters the allocation bitmap marks free.
     pub(crate) free: u32,
     pub(crate) writable: bool,
@@ -27,6 +30,8 @@ pub struct Volume<D> {
     /// progress, as `begin_change` and `end_change` mark it, rather than
     /// from mounting to `unmount`.
     pub(crate) quick: bool,
+    /// Where each directory found so far lies, by its first cluster.
+    pub(crate) dirs: BTreeMap<u32, Place>,
 }
 
 impl<D: Device> Volume<D> {
@@ -57,8 +62,10 @@ impl<D: Device> Volume<D> {
             disk,
             writable: writable && clean && layout.region == 0,
             layout,
+            upcase: Upcase::default(),
             free: 0,
             quick,
+            dirs: BTreeMap::new(),
         };
         volume.read_critical()?;
         if volume.writable && !quick {
@@ -68,8 +75,8 @@ impl<D: Device> Volume<D> {
         Ok(volume)
     }
 
-    /// Checks the up-case table's checksum, and counts the free clusters
-    /// in the allocation bitmap of the FAT in use, from their entries in the
+    /// Reads the up-case table, whose checksum must hold, and the
+    /// allocation bitmap of the FAT in use, from their entries in the
     /// root directory.
     fn read_critical(&mut self) -> Result<(), Error> {
         let root = self.root_bytes()?;
@@ -95,6 +102,7 @@ impl<D: Device> Volume<D> {
         if upcase::checksum(&bytes) != checksum {
             return Err(Error::Invalid);
         }
+        self.upcase = Upcase::parse(&bytes);
         let (first, len) = bitmap.ok_or(Error::Invalid)?;
         if len.saturating_mul(8) < u64::from(self.layout.clusters) {
             return Err(Error::Invalid);
@@ -257,6 +265,42 @@ impl<D: Device> Volume<D> {
                 next => at = next,
             }
         }
+    }
+
+    /// Cluster `index` of an allocation that starts at `first`, walking a
+    /// chain from `near` when it lies before, and keeping the cluster
+    /// found there.
+    pub(crate) fn cluster_at(
+        &mut self,
+        first: u32,
+        contiguous: bool,
+        index: u64,
+        near: &mut (u32, u64),
+    ) -> Result<u32, Error> {
+        let heap = u64::from(self.layout.clusters);
+        if index >= heap || !self.layout.is_data(first) {
+            return Err(Error::Io);
+        }
+        if contiguous {
+            let at = u64::from(first) + index;
+            return match at < heap + 2 {
+                true => Ok(at as u32),
+                false => Err(Error::Io),
+            };
+        }
+        let (mut at, mut i) = match near.0 != 0 && near.1 <= index {
+            true => *near,
+            false => (first, 0),
+        };
+        while i < index {
+            at = self.fat(at)?;
+            if !self.layout.is_data(at) {
+                return Err(Error::Io);
+            }
+            i += 1;
+        }
+        *near = (at, i);
+        Ok(at)
     }
 
     /// The volume label, or `None` when the volume has none.

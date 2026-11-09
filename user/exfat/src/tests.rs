@@ -146,6 +146,16 @@ fn fsck(bytes: &[u8]) {
     assert!(out.status.success(), "fsck.exfat: {text}");
 }
 
+fn names<D: Device>(volume: &mut Volume<D>, dir: Dir) -> Vec<String> {
+    volume
+        .list(dir, 0, 1000)
+        .unwrap()
+        .0
+        .into_iter()
+        .map(|n| n.name)
+        .collect()
+}
+
 fn dirty(bytes: &[u8]) -> bool {
     bytes[106] & 2 != 0
 }
@@ -165,6 +175,7 @@ fn mounts_what_mkfs_formats() {
             volume.label().unwrap().as_deref(),
             Some(args[args.len() - 1])
         );
+        assert!(names(&mut volume, Dir::Root).is_empty());
         // Only the bitmap, the up-case table and the root are in use.
         let used = layout.clusters - volume.free_clusters();
         assert!((3..=6).contains(&used), "{used} clusters in use");
@@ -233,4 +244,19 @@ fn falls_back_to_the_backup_boot_region_read_only() {
         Volume::mount(Mem::new(bytes), size, false).err(),
         Some(Error::Invalid)
     );
+}
+
+#[test]
+fn finds_nothing_on_an_empty_volume() {
+    let bytes = mkfs(8 * MIB, &[]);
+    let size = bytes.len() as u64;
+    let mut volume = Volume::mount(Mem::new(bytes), size, false).unwrap();
+    // The root holds only the bitmap, the up-case table and the label.
+    assert_eq!(volume.list(Dir::Root, 0, 10).unwrap().0.len(), 0);
+    let missing = volume.find(Dir::Root, "anything");
+    assert_eq!(missing.err(), Some(Error::NotFound));
+    let too_long = volume.find(Dir::Root, &"x".repeat(256));
+    assert_eq!(too_long.err(), Some(Error::NameTooLong));
+    // A directory that no listing or finding gave is unknown.
+    assert_eq!(volume.list(Dir::Sub(5), 0, 10).err(), Some(Error::NotFound));
 }
