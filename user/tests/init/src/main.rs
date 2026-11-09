@@ -9702,7 +9702,8 @@ mod manager {
     /// reads, writes, renames and removes as it should. Each partition's
     /// `filesystem` service is also published under `partuuid-<guid>`,
     /// the root partition's also as `root`, and that of the EFI system
-    /// partition on the root partition's disk as `esp`. The btrfs test
+    /// partition on the root partition's disk as `esp`, neither of them
+    /// as a `volume-<guid>`. The btrfs test
     /// driver sets the time zone through the time service, which makes
     /// `etc/localtime` on the root a link to the zone's file of the root's
     /// `usr/share/zoneinfo`. It then kills the virtio-blk driver while it writes a file on
@@ -9845,6 +9846,9 @@ mod manager {
             b"driver test-fat declined",
             b"driver btrfs declined",
             b"driver test-btrfs declined",
+            // The only file systems are the root's and the ESP's, which
+            // are not volumes.
+            b"published device.filesystem volume-",
         ];
         let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
         ensure("adding the PCI functions and starting their driver", logged)

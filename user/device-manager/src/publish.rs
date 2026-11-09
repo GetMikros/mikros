@@ -35,6 +35,8 @@ const PARTITION_GUID: &str = "partition_guid";
 const ROOT: &str = "root";
 /// The instance name of the file system of the boot's EFI system partition.
 const ESP: &str = "esp";
+/// The property that keeps a partition's file system from being a volume.
+const NO_AUTOMOUNT: &str = "no_automount";
 
 /// The service IDs given out during this boot, by device, class, and
 /// how many services of that class the device's driver published before
@@ -81,8 +83,9 @@ pub struct Published {
 /// ID of the last `filesystem` service of the same start of the driver.
 /// A `filesystem` service of a partition is also registered, through
 /// duplicates of `provider`, as `partuuid-<guid>`, the GUID in lowercase,
-/// as `root` when the partition is the root partition, and as `esp` when
-/// it is the boot's EFI system partition. Fails with
+/// as `root` when the partition is the root partition, as `esp` when it
+/// is the boot's EFI system partition, and otherwise as `volume-<guid>`
+/// unless its `no_automount` property is `true`. Fails with
 /// `INVALID_ARGS` for a class that drivers may not publish, and with
 /// `BAD_STATE` for a `subvolumes` service before any `filesystem`
 /// service.
@@ -159,8 +162,9 @@ pub async fn publish(
 
 /// The other instance names of a `filesystem` service of the driver of
 /// device `caller`: `partuuid-<guid>` for a partition, `root` as well
-/// for the root partition, and `esp` for the boot's EFI system
-/// partition.
+/// for the root partition, `esp` for the boot's EFI system partition,
+/// and `volume-<guid>` for any other partition whose `no_automount`
+/// property is not `true`.
 fn aliases(m: &Manager, caller: u64) -> Vec<String> {
     let devices = m.devices.borrow();
     let Some(device) = devices.get(caller) else {
@@ -170,12 +174,22 @@ fn aliases(m: &Manager, caller: u64) -> Vec<String> {
     let Some((_, guid)) = guid else {
         return Vec::new();
     };
-    let mut aliases = alloc::vec![format!("partuuid-{}", guid.to_ascii_lowercase())];
-    if m.profiles.claim_root(device) {
+    let guid = guid.to_ascii_lowercase();
+    let mut aliases = alloc::vec![format!("partuuid-{guid}")];
+    let root = m.profiles.claim_root(device);
+    if root {
         aliases.push(String::from(ROOT));
     }
-    if m.profiles.is_esp(device, &devices) {
+    let esp = m.profiles.is_esp(device, &devices);
+    if esp {
         aliases.push(String::from(ESP));
+    }
+    let no_automount = device
+        .properties
+        .iter()
+        .any(|(k, v)| k == NO_AUTOMOUNT && v == "true");
+    if !root && !esp && !no_automount {
+        aliases.push(format!("volume-{guid}"));
     }
     aliases
 }
