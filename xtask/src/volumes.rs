@@ -1,12 +1,19 @@
-//! The run of the test image in which the volumes of a USB disk come and
-//! go in `/Volumes`: the USB disk holds a GPT with a basic data partition
-//! with a FAT file system labelled `USBSTICK`, and a Mikros root type
-//! partition with a btrfs labelled `USBBTRFS`, each with `HELLO.TXT` on
-//! it. The test init serves `tests/volumes.img` with `test=usb-volumes`,
-//! whose volumes probe reads and writes both volumes through `/Volumes`.
-//! The runner then unplugs the disk through QEMU's monitor and waits for
-//! the probe to see the volumes leave. Afterwards the FAT volume must hold
-//! what the probe wrote.
+//! The run of the test image in which the volumes of USB disks come and
+//! go in `/Volumes`, each with `HELLO.TXT` on it:
+//! - The first disk holds a GPT with a basic data partition with a FAT
+//!   file system labelled `USBSTICK`, and a Mikros root type partition
+//!   with a btrfs labelled `USBBTRFS`.
+//! - The second holds an MBR with a FAT12 primary partition labelled
+//!   `MBRFAT`, and an extended partition whose logical partition, of the
+//!   Linux type `0x83`, holds a btrfs labelled `MBRBTRFS`.
+//! - The third holds a FAT labelled `WHOLEFAT` on the whole disk, without
+//!   a partition table.
+//!
+//! The test init serves `tests/volumes.img` with `test=usb-volumes`,
+//! whose volumes probe reads and writes every volume through `/Volumes`.
+//! The runner then unplugs the disks through QEMU's monitor and waits for
+//! the probe to see the volumes leave. Afterwards each FAT volume must
+//! hold what the probe wrote.
 
 use crate::build::{self, Kind};
 use crate::image::{esp, gpt};
@@ -40,10 +47,107 @@ const MIKROS_ROOT: &str = "fa730af6-8ba3-42d9-b155-466909d08135";
 const BTRFS_LABEL: &str = "USBBTRFS";
 const DEVICE: &str = "stick";
 const LABEL: [u8; 11] = *b"USBSTICK   ";
+/// The second disk: its QEMU device ID, its disk signature, the blocks of
+/// its FAT partition, where its extended partition starts, where its
+/// logical partition starts after the extended boot record, and the
+/// labels.
+const MBR_DEVICE: &str = "stick2";
+const MBR_FILE: &str = "usb-mbr.img";
+const MBR_SIGNATURE: u32 = 0x4d42_5221;
+const MBR_FAT_FIRST: u64 = 2048;
+const MBR_FAT_SECTORS: u64 = 2048;
+const MBR_EXTENDED_FIRST: u64 = 4096;
+const MBR_LOGICAL_OFFSET: u64 = 2048;
+const MBR_SECTORS: u64 = MBR_EXTENDED_FIRST + MBR_LOGICAL_OFFSET + BTRFS_SECTORS;
+const MBR_LABEL: [u8; 11] = *b"MBRFAT     ";
+const MBR_BTRFS_LABEL: &str = "MBRBTRFS";
+/// The third disk: its QEMU device ID, its size in sectors and its
+/// label.
+const WHOLE_DEVICE: &str = "stick3";
+const WHOLE_FILE: &str = "usb-whole.img";
+const WHOLE_SECTORS: u64 = 2048;
+const WHOLE_LABEL: [u8; 11] = *b"WHOLEFAT   ";
 const HELLO: &[u8] = b"hello from the host\n";
 const WRITTEN: &[u8] = b"written on Mikros\n";
 
-/// Writes the USB disk, `usb.img` in `dir`, in place of the scratch disk.
+/// Writes the USB disks in `dir`: the first, `usb.img`, in place of the
+/// scratch disk, and the other two.
+fn write_sticks(dir: &Path) -> Result<()> {
+    write_stick(dir)?;
+    write_mbr_stick(dir)?;
+    let whole = esp::build_volume(
+        WHOLE_SECTORS * gpt::SECTOR,
+        fatfs::FatType::Fat12,
+        WHOLE_LABEL,
+        &[("HELLO.TXT", HELLO)],
+    )?;
+    let path = dir.join(WHOLE_FILE);
+    fs::write(&path, whole).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Writes the second USB disk, with its MBR and extended boot record.
+fn write_mbr_stick(dir: &Path) -> Result<()> {
+    let mut bytes = vec![0u8; (MBR_SECTORS * gpt::SECTOR) as usize];
+    // Sets entry `i` of the boot record at `record`, and its signature.
+    let entry = |bytes: &mut [u8], record: u64, i: usize, kind: u8, start: u64, count: u64| {
+        let base = (record * gpt::SECTOR) as usize;
+        let at = base + 446 + 16 * i;
+        bytes[at + 4] = kind;
+        bytes[at + 8..at + 12].copy_from_slice(&(start as u32).to_le_bytes());
+        bytes[at + 12..at + 16].copy_from_slice(&(count as u32).to_le_bytes());
+        bytes[base + 510..base + 512].copy_from_slice(&[0x55, 0xAA]);
+    };
+    bytes[440..444].copy_from_slice(&MBR_SIGNATURE.to_le_bytes());
+    entry(&mut bytes, 0, 0, 0x01, MBR_FAT_FIRST, MBR_FAT_SECTORS);
+    let extended = MBR_SECTORS - MBR_EXTENDED_FIRST;
+    entry(&mut bytes, 0, 1, 0x0f, MBR_EXTENDED_FIRST, extended);
+    // The logical partition starts after its record, by the record's LBA.
+    entry(
+        &mut bytes,
+        MBR_EXTENDED_FIRST,
+        0,
+        0x83,
+        MBR_LOGICAL_OFFSET,
+        BTRFS_SECTORS,
+    );
+    let size = MBR_FAT_SECTORS * gpt::SECTOR;
+    let fat = esp::build_volume(
+        size,
+        fatfs::FatType::Fat12,
+        MBR_LABEL,
+        &[("HELLO.TXT", HELLO)],
+    )?;
+    let start = (MBR_FAT_FIRST * gpt::SECTOR) as usize;
+    bytes[start..start + fat.len()].copy_from_slice(&fat);
+    let btrfs = btrfs_volume(dir, MBR_BTRFS_LABEL)?;
+    let start = ((MBR_EXTENDED_FIRST + MBR_LOGICAL_OFFSET) * gpt::SECTOR) as usize;
+    bytes[start..start + btrfs.len()].copy_from_slice(&btrfs);
+    let path = dir.join(MBR_FILE);
+    fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
+}
+
+/// QEMU's arguments for the second and third disks in `dir`, on ports 3
+/// and 4 of the xHCI controller's bus.
+fn more_sticks(dir: &Path) -> Vec<String> {
+    let mut args = Vec::new();
+    for (device, file, port) in [(MBR_DEVICE, MBR_FILE, 3), (WHOLE_DEVICE, WHOLE_FILE, 4)] {
+        let path = dir.join(file);
+        args.extend([
+            "-drive".into(),
+            format!(
+                "if=none,id={device}-drive,format=raw,file={}",
+                path.display()
+            ),
+            "-device".into(),
+            format!(
+                "usb-storage,id={device},bus=usb.0,port={port},drive={device}-drive,serial=mikros"
+            ),
+        ]);
+    }
+    args
+}
+
+/// Writes the first USB disk, `usb.img` in `dir`.
 fn write_stick(dir: &Path) -> Result<()> {
     let mut image = Cursor::new(vec![0u8; (SECTORS * gpt::SECTOR) as usize]);
     let partitions = [
@@ -69,16 +173,16 @@ fn write_stick(dir: &Path) -> Result<()> {
     let mut bytes = image.into_inner();
     let start = (FIRST_LBA * gpt::SECTOR) as usize;
     bytes[start..start + volume.len()].copy_from_slice(&volume);
-    let btrfs = btrfs_volume(dir)?;
+    let btrfs = btrfs_volume(dir, BTRFS_LABEL)?;
     let start = (BTRFS_FIRST_LBA * gpt::SECTOR) as usize;
     bytes[start..start + btrfs.len()].copy_from_slice(&btrfs);
     let path = dir.join("usb.img");
     fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
-/// A btrfs of the btrfs partition's size labelled `USBBTRFS` with
-/// `HELLO.TXT` on it, made by mkfs.btrfs in `dir`.
-fn btrfs_volume(dir: &Path) -> Result<Vec<u8>> {
+/// A btrfs of `BTRFS_SECTORS` labelled `label` with `HELLO.TXT` on it,
+/// made by mkfs.btrfs in `dir`.
+fn btrfs_volume(dir: &Path, label: &str) -> Result<Vec<u8>> {
     let tree = dir.join("usb-btrfs-tree");
     let _ = fs::remove_dir_all(&tree);
     fs::create_dir_all(&tree)?;
@@ -86,7 +190,7 @@ fn btrfs_volume(dir: &Path) -> Result<Vec<u8>> {
     let image = dir.join("usb-btrfs.img");
     fs::File::create(&image)?.set_len(BTRFS_SECTORS * gpt::SECTOR)?;
     let status = std::process::Command::new("mkfs.btrfs")
-        .args(["-q", "-f", "-L", BTRFS_LABEL, "--rootdir"])
+        .args(["-q", "-f", "-L", label, "--rootdir"])
         .arg(&tree)
         .arg(&image)
         .status()
@@ -100,12 +204,12 @@ fn btrfs_volume(dir: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// The contents of `name` in the root of the FAT volume on the USB disk
-/// in `dir`.
-fn read_stick(dir: &Path, name: &str) -> Result<Vec<u8>> {
-    let bytes = fs::read(dir.join("usb.img"))?;
-    let start = (FIRST_LBA * gpt::SECTOR) as usize;
-    let end = ((LAST_LBA + 1) * gpt::SECTOR) as usize;
+/// The contents of `name` in the root of the FAT volume of `sectors`
+/// from `first` on the disk `file` in `dir`.
+fn read_fat(dir: &Path, file: &str, first: u64, sectors: u64, name: &str) -> Result<Vec<u8>> {
+    let bytes = fs::read(dir.join(file))?;
+    let start = (first * gpt::SECTOR) as usize;
+    let end = ((first + sectors) * gpt::SECTOR) as usize;
     let mut volume = Cursor::new(bytes[start..end].to_vec());
     let fs = fatfs::FileSystem::new(&mut volume, fatfs::FsOptions::new())?;
     let mut data = Vec::new();
@@ -126,11 +230,14 @@ pub fn run(
     image::create_with(kind, built, &dir.join("disk.img"), "test=usb-volumes", &[])?;
     let log = dir.join("serial.log");
     let socket = scenario::monitor_socket(dir);
-    let mut qemu = scenario::start_with(machine, dir, false, &write_stick)?;
+    let extra = more_sticks(dir);
+    let mut qemu = scenario::start_with(machine, dir, false, &write_sticks, &extra)?;
     let deadline = Instant::now() + timeout;
     let ended = (|| -> Result<()> {
         scenario::wait_for_line(&log, READY, &mut qemu, deadline)?;
-        scenario::monitor(&socket, &format!("device_del {DEVICE}"))?;
+        for device in [DEVICE, MBR_DEVICE, WHOLE_DEVICE] {
+            scenario::monitor(&socket, &format!("device_del {device}"))?;
+        }
         scenario::wait_for_line(&log, GONE, &mut qemu, deadline)?;
         Ok(())
     })();
@@ -149,9 +256,17 @@ pub fn run(
             log.display()
         )
     })?;
-    let written = read_stick(dir, "WRITTEN.TXT").context("reading what the probe wrote")?;
-    if written != WRITTEN {
-        bail!("WRITTEN.TXT on the USB FAT volume holds {written:?}");
+    let fats = [
+        ("usb.img", FIRST_LBA, LAST_LBA - FIRST_LBA + 1),
+        (MBR_FILE, MBR_FAT_FIRST, MBR_FAT_SECTORS),
+        (WHOLE_FILE, 0, WHOLE_SECTORS),
+    ];
+    for (file, first, sectors) in fats {
+        let written = read_fat(dir, file, first, sectors, "WRITTEN.TXT")
+            .with_context(|| format!("reading what the probe wrote on {file}"))?;
+        if written != WRITTEN {
+            bail!("WRITTEN.TXT on the FAT volume of {file} holds {written:?}");
+        }
     }
     Ok(())
 }
@@ -161,13 +276,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writes_a_labelled_fat_volume_on_the_stick() {
+    fn writes_labelled_fat_volumes_on_the_sticks() {
         let dir = std::env::temp_dir().join(format!("volumes-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        write_stick(&dir).unwrap();
-        assert_eq!(read_stick(&dir, "HELLO.TXT").unwrap(), HELLO);
+        write_sticks(&dir).unwrap();
+        let sectors = LAST_LBA - FIRST_LBA + 1;
+        assert_eq!(
+            read_fat(&dir, "usb.img", FIRST_LBA, sectors, "HELLO.TXT").unwrap(),
+            HELLO
+        );
         let bytes = fs::read(dir.join("usb.img")).unwrap();
         assert_eq!(bytes.len() as u64, SECTORS * gpt::SECTOR);
+        let mbr = read_fat(&dir, MBR_FILE, MBR_FAT_FIRST, MBR_FAT_SECTORS, "HELLO.TXT");
+        assert_eq!(mbr.unwrap(), HELLO);
+        let bytes = fs::read(dir.join(MBR_FILE)).unwrap();
+        assert_eq!(bytes[510..512], [0x55, 0xAA]);
+        let ebr = (MBR_EXTENDED_FIRST * gpt::SECTOR) as usize;
+        assert_eq!(bytes[ebr + 446 + 4], 0x83);
+        let whole = read_fat(&dir, WHOLE_FILE, 0, WHOLE_SECTORS, "HELLO.TXT");
+        assert_eq!(whole.unwrap(), HELLO);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

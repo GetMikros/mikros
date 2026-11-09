@@ -1,15 +1,16 @@
 //! A boot service of the test image of the USB volumes run, which checks
-//! that the FAT and btrfs volumes of a USB disk appear in `/Volumes`, can
-//! be read and written there, and go away when the disk is unplugged.
+//! that the FAT and btrfs volumes of USB disks with a GPT, an MBR and no
+//! partition table appear in `/Volumes`, can be read and written there,
+//! and go away when the disks are unplugged.
 //!
 //! Started without `/Volumes`, it grants its own app ID and user
 //! `files.volumes` through the broker and starts a copy of itself, which
-//! has `/Volumes` in its namespace. For each of the volumes `USBSTICK`
-//! and `USBBTRFS`, the copy waits for it, reads `HELLO.TXT`, which the
-//! runner put there, writes `WRITTEN.TXT` and reads it back; it then logs
-//! `READY`. The runner then unplugs the disk, and the copy logs `GONE`
-//! once both volumes have left `/Volumes`. A failed check logs `FAILED`
-//! with what failed.
+//! has `/Volumes` in its namespace. For each of the volumes in `LABELS`,
+//! the copy waits for it, reads `HELLO.TXT`, which the runner put there,
+//! writes `WRITTEN.TXT` and reads it back; it then logs `READY`. The
+//! runner then unplugs the disks, and the copy logs `GONE` once every
+//! volume has left `/Volumes`. A failed check logs `FAILED` with what
+//! failed.
 
 #![no_std]
 #![no_main]
@@ -36,7 +37,10 @@ const BROKER: &str = "mikros.permissions.Broker";
 const VOLUMES_PERMISSION: &str = "files.volumes";
 const VOLUMES: &str = "/Volumes";
 /// The volumes' labels, and the files on them.
-const LABELS: [&str; 2] = ["USBSTICK", "USBBTRFS"];
+/// The volumes of the GPT disk, those of the MBR disk, its btrfs on a
+/// logical partition of the Linux type, and the FAT on a disk without a
+/// partition table.
+const LABELS: [&str; 5] = ["USBSTICK", "USBBTRFS", "MBRFAT", "MBRBTRFS", "WHOLEFAT"];
 const HELLO: &str = "HELLO.TXT";
 const HELLO_TEXT: &[u8] = b"hello from the host\n";
 const WRITTEN: &str = "WRITTEN.TXT";
