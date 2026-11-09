@@ -4587,6 +4587,22 @@ fn channel_errors(s: &Startup) -> Result {
 /// toward each other are destroyed once their other handles are closed,
 /// and give back their kernel memory.
 fn endpoint_cycles_reclaimed(s: &Startup) -> Result {
+    // The root budget is also charged for the processes that earlier
+    // tests left running, which may make or close objects between two
+    // readings; a cycle that is not reclaimed shows in every attempt.
+    const ATTEMPTS: usize = 5;
+    for _ in 0..ATTEMPTS {
+        if endpoint_cycle_reclaimed(s)? {
+            return Ok(());
+        }
+    }
+    ensure("reclaiming the channels", false)
+}
+
+/// Makes a cycle of two channels, each held by a message in the other,
+/// closes the handles, and returns whether the kernel memory charged for
+/// them went back.
+fn endpoint_cycle_reclaimed(s: &Startup) -> Result<bool> {
     let (mut a, mut b, mut c, mut d) = (0, 0, 0, 0);
     // Handle table slots stay charged once made, so the four that the
     // test uses are made first.
@@ -4616,7 +4632,7 @@ fn endpoint_cycles_reclaimed(s: &Startup) -> Result {
         // SAFETY: the call takes no pointers.
         check("closing", unsafe { sys::handle_close(h) })?;
     }
-    ensure("reclaiming the channels", budget_kernel(s)? == before)
+    Ok(budget_kernel(s)? == before)
 }
 
 /// The thread state of a thread stopped in an exception.
