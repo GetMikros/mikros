@@ -455,3 +455,47 @@ fn makes_unique_short_names() {
         ]
     );
 }
+
+/// A device that counts the reads it was asked for.
+struct Counted(Mem, std::rc::Rc<core::cell::Cell<usize>>);
+
+impl Device for Counted {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
+        self.1.set(self.1.get() + 1);
+        self.0.read(offset, buf)
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), Error> {
+        self.0.write(offset, data)
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.0.flush()
+    }
+}
+
+#[test]
+fn counts_free_clusters_as_fatfs_does_in_few_reads() {
+    for (size, ty, expected) in TYPES {
+        let mut bytes = image(size, ty, sample);
+        let fatfs_free = {
+            let fs =
+                fatfs::FileSystem::new(Cursor::new(&mut bytes), fatfs::FsOptions::new()).unwrap();
+            fs.stats().unwrap().free_clusters()
+        };
+        let reads = std::rc::Rc::new(core::cell::Cell::new(0));
+        let device = Counted(Mem(bytes), reads.clone());
+        let mut volume = Volume::mount(device, size as u64, false).unwrap();
+        let before = reads.get();
+        assert_eq!(volume.free_clusters().unwrap(), fatfs_free, "{expected:?}");
+        // A 40 MiB FAT32 volume of 512-byte clusters has a FAT of 640
+        // sectors, read in pieces of 64 KiB.
+        if expected != FatType::Fat12 {
+            assert!(
+                reads.get() - before <= 8,
+                "{expected:?}: {} reads",
+                reads.get() - before
+            );
+        }
+    }
+}

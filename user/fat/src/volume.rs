@@ -3,7 +3,7 @@
 use crate::bpb::{FatType, Layout};
 use crate::dir::{self, ENTRY, LongName, Short, Slot, Stamp, VOLUME_ID};
 use crate::disk::Disk;
-use crate::table::{self, Entry};
+use crate::table;
 use crate::{Device, Error};
 use alloc::string::String;
 use alloc::vec;
@@ -215,12 +215,7 @@ impl<D: Device> Volume<D> {
         if let Some(free) = self.free {
             return Ok(free);
         }
-        let mut free = 0;
-        for cluster in 2..self.layout.clusters + 2 {
-            if table::get(&mut self.disk, &self.layout, cluster)? == Entry::Free {
-                free += 1;
-            }
-        }
+        let free = table::count_free(&mut self.disk, &self.layout)?;
         self.free = Some(free);
         Ok(free)
     }

@@ -84,6 +84,52 @@ pub(crate) fn set_raw<D: Device>(
     Ok(())
 }
 
+/// The bytes of the FAT that counting free clusters reads at once.
+const COUNT_CHUNK: usize = 64 << 10;
+
+/// How many clusters the FAT that is read says are free. FAT16 and FAT32
+/// tables are read in pieces of `COUNT_CHUNK` bytes rather than entry
+/// by entry, which takes one request of the device for each sector;
+/// FAT12 tables take a few sectors at most.
+pub(crate) fn count_free<D: Device>(disk: &mut Disk<D>, layout: &Layout) -> Result<u32, Error> {
+    let width = match layout.fat_type {
+        FatType::Fat12 => {
+            let mut free = 0;
+            for cluster in 2..layout.clusters + 2 {
+                free += u32::from(get(disk, layout, cluster)? == Entry::Free);
+            }
+            return Ok(free);
+        }
+        FatType::Fat16 => 2,
+        FatType::Fat32 => 4,
+    };
+    let start = layout.fat_start + read_fat(layout) * layout.fat_size;
+    // Entries 2 to clusters + 1 count, in whole sectors from the first.
+    let entries = u64::from(layout.clusters) + 2;
+    let end = (entries * width).next_multiple_of(disk.sector());
+    let mut buf = alloc::vec![0u8; COUNT_CHUNK];
+    let (mut at, mut free) = (0, 0);
+    while at < end {
+        let len = (end - at).min(COUNT_CHUNK as u64) as usize;
+        disk.read_direct(start + at, &mut buf[..len])?;
+        let first = at / width;
+        for (i, entry) in buf[..len].chunks_exact(width as usize).enumerate() {
+            let n = first + i as u64;
+            if n < 2 || n >= entries {
+                continue;
+            }
+            let value = match entry {
+                [a, b] => u32::from(u16::from_le_bytes([*a, *b])),
+                [a, b, c, d] => u32::from_le_bytes([*a, *b, *c, *d]) & 0x0FFF_FFFF,
+                _ => unreachable!("entries of 2 or 4 bytes"),
+            };
+            free += u32::from(value == 0);
+        }
+        at += len as u64;
+    }
+    Ok(free)
+}
+
 /// What FAT entry `cluster` says.
 pub(crate) fn get<D: Device>(
     disk: &mut Disk<D>,
