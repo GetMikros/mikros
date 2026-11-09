@@ -3,6 +3,7 @@
 use crate::boot::BootHandles;
 use crate::broker;
 use crate::directory::{Dir, Initially};
+use crate::sources::Sources;
 use crate::supervisor::Supervisor;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
@@ -65,11 +66,18 @@ pub async fn start(
         }
     });
     let start = order.start.clone();
+    let own = ClientIdentity {
+        pid: me.pid,
+        user: me.user,
+        app_id: me.app_id.clone(),
+    };
+    let sources = Sources::new(own, reactor.clone(), dir.spawner().clone());
     let supervisor = Rc::new(Supervisor {
         launcher,
         boot,
         reactor,
         me,
+        sources,
         dir,
         services,
         manifests,

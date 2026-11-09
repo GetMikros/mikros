@@ -28,12 +28,33 @@ pub struct Started {
     pub process: OwnedHandle,
     /// The service manager's end of the service's `Provider` channel.
     pub provider: Rc<ProviderClient>,
+    /// The other ends of the service's standard output and error, for
+    /// the log service, until they are taken.
+    pub streams: Option<(OwnedHandle, OwnedHandle)>,
+}
+
+/// The `id` of standard output and error among the startup handles:
+/// descriptors 1 and 2, of the pipe kind 2 (MIKSPEC-0058.R3).
+const STDOUT_ID: u32 = 1 + (2 << 28);
+const STDERR_ID: u32 = 2 + (2 << 28);
+
+/// A new stream: the service's end and the other.
+fn stream() -> Result<(OwnedHandle, OwnedHandle), String> {
+    let (mut ours, mut theirs) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    let status = unsafe { sys::stream_create(0, &mut theirs, &mut ours) };
+    if status != mikros_rt::OK {
+        return Err(format!("creating a stream: {status}"));
+    }
+    // SAFETY: the kernel just created both handles for us.
+    Ok(unsafe { (OwnedHandle::from_raw(theirs), OwnedHandle::from_raw(ours)) })
 }
 
 /// Starts `service` with app ID `system.<name>`, the service manager's
-/// own user, a new `Provider` channel, the boot handles its manifest
-/// lists and the `PRIORITY` resource its priority needs, from `boot`,
-/// and the startup handles `handles`.
+/// own user, a new `Provider` channel, a stream each as its standard
+/// output and error, the boot handles its manifest lists and the
+/// `PRIORITY` resource its priority needs, from `boot`, and the startup
+/// handles `handles`.
 pub async fn launch(
     launcher: &LauncherAsyncClient,
     boot: &BootHandles,
@@ -48,6 +69,18 @@ pub async fn launch(
         id: 0,
         handle: server.into_handle(),
     });
+    let (output, output_end) = stream()?;
+    let (error, error_end) = stream()?;
+    handles.push(StartupHandle {
+        role: HandleRole::Stdout,
+        id: STDOUT_ID,
+        handle: output,
+    });
+    handles.push(StartupHandle {
+        role: HandleRole::Stderr,
+        id: STDERR_ID,
+        handle: error,
+    });
     let request = SpawnRequest {
         path: service.binary.clone(),
         arguments: arguments(&service.binary).map_err(|s| format!("arguments: {s}"))?,
@@ -61,6 +94,7 @@ pub async fn launch(
             pid: spawned.pid,
             process: spawned.process,
             provider: Rc::new(ProviderClient::new(provider)),
+            streams: Some((output_end, error_end)),
         }),
         Ok(Err(status)) => Err(format!("Spawn failed: {status:?}")),
         Err(e) => Err(format!("Spawn failed: {e:?}")),

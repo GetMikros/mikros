@@ -5,6 +5,7 @@ use crate::boot::BootHandles;
 use crate::broker;
 use crate::directory::Dir;
 use crate::launch::{self, Started};
+use crate::sources::{SOURCES, Sources};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
@@ -34,6 +35,8 @@ pub struct Supervisor {
     pub reactor: Reactor,
     /// The service manager's own identity, for its broker connection.
     pub me: ClientIdentity,
+    /// Where the standard output and error of services go.
+    pub sources: Rc<Sources>,
     pub dir: Rc<Dir>,
     pub services: Vec<Service>,
     pub manifests: Vec<Vec<u8>>,
@@ -72,10 +75,15 @@ impl Supervisor {
         Box::pin(async move {
             let name = this.services[i].name.clone();
             match this.launch(i).await {
-                Ok(started) => {
+                Ok(mut started) => {
                     mikros_rt::log!(Info, "started service {name} as pid {}", started.pid);
                     this.active.borrow_mut().insert(i);
+                    let (pid, streams) = (started.pid, started.streams.take());
                     this.watch(i, started);
+                    if let Some((output, error)) = streams {
+                        let app_id = format!("system.{name}");
+                        this.sources.add(pid, app_id, output, error);
+                    }
                     true
                 }
                 Err(why) => {
@@ -141,6 +149,10 @@ impl Supervisor {
         let Started {
             process, provider, ..
         } = started;
+        let service = &self.services[i];
+        if service.provides.iter().any(|p| p.protocol == SOURCES) {
+            self.sources.log_runs(&provider);
+        }
         self.dir.running(&name, provider);
         let this = self.clone();
         self.dir.spawner().clone().spawn(async move {
