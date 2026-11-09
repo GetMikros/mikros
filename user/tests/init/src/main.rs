@@ -10207,6 +10207,49 @@ mod manager {
         mikros_test::exit_qemu(mikros_test::FAILED)
     }
 
+    /// The `durability` scenario: serves `tests/durable.img`, whose
+    /// durability test driver writes its blocks on the partition of each
+    /// of the four scratch disks, and stops QEMU with `PASSED` once it
+    /// logged that it did on each, or with `FAILED`.
+    pub fn durability_scenario(s: &Startup) -> i64 {
+        const SECONDS: i64 = 120;
+        const EXPECTED: &[(&[u8], usize)] = &[(b"test-durable: wrote the blocks on ", 4)];
+        const FAILED: &[&[u8]] = &[
+            b"test-durable: FAILED",
+            b"driver pci-bus declined",
+            b"driver virtio-blk declined",
+            b"driver nvme declined",
+            b"driver ahci declined",
+            b"driver xhci declined",
+            b"driver usb-storage declined",
+            b"driver partition declined",
+            b"terminated with code",
+        ];
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(
+                Error,
+                "SCENARIO durability: {} failed ({})",
+                f.what,
+                f.status
+            );
+            return 1;
+        }
+        match device_manager_logs(s, b"tests/durable.img", false, SECONDS, EXPECTED, FAILED) {
+            Ok(true) => {
+                mikros_rt::log!(Info, "SCENARIO durability PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO durability FAILED"),
+            Err(f) => mikros_rt::log!(
+                Error,
+                "SCENARIO durability FAILED: {} failed ({})",
+                f.what,
+                f.status
+            ),
+        }
+        mikros_test::exit_qemu(mikros_test::FAILED)
+    }
+
     /// The `bus-restart` scenario: serves `tests/bus.img`, whose drivers
     /// bring up the root file system from the boot disk, on whichever
     /// controller the runner put it, and whose restart probe kills the PCI
@@ -10707,6 +10750,7 @@ mod bootfs {
                         "channel-echo",
                         "debuggee",
                         "devices.img",
+                        "durable.img",
                         "failing.img",
                         "launcher.img",
                         "log.img",
@@ -11243,6 +11287,8 @@ fn scenario(s: &Startup) -> Option<i64> {
         // controller.
         "bus-restart" => manager::bus_restart_scenario(s),
         "acpi-restart" => manager::acpi_restart_scenario(s),
+        // The runner logs the writes and flushes of the scratch disks.
+        "durability" => manager::durability_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.
         "wait" => {
             log!(Info, "SCENARIO waiting");

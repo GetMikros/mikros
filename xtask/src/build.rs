@@ -1086,6 +1086,33 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             ]);
             let bus_image = device_image("bus.img", &[], &bus_files)?;
             println!("built    {}", bus_image.display());
+            // The durability run serves this image: the PCI bus driver, the
+            // drivers of the disk controllers, of USB mass storage and of
+            // partitions, and the log service, from the PCI test's files,
+            // with the durability test driver.
+            let durable_drivers = [
+                "pci-bus",
+                "virtio-blk",
+                "nvme",
+                "ahci",
+                "xhci",
+                "usb-storage",
+                "partition",
+            ];
+            let durable_files: Vec<(String, PathBuf)> = pci_bus_files
+                .iter()
+                .filter(|(at, _)| {
+                    durable_drivers
+                        .iter()
+                        .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
+                        || at.contains("log-service")
+                        || at.ends_with("services/log.yaml")
+                })
+                .cloned()
+                .collect();
+            let durable_image =
+                device_image("durable.img", &[("test-durable", true)], &durable_files)?;
+            println!("built    {}", durable_image.display());
             let members = [
                 ("tests/accounts.img", accounts_image.as_path()),
                 ("tests/broker.img", broker_image.as_path()),
@@ -1103,6 +1130,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/volumes.img", volumes_image.as_path()),
                 ("tests/root.img", root_image.as_path()),
                 ("tests/bus.img", bus_image.as_path()),
+                ("tests/durable.img", durable_image.as_path()),
                 ("tests/acpi-restart.img", acpi_restart_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),

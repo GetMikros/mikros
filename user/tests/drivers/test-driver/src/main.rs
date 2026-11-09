@@ -84,6 +84,7 @@ extern crate alloc;
 mod acpi;
 mod btrfs;
 mod crash;
+mod durable;
 mod fat;
 mod removal;
 mod zone;
@@ -114,6 +115,7 @@ const KEPT_CHILD: &str = "system.driver.test-kept-child";
 const PCI: &str = "system.driver.test-pci";
 const EDU: &str = "system.driver.test-edu";
 const DISK: &str = "system.driver.test-disk";
+const DURABLE: &str = "system.driver.test-durable";
 const FAT: &str = "system.driver.test-fat";
 const BTRFS: &str = "system.driver.test-btrfs";
 const ACPI: &str = "system.driver.test-acpi";
@@ -241,6 +243,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                                 false => Err(Status::InvalidArgs),
                             }
                         }
+                        DURABLE => match bus {
+                            Some(bus) => durable::works(bus, &reactor, process).await,
+                            None => Err(Status::InvalidArgs),
+                        },
                         FAT => match fat::works(&directory, &reactor, process).await {
                             true => Ok(DriverStartResponse {}),
                             false => Err(Status::InvalidArgs),

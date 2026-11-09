@@ -1,0 +1,7 @@
+# A driver for each partition that the partition driver adds in the
+# durability run, which writes blocks on the scratch disks' partitions
+# for the runner to find in QEMU's logs of their writes, and declines the
+# others.
+name: test-durable
+binary: /usr/lib/drivers/test-durable/test-durable
+match: [storage:partition]
