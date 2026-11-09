@@ -1,11 +1,12 @@
-//! The run of the test image in which a FAT volume on a USB disk comes
-//! and goes in `/Volumes`: the USB disk holds a GPT with one basic data
-//! partition, a FAT file system labelled `USBSTICK` with `HELLO.TXT` on
+//! The run of the test image in which the volumes of a USB disk come and
+//! go in `/Volumes`: the USB disk holds a GPT with a basic data partition
+//! with a FAT file system labelled `USBSTICK`, and a Mikros root type
+//! partition with a btrfs labelled `USBBTRFS`, each with `HELLO.TXT` on
 //! it. The test init serves `tests/volumes.img` with `test=usb-volumes`,
-//! whose volumes probe reads and writes the volume through `/Volumes`.
+//! whose volumes probe reads and writes both volumes through `/Volumes`.
 //! The runner then unplugs the disk through QEMU's monitor and waits for
-//! the probe to see the volume leave. Afterwards the disk must hold what
-//! the probe wrote.
+//! the probe to see the volumes leave. Afterwards the FAT volume must hold
+//! what the probe wrote.
 
 use crate::build::{self, Kind};
 use crate::image::{esp, gpt};
@@ -19,19 +20,24 @@ use std::time::{Duration, Instant};
 
 /// The lines the volumes probe logs once it has used the volume, once the
 /// volume has gone, and when a check failed.
-const READY: &str = "volumes-probe: read and wrote /Volumes/USBSTICK";
-const GONE: &str = "volumes-probe: /Volumes/USBSTICK is gone";
+const READY: &str = "volumes-probe: read and wrote the USB volumes";
+const GONE: &str = "volumes-probe: the USB volumes are gone";
 const FAILED: &str = "volumes-probe: FAILED";
 const PANIC_LINE: &str = "KERNEL PANIC: ";
-/// The USB disk: its size in sectors, its partition's blocks, its GUIDs,
-/// the basic data partition type, and the QEMU device ID it is unplugged
-/// by.
-const SECTORS: u64 = 2048;
+/// The USB disk: the blocks of its FAT and btrfs partitions, its size in
+/// sectors with room for the backup GPT, its GUIDs, the partition types,
+/// and the QEMU device ID it is unplugged by.
 const FIRST_LBA: u64 = 34;
-const LAST_LBA: u64 = 2014;
+const LAST_LBA: u64 = 2047;
+const BTRFS_FIRST_LBA: u64 = 2048;
+const BTRFS_SECTORS: u64 = 128 << 11;
+const SECTORS: u64 = BTRFS_FIRST_LBA + BTRFS_SECTORS + 34;
 const DISK_GUID: &str = "55534221-0000-4000-8000-0000000000d4";
 const PARTITION_GUID: &str = "55534221-0000-4000-8000-000000000004";
+const BTRFS_GUID: &str = "55534221-0000-4000-8000-000000000005";
 const BASIC_DATA: &str = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7";
+const MIKROS_ROOT: &str = "fa730af6-8ba3-42d9-b155-466909d08135";
+const BTRFS_LABEL: &str = "USBBTRFS";
 const DEVICE: &str = "stick";
 const LABEL: [u8; 11] = *b"USBSTICK   ";
 const HELLO: &[u8] = b"hello from the host\n";
@@ -40,22 +46,58 @@ const WRITTEN: &[u8] = b"written on Mikros\n";
 /// Writes the USB disk, `usb.img` in `dir`, in place of the scratch disk.
 fn write_stick(dir: &Path) -> Result<()> {
     let mut image = Cursor::new(vec![0u8; (SECTORS * gpt::SECTOR) as usize]);
-    let partition = gpt::Partition {
-        type_guid: uuid::Uuid::parse_str(BASIC_DATA)?,
-        guid: uuid::Uuid::parse_str(PARTITION_GUID)?,
-        name: "stick",
-        first_lba: FIRST_LBA,
-        last_lba: LAST_LBA,
-    };
+    let partitions = [
+        gpt::Partition {
+            type_guid: uuid::Uuid::parse_str(BASIC_DATA)?,
+            guid: uuid::Uuid::parse_str(PARTITION_GUID)?,
+            name: "stick",
+            first_lba: FIRST_LBA,
+            last_lba: LAST_LBA,
+        },
+        gpt::Partition {
+            type_guid: uuid::Uuid::parse_str(MIKROS_ROOT)?,
+            guid: uuid::Uuid::parse_str(BTRFS_GUID)?,
+            name: "btrfs",
+            first_lba: BTRFS_FIRST_LBA,
+            last_lba: BTRFS_FIRST_LBA + BTRFS_SECTORS - 1,
+        },
+    ];
     let disk_guid = uuid::Uuid::parse_str(DISK_GUID)?;
-    gpt::write(&mut image, SECTORS, disk_guid, &[partition])?;
+    gpt::write(&mut image, SECTORS, disk_guid, &partitions)?;
     let size = (LAST_LBA - FIRST_LBA + 1) * gpt::SECTOR;
     let volume = esp::build_volume(size, fatfs::FatType::Fat12, LABEL, &[("HELLO.TXT", HELLO)])?;
-    let start = (FIRST_LBA * gpt::SECTOR) as usize;
     let mut bytes = image.into_inner();
+    let start = (FIRST_LBA * gpt::SECTOR) as usize;
     bytes[start..start + volume.len()].copy_from_slice(&volume);
+    let btrfs = btrfs_volume(dir)?;
+    let start = (BTRFS_FIRST_LBA * gpt::SECTOR) as usize;
+    bytes[start..start + btrfs.len()].copy_from_slice(&btrfs);
     let path = dir.join("usb.img");
     fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
+}
+
+/// A btrfs of the btrfs partition's size labelled `USBBTRFS` with
+/// `HELLO.TXT` on it, made by mkfs.btrfs in `dir`.
+fn btrfs_volume(dir: &Path) -> Result<Vec<u8>> {
+    let tree = dir.join("usb-btrfs-tree");
+    let _ = fs::remove_dir_all(&tree);
+    fs::create_dir_all(&tree)?;
+    fs::write(tree.join("HELLO.TXT"), HELLO)?;
+    let image = dir.join("usb-btrfs.img");
+    fs::File::create(&image)?.set_len(BTRFS_SECTORS * gpt::SECTOR)?;
+    let status = std::process::Command::new("mkfs.btrfs")
+        .args(["-q", "-f", "-L", BTRFS_LABEL, "--rootdir"])
+        .arg(&tree)
+        .arg(&image)
+        .status()
+        .context("failed to run mkfs.btrfs")?;
+    if !status.success() {
+        bail!("mkfs.btrfs failed with {status}");
+    }
+    let bytes = fs::read(&image)?;
+    fs::remove_dir_all(&tree)?;
+    fs::remove_file(&image)?;
+    Ok(bytes)
 }
 
 /// The contents of `name` in the root of the FAT volume on the USB disk
@@ -109,7 +151,7 @@ pub fn run(
     })?;
     let written = read_stick(dir, "WRITTEN.TXT").context("reading what the probe wrote")?;
     if written != WRITTEN {
-        bail!("WRITTEN.TXT on the USB disk holds {written:?}");
+        bail!("WRITTEN.TXT on the USB FAT volume holds {written:?}");
     }
     Ok(())
 }

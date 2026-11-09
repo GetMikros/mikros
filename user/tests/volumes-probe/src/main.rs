@@ -1,20 +1,22 @@
 //! A boot service of the test image of the USB volumes run, which checks
-//! that a FAT volume on a USB disk appears in `/Volumes`, can be read and
-//! written there, and goes away when the disk is unplugged.
+//! that the FAT and btrfs volumes of a USB disk appear in `/Volumes`, can
+//! be read and written there, and go away when the disk is unplugged.
 //!
 //! Started without `/Volumes`, it grants its own app ID and user
 //! `files.volumes` through the broker and starts a copy of itself, which
-//! has `/Volumes` in its namespace. The copy waits for the volume
-//! `USBSTICK`, reads `HELLO.TXT`, which the runner put there, writes
-//! `WRITTEN.TXT` and reads it back, and logs `READY`. The runner then
-//! unplugs the disk, and the copy logs `GONE` once the volume has left
-//! `/Volumes`. A failed check logs `FAILED` with what failed.
+//! has `/Volumes` in its namespace. For each of the volumes `USBSTICK`
+//! and `USBBTRFS`, the copy waits for it, reads `HELLO.TXT`, which the
+//! runner put there, writes `WRITTEN.TXT` and reads it back; it then logs
+//! `READY`. The runner then unplugs the disk, and the copy logs `GONE`
+//! once both volumes have left `/Volumes`. A failed check logs `FAILED`
+//! with what failed.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use mikros_rt::exec::{Executor, Reactor};
@@ -33,15 +35,15 @@ const BINARY: &str = "/usr/bin/volumes-probe";
 const BROKER: &str = "mikros.permissions.Broker";
 const VOLUMES_PERMISSION: &str = "files.volumes";
 const VOLUMES: &str = "/Volumes";
-/// The volume's label, and the files on it.
-const LABEL: &str = "USBSTICK";
-const HELLO: &str = "USBSTICK/HELLO.TXT";
+/// The volumes' labels, and the files on them.
+const LABELS: [&str; 2] = ["USBSTICK", "USBBTRFS"];
+const HELLO: &str = "HELLO.TXT";
 const HELLO_TEXT: &[u8] = b"hello from the host\n";
-const WRITTEN: &str = "USBSTICK/WRITTEN.TXT";
+const WRITTEN: &str = "WRITTEN.TXT";
 const WRITTEN_TEXT: &[u8] = b"written on Mikros\n";
 /// The lines the runner waits for.
-const READY: &str = "volumes-probe: read and wrote /Volumes/USBSTICK";
-const GONE: &str = "volumes-probe: /Volumes/USBSTICK is gone";
+const READY: &str = "volumes-probe: read and wrote the USB volumes";
+const GONE: &str = "volumes-probe: the USB volumes are gone";
 /// The ID of the log handle among the user handles.
 const LOG_ID: u32 = 2;
 /// The user of the caller, for `Spawn`.
@@ -82,7 +84,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         .find(|e| e.path == VOLUMES)
         .map(|e| NodeAsyncClient::new(e.directory, reactor.clone()));
     let checked = match volumes {
-        Some(volumes) => executor.block_on(use_volume(&volumes, &reactor)),
+        Some(volumes) => executor.block_on(use_volumes(&volumes, &reactor)),
         None => {
             let header = managed.header;
             let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
@@ -155,42 +157,17 @@ async fn start_copy(
     }
 }
 
-/// Waits for the volume in `volumes`, reads and writes it, logs `READY`,
-/// and logs `GONE` once the volume has left.
-async fn use_volume(volumes: &NodeAsyncClient, reactor: &Reactor) -> Result<(), &'static str> {
-    let limit = now() + LIMIT;
-    let hello = loop {
-        if let Ok(file) = open(volumes, reactor, HELLO, OpenFlags(0), Rights::READ).await {
-            break file;
-        }
-        if now() >= limit {
-            return Err("waiting for the volume");
-        }
-        let _ = reactor.sleep_until(now() + 100 * MS).await;
-    };
-    let read = hello.read(0, 4096).await;
-    if !matches!(&read, Ok(Ok(r)) if r.data == HELLO_TEXT) {
-        return Err("reading HELLO.TXT");
-    }
-    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
-    let written = open(volumes, reactor, WRITTEN, flags, RW).await?;
-    let wrote = written.write(0, WRITTEN_TEXT.to_vec()).await;
-    if !matches!(wrote, Ok(Ok(w)) if w.written as usize == WRITTEN_TEXT.len()) {
-        return Err("writing WRITTEN.TXT");
-    }
-    if !matches!(written.sync().await, Ok(Ok(_))) {
-        return Err("syncing WRITTEN.TXT");
-    }
-    let again = open(volumes, reactor, WRITTEN, OpenFlags(0), Rights::READ).await?;
-    let read = again.read(0, 4096).await;
-    if !matches!(&read, Ok(Ok(r)) if r.data == WRITTEN_TEXT) {
-        return Err("reading WRITTEN.TXT back");
+/// Uses each volume in `volumes`, logs `READY`, and logs `GONE` once
+/// they have left.
+async fn use_volumes(volumes: &NodeAsyncClient, reactor: &Reactor) -> Result<(), &'static str> {
+    for label in LABELS {
+        use_volume(volumes, reactor, label).await?;
     }
     mikros_rt::log!(Info, "{}", READY);
     let limit = now() + LIMIT;
     while listed(volumes).await? {
         if now() >= limit {
-            return Err("waiting for the volume to go");
+            return Err("waiting for the volumes to go");
         }
         let _ = reactor.sleep_until(now() + 100 * MS).await;
     }
@@ -198,7 +175,48 @@ async fn use_volume(volumes: &NodeAsyncClient, reactor: &Reactor) -> Result<(), 
     Ok(())
 }
 
-/// Whether `/Volumes` lists the volume.
+/// Waits for the volume `label` in `volumes`, reads `HELLO.TXT` on it,
+/// and writes `WRITTEN.TXT` and reads it back.
+async fn use_volume(
+    volumes: &NodeAsyncClient,
+    reactor: &Reactor,
+    label: &str,
+) -> Result<(), &'static str> {
+    let hello = format!("{label}/{HELLO}");
+    let written_path = format!("{label}/{WRITTEN}");
+    let limit = now() + LIMIT;
+    let file = loop {
+        if let Ok(file) = open(volumes, reactor, &hello, OpenFlags(0), Rights::READ).await {
+            break file;
+        }
+        if now() >= limit {
+            return Err("waiting for a volume");
+        }
+        let _ = reactor.sleep_until(now() + 100 * MS).await;
+    };
+    let read = file.read(0, 4096).await;
+    if !matches!(&read, Ok(Ok(r)) if r.data == HELLO_TEXT) {
+        return Err("reading HELLO.TXT");
+    }
+    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
+    let written = open(volumes, reactor, &written_path, flags, RW).await?;
+    let wrote = written.write(0, WRITTEN_TEXT.to_vec()).await;
+    if !matches!(wrote, Ok(Ok(w)) if w.written as usize == WRITTEN_TEXT.len()) {
+        return Err("writing WRITTEN.TXT");
+    }
+    if !matches!(written.sync().await, Ok(Ok(_))) {
+        return Err("syncing WRITTEN.TXT");
+    }
+    let again = open(volumes, reactor, &written_path, OpenFlags(0), Rights::READ).await?;
+    let read = again.read(0, 4096).await;
+    if !matches!(&read, Ok(Ok(r)) if r.data == WRITTEN_TEXT) {
+        return Err("reading WRITTEN.TXT back");
+    }
+    mikros_rt::log!(Info, "volumes-probe: read and wrote /Volumes/{}", label);
+    Ok(())
+}
+
+/// Whether `/Volumes` still lists either volume.
 async fn listed(volumes: &NodeAsyncClient) -> Result<bool, &'static str> {
     let mut cookie = 0;
     loop {
@@ -209,7 +227,11 @@ async fn listed(volumes: &NodeAsyncClient) -> Result<bool, &'static str> {
         if listed.entries.is_empty() {
             return Ok(false);
         }
-        if listed.entries.iter().any(|e| e.name == LABEL) {
+        if listed
+            .entries
+            .iter()
+            .any(|e| LABELS.contains(&e.name.as_str()))
+        {
             return Ok(true);
         }
         cookie = listed.next;
