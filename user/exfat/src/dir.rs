@@ -30,6 +30,9 @@ pub struct Node {
     pub parent: Dir,
     pub slot: u32,
     pub(crate) set: Set,
+    /// A cluster of the node's chain and its index there, to walk on
+    /// from.
+    pub(crate) near: (u32, u64),
 }
 
 impl Node {
@@ -171,6 +174,7 @@ impl<D: Device> Volume<D> {
             name: set.name(),
             parent: dir,
             slot,
+            near: (set.first_cluster, 0),
             set,
         }
     }

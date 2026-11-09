@@ -325,6 +325,13 @@ impl Builder {
     }
 }
 
+/// The bytes 0 to 255 over and over, `len` of them.
+fn pattern(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(7).wrapping_add(seed))
+        .collect()
+}
+
 fn names<D: Device>(volume: &mut Volume<D>, dir: Dir) -> Vec<String> {
     volume
         .list(dir, 0, 1000)
@@ -333,6 +340,12 @@ fn names<D: Device>(volume: &mut Volume<D>, dir: Dir) -> Vec<String> {
         .into_iter()
         .map(|n| n.name)
         .collect()
+}
+
+fn read_all<D: Device>(volume: &mut Volume<D>, node: &mut Node) -> Vec<u8> {
+    let mut data = vec![0u8; node.size() as usize];
+    assert_eq!(volume.read(node, 0, &mut data).unwrap(), data.len());
+    data
 }
 
 fn dirty(bytes: &[u8]) -> bool {
@@ -422,6 +435,77 @@ fn falls_back_to_the_backup_boot_region_read_only() {
     assert_eq!(
         Volume::mount(Mem::new(bytes), size, false).err(),
         Some(Error::Invalid)
+    );
+}
+
+#[test]
+fn reads_files_in_a_row_and_in_chains() {
+    let mut b = Builder::new(mkfs(8 * MIB, &[]));
+    let cluster = b.layout.cluster_size as usize;
+    let root = b.layout.root_cluster;
+    let row = pattern(3 * cluster + 100, 1);
+    let chained = pattern(4 * cluster + 7, 2);
+    let half = pattern(2 * cluster, 3);
+    b.file(root, "Row.bin", &row, row.len(), 0);
+    b.file(root, "Chained.bin", &chained, chained.len(), 2);
+    b.file(root, "Half valid.bin", &half, cluster + 10, 0);
+    b.file(root, "empty", &[], 0, 0);
+    let sub = b.dir(root, "Sub Dir");
+    b.file(sub, "inner.txt", b"hello from inside", 17, 1);
+    fsck(&b.bytes);
+
+    let size = b.bytes.len() as u64;
+    let mut volume = Volume::mount(Mem::new(b.bytes), size, false).unwrap();
+    assert_eq!(
+        names(&mut volume, Dir::Root),
+        [
+            "Row.bin",
+            "Chained.bin",
+            "Half valid.bin",
+            "empty",
+            "Sub Dir"
+        ]
+    );
+    for (name, data) in [("row.BIN", &row), ("CHAINED.bin", &chained)] {
+        let mut node = volume.find(Dir::Root, name).unwrap();
+        assert_eq!(read_all(&mut volume, &mut node), *data);
+        // Reads that cross clusters, backwards and forwards.
+        for offset in [cluster as u64 * 3 + 5, cluster as u64 - 3, 1] {
+            let mut buf = [0u8; 300];
+            let n = volume.read(&mut node, offset, &mut buf).unwrap();
+            assert_eq!(buf[..n], data[offset as usize..offset as usize + n]);
+        }
+        assert_eq!(
+            volume
+                .read(&mut node, data.len() as u64, &mut [0u8; 8])
+                .unwrap(),
+            0
+        );
+    }
+    let chained_node = volume.find(Dir::Root, "chained.bin").unwrap();
+    assert_eq!(volume.allocated(&chained_node).unwrap(), 5 * cluster as u64);
+    let mut node = volume.find(Dir::Root, "half valid.bin").unwrap();
+    let data = read_all(&mut volume, &mut node);
+    assert_eq!(data[..cluster + 10], half[..cluster + 10]);
+    assert!(data[cluster + 10..].iter().all(|&b| b == 0));
+    let mut empty = volume.find(Dir::Root, "EMPTY").unwrap();
+    assert_eq!((empty.size(), volume.allocated(&empty).unwrap()), (0, 0));
+    assert_eq!(volume.read(&mut empty, 0, &mut [0u8; 8]).unwrap(), 0);
+
+    let dir = volume.find(Dir::Root, "sub dir").unwrap();
+    assert!(dir.is_directory());
+    assert_eq!(dir.attributes() & DIRECTORY, DIRECTORY);
+    assert_eq!(dir.modified(), stamp());
+    let sub = dir.as_dir().unwrap();
+    assert_eq!(volume.allocated_dir(sub).unwrap(), cluster as u64);
+    let mut inner = volume.find(sub, "Inner.TXT").unwrap();
+    assert_eq!(read_all(&mut volume, &mut inner), b"hello from inside");
+    let offset = volume.entry_offset(&inner).unwrap();
+    assert_eq!(offset, volume.layout().cluster_start(dir.set.first_cluster));
+    assert_eq!(volume.find(sub, "missing").err(), Some(Error::NotFound));
+    assert_eq!(
+        volume.read(&mut dir.clone(), 0, &mut [0u8; 8]).err(),
+        Some(Error::IsDirectory)
     );
 }
 
