@@ -570,6 +570,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "time-service"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "tmpfs"
 version = "0.0.0"
 dependencies = [

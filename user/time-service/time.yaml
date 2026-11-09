@@ -1,0 +1,9 @@
+# The service manifest of the time service, installed as
+# usr/lib/services/time.yaml.
+name: time
+binary: /usr/bin/time-service
+start: boot
+boot_handles: [platform_info]
+permissions: [permissions.check]
+provides:
+  - protocol: mikros.time.Clock
