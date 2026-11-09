@@ -6293,6 +6293,7 @@ unsafe extern "sysv64" {
 }
 
 extern "sysv64" fn signal_handler(signo: u64, info: u64, context: u64) {
+    SPINNER_LOOPS_HANDLED.store(SPINNER_LOOPS.load(Ordering::Relaxed), Ordering::Release);
     let mut mask = 0;
     // SAFETY: the pointer is valid; adding no signal only reads the mask.
     unsafe { sys::signal_set_mask(0, 0, &mut mask) };
@@ -6530,6 +6531,8 @@ fn syscall_clears_flags(_: &Startup) -> Result {
 
 /// Counts the loops of `spin_until_handled`.
 static SPINNER_LOOPS: AtomicU64 = AtomicU64::new(0);
+/// `SPINNER_LOOPS` as the last signal handler started.
+static SPINNER_LOOPS_HANDLED: AtomicU64 = AtomicU64::new(0);
 
 /// Spins in user mode, never entering the kernel, until the handler has
 /// run `rounds` times, then exits.
@@ -6548,15 +6551,27 @@ extern "sysv64" fn spin_until_handled(rounds: u64, _: u64) -> ! {
 /// A slice of a thread alone lasts 4 ms. A first round is not timed: it
 /// also runs the handler's code and its return for the first time, which
 /// an emulator such as QEMU without KVM takes milliseconds to translate.
-/// Each round starts once the spinner spins again, and each of the ten
-/// rounds after the first must take less than 2 ms, half a slice, or
-/// `SLOWER` times that in a fuzz build, which only shows that the handler
-/// runs. The
-/// spinner ends and the action is restored whether the rounds passed or
-/// not, so that a failure leaves nothing behind for later tests.
+/// Each round starts once the spinner spins again.
+///
+/// The rounds are measured in the spinner's loops, not in time, so that
+/// the host pausing an emulated processor does not fail them: a paused
+/// spinner does not loop either. Its loop rate is the highest of
+/// `WINDOWS` windows of 4 ms, since a pause only lowers a window's rate.
+/// A round is quick when the spinner loops less than 2 ms' worth, half a
+/// slice, or `SLOWER` times that in a fuzz build, between the signal and
+/// the start of the handler. At least `QUICK` of the ten rounds after the
+/// first must be quick: a spinner paused for longer than a slice may meet
+/// its timer at once as it resumes, and so look quick without the signal
+/// interrupting it, but not in most rounds.
+///
+/// The spinner ends and the action is restored whether the rounds passed
+/// or not, so that a failure leaves nothing behind for later tests.
 fn signal_reaches_other_processor(s: &Startup) -> Result {
     const ROUNDS: u64 = 10;
-    const LIMIT: i64 = SLOWER * 2_000_000;
+    const QUICK: u64 = 8;
+    const WINDOWS: usize = 5;
+    const WINDOW: i64 = 4_000_000;
+    const LIMIT: u64 = SLOWER as u64 * 2_000_000;
     let mut count = 0u32;
     // SAFETY: the pointer describes `count`.
     check("reading the processor count", unsafe {
@@ -6581,16 +6596,35 @@ fn signal_reaches_other_processor(s: &Startup) -> Result {
             sleep_ms(1);
         }
         sleep_ms(20);
+        // The most loops that the spinner made in LIMIT nanoseconds.
+        let mut limit = 0;
+        for _ in 0..WINDOWS {
+            let (start, loops) = (now(), SPINNER_LOOPS.load(Ordering::Acquire));
+            while now() < start + WINDOW {
+                core::hint::spin_loop();
+            }
+            let (end, after) = (now(), SPINNER_LOOPS.load(Ordering::Acquire));
+            let elapsed = (end - start) as u64;
+            limit = limit.max((after - loops) * LIMIT / elapsed);
+        }
+        ensure("measuring the spinner", limit > 0)?;
+        let mut quick = 0;
         for round in 1..=ROUNDS + 1 {
-            let sent = now();
+            let before = SPINNER_LOOPS.load(Ordering::Acquire);
             // SAFETY: the call takes no pointers.
             check("signalling the spinner", unsafe {
                 sys::thread_signal(thread, USR1, round)
             })?;
-            let limit = if round == 1 { in_time() } else { sent + LIMIT };
+            let deadline = in_time();
             while HANDLED.load(Ordering::Acquire) < round {
-                ensure("running the handler", now() < limit)?;
+                ensure("running the handler", now() < deadline)?;
                 core::hint::spin_loop();
+            }
+            let loops = SPINNER_LOOPS_HANDLED
+                .load(Ordering::Acquire)
+                .saturating_sub(before);
+            if round > 1 && loops < limit {
+                quick += 1;
             }
             // The next round starts once the spinner has returned from
             // the handler and spins again; after the last it ends.
@@ -6601,7 +6635,7 @@ fn signal_reaches_other_processor(s: &Startup) -> Result {
                 core::hint::spin_loop();
             }
         }
-        Ok(())
+        ensure("running the handler at once", quick >= QUICK)
     })();
     // The spinner ends once the count reaches its rounds, and the action
     // is restored only then, so that no signal pending for it meets the
