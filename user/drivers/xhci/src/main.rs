@@ -11,6 +11,8 @@
 extern crate alloc;
 
 mod controller;
+mod descriptors;
+mod device;
 mod regs;
 mod ring;
 mod transfer;
