@@ -3,6 +3,7 @@
 //! and control, interrupt and bulk transfers limited to what belongs to
 //! the interface.
 
+use crate::controller::Controller;
 use crate::descriptors::{self, BULK, INTERRUPT, endpoint_id};
 use crate::device::{FULL, HIGH, LOW, SUPER, setup};
 use crate::transfer::{Direction, Endpoint, Request};
@@ -391,18 +392,78 @@ async fn bulk(
             )
         })?;
     }
-    // A controller without 64-bit addressing cannot reach the pages
-    // above 4 GiB.
-    if controller.below_4g && pages.iter().any(|&page| page + PAGE > FOUR_GIB) {
-        return Err(Status::NoResources);
-    }
     let max_packet = descriptor.max_packet & 0x7FF;
+    // A controller without 64-bit addressing cannot reach pages above
+    // 4 GiB: the data goes through a buffer of the driver's below them.
+    let bounce = controller.below_4g && pages.iter().any(|&page| page + PAGE > FOUR_GIB);
+    if bounce {
+        drop(pin);
+        let input = descriptor.is_in();
+        return bounced(
+            &controller,
+            endpoint,
+            buffer,
+            offset,
+            length,
+            input,
+            max_packet,
+        )
+        .await;
+    }
     let request = Request::normal(&pages, offset - start, length, max_packet);
     let (id, receiver) = endpoint.enqueue(request).await?;
     let finish = move |result: Result<u32, Status>| {
         drop(pin);
         drop(buffer);
         result
+    };
+    Ok(Pending {
+        endpoint,
+        id,
+        receiver,
+        finish: alloc::boxed::Box::new(finish),
+    })
+}
+
+/// Enqueues a bulk transfer of the `length` bytes at `offset` in
+/// `buffer` through contiguous memory of the driver's below 4 GiB, into
+/// which they are copied before an OUT transfer, and from which the
+/// bytes received are copied after an IN transfer (`input`).
+async fn bounced(
+    controller: &Controller,
+    endpoint: Rc<Endpoint>,
+    buffer: OwnedHandle,
+    offset: u64,
+    length: u32,
+    input: bool,
+    max_packet: u16,
+) -> Result<Pending<u32>, Status> {
+    let memory = controller.memory(u64::from(length))?;
+    let mut bytes = vec![0u8; length as usize];
+    if !input {
+        // SAFETY: the pointer describes `bytes`.
+        kernel(unsafe {
+            sys::mem_read(buffer.raw(), offset, bytes.as_mut_ptr(), bytes.len() as u64)
+        })?;
+        for (i, byte) in bytes.iter().enumerate() {
+            memory.write8(i as u64, *byte);
+        }
+    }
+    let count = memory.size() / PAGE;
+    let pages: Vec<u64> = (0..count).map(|i| memory.physical(i * PAGE)).collect();
+    let request = Request::normal(&pages, 0, length, max_packet);
+    let (id, receiver) = endpoint.enqueue(request).await?;
+    let finish = move |result: Result<u32, Status>| {
+        let actual = result?;
+        if input {
+            let mut bytes = vec![0u8; actual.min(length) as usize];
+            memory.read_bytes(0, &mut bytes);
+            // SAFETY: the pointer describes `bytes`.
+            kernel(unsafe {
+                sys::mem_write(buffer.raw(), offset, bytes.as_ptr(), bytes.len() as u64)
+            })?;
+        }
+        Ok(actual)
     };
     Ok(Pending {
         endpoint,
