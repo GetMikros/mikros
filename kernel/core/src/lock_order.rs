@@ -95,6 +95,8 @@ classes! {
     SMP_BOOT_FEATURES,
     SPACE_BOOT_INFO,
     SPACE_CMDLINE,
+    // Held while the firmware runs, which takes no lock.
+    UEFI_CALLS,
     MOCK_OUTPUT,
     TEST,
 }

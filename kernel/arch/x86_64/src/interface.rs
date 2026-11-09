@@ -241,6 +241,7 @@ impl Arch for X86 {
         time::init(info);
         timer::init();
         crate::iommu::init(info);
+        crate::uefi::selftest(info);
         crate::smp::start(info);
     }
 

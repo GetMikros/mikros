@@ -102,6 +102,12 @@ fn code_arg(key: &str, ranges: &[(u64, u64)]) -> String {
     format!("{key}={}", list.join(","))
 }
 
+/// The command line word that has the kernel call one of the firmware's
+/// runtime services while it starts, and the line it then logs when the
+/// call succeeds.
+const UEFI_SELFTEST: &str = "uefi_selftest";
+const UEFI_SELFTEST_PASSED: &str = "uefi: GetNextVariableName returned 0x0";
+
 /// The command line word that has the test init leave out the test of
 /// ported software, whose suites take minutes when emulated. Only the
 /// first run of a build kind other than fuzz runs it.
@@ -395,11 +401,24 @@ pub fn run(args: &Args) -> Result<()> {
     let dir = test_dir(args.kind);
     fs::create_dir_all(&dir)?;
     let disk = dir.join("disk.img");
-    let cmdline = test_cmdline(args.kind, &built.kernel)?;
+    let cmdline = [
+        test_cmdline(args.kind, &built.kernel)?.as_str(),
+        UEFI_SELFTEST,
+    ]
+    .join(" ");
+    let cmdline = cmdline.trim().to_owned();
     image::create_for_tests(args.kind, &built, &disk, &cmdline)?;
     let log = dir.join("serial.log");
     let processor = qemu::Processor::available();
-    integration(args, processor, args.timeout, &disk, &log, "", "")?;
+    integration(
+        args,
+        processor,
+        args.timeout,
+        &disk,
+        &log,
+        "",
+        UEFI_SELFTEST_PASSED,
+    )?;
     // Kernel page-table isolation applies only to Intel processors that do
     // not report RDCL_NO: the host's under KVM with the bit hidden, or
     // QEMU's emulated processor when it names that vendor. Emulation takes

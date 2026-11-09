@@ -114,6 +114,8 @@ mod timer;
 #[cfg(target_os = "none")]
 mod tlb;
 #[cfg(target_os = "none")]
+mod uefi;
+#[cfg(target_os = "none")]
 use kernel_core::user;
 #[cfg(target_os = "none")]
 mod usercopy;
