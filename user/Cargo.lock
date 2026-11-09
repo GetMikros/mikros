@@ -29,6 +29,7 @@ dependencies = [
 name = "ahci"
 version = "0.0.0"
 dependencies = [
+ "mikros-ata",
  "mikros-rt",
  "mikros-storage",
 ]
@@ -285,6 +286,10 @@ version = "0.0.0"
 dependencies = [
  "mikros-rt",
 ]
+
+[[package]]
+name = "mikros-ata"
+version = "0.0.0"
 
 [[package]]
 name = "mikros-bootfs"

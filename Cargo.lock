@@ -770,6 +770,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-ata"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-bootfs"
 version = "0.0.0"
 dependencies = [

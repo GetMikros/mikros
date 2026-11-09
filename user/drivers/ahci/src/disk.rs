@@ -1,26 +1,19 @@
 //! A SATA disk on a port: identifying it, and its reads, writes,
 //! flushes and discards.
 
-use crate::port::{Ata, DEVICE_LBA, PRD_MAX, Port};
+use crate::port::{PRD_MAX, Port};
 use alloc::rc::Rc;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use mikros_ata::{
+    Ata, DATA_SET_MANAGEMENT, DEVICE_LBA, FLUSH_CACHE_EXT, IDENTIFY_DEVICE, Identity, read_write,
+};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockFlags, BlockInfo};
 use mikros_rt::sys;
 use mikros_storage::{Contiguous, PAGE};
 
-/// ATA commands.
-const READ_DMA_EXT: u8 = 0x25;
-const WRITE_DMA_EXT: u8 = 0x35;
-const WRITE_DMA_FUA_EXT: u8 = 0x3D;
-const READ_FPDMA_QUEUED: u8 = 0x60;
-const WRITE_FPDMA_QUEUED: u8 = 0x61;
-const FLUSH_CACHE_EXT: u8 = 0xEA;
-const IDENTIFY_DEVICE: u8 = 0xEC;
-const DATA_SET_MANAGEMENT: u8 = 0x06;
 /// DATA SET MANAGEMENT's TRIM bit, the size of one LBA range entry and
 /// the most sectors in one.
 const TRIM: u16 = 1 << 0;
@@ -34,58 +27,6 @@ const COMMAND_SECTORS_MAX: u64 = 1 << 16;
 const TRANSFER_MAX: u64 = (PRD_MAX as u64 - 1) * PAGE;
 /// The size of IDENTIFY DEVICE's data.
 const IDENTIFY_SIZE: u32 = 512;
-/// The bit of IDENTIFY DEVICE's words 84 and 87 that reports WRITE DMA
-/// FUA EXT, and that of WRITE FPDMA QUEUED's device register that forces
-/// unit access.
-const FUA_SUPPORTED: u16 = 1 << 6;
-const FPDMA_FUA: u8 = 1 << 7;
-
-/// What IDENTIFY DEVICE says about a disk.
-pub struct Identity {
-    pub model: String,
-    pub serial: String,
-    pub lba48: bool,
-    pub sectors: u64,
-    pub sector_size: u32,
-    /// Native command queuing, and its queue depth.
-    pub ncq: bool,
-    pub queue_depth: u32,
-    pub trim: bool,
-    pub write_cache: bool,
-    /// Forced unit access writes.
-    pub fua: bool,
-}
-
-/// The logical sector size in bytes that the IDENTIFY DEVICE words `w`
-/// give: words 117 and 118, in words of two bytes, when word 106 says
-/// that logical sectors are longer than 256 words, and otherwise 512.
-/// `None` when it is not a power of two of at least 512, which the disk's
-/// block size must be.
-fn sector_size(w: &[u16; 256]) -> Option<u32> {
-    let size = if w[106] & 0xC000 == 0x4000 && w[106] & 1 << 12 != 0 {
-        (u32::from(w[117]) | u32::from(w[118]) << 16).checked_mul(2)?
-    } else {
-        512
-    };
-    (size >= 512 && size.is_power_of_two()).then_some(size)
-}
-
-/// An identify string: ASCII with the bytes of each word swapped, padded
-/// with spaces.
-fn text(words: &[u16]) -> String {
-    let text: String = words
-        .iter()
-        .flat_map(|w| [(w >> 8) as u8, *w as u8])
-        .map(|b| {
-            if b.is_ascii_graphic() || b == b' ' {
-                b as char
-            } else {
-                ' '
-            }
-        })
-        .collect();
-    String::from(text.trim())
-}
 
 /// Sends IDENTIFY DEVICE to the disk on `port`, into `page`.
 pub async fn identify(port: &Port, page: &Contiguous) -> Result<Identity, Status> {
@@ -99,7 +40,7 @@ pub async fn identify(port: &Port, page: &Contiguous) -> Result<Identity, Status
     for (i, word) in w.iter_mut().enumerate() {
         *word = page.read16(2 * i as u64);
     }
-    let Some(sector_size) = sector_size(&w) else {
+    let Some(identity) = Identity::parse(&w) else {
         mikros_rt::log!(
             Info,
             "ahci: skipping the disk on port {}: its logical sectors are not a power of two of at least 512 bytes",
@@ -107,19 +48,7 @@ pub async fn identify(port: &Port, page: &Contiguous) -> Result<Identity, Status
         );
         return Err(Status::NotSupported);
     };
-    let sectors = (0..4).fold(0u64, |n, i| n | u64::from(w[100 + i]) << (16 * i));
-    Ok(Identity {
-        model: text(&w[27..47]),
-        serial: text(&w[10..20]),
-        lba48: w[83] & 1 << 10 != 0,
-        sectors,
-        sector_size,
-        ncq: w[76] & 1 << 8 != 0,
-        queue_depth: u32::from(w[75] & 0x1F) + 1,
-        trim: w[169] & 1 != 0,
-        write_cache: w[85] & 1 << 5 != 0,
-        fua: (w[84] | w[87]) & FUA_SUPPORTED != 0,
-    })
+    Ok(identity)
 }
 
 pub struct Disk {
@@ -193,37 +122,9 @@ impl Disk {
         let sectors = len / u64::from(self.identity.sector_size);
         // A count of 0 stands for 65536.
         let count = sectors as u16;
-        let forced = write && fua && self.identity.fua;
-        let ata = match (self.queued, write) {
-            (true, _) => Ata {
-                command: if write {
-                    WRITE_FPDMA_QUEUED
-                } else {
-                    READ_FPDMA_QUEUED
-                },
-                features: count,
-                lba: block,
-                device: if forced {
-                    DEVICE_LBA | FPDMA_FUA
-                } else {
-                    DEVICE_LBA
-                },
-                ..Ata::default()
-            },
-            (false, write) => Ata {
-                command: match (write, forced) {
-                    (true, true) => WRITE_DMA_FUA_EXT,
-                    (true, false) => WRITE_DMA_EXT,
-                    (false, _) => READ_DMA_EXT,
-                },
-                lba: block,
-                count,
-                device: DEVICE_LBA,
-                ..Ata::default()
-            },
-        };
+        let (ata, flush) = read_write(self.queued, write, fua, self.identity.fua, block, count);
         self.port.issue(ata, &data, write, self.queued).await?;
-        if write && fua && !forced {
+        if flush {
             self.flush().await?;
         }
         Ok(())

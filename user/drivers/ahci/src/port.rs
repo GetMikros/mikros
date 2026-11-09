@@ -9,6 +9,7 @@ use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::sync::atomic::{Ordering, fence};
 use core::task::{Poll, Waker};
+use mikros_ata::Ata;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -61,21 +62,9 @@ const TABLE_SIZE: u64 = 0x80 + 16 * PRD_MAX as u64;
 const STOP_LIMIT: i64 = 500 * MS;
 const LINK_LIMIT: i64 = 1000 * MS;
 const BUSY_LIMIT: i64 = 1000 * MS;
-/// The type and command bit of a host to device register FIS, and the
-/// LBA mode bit of its device field.
+/// The type and command bit of a host to device register FIS.
 const FIS_H2D: u8 = 0x27;
 const FIS_COMMAND: u8 = 0x80;
-pub const DEVICE_LBA: u8 = 1 << 6;
-
-/// An ATA command for a host to device register FIS.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Ata {
-    pub command: u8,
-    pub features: u16,
-    pub lba: u64,
-    pub count: u16,
-    pub device: u8,
-}
 
 /// What an interrupt found on a port.
 pub enum Event {
