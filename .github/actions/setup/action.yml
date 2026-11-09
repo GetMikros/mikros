@@ -30,12 +30,9 @@ outputs:
   rust-build-hit:
     description: Whether the Rust build cache had that exact key.
     value: ${{ steps.rust-build.outputs.cache-hit }}
-  llvm-key:
-    description: The key of the LLVM build cache.
-    value: ${{ steps.llvm.outputs.cache-primary-key }}
-  llvm-hit:
-    description: Whether the LLVM build cache had that exact key.
-    value: ${{ steps.llvm.outputs.cache-hit }}
+  llvm-deps:
+    description: The hash of the restored LLVM build's Ninja dependency log, or nothing without one.
+    value: ${{ steps.llvm-restored.outputs.deps }}
 
 runs:
   using: composite
@@ -66,14 +63,26 @@ runs:
         key: cargo-home-fuzz-0.13.2-${{ hashFiles('Cargo.lock', 'user/Cargo.lock', 'user/std/Cargo.lock', 'kernel/fuzz/Cargo.lock', 'boot/mikrosboot/fuzz/Cargo.lock') }}
         restore-keys: cargo-home-fuzz-0.13.2-
     # Building Clang and LLD takes about an hour, so the LLVM directory,
-    # with its source and build tree, is kept between runs.
+    # with its source and build tree, is kept between runs. Ninja compiles
+    # an object again when a system header it includes is newer than it,
+    # as after an update of the C or C++ library's packages, which every
+    # job installs afresh. So ci.yml saves the build again whenever Ninja
+    # compiled something, which changes its dependency log, under a key
+    # that ends in that log's hash, and the newest such build is restored:
+    # the primary key here is never saved.
     - name: Restore the LLVM build
       id: llvm
       uses: actions/cache/restore@v4
       with:
         path: target/llvm
-        key: llvm-${{ hashFiles('xtask/src/llvm.rs', 'tools/llvm/patches/**') }}
-        restore-keys: llvm-
+        key: llvm-${{ hashFiles('xtask/src/llvm.rs', 'tools/llvm/patches/**') }}-newest
+        restore-keys: |
+          llvm-${{ hashFiles('xtask/src/llvm.rs', 'tools/llvm/patches/**') }}-
+          llvm-
+    - name: Note the restored LLVM build
+      id: llvm-restored
+      shell: sh
+      run: echo "deps=${{ hashFiles('target/llvm/build/.ninja_deps') }}" >> "$GITHUB_OUTPUT"
     # The firmware, the Meson, CMake, musl and port downloads with their
     # patched sources, and the builds of CMake and musl. xtask extracts a
     # source again when its patches change, and Ninja and make rebuild

@@ -101,13 +101,15 @@ jobs:
             kernel/fuzz/target
             boot/mikrosboot/fuzz/target
           key: ${{ steps.setup.outputs.rust-build-key }}
-      # The LLVM build is saved only once it is whole: the compiler-rt
-      # builtins are the last thing it installs.
+      # The LLVM build is saved when Ninja compiled something in it, which
+      # changes its dependency log, and only once it is whole: the
+      # compiler-rt builtins are the last thing it installs.
       - name: Save the LLVM build
         if: >-
-          always() && steps.setup.outputs.llvm-hit != 'true' &&
-          hashFiles('target/llvm/install/lib/clang/*/lib/x86_64-unknown-mikros/libclang_rt.builtins.a') != ''
+          always() &&
+          hashFiles('target/llvm/install/lib/clang/*/lib/x86_64-unknown-mikros/libclang_rt.builtins.a') != '' &&
+          hashFiles('target/llvm/build/.ninja_deps') != steps.setup.outputs.llvm-deps
         uses: actions/cache/save@v4
         with:
           path: target/llvm
-          key: ${{ steps.setup.outputs.llvm-key }}
+          key: llvm-${{ hashFiles('xtask/src/llvm.rs', 'tools/llvm/patches/**') }}-${{ hashFiles('target/llvm/build/.ninja_deps') }}
