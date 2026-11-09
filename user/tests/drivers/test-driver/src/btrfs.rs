@@ -2,7 +2,9 @@
 //! whether the btrfs server serves the root partition of the same disk
 //! through its `filesystem` service as it should.
 
-use crate::fat::{PERM_READ, PERM_WRITE, bytes, expect, failed, locks, map, ok, open, root};
+use crate::fat::{
+    PERM_READ, PERM_WRITE, bytes, expect, failed, locks, logged, map, ok, open, root,
+};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -87,6 +89,9 @@ async fn check(
 
     system(&root, reactor).await?;
     usr(&root, reactor).await?;
+    // The log service keeps the boot's log on the root file system.
+    let published = b" I 0 kernel device-manager: published device.filesystem root for device";
+    logged(&root, "var/log/system/boot-1.log", published, reactor).await?;
 
     let (etc, _) = open(&root, "etc", OpenFlags::DIRECTORY, reactor)
         .await

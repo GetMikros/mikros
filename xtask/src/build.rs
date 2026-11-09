@@ -774,6 +774,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/drivers/btrfs/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/btrfs/driver.yaml"),
                 ),
+                // The log service, which keeps the log in files on the
+                // root file system and the EFI system partition.
+                ("usr/bin/log-service".to_owned(), log_service.clone()),
+                ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
             ];
             let pci_image = device_image(
                 "pci.img",

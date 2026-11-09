@@ -127,6 +127,9 @@ async fn check(
     expect(kind == NodeType::File)?;
     let text = ok(conf.read(0, 4096).await)?.data;
     expect(contains(&text, b"root=PARTUUID="))?;
+    // The log service keeps the boot's log on the EFI system partition.
+    let published = b" I 0 kernel device-manager: published device.filesystem esp for device";
+    logged(&root, "EFI/Mikros/boot.log", published, reactor).await?;
 
     let create_dir = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::DIRECTORY.0);
     let (folder, kind) = open(&root, "Test Folder", create_dir, reactor).await.ok()?;
@@ -238,4 +241,37 @@ pub fn expect(condition: bool) -> Option<()> {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Waits until the file at `path` below `dir` holds `line`, as the log
+/// service writes it, for at most `LOG_LIMIT`, reading what was added
+/// once a second, so as not to keep the file system's server busy.
+pub async fn logged(
+    dir: &NodeAsyncClient,
+    path: &str,
+    line: &[u8],
+    reactor: &Reactor,
+) -> Option<()> {
+    const CHUNK: u32 = 32768;
+    const AGAIN: i64 = 1_000_000_000;
+    /// Emulated processors take long to bring the file systems up.
+    const LOG_LIMIT: i64 = 180_000_000_000;
+    let deadline = now() + LOG_LIMIT;
+    let mut text = Vec::new();
+    loop {
+        if let Ok((file, _)) = open(dir, path, OpenFlags(0), reactor).await {
+            loop {
+                let data = ok(file.read(text.len() as u64, CHUNK).await)?.data;
+                if data.is_empty() {
+                    break;
+                }
+                text.extend_from_slice(&data);
+            }
+            if contains(&text, line) {
+                return Some(());
+            }
+        }
+        expect(now() < deadline)?;
+        let _ = reactor.sleep_until(now() + AGAIN).await;
+    }
 }
