@@ -7,7 +7,10 @@
 //! platform information names. Each host bridge has the properties
 //! `segment`, `bus_start` and `bus_end` in decimal and `ecam_base` in
 //! hexadecimal with `0x`, and a shared `MMIO` resource covering the
-//! configuration space of its buses.
+//! configuration space of its buses. After the host bridges, when the
+//! platform information names an RSDP, it adds `acpi` as
+//! `platform:acpi`, with the property `rsdp`, the RSDP's physical address
+//! in hexadecimal with `0x`, and no resources.
 //!
 //! It then reads the driver manifests, binds a driver to each device
 //! that one matches, and starts and supervises the bound drivers.
@@ -131,6 +134,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     match rsdp.and_then(|rsdp| memory.find(rsdp, b"MCFG")) {
         Some(mcfg) => add_host_bridges(&mut devices, &root, &mcfg),
         None => mikros_rt::log!(Warning, "device-manager: no MCFG table, so no PCI"),
+    }
+    // After the host bridges, so that they keep their IDs.
+    if let Some(rsdp) = rsdp {
+        devices.add(
+            "acpi".into(),
+            vec!["platform:acpi".into()],
+            vec![("rsdp".into(), format!("{rsdp:#x}"))],
+            None,
+            Vec::new(),
+        );
     }
     let drivers = match managed::take_entry(&mut managed.namespace, drivers::DRIVERS) {
         Some((directory, at)) => {
