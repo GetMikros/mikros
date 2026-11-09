@@ -27,7 +27,6 @@ pub const DIRECTORY: u16 = 0x10;
 pub const ARCHIVE: u16 = 0x20;
 /// The stream extension's flags: clusters may be allocated, and they lie
 /// in a row without FAT entries.
-#[cfg(test)]
 pub const ALLOCATION_POSSIBLE: u8 = 1 << 0;
 pub const NO_FAT_CHAIN: u8 = 1 << 1;
 
@@ -111,13 +110,9 @@ impl Set {
         entries_for(self.name.len())
     }
 
-    /// The entries of the set, with its checksum and the name's hash.
-    #[cfg(test)]
-    pub fn encode(&self, upcase: &Upcase) -> Vec<u8> {
-        let count = self.entries();
-        let mut set = alloc::vec![0u8; count * ENTRY];
-        set[0] = FILE;
-        set[1] = (count - 1) as u8;
+    /// Writes the fields of the set's file entry and stream extension
+    /// into `set`, the entries of a set, and leaves the rest as it is.
+    pub fn write_fields(&self, set: &mut [u8]) {
         set[4..6].copy_from_slice(&self.attributes.to_le_bytes());
         let stamps = [(8, 20, 22, self.created), (12, 21, 23, self.modified)];
         for (at, increment_at, offset_at, stamp) in stamps {
@@ -128,13 +123,23 @@ impl Set {
         set[16..20].copy_from_slice(&self.accessed.timestamp.to_le_bytes());
         set[24] = self.accessed.utc_offset;
         let s = &mut set[ENTRY..2 * ENTRY];
-        s[0] = STREAM;
         s[1] = self.flags;
-        s[3] = self.name.len() as u8;
-        s[4..6].copy_from_slice(&upcase.hash(&self.name).to_le_bytes());
         s[8..16].copy_from_slice(&self.valid_size.to_le_bytes());
         s[20..24].copy_from_slice(&self.first_cluster.to_le_bytes());
         s[24..32].copy_from_slice(&self.size.to_le_bytes());
+    }
+
+    /// The entries of the set, with its checksum and the name's hash.
+    #[cfg(test)]
+    pub fn encode(&self, upcase: &Upcase) -> Vec<u8> {
+        let count = self.entries();
+        let mut set = alloc::vec![0u8; count * ENTRY];
+        set[0] = FILE;
+        set[1] = (count - 1) as u8;
+        set[ENTRY] = STREAM;
+        set[ENTRY + 3] = self.name.len() as u8;
+        set[ENTRY + 4..ENTRY + 6].copy_from_slice(&upcase.hash(&self.name).to_le_bytes());
+        self.write_fields(&mut set);
         for (i, chunk) in self.name.chunks(NAME_UNITS).enumerate() {
             let n = &mut set[(2 + i) * ENTRY..(3 + i) * ENTRY];
             n[0] = NAME;

@@ -2,6 +2,7 @@
 //! and allocation bitmap that the root directory gives, and the clusters
 //! of an allocation, in a row or in a chain in the FAT.
 
+use crate::bitmap::Bitmap;
 use crate::boot::{self, Layout};
 use crate::dir::Place;
 use crate::entry::{self, ENTRY};
@@ -23,8 +24,9 @@ pub struct Volume<D> {
     pub(crate) disk: Disk<D>,
     pub(crate) layout: Layout,
     pub(crate) upcase: Upcase,
-    /// How many clusters the allocation bitmap marks free.
-    pub(crate) free: u32,
+    pub(crate) bitmap: Bitmap,
+    /// Where to look for free clusters next.
+    pub(crate) hint: u32,
     pub(crate) writable: bool,
     /// Whether the volume is marked dirty only while a change is in
     /// progress, as `begin_change` and `end_change` mark it, rather than
@@ -63,7 +65,8 @@ impl<D: Device> Volume<D> {
             writable: writable && clean && layout.region == 0,
             layout,
             upcase: Upcase::default(),
-            free: 0,
+            bitmap: Bitmap::empty(),
+            hint: 2,
             quick,
             dirs: BTreeMap::new(),
         };
@@ -109,10 +112,7 @@ impl<D: Device> Volume<D> {
         }
         let clusters = self.clusters(first, false, Some(len.div_ceil(cluster)))?;
         let bytes = self.read_clusters(&clusters, false)?;
-        let used: u32 = (0..self.layout.clusters)
-            .map(|i| u32::from(bytes[(i / 8) as usize] >> (i % 8) & 1))
-            .sum();
-        self.free = self.layout.clusters - used;
+        self.bitmap = Bitmap::new(clusters, bytes, self.layout.clusters);
         Ok(())
     }
 
@@ -149,7 +149,7 @@ impl<D: Device> Volume<D> {
             false => self.layout.flags & !boot::VOLUME_DIRTY,
         };
         let clusters = u64::from(self.layout.clusters);
-        let used = clusters - u64::from(self.free);
+        let used = clusters - u64::from(self.bitmap.free);
         let mut fields = [0u8; 7];
         self.disk.read(boot::FLAGS_AT as u64, &mut fields)?;
         fields[0..2].copy_from_slice(&flags.to_le_bytes());
@@ -217,7 +217,7 @@ impl<D: Device> Volume<D> {
 
     /// How many clusters are free.
     pub fn free_clusters(&self) -> u32 {
-        self.free
+        self.bitmap.free
     }
 
     /// The FAT entry of `cluster`.

@@ -1,6 +1,8 @@
-//! Reading files.
+//! Reading and writing files.
 
+use crate::allocation::Extent;
 use crate::dir::Node;
+use crate::entry::{ARCHIVE, Stamp};
 use crate::volume::{BLOCK, Volume};
 use crate::{Device, Error};
 use alloc::vec;
@@ -67,6 +69,53 @@ impl<D: Device> Volume<D> {
         let from = (at - start) as usize;
         buf.copy_from_slice(&whole[from..from + buf.len()]);
         Ok(())
+    }
+
+    /// Gives the file `node` `size` bytes, and the clusters they take, and
+    /// writes its set. The clusters it no longer holds are freed after
+    /// that.
+    fn resize(&mut self, node: &mut Node, size: u64) -> Result<(), Error> {
+        let cluster = self.layout.cluster_size;
+        let mut extent = Extent::of(&node.set, cluster);
+        let count = size.div_ceil(u64::from(cluster));
+        self.grow(&mut extent, count, false)?;
+        let freed = self.shrink(&mut extent, count)?;
+        extent.apply(&mut node.set);
+        node.set.size = size;
+        node.set.valid_size = node.set.valid_size.min(size);
+        node.near = (node.set.first_cluster, 0);
+        self.store(node)?;
+        self.release(&freed)
+    }
+
+    /// Sets the size of the file `node` to `size`, freeing the clusters
+    /// past it or taking the ones it needs, whose bytes read as zeros as
+    /// they lie past its valid data, and marks it modified at `now`.
+    pub fn truncate(&mut self, node: &mut Node, size: u64, now: Stamp) -> Result<(), Error> {
+        self.check_writable()?;
+        if node.is_directory() {
+            return Err(Error::IsDirectory);
+        }
+        node.set.modified = now;
+        node.set.attributes |= ARCHIVE;
+        self.resize(node, size)
+    }
+
+    /// Sets the access and modification times of `node`, when given.
+    pub fn set_times(
+        &mut self,
+        node: &mut Node,
+        accessed: Option<Stamp>,
+        modified: Option<Stamp>,
+    ) -> Result<(), Error> {
+        self.check_writable()?;
+        if let Some(accessed) = accessed {
+            node.set.accessed = accessed;
+        }
+        if let Some(modified) = modified {
+            node.set.modified = modified;
+        }
+        self.store(node)
     }
 
     /// How many bytes the clusters of `node` take.

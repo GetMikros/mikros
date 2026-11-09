@@ -615,3 +615,87 @@ fn lists_in_steps_and_leaves_out_damaged_sets() {
         Some(Error::NotFound)
     );
 }
+
+// Writing.
+
+fn mount_writable(bytes: Vec<u8>) -> Volume<Mem> {
+    let size = bytes.len() as u64;
+    Volume::mount(Mem::new(bytes), size, true).unwrap()
+}
+
+/// Unmounts `volume`, checks it with fsck.exfat, and mounts it again
+/// read-only.
+fn remount(mut volume: Volume<Mem>) -> Volume<Mem> {
+    volume.unmount().unwrap();
+    let bytes = volume.into_device().0;
+    fsck(&bytes);
+    let size = bytes.len() as u64;
+    Volume::mount(Mem::new(bytes), size, false).unwrap()
+}
+
+#[test]
+fn truncates_files_in_a_row_and_in_chains() {
+    let mut b = Builder::new(mkfs(8 * MIB, &[]));
+    let root = b.layout.root_cluster;
+    b.file(root, "a", &[], 0, 0);
+    b.file(root, "b", &[], 0, 0);
+    let mut volume = mount_writable(b.bytes);
+    let cluster = u64::from(volume.layout().cluster_size);
+    let free = volume.free_clusters();
+    let mut a = volume.find(Dir::Root, "a").unwrap();
+    let mut b = volume.find(Dir::Root, "b").unwrap();
+    volume.truncate(&mut a, 2 * cluster + 1, stamp()).unwrap();
+    assert!(a.set.contiguous());
+    // Growing while the clusters after it are free keeps the row.
+    volume.truncate(&mut a, 4 * cluster, stamp()).unwrap();
+    assert!(a.set.contiguous());
+    // Once another file takes the cluster after it, it needs a chain.
+    volume.truncate(&mut b, 1, stamp()).unwrap();
+    volume.truncate(&mut a, 6 * cluster, stamp()).unwrap();
+    assert!(!a.set.contiguous());
+    assert_eq!(volume.allocated(&a).unwrap(), 6 * cluster);
+    assert_eq!(volume.free_clusters(), free - 7);
+    // The bytes it gained lie past its valid data.
+    assert!(read_all(&mut volume, &mut a).iter().all(|&x| x == 0));
+    volume.truncate(&mut a, 2 * cluster, stamp()).unwrap();
+    assert_eq!(volume.free_clusters(), free - 3);
+    volume.truncate(&mut b, 0, stamp()).unwrap();
+    assert_eq!((volume.allocated(&b).unwrap(), b.set.first_cluster), (0, 0));
+    // Two seconds later, in UTC.
+    let later = Stamp {
+        timestamp: stamp().timestamp + 1,
+        increment: 0,
+        utc_offset: 0x80,
+    };
+    volume.set_times(&mut b, Some(later), Some(later)).unwrap();
+    let mut volume = remount(volume);
+    assert_eq!(volume.free_clusters(), free - 2);
+    let a = volume.find(Dir::Root, "A").unwrap();
+    assert_eq!((a.size(), a.modified()), (2 * cluster, stamp()));
+    let b = volume.find(Dir::Root, "b").unwrap();
+    assert_eq!((b.size(), b.accessed(), b.modified()), (0, later, later));
+}
+
+#[test]
+fn refuses_to_truncate_when_read_only_or_full() {
+    let mut b = Builder::new(mkfs(8 * MIB, &[]));
+    let root = b.layout.root_cluster;
+    b.file(root, "f", &[], 0, 0);
+    let size = b.bytes.len() as u64;
+    let mut volume = Volume::mount(Mem::new(b.bytes), size, false).unwrap();
+    let mut f = volume.find(Dir::Root, "f").unwrap();
+    let refused = volume.truncate(&mut f, 10, stamp());
+    assert_eq!(refused.err(), Some(Error::ReadOnly));
+    let mut volume = mount_writable(volume.into_device().0);
+    let mut f = volume.find(Dir::Root, "f").unwrap();
+    let free = volume.free_clusters();
+    let cluster = u64::from(volume.layout().cluster_size);
+    let too_big = volume.truncate(&mut f, u64::from(free + 1) * cluster, stamp());
+    assert_eq!(too_big.err(), Some(Error::NoSpace));
+    assert_eq!(volume.free_clusters(), free);
+    volume
+        .truncate(&mut f, u64::from(free) * cluster, stamp())
+        .unwrap();
+    assert_eq!(volume.free_clusters(), 0);
+    remount(volume);
+}

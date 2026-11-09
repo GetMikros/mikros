@@ -160,6 +160,31 @@ impl<D: Device> Volume<D> {
         entry::parse(&set).ok_or(Error::NotFound)
     }
 
+    /// Writes the file entry and stream extension of `node`'s set over
+    /// the set where it lies, keeping its name and any other secondary
+    /// entries, with the checksum of the whole set again.
+    pub(crate) fn store(&mut self, node: &Node) -> Result<(), Error> {
+        let mut file = [0u8; ENTRY];
+        let first = self.entry_at(node.parent, node.slot)?;
+        self.disk.read(first, &mut file)?;
+        let count = usize::from(file[1]) + 1;
+        if file[0] != entry::FILE || count < 3 {
+            return Err(Error::Io);
+        }
+        let mut places = Vec::with_capacity(count);
+        let mut set = vec![0u8; count * ENTRY];
+        for (i, e) in set.chunks_mut(ENTRY).enumerate() {
+            let at = self.entry_at(node.parent, node.slot + i as u32)?;
+            self.disk.read(at, e)?;
+            places.push(at);
+        }
+        node.set.write_fields(&mut set);
+        let sum = entry::set_checksum(&set);
+        set[2..4].copy_from_slice(&sum.to_le_bytes());
+        self.disk.write(places[1], &set[ENTRY..2 * ENTRY])?;
+        self.disk.write(places[0], &set[..ENTRY])
+    }
+
     /// The node of `set`, whose file entry is entry `slot` of `dir`. The
     /// place of a directory is kept, for finding its entries.
     pub(crate) fn node(&mut self, dir: Dir, slot: u32, set: Set) -> Node {
