@@ -10068,6 +10068,68 @@ mod manager {
         }
     }
 
+    /// The `root-disk` scenario: serves `tests/root.img`, whose drivers
+    /// bring up the root file system and the EFI system partition from
+    /// the boot disk, on whichever controller the runner put it, and
+    /// stops QEMU with `PASSED` once the process manager has switched to
+    /// the root and serves `/boot/efi`, or with `FAILED`.
+    pub fn root_disk_scenario(s: &Startup) -> i64 {
+        // The root's disk, its partitions and file systems take about two
+        // minutes when the processor is emulated.
+        const ROOT_SECONDS: i64 = 300;
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: published device.filesystem root for device",
+                1,
+            ),
+            (
+                b"device-manager: published device.filesystem esp for device",
+                1,
+            ),
+            (
+                b"process-manager: namespaces come from the root file system",
+                1,
+            ),
+            (
+                b"process-manager: serving the EFI system partition as /boot/efi",
+                1,
+            ),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"driver pci-bus declined",
+            b"driver virtio-blk declined",
+            b"driver nvme declined",
+            b"driver ahci declined",
+            b"driver partition declined",
+            b"driver fat declined",
+            b"driver btrfs declined",
+            b"terminated with code",
+        ];
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(
+                Error,
+                "SCENARIO root-disk: {} failed ({})",
+                f.what,
+                f.status
+            );
+            return 1;
+        }
+        match device_manager_logs(s, b"tests/root.img", false, ROOT_SECONDS, EXPECTED, FAILED) {
+            Ok(true) => {
+                mikros_rt::log!(Info, "SCENARIO root-disk PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO root-disk FAILED"),
+            Err(f) => mikros_rt::log!(
+                Error,
+                "SCENARIO root-disk FAILED: {} failed ({})",
+                f.what,
+                f.status
+            ),
+        }
+        mikros_test::exit_qemu(mikros_test::FAILED)
+    }
+
     /// The `power-off` scenario: serves `tests/power.img`, whose power
     /// probe shuts the machine down once the runner presses the power
     /// button, and waits for the machine to go off; it returns 1 only when
@@ -10476,6 +10538,7 @@ mod bootfs {
                         "ports.img",
                         "power.img",
                         "restart.img",
+                        "root.img",
                         "services.img",
                         "time.img",
                         "tmpfs.img",
@@ -10993,6 +11056,8 @@ fn scenario(s: &Startup) -> Option<i64> {
         "power-off" => manager::power_off_scenario(s),
         // The runner unplugs the USB disk once the volumes probe used it.
         "usb-volumes" => manager::usb_volumes_scenario(s),
+        // The runner puts the boot disk on an NVMe or an AHCI controller.
+        "root-disk" => manager::root_disk_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.
         "wait" => {
             log!(Info, "SCENARIO waiting");

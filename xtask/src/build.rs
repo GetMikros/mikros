@@ -987,6 +987,32 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             ]);
             let volumes_image = device_image("volumes.img", &[], &volumes_files)?;
             println!("built    {}", volumes_image.display());
+            // The root disk runs serve this image: the PCI bus driver, the
+            // drivers of the disk controllers, the partition, FAT and btrfs
+            // drivers, and the log service, from the PCI test's files,
+            // without test drivers.
+            let root_drivers = [
+                "pci-bus",
+                "virtio-blk",
+                "nvme",
+                "ahci",
+                "partition",
+                "fat",
+                "btrfs",
+            ];
+            let root_files: Vec<(String, PathBuf)> = pci_bus_files
+                .iter()
+                .filter(|(at, _)| {
+                    root_drivers
+                        .iter()
+                        .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
+                        || at.contains("log-service")
+                        || at.ends_with("services/log.yaml")
+                })
+                .cloned()
+                .collect();
+            let root_image = device_image("root.img", &[], &root_files)?;
+            println!("built    {}", root_image.display());
             let members = [
                 ("tests/accounts.img", accounts_image.as_path()),
                 ("tests/broker.img", broker_image.as_path()),
@@ -1002,6 +1028,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/power.img", power_image.as_path()),
                 ("tests/pci.img", pci_image.as_path()),
                 ("tests/volumes.img", volumes_image.as_path()),
+                ("tests/root.img", root_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),

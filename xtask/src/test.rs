@@ -42,7 +42,7 @@ const TEST_MEMORY: &str = "3G";
 
 /// The value the test init writes to `isa-debug-exit` when every test
 /// passed; QEMU exits with twice the value plus one.
-const PASSED: i32 = 0x10 * 2 + 1;
+pub(crate) const PASSED: i32 = 0x10 * 2 + 1;
 
 /// The line that marks a kernel panic in the serial output.
 const PANIC_LINE: &str = "KERNEL PANIC:";
@@ -149,7 +149,7 @@ fn test_dir(kind: Kind) -> PathBuf {
 
 /// Whether a run passed, given QEMU's exit code and the serial output,
 /// or why it failed.
-fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
+pub(crate) fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
     if serial.lines().any(|l| l.contains(PANIC_LINE)) {
         return Err("the kernel panicked".into());
     }
@@ -490,6 +490,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("USB volumes run passed");
+    crate::root_disk::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("root-disk"),
+        timeout,
+    )?;
+    println!("root disk runs passed");
     Ok(())
 }
 

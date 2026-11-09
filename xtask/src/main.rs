@@ -27,6 +27,7 @@ mod port_tests;
 mod ports;
 mod power;
 mod qemu;
+mod root_disk;
 mod run;
 mod rust_std;
 mod scenario;
