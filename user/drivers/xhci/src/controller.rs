@@ -5,8 +5,9 @@
 
 use crate::regs::{Regs, USBCMD_INTE, USBCMD_RS, USBSTS_EINT};
 use crate::ring::{
-    EventRing, Ring, TRB_COMMAND_COMPLETION, TRB_PORT_STATUS_CHANGE, Trb, kind,
+    EventRing, Ring, TRB_COMMAND_COMPLETION, TRB_PORT_STATUS_CHANGE, TRB_TRANSFER_EVENT, Trb, kind,
 };
+use crate::transfer::Endpoint;
 use crate::wait::{Sender, Waiters, oneshot};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::Rc;
@@ -59,6 +60,8 @@ pub struct Controller {
     command_room: Waiters,
     waiting: RefCell<BTreeMap<u64, Sender<Result<Completed, Status>>>>,
     events: EventRing,
+    /// The transfer events' takers, by slot ID and endpoint ID.
+    endpoints: RefCell<BTreeMap<(u8, u8), Rc<Endpoint>>>,
     /// Root hub ports with a status change that was not looked at yet.
     changed: RefCell<BTreeSet<u8>>,
     port_changes: Waiters,
@@ -127,6 +130,7 @@ impl Controller {
             command_room: Waiters::default(),
             waiting: RefCell::new(BTreeMap::new()),
             events,
+            endpoints: RefCell::new(BTreeMap::new()),
             changed: RefCell::new(BTreeSet::new()),
             port_changes: Waiters::default(),
             _interrupts: RefCell::new(Vec::new()),
@@ -225,6 +229,13 @@ impl Controller {
                     self.commands.release(1);
                     self.command_room.wake();
                 }
+                TRB_TRANSFER_EVENT => {
+                    let key = ((trb[3] >> 24) as u8, ((trb[3] >> 16) & 0x1F) as u8);
+                    let taker = self.endpoints.borrow().get(&key).cloned();
+                    if let Some(taker) = taker {
+                        taker.event(&trb);
+                    }
+                }
                 TRB_PORT_STATUS_CHANGE => {
                     self.changed.borrow_mut().insert((trb[0] >> 24) as u8);
                     self.port_changes.wake();
@@ -271,6 +282,21 @@ impl Controller {
     /// takes it away with 0.
     pub fn set_device_context(&self, slot: u8, at: u64) {
         self.dcbaa.write64(8 * u64::from(slot), at);
+    }
+
+    /// Sends the transfer events of endpoint `endpoint` of `slot` to
+    /// `taker`, or to nothing with `None`.
+    pub fn set_endpoint(&self, slot: u8, endpoint: u8, taker: Option<Rc<Endpoint>>) {
+        let mut endpoints = self.endpoints.borrow_mut();
+        match taker {
+            Some(taker) => endpoints.insert((slot, endpoint), taker),
+            None => endpoints.remove(&(slot, endpoint)),
+        };
+    }
+
+    /// The endpoint `endpoint` of `slot`.
+    pub fn endpoint(&self, slot: u8, endpoint: u8) -> Option<Rc<Endpoint>> {
+        self.endpoints.borrow().get(&(slot, endpoint)).cloned()
     }
 
     /// Waits for a root hub port with a status change and returns it.

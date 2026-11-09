@@ -13,6 +13,7 @@ extern crate alloc;
 mod controller;
 mod regs;
 mod ring;
+mod transfer;
 mod wait;
 
 use alloc::rc::Rc;
