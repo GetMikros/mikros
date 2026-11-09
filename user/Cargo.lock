@@ -640,6 +640,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xhci"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-storage",
+]
+
+[[package]]
 name = "yaml-rust2"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

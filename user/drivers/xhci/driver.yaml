@@ -1,0 +1,7 @@
+# The manifest of the xHCI driver, the USB host process of one
+# controller, installed as usr/lib/drivers/xhci/driver.yaml.
+name: xhci
+binary: /usr/lib/drivers/xhci/xhci
+match: [pci:c0c0330]
+kind: normal
+needs: [dma]
