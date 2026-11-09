@@ -71,6 +71,18 @@ type Found = extern "C" fn(*mut c_void, *const RawDevice);
 
 unsafe extern "C" {
     fn mikros_acpi_devices(found: Found, context: *mut c_void) -> Status;
+    fn mikros_acpi_century() -> u8;
+}
+
+/// The CMOS index of the real-time clock's century register that the
+/// FADT names: None when it names none.
+pub fn century() -> Option<u8> {
+    // SAFETY: the glue takes no arguments; ACPICA has parsed the FADT
+    // once it runs.
+    match unsafe { mikros_acpi_century() } {
+        0 => None,
+        index => Some(index),
+    }
 }
 
 /// The string at `text`, or an empty one for none.

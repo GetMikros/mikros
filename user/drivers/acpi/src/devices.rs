@@ -4,7 +4,8 @@
 //! each requested shared. It is named after the last segment of its path,
 //! in lowercase. The PS/2 keyboard and mouse are one device, `i8042`,
 //! with the hardware ID `acpi:i8042`, the keyboard's path and the
-//! resources of both.
+//! resources of both. A CMOS real-time clock also has the property
+//! `century`, the index of its century register, when the FADT names one.
 
 use crate::host::Host;
 use alloc::string::{String, ToString};
@@ -21,6 +22,9 @@ const KIND_IRQ: u32 = 3;
 /// The IDs of PS/2 keyboards and mice, as `_HID` or `_CID`.
 const KEYBOARDS: [&str; 2] = ["PNP0303", "PNP030B"];
 const MICE: [&str; 2] = ["PNP0F03", "PNP0F13"];
+/// The IDs of CMOS real-time clocks, which get the FADT's century
+/// register as the property `century`.
+const CLOCKS: [&str; 3] = ["PNP0B00", "PNP0B01", "PNP0B02"];
 const PS2_NAME: &str = "i8042";
 const PS2_ID: &str = "acpi:i8042";
 /// What `AddDevice` takes at most.
@@ -76,11 +80,17 @@ pub fn add(host: &Host) -> Vec<u64> {
             mouse = Some(device);
         } else {
             let ids = hardware_ids(&device);
+            let century = match is_one_of(&device, &CLOCKS) {
+                true => mikros_acpica::devices::century(),
+                false => None,
+            };
+            let name = name_of(&device.path);
             added.extend(add_one(
                 host,
-                name_of(&device.path),
+                name,
                 ids,
                 &device.path,
+                century,
                 &device.resources,
             ));
         }
@@ -92,19 +102,28 @@ pub fn add(host: &Host) -> Vec<u64> {
             .flat_map(|d| d.resources.iter().copied())
             .collect();
         let ids = vec![PS2_ID.to_string()];
-        added.extend(add_one(host, PS2_NAME.into(), ids, &first.path, &resources));
+        added.extend(add_one(
+            host,
+            PS2_NAME.into(),
+            ids,
+            &first.path,
+            None,
+            &resources,
+        ));
     }
     added
 }
 
-/// Adds one device, with a shared resource of the device manager for
-/// each of `resources` that it grants: its ID, or None when it could not
-/// be added.
+/// Adds one device, with the property `century` when `century` is the
+/// index of a century register, and a shared resource of the device
+/// manager for each of `resources` that it grants: its ID, or None when
+/// it could not be added.
 fn add_one(
     host: &Host,
     name: String,
     hardware_ids: Vec<String>,
     path: &str,
+    century: Option<u8>,
     resources: &[Resource],
 ) -> Option<u64> {
     let mut granted = Vec::new();
@@ -117,10 +136,16 @@ fn add_one(
         // A refused resource is logged by the host and left out.
         granted.extend(host.request(kind, r.base, r.size, true));
     }
-    let properties = vec![Property {
+    let mut properties = vec![Property {
         key: "path".into(),
         value: path.into(),
     }];
+    if let Some(century) = century {
+        properties.push(Property {
+            key: "century".into(),
+            value: format!("{century:#x}"),
+        });
+    }
     let added = host
         .manager()
         .add_device(name.clone(), hardware_ids, properties, granted, FOREVER);

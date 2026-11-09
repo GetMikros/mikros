@@ -96,3 +96,10 @@ UINT32 mikros_acpi_devices(void (*found)(void *context, const struct mikros_acpi
     return AcpiWalkNamespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT, ACPI_UINT32_MAX, visit, NULL,
                              &walk, NULL);
 }
+
+/* The CMOS index of the RTC's century register that the FADT names, or 0
+ * when it names none. */
+UINT8 mikros_acpi_century(void)
+{
+    return AcpiGbl_FADT.Century;
+}
