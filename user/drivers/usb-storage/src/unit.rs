@@ -22,8 +22,13 @@ const READ_16: u8 = 0x88;
 const WRITE_16: u8 = 0x8A;
 const SERVICE_ACTION_IN_16: u8 = 0x9E;
 const READ_CAPACITY_16: u8 = 0x10;
-/// The sense key of requests the unit does not support.
+/// The sense keys of requests the unit does not support, and of a unit
+/// that was reset or changed, as after the host controller's driver
+/// restarted.
 const ILLEGAL_REQUEST: u8 = 0x5;
+const UNIT_ATTENTION: u8 = 0x6;
+/// How often a command goes again after a unit attention.
+const ATTENTIONS_MAX: u32 = 3;
 /// The peripheral device type of direct-access block devices.
 const DIRECT_ACCESS: u8 = 0;
 /// How often TEST UNIT READY is sent until the unit is ready.
@@ -67,16 +72,24 @@ async fn data_in(
 }
 
 /// Sends `command` to `lun`. When the unit reports that it failed, reads
-/// its sense data with REQUEST SENSE, and fails with its sense key.
+/// its sense data with REQUEST SENSE, and fails with its sense key,
+/// after sending the command again a few times for a unit attention.
 async fn run(bot: &Bot, lun: u8, command: &[u8], data: Data<'_>) -> Result<u32, Failure> {
-    let result = bot.command(lun, command, data).await;
-    if result != Err(Failure::Failed) {
-        return result;
-    }
-    let sense = [REQUEST_SENSE, 0, 0, 0, 18, 0];
-    match bot.command(lun, &sense, Data::In(18)).await {
-        Ok(moved) if moved >= 3 => Err(Failure::Sense(bot.read(DATA_AT, 3)[2] & 0xF)),
-        _ => Err(Failure::Failed),
+    let mut attentions = 0;
+    loop {
+        let result = bot.command(lun, command, data).await;
+        if result != Err(Failure::Failed) {
+            return result;
+        }
+        let sense = [REQUEST_SENSE, 0, 0, 0, 18, 0];
+        let failure = match bot.command(lun, &sense, Data::In(18)).await {
+            Ok(moved) if moved >= 3 => Failure::Sense(bot.read(DATA_AT, 3)[2] & 0xF),
+            _ => Failure::Failed,
+        };
+        attentions += 1;
+        if failure != Failure::Sense(UNIT_ATTENTION) || attentions > ATTENTIONS_MAX {
+            return Err(failure);
+        }
     }
 }
 

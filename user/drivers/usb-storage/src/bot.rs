@@ -1,11 +1,17 @@
 //! The Bulk-Only Transport: command block wrappers, the data stage and
 //! command status wrappers on the interface's bulk endpoints, one
 //! command at a time, with the class requests and the reset recovery.
+//! A command whose interface channel closed without a reply, as when the
+//! host controller's driver ended, goes again on the channel that
+//! `Reconnect` gives once that driver restarted. A device that the
+//! driver found gone fails its commands at once.
 
 use crate::lock::Lock;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::Cell;
-use mikros_rt::interfaces::__midl::OwnedHandle;
+use core::cell::{Cell, RefCell};
+use mikros_rt::exec::Reactor;
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::usb::{InterfaceAsyncClient, Setup};
 use mikros_rt::sys;
@@ -26,6 +32,11 @@ const MASS_STORAGE_RESET: u8 = 0xFF;
 const GET_MAX_LUN: u8 = 0xFE;
 /// How long a command may take.
 const COMMAND_LIMIT: i64 = 20_000 * MS;
+/// How long a command whose channel closed waits for a new one: the
+/// device manager keeps a restarted driver's children for 10 seconds.
+const RECONNECT_LIMIT: i64 = 15_000 * MS;
+/// How often a command goes on a new channel before it fails.
+const CHANNELS_MAX: u32 = 3;
 const PERM_READ: u32 = 1 << 0;
 const PERM_WRITE: u32 = 1 << 1;
 const SAME_RIGHTS: u32 = 1 << 31;
@@ -52,6 +63,7 @@ impl From<Failure> for Status {
 }
 
 /// Where a command's data stage goes.
+#[derive(Clone, Copy)]
 pub enum Data<'a> {
     None,
     /// `length` bytes from the device into the driver's page.
@@ -66,11 +78,15 @@ pub enum Data<'a> {
     },
 }
 
-/// The transport of one interface: its client, its bulk endpoints, the
-/// page that holds the wrappers, and the lock that keeps one command at
-/// a time.
+/// The transport of one interface: its client, which `reconnect`
+/// replaces, how many channels it has had and the last that closed
+/// without a reply, its bulk endpoints, the page that holds the
+/// wrappers, and the lock that keeps one command at a time.
 pub struct Bot {
-    pub interface: InterfaceAsyncClient,
+    interface: RefCell<Rc<InterfaceAsyncClient>>,
+    channels: Cell<u64>,
+    closed: Cell<Option<u64>>,
+    reactor: Reactor,
     pub number: u8,
     bulk_in: u8,
     bulk_out: u8,
@@ -95,22 +111,14 @@ fn duplicate(handle: &OwnedHandle) -> Result<OwnedHandle, Status> {
     Ok(unsafe { OwnedHandle::from_raw(out) })
 }
 
-/// The status of a reply on the interface's channel.
-fn reply<T>(
-    reply: Result<Result<T, Status>, mikros_rt::interfaces::__midl::Error>,
-) -> Result<T, Status> {
-    match reply {
-        Ok(result) => result,
-        Err(_) => Err(Status::PeerClosed),
-    }
-}
-
 impl Bot {
-    /// The transport of interface `number` through `interface`, on the
-    /// bulk endpoints `bulk_in` and `bulk_out`, with a page of pinned
-    /// memory from the `DMA` resource `dma` mapped into `process`.
+    /// The transport of interface `number` through `interface`, served
+    /// on the executor of `reactor`, on the bulk endpoints `bulk_in` and
+    /// `bulk_out`, with a page of pinned memory from the `DMA` resource
+    /// `dma` mapped into `process`.
     pub fn new(
         interface: InterfaceAsyncClient,
+        reactor: &Reactor,
         number: u8,
         bulk_in: u8,
         bulk_out: u8,
@@ -136,7 +144,10 @@ impl Bot {
             )
         })?;
         Ok(Bot {
-            interface,
+            interface: RefCell::new(Rc::new(interface)),
+            channels: Cell::new(0),
+            closed: Cell::new(None),
+            reactor: reactor.clone(),
             number,
             bulk_in,
             bulk_out,
@@ -145,6 +156,49 @@ impl Bot {
             tag: Cell::new(0),
             lock: Lock::default(),
         })
+    }
+
+    /// Replaces the interface channel with `bus`, which `Reconnect` gives
+    /// once the host controller's driver restarted.
+    pub fn reconnect(&self, bus: OwnedHandle) {
+        let client = InterfaceAsyncClient::new(ClientEnd::new(bus), self.reactor.clone());
+        *self.interface.borrow_mut() = Rc::new(client);
+        self.channels.set(self.channels.get() + 1);
+    }
+
+    /// The client of the interface channel now.
+    fn interface(&self) -> Rc<InterfaceAsyncClient> {
+        self.interface.borrow().clone()
+    }
+
+    /// The status of a reply on the interface channel `channel`:
+    /// `PEER_CLOSED`, also when the channel closed without one, which is
+    /// then kept.
+    fn reply<T>(
+        &self,
+        channel: u64,
+        reply: Result<Result<T, Status>, mikros_rt::interfaces::__midl::Error>,
+    ) -> Result<T, Status> {
+        match reply {
+            Ok(result) => result,
+            Err(_) => {
+                self.closed.set(Some(channel));
+                Err(Status::PeerClosed)
+            }
+        }
+    }
+
+    /// Waits until a channel other than channel `channel` comes, and
+    /// says whether it came within `RECONNECT_LIMIT`.
+    async fn new_channel(&self, channel: u64) -> bool {
+        let limit = now() + RECONNECT_LIMIT;
+        while self.channels.get() == channel {
+            if now() >= limit {
+                return false;
+            }
+            let _ = self.reactor.sleep_until(now() + 10 * MS).await;
+        }
+        true
     }
 
     fn write(&self, offset: u64, bytes: &[u8]) {
@@ -175,11 +229,12 @@ impl Bot {
             index: u16::from(self.number),
             length,
         };
+        let channel = self.channels.get();
         let sent = self
-            .interface
+            .interface()
             .control_transfer(setup, Vec::new(), now() + COMMAND_LIMIT)
             .await;
-        reply(sent).map(|r| r.data)
+        self.reply(channel, sent).map(|r| r.data)
     }
 
     /// The number of logical units, from Get Max LUN: 1 when the device
@@ -200,15 +255,18 @@ impl Bot {
         length: u32,
     ) -> Result<u32, Status> {
         let buffer = duplicate(memory)?;
+        let channel = self.channels.get();
         let sent = self
-            .interface
+            .interface()
             .bulk_transfer(endpoint, buffer, offset, length, now() + COMMAND_LIMIT)
             .await;
-        reply(sent).map(|r| r.actual)
+        self.reply(channel, sent).map(|r| r.actual)
     }
 
     async fn clear_halt(&self, endpoint: u8) -> Result<(), Status> {
-        reply(self.interface.clear_halt(endpoint).await).map(|_| ())
+        let channel = self.channels.get();
+        let cleared = self.interface().clear_halt(endpoint).await;
+        self.reply(channel, cleared).map(|_| ())
     }
 
     /// The reset recovery: a Bulk-Only Mass Storage Reset, and clearing
@@ -220,10 +278,36 @@ impl Bot {
     }
 
     /// Sends the command block `command` to logical unit `lun` with the
+    /// data stage `data`, and reads its status, as `command_once` does.
+    /// When the interface channel closed without a reply, the command
+    /// goes again on the next channel that comes, as long as one comes in
+    /// time.
+    pub async fn command(&self, lun: u8, command: &[u8], data: Data<'_>) -> Result<u32, Failure> {
+        let mut tries = 0;
+        loop {
+            let channel = self.channels.get();
+            let result = self.command_once(lun, command, data).await;
+            tries += 1;
+            if result != Err(Failure::Transport(Status::PeerClosed))
+                || self.closed.get() != Some(channel)
+                || tries > CHANNELS_MAX
+                || !self.new_channel(channel).await
+            {
+                return result;
+            }
+            mikros_rt::log!(
+                Info,
+                "usb-storage: interface {} sends a command again on a new channel",
+                self.number
+            );
+        }
+    }
+
+    /// Sends the command block `command` to logical unit `lun` with the
     /// data stage `data`, and reads its status. Returns the bytes the
     /// data stage moved. A stalled data stage has its endpoint's halt
     /// cleared; an invalid status wrapper leads to the reset recovery.
-    pub async fn command(&self, lun: u8, command: &[u8], data: Data<'_>) -> Result<u32, Failure> {
+    async fn command_once(&self, lun: u8, command: &[u8], data: Data<'_>) -> Result<u32, Failure> {
         let _held = self.lock.lock().await;
         let transport = Failure::Transport;
         let tag = self.tag.get().wrapping_add(1);

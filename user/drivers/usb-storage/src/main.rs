@@ -9,6 +9,9 @@
 //! serves, and its raw access service is published with the class
 //! `storage`. The buffers of those connections are pinned memory objects
 //! that the driver passes to the host process with each transfer.
+//! `Reconnect` gives a new interface channel once the host controller's
+//! driver restarted, on which the commands that had not completed go
+//! again.
 
 #![no_std]
 #![no_main]
@@ -29,8 +32,9 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse, DriverRequest,
-    DriverStartRequest, DriverStartResponse, DriverStopResponse,
+    DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse,
+    DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
+    DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::Provider;
@@ -77,18 +81,18 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let server = Rc::new(DriverAsyncServer::new(end, reactor.clone()));
     let process = managed.header.process.raw();
     let disks: Disks = Rc::default();
-    let mut started = false;
+    let mut started: Option<Rc<Bot>> = None;
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
             let _ = match request {
-                DriverRequest::Start(_, responder) if started => {
+                DriverRequest::Start(_, responder) if started.is_some() => {
                     responder.reply(s, Err(Status::BadState))
                 }
                 DriverRequest::Start(request, responder) => {
                     match start(request, process, &reactor).await {
                         Ok((bot, dma, serial, manager)) => {
-                            started = true;
+                            started = Some(bot.clone());
                             let task = add_disks(
                                 bot,
                                 dma,
@@ -108,9 +112,15 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let _ = responder.reply(s, DriverStopResponse {});
                     return 0;
                 }
-                DriverRequest::Reconnect(_, responder) => {
-                    responder.reply(s, Err(Status::NotSupported))
-                }
+                // A restarted host controller driver gives a new interface
+                // channel.
+                DriverRequest::Reconnect(request, responder) => match &started {
+                    Some(bot) => {
+                        bot.reconnect(request.bus);
+                        responder.reply(s, Ok(DriverReconnectResponse {}))
+                    }
+                    None => responder.reply(s, Err(Status::BadState)),
+                },
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
                 }
@@ -186,7 +196,15 @@ async fn start(
         found.map(|e| e.address).ok_or(Status::InvalidArgs)
     };
     let (bulk_in, bulk_out) = (bulk(true)?, bulk(false)?);
-    let bot = Bot::new(interface, info.number, bulk_in, bulk_out, &dma, process)?;
+    let bot = Bot::new(
+        interface,
+        reactor,
+        info.number,
+        bulk_in,
+        bulk_out,
+        &dma,
+        process,
+    )?;
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     Ok((Rc::new(bot), Rc::new(dma), info.serial, manager))
 }
