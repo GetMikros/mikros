@@ -98,12 +98,14 @@ async fn serve(
     reactor: Reactor,
     client: ClientIdentity,
 ) {
+    // The connection hears of the power button from the start, which
+    // needs no permission.
+    let server = Rc::new(AcpiAsyncServer::new(end, reactor));
+    acpi.connections.borrow_mut().push(Rc::downgrade(&server));
     // Asked once, when the connection is made, and kept for it: the
     // service manager's connection keeps it after the broker stops at
     // shutdown.
     let may_control = acpi.may_control(&client).await;
-    let server = Rc::new(AcpiAsyncServer::new(end, reactor));
-    acpi.connections.borrow_mut().push(Rc::downgrade(&server));
     while let Ok(request) = server.next().await {
         let s = server.server();
         let _ = match request {
@@ -171,6 +173,7 @@ pub fn watch_button(acpi: Rc<Acpi>, reactor: Reactor, spawner: &Spawner) -> bool
         while reactor.signals(event.raw(), SIGNALED).await.is_ok() {
             // SAFETY: the call takes no pointers.
             unsafe { sys::object_signal(event.raw(), SIGNALED, 0) };
+            mikros_rt::log!(Info, "acpi: the power button was pressed");
             acpi.pressed();
         }
     });

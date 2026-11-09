@@ -3,9 +3,9 @@
 //! It drives the `platform:acpi` device. `Start` takes the address of the
 //! RSDP from the device's `rsdp` property, readies ACPICA's operating
 //! system layer with resources from the device manager's
-//! `RequestResource`, and starts ACPICA. The server then publishes the
-//! `acpi` service class and adds the devices of the namespace, as
-//! `devices` says. When the `Driver` channel closes once it has started,
+//! `RequestResource`, and starts ACPICA. The server then adds the devices
+//! of the namespace, as `devices` says, and publishes the `acpi` service
+//! class. When the `Driver` channel closes once it has started,
 //! as when the device manager exits at shutdown, the server goes on
 //! serving its connections. `ConnectChild` for a device the server added
 //! succeeds and keeps the channel, on which nothing is served; the
@@ -153,6 +153,9 @@ async fn start(
     }
     let acpi = Rc::new(Acpi::new(broker(&directory, reactor).await));
     service::watch_button(acpi.clone(), reactor.clone(), spawner);
+    // The devices come first, as adding them holds up this thread, so
+    // that the service is served as soon as it is published.
+    let children = devices::add(host);
     let (client, server) = endpoints::<Provider>().map_err(|_| Status::NoResources)?;
     let published = host
         .manager()
@@ -164,7 +167,7 @@ async fn start(
     let task = service::serve_provider(acpi, server, reactor.clone(), spawner.clone());
     spawner.spawn(task);
     Ok(Started {
-        children: devices::add(host),
+        children,
         buses: Vec::new(),
     })
 }
