@@ -1,11 +1,11 @@
-// MIKSPEC-0054.R5
+// MIKSPEC-0054.R13
 
 library mikros.time;
 using mikros.base;
 
 protocol Clock {
     @1 GetUtc() -> (utc base.UtcTime);
-    @2 GetTimePage() -> (page handle<MemoryObject, READ | MAP>);
+    @2 GetTimePage() -> (page handle<MemoryObject, DUPLICATE | TRANSFER | READ | MAP | INSPECT>);
     @3 SetUtc(utc base.UtcTime) -> () error base.Status;
     @4 GetTimezone() -> (name string<64>);
     @5 SetTimezone(name string<64>) -> () error base.Status;

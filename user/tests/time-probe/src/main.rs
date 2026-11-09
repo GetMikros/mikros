@@ -4,7 +4,9 @@
 //! UTC is the boot time plus the monotonic clock, as the time page also
 //! says, that the page cannot be written, that setting the time changes
 //! it and is sent to watchers, and that without a root file system the
-//! zone is UTC and cannot be set. As `time-guest`, which holds no
+//! zone is UTC and cannot be set, and that the time page of its startup,
+//! when the process manager had one to give, says the same as the
+//! service. As `time-guest`, which holds no
 //! permission, it checks that it can neither set the time nor the zone.
 //! It exits with 0 when every check passed, or with the number of the
 //! first that failed.
@@ -59,9 +61,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return 1;
     };
     let process = managed.header.process.raw();
+    let startup_page = managed.header.time_page.as_ref().map(|page| page.raw());
     let result = match managed.header.app_id.as_str() {
         GUEST => guest(&clock),
-        _ => probe(&clock, &managed.handles, process),
+        _ => probe(&clock, &managed.handles, process, startup_page),
     };
     match result {
         Ok(()) => 0,
@@ -131,7 +134,12 @@ fn page_offset(process: sys::Handle, page: sys::Handle) -> Option<(u32, i64)> {
     Some(read)
 }
 
-fn probe(clock: &ClockClient, handles: &[StartupHandle], process: sys::Handle) -> Result<(), i64> {
+fn probe(
+    clock: &ClockClient,
+    handles: &[StartupHandle],
+    process: sys::Handle,
+    startup_page: Option<sys::Handle>,
+) -> Result<(), i64> {
     // UTC is the boot time plus the monotonic clock.
     let boot = boot_time(handles).ok_or(2)?;
     let utc = clock.get_utc(FOREVER).map_err(|_| 3)?.utc;
@@ -186,10 +194,23 @@ fn probe(clock: &ClockClient, handles: &[StartupHandle], process: sys::Handle) -
     if zone != "UTC" {
         return Err(12);
     }
-    match clock.set_timezone("Europe/Berlin".into(), FOREVER) {
-        Ok(Err(Status::BadState)) => Ok(()),
-        _ => Err(13),
+    if !matches!(
+        clock.set_timezone("Europe/Berlin".into(), FOREVER),
+        Ok(Err(Status::BadState))
+    ) {
+        return Err(13);
     }
+    // The process manager gets the page once the service runs, and none
+    // waits for it; when it had the page as the probe started, the
+    // probe's startup holds the page that the service writes.
+    if let Some(page) = startup_page {
+        let (version, offset) = page_offset(process, page).ok_or(14)?;
+        let utc = clock.get_utc(FOREVER).map_err(|_| 14)?.utc;
+        if version != 1 || (utc - (now() + offset)).abs() > SLACK {
+            return Err(14);
+        }
+    }
+    Ok(())
 }
 
 fn guest(clock: &ClockClient) -> Result<(), i64> {

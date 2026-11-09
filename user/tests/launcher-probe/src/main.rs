@@ -100,6 +100,7 @@ const PAGE_SIZE: u64 = 4096;
 /// UTC minus monotonic time on the time page the probe hands out: 1
 /// January 2024.
 const UTC_OFFSET: i64 = 1_704_067_200 * 1_000_000_000;
+const DUPLICATE: u32 = 1 << 0;
 const TRANSFER: u32 = 1 << 1;
 const READ: u32 = 1 << 2;
 const MAP: u32 = 1 << 5;
@@ -227,7 +228,8 @@ async fn serve_clock(end: ServerEnd<Clock>, reactor: Reactor) {
     }
 }
 
-/// A read-only time page whose offset is `UTC_OFFSET`.
+/// A read-only time page whose offset is `UTC_OFFSET`, with the rights
+/// that `GetTimePage` gives.
 fn time_page() -> OwnedHandle {
     let mut page = [0u8; 16];
     page[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -237,7 +239,11 @@ fn time_page() -> OwnedHandle {
     unsafe {
         sys::mem_create(PAGE_SIZE, 0, &mut mem);
         sys::mem_write(mem, 0, page.as_ptr(), page.len() as u64);
-        sys::handle_duplicate(mem, TRANSFER | READ | MAP | INSPECT, &mut read_only);
+        sys::handle_duplicate(
+            mem,
+            DUPLICATE | TRANSFER | READ | MAP | INSPECT,
+            &mut read_only,
+        );
         sys::handle_close(mem);
         OwnedHandle::from_raw(read_only)
     }
