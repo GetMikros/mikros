@@ -3,7 +3,7 @@
 //! through its `filesystem` service as it should.
 
 use crate::fat::{
-    PERM_READ, PERM_WRITE, bytes, expect, failed, locks, logged, map, ok, open, root,
+    PERM_READ, PERM_WRITE, bytes, expect, failed, locks, logged, map, named, ok, open,
 };
 use alloc::format;
 use alloc::string::String;
@@ -12,8 +12,8 @@ use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::btrfs::{SubvolumeInfo, Subvolumes, SubvolumesAsyncClient};
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemAsyncClient, MemoryFlags, Node, NodeAsyncClient, NodeType,
-    OpenFlags, Rights, WatchKind, WatchMask, Watcher, WatcherRequest, WatcherServer,
+    Error, MemoryFlags, Node, NodeAsyncClient, NodeType, OpenFlags, Rights, WatchKind, WatchMask,
+    Watcher, WatcherRequest, WatcherServer,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::sys;
@@ -59,7 +59,7 @@ async fn check(
     reactor: &Reactor,
     process: sys::Handle,
 ) -> Option<()> {
-    let root = root(directory, reactor, "btrfs").await?;
+    let root = named(directory, reactor, "root").await?;
     let info = ok(root.query_filesystem().await)?.info;
     expect(!info.read_only && info.free_bytes > 0 && info.block_size == 4096)?;
     let attributes = ok(root.get_attributes().await)?.attributes;
@@ -481,54 +481,34 @@ async fn case_insensitive(
 }
 
 /// A connection to the `subvolumes` service of the btrfs file system,
-/// whose instance is named as the file system's `filesystem` service is,
-/// once it appears.
+/// whose instance is named as one of the file system's `filesystem`
+/// service is, once it appears. Only btrfs servers publish the service,
+/// so no file system's server is asked anything.
 async fn connect_subvolumes(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
 ) -> Option<SubvolumesAsyncClient> {
     let deadline = crate::now() + PUBLISH_LIMIT;
-    let Ok(Ok(listed)) = directory.list(FILESYSTEM.into()).await else {
-        return None;
-    };
-    for instance in listed.instances {
-        let (client, server) = endpoints::<Filesystem>().ok()?;
-        let connected = directory
-            .connect(
-                FILESYSTEM.into(),
-                Some(instance.clone()),
-                server.into_handle(),
-            )
-            .await;
-        if !matches!(connected, Ok(Ok(_))) {
-            continue;
-        }
-        let fs = FilesystemAsyncClient::new(ClientEnd::new(client.into_handle()), reactor.clone());
-        if !ok(fs.query_filesystem().await).is_some_and(|q| q.info.r#type == "btrfs") {
-            continue;
-        }
-        loop {
-            let (client, server) = endpoints::<Subvolumes>().ok()?;
-            let connected = directory
-                .connect(
-                    SUBVOLUMES.into(),
-                    Some(instance.clone()),
-                    server.into_handle(),
-                )
-                .await;
-            if matches!(connected, Ok(Ok(_))) {
-                return Some(SubvolumesAsyncClient::new(
-                    ClientEnd::new(client.into_handle()),
-                    reactor.clone(),
-                ));
+    loop {
+        if let Ok(Ok(listed)) = directory.list(FILESYSTEM.into()).await {
+            for instance in listed.instances {
+                let (client, server) = endpoints::<Subvolumes>().ok()?;
+                let connected = directory
+                    .connect(SUBVOLUMES.into(), Some(instance), server.into_handle())
+                    .await;
+                if matches!(connected, Ok(Ok(_))) {
+                    return Some(SubvolumesAsyncClient::new(
+                        ClientEnd::new(client.into_handle()),
+                        reactor.clone(),
+                    ));
+                }
             }
-            if crate::now() > deadline {
-                return None;
-            }
-            let _ = reactor.sleep_until(crate::now() + 20_000_000).await;
         }
+        if crate::now() > deadline {
+            return None;
+        }
+        let _ = reactor.sleep_until(crate::now() + 20_000_000).await;
     }
-    None
 }
 
 /// Every subvolume, over as many replies as it takes.

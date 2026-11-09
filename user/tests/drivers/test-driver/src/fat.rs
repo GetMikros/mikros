@@ -33,6 +33,41 @@ pub fn failed<T>(reply: Reply<T>) -> Option<Error> {
     reply.ok()?.err()
 }
 
+/// A connection to the root of `instance` of the `filesystem` service,
+/// read and write, once it appears, without asking any other instance's
+/// server anything.
+pub async fn named(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+    instance: &str,
+) -> Option<NodeAsyncClient> {
+    let deadline = now() + PUBLISH_LIMIT;
+    loop {
+        let listed = directory.list(FILESYSTEM.into()).await;
+        if matches!(&listed, Ok(Ok(l)) if l.instances.iter().any(|i| i == instance)) {
+            let (client, server) = endpoints::<Filesystem>().ok()?;
+            let connected = directory
+                .connect(
+                    FILESYSTEM.into(),
+                    Some(instance.into()),
+                    server.into_handle(),
+                )
+                .await;
+            expect(matches!(connected, Ok(Ok(_))))?;
+            let fs =
+                FilesystemAsyncClient::new(ClientEnd::new(client.into_handle()), reactor.clone());
+            let (node, node_server) = endpoints::<Node>().ok()?;
+            let rights = Rights(Rights::READ.0 | Rights::WRITE.0);
+            ok(fs.get_root(node_server, rights).await)?;
+            return Some(NodeAsyncClient::new(node, reactor.clone()));
+        }
+        if now() > deadline {
+            return None;
+        }
+        let _ = reactor.sleep_until(now() + POLL).await;
+    }
+}
+
 /// A connection to the root of the `filesystem` service whose file
 /// system is of the type `kind`, read and write, once it appears.
 pub async fn root(
