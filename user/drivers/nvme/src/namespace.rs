@@ -9,14 +9,11 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockFlags, BlockInfo};
 use mikros_storage::PAGE;
 
-/// I/O opcodes.
+/// I/O opcodes other than Read and Write, which `Command::read_write`
+/// makes.
 const FLUSH: u8 = 0x00;
-const WRITE: u8 = 0x01;
-const READ: u8 = 0x02;
 const DATASET_MANAGEMENT: u8 = 0x09;
-/// Write's force unit access bit, and Dataset Management's deallocate
-/// attribute.
-const FUA: u32 = 1 << 30;
+/// Dataset Management's deallocate attribute.
 const DEALLOCATE: u32 = 1 << 2;
 /// The ranges one Dataset Management command takes, and the most blocks
 /// in one range.
@@ -90,17 +87,7 @@ impl Namespace {
             }
         };
         let blocks = (len / u64::from(self.block_size)) as u32;
-        let mut cdw12 = blocks - 1;
-        if write && fua {
-            cdw12 |= FUA;
-        }
-        let command = Command {
-            opcode: if write { WRITE } else { READ },
-            nsid: self.nsid,
-            prp1,
-            prp2,
-            cdw: [block as u32, (block >> 32) as u32, cdw12, 0, 0, 0],
-        };
+        let command = Command::read_write(write, self.nsid, block, blocks, prp1, prp2, fua);
         let done = self.controller.io.submit(command).await;
         if let Some(page) = list {
             self.controller.give_page(page);

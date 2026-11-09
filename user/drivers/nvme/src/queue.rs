@@ -19,16 +19,7 @@ use mikros_storage::{Contiguous, now};
 const SQE: u64 = 64;
 const CQE: u64 = 16;
 
-/// A command, without its command ID, which the queue assigns.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Command {
-    pub opcode: u8,
-    pub nsid: u32,
-    pub prp1: u64,
-    pub prp2: u64,
-    /// Command dwords 10 to 15.
-    pub cdw: [u32; 6],
-}
+pub use mikros_nvme::Command;
 
 /// Why a command did not succeed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,14 +132,8 @@ impl QueuePair {
             let mut state = self.state.borrow_mut();
             let at = u64::from(state.tail) * SQE;
             let sq = &self.submission;
-            sq.write32(at, u32::from(command.opcode) | u32::from(cid) << 16);
-            sq.write32(at + 4, command.nsid);
-            sq.write64(at + 8, 0);
-            sq.write64(at + 16, 0);
-            sq.write64(at + 24, command.prp1);
-            sq.write64(at + 32, command.prp2);
-            for (i, dword) in command.cdw.iter().enumerate() {
-                sq.write32(at + 40 + 4 * i as u64, *dword);
+            for (i, dword) in command.entry(cid).iter().enumerate() {
+                sq.write32(at + 4 * i as u64, *dword);
             }
             state.in_flight.insert(
                 cid,
