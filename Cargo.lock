@@ -800,6 +800,7 @@ name = "mikros-exfat"
 version = "0.0.0"
 dependencies = [
  "mikros-fat",
+ "mikros-tz",
 ]
 
 [[package]]
@@ -807,6 +808,7 @@ name = "mikros-fat"
 version = "0.0.0"
 dependencies = [
  "fatfs",
+ "mikros-tz",
 ]
 
 [[package]]

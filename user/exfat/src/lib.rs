@@ -25,7 +25,7 @@ mod volume;
 pub use boot::Layout;
 pub use dir::{Dir, Node};
 pub use entry::{ARCHIVE, DIRECTORY, NAME_MAX, Stamp};
-pub use mikros_fat::{Device, Error};
+pub use mikros_fat::{Device, Error, Local};
 pub use volume::Volume;
 
 #[cfg(test)]

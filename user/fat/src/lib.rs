@@ -15,6 +15,7 @@ mod change;
 mod dir;
 mod disk;
 mod files;
+mod local;
 mod names;
 mod table;
 mod volume;
@@ -22,6 +23,7 @@ mod volume;
 pub use bpb::{FatType, Layout};
 pub use dir::{ARCHIVE, DIRECTORY, HIDDEN, READ_ONLY, SYSTEM, Stamp};
 pub use disk::Disk;
+pub use local::Local;
 pub use names::valid_long;
 pub use volume::{Dir, FILE_MAX, Node, Volume};
 

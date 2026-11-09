@@ -8,3 +8,6 @@ workspace = "../.."
 
 [dependencies]
 mikros-fat = { path = "../fat" }
+
+[dev-dependencies]
+mikros-tz = { path = "../tz" }

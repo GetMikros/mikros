@@ -855,3 +855,46 @@ fn removes_and_renames() {
     let mut volume = remount(volume);
     assert!(names(&mut volume, Dir::Root).is_empty());
 }
+
+// Timestamps.
+
+const KOLKATA: &[u8] = include_bytes!("../../tz/src/zones/Asia_Kolkata");
+const NEW_YORK: &[u8] = include_bytes!("../../tz/src/zones/America_New_York");
+
+fn zone(bytes: &[u8]) -> Local {
+    Local::zone(mikros_tz::Zone::parse(bytes).unwrap())
+}
+
+#[test]
+fn writes_local_time_with_its_offset_and_reads_by_the_offset() {
+    const NS: i64 = 1_000_000_000;
+    // 2024-01-15 12:00:00.25 UTC.
+    let utc = (mikros_tz::days(2024, 1, 15) * 86_400 + 12 * 3600) * NS + NS / 4;
+    let kolkata = zone(KOLKATA);
+    let stamp = Stamp::of_utc(utc, &kolkata);
+    // 17:30 local time, 22 steps of 15 minutes ahead of UTC.
+    assert_eq!(stamp.utc_offset, 0x80 | 22);
+    assert_eq!(stamp.offset_minutes(), Some(330));
+    assert_eq!(stamp.timestamp >> 11 & 0x1F, 17);
+    assert_eq!(stamp.timestamp >> 5 & 0x3F, 30);
+    assert_eq!(stamp.increment, 25);
+    // Its offset decides, whatever the zone is now.
+    assert_eq!(stamp.to_utc(&Local::utc()), utc);
+    assert_eq!(stamp.to_utc(&zone(NEW_YORK)), utc);
+    // Behind UTC, in New York in winter.
+    let new_york = Stamp::of_utc(utc, &zone(NEW_YORK));
+    assert_eq!(new_york.offset_minutes(), Some(-300));
+    assert_eq!(new_york.timestamp >> 11 & 0x1F, 7);
+    assert_eq!(new_york.to_utc(&kolkata), utc);
+    // Without a valid offset, the stamp is local time of the zone.
+    let bare = Stamp {
+        utc_offset: 0,
+        ..stamp
+    };
+    assert_eq!(bare.to_utc(&kolkata), utc);
+    assert_eq!(bare.to_utc(&Local::utc()), utc + 330 * 60 * NS);
+    // An offset that is no whole number of steps stays invalid: Kolkata's
+    // local mean time of 1850.
+    let old = (mikros_tz::days(1850, 1, 1) * 86_400) * NS;
+    assert_eq!(Stamp::of_utc(old, &kolkata).offset_minutes(), None);
+}

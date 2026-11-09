@@ -5,6 +5,13 @@
 use crate::upcase::Upcase;
 use alloc::string::String;
 use alloc::vec::Vec;
+use mikros_fat::Local;
+
+/// The bit of a UTC offset field that makes it valid, and the step of
+/// the offset it holds, 15 minutes, in seconds.
+const VALID_OFFSET: u8 = 0x80;
+const OFFSET_STEP: i32 = 15 * 60;
+const NS_PER_MINUTE: i64 = 60_000_000_000;
 
 /// The size of a directory entry.
 pub const ENTRY: usize = 32;
@@ -69,12 +76,46 @@ pub struct Stamp {
 impl Stamp {
     /// The offset from UTC in minutes, when it is valid.
     pub fn offset_minutes(&self) -> Option<i32> {
-        if self.utc_offset & 0x80 == 0 {
+        if self.utc_offset & VALID_OFFSET == 0 {
             return None;
         }
         // A signed 7-bit value.
         let steps = i32::from(((self.utc_offset & 0x7F) << 1) as i8 >> 1);
         Some(steps * 15)
+    }
+
+    /// The UTC time of the stamp, in nanoseconds since 1970: by its
+    /// offset from UTC when that is valid, and otherwise as local time in
+    /// `local`. The date, time and 10 ms increment lie in the stamp as in
+    /// a FAT stamp's date, time and hundredths.
+    pub fn to_utc(&self, local: &Local) -> i64 {
+        let fat = mikros_fat::Stamp {
+            date: (self.timestamp >> 16) as u16,
+            time: self.timestamp as u16,
+            hundredths: self.increment,
+        };
+        match self.offset_minutes() {
+            Some(minutes) => Local::utc().to_utc(fat) - i64::from(minutes) * NS_PER_MINUTE,
+            None => local.to_utc(fat),
+        }
+    }
+
+    /// The stamp of the UTC time `utc`, in nanoseconds since 1970: its
+    /// local time in `local`, with the offset of `local` then, valid when
+    /// it is a whole number of the 15-minute steps that the field holds.
+    pub fn of_utc(utc: i64, local: &Local) -> Stamp {
+        let fat = local.to_stamp(utc);
+        let offset = local.offset_at(utc);
+        let steps = offset / OFFSET_STEP;
+        let utc_offset = match offset % OFFSET_STEP == 0 && (-64..64).contains(&steps) {
+            true => VALID_OFFSET | (steps as u8 & 0x7F),
+            false => 0,
+        };
+        Stamp {
+            timestamp: u32::from(fat.date) << 16 | u32::from(fat.time),
+            increment: fat.hundredths,
+            utc_offset,
+        }
     }
 }
 
