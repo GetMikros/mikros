@@ -549,6 +549,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("ACPI restart run passed");
+    crate::durability::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("durability"),
+        timeout,
+    )?;
+    println!("durability run passed");
     Ok(())
 }
 

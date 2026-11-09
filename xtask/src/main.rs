@@ -11,6 +11,7 @@ mod cmake;
 mod debug;
 mod debug_build;
 mod debuginfo;
+mod durability;
 mod entry_state;
 mod extended;
 mod fetch;
