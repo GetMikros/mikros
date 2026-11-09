@@ -17,6 +17,7 @@ extern crate alloc;
 mod controller;
 mod descriptors;
 mod device;
+mod hub;
 mod interface;
 mod regs;
 mod ring;
@@ -31,8 +32,8 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceManagerAsyncClient, DriverAsyncServer, DriverConnectChildResponse,
-    DriverReconnectResponse, DriverRequest, DriverStartRequest, DriverStartResponse,
-    DriverStopResponse,
+    DriverReconnectResponse, DriverRequest, DriverResetChildResponse, DriverStartRequest,
+    DriverStartResponse, DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -103,8 +104,18 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     }
                     None => responder.reply(s, Err(Status::BadState)),
                 },
-                DriverRequest::ResetChild(_, responder) => {
-                    responder.reply(s, Err(Status::NotFound))
+                DriverRequest::ResetChild(request, responder) => {
+                    let Some(usb) = core.clone() else {
+                        let _ = responder.reply(s, Err(Status::BadState));
+                        continue;
+                    };
+                    let server = server.clone();
+                    spawner.spawn(async move {
+                        let reset = usb.reset_device(request.device).await;
+                        let reset = reset.map(|()| DriverResetChildResponse {});
+                        let _ = responder.reply(server.server(), reset);
+                    });
+                    Ok(())
                 }
                 DriverRequest::ConnectChild(request, responder) => {
                     let Some(usb) = core.clone() else {

@@ -6,11 +6,12 @@ use crate::controller::Controller;
 use crate::descriptors::{
     self, CLASS_HUB, CONFIGURATION, Configuration, DEVICE, ISOCHRONOUS, STRING,
 };
-use crate::device::{Device, Place, SUPER, setup};
+use crate::device::{Device, FULL, HIGH, LOW, Place, SUPER, setup};
+use crate::hub;
 use crate::regs::{PORT_CCS, PORT_CHANGES, PORT_PED, PORT_PP, PORT_PR, PORT_PRC, Protocol};
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::rc::Rc;
+use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -56,9 +57,13 @@ impl Interface {
     }
 }
 
-/// An attached device: its slot, its descriptors and strings, and its
-/// interfaces once they are added.
+/// An attached device: the hub it is on, if it is not on a root hub
+/// port, and its port there, its slot, its descriptors and strings, its
+/// interfaces once they are added, and for a hub the devices on its
+/// ports.
 pub struct UsbDevice {
+    pub parent: Option<Weak<UsbDevice>>,
+    pub port: u8,
     pub slot: Rc<Device>,
     pub descriptor: descriptors::Device,
     pub configuration: Configuration,
@@ -67,6 +72,7 @@ pub struct UsbDevice {
     pub product: String,
     pub serial: String,
     pub interfaces: RefCell<Vec<Rc<Interface>>>,
+    pub children: RefCell<BTreeMap<u8, Rc<UsbDevice>>>,
 }
 
 /// The USB core of one controller.
@@ -136,7 +142,7 @@ impl Usb {
             }
         }
         if connected && !self.attached.borrow().contains_key(&port) {
-            match self.attach(port).await {
+            match self.attach(None, port).await {
                 Ok(device) => {
                     self.attached.borrow_mut().insert(port, device);
                 }
@@ -144,6 +150,38 @@ impl Usb {
                     Warning,
                     "xhci: could not enumerate the device on port {}: {:?}",
                     port,
+                    status
+                ),
+            }
+        }
+    }
+
+    /// Handles a status change of port `port` of `hub`, as for a root
+    /// hub port.
+    pub async fn hub_port_changed(self: &Rc<Self>, hub: &Rc<UsbDevice>, port: u8) {
+        let Ok((status, changes)) = hub::port_status(hub, port).await else {
+            return;
+        };
+        let _ = hub::clear_changes(hub, port, changes).await;
+        let connected = status & hub::PORT_CONNECTION != 0;
+        let reconnected = changes & hub::CHANGE_CONNECTION != 0;
+        let had = hub.children.borrow().contains_key(&port);
+        if had && (!connected || reconnected) {
+            let device = hub.children.borrow_mut().remove(&port);
+            if let Some(device) = device {
+                self.detach(&device).await;
+            }
+        }
+        if connected && !hub.children.borrow().contains_key(&port) {
+            match self.attach(Some(hub), port).await {
+                Ok(device) => {
+                    hub.children.borrow_mut().insert(port, device);
+                }
+                Err(status) => mikros_rt::log!(
+                    Warning,
+                    "xhci: could not enumerate the device on port {} of the hub in slot {}: {:?}",
+                    port,
+                    hub.slot.slot,
                     status
                 ),
             }
@@ -175,23 +213,63 @@ impl Usb {
         }
     }
 
-    /// Enumerates the device connected to root hub port `port`.
-    async fn attach(self: &Rc<Self>, port: u8) -> Result<Rc<UsbDevice>, Status> {
-        let speed = self.reset_port(port).await?;
+    /// Resets port `port` of `parent`, or root hub port `port` without
+    /// one, and returns the speed of the device on it.
+    async fn reset(&self, parent: Option<&Rc<UsbDevice>>, port: u8) -> Result<u8, Status> {
+        match parent {
+            Some(hub) => hub::reset_port(hub, port).await,
+            None => self.reset_port(port).await,
+        }
+    }
+
+    /// Enumerates the device connected to port `port` of `parent`, or to
+    /// root hub port `port` without one. Devices more tiers below the
+    /// root hub than a route string covers are not enumerated.
+    async fn attach(
+        self: &Rc<Self>,
+        parent: Option<&Rc<UsbDevice>>,
+        port: u8,
+    ) -> Result<Rc<UsbDevice>, Status> {
+        let mut place = match parent {
+            None => Place {
+                root_port: port,
+                route: 0,
+                tt: None,
+            },
+            Some(hub) => {
+                let above = &hub.slot.place;
+                let depth = hub::depth(above.route);
+                if depth >= hub::MAX_DEPTH || port > 15 {
+                    return Err(Status::NotSupported);
+                }
+                Place {
+                    root_port: above.root_port,
+                    route: above.route | u32::from(port) << (4 * depth),
+                    tt: above.tt,
+                }
+            }
+        };
+        let speed = self.reset(parent, port).await?;
+        // A low- or full-speed device directly on a high-speed hub uses
+        // that hub's transaction translator.
+        if let Some(hub) = parent
+            && hub.slot.speed == HIGH
+            && matches!(speed, LOW | FULL)
+        {
+            let multi = hub.slot.hub().is_some_and(|h| h.multi_tt);
+            place.tt = Some((hub.slot.slot, port, multi));
+        }
         mikros_rt::log!(
             Info,
-            "xhci: device on port {} (USB {}), speed {}",
-            port,
-            self.revision(port),
+            "xhci: device on port {} (USB {}), route {:x}, speed {}",
+            place.root_port,
+            self.revision(place.root_port),
+            place.route,
             speed
         );
-        let place = Place {
-            root_port: port,
-            route: 0,
-            tt: None,
-        };
         let slot = Device::new(self.controller.clone(), place, speed).await?;
-        match self.enumerate(slot.clone()).await {
+        let parent = parent.map(Rc::downgrade);
+        match self.enumerate(slot.clone(), parent, port).await {
             Ok(device) => Ok(device),
             Err(status) => {
                 slot.disable().await;
@@ -200,13 +278,21 @@ impl Usb {
         }
     }
 
-    /// Reads the descriptors and strings of the addressed device `slot`,
-    /// selects its first configuration and adds its interfaces.
-    pub async fn enumerate(self: &Rc<Self>, slot: Rc<Device>) -> Result<Rc<UsbDevice>, Status> {
+    /// Reads the descriptors and strings of the addressed device `slot`
+    /// on port `port` of `parent`, selects its first configuration and
+    /// adds its interfaces, or for a hub starts handling its ports.
+    async fn enumerate(
+        self: &Rc<Self>,
+        slot: Rc<Device>,
+        parent: Option<Weak<UsbDevice>>,
+        port: u8,
+    ) -> Result<Rc<UsbDevice>, Status> {
         let (descriptor, configuration_bytes, configuration) = read_descriptors(&slot).await?;
         let strings = read_strings(&slot, &descriptor).await;
         configure(&slot, &configuration).await?;
         let device = Rc::new(UsbDevice {
+            parent,
+            port,
             slot,
             descriptor,
             configuration,
@@ -215,7 +301,12 @@ impl Usb {
             product: strings[1].clone(),
             serial: strings[2].clone(),
             interfaces: RefCell::new(Vec::new()),
+            children: RefCell::new(BTreeMap::new()),
         });
+        if hub::is_hub(&device) {
+            let task = hub::run(self.clone(), device.clone());
+            self.controller.spawner.spawn(task);
+        }
         self.add_interfaces(&device).await;
         Ok(device)
     }
@@ -267,17 +358,90 @@ impl Usb {
         }
     }
 
-    /// Removes `device`, which was detached: fails its transfers,
-    /// removes its interface devices, and gives its slot back.
+    /// Removes `device`, which was detached, and for a hub the devices
+    /// behind it first: fails their transfers, removes their interface
+    /// devices, and gives their slots back.
     pub async fn detach(&self, device: &Rc<UsbDevice>) {
-        device.slot.fail_all();
+        let mut order = Vec::new();
+        let mut stack = vec![device.clone()];
+        while let Some(next) = stack.pop() {
+            let children = core::mem::take(&mut *next.children.borrow_mut());
+            stack.extend(children.into_values());
+            order.push(next);
+        }
+        for device in order.iter().rev() {
+            device.slot.fail_all();
+            self.remove_interfaces(device).await;
+            device.slot.disable().await;
+        }
+    }
+
+    /// Removes the interface devices of `device`.
+    async fn remove_interfaces(&self, device: &UsbDevice) {
         let interfaces = core::mem::take(&mut *device.interfaces.borrow_mut());
         for interface in interfaces {
             let id = interface.id.get();
             self.interfaces.borrow_mut().remove(&id);
             let _ = self.manager.remove_device(id).await;
         }
-        device.slot.disable().await;
+    }
+
+    /// Resets the USB device of the interface device `id`: fails the
+    /// transfers of all its interfaces, resets its port, and gives it its
+    /// address and configuration again. When its device and
+    /// configuration descriptors are the same as before, its interface
+    /// devices are kept; otherwise they are removed, the device is
+    /// enumerated as a new one, and the reset fails with `NOT_FOUND`.
+    pub async fn reset_device(self: &Rc<Self>, id: u64) -> Result<(), Status> {
+        let interface = self.interfaces.borrow().get(&id).cloned();
+        let device = interface.ok_or(Status::NotFound)?.device.clone();
+        let parent = device.parent.as_ref().and_then(Weak::upgrade);
+        let port = match &parent {
+            Some(_) => device.port,
+            None => device.slot.place.root_port,
+        };
+        device.slot.fail_all();
+        if self.reconfigure(&device, parent.as_ref(), port).await == Ok(true) {
+            for interface in device.interfaces.borrow().iter() {
+                interface.alternate.set(0);
+            }
+            return Ok(());
+        }
+        let removed = match &parent {
+            Some(hub) => hub.children.borrow_mut().remove(&port),
+            None => self.attached.borrow_mut().remove(&port),
+        };
+        if let Some(removed) = removed {
+            self.detach(&removed).await;
+        }
+        match &parent {
+            Some(hub) => self.hub_port_changed(hub, port).await,
+            None => self.controller.port_changed(port),
+        }
+        Err(Status::NotFound)
+    }
+
+    /// Resets the port of `device`, port `port` of `parent` or root hub
+    /// port `port`, gives the device its address again, and when it
+    /// reports the same device and configuration descriptors, its
+    /// configuration. Returns whether they were the same.
+    async fn reconfigure(
+        &self,
+        device: &UsbDevice,
+        parent: Option<&Rc<UsbDevice>>,
+        port: u8,
+    ) -> Result<bool, Status> {
+        let speed = self.reset(parent, port).await?;
+        if speed != device.slot.speed {
+            return Ok(false);
+        }
+        device.slot.reset().await?;
+        let (descriptor, bytes, configuration) = read_descriptors(&device.slot).await?;
+        let same = descriptor == device.descriptor && bytes == device.configuration_bytes;
+        if same {
+            configure(&device.slot, &configuration).await?;
+        }
+        Ok(same)
     }
 
     /// The interface device with ID `id`, waiting a while for it, since

@@ -33,6 +33,7 @@ pub const TRB_EVALUATE_CONTEXT: u32 = 13;
 pub const TRB_RESET_ENDPOINT: u32 = 14;
 pub const TRB_STOP_ENDPOINT: u32 = 15;
 pub const TRB_SET_DEQUEUE: u32 = 16;
+pub const TRB_RESET_DEVICE: u32 = 17;
 pub const TRB_TRANSFER_EVENT: u32 = 32;
 pub const TRB_COMMAND_COMPLETION: u32 = 33;
 pub const TRB_PORT_STATUS_CHANGE: u32 = 34;

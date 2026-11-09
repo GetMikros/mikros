@@ -5,7 +5,7 @@ use crate::controller::Controller;
 use crate::descriptors::{self, BULK, INTERRUPT};
 use crate::ring::{
     TRB_ADDRESS_DEVICE, TRB_CONFIGURE_ENDPOINT, TRB_DISABLE_SLOT, TRB_ENABLE_SLOT,
-    TRB_EVALUATE_CONTEXT, trb_type,
+    TRB_EVALUATE_CONTEXT, TRB_RESET_DEVICE, trb_type,
 };
 use crate::transfer::{Direction, Endpoint, Request};
 use alloc::collections::BTreeMap;
@@ -202,6 +202,41 @@ impl Device {
         self.write_slot(0, 1 << 1, self.entries());
         self.write_ep0();
         self.evaluate().await
+    }
+
+    /// Makes the device a hub with `hub` in its slot context.
+    pub async fn set_hub(&self, hub: HubInfo) -> Result<(), Status> {
+        self.hub.set(Some(hub));
+        self.write_slot(0, 0, self.entries());
+        let input = self.input.physical(0);
+        let trb = [
+            input as u32,
+            (input >> 32) as u32,
+            0,
+            trb_type(TRB_CONFIGURE_ENDPOINT) | u32::from(self.slot) << 24,
+        ];
+        self.controller.command_ok(trb).await.map(|_| ())
+    }
+
+    /// What the slot context says about the device as a hub.
+    pub fn hub(&self) -> Option<HubInfo> {
+        self.hub.get()
+    }
+
+    /// Puts the slot back in the default state with a Reset Device
+    /// command, after the device's port was reset, and gives the device
+    /// its address again. Its endpoints other than the default control
+    /// endpoint are gone.
+    pub async fn reset(&self) -> Result<(), Status> {
+        self.fail_all();
+        let trb = [
+            0,
+            0,
+            0,
+            trb_type(TRB_RESET_DEVICE) | u32::from(self.slot) << 24,
+        ];
+        self.controller.command_ok(trb).await?;
+        self.address().await
     }
 
     async fn evaluate(&self) -> Result<(), Status> {
