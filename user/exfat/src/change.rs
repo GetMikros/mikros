@@ -1,4 +1,5 @@
-//! Creating the entries of directories, and growing directories.
+//! Creating, removing and renaming the entries of directories, and
+//! growing directories.
 
 use crate::allocation::Extent;
 use crate::dir::{Dir, Node, Place};
@@ -55,6 +56,85 @@ impl<D: Device> Volume<D> {
         }
         let slot = inserted?;
         Ok(self.node(dir, slot, set))
+    }
+
+    /// Removes the entry `name` of `dir`, and frees its clusters. A
+    /// directory must be empty, and must be one when `directory`, and a
+    /// file when not.
+    pub fn remove(&mut self, dir: Dir, name: &str, directory: bool) -> Result<(), Error> {
+        self.check_writable()?;
+        let node = self.find(dir, name)?;
+        match (node.is_directory(), directory) {
+            (true, false) => return Err(Error::IsDirectory),
+            (false, true) => return Err(Error::NotDirectory),
+            _ => {}
+        }
+        if let Some(sub) = node.as_dir()
+            && !self.list(sub, 0, 1)?.0.is_empty()
+        {
+            return Err(Error::NotEmpty);
+        }
+        let clusters = self.clusters_of(&node.set)?;
+        self.release_set(&node)?;
+        if let Some(Dir::Sub(first)) = node.as_dir() {
+            self.dirs.remove(&first);
+        }
+        self.release(&clusters)
+    }
+
+    /// Moves the entry `name` of `from` to `new_name` in `to`, replacing
+    /// a file there, or an empty directory when it moves a directory.
+    pub fn rename(
+        &mut self,
+        from: Dir,
+        name: &str,
+        to: Dir,
+        new_name: &str,
+    ) -> Result<Node, Error> {
+        self.check_writable()?;
+        let units = check_name(new_name)?;
+        let node = self.find(from, name)?;
+        let moved = node.as_dir();
+        if let Some(moved) = moved
+            && self.is_within(to, moved)?
+        {
+            return Err(Error::Invalid);
+        }
+        match self.find(to, new_name) {
+            Ok(existing) if existing.parent == node.parent && existing.slot == node.slot => {}
+            Ok(existing) => {
+                match (existing.is_directory(), moved.is_some()) {
+                    (true, false) => return Err(Error::IsDirectory),
+                    (false, true) => return Err(Error::NotDirectory),
+                    _ => {}
+                }
+                self.remove(to, &existing.name, existing.is_directory())?;
+            }
+            Err(Error::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+        let mut set = node.set.clone();
+        set.name = units;
+        // The new set comes first, so that a crash leaves the node with
+        // two names rather than none.
+        let slot = self.insert(to, &set)?;
+        self.release_set(&node)?;
+        Ok(self.node(to, slot, set))
+    }
+
+    /// Whether `dir` is `ancestor` or lies below it.
+    fn is_within(&self, dir: Dir, ancestor: Dir) -> Result<bool, Error> {
+        let mut current = dir;
+        for _ in 0..=self.dirs.len() {
+            if current == ancestor {
+                return Ok(true);
+            }
+            current = match current {
+                Dir::Root => return Ok(false),
+                Dir::Sub(first) => self.dirs.get(&first).ok_or(Error::NotFound)?.parent,
+            };
+        }
+        Err(Error::Io)
     }
 
     /// Writes `set` into free entries in a row in `dir`, growing it a
@@ -114,6 +194,23 @@ impl<D: Device> Volume<D> {
                 ..place
             },
         );
+        Ok(())
+    }
+
+    /// Marks the entries of `node`'s set as no longer in use, its file
+    /// entry first.
+    fn release_set(&mut self, node: &Node) -> Result<(), Error> {
+        let mut file = [0u8; ENTRY];
+        let first = self.entry_at(node.parent, node.slot)?;
+        self.disk.read(first, &mut file)?;
+        let count = usize::from(file[1]) + 1;
+        for i in 0..count {
+            let at = self.entry_at(node.parent, node.slot + i as u32)?;
+            let mut e = [0u8; ENTRY];
+            self.disk.read(at, &mut e)?;
+            e[0] &= !IN_USE;
+            self.disk.write(at, &e)?;
+        }
         Ok(())
     }
 }

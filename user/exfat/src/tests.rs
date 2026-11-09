@@ -797,3 +797,61 @@ fn grows_directories_a_cluster_at_a_time() {
         assert_eq!(names(&mut volume, Dir::Root)[1..], expected);
     }
 }
+
+#[test]
+fn removes_and_renames() {
+    let mut volume = mount_writable(mkfs(8 * MIB, &[]));
+    let free = volume.free_clusters();
+    let docs = volume.create(Dir::Root, "Docs", true, stamp()).unwrap();
+    let docs = docs.as_dir().unwrap();
+    volume.create(docs, "note.txt", false, stamp()).unwrap();
+    let mut top = volume.create(Dir::Root, "Top.txt", false, stamp()).unwrap();
+    volume.write(&mut top, 0, b"top", stamp()).unwrap();
+    let mut remove = |name: &str, directory: bool| volume.remove(Dir::Root, name, directory).err();
+    assert_eq!(remove("docs", true), Some(Error::NotEmpty));
+    assert_eq!(remove("top.txt", true), Some(Error::NotDirectory));
+    assert_eq!(remove("docs", false), Some(Error::IsDirectory));
+    assert_eq!(remove("missing", false), Some(Error::NotFound));
+    // A new case of the same name.
+    let renamed = volume
+        .rename(Dir::Root, "Top.txt", Dir::Root, "TOP.txt")
+        .unwrap();
+    assert_eq!(renamed.name, "TOP.txt");
+    assert_eq!(names(&mut volume, Dir::Root), ["Docs", "TOP.txt"]);
+    // Into a directory, over a file there.
+    let mut other = volume.create(docs, "other.txt", false, stamp()).unwrap();
+    volume.write(&mut other, 0, b"replaced", stamp()).unwrap();
+    volume
+        .rename(Dir::Root, "top.txt", docs, "other.txt")
+        .unwrap();
+    assert_eq!(names(&mut volume, Dir::Root), ["Docs"]);
+    assert_eq!(names(&mut volume, docs), ["note.txt", "other.txt"]);
+    // A directory moves, but not below itself.
+    let sub = volume.create(Dir::Root, "Sub", true, stamp()).unwrap();
+    let sub = sub.as_dir().unwrap();
+    volume.rename(Dir::Root, "Docs", sub, "Docs").unwrap();
+    let into_itself = volume.rename(sub, "Docs", docs, "inner");
+    assert_eq!(into_itself.err(), Some(Error::Invalid));
+    volume
+        .create(docs, "after the move", false, stamp())
+        .unwrap();
+    let mut volume = remount(volume);
+    let sub = volume.find(Dir::Root, "sub").unwrap().as_dir().unwrap();
+    let docs = volume.find(sub, "docs").unwrap().as_dir().unwrap();
+    let expected = ["note.txt", "other.txt", "after the move"];
+    assert_eq!(names(&mut volume, docs), expected);
+    let mut other = volume.find(docs, "other.txt").unwrap();
+    assert_eq!(read_all(&mut volume, &mut other), b"top");
+    // Removing everything gives every cluster back.
+    let mut volume = mount_writable(volume.into_device().0);
+    let sub = volume.find(Dir::Root, "sub").unwrap().as_dir().unwrap();
+    let docs = volume.find(sub, "docs").unwrap().as_dir().unwrap();
+    for name in expected {
+        volume.remove(docs, name, false).unwrap();
+    }
+    volume.remove(sub, "docs", true).unwrap();
+    volume.remove(Dir::Root, "sub", true).unwrap();
+    assert_eq!(volume.free_clusters(), free);
+    let mut volume = remount(volume);
+    assert!(names(&mut volume, Dir::Root).is_empty());
+}

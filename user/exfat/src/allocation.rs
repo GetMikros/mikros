@@ -193,4 +193,10 @@ impl<D: Device> Volume<D> {
     pub(crate) fn release(&mut self, clusters: &[u32]) -> Result<(), Error> {
         self.mark(clusters, false)
     }
+
+    /// The clusters of `set`.
+    pub(crate) fn clusters_of(&mut self, set: &Set) -> Result<Vec<u32>, Error> {
+        let extent = Extent::of(set, self.layout.cluster_size);
+        self.clusters(extent.first, extent.contiguous, Some(extent.count))
+    }
 }
