@@ -107,6 +107,22 @@ fn derives_no_boot_time_ns_that_does_not_fit() {
 }
 
 #[test]
+fn takes_mapped_runtime_services_only_from_version_1_2() {
+    let mut info = sample();
+    info.flags |= flags::RUNTIME_SERVICES_MAPPED;
+    for (minor, mapped) in [(0, false), (1, false), (2, true), (3, true)] {
+        info.version_minor = minor;
+        let decoded = decode(&encode(&info)).unwrap();
+        assert_eq!(
+            decoded.flags & flags::RUNTIME_SERVICES_MAPPED != 0,
+            mapped,
+            "1.{minor}"
+        );
+        assert_eq!(decoded.flags & 0b111, info.flags & 0b111, "1.{minor}");
+    }
+}
+
+#[test]
 fn ignores_bytes_after_known_fields() {
     let mut info = sample();
     info.version_minor = 3;

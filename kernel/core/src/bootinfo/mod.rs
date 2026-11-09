@@ -82,12 +82,16 @@ pub fn size(header: &[u8]) -> Result<usize, Error> {
 /// read only from a structure of version 1.1 or later that is large
 /// enough to hold it, and otherwise derived from `boot_time`; a boot time
 /// whose nanoseconds do not fit an `i64` then counts as none.
+/// `RUNTIME_SERVICES_MAPPED` counts only from version 1.2 on.
 pub fn decode(data: &[u8]) -> Result<BootInfo, Error> {
     let size = size(data)?;
     // The fields of version 1.0 lie below the checked size.
     let d = data.get(..size).ok_or(Error::Truncated)?;
     let minor = u16_at(d, 0x0A)?;
     let mut info_flags = u32_at(d, 0x14)?;
+    if minor < 2 {
+        info_flags &= !flags::RUNTIME_SERVICES_MAPPED;
+    }
     let mut boot_time = u64_at(d, 0xD0)? as i64;
     let boot_time_ns = if size >= BOOT_INFO_SIZE as usize && minor >= 1 {
         u64_at(d, 0xE8)? as i64

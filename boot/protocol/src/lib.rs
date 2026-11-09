@@ -28,6 +28,9 @@ pub mod flags {
     pub const FRAMEBUFFER_PRESENT: u32 = 1 << 0;
     pub const RNG_SEED_VALID: u32 = 1 << 1;
     pub const BOOT_TIME_VALID: u32 = 1 << 2;
+    /// Added in version 1.2: the firmware's runtime services were moved
+    /// to their addresses in the runtime window.
+    pub const RUNTIME_SERVICES_MAPPED: u32 = 1 << 3;
 }
 
 /// Values of `Framebuffer::format`.
@@ -139,6 +142,10 @@ pub enum Kind {
     ApTrampoline = 12,
     Reserved = 13,
     Bad = 14,
+    /// Added in version 1.2, before which such code is `FirmwareRuntime`.
+    FirmwareRuntimeCode = 15,
+    /// Added in version 1.2, before which such I/O memory is `Mmio`.
+    FirmwareRuntimeMmio = 16,
 }
 
 impl Kind {
@@ -158,13 +165,24 @@ impl Kind {
             12 => Kind::ApTrampoline,
             13 => Kind::Reserved,
             14 => Kind::Bad,
+            15 => Kind::FirmwareRuntimeCode,
+            16 => Kind::FirmwareRuntimeMmio,
             _ => return None,
         })
     }
 
     /// Whether ranges of this kind are covered by the direct map.
     pub const fn in_direct_map(self) -> bool {
-        matches!(self as u32, 1..=9 | 12)
+        matches!(self as u32, 1..=9 | 12 | 15)
+    }
+
+    /// Whether ranges of this kind hold the firmware's runtime services,
+    /// which the runtime window maps.
+    pub const fn is_firmware_runtime(self) -> bool {
+        matches!(
+            self,
+            Kind::FirmwareRuntime | Kind::FirmwareRuntimeCode | Kind::FirmwareRuntimeMmio
+        )
     }
 }
 
@@ -180,6 +198,11 @@ pub mod x86_64 {
     /// The lowest and highest-plus-one physical addresses of the AP
     /// trampoline page.
     pub const AP_TRAMPOLINE_MIN: u64 = 0x1000;
+    /// The firmware's runtime ranges are mapped at this address plus their
+    /// physical address, for physical addresses below
+    /// `RUNTIME_WINDOW_SIZE`.
+    pub const RUNTIME_WINDOW_BASE: u64 = 0xFFFF_FE00_0000_0000;
+    pub const RUNTIME_WINDOW_SIZE: u64 = 512 << 30;
     pub const AP_TRAMPOLINE_END: u64 = 0xA0000;
 
     /// Whether the page at `phys` lies between `AP_TRAMPOLINE_MIN` and
@@ -261,15 +284,34 @@ mod tests {
 
     #[test]
     fn kinds_round_trip_and_know_the_direct_map() {
-        for value in 1..=14 {
+        for value in 1..=16 {
             assert_eq!(Kind::from_u32(value).map(|k| k as u32), Some(value));
         }
         assert_eq!(Kind::from_u32(0), None);
-        assert_eq!(Kind::from_u32(15), None);
+        assert_eq!(Kind::from_u32(17), None);
         assert!(Kind::Usable.in_direct_map() && Kind::FirmwareRuntime.in_direct_map());
-        assert!(Kind::ApTrampoline.in_direct_map());
-        for kind in [Kind::Mmio, Kind::Framebuffer, Kind::Reserved, Kind::Bad] {
+        assert!(Kind::ApTrampoline.in_direct_map() && Kind::FirmwareRuntimeCode.in_direct_map());
+        for kind in [
+            Kind::Mmio,
+            Kind::Framebuffer,
+            Kind::Reserved,
+            Kind::Bad,
+            Kind::FirmwareRuntimeMmio,
+        ] {
             assert!(!kind.in_direct_map(), "{kind:?}");
+        }
+        let runtime: [Kind; 3] = [
+            Kind::FirmwareRuntime,
+            Kind::FirmwareRuntimeCode,
+            Kind::FirmwareRuntimeMmio,
+        ];
+        for value in 1..=16 {
+            let kind = Kind::from_u32(value).unwrap();
+            assert_eq!(
+                kind.is_firmware_runtime(),
+                runtime.contains(&kind),
+                "{kind:?}"
+            );
         }
     }
 

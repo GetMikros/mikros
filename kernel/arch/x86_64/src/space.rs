@@ -302,7 +302,7 @@ fn symbol(s: *const u8) -> u64 {
 }
 
 /// The kinds of memory the kernel's direct map covers.
-pub const DIRECT_KINDS: [Kind; 9] = [
+pub const DIRECT_KINDS: [Kind; 10] = [
     Kind::Usable,
     Kind::BootloaderReclaimable,
     Kind::KernelStack,
@@ -311,6 +311,7 @@ pub const DIRECT_KINDS: [Kind; 9] = [
     Kind::AcpiReclaimable,
     Kind::AcpiNvs,
     Kind::FirmwareRuntime,
+    Kind::FirmwareRuntimeCode,
     Kind::ApTrampoline,
 ];
 
