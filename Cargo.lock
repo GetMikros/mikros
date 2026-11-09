@@ -796,6 +796,10 @@ name = "mikros-gpt"
 version = "0.0.0"
 
 [[package]]
+name = "mikros-logstore"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-manifest"
 version = "0.0.0"
 dependencies = [
