@@ -7,10 +7,13 @@
 //! `files.volumes` through the broker and starts a copy of itself, which
 //! has `/Volumes` in its namespace. For each of the volumes in `LABELS`,
 //! the copy waits for it, reads `HELLO.TXT`, which the runner put there,
-//! writes `WRITTEN.TXT` and reads it back; it then logs `READY`. The
-//! runner then unplugs the disks, and the copy logs `GONE` once every
-//! volume has left `/Volumes`. A failed check logs `FAILED` with what
-//! failed.
+//! writes `WRITTEN.TXT` and reads it back. It then kills the xHCI driver
+//! and writes `AGAIN.TXT` on the first volume, which the USB mass storage
+//! driver sends again once the restarted xHCI driver gives it a new
+//! channel; every other driver must still run as the process it was, and
+//! every volume is used again. It then logs `READY`. The runner then
+//! unplugs the disks, and the copy logs `GONE` once every volume has left
+//! `/Volumes`. A failed check logs `FAILED` with what failed.
 
 #![no_std]
 #![no_main]
@@ -18,6 +21,7 @@
 extern crate alloc;
 
 use alloc::format;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use mikros_rt::exec::{Executor, Reactor};
@@ -47,6 +51,15 @@ const HELLO: &str = "HELLO.TXT";
 const HELLO_TEXT: &[u8] = b"hello from the host\n";
 const WRITTEN: &str = "WRITTEN.TXT";
 const WRITTEN_TEXT: &[u8] = b"written on Mikros\n";
+const AGAIN: &str = "AGAIN.TXT";
+const AGAIN_TEXT: &[u8] = b"written across an xHCI restart\n";
+const HOST_DRIVER: &str = "system.driver.xhci";
+const DRIVER_PREFIX: &str = "system.driver.";
+const KILL: u32 = 9;
+/// How long the xHCI driver may take to run again, and then how long
+/// the device manager has to reconnect the devices below it.
+const RESTART_LIMIT: i64 = 30_000 * MS;
+const SETTLE: i64 = 3_000 * MS;
 /// The lines the runner waits for.
 const READY: &str = "volumes-probe: read and wrote the USB volumes";
 const GONE: &str = "volumes-probe: the USB volumes are gone";
@@ -89,10 +102,13 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         .into_iter()
         .find(|e| e.path == VOLUMES)
         .map(|e| NodeAsyncClient::new(e.directory, reactor.clone()));
+    let header = managed.header;
     let checked = match volumes {
-        Some(volumes) => executor.block_on(use_volumes(&volumes, &reactor)),
+        Some(volumes) => {
+            let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
+            executor.block_on(use_volumes(&volumes, &launcher, &reactor))
+        }
         None => {
-            let header = managed.header;
             let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
             let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
             let started = start_copy(
@@ -163,9 +179,18 @@ async fn start_copy(
     }
 }
 
-/// Uses each volume in `volumes`, logs `READY`, and logs `GONE` once
-/// they have left.
-async fn use_volumes(volumes: &NodeAsyncClient, reactor: &Reactor) -> Result<(), &'static str> {
+/// Uses each volume in `volumes`, restarts the xHCI driver through
+/// `launcher` as `restart_host_controller` does, uses each volume again,
+/// logs `READY`, and logs `GONE` once they have left.
+async fn use_volumes(
+    volumes: &NodeAsyncClient,
+    launcher: &LauncherAsyncClient,
+    reactor: &Reactor,
+) -> Result<(), &'static str> {
+    for label in LABELS {
+        use_volume(volumes, reactor, label).await?;
+    }
+    restart_host_controller(volumes, launcher, reactor).await?;
     for label in LABELS {
         use_volume(volumes, reactor, label).await?;
     }
@@ -219,6 +244,77 @@ async fn use_volume(
         return Err("reading WRITTEN.TXT back");
     }
     mikros_rt::log!(Info, "volumes-probe: read and wrote /Volumes/{}", label);
+    Ok(())
+}
+
+/// The drivers that run, as their app IDs and process IDs.
+async fn drivers(launcher: &LauncherAsyncClient) -> Result<Vec<(String, u32)>, &'static str> {
+    let listed = launcher.list().await.map_err(|_| "listing the processes")?;
+    let mut drivers = Vec::new();
+    for pid in listed.pids {
+        if let Ok(Ok(info)) = launcher.get_info(pid).await
+            && info.info.app_id.starts_with(DRIVER_PREFIX)
+        {
+            drivers.push((info.info.app_id, pid));
+        }
+    }
+    Ok(drivers)
+}
+
+/// Kills the xHCI driver, and writes and syncs `AGAIN.TXT` on the first
+/// volume, which the USB mass storage driver can only send once the
+/// restarted xHCI driver gives it a new channel. Once the xHCI driver
+/// runs again, every other driver must still run as the process it was.
+async fn restart_host_controller(
+    volumes: &NodeAsyncClient,
+    launcher: &LauncherAsyncClient,
+    reactor: &Reactor,
+) -> Result<(), &'static str> {
+    let before = drivers(launcher).await?;
+    let host: Vec<u32> = before
+        .iter()
+        .filter(|(app, _)| app == HOST_DRIVER)
+        .map(|&(_, pid)| pid)
+        .collect();
+    let [host] = host[..] else {
+        return Err("finding one xHCI driver");
+    };
+    if !matches!(launcher.kill(host, KILL).await, Ok(Ok(_))) {
+        return Err("killing the xHCI driver");
+    }
+    mikros_rt::log!(Info, "volumes-probe: killed the xHCI driver, pid {}", host);
+    let path = format!("{}/{AGAIN}", LABELS[0]);
+    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
+    let again = open(volumes, reactor, &path, flags, RW).await?;
+    let wrote = again.write(0, AGAIN_TEXT.to_vec()).await;
+    if !matches!(wrote, Ok(Ok(w)) if w.written as usize == AGAIN_TEXT.len()) {
+        return Err("writing AGAIN.TXT");
+    }
+    if !matches!(again.sync().await, Ok(Ok(_))) {
+        return Err("syncing AGAIN.TXT across the restart");
+    }
+    let limit = now() + RESTART_LIMIT;
+    loop {
+        let running = drivers(launcher).await?;
+        if running
+            .iter()
+            .any(|(app, pid)| app == HOST_DRIVER && *pid != host)
+        {
+            break;
+        }
+        if now() >= limit {
+            return Err("waiting for the xHCI driver to run again");
+        }
+        let _ = reactor.sleep_until(now() + 100 * MS).await;
+    }
+    let _ = reactor.sleep_until(now() + SETTLE).await;
+    let after = drivers(launcher).await?;
+    for (app, pid) in before.iter().filter(|(app, _)| app != HOST_DRIVER) {
+        if !after.iter().any(|(a, p)| a == app && p == pid) {
+            mikros_rt::log!(Error, "volumes-probe: {}, pid {}, no longer runs", app, pid);
+            return Err("keeping the other drivers across the xHCI restart");
+        }
+    }
     Ok(())
 }
 

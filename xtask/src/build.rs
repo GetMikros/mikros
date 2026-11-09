@@ -1006,8 +1006,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", pci_image.display());
             // The USB volumes run serves this image, with root=bootfs: the
             // PCI bus, xHCI, USB mass storage, partition, FAT, exFAT and
-            // btrfs drivers and the time zones from the PCI test's files,
-            // the temporary file system, and the volumes probe.
+            // btrfs drivers, the time zones and the log service, through
+            // which the drivers' messages reach the serial output, from the
+            // PCI test's files, the temporary file system, and the volumes
+            // probe.
             let volumes_probe = user_build("volumes-probe", kind)?;
             println!("built    {}", volumes_probe.display());
             let volume_drivers = [
@@ -1026,6 +1028,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         .iter()
                         .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
                         || at.starts_with("usr/share/zoneinfo/")
+                        || at.contains("log-service")
+                        || at.ends_with("services/log.yaml")
                 })
                 .cloned()
                 .collect();

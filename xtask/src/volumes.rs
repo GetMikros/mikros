@@ -14,8 +14,9 @@
 //! whose volumes probe reads and writes every volume through `/Volumes`.
 //! The runner then unplugs the disks through QEMU's monitor and waits for
 //! the probe to see the volumes leave. Afterwards each FAT and exFAT
-//! volume must hold what the probe wrote, and fsck.exfat must find the
-//! exFAT volume clean.
+//! volume must hold what the probe wrote, the first FAT volume also what
+//! it wrote across a restart of the xHCI driver, and fsck.exfat must find
+//! the exFAT volume clean.
 
 use crate::build::{self, Kind};
 use crate::image::{esp, gpt};
@@ -33,6 +34,9 @@ const READY: &str = "volumes-probe: read and wrote the USB volumes";
 const GONE: &str = "volumes-probe: the USB volumes are gone";
 const FAILED: &str = "volumes-probe: FAILED";
 const PANIC_LINE: &str = "KERNEL PANIC: ";
+/// The line the USB mass storage driver logs when it sends a command
+/// again on the channel that the restarted xHCI driver gave it.
+const RESENT: &str = "sends a command again on a new channel";
 /// The USB disk: the blocks of its FAT, btrfs and exFAT partitions, its
 /// size in sectors with room for the backup GPT, its GUIDs, the partition
 /// types, and the QEMU device ID it is unplugged by.
@@ -75,6 +79,7 @@ const WHOLE_SECTORS: u64 = 2048;
 const WHOLE_LABEL: [u8; 11] = *b"WHOLEFAT   ";
 const HELLO: &[u8] = b"hello from the host\n";
 const WRITTEN: &[u8] = b"written on Mikros\n";
+const AGAIN: &[u8] = b"written across an xHCI restart\n";
 
 /// Writes the USB disks in `dir`: the first, `usb.img`, in place of the
 /// scratch disk, and the other two.
@@ -360,6 +365,12 @@ pub fn run(
             log.display()
         )
     })?;
+    if !serial.contains(RESENT) {
+        bail!(
+            "no command went again across the xHCI restart; serial output in {}",
+            log.display()
+        );
+    }
     let fats = [
         ("usb.img", FIRST_LBA, LAST_LBA - FIRST_LBA + 1),
         (MBR_FILE, MBR_FAT_FIRST, MBR_FAT_SECTORS),
@@ -371,6 +382,12 @@ pub fn run(
         if written != WRITTEN {
             bail!("WRITTEN.TXT on the FAT volume of {file} holds {written:?}");
         }
+    }
+    let sectors = LAST_LBA - FIRST_LBA + 1;
+    let again = read_fat(dir, "usb.img", FIRST_LBA, sectors, "AGAIN.TXT")
+        .context("reading what the probe wrote across the xHCI restart")?;
+    if again != AGAIN {
+        bail!("AGAIN.TXT on the first FAT volume holds {again:?}");
     }
     let written = read_exfat(dir, "WRITTEN.TXT")?;
     if written != WRITTEN {
