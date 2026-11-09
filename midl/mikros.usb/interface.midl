@@ -1,0 +1,49 @@
+// MIKSPEC-0041.R6
+
+library mikros.usb;
+using mikros.base;
+
+type Speed = enum : u32 { LOW = 1; FULL = 2; HIGH = 3; SUPER = 4; SUPER_PLUS = 5; };
+
+type Setup = struct {
+    request_type u8;
+    request u8;
+    value u16;
+    index u16;
+    length u16;
+};
+
+type EndpointInfo = struct {
+    address u8;
+    attributes u8;
+    max_packet_size u16;
+    interval u8;
+};
+
+type InterfaceInfo = struct {
+    vendor_id u16;
+    product_id u16;
+    device_version u16;
+    speed Speed;
+    number u8;
+    class u8;
+    subclass u8;
+    protocol u8;
+    endpoints vector<EndpointInfo, 30>;
+    manufacturer string<128>;
+    product string<128>;
+    serial string<128>;
+};
+
+protocol Interface {
+    @1 GetInfo() -> (info InterfaceInfo);
+    @2 GetConfigurationDescriptor() -> (data vector<u8, 4096>);
+    @3 ControlTransfer(setup Setup, data vector<u8, 4096>,
+                       deadline base.MonotonicTime) -> (data vector<u8, 4096>) error base.Status;
+    @4 InterruptTransfer(endpoint u8, data vector<u8, 1024>, length u32,
+                         deadline base.MonotonicTime) -> (data vector<u8, 1024>) error base.Status;
+    @5 BulkTransfer(endpoint u8, buffer handle<MemoryObject>, offset u64,
+                    length u32, deadline base.MonotonicTime) -> (actual u32) error base.Status;
+    @6 SetAlternateSetting(alternate u8) -> () error base.Status;
+    @7 ClearHalt(endpoint u8) -> () error base.Status;
+};
