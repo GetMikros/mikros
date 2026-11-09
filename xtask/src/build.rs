@@ -450,7 +450,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .iter()
                 .map(|(n, p)| (n.as_str(), p.as_path()))
                 .collect();
-            let ports_image = boot_image(kind, "ports.img", &members)?;
+            let ports_image = test_image(kind, "ports.img", &members)?;
             println!("built    {}", ports_image.display());
             let broker = user_build("permissions-broker", kind)?;
             println!("built    {}", broker.display());
@@ -458,7 +458,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", broker_probe.display());
             // The broker tests serve this image, in which the broker
             // probe takes the service manager's place.
-            let broker_image = boot_image(
+            let broker_image = test_image(
                 kind,
                 "broker.img",
                 &[
@@ -482,7 +482,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // starts as a boot service.
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
-            let services_image = boot_image(
+            let services_image = test_image(
                 kind,
                 "services.img",
                 &[
@@ -530,7 +530,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let union_manifest = crate::workspace_root().join("user/union/union.yaml");
             let union_probe_manifest =
                 crate::workspace_root().join("user/tests/union-probe/union-probe.yaml");
-            let tmpfs_image = boot_image(
+            let tmpfs_image = test_image(
                 kind,
                 "tmpfs.img",
                 &[
@@ -567,7 +567,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", log_probe.display());
             let log_probe_manifest =
                 crate::workspace_root().join("user/tests/log-probe/log-probe.yaml");
-            let log_image = boot_image(
+            let log_image = test_image(
                 kind,
                 "log.img",
                 &[
@@ -596,7 +596,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let time_probe = user_build("time-probe", kind)?;
             println!("built    {}", time_probe.display());
             let probe_dir = crate::workspace_root().join("user/tests/time-probe");
-            let time_image = boot_image(
+            let time_image = test_image(
                 kind,
                 "time.img",
                 &[
@@ -631,7 +631,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let namespace_probe_manifest = probe_dir.join("namespace-probe.yaml");
             let probe_conf = probe_dir.join("probe.conf");
             let probe_data = probe_dir.join("data.txt");
-            let namespaces_image = boot_image(
+            let namespaces_image = test_image(
                 kind,
                 "namespaces.img",
                 &[
@@ -673,7 +673,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let thief_manifest = probe_dir.join("accounts-thief.yaml");
             let sneak_manifest = probe_dir.join("accounts-sneak.yaml");
             let users = accounts_users(kind)?;
-            let accounts_image = boot_image(
+            let accounts_image = test_image(
                 kind,
                 "accounts.img",
                 &[
@@ -781,7 +781,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     .iter()
                     .map(|(name, path)| (name.as_str(), path.as_path()))
                     .collect();
-                boot_image(kind, file, &members)
+                test_image(kind, file, &members)
             };
             let drivers = [
                 ("test-host", true),
@@ -1038,6 +1038,61 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
 /// and the path of its contents, as a regular file.
 fn boot_image(kind: Kind, file: &str, members: &[(&str, &Path)]) -> Result<PathBuf> {
     archive(kind, file, members, &[], &[])
+}
+
+/// Like `boot_image`, for the images that the test boot image holds:
+/// their programs go without their debug information, which takes most
+/// of a debug build's bytes and which every image would otherwise hold a
+/// copy of. Their symbols stay.
+fn test_image(kind: Kind, file: &str, members: &[(&str, &Path)]) -> Result<PathBuf> {
+    let stripped: Vec<(&str, PathBuf)> = members
+        .iter()
+        .map(|&(name, source)| Ok((name, without_debug_info(kind, source)?)))
+        .collect::<Result<_>>()?;
+    let members: Vec<(&str, &Path)> = stripped
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    boot_image(kind, file, &members)
+}
+
+/// A copy of the ELF file `source` without its debug information, made
+/// again only when `source` is newer, or `source` itself when it is not
+/// an ELF file.
+fn without_debug_info(kind: Kind, source: &Path) -> Result<PathBuf> {
+    let mut magic = [0u8; 4];
+    let is_elf = File::open(source)
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic))
+        .is_ok()
+        && magic == *b"\x7fELF";
+    if !is_elf {
+        return Ok(source.to_path_buf());
+    }
+    let dir = crate::workspace_root()
+        .join("target/boot")
+        .join(kind.name())
+        .join("stripped");
+    fs::create_dir_all(&dir)?;
+    // Programs of the same name come from one build directory.
+    let name = source
+        .strip_prefix(crate::workspace_root())
+        .unwrap_or(source)
+        .to_string_lossy()
+        .replace('/', "_");
+    let stripped = dir.join(name);
+    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    if modified(&stripped).is_some_and(|s| Some(s) >= modified(source)) {
+        return Ok(stripped);
+    }
+    let mut objcopy = Command::new(crate::llvm::tool("llvm-objcopy"));
+    objcopy.arg("--strip-debug").arg(source).arg(&stripped);
+    let status = objcopy
+        .status()
+        .with_context(|| format!("stripping {}", source.display()))?;
+    if !status.success() {
+        bail!("stripping {} failed", source.display());
+    }
+    Ok(stripped)
 }
 
 /// Like `boot_image`, with the directories `dirs` after the files, and
