@@ -1,7 +1,7 @@
 //! The served volume, the nodes that connections are open to, the
 //! tokens of directories, and the `Filesystem` service.
 
-use crate::device::BlockDevice;
+use crate::format::Format;
 use crate::node;
 use crate::time::{self, Utc};
 use alloc::collections::BTreeMap;
@@ -9,7 +9,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
-use mikros_fat::{Dir, FatType, Node as FatNode, Stamp, Volume};
+use mikros_fat::Stamp;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{
@@ -36,8 +36,8 @@ pub enum Target {
 /// A node that connections are open to: its entry as the volume has it
 /// now, how many connections, whether it has been removed, the byte-range
 /// locks of its connections, and the tasks that wait for one.
-struct Open {
-    node: FatNode,
+struct Open<N> {
+    node: N,
     refs: usize,
     removed: bool,
     locks: Vec<Lock>,
@@ -54,12 +54,12 @@ struct Lock {
     end: u64,
 }
 
-pub struct Fs {
-    pub volume: RefCell<Volume<BlockDevice>>,
-    nodes: RefCell<BTreeMap<u64, Open>>,
+pub struct Fs<F: Format> {
+    pub volume: RefCell<F>,
+    nodes: RefCell<BTreeMap<u64, Open<F::Node>>>,
     next: Cell<u64>,
     /// The directories that tokens name, by the token's object ID.
-    tokens: RefCell<BTreeMap<u64, Dir>>,
+    tokens: RefCell<BTreeMap<u64, F::Dir>>,
     /// The pager of the paged objects of files, and those objects with
     /// their sizes, by node.
     pub pager: OwnedHandle,
@@ -90,15 +90,15 @@ pub fn error(e: mikros_fat::Error) -> Error {
     }
 }
 
-impl Fs {
+impl<F: Format> Fs<F> {
     pub fn new(
-        volume: Volume<BlockDevice>,
+        volume: F,
         utc: Utc,
         pager: OwnedHandle,
         quick_disconnect: bool,
         reactor: Reactor,
         spawner: Spawner,
-    ) -> Fs {
+    ) -> Fs<F> {
         Fs {
             volume: RefCell::new(volume),
             nodes: RefCell::new(BTreeMap::new()),
@@ -134,8 +134,8 @@ impl Fs {
     }
 
     /// The local time now, for the stamps of changes.
-    pub fn now(&self) -> Stamp {
-        self.utc.stamp()
+    pub fn now(&self) -> F::Stamp {
+        F::stamp(self.utc.now())
     }
 
     /// Serves `end` as a connection to `target` with `rights`, writing at
@@ -175,10 +175,10 @@ impl Fs {
 
     /// The target for `node`, the one connections to the same entry
     /// share, which the caller then serves.
-    pub fn target(&self, node: FatNode) -> Target {
+    pub fn target(&self, node: F::Node) -> Target {
         let mut nodes = self.nodes.borrow_mut();
-        let same =
-            |o: &Open| !o.removed && o.node.parent == node.parent && o.node.slot == node.slot;
+        let place = F::place(&node);
+        let same = |o: &Open<F::Node>| !o.removed && F::place(&o.node) == place;
         if let Some((&id, _)) = nodes.iter().find(|(_, o)| same(o)) {
             return Target::Node(id);
         }
@@ -202,7 +202,7 @@ impl Fs {
     pub fn with_node<R>(
         &self,
         id: u64,
-        f: impl FnOnce(&mut Volume<BlockDevice>, &mut FatNode) -> Result<R, mikros_fat::Error>,
+        f: impl FnOnce(&mut F, &mut F::Node) -> Result<R, mikros_fat::Error>,
     ) -> Result<R, Error> {
         let mut nodes = self.nodes.borrow_mut();
         let open = nodes.get_mut(&id).ok_or(Error::NotFound)?;
@@ -213,12 +213,11 @@ impl Fs {
     }
 
     /// The directory that `target` is, or `NOT_DIRECTORY`.
-    pub fn dir(&self, target: Target) -> Result<Dir, Error> {
-        let root = self.volume.borrow().root();
+    pub fn dir(&self, target: Target) -> Result<F::Dir, Error> {
         match target {
-            Target::Root => Ok(root),
+            Target::Root => Ok(self.volume.borrow().root()),
             Target::Node(id) => self
-                .with_node(id, |_, node| Ok(node.as_dir(root)))?
+                .with_node(id, |volume, node| Ok(volume.as_dir(node)))?
                 .ok_or(Error::NotDirectory),
         }
     }
@@ -227,7 +226,7 @@ impl Fs {
     pub fn is_directory(&self, target: Target) -> Result<bool, Error> {
         match target {
             Target::Root => Ok(true),
-            Target::Node(id) => self.with_node(id, |_, node| Ok(node.is_directory())),
+            Target::Node(id) => self.with_node(id, |_, node| Ok(F::is_directory(node))),
         }
     }
 
@@ -290,26 +289,27 @@ impl Fs {
         }
     }
 
-    /// Records that the entry at `slot` of `parent` has moved to `to`.
-    pub fn moved(&self, parent: Dir, slot: u32, to: &FatNode) {
+    /// Records that the entry at `place`, a directory and a slot there,
+    /// has moved to `to`.
+    pub fn moved(&self, place: (F::Dir, u32), to: &F::Node) {
         for open in self.nodes.borrow_mut().values_mut() {
-            if !open.removed && open.node.parent == parent && open.node.slot == slot {
+            if !open.removed && F::place(&open.node) == place {
                 open.node = to.clone();
             }
         }
     }
 
-    /// Records that the entry at `slot` of `parent` is gone.
-    pub fn removed(&self, parent: Dir, slot: u32) {
+    /// Records that the entry at `place` is gone.
+    pub fn removed(&self, place: (F::Dir, u32)) {
         for open in self.nodes.borrow_mut().values_mut() {
-            if open.node.parent == parent && open.node.slot == slot {
+            if F::place(&open.node) == place {
                 open.removed = true;
             }
         }
     }
 
     /// A new token that names `dir`.
-    pub fn token(&self, dir: Dir) -> Result<OwnedHandle, Error> {
+    pub fn token(&self, dir: F::Dir) -> Result<OwnedHandle, Error> {
         let mut raw = 0;
         // SAFETY: the out pointer is valid for the call.
         if unsafe { sys::event_create(0, &mut raw) } != mikros_rt::OK {
@@ -333,7 +333,7 @@ impl Fs {
 
     /// The directory that the token `handle` names, when it is one of
     /// this file system's.
-    pub fn token_dir(&self, handle: &OwnedHandle) -> Option<Dir> {
+    pub fn token_dir(&self, handle: &OwnedHandle) -> Option<F::Dir> {
         let koid = koid(handle)?;
         self.tokens.borrow().get(&koid).copied()
     }
@@ -341,17 +341,12 @@ impl Fs {
     /// What `QueryFilesystem` reports.
     pub fn info(&self) -> Result<FilesystemInfo, Error> {
         let mut volume = self.volume.borrow_mut();
-        let layout = volume.layout().clone();
-        let cluster = u64::from(layout.cluster_size);
+        let cluster = u64::from(volume.cluster_size());
         let free = u64::from(volume.free_clusters().map_err(error)?);
         Ok(FilesystemInfo {
-            r#type: match layout.fat_type {
-                FatType::Fat12 => "fat12".into(),
-                FatType::Fat16 => "fat16".into(),
-                FatType::Fat32 => "fat32".into(),
-            },
-            block_size: layout.cluster_size,
-            total_bytes: u64::from(layout.clusters) * cluster,
+            r#type: volume.kind().into(),
+            block_size: volume.cluster_size(),
+            total_bytes: u64::from(volume.clusters()) * cluster,
             free_bytes: free * cluster,
             read_only: volume.read_only(),
             label: volume.label().map_err(error)?.unwrap_or_default(),
@@ -387,7 +382,7 @@ impl Fs {
     /// Writes what remains and marks the volume as shut down cleanly.
     pub fn unmount(&self) {
         if let Err(e) = self.volume.borrow_mut().unmount() {
-            mikros_rt::log!(Error, "fat: unmounting failed: {e:?}");
+            mikros_rt::log!(Error, "{}: unmounting failed: {e:?}", F::NAME);
         }
     }
 }
@@ -412,13 +407,13 @@ fn cut(locks: &mut Vec<Lock>, owner: u64, start: u64, end: u64) {
 }
 
 /// The attributes of the entry `node`.
-pub fn node_attributes(
-    volume: &mut Volume<BlockDevice>,
-    node: &FatNode,
+pub fn node_attributes<F: Format>(
+    volume: &mut F,
+    node: &F::Node,
 ) -> Result<Attributes, mikros_fat::Error> {
-    let allocated = volume.allocated(node.cluster())?;
-    let directory = node.is_directory();
-    let modified = time::to_utc(node.modified());
+    let allocated = volume.allocated(node)?;
+    let directory = F::is_directory(node);
+    let [created, modified, accessed] = F::times(node);
     Ok(Attributes {
         r#type: if directory {
             NodeType::Directory
@@ -427,13 +422,13 @@ pub fn node_attributes(
         },
         mode: if directory { 0o755 } else { 0o644 },
         owner: 0,
-        size: if directory { allocated } else { node.size() },
+        size: if directory { allocated } else { F::size(node) },
         allocated,
         links: 1,
         inode: 2 + volume.entry_offset(node)? / 32,
-        created: time::to_utc(node.created()),
+        created,
         modified,
-        accessed: time::to_utc(node.accessed()),
+        accessed,
         changed: modified,
     })
 }
@@ -458,7 +453,7 @@ fn koid(handle: &OwnedHandle) -> Option<u64> {
 
 /// Serves the provider `end` of the published `filesystem` service until
 /// it closes: each connection to `device.filesystem` gets `Filesystem`.
-pub async fn serve_provider(fs: Rc<Fs>, end: ServerEnd<Provider>) {
+pub async fn serve_provider<F: Format>(fs: Rc<Fs<F>>, end: ServerEnd<Provider>) {
     let server = ProviderAsyncServer::new(end, fs.reactor.clone());
     while let Ok(ProviderRequest::Connect(request)) = server.next().await {
         if request.protocol == PROTOCOL {
@@ -470,7 +465,7 @@ pub async fn serve_provider(fs: Rc<Fs>, end: ServerEnd<Provider>) {
 
 /// Serves `Filesystem` on `end`. `GetRoot` asking for `WRITE` on a
 /// read-only volume fails with `READ_ONLY`.
-async fn serve_filesystem(fs: Rc<Fs>, end: ServerEnd<Filesystem>) {
+async fn serve_filesystem<F: Format>(fs: Rc<Fs<F>>, end: ServerEnd<Filesystem>) {
     let server = FilesystemAsyncServer::new(end, fs.reactor.clone());
     while let Ok(request) = server.next().await {
         let s = server.server();

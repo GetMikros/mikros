@@ -1,35 +1,22 @@
-//! The FAT server.
-//!
-//! It binds to partitions of the EFI system partition and Microsoft
-//! basic data types, reads and writes the partition through the `Block`
-//! channel that `Start` gives it as `bus`, and publishes the volume as a
-//! service of class `filesystem` that serves `mikros.fs.Filesystem`.
-//! `Start` fails with `NOT_SUPPORTED` for a partition that does not hold
-//! a valid FAT volume. `Stop` writes what remains and marks the volume as
-//! shut down cleanly. `Reconnect` gives the partition's new channel after
-//! its driver restarted, on which the requests that had not completed go
-//! again. `ResetChild` and `ConnectChild` fail with `NOT_SUPPORTED`.
+//! The server: it binds to a partition, reads and writes it through the
+//! `Block` channel that `Start` gives it as `bus`, and publishes the
+//! volume as a service of class `filesystem` that serves
+//! `mikros.fs.Filesystem`. `Start` fails with `NOT_SUPPORTED` for a
+//! partition that does not hold a valid volume of the format it serves.
+//! `Stop` writes what remains and marks the volume as shut down cleanly.
+//! `Reconnect` gives the partition's new channel after its driver
+//! restarted, on which the requests that had not completed go again.
+//! `ResetChild` and `ConnectChild` fail with `NOT_SUPPORTED`.
 //!
 //! This thread serves the `Driver` channel until the volume is mounted,
 //! and the volume's clients after that; the driver's thread takes the
 //! channel then (see `driver`).
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-mod device;
-mod driver;
-mod fs;
-mod memory;
-mod node;
-mod time;
-
+use crate::device::BlockDevice;
+use crate::format::Format;
+use crate::fs::{self, Fs};
+use crate::{driver, memory, time};
 use alloc::rc::Rc;
-use device::BlockDevice;
-use fs::Fs;
-use mikros_fat::Volume;
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -42,8 +29,6 @@ use mikros_rt::interfaces::mikros::service::{DirectoryClient, Provider};
 use mikros_rt::interfaces::mikros::storage::BlockClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
-mikros_rt::raw_main!(main);
-
 const SERVICE_CLASS: &str = "filesystem";
 /// The property of the partition that says how its changes may be
 /// cached (MIKSPEC-0025.R33), and the value that has them durable at
@@ -52,7 +37,9 @@ const CACHE: &str = "cache";
 const QUICK_DISCONNECT: &str = "quick-disconnect";
 const FOREVER: i64 = i64::MAX;
 
-fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
+/// Runs the server of the format `F` in the driver process whose
+/// bootstrap channel is `bootstrap`, and gives its exit code.
+pub fn run<F: Format>(bootstrap: sys::Handle) -> i64 {
     let Ok(mut executor) = Executor::new() else {
         return PANIC_EXIT_CODE;
     };
@@ -87,7 +74,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         };
         let _ = match request {
             DriverRequest::Start(request, responder) => {
-                match start(request, process, &directory, &reactor, &spawner) {
+                match start::<F>(request, process, &directory, &reactor, &spawner) {
                     Ok((fs, manager)) => {
                         let _ = responder.reply(&server, Ok(DriverStartResponse {}));
                         spawner.spawn(publish(fs.clone(), manager));
@@ -112,7 +99,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         };
     };
     if !thread.start(server, process) {
-        mikros_rt::log!(Error, "fat: the driver's thread did not start");
+        mikros_rt::log!(Error, "{}: the driver's thread did not start", F::NAME);
         return PANIC_EXIT_CODE;
     }
     executor.block_on(async {
@@ -130,14 +117,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 /// and the device manager. Fails with `INVALID_ARGS` without a bus
 /// channel, with `NO_RESOURCES` when the disk gives no buffer or there
 /// is no pager, with `NOT_SUPPORTED` when the partition holds no valid
-/// FAT volume, and with `INTERNAL` when reading it fails.
-fn start(
+/// volume of the format `F`, and with `INTERNAL` when reading it fails.
+fn start<F: Format>(
     request: DriverStartRequest,
     process: sys::Handle,
     directory: &DirectoryClient,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<(Rc<Fs>, DeviceManagerAsyncClient), Status> {
+) -> Result<(Rc<Fs<F>>, DeviceManagerAsyncClient), Status> {
     let quick_disconnect = request
         .device
         .properties
@@ -147,16 +134,12 @@ fn start(
     let block = BlockClient::new(ClientEnd::new(bus));
     let device = BlockDevice::new(block, process, &driver::GATE).ok_or(Status::NoResources)?;
     let (size, writable) = (device.size(), !device.read_only());
-    let mounted = match quick_disconnect {
-        true => Volume::mount_quick_disconnect(device, size, writable),
-        false => Volume::mount(device, size, writable),
-    };
-    let volume = mounted.map_err(|e| match e {
+    let volume = F::mount(device, size, writable, quick_disconnect).map_err(|e| match e {
         mikros_fat::Error::Invalid => Status::NotSupported,
         _ => Status::Internal,
     })?;
     let utc = time::Utc::new(directory, process);
-    let pager = memory::pager().ok_or(Status::NoResources)?;
+    let pager = memory::pager(F::NAME).ok_or(Status::NoResources)?;
     let fs = Rc::new(Fs::new(
         volume,
         utc,
@@ -171,7 +154,7 @@ fn start(
 
 /// Publishes the volume as a `filesystem` service and serves it. Keeps
 /// the device manager's channel open for as long as the driver runs.
-async fn publish(fs: Rc<Fs>, manager: DeviceManagerAsyncClient) {
+async fn publish<F: Format>(fs: Rc<Fs<F>>, manager: DeviceManagerAsyncClient) {
     if let Ok((client, server)) = endpoints::<Provider>()
         && let Ok(Ok(_)) = manager.publish_service(SERVICE_CLASS.into(), client).await
     {

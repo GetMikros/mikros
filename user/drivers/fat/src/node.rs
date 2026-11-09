@@ -1,15 +1,14 @@
 //! One connection to a node of the volume.
 
+use crate::format::Format;
 use crate::fs::{self, Fs, Target};
 use crate::memory;
-use crate::time;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::future::poll_fn;
 use core::task::Poll;
-use mikros_fat::{Dir, FILE_MAX};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;
 
@@ -20,8 +19,8 @@ const ENTRIES_MAX: usize = 64;
 /// The longest path component, in bytes.
 const NAME_MAX: usize = 255;
 
-struct Connection {
-    fs: Rc<Fs>,
+struct Connection<F: Format> {
+    fs: Rc<Fs<F>>,
     target: Target,
     rights: Rights,
     cursor: u64,
@@ -33,7 +32,13 @@ struct Connection {
 /// Serves the connection on `end` to `target` with `rights` until the
 /// client closes it or sends an invalid message, and then lets go of
 /// `target`.
-pub async fn serve(fs: Rc<Fs>, end: ServerEnd<Node>, target: Target, rights: Rights, append: bool) {
+pub async fn serve<F: Format>(
+    fs: Rc<Fs<F>>,
+    end: ServerEnd<Node>,
+    target: Target,
+    rights: Rights,
+    append: bool,
+) {
     let server = NodeAsyncServer::new(end, fs.reactor.clone());
     let owner = fs.owner();
     let mut connection = Connection {
@@ -58,7 +63,7 @@ pub async fn serve(fs: Rc<Fs>, end: ServerEnd<Node>, target: Target, rights: Rig
     connection.fs.close(connection.target, owner);
 }
 
-impl Connection {
+impl<F: Format> Connection<F> {
     fn handle(&mut self, request: NodeRequest, s: &NodeServer) {
         use NodeRequest as R;
         // A reply that cannot be sent means that the client went away,
@@ -137,7 +142,7 @@ impl Connection {
                 r.reply(s, renamed.map(|()| NodeRenameResponse {}))
             }
             R::ReadLink(_, r) => r.reply(s, Err(Error::Invalid)),
-            // What FAT cannot hold.
+            // What the volume cannot hold.
             R::CloneRange(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Link(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::CreateSymlink(_, r) => r.reply(s, Err(Error::NotSupported)),
@@ -199,11 +204,11 @@ impl Connection {
         let accessed = q
             .mask
             .contains(AttributeMask::ACCESSED)
-            .then(|| time::to_stamp(q.accessed));
+            .then(|| F::stamp(q.accessed));
         let modified = q
             .mask
             .contains(AttributeMask::MODIFIED)
-            .then(|| time::to_stamp(q.modified));
+            .then(|| F::stamp(q.modified));
         self.fs.with_node(id, |volume, node| {
             volume.set_times(node, accessed, modified)
         })?;
@@ -243,10 +248,10 @@ impl Connection {
         let written = self
             .fs
             .with_node(id, |volume, node| {
-                let at = offset.unwrap_or(node.size());
+                let at = offset.unwrap_or(F::size(node));
                 volume.write(node, at, data, now).map(|()| at)
             })
-            .map_err(|e| too_big(offset, data.len(), e));
+            .map_err(|e| too_big(offset, data.len(), F::FILE_MAX, e));
         self.fs.changed(id);
         written
     }
@@ -262,7 +267,7 @@ impl Connection {
 
     fn truncate(&self, size: u64) -> Result<(), Error> {
         self.require_write()?;
-        if size > FILE_MAX {
+        if size > F::FILE_MAX {
             return Err(Error::TooBig);
         }
         let id = self.file()?;
@@ -279,7 +284,7 @@ impl Connection {
         let base = match origin {
             SeekOrigin::Start => 0,
             SeekOrigin::Current => self.cursor,
-            SeekOrigin::End => self.fs.with_node(id, |_, node| Ok(node.size()))?,
+            SeekOrigin::End => self.fs.with_node(id, |_, node| Ok(F::size(node)))?,
             SeekOrigin::Unknown(_) => return Err(Error::Invalid),
         };
         let position = i128::from(base) + i128::from(offset);
@@ -352,7 +357,6 @@ impl Connection {
         }
         let mut dir = self.fs.dir(self.target)?;
         let (parts, trailing) = components(&q.path)?;
-        let root = self.fs.volume.borrow().root();
         let Some((&last, within)) = parts.split_last() else {
             // The path names this directory itself.
             self.fs.serve(q.node, self.target, q.rights, false);
@@ -364,7 +368,7 @@ impl Connection {
         for part in within {
             let mut volume = self.fs.volume.borrow_mut();
             let node = volume.find(dir, part).map_err(fs::error)?;
-            dir = node.as_dir(root).ok_or(Error::NotDirectory)?;
+            dir = volume.as_dir(&node).ok_or(Error::NotDirectory)?;
         }
         let want_dir = q.flags.contains(OpenFlags::DIRECTORY) || trailing;
         let found = self.fs.volume.borrow_mut().find(dir, last);
@@ -372,7 +376,7 @@ impl Connection {
             Ok(_) if q.flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) => {
                 return Err(Error::Exists);
             }
-            Ok(node) if want_dir && !node.is_directory() => return Err(Error::NotDirectory),
+            Ok(node) if want_dir && !F::is_directory(&node) => return Err(Error::NotDirectory),
             Ok(node) => node,
             Err(mikros_fat::Error::NotFound) if q.flags.contains(OpenFlags::CREATE) => {
                 self.require_write()?;
@@ -386,7 +390,7 @@ impl Connection {
             }
             Err(e) => return Err(fs::error(e)),
         };
-        let r#type = if node.is_directory() {
+        let r#type = if F::is_directory(&node) {
             NodeType::Directory
         } else {
             NodeType::File
@@ -429,9 +433,9 @@ impl Connection {
         let (nodes, next) = volume.list(dir, from, ENTRIES_MAX).map_err(fs::error)?;
         let mut entries = Vec::with_capacity(nodes.len());
         for node in nodes {
-            let attrs = fs::node_attributes(&mut volume, &node).map_err(fs::error)?;
+            let attrs = fs::node_attributes(&mut *volume, &node).map_err(fs::error)?;
             entries.push(DirEntry {
-                name: node.name,
+                name: F::name(&node).into(),
                 r#type: attrs.r#type,
                 inode: attrs.inode,
                 attributes: attributes.then(|| Box::new(attrs)),
@@ -450,7 +454,7 @@ impl Connection {
         let mut volume = self.fs.volume.borrow_mut();
         let node = volume.find(dir, name).map_err(fs::error)?;
         volume.remove(dir, name, directory).map_err(fs::error)?;
-        self.fs.removed(node.parent, node.slot);
+        self.fs.removed(F::place(&node));
         Ok(())
     }
 
@@ -467,33 +471,33 @@ impl Connection {
         let from = self.fs.dir(self.target)?;
         check_component(&q.name)?;
         check_component(&q.new_name)?;
-        let to: Dir = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
         let mut volume = self.fs.volume.borrow_mut();
         let node = volume.find(from, &q.name).map_err(fs::error)?;
         // An entry that the rename replaces is gone; its slots may take
         // the moved entry.
         if let Ok(existing) = volume.find(to, &q.new_name)
-            && (existing.parent, existing.slot) != (node.parent, node.slot)
+            && F::place(&existing) != F::place(&node)
         {
             let moved = volume
                 .rename(from, &q.name, to, &q.new_name)
                 .map_err(fs::error)?;
-            self.fs.removed(existing.parent, existing.slot);
-            self.fs.moved(node.parent, node.slot, &moved);
+            self.fs.removed(F::place(&existing));
+            self.fs.moved(F::place(&node), &moved);
             return Ok(());
         }
         let moved = volume
             .rename(from, &q.name, to, &q.new_name)
             .map_err(fs::error)?;
-        self.fs.moved(node.parent, node.slot, &moved);
+        self.fs.moved(F::place(&node), &moved);
         Ok(())
     }
 }
 
-/// `TOO_BIG` for a write that would take the file past what FAT holds,
-/// and `e` otherwise.
-fn too_big(offset: Option<u64>, len: usize, e: Error) -> Error {
-    let past = offset.is_some_and(|at| at.saturating_add(len as u64) > FILE_MAX);
+/// `TOO_BIG` for a write that would take the file past `max` bytes, the
+/// most a file holds, and `e` otherwise.
+fn too_big(offset: Option<u64>, len: usize, max: u64, e: Error) -> Error {
+    let past = offset.is_some_and(|at| at.saturating_add(len as u64) > max);
     if past && e == Error::NoSpace {
         Error::TooBig
     } else {

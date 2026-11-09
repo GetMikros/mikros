@@ -2,6 +2,7 @@
 //! objects whose pages the server supplies from the file and drops again
 //! when the file changes, so that they show its changes.
 
+use crate::format::Format;
 use crate::fs::Fs;
 use alloc::rc::Rc;
 use alloc::vec;
@@ -33,29 +34,31 @@ pub fn rights(write: bool, execute: bool) -> u32 {
     base | if write { WRITE } else { 0 } | if execute { EXECUTE } else { 0 }
 }
 
-fn owned(status: sys::Status, raw: sys::Handle) -> Result<OwnedHandle, Error> {
+/// The handle `raw` that a call with `status` made, logging the failure
+/// of a call of the server `name`.
+fn owned(name: &str, status: sys::Status, raw: sys::Handle) -> Result<OwnedHandle, Error> {
     if status != mikros_rt::OK {
-        mikros_rt::log!(Error, "fat: a memory object call failed: {status}");
+        mikros_rt::log!(Error, "{name}: a memory object call failed: {status}");
         return Err(Error::Io);
     }
     // SAFETY: the kernel just created the handle for us.
     Ok(unsafe { OwnedHandle::from_raw(raw) })
 }
 
-/// A new pager for the server's paged objects.
-pub fn pager() -> Option<OwnedHandle> {
+/// A new pager for the paged objects of the server `name`.
+pub fn pager(name: &str) -> Option<OwnedHandle> {
     let mut raw = 0;
     // SAFETY: the out pointer is valid for the call.
-    owned(unsafe { sys::pager_create(0, &mut raw) }, raw).ok()
+    owned(name, unsafe { sys::pager_create(0, &mut raw) }, raw).ok()
 }
 
-impl Fs {
+impl<F: Format> Fs<F> {
     /// The bytes of the file of node `id` from `at`, `len` of them, with
     /// zeros past its end, in a new anonymous memory object.
     fn contents(&self, id: u64, at: u64, len: u64) -> Result<OwnedHandle, Error> {
         let mut raw = 0;
         // SAFETY: the out pointer is valid for the call.
-        let mem = owned(unsafe { sys::mem_create(len, 0, &mut raw) }, raw)?;
+        let mem = owned(F::NAME, unsafe { sys::mem_create(len, 0, &mut raw) }, raw)?;
         let mut data = vec![0u8; len as usize];
         let n = self.with_node(id, |volume, node| volume.read(node, at, &mut data))?;
         // SAFETY: the pointer describes the first `n` bytes of `data`.
@@ -70,12 +73,13 @@ impl Fs {
     /// copy-on-write clone of a copy that the server makes and drops
     /// again, so that the client's object is a clone as `PRIVATE` asks.
     pub fn private_memory(&self, id: u64, rights: u32) -> Result<OwnedHandle, Error> {
-        let size = self.with_node(id, |_, node| Ok(node.size()))?;
+        let size = self.with_node(id, |_, node| Ok(F::size(node)))?;
         let len = size.next_multiple_of(PAGE).max(PAGE);
         let copy = self.contents(id, 0, len)?;
         let mut raw = 0;
         // SAFETY: the out pointer is valid for the call.
         let clone = owned(
+            F::NAME,
             unsafe { sys::mem_clone(copy.raw(), 0, 0, len, &mut raw) },
             raw,
         )?;
@@ -83,6 +87,7 @@ impl Fs {
         // SAFETY: the out pointer is valid for the call; the kernel closes
         // the old handle.
         owned(
+            F::NAME,
             unsafe { sys::handle_replace(clone.into_raw(), rights, &mut out) },
             out,
         )
@@ -96,7 +101,7 @@ impl Fs {
         let raw = match existing {
             Some(raw) => raw,
             None => {
-                let size = self.with_node(id, |_, node| Ok(node.size()))?;
+                let size = self.with_node(id, |_, node| Ok(F::size(node)))?;
                 let len = size.next_multiple_of(PAGE).max(PAGE);
                 let packets = self.reactor.packets();
                 let mut raw = 0;
@@ -111,7 +116,7 @@ impl Fs {
                         &mut raw,
                     )
                 };
-                let mem = owned(created, raw)?;
+                let mem = owned(F::NAME, created, raw)?;
                 self.hold(id);
                 let raw = mem.raw();
                 self.paged.borrow_mut().insert(id, (mem, len));
@@ -121,7 +126,11 @@ impl Fs {
         };
         let mut out = 0;
         // SAFETY: the out pointer is valid for the call.
-        owned(unsafe { sys::handle_duplicate(raw, rights, &mut out) }, out)
+        owned(
+            F::NAME,
+            unsafe { sys::handle_duplicate(raw, rights, &mut out) },
+            out,
+        )
     }
 
     /// Drops the pages of the paged object of node `id`, when it has one,
@@ -136,7 +145,7 @@ impl Fs {
 
 /// Answers the page requests of the paged object of node `id` from its
 /// file for as long as the server runs, failing those of a removed file.
-async fn supply(fs: Rc<Fs>, packets: Packets, id: u64) {
+async fn supply<F: Format>(fs: Rc<Fs<F>>, packets: Packets, id: u64) {
     loop {
         let packet = packets.next().await;
         let word =
@@ -158,7 +167,7 @@ async fn supply(fs: Rc<Fs>, packets: Packets, id: u64) {
             Err(_) => unsafe { sys::pager_op(fs.pager.raw(), mem, OP_FAIL, at, len) },
         };
         if status != mikros_rt::OK {
-            mikros_rt::log!(Error, "fat: supplying a page failed: {status}");
+            mikros_rt::log!(Error, "{}: supplying a page failed: {status}", F::NAME);
         }
     }
 }

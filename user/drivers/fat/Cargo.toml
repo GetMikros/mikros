@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+# The server, which the FAT server, src/bin/fat.rs, runs.
+[lib]
+name = "fat_server"
+
 [dependencies]
 mikros-fat = { path = "../../fat" }
 mikros-rt = { path = "../../mikros-rt" }

@@ -53,11 +53,6 @@ impl Utc {
         unsafe { sys::clock_get_monotonic(&mut monotonic) };
         offset.saturating_add(monotonic)
     }
-
-    /// The local time now as a FAT stamp.
-    pub fn stamp(&self) -> Stamp {
-        to_stamp(self.now())
-    }
 }
 
 /// Maps the time page of the time service in `directory`.
