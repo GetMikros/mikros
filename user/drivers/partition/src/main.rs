@@ -334,17 +334,23 @@ async fn add_partitions(
     drop(manager);
 }
 
+/// The bit of a GPT entry's attributes that asks for the partition not
+/// to be mounted automatically.
+const NO_AUTOMOUNT: u64 = 1 << 63;
+
 /// The properties of the device of partition `entry`.
 fn properties(entry: &mikros_gpt::Partition) -> Vec<Property> {
     let property = |key: &str, value: String| Property {
         key: key.into(),
         value,
     };
+    let no_automount = entry.attributes & NO_AUTOMOUNT != 0;
     vec![
         property("partition_guid", guid_string(&entry.guid)),
         property("name", entry.name.clone()),
         property("first_lba", format!("{}", entry.first_lba)),
         property("last_lba", format!("{}", entry.last_lba)),
+        property("no_automount", format!("{no_automount}")),
     ]
 }
 
