@@ -1,11 +1,15 @@
 //! The `AcpiOs` functions of ACPICA's operating system layer that need
-//! nothing of the hardware: memory, locks, mutexes and semaphores.
+//! nothing of the hardware: memory, locks, mutexes and semaphores, time,
+//! signals from AML, the table overrides, and output.
 
-use crate::sync::{FOREVER, Lock, Semaphore, now};
+use crate::sync::{FOREVER, Lock, Locked, Semaphore, now};
 use crate::{AE_BAD_PARAMETER, AE_LIMIT, AE_OK, AE_TIME, Status};
 use alloc::boxed::Box;
+use alloc::string::String;
 use core::alloc::Layout;
-use core::ffi::c_void;
+use core::ffi::{CStr, c_char, c_void};
+use mikros_rt::log::{self, Severity};
+use mikros_rt::sys;
 
 /// The bytes before each block of `AcpiOsAllocate` that hold its size,
 /// as many as the block's alignment.
@@ -13,6 +17,11 @@ const HEADER: usize = 16;
 /// The timeout that waits for ever.
 const WAIT_FOREVER: u16 = 0xFFFF;
 const NANOS_PER_MILLI: i64 = 1_000_000;
+/// The `AcpiOsSignal` functions.
+const SIGNAL_FATAL: u32 = 0;
+const SIGNAL_BREAKPOINT: u32 = 1;
+/// The longest line that the output keeps before it logs it.
+const LINE_MAX: usize = 512;
 
 /// The deadline of a wait of `timeout` milliseconds.
 fn deadline(timeout: u16) -> i64 {
@@ -186,5 +195,149 @@ extern "C" fn AcpiOsSignalSemaphore(handle: *mut c_void, units: u32) -> Status {
         AE_OK
     } else {
         AE_LIMIT
+    }
+}
+
+/// The timer in units of 100 ns.
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsGetTimer() -> u64 {
+    (now() / 100) as u64
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsSleep(milliseconds: u64) {
+    let nanos = i64::try_from(milliseconds)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(NANOS_PER_MILLI);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_sleep(now().saturating_add(nanos)) };
+}
+
+/// Waits `microseconds` without giving up the processor.
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsStall(microseconds: u32) {
+    let end = now() + i64::from(microseconds) * 1000;
+    while now() < end {
+        core::hint::spin_loop();
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsEnterSleep(_state: u8, _a: u32, _b: u32) -> Status {
+    AE_OK
+}
+
+/// What a fatal AML operation passes to `AcpiOsSignal`.
+#[repr(C)]
+struct FatalInfo {
+    kind: u32,
+    code: u32,
+    argument: u32,
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsSignal(function: u32, info: *mut c_void) -> Status {
+    if info.is_null() {
+        return AE_OK;
+    }
+    match function {
+        SIGNAL_FATAL => {
+            // SAFETY: ACPICA passes a fatal operation's information.
+            let info = unsafe { &*(info as *const FatalInfo) };
+            mikros_rt::log!(
+                Error,
+                "acpi: AML fatal: type {:#x}, code {:#x}, argument {:#x}",
+                info.kind,
+                info.code,
+                info.argument
+            );
+        }
+        SIGNAL_BREAKPOINT => {
+            // SAFETY: ACPICA passes the breakpoint's message.
+            let message = unsafe { CStr::from_ptr(info as *const c_char) };
+            mikros_rt::log!(Info, "acpi: AML breakpoint: {}", message.to_string_lossy());
+        }
+        _ => {}
+    }
+    AE_OK
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsPredefinedOverride(_name: *const c_void, new: *mut *mut c_char) -> Status {
+    if new.is_null() {
+        return AE_BAD_PARAMETER;
+    }
+    // SAFETY: ACPICA passes a pointer to write the override to.
+    unsafe { *new = core::ptr::null_mut() };
+    AE_OK
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsTableOverride(_table: *mut c_void, new: *mut *mut c_void) -> Status {
+    if new.is_null() {
+        return AE_BAD_PARAMETER;
+    }
+    // SAFETY: ACPICA passes a pointer to write the override to.
+    unsafe { *new = core::ptr::null_mut() };
+    AE_OK
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn AcpiOsPhysicalTableOverride(
+    _table: *mut c_void,
+    address: *mut u64,
+    length: *mut u32,
+) -> Status {
+    if address.is_null() || length.is_null() {
+        return AE_BAD_PARAMETER;
+    }
+    // SAFETY: ACPICA passes pointers to write the override to.
+    unsafe {
+        *address = 0;
+        *length = 0;
+    }
+    AE_OK
+}
+
+/// What ACPICA has written of the line it is writing.
+static LINE: Locked<String> = Locked::new(String::new());
+
+/// The severity of a line of ACPICA's output, from how it starts.
+fn severity(line: &str) -> Severity {
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| line.starts_with(p));
+    if starts(&["ACPI Error", "ACPI Exception", "Firmware Error"]) {
+        Severity::Error
+    } else if starts(&["ACPI Warning", "Firmware Warning"]) {
+        Severity::Warning
+    } else {
+        Severity::Info
+    }
+}
+
+/// Takes a piece of ACPICA's output from the glue's `AcpiOsVprintf`, and
+/// logs each line once it ends, or once it is too long.
+#[unsafe(no_mangle)]
+extern "C" fn mikros_acpi_print(text: *const c_char) {
+    if text.is_null() {
+        return;
+    }
+    // SAFETY: the glue passes a string that ends with a 0.
+    let text = unsafe { CStr::from_ptr(text) }.to_bytes();
+    let mut line = LINE.lock();
+    for piece in text.split_inclusive(|&b| b == b'\n') {
+        let ends = piece.last() == Some(&b'\n');
+        let piece = if ends {
+            &piece[..piece.len() - 1]
+        } else {
+            piece
+        };
+        line.push_str(&String::from_utf8_lossy(piece));
+        if ends || line.len() >= LINE_MAX {
+            let text = line.trim_end();
+            if !text.is_empty() {
+                log::write(severity(text), format_args!("acpi: {text}"));
+            }
+            line.clear();
+        }
     }
 }
