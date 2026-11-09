@@ -317,14 +317,13 @@ pub enum Reset {
 /// capability reports one, a transition from D3hot to D0 when its power
 /// management capability does not set `No_Soft_Reset`, or a reset of
 /// the secondary bus of the bridge above it, when that bridge is on one
-/// of the buses from `bus_start` to `bus_end` and the function's device
-/// is the only one on its bus.
-pub fn reset_method(
-    config: &impl Config,
-    at: Address,
-    bus_start: u8,
-    bus_end: u8,
-) -> Option<Reset> {
+/// of the buses from `bus_start` to the one before the function's and
+/// the function's device is the only one on its bus. As buses are
+/// numbered, a bridge's own bus comes before its secondary bus, so a
+/// function on `bus_start` has no bridge above it. The bridge is looked
+/// for as `scan` looks for functions, so that absent devices and the
+/// functions of single-function devices are not read.
+pub fn reset_method(config: &impl Config, at: Address, bus_start: u8) -> Option<Reset> {
     let caps = capabilities(config, at);
     let find = |id| {
         caps.iter()
@@ -346,20 +345,32 @@ pub fn reset_method(
     {
         return Some(Reset::PowerCycle(cap));
     }
-    let bridge = (bus_start..=bus_end).find_map(|bus| {
-        (0..32u8)
-            .flat_map(|device| {
-                (0..8u8).map(move |function| Address {
+    let bridge = (bus_start..at.bus).find_map(|bus| {
+        (0..32u8).find_map(|device| {
+            let first = Address {
+                bus,
+                device,
+                function: 0,
+            };
+            if config.read(first, VENDOR_ID, 2) as u16 == NO_VENDOR {
+                return None;
+            }
+            let functions = match config.read(first, HEADER_TYPE, 1) as u8 & MULTI_FUNCTION {
+                0 => 1,
+                _ => 8,
+            };
+            (0..functions)
+                .map(|function| Address {
                     bus,
                     device,
                     function,
                 })
-            })
-            .find(|&b| {
-                config.read(b, VENDOR_ID, 2) as u16 != NO_VENDOR
-                    && config.read(b, HEADER_TYPE, 1) as u8 & HEADER_LAYOUT == 1
-                    && config.read(b, SECONDARY_BUS, 1) as u8 == at.bus
-            })
+                .find(|&b| {
+                    config.read(b, VENDOR_ID, 2) as u16 != NO_VENDOR
+                        && config.read(b, HEADER_TYPE, 1) as u8 & HEADER_LAYOUT == 1
+                        && config.read(b, SECONDARY_BUS, 1) as u8 == at.bus
+                })
+        })
     })?;
     let alone = (0..32u8).filter(|&d| d != at.device).all(|device| {
         let other = Address {

@@ -288,24 +288,24 @@ fn chooses_how_to_reset_a_function() {
     let f = fake.add(flr, &VIRTIO_BLOCK, 0);
     list(f, &[(CAP_PM, 0x40), (CAP_PCIE, 0x60)]);
     put(f, 0x64, &(1u32 << 28).to_le_bytes());
-    assert_eq!(reset_method(&fake, flr, 0, 1), Some(Reset::PcieFlr(0x60)));
+    assert_eq!(reset_method(&fake, flr, 0), Some(Reset::PcieFlr(0x60)));
     // Then the Advanced Features one.
     let af = at(0, 2, 0);
     let f = fake.add(af, &VIRTIO_BLOCK, 0);
     list(f, &[(CAP_PCIE, 0x40), (CAP_AF, 0x50)]);
     put(f, 0x53, &[1 << 1]);
-    assert_eq!(reset_method(&fake, af, 0, 1), Some(Reset::AfFlr(0x50)));
+    assert_eq!(reset_method(&fake, af, 0), Some(Reset::AfFlr(0x50)));
     // Then D3hot to D0, unless No_Soft_Reset is set.
     let pm = at(0, 3, 0);
     let f = fake.add(pm, &VIRTIO_BLOCK, 0);
     list(f, &[(CAP_PM, 0x40)]);
-    assert_eq!(reset_method(&fake, pm, 0, 1), Some(Reset::PowerCycle(0x40)));
+    assert_eq!(reset_method(&fake, pm, 0), Some(Reset::PowerCycle(0x40)));
     put(
         fake.functions.get_mut(&pm).unwrap(),
         0x44,
         &(1u32 << 3).to_le_bytes(),
     );
-    assert_eq!(reset_method(&fake, pm, 0, 1), None);
+    assert_eq!(reset_method(&fake, pm, 0), None);
     // Then the secondary bus reset of the bridge above, for the only
     // device on that bus, but not for one of two.
     let bridge = at(0, 5, 0);
@@ -314,11 +314,50 @@ fn chooses_how_to_reset_a_function() {
     let alone = at(1, 0, 0);
     fake.add(alone, &VIRTIO_BLOCK, 0);
     assert_eq!(
-        reset_method(&fake, alone, 0, 1),
+        reset_method(&fake, alone, 0),
         Some(Reset::SecondaryBus(bridge))
     );
     fake.add(at(1, 1, 0), &VIRTIO_BLOCK, 0);
-    assert_eq!(reset_method(&fake, alone, 0, 1), None);
+    assert_eq!(reset_method(&fake, alone, 0), None);
     // A function on the root bus has no bridge above it.
-    assert_eq!(reset_method(&fake, at(0, 3, 0), 0, 1), None);
+    assert_eq!(reset_method(&fake, at(0, 3, 0), 0), None);
+}
+
+/// Configuration space that counts the reads asked of it.
+struct Counted<'a>(&'a Fake, core::cell::Cell<usize>);
+
+impl Config for Counted<'_> {
+    fn read(&self, at: Address, offset: u16, width: u8) -> u32 {
+        self.1.set(self.1.get() + 1);
+        self.0.read(at, offset, width)
+    }
+
+    fn write(&mut self, _: Address, _: u16, _: u8, _: u32) {}
+}
+
+#[test]
+fn looks_for_the_bridge_above_a_function_only_where_it_can_be() {
+    let mut fake = Fake::default();
+    // A function on the first bus without a way to reset it: no bridge
+    // can be above it, so only its own capabilities are read.
+    let root = at(0, 2, 0);
+    fake.add(root, &VIRTIO_BLOCK, 0);
+    let counted = Counted(&fake, core::cell::Cell::new(0));
+    assert_eq!(reset_method(&counted, root, 0), None);
+    assert!(counted.1.get() < 8, "{} reads", counted.1.get());
+    // A bridge on bus 1 to bus 2, as function 1 of a multi-function
+    // device, above the only device of bus 2.
+    fake.add(at(1, 4, 0), &VIRTIO_BLOCK, MULTI_FUNCTION);
+    let f = fake.add(at(1, 4, 1), &VIRTIO_BLOCK, 1);
+    f.space[usize::from(SECONDARY_BUS)] = 2;
+    let below = at(2, 0, 0);
+    fake.add(below, &VIRTIO_BLOCK, 0);
+    let counted = Counted(&fake, core::cell::Cell::new(0));
+    assert_eq!(
+        reset_method(&counted, below, 0),
+        Some(Reset::SecondaryBus(at(1, 4, 1)))
+    );
+    // The device numbers of buses 0 and 1, and the functions of the two
+    // devices found, rather than every function of every bus.
+    assert!(counted.1.get() < 128, "{} reads", counted.1.get());
 }

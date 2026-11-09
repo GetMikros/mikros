@@ -40,7 +40,7 @@ pub async fn reset(bus: &Bus, function: &Function) -> Result<(), Status> {
     config.write(at, COMMAND, 2, command & !decoding);
     let bars: [u32; 6] = core::array::from_fn(|i| config.read(at, BAR0 + 4 * i as u16, 4));
     let line = config.read(at, INTERRUPT_LINE, 1);
-    let method = reset_method(&config, at, bus.ecam.bus_start(), bus.ecam.bus_end());
+    let method = reset_method(&config, at, bus.ecam.bus_start());
     let result = match method {
         None => Err(Status::NotSupported),
         Some(method) => {
