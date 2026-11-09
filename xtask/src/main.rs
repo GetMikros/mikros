@@ -1,5 +1,6 @@
 //! Development tasks for the Mikros repository, run with `cargo xtask`.
 
+mod acpica;
 mod boot_menu;
 mod btrfs;
 mod build;
@@ -48,6 +49,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Build ACPICA, which the ACPI server runs on, into a static library.
+    Acpica(acpica::Args),
     /// Build Linux's btrfs code on the btrfs shim into a static library.
     Btrfs(btrfs::Args),
     /// Build the system components.
@@ -86,6 +89,7 @@ pub fn workspace_root() -> PathBuf {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
+        Command::Acpica(args) => acpica::run(&args),
         Command::Btrfs(args) => btrfs::run(&args),
         Command::Build(args) => build::run(&args),
         Command::Casefold(args) => casefold::run(&args),
