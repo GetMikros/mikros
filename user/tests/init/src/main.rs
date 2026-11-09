@@ -1738,6 +1738,20 @@ extern "sysv64" fn futex_waiter(addr: u64, index: u64) -> ! {
     unreachable!("thread_exit returned");
 }
 
+/// The index of the waiter that `futex_waiter` recorded as woken
+/// `at`-th, once one has, or a failure after `in_time`.
+fn futex_woken(at: usize) -> Result<u64> {
+    let deadline = in_time();
+    loop {
+        let index = FUTEX_ORDER[at].load(Ordering::Acquire);
+        if index != 0 {
+            return Ok(index);
+        }
+        ensure("recording the woken waiter", now() < deadline)?;
+        sleep_ms(1);
+    }
+}
+
 /// Starts a thread of this process at `entry` with both arguments.
 fn spawn2(s: &Startup, entry: extern "sysv64" fn(u64, u64) -> !, a: u64, b: u64) -> Result<Handle> {
     let stack_size = 16 * 1024;
@@ -1960,30 +1974,20 @@ fn futexes(s: &Startup) -> Result {
             sys::futex_wait(word as *const u32, 0, soon()) == TIMED_OUT,
         )?;
     }
+    // Each waiter is blocked before the next starts, so that they wait
+    // in the order of their indices.
     for index in 1..=3 {
-        spawn2(s, futex_waiter, word, index)?;
-        sleep_ms(5);
+        let waiter = spawn2(s, futex_waiter, word, index)?;
+        wait_until_blocked(waiter)?;
     }
     ensure("waking one", futex_wake(word, 1)? == 1)?;
-    sleep_ms(5);
-    ensure(
-        "waking the oldest",
-        FUTEX_ORDER[0].load(Ordering::Acquire) == 1,
-    )?;
+    ensure("waking the oldest", futex_woken(0)? == 1)?;
     // The second mapping reaches the same futex. Waiters are woken one
     // at a time, as threads woken together may run in either order.
     ensure("waking the next", futex_wake(second + 64, 1)? == 1)?;
-    sleep_ms(5);
-    ensure(
-        "waking in order",
-        FUTEX_ORDER[1].load(Ordering::Acquire) == 2,
-    )?;
+    ensure("waking in order", futex_woken(1)? == 2)?;
     ensure("waking the rest", futex_wake(word, u32::MAX)? == 1)?;
-    sleep_ms(5);
-    ensure(
-        "waking the last",
-        FUTEX_ORDER[2].load(Ordering::Acquire) == 3,
-    )?;
+    ensure("waking the last", futex_woken(2)? == 3)?;
     ensure("waking nobody", futex_wake(word, 1)? == 0)
 }
 
