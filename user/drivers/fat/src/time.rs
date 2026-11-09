@@ -29,23 +29,29 @@ const READ_MAX: u32 = 32768;
 /// UTC from the time page, and the system time zone from the time
 /// service and the zone files, once they are there.
 pub struct Clock {
+    /// The server's name, for its log messages.
+    name: &'static str,
     page: Option<u64>,
     clock: Option<ClockClient>,
     zoneinfo: Option<NodeClient>,
-    /// The zone last read, by its name.
+    /// The zone last named, and its local time: UTC when its rules could
+    /// not be read.
     zone: RefCell<Option<(String, Local)>>,
 }
 
 impl Clock {
-    /// UTC and the system time zone through the time service in
-    /// `directory`, when it runs, with the zone files of `zoneinfo`.
+    /// UTC and the system time zone of the server `name` through the
+    /// time service in `directory`, when it runs, with the zone files of
+    /// `zoneinfo`.
     pub fn new(
+        name: &'static str,
         directory: &DirectoryClient,
         process: sys::Handle,
         zoneinfo: Option<NodeClient>,
     ) -> Clock {
         let clock = connect(directory);
         Clock {
+            name,
             page: clock.as_ref().and_then(|c| time_page(c, process)),
             clock,
             zoneinfo,
@@ -77,8 +83,8 @@ impl Clock {
     }
 
     /// The system time zone now: the one whose name the time service
-    /// gives, with the rules of its file, read again when the name
-    /// changes. While either cannot be had, local time is UTC.
+    /// gives, with the rules of its file, read once the name changes,
+    /// which is logged. While either cannot be had, local time is UTC.
     pub fn local(&self) -> Local {
         let Some(name) = self.zone_name() else {
             return Local::utc();
@@ -88,10 +94,24 @@ impl Clock {
         {
             return local.clone();
         }
-        let Some(rules) = self.rules(&name) else {
-            return Local::utc();
+        let local = match self.rules(&name) {
+            Some(rules) => {
+                mikros_rt::log!(
+                    Info,
+                    "{}: local times are in the time zone {name}",
+                    self.name
+                );
+                Local::zone(rules)
+            }
+            None => {
+                mikros_rt::log!(
+                    Error,
+                    "{}: the time zone {name} cannot be read: local times are UTC",
+                    self.name
+                );
+                Local::utc()
+            }
         };
-        let local = Local::zone(rules);
         *self.zone.borrow_mut() = Some((name, local.clone()));
         local
     }

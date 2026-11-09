@@ -150,7 +150,7 @@ fn start<F: Format>(
         _ => Status::Internal,
     })?;
     let pager = memory::pager(F::NAME).ok_or(Status::NoResources)?;
-    let clock = time::Clock::new(directory, process, zoneinfo.take());
+    let clock = time::Clock::new(F::NAME, directory, process, zoneinfo.take());
     let fs = Rc::new(Fs::new(
         volume,
         clock,
