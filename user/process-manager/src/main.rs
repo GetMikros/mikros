@@ -16,6 +16,7 @@ mod namespace;
 mod processes;
 mod records;
 mod start;
+mod volumes;
 
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{Error, OwnedHandle, ServerEnd};

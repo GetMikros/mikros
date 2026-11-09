@@ -223,6 +223,15 @@ impl Manager {
                 shared.namespaces.prepare_esp(directory, reactor).await;
             });
         }
+        // `/Volumes` follows the instances of volumes through another
+        // directory of the process manager's own.
+        if let Ok(directory) = bind_own_directory(&control).await {
+            let shared = self.shared.clone();
+            self.shared.spawner.spawn(async move {
+                let directory = DirectoryAsyncClient::new(directory, shared.reactor.clone());
+                shared.volumes.clone().watch(directory).await;
+            });
+        }
         // Processes get the time page once the time service gives it,
         // through another directory of the process manager's own; none
         // waits for it.

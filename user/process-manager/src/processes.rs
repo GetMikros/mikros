@@ -44,6 +44,8 @@ pub struct Shared {
     pub fs: Rc<Fs>,
     /// The `/dev` of every process.
     pub dev: Dev,
+    /// `/Volumes`, for the processes that hold `files.volumes`.
+    pub volumes: Rc<crate::volumes::Volumes>,
     /// How the namespaces of new processes are built.
     pub namespaces: Rc<Namespaces>,
     /// The root budget.
@@ -103,6 +105,7 @@ impl Shared {
         Rc::new(Shared {
             fs,
             dev: Dev::new(reactor.clone(), spawner.clone()),
+            volumes: crate::volumes::Volumes::new(reactor.clone(), spawner.clone()),
             namespaces,
             budget,
             clock_page,

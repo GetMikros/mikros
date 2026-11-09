@@ -24,7 +24,8 @@
 //! system partition that the system booted from, the instance `esp` of
 //! `device.filesystem`, once it is published, and from then on gives it
 //! as `/boot/efi` to the processes whose manifests list it
-//! (MIKSPEC-0064.R9, MIKSPEC-0064.R15).
+//! (MIKSPEC-0064.R9, MIKSPEC-0064.R15). Processes whose profiles apply and
+//! that hold `files.volumes` get `/Volumes`, read and write.
 
 use crate::processes::Shared;
 use alloc::format;
@@ -43,7 +44,9 @@ use mikros_rt::interfaces::mikros::fs::{
     TemporaryFilesystem, TemporaryFilesystemAsyncClient,
 };
 use mikros_rt::interfaces::mikros::process::NamespaceEntry;
-use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, DirectoryEvent};
+use mikros_rt::interfaces::mikros::service::{
+    ClientIdentity, DirectoryAsyncClient, DirectoryEvent,
+};
 use process_manager::bootfs::{Fs, ItemKind};
 
 /// The accounts service's data directory, which no other process's
@@ -65,6 +68,9 @@ const ROOT_INSTANCE: &str = "root";
 const SYSTEM: &str = "/@system";
 /// Where the EFI system partition is served, and its instance.
 const BOOT_EFI: &str = "/boot/efi";
+/// The directory of the other volumes, and the permission it needs.
+const VOLUMES: &str = "/Volumes";
+const VOLUMES_PERMISSION: &str = "files.volumes";
 const ESP_INSTANCE: &str = "esp";
 /// How long to wait before asking again for tmpfs.
 const RETRY: i64 = 20_000_000;
@@ -407,8 +413,28 @@ impl Namespaces {
                 entries.push(self.entry(shared, &ready, &path, rights).await?);
             }
         }
+        if self.holds_volumes(shared, app_id, user).await {
+            entries.push(NamespaceEntry {
+                path: VOLUMES.into(),
+                directory: shared.volumes.directory()?,
+            });
+        }
         entries.push(dev);
         Ok(entries)
+    }
+
+    /// Whether the processes of `app_id` and `user` hold `files.volumes`,
+    /// as the broker says.
+    async fn holds_volumes(&self, shared: &Shared, app_id: &str, user: u32) -> bool {
+        let client = ClientIdentity {
+            pid: 0,
+            user,
+            app_id: app_id.into(),
+        };
+        shared
+            .permissions
+            .holds(client, false, VOLUMES_PERMISSION)
+            .await
     }
 
     /// The entry `path` of the root table with `rights`. A path that does
