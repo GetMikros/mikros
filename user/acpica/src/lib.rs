@@ -13,6 +13,7 @@
 extern crate alloc;
 
 mod osl;
+mod pci;
 mod physical;
 mod ports;
 mod sync;
@@ -104,10 +105,12 @@ fn check(status: Status) -> Result<(), Status> {
 
 /// Starts ACPICA on the firmware's tables, enables ACPI mode and the
 /// system control interrupt, and initializes the namespace's objects: the
-/// status of the step that failed when one did.
+/// status of the step that failed when one did. The ECAM ranges are read
+/// from the tables before anything of ACPICA can need them.
 pub fn start() -> Result<(), Status> {
     // SAFETY: `install` readied the layer; the glue takes no arguments.
     check(unsafe { mikros_acpi_tables() })?;
+    pci::ranges();
     // SAFETY: as above.
     check(unsafe { mikros_acpi_enable() })
 }
