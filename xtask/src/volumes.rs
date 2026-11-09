@@ -1,8 +1,9 @@
 //! The run of the test image in which the volumes of USB disks come and
 //! go in `/Volumes`, each with `HELLO.TXT` on it:
 //! - The first disk holds a GPT with a basic data partition with a FAT
-//!   file system labelled `USBSTICK`, and a Mikros root type partition
-//!   with a btrfs labelled `USBBTRFS`.
+//!   file system labelled `USBSTICK`, a Mikros root type partition with a
+//!   btrfs labelled `USBBTRFS`, and another basic data partition with an
+//!   exFAT file system labelled `GPTEXFAT`.
 //! - The second holds an MBR with a FAT12 primary partition labelled
 //!   `MBRFAT`, and an extended partition whose logical partition, of the
 //!   Linux type `0x83`, holds a btrfs labelled `MBRBTRFS`.
@@ -12,8 +13,9 @@
 //! The test init serves `tests/volumes.img` with `test=usb-volumes`,
 //! whose volumes probe reads and writes every volume through `/Volumes`.
 //! The runner then unplugs the disks through QEMU's monitor and waits for
-//! the probe to see the volumes leave. Afterwards each FAT volume must
-//! hold what the probe wrote.
+//! the probe to see the volumes leave. Afterwards each FAT and exFAT
+//! volume must hold what the probe wrote, and fsck.exfat must find the
+//! exFAT volume clean.
 
 use crate::build::{self, Kind};
 use crate::image::{esp, gpt};
@@ -31,20 +33,24 @@ const READY: &str = "volumes-probe: read and wrote the USB volumes";
 const GONE: &str = "volumes-probe: the USB volumes are gone";
 const FAILED: &str = "volumes-probe: FAILED";
 const PANIC_LINE: &str = "KERNEL PANIC: ";
-/// The USB disk: the blocks of its FAT and btrfs partitions, its size in
-/// sectors with room for the backup GPT, its GUIDs, the partition types,
-/// and the QEMU device ID it is unplugged by.
+/// The USB disk: the blocks of its FAT, btrfs and exFAT partitions, its
+/// size in sectors with room for the backup GPT, its GUIDs, the partition
+/// types, and the QEMU device ID it is unplugged by.
 const FIRST_LBA: u64 = 34;
 const LAST_LBA: u64 = 2047;
 const BTRFS_FIRST_LBA: u64 = 2048;
 const BTRFS_SECTORS: u64 = 128 << 11;
-const SECTORS: u64 = BTRFS_FIRST_LBA + BTRFS_SECTORS + 34;
+const EXFAT_FIRST_LBA: u64 = BTRFS_FIRST_LBA + BTRFS_SECTORS;
+const EXFAT_SECTORS: u64 = 4 << 11;
+const SECTORS: u64 = EXFAT_FIRST_LBA + EXFAT_SECTORS + 34;
 const DISK_GUID: &str = "55534221-0000-4000-8000-0000000000d4";
 const PARTITION_GUID: &str = "55534221-0000-4000-8000-000000000004";
 const BTRFS_GUID: &str = "55534221-0000-4000-8000-000000000005";
+const EXFAT_GUID: &str = "55534221-0000-4000-8000-000000000006";
 const BASIC_DATA: &str = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7";
 const MIKROS_ROOT: &str = "fa730af6-8ba3-42d9-b155-466909d08135";
 const BTRFS_LABEL: &str = "USBBTRFS";
+const EXFAT_LABEL: &str = "GPTEXFAT";
 const DEVICE: &str = "stick";
 const LABEL: [u8; 11] = *b"USBSTICK   ";
 /// The second disk: its QEMU device ID, its disk signature, the blocks of
@@ -165,6 +171,13 @@ fn write_stick(dir: &Path) -> Result<()> {
             first_lba: BTRFS_FIRST_LBA,
             last_lba: BTRFS_FIRST_LBA + BTRFS_SECTORS - 1,
         },
+        gpt::Partition {
+            type_guid: uuid::Uuid::parse_str(BASIC_DATA)?,
+            guid: uuid::Uuid::parse_str(EXFAT_GUID)?,
+            name: "exfat",
+            first_lba: EXFAT_FIRST_LBA,
+            last_lba: EXFAT_FIRST_LBA + EXFAT_SECTORS - 1,
+        },
     ];
     let disk_guid = uuid::Uuid::parse_str(DISK_GUID)?;
     gpt::write(&mut image, SECTORS, disk_guid, &partitions)?;
@@ -176,6 +189,9 @@ fn write_stick(dir: &Path) -> Result<()> {
     let btrfs = btrfs_volume(dir, BTRFS_LABEL)?;
     let start = (BTRFS_FIRST_LBA * gpt::SECTOR) as usize;
     bytes[start..start + btrfs.len()].copy_from_slice(&btrfs);
+    let exfat = exfat_volume(dir, EXFAT_LABEL)?;
+    let start = (EXFAT_FIRST_LBA * gpt::SECTOR) as usize;
+    bytes[start..start + exfat.len()].copy_from_slice(&exfat);
     let path = dir.join("usb.img");
     fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
 }
@@ -202,6 +218,94 @@ fn btrfs_volume(dir: &Path, label: &str) -> Result<Vec<u8>> {
     fs::remove_dir_all(&tree)?;
     fs::remove_file(&image)?;
     Ok(bytes)
+}
+
+/// A volume in memory, for mikros-exfat.
+struct Memory(Vec<u8>);
+
+impl mikros_exfat::Device for Memory {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), mikros_exfat::Error> {
+        let at = offset as usize;
+        let bytes = self.0.get(at..at + buf.len());
+        buf.copy_from_slice(bytes.ok_or(mikros_exfat::Error::Io)?);
+        Ok(())
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), mikros_exfat::Error> {
+        let at = offset as usize;
+        let bytes = self.0.get_mut(at..at + data.len());
+        bytes.ok_or(mikros_exfat::Error::Io)?.copy_from_slice(data);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), mikros_exfat::Error> {
+        Ok(())
+    }
+}
+
+/// An exFAT volume of `EXFAT_SECTORS` labelled `label`, which mkfs.exfat
+/// formats in `dir`, with `HELLO.TXT`, which mikros-exfat puts on it,
+/// modified on 2024-01-01 at midnight UTC.
+fn exfat_volume(dir: &Path, label: &str) -> Result<Vec<u8>> {
+    let image = dir.join("usb-exfat.img");
+    fs::File::create(&image)?.set_len(EXFAT_SECTORS * gpt::SECTOR)?;
+    let output = std::process::Command::new("mkfs.exfat")
+        .args(["-L", label])
+        .arg(&image)
+        .output()
+        .context("failed to run mkfs.exfat")?;
+    if !output.status.success() {
+        bail!("mkfs.exfat failed with {}", output.status);
+    }
+    let bytes = fs::read(&image)?;
+    fs::remove_file(&image)?;
+    let size = bytes.len() as u64;
+    let failed = |e| anyhow::anyhow!("putting HELLO.TXT on the exFAT volume: {e:?}");
+    let mut volume = mikros_exfat::Volume::mount(Memory(bytes), size, true).map_err(failed)?;
+    let stamp = mikros_exfat::Stamp {
+        timestamp: 44 << 25 | 1 << 21 | 1 << 16,
+        increment: 0,
+        utc_offset: 0x80,
+    };
+    let root = volume.root();
+    let mut hello = volume
+        .create(root, "HELLO.TXT", false, stamp)
+        .map_err(failed)?;
+    volume.write(&mut hello, 0, HELLO, stamp).map_err(failed)?;
+    volume.unmount().map_err(failed)?;
+    Ok(volume.into_device().0)
+}
+
+/// The contents of `name` in the root of the exFAT volume of
+/// `EXFAT_SECTORS` from `EXFAT_FIRST_LBA` on `usb.img` in `dir`, once
+/// fsck.exfat has found the volume clean.
+fn read_exfat(dir: &Path, name: &str) -> Result<Vec<u8>> {
+    let bytes = fs::read(dir.join("usb.img"))?;
+    let start = (EXFAT_FIRST_LBA * gpt::SECTOR) as usize;
+    let end = ((EXFAT_FIRST_LBA + EXFAT_SECTORS) * gpt::SECTOR) as usize;
+    let image = dir.join("usb-exfat.img");
+    fs::write(&image, &bytes[start..end])?;
+    let output = std::process::Command::new("fsck.exfat")
+        .arg("-n")
+        .arg(&image)
+        .output()
+        .context("failed to run fsck.exfat")?;
+    fs::remove_file(&image)?;
+    if !output.status.success() {
+        bail!(
+            "fsck.exfat found the exFAT volume damaged: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    let failed = |e| anyhow::anyhow!("reading the exFAT volume: {e:?}");
+    let volume = Memory(bytes[start..end].to_vec());
+    let size = (end - start) as u64;
+    let mut volume = mikros_exfat::Volume::mount(volume, size, false).map_err(failed)?;
+    let root = volume.root();
+    let mut node = volume.find(root, name).map_err(failed)?;
+    let mut data = vec![0u8; node.size() as usize];
+    volume.read(&mut node, 0, &mut data).map_err(failed)?;
+    Ok(data)
 }
 
 /// The contents of `name` in the root of the FAT volume of `sectors`
@@ -268,6 +372,10 @@ pub fn run(
             bail!("WRITTEN.TXT on the FAT volume of {file} holds {written:?}");
         }
     }
+    let written = read_exfat(dir, "WRITTEN.TXT")?;
+    if written != WRITTEN {
+        bail!("WRITTEN.TXT on the exFAT volume holds {written:?}");
+    }
     Ok(())
 }
 
@@ -295,6 +403,7 @@ mod tests {
         assert_eq!(bytes[ebr + 446 + 4], 0x83);
         let whole = read_fat(&dir, WHOLE_FILE, 0, WHOLE_SECTORS, "HELLO.TXT");
         assert_eq!(whole.unwrap(), HELLO);
+        assert_eq!(read_exfat(&dir, "HELLO.TXT").unwrap(), HELLO);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

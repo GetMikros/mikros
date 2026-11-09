@@ -1,7 +1,7 @@
 //! A boot service of the test image of the USB volumes run, which checks
-//! that the FAT and btrfs volumes of USB disks with a GPT, an MBR and no
-//! partition table appear in `/Volumes`, can be read and written there,
-//! and go away when the disks are unplugged.
+//! that the FAT, exFAT and btrfs volumes of USB disks with a GPT, an MBR
+//! and no partition table appear in `/Volumes`, can be read and written
+//! there, and go away when the disks are unplugged.
 //!
 //! Started without `/Volumes`, it grants its own app ID and user
 //! `files.volumes` through the broker and starts a copy of itself, which
@@ -40,7 +40,9 @@ const VOLUMES: &str = "/Volumes";
 /// The volumes of the GPT disk, those of the MBR disk, its btrfs on a
 /// logical partition of the Linux type, and the FAT on a disk without a
 /// partition table.
-const LABELS: [&str; 5] = ["USBSTICK", "USBBTRFS", "MBRFAT", "MBRBTRFS", "WHOLEFAT"];
+const LABELS: [&str; 6] = [
+    "USBSTICK", "USBBTRFS", "GPTEXFAT", "MBRFAT", "MBRBTRFS", "WHOLEFAT",
+];
 const HELLO: &str = "HELLO.TXT";
 const HELLO_TEXT: &[u8] = b"hello from the host\n";
 const WRITTEN: &str = "WRITTEN.TXT";

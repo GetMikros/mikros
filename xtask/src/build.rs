@@ -967,8 +967,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", pci_image.display());
             // The USB volumes run serves this image, with root=bootfs: the
-            // PCI bus, xHCI, USB mass storage, partition, FAT and btrfs drivers
-            // from the PCI test's files, the temporary file system, and
+            // PCI bus, xHCI, USB mass storage, partition, FAT, exFAT and
+            // btrfs drivers from the PCI test's files, the temporary file system, and
             // the volumes probe.
             let volumes_probe = user_build("volumes-probe", kind)?;
             println!("built    {}", volumes_probe.display());
@@ -978,6 +978,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 "usb-storage",
                 "partition",
                 "fat",
+                "exfat",
                 "btrfs",
             ];
             let mut volumes_files: Vec<(String, PathBuf)> = pci_bus_files

@@ -1572,6 +1572,7 @@ dependencies = [
  "flate2",
  "libc",
  "lzma-rs",
+ "mikros-exfat",
  "mikros-userdb",
  "object",
  "serde_json",
