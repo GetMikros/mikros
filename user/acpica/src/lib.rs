@@ -17,6 +17,7 @@ mod osl;
 mod pci;
 mod physical;
 mod ports;
+pub mod power;
 pub mod route;
 mod sync;
 mod threads;
