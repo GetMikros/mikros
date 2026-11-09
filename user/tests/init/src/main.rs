@@ -9768,7 +9768,14 @@ mod manager {
             b"driver rtc declined",
             b"time: reading the real-time clock failed",
         ];
-        let logged = device_manager_logs(s, b"tests/acpi.img", false, super::PROBE_SECONDS, EXPECTED, FAILED)?;
+        let logged = device_manager_logs(
+            s,
+            b"tests/acpi.img",
+            false,
+            super::PROBE_SECONDS,
+            EXPECTED,
+            FAILED,
+        )?;
         ensure("starting the ACPI server and its service", logged)
     }
 
@@ -9976,33 +9983,15 @@ mod manager {
 
     /// Starts the service manager from the boot image member `image`,
     /// giving it the root resource, the log and init's platform
-    /// information, which the device manager gets, after skipping what
-    /// the log already holds. When `framebuffer`
-    /// is true, it also gets a memory object in place of a framebuffer,
-    /// and the platform information has its framebuffer flag set. Then
-    /// reads the log, for at most `seconds` from the service manager's
-    /// start, until each line of `expected` has appeared as many times as
-    /// it gives, or a line has appeared with a part of `failed`, a failure
-    /// to start the broker or the device manager, or the device manager's
-    /// end. Returns whether each line appeared exactly as many times.
-    fn device_manager_logs(
+    /// information, with its framebuffer flag set and a memory object in
+    /// place of a framebuffer when `framebuffer`: the process manager, init's
+    /// bootstrap client, a reader of the log past the lines that it already
+    /// held, and the service manager's process.
+    fn services_from(
         s: &Startup,
         image: &[u8],
         framebuffer: bool,
-        seconds: i64,
-        expected: &[(&[u8], usize)],
-        failed: &[&[u8]],
-    ) -> Result<bool> {
-        // The processes of earlier tests may still log, so the lines
-        // name what they are about.
-        const ENDED: &[&[u8]] = &[
-            b"service permissions did not start",
-            b"service permissions will not start",
-            b"service device-manager did not start",
-            b"service device-manager will not start",
-            b"service device-manager exited",
-            b"service device-manager ended",
-        ];
+    ) -> Result<(Manager, InitBootstrapClient, OwnedHandle, OwnedHandle)> {
         let (m, init, reader) = serving(s, image)?;
         // The lines of earlier tests are skipped.
         while super::read_record(reader.raw()).0 == 0 {}
@@ -10047,6 +10036,56 @@ mod manager {
                 status: 0,
             });
         };
+        Ok((m, init, reader, started.process))
+    }
+
+    /// The `power-off` scenario: serves `tests/power.img`, whose power
+    /// probe shuts the machine down once the runner presses the power
+    /// button, and waits for the machine to go off; it returns 1 only when
+    /// the service manager did not start.
+    pub fn power_off_scenario(s: &Startup) -> i64 {
+        match services_from(s, b"tests/power.img", false) {
+            // Everything stays as it is until the machine is off.
+            Ok(_running) => loop {
+                super::sleep_ms(1000);
+            },
+            Err(failure) => {
+                mikros_rt::log!(Error, "SCENARIO power-off: {} failed", failure.what);
+                1
+            }
+        }
+    }
+
+    /// Starts the service manager from the boot image member `image`,
+    /// giving it the root resource, the log and init's platform
+    /// information, which the device manager gets, after skipping what
+    /// the log already holds. When `framebuffer`
+    /// is true, it also gets a memory object in place of a framebuffer,
+    /// and the platform information has its framebuffer flag set. Then
+    /// reads the log, for at most `seconds` from the service manager's
+    /// start, until each line of `expected` has appeared as many times as
+    /// it gives, or a line has appeared with a part of `failed`, a failure
+    /// to start the broker or the device manager, or the device manager's
+    /// end. Returns whether each line appeared exactly as many times.
+    fn device_manager_logs(
+        s: &Startup,
+        image: &[u8],
+        framebuffer: bool,
+        seconds: i64,
+        expected: &[(&[u8], usize)],
+        failed: &[&[u8]],
+    ) -> Result<bool> {
+        // The processes of earlier tests may still log, so the lines
+        // name what they are about.
+        const ENDED: &[&[u8]] = &[
+            b"service permissions did not start",
+            b"service permissions will not start",
+            b"service device-manager did not start",
+            b"service device-manager will not start",
+            b"service device-manager exited",
+            b"service device-manager ended",
+        ];
+        let (m, _init, reader, process) = services_from(s, image, framebuffer)?;
         let deadline = super::within(seconds);
         let mut seen = alloc::vec![0; expected.len()];
         let outcome = loop {
@@ -10080,7 +10119,7 @@ mod manager {
             }
         };
         // SAFETY: the call takes no pointers.
-        unsafe { sys::task_kill(started.process.raw()) };
+        unsafe { sys::task_kill(process.raw()) };
         drop(m);
         let exact = seen
             .iter()
@@ -10406,6 +10445,7 @@ mod bootfs {
                         "pci.img",
                         "pie",
                         "ports.img",
+                        "power.img",
                         "restart.img",
                         "services.img",
                         "time.img",
@@ -10910,7 +10950,8 @@ fn exit_after_painting(s: &Startup) -> i64 {
 }
 
 /// Runs the scenario that the command line names with `test=`, which
-/// ends in a kernel panic, or returns `None` when it names none.
+/// ends in a kernel panic, or with the machine off, or returns `None`
+/// when it names none.
 fn scenario(s: &Startup) -> Option<i64> {
     let cmdline = core::str::from_utf8(s.cmdline).unwrap_or("");
     let name = cmdline
@@ -10918,6 +10959,8 @@ fn scenario(s: &Startup) -> Option<i64> {
         .find_map(|word| word.strip_prefix("test="))?;
     Some(match name {
         "init-exit" => exit_after_painting(s),
+        // The runner presses the power button once the power probe waits.
+        "power-off" => manager::power_off_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.
         "wait" => {
             log!(Info, "SCENARIO waiting");

@@ -744,6 +744,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let acpi = acpi_build(kind)?;
             let rtc = user_build("rtc", kind)?;
             println!("built    {}", rtc.display());
+            let power_probe = user_build("power-probe", kind)?;
+            println!("built    {}", power_probe.display());
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let device_image = |file: &str,
@@ -834,6 +836,30 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", acpi_image.display());
+            // The power-off run serves this image, with the ACPI server, the
+            // log service and the power probe, which shuts the machine down
+            // once the power button is pressed.
+            let power_image = device_image(
+                "power.img",
+                &[],
+                &[
+                    ("usr/lib/drivers/acpi/acpi".to_owned(), acpi.clone()),
+                    (
+                        "usr/lib/drivers/acpi/driver.yaml".to_owned(),
+                        crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
+                    ),
+                    // The log service, through which the server's messages
+                    // reach the kernel log.
+                    ("usr/bin/log-service".to_owned(), log_service.clone()),
+                    ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                    ("usr/bin/power-probe".to_owned(), power_probe.clone()),
+                    (
+                        "usr/lib/services/power-probe.yaml".to_owned(),
+                        crate::workspace_root().join("user/tests/power-probe/power-probe.yaml"),
+                    ),
+                ],
+            )?;
+            println!("built    {}", power_image.display());
             // The PCI bus driver tests serve this image, with the bus
             // driver and test drivers for the host bridge's function, for
             // QEMU's edu device and for the e1000e function, the
@@ -936,6 +962,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/failing.img", failing_image.as_path()),
                 ("tests/restart.img", restart_image.as_path()),
                 ("tests/acpi.img", acpi_image.as_path()),
+                ("tests/power.img", power_image.as_path()),
                 ("tests/pci.img", pci_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),

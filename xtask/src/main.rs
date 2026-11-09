@@ -25,6 +25,7 @@ mod musl;
 mod port;
 mod port_tests;
 mod ports;
+mod power;
 mod qemu;
 mod run;
 mod rust_std;

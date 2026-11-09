@@ -455,6 +455,14 @@ pub fn run(args: &Args) -> Result<()> {
     let boot_menu = dir.join("boot-menu");
     crate::boot_menu::run(&args.machine, args.kind, &built, &boot_menu, timeout)?;
     println!("boot menu runs passed");
+    crate::power::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("power"),
+        timeout,
+    )?;
+    println!("power-off run passed");
     Ok(())
 }
 

@@ -1,0 +1,10 @@
+# The service manifest of the power probe, the boot service of
+# tests/power.img, installed as usr/lib/services/power-probe.yaml. It logs
+# through the kernel log, as the image has no log service.
+name: power-probe
+binary: /usr/bin/power-probe
+start: boot
+# Started after the device manager, so that it is stopped before it.
+after: [device-manager]
+boot_handles: [log_manage]
+permissions: [power.control, device.registry]
