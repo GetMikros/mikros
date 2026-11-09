@@ -1,16 +1,20 @@
 //! The thread that serves the `Driver` channel once the volume is
-//! mounted, so that requests get through while the server's thread
-//! makes its calls on the partition.
+//! mounted, so that `Reconnect` and `Stop` get through while the
+//! server's thread waits in a call on a partition channel that closed.
 //!
-//! `Stop` wakes the server's thread through an event to unmount the
-//! volume, and replies once it has. When the channel closes, the
-//! server's thread is woken to end the program, as it did when it
-//! served the channel itself.
+//! `Reconnect` hands the new channel to the `Gate`. `Stop` fails what
+//! waits there, wakes the server's thread through an event to unmount
+//! the volume, and replies once it has. When the channel closes, what
+//! waits at the `Gate` fails too, and the server's thread is woken to
+//! end the program, as it did when it served the channel itself.
 
+use crate::device::Gate;
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::driver::{DriverRequest, DriverServer, DriverStopResponse};
+use mikros_rt::interfaces::mikros::driver::{
+    DriverReconnectResponse, DriverRequest, DriverServer, DriverStopResponse,
+};
 use mikros_rt::sys;
 
 const PERM_READ: u32 = 1 << 0;
@@ -19,6 +23,9 @@ const FOREVER: i64 = i64::MAX;
 const STACK_SIZE: u64 = 128 << 10;
 /// The event signal that wakes the server's thread when the driver ends.
 pub const ENDING: u32 = 1 << 24;
+
+/// The new channels that `Reconnect` gives, for the partition's device.
+pub static GATE: Gate = Gate::new();
 
 /// How the driver ends.
 pub const RUNNING: u32 = 0;
@@ -144,10 +151,12 @@ impl Thread {
         })
     }
 
-    /// Serves the rest of the requests on `server` on the thread. False
-    /// when it did not start.
-    pub fn start(self, server: DriverServer) -> bool {
-        let serving = Box::into_raw(Box::new(server));
+    /// Serves the rest of the requests on `server` on the thread, which
+    /// gives the partition's device the channels that `Reconnect` gives
+    /// and maps their buffers into `process`. False when it did not
+    /// start.
+    pub fn start(self, server: DriverServer, process: sys::Handle) -> bool {
+        let serving = Box::into_raw(Box::new((server, process)));
         // SAFETY: the stack is mapped and unused, 8 bytes below a 16-byte
         // boundary as a function's entry expects; `serve` takes the box.
         let started = unsafe {
@@ -172,24 +181,27 @@ impl Thread {
 extern "sysv64" fn serve(serving: u64, _: u64) -> ! {
     // SAFETY: `Thread::start` made the pointer from a box for this
     // thread alone.
-    let server = *unsafe { Box::from_raw(serving as *mut DriverServer) };
+    let (server, process) = *unsafe { Box::from_raw(serving as *mut (DriverServer, sys::Handle)) };
     loop {
         let Ok(request) = server.next(FOREVER) else {
+            // Nothing can reconnect the partition any more.
+            GATE.stop();
             END.end(CLOSED);
             break;
         };
         let _ = match request {
             DriverRequest::Start(_, responder) => responder.reply(&server, Err(Status::BadState)),
             DriverRequest::Stop(_, responder) => {
+                GATE.stop();
                 END.end(STOPPED);
                 END.wait(1);
                 let _ = responder.reply(&server, DriverStopResponse {});
                 END.advance(2);
                 break;
             }
-            // The driver does not take a new bus channel yet.
-            DriverRequest::Reconnect(_, responder) => {
-                responder.reply(&server, Err(Status::NotSupported))
+            DriverRequest::Reconnect(request, responder) => {
+                let reconnected = GATE.reconnect(request.bus, process);
+                responder.reply(&server, reconnected.map(|()| DriverReconnectResponse {}))
             }
             DriverRequest::ResetChild(_, responder) => {
                 responder.reply(&server, Err(Status::NotSupported))

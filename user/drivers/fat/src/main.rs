@@ -6,8 +6,9 @@
 //! service of class `filesystem` that serves `mikros.fs.Filesystem`.
 //! `Start` fails with `NOT_SUPPORTED` for a partition that does not hold
 //! a valid FAT volume. `Stop` writes what remains and marks the volume as
-//! shut down cleanly. `Reconnect`, `ResetChild` and `ConnectChild` fail
-//! with `NOT_SUPPORTED`.
+//! shut down cleanly. `Reconnect` gives the partition's new channel after
+//! its driver restarted, on which the requests that had not completed go
+//! again. `ResetChild` and `ConnectChild` fail with `NOT_SUPPORTED`.
 //!
 //! This thread serves the `Driver` channel until the volume is mounted,
 //! and the volume's clients after that; the driver's thread takes the
@@ -98,7 +99,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 return 0;
             }
             DriverRequest::Reconnect(_, responder) => {
-                responder.reply(&server, Err(Status::NotSupported))
+                responder.reply(&server, Err(Status::BadState))
             }
             DriverRequest::ResetChild(_, responder) => {
                 responder.reply(&server, Err(Status::NotSupported))
@@ -108,7 +109,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             }
         };
     };
-    if !thread.start(server) {
+    if !thread.start(server, process) {
         mikros_rt::log!(Error, "fat: the driver's thread did not start");
         return PANIC_EXIT_CODE;
     }
@@ -142,7 +143,7 @@ fn start(
         .any(|p| p.key == CACHE && p.value == QUICK_DISCONNECT);
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let block = BlockClient::new(ClientEnd::new(bus));
-    let device = BlockDevice::new(block, process).ok_or(Status::NoResources)?;
+    let device = BlockDevice::new(block, process, &driver::GATE).ok_or(Status::NoResources)?;
     let (size, writable) = (device.size(), !device.read_only());
     let mounted = match quick_disconnect {
         true => Volume::mount_quick_disconnect(device, size, writable),
