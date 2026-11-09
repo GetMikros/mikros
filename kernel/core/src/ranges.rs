@@ -54,6 +54,27 @@ impl<const N: usize> Ranges<N> {
         }
     }
 
+    /// A space whose addresses are all free but those from `hole_start` to
+    /// `hole_end`, which are never allocated.
+    pub const fn with_hole(start: u64, end: u64, hole_start: u64, hole_end: u64) -> Self {
+        let mut free = [(0, 0); N];
+        let mut len = 0;
+        if start < hole_start && hole_start <= end && len < N {
+            free[len] = (start, hole_start);
+            len += 1;
+        }
+        if start <= hole_end && hole_end < end && len < N {
+            free[len] = (hole_end, end);
+            len += 1;
+        }
+        Ranges {
+            start,
+            end,
+            free,
+            len,
+        }
+    }
+
     /// Allocates `size` bytes starting at a multiple of `align`, a power of
     /// two, from the lowest free range that has room.
     pub fn alloc(&mut self, size: u64, align: u64) -> Option<u64> {
@@ -153,6 +174,25 @@ mod tests {
         assert_eq!(r.count(), 1);
         assert_eq!(r.alloc(0xF_F000, 0x1000), Some(0x1000));
         assert_eq!(r.alloc(0x1000, 0x1000), None);
+    }
+
+    #[test]
+    fn never_allocates_the_hole() {
+        let mut r = Ranges::<4>::with_hole(0x1000, 0x10_0000, 0x4000, 0x8000);
+        assert_eq!(r.count(), 2);
+        assert_eq!(r.alloc(0x4000, 0x1000), Some(0x8000));
+        assert_eq!(r.alloc(0x3000, 0x1000), Some(0x1000));
+        assert_eq!(r.alloc(0x1000, 0x1000), Some(0xC000));
+        r.free(0x8000, 0x4000).unwrap();
+        r.free(0x1000, 0x3000).unwrap();
+        r.free(0xC000, 0x1000).unwrap();
+        assert_eq!(r.count(), 2);
+        // Room only across the hole.
+        assert_eq!(r.alloc(0xF_9000, 0x1000), None);
+        assert_eq!(r.alloc(0xF_8000, 0x1000), Some(0x8000));
+        // A hole at either end leaves one range.
+        assert_eq!(Ranges::<4>::with_hole(0, 0x10, 0, 0x8).count(), 1);
+        assert_eq!(Ranges::<4>::with_hole(0, 0x10, 0x8, 0x10).count(), 1);
     }
 
     #[test]

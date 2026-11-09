@@ -4,7 +4,8 @@
 use crate::log::log;
 use crate::memory::{self, FRAMES};
 use crate::paging::{Flags, Mapper, PAGE_SIZE, PAT_VALUE, Policy, Tables};
-use boot_protocol::{BootInfo, CMDLINE_MAX, Kind};
+use boot_protocol::x86_64::{RUNTIME_WINDOW_BASE, RUNTIME_WINDOW_SIZE};
+use boot_protocol::{BootInfo, CMDLINE_MAX, Kind, flags};
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::ranges::Ranges;
@@ -12,7 +13,8 @@ use kernel_core::sync::SpinLock;
 
 /// The start of the kernel dynamic region.
 const DYNAMIC_START: u64 = 0xFFFF_C000_0000_0000;
-/// The end of the kernel dynamic region.
+/// The end of the kernel dynamic region, which leaves out the runtime
+/// window.
 const DYNAMIC_END: u64 = 0xFFFF_FF80_0000_0000;
 /// The size of the stack the kernel moves to.
 const STACK_SIZE: u64 = 64 << 10;
@@ -33,7 +35,12 @@ static DIRECT_MAP_BASE: AtomicU64 = AtomicU64::new(0);
 /// The unused parts of the kernel dynamic region.
 static DYNAMIC: SpinLock<Ranges<DYNAMIC_RANGES>> = SpinLock::new(
     kernel_core::lock_order::SPACE_DYNAMIC,
-    Ranges::new(DYNAMIC_START, DYNAMIC_END),
+    Ranges::with_hole(
+        DYNAMIC_START,
+        DYNAMIC_END,
+        RUNTIME_WINDOW_BASE,
+        RUNTIME_WINDOW_BASE + RUNTIME_WINDOW_SIZE,
+    ),
 );
 /// The most free ranges the dynamic region keeps track of.
 const DYNAMIC_RANGES: usize = 256;
@@ -344,6 +351,35 @@ fn build(info: &BootInfo, mapper: &mut Mapper<FrameTables>) -> Result<u64, crate
         mapper.map(direct_of(info, start), start, end - start, data)?;
     }
 
+    if info.flags & flags::RUNTIME_SERVICES_MAPPED != 0 {
+        let mut ranges = 0;
+        for e in memory::memory_map(info) {
+            let Some(flags) = Kind::from_u32(e.kind).and_then(|k| runtime_flags(k, data)) else {
+                continue;
+            };
+            let size = e.page_count * PAGE_SIZE;
+            // The bootloader does not move the runtime services when a
+            // range would end past the window.
+            if e.phys_start
+                .checked_add(size)
+                .is_none_or(|end| end > RUNTIME_WINDOW_SIZE)
+            {
+                continue;
+            }
+            mapper.map(
+                RUNTIME_WINDOW_BASE + e.phys_start,
+                e.phys_start,
+                size,
+                flags,
+            )?;
+            ranges += 1;
+        }
+        log!(
+            Info,
+            "uefi: {ranges} runtime ranges mapped in the runtime window"
+        );
+    }
+
     let phys = |virt: u64| info.kernel_phys_base + (virt - info.kernel_virt_base);
     let sections = [
         (
@@ -379,6 +415,24 @@ fn build(info: &BootInfo, mapper: &mut Mapper<FrameTables>) -> Result<u64, crate
     let stack = reserve_dynamic(STACK_SIZE);
     mapper.map(stack, stack_phys, STACK_SIZE, data)?;
     Ok(stack)
+}
+
+/// How the runtime window maps a range of `kind`, given the flags of
+/// kernel data, or `None` when it does not map such ranges.
+fn runtime_flags(kind: Kind, data: Flags) -> Option<Flags> {
+    match kind {
+        Kind::FirmwareRuntimeCode => Some(Flags {
+            writable: false,
+            executable: true,
+            ..data
+        }),
+        Kind::FirmwareRuntime => Some(data),
+        Kind::FirmwareRuntimeMmio => Some(Flags {
+            policy: Policy::UncachedDevice,
+            ..data
+        }),
+        _ => None,
+    }
 }
 
 fn direct_of(info: &BootInfo, phys: u64) -> u64 {
