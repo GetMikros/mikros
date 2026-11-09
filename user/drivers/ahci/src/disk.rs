@@ -48,6 +48,20 @@ pub struct Identity {
     pub write_cache: bool,
 }
 
+/// The logical sector size in bytes that the IDENTIFY DEVICE words `w`
+/// give: words 117 and 118, in words of two bytes, when word 106 says
+/// that logical sectors are longer than 256 words, and otherwise 512.
+/// `None` when it is not a power of two of at least 512, which the disk's
+/// block size must be.
+fn sector_size(w: &[u16; 256]) -> Option<u32> {
+    let size = if w[106] & 0xC000 == 0x4000 && w[106] & 1 << 12 != 0 {
+        (u32::from(w[117]) | u32::from(w[118]) << 16).checked_mul(2)?
+    } else {
+        512
+    };
+    (size >= 512 && size.is_power_of_two()).then_some(size)
+}
+
 /// An identify string: ASCII with the bytes of each word swapped, padded
 /// with spaces.
 fn text(words: &[u16]) -> String {
@@ -77,9 +91,13 @@ pub async fn identify(port: &Port, page: &Contiguous) -> Result<Identity, Status
     for (i, word) in w.iter_mut().enumerate() {
         *word = page.read16(2 * i as u64);
     }
-    let sector_size = match w[106] & 0xC000 == 0x4000 && w[106] & 1 << 12 != 0 {
-        true => 2 * (u32::from(w[117]) | u32::from(w[118]) << 16),
-        false => 512,
+    let Some(sector_size) = sector_size(&w) else {
+        mikros_rt::log!(
+            Info,
+            "ahci: skipping the disk on port {}: its logical sectors are not a power of two of at least 512 bytes",
+            port.number
+        );
+        return Err(Status::NotSupported);
     };
     let sectors = (0..4).fold(0u64, |n, i| n | u64::from(w[100 + i]) << (16 * i));
     Ok(Identity {
