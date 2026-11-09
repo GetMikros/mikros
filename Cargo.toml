@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["boot/bootmenu", "boot/mikrosboot", "boot/protocol", "kernel/arch/x86_64", "kernel/core", "kernel/syscalls", "tools/midl-tests", "tools/midlc", "user/bootfs", "user/btrfs", "user/casefold", "user/fat", "user/gpt", "user/logstore", "user/manifest", "user/memfs", "user/pci", "user/permissions", "user/tz", "user/userdb", "user/ustar", "user/yaml", "xtask"]
+members = ["boot/bootmenu", "boot/mikrosboot", "boot/protocol", "kernel/arch/x86_64", "kernel/core", "kernel/syscalls", "tools/midl-tests", "tools/midlc", "user/bootfs", "user/btrfs", "user/casefold", "user/cmos", "user/fat", "user/gpt", "user/logstore", "user/manifest", "user/memfs", "user/pci", "user/permissions", "user/tz", "user/userdb", "user/ustar", "user/yaml", "xtask"]
 
 [workspace.package]
 version = "0.0.0"

@@ -785,6 +785,13 @@ name = "mikros-casefold"
 version = "0.0.0"
 
 [[package]]
+name = "mikros-cmos"
+version = "0.0.0"
+dependencies = [
+ "mikros-tz",
+]
+
+[[package]]
 name = "mikros-fat"
 version = "0.0.0"
 dependencies = [

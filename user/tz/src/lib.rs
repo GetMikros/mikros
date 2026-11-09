@@ -334,12 +334,14 @@ impl Date {
     }
 }
 
-fn is_leap(year: i64) -> bool {
+/// Whether `year` of the proleptic Gregorian calendar is a leap year.
+pub fn is_leap(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-/// Days since 1970-01-01 of the date `year`-`month`-`day`.
-fn days(year: i64, month: u32, day: u32) -> i64 {
+/// Days since 1970-01-01 of the date `year`-`month`-`day` of the
+/// proleptic Gregorian calendar.
+pub fn days(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y.rem_euclid(400);
@@ -349,8 +351,9 @@ fn days(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// The year, month and day of `days` since 1970-01-01.
-fn civil(days: i64) -> (i64, u32, u32) {
+/// The year, month and day of `days` since 1970-01-01, in the proleptic
+/// Gregorian calendar.
+pub fn civil(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
