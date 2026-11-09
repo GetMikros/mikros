@@ -7,8 +7,8 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use fat_server::{BlockDevice, Format, time};
-use mikros_fat::{Dir, Error, FatType, Node, Stamp, Volume};
+use fat_server::{BlockDevice, Format};
+use mikros_fat::{Dir, Error, FatType, Local, Node, Stamp, Volume};
 use mikros_rt::sys;
 
 mikros_rt::raw_main!(main);
@@ -163,11 +163,11 @@ impl Format for Fat {
         node.size()
     }
 
-    fn times(node: &Node) -> [i64; 3] {
-        [node.created(), node.modified(), node.accessed()].map(time::to_utc)
+    fn times(node: &Node, local: &Local) -> [i64; 3] {
+        [node.created(), node.modified(), node.accessed()].map(|s| local.to_utc(s))
     }
 
-    fn stamp(utc: i64) -> Stamp {
-        time::to_stamp(utc)
+    fn stamp(utc: i64, local: &Local) -> Stamp {
+        local.to_stamp(utc)
     }
 }

@@ -24,6 +24,7 @@ use mikros_rt::interfaces::mikros::driver::{
     DeviceManagerAsyncClient, DriverRequest, DriverServer, DriverStartRequest, DriverStartResponse,
     DriverStopResponse,
 };
+use mikros_rt::interfaces::mikros::fs::NodeClient;
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::{DirectoryClient, Provider};
 use mikros_rt::interfaces::mikros::storage::BlockClient;
@@ -68,13 +69,21 @@ pub fn run<F: Format>(bootstrap: sys::Handle) -> i64 {
     let Some(thread) = driver::Thread::create(process) else {
         return PANIC_EXIT_CODE;
     };
+    let mut zoneinfo = time::zoneinfo(&mut managed.namespace);
     let fs = loop {
         let Ok(request) = server.next(FOREVER) else {
             return 0;
         };
         let _ = match request {
             DriverRequest::Start(request, responder) => {
-                match start::<F>(request, process, &directory, &reactor, &spawner) {
+                match start::<F>(
+                    request,
+                    process,
+                    &directory,
+                    &mut zoneinfo,
+                    &reactor,
+                    &spawner,
+                ) {
                     Ok((fs, manager)) => {
                         let _ = responder.reply(&server, Ok(DriverStartResponse {}));
                         spawner.spawn(publish(fs.clone(), manager));
@@ -118,10 +127,12 @@ pub fn run<F: Format>(bootstrap: sys::Handle) -> i64 {
 /// channel, with `NO_RESOURCES` when the disk gives no buffer or there
 /// is no pager, with `NOT_SUPPORTED` when the partition holds no valid
 /// volume of the format `F`, and with `INTERNAL` when reading it fails.
+/// The volume's times take the zone files from `zoneinfo`.
 fn start<F: Format>(
     request: DriverStartRequest,
     process: sys::Handle,
     directory: &DirectoryClient,
+    zoneinfo: &mut Option<NodeClient>,
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(Rc<Fs<F>>, DeviceManagerAsyncClient), Status> {
@@ -138,11 +149,11 @@ fn start<F: Format>(
         mikros_fat::Error::Invalid => Status::NotSupported,
         _ => Status::Internal,
     })?;
-    let utc = time::Utc::new(directory, process);
     let pager = memory::pager(F::NAME).ok_or(Status::NoResources)?;
+    let clock = time::Clock::new(directory, process, zoneinfo.take());
     let fs = Rc::new(Fs::new(
         volume,
-        utc,
+        clock,
         pager,
         quick_disconnect,
         reactor.clone(),

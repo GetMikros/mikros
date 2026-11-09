@@ -8,15 +8,11 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use fat_server::{BlockDevice, Format, time};
-use mikros_exfat::{Dir, Error, Node, Stamp, Volume};
+use fat_server::{BlockDevice, Format};
+use mikros_exfat::{Dir, Error, Local, Node, Stamp, Volume};
 use mikros_rt::sys;
 
 mikros_rt::raw_main!(main);
-
-/// A UTC offset of 0 that is valid.
-const UTC: u8 = 0x80;
-const NS_PER_MINUTE: i64 = 60_000_000_000;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     fat_server::run::<Exfat>(bootstrap)
@@ -24,33 +20,6 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 
 /// A mounted exFAT volume.
 struct Exfat(Volume<BlockDevice>);
-
-/// The UTC time of `stamp`: by its UTC offset when that is valid, and
-/// otherwise as the FAT server takes its local times. The date and time
-/// lie in the stamp as in FAT's, and its increment of 10 ms as FAT's
-/// hundredths.
-fn to_utc(stamp: Stamp) -> i64 {
-    let local = time::to_utc(mikros_fat::Stamp {
-        date: (stamp.timestamp >> 16) as u16,
-        time: stamp.timestamp as u16,
-        hundredths: stamp.increment,
-    });
-    match stamp.offset_minutes() {
-        Some(minutes) => local - i64::from(minutes) * NS_PER_MINUTE,
-        None => local,
-    }
-}
-
-/// The stamp of the UTC time `utc`: local time as the FAT server writes
-/// it, which is UTC, with a valid offset of 0.
-fn to_stamp(utc: i64) -> Stamp {
-    let fat = time::to_stamp(utc);
-    Stamp {
-        timestamp: u32::from(fat.date) << 16 | u32::from(fat.time),
-        increment: fat.hundredths,
-        utc_offset: UTC,
-    }
-}
 
 impl Format for Exfat {
     type Dir = Dir;
@@ -191,11 +160,11 @@ impl Format for Exfat {
         node.size()
     }
 
-    fn times(node: &Node) -> [i64; 3] {
-        [node.created(), node.modified(), node.accessed()].map(to_utc)
+    fn times(node: &Node, local: &Local) -> [i64; 3] {
+        [node.created(), node.modified(), node.accessed()].map(|s| s.to_utc(local))
     }
 
-    fn stamp(utc: i64) -> Stamp {
-        to_stamp(utc)
+    fn stamp(utc: i64, local: &Local) -> Stamp {
+        Stamp::of_utc(utc, local)
     }
 }

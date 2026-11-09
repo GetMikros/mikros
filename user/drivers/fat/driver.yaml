@@ -8,3 +8,7 @@ match:
   # Any other partition whose first bytes hold FAT.
   - fs:fat
 kind: normal
+# The rules of the system time zone, for the volume's local times.
+namespace:
+  - path: /usr/share/zoneinfo
+    rights: r

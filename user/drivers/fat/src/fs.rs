@@ -3,13 +3,13 @@
 
 use crate::format::Format;
 use crate::node;
-use crate::time::{self, Utc};
+use crate::time::Clock;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
-use mikros_fat::Stamp;
+use mikros_fat::{Local, Stamp};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{
@@ -64,7 +64,7 @@ pub struct Fs<F: Format> {
     /// their sizes, by node.
     pub pager: OwnedHandle,
     pub paged: RefCell<BTreeMap<u64, (OwnedHandle, u64)>>,
-    pub utc: Utc,
+    pub clock: Clock,
     /// Whether the partition's `cache` property is `quick-disconnect`
     /// (MIKSPEC-0025.R33), which has every change durable when its call
     /// returns (MIKSPEC-0049.R20).
@@ -93,7 +93,7 @@ pub fn error(e: mikros_fat::Error) -> Error {
 impl<F: Format> Fs<F> {
     pub fn new(
         volume: F,
-        utc: Utc,
+        clock: Clock,
         pager: OwnedHandle,
         quick_disconnect: bool,
         reactor: Reactor,
@@ -106,7 +106,7 @@ impl<F: Format> Fs<F> {
             tokens: RefCell::new(BTreeMap::new()),
             pager,
             paged: RefCell::new(BTreeMap::new()),
-            utc,
+            clock,
             quick_disconnect,
             reactor,
             spawner,
@@ -135,7 +135,7 @@ impl<F: Format> Fs<F> {
 
     /// The local time now, for the stamps of changes.
     pub fn now(&self) -> F::Stamp {
-        F::stamp(self.utc.now())
+        F::stamp(self.clock.now(), &self.clock.local())
     }
 
     /// Serves `end` as a connection to `target` with `rights`, writing at
@@ -360,7 +360,8 @@ impl<F: Format> Fs<F> {
                 let mut volume = self.volume.borrow_mut();
                 let root = volume.root();
                 let allocated = volume.allocated_dir(root).map_err(error)?;
-                let epoch = time::to_utc(Stamp::default());
+                // The root's times are those of FAT's first date, in UTC.
+                let epoch = Local::utc().to_utc(Stamp::default());
                 Ok(Attributes {
                     r#type: NodeType::Directory,
                     mode: 0o755,
@@ -375,7 +376,10 @@ impl<F: Format> Fs<F> {
                     changed: epoch,
                 })
             }
-            Target::Node(id) => self.with_node(id, |volume, node| node_attributes(volume, node)),
+            Target::Node(id) => {
+                let local = self.clock.local();
+                self.with_node(id, |volume, node| node_attributes(volume, node, &local))
+            }
         }
     }
 
@@ -406,14 +410,16 @@ fn cut(locks: &mut Vec<Lock>, owner: u64, start: u64, end: u64) {
     *locks = kept;
 }
 
-/// The attributes of the entry `node`.
+/// The attributes of the entry `node`, with its times in UTC from the
+/// local times of `local`.
 pub fn node_attributes<F: Format>(
     volume: &mut F,
     node: &F::Node,
+    local: &Local,
 ) -> Result<Attributes, mikros_fat::Error> {
     let allocated = volume.allocated(node)?;
     let directory = F::is_directory(node);
-    let [created, modified, accessed] = F::times(node);
+    let [created, modified, accessed] = F::times(node, local);
     Ok(Attributes {
         r#type: if directory {
             NodeType::Directory

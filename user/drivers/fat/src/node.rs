@@ -201,14 +201,15 @@ impl<F: Format> Connection<F> {
         let Target::Node(id) = self.target else {
             return Err(Error::NotSupported);
         };
+        let local = self.fs.clock.local();
         let accessed = q
             .mask
             .contains(AttributeMask::ACCESSED)
-            .then(|| F::stamp(q.accessed));
+            .then(|| F::stamp(q.accessed, &local));
         let modified = q
             .mask
             .contains(AttributeMask::MODIFIED)
-            .then(|| F::stamp(q.modified));
+            .then(|| F::stamp(q.modified, &local));
         self.fs.with_node(id, |volume, node| {
             volume.set_times(node, accessed, modified)
         })?;
@@ -429,11 +430,12 @@ impl<F: Format> Connection<F> {
                 next: cookie,
             });
         };
+        let local = self.fs.clock.local();
         let mut volume = self.fs.volume.borrow_mut();
         let (nodes, next) = volume.list(dir, from, ENTRIES_MAX).map_err(fs::error)?;
         let mut entries = Vec::with_capacity(nodes.len());
         for node in nodes {
-            let attrs = fs::node_attributes(&mut *volume, &node).map_err(fs::error)?;
+            let attrs = fs::node_attributes(&mut *volume, &node, &local).map_err(fs::error)?;
             entries.push(DirEntry {
                 name: F::name(&node).into(),
                 r#type: attrs.r#type,

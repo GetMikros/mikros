@@ -3,7 +3,7 @@
 use crate::device::BlockDevice;
 use alloc::string::String;
 use alloc::vec::Vec;
-use mikros_fat::Error;
+use mikros_fat::{Error, Local};
 
 /// A mounted volume of the format that a server serves, on a
 /// `BlockDevice`, with its directories and nodes.
@@ -93,8 +93,9 @@ pub trait Format: Sized + 'static {
     fn is_directory(node: &Self::Node) -> bool;
     fn size(node: &Self::Node) -> u64;
     /// When `node` was created, modified and accessed, in UTC
-    /// nanoseconds since 1970.
-    fn times(node: &Self::Node) -> [i64; 3];
-    /// The stamp that the server writes for the UTC time `utc`.
-    fn stamp(utc: i64) -> Self::Stamp;
+    /// nanoseconds since 1970, with local times in `local`.
+    fn times(node: &Self::Node, local: &Local) -> [i64; 3];
+    /// The stamp that the server writes for the UTC time `utc`, in the
+    /// local time of `local`.
+    fn stamp(utc: i64, local: &Local) -> Self::Stamp;
 }

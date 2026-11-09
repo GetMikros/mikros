@@ -953,6 +953,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     time_manifest.clone(),
                 ),
             ];
+            // The time zones, for the FAT and exFAT servers' local times.
+            let mut pci_bus_files = pci_bus_files.to_vec();
+            pci_bus_files.extend(crate::tzdata::members(&crate::tzdata::zoneinfo()?)?);
             let pci_image = device_image(
                 "pci.img",
                 &[
@@ -968,8 +971,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", pci_image.display());
             // The USB volumes run serves this image, with root=bootfs: the
             // PCI bus, xHCI, USB mass storage, partition, FAT, exFAT and
-            // btrfs drivers from the PCI test's files, the temporary file system, and
-            // the volumes probe.
+            // btrfs drivers and the time zones from the PCI test's files,
+            // the temporary file system, and the volumes probe.
             let volumes_probe = user_build("volumes-probe", kind)?;
             println!("built    {}", volumes_probe.display());
             let volume_drivers = [
@@ -987,6 +990,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     volume_drivers
                         .iter()
                         .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
+                        || at.starts_with("usr/share/zoneinfo/")
                 })
                 .cloned()
                 .collect();
@@ -1006,8 +1010,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", volumes_image.display());
             // The root disk runs serve this image: the PCI bus driver, the
             // drivers of the disk controllers, the partition, FAT and btrfs
-            // drivers, and the log service, from the PCI test's files,
-            // without test drivers.
+            // drivers, the time zones and the log service, from the PCI
+            // test's files, without test drivers.
             let root_drivers = [
                 "pci-bus",
                 "virtio-blk",
@@ -1023,6 +1027,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     root_drivers
                         .iter()
                         .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
+                        || at.starts_with("usr/share/zoneinfo/")
                         || at.contains("log-service")
                         || at.ends_with("services/log.yaml")
                 })

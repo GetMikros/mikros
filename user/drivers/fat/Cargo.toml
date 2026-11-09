@@ -12,3 +12,4 @@ name = "fat_server"
 [dependencies]
 mikros-fat = { path = "../../fat" }
 mikros-rt = { path = "../../mikros-rt" }
+mikros-tz = { path = "../../tz" }

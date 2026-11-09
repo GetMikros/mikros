@@ -192,6 +192,7 @@ version = "0.0.0"
 dependencies = [
  "mikros-fat",
  "mikros-rt",
+ "mikros-tz",
 ]
 
 [[package]]
