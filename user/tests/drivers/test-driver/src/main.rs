@@ -61,6 +61,10 @@
 //!   the test machine's disk, it succeeds when the FAT server serves
 //!   the disk's EFI system partition through its `filesystem` service as
 //!   `fat::works` checks. It fails with `INVALID_ARGS` otherwise.
+//! - As `system.driver.test-acpi`, the driver of the q35 host bridge in
+//!   the ACPI server test, it succeeds when the `acpi` service routes PCI
+//!   interrupt pins and refuses power control as `acpi::works` checks.
+//!   It fails with `INVALID_ARGS` otherwise.
 //! - As `system.driver.test-decline`, it fails with `NOT_SUPPORTED`.
 //! - As `system.driver.test-close`, the driver publishes a `storage`
 //!   service and ends without replying.
@@ -75,6 +79,7 @@
 
 extern crate alloc;
 
+mod acpi;
 mod btrfs;
 mod crash;
 mod fat;
@@ -109,6 +114,7 @@ const EDU: &str = "system.driver.test-edu";
 const DISK: &str = "system.driver.test-disk";
 const FAT: &str = "system.driver.test-fat";
 const BTRFS: &str = "system.driver.test-btrfs";
+const ACPI: &str = "system.driver.test-acpi";
 /// The models of the test machine's disks: the virtio disk, and the
 /// scratch disks behind QEMU's NVMe and AHCI controllers.
 const MODELS: [&str; 4] = [
@@ -248,6 +254,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                                 false => Err(Status::InvalidArgs),
                             }
                         }
+                        ACPI => match acpi::works(&directory, &reactor).await {
+                            true => Ok(DriverStartResponse {}),
+                            false => Err(Status::InvalidArgs),
+                        },
                         CRASH_HOST => Ok(DriverStartResponse {}),
                         KEPT_CHILD => {
                             let signalled = signal(bus.as_ref());

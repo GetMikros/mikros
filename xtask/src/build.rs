@@ -736,6 +736,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let fat = user_build("fat", kind)?;
             println!("built    {}", fat.display());
             let btrfs = btrfs_build(kind)?;
+            let acpi = acpi_build(kind)?;
             let devices_manifest =
                 crate::workspace_root().join("user/device-manager/device-manager.yaml");
             let device_image = |file: &str,
@@ -795,6 +796,25 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", restart_image.display());
+            // The ACPI server test serves this image, with the ACPI server
+            // for the platform:acpi device and a test driver for the host
+            // bridge that checks the server's service as its client.
+            let acpi_image = device_image(
+                "acpi.img",
+                &[("test-acpi", true)],
+                &[
+                    ("usr/lib/drivers/acpi/acpi".to_owned(), acpi.clone()),
+                    (
+                        "usr/lib/drivers/acpi/driver.yaml".to_owned(),
+                        crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
+                    ),
+                    // The log service, through which the drivers' messages
+                    // reach the kernel log.
+                    ("usr/bin/log-service".to_owned(), log_service.clone()),
+                    ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                ],
+            )?;
+            println!("built    {}", acpi_image.display());
             // The PCI bus driver tests serve this image, with the bus
             // driver and test drivers for the host bridge's function, for
             // QEMU's edu device and for the e1000e function, the
@@ -896,6 +916,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/devices.img", devices_image.as_path()),
                 ("tests/failing.img", failing_image.as_path()),
                 ("tests/restart.img", restart_image.as_path()),
+                ("tests/acpi.img", acpi_image.as_path()),
                 ("tests/pci.img", pci_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),

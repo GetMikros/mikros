@@ -9716,6 +9716,49 @@ mod manager {
         ensure("keeping the child across its parent's restart", logged)
     }
 
+    /// Serves `tests/acpi.img`, with the ACPI server and a test driver for
+    /// the q35 host bridge: the device manager binds the server to the
+    /// `platform:acpi` device, the server starts ACPICA on the machine's
+    /// tables, publishes the `acpi` service and adds the devices of the
+    /// namespace, and `test-acpi` starts once it found the service routing
+    /// PCI interrupt pins and refusing power control.
+    pub fn device_manager_starts_the_acpi_server(s: &Startup) -> Result {
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"device-manager: bound driver acpi to device 2, acpi, as platform:acpi",
+                1,
+            ),
+            (b"device-manager: started driver acpi for device 2 as pid", 1),
+            (b"device-manager: published device.acpi ", 1),
+            // Among the devices of the namespace, those of the LPC bridge
+            // below the host bridge: the RTC with its ports and IRQ 8, and
+            // the PS/2 keyboard and mouse as one device with the ports and
+            // IRQs of both.
+            (
+                b", rtc, as acpi:pnp0b00, under 2, with 2 resources, path \\_SB.PCI0.",
+                1,
+            ),
+            (
+                b", i8042, as acpi:i8042, under 2, with 4 resources, path \\_SB.PCI0.",
+                1,
+            ),
+            (
+                b"device-manager: bound driver test-acpi to device 1, pci-host-0, as platform:pci-host-ecam",
+                1,
+            ),
+            (b"device-manager: started driver test-acpi for device 1 as pid", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"driver acpi declined",
+            b"driver acpi for device 2 terminated",
+            b"driver acpi for device 2 did not start",
+            b"driver test-acpi declined",
+            b"acpi: starting ACPICA failed",
+        ];
+        let logged = device_manager_logs(s, b"tests/acpi.img", false, super::PROBE_SECONDS, EXPECTED, FAILED)?;
+        ensure("starting the ACPI server and its service", logged)
+    }
+
     /// From a boot image with the service manager, the broker, the
     /// device manager, the PCI bus driver and a test driver for the q35
     /// host bridge's function 00:00.0, with their manifests, the device
@@ -10336,6 +10379,7 @@ mod bootfs {
                 names
                     == [
                         "accounts.img",
+                        "acpi.img",
                         "broker.img",
                         "call-server",
                         "channel-echo",
@@ -10533,7 +10577,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 144] = [
+const TESTS: [(&str, Test); 145] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -10785,6 +10829,10 @@ const TESTS: [(&str, Test); 144] = [
     // driver outlives the test and keeps exclusive resources, the BTI
     // range of segment 0 and the BARs of q35, and its processes keep
     // allocating.
+    (
+        "device_manager_starts_the_acpi_server",
+        manager::device_manager_starts_the_acpi_server,
+    ),
     (
         "device_manager_starts_the_pci_bus_driver",
         manager::device_manager_starts_the_pci_bus_driver,
