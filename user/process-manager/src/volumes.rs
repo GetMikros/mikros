@@ -209,11 +209,27 @@ impl Volumes {
     }
 }
 
+/// The most bytes in an entry's name.
+const NAME_MAX: usize = 255;
+
 /// The name of a new entry for a volume with `label` and partition GUID
-/// `guid`, given the names that earlier entries have.
+/// `guid`, given the names that earlier entries have. The GUID takes the
+/// place of a label that cannot be a name, and of one whose name, with
+/// the suffix that makes it unique, would be longer than `NAME_MAX`.
 fn entry_name(label: &str, guid: &str, taken: &[&str]) -> String {
     let usable = !label.is_empty() && label != "." && label != ".." && !label.contains(['/', '\0']);
-    let base = if usable { label } else { guid };
+    if usable {
+        let name = unique(label, taken);
+        if name.len() <= NAME_MAX {
+            return name;
+        }
+    }
+    unique(guid, taken)
+}
+
+/// `base`, or, when an earlier entry has that name, `base` with a space
+/// and the smallest number from 2 that no earlier entry has.
+fn unique(base: &str, taken: &[&str]) -> String {
     if !taken.contains(&base) {
         return String::from(base);
     }
