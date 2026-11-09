@@ -506,6 +506,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("bus restart runs passed");
+    crate::root_disk::run_acpi_restart(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("acpi-restart"),
+        timeout,
+    )?;
+    println!("ACPI restart run passed");
     Ok(())
 }
 

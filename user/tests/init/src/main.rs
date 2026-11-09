@@ -10178,6 +10178,58 @@ mod manager {
         mikros_test::exit_qemu(mikros_test::FAILED)
     }
 
+    /// The `acpi-restart` scenario: serves `tests/acpi-restart.img`, whose
+    /// restart probe kills the ACPI server once the real-time clock's
+    /// driver below it runs; stops QEMU with `PASSED` once the probe
+    /// passed, or with `FAILED`.
+    pub fn acpi_restart_scenario(s: &Startup) -> i64 {
+        const SECONDS: i64 = 300;
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (b"device-manager: published device.rtc ", 1),
+            (b"restart-probe: killed system.driver.acpi", 1),
+            (b"device-manager: restarting driver acpi for device", 1),
+            (b"restart-probe: PASSED", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"restart-probe: FAILED",
+            b"left without a driver",
+            b"did not start",
+            b"declined",
+            b"acpi: starting ACPICA failed",
+        ];
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(
+                Error,
+                "SCENARIO acpi-restart: {} failed ({})",
+                f.what,
+                f.status
+            );
+            return 1;
+        }
+        let logged = device_manager_logs(
+            s,
+            b"tests/acpi-restart.img",
+            false,
+            SECONDS,
+            EXPECTED,
+            FAILED,
+        );
+        match logged {
+            Ok(true) => {
+                mikros_rt::log!(Info, "SCENARIO acpi-restart PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO acpi-restart FAILED"),
+            Err(f) => mikros_rt::log!(
+                Error,
+                "SCENARIO acpi-restart FAILED: {} failed ({})",
+                f.what,
+                f.status
+            ),
+        }
+        mikros_test::exit_qemu(mikros_test::FAILED)
+    }
+
     /// The `power-off` scenario: serves `tests/power.img`, whose service
     /// manager shuts the machine down once the runner presses the power
     /// button, and waits for the machine to go off; it returns 1 only when
@@ -10570,6 +10622,7 @@ mod bootfs {
                 names
                     == [
                         "accounts.img",
+                        "acpi-restart.img",
                         "acpi.img",
                         "broker.img",
                         "bus.img",
@@ -11111,6 +11164,7 @@ fn scenario(s: &Startup) -> Option<i64> {
         // The runner puts the boot disk on a virtio-blk, NVMe or AHCI
         // controller.
         "bus-restart" => manager::bus_restart_scenario(s),
+        "acpi-restart" => manager::acpi_restart_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.
         "wait" => {
             log!(Info, "SCENARIO waiting");

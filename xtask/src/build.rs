@@ -846,6 +846,41 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", acpi_image.display());
+            // The ACPI restart run serves this image: the ACPI server, the
+            // clock's driver, the log and time services, and the restart
+            // probe, which kills the ACPI server.
+            let restart_probe = user_build("restart-probe", kind)?;
+            println!("built    {}", restart_probe.display());
+            let acpi_restart_image = device_image(
+                "acpi-restart.img",
+                &[],
+                &[
+                    ("usr/lib/drivers/acpi/acpi".to_owned(), acpi.clone()),
+                    (
+                        "usr/lib/drivers/acpi/driver.yaml".to_owned(),
+                        crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
+                    ),
+                    ("usr/bin/log-service".to_owned(), log_service.clone()),
+                    ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                    ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
+                    (
+                        "usr/lib/drivers/rtc/driver.yaml".to_owned(),
+                        crate::workspace_root().join("user/drivers/rtc/driver.yaml"),
+                    ),
+                    ("usr/bin/time-service".to_owned(), time_service.clone()),
+                    (
+                        "usr/lib/services/time.yaml".to_owned(),
+                        time_manifest.clone(),
+                    ),
+                    ("usr/bin/restart-probe".to_owned(), restart_probe.clone()),
+                    (
+                        "usr/lib/services/acpi-restart-probe.yaml".to_owned(),
+                        crate::workspace_root()
+                            .join("user/tests/restart-probe/acpi-restart-probe.yaml"),
+                    ),
+                ],
+            )?;
+            println!("built    {}", acpi_restart_image.display());
             // The power-off run serves this image, with the ACPI server, the
             // log service and the power probe, a boot service that the
             // service manager stops when the power button shuts the
@@ -1037,8 +1072,6 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", root_image.display());
             // The bus restart runs serve this image: the root disk runs'
             // with the restart probe.
-            let restart_probe = user_build("restart-probe", kind)?;
-            println!("built    {}", restart_probe.display());
             let mut bus_files = root_files.clone();
             bus_files.extend([
                 ("usr/bin/restart-probe".to_owned(), restart_probe.clone()),
@@ -1066,6 +1099,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/volumes.img", volumes_image.as_path()),
                 ("tests/root.img", root_image.as_path()),
                 ("tests/bus.img", bus_image.as_path()),
+                ("tests/acpi-restart.img", acpi_restart_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),

@@ -8,7 +8,11 @@
 //!   controller: the test init serves `tests/bus.img` with
 //!   `test=bus-restart`, whose restart probe kills the PCI bus driver
 //!   below the mounted root, until the probe finds the other drivers and
-//!   the root still working.
+//!   the root still working;
+//! - the ACPI restart run: the test init serves `tests/acpi-restart.img`
+//!   with `test=acpi-restart`, whose restart probe kills the ACPI server
+//!   below the real-time clock's driver, until the probe finds the other
+//!   drivers and the clock still working.
 //!
 //! The test init stops QEMU through `isa-debug-exit` once the run passed
 //! or failed.
@@ -36,6 +40,13 @@ const ROOT_DISK: Runs = Runs {
     scenario: "test=root-disk",
     passed: "SCENARIO root-disk PASSED",
     disks: &[("nvme", Disk::Nvme), ("ahci", Disk::Ahci)],
+};
+
+const ACPI_RESTART: Runs = Runs {
+    name: "ACPI restart",
+    scenario: "test=acpi-restart",
+    passed: "SCENARIO acpi-restart PASSED",
+    disks: &[("virtio", Disk::Virtio)],
 };
 
 const BUS_RESTART: Runs = Runs {
@@ -80,6 +91,17 @@ pub fn run_bus_restart(
     timeout: Duration,
 ) -> Result<()> {
     run_all(&BUS_RESTART, machine, kind, built, dir, timeout)
+}
+
+/// Boots the ACPI restart run, as `run` does the root disk runs.
+pub fn run_acpi_restart(
+    machine: &MachineArgs,
+    kind: Kind,
+    built: &build::Built,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<()> {
+    run_all(&ACPI_RESTART, machine, kind, built, dir, timeout)
 }
 
 fn run_all(
@@ -136,7 +158,7 @@ mod tests {
     #[test]
     fn needs_the_passed_code_and_line() {
         let passed = crate::test::PASSED;
-        for runs in [&ROOT_DISK, &BUS_RESTART] {
+        for runs in [&ROOT_DISK, &BUS_RESTART, &ACPI_RESTART] {
             let line = runs.passed;
             assert_eq!(verdict(Some(passed), line, line), Ok(()));
             assert!(verdict(Some(passed), "SCENARIO root-disk FAILED", line).is_err());

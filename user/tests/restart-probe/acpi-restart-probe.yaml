@@ -1,0 +1,11 @@
+# The service manifest of the restart probe as the boot service of
+# tests/acpi-restart.img, installed as
+# usr/lib/services/acpi-restart-probe.yaml. It logs through the kernel
+# log.
+name: acpi-restart-probe
+binary: /usr/bin/restart-probe
+start: boot
+after: [device-manager]
+boot_handles: [log_manage]
+# To kill the ACPI server, and to reach the real-time clock's service.
+permissions: [process.signal_any, time.set]

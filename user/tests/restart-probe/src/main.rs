@@ -1,13 +1,18 @@
-//! The boot service of `tests/bus.img`, which the bus restart runs of
-//! `cargo xtask test` boot, with the root file system on a disk behind a
-//! virtio-blk, NVMe or AHCI controller. It kills the PCI bus driver below
-//! running drivers and checks that the device manager runs it again
-//! while every other driver goes on as the process it was, as a driver
-//! does that takes the restarted bus driver's channel through
-//! `Reconnect`. Before the kill it waits until the drivers have started.
-//! It writes and syncs part of a file on the root before the kill and the
-//! rest after it, and the file must read back as written. It logs
-//! `PASSED`, or `FAILED` with what failed.
+//! The boot service of `tests/bus.img` and `tests/acpi-restart.img`,
+//! which kills a bus driver below running drivers and checks that the
+//! device manager runs it again while every other driver goes on as the
+//! process it was, as a driver does that takes the restarted bus driver's
+//! channel through `Reconnect`. Before the kill it waits until the
+//! drivers have started. It logs `PASSED`, or `FAILED` with what failed.
+//!
+//! - As `system.restart-probe`, in the bus restart runs of `cargo xtask
+//!   test`, with the root file system on a disk behind a virtio-blk, NVMe
+//!   or AHCI controller, it kills the PCI bus driver. It writes and syncs
+//!   part of a file on the root before the kill and the rest after it,
+//!   and the file must read back as written.
+//! - As `system.acpi-restart-probe`, in the ACPI restart run, it kills
+//!   the ACPI server once the real-time clock's driver has published its
+//!   service, which must still read the clock afterwards.
 
 #![no_std]
 #![no_main]
@@ -24,6 +29,7 @@ use mikros_rt::interfaces::mikros::fs::{
 };
 use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
+use mikros_rt::interfaces::mikros::time::{Rtc, RtcAsyncClient};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
@@ -32,7 +38,11 @@ mikros_rt::raw_main!(main);
 /// handles.
 const LOG_ID: u32 = 2;
 const FILESYSTEM: &str = "device.filesystem";
+const RTC: &str = "device.rtc";
 const BUS_DRIVER: &str = "system.driver.pci-bus";
+const ACPI_DRIVER: &str = "system.driver.acpi";
+/// The app ID that kills the ACPI server.
+const ACPI_PROBE: &str = "system.acpi-restart-probe";
 const DRIVER_PREFIX: &str = "system.driver.";
 const KILL: u32 = 9;
 const MS: i64 = 1_000_000;
@@ -97,7 +107,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let header = managed.header;
     let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
     let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
-    let passed = executor.block_on(bus(&directory, &launcher, &reactor));
+    let passed = match header.app_id == ACPI_PROBE {
+        true => executor.block_on(acpi(&directory, &launcher, &reactor)),
+        false => executor.block_on(bus(&directory, &launcher, &reactor)),
+    };
     if passed.is_some() {
         mikros_rt::log!(Info, "restart-probe: PASSED");
     }
@@ -217,6 +230,46 @@ async fn restarted(
         }
     }
     Some(())
+}
+
+/// Kills the ACPI server once the clock's service is published, and
+/// reads the clock once the server runs again.
+async fn acpi(
+    directory: &DirectoryAsyncClient,
+    launcher: &LauncherAsyncClient,
+    reactor: &Reactor,
+) -> Option<()> {
+    let rtc = rtc(directory, reactor).await?;
+    let (before, killed) = kill(launcher, reactor, ACPI_DRIVER).await?;
+    restarted(launcher, reactor, ACPI_DRIVER, killed, &before).await?;
+    match rtc.get().await {
+        Ok(Ok(_)) => Some(()),
+        _ => failed("reading the clock after the ACPI server restarted"),
+    }
+}
+
+/// The clock's service, once it is published.
+async fn rtc(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<RtcAsyncClient> {
+    let limit = now() + ROOT_LIMIT;
+    let instance = loop {
+        if let Ok(Ok(listed)) = directory.list(RTC.into()).await
+            && let Some(instance) = listed.instances.into_iter().next()
+        {
+            break instance;
+        }
+        if now() > limit {
+            return failed("waiting for the clock's service");
+        }
+        let _ = reactor.sleep_until(now() + 50 * MS).await;
+    };
+    let (client, server) = endpoints::<Rtc>().ok()?;
+    let connected = directory
+        .connect(RTC.into(), Some(instance), server.into_handle())
+        .await;
+    if !matches!(connected, Ok(Ok(_))) {
+        return failed("connecting to the clock's service");
+    }
+    Some(RtcAsyncClient::new(client, reactor.clone()))
 }
 
 /// Kills the PCI bus driver below the root file system, between writes
