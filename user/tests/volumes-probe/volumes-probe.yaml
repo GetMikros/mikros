@@ -7,3 +7,7 @@ after: [device-manager, tmpfs]
 boot_handles: [log_manage]
 # To grant itself files.volumes, which its copy then holds.
 permissions: [permissions.manage]
+# Its program, to start the copy.
+namespace:
+  - path: /usr/bin
+    rights: rx

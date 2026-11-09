@@ -138,6 +138,7 @@ fn check(entries: &[(String, NodeClient)]) -> Result<(), i64> {
         paths
             == [
                 "/usr/share/probe",
+                "/usr/bin",
                 "/var/lib/namespace-probe",
                 "/etc",
                 "/dev",

@@ -7,8 +7,12 @@ after: [tmpfs]
 namespace:
   - path: /usr/share/probe
     rights: r
+  # Its programs, to start a copy of itself.
+  - path: /usr/bin
+    rights: rx
+  # Executable, so that a program copied there can be started.
   - path: /var/lib/namespace-probe
-    rights: rw
+    rights: rwx
   - path: /etc
     rights: r
 # To start a copy of itself as a command-line tool, and as a native app.

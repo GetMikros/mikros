@@ -12,4 +12,4 @@ provides:
     permission: files.volumes
 namespace:
   - path: /usr/lib/drivers
-    rights: r
+    rights: rx
