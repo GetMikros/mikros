@@ -26,6 +26,12 @@ pub struct Args {
     /// without building the test image or starting QEMU.
     #[arg(long, conflicts_with = "no_host")]
     pub host: bool,
+    /// Run the pass with kernel page-table isolation on QEMU's emulated
+    /// Intel processor even when the host's could be used under KVM. The
+    /// emulated processor is about ten times slower, which shows races
+    /// and slow paths that KVM hides.
+    #[arg(long, conflicts_with = "host")]
+    pub emulated_isolation: bool,
     #[command(flatten)]
     pub machine: MachineArgs,
 }
@@ -395,21 +401,27 @@ pub fn run(args: &Args) -> Result<()> {
     let processor = qemu::Processor::available();
     integration(args, processor, args.timeout, &disk, &log, "", "")?;
     // Kernel page-table isolation applies only to Intel processors that do
-    // not report RDCL_NO, as QEMU's emulated processor does not when it
-    // names that vendor. Emulation takes about five times as long as KVM.
+    // not report RDCL_NO: the host's under KVM with the bit hidden, or
+    // QEMU's emulated processor when it names that vendor. Emulation takes
+    // about five times as long as KVM.
     if args.kind != Kind::Fuzz {
         let isolation_disk = dir.join("isolation-disk.img");
         let isolation_cmdline = [cmdline.as_str(), SKIP_PORTED].join(" ");
         let isolation_cmdline = isolation_cmdline.trim();
         image::create_for_tests(args.kind, &built, &isolation_disk, isolation_cmdline)?;
-        let timeout = match processor {
-            qemu::Processor::Host => args.timeout * 5,
+        let isolating = if args.emulated_isolation {
+            qemu::Processor::EmulatedIntel
+        } else {
+            qemu::Processor::isolating()
+        };
+        let timeout = match (processor, isolating) {
+            (qemu::Processor::Host, qemu::Processor::EmulatedIntel) => args.timeout * 5,
             _ => args.timeout,
         };
         let isolation_log = dir.join("isolation-serial.log");
         integration(
             args,
-            qemu::Processor::EmulatedIntel,
+            isolating,
             timeout,
             &isolation_disk,
             &isolation_log,
@@ -466,6 +478,16 @@ mod tests {
         let full = TestCommand::try_parse_from(["test"]).unwrap();
         assert!(!full.args.host);
         assert!(TestCommand::try_parse_from(["test", "--host", "--no-host"]).is_err());
+    }
+
+    #[test]
+    fn takes_emulated_isolation_without_host() {
+        let parsed = TestCommand::try_parse_from(["test", "--emulated-isolation"]).unwrap();
+        assert!(parsed.args.emulated_isolation);
+        let full = TestCommand::try_parse_from(["test"]).unwrap();
+        assert!(!full.args.emulated_isolation);
+        let both = ["test", "--host", "--emulated-isolation"];
+        assert!(TestCommand::try_parse_from(both).is_err());
     }
 
     #[test]

@@ -71,6 +71,9 @@ pub enum Processor {
     /// The emulated processor with the vendor `GenuineIntel` and without
     /// `RDCL_NO`, for which the kernel isolates its page tables.
     EmulatedIntel,
+    /// The host's Intel processor, under KVM, with `RDCL_NO` hidden, for
+    /// which the kernel isolates its page tables as for `EmulatedIntel`.
+    HostWithoutRdclNo,
 }
 
 impl Processor {
@@ -83,6 +86,26 @@ impl Processor {
             Processor::Emulated
         }
     }
+
+    /// A processor for which the kernel isolates its page tables: the
+    /// host's with `RDCL_NO` hidden when KVM can be used and the host's
+    /// vendor is Intel, and otherwise the emulated Intel one.
+    pub fn isolating() -> Processor {
+        if kvm_available() && host_is_intel() {
+            Processor::HostWithoutRdclNo
+        } else {
+            Processor::EmulatedIntel
+        }
+    }
+}
+
+/// Whether `/proc/cpuinfo` names the host's processor vendor `GenuineIntel`.
+fn host_is_intel() -> bool {
+    std::fs::read_to_string("/proc/cpuinfo").is_ok_and(|info| {
+        info.lines()
+            .find(|line| line.starts_with("vendor_id"))
+            .is_some_and(|line| line.ends_with("GenuineIntel"))
+    })
 }
 
 /// The QEMU arguments for a virtual machine booting `image` with the
@@ -97,10 +120,9 @@ pub fn args(
     let mut args: Vec<String> = Vec::new();
     let mut push = |items: &[&str]| args.extend(items.iter().map(|s| s.to_string()));
 
-    let accel = if processor == Processor::Host {
-        "kvm"
-    } else {
-        "tcg"
+    let accel = match processor {
+        Processor::Host | Processor::HostWithoutRdclNo => "kvm",
+        Processor::Emulated | Processor::EmulatedIntel => "tcg",
     };
     // Interrupt remapping needs the I/O APIC to be emulated by QEMU.
     let irqchip = if machine.no_iommu {
@@ -120,6 +142,7 @@ pub fn args(
             Processor::Host => "host,migratable=no,+invtsc",
             Processor::Emulated => "max",
             Processor::EmulatedIntel => "max,vendor=GenuineIntel",
+            Processor::HostWithoutRdclNo => "host,migratable=no,+invtsc,-rdctl-no",
         },
     ]);
     let memory = machine.memory.as_deref().unwrap_or(DEFAULT_MEMORY);
@@ -227,6 +250,21 @@ mod tests {
         assert_eq!(
             after(&intel, "-machine"),
             ["q35,accel=tcg,kernel-irqchip=split"]
+        );
+        let hidden = args(
+            &machine(),
+            Processor::HostWithoutRdclNo,
+            &firmware(),
+            Path::new("v.fd"),
+            image,
+        );
+        assert_eq!(
+            after(&hidden, "-cpu"),
+            ["host,migratable=no,+invtsc,-rdctl-no"]
+        );
+        assert_eq!(
+            after(&hidden, "-machine"),
+            ["q35,accel=kvm,kernel-irqchip=split"]
         );
         assert_eq!(after(&without, "-smp"), ["4"]);
         assert_eq!(after(&without, "-serial"), ["stdio"]);
