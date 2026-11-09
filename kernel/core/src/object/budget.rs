@@ -126,6 +126,11 @@ impl Budget {
         core::iter::successors(Some(self), |b| b.parent.as_deref())
     }
 
+    /// Whether this budget is `ancestor` or lies below it.
+    pub fn is_within(&self, ancestor: &Budget) -> bool {
+        self.path().any(|b| core::ptr::eq(b, ancestor))
+    }
+
     /// Sets or clears `OVER_THRESHOLD` to match the usage. Runs under
     /// `ACCOUNTS`.
     fn update_signal(&self) {
@@ -431,6 +436,19 @@ mod tests {
         assert_eq!((root.kernel.used(), root.pages.used()), (0, 0));
         assert_eq!(root.charge_kernel(u64::MAX), Ok(()));
         assert_eq!(root.charge_kernel(1), Err(Error::NoResources));
+    }
+
+    #[test]
+    fn knows_the_budgets_it_lies_within() {
+        let root = Budget::root();
+        let mid = Budget::child(&root, UNLIMITED, UNLIMITED, None).unwrap();
+        let leaf = Budget::child(&mid, UNLIMITED, UNLIMITED, None).unwrap();
+        let sibling = Budget::child(&root, UNLIMITED, UNLIMITED, Some(&leaf)).unwrap();
+        assert!(leaf.is_within(&leaf) && leaf.is_within(&mid) && leaf.is_within(&root));
+        assert!(!mid.is_within(&leaf));
+        // Being charged for a budget does not put one below it.
+        assert!(!sibling.is_within(&leaf) && !sibling.is_within(&mid));
+        assert!(sibling.is_within(&root));
     }
 
     #[test]

@@ -172,9 +172,9 @@ syscalls:
     number: 15
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0008.R8]
+    spec: [MIKSPEC-0008.R42]
     args:
-      - {name: handle, type: Handle, dir: in, object: [Process, Thread], rights: [MANAGE]}
+      - {name: handle, type: Handle, dir: in, object: [Process, Thread, Budget], rights: [MANAGE]}
 
   - name: mem_create
     number: 16

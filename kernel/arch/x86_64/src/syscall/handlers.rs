@@ -367,6 +367,10 @@ pub fn process_exit(code: i64) -> Result<(), Error> {
 pub fn task_kill(handle: Checked) -> Result<(), Error> {
     match handle.object.header().kind() {
         ObjectType::Process => object::<Process>(handle).terminate(-1),
+        ObjectType::Budget => {
+            let caller = current_process().ok();
+            crate::process::kill_budget(&object::<Budget>(handle), caller.as_deref());
+        }
         _ => end_thread(&object(handle)),
     }
     Ok(())

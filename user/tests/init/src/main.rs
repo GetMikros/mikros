@@ -4231,6 +4231,59 @@ fn out_of_memory_report(s: &Startup) -> Result {
     ensure("ending with exit code -2", exit_code(process)? == -2)
 }
 
+/// Killing a budget terminates, with exit code -1 and before the call
+/// returns, the processes of the budget and of the budgets below it,
+/// whether they have started or not, and none of another budget.
+fn kill_budget(s: &Startup) -> Result {
+    let budget = |parent: Handle| -> Result<Handle> {
+        let mut budget = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating a budget", unsafe {
+            sys::budget_create(parent, u64::MAX, u64::MAX, &mut budget)
+        })?;
+        Ok(budget)
+    };
+    let (outer, other) = (budget(s.budget)?, budget(s.budget)?);
+    let inner = budget(outer)?;
+    // The debuggee with 1 waits on its bootstrap channel until killed.
+    let (waiting, a) = start_program_in(s, outer, "debuggee", 1, |_| Ok(()))?;
+    let (below, b) = start_program_in(s, inner, "debuggee", 1, |_| Ok(()))?;
+    let (spared, c) = start_program_in(s, other, "debuggee", 1, |_| Ok(()))?;
+    let mut unstarted = 0;
+    let name = b"unstarted";
+    // SAFETY: the pointers describe `name` and `unstarted`.
+    check("creating a process", unsafe {
+        sys::process_create(inner, name.as_ptr(), name.len() as u64, &mut unstarted)
+    })?;
+    // SAFETY: the call takes no pointers.
+    check("killing the budget", unsafe { sys::task_kill(outer) })?;
+    for process in [waiting, below, unstarted] {
+        ensure(
+            "having terminated the process",
+            wait(process, TERMINATED, 0).0 == 0,
+        )?;
+        ensure(
+            "ending it with exit code -1",
+            u64_at(&info::<0x28>(process, 2)?, 0) as i64 == -1,
+        )?;
+    }
+    ensure(
+        "leaving another budget's process running",
+        wait(spared, TERMINATED, 0).0 == TIMED_OUT,
+    )?;
+    // SAFETY: the call takes no pointers.
+    check("killing the empty budget", unsafe { sys::task_kill(outer) })?;
+    // SAFETY: the call takes no pointers.
+    check("killing the other budget", unsafe { sys::task_kill(other) })?;
+    ensure("ending its process", exit_code(spared)? == -1)?;
+    for handle in [
+        waiting, below, spared, unstarted, a, b, c, inner, outer, other,
+    ] {
+        close(handle)?;
+    }
+    Ok(())
+}
+
 /// A thread reports its start with its entry point, where it starts, and
 /// its end through `thread_exit` with address 0; neither report takes
 /// `DELIVER_SIGNAL`; and the process, whose last thread it was, ends with
@@ -10825,7 +10878,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 145] = [
+const TESTS: [(&str, Test); 146] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -10977,6 +11030,7 @@ const TESTS: [(&str, Test); 145] = [
         exception_reports_and_actions,
     ),
     ("out_of_memory_report", out_of_memory_report),
+    ("kill_budget", kill_budget),
     ("thread_events", thread_events),
     ("start_refusals", start_refusals),
     ("kill_stopped_thread", kill_stopped_thread),

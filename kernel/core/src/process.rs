@@ -11,6 +11,7 @@ use crate::status::Error;
 use crate::sync::SpinLock;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 pub const NEW: u32 = 0;
@@ -69,14 +70,17 @@ pub struct Process {
 /// The first of all processes, newest first, linked through
 /// `Process::next` and `Process::prev`, which the kernel debugger
 /// scripts follow. The links change only under `REGISTRY`, and a
-/// process leaves the list before its memory goes.
+/// process leaves the list before its memory goes. The list holds a weak
+/// reference to each process, whose pointer the links are, so that a
+/// process found there can be held while it still exists.
 static FIRST_PROCESS: AtomicPtr<Process> = AtomicPtr::new(core::ptr::null_mut());
 static REGISTRY: SpinLock<()> = SpinLock::new(crate::lock_order::PROCESS_REGISTRY, ());
 
-/// Adds `process` to the list of all processes.
+/// Adds `process` to the list of all processes, with a weak reference
+/// that `unregister` gives back.
 fn register(process: &Arc<Process>) {
     let _registry = REGISTRY.lock();
-    let this = Arc::as_ptr(process).cast_mut();
+    let this = Weak::into_raw(Arc::downgrade(process)).cast_mut();
     let first = FIRST_PROCESS.load(Ordering::Relaxed);
     process.next.store(first, Ordering::Relaxed);
     if !first.is_null() {
@@ -107,7 +111,49 @@ fn unregister(process: &Process) {
         if !next.is_null() {
             (*next).prev.store(prev, Ordering::Relaxed);
         }
+        // The list's weak reference, which `register` made.
+        drop(Weak::from_raw(this));
     }
+}
+
+/// Terminates with exit code -1 every process that belongs to `budget` or
+/// to a budget below it, also those created there meanwhile, and returns
+/// once a look at all processes finds none of them that has not
+/// terminated. The process `caller`, which makes the call, goes last,
+/// when it belongs there, so that ending its thread ends no other.
+pub fn kill_budget(budget: &Budget, caller: Option<&Process>) {
+    while let Some(process) = next_in(budget, caller) {
+        process.terminate(-1);
+        sched::preempt_point_if_unlocked();
+    }
+    if let Some(caller) = caller
+        && caller.budget.is_within(budget)
+    {
+        caller.terminate(-1);
+    }
+}
+
+/// A process other than `skip` that belongs to `budget` or to a budget
+/// below it and has not terminated, if there is one that still exists.
+fn next_in(budget: &Budget, skip: Option<&Process>) -> Option<Arc<Process>> {
+    let _registry = REGISTRY.lock();
+    let mut at = FIRST_PROCESS.load(Ordering::Relaxed);
+    while !at.is_null() {
+        // SAFETY: listed processes are alive while the lock is held.
+        let process = unsafe { &*at };
+        let skipped = skip.is_some_and(|s| core::ptr::eq(s, process));
+        if !skipped && process.state() != TERMINATED && process.budget.is_within(budget) {
+            // SAFETY: the pointer came from `Weak::into_raw`, and the
+            // list keeps that weak reference, which is not dropped here.
+            let weak = ManuallyDrop::new(unsafe { Weak::from_raw(at) });
+            // One being dropped is not upgraded, and leaves the list.
+            if let Some(process) = weak.upgrade() {
+                return Some(process);
+            }
+        }
+        at = process.next.load(Ordering::Relaxed);
+    }
+    None
 }
 
 /// The policy bits of `process_set_policy`.
