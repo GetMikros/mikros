@@ -6,7 +6,9 @@
 
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENODEV, ENOSYS, ENOTTY};
 use crate::fd::Description;
-use crate::{clock, dir, epoll, fd, fs, futex, io, poll, process, signal, spawn, stat, thread};
+use crate::{
+    clock, dir, epoll, fd, fs, futex, io, poll, process, signal, spawn, stat, thread, timerfd,
+};
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::MemoryFlags;
@@ -77,6 +79,9 @@ const SYS_EPOLL_WAIT: i64 = 232;
 const SYS_EPOLL_CTL: i64 = 233;
 const SYS_EPOLL_PWAIT: i64 = 281;
 const SYS_EPOLL_CREATE1: i64 = 291;
+const SYS_TIMERFD_CREATE: i64 = 283;
+const SYS_TIMERFD_SETTIME: i64 = 286;
+const SYS_TIMERFD_GETTIME: i64 = 287;
 const SYS_READLINKAT: i64 = 267;
 const SYS_FACCESSAT: i64 = 269;
 const SYS_DUP3: i64 = 292;
@@ -235,6 +240,14 @@ extern "C" fn __mikros_syscall(
         SYS_SELECT => poll::select(a1, a2 as *mut _, a3 as *mut _, a4 as *mut _, a5 as *const _),
         SYS_EPOLL_CREATE => epoll::create_sized(a1),
         SYS_EPOLL_CREATE1 => epoll::create(a1),
+        SYS_TIMERFD_CREATE => timerfd::create(a1, a2),
+        SYS_TIMERFD_SETTIME => timerfd::settime(
+            a1,
+            a2,
+            a3 as *const timerfd::Itimerspec,
+            a4 as *mut timerfd::Itimerspec,
+        ),
+        SYS_TIMERFD_GETTIME => timerfd::gettime(a1, a2 as *mut timerfd::Itimerspec),
         SYS_EPOLL_CTL => epoll::ctl(a1, a2, a3, a4 as *const epoll::Event),
         SYS_EPOLL_WAIT => epoll::pwait(a1, a2 as *mut epoll::Event, a3, a4, core::ptr::null(), 8),
         SYS_EPOLL_PWAIT => epoll::pwait(
@@ -509,8 +522,9 @@ fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
             let Some(description) = fd::get(fd) else {
                 return -EBADF;
             };
-            let node = match &*description {
-                Description::File(node) | Description::Directory(node, _) => node,
+            let flags = match &*description {
+                Description::File(node) | Description::Directory(node, _) => &node.flags,
+                Description::Timer(timer) => &timer.flags,
                 // Streams are read and written, and have no other flags,
                 // nor has an epoll instance.
                 Description::Stream(_) | Description::Epoll(_) => {
@@ -521,7 +535,6 @@ fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
                     };
                 }
             };
-            let flags = &node.flags;
             if cmd == F_GETFL {
                 return i64::from(flags.load(Ordering::Relaxed));
             }

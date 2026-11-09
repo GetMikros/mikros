@@ -1,6 +1,6 @@
 //! The descriptor table of the process. Each descriptor refers to an open
-//! description: a stream, a connection to a file or directory, or an
-//! epoll instance, which `dup` shares between descriptors.
+//! description: a stream, a connection to a file or directory, an epoll
+//! instance or a timer, which `dup` shares between descriptors.
 
 use crate::errno::{EBADF, EINVAL, EMFILE};
 use crate::lock::Lock;
@@ -35,6 +35,8 @@ pub enum Description {
     Directory(Node, Lock<crate::dir::Listing>),
     /// An epoll instance, which stays in the process.
     Epoll(crate::epoll::Epoll),
+    /// A timer descriptor, which stays in the process.
+    Timer(crate::timerfd::Timerfd),
 }
 
 /// A connection to a file system node, with the status flags it was
@@ -234,14 +236,14 @@ pub fn shared_handle(description: &Description) -> Option<(mikros_rt::sys::Handl
         Description::File(node) | Description::Directory(node, _) => {
             Some((node.node.lock().channel().ok()?, KIND_FILE))
         }
-        Description::Epoll(_) => None,
+        Description::Epoll(_) | Description::Timer(_) => None,
     }
 }
 
 /// Whether `description` may be passed to another process, which an
-/// epoll instance is not.
+/// epoll instance and a timer descriptor are not.
 pub fn passed(description: &Description) -> bool {
-    !matches!(description, Description::Epoll(_))
+    !matches!(description, Description::Epoll(_) | Description::Timer(_))
 }
 
 /// `mikros_fd_handle`: a new handle, which the caller owns, with the

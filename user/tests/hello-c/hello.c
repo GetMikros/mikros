@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -1059,6 +1061,85 @@ static int epolls_report_streams(void)
 	return ok;
 }
 
+/* A timer descriptor on the monotonic clock, the only clock it takes.
+   A read gives the expirations since the last read, waiting for one,
+   or failing with EAGAIN with O_NONBLOCK. A periodic timer counts the
+   periods that passed unread and is armed again for the next one. poll
+   and edge-triggered epoll find the descriptor readable once its timer
+   expired. gettime gives the time left and the period, settime the old
+   setting. Writes and seeks fail, and a spawned program does not get
+   the descriptor. */
+static int timerfds_count_expirations(void)
+{
+	const long ms = 1000000;
+	uint64_t n = 0;
+	struct itimerspec once = {.it_value = {.tv_nsec = 10 * ms}};
+	struct itimerspec every = {.it_interval = {.tv_nsec = 5 * ms}, .it_value = {.tv_nsec = 5 * ms}};
+	struct itimerspec got, old, off = {0}, bad = {.it_value = {.tv_nsec = 1000 * ms}};
+	struct pollfd pfd;
+	int t = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+	if (t < 0)
+		return 0;
+	pfd = (struct pollfd){.fd = t, .events = POLLIN};
+	int ok = timerfd_create(CLOCK_REALTIME, 0) == -1 && errno == EINVAL
+		&& timerfd_create(CLOCK_MONOTONIC, 1) == -1 && errno == EINVAL
+		&& (fcntl(t, F_GETFD) & FD_CLOEXEC) && (fcntl(t, F_GETFL) & O_NONBLOCK)
+		/* Disarmed: nothing to read and no time left. */
+		&& read(t, &n, 8) == -1 && errno == EAGAIN && read(t, &n, 4) == -1 && errno == EINVAL
+		&& timerfd_gettime(t, &got) == 0 && got.it_value.tv_sec == 0 && got.it_value.tv_nsec == 0
+		&& poll(&pfd, 1, 0) == 0
+		/* Once: one expiration, after which it is disarmed. */
+		&& timerfd_settime(t, 0, &once, 0) == 0 && timerfd_gettime(t, &got) == 0
+		&& got.it_value.tv_sec == 0 && got.it_value.tv_nsec > 0 && got.it_value.tv_nsec <= 10 * ms
+		&& poll(&pfd, 1, -1) == 1 && pfd.revents == POLLIN
+		&& read(t, &n, 8) == 8 && n == 1 && read(t, &n, 8) == -1 && errno == EAGAIN
+		&& poll(&pfd, 1, 0) == 0;
+	/* Periodic, with reads that wait: expirations add up while unread. */
+	struct timespec pause = {.tv_nsec = 30 * ms};
+	ok = ok && fcntl(t, F_SETFL, 0) == 0 && !(fcntl(t, F_GETFL) & O_NONBLOCK)
+		&& timerfd_settime(t, 0, &every, &old) == 0 && old.it_value.tv_nsec == 0
+		&& old.it_interval.tv_nsec == 0 && read(t, &n, 8) == 8 && n >= 1
+		&& nanosleep(&pause, 0) == 0 && read(t, &n, 8) == 8 && n >= 5
+		&& timerfd_gettime(t, &got) == 0 && got.it_interval.tv_sec == 0
+		&& got.it_interval.tv_nsec == 5 * ms && got.it_value.tv_sec == 0
+		&& got.it_value.tv_nsec > 0 && got.it_value.tv_nsec <= 5 * ms;
+	/* Edge-triggered epoll sees each expiration after a read. */
+	struct epoll_event ev = {.events = EPOLLIN | EPOLLET, .data.u64 = 7}, e;
+	int ep = epoll_create1(0);
+	ok = ok && ep >= 0 && epoll_ctl(ep, EPOLL_CTL_ADD, t, &ev) == 0
+		&& epoll_wait(ep, &e, 1, -1) == 1 && e.events == EPOLLIN && e.data.u64 == 7
+		&& read(t, &n, 8) == 8 && n >= 1
+		&& epoll_wait(ep, &e, 1, -1) == 1 && read(t, &n, 8) == 8 && n >= 1;
+	if (ep >= 0)
+		close(ep);
+	/* An absolute time that passed expires at once. */
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	struct itimerspec past = {.it_value = now};
+	int file = open(GREETING, O_RDONLY);
+	ok = ok && file >= 0 && timerfd_settime(t, TFD_TIMER_ABSTIME, &past, &old) == 0
+		&& old.it_interval.tv_nsec == 5 * ms && read(t, &n, 8) == 8 && n == 1
+		&& timerfd_settime(t, 0, &off, 0) == 0 && fcntl(t, F_SETFL, O_NONBLOCK) == 0
+		&& read(t, &n, 8) == -1 && errno == EAGAIN
+		&& timerfd_settime(t, 0, &bad, 0) == -1 && errno == EINVAL
+		&& timerfd_settime(t, 2, &once, 0) == -1 && errno == EINVAL
+		&& timerfd_settime(999, 0, &once, 0) == -1 && errno == EBADF
+		&& timerfd_gettime(file, &got) == -1 && errno == EINVAL
+		&& write(t, &n, 8) == -1 && errno == EINVAL
+		&& lseek(t, 0, SEEK_SET) == -1 && errno == ESPIPE;
+	if (file >= 0)
+		close(file);
+	char *args[] = { "spawn-child", "closed", "9", 0 };
+	pid_t pid;
+	int status;
+	ok = ok && dup2(t, 9) == 9
+		&& posix_spawn(&pid, "/usr/bin/spawn-child", 0, 0, args, 0) == 0
+		&& waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 7;
+	close(9);
+	close(t);
+	return ok;
+}
+
 /* An epoll instance is ready for poll and for other instances while it
    has an event, also after a wait reported a level-triggered entry that
    is still ready. Instances may not watch each other in a loop. A
@@ -1172,6 +1253,8 @@ int main(int argc, char **argv)
 		return 35;
 	if (!epolls_nest())
 		return 36;
+	if (!timerfds_count_expirations())
+		return 37;
 	char *copy = malloc(64);
 	if (!copy)
 		return 34;

@@ -55,10 +55,11 @@ fn signals(events: i16) -> u32 {
     signals
 }
 
-/// The events that `observed` signals on a stream report for `events`.
+/// The events that `observed` signals on a stream, an epoll instance's
+/// port or a timer descriptor's timer report for `events`.
 fn stream_events(events: i16, observed: u32) -> i16 {
     let mut revents = 0;
-    if observed & READABLE != 0 {
+    if observed & (READABLE | crate::timerfd::SIGNALED) != 0 {
         revents |= events & INPUT;
     }
     if observed & WRITABLE != 0 {
@@ -279,13 +280,17 @@ fn wait(fds: &mut [Pollfd], deadline: i64, mut mask: Option<u64>) -> i64 {
             continue;
         };
         // A stream waits for its signals; an epoll instance for its port
-        // to become readable, which it is while it has events.
+        // to become readable, which it is while it has events; a timer
+        // descriptor for its timer to expire.
         let (handle, signals) = match &*description {
             Description::Stream(stream) => (stream.raw(), signals(entry.events)),
             Description::Epoll(epoll) if entry.events & INPUT != 0 => {
                 (epoll.port().raw(), READABLE)
             }
-            Description::Epoll(_) => continue,
+            Description::Timer(timer) if entry.events & INPUT != 0 => {
+                (timer.timer.raw(), crate::timerfd::SIGNALED)
+            }
+            Description::Epoll(_) | Description::Timer(_) => continue,
             Description::File(..) | Description::Directory(..) => {
                 entry.revents = entry.events & (INPUT | OUTPUT);
                 ready |= entry.revents != 0;
@@ -356,6 +361,7 @@ impl Drop for Waits {
             let handle = match &**description {
                 Description::Stream(stream) => stream.raw(),
                 Description::Epoll(epoll) => epoll.port().raw(),
+                Description::Timer(timer) => timer.timer.raw(),
                 _ => continue,
             };
             if *pending {

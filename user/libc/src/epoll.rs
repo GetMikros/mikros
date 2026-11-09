@@ -127,11 +127,21 @@ impl Entry {
     }
 }
 
-/// What a watched descriptor is waited on through: its object, and
-/// whether it is a stream, or another instance's port.
+/// What kind of object a watched descriptor is waited on through.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Stream,
+    /// Another instance's port.
+    Port,
+    /// A timer descriptor's timer, which is signaled once it expired.
+    Timer,
+}
+
+/// What a watched descriptor is waited on through: its object, and what
+/// kind of object that is.
 struct Watched<'a> {
     handle: &'a OwnedHandle,
-    stream: bool,
+    kind: Kind,
 }
 
 /// The object that `description` is waited on through, or why it cannot
@@ -140,27 +150,40 @@ fn watched(description: &Description) -> Result<Watched<'_>, i64> {
     match description {
         Description::Stream(stream) => Ok(Watched {
             handle: stream,
-            stream: true,
+            kind: Kind::Stream,
         }),
         Description::Epoll(epoll) => Ok(Watched {
             handle: &epoll.port,
-            stream: false,
+            kind: Kind::Port,
+        }),
+        Description::Timer(timer) => Ok(Watched {
+            handle: &timer.timer,
+            kind: Kind::Timer,
         }),
         Description::File(..) | Description::Directory(..) => Err(EPERM),
     }
 }
 
 /// The signals that `events` waits for on `watched`. A closed peer always
-/// counts for a stream; an instance only becomes readable.
+/// counts for a stream; an instance only becomes readable, and a timer
+/// descriptor only readable once its timer expired.
 fn signals(watched: &Watched, events: u32) -> u32 {
-    let mut signals = if watched.stream { PEER_CLOSED } else { 0 };
-    if events & INPUT != 0 {
-        signals |= READABLE;
+    let input = events & INPUT != 0;
+    match watched.kind {
+        Kind::Stream => {
+            let mut signals = PEER_CLOSED;
+            if input {
+                signals |= READABLE;
+            }
+            if events & OUTPUT != 0 {
+                signals |= WRITABLE;
+            }
+            signals
+        }
+        Kind::Port if input => READABLE,
+        Kind::Timer if input => crate::timerfd::SIGNALED,
+        Kind::Port | Kind::Timer => 0,
     }
-    if watched.stream && events & OUTPUT != 0 {
-        signals |= WRITABLE;
-    }
-    signals
 }
 
 /// The events that `observed` signals report for `events`.
@@ -174,6 +197,10 @@ fn reported(events: u32, observed: u32) -> u32 {
     }
     if observed & PEER_CLOSED != 0 {
         out |= EPOLLHUP | events & EPOLLRDHUP;
+    }
+    // Only a timer descriptor's timer is waited on for this signal.
+    if observed & crate::timerfd::SIGNALED != 0 {
+        out |= events & INPUT;
     }
     out
 }
@@ -282,7 +309,7 @@ fn control(epfd: i64, op: i64, fd: i64, event: *const Event) -> Result<(), i64> 
         EPOLL_CTL_DEL => None,
         _ => return Err(EINVAL),
     };
-    if op == EPOLL_CTL_ADD && !watched.stream && loops(&instance, &target, 0) {
+    if op == EPOLL_CTL_ADD && watched.kind == Kind::Port && loops(&instance, &target, 0) {
         return Err(ELOOP);
     }
     let mut state = epoll.state.lock();
