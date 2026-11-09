@@ -19,6 +19,7 @@ use mikros_rt::interfaces::mikros::service::{ClientIdentity, Directory, Director
 const PROTOCOL: &str = "mikros.permissions.Broker";
 pub const SET_IDENTITY: &str = "process.set_identity";
 pub const FULL_DISK: &str = "files.full_disk";
+pub const SIGNAL_ANY: &str = "process.signal_any";
 /// The permission asked about, for the process manager itself, to learn
 /// that the broker serves requests. Any answer will do.
 const PROBE: &str = "permissions.check";

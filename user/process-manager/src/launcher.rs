@@ -6,7 +6,7 @@
 //! `SetProcessGroup` and `KillGroup` are served; every other method fails
 //! with `NOT_SUPPORTED`.
 
-use crate::broker::{FULL_DISK, SET_IDENTITY};
+use crate::broker::{FULL_DISK, SET_IDENTITY, SIGNAL_ANY};
 use crate::processes::{NewProcess, Shared};
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, duplicate};
@@ -73,7 +73,14 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                 });
                 Ok(())
             }
-            R::Kill(request, r) => r.reply(s, kill(&shared, pid, request.pid, request.signo)),
+            R::Kill(request, r) => {
+                let (shared, server) = (shared.clone(), server.clone());
+                shared.clone().spawner.spawn(async move {
+                    let result = kill(&shared, pid, request.pid, request.signo).await;
+                    let _ = r.reply(server.server(), result);
+                });
+                Ok(())
+            }
             R::Exec(request, r) => {
                 let (shared, server) = (shared.clone(), server.clone());
                 shared.clone().spawner.spawn(async move {
@@ -353,9 +360,8 @@ fn list(shared: &Shared, caller: u32) -> LauncherListResponse {
     LauncherListResponse { pids }
 }
 
-/// Whether process `caller` may signal process `target`: a descendant,
-/// or one with its user ID and app ID. `process.signal_any` cannot be
-/// held before the permission broker serves requests.
+/// Whether process `caller` may signal process `target` without asking
+/// the broker: a descendant, or one with its user ID and app ID.
 fn may_signal(records: &Records, caller: u32, target: u32) -> bool {
     let (Some(from), Some(to)) = (records.get(caller), records.get(target)) else {
         return false;
@@ -373,19 +379,39 @@ fn signal(record: &Record, signo: u32) -> Result<(), Status> {
     }
 }
 
-/// Sends `signo` to process `target` for process `caller`.
-fn kill(
+/// Sends `signo` to process `target` for process `caller`, which may
+/// signal it as `may_signal` says, or else when the broker says that it
+/// holds `process.signal_any`.
+async fn kill(
     shared: &Shared,
     caller: u32,
     target: u32,
     signo: u32,
 ) -> Result<LauncherKillResponse, Status> {
-    let records = shared.records.borrow();
-    records.get(caller).ok_or(Status::BadState)?;
-    let to = records.get(target).ok_or(Status::NotFound)?;
-    if !may_signal(&records, caller, target) {
+    let client = {
+        let records = shared.records.borrow();
+        let from = records.get(caller).ok_or(Status::BadState)?;
+        let to = records.get(target).ok_or(Status::NotFound)?;
+        if may_signal(&records, caller, target) {
+            return signal(to, signo).map(|()| LauncherKillResponse {});
+        }
+        ClientIdentity {
+            pid: caller,
+            user: from.user,
+            app_id: from.app_id.clone(),
+        }
+    };
+    let bootstrap = shared.identity_setter.get() == Some(caller);
+    if !shared
+        .permissions
+        .holds(client, bootstrap, SIGNAL_ANY)
+        .await
+    {
         return Err(Status::AccessDenied);
     }
+    // The target may have ended while the broker answered.
+    let records = shared.records.borrow();
+    let to = records.get(target).ok_or(Status::NotFound)?;
     signal(to, signo).map(|()| LauncherKillResponse {})
 }
 
