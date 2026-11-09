@@ -160,6 +160,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let fat = user_build("fat", kind)?;
             println!("built    {}", fat.display());
             let fat_manifest = crate::workspace_root().join("user/drivers/fat/driver.yaml");
+            let exfat = user_build("exfat", kind)?;
+            println!("built    {}", exfat.display());
+            let exfat_manifest = crate::workspace_root().join("user/drivers/exfat/driver.yaml");
             let btrfs = btrfs_build(kind)?;
             let btrfs_manifest = crate::workspace_root().join("user/drivers/btrfs/driver.yaml");
             let tmpfs = user_build("tmpfs", kind)?;
@@ -239,6 +242,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ),
                 ("usr/lib/drivers/fat/fat", fat.as_path()),
                 ("usr/lib/drivers/fat/driver.yaml", fat_manifest.as_path()),
+                ("usr/lib/drivers/exfat/exfat", exfat.as_path()),
+                (
+                    "usr/lib/drivers/exfat/driver.yaml",
+                    exfat_manifest.as_path(),
+                ),
                 ("usr/lib/drivers/btrfs/btrfs", btrfs.as_path()),
                 (
                     "usr/lib/drivers/btrfs/driver.yaml",
@@ -740,6 +748,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", partition.display());
             let fat = user_build("fat", kind)?;
             println!("built    {}", fat.display());
+            let exfat = user_build("exfat", kind)?;
+            println!("built    {}", exfat.display());
             let btrfs = btrfs_build(kind)?;
             let acpi = acpi_build(kind)?;
             let rtc = user_build("rtc", kind)?;
@@ -920,6 +930,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "usr/lib/drivers/fat/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/fat/driver.yaml"),
+                ),
+                ("usr/lib/drivers/exfat/exfat".to_owned(), exfat.clone()),
+                (
+                    "usr/lib/drivers/exfat/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/exfat/driver.yaml"),
                 ),
                 ("usr/lib/drivers/btrfs/btrfs".to_owned(), btrfs.clone()),
                 (

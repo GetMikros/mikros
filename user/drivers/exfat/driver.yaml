@@ -1,0 +1,8 @@
+# The manifest of the exFAT server, installed as
+# usr/lib/drivers/exfat/driver.yaml.
+name: exfat
+binary: /usr/lib/drivers/exfat/exfat
+match:
+  # Any partition whose first bytes hold exFAT.
+  - fs:exfat
+kind: normal

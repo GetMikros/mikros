@@ -177,6 +177,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "exfat"
+version = "0.0.0"
+dependencies = [
+ "fat",
+ "mikros-exfat",
+ "mikros-fat",
+ "mikros-rt",
+]
+
+[[package]]
 name = "fat"
 version = "0.0.0"
 dependencies = [
@@ -311,6 +321,13 @@ name = "mikros-cmos"
 version = "0.0.0"
 dependencies = [
  "mikros-tz",
+]
+
+[[package]]
+name = "mikros-exfat"
+version = "0.0.0"
+dependencies = [
+ "mikros-fat",
 ]
 
 [[package]]
