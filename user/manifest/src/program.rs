@@ -64,7 +64,7 @@ pub fn parse_program(file_name: &str, bytes: &[u8]) -> Result<ProgramManifest, E
     let program = Program {
         app_id: app_id.into(),
         binary: binary.into(),
-        permissions: strings(map, "permissions")?,
+        permissions: crate::permissions(map)?,
         namespace,
         spawned_by: strings(map, "spawned_by")?,
     };

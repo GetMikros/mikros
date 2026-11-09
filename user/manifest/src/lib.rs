@@ -257,7 +257,7 @@ pub fn parse(file_name: &str, bytes: &[u8]) -> Result<Manifest, Error> {
         start,
         restart,
         boot_handles,
-        permissions: strings(map, "permissions")?,
+        permissions: permissions(map)?,
         namespace: program::namespace(map, &mut unknown)?,
         priority,
         stop_timeout,
@@ -268,6 +268,25 @@ pub fn parse(file_name: &str, bytes: &[u8]) -> Result<Manifest, Error> {
 /// The items of the list at `key`, or none when it is absent.
 fn list<'a>(map: Map<'a>, key: &str) -> Result<&'a [Node], mikros_yaml::Error> {
     map.get(key).map_or(Ok(&[]), Node::list)
+}
+
+/// The permissions that no service or program manifest may list: the
+/// service manager uses `logs.add_source` without a manifest.
+const RESERVED_PERMISSIONS: [&str; 1] = ["logs.add_source"];
+
+/// The permissions at `permissions`, or none when it is absent; a
+/// service or program manifest that lists one of `RESERVED_PERMISSIONS`
+/// is invalid.
+fn permissions(map: Map<'_>) -> Result<Vec<String>, Error> {
+    let mut permissions = Vec::new();
+    for item in list(map, "permissions")? {
+        let permission = item.string()?;
+        if RESERVED_PERMISSIONS.contains(&permission) {
+            return Err(error(item, ErrorKind::ReservedPermission));
+        }
+        permissions.push(permission.into());
+    }
+    Ok(permissions)
 }
 
 /// The list of strings at `key`, or none when it is absent.

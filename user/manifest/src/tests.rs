@@ -452,3 +452,22 @@ fn chooses_drivers_by_hardware_id_kind_and_name() {
     assert_eq!(choose(&only_fallback, &vga).unwrap().driver.name, "vga");
     assert_eq!(chosen(&ids(&["usb:1:2"])), None);
 }
+
+#[test]
+fn refuses_services_and_programs_that_list_logs_add_source() {
+    let listed = "permissions: [logs.read, logs.add_source]\n";
+    let service = parse("log.yaml", format!("{MINIMAL}{listed}").as_bytes()).unwrap_err();
+    assert_eq!(
+        (service.kind, service.line),
+        (ErrorKind::ReservedPermission, 4)
+    );
+    let program = "app_id: system.console\nbinary: /usr/bin/x\n";
+    let program = parse_program(
+        "system.console.yaml",
+        format!("{program}{listed}").as_bytes(),
+    );
+    assert_eq!(program.unwrap_err().kind, ErrorKind::ReservedPermission);
+    // Other permissions stay as listed.
+    let read = manifest("log.yaml", &format!("{MINIMAL}permissions: [logs.read]\n"));
+    assert_eq!(read.service.permissions, ["logs.read"]);
+}
