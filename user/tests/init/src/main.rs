@@ -9675,12 +9675,17 @@ mod manager {
     /// serves `Block` to the partition driver for the disk. The NVMe
     /// driver does the same for the scratch disk
     /// behind the NVMe controller, as `disk-1`, and the AHCI driver for
-    /// the one on port 2 of the AHCI controller, as `disk-2`. Each disk
-    /// device has the properties `serial`, here `mikros`, and
-    /// `removable`, here `false`, and the device manager gives each disk
-    /// and partition the property `cache`, here `write-back`, since the
-    /// root partition's file system, which the device manager connects
-    /// to once it is published, has no storage profiles. The
+    /// the one on port 2 of the AHCI controller, as `disk-2`. The xHCI
+    /// driver drives the controller at 00:1d.0 and adds the interface of
+    /// the USB mass storage device on it and that of the keyboard behind
+    /// the USB hub on it, and the USB mass storage driver
+    /// adds the scratch disk behind it as `disk-0`. Each disk device has
+    /// the properties `serial`, here `mikros`, and `removable`, here
+    /// `false` and for the USB disk `true`, and the device manager gives
+    /// each disk and partition the property `cache`, here `write-back`,
+    /// since the root partition's file system, which the device manager
+    /// connects to once it is published, has no storage profiles, and
+    /// `quick-disconnect` for the USB disk and its partition. The
     /// partition driver reads each disk's GPT and adds its partitions:
     /// the scratch partition `part-1` of each scratch disk, and the EFI
     /// system partition `part-1` and root partition `part-2` of the test
@@ -9689,8 +9694,9 @@ mod manager {
     /// partitions that is the test driver, whose `Start` succeeds only
     /// when reads, writes, flushes, the writable lock and refusals work
     /// as they should, and when the device manager's removal service,
-    /// once the driver has granted itself `files.removable`, lists no
-    /// removable disks and refuses to eject its partition. For the EFI system partition it is the FAT server,
+    /// once the driver has granted itself `files.removable`, lists at
+    /// most the USB disk as removable and refuses to eject its
+    /// partition. For the EFI system partition it is the FAT server,
     /// which publishes the volume's `filesystem` service, and the test
     /// driver for the root partition succeeds only when that service
     /// reads, writes, renames and removes as it should. Each partition's
@@ -9739,7 +9745,7 @@ mod manager {
                 b", disk-0, as storage:disk, under 5, with 0 resources",
                 1,
             ),
-            (b"device-manager: started driver test-disk for device", 2),
+            (b"device-manager: started driver test-disk for device", 3),
             (b"device-manager: bound driver fat to device", 1),
             (b"device-manager: started driver fat for device", 1),
             (b"device-manager: bound driver test-fat to device", 1),
@@ -9758,11 +9764,11 @@ mod manager {
             (b"device-manager: started driver btrfs for device", 1),
             (b"device-manager: bound driver test-btrfs to device", 1),
             (b"device-manager: started driver test-btrfs for device", 1),
-            (b"device-manager: bound driver partition to device", 3),
-            (b"device-manager: started driver partition for device", 3),
+            (b"device-manager: bound driver partition to device", 4),
+            (b"device-manager: started driver partition for device", 4),
             (
                 b", part-1, as gpt:0fc63daf-8483-4772-8e79-3d69d8477de4, under",
-                2,
+                3,
             ),
             (
                 b", part-1, as gpt:c12a7328-f81f-11d2-ba4b-00a0c93ec93b, under",
@@ -9788,11 +9794,26 @@ mod manager {
             (b", pci-0000:00:1f.2, as pci:c010601", 1),
             (b"device-manager: started driver ahci for device", 1),
             (b", disk-2, as storage:disk, under", 1),
-            // The three disks, each with the serial number `mikros`.
+            // The xHCI controller, the USB mass storage device's
+            // interface, and the USB disk, which is removable.
+            (b"device-manager: bound driver xhci to device", 1),
+            (b", pci-0000:00:1d.0, as pci:v1b36d000dsv", 1),
+            (b"device-manager: started driver xhci for device", 1),
+            (b", as usb:v46f4p0001i00, under", 1),
+            // The keyboard behind the USB hub, whose interface has no
+            // driver here; the hub itself adds no device.
+            (b".1-0, as usb:v0627p0001i00, under", 1),
+            (b"device-manager: bound driver usb-storage to device", 1),
+            (b"device-manager: started driver usb-storage for device", 1),
+            (b", disk-0, as storage:disk, under", 2),
+            // The three fixed disks, each with the serial number
+            // `mikros`, and the USB disk.
             (b" resources, serial mikros, removable false", 3),
-            // The three disks and the six partitions on them, none of
-            // them removable.
+            (b" resources, serial mikros, removable true", 1),
+            // The three fixed disks and the six partitions on them, none
+            // of them removable, and the USB disk and its partition.
             (b", cache write-back", 9),
+            (b", cache quick-disconnect", 2),
             // The root partition's file system, which has no storage
             // profiles, so the defaults above apply.
             (
@@ -9801,7 +9822,7 @@ mod manager {
             ),
             // The disks and partitions, and the disk of the restarted
             // virtio-blk driver again, under its old ID.
-            (b"device-manager: published device.storage ", 10),
+            (b"device-manager: published device.storage ", 12),
             (
                 b"device-manager: driver test-reset for device 4 failed after 5 restarts",
                 1,
@@ -9817,6 +9838,8 @@ mod manager {
             b"driver test-disk declined",
             b"driver nvme declined",
             b"driver ahci declined",
+            b"driver xhci declined",
+            b"driver usb-storage declined",
             b"driver partition declined",
             b"driver fat declined",
             b"driver test-fat declined",

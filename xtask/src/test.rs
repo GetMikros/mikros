@@ -149,10 +149,11 @@ fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
 }
 
 /// The scratch disks of the test machine, in the directory of its serial
-/// log: one behind an NVMe controller and one on port 2 of the q35
-/// machine's AHCI controller, each with the GUIDs of its table and of
-/// its one partition.
-const SCRATCH_DISKS: [(&str, &str, &str); 2] = [
+/// log: one behind an NVMe controller, one on port 2 of the q35
+/// machine's AHCI controller, and one USB mass storage device on the
+/// xHCI controller, each with the GUIDs of its table and of its one
+/// partition.
+const SCRATCH_DISKS: [(&str, &str, &str); 3] = [
     (
         "nvme.img",
         "4e564d65-0000-4000-8000-0000000000d1",
@@ -162,6 +163,11 @@ const SCRATCH_DISKS: [(&str, &str, &str); 2] = [
         "ahci.img",
         "41484349-0000-4000-8000-0000000000d2",
         "41484349-0000-4000-8000-000000000002",
+    ),
+    (
+        "usb.img",
+        "55534221-0000-4000-8000-0000000000d3",
+        "55534221-0000-4000-8000-000000000003",
     ),
 ];
 /// The size of a scratch disk, in sectors.
@@ -195,8 +201,11 @@ pub fn scratch_disks(log: &Path) -> Result<()> {
 
 /// The arguments of `qemu::args` with the serial port written to `log`,
 /// no display, the debug exit device, QEMU's `edu` device for DMA tests,
-/// able to reach the first 4 GiB, the scratch disks of `scratch_disks`
-/// with the serial number `mikros`, and no reboot. The devices follow
+/// able to reach the first 4 GiB, an xHCI controller at 00:1d.0, the
+/// scratch disks of `scratch_disks` with the serial number `mikros`, the
+/// last as a USB mass storage device on port 1 of that controller, a USB
+/// hub on its port 2 with a USB keyboard on the hub's port 1, and no
+/// reboot. The devices follow
 /// the IOMMU, which must come first.
 pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
     if let Some(i) = args.iter().position(|a| a == "-serial") {
@@ -223,6 +232,16 @@ pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
             &drive("scratch-ahci", SCRATCH_DISKS[1].0),
             "-device",
             "ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros",
+            "-device",
+            "qemu-xhci,id=usb,addr=0x1d",
+            "-drive",
+            &drive("scratch-usb", SCRATCH_DISKS[2].0),
+            "-device",
+            "usb-storage,bus=usb.0,port=1,drive=scratch-usb,serial=mikros",
+            "-device",
+            "usb-hub,bus=usb.0,port=2",
+            "-device",
+            "usb-kbd,bus=usb.0,port=2.1",
             "-no-reboot",
         ]
         .map(String::from),
@@ -544,6 +563,15 @@ ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
         assert!(args.contains(&"nvme,drive=scratch-nvme,serial=mikros".to_string()));
         assert!(args.contains(&"if=none,id=scratch-ahci,format=raw,file=/t/ahci.img".to_string()));
         assert!(args.contains(&"ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros".to_string()));
+        assert!(args.contains(&"qemu-xhci,id=usb,addr=0x1d".to_string()));
+        assert!(args.contains(&"if=none,id=scratch-usb,format=raw,file=/t/usb.img".to_string()));
+        assert!(
+            args.contains(
+                &"usb-storage,bus=usb.0,port=1,drive=scratch-usb,serial=mikros".to_string()
+            )
+        );
+        assert!(args.contains(&"usb-hub,bus=usb.0,port=2".to_string()));
+        assert!(args.contains(&"usb-kbd,bus=usb.0,port=2.1".to_string()));
         assert!(args.contains(&"-no-reboot".to_string()));
     }
 }

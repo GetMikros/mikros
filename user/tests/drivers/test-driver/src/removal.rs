@@ -1,6 +1,6 @@
 //! As the test disk driver: whether the device manager's
 //! `mikros.driver.Removal` serves it as it should on the test machine,
-//! whose disks are not removable.
+//! whose one removable disk is the USB scratch disk.
 
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
@@ -16,8 +16,10 @@ const REMOVAL: &str = "mikros.driver.Removal";
 const REMOVABLE: &str = "files.removable";
 
 /// Grants this driver `files.removable` with the broker, then checks
-/// that `Removal` lists no removable disks and fails to eject `device`,
-/// the driver's own partition, with `NOT_FOUND`.
+/// that `Removal` lists at most one removable disk, the USB scratch disk
+/// with the serial number `mikros`, which may not have been added yet,
+/// and fails to eject `device`, the driver's own partition, with
+/// `NOT_FOUND`.
 pub async fn works(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
@@ -54,7 +56,20 @@ pub async fn works(
         return false;
     }
     let removal = RemovalAsyncClient::new(ClientEnd::new(client.into_handle()), reactor.clone());
-    let none = matches!(removal.list().await, Ok(listed) if listed.disks.is_empty());
+    let listed = match removal.list().await {
+        Ok(listed) => listed.disks,
+        Err(_) => return false,
+    };
+    let usb_only = listed.len() <= 1 && listed.iter().all(|d| d.serial == "mikros");
     let refused = matches!(removal.eject(device).await, Ok(Err(Status::NotFound)));
-    none && refused
+    if !(usb_only && refused) {
+        mikros_rt::log!(
+            Error,
+            "test-disk: Removal listed {} disks; ejecting device {} refused: {}",
+            listed.len(),
+            device,
+            refused
+        );
+    }
+    usb_only && refused
 }

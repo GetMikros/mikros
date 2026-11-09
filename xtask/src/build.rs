@@ -141,6 +141,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let ahci = user_build("ahci", kind)?;
             println!("built    {}", ahci.display());
             let ahci_manifest = crate::workspace_root().join("user/drivers/ahci/driver.yaml");
+            let xhci = user_build("xhci", kind)?;
+            println!("built    {}", xhci.display());
+            let xhci_manifest = crate::workspace_root().join("user/drivers/xhci/driver.yaml");
+            let usb_storage = user_build("usb-storage", kind)?;
+            println!("built    {}", usb_storage.display());
+            let usb_storage_manifest =
+                crate::workspace_root().join("user/drivers/usb-storage/driver.yaml");
             let partition = user_build("partition", kind)?;
             println!("built    {}", partition.display());
             let partition_manifest =
@@ -206,6 +213,16 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/lib/drivers/nvme/driver.yaml", nvme_manifest.as_path()),
                 ("usr/lib/drivers/ahci/ahci", ahci.as_path()),
                 ("usr/lib/drivers/ahci/driver.yaml", ahci_manifest.as_path()),
+                ("usr/lib/drivers/xhci/xhci", xhci.as_path()),
+                ("usr/lib/drivers/xhci/driver.yaml", xhci_manifest.as_path()),
+                (
+                    "usr/lib/drivers/usb-storage/usb-storage",
+                    usb_storage.as_path(),
+                ),
+                (
+                    "usr/lib/drivers/usb-storage/driver.yaml",
+                    usb_storage_manifest.as_path(),
+                ),
                 ("usr/lib/drivers/partition/partition", partition.as_path()),
                 (
                     "usr/lib/drivers/partition/driver.yaml",
@@ -706,6 +723,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", nvme.display());
             let ahci = user_build("ahci", kind)?;
             println!("built    {}", ahci.display());
+            let xhci = user_build("xhci", kind)?;
+            println!("built    {}", xhci.display());
+            let usb_storage = user_build("usb-storage", kind)?;
+            println!("built    {}", usb_storage.display());
             let partition = user_build("partition", kind)?;
             println!("built    {}", partition.display());
             let fat = user_build("fat", kind)?;
@@ -772,8 +793,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", restart_image.display());
             // The PCI bus driver tests serve this image, with the bus
             // driver and test drivers for the host bridge's function, for
-            // QEMU's edu device and for the e1000e function, and the
-            // storage drivers, with the partition driver, the FAT server for
+            // QEMU's edu device and for the e1000e function, the
+            // storage drivers, the xHCI driver and the USB mass storage
+            // driver, with the partition driver, the FAT server for
             // the EFI system partition, a test driver for the root partition
             // that checks it, and one for each scratch partition.
             let pci_bus_files = [
@@ -802,6 +824,19 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "usr/lib/drivers/ahci/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/ahci/driver.yaml"),
+                ),
+                ("usr/lib/drivers/xhci/xhci".to_owned(), xhci.clone()),
+                (
+                    "usr/lib/drivers/xhci/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/xhci/driver.yaml"),
+                ),
+                (
+                    "usr/lib/drivers/usb-storage/usb-storage".to_owned(),
+                    usb_storage.clone(),
+                ),
+                (
+                    "usr/lib/drivers/usb-storage/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/usb-storage/driver.yaml"),
                 ),
                 (
                     "usr/lib/drivers/partition/partition".to_owned(),

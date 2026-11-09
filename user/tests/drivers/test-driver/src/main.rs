@@ -111,7 +111,12 @@ const FAT: &str = "system.driver.test-fat";
 const BTRFS: &str = "system.driver.test-btrfs";
 /// The models of the test machine's disks: the virtio disk, and the
 /// scratch disks behind QEMU's NVMe and AHCI controllers.
-const MODELS: [&str; 3] = ["virtio-blk", "QEMU NVMe Ctrl", "QEMU HARDDISK"];
+const MODELS: [&str; 4] = [
+    "virtio-blk",
+    "QEMU NVMe Ctrl",
+    "QEMU HARDDISK",
+    "QEMU QEMU HARDDISK",
+];
 const DECLINE: &str = "system.driver.test-decline";
 const CLOSE: &str = "system.driver.test-close";
 const RESET: &str = "system.driver.test-reset";
@@ -540,18 +545,34 @@ async fn disk_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -
     let read_back =
         ok(disk.read(id, 4096, last, 1).await) && bytes[4096..4608] == bytes[2048..2560];
     let restored = ok(disk.write(id, 1024, last, 1, false).await) && ok(disk.flush().await);
-    described
-        && first
-        && matches!(none, Ok(Err(Status::InvalidArgs)))
-        && matches!(unaligned, Ok(Err(Status::InvalidArgs)))
-        && matches!(beyond, Ok(Err(Status::OutOfRange)))
-        && big
-        && locked
-        && relocked
-        && saved
-        && written
-        && read_back
-        && restored
+    let checks = [
+        ("described", described),
+        ("first", first),
+        ("none", matches!(none, Ok(Err(Status::InvalidArgs)))),
+        (
+            "unaligned",
+            matches!(unaligned, Ok(Err(Status::InvalidArgs))),
+        ),
+        ("beyond", matches!(beyond, Ok(Err(Status::OutOfRange)))),
+        ("big", big),
+        ("locked", locked),
+        ("relocked", relocked),
+        ("saved", saved),
+        ("written", written),
+        ("read_back", read_back),
+        ("restored", restored),
+    ];
+    for (name, passed) in checks {
+        if !passed {
+            mikros_rt::log!(
+                Error,
+                "test-disk: the {} check of {} failed",
+                name,
+                info.model
+            );
+        }
+    }
+    checks.iter().all(|(_, passed)| *passed)
 }
 
 /// Whether `text` is a GUID in lowercase with hyphens.
