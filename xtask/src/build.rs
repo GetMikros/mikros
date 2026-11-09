@@ -156,6 +156,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let union = user_build("union", kind)?;
             println!("built    {}", union.display());
             let union_manifest = crate::workspace_root().join("user/union/union.yaml");
+            let log_service = user_build("log-service", kind)?;
+            println!("built    {}", log_service.display());
+            let log_manifest = crate::workspace_root().join("user/log-service/log.yaml");
             let broker_manifest =
                 crate::workspace_root().join("user/permissions-broker/permissions.yaml");
             let devices_manifest =
@@ -174,6 +177,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
                 ("usr/bin/union", union.as_path()),
                 ("usr/lib/services/union.yaml", union_manifest.as_path()),
+                ("usr/bin/log-service", log_service.as_path()),
+                ("usr/lib/services/log.yaml", log_manifest.as_path()),
                 ("usr/bin/device-manager", devices.as_path()),
                 (
                     "usr/lib/services/device-manager.yaml",
