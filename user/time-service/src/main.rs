@@ -7,7 +7,9 @@
 //! that time is valid, and 0 otherwise. The page is made before the
 //! first connection is served, so that no client gets it unset. Once the
 //! root file system is published, the system time zone and whether the
-//! real-time clock keeps local time come from there (see `root`).
+//! real-time clock keeps local time come from there (see `root`). Once a
+//! real-time clock is published, UTC comes from it, unless `SetUtc` set
+//! the time first, and setting the time writes it (see `rtc`).
 
 #![no_std]
 #![no_main]
@@ -17,6 +19,8 @@ extern crate alloc;
 mod clock;
 mod page;
 mod root;
+mod rtc;
+mod watch;
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -86,7 +90,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         matches!(connected, Ok(Ok(_))).then(|| BrokerAsyncClient::new(client, reactor.clone()))
     });
     let time = Rc::new(Time::new(page, broker, boot));
-    spawner.spawn(root::watch(time.clone(), directory, reactor.clone()));
+    let task = watch::watch(time.clone(), directory, reactor.clone(), spawner.clone());
+    spawner.spawn(task);
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {

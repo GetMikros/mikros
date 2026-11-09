@@ -1,9 +1,10 @@
 //! The time service's files on the root file system: once the
-//! `device.filesystem` instance `root` is published, the service reads
-//! there, once, the `rtc` key of `etc/time.yaml`, which says whether the
-//! real-time clock keeps UTC or local time, and the system time zone,
-//! which the link `etc/localtime` names in `usr/share/zoneinfo/`; and it
-//! makes that link anew when the time zone is set.
+//! `device.filesystem` instance `root` is published, which `watch` sees,
+//! the service reads there, once, the `rtc` key of `etc/time.yaml`, which
+//! says whether the real-time clock keeps UTC or local time, and the
+//! system time zone, which the link `etc/localtime` names in
+//! `usr/share/zoneinfo/`; and it makes that link anew when the time zone
+//! is set.
 
 use crate::clock::{NANOS_PER_SECOND, Time};
 use alloc::format;
@@ -16,10 +17,10 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{
     Error, Filesystem, FilesystemAsyncClient, Node, NodeAsyncClient, OpenFlags, Rights,
 };
-use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, DirectoryEvent};
+use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 
-const FILESYSTEM: &str = "device.filesystem";
-const ROOT: &str = "root";
+pub const FILESYSTEM: &str = "device.filesystem";
+pub const ROOT: &str = "root";
 const TIME_YAML: &str = "etc/time.yaml";
 const LOCALTIME: &str = "localtime";
 const ZONEINFO: &str = "/usr/share/zoneinfo/";
@@ -50,11 +51,18 @@ impl Zone {
     pub fn utc_of_local(&self, local: i64) -> i64 {
         self.rules.as_ref().map_or(local, |z| z.utc_of_local(local))
     }
+
+    /// The local time of the UTC time `utc`, in seconds since 1970.
+    pub fn local_of_utc(&self, utc: i64) -> i64 {
+        self.rules
+            .as_ref()
+            .map_or(utc, |z| utc + i64::from(z.offset_at(utc)))
+    }
 }
 
-/// Waits for the root file system to be published through `directory`,
-/// and then reads the time service's files there into `time`.
-pub async fn watch(time: Rc<Time>, directory: DirectoryAsyncClient, reactor: Reactor) {
+/// Connects to the root file system through `directory`, once it is
+/// published, and reads the time service's files there into `time`.
+pub async fn connected(time: Rc<Time>, directory: Rc<DirectoryAsyncClient>, reactor: Reactor) {
     let Some(root) = connect(&directory, &reactor).await else {
         return;
     };
@@ -66,34 +74,9 @@ pub async fn watch(time: Rc<Time>, directory: DirectoryAsyncClient, reactor: Rea
     time.root_available(Rc::new(root), rtc_local, zone);
 }
 
-/// The root directory of the root file system, read and write, once it
-/// is published; None when the directory fails.
+/// The root directory of the root file system, read and write; None when
+/// it cannot be reached.
 async fn connect(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<NodeAsyncClient> {
-    if !matches!(directory.watch(FILESYSTEM.into()).await, Ok(Ok(_))) {
-        return None;
-    }
-    loop {
-        // The service has no instances until a first one is registered.
-        let listed = match directory.list(FILESYSTEM.into()).await {
-            Ok(Ok(listed)) => listed.instances,
-            Ok(Err(_)) => Vec::new(),
-            Err(_) => return None,
-        };
-        if listed.iter().any(|i| i == ROOT) {
-            break;
-        }
-        loop {
-            match directory.next_event().await {
-                Ok(DirectoryEvent::OnInstanceAdded(added))
-                    if added.protocol == FILESYSTEM && added.instance == ROOT =>
-                {
-                    break;
-                }
-                Ok(_) => {}
-                Err(_) => return None,
-            }
-        }
-    }
     let (client, server) = endpoints::<Filesystem>().ok()?;
     let connected = directory
         .connect(FILESYSTEM.into(), Some(ROOT.into()), server.into_handle())

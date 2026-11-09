@@ -4,6 +4,7 @@ name: time
 binary: /usr/bin/time-service
 start: boot
 boot_handles: [platform_info]
-permissions: [permissions.check, filesystem.mount]
+# time.set also to reach the real-time clock's device.rtc.
+permissions: [permissions.check, filesystem.mount, time.set]
 provides:
   - protocol: mikros.time.Clock
