@@ -1,4 +1,4 @@
-// MIKSPEC-0063.R2
+// MIKSPEC-0063.R2, MIKSPEC-0063.R9
 
 library mikros.log;
 using mikros.base;
@@ -23,4 +23,9 @@ protocol Reader {
     @1 Read(after u64, max u32) -> (records vector<Record, 32>);
     @2 Follow() -> () error base.Status;
     @3 -> OnRecords(records vector<Record, 32>);
+};
+
+protocol Sources {
+    @1 Add(pid u32, app_id string<128>, output handle<Stream>,
+           error handle<Stream>) -> () error base.Status;
 };

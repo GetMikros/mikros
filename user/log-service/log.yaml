@@ -9,3 +9,5 @@ provides:
   - protocol: mikros.log.Writer
   - protocol: mikros.log.Reader
     permission: logs.read
+  - protocol: mikros.log.Sources
+    permission: logs.add_source

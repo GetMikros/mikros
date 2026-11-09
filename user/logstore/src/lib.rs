@@ -1,7 +1,7 @@
 //! The records of the log service, kept in memory in the order they
 //! came, each with its sequence number, until they take more than the
-//! store's limit, when the oldest go; and the text lines of records in
-//! the log's files.
+//! store's limit, when the oldest go; the text lines of records in the
+//! log's files; and the lines of streams, as records take them.
 
 #![no_std]
 
@@ -9,6 +9,7 @@ extern crate alloc;
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::Write;
 
 #[cfg(test)]
@@ -184,4 +185,71 @@ fn civil(days: i64) -> (i64, u32, u32) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     (year, month, day)
+}
+
+/// The lines of a stream of bytes, each at most `max` bytes, cut where a
+/// line is longer at a character boundary where the bytes are UTF-8.
+pub struct Lines {
+    line: Vec<u8>,
+    max: usize,
+}
+
+impl Lines {
+    /// Lines of at most `max` bytes, which is at least 4.
+    pub fn new(max: usize) -> Lines {
+        Lines {
+            line: Vec::new(),
+            max: max.max(4),
+        }
+    }
+
+    /// Takes the next `bytes` of the stream, and gives `each` every line
+    /// that they end, without its line feed.
+    pub fn push(&mut self, bytes: &[u8], mut each: impl FnMut(&[u8])) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                each(&self.line);
+                self.line.clear();
+                continue;
+            }
+            self.line.push(byte);
+            if self.line.len() == self.max {
+                let at = boundary(&self.line);
+                each(&self.line[..at]);
+                self.line.drain(..at);
+            }
+        }
+    }
+
+    /// Gives `each` what follows the last line feed, if anything, as the
+    /// stream ends.
+    pub fn finish(&mut self, mut each: impl FnMut(&[u8])) {
+        if !self.line.is_empty() {
+            each(&self.line);
+            self.line.clear();
+        }
+    }
+}
+
+/// Where a line cut from the start of the full `line` ends: at its end,
+/// unless its last character is not whole yet, which then starts the
+/// next.
+fn boundary(line: &[u8]) -> usize {
+    // A UTF-8 continuation byte starts with the bits 10.
+    let mut start = line.len() - 1;
+    while start > 0 && line[start] & 0xC0 == 0x80 {
+        start -= 1;
+    }
+    let len = match line[start] {
+        0xF0.. => 4,
+        0xE0.. => 3,
+        0xC0.. => 2,
+        _ => 1,
+    };
+    if start + len <= line.len() {
+        line.len()
+    } else {
+        // Never nothing, even for bytes that are not UTF-8.
+        start.max(1)
+    }
 }

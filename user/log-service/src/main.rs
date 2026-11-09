@@ -8,6 +8,8 @@
 //! a client writes takes its pid and app ID from the client's identity
 //! as the directory gave it, and its message is also copied into the
 //! kernel log, whose records from this process are not taken again.
+//! The service manager adds the standard output and error of services
+//! through `mikros.log.Sources`, which `logs.add_source` lets it use.
 //!
 //! Once the root file system and the EFI system partition are
 //! published, the records also go to files on them (see `files`). On
@@ -23,6 +25,7 @@ mod files;
 mod kernel;
 mod log;
 mod reader;
+mod sources;
 mod writer;
 
 use crate::log::Log;
@@ -41,6 +44,7 @@ mikros_rt::raw_main!(main);
 /// The protocols the service provides.
 const WRITER: &str = "mikros.log.Writer";
 const READER: &str = "mikros.log.Reader";
+const SOURCES: &str = "mikros.log.Sources";
 /// The `id` of the `log_manage` boot handle among the `USER` startup
 /// handles.
 const LOG_MANAGE_ID: u32 = 2;
@@ -107,6 +111,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             } else if c.protocol == READER {
                 let end = ServerEnd::new(c.server);
                 let task = reader::serve(log.clone(), end, reactor.clone(), spawner.clone());
+                spawner.spawn(task);
+            } else if c.protocol == SOURCES {
+                let end = ServerEnd::new(c.server);
+                let task = sources::serve(log.clone(), end, reactor.clone(), spawner.clone());
                 spawner.spawn(task);
             }
         }

@@ -129,3 +129,46 @@ fn writes_utc_dates_across_the_calendar() {
     assert_eq!(utc(4_107_542_400), "2100-03-01T00:00:00.000000000Z");
     assert_eq!(utc(1), "1970-01-01T00:00:01.000000000Z");
 }
+
+fn split(max: usize, pieces: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut lines = Lines::new(max);
+    let mut out = Vec::new();
+    for piece in pieces {
+        lines.push(piece, |l| out.push(l.to_vec()));
+    }
+    lines.finish(|l| out.push(l.to_vec()));
+    out
+}
+
+#[test]
+fn splits_a_stream_at_line_feeds() {
+    let out = split(1024, &[b"one\ntw", b"o\n\nthr", b"ee"]);
+    assert_eq!(out, [&b"one"[..], b"two", b"", b"three"]);
+}
+
+#[test]
+fn cuts_long_lines_into_pieces_of_the_most() {
+    let out = split(4, &[b"abcdefghij\n"]);
+    assert_eq!(out, [&b"abcd"[..], b"efgh", b"ij"]);
+}
+
+#[test]
+fn cuts_long_lines_at_character_boundaries() {
+    // "aé€x": é is 2 bytes, € 3; a cut at 4 bytes would split €.
+    let text = "aé€x".as_bytes();
+    let out = split(4, &[text]);
+    assert_eq!(out, ["aé".as_bytes(), "€x".as_bytes()]);
+    for line in &out {
+        assert!(core::str::from_utf8(line).is_ok());
+    }
+    // A whole character at the end of the most stays.
+    let out = split(4, &["a€b".as_bytes()]);
+    assert_eq!(out, ["a€".as_bytes(), b"b"]);
+}
+
+#[test]
+fn cuts_bytes_that_are_not_utf8_at_the_most() {
+    // Without a character's start, nothing keeps a cut from the most.
+    let out = split(4, &[&[0x80, 0x80, 0x80, 0x80, 0x80]]);
+    assert_eq!(out, [&[0x80u8, 0x80, 0x80, 0x80][..], &[0x80]]);
+}
