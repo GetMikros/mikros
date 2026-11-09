@@ -5,7 +5,9 @@
 //! system layer with resources from the device manager's
 //! `RequestResource`, and starts ACPICA. The server then publishes the
 //! `acpi` service class and adds the devices of the namespace, as
-//! `devices` says. `ConnectChild` for a device the server added
+//! `devices` says. When the `Driver` channel closes once it has started,
+//! as when the device manager exits at shutdown, the server goes on
+//! serving its connections. `ConnectChild` for a device the server added
 //! succeeds and keeps the channel, on which nothing is served; the
 //! server has no bus protocol for its children.
 
@@ -106,6 +108,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     _ => responder.reply(s, Err(Status::NotFound)),
                 },
             };
+        }
+        // The device manager exits at shutdown without stopping the
+        // server, whose connections, the service manager's among them,
+        // are served until the machine is powered off or restarted.
+        if started.is_some() {
+            core::future::pending::<()>().await;
         }
         PANIC_EXIT_CODE
     })

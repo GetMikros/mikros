@@ -111,10 +111,12 @@ fn check(status: Status) -> Result<(), Status> {
 /// system control interrupt, initializes the namespace's objects, and
 /// tells the firmware that interrupts are routed through I/O APICs: the
 /// status of the step that failed when one did. The ECAM ranges and the
-/// SCI are read from the tables before anything of ACPICA can need them.
+/// SCI are read from the tables before anything of ACPICA can need them,
+/// and the resources of the power registers are obtained and kept.
 pub fn start() -> Result<(), Status> {
     // SAFETY: `install` readied the layer; the glue takes no arguments.
     check(unsafe { mikros_acpi_tables() })?;
+    power::hold_resources();
     pci::ranges();
     interrupts::read_sci()?;
     // SAFETY: as above.

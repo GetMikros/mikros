@@ -18,7 +18,7 @@ static ENABLED: Locked<Vec<(u16, u16, OwnedHandle)>> = Locked::new(Vec::new());
 /// Enables the `count` ports from `port` for the process, unless a range
 /// already holds them: false when the device manager or the kernel
 /// refused.
-fn enable(port: u16, count: u16) -> bool {
+pub(crate) fn enable(port: u16, count: u16) -> bool {
     let end = u32::from(port) + u32::from(count);
     if end > 0x1_0000 {
         return false;

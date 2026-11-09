@@ -10,6 +10,11 @@
 /* The notification of a power button device that it was pressed. */
 #define BUTTON_PRESSED  0x80
 
+/* The address spaces of power registers, as mikros_acpi_power_register
+ * gives them. */
+#define MIKROS_ACPI_SPACE_MEMORY    0
+#define MIKROS_ACPI_SPACE_IO        1
+
 /* Enters sleep state S5. Returns an ACPI_STATUS when it does not. */
 UINT32 mikros_acpi_power_off(void)
 {
@@ -76,4 +81,38 @@ UINT32 mikros_acpi_watch_power_button(void (*on_press)(void *context), void *con
         return status;
     }
     return AcpiGetDevices("PNP0C0C", watch_button, NULL, NULL);
+}
+
+/* The power register `index`: 0 the PM1a control register, 1 the PM1b
+ * control register and 2 the reset register, with its address space, a
+ * MIKROS_ACPI_SPACE_ value, its address and its size in bytes. Returns
+ * AE_NOT_EXIST when the FADT has no such register, the reset register
+ * only when the FADT reports it, or one in another address space. */
+UINT32 mikros_acpi_power_register(UINT32 index, UINT32 *space, UINT64 *address, UINT32 *bytes)
+{
+    ACPI_GENERIC_ADDRESS *registers[] = {
+        &AcpiGbl_FADT.XPm1aControlBlock,
+        &AcpiGbl_FADT.XPm1bControlBlock,
+        (AcpiGbl_FADT.Flags & ACPI_FADT_RESET_REGISTER) ? &AcpiGbl_FADT.ResetRegister : NULL,
+    };
+    if (index >= ACPI_ARRAY_LENGTH(registers)) {
+        return AE_BAD_PARAMETER;
+    }
+    ACPI_GENERIC_ADDRESS *r = registers[index];
+    if (!r || !r->Address) {
+        return AE_NOT_EXIST;
+    }
+    switch (r->SpaceId) {
+    case ACPI_ADR_SPACE_SYSTEM_MEMORY:
+        *space = MIKROS_ACPI_SPACE_MEMORY;
+        break;
+    case ACPI_ADR_SPACE_SYSTEM_IO:
+        *space = MIKROS_ACPI_SPACE_IO;
+        break;
+    default:
+        return AE_NOT_EXIST;
+    }
+    *address = r->Address;
+    *bytes = r->BitWidth > 8 ? (UINT32)(r->BitWidth + 7) / 8 : 1;
+    return AE_OK;
 }
