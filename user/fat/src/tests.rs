@@ -48,6 +48,41 @@ fn finds_the_layout_of_each_type() {
     }
 }
 
+/// A volume of the type `ty` formatted with the label `label`.
+fn labelled(size: usize, ty: fatfs::FatType, label: &[u8; 11]) -> Vec<u8> {
+    let mut bytes = vec![0u8; size];
+    let options = fatfs::FormatVolumeOptions::new()
+        .fat_type(ty)
+        .bytes_per_cluster(512)
+        .volume_label(*label);
+    fatfs::format_volume(Cursor::new(&mut bytes), options).unwrap();
+    bytes
+}
+
+#[test]
+fn reads_the_volume_label() {
+    for (size, ty, _) in TYPES {
+        let bytes = labelled(size, ty, b"MIKROS DATA");
+        let mut volume = Volume::mount(Mem(bytes.clone()), size as u64, false).unwrap();
+        assert_eq!(volume.label().unwrap().as_deref(), Some("MIKROS DATA"));
+        // Without the root directory's entry, the boot sector's label.
+        let mut bytes = bytes;
+        let layout = Layout::parse(&bytes[..512], size as u64).unwrap();
+        let root = match layout.fat_type {
+            FatType::Fat32 => layout.cluster_start(layout.root_cluster),
+            _ => layout.root_start,
+        } as usize;
+        assert_eq!(bytes[root + 11], dir::VOLUME_ID);
+        bytes[root] = 0xE5;
+        let mut volume = Volume::mount(Mem(bytes), size as u64, false).unwrap();
+        assert_eq!(volume.label().unwrap().as_deref(), Some("MIKROS DATA"));
+        // Without either, no label.
+        let unlabelled = image(size, ty, |_| {});
+        let mut volume = Volume::mount(Mem(unlabelled), size as u64, false).unwrap();
+        assert_eq!(volume.label().unwrap(), None);
+    }
+}
+
 #[test]
 fn refuses_invalid_boot_sectors() {
     let size = 1 << 20;

@@ -35,6 +35,9 @@ pub struct Layout {
     /// The FSInfo sector of FAT32, when there is one.
     pub fs_info: Option<u64>,
     pub total_bytes: u64,
+    /// The volume label of the extended boot record, when it has one
+    /// other than `NO NAME`.
+    pub boot_label: Option<[u8; 11]>,
 }
 
 fn u16_at(b: &[u8], at: usize) -> u16 {
@@ -134,6 +137,13 @@ impl Layout {
                 fs_info = Some(info * s);
             }
         }
+        // The extended boot record, which signature 0x29 marks, holds a
+        // label.
+        let (signature, label_at) = if fat32 { (0x42, 0x47) } else { (0x26, 0x2B) };
+        let mut boot_label = [0u8; 11];
+        boot_label.copy_from_slice(&sector[label_at..label_at + 11]);
+        let boot_label =
+            (sector[signature] == 0x29 && &boot_label != b"NO NAME    ").then_some(boot_label);
         Ok(Layout {
             fat_type,
             sector_size,
@@ -149,6 +159,7 @@ impl Layout {
             clusters: clusters as u32,
             fs_info,
             total_bytes: total * s,
+            boot_label,
         })
     }
 

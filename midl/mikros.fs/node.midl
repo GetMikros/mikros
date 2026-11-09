@@ -1,4 +1,4 @@
-// MIKSPEC-0049.R1, MIKSPEC-0049.R17
+// MIKSPEC-0049.R21, MIKSPEC-0049.R17
 
 library mikros.fs;
 using mikros.base;
@@ -55,6 +55,7 @@ type FilesystemInfo = struct {
     total_bytes u64;
     free_bytes u64;
     read_only bool;
+    label string<64>;
 };
 
 type WatchMask = bits : u32 {

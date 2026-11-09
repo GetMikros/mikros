@@ -373,6 +373,11 @@ impl Disk {
         ret
     }
 
+    /// Reads `buf.len()` bytes at `offset`, whole blocks: whether it could.
+    pub fn read(&self, offset: u64, buf: &mut [u8]) -> bool {
+        self.transfer(false, offset, buf.as_mut_ptr(), buf.len()) == 0
+    }
+
     pub fn flush(&self) -> c_int {
         let ok = self.request(|link| match link.block.flush(FOREVER) {
             Ok(flushed) => Attempt::Done(flushed.is_ok()),

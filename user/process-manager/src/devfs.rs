@@ -89,6 +89,7 @@ impl Connection {
                         total_bytes: 0,
                         free_bytes: 0,
                         read_only: true,
+                        label: String::new(),
                     },
                 }),
             ),

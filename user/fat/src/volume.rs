@@ -291,6 +291,35 @@ impl<D: Device> Volume<D> {
         Ok(b)
     }
 
+    /// The volume's label: that of the root directory's volume label
+    /// entry, or else that of the boot sector, without its trailing
+    /// spaces; None without one.
+    pub fn label(&mut self) -> Result<Option<String>, Error> {
+        let root = self.root();
+        let mut entry = None;
+        let mut slot = 0;
+        while let Some(at) = self.slot_at(root, slot)? {
+            match Slot::parse(&self.read_slot(at)?) {
+                Slot::End => break,
+                Slot::Short(short) if short.attributes & VOLUME_ID != 0 => {
+                    entry = Some(short.name);
+                    break;
+                }
+                _ => {}
+            }
+            slot += 1;
+        }
+        let Some(bytes) = entry.or(self.layout.boot_label) else {
+            return Ok(None);
+        };
+        let end = bytes.iter().rposition(|&b| b != b' ').map_or(0, |e| e + 1);
+        let label: String = bytes[..end]
+            .iter()
+            .map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' })
+            .collect();
+        Ok((!label.is_empty()).then_some(label))
+    }
+
     /// The entries of `dir` from slot `from`, at most `max`, other than
     /// `.`, `..` and the volume label, and the slot to continue from.
     pub fn list(&mut self, dir: Dir, from: u32, max: usize) -> Result<(Vec<Node>, u32), Error> {

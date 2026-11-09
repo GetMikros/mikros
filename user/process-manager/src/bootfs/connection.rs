@@ -145,6 +145,7 @@ impl Connection {
             total_bytes: self.fs.image.len() as u64,
             free_bytes: 0,
             read_only: true,
+            label: String::new(),
         }
     }
 

@@ -354,6 +354,7 @@ impl Fs {
             total_bytes: u64::from(layout.clusters) * cluster,
             free_bytes: free * cluster,
             read_only: volume.read_only(),
+            label: volume.label().map_err(error)?.unwrap_or_default(),
         })
     }
 

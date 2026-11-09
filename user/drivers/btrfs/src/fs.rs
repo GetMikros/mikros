@@ -95,6 +95,9 @@ pub struct Fs {
     /// (MIKSPEC-0049.R20).
     disk: &'static Disk,
     quick_disconnect: bool,
+    /// The label of the primary superblock, which `QueryFilesystem`
+    /// reports.
+    label: String,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -193,6 +196,7 @@ impl Fs {
             read_only,
             disk,
             quick_disconnect,
+            label: superblock_label(disk),
             reactor,
             spawner,
         })
@@ -334,6 +338,7 @@ impl Fs {
             total_bytes: statfs.blocks * statfs.block_size,
             free_bytes: statfs.blocks_available * statfs.block_size,
             read_only: self.read_only,
+            label: self.label.clone(),
         })
     }
 }
@@ -407,4 +412,33 @@ async fn serve_filesystem(fs: Rc<Fs>, end: ServerEnd<Filesystem>, user: u32) {
             ),
         };
     }
+}
+
+/// Where the primary superblock lies, how long it is, and where it holds
+/// its magic and its label, which ends at a 0 or fills its 256 bytes.
+const SUPERBLOCK: u64 = 0x10000;
+const SUPERBLOCK_SIZE: usize = 4096;
+const MAGIC_AT: usize = 0x40;
+const MAGIC: &[u8; 8] = b"_BHRfS_M";
+const LABEL_AT: usize = 0x12B;
+const LABEL_SIZE: usize = 256;
+/// The most bytes of a label that `FilesystemInfo` holds.
+const LABEL_MAX: usize = 64;
+
+/// The label of the primary superblock on `disk`, cut to `LABEL_MAX`
+/// bytes at a character's end: empty without one, or when the superblock
+/// cannot be read.
+fn superblock_label(disk: &Disk) -> String {
+    let mut superblock = alloc::vec![0u8; SUPERBLOCK_SIZE];
+    if !disk.read(SUPERBLOCK, &mut superblock) || &superblock[MAGIC_AT..MAGIC_AT + 8] != MAGIC {
+        return String::new();
+    }
+    let raw = &superblock[LABEL_AT..LABEL_AT + LABEL_SIZE];
+    let len = raw.iter().position(|&b| b == 0).unwrap_or(LABEL_SIZE);
+    let label = String::from_utf8_lossy(&raw[..len]);
+    let mut end = label.len().min(LABEL_MAX);
+    while !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    String::from(&label[..end])
 }
