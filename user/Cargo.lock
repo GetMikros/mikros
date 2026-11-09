@@ -272,6 +272,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-acpica"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "mikros-bootfs"
 version = "0.0.0"
 dependencies = [
