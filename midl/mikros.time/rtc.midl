@@ -1,0 +1,9 @@
+// MIKSPEC-0055.R2
+
+library mikros.time;
+using mikros.base;
+
+protocol Rtc {
+    @1 Get() -> (utc base.UtcTime) error base.Status;
+    @2 Set(utc base.UtcTime) -> () error base.Status;
+};

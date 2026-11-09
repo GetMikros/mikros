@@ -1,0 +1,10 @@
+[package]
+name = "rtc"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-cmos = { path = "../../cmos" }
+mikros-rt = { path = "../../mikros-rt" }

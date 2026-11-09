@@ -1,0 +1,7 @@
+# The manifest of the CMOS real-time clock driver, installed as
+# usr/lib/drivers/rtc/driver.yaml.
+name: rtc
+binary: /usr/lib/drivers/rtc/rtc
+match: [acpi:pnp0b00, acpi:pnp0b01, acpi:pnp0b02]
+kind: normal
+needs: [ioports]

@@ -133,6 +133,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", pci_bus.display());
             let acpi = acpi_build(kind)?;
             let acpi_manifest = crate::workspace_root().join("user/drivers/acpi/driver.yaml");
+            let rtc = user_build("rtc", kind)?;
+            println!("built    {}", rtc.display());
+            let rtc_manifest = crate::workspace_root().join("user/drivers/rtc/driver.yaml");
             let virtio_blk = user_build("virtio-blk", kind)?;
             println!("built    {}", virtio_blk.display());
             let virtio_blk_manifest =
@@ -205,6 +208,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ),
                 ("usr/lib/drivers/acpi/acpi", acpi.as_path()),
                 ("usr/lib/drivers/acpi/driver.yaml", acpi_manifest.as_path()),
+                ("usr/lib/drivers/rtc/rtc", rtc.as_path()),
+                ("usr/lib/drivers/rtc/driver.yaml", rtc_manifest.as_path()),
                 (
                     "usr/lib/drivers/virtio-blk/virtio-blk",
                     virtio_blk.as_path(),
