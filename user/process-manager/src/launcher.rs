@@ -116,8 +116,8 @@ async fn new_process(
     parent: impl FnOnce(&Record) -> u32,
     request: SpawnRequest,
 ) -> Result<(NewProcess, bool), Status> {
-    // TODO: resolve the path in the caller's namespace (MIKSPEC-0050.R3)
-    // rather than the boot file system.
+    // The path is resolved in the caller's namespace when the process is
+    // loaded; binding an app ID looks at where it lies.
     let program = request.path.strip_prefix('/').ok_or(Status::InvalidArgs)?;
     // Without the permission broker no caller may name a user or start
     // a login session.
@@ -133,8 +133,8 @@ async fn new_process(
     let app_id = named.unwrap_or_else(|| from.app_id.clone());
     let same = app_id == from.app_id;
     let new = NewProcess {
-        program: program.into(),
         path: request.path.clone(),
+        programs: from.programs.clone(),
         parent: parent(from),
         process_group: from.process_group,
         session: from.session,

@@ -1,7 +1,7 @@
 //! Serving init: registering it as process ID 1 and starting the
 //! service manager.
 
-use crate::namespace::Namespaces;
+use crate::namespace::{Namespaces, Programs};
 use crate::processes::{NewProcess, Shared, bind, koid};
 use crate::records::{INIT_PID, Record};
 use crate::start::{self, duplicate};
@@ -22,10 +22,9 @@ use mikros_rt::sys;
 use process_manager::bootfs::Fs;
 
 const SAME_RIGHTS: u32 = 1 << 31;
-/// The service manager's program, and its path in its own namespace.
 /// The time service's protocol.
 const CLOCK: &str = "mikros.time.Clock";
-const SERVICE_MANAGER: &str = "usr/bin/service-manager";
+/// The service manager's program, which init's namespace resolves.
 const SERVICE_MANAGER_PATH: &str = "/usr/bin/service-manager";
 const SERVICE_MANAGER_APP: &str = "system.service-manager";
 /// The identity of the process manager's own directory.
@@ -73,10 +72,18 @@ impl Manager {
         } = startup;
         let fs = Fs::new(process.raw(), &boot_image, reactor.clone(), spawner.clone())?;
         let namespaces = Rc::new(Namespaces::new(&command_line));
+        let mut own = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status = unsafe { sys::handle_duplicate(process.raw(), SAME_RIGHTS, &mut own) };
+        if status != mikros_rt::OK {
+            return Err(status);
+        }
+        // SAFETY: the kernel just created the handle for us.
+        let own = unsafe { OwnedHandle::from_raw(own) };
         Ok(Manager {
             _log: log,
             _process: process,
-            shared: Shared::new(fs, namespaces, budget, clock_page, reactor, spawner),
+            shared: Shared::new(fs, namespaces, budget, clock_page, own, reactor, spawner),
             init_process: Some(init_process),
             init: Some(init_bootstrap),
             service_manager: None,
@@ -117,6 +124,8 @@ impl Manager {
             login_session: 0,
             budget: duplicate(self.shared.budget.raw(), SAME_RIGHTS)?,
             path: "init".into(),
+            // init's programs come from the boot file system.
+            programs: Rc::new(Programs::boot()),
             process,
             exit: None,
             stopped: None,
@@ -160,8 +169,9 @@ impl Manager {
         }];
         handles.extend(init_handles);
         let new = NewProcess {
-            program: SERVICE_MANAGER.into(),
             path: SERVICE_MANAGER_PATH.into(),
+            // As init's programs, it comes from the boot file system.
+            programs: Rc::new(Programs::boot()),
             parent: INIT_PID,
             process_group: INIT_GROUP,
             session: INIT_GROUP,

@@ -3,7 +3,7 @@
 
 use crate::broker::Permissions;
 use crate::launcher;
-use crate::namespace::Namespaces;
+use crate::namespace::{Namespaces, Programs};
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, Transfer, duplicate};
 use alloc::collections::BTreeMap;
@@ -16,7 +16,7 @@ use core::task::{Poll, Waker};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::process::{Launcher, StartupHandle};
+use mikros_rt::interfaces::mikros::process::{Launcher, NamespaceEntry, StartupHandle};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, ProcessDirectoryAsyncClient,
 };
@@ -51,6 +51,9 @@ pub struct Shared {
     /// The root budget.
     pub budget: OwnedHandle,
     pub clock_page: OwnedHandle,
+    /// The process manager's own process, which the files of programs
+    /// are mapped into while they are loaded.
+    pub process: OwnedHandle,
     /// The time service's time page, once it gave it.
     pub time_page: RefCell<Option<OwnedHandle>>,
     pub reactor: Reactor,
@@ -77,10 +80,10 @@ pub struct Shared {
 
 /// A process to start.
 pub struct NewProcess {
-    /// The program, relative to the root of the boot file system.
-    pub program: String,
-    /// The executable path the record keeps.
+    /// The absolute path of the program, which the record keeps.
     pub path: String,
+    /// The namespace that `path` is resolved in: the spawner's.
+    pub programs: Rc<Programs>,
     pub parent: u32,
     pub process_group: u32,
     pub session: u32,
@@ -99,11 +102,13 @@ impl Shared {
         namespaces: Rc<Namespaces>,
         budget: OwnedHandle,
         clock_page: OwnedHandle,
+        process: OwnedHandle,
         reactor: Reactor,
         spawner: Spawner,
     ) -> Rc<Shared> {
         Rc::new(Shared {
             fs,
+            process,
             dev: Dev::new(reactor.clone(), spawner.clone()),
             volumes: crate::volumes::Volumes::new(reactor.clone(), spawner.clone()),
             namespaces,
@@ -154,7 +159,8 @@ impl Shared {
     }
 
     /// Starts `new` as process `pid`, whose record it adds, or replaces
-    /// when `replacing`.
+    /// when `replacing`. Its namespace is built first, so that a process
+    /// that may not start fails as such whatever its program.
     async fn start_as(
         self: &Rc<Self>,
         pid: u32,
@@ -162,9 +168,22 @@ impl Shared {
         control: &ProcessDirectoryAsyncClient,
         replacing: bool,
     ) -> Result<OwnedHandle, Status> {
-        let name = new.program.rsplit('/').next().unwrap_or("process");
+        let name = new.path.rsplit('/').next().unwrap_or("process");
         let budget = self.budget_of(new.user, &new.app_id)?;
-        let started = start::load(&self.fs, budget.raw(), &new.program, name)?;
+        let namespaces = self.namespaces.clone();
+        let (namespace, programs) = namespaces
+            .of(self, &new.app_id, new.user, new.service_manager)
+            .await?;
+        let started = start::load(
+            &self.fs,
+            &new.programs,
+            self.process.raw(),
+            &self.reactor,
+            budget.raw(),
+            &new.path,
+            name,
+        )
+        .await?;
         let NewProcess {
             path,
             parent,
@@ -175,7 +194,6 @@ impl Shared {
             login_session,
             arguments,
             handles,
-            service_manager,
             ..
         } = new;
         let identity = ClientIdentity {
@@ -186,13 +204,7 @@ impl Shared {
         let started_app = app_id.clone();
         let transferred = self
             .transfer(
-                &started,
-                identity,
-                parent,
-                arguments,
-                handles,
-                service_manager,
-                control,
+                &started, identity, parent, arguments, handles, namespace, control,
             )
             .await;
         let recorded = transferred.and_then(|()| {
@@ -206,6 +218,7 @@ impl Shared {
                 login_session,
                 budget,
                 path,
+                programs: Rc::new(programs),
                 process: duplicate(started.process.raw(), SAME_RIGHTS)?,
                 exit: None,
                 stopped: None,
@@ -271,13 +284,9 @@ impl Shared {
         parent: u32,
         arguments: OwnedHandle,
         handles: Vec<StartupHandle>,
-        service_manager: bool,
+        namespace: Vec<NamespaceEntry>,
         control: &ProcessDirectoryAsyncClient,
     ) -> Result<(), Status> {
-        let namespaces = self.namespaces.clone();
-        let namespace = namespaces
-            .of(self, &identity.app_id, identity.user, service_manager)
-            .await?;
         let channel = |_| Status::NoResources;
         let (launcher, launcher_end) = endpoints::<Launcher>().map_err(channel)?;
         let (directory, directory_end) = endpoints::<Directory>().map_err(channel)?;

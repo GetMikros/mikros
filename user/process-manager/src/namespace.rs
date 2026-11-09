@@ -126,6 +126,77 @@ enum Source {
     Dir(Rc<NodeAsyncClient>, &'static str),
 }
 
+/// Where the programs below a namespace entry come from, for `Spawn` and
+/// `Exec` (MIKSPEC-0034.R27).
+pub enum Origin {
+    /// None may be executed: the entry's rights lack `EXECUTE`.
+    None,
+    /// A directory of the boot file system, by its path from the root.
+    Boot(String),
+    /// A directory on a file system server, through a connection of the
+    /// process manager's own with the entry's rights, and whether it is
+    /// the root's `/usr`, whose files are system components.
+    Dir {
+        dir: Rc<NodeAsyncClient>,
+        system: bool,
+    },
+}
+
+/// The entries of a process's namespace, by path, with where the
+/// programs below each come from.
+pub struct Programs {
+    entries: Vec<(String, Origin)>,
+}
+
+impl Programs {
+    /// The boot file system as `/`, with `/dev`: the namespace of init,
+    /// in which its programs are resolved (MIKSPEC-0034.R27), and of the
+    /// processes that go without their profiles.
+    pub fn boot() -> Programs {
+        Programs {
+            entries: alloc::vec![
+                (String::from("/"), Origin::Boot(String::new())),
+                (String::from("/dev"), Origin::None),
+            ],
+        }
+    }
+
+    /// Where the normalized absolute `path` lies: the origin of the
+    /// longest entry that holds it, and the path below that entry.
+    pub fn find<'a, 'p>(&'a self, path: &'p str) -> Option<(&'a Origin, &'p str)> {
+        self.entries
+            .iter()
+            .filter_map(|(at, origin)| {
+                let rest = match at.as_str() {
+                    "/" => path.strip_prefix('/')?,
+                    at => match path.strip_prefix(at)? {
+                        "" => "",
+                        rest => rest.strip_prefix('/')?,
+                    },
+                };
+                Some((at.len(), origin, rest))
+            })
+            .max_by_key(|&(len, ..)| len)
+            .map(|(_, origin, rest)| (origin, rest))
+    }
+}
+
+/// Adds `entry`, with where its programs come from, to `entries` and
+/// `origins`.
+fn add(
+    entries: &mut Vec<NamespaceEntry>,
+    origins: &mut Vec<(String, Origin)>,
+    (entry, origin): (NamespaceEntry, Origin),
+) {
+    origins.push((entry.path.clone(), origin));
+    entries.push(entry);
+}
+
+/// `entry`, from which no programs come.
+fn none(entry: NamespaceEntry) -> (NamespaceEntry, Origin) {
+    (entry, Origin::None)
+}
+
 type Reply<T> = Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>;
 
 fn flat<T>(reply: Reply<T>) -> Result<T, Error> {
@@ -133,7 +204,7 @@ fn flat<T>(reply: Reply<T>) -> Result<T, Error> {
 }
 
 /// The status a start fails with for a file system error.
-fn status(e: Error) -> Status {
+pub fn status(e: Error) -> Status {
     match e {
         Error::NotFound => Status::NotFound,
         Error::AccessDenied | Error::ReadOnly => Status::AccessDenied,
@@ -144,7 +215,7 @@ fn status(e: Error) -> Status {
 }
 
 /// Opens `path` from `dir` with `flags` and `rights`.
-async fn open(
+pub async fn open(
     dir: &NodeAsyncClient,
     path: &str,
     flags: OpenFlags,
@@ -326,16 +397,16 @@ impl Namespaces {
     }
 
     /// The namespace of a new process of `app_id` and `user`, the service
-    /// manager that init asked for when `service_manager`. Once tmpfs
-    /// has started, that of any other process waits for profiles to
-    /// apply.
+    /// manager that init asked for when `service_manager`, and where the
+    /// programs it names come from. Once tmpfs has started, that of any
+    /// other process waits for profiles to apply.
     pub async fn of(
         &self,
         shared: &Shared,
         app_id: &str,
         user: u32,
         service_manager: bool,
-    ) -> Result<Vec<NamespaceEntry>, Status> {
+    ) -> Result<(Vec<NamespaceEntry>, Programs), Status> {
         let dev = NamespaceEntry {
             path: "/dev".into(),
             directory: shared.dev.directory()?,
@@ -346,19 +417,29 @@ impl Namespaces {
         let ready = self.ready.borrow().clone();
         let Some(ready) = ready else {
             let root = crate::start::root(&shared.fs)?;
-            return Ok(alloc::vec![
+            let entries = alloc::vec![
                 NamespaceEntry {
                     path: "/".into(),
                     directory: root
                 },
                 dev
-            ]);
+            ];
+            return Ok((entries, Programs::boot()));
         };
         let reactor = &shared.reactor;
         let mut entries = Vec::new();
+        let mut origins = Vec::new();
         if service_manager {
-            entries.push(self.entry(shared, &ready, "/usr", RX).await?);
-            entries.push(self.entry(shared, &ready, "/etc", Rights::READ).await?);
+            add(
+                &mut entries,
+                &mut origins,
+                self.entry(shared, &ready, "/usr", RX).await?,
+            );
+            add(
+                &mut entries,
+                &mut origins,
+                self.entry(shared, &ready, "/etc", Rights::READ).await?,
+            );
         } else if app_id == CLI_APP {
             if user != 0 {
                 // The profile names the user, whose name is not known yet.
@@ -366,16 +447,34 @@ impl Namespaces {
             }
             // User 0 has no folder in /Users, so /Libraries is only the
             // system's.
-            entries.push(self.entry(shared, &ready, "/usr", RX).await?);
-            entries.push(self.entry(shared, &ready, "/etc", Rights::READ).await?);
-            entries.push(self.entry(shared, &ready, "/Apps", Rights::READ).await?);
-            entries.push(
+            add(
+                &mut entries,
+                &mut origins,
+                self.entry(shared, &ready, "/usr", RX).await?,
+            );
+            add(
+                &mut entries,
+                &mut origins,
+                self.entry(shared, &ready, "/etc", Rights::READ).await?,
+            );
+            add(
+                &mut entries,
+                &mut origins,
+                self.entry(shared, &ready, "/Apps", Rights::READ).await?,
+            );
+            add(
+                &mut entries,
+                &mut origins,
                 self.entry(shared, &ready, "/Libraries", Rights::READ)
                     .await?,
             );
             let budget = shared.user_budget(user)?;
             let tmpfs = self.tmpfs().await;
-            entries.push(tmp(&tmpfs, &format!("cli/{user}"), budget, reactor).await?);
+            add(
+                &mut entries,
+                &mut origins,
+                none(tmp(&tmpfs, &format!("cli/{user}"), budget, reactor).await?),
+            );
         } else if !app_id.starts_with("system.") {
             // A native app.
             if user == 0 {
@@ -386,12 +485,24 @@ impl Namespaces {
         } else {
             let (program, listed) = manifest_entries(&shared.fs, app_id);
             if program {
-                entries.push(self.entry(shared, &ready, "/usr", RX).await?);
-                entries.push(self.entry(shared, &ready, "/etc", Rights::READ).await?);
+                add(
+                    &mut entries,
+                    &mut origins,
+                    self.entry(shared, &ready, "/usr", RX).await?,
+                );
+                add(
+                    &mut entries,
+                    &mut origins,
+                    self.entry(shared, &ready, "/etc", Rights::READ).await?,
+                );
                 let path = format!("apps/{user}/{app_id}");
                 let budget = shared.budget_of(user, app_id)?;
                 let tmpfs = self.tmpfs().await;
-                entries.push(tmp(&tmpfs, &path, budget, reactor).await?);
+                add(
+                    &mut entries,
+                    &mut origins,
+                    none(tmp(&tmpfs, &path, budget, reactor).await?),
+                );
                 if user != 0 {
                     // The folders of the user's app need the user's name.
                     return Err(Status::NotSupported);
@@ -410,17 +521,22 @@ impl Namespaces {
                     return Err(Status::AccessDenied);
                 }
                 let rights = rights(&text).ok_or(Status::InvalidArgs)?;
-                entries.push(self.entry(shared, &ready, &path, rights).await?);
+                add(
+                    &mut entries,
+                    &mut origins,
+                    self.entry(shared, &ready, &path, rights).await?,
+                );
             }
         }
         if self.holds_volumes(shared, app_id, user).await {
-            entries.push(NamespaceEntry {
+            let volumes = NamespaceEntry {
                 path: VOLUMES.into(),
                 directory: shared.volumes.directory()?,
-            });
+            };
+            add(&mut entries, &mut origins, none(volumes));
         }
-        entries.push(dev);
-        Ok(entries)
+        add(&mut entries, &mut origins, none(dev));
+        Ok((entries, Programs { entries: origins }))
     }
 
     /// Whether the processes of `app_id` and `user` hold `files.volumes`,
@@ -437,17 +553,18 @@ impl Namespaces {
             .await
     }
 
-    /// The entry `path` of the root table with `rights`. A path that does
-    /// not exist is made when the rights hold `WRITE` and it lies on
-    /// tmpfs, and fails with `NOT_FOUND` otherwise; rights beyond those of
-    /// its root fail with `ACCESS_DENIED`.
+    /// The entry `path` of the root table with `rights`, and where the
+    /// programs below it come from. A path that does not exist is made
+    /// when the rights hold `WRITE` and it lies on tmpfs, and fails with
+    /// `NOT_FOUND` otherwise; rights beyond those of its root fail with
+    /// `ACCESS_DENIED`.
     async fn entry(
         &self,
         shared: &Shared,
         ready: &Ready,
         path: &str,
         rights: Rights,
-    ) -> Result<NamespaceEntry, Status> {
+    ) -> Result<(NamespaceEntry, Origin), Status> {
         let normal = path.trim_end_matches('/');
         let mut table: Vec<(&str, Source, Rights)> = match &ready.roots {
             Roots::Boot { etc, var, users } => alloc::vec![
@@ -495,6 +612,10 @@ impl Namespaces {
             .ok_or(Status::NotFound)?;
         // Missing directories are made only where services keep state.
         let creatable = matches!(top, "/etc" | "/var" | "/Users");
+        let executable = rights.contains(Rights::EXECUTE);
+        // The system's own programs are those of the root's /usr; the
+        // boot file system tells its own apart itself.
+        let system = top == "/usr";
         if rights.0 & !most.0 != 0 {
             return Err(Status::AccessDenied);
         }
@@ -508,6 +629,15 @@ impl Namespaces {
                 if !shared.fs.serve_directory(server, &boot_path, rights) {
                     return Err(Status::NotFound);
                 }
+                let origin = match executable {
+                    true => Origin::Boot(boot_path),
+                    false => Origin::None,
+                };
+                let entry = NamespaceEntry {
+                    path: String::from(normal),
+                    directory: client,
+                };
+                Ok((entry, origin))
             }
             Source::Dir(dir, top) => {
                 let rest = match (top.is_empty(), rest.is_empty()) {
@@ -532,19 +662,48 @@ impl Namespaces {
                         let (again, server) =
                             endpoints::<Node>().map_err(|_| Status::NoResources)?;
                         flat(made.clone(server, rights).await).map_err(status)?;
-                        return Ok(NamespaceEntry {
+                        let origin = match executable {
+                            true => Origin::Dir {
+                                dir: Rc::new(made),
+                                system,
+                            },
+                            false => Origin::None,
+                        };
+                        let entry = NamespaceEntry {
                             path: String::from(normal),
                             directory: again,
-                        });
+                        };
+                        return Ok((entry, origin));
                     }
                     Err(e) => return Err(status(e)),
                 }
+                // The process manager keeps a connection of its own to a
+                // directory that programs may come from.
+                let origin = match executable {
+                    true => Origin::Dir {
+                        dir: Rc::new(
+                            open(
+                                &dir,
+                                &target,
+                                OpenFlags::DIRECTORY,
+                                0,
+                                rights,
+                                &shared.reactor,
+                            )
+                            .await
+                            .map_err(status)?,
+                        ),
+                        system,
+                    },
+                    false => Origin::None,
+                };
+                let entry = NamespaceEntry {
+                    path: String::from(normal),
+                    directory: client,
+                };
+                Ok((entry, origin))
             }
         }
-        Ok(NamespaceEntry {
-            path: String::from(normal),
-            directory: client,
-        })
     }
 }
 

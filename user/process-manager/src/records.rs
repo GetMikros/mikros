@@ -1,6 +1,8 @@
 //! The records of the processes the process manager knows.
 
+use crate::namespace::Programs;
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::rc::Rc;
 use alloc::string::String;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 
@@ -22,6 +24,9 @@ pub struct Record {
     pub budget: OwnedHandle,
     /// The executable path the process was started with.
     pub path: String,
+    /// Where the programs that the process names come from: its
+    /// namespace's.
+    pub programs: Rc<Programs>,
     pub process: OwnedHandle,
     /// How the process ended, once it did.
     pub exit: Option<Exit>,

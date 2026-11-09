@@ -1,12 +1,17 @@
-//! Starting processes from the boot file system: loading the program,
-//! and sending the startup transfer on its bootstrap channel.
+//! Starting processes: loading the program, which the spawner's
+//! namespace names, and sending the startup transfer on its bootstrap
+//! channel.
 
+use crate::namespace::{self, Origin, Programs};
+use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use mikros_manifest::path;
+use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::fs::{Node, Rights};
+use mikros_rt::interfaces::mikros::fs::{MemoryFlags, Node, NodeType, OpenFlags, Rights};
 use mikros_rt::interfaces::mikros::process::{
     Bootstrap, BootstrapClient, Launcher, NamespaceEntry, StartupHandle, StartupHeader,
 };
@@ -15,6 +20,7 @@ use mikros_rt::sys::{self, Handle};
 use process_manager::bootfs::{Executable, Fs};
 
 const PAGE_SIZE: u64 = 4096;
+const PERM_READ: u32 = 1 << 0;
 /// The only version of the transfer.
 const VERSION: u32 = 1;
 /// The most entries one `Handles` or `Namespace` batch carries.
@@ -90,16 +96,173 @@ struct Image {
     code: Option<(u64, u64)>,
 }
 
-/// Maps `executable` of `fs` into `process`.
-fn load_image(fs: &Rc<Fs>, process: Handle, executable: &Executable) -> Result<Image, Status> {
+/// A file on a file system server, mapped read-only into the process
+/// manager while it is loaded.
+struct Mapped {
+    memory: OwnedHandle,
+    at: u64,
+    size: u64,
+    /// The mapping's length, a whole number of pages.
+    len: u64,
+    /// The process manager's own process.
+    own: Handle,
+}
+
+impl Mapped {
+    fn file(&self) -> &[u8] {
+        // SAFETY: the file is mapped readable at `at` for `size` bytes
+        // until `self` drops.
+        unsafe { core::slice::from_raw_parts(self.at as *const u8, self.size as usize) }
+    }
+
+    /// A new memory object of `len` bytes, a whole number of pages,
+    /// private to its holder, with the file's bytes from `from` and zeros
+    /// after the end of the file.
+    fn private_range(&self, from: u64, len: u64) -> Result<OwnedHandle, sys::Status> {
+        let file = self.file();
+        let start = usize::try_from(from).map_or(file.len(), |f| f.min(file.len()));
+        let count = usize::try_from(len).map_or(file.len() - start, |l| l.min(file.len() - start));
+        let mut mem = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status = unsafe { sys::mem_create(len, 0, &mut mem) };
+        if status != mikros_rt::OK {
+            return Err(status);
+        }
+        // SAFETY: the handle was just created for us.
+        let mem = unsafe { OwnedHandle::from_raw(mem) };
+        // SAFETY: the pointer describes `count` bytes of the file.
+        let status = unsafe { sys::mem_write(mem.raw(), 0, file[start..].as_ptr(), count as u64) };
+        if status != mikros_rt::OK {
+            return Err(status);
+        }
+        Ok(mem)
+    }
+}
+
+impl Drop for Mapped {
+    fn drop(&mut self) {
+        // SAFETY: the range is the mapping that `map_file` made, which
+        // nothing uses once `self` drops.
+        unsafe { sys::vm_unmap(self.own, self.at, self.len) };
+    }
+}
+
+/// An executable as a path names it in a namespace (MIKSPEC-0034.R27): a
+/// file of the boot file system, or one on a file system server, which
+/// is a system component when it comes from the root's `/usr`.
+enum Program {
+    Boot(Executable),
+    File { file: Mapped, system: bool },
+}
+
+impl Program {
+    fn file(&self) -> &[u8] {
+        match self {
+            Program::Boot(executable) => executable.file,
+            Program::File { file, .. } => file.file(),
+        }
+    }
+
+    fn system(&self) -> bool {
+        match self {
+            Program::Boot(executable) => executable.system,
+            Program::File { system, .. } => *system,
+        }
+    }
+}
+
+/// The program that the absolute `path` names in `programs`. Fails with
+/// `NOT_FOUND` when no entry holds it, and `ACCESS_DENIED` when its entry
+/// lacks `EXECUTE` or it is not a regular file. `own` is the process
+/// manager's process, which a file on a server is mapped into.
+async fn resolve(
+    fs: &Rc<Fs>,
+    programs: &Programs,
+    own: Handle,
+    path: &str,
+    reactor: &Reactor,
+) -> Result<Program, Status> {
+    let normal = path::normalize(path).ok_or(Status::InvalidArgs)?;
+    let (origin, rest) = programs.find(&normal).ok_or(Status::NotFound)?;
+    match origin {
+        Origin::None => Err(Status::AccessDenied),
+        Origin::Boot(dir) => {
+            let at = match (dir.is_empty(), rest.is_empty()) {
+                (true, _) => String::from(rest),
+                (false, true) => dir.clone(),
+                (false, false) => format!("{dir}/{rest}"),
+            };
+            fs.executable(&at).map(Program::Boot).map_err(status)
+        }
+        Origin::Dir { dir, system } => {
+            let name = if rest.is_empty() { "." } else { rest };
+            let rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
+            let file = namespace::open(dir, name, OpenFlags(0), 0, rights, reactor)
+                .await
+                .map_err(namespace::status)?;
+            let attributes = reply(file.get_attributes().await)?.attributes;
+            if attributes.r#type != NodeType::File {
+                return Err(Status::AccessDenied);
+            }
+            let memory = reply(file.get_memory_object(MemoryFlags::EXECUTE).await)?.memory;
+            let file = map_file(own, memory, attributes.size)?;
+            Ok(Program::File {
+                file,
+                system: *system,
+            })
+        }
+    }
+}
+
+/// The response of a call to a file system server, or the status a
+/// start fails with.
+fn reply<T>(
+    r: Result<
+        Result<T, mikros_rt::interfaces::mikros::fs::Error>,
+        mikros_rt::interfaces::__midl::Error,
+    >,
+) -> Result<T, Status> {
+    match r {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(namespace::status(e)),
+        Err(_) => Err(Status::Internal),
+    }
+}
+
+/// Maps the first `size` bytes of the file's memory object `memory`
+/// read-only into the process manager's process `own`.
+fn map_file(own: Handle, memory: OwnedHandle, size: u64) -> Result<Mapped, Status> {
+    let len = size.max(1).next_multiple_of(PAGE_SIZE);
+    let mut at = 0;
+    // SAFETY: the out pointer is valid; the kernel picks a free range.
+    check(unsafe { sys::vm_map(own, PERM_READ, 0, memory.raw(), 0, len, &mut at) })?;
+    Ok(Mapped {
+        memory,
+        at,
+        size,
+        len,
+        own,
+    })
+}
+
+/// Maps `program` into `process`.
+fn load_image(fs: &Rc<Fs>, process: Handle, program: &Program) -> Result<Image, Status> {
     let private = |offset: u64, len: u64| {
-        fs.private_range(executable, offset, len)
+        let range = match program {
+            Program::Boot(executable) => fs.private_range(executable, offset, len),
+            Program::File { file, .. } => file.private_range(offset, len),
+        };
+        range
             .map(OwnedHandle::into_raw)
             .map_err(mikros_loader::Error::Status)
     };
+    let shared = match program {
+        Program::Boot(executable) => executable.shared.raw(),
+        Program::File { file, .. } => file.memory.raw(),
+    };
     let image = mikros_loader::Image {
-        file: executable.file,
-        shared: executable.shared.raw(),
+        file: program.file(),
+        shared,
         private: &private,
     };
     let loaded = mikros_loader::load(process, &image).map_err(loading)?;
@@ -113,16 +276,25 @@ fn load_image(fs: &Rc<Fs>, process: Handle, executable: &Executable) -> Result<I
     })
 }
 
-/// Loads the program at `path` of `fs` into a new process charged to
-/// `budget`, and starts it with a new bootstrap channel: at the entry of
-/// the dynamic linker, which is loaded too, when the program names one,
-/// and at its own entry otherwise.
-pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Started, Status> {
-    let executable = fs.executable(path).map_err(status)?;
+/// Loads the program that the absolute `path` names in `programs`, the
+/// spawner's, into a new process charged to `budget`, and starts it with
+/// a new bootstrap channel: at the entry of the dynamic linker, which is
+/// loaded from the same namespace, when the program names one, and at
+/// its own entry otherwise. `own` is the process manager's process.
+pub async fn load(
+    fs: &Rc<Fs>,
+    programs: &Programs,
+    own: Handle,
+    reactor: &Reactor,
+    budget: Handle,
+    path: &str,
+    name: &str,
+) -> Result<Started, Status> {
+    let executable = resolve(fs, programs, own, path, reactor).await?;
     // An application makes system calls only through the dynamic linker,
     // which is also the C library, so one that has none is refused.
-    let application = !executable.system;
-    if application && !mikros_loader::is_dynamic(executable.file).map_err(loading)? {
+    let application = !executable.system();
+    if application && !mikros_loader::is_dynamic(executable.file()).map_err(loading)? {
         return Err(Status::NotSupported);
     }
     let mut process = 0;
@@ -133,10 +305,8 @@ pub fn load(fs: &Rc<Fs>, budget: Handle, path: &str, name: &str) -> Result<Start
     let loaded = load_image(fs, process.raw(), &executable)?;
     // The loader accepts only the one dynamic linker.
     let (entry, interpreter_base) = if loaded.dynamic {
-        // `fs` resolves paths from its root, without the leading slash.
         let path = core::str::from_utf8(mikros_loader::INTERPRETER).expect("an ASCII path");
-        let path = path.strip_prefix('/').unwrap_or(path);
-        let linker = fs.executable(path).map_err(status)?;
+        let linker = resolve(fs, programs, own, path, reactor).await?;
         let linked = load_image(fs, process.raw(), &linker)?;
         // The dynamic linker is not itself linked dynamically.
         if linked.dynamic {

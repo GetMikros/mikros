@@ -52,7 +52,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         .collect();
     let checked = match header.app_id == CLI {
         true => check_cli(&entries),
-        false => check(&entries).and_then(|()| spawns(&LauncherClient::new(header.launcher))),
+        false => {
+            check(&entries).and_then(|()| spawns(&LauncherClient::new(header.launcher), &entries))
+        }
     };
     match checked {
         Ok(()) => 0,
@@ -79,14 +81,73 @@ fn spawn(launcher: &LauncherClient, path: &str, app_id: &str) -> Result<u32, Opt
 }
 
 /// A command-line tool of user 0 starts with its profile and passes its
-/// checks; a native app of user 0 does not start.
-fn spawns(launcher: &LauncherClient) -> Result<(), i64> {
+/// checks; a native app of user 0 does not start. Paths are resolved in
+/// the probe's namespace: a program of the boot image outside it is not
+/// found, a file below an entry without `x` may not be started, and a
+/// copy of the probe in its state directory, on tmpfs, is an application
+/// there, which a program without the dynamic linker may not be.
+fn spawns(launcher: &LauncherClient, entries: &[(String, NodeClient)]) -> Result<(), i64> {
     let pid = spawn(launcher, BINARY, CLI).map_err(|_| 20)?;
     let waited = launcher.wait(pid as i32, WaitOptions(0), FOREVER, FOREVER);
     let code = waited.ok().and_then(|w| w.ok()).ok_or(21)?.status.exit_code;
     expect(code == 0, code)?;
     let native = spawn(launcher, NATIVE, NATIVE_APP);
-    expect(native == Err(Some(Status::AccessDenied)), 22)
+    expect(native == Err(Some(Status::AccessDenied)), 22)?;
+    expect(
+        spawn_own(launcher, NATIVE) == Err(Some(Status::NotFound)),
+        23,
+    )?;
+    expect(
+        spawn_own(launcher, "/usr/share/probe/data.txt") == Err(Some(Status::AccessDenied)),
+        24,
+    )?;
+    let entry = |path: &str| entries.iter().find(|(p, _)| p == path).map(|(_, n)| n);
+    let bin = entry("/usr/bin").ok_or(25)?;
+    let state = entry("/var/lib/namespace-probe").ok_or(25)?;
+    copy(bin, "namespace-probe", state, "copy").ok_or(25)?;
+    let copied = spawn_own(launcher, "/var/lib/namespace-probe/copy");
+    expect(copied == Err(Some(Status::NotSupported)), 26)
+}
+
+/// Starts `path` with the caller's app ID and user.
+fn spawn_own(launcher: &LauncherClient, path: &str) -> Result<u32, Option<Status>> {
+    let arguments = arguments(path).ok_or(None)?;
+    let request = SpawnRequest {
+        path: path.into(),
+        arguments,
+        handles: Vec::new(),
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+    };
+    match launcher.spawn(request, FOREVER) {
+        Ok(Ok(spawned)) => Ok(spawned.pid),
+        Ok(Err(status)) => Err(Some(status)),
+        Err(_) => Err(None),
+    }
+}
+
+/// Copies the file `name` of `from` to a new file `to` of `dir`.
+fn copy(from: &NodeClient, name: &str, dir: &NodeClient, to: &str) -> Option<()> {
+    let source = open(from, name, OpenFlags(0), Rights::READ).ok()?;
+    let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
+    let target = open(dir, to, create, RW).ok()?;
+    let mut offset = 0;
+    loop {
+        let data = source.read(offset, 32768, FOREVER).ok()?.ok()?.data;
+        if data.is_empty() {
+            return Some(());
+        }
+        let written = target
+            .write(offset, data.clone(), FOREVER)
+            .ok()?
+            .ok()?
+            .written;
+        if written as usize != data.len() {
+            return None;
+        }
+        offset += data.len() as u64;
+    }
 }
 
 /// The arguments of a program at `path`: only its path.
