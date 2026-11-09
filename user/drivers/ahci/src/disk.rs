@@ -15,6 +15,7 @@ use mikros_storage::{Contiguous, PAGE};
 /// ATA commands.
 const READ_DMA_EXT: u8 = 0x25;
 const WRITE_DMA_EXT: u8 = 0x35;
+const WRITE_DMA_FUA_EXT: u8 = 0x3D;
 const READ_FPDMA_QUEUED: u8 = 0x60;
 const WRITE_FPDMA_QUEUED: u8 = 0x61;
 const FLUSH_CACHE_EXT: u8 = 0xEA;
@@ -33,6 +34,11 @@ const COMMAND_SECTORS_MAX: u64 = 1 << 16;
 const TRANSFER_MAX: u64 = (PRD_MAX as u64 - 1) * PAGE;
 /// The size of IDENTIFY DEVICE's data.
 const IDENTIFY_SIZE: u32 = 512;
+/// The bit of IDENTIFY DEVICE's words 84 and 87 that reports WRITE DMA
+/// FUA EXT, and that of WRITE FPDMA QUEUED's device register that forces
+/// unit access.
+const FUA_SUPPORTED: u16 = 1 << 6;
+const FPDMA_FUA: u8 = 1 << 7;
 
 /// What IDENTIFY DEVICE says about a disk.
 pub struct Identity {
@@ -46,6 +52,8 @@ pub struct Identity {
     pub queue_depth: u32,
     pub trim: bool,
     pub write_cache: bool,
+    /// Forced unit access writes.
+    pub fua: bool,
 }
 
 /// The logical sector size in bytes that the IDENTIFY DEVICE words `w`
@@ -110,6 +118,7 @@ pub async fn identify(port: &Port, page: &Contiguous) -> Result<Identity, Status
         queue_depth: u32::from(w[75] & 0x1F) + 1,
         trim: w[169] & 1 != 0,
         write_cache: w[85] & 1 << 5 != 0,
+        fua: (w[84] | w[87]) & FUA_SUPPORTED != 0,
     })
 }
 
@@ -155,7 +164,9 @@ impl Disk {
     /// `pages`, from or to the blocks from `block`. `offset` must be even,
     /// and `len` a multiple of the sector size of at most
     /// `max_transfer_blocks` sectors, within `pages`. A write with `fua`
-    /// is followed by a flush.
+    /// forces unit access when the disk supports it, with WRITE FPDMA
+    /// QUEUED's FUA bit or WRITE DMA FUA EXT, and is followed by a flush
+    /// otherwise.
     pub async fn transfer(
         &self,
         write: bool,
@@ -182,6 +193,7 @@ impl Disk {
         let sectors = len / u64::from(self.identity.sector_size);
         // A count of 0 stands for 65536.
         let count = sectors as u16;
+        let forced = write && fua && self.identity.fua;
         let ata = match (self.queued, write) {
             (true, _) => Ata {
                 command: if write {
@@ -191,11 +203,19 @@ impl Disk {
                 },
                 features: count,
                 lba: block,
-                device: DEVICE_LBA,
+                device: if forced {
+                    DEVICE_LBA | FPDMA_FUA
+                } else {
+                    DEVICE_LBA
+                },
                 ..Ata::default()
             },
-            (false, _) => Ata {
-                command: if write { WRITE_DMA_EXT } else { READ_DMA_EXT },
+            (false, write) => Ata {
+                command: match (write, forced) {
+                    (true, true) => WRITE_DMA_FUA_EXT,
+                    (true, false) => WRITE_DMA_EXT,
+                    (false, _) => READ_DMA_EXT,
+                },
                 lba: block,
                 count,
                 device: DEVICE_LBA,
@@ -203,7 +223,7 @@ impl Disk {
             },
         };
         self.port.issue(ata, &data, write, self.queued).await?;
-        if write && fua {
+        if write && fua && !forced {
             self.flush().await?;
         }
         Ok(())
@@ -271,6 +291,9 @@ impl mikros_storage::Disk for Disk {
         }
         if self.identity.trim {
             flags |= BlockFlags::DISCARD.0;
+        }
+        if self.identity.fua {
+            flags |= BlockFlags::FUA.0;
         }
         BlockInfo {
             block_size: self.identity.sector_size,
