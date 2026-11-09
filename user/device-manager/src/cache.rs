@@ -38,7 +38,7 @@ enum Root {
     BootFs,
     /// `root=PARTUUID=<guid>`.
     Guid(String),
-    /// Neither: the partition of the Mikros root type.
+    /// Neither: the partition of the Mikros root type on the boot disk.
     OfRootType,
 }
 
@@ -80,24 +80,48 @@ impl Profiles {
         }
     }
 
-    /// Whether `device` matches the command line's root partition.
-    fn matches_root(&self, device: &Device) -> bool {
+    /// Whether `device`, among `devices`, matches the command line's root
+    /// partition: without `root=`, a partition of the Mikros root type on
+    /// the boot disk.
+    fn matches_root(&self, device: &Device, devices: &Devices) -> bool {
         match &self.root {
             Root::BootFs => false,
             Root::Guid(guid) => property(&device.properties, PARTITION_GUID)
                 .is_some_and(|ours| ours.eq_ignore_ascii_case(guid)),
-            Root::OfRootType => device.hardware_ids.iter().any(|id| id == ROOT_TYPE),
+            Root::OfRootType => {
+                device.hardware_ids.iter().any(|id| id == ROOT_TYPE)
+                    && device
+                        .parent
+                        .is_some_and(|disk| self.boot_disk(disk, devices))
+            }
         }
     }
 
-    /// Whether `device`, whose driver published a `filesystem` service,
-    /// is the root partition: the first device that publishes one and
-    /// matches the command line becomes it, and stays it.
-    pub fn claim_root(&self, device: &Device) -> bool {
+    /// Whether device `disk`, among `devices`, is the boot disk: the disk
+    /// holding the partition whose GUID `esp=PARTUUID=` gives, or, without
+    /// that option, any disk whose `removable` property is `false`.
+    fn boot_disk(&self, disk: u64, devices: &Devices) -> bool {
+        match &self.esp {
+            Some(guid) => devices.iter().any(|d| {
+                d.parent == Some(disk)
+                    && property(&d.properties, PARTITION_GUID)
+                        .is_some_and(|ours| ours.eq_ignore_ascii_case(guid))
+            }),
+            None => devices
+                .get(disk)
+                .is_some_and(|d| property(&d.properties, REMOVABLE) == Some("false")),
+        }
+    }
+
+    /// Whether `device`, among `devices`, whose driver published a
+    /// `filesystem` service, is the root partition: the first device that
+    /// publishes one and matches the command line becomes it, and stays
+    /// it.
+    pub fn claim_root(&self, device: &Device, devices: &Devices) -> bool {
         if let Some(root) = self.root_device.get() {
             return root == device.id;
         }
-        let matches = self.matches_root(device);
+        let matches = self.matches_root(device, devices);
         if matches {
             self.root_device.set(Some(device.id));
         }
@@ -123,7 +147,10 @@ impl Profiles {
         let on_disk = |d: &&Device| d.parent == Some(disk);
         let root_here = match self.root_device.get() {
             Some(root) => devices.get(root).is_some_and(|r| r.parent == Some(disk)),
-            None => devices.iter().filter(on_disk).any(|d| self.matches_root(d)),
+            None => devices
+                .iter()
+                .filter(on_disk)
+                .any(|d| self.matches_root(d, devices)),
         };
         let first_esp = devices
             .iter()

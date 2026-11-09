@@ -176,7 +176,7 @@ fn aliases(m: &Manager, caller: u64) -> Vec<String> {
     };
     let guid = guid.to_ascii_lowercase();
     let mut aliases = alloc::vec![format!("partuuid-{guid}")];
-    let root = m.profiles.claim_root(device);
+    let root = m.profiles.claim_root(device, &devices);
     if root {
         aliases.push(String::from(ROOT));
     }
