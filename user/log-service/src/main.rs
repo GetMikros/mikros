@@ -8,12 +8,18 @@
 //! a client writes takes its pid and app ID from the client's identity
 //! as the directory gave it, and its message is also copied into the
 //! kernel log, whose records from this process are not taken again.
+//!
+//! Once the root file system and the EFI system partition are
+//! published, the records also go to files on them (see `files`). On
+//! `TERM`, which the service manager sends to stop it, the service writes
+//! the last records to them and exits.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod files;
 mod kernel;
 mod log;
 mod reader;
@@ -25,7 +31,9 @@ use alloc::vec::Vec;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
-use mikros_rt::interfaces::mikros::service::{ProviderAsyncServer, ProviderRequest};
+use mikros_rt::interfaces::mikros::service::{
+    DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
+};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
@@ -36,6 +44,13 @@ const READER: &str = "mikros.log.Reader";
 /// The `id` of the `log_manage` boot handle among the `USER` startup
 /// handles.
 const LOG_MANAGE_ID: u32 = 2;
+/// The mask bit of `TERM`, signal 15.
+const TERM: u64 = 1 << (15 - 1);
+/// How often the service looks for a pending `TERM`, and for its files
+/// to be written out once it came.
+const POLL: i64 = 100_000_000;
+/// The longest the service waits for its files to be written out.
+const FINISH_LIMIT: i64 = 5_000_000_000;
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -67,6 +82,17 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         }
         None => mikros_rt::log!(Error, "log: there is no log_manage handle"),
     }
+    // `TERM` stays pending for `stop` instead of ending the process.
+    // SAFETY: the call takes no pointers but `old`, which is null.
+    unsafe { sys::signal_set_mask(0, TERM, core::ptr::null_mut()) };
+    spawner.spawn(stop(log.clone(), reactor.clone()));
+    let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
+    spawner.spawn(files::watch(
+        log.clone(),
+        directory,
+        reactor.clone(),
+        spawner.clone(),
+    ));
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
@@ -111,4 +137,21 @@ fn koid(handle: sys::Handle) -> u64 {
         return 0;
     }
     u64::from_le_bytes(record[..8].try_into().expect("8 bytes"))
+}
+
+/// Waits for `TERM`, then has the files written out, waiting at most
+/// `FINISH_LIMIT` for them, and exits.
+async fn stop(log: Rc<Log>, reactor: mikros_rt::exec::Reactor) {
+    let mut info = [0u8; 64];
+    // SAFETY: the pointer refers to room for the signal's information.
+    while unsafe { sys::signal_wait(TERM, 0, info.as_mut_ptr()) } != mikros_rt::OK {
+        let _ = reactor.sleep_until(log::now().saturating_add(POLL)).await;
+    }
+    log.stop();
+    let deadline = log::now().saturating_add(FINISH_LIMIT);
+    while log.open_files.get() > 0 && log::now() < deadline {
+        let _ = reactor.sleep_until(log::now().saturating_add(POLL)).await;
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::process_exit(0) };
 }

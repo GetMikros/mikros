@@ -41,6 +41,9 @@ pub async fn serve(log: Rc<Log>, end: ServerEnd<Reader>, reactor: Reactor, spawn
 async fn follow(log: Rc<Log>, server: Rc<ReaderAsyncServer>, mut from: u64) {
     loop {
         log.newer(from).await;
+        if log.stopping() && log.latest() <= from {
+            return;
+        }
         let records = log.after(from, BATCH);
         let Some(last) = records.last() else {
             // Records that came were dropped before they could be sent.

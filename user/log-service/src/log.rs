@@ -2,7 +2,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
 use mikros_logstore::{Entry, Store};
@@ -59,8 +59,14 @@ pub struct Log {
     store: RefCell<Store>,
     /// The kernel log that the records of clients are copied into.
     kernel: Option<sys::Handle>,
-    /// The readers that wait for records newer than they have.
+    /// The tasks that wait for records newer than they have, or for the
+    /// service to stop.
     waiting: RefCell<Vec<Waker>>,
+    /// Whether the service stops.
+    stopping: Cell<bool>,
+    /// The files that records go to and that have not been written out
+    /// for the last time.
+    pub open_files: Cell<u32>,
 }
 
 impl Log {
@@ -71,7 +77,43 @@ impl Log {
             store: RefCell::new(Store::new(MEMORY)),
             kernel,
             waiting: RefCell::new(Vec::new()),
+            stopping: Cell::new(false),
+            open_files: Cell::new(0),
         }
+    }
+
+    fn wake(&self) {
+        for waker in self.waiting.take() {
+            waker.wake();
+        }
+    }
+
+    /// Makes the tasks that wait for records go on, as the service stops.
+    pub fn stop(&self) {
+        self.stopping.set(true);
+        self.wake();
+    }
+
+    pub fn stopping(&self) -> bool {
+        self.stopping.get()
+    }
+
+    /// The lines of the records after sequence number `after`, as many as
+    /// fit in `max` bytes, but at least one if there is one, and the
+    /// sequence number of the last of them, or None when there are none.
+    pub fn lines_after(&self, after: u64, max: usize) -> Option<(Vec<u8>, u64)> {
+        let store = self.store.borrow();
+        let mut lines = Vec::new();
+        let mut last = None;
+        for entry in store.after(after, usize::MAX) {
+            let line = mikros_logstore::line(entry);
+            if last.is_some() && lines.len() + line.len() > max {
+                break;
+            }
+            lines.extend_from_slice(line.as_bytes());
+            last = Some(entry.sequence);
+        }
+        last.map(|last| (lines, last))
     }
 
     /// Adds a record that a client made, and copies its message into the
@@ -102,9 +144,7 @@ impl Log {
         self.store
             .borrow_mut()
             .push(timestamp, UTC_UNKNOWN, pid, app_id, severity, message);
-        for waker in self.waiting.take() {
-            waker.wake();
-        }
+        self.wake();
     }
 
     /// The sequence number of the latest record, 0 before the first.
@@ -117,10 +157,11 @@ impl Log {
         self.store.borrow().after(after, max).map(record).collect()
     }
 
-    /// Completes once there is a record after sequence number `after`.
+    /// Completes once there is a record after sequence number `after`,
+    /// or the service stops.
     pub async fn newer(&self, after: u64) {
         poll_fn(|cx| {
-            if self.latest() > after {
+            if self.latest() > after || self.stopping() {
                 Poll::Ready(())
             } else {
                 self.waiting.borrow_mut().push(cx.waker().clone());
