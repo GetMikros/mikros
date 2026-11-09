@@ -17,6 +17,7 @@ mod osl;
 mod pci;
 mod physical;
 mod ports;
+pub mod route;
 mod sync;
 mod threads;
 
@@ -105,7 +106,8 @@ fn check(status: Status) -> Result<(), Status> {
 }
 
 /// Starts ACPICA on the firmware's tables, enables ACPI mode and the
-/// system control interrupt, and initializes the namespace's objects: the
+/// system control interrupt, initializes the namespace's objects, and
+/// tells the firmware that interrupts are routed through I/O APICs: the
 /// status of the step that failed when one did. The ECAM ranges and the
 /// SCI are read from the tables before anything of ACPICA can need them.
 pub fn start() -> Result<(), Status> {
@@ -114,5 +116,6 @@ pub fn start() -> Result<(), Status> {
     pci::ranges();
     interrupts::read_sci()?;
     // SAFETY: as above.
-    check(unsafe { mikros_acpi_enable() })
+    check(unsafe { mikros_acpi_enable() })?;
+    route::use_apic()
 }
