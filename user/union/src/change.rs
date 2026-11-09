@@ -18,12 +18,12 @@ const INFO_BASIC: u32 = 1;
 /// The rights of a token: DUPLICATE, TRANSFER and INSPECT.
 const TOKEN_RIGHTS: u32 = 1 << 0 | 1 << 1 | 1 << 9;
 
-/// Checks a name that a change gives an entry: names of whiteouts may not
-/// be made through a view.
+/// Checks a name that a change gives an entry: it may hold neither `/`
+/// nor NUL, and names of whiteouts may not be made through a view.
 pub fn check_name(name: &str) -> Result<(), Error> {
     match name {
         "" | "." | ".." => Err(Error::Invalid),
-        n if n.contains('/') || n.starts_with(WHITEOUT) => Err(Error::Invalid),
+        n if n.contains(['/', '\0']) || n.starts_with(WHITEOUT) => Err(Error::Invalid),
         n if n.len() > 255 => Err(Error::NameTooLong),
         _ => Ok(()),
     }
