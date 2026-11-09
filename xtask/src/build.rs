@@ -514,6 +514,36 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", tmpfs_image.display());
+            // The log service test serves this image: the service manager,
+            // the broker, the log service and a probe that writes and reads
+            // the log, with their manifests.
+            let log_service = user_build("log-service", kind)?;
+            println!("built    {}", log_service.display());
+            let log_manifest = crate::workspace_root().join("user/log-service/log.yaml");
+            let log_probe = user_build("log-probe", kind)?;
+            println!("built    {}", log_probe.display());
+            let log_probe_manifest =
+                crate::workspace_root().join("user/tests/log-probe/log-probe.yaml");
+            let log_image = boot_image(
+                kind,
+                "log.img",
+                &[
+                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/permissions-broker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/log-service", log_service.as_path()),
+                    ("usr/lib/services/log.yaml", log_manifest.as_path()),
+                    ("usr/bin/log-probe", log_probe.as_path()),
+                    (
+                        "usr/lib/services/log-probe.yaml",
+                        log_probe_manifest.as_path(),
+                    ),
+                ],
+            )?;
+            println!("built    {}", log_image.display());
             // The namespace test serves this image, with root=bootfs: the
             // service manager, the broker, the temporary file system and a
             // probe of its namespace, with their manifests, files in /etc,
@@ -758,6 +788,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/broker.img", broker_image.as_path()),
                 ("tests/services.img", services_image.as_path()),
                 ("tests/tmpfs.img", tmpfs_image.as_path()),
+                ("tests/log.img", log_image.as_path()),
                 ("tests/namespaces.img", namespaces_image.as_path()),
                 ("tests/devices.img", devices_image.as_path()),
                 ("tests/failing.img", failing_image.as_path()),

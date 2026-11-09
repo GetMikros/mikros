@@ -1,0 +1,4 @@
+name: log-probe
+binary: /usr/bin/log-probe
+start: boot
+permissions: [logs.read]

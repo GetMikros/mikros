@@ -9075,6 +9075,80 @@ mod manager {
         ensure("passing every check of the probes", outcome == Some(true))
     }
 
+    /// From a boot image with the service manager, the permission broker,
+    /// the log service and a probe, with their manifests, the service
+    /// manager starts the log service with the log, and the probe, which
+    /// holds `logs.read`. The probe writes records and reads them back
+    /// with the pid and app ID of its identity, numbered from 1, among the
+    /// kernel log's records, and gets a later one as an event after
+    /// `Follow`. It exits with 0 once every check passed, as the service
+    /// manager logs, and the log service copies the probe's first record
+    /// into the kernel log.
+    pub fn log_service_collects_records(s: &Startup) -> Result {
+        const PASSED: [&[u8]; 2] = [
+            b"service log-probe exited with code 0",
+            b"log-probe: the first record",
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service log-probe exited",
+            b"service log-probe ended",
+            b"service log exited",
+            b"service log ended",
+        ];
+        let (m, init, reader) = serving(s, b"tests/log.img")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let log = StartupHandle {
+            role: HandleRole::User,
+            id: 2,
+            handle: copy(s.log, SAME_RIGHTS)?,
+        };
+        let root = StartupHandle {
+            role: HandleRole::User,
+            id: 1,
+            handle: copy(s.root_resource, SAME_RIGHTS)?,
+        };
+        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        let mut passed = [false; 2];
+        let outcome = loop {
+            if passed.iter().all(|&p| p) {
+                break Some(true);
+            }
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if let Some(at) = PASSED.iter().position(|p| super::contains(message, p)) {
+                passed[at] = true;
+                continue;
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop(m);
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("passing every check of the probe", outcome == Some(true))
+    }
+
     /// With `root=bootfs` on the command line, from a boot image with the
     /// service manager, the permission broker, the temporary file system,
     /// a probe of namespaces with their manifests, files in `/etc`, `/usr`
@@ -10038,6 +10112,7 @@ mod bootfs {
                         "devices.img",
                         "failing.img",
                         "launcher.img",
+                        "log.img",
                         "managed",
                         "namespaces.img",
                         "pci.img",
@@ -10226,7 +10301,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 142] = [
+const TESTS: [(&str, Test); 143] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -10296,6 +10371,10 @@ const TESTS: [(&str, Test); 142] = [
     (
         "tmpfs_serves_its_clients",
         manager::tmpfs_serves_its_clients,
+    ),
+    (
+        "log_service_collects_records",
+        manager::log_service_collects_records,
     ),
     (
         "process_manager_builds_namespaces_from_the_boot_image",
