@@ -9576,7 +9576,14 @@ mod manager {
             b"driver test-child for device 3 did not start",
             b"driver test-child for device 3 terminated",
         ];
-        let logged = device_manager_logs(s, b"tests/devices.img", false, EXPECTED, FAILED)?;
+        let logged = device_manager_logs(
+            s,
+            b"tests/devices.img",
+            false,
+            super::PROBE_SECONDS,
+            EXPECTED,
+            FAILED,
+        )?;
         ensure(
             "adding the host bridge and starting the normal driver",
             logged,
@@ -9635,7 +9642,14 @@ mod manager {
             b"ResetChild",
             b"restarting driver test-decline",
         ];
-        let logged = device_manager_logs(s, b"tests/failing.img", true, EXPECTED, FAILED)?;
+        let logged = device_manager_logs(
+            s,
+            b"tests/failing.img",
+            true,
+            super::PROBE_SECONDS,
+            EXPECTED,
+            FAILED,
+        )?;
         ensure(
             "failing the declined device, and the other after five restarts",
             logged,
@@ -9687,7 +9701,14 @@ mod manager {
             b"declined",
             b"did not start",
         ];
-        let logged = device_manager_logs(s, b"tests/restart.img", false, EXPECTED, FAILED)?;
+        let logged = device_manager_logs(
+            s,
+            b"tests/restart.img",
+            false,
+            super::PROBE_SECONDS,
+            EXPECTED,
+            FAILED,
+        )?;
         ensure("keeping the child across its parent's restart", logged)
     }
 
@@ -9748,6 +9769,10 @@ mod manager {
     /// had not completed again, so that the file reads back whole. The
     /// device manager says all of it in the log.
     pub fn device_manager_starts_the_pci_bus_driver(s: &Startup) -> Result {
+        // The bus, its storage, file systems and services take about two
+        // minutes when the processor is emulated, more than other device
+        // tests are given.
+        const PCI_SECONDS: i64 = 300;
         const EXPECTED: &[(&[u8], usize)] = &[
             (
                 b"device-manager: bound driver pci-bus to device 1, pci-host-0, as platform:pci-host-ecam",
@@ -9884,7 +9909,8 @@ mod manager {
             // are not volumes.
             b"published device.filesystem volume-",
         ];
-        let logged = device_manager_logs(s, b"tests/pci.img", false, EXPECTED, FAILED)?;
+        let logged =
+            device_manager_logs(s, b"tests/pci.img", false, PCI_SECONDS, EXPECTED, FAILED)?;
         ensure("adding the PCI functions and starting their driver", logged)
     }
 
@@ -9894,15 +9920,16 @@ mod manager {
     /// the log already holds. When `framebuffer`
     /// is true, it also gets a memory object in place of a framebuffer,
     /// and the platform information has its framebuffer flag set. Then
-    /// reads the log until each line of `expected` has appeared as many
-    /// times as it gives, or a line has appeared with a part of
-    /// `failed`, a failure to start the broker or the device manager, or
-    /// the device manager's end. Returns whether each line appeared
-    /// exactly as many times.
+    /// reads the log, for at most `seconds` from the service manager's
+    /// start, until each line of `expected` has appeared as many times as
+    /// it gives, or a line has appeared with a part of `failed`, a failure
+    /// to start the broker or the device manager, or the device manager's
+    /// end. Returns whether each line appeared exactly as many times.
     fn device_manager_logs(
         s: &Startup,
         image: &[u8],
         framebuffer: bool,
+        seconds: i64,
         expected: &[(&[u8], usize)],
         failed: &[&[u8]],
     ) -> Result<bool> {
@@ -9960,7 +9987,7 @@ mod manager {
                 status: 0,
             });
         };
-        let deadline = super::within(super::PROBE_SECONDS);
+        let deadline = super::within(seconds);
         let mut seen = alloc::vec![0; expected.len()];
         let outcome = loop {
             if seen
