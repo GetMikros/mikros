@@ -340,7 +340,7 @@ pub fn run(
     let log = dir.join("serial.log");
     let socket = scenario::monitor_socket(dir);
     let extra = more_sticks(dir);
-    let mut qemu = scenario::start_with(machine, dir, false, &write_sticks, &extra)?;
+    let mut qemu = scenario::start_with(machine, dir, false, &write_sticks, &extra, false)?;
     let deadline = Instant::now() + timeout;
     let ended = (|| -> Result<()> {
         scenario::wait_for_line(&log, READY, &mut qemu, deadline)?;

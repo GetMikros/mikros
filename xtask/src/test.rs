@@ -162,10 +162,11 @@ pub(crate) fn verdict(code: Option<i32>, serial: &str) -> Result<(), String> {
 
 /// The scratch disks of the test machine, in the directory of its serial
 /// log: one behind an NVMe controller, one on port 2 of the q35
-/// machine's AHCI controller, and one USB mass storage device on the
-/// xHCI controller, each with the GUIDs of its table and of its one
+/// machine's AHCI controller, one USB mass storage device on the xHCI
+/// controller, and, in the durability run only, one behind a virtio-blk
+/// controller, each with the GUIDs of its table and of its one
 /// partition.
-const SCRATCH_DISKS: [(&str, &str, &str); 3] = [
+const SCRATCH_DISKS: [(&str, &str, &str); 4] = [
     (
         "nvme.img",
         "4e564d65-0000-4000-8000-0000000000d1",
@@ -181,15 +182,29 @@ const SCRATCH_DISKS: [(&str, &str, &str); 3] = [
         "55534221-0000-4000-8000-0000000000d3",
         "55534221-0000-4000-8000-000000000003",
     ),
+    (
+        "virtio.img",
+        "56495254-0000-4000-8000-0000000000d4",
+        "56495254-0000-4000-8000-000000000004",
+    ),
 ];
 /// The size of a scratch disk, in sectors.
 const SCRATCH_SECTORS: u64 = 2048;
 /// The type of a scratch disk's partition: Linux file system data.
 const SCRATCH_TYPE: &str = "0fc63daf-8483-4772-8e79-3d69d8477de4";
 
-/// Creates the scratch disks next to `log`. Each is a GPT disk of 1 MiB
-/// whose one partition, named `scratch`, spans every usable block, LBA
-/// 34 to 2014, and holds zeros.
+/// The first block of a scratch disk's partition.
+pub(crate) const SCRATCH_FIRST_LBA: u64 = 34;
+
+/// The file, beside the scratch disk `name`, of QEMU's log of the writes
+/// and flushes that reach it when the disk is logged.
+pub(crate) fn writes_log(name: &str) -> String {
+    format!("{}.writes", name.trim_end_matches(".img"))
+}
+
+/// Creates the scratch disks next to `log`, and an empty log of the
+/// writes of each. Each is a GPT disk of 1 MiB whose one partition, named
+/// `scratch`, spans every usable block, LBA 34 to 2014, and holds zeros.
 pub fn scratch_disks(log: &Path) -> Result<()> {
     use crate::image::gpt;
     let dir = log.parent().unwrap_or(Path::new("."));
@@ -199,7 +214,7 @@ pub fn scratch_disks(log: &Path) -> Result<()> {
             type_guid: uuid::Uuid::parse_str(SCRATCH_TYPE)?,
             guid: uuid::Uuid::parse_str(partition_guid)?,
             name: "scratch",
-            first_lba: 34,
+            first_lba: SCRATCH_FIRST_LBA,
             last_lba: SCRATCH_SECTORS - 34,
         };
         let disk_guid = uuid::Uuid::parse_str(disk_guid)?;
@@ -207,6 +222,8 @@ pub fn scratch_disks(log: &Path) -> Result<()> {
         let path = dir.join(name);
         fs::write(&path, image.into_inner())
             .with_context(|| format!("writing {}", path.display()))?;
+        let writes = dir.join(writes_log(name));
+        fs::write(&writes, []).with_context(|| format!("writing {}", writes.display()))?;
     }
     Ok(())
 }
@@ -219,45 +236,62 @@ pub fn scratch_disks(log: &Path) -> Result<()> {
 /// hub on its port 2 with a USB keyboard on the hub's port 1, and no
 /// reboot. The devices follow
 /// the IOMMU, which must come first.
-pub fn test_args(mut args: Vec<String>, log: &Path) -> Vec<String> {
+///
+/// With `logged`, as the durability run has it, QEMU logs every write and
+/// flush that reaches a scratch disk in the disk's `writes_log`, with its
+/// `blklogwrites` block driver, and the machine has the virtio-blk scratch
+/// disk too, after the other devices.
+pub fn test_args(mut args: Vec<String>, log: &Path, logged: bool) -> Vec<String> {
     if let Some(i) = args.iter().position(|a| a == "-serial") {
         args[i + 1] = format!("file:{}", log.display());
     }
     let dir = log.parent().unwrap_or(Path::new("."));
-    let drive = |id: &str, name: &str| {
+    let drive = |id: &str, name: &str| -> Vec<String> {
         let path = dir.join(name);
-        format!("if=none,id={id},format=raw,file={}", path.display())
-    };
-    args.extend(
-        [
-            "-display",
-            "none",
-            "-device",
-            "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            "-device",
-            "edu,dma_mask=0xffffffff",
-            "-drive",
-            &drive("scratch-nvme", SCRATCH_DISKS[0].0),
-            "-device",
-            "nvme,drive=scratch-nvme,serial=mikros",
-            "-drive",
-            &drive("scratch-ahci", SCRATCH_DISKS[1].0),
-            "-device",
-            "ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros",
-            "-device",
-            "qemu-xhci,id=usb,addr=0x1d",
-            "-drive",
-            &drive("scratch-usb", SCRATCH_DISKS[2].0),
-            "-device",
-            "usb-storage,id=stick,bus=usb.0,port=1,drive=scratch-usb,serial=mikros",
-            "-device",
-            "usb-hub,bus=usb.0,port=2",
-            "-device",
-            "usb-kbd,bus=usb.0,port=2.1",
-            "-no-reboot",
+        if !logged {
+            let drive = format!("if=none,id={id},format=raw,file={}", path.display());
+            return vec!["-drive".into(), drive];
+        }
+        let writes = dir.join(writes_log(name));
+        vec![
+            "-blockdev".into(),
+            format!(
+                "driver=file,node-name={id}-file,filename={}",
+                path.display()
+            ),
+            "-blockdev".into(),
+            format!(
+                "driver=file,node-name={id}-log,filename={}",
+                writes.display()
+            ),
+            "-blockdev".into(),
+            format!(
+                "driver=blklogwrites,node-name={id},file={id}-file,log={id}-log,log-sector-size=512"
+            ),
         ]
-        .map(String::from),
-    );
+    };
+    let device = |device: &str| ["-device".to_owned(), device.to_owned()];
+    args.extend(["-display", "none"].map(String::from));
+    args.extend(device("isa-debug-exit,iobase=0xf4,iosize=0x04"));
+    args.extend(device("edu,dma_mask=0xffffffff"));
+    args.extend(drive("scratch-nvme", SCRATCH_DISKS[0].0));
+    args.extend(device("nvme,drive=scratch-nvme,serial=mikros"));
+    args.extend(drive("scratch-ahci", SCRATCH_DISKS[1].0));
+    args.extend(device("ide-hd,drive=scratch-ahci,bus=ide.2,serial=mikros"));
+    args.extend(device("qemu-xhci,id=usb,addr=0x1d"));
+    args.extend(drive("scratch-usb", SCRATCH_DISKS[2].0));
+    args.extend(device(
+        "usb-storage,id=stick,bus=usb.0,port=1,drive=scratch-usb,serial=mikros",
+    ));
+    args.extend(device("usb-hub,bus=usb.0,port=2"));
+    args.extend(device("usb-kbd,bus=usb.0,port=2.1"));
+    if logged {
+        args.extend(drive("scratch-virtio", SCRATCH_DISKS[3].0));
+        args.extend(device(
+            "virtio-blk-pci,drive=scratch-virtio,disable-legacy=on,serial=mikros",
+        ));
+    }
+    args.push("-no-reboot".into());
     args
 }
 
@@ -303,6 +337,7 @@ fn boot(
     let qemu_args = test_args(
         qemu::args(&args.machine, processor, &firmware, &vars, disk),
         log,
+        false,
     );
     let mut child = Command::new(qemu::QEMU)
         .args(qemu_args)
@@ -636,7 +671,7 @@ ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
     #[test]
     fn writes_serial_output_to_the_log() {
         let args = vec!["-m".into(), "1G".into(), "-serial".into(), "stdio".into()];
-        let args = test_args(args, Path::new("/t/serial.log"));
+        let args = test_args(args, Path::new("/t/serial.log"), false);
         assert_eq!(args[3], "file:/t/serial.log");
         assert!(args.contains(&"isa-debug-exit,iobase=0xf4,iosize=0x04".to_string()));
         assert!(args.contains(&"edu,dma_mask=0xffffffff".to_string()));
@@ -652,5 +687,31 @@ ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
         assert!(args.contains(&"usb-hub,bus=usb.0,port=2".to_string()));
         assert!(args.contains(&"usb-kbd,bus=usb.0,port=2.1".to_string()));
         assert!(args.contains(&"-no-reboot".to_string()));
+        assert!(!args.iter().any(|a| a.contains("scratch-virtio")));
+    }
+
+    #[test]
+    fn logs_the_writes_of_the_scratch_disks_when_logged() {
+        let args = vec!["-serial".into(), "stdio".into()];
+        let args = test_args(args, Path::new("/t/serial.log"), true);
+        assert!(!args.contains(&"-drive".to_string()));
+        for (id, name) in [
+            ("scratch-nvme", "nvme"),
+            ("scratch-ahci", "ahci"),
+            ("scratch-usb", "usb"),
+            ("scratch-virtio", "virtio"),
+        ] {
+            let file = format!("driver=file,node-name={id}-file,filename=/t/{name}.img");
+            let log = format!("driver=file,node-name={id}-log,filename=/t/{name}.writes");
+            let logged = format!(
+                "driver=blklogwrites,node-name={id},file={id}-file,log={id}-log,log-sector-size=512"
+            );
+            for arg in [file, log, logged] {
+                assert!(args.contains(&arg), "{arg}");
+            }
+        }
+        let virtio = "virtio-blk-pci,drive=scratch-virtio,disable-legacy=on,serial=mikros";
+        assert!(args.contains(&virtio.to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("-no-reboot"));
     }
 }

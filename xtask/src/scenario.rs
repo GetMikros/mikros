@@ -257,18 +257,20 @@ pub fn monitor_socket(dir: &Path) -> PathBuf {
 /// device, the one the firmware gives a linear framebuffer for. A reset
 /// ends QEMU unless `reboot`.
 pub fn start(machine: &MachineArgs, dir: &Path, reboot: bool) -> Result<Child> {
-    start_with(machine, dir, reboot, &|_| Ok(()), &[])
+    start_with(machine, dir, reboot, &|_| Ok(()), &[], false)
 }
 
 /// As `start`, calling `prepare` with `dir` after the scratch disks are
 /// written and before QEMU starts, so that it can replace them, and with
-/// `extra` added to QEMU's arguments.
+/// `extra` added to QEMU's arguments. With `logged`, QEMU logs the writes
+/// of the scratch disks, as `test::test_args` says.
 pub fn start_with(
     machine: &MachineArgs,
     dir: &Path,
     reboot: bool,
     prepare: &dyn Fn(&Path) -> Result<()>,
     extra: &[String],
+    logged: bool,
 ) -> Result<Child> {
     let disk = dir.join("disk.img");
     for name in ["serial.log", "screen.ppm", "console.ppm"] {
@@ -292,6 +294,7 @@ pub fn start_with(
             &disk,
         ),
         &dir.join("serial.log"),
+        logged,
     );
     if reboot {
         args.retain(|a| a != "-no-reboot");
