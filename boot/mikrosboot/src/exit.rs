@@ -3,12 +3,13 @@
 /// The most times exiting boot services is tried.
 pub const EXIT_ATTEMPTS: usize = 8;
 
-/// The final firmware memory map, as the number of bytes written and the
-/// descriptor size.
+/// The final firmware memory map, as the number of bytes written, the
+/// descriptor size and the descriptor version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FinalMap {
     pub size: usize,
     pub descriptor_size: usize,
+    pub descriptor_version: u32,
 }
 
 /// The two boot services used to exit boot services.
@@ -92,6 +93,7 @@ mod tests {
             let map = FinalMap {
                 size: 48 * (n + 1),
                 descriptor_size: 48,
+                descriptor_version: 1,
             };
             Ok((map, 100 + n))
         }
@@ -116,7 +118,8 @@ mod tests {
             exit(&mut fw),
             Ok(FinalMap {
                 size: 48,
-                descriptor_size: 48
+                descriptor_size: 48,
+                descriptor_version: 1,
             })
         );
         assert_eq!(fw.calls, [Call::Map, Call::Exit(100)]);

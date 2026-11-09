@@ -14,11 +14,12 @@ use mikrosboot::handoff::{CMDLINE_OFFSET, INFO_PAGES, Prepared};
 use mikrosboot::load::{self, Layout, PHYS_ALIGN};
 use mikrosboot::memmap::{Map, Region};
 use mikrosboot::paging::{self, BOOT_STACK_SIZE, Frames, Placement};
-use mikrosboot::placement;
+use mikrosboot::{placement, runtime};
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::mem::memory_map::MemoryMap;
 use uefi::{Status, table};
 use uefi_raw::table::boot::{BootServices, MemoryDescriptor};
+use uefi_raw::table::system::SystemTable;
 
 /// Room for firmware memory map descriptors beyond those of the map read
 /// while allocating.
@@ -132,7 +133,7 @@ fn current_runs(step: &'static str) -> Result<(alloc::vec::Vec<(u64, u64)>, usiz
     let mut entries = Map::new(&mut buf);
     for d in map.entries() {
         entries
-            .push_firmware(d.phys_start, d.page_count, d.ty.0)
+            .push_firmware(d.phys_start, d.page_count, d.ty.0, d.att.bits())
             .map_err(|e| Failure::new(step, e))?;
     }
     entries.sort().map_err(|e| Failure::new(step, e))?;
@@ -255,6 +256,7 @@ fn prepare(g: Gathered) -> Result<(Prepared, Words), Failure> {
         rng_seed: g.rng_seed,
         boot_time: g.boot_time,
         direct_map_base: DIRECT_MAP_BASE,
+        runtime_services_mapped: false,
     };
     let mut left = Words {
         words: [0; placement::WORDS],
@@ -297,6 +299,7 @@ impl exit::BootServices for Exit<'_> {
         let map = FinalMap {
             size,
             descriptor_size,
+            descriptor_version: version,
         };
         Ok((map, key))
     }
@@ -345,6 +348,36 @@ impl Frames for Pool {
     }
 }
 
+/// Moves the firmware's runtime services into the runtime window with
+/// `SetVirtualAddressMap`, giving whether that succeeded. Runs once, after
+/// boot services have ended and the kernel memory map has been built from
+/// the final firmware map, which this rewrites.
+fn move_runtime_services(p: &Prepared, fw: &FinalMap) -> bool {
+    if p.system_table == 0 {
+        return false;
+    }
+    // SAFETY: the firmware wrote `size` bytes of descriptors to the
+    // buffer, which is ours, and nothing reads them after this.
+    let map = unsafe { core::slice::from_raw_parts_mut(p.firmware_map_phys as *mut u8, fw.size) };
+    let Some(count) = runtime::virtual_map(map, fw.descriptor_size) else {
+        return false;
+    };
+    // SAFETY: the system table and the runtime services table stay at
+    // their physical addresses, which the firmware's identity map covers,
+    // until this call; the map holds `count` descriptors of the firmware's
+    // size and version.
+    let status = unsafe {
+        let runtime_services = &*(*(p.system_table as *const SystemTable)).runtime_services;
+        (runtime_services.set_virtual_address_map)(
+            count * fw.descriptor_size,
+            fw.descriptor_size,
+            fw.descriptor_version,
+            map.as_ptr().cast(),
+        )
+    };
+    status == Status::SUCCESS
+}
+
 /// Builds the kernel memory map and page tables, fills `BootInfo` and
 /// enters the kernel. Runs after boot services have ended.
 fn enter(p: &mut Prepared, fw: &FinalMap, random: &Words) -> Option<core::convert::Infallible> {
@@ -357,9 +390,10 @@ fn enter(p: &mut Prepared, fw: &FinalMap, random: &Words) -> Option<core::conver
         let at = p.firmware_map_phys as usize + i * fw.descriptor_size;
         // SAFETY: the firmware wrote `size` bytes of descriptors here.
         let d = unsafe { (at as *const MemoryDescriptor).read_unaligned() };
-        (d.phys_start, d.page_count, d.ty.0)
+        (d.phys_start, d.page_count, d.ty.0, d.att.bits())
     });
     p.memory_map(&mut map, firmware).ok()?;
+    p.runtime_services_mapped = move_runtime_services(p, fw);
     // With random words, the direct map goes where it still covers the
     // final map.
     let mut words = random.words[..random.len].iter().copied();

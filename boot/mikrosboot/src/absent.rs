@@ -26,11 +26,6 @@ fn never_uses_multiprocessor_services() {
 }
 
 #[test]
-fn never_sets_a_virtual_address_map() {
-    assert_unused(&["SetVirtualAddressMap", "set_virtual_address_map"]);
-}
-
-#[test]
 fn never_enables_interrupts() {
     assert_unused(&["\"sti", "; sti", "enable_interrupts"]);
 }

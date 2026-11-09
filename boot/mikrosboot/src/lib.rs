@@ -18,6 +18,7 @@ pub mod memmap;
 pub mod paging;
 pub mod placement;
 pub mod report;
+pub mod runtime;
 
 #[cfg(test)]
 mod absent;

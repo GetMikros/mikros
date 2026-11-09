@@ -9,7 +9,7 @@
 pub const MAGIC: [u8; 8] = *b"MIKROSBI";
 /// The protocol version this crate describes.
 pub const VERSION_MAJOR: u16 = 1;
-pub const VERSION_MINOR: u16 = 1;
+pub const VERSION_MINOR: u16 = 2;
 
 /// The name and type of the ELF note that gives the protocol version a
 /// kernel was built for. Its descriptor is a `u16` major version followed

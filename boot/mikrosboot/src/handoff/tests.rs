@@ -48,17 +48,18 @@ fn prepared() -> Prepared {
         rng_seed: None,
         boot_time: None,
         direct_map_base: DIRECT_MAP_BASE,
+        runtime_services_mapped: false,
     }
 }
 
 /// A firmware map in which the bootloader's allocations are loader data.
-fn firmware() -> [(u64, u64, u32); 5] {
+fn firmware() -> [(u64, u64, u32, u64); 5] {
     [
-        (0, 8, CONVENTIONAL),
-        (0x8000, 1, LOADER_DATA),
-        (0x9000, 0x97, CONVENTIONAL),
-        (0x10_0000, 0x100, CONVENTIONAL),
-        (0x20_0000, 0x200, LOADER_DATA),
+        (0, 8, CONVENTIONAL, 0xF),
+        (0x8000, 1, LOADER_DATA, 0xF),
+        (0x9000, 0x97, CONVENTIONAL, 0xF),
+        (0x10_0000, 0x100, CONVENTIONAL, 0xF),
+        (0x20_0000, 0x200, LOADER_DATA, 0xF),
     ]
 }
 
@@ -130,12 +131,40 @@ fn fits_boot_info_and_the_command_line_in_their_pages() {
 }
 
 #[test]
+fn reports_runtime_ranges_with_runtime_kinds() {
+    use crate::memmap::EFI_MEMORY_RUNTIME;
+    let p = prepared();
+    let mut buf = vec![MemoryMapEntry::default(); p.entries_capacity];
+    let mut map = Map::new(&mut buf);
+    let mut firmware = firmware().to_vec();
+    let runtime = EFI_MEMORY_RUNTIME | 0xF;
+    firmware.push((0x7e0_0000, 4, 5, runtime));
+    firmware.push((0x7e0_4000, 4, 6, runtime));
+    firmware.push((0x7e0_8000, 1, 10, runtime));
+    firmware.push((0xffc0_0000, 0x400, 11, EFI_MEMORY_RUNTIME | 1));
+    p.memory_map(&mut map, firmware).unwrap();
+    let entries = map.entries();
+    assert_eq!(
+        kind_at(entries, 0x7e0_0000),
+        Some(Kind::FirmwareRuntimeCode)
+    );
+    assert_eq!(kind_at(entries, 0x7e0_4000), Some(Kind::FirmwareRuntime));
+    assert_eq!(kind_at(entries, 0x7e0_8000), Some(Kind::FirmwareRuntime));
+    assert_eq!(
+        kind_at(entries, 0xffc0_0000),
+        Some(Kind::FirmwareRuntimeMmio)
+    );
+    assert!(direct_mapped(entries, 0x7e0_0000, 0x7e0_9000));
+    assert!(!direct_mapped(entries, 0xffc0_0000, 0xffc0_1000));
+}
+
+#[test]
 fn refuses_a_map_the_direct_map_cannot_cover() {
     let p = prepared();
     let mut buf = vec![MemoryMapEntry::default(); p.entries_capacity];
     let mut map = Map::new(&mut buf);
     let mut firmware = firmware().to_vec();
-    firmware.push((DIRECT_MAP_LIMIT - P, 2, LOADER_DATA));
+    firmware.push((DIRECT_MAP_LIMIT - P, 2, LOADER_DATA, 0xF));
     assert_eq!(
         p.memory_map(&mut map, firmware),
         Err(memmap::Error::AboveDirectMapLimit(DIRECT_MAP_LIMIT + P))
@@ -157,6 +186,15 @@ fn fills_boot_info_with_physical_addresses() {
     assert_eq!(info.arch_data0, 0x8000);
     assert_eq!(info.framebuffer.phys_base, 0xfd00_0000);
     assert_eq!(info.flags, flags::FRAMEBUFFER_PRESENT);
+    assert_eq!((info.version_major, info.version_minor), (1, 2));
+    let mapped = Prepared {
+        runtime_services_mapped: true,
+        ..prepared()
+    };
+    assert_eq!(
+        mapped.boot_info(&entries).flags,
+        flags::FRAMEBUFFER_PRESENT | flags::RUNTIME_SERVICES_MAPPED
+    );
     assert_eq!(
         (info.kernel_phys_base, info.kernel_size),
         (0x20_0000, 16 * P)

@@ -19,18 +19,31 @@ mod uefi_type {
     pub const MMIO_PORT_SPACE: u32 = 12;
 }
 
-/// The kind of a range of the given UEFI memory type.
-pub fn firmware_kind(uefi_type: u32) -> Kind {
+/// The UEFI memory attribute of ranges that the runtime services use.
+pub const EFI_MEMORY_RUNTIME: u64 = 1 << 63;
+
+/// The kind of a range of the given UEFI memory type and attributes. A
+/// range with `EFI_MEMORY_RUNTIME` always gets a firmware runtime kind:
+/// `FirmwareRuntime` when its type would give another kind.
+pub fn firmware_kind(uefi_type: u32, attribute: u64) -> Kind {
     use uefi_type::*;
-    match uefi_type {
+    let runtime = attribute & EFI_MEMORY_RUNTIME != 0;
+    let kind = match uefi_type {
         CONVENTIONAL | BOOT_SERVICES_CODE | BOOT_SERVICES_DATA => Kind::Usable,
         LOADER_CODE | LOADER_DATA => Kind::BootloaderReclaimable,
-        RUNTIME_SERVICES_CODE | RUNTIME_SERVICES_DATA => Kind::FirmwareRuntime,
+        RUNTIME_SERVICES_CODE => Kind::FirmwareRuntimeCode,
+        RUNTIME_SERVICES_DATA => Kind::FirmwareRuntime,
         ACPI_RECLAIM => Kind::AcpiReclaimable,
         ACPI_NVS => Kind::AcpiNvs,
+        MMIO | MMIO_PORT_SPACE if runtime => Kind::FirmwareRuntimeMmio,
         MMIO | MMIO_PORT_SPACE => Kind::Mmio,
         UNUSABLE => Kind::Bad,
         _ => Kind::Reserved,
+    };
+    if runtime && !kind.is_firmware_runtime() {
+        Kind::FirmwareRuntime
+    } else {
+        kind
     }
 }
 
@@ -131,8 +144,15 @@ impl<'a> Map<'a> {
         self.len -= 1;
     }
 
-    /// Adds a range from the firmware memory map. Empty ranges are skipped.
-    pub fn push_firmware(&mut self, start: u64, pages: u64, uefi_type: u32) -> Result<(), Error> {
+    /// Adds a range from the firmware memory map, with its UEFI type and
+    /// attributes. Empty ranges are skipped.
+    pub fn push_firmware(
+        &mut self,
+        start: u64,
+        pages: u64,
+        uefi_type: u32,
+        attribute: u64,
+    ) -> Result<(), Error> {
         if pages == 0 {
             return Ok(());
         }
@@ -142,7 +162,7 @@ impl<'a> Map<'a> {
             Region {
                 start,
                 pages,
-                kind: firmware_kind(uefi_type),
+                kind: firmware_kind(uefi_type, attribute),
             },
         )
     }

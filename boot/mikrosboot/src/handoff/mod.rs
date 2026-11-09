@@ -8,7 +8,7 @@ use crate::paging::BOOT_STACK_SIZE;
 use boot_protocol::x86_64::DIRECT_MAP_LIMIT;
 use boot_protocol::{
     BOOT_INFO_SIZE, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, PAGE_SIZE, VERSION_MAJOR,
-    VERSION_MINOR, arch,
+    VERSION_MINOR, arch, flags,
 };
 
 /// The pages allocated for `BootInfo` and the command line.
@@ -45,6 +45,9 @@ pub struct Prepared {
     pub boot_time: Option<u64>,
     /// Where the direct map starts.
     pub direct_map_base: u64,
+    /// Whether the firmware's runtime services were moved into the
+    /// runtime window.
+    pub runtime_services_mapped: bool,
 }
 
 impl Prepared {
@@ -83,15 +86,15 @@ impl Prepared {
     }
 
     /// Builds the kernel memory map in `map` from the firmware's ranges, as
-    /// start, page count and UEFI type, and `overlays`, and checks that the
-    /// direct map can cover it.
+    /// start, page count, UEFI type and attributes, and `overlays`, and
+    /// checks that the direct map can cover it.
     pub fn memory_map(
         &self,
         map: &mut Map,
-        firmware: impl IntoIterator<Item = (u64, u64, u32)>,
+        firmware: impl IntoIterator<Item = (u64, u64, u32, u64)>,
     ) -> Result<(), memmap::Error> {
-        for (start, pages, uefi_type) in firmware {
-            map.push_firmware(start, pages, uefi_type)?;
+        for (start, pages, uefi_type, attribute) in firmware {
+            map.push_firmware(start, pages, uefi_type, attribute)?;
         }
         map.sort()?;
         for region in self.overlays().into_iter().flatten() {
@@ -105,13 +108,18 @@ impl Prepared {
     /// absent is zero.
     pub fn boot_info(&self, entries: &[MemoryMapEntry]) -> BootInfo {
         let optional = crate::info::optional(self.framebuffer, self.rng_seed, self.boot_time);
+        let runtime = if self.runtime_services_mapped {
+            flags::RUNTIME_SERVICES_MAPPED
+        } else {
+            0
+        };
         BootInfo {
             magic: MAGIC,
             version_major: VERSION_MAJOR,
             version_minor: VERSION_MINOR,
             size: BOOT_INFO_SIZE,
             arch: arch::X86_64,
-            flags: optional.flags,
+            flags: optional.flags | runtime,
             memory_map_phys: entries.as_ptr() as u64,
             memory_map_count: entries.len() as u64,
             memory_map_entry_size: size_of::<MemoryMapEntry>() as u64,
