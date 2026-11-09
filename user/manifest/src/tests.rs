@@ -362,6 +362,16 @@ fn refuses_driver_manifests_that_break_the_rules() {
         kind_of(&format!("{base}match: [Pci:1]\n")),
         ErrorKind::BadHardwareId
     );
+    assert_eq!(
+        kind_of(&format!("{base}permissions: [dma.map, logs.add_source]\n")),
+        ErrorKind::ReservedPermission
+    );
+    let e = parse_driver(
+        dir,
+        format!("{base}permissions: [logs.add_source]\n").as_bytes(),
+    )
+    .unwrap_err();
+    assert_eq!((e.line, e.column), (4, 15));
     assert_eq!(kind_of("binary: /usr/a\n"), ErrorKind::Missing("name"));
     assert_eq!(kind_of("name: a\n"), ErrorKind::Missing("binary"));
     assert_eq!(

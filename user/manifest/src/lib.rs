@@ -155,6 +155,9 @@ pub enum ErrorKind {
     BadNeed,
     /// `match` holds a string that is not a hardware ID.
     BadHardwareId,
+    /// `permissions` lists a permission that no manifest of its kind may
+    /// list.
+    ReservedPermission,
 }
 
 impl From<mikros_yaml::Error> for Error {

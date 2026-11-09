@@ -22,6 +22,8 @@ const KEYS: &[&str] = &[
 ];
 /// The keys of service manifests that a driver manifest must not have.
 const SERVICE_KEYS: [&str; 5] = ["provides", "after", "start", "restart", "boot_handles"];
+/// The permissions that no driver manifest may list.
+const DRIVER_RESERVED_PERMISSIONS: [&str; 1] = ["logs.add_source"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Driver {
@@ -154,6 +156,11 @@ pub fn parse_driver(directory: &str, bytes: &[u8]) -> Result<DriverManifest, Err
         None => PRIORITY_DEFAULT,
         Some(node) => node.integer(i64::MIN, i64::MAX)?,
     };
+    for item in list(map, "permissions")? {
+        if DRIVER_RESERVED_PERMISSIONS.contains(&item.string()?) {
+            return Err(error(item, ErrorKind::ReservedPermission));
+        }
+    }
     let driver = Driver {
         name: name.into(),
         binary: binary.into(),
