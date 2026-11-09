@@ -631,6 +631,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "usb-storage"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-storage",
+]
+
+[[package]]
 name = "virtio-blk"
 version = "0.0.0"
 dependencies = [
