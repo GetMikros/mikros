@@ -6,10 +6,14 @@ license = "MPL-2.0"
 publish = false
 
 [features]
-default = ["entry"]
+default = ["entry", "runtime"]
 # Defines `_start`, which runs the `__mikros_entry` of a `main!` macro.
 # Without it, another program entry, such as the C library's, is used.
 entry = []
+# Makes the heap the global allocator and defines the panic handler.
+# Programs that use the standard library, which has its own, leave it
+# out.
+runtime = []
 # Includes the bindings of the system calls that exist only for fuzzing.
 fuzz = []
 

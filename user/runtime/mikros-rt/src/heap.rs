@@ -62,6 +62,7 @@ pub struct Heap {
 // through `state`.
 unsafe impl Sync for Heap {}
 
+#[cfg(feature = "runtime")]
 #[global_allocator]
 static HEAP: Heap = Heap {
     locked: AtomicBool::new(false),

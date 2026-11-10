@@ -148,6 +148,7 @@ pub fn exit(code: i64) -> ! {
     unreachable!("process_exit returned");
 }
 
+#[cfg(feature = "runtime")]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     log::write(log::Severity::Error, format_args!("panic: {info}"));

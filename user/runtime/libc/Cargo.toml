@@ -16,7 +16,7 @@ crate-type = ["staticlib"]
 shared = []
 
 [dependencies]
-mikros-rt = { path = "../mikros-rt", default-features = false }
+mikros-rt = { path = "../mikros-rt", default-features = false, features = ["runtime"] }
 
 [build-dependencies]
 syscall-table = { path = "../../../kernel/syscalls" }
