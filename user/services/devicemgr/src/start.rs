@@ -9,6 +9,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use mikros_manifest::{Driver, Need};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
@@ -38,6 +39,17 @@ const INFO_RESOURCE_SIZE: usize = 0x18;
 /// The priorities that a driver's `priority` may reach beyond 16.
 const PRIORITY_FIRST: i64 = 17;
 const PRIORITY_LAST: i64 = 31;
+/// The boot framebuffer's hardware ID, and the start of PCI display
+/// controllers' class IDs.
+const BOOT_FRAMEBUFFER: &str = "platform:boot-framebuffer";
+const PCI_DISPLAY: &str = "pci:c03";
+/// The `id` of the framebuffer's `USER` startup handle.
+const FRAMEBUFFER_ID: u32 = 1;
+
+/// Whether `hardware_id` is that of a display device.
+fn is_display(hardware_id: &str) -> bool {
+    hardware_id == BOOT_FRAMEBUFFER || hardware_id.starts_with(PCI_DISPLAY)
+}
 
 /// What starting drivers takes: the process manager's `Launcher`, the
 /// broker, the root resource, and a `PRIORITY` resource covering 17 to
@@ -48,6 +60,12 @@ pub struct Starter {
     pub root: OwnedHandle,
     pub priority: Option<OwnedHandle>,
     pub reactor: Reactor,
+    /// The framebuffer's memory object, for the boot framebuffer's
+    /// driver alone.
+    framebuffer: Option<OwnedHandle>,
+    /// The log handle with `MANAGE`, until the kernel console is
+    /// released.
+    console: RefCell<Option<OwnedHandle>>,
 }
 
 /// What `Start` gets for a device: its description and copies of the
@@ -81,6 +99,8 @@ impl Starter {
         launcher: LauncherAsyncClient,
         broker: Option<BrokerAsyncClient>,
         root: OwnedHandle,
+        framebuffer: Option<OwnedHandle>,
+        console: Option<OwnedHandle>,
         reactor: Reactor,
     ) -> Starter {
         let priority = resource(&root, KIND_PRIORITY, PRIORITY_FIRST as u64, 15, 0);
@@ -96,6 +116,8 @@ impl Starter {
             root,
             priority: priority.ok(),
             reactor,
+            framebuffer,
+            console: RefCell::new(console),
         }
     }
 
@@ -111,9 +133,15 @@ impl Starter {
         })
     }
 
-    /// Spawns `driver` with app ID `system.driver.<name>`, after
-    /// registering its permissions with the broker.
-    pub async fn spawn(&self, driver: &Driver) -> Result<Spawned, String> {
+    /// Spawns `driver` for the device with `hardware_ids`, with app ID
+    /// `system.driver.<name>`, after registering its permissions with
+    /// the broker. Before the first driver of a display device, the
+    /// kernel console is released; the boot framebuffer's driver gets
+    /// the framebuffer's memory object.
+    pub async fn spawn(&self, driver: &Driver, hardware_ids: &[String]) -> Result<Spawned, String> {
+        if hardware_ids.iter().any(|id| is_display(id)) {
+            self.release_console();
+        }
         let app_id = format!("system.driver.{}", driver.name);
         let broker = self
             .broker
@@ -134,6 +162,19 @@ impl Starter {
             handle: server.into_handle(),
         }];
         handles.extend(self.priority(driver.priority)?);
+        if hardware_ids.iter().any(|id| id == BOOT_FRAMEBUFFER) {
+            let framebuffer = self
+                .framebuffer
+                .as_ref()
+                .ok_or_else(|| String::from("there is no framebuffer"))?;
+            let framebuffer =
+                duplicate(framebuffer).map_err(|s| format!("duplicating the framebuffer: {s}"))?;
+            handles.push(StartupHandle {
+                role: HandleRole::User,
+                id: FRAMEBUFFER_ID,
+                handle: framebuffer,
+            });
+        }
         let arguments = arguments(&driver.binary).map_err(|s| format!("arguments: {s}"))?;
         let request = SpawnRequest {
             path: driver.binary.clone(),
@@ -153,6 +194,23 @@ impl Starter {
             process: spawned.process,
             driver: Rc::new(DriverAsyncClient::new(client, self.reactor.clone())),
         })
+    }
+
+    /// Releases the kernel console, once.
+    fn release_console(&self) {
+        let Some(log) = self.console.borrow_mut().take() else {
+            return;
+        };
+        // SAFETY: the call takes no pointers.
+        let status = unsafe { sys::log_console_release(log.raw()) };
+        if status == mikros_rt::OK {
+            mikros_rt::log!(Info, "device-manager: released the kernel console");
+        } else {
+            mikros_rt::log!(
+                Error,
+                "device-manager: releasing the kernel console failed: {status}"
+            );
+        }
     }
 
     /// Calls `Start` on `driver` with `prepared`, the bus channel `bus`

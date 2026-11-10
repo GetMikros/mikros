@@ -113,8 +113,12 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             return;
         };
         let name = &driver.name;
-        let (prepared, parent) = match m.devices.borrow().get(id) {
-            Some(device) => (m.starter.prepare(device, driver), device.parent),
+        let (prepared, parent, hardware_ids) = match m.devices.borrow().get(id) {
+            Some(device) => (
+                m.starter.prepare(device, driver),
+                device.parent,
+                device.hardware_ids.clone(),
+            ),
             None => return,
         };
         let did_not_start = |why: &str| {
@@ -141,7 +145,7 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
                 }
             }
         };
-        let spawned = match m.starter.spawn(driver).await {
+        let spawned = match m.starter.spawn(driver, &hardware_ids).await {
             Ok(spawned) => spawned,
             Err(why) => return did_not_start(&why),
         };

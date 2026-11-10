@@ -66,6 +66,8 @@ const INFO_HEADER_SIZE: usize = 0x68;
 const FIRMWARE_TABLE: usize = 0x08;
 const FLAGS: usize = 0x04;
 const HAS_FRAMEBUFFER: u32 = 1 << 0;
+/// Where the header holds the framebuffer's description.
+const FRAMEBUFFER: usize = 0x10;
 /// Where the header gives the command line's offset and length, and the
 /// longest command line.
 const CMDLINE_OFFSET: usize = 0x48;
@@ -117,11 +119,13 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let has_framebuffer = info
         .as_ref()
         .is_some_and(|i| u32_at(i, FLAGS) & HAS_FRAMEBUFFER != 0);
-    if framebuffer.is_some() && has_framebuffer {
+    if framebuffer.is_some()
+        && let Some(header) = info.as_ref().filter(|_| has_framebuffer)
+    {
         devices.add(
             "boot-framebuffer".into(),
             vec!["platform:boot-framebuffer".into()],
-            Vec::new(),
+            framebuffer_properties(header),
             None,
             Vec::new(),
         );
@@ -167,7 +171,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let registrar = executor.block_on(connect::<Registrar>(&directory, REGISTRAR));
     let registrar = registrar.map(|r| RegistrarAsyncClient::new(r, reactor.clone()));
     let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
-    let starter = Starter::new(launcher, broker, root, reactor.clone());
+    let console = log.as_ref().and_then(|l| start::duplicate(l).ok());
+    let shared = framebuffer.as_ref().and_then(|f| start::duplicate(f).ok());
+    let starter = Starter::new(launcher, broker, root, shared, console, reactor.clone());
     let manager = Rc::new(Manager {
         devices: RefCell::new(devices),
         drivers,
@@ -298,6 +304,36 @@ fn take(handles: &mut Vec<StartupHandle>, id: u32) -> Option<OwnedHandle> {
         .iter()
         .position(|h| h.role == HandleRole::User && h.id == id)?;
     Some(handles.remove(at).handle)
+}
+
+/// The properties of the boot framebuffer's device: its description from
+/// the platform information's header, the sizes and format in decimal
+/// and the masks as `0x` and lowercase hexadecimal digits.
+fn framebuffer_properties(header: &[u8]) -> Vec<(String, String)> {
+    let decimal = [
+        ("size", u64_at(header, FRAMEBUFFER + 0x08)),
+        ("width", u64::from(u32_at(header, FRAMEBUFFER + 0x10))),
+        ("height", u64::from(u32_at(header, FRAMEBUFFER + 0x14))),
+        ("stride", u64::from(u32_at(header, FRAMEBUFFER + 0x18))),
+        ("format", u64::from(u32_at(header, FRAMEBUFFER + 0x1C))),
+    ];
+    let masks = [
+        ("red_mask", 0x20),
+        ("green_mask", 0x24),
+        ("blue_mask", 0x28),
+        ("reserved_mask", 0x2C),
+    ];
+    let mut properties: Vec<(String, String)> = decimal
+        .iter()
+        .map(|(k, v)| ((*k).into(), format!("{v}")))
+        .collect();
+    properties.extend(masks.iter().map(|(k, at)| {
+        (
+            (*k).into(),
+            format!("{:#x}", u32_at(header, FRAMEBUFFER + at)),
+        )
+    }));
+    properties
 }
 
 fn u32_at(b: &[u8], at: usize) -> u32 {
