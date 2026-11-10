@@ -1,12 +1,11 @@
 [package]
-name = "permissions-broker"
+name = "timesvc"
 version.workspace = true
 edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
 [dependencies]
-mikros-manifest = { path = "../../lib/manifest" }
-mikros-permissions = { path = "../../lib/permissions" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
+mikros-tz = { path = "../../lib/tz" }
 mikros-yaml = { path = "../../lib/yaml" }

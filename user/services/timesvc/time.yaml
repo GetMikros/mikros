@@ -1,7 +1,7 @@
 # The service manifest of the time service, installed as
 # usr/lib/services/time.yaml.
 name: time
-binary: /usr/bin/time-service
+binary: /usr/bin/timesvc
 start: boot
 boot_handles: [platform_info]
 # time.set also to reach the real-time clock's device.rtc.

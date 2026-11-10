@@ -125,7 +125,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", manager.display());
             let services = user_build("servicemgr", kind)?;
             println!("built    {}", services.display());
-            let broker = user_build("permissions-broker", kind)?;
+            let broker = user_build("permbroker", kind)?;
             println!("built    {}", broker.display());
             let devices = user_build("devicemgr", kind)?;
             println!("built    {}", devices.display());
@@ -171,15 +171,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let union = user_build("union", kind)?;
             println!("built    {}", union.display());
             let union_manifest = crate::workspace_root().join("user/services/union/union.yaml");
-            let log_service = user_build("log-service", kind)?;
+            let log_service = user_build("logsvc", kind)?;
             println!("built    {}", log_service.display());
-            let log_manifest = crate::workspace_root().join("user/services/log-service/log.yaml");
-            let time_service = user_build("time-service", kind)?;
+            let log_manifest = crate::workspace_root().join("user/services/logsvc/log.yaml");
+            let time_service = user_build("timesvc", kind)?;
             println!("built    {}", time_service.display());
-            let time_manifest =
-                crate::workspace_root().join("user/services/time-service/time.yaml");
+            let time_manifest = crate::workspace_root().join("user/services/timesvc/time.yaml");
             let broker_manifest =
-                crate::workspace_root().join("user/services/permissions-broker/permissions.yaml");
+                crate::workspace_root().join("user/services/permbroker/permissions.yaml");
             let devices_manifest =
                 crate::workspace_root().join("user/services/devicemgr/devicemgr.yaml");
             let pci_bus_manifest = crate::workspace_root().join("user/drivers/pci-bus/driver.yaml");
@@ -187,7 +186,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("init", init.as_path()),
                 ("usr/bin/processmgr", manager.as_path()),
                 ("usr/bin/servicemgr", services.as_path()),
-                ("usr/bin/permissions-broker", broker.as_path()),
+                ("usr/bin/permbroker", broker.as_path()),
                 (
                     "usr/lib/services/permissions.yaml",
                     broker_manifest.as_path(),
@@ -196,9 +195,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
                 ("usr/bin/union", union.as_path()),
                 ("usr/lib/services/union.yaml", union_manifest.as_path()),
-                ("usr/bin/log-service", log_service.as_path()),
+                ("usr/bin/logsvc", log_service.as_path()),
                 ("usr/lib/services/log.yaml", log_manifest.as_path()),
-                ("usr/bin/time-service", time_service.as_path()),
+                ("usr/bin/timesvc", time_service.as_path()),
                 ("usr/lib/services/time.yaml", time_manifest.as_path()),
                 ("usr/bin/devicemgr", devices.as_path()),
                 (
@@ -461,7 +460,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .collect();
             let ports_image = test_image(kind, "ports.img", &members)?;
             println!("built    {}", ports_image.display());
-            let broker = user_build("permissions-broker", kind)?;
+            let broker = user_build("permbroker", kind)?;
             println!("built    {}", broker.display());
             let broker_probe = user_build("broker-probe", kind)?;
             println!("built    {}", broker_probe.display());
@@ -472,7 +471,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 "broker.img",
                 &[
                     ("usr/bin/servicemgr", broker_probe.as_path()),
-                    ("usr/bin/permissions-broker", broker.as_path()),
+                    ("usr/bin/permbroker", broker.as_path()),
                 ],
             )?;
             println!("built    {}", broker_image.display());
@@ -490,13 +489,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // system's services and their manifests, and a probe that
             // starts as a boot service.
             let broker_manifest =
-                crate::workspace_root().join("user/services/permissions-broker/permissions.yaml");
+                crate::workspace_root().join("user/services/permbroker/permissions.yaml");
             let services_image = test_image(
                 kind,
                 "services.img",
                 &[
                     ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permissions-broker", broker.as_path()),
+                    ("usr/bin/permbroker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
                         broker_manifest.as_path(),
@@ -544,7 +543,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 "tmpfs.img",
                 &[
                     ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permissions-broker", broker.as_path()),
+                    ("usr/bin/permbroker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
                         broker_manifest.as_path(),
@@ -569,9 +568,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // The log service test serves this image: the service manager,
             // the broker, the log service and a probe that writes and reads
             // the log, with their manifests.
-            let log_service = user_build("log-service", kind)?;
+            let log_service = user_build("logsvc", kind)?;
             println!("built    {}", log_service.display());
-            let log_manifest = crate::workspace_root().join("user/services/log-service/log.yaml");
+            let log_manifest = crate::workspace_root().join("user/services/logsvc/log.yaml");
             let log_probe = user_build("log-probe", kind)?;
             println!("built    {}", log_probe.display());
             let log_probe_manifest =
@@ -581,12 +580,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 "log.img",
                 &[
                     ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permissions-broker", broker.as_path()),
+                    ("usr/bin/permbroker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
                         broker_manifest.as_path(),
                     ),
-                    ("usr/bin/log-service", log_service.as_path()),
+                    ("usr/bin/logsvc", log_service.as_path()),
                     ("usr/lib/services/log.yaml", log_manifest.as_path()),
                     ("usr/bin/log-probe", log_probe.as_path()),
                     (
@@ -599,10 +598,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // The time service test serves this image: the service manager,
             // the broker, the time service and the time probe as two
             // services, with their manifests.
-            let time_service = user_build("time-service", kind)?;
+            let time_service = user_build("timesvc", kind)?;
             println!("built    {}", time_service.display());
-            let time_manifest =
-                crate::workspace_root().join("user/services/time-service/time.yaml");
+            let time_manifest = crate::workspace_root().join("user/services/timesvc/time.yaml");
             let time_probe = user_build("time-probe", kind)?;
             println!("built    {}", time_probe.display());
             let probe_dir = crate::workspace_root().join("user/tests/time-probe");
@@ -611,12 +609,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 "time.img",
                 &[
                     ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permissions-broker", broker.as_path()),
+                    ("usr/bin/permbroker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
                         broker_manifest.as_path(),
                     ),
-                    ("usr/bin/time-service", time_service.as_path()),
+                    ("usr/bin/timesvc", time_service.as_path()),
                     ("usr/lib/services/time.yaml", time_manifest.as_path()),
                     ("usr/bin/time-probe", time_probe.as_path()),
                     (
@@ -646,7 +644,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 "namespaces.img",
                 &[
                     ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permissions-broker", broker.as_path()),
+                    ("usr/bin/permbroker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
                         broker_manifest.as_path(),
@@ -689,7 +687,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 "accounts.img",
                 &[
                     ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permissions-broker", broker.as_path()),
+                    ("usr/bin/permbroker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
                         broker_manifest.as_path(),
@@ -767,7 +765,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
              -> Result<PathBuf> {
                 let mut members: Vec<(String, PathBuf)> = vec![
                     ("usr/bin/servicemgr".into(), services.clone()),
-                    ("usr/bin/permissions-broker".into(), broker.clone()),
+                    ("usr/bin/permbroker".into(), broker.clone()),
                     (
                         "usr/lib/services/permissions.yaml".into(),
                         broker_manifest.clone(),
@@ -834,14 +832,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ),
                     // The log service, through which the drivers' messages
                     // reach the kernel log.
-                    ("usr/bin/log-service".to_owned(), log_service.clone()),
+                    ("usr/bin/logsvc".to_owned(), log_service.clone()),
                     ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
                     ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
                     (
                         "usr/lib/drivers/rtc/driver.yaml".to_owned(),
                         crate::workspace_root().join("user/drivers/rtc/driver.yaml"),
                     ),
-                    ("usr/bin/time-service".to_owned(), time_service.clone()),
+                    ("usr/bin/timesvc".to_owned(), time_service.clone()),
                     (
                         "usr/lib/services/time.yaml".to_owned(),
                         time_manifest.clone(),
@@ -863,14 +861,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         "usr/lib/drivers/acpi/driver.yaml".to_owned(),
                         crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
                     ),
-                    ("usr/bin/log-service".to_owned(), log_service.clone()),
+                    ("usr/bin/logsvc".to_owned(), log_service.clone()),
                     ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
                     ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
                     (
                         "usr/lib/drivers/rtc/driver.yaml".to_owned(),
                         crate::workspace_root().join("user/drivers/rtc/driver.yaml"),
                     ),
-                    ("usr/bin/time-service".to_owned(), time_service.clone()),
+                    ("usr/bin/timesvc".to_owned(), time_service.clone()),
                     (
                         "usr/lib/services/time.yaml".to_owned(),
                         time_manifest.clone(),
@@ -919,7 +917,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             power_files.extend([
                 // The log service, through which the server's messages
                 // reach the kernel log.
-                ("usr/bin/log-service".to_owned(), log_service.clone()),
+                ("usr/bin/logsvc".to_owned(), log_service.clone()),
                 ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
                 ("usr/bin/power-probe".to_owned(), power_probe.clone()),
                 (
@@ -1001,11 +999,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ),
                 // The log service, which keeps the log in files on the
                 // root file system and the EFI system partition.
-                ("usr/bin/log-service".to_owned(), log_service.clone()),
+                ("usr/bin/logsvc".to_owned(), log_service.clone()),
                 ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
                 // The time service, which takes the time zone from the
                 // root file system.
-                ("usr/bin/time-service".to_owned(), time_service.clone()),
+                ("usr/bin/timesvc".to_owned(), time_service.clone()),
                 (
                     "usr/lib/services/time.yaml".to_owned(),
                     time_manifest.clone(),
@@ -1052,7 +1050,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         .iter()
                         .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
                         || at.starts_with("usr/share/zoneinfo/")
-                        || at.contains("log-service")
+                        || at.contains("logsvc")
                         || at.ends_with("services/log.yaml")
                 })
                 .cloned()
@@ -1091,7 +1089,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         .iter()
                         .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
                         || at.starts_with("usr/share/zoneinfo/")
-                        || at.contains("log-service")
+                        || at.contains("logsvc")
                         || at.ends_with("services/log.yaml")
                 })
                 .cloned()
@@ -1129,7 +1127,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     durable_drivers
                         .iter()
                         .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
-                        || at.contains("log-service")
+                        || at.contains("logsvc")
                         || at.ends_with("services/log.yaml")
                 })
                 .cloned()

@@ -35,7 +35,7 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 mikros_rt::raw_main!(main);
 
 const CONTROL_ID: u32 = 0;
-const BROKER: &str = "/usr/bin/permissions-broker";
+const BROKER: &str = "/usr/bin/permbroker";
 const PROTOCOL: &str = "mikros.permissions.Broker";
 const CALLER_USER: u32 = u32::MAX;
 const FOREVER: i64 = i64::MAX;
@@ -47,7 +47,7 @@ const SAME_RIGHTS: u32 = 1 << 31;
 
 const MANIFEST: &str = "\
 name: permissions
-binary: /usr/bin/permissions-broker
+binary: /usr/bin/permbroker
 start: boot
 provides:
   - protocol: mikros.permissions.Broker
