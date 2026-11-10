@@ -351,8 +351,10 @@ impl Frames for Pool {
 /// Moves the firmware's runtime services into the runtime window with
 /// `SetVirtualAddressMap`, giving whether that succeeded. Runs once, after
 /// boot services have ended and the kernel memory map has been built from
-/// the final firmware map, which this rewrites.
-fn move_runtime_services(p: &Prepared, fw: &FinalMap) -> bool {
+/// the final firmware map, which this rewrites. The call runs on
+/// `window_table`, a page of ours, which becomes a copy of the firmware's
+/// top-level page table that also maps the runtime window.
+fn move_runtime_services(p: &Prepared, fw: &FinalMap, window_table: u64) -> bool {
     if p.system_table == 0 {
         return false;
     }
@@ -362,6 +364,22 @@ fn move_runtime_services(p: &Prepared, fw: &FinalMap) -> bool {
     let Some(count) = runtime::virtual_map(map, fw.descriptor_size) else {
         return false;
     };
+    // Some firmware already uses the new addresses during the call, so it
+    // runs on a copy of the firmware's tables that also maps the runtime
+    // window. The bootloader stays on that copy until it enters the kernel.
+    let cr3: u64;
+    // SAFETY: reading CR3 has no side effects at the bootloader's privilege.
+    unsafe { asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)) };
+    let firmware_table = (cr3 & paging::ADDR_MASK) as *const [u64; 512];
+    let table = window_table as *mut [u64; 512];
+    // SAFETY: the firmware's top-level table is identity-mapped and 4 KiB;
+    // `window_table` is a page of ours; the copy maps everything the
+    // firmware's table does, so loading it changes no address in use.
+    unsafe {
+        table.write(firmware_table.read());
+        runtime::alias_window(&mut *table);
+        asm!("mov cr3, {}", in(reg) window_table | (cr3 & 0xfff), options(nostack));
+    }
     // SAFETY: the system table and the runtime services table stay at
     // their physical addresses, which the firmware's identity map covers,
     // until this call; the map holds `count` descriptors of the firmware's
@@ -380,7 +398,12 @@ fn move_runtime_services(p: &Prepared, fw: &FinalMap) -> bool {
 
 /// Builds the kernel memory map and page tables, fills `BootInfo` and
 /// enters the kernel. Runs after boot services have ended.
-fn enter(p: &mut Prepared, fw: &FinalMap, random: &Words) -> Option<core::convert::Infallible> {
+fn enter(
+    p: &mut Prepared,
+    fw: &FinalMap,
+    random: &Words,
+    window_table: u64,
+) -> Option<core::convert::Infallible> {
     // SAFETY: the buffer was allocated for `entries_capacity` entries.
     let buf = unsafe {
         core::slice::from_raw_parts_mut(p.entries_phys as *mut MemoryMapEntry, p.entries_capacity)
@@ -393,7 +416,7 @@ fn enter(p: &mut Prepared, fw: &FinalMap, random: &Words) -> Option<core::conver
         (d.phys_start, d.page_count, d.ty.0, d.att.bits())
     });
     p.memory_map(&mut map, firmware).ok()?;
-    p.runtime_services_mapped = move_runtime_services(p, fw);
+    p.runtime_services_mapped = move_runtime_services(p, fw, window_table);
     // With random words, the direct map goes where it still covers the
     // final map.
     let mut words = random.words[..random.len].iter().copied();
@@ -448,11 +471,19 @@ pub fn boot(g: Gathered) -> Failure {
         Ok(prepared) => prepared,
         Err(failure) => return failure,
     };
+    let window_table = match allocate(
+        AllocateType::AnyPages,
+        1,
+        "allocating the table for SetVirtualAddressMap",
+    ) {
+        Ok(page) => page,
+        Err(failure) => return failure,
+    };
     match exit_boot_services(&prepared) {
         Ok(fw) => {
             // SAFETY: boot services have ended; nothing may interrupt now.
             unsafe { asm!("cli", options(nomem, nostack)) };
-            enter(&mut prepared, &fw, &random);
+            enter(&mut prepared, &fw, &random, window_table);
             halt()
         }
         Err(Some(failure)) => failure,

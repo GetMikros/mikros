@@ -63,6 +63,19 @@ pub fn virtual_map(map: &mut [u8], descriptor_size: usize) -> Option<usize> {
     Some(kept)
 }
 
+/// The entry of a 4-level top-level page table that maps the runtime
+/// window, which is exactly the 512 GiB one entry covers.
+pub const WINDOW_SLOT: usize = ((RUNTIME_WINDOW_BASE >> 39) & 511) as usize;
+
+/// Makes `table`, a copy of the firmware's top-level page table, map the
+/// runtime window to the memory its first entry maps, the firmware's
+/// identity map of the first 512 GiB. With it, firmware that uses the
+/// virtual addresses of `virtual_map` during `SetVirtualAddressMap` finds
+/// its ranges there as well as at their physical addresses.
+pub fn alias_window(table: &mut [u64; 512]) {
+    table[WINDOW_SLOT] = table[0];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +98,27 @@ mod tests {
     }
 
     const RT: u64 = EFI_MEMORY_RUNTIME | 0xF;
+
+    #[test]
+    fn window_takes_one_top_level_entry() {
+        assert_eq!(WINDOW_SLOT, 508);
+        assert_eq!(RUNTIME_WINDOW_SIZE, 1 << 39);
+        assert_eq!(RUNTIME_WINDOW_BASE % (1 << 39), 0);
+    }
+
+    #[test]
+    fn aliases_the_window_to_the_first_entry() {
+        let mut table = [0u64; 512];
+        table[0] = 0x1234_5003;
+        table[1] = 0x6789_a003;
+        table[511] = 0xbcde_f003;
+        let mut aliased = table;
+        alias_window(&mut aliased);
+        assert_eq!(aliased[WINDOW_SLOT], table[0]);
+        for i in (0..512).filter(|&i| i != WINDOW_SLOT) {
+            assert_eq!(aliased[i], table[i], "{i}");
+        }
+    }
 
     #[test]
     fn keeps_runtime_descriptors_with_window_addresses() {

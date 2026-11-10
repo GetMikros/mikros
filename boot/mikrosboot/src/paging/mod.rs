@@ -9,7 +9,7 @@ const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
 const HUGE: u64 = 1 << 7;
 const NO_EXECUTE: u64 = 1 << 63;
-const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+pub const ADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 
 const MIB_2: u64 = 2 << 20;
 const GIB_1: u64 = 1 << 30;
