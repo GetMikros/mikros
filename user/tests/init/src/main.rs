@@ -9673,7 +9673,7 @@ mod manager {
 
     /// From a boot image like that of
     /// `device_manager_adds_platform_devices` with other test drivers,
-    /// and a stand-in for the boot framebuffer, the device manager adds
+    /// and the boot framebuffer, the device manager adds
     /// the framebuffer as device 1 and the host bridge as device 2. The
     /// host bridge's driver fails `Start`: the device manager terminates
     /// it, and the device fails without a restart. The framebuffer's
@@ -10081,8 +10081,9 @@ mod manager {
 
     /// Starts the service manager from the boot image member `image`,
     /// giving it the root resource, the log and init's platform
-    /// information, with its framebuffer flag set and a memory object in
-    /// place of a framebuffer when `framebuffer`: the process manager, init's
+    /// information, with its framebuffer flag set and a copy of the
+    /// framebuffer's memory object, or a stand-in for it when the machine
+    /// has none, when `framebuffer`: the process manager, init's
     /// bootstrap client, a reader of the log past the lines that it already
     /// held, and the service manager's process.
     fn services_from(
@@ -10135,7 +10136,13 @@ mod manager {
             user(5, memory("writing the platform information", &message)?),
         ];
         if framebuffer {
-            handles.push(user(4, memory("making a framebuffer", &[])?));
+            // The real framebuffer when there is one, so that its driver
+            // can map it as the description in the message says.
+            let shared = match &s.framebuffer {
+                Some(fb) => copy(fb.memory, SAME_RIGHTS)?,
+                None => memory("making a framebuffer", &[])?,
+            };
+            handles.push(user(4, shared));
         }
         let reply = init.start_service_manager(handles, deadline);
         let Ok(Ok(started)) = reply else {
@@ -10365,6 +10372,47 @@ mod manager {
             Err(f) => mikros_rt::log!(
                 Error,
                 "SCENARIO acpi-restart FAILED: {} failed ({})",
+                f.what,
+                f.status
+            ),
+        }
+        mikros_test::exit_qemu(mikros_test::FAILED)
+    }
+
+    /// The `input` scenario: serves `tests/input.img`, whose input probe
+    /// fills the basic display driver's screen and then waits for the
+    /// keys and mouse movement that the runner sends; stops QEMU with
+    /// `PASSED` once the probe passed, or with `FAILED`.
+    pub fn input_scenario(s: &Startup) -> i64 {
+        const SECONDS: i64 = 300;
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (b"device-manager: released the kernel console", 1),
+            (b"basicdisplay: serving the ", 1),
+            (b"ps2: published the keyboard", 1),
+            (b"ps2: published the mouse", 1),
+            (b"usbhid: published a Keyboard", 1),
+            (b"input-probe: painted", 1),
+            (b"input-probe: PASSED", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"input-probe: FAILED",
+            b"left without a driver",
+            b"did not start",
+            b"declined",
+        ];
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(Error, "SCENARIO input: {} failed ({})", f.what, f.status);
+            return 1;
+        }
+        match device_manager_logs(s, b"tests/input.img", true, SECONDS, EXPECTED, FAILED) {
+            Ok(true) => {
+                mikros_rt::log!(Info, "SCENARIO input PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO input FAILED"),
+            Err(f) => mikros_rt::log!(
+                Error,
+                "SCENARIO input FAILED: {} failed ({})",
                 f.what,
                 f.status
             ),
@@ -10773,6 +10821,7 @@ mod bootfs {
                         "devices.img",
                         "durable.img",
                         "failing.img",
+                        "input.img",
                         "launcher.img",
                         "log.img",
                         "managed",
@@ -11308,6 +11357,7 @@ fn scenario(s: &Startup) -> Option<i64> {
         // controller.
         "bus-restart" => manager::bus_restart_scenario(s),
         "acpi-restart" => manager::acpi_restart_scenario(s),
+        "input" => manager::input_scenario(s),
         // The runner logs the writes and flushes of the scratch disks.
         "durability" => manager::durability_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.

@@ -1,0 +1,11 @@
+# The service manifest of the input probe as the boot service of
+# tests/input.img, installed as usr/lib/services/input-probe.yaml. It
+# logs through the kernel log.
+name: input-probe
+binary: /usr/bin/input-probe
+start: boot
+after: [devicemgr]
+boot_handles: [log_manage]
+# To own the display and read the input devices; gpu.render, which
+# connecting to the gpu service also needs, is held by default.
+permissions: [gpu.display, input.seat]

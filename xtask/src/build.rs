@@ -903,6 +903,43 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", acpi_restart_image.display());
+            // The input run serves this image: the ACPI server with the
+            // PS/2 driver, the PCI bus, xHCI and USB HID drivers, the basic
+            // display driver, the log service, through which the drivers'
+            // messages reach the kernel log, and the input probe, their
+            // client.
+            let basic_display = user_build("basicdisplay", kind)?;
+            println!("built    {}", basic_display.display());
+            let input_probe = user_build("input-probe", kind)?;
+            println!("built    {}", input_probe.display());
+            let mut input_files: Vec<(String, PathBuf)> = Vec::new();
+            for (name, binary) in [
+                ("acpi", &acpi),
+                ("ps2", &ps2),
+                ("pcibus", &pci_bus),
+                ("xhci", &xhci),
+                ("usbhid", &usb_hid),
+                ("basicdisplay", &basic_display),
+            ] {
+                input_files.extend([
+                    (format!("usr/lib/drivers/{name}/{name}"), binary.clone()),
+                    (
+                        format!("usr/lib/drivers/{name}/driver.yaml"),
+                        crate::workspace_root().join(format!("user/drivers/{name}/driver.yaml")),
+                    ),
+                ]);
+            }
+            input_files.extend([
+                ("usr/bin/logsvc".to_owned(), log_service.clone()),
+                ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                ("usr/bin/input-probe".to_owned(), input_probe.clone()),
+                (
+                    "usr/lib/services/input-probe.yaml".to_owned(),
+                    crate::workspace_root().join("user/tests/input-probe/input-probe.yaml"),
+                ),
+            ]);
+            let input_image = device_image("input.img", &[], &input_files)?;
+            println!("built    {}", input_image.display());
             // The power-off run serves this image, with the ACPI server, the
             // log service and the power probe, a boot service that the
             // service manager stops when the power button shuts the
@@ -1178,6 +1215,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/bus.img", bus_image.as_path()),
                 ("tests/durable.img", durable_image.as_path()),
                 ("tests/acpi-restart.img", acpi_restart_image.as_path()),
+                ("tests/input.img", input_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),
