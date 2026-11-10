@@ -31,6 +31,11 @@ impl Checks {
         }
     }
 
+    /// The service's directory.
+    pub fn directory(&self) -> &DirectoryAsyncClient {
+        &self.directory
+    }
+
     /// Whether the broker allows `client` `permission`. Without an
     /// answer, it does not.
     pub async fn holds(&self, client: &ClientIdentity, permission: &str) -> bool {

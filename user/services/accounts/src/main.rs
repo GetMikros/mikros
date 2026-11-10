@@ -10,6 +10,7 @@
 extern crate alloc;
 
 mod checks;
+mod homes;
 mod lock;
 mod serve;
 mod service;

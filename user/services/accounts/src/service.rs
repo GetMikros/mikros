@@ -174,8 +174,16 @@ impl Service {
             return Err(Status::NoResources);
         }
         // The home folder is a subvolume of its own, which only a file
-        // system with subvolumes makes.
-        Err(Status::NotSupported)
+        // system with subvolumes makes. The record is added last, so that
+        // a failure before it leaves no user.
+        let homes = self.homes.as_ref().ok_or(Status::NotSupported)?;
+        let subvolumes = crate::homes::subvolumes(self.checks.directory(), &self.reactor).await?;
+        let phc = hash::hash(password.0.as_bytes(), &salt()?).ok_or(Status::NoMemory)?;
+        crate::homes::create(&subvolumes, homes, name, &self.reactor).await?;
+        let mut users = self.store.users().clone();
+        let id = users.create(name, full_name, kind, phc).map_err(status)?;
+        self.save(users).await?;
+        Ok(id)
     }
 
     /// Whether `/Users/<name>` exists.
@@ -206,13 +214,15 @@ impl Service {
         }
         let _changing = self.changes.lock().await;
         let mut users = self.store.users().clone();
-        users.delete(user).map_err(status)?;
-        if delete_home {
-            // The home folder is a subvolume, which only a file system
-            // with subvolumes deletes.
-            return Err(Status::NotSupported);
+        let deleted = users.delete(user).map_err(status)?;
+        if !delete_home {
+            return self.save(users).await;
         }
-        self.save(users).await
+        // The home folder is a subvolume, which only a file system with
+        // subvolumes deletes; without one, nothing is deleted.
+        let subvolumes = crate::homes::subvolumes(self.checks.directory(), &self.reactor).await?;
+        self.save(users).await?;
+        crate::homes::delete(&subvolumes, &deleted.name).await
     }
 
     pub async fn set_password(

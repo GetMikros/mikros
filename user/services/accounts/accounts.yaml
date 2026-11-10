@@ -11,4 +11,6 @@ namespace:
     rights: rw
   - path: /Users
     rights: rw
-permissions: [permissions.check, session.authorize]
+# filesystem.manage is only for creating and deleting the subvolumes of
+# users' home folders on the root file system.
+permissions: [permissions.check, session.authorize, filesystem.manage]
