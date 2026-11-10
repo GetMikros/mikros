@@ -6,7 +6,7 @@ use crate::launcher;
 use crate::namespace::{Namespaces, Programs};
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, Transfer, duplicate};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -76,6 +76,8 @@ pub struct Shared {
     /// The tasks waiting for a process to terminate, stop or be
     /// continued.
     waiters: RefCell<Vec<Waker>>,
+    /// The login sessions sent `KILL`, whose processes may start no more.
+    pub killed_sessions: RefCell<BTreeSet<u32>>,
 }
 
 /// A process to start.
@@ -125,6 +127,7 @@ impl Shared {
             permissions: Permissions::default(),
             changes: Cell::new(0),
             waiters: RefCell::new(Vec::new()),
+            killed_sessions: RefCell::new(BTreeSet::new()),
         })
     }
 

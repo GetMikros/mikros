@@ -6,7 +6,7 @@
 //! `SetProcessGroup` and `KillGroup` are served; every other method fails
 //! with `NOT_SUPPORTED`.
 
-use crate::broker::{FULL_DISK, LIST_ALL, SET_IDENTITY, SIGNAL_ANY};
+use crate::broker::{FULL_DISK, LIST_ALL, SET_IDENTITY, SET_USER, SIGNAL_ANY};
 use crate::processes::{NewProcess, Shared};
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, duplicate};
@@ -18,9 +18,10 @@ use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
     ExitStatus, Launcher, LauncherAsyncServer, LauncherCreateSessionResponse, LauncherExecResponse,
-    LauncherGetInfoResponse, LauncherKillGroupResponse, LauncherKillResponse, LauncherListResponse,
-    LauncherRequest, LauncherSetProcessGroupResponse, LauncherSpawnResponse, LauncherWaitResponse,
-    ProcessInfo, SpawnRequest, StatusKind, WaitOptions,
+    LauncherGetInfoResponse, LauncherKillGroupResponse, LauncherKillLoginSessionResponse,
+    LauncherKillResponse, LauncherListResponse, LauncherRequest, LauncherSetProcessGroupResponse,
+    LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo, SpawnRequest, StatusKind,
+    WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::sys;
@@ -34,6 +35,8 @@ const MANAGE: u32 = 1 << 8;
 const INSPECT: u32 = 1 << 9;
 /// A `user` that means the caller's user ID.
 const CALLER_USER: u32 = u32::MAX;
+/// The signal that ends a process at once.
+const SIGKILL: u32 = 9;
 /// App IDs that need no bundle.
 const SYSTEM_PREFIX: &str = "system.";
 /// The app ID that `files.full_disk` lets a caller name, for programs
@@ -115,7 +118,15 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                 Ok(())
             }
             R::Fork(_, r) => r.reply(s, Err(no)),
-            R::KillLoginSession(_, r) => r.reply(s, Err(no)),
+            R::KillLoginSession(request, r) => {
+                let (shared, server) = (shared.clone(), server.clone());
+                shared.clone().spawner.spawn(async move {
+                    let (session, signo) = (request.login_session, request.signo);
+                    let result = kill_login_session(&shared, pid, session, signo).await;
+                    let _ = r.reply(server.server(), result);
+                });
+                Ok(())
+            }
             R::List(_, r) => {
                 let (shared, server) = (shared.clone(), server.clone());
                 shared.clone().spawner.spawn(async move {
@@ -130,18 +141,22 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
 
 /// The process that `request` of process `caller` starts with the
 /// parent `parent`, and whether it keeps the caller's user and app ID.
+/// Only a spawn, by a caller that holds `process.set_user`, may name
+/// another user or ask for a new login session, which `spawn` gives the
+/// new process's ID. A process of a login session sent `KILL` starts
+/// none.
 async fn new_process(
     shared: &Shared,
     caller: u32,
     parent: impl FnOnce(&Record) -> u32,
     request: SpawnRequest,
+    spawning: bool,
 ) -> Result<(NewProcess, bool), Status> {
     // The path is resolved in the caller's namespace when the process is
     // loaded; binding an app ID looks at where it lies.
     let program = request.path.strip_prefix('/').ok_or(Status::InvalidArgs)?;
-    // Without the permission broker no caller may name a user or start
-    // a login session.
-    if request.user != CALLER_USER || request.login_session {
+    let changes = request.user != CALLER_USER || request.login_session;
+    if changes && (!spawning || !holds(shared, caller, SET_USER).await) {
         return Err(Status::AccessDenied);
     }
     let named = match &request.app_id {
@@ -150,8 +165,20 @@ async fn new_process(
     };
     let records = shared.records.borrow();
     let from = records.get(caller).ok_or(Status::BadState)?;
+    if spawning
+        && shared
+            .killed_sessions
+            .borrow()
+            .contains(&from.login_session)
+    {
+        return Err(Status::BadState);
+    }
     let app_id = named.unwrap_or_else(|| from.app_id.clone());
-    let same = app_id == from.app_id;
+    let user = match request.user {
+        CALLER_USER => from.user,
+        user => user,
+    };
+    let same = app_id == from.app_id && user == from.user;
     let new = NewProcess {
         path: request.path.clone(),
         programs: from.programs.clone(),
@@ -159,7 +186,7 @@ async fn new_process(
         process_group: from.process_group,
         session: from.session,
         app_id,
-        user: from.user,
+        user,
         login_session: from.login_session,
         arguments: duplicate(request.arguments.raw(), SAME_RIGHTS)?,
         handles: request.handles,
@@ -174,13 +201,17 @@ async fn spawn(
     caller: u32,
     request: SpawnRequest,
 ) -> Result<LauncherSpawnResponse, Status> {
-    let (new_app, same) = new_process(shared, caller, |_| caller, request).await?;
+    let new_session = request.login_session;
+    let (mut new_app, same) = new_process(shared, caller, |_| caller, request, true).await?;
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
     let pid = shared
         .records
         .borrow_mut()
         .reserve()
         .ok_or(Status::NoResources)?;
+    if new_session {
+        new_app.login_session = pid;
+    }
     let process = shared.start(pid, new_app, &control).await?;
     let manage = if same { MANAGE } else { 0 };
     // `TRANSFER` and `INSPECT` let the handle travel in the reply and
@@ -199,7 +230,7 @@ async fn exec(
     caller: u32,
     request: SpawnRequest,
 ) -> Result<LauncherExecResponse, Status> {
-    let (new, _) = new_process(shared, caller, |from| from.parent, request).await?;
+    let (new, _) = new_process(shared, caller, |from| from.parent, request, false).await?;
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
     shared.replace(caller, new, &control).await?;
     Ok(LauncherExecResponse {})
@@ -517,6 +548,35 @@ async fn kill_group(
         true => Ok(LauncherKillGroupResponse {}),
         false => Err(Status::AccessDenied),
     }
+}
+
+/// Sends `signo` for process `caller`, which must hold
+/// `process.set_user`, to every running process of login session
+/// `session`; after `KILL` the session's processes may start no more.
+/// Fails with `INVALID_ARGS` for login session 0.
+async fn kill_login_session(
+    shared: &Shared,
+    caller: u32,
+    session: u32,
+    signo: u32,
+) -> Result<LauncherKillLoginSessionResponse, Status> {
+    if !holds(shared, caller, SET_USER).await {
+        return Err(Status::AccessDenied);
+    }
+    if session == 0 {
+        return Err(Status::InvalidArgs);
+    }
+    if signo == SIGKILL {
+        shared.killed_sessions.borrow_mut().insert(session);
+    }
+    let records = shared.records.borrow();
+    for (_, record) in records
+        .iter()
+        .filter(|(_, r)| r.login_session == session && r.exit.is_none())
+    {
+        signal(record, signo)?;
+    }
+    Ok(LauncherKillLoginSessionResponse {})
 }
 
 /// Makes process `caller` the leader of a new session and of a new

@@ -21,6 +21,7 @@ pub const SET_IDENTITY: &str = "process.set_identity";
 pub const FULL_DISK: &str = "files.full_disk";
 pub const SIGNAL_ANY: &str = "process.signal_any";
 pub const LIST_ALL: &str = "process.list_all";
+pub const SET_USER: &str = "process.set_user";
 /// The permission asked about, for the process manager itself, to learn
 /// that the broker serves requests. Any answer will do.
 const PROBE: &str = "permissions.check";

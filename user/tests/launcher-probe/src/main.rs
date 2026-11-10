@@ -526,6 +526,13 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
             other(|r| r.login_session = true).await.err() == Some(Status::AccessDenied),
         )?;
         check(
+            "refusing to end a login session",
+            matches!(
+                l.kill_login_session(1, 9).await,
+                Ok(Err(Status::AccessDenied))
+            ),
+        )?;
+        check(
             "refusing an app ID outside system",
             other(|r| r.app_id = Some("test.other".into())).await.err()
                 == Some(Status::AccessDenied),
