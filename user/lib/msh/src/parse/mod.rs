@@ -1,5 +1,8 @@
 //! Parsing msh's command language into its syntax tree.
 
+mod control;
+mod expr;
+mod literal;
 mod words;
 
 use crate::ast::*;
@@ -22,6 +25,9 @@ impl fmt::Display for Error {
 }
 
 type Result<T> = std::result::Result<T, Error>;
+
+/// The keywords that start a statement.
+const KEYWORDS: [&str; 2] = ["let", "return"];
 
 /// Parses `source` into the statements of a block.
 pub fn parse(source: &str) -> Result<Block> {
@@ -156,6 +162,23 @@ impl Parser<'_> {
         Some(name)
     }
 
+    /// An identifier.
+    fn name(&mut self) -> Result<String> {
+        let name = self
+            .peek_name()
+            .ok_or_else(|| self.error("a name is expected here"))?;
+        self.pos += name.chars().count();
+        Ok(name)
+    }
+
+    /// Whether the keyword `word` is here, as a whole word.
+    fn at_keyword(&self, word: &str) -> bool {
+        self.looking_at(word)
+            && !self
+                .peek_at(word.chars().count())
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    }
+
     fn expect(&mut self, c: char, what: &str) -> Result<()> {
         if self.peek() == Some(c) {
             self.pos += 1;
@@ -202,7 +225,104 @@ impl Parser<'_> {
     }
 
     fn statement_kind(&mut self) -> Result<StatementKind> {
+        for keyword in KEYWORDS {
+            if self.at_keyword(keyword) {
+                self.pos += keyword.len();
+                self.skip_spaces();
+                return self.keyword(keyword);
+            }
+        }
+        if let Some(assign) = self.assignment()? {
+            return Ok(assign);
+        }
+        if self.peek() == Some('(') {
+            let expr = self.paren()?;
+            self.skip_spaces();
+            if self.peek() != Some('|') {
+                return Ok(StatementKind::Expr(expr));
+            }
+            let mut pipeline = Pipeline {
+                commands: vec![Command::Expr(expr)],
+                background: false,
+            };
+            self.rest_of_pipeline(&mut pipeline, false)?;
+            return Ok(StatementKind::Pipeline(pipeline));
+        }
         Ok(StatementKind::Pipeline(self.pipeline(false)?))
+    }
+
+    /// `name = value`, `name += value` or `env.NAME = value`, if one
+    /// starts here.
+    fn assignment(&mut self) -> Result<Option<StatementKind>> {
+        let Some(name) = self.peek_name() else {
+            return Ok(None);
+        };
+        let start = self.pos;
+        self.pos += name.chars().count();
+        let target = if name == "env" && self.peek() == Some('.') {
+            self.pos += 1;
+            match self.peek_name() {
+                Some(var) => {
+                    self.pos += var.chars().count();
+                    Target::Environment(var)
+                }
+                None => {
+                    self.pos = start;
+                    return Ok(None);
+                }
+            }
+        } else {
+            Target::Variable(name)
+        };
+        let tight = self.peek() == Some('=') && self.peek_at(1).is_some_and(|c| !c.is_whitespace());
+        if tight && self.command_follows() {
+            // `NAME=value command`, which sets a variable for a command.
+            self.pos = start;
+            return Ok(None);
+        }
+        self.skip_spaces();
+        let append = self.looking_at("+=");
+        let assigns = append || (self.peek() == Some('=') && self.peek_at(1) != Some('='));
+        if !assigns {
+            self.pos = start;
+            return Ok(None);
+        }
+        self.pos += if append { 2 } else { 1 };
+        self.skip_spaces();
+        let value = self.expression()?;
+        Ok(Some(StatementKind::Assign {
+            target,
+            append,
+            value,
+        }))
+    }
+
+    /// Whether, after the `=value` word here, the statement goes on with
+    /// a command.
+    fn command_follows(&mut self) -> bool {
+        let save = self.pos;
+        self.pos += 1;
+        let words = self.word().is_ok();
+        self.skip_spaces();
+        let follows = words && !matches!(self.peek(), None | Some('\n' | '\r' | ';' | '}' | '#'));
+        self.pos = save;
+        follows
+    }
+
+    /// A record's key: a name or a quoted string.
+    fn key(&mut self) -> Result<String> {
+        match self.peek() {
+            Some('"' | '\'') => match self.operand()? {
+                Expr::String(parts) => match parts.as_slice() {
+                    [] => Ok(String::new()),
+                    [StringPart::Text(text)] => Ok(text.clone()),
+                    _ => Err(self.error("a key cannot interpolate")),
+                },
+                Expr::Literal(Literal::String(text)) => Ok(text),
+                _ => Err(self.error("a key is expected here")),
+            },
+            _ => self.name(),
+        }
     }
 }
 

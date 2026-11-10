@@ -51,7 +51,7 @@ impl Parser<'_> {
     fn command(&mut self, before_block: bool) -> Result<Command> {
         self.skip_spaces();
         if self.peek() == Some('(') {
-            return Err(self.error("parentheses are not parsed yet"));
+            return Ok(Command::Expr(self.paren()?));
         }
         let mut simple = Simple {
             environment: Vec::new(),
@@ -78,8 +78,23 @@ impl Parser<'_> {
             match self.peek() {
                 None | Some('\n' | '\r' | ';' | '|' | '&' | ')' | '}') => break,
                 Some('{') if before_block => break,
-                Some('{' | '[' | '(') => {
-                    return Err(self.error("blocks, lists and parentheses are not parsed yet"));
+                Some('{') => {
+                    self.pos += 1;
+                    simple
+                        .words
+                        .push(Argument::Block(self.statements(Some('}'))?));
+                }
+                Some('[') => {
+                    let list = self.operand()?;
+                    simple.words.push(Argument::Word(Word {
+                        parts: vec![WordPart::Expr(list)],
+                    }));
+                }
+                Some('(') => {
+                    let expr = self.paren()?;
+                    simple.words.push(Argument::Word(Word {
+                        parts: vec![WordPart::Expr(expr)],
+                    }));
                 }
                 Some(']') => return Err(self.error("this `]` closes nothing")),
                 _ => {
@@ -138,17 +153,23 @@ impl Parser<'_> {
         }
         self.skip_spaces();
         match self.peek() {
-            Some(c) if !special(c) => {}
+            Some(c) if !special(c) || c == '(' => {}
             None => return Err(self.incomplete("a redirection's file is missing")),
             _ => return Err(self.error("a redirection's file is expected here")),
         }
-        let target = self.word()?;
+        let target = if self.peek() == Some('(') {
+            Word {
+                parts: vec![WordPart::Expr(self.paren()?)],
+            }
+        } else {
+            self.word()?
+        };
         Ok(Some(Redirection { kind, target }))
     }
 
     /// A word: bare text, quoted strings and variables up to whitespace or
     /// a special character.
-    fn word(&mut self) -> Result<Word> {
+    pub(super) fn word(&mut self) -> Result<Word> {
         let start = self.pos;
         let mut parts: Vec<WordPart> = Vec::new();
         let mut bare = String::new();
@@ -198,7 +219,7 @@ impl Parser<'_> {
     }
 
     /// `$name`, `$name.field.0`, `$env.NAME` or `$list...`.
-    fn variable(&mut self) -> Result<Variable> {
+    pub(super) fn variable(&mut self) -> Result<Variable> {
         self.expect('$', "`$`")?;
         let name = self.variable_name()?;
         let (environment, name) = match name.as_str() {
@@ -249,7 +270,7 @@ impl Parser<'_> {
     }
 
     /// A single-quoted string, which has no escapes.
-    fn single_quoted(&mut self) -> Result<String> {
+    pub(super) fn single_quoted(&mut self) -> Result<String> {
         self.pos += 1;
         let mut text = String::new();
         loop {
@@ -269,7 +290,7 @@ impl Parser<'_> {
 
     /// A double-quoted string, with its escapes and `{expr}`
     /// interpolations.
-    fn double_quoted(&mut self) -> Result<Vec<StringPart>> {
+    pub(super) fn double_quoted(&mut self) -> Result<Vec<StringPart>> {
         self.pos += 1;
         let mut parts = Vec::new();
         let mut text = String::new();
@@ -312,7 +333,17 @@ impl Parser<'_> {
                     text.push(escaped);
                     self.pos += 1;
                 }
-                Some('{') => return Err(self.error("interpolation is not parsed yet")),
+                Some('{') => {
+                    if !text.is_empty() {
+                        parts.push(StringPart::Text(std::mem::take(&mut text)));
+                    }
+                    self.pos += 1;
+                    self.skip_blank();
+                    let expr = self.expression()?;
+                    self.skip_blank();
+                    self.expect('}', "`}` after the interpolation")?;
+                    parts.push(StringPart::Expr(expr));
+                }
                 Some(c) => {
                     text.push(c);
                     self.pos += 1;
