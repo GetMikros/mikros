@@ -139,6 +139,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let ps2 = user_build("ps2", kind)?;
             println!("built    {}", ps2.display());
             let ps2_manifest = crate::workspace_root().join("user/drivers/ps2/driver.yaml");
+            let usb_hid = user_build("usbhid", kind)?;
+            println!("built    {}", usb_hid.display());
+            let usb_hid_manifest = crate::workspace_root().join("user/drivers/usbhid/driver.yaml");
             let virtio_blk = user_build("virtioblk", kind)?;
             println!("built    {}", virtio_blk.display());
             let virtio_blk_manifest =
@@ -218,6 +221,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/lib/drivers/rtc/driver.yaml", rtc_manifest.as_path()),
                 ("usr/lib/drivers/ps2/ps2", ps2.as_path()),
                 ("usr/lib/drivers/ps2/driver.yaml", ps2_manifest.as_path()),
+                ("usr/lib/drivers/usbhid/usbhid", usb_hid.as_path()),
+                (
+                    "usr/lib/drivers/usbhid/driver.yaml",
+                    usb_hid_manifest.as_path(),
+                ),
                 ("usr/lib/drivers/virtioblk/virtioblk", virtio_blk.as_path()),
                 (
                     "usr/lib/drivers/virtioblk/driver.yaml",

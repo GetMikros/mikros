@@ -1,0 +1,12 @@
+[package]
+name = "usbhid"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-evdev = { path = "../../lib/evdev" }
+mikros-hid = { path = "../../lib/hid" }
+mikros-inputdev = { path = "../../lib/inputdev" }
+mikros-rt = { path = "../../runtime/mikros-rt" }
