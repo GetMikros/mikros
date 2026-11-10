@@ -1016,6 +1016,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[
                     ("test-pci", true),
                     ("test-edu", true),
+                    ("test-small-bar", true),
                     ("test-reset", true),
                     ("test-disk", true),
                     ("test-fat", true),

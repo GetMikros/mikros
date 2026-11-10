@@ -233,7 +233,8 @@ pub fn scratch_disks(log: &Path) -> Result<()> {
 /// able to reach the first 4 GiB, an xHCI controller at 00:1d.0, the
 /// scratch disks of `scratch_disks` with the serial number `mikros`, the
 /// last as a USB mass storage device on port 1 of that controller, a USB
-/// hub on its port 2 with a USB keyboard on the hub's port 1, and no
+/// hub on its port 2 with a USB keyboard on the hub's port 1, QEMU's
+/// i6300esb watchdog, whose memory BAR is 16 bytes long, and no
 /// reboot. The devices follow
 /// the IOMMU, which must come first.
 ///
@@ -285,6 +286,8 @@ pub fn test_args(mut args: Vec<String>, log: &Path, logged: bool) -> Vec<String>
     ));
     args.extend(device("usb-hub,bus=usb.0,port=2"));
     args.extend(device("usb-kbd,bus=usb.0,port=2.1"));
+    // A watchdog whose memory BAR is smaller than a page.
+    args.extend(device("i6300esb"));
     if logged {
         args.extend(drive("scratch-virtio", SCRATCH_DISKS[3].0));
         args.extend(device(
@@ -694,6 +697,7 @@ ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
         ));
         assert!(args.contains(&"usb-hub,bus=usb.0,port=2".to_string()));
         assert!(args.contains(&"usb-kbd,bus=usb.0,port=2.1".to_string()));
+        assert!(args.contains(&"i6300esb".to_string()));
         assert!(args.contains(&"-no-reboot".to_string()));
         assert!(!args.iter().any(|a| a.contains("scratch-virtio")));
     }

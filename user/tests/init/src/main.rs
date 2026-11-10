@@ -9929,6 +9929,10 @@ mod manager {
             (b"device-manager: started driver test-pci for device", 1),
             (b"device-manager: bound driver test-edu to device", 1),
             (b"device-manager: started driver test-edu for device", 1),
+            // The watchdog's 16-byte BAR, mapped through its page.
+            (b"device-manager: bound driver test-small-bar to device", 1),
+            (b"device-manager: started driver test-small-bar for device", 1),
+            (b"test-small-bar: mapped BAR 0 at ", 1),
             (b"device-manager: the driver of device 1 ", 6),
             (
                 b"device-manager: bound driver virtio-blk to device 5, pci-0000:00:02.0, as pci:v1af4d1042",
@@ -10038,6 +10042,7 @@ mod manager {
             b"driver pci-bus for device 1 did not start",
             b"driver test-pci declined",
             b"driver test-edu declined",
+            b"driver test-small-bar declined",
             b"driver virtio-blk declined",
             b"driver test-disk declined",
             b"driver nvme declined",

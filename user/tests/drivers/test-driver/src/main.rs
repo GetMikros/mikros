@@ -114,6 +114,7 @@ const CRASH_HOST: &str = "system.driver.test-crash-host";
 const KEPT_CHILD: &str = "system.driver.test-kept-child";
 const PCI: &str = "system.driver.test-pci";
 const EDU: &str = "system.driver.test-edu";
+const SMALL_BAR: &str = "system.driver.test-small-bar";
 const DISK: &str = "system.driver.test-disk";
 const DURABLE: &str = "system.driver.test-durable";
 const FAT: &str = "system.driver.test-fat";
@@ -213,6 +214,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         PCI => {
                             let works = match bus {
                                 Some(bus) => pci_device_works(bus, &reactor).await,
+                                None => false,
+                            };
+                            match works {
+                                true => Ok(DriverStartResponse {}),
+                                false => Err(Status::InvalidArgs),
+                            }
+                        }
+                        SMALL_BAR => {
+                            let works = match bus {
+                                Some(bus) => small_bar_works(bus, &reactor, process).await,
                                 None => false,
                             };
                             match works {
@@ -460,6 +471,40 @@ async fn pci_device_works(bus: OwnedHandle, reactor: &Reactor) -> bool {
 /// As the driver of `edu`, with `dma`: whether `bus` gives it the
 /// device's interrupts as it should, and its message-signaled interrupt
 /// arrives when the device raises it.
+/// As the small BAR test driver, for QEMU's i6300esb watchdog, whose
+/// memory BAR 0 is 16 bytes long: `GetBar` gives that BAR as it is, with
+/// a resource of the page it lies in, which maps, and its registers read
+/// through the mapping. The watchdog is only enabled through
+/// configuration space, which this does not write.
+async fn small_bar_works(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -> bool {
+    let device = DeviceAsyncClient::new(ClientEnd::new(bus), reactor.clone());
+    let bar = match device.get_bar(0).await {
+        Ok(Ok(got)) => got.bar,
+        failed => {
+            let failed = failed.map(|r| r.err());
+            mikros_rt::log!(Error, "test-small-bar: GetBar failed: {failed:?}");
+            return false;
+        }
+    };
+    let page = bar.base & !(PAGE_SIZE - 1);
+    let Some(registers) = map(&bar.resource, page, process) else {
+        mikros_rt::log!(Error, "test-small-bar: mapping the page of BAR 0 failed");
+        return false;
+    };
+    // The interrupt status register, the third of the BAR's four.
+    let status = registers + (bar.base - page) + 8;
+    // SAFETY: the register lies in the mapped page, and reading it has no
+    // effect.
+    let _ = unsafe { core::ptr::read_volatile(status as *const u32) };
+    mikros_rt::log!(
+        Info,
+        "test-small-bar: mapped BAR 0 at {:#x}, {} bytes long, through its page",
+        bar.base,
+        bar.size
+    );
+    bar.size == 0x10
+}
+
 async fn edu_interrupts_work(bus: OwnedHandle, reactor: &Reactor, process: sys::Handle) -> bool {
     let device = DeviceAsyncClient::new(ClientEnd::new(bus), reactor.clone());
     let Ok(Ok(bar)) = device.get_bar(0).await.map(|r| r.map(|r| r.bar)) else {
