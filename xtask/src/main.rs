@@ -8,6 +8,7 @@ mod build_systems;
 mod casefold;
 mod check;
 mod cmake;
+mod console;
 mod debug;
 mod debug_build;
 mod debuginfo;

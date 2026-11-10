@@ -560,6 +560,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("input run passed");
+    crate::console::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("console"),
+        timeout,
+    )?;
+    println!("console run passed");
     crate::durability::run(
         &args.machine,
         args.kind,

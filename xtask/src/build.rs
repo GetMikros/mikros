@@ -1047,6 +1047,59 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             ]);
             let input_image = device_image("input.img", &[], &input_files)?;
             println!("built    {}", input_image.display());
+            // The console run serves this image: the drivers and the log
+            // service of the input run, the terminal service, the text
+            // console with the libraries, keymaps and fonts it reads, and
+            // the console probe, which stands in for the session manager.
+            let console = crate::rust_std::build("console", kind)?;
+            println!("built    {}", console.display());
+            let console_probe = user_build("console-probe", kind)?;
+            println!("built    {}", console_probe.display());
+            let mut console_files: Vec<(String, PathBuf)> = input_files
+                .iter()
+                .filter(|(name, _)| !name.contains("input-probe"))
+                .cloned()
+                .collect();
+            console_files.extend([
+                ("usr/bin/termsvc".to_owned(), term_service.clone()),
+                (
+                    "usr/lib/services/terminal.yaml".to_owned(),
+                    crate::workspace_root().join("user/services/termsvc/terminal.yaml"),
+                ),
+                ("usr/bin/console".to_owned(), console.clone()),
+                ("usr/lib/ld-mikros.dlib".to_owned(), dynamic_linker.clone()),
+                (
+                    "usr/lib/libfreetype.6.dlib".to_owned(),
+                    freetype.install.join("lib/libfreetype.6.20.7.dlib"),
+                ),
+                (
+                    "usr/lib/libxkbcommon.0.dlib".to_owned(),
+                    xkbcommon.install.join("lib/libxkbcommon.0.13.2.dlib"),
+                ),
+                ("usr/bin/console-probe".to_owned(), console_probe.clone()),
+                (
+                    "usr/lib/services/console-probe.yaml".to_owned(),
+                    crate::workspace_root().join("user/tests/console-probe/console-probe.yaml"),
+                ),
+            ]);
+            for font in ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"] {
+                console_files.push((
+                    format!("usr/share/fonts/dejavu/{font}"),
+                    fonts.ttf.join(font),
+                ));
+            }
+            let keymap_data = keymaps.install.join("share/xkeyboard-config-2");
+            let mut keymap_files = Vec::new();
+            crate::port_tests::collect(&keymap_data, &mut keymap_files)?;
+            for path in keymap_files {
+                let relative = path
+                    .strip_prefix(&keymap_data)?
+                    .to_str()
+                    .context("not UTF-8")?;
+                console_files.push((format!("usr/share/X11/xkb/{relative}"), path.clone()));
+            }
+            let console_image = device_image("console.img", &[], &console_files)?;
+            println!("built    {}", console_image.display());
             // The power-off run serves this image, with the ACPI server, the
             // log service and the power probe, a boot service that the
             // service manager stops when the power button shuts the
@@ -1324,6 +1377,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/durable.img", durable_image.as_path()),
                 ("tests/acpi-restart.img", acpi_restart_image.as_path()),
                 ("tests/input.img", input_image.as_path()),
+                ("tests/console.img", console_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),

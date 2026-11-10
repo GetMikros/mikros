@@ -10515,6 +10515,49 @@ mod manager {
         mikros_test::exit_qemu(mikros_test::FAILED)
     }
 
+    /// The `console` scenario: serves `tests/console.img`, whose console
+    /// probe starts the text console in the session manager's place and
+    /// serves its logins, while the runner types a login and a line on
+    /// the keyboard; stops QEMU with `PASSED` once the probe passed, or
+    /// with `FAILED`.
+    pub fn console_scenario(s: &Startup) -> i64 {
+        const SECONDS: i64 = 300;
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (b"device-manager: released the kernel console", 1),
+            (b"console-probe: started the console", 1),
+            (b"console-probe: gave the seat", 1),
+            (b"console-probe: Login as sip", 1),
+            (b"console-probe: the console reported the cursor", 1),
+            (b"console-probe: read the typed line", 1),
+            (b"console-probe: ended the session", 1),
+            (b"console-probe: PASSED", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"console-probe: FAILED",
+            b"left without a driver",
+            b"did not start",
+            b"declined",
+        ];
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(Error, "SCENARIO console: {} failed ({})", f.what, f.status);
+            return 1;
+        }
+        match device_manager_logs(s, b"tests/console.img", true, SECONDS, EXPECTED, FAILED) {
+            Ok(true) => {
+                mikros_rt::log!(Info, "SCENARIO console PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO console FAILED"),
+            Err(f) => mikros_rt::log!(
+                Error,
+                "SCENARIO console FAILED: {} failed ({})",
+                f.what,
+                f.status
+            ),
+        }
+        mikros_test::exit_qemu(mikros_test::FAILED)
+    }
+
     /// The `power-off` scenario: serves `tests/power.img`, whose service
     /// manager shuts the machine down once the runner presses the power
     /// button, and waits for the machine to go off; it returns 1 only when
@@ -10912,6 +10955,7 @@ mod bootfs {
                         "bus.img",
                         "call-server",
                         "channel-echo",
+                        "console.img",
                         "debuggee",
                         "devices.img",
                         "durable.img",
@@ -11458,6 +11502,7 @@ fn scenario(s: &Startup) -> Option<i64> {
         "bus-restart" => manager::bus_restart_scenario(s),
         "acpi-restart" => manager::acpi_restart_scenario(s),
         "input" => manager::input_scenario(s),
+        "console" => manager::console_scenario(s),
         // The runner logs the writes and flushes of the scratch disks.
         "durability" => manager::durability_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.

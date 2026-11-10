@@ -309,7 +309,7 @@ fn major_version_name(name: &str) -> bool {
 }
 
 /// Adds every regular file below `dir` to `files`, in name order.
-fn collect(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+pub fn collect(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
         .map(|e| e.map(|e| e.path()))

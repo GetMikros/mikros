@@ -152,7 +152,7 @@ pub fn screen_dump(socket: &Path, path: &Path) -> Result<Vec<u8>> {
 }
 
 /// Why the screen `ppm` does not show the console's text, if it does not.
-fn console_problem(ppm: &[u8]) -> Option<&'static str> {
+pub fn console_problem(ppm: &[u8]) -> Option<&'static str> {
     match ppm_pixels(ppm) {
         None => Some("the screen dump is not a PPM image"),
         Some(pixels) if pixels.iter().all(|&p| p == pixels[0]) => Some("the console shows nothing"),
