@@ -96,8 +96,6 @@ pub struct Simple {
     /// The command's name and arguments.
     pub words: Vec<Argument>,
     pub redirections: Vec<Redirection>,
-    /// Ended with `?`, which returns its error to the caller.
-    pub propagate: bool,
 }
 
 /// An argument: a word, or a block such as `{ $it + 1 }`.
@@ -184,6 +182,9 @@ pub enum Expr {
     Block(Block),
     /// Words, as the items of `for`, each a string after expansion.
     Words(Vec<Word>),
+    /// `(command)?` or `(expr)?`, whose error returns to the caller of
+    /// the function it is in.
+    Propagate(Box<Expr>),
 }
 
 #[derive(Clone, Debug, PartialEq)]

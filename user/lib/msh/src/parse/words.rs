@@ -1,6 +1,6 @@
 //! Commands, pipelines, words, quoted strings and redirections.
 
-use super::{Parser, Result};
+use super::{Error, Parser, Result};
 use crate::ast::*;
 
 /// Whether `c` ends a bare word.
@@ -57,7 +57,6 @@ impl Parser<'_> {
             environment: Vec::new(),
             words: Vec::new(),
             redirections: Vec::new(),
-            propagate: false,
         };
         // NAME=value words before the command.
         while let Some(name) = self.peek_name() {
@@ -116,14 +115,6 @@ impl Parser<'_> {
             }
             return Err(self.error("a command is missing after these words"));
         }
-        // `command?`: a last argument that is a lone `?`.
-        if let Some(Argument::Word(Word { parts })) = simple.words.last()
-            && matches!(parts.as_slice(), [WordPart::Bare(q)] if q == "?")
-            && simple.words.len() > 1
-        {
-            simple.words.pop();
-            simple.propagate = true;
-        }
         Ok(Command::Simple(simple))
     }
 
@@ -179,6 +170,12 @@ impl Parser<'_> {
             }
         };
         while let Some(c) = self.peek() {
+            if c == '[' && !(parts.is_empty() && bare.is_empty()) {
+                // A `[` right after the word's text belongs to it, up to its
+                // matching `]`, as a glob's bracket expression.
+                bare.push_str(&self.bracket()?);
+                continue;
+            }
             if special(c) {
                 break;
             }
@@ -216,6 +213,32 @@ impl Parser<'_> {
             return Err(self.error_at(start, "a word is expected here"));
         }
         Ok(Word { parts })
+    }
+
+    /// `[` and the text up to its matching `]`.
+    fn bracket(&mut self) -> Result<String> {
+        let start = self.pos;
+        let mut depth = 0;
+        loop {
+            match self.peek() {
+                None | Some('\n') => {
+                    return Err(Error {
+                        incomplete: self.peek().is_none(),
+                        ..self.error_at(start, "this `[` has no matching `]`")
+                    });
+                }
+                Some('[') => depth += 1,
+                Some(']') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.pos += 1;
+                        return Ok(self.chars[start..self.pos].iter().collect());
+                    }
+                }
+                _ => {}
+            }
+            self.pos += 1;
+        }
     }
 
     /// `$name`, `$name.field.0`, `$env.NAME` or `$list...`.

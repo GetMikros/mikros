@@ -109,6 +109,17 @@ fn continues_lines() {
 }
 
 #[test]
+fn keeps_brackets_after_text_in_the_word() {
+    let s = simple("ls file[12].txt *.[ch] [a b]");
+    assert_eq!(s.words[1], bare("file[12].txt"));
+    assert_eq!(s.words[2], bare("*.[ch]"));
+    assert!(
+        matches!(&s.words[3], Argument::Word(w) if matches!(w.parts[0], WordPart::Expr(Expr::List(_))))
+    );
+    assert!(failure("ls a[b").incomplete);
+}
+
+#[test]
 fn reads_variables_in_words() {
     let s = simple("cat $dir/file $list... $rec.name.0");
     let Argument::Word(w) = &s.words[1] else {
@@ -317,7 +328,12 @@ fn reads_loops_functions_params_try_and_use() {
         StatementKind::Try { .. }
     ));
     assert!(matches!(one("use lib/util.msh"), StatementKind::Use(_)));
-    assert!(simple("rm x ?").propagate);
+    // `(command)?` propagates; a lone `?` is a word.
+    let StatementKind::Expr(Expr::Propagate(inner)) = one("(rm x)?") else {
+        panic!()
+    };
+    assert!(matches!(*inner, Expr::Pipeline(_)));
+    assert_eq!(simple("ls ?").words[1], bare("?"));
 }
 
 #[test]

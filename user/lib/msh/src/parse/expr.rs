@@ -171,6 +171,11 @@ impl Parser<'_> {
         };
         self.skip_blank();
         self.expect(')', "`)`")?;
+        // `(command)?` returns its error to the caller.
+        if self.peek() == Some('?') {
+            self.pos += 1;
+            return Ok(Expr::Propagate(Box::new(expr)));
+        }
         Ok(expr)
     }
 
