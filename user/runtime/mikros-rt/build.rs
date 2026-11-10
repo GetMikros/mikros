@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo");
-    let table_path = PathBuf::from(&dir).join("../../kernel/syscalls.yaml");
+    let table_path = PathBuf::from(&dir).join("../../../kernel/syscalls.yaml");
     println!("cargo:rerun-if-changed={}", table_path.display());
     let shown = "kernel/syscalls.yaml";
     let bytes = std::fs::read(&table_path).unwrap_or_else(|e| panic!("{shown}: {e}"));
@@ -13,7 +13,7 @@ fn main() {
     let code = syscall_table::generate::user_bindings_x86_64(&read.table);
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("set by cargo")).join("syscalls.rs");
     std::fs::write(&out, code).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
-    system_libraries(&PathBuf::from(&dir).join("../../midl"));
+    system_libraries(&PathBuf::from(&dir).join("../../../midl"));
 }
 
 /// Compiles every `.midl` file under `root` into `interfaces.rs`.

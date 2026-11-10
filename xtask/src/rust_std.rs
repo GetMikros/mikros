@@ -1,6 +1,6 @@
 //! The Rust standard library for Mikros: the toolchain's `library/`
-//! source with the Mikros patches in `user/std/patches/`, and the
-//! programs of the `user/std` workspace built against it.
+//! source with the Mikros patches in `user/runtime/std/patches/`, and the
+//! programs of the `user/runtime/std` workspace built against it.
 //!
 //! Cargo builds the standard library from source (`-Zbuild-std`) out
 //! of the copy in `target/rust-std/library`. In that copy, the vendored
@@ -41,12 +41,12 @@ fn toolchain_library() -> Result<PathBuf> {
 
 /// The patched copy of the standard library source, made again from
 /// the toolchain's whenever the toolchain or the patches changed. Cargo
-/// does not see changes in it, so the target directory of `user/std` is
+/// does not see changes in it, so the target directory of `user/runtime/std` is
 /// removed then as well.
 pub fn source() -> Result<PathBuf> {
     let root = crate::workspace_root();
     let toolchain = toolchain_library()?;
-    let patches = crate::port::patches(&root.join("user/std/patches"))?;
+    let patches = crate::port::patches(&root.join("user/runtime/std/patches"))?;
     let stamp = format!(
         "{}\n{}\n",
         toolchain.display(),
@@ -56,7 +56,7 @@ pub fn source() -> Result<PathBuf> {
     if fs::read_to_string(dir().join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
         return Ok(library);
     }
-    for stale in [dir(), root.join("user/std/target")] {
+    for stale in [dir(), root.join("user/runtime/std/target")] {
         if stale.exists() {
             fs::remove_dir_all(&stale).with_context(|| format!("removing {}", stale.display()))?;
         }
@@ -187,7 +187,7 @@ fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Builds the program `bin` of the package of the same name in the
-/// `user/std` workspace, which uses the standard library, and returns
+/// `user/runtime/std` workspace, which uses the standard library, and returns
 /// its path. It is linked by the sysroot's Clang, with the C library
 /// and libunwind.
 pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
@@ -203,7 +203,7 @@ pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
         format!("-Clink-arg=--config={}", config.display()),
     ];
     let status = Command::new(cargo)
-        .current_dir(root.join("user/std"))
+        .current_dir(root.join("user/runtime/std"))
         .env("__CARGO_TESTS_ONLY_SRC_ROOT", &library)
         .env("CARGO_ENCODED_RUSTFLAGS", rustflags.join("\x1f"))
         // These replace the `user` workspace's settings, which build
@@ -221,7 +221,7 @@ pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
         bail!("building {bin} failed");
     }
     Ok(root
-        .join("user/std/target/x86_64-unknown-mikros")
+        .join("user/runtime/std/target/x86_64-unknown-mikros")
         .join(kind.profile_dir())
         .join(bin))
 }

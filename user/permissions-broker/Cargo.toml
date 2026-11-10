@@ -8,5 +8,5 @@ publish = false
 [dependencies]
 mikros-manifest = { path = "../lib/manifest" }
 mikros-permissions = { path = "../lib/permissions" }
-mikros-rt = { path = "../mikros-rt" }
+mikros-rt = { path = "../runtime/mikros-rt" }
 mikros-yaml = { path = "../lib/yaml" }

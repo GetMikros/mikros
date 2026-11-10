@@ -9,4 +9,4 @@ publish = false
 fat = { path = "../fat" }
 mikros-exfat = { path = "../../lib/exfat" }
 mikros-fat = { path = "../../lib/fat" }
-mikros-rt = { path = "../../mikros-rt" }
+mikros-rt = { path = "../../runtime/mikros-rt" }

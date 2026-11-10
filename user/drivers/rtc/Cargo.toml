@@ -7,4 +7,4 @@ publish = false
 
 [dependencies]
 mikros-cmos = { path = "../../lib/cmos" }
-mikros-rt = { path = "../../mikros-rt" }
+mikros-rt = { path = "../../runtime/mikros-rt" }

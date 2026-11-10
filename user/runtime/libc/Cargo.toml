@@ -19,4 +19,4 @@ shared = []
 mikros-rt = { path = "../mikros-rt", default-features = false }
 
 [build-dependencies]
-syscall-table = { path = "../../kernel/syscalls" }
+syscall-table = { path = "../../../kernel/syscalls" }

@@ -9,4 +9,4 @@ publish = false
 mikros-bootfs = { path = "../lib/bootfs" }
 mikros-loader = { path = "../loader" }
 mikros-manifest = { path = "../lib/manifest" }
-mikros-rt = { path = "../mikros-rt" }
+mikros-rt = { path = "../runtime/mikros-rt" }

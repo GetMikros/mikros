@@ -7,4 +7,4 @@ publish = false
 
 [dependencies]
 mikros-pci = { path = "../../lib/pci" }
-mikros-rt = { path = "../../mikros-rt" }
+mikros-rt = { path = "../../runtime/mikros-rt" }

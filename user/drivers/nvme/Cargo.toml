@@ -7,5 +7,5 @@ publish = false
 
 [dependencies]
 mikros-nvme = { path = "../../lib/nvme" }
-mikros-rt = { path = "../../mikros-rt" }
+mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-storage = { path = "../../storage" }

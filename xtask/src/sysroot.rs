@@ -87,7 +87,7 @@ pub fn build() -> Result<PathBuf> {
         .with_context(|| format!("writing {}", header.display()))?;
     for header in ["abi.h", "process.h"] {
         let from = crate::workspace_root()
-            .join("user/libc/include/mikros")
+            .join("user/runtime/libc/include/mikros")
             .join(header);
         copy(&from, &sysroot.join("include/mikros").join(header))?;
     }
@@ -98,7 +98,7 @@ pub fn build() -> Result<PathBuf> {
     let layer = mikros_layer(false)?;
     let shared_layer = exported_object(&mikros_layer(true)?)?;
     let abi_note = crate::workspace_root().join("target/musl/abi-note.o");
-    assemble(&cfg, "user/libc/crt/abi-note.S", &abi_note)?;
+    assemble(&cfg, "user/runtime/libc/crt/abi-note.S", &abi_note)?;
     let musl = crate::musl::build(&cfg, &[&shared_layer, &abi_note])?;
     let lib = sysroot.join("lib");
     combine(&lib.join("libc.slib"), &[&musl.libc, &layer])?;
@@ -118,7 +118,7 @@ pub fn build() -> Result<PathBuf> {
     .context("adding the ABI note to crti.o")?;
     copy(&musl.crtn, &lib.join("crtn.o"))?;
     copy(&llvm::build_unwinder(&cfg)?, &lib.join("libunwind.slib"))?;
-    assemble(&cfg, "user/libc/crt/crt1.S", &lib.join("crt1.o"))?;
+    assemble(&cfg, "user/runtime/libc/crt/crt1.S", &lib.join("crt1.o"))?;
     Ok(sysroot)
 }
 

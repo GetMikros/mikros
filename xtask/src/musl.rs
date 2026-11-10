@@ -1,5 +1,5 @@
 //! The pinned musl release that the C library is a port of: fetching
-//! it, applying the Mikros patches in `user/libc/patches/`, and building
+//! it, applying the Mikros patches in `user/runtime/libc/patches/`, and building
 //! its static library and headers with the sysroot's Clang
 //! configuration.
 
@@ -19,7 +19,7 @@ fn dir() -> PathBuf {
 }
 
 fn patches_dir() -> PathBuf {
-    crate::workspace_root().join("user/libc/patches")
+    crate::workspace_root().join("user/runtime/libc/patches")
 }
 
 /// The `DT_SONAME` of the shared C library.

@@ -4,8 +4,8 @@
 //!
 //! The release's components are compiled freestanding, with ACPICA's own
 //! C library routines, and with the release's headers copied and given a
-//! platform header for Mikros, `user/acpica/platform/acmikros.h`, as is
-//! the ACPI server's glue, `user/acpica/glue`, which gives what the server
+//! platform header for Mikros, `user/runtime/acpica/platform/acmikros.h`, as is
+//! the ACPI server's glue, `user/runtime/acpica/glue`, which gives what the server
 //! asks of ACPICA simple types; a change to any of these rebuilds the
 //! library. The operating system layer, the `AcpiOs`
 //! functions, is the program's that links the library. The objects are
@@ -155,10 +155,10 @@ pub fn build(flavor: Flavor) -> Result<PathBuf> {
         .join("target/acpica")
         .join(flavor.name());
     let library = out.join("libacpica.a");
-    let platform = crate::workspace_root().join("user/acpica/platform/acmikros.h");
+    let platform = crate::workspace_root().join("user/runtime/acpica/platform/acmikros.h");
     let mikros =
         fs::read_to_string(&platform).with_context(|| format!("reading {}", platform.display()))?;
-    let glue_dir = crate::workspace_root().join("user/acpica/glue");
+    let glue_dir = crate::workspace_root().join("user/runtime/acpica/glue");
     let mut glue_files = Vec::new();
     for entry in fs::read_dir(&glue_dir)? {
         let path = entry?.path();

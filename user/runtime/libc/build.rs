@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo");
-    let table_path = PathBuf::from(&dir).join("../../kernel/syscalls.yaml");
+    let table_path = PathBuf::from(&dir).join("../../../kernel/syscalls.yaml");
     println!("cargo:rerun-if-changed={}", table_path.display());
     let shown = "kernel/syscalls.yaml";
     let bytes = std::fs::read(&table_path).unwrap_or_else(|e| panic!("{shown}: {e}"));

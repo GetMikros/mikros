@@ -97,7 +97,7 @@ jobs:
             target/x86_64-unknown-uefi
             target/rust-std
             user/target
-            user/std/target
+            user/runtime/std/target
             kernel/fuzz/target
             boot/mikrosboot/fuzz/target
           key: ${{ steps.setup.outputs.rust-build-key }}
