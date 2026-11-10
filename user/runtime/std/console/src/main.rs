@@ -138,9 +138,17 @@ impl Console {
 
     /// Redraws the rows that changed, for as long as the console runs.
     async fn redraw(self: Rc<Self>) {
+        // The row the cursor was drawn on, which is drawn again when the
+        // cursor has left it, so that it shows the cursor no more.
+        let mut drawn_cursor: Option<usize> = None;
         loop {
             self.changed.changed().await;
-            let rows = self.with_screen(|s| s.take_dirty());
+            let (mut rows, cursor) = self.with_screen(|s| (s.take_dirty(), s.cursor()));
+            let cursor_row = cursor.map(|(row, _)| row);
+            rows.extend(drawn_cursor.into_iter().chain(cursor_row));
+            rows.sort_unstable();
+            rows.dedup();
+            drawn_cursor = cursor_row;
             let mut renderer = self.renderer.borrow_mut().take();
             if let Some(r) = renderer.as_mut() {
                 self.with_screen(|s| r.draw(s, &rows));
