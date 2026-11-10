@@ -22,7 +22,7 @@ use mikros_rt::interfaces::mikros::service::ClientIdentity;
 /// The directory of the service manifests.
 pub const SERVICES: &str = "/usr/lib/services";
 /// The service that starts right after the broker.
-const TMPFS: &str = "tmpfs";
+pub const TMPFS: &str = "tmpfs";
 const SUFFIX: &str = ".yaml";
 
 /// Reads the service manifests in `SERVICES`, which is at the relative
@@ -81,8 +81,8 @@ pub async fn start(
         me,
         sources,
         dir,
-        services,
-        manifests,
+        services: RefCell::new(services),
+        manifests: RefCell::new(manifests),
         broker: RefCell::new(None),
         active: RefCell::new(BTreeSet::new()),
         restarts: RefCell::new(BTreeMap::new()),
@@ -90,6 +90,7 @@ pub async fn start(
         demand_waker: RefCell::new(None),
         running: RefCell::new(Vec::new()),
         stopping: Cell::new(false),
+        root: RefCell::new(None),
     });
     let weak = Rc::downgrade(&supervisor);
     supervisor.dir.set_demand(Rc::new(move |name: &str| {
@@ -112,16 +113,23 @@ pub async fn start(
         .spawner()
         .clone()
         .spawn(supervisor.clone().watch_power_button());
+    // The root's manifests count once the process manager says the root
+    // file system is available.
+    supervisor
+        .dir
+        .spawner()
+        .clone()
+        .spawn(crate::root::follow(supervisor.clone()));
     // `order` puts the broker first whenever anything starts; without
     // it, nothing else can.
     let Some((&first, rest)) = start.split_first() else {
-        for s in &supervisor.services {
+        for s in supervisor.services.borrow().iter() {
             supervisor.dir.never(&s.name);
         }
         return;
     };
     if !supervisor.start(first).await {
-        for s in &supervisor.services {
+        for s in supervisor.services.borrow().iter() {
             supervisor.dir.never(&s.name);
         }
         return;
@@ -137,7 +145,11 @@ pub async fn start(
 /// `fs`, with the manifests' bytes. Files that cannot be read or are
 /// invalid are logged and left out, and so are the keys that a manifest
 /// does not have.
-async fn read_all(fs: &NodeAsyncClient, at: &str, reactor: &Reactor) -> Vec<(Service, Vec<u8>)> {
+pub async fn read_all(
+    fs: &NodeAsyncClient,
+    at: &str,
+    reactor: &Reactor,
+) -> Vec<(Service, Vec<u8>)> {
     let names = match files::list(fs, reactor, at, NodeType::File, SUFFIX).await {
         Ok(names) => names,
         Err(Failure::Fs(Error::NotFound)) => Vec::new(),

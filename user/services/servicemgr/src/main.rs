@@ -19,6 +19,7 @@ mod control;
 mod directory;
 mod launch;
 mod registrar;
+mod root;
 mod services;
 mod sources;
 mod supervisor;
@@ -33,7 +34,7 @@ use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
 use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient, StartupHandle};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, ProcessDirectory, ProcessDirectoryAsyncServer, ProcessDirectoryBindResponse,
-    ProcessDirectoryRequest,
+    ProcessDirectoryRequest, ProcessDirectoryRootAvailableResponse,
 };
 use mikros_rt::{PANIC_EXIT_CODE, log, managed, sys};
 
@@ -111,13 +112,24 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     PANIC_EXIT_CODE
 }
 
-/// Accepts `Bind` requests on the control endpoint `end` until the
-/// process manager closes it.
+/// Serves `Bind` and `RootAvailable` on the control endpoint `end` until
+/// the process manager closes it.
 async fn serve_control(end: OwnedHandle, reactor: Reactor, dir: Rc<Dir>) {
     let server = ProcessDirectoryAsyncServer::new(ServerEnd::<ProcessDirectory>::new(end), reactor);
-    while let Ok(ProcessDirectoryRequest::Bind(request, responder)) = server.next().await {
-        // The binding is active once it is served, before the reply.
-        dir.serve(request.directory, request.client);
-        let _ = responder.reply(server.server(), Ok(ProcessDirectoryBindResponse {}));
+    while let Ok(request) = server.next().await {
+        let _ = match request {
+            ProcessDirectoryRequest::Bind(request, responder) => {
+                // The binding is active once it is served, before the reply.
+                dir.serve(request.directory, request.client);
+                responder.reply(server.server(), Ok(ProcessDirectoryBindResponse {}))
+            }
+            ProcessDirectoryRequest::RootAvailable(request, responder) => {
+                let given = dir.give_root(request.usr, request.etc);
+                responder.reply(
+                    server.server(),
+                    given.map(|()| ProcessDirectoryRootAvailableResponse {}),
+                )
+            }
+        };
     }
 }

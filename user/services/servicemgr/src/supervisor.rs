@@ -51,8 +51,10 @@ pub struct Supervisor {
     /// Where the standard output and error of services go.
     pub sources: Rc<Sources>,
     pub dir: Rc<Dir>,
-    pub services: Vec<Service>,
-    pub manifests: Vec<Vec<u8>>,
+    /// The services of the manifests read so far, by index; later ones
+    /// are added after them.
+    pub services: RefCell<Vec<Service>>,
+    pub manifests: RefCell<Vec<Vec<u8>>>,
     pub broker: RefCell<Option<Rc<BrokerAsyncClient>>>,
     /// The services that started and have not stopped for good.
     pub active: RefCell<BTreeSet<usize>>,
@@ -67,6 +69,13 @@ pub struct Supervisor {
     /// Set once `Shutdown` began: from then on, no service is started or
     /// restarted.
     pub stopping: Cell<bool>,
+    /// The root file system's `/usr` and `/etc`, once it is available.
+    pub root: RefCell<
+        Option<(
+            mikros_rt::interfaces::mikros::fs::NodeAsyncClient,
+            mikros_rt::interfaces::mikros::fs::NodeAsyncClient,
+        )>,
+    >,
 }
 
 /// What happens to a service that ended.
@@ -86,13 +95,23 @@ fn now() -> i64 {
 }
 
 impl Supervisor {
+    /// A copy of service `i`'s manifest.
+    pub fn service(&self, i: usize) -> Service {
+        self.services.borrow()[i].clone()
+    }
+
+    /// The index of the service named `name`.
+    pub fn position(&self, name: &str) -> Option<usize> {
+        self.services.borrow().iter().position(|s| s.name == name)
+    }
+
     /// Starts service `i`, and returns whether it started. A service
     /// that did not start is logged and its protocols are no longer
     /// provided.
     pub fn start(self: &Rc<Self>, i: usize) -> Pin<Box<dyn Future<Output = bool>>> {
         let this = self.clone();
         Box::pin(async move {
-            let name = this.services[i].name.clone();
+            let name = this.service(i).name;
             match this.launch(i).await {
                 Ok(mut started) => {
                     mikros_rt::log!(Info, "started service {name} as pid {}", started.pid);
@@ -120,7 +139,8 @@ impl Supervisor {
     /// permissions of every other active service are registered again,
     /// and any other service once its own are registered.
     async fn launch(&self, i: usize) -> Result<Started, String> {
-        let service = &self.services[i];
+        let service = self.service(i);
+        let service = &service;
         if service.name == broker::NAME {
             let me = ClientIdentity {
                 pid: self.me.pid,
@@ -128,7 +148,7 @@ impl Supervisor {
                 app_id: self.me.app_id.clone(),
             };
             let (launcher, boot, reactor) = (&self.launcher, &self.boot, &self.reactor);
-            let manifest = &self.manifests[i];
+            let manifest = &self.manifests.borrow()[i].clone();
             let (started, broker) =
                 broker::start(launcher, boot, reactor, me, service, manifest).await?;
             *self.broker.borrow_mut() = Some(broker.clone());
@@ -155,7 +175,7 @@ impl Supervisor {
 
     /// Registers the permissions of service `i`'s manifest.
     async fn grant(&self, broker: &BrokerAsyncClient, i: usize) -> Result<(), String> {
-        let service = &self.services[i];
+        let service = self.service(i);
         let app_id = format!("system.{}", service.name);
         broker::grant(broker, &app_id, service.permissions.clone()).await
     }
@@ -165,11 +185,11 @@ impl Supervisor {
     /// Connections wait while it restarts; otherwise its protocols are
     /// no longer provided.
     fn watch(self: &Rc<Self>, i: usize, started: Started) {
-        let name = self.services[i].name.clone();
+        let service = self.service(i);
+        let name = service.name.clone();
         let Started {
             process, provider, ..
         } = started;
-        let service = &self.services[i];
         if service.provides.iter().any(|p| p.protocol == SOURCES) {
             self.sources.log_runs(&provider);
         }
@@ -197,7 +217,7 @@ impl Supervisor {
                     this.dir.stopped(&name);
                     this.start(i).await;
                 }
-                After::Stop if this.services[i].start == Start::OnDemand => {
+                After::Stop if this.service(i).start == Start::OnDemand => {
                     this.active.borrow_mut().remove(&i);
                     this.dir.idle(&name);
                 }
@@ -214,7 +234,7 @@ impl Supervisor {
     /// exit code 0, unless it was restarted `RESTARTS_MAX` times within
     /// `WINDOW`.
     fn after(&self, i: usize, (code, signal): (i64, u32)) -> After {
-        let service = &self.services[i];
+        let service = self.service(i);
         let failed = code != 0 || signal != 0;
         let wanted = match service.restart {
             Restart::Always => true,
@@ -245,7 +265,7 @@ impl Supervisor {
     /// Asks for the on-demand service `name`, which a connection waits
     /// for, to be started.
     pub fn demand(&self, name: &str) {
-        let Some(i) = self.services.iter().position(|s| s.name == name) else {
+        let Some(i) = self.position(name) else {
             return;
         };
         self.demanded.borrow_mut().push_back(i);
@@ -292,7 +312,7 @@ impl Supervisor {
     /// `KILL` once its stop timeout has passed, and returns once it has
     /// terminated.
     async fn stop(&self, i: usize, pid: u32) {
-        let service = &self.services[i];
+        let service = self.service(i);
         let timeout = i64::try_from(service.stop_timeout)
             .unwrap_or(i64::MAX)
             .saturating_mul(NANOS_PER_SECOND);
@@ -403,18 +423,18 @@ impl Supervisor {
     /// are not active, each with its own, then `i`. `chain` holds the
     /// services that wait for `i` to start; meeting one again is a
     /// cycle. Returns whether `i` started.
-    fn start_with_after(
+    pub fn start_with_after(
         self: &Rc<Self>,
         i: usize,
         chain: Vec<usize>,
     ) -> Pin<Box<dyn Future<Output = bool>>> {
         let this = self.clone();
         Box::pin(async move {
-            let name = this.services[i].name.clone();
+            let name = this.service(i).name;
             let mut chain = chain;
             chain.push(i);
-            for after in this.services[i].after.clone() {
-                let Some(j) = this.services.iter().position(|s| s.name == after) else {
+            for after in this.service(i).after {
+                let Some(j) = this.position(&after) else {
                     continue;
                 };
                 let failed = if chain.contains(&j) {

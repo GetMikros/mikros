@@ -28,6 +28,7 @@ use mikros_manifest::Service;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::fs::Node;
 use mikros_rt::interfaces::mikros::permissions::{BrokerAsyncClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, DirectoryAsyncServer, DirectoryConnectResponse,
@@ -67,6 +68,12 @@ pub struct Dir {
     registered: Cell<u64>,
     demand: RefCell<Option<Demand>>,
     shutdown: RefCell<Option<Shutdown>>,
+    /// The root file system's `/usr` and `/etc` once the process manager
+    /// gave them, until the supervisor takes them, whether it has given
+    /// them, and the task that waits for them.
+    root: RefCell<Option<(ClientEnd<Node>, ClientEnd<Node>)>>,
+    root_given: Cell<bool>,
+    root_waiting: RefCell<Option<Waker>>,
 }
 
 /// A protocol that a manifest provides.
@@ -140,6 +147,9 @@ impl Dir {
             registered: Cell::new(0),
             demand: RefCell::new(None),
             shutdown: RefCell::new(None),
+            root: RefCell::new(None),
+            root_given: Cell::new(false),
+            root_waiting: RefCell::new(None),
         })
     }
 
@@ -214,6 +224,79 @@ impl Dir {
         for waker in self.waiting.take() {
             waker.wake();
         }
+    }
+
+    /// Records the protocols that `services`, added after the first
+    /// `first` services, provide, as `initially` says for each by its
+    /// index. A protocol that an earlier service or two of them provide
+    /// is left as it was.
+    pub fn add_services(
+        &self,
+        first: usize,
+        services: &[Service],
+        initially: impl Fn(usize) -> Initially,
+    ) {
+        let mut providers = BTreeMap::<String, Vec<usize>>::new();
+        for (k, s) in services.iter().enumerate() {
+            for p in &s.provides {
+                providers.entry(p.protocol.clone()).or_default().push(k);
+            }
+        }
+        let mut provided = self.provided.borrow_mut();
+        for (protocol, by) in providers {
+            let ([k], false) = (&by[..], provided.contains_key(&protocol)) else {
+                mikros_rt::log!(
+                    Error,
+                    "protocol {protocol} is provided by more than one service, so the new one does not"
+                );
+                continue;
+            };
+            let s = &services[*k];
+            let permission = s
+                .provides
+                .iter()
+                .find(|p| p.protocol == protocol)
+                .and_then(|p| p.permission.clone());
+            let provider = match initially(first + k) {
+                Initially::Starting => Provider::Waiting(Vec::new()),
+                Initially::Idle => Provider::Idle,
+                Initially::Never => Provider::Never,
+            };
+            provided.insert(
+                protocol,
+                Provided {
+                    service: s.name.clone(),
+                    permission,
+                    provider,
+                },
+            );
+        }
+    }
+
+    /// Takes the root file system's `/usr` and `/etc` from the process
+    /// manager, once: a second time fails with `BAD_STATE`.
+    pub fn give_root(&self, usr: ClientEnd<Node>, etc: ClientEnd<Node>) -> Result<(), Status> {
+        if self.root_given.replace(true) {
+            return Err(Status::BadState);
+        }
+        *self.root.borrow_mut() = Some((usr, etc));
+        if let Some(waker) = self.root_waiting.borrow_mut().take() {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    /// The root file system's `/usr` and `/etc`, once the process manager
+    /// gave them.
+    pub async fn root(&self) -> (ClientEnd<Node>, ClientEnd<Node>) {
+        poll_fn(|cx| match self.root.borrow_mut().take() {
+            Some(root) => Poll::Ready(root),
+            None => {
+                *self.root_waiting.borrow_mut() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
     }
 
     pub fn spawner(&self) -> &Spawner {
