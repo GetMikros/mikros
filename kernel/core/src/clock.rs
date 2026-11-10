@@ -114,20 +114,31 @@ mod tests {
     fn keeps_concurrent_readers_within_one_wrap() {
         // Readers on several threads read a shared 16-bit counter that
         // each also advances, and extend their readings in whatever order
-        // they come; none may get a value a wrap ahead of the counter.
+        // they come; none may get a value a wrap ahead of the counter. The
+        // threads go in rounds of `ROUND` readings each, so that a reading
+        // is extended less than half a wrap after any other, as the
+        // extender needs, even when a thread waits long between taking a
+        // reading and extending it.
         use core::sync::atomic::AtomicU64;
-        use std::sync::Arc;
+        use std::sync::{Arc, Barrier};
+        const THREADS: u64 = 4;
+        const ROUND: u64 = 0x1000;
+        const _: () = assert!(THREADS * ROUND < 0x8000);
         let counter = Arc::new(AtomicU64::new(0));
         let e = Arc::new(Extender::new(16));
-        let threads: std::vec::Vec<_> = (0..4)
+        let barrier = Arc::new(Barrier::new(THREADS as usize));
+        let threads: std::vec::Vec<_> = (0..THREADS)
             .map(|_| {
-                let (counter, e) = (counter.clone(), e.clone());
+                let (counter, e, barrier) = (counter.clone(), e.clone(), barrier.clone());
                 std::thread::spawn(move || {
-                    for _ in 0..100_000 {
-                        let reading = counter.fetch_add(1, Ordering::Relaxed);
-                        let value = e.extend(reading & 0xffff);
-                        assert!(value <= counter.load(Ordering::Relaxed));
-                        assert!(value + 0x8000 > reading);
+                    for _ in 0..25 {
+                        for _ in 0..ROUND {
+                            let reading = counter.fetch_add(1, Ordering::Relaxed);
+                            let value = e.extend(reading & 0xffff);
+                            assert!(value <= counter.load(Ordering::Relaxed));
+                            assert!(value + 0x8000 > reading);
+                        }
+                        barrier.wait();
                     }
                 })
             })
