@@ -18,10 +18,11 @@ const TEST_FIRST: u8 = 0xAB;
 const DISABLE_FIRST: u8 = 0xAD;
 const ENABLE_FIRST: u8 = 0xAE;
 const TO_SECOND: u8 = 0xD4;
-/// The configuration byte's bits: the ports' interrupts, the second
-/// port's clock being off, and translation to scan code set 1.
+/// The configuration byte's bits: the ports' interrupts, their clocks
+/// being off, and translation to scan code set 1.
 const FIRST_INTERRUPT: u8 = 1 << 0;
 const SECOND_INTERRUPT: u8 = 1 << 1;
+const FIRST_CLOCK_OFF: u8 = 1 << 4;
 const SECOND_CLOCK_OFF: u8 = 1 << 5;
 const TRANSLATION: u8 = 1 << 6;
 /// What the self-test and the port tests answer when they pass.
@@ -127,13 +128,15 @@ impl<P: Ports> Controller<P> {
         Ok(present)
     }
 
-    /// Turns on the interrupts of the ports in `present`.
+    /// Turns on the interrupts of the ports in `present`. Their clocks,
+    /// which enabling the ports turned on, stay on: the configuration
+    /// byte read while they were disabled says off.
     pub fn enable_interrupts(&mut self, present: Present) -> Result<(), Error> {
         if present.first {
-            self.config |= FIRST_INTERRUPT;
+            self.config = (self.config | FIRST_INTERRUPT) & !FIRST_CLOCK_OFF;
         }
         if present.second {
-            self.config |= SECOND_INTERRUPT;
+            self.config = (self.config | SECOND_INTERRUPT) & !SECOND_CLOCK_OFF;
         }
         self.write_config()
     }

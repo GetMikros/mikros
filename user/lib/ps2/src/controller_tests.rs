@@ -65,6 +65,12 @@ impl Ports for Fake {
                 self.output.push_back((Port::First, answer));
             }
             0xD4 => self.to_second = true,
+            // Disabling and enabling a port turns its clock off and on.
+            0xAD => self.config |= 0x10,
+            // Only a controller with a second port has its clock bit.
+            0xA7 if self.mouse.is_some() => self.config |= 0x20,
+            0xAE => self.config &= !0x10,
+            0xA8 => self.config &= !0x20,
             _ => {}
         }
     }
@@ -129,8 +135,8 @@ fn init_follows_the_order_and_finds_both_devices() {
             0xAD, 0xA7, 0x20, 0x60, 0xAA, 0x60, 0xAB, 0xA9, 0xAE, 0xA8, 0xD4, 0x60
         ]
     );
-    // Interrupts on, translation off.
-    assert_eq!(fake.config & 0x43, 0x03);
+    // Interrupts on, translation off, and both clocks still on.
+    assert_eq!(fake.config & 0x73, 0x03);
     assert_eq!(
         fake.written,
         vec![(Port::First, RESET), (Port::Second, RESET)]
