@@ -28,8 +28,8 @@ use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
-    DriverAsyncServer, DriverConnectChildResponse, DriverRequest, DriverStartRequest,
-    DriverStartResponse, DriverStopResponse,
+    DriverAsyncServer, DriverConnectChildResponse, DriverPrepareShutdownResponse, DriverRequest,
+    DriverStartRequest, DriverStartResponse, DriverStopResponse,
 };
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerAsyncClient};
 use mikros_rt::interfaces::mikros::process::HandleRole;
@@ -96,6 +96,17 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 }
                 DriverRequest::Reconnect(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))
+                }
+                // The device manager is about to exit: the resources that
+                // methods run at power-off and restart may need are taken
+                // while it still grants them.
+                DriverRequest::PrepareShutdown(_, responder) => {
+                    let (held, failed) = mikros_acpica::power::hold_operation_regions();
+                    mikros_rt::log!(
+                        Info,
+                        "acpi: holding {held} operation regions for power-off and restart, {failed} refused"
+                    );
+                    responder.reply(s, Ok(DriverPrepareShutdownResponse {}))
                 }
                 DriverRequest::ResetChild(_, responder) => {
                     responder.reply(s, Err(Status::NotSupported))

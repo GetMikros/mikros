@@ -1,9 +1,11 @@
 //! Powering the machine off and restarting it, and the power button,
 //! through the glue, with the resources of the registers that they write
-//! held from the start.
+//! held from the start, and those of every operation region held before
+//! the device manager exits.
 
 use crate::sync::now;
 use crate::{AE_ERROR, AE_OK, Status, physical, ports};
+use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use mikros_rt::sys;
@@ -17,6 +19,8 @@ const RESET_WAIT: i64 = 1_000_000_000;
 /// The power registers of `mikros_acpi_power_register`: the PM1a and PM1b
 /// control registers and the reset register, and their address spaces.
 const POWER_REGISTERS: u32 = 3;
+/// ACPI's address spaces of system memory and system I/O.
+const SPACE_MEMORY: u32 = 0;
 const SPACE_IO: u32 = 1;
 
 unsafe extern "C" {
@@ -28,6 +32,10 @@ unsafe extern "C" {
         space: *mut u32,
         address: *mut u64,
         bytes: *mut u32,
+    ) -> Status;
+    fn mikros_acpi_operation_regions(
+        found: extern "C" fn(space: u32, address: u64, length: u64, context: *mut c_void),
+        context: *mut c_void,
     ) -> Status;
     fn mikros_acpi_watch_power_button(
         pressed: extern "C" fn(*mut c_void),
@@ -67,6 +75,56 @@ pub(crate) fn hold_resources() {
     if !ports::enable(RESET_CONTROL, 1) {
         mikros_rt::log!(Warning, "acpi: holding port {RESET_CONTROL:#x} failed");
     }
+}
+
+extern "C" fn region_found(space: u32, address: u64, length: u64, context: *mut c_void) {
+    // SAFETY: `hold_operation_regions` passes its vector, which outlives
+    // the walk that calls this.
+    let regions = unsafe { &mut *context.cast::<Vec<(u32, u64, u64)>>() };
+    regions.push((space, address, length));
+}
+
+/// Obtains and keeps the I/O ports of every system I/O operation region in
+/// the namespace and the memory of every system memory one, except those
+/// already held, so that the methods that powering off and restarting run
+/// can reach them once no more resources can be had. Each range that
+/// cannot be had is logged. Returns how many regions it held and how many
+/// it could not.
+pub fn hold_operation_regions() -> (usize, usize) {
+    let mut regions: Vec<(u32, u64, u64)> = Vec::new();
+    let context = (&raw mut regions).cast::<c_void>();
+    // SAFETY: `region_found` takes `context` as the vector, which lives
+    // until the call returns.
+    let walked = unsafe { mikros_acpi_operation_regions(region_found, context) };
+    if walked != AE_OK {
+        mikros_rt::log!(
+            Warning,
+            "acpi: listing the operation regions failed: {walked:#x}"
+        );
+    }
+    let (mut held, mut failed) = (0, 0);
+    for (space, address, length) in regions {
+        let kept = match space {
+            SPACE_IO => u16::try_from(address)
+                .ok()
+                .zip(u16::try_from(length).ok())
+                .is_some_and(|(port, count)| ports::enable(port, count)),
+            // The mapping is never given back.
+            SPACE_MEMORY => physical::map(address, length).is_some(),
+            _ => continue,
+        };
+        if kept {
+            held += 1;
+        } else {
+            failed += 1;
+            let what = if space == SPACE_IO { "ports" } else { "memory" };
+            mikros_rt::log!(
+                Warning,
+                "acpi: holding the {what} at {address:#x}, {length:#x} long, failed"
+            );
+        }
+    }
+    (held, failed)
 }
 
 /// Enters sleep state S5, which does not return: the status of the step

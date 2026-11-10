@@ -203,6 +203,9 @@ extern "sysv64" fn serve(serving: u64, _: u64) -> ! {
                 let reconnected = GATE.reconnect(request.bus, process);
                 responder.reply(&server, reconnected.map(|()| DriverReconnectResponse {}))
             }
+            DriverRequest::PrepareShutdown(_, responder) => {
+                responder.reply(&server, Err(Status::NotSupported))
+            }
             DriverRequest::ResetChild(_, responder) => {
                 responder.reply(&server, Err(Status::NotSupported))
             }

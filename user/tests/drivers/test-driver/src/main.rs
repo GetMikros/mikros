@@ -305,6 +305,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     }
                     false => responder.reply(s, Err(Status::NotSupported)),
                 },
+                DriverRequest::PrepareShutdown(_, responder) => {
+                    responder.reply(s, Err(Status::NotSupported))
+                }
                 DriverRequest::ResetChild(_, responder) => match host {
                     true => responder.reply(s, Ok(DriverResetChildResponse {})),
                     false => responder.reply(s, Err(Status::NotSupported)),

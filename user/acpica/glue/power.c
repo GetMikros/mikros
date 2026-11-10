@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /*
  * Entering S5, resetting the machine through the FADT's reset register,
- * and the power button: the fixed event and power button devices'
- * notifications.
+ * the power button: the fixed event and power button devices'
+ * notifications, and the operation regions held before power-off.
  */
 
 #include "glue.h"
+#include "acdispat.h"
+#include "acinterp.h"
+#include "acnamesp.h"
 
 /* The notification of a power button device that it was pressed. */
 #define BUTTON_PRESSED  0x80
@@ -115,4 +118,44 @@ UINT32 mikros_acpi_power_register(UINT32 index, UINT32 *space, UINT64 *address, 
     *address = r->Address;
     *bytes = r->BitWidth > 8 ? (UINT32)(r->BitWidth + 7) / 8 : 1;
     return AE_OK;
+}
+
+struct region_visit {
+    void (*found)(UINT32 space, UINT64 address, UINT64 length, void *context);
+    void *context;
+};
+
+/* Reports the operation region `handle`, with its address and length,
+ * which are evaluated first, as when a method first uses it, when they
+ * have not been yet. One whose address cannot be evaluated is left out. */
+static ACPI_STATUS visit_region(ACPI_HANDLE handle, UINT32 level, void *context, void **ret)
+{
+    (void)level;
+    (void)ret;
+    struct region_visit *visit = context;
+    ACPI_OPERAND_OBJECT *region = AcpiNsGetAttachedObject((ACPI_NAMESPACE_NODE *)handle);
+    if (!region || region->Common.Type != ACPI_TYPE_REGION) {
+        return AE_OK;
+    }
+    if (!(region->Common.Flags & AOPOBJ_DATA_VALID)) {
+        AcpiExEnterInterpreter();
+        ACPI_STATUS status = AcpiDsGetRegionArguments(region);
+        AcpiExExitInterpreter();
+        if (ACPI_FAILURE(status)) {
+            return AE_OK;
+        }
+    }
+    visit->found(region->Region.SpaceId, region->Region.Address, region->Region.Length,
+                 visit->context);
+    return AE_OK;
+}
+
+/* Calls `found` with the address space, address and length of each
+ * operation region in the namespace. Returns an ACPI_STATUS. */
+UINT32 mikros_acpi_operation_regions(
+    void (*found)(UINT32 space, UINT64 address, UINT64 length, void *context), void *context)
+{
+    struct region_visit visit = {found, context};
+    return AcpiWalkNamespace(ACPI_TYPE_REGION, ACPI_ROOT_OBJECT, ACPI_UINT32_MAX, visit_region,
+                             NULL, &visit, NULL);
 }

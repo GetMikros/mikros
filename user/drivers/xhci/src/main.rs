@@ -104,6 +104,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     }
                     None => responder.reply(s, Err(Status::BadState)),
                 },
+                DriverRequest::PrepareShutdown(_, responder) => {
+                    responder.reply(s, Err(Status::NotSupported))
+                }
                 DriverRequest::ResetChild(request, responder) => {
                     let Some(usb) = core.clone() else {
                         let _ = responder.reply(s, Err(Status::BadState));

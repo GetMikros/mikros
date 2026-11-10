@@ -99,6 +99,9 @@ pub fn run<F: Format>(bootstrap: sys::Handle) -> i64 {
             DriverRequest::Reconnect(_, responder) => {
                 responder.reply(&server, Err(Status::BadState))
             }
+            DriverRequest::PrepareShutdown(_, responder) => {
+                responder.reply(&server, Err(Status::NotSupported))
+            }
             DriverRequest::ResetChild(_, responder) => {
                 responder.reply(&server, Err(Status::NotSupported))
             }
