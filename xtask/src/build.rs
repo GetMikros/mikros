@@ -142,6 +142,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         ],
     )?;
     println!("built    {}", freetype.install.display());
+    let fonts = crate::fonts::fetch()?;
+    println!("ok       {}", fonts.ttf.display());
     let boot_image = match boot {
         BootImage::System => {
             let init = user_build("init", kind)?;
@@ -164,6 +166,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let ps2 = user_build("ps2", kind)?;
             println!("built    {}", ps2.display());
             let ps2_manifest = crate::workspace_root().join("user/drivers/ps2/driver.yaml");
+            let [sans, sans_bold, mono, mono_bold] = crate::fonts::FILES.map(|f| fonts.ttf.join(f));
+            let fonts_conf = crate::workspace_root().join("user/data/fonts.conf");
             let usb_hid = user_build("usbhid", kind)?;
             println!("built    {}", usb_hid.display());
             let usb_hid_manifest = crate::workspace_root().join("user/drivers/usbhid/driver.yaml");
@@ -244,6 +248,20 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/lib/drivers/acpi/driver.yaml", acpi_manifest.as_path()),
                 ("usr/lib/drivers/rtc/rtc", rtc.as_path()),
                 ("usr/lib/drivers/rtc/driver.yaml", rtc_manifest.as_path()),
+                // The system fonts and the fontconfig configuration that
+                // names them as the defaults.
+                ("usr/share/fonts/dejavu/DejaVuSans.ttf", sans.as_path()),
+                (
+                    "usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+                    sans_bold.as_path(),
+                ),
+                ("usr/share/fonts/dejavu/DejaVuSansMono.ttf", mono.as_path()),
+                (
+                    "usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf",
+                    mono_bold.as_path(),
+                ),
+                ("usr/share/fonts/dejavu/LICENSE", fonts.license.as_path()),
+                ("etc/fonts/fonts.conf", fonts_conf.as_path()),
                 ("usr/lib/drivers/ps2/ps2", ps2.as_path()),
                 ("usr/lib/drivers/ps2/driver.yaml", ps2_manifest.as_path()),
                 ("usr/lib/drivers/usbhid/usbhid", usb_hid.as_path()),

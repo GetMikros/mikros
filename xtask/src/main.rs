@@ -16,6 +16,7 @@ mod entry_state;
 mod extended;
 mod fetch;
 mod firmware;
+mod fonts;
 mod fuzz;
 mod image;
 mod input;
