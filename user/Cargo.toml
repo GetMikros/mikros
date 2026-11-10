@@ -4,7 +4,7 @@ members = ["drivers/acpi", "drivers/ahci", "drivers/btrfs", "drivers/exfat", "dr
 # Built here as a dependency, and host-tested in the root workspace,
 # except `std`, a workspace of its own for programs that use the
 # standard library.
-exclude = ["lib/ata", "lib/bootfs", "lib/btrfs", "lib/casefold", "lib/cmos", "lib/exfat", "lib/fat", "lib/gpt", "lib/logstore", "lib/manifest", "lib/memfs", "lib/nvme", "lib/pci", "lib/permissions", "lib/tz", "lib/userdb", "lib/ustar", "lib/yaml", "runtime/std"]
+exclude = ["lib/ata", "lib/bootfs", "lib/btrfs", "lib/casefold", "lib/cmos", "lib/evdev", "lib/exfat", "lib/fat", "lib/gpt", "lib/logstore", "lib/manifest", "lib/memfs", "lib/nvme", "lib/pci", "lib/permissions", "lib/tz", "lib/userdb", "lib/ustar", "lib/yaml", "runtime/std"]
 
 [workspace.package]
 version = "0.0.0"
