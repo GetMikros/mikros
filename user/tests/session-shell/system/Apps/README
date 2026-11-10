@@ -1,0 +1,2 @@
+Gives tests/console.img an /Apps folder, which the namespace of a
+command-line session needs.

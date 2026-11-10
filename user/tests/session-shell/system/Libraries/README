@@ -1,0 +1,2 @@
+Gives tests/console.img a /Libraries folder, the system layer of the
+merged /Libraries of a command-line session.

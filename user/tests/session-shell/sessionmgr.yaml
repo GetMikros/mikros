@@ -1,0 +1,21 @@
+# The session manager's service manifest in tests/console.img, installed
+# as usr/lib/services/sessionmgr.yaml: user/services/sessionmgr's, with
+# the kernel log handle, so that its messages reach the serial output
+# that the console scenario reads.
+name: sessionmgr
+binary: /usr/bin/sessionmgr
+start: boot
+after: [devicemgr, accounts]
+boot_handles: [log_manage]
+# To start the text console, the setup program and users' shells,
+# and the dynamic linker they load.
+namespace:
+  - path: /usr
+    rights: rx
+permissions:
+  - process.set_user
+  - process.set_identity
+  - accounts.authenticate
+  - gpu.display
+  - input.seat
+  - power.control
