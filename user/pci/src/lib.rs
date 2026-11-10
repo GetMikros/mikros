@@ -351,6 +351,88 @@ pub fn size_bars(config: &mut impl Config, at: Address) -> Vec<Bar> {
     bars
 }
 
+/// The property of each BAR of `bars` with its size (MIKSPEC-0026.R24):
+/// `bar` and the BAR's index in decimal, and `0x` and the size in
+/// lowercase hexadecimal.
+pub fn bar_properties(bars: &[Bar]) -> Vec<(String, String)> {
+    bars.iter()
+        .map(|bar| (format!("bar{}", bar.index), format!("{:#x}", bar.size)))
+        .collect()
+}
+
+/// The size of the BAR at `index` in the `bar` properties of
+/// `properties`: None when it has none; Some(None) when one of its
+/// properties names that BAR but is not a valid size.
+fn property_size(properties: &[(String, String)], index: u8) -> Option<Option<u64>> {
+    let key = format!("bar{index}");
+    let (_, value) = properties.iter().find(|(k, _)| *k == key)?;
+    let digits = value.strip_prefix("0x")?;
+    let lowercase = !digits.is_empty()
+        && digits
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let size = u64::from_str_radix(digits, 16).ok().filter(|_| lowercase);
+    Some(size.filter(|s| s.is_power_of_two()))
+}
+
+/// The BARs of the function at `at`, with the sizes that `properties`
+/// gives as `bar_properties` writes them, read from its BAR registers
+/// without writing any, when those properties name exactly the BARs that
+/// the function implements, those whose registers are not zero, each with
+/// a valid size that its base is aligned to. None otherwise, when the BARs
+/// must be sized.
+pub fn kept_bars(
+    config: &impl Config,
+    at: Address,
+    properties: &[(String, String)],
+) -> Option<Vec<Bar>> {
+    let mut bars = Vec::new();
+    let mut named = 0;
+    let mut index = 0;
+    while index < BARS {
+        let offset = BAR0 + 4 * u16::from(index);
+        let original = config.read(at, offset, 4);
+        let wide = original & BAR_IO == 0 && original & BAR_TYPE == BAR_64 && index + 1 < BARS;
+        let high = if wide {
+            config.read(at, offset + 4, 4)
+        } else {
+            0
+        };
+        let size = property_size(properties, index);
+        if original == 0 && high == 0 {
+            if size.is_some() {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        let size = size??;
+        named += 1;
+        let io = original & BAR_IO != 0;
+        let flags = if io { BAR_IO_FLAGS } else { BAR_MEMORY_FLAGS };
+        let base = (u64::from(high) << 32) | u64::from(original & !flags);
+        let smallest = if io { 4 } else { 16 };
+        if size < smallest || base & (size - 1) != 0 {
+            return None;
+        }
+        bars.push(Bar {
+            index,
+            kind: if io { BarKind::Io } else { BarKind::Mmio },
+            prefetchable: !io && original & BAR_PREFETCHABLE != 0,
+            base,
+            size,
+        });
+        index += if wide { 2 } else { 1 };
+    }
+    // A `bar` property for a BAR that the registers do not show, such as
+    // the upper half of a 64-bit pair, does not match.
+    let properties_named = properties
+        .iter()
+        .filter(|(k, _)| k.starts_with("bar"))
+        .count();
+    (properties_named == named).then_some(bars)
+}
+
 /// The capabilities of the function at `at`, by ID and offset, in the
 /// order of its list. A list that loops, or points below the header, is
 /// followed no further.

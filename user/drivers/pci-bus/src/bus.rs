@@ -8,16 +8,17 @@ use crate::interrupts::{Intx, Line};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
-use mikros_pci::{Address, Bar, Claim, Header, claims, scan, size_bars};
+use mikros_pci::{Address, Bar, Claim, Header, bar_properties, claims, kept_bars, scan, size_bars};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
+use mikros_rt::interfaces::mikros::driver::{DeviceManagerAsyncClient, Property};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::sys;
 
@@ -124,16 +125,44 @@ pub fn requester_id(segment: u16, at: Address) -> u64 {
 pub async fn enumerate(bus: Rc<Bus>) {
     let ecam = &bus.ecam;
     // Whether a memory BAR gets its pages depends on the BARs of every
-    // other function, so all are sized first.
-    let found: Vec<(Address, Header, Vec<Bar>)> = scan(&ecam, ecam.bus_start(), ecam.bus_end())
-        .into_iter()
-        .map(|at| (at, Header::read(&ecam, at), size_bars(&mut &bus.ecam, at)))
-        .collect();
+    // other function, so all are sized first. A function that the device
+    // manager keeps for this restarted driver has a driver that may be
+    // using it, so its BARs are taken from the sizes found before when
+    // they still fit, rather than written to size them.
+    let mut found: Vec<(Address, Header, Vec<Bar>)> = Vec::new();
+    let mut taken = 0;
+    for at in scan(&ecam, ecam.bus_start(), ecam.bus_end()) {
+        let kept = match bus.manager.get_kept_child(name(bus.segment, at)).await {
+            Ok(Ok(kept)) => {
+                let properties: Vec<(String, String)> = kept
+                    .device
+                    .properties
+                    .into_iter()
+                    .map(|p| (p.key, p.value))
+                    .collect();
+                kept_bars(&ecam, at, &properties)
+            }
+            _ => None,
+        };
+        taken += usize::from(kept.is_some());
+        let bars = kept.unwrap_or_else(|| size_bars(&mut &bus.ecam, at));
+        found.push((at, Header::read(&ecam, at), bars));
+    }
+    if taken > 0 {
+        mikros_rt::log!(
+            Info,
+            "pci-bus: took the BAR sizes of {taken} kept functions without sizing them"
+        );
+    }
     let planned = {
         let all: Vec<&[Bar]> = found.iter().map(|(_, _, bars)| bars.as_slice()).collect();
         claims(&all)
     };
     for ((at, header, sized), planned) in found.into_iter().zip(planned) {
+        let properties = bar_properties(&sized)
+            .into_iter()
+            .map(|(key, value)| Property { key, value })
+            .collect();
         let mut groups: BTreeMap<usize, Result<Rc<OwnedHandle>, Status>> = BTreeMap::new();
         let mut bars = Vec::new();
         for (bar, claim) in sized.into_iter().zip(planned) {
@@ -159,12 +188,11 @@ pub async fn enumerate(bus: Rc<Bus>) {
             Ok(resource) => bti_create(resource, requester_id(bus.segment, at)),
             Err(status) => Err(*status),
         };
-        let name = format!(
-            "pci-{:04x}:{:02x}:{:02x}.{:x}",
-            bus.segment, at.bus, at.device, at.function
-        );
         let ids = header.hardware_ids().into_iter().collect();
-        let added = bus.manager.add_device(name, ids, vec![], vec![]).await;
+        let added = bus
+            .manager
+            .add_device(name(bus.segment, at), ids, properties, vec![])
+            .await;
         if let Ok(Ok(added)) = added {
             let function = Function {
                 at,
@@ -181,6 +209,14 @@ pub async fn enumerate(bus: Rc<Bus>) {
     }
     bus.complete.set(true);
     bus.wake();
+}
+
+/// The device name of the function at `at` in `segment`.
+fn name(segment: u16, at: Address) -> String {
+    format!(
+        "pci-{:04x}:{:02x}:{:02x}.{:x}",
+        segment, at.bus, at.device, at.function
+    )
 }
 
 /// An exclusive resource of `kind` from `base` for `size` bytes, through

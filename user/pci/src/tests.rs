@@ -454,3 +454,69 @@ fn claims_nothing_for_a_page_that_another_function_touches() {
         ]
     );
 }
+
+#[test]
+fn writes_and_reads_back_the_bar_properties() {
+    let mut fake = Fake::default();
+    let f = at(0, 3, 0);
+    let function = fake.add(f, &VIRTIO_BLOCK, 0);
+    function.bar(0, BAR_IO, 0xc040, 0x20, u32::MAX);
+    function.bar(1, 0, 0xfcd0_0000, 0x800, u32::MAX);
+    function.bar(
+        2,
+        BAR_64 | BAR_PREFETCHABLE,
+        0x8_0000_0000,
+        0x4000,
+        u32::MAX,
+    );
+    function.space[usize::from(COMMAND)] = (COMMAND_IO | COMMAND_MEMORY) as u8;
+    let sized = size_bars(&mut fake, f);
+    let properties = bar_properties(&sized);
+    assert_eq!(
+        properties,
+        [
+            ("bar0".into(), "0x20".into()),
+            ("bar1".into(), "0x800".into()),
+            ("bar2".into(), "0x4000".into()),
+        ]
+    );
+    // Taking them back reads the registers only, which `kept_bars`'s
+    // shared reference to the configuration space ensures.
+    assert_eq!(kept_bars(&fake, f, &properties), Some(sized));
+    // Other properties are ignored.
+    let mut more = properties.clone();
+    more.push(("cache".into(), "write-back".into()));
+    assert!(kept_bars(&fake, f, &more).is_some());
+}
+
+#[test]
+fn sizes_again_unless_the_bar_properties_fit() {
+    let mut fake = Fake::default();
+    let f = at(0, 4, 0);
+    let function = fake.add(f, &VIRTIO_BLOCK, 0);
+    function.bar(0, 0, 0xfe00_0000, 0x1000, u32::MAX);
+    function.bar(2, BAR_64, 0x8_0000_0000, 0x4000, u32::MAX);
+    let good = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs.iter().map(|&(k, v)| (k.into(), v.into())).collect()
+    };
+    assert!(kept_bars(&fake, f, &good(&[("bar0", "0x1000"), ("bar2", "0x4000")])).is_some());
+    for properties in [
+        // A BAR without its property, or a property without its BAR.
+        good(&[("bar0", "0x1000")]),
+        good(&[("bar0", "0x1000"), ("bar2", "0x4000"), ("bar4", "0x10")]),
+        // The upper half of a 64-bit pair.
+        good(&[("bar0", "0x1000"), ("bar2", "0x4000"), ("bar3", "0x10")]),
+        // Not a size: not hexadecimal, uppercase, no prefix, not a power of
+        // two, smaller than a memory BAR can be, or larger than the base's
+        // alignment.
+        good(&[("bar0", "0x1000"), ("bar2", "4000")]),
+        good(&[("bar0", "0x1000"), ("bar2", "0x4G00")]),
+        good(&[("bar0", "0X1000"), ("bar2", "0x4000")]),
+        good(&[("bar0", "0x1000"), ("bar2", "0xA000")]),
+        good(&[("bar0", "0x1000"), ("bar2", "0x3000")]),
+        good(&[("bar0", "0x8"), ("bar2", "0x4000")]),
+        good(&[("bar0", "0x4000000"), ("bar2", "0x4000")]),
+    ] {
+        assert_eq!(kept_bars(&fake, f, &properties), None, "{properties:?}");
+    }
+}
