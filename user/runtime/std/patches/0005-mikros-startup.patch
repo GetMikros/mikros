@@ -1,0 +1,88 @@
+diff --git a/std/src/os/mikros/io.rs b/std/src/os/mikros/io.rs
+index 3d61a29..55b8576 100644
+--- a/std/src/os/mikros/io.rs
++++ b/std/src/os/mikros/io.rs
+@@ -56,6 +56,35 @@ impl fmt::Debug for OwnedHandle {
+     }
+ }
+ 
++/// A kernel handle that this value borrows for `'a`, without closing it.
++#[derive(Clone, Copy)]
++pub struct BorrowedHandle<'a> {
++    raw: RawHandle,
++    _owner: crate::marker::PhantomData<&'a OwnedHandle>,
++}
++
++impl BorrowedHandle<'_> {
++    /// Borrows the handle `raw`.
++    ///
++    /// # Safety
++    ///
++    /// `raw` must stay open for the lifetime of the borrow.
++    pub unsafe fn borrow_raw(raw: RawHandle) -> Self {
++        BorrowedHandle { raw, _owner: crate::marker::PhantomData }
++    }
++
++    /// The handle's value, which stays owned by its owner.
++    pub fn as_raw_handle(&self) -> RawHandle {
++        self.raw
++    }
++}
++
++impl fmt::Debug for BorrowedHandle<'_> {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("BorrowedHandle").field("raw", &self.raw).finish()
++    }
++}
++
+ /// The handle that a C library call returned, or the negated error
+ /// number it returned instead.
+ pub(super) fn owned(result: i64) -> io::Result<OwnedHandle> {
+diff --git a/std/src/os/mikros/mod.rs b/std/src/os/mikros/mod.rs
+index de3131c..90703ef 100644
+--- a/std/src/os/mikros/mod.rs
++++ b/std/src/os/mikros/mod.rs
+@@ -7,3 +7,17 @@ pub mod fs;
+ pub mod io;
+ pub mod process;
+ pub mod raw;
++pub mod startup;
++
++unsafe extern "C" {
++    fn mikros_directory() -> io::RawHandle;
++}
++
++/// The process's `Directory` connection, which the C library keeps open
++/// for as long as the process runs.
++#[unstable(feature = "mikros_handles", issue = "none")]
++pub fn directory() -> io::BorrowedHandle<'static> {
++    // SAFETY: the call takes no pointers, and the C library never closes
++    // the connection.
++    unsafe { io::BorrowedHandle::borrow_raw(mikros_directory()) }
++}
+diff --git a/std/src/os/mikros/startup.rs b/std/src/os/mikros/startup.rs
+new file mode 100644
+index 0000000..0a1f473
+--- /dev/null
++++ b/std/src/os/mikros/startup.rs
+@@ -0,0 +1,20 @@
++//! The startup handles that the C library did not install as
++//! descriptors.
++
++#![unstable(feature = "mikros_handles", issue = "none")]
++
++use super::io::{OwnedHandle, RawHandle};
++
++unsafe extern "C" {
++    fn mikros_take_startup_handle(role: u32, id: u32) -> RawHandle;
++}
++
++/// The startup handle with `role` and `id` that the C library did not
++/// install as a descriptor or keep, which the caller owns from then on,
++/// once: `None` after that and for a handle the process did not get.
++pub fn take_handle(role: u32, id: u32) -> Option<OwnedHandle> {
++    // SAFETY: the call takes no pointers.
++    let raw = unsafe { mikros_take_startup_handle(role, id) };
++    // SAFETY: the C library hands the handle over to the caller.
++    (raw != 0).then(|| unsafe { OwnedHandle::from_raw_handle(raw) })
++}

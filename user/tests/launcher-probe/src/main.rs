@@ -73,6 +73,8 @@ const TALLY_MESON: &str = "/usr/bin/tally-meson-user";
 /// A Rust program that uses the standard library, which opens
 /// `/dev/null` for its closed standard input and error.
 const HELLO_STD: &str = "/usr/bin/hello-std";
+/// The `id` of the `USER` startup handle that hello-std takes.
+const HELLO_STD_HANDLE: u32 = 9;
 /// The same C programs as applications, which the boot image provides
 /// under /Apps, a link under /usr to the static one, and a dynamic C
 /// program that makes a system call with its own instruction, as a
@@ -792,7 +794,16 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
             "stopping it as an application",
             wait(l, gated as i32).await == Some((gated, -3, SEGV)),
         )?;
-        let (output, code) = run_c(l, HELLO_STD).await;
+        // It takes a USER startup handle that the C library leaves to it.
+        let (output, code) = run_with(l, HELLO_STD, |r| {
+            let (_, given) = stream();
+            r.handles.push(StartupHandle {
+                role: HandleRole::User,
+                id: HELLO_STD_HANDLE,
+                handle: given,
+            });
+        })
+        .await;
         check("running a Rust program that uses std", code == Some(0))?;
         check(
             "reading what it printed",

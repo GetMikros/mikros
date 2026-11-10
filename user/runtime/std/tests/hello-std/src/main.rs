@@ -3,9 +3,13 @@
 //! standard output, and exits with 0 when it was given exactly one
 //! argument and every check below passed, and with the number of the
 //! first check that failed otherwise. The launcher probe starts it, and
-//! gives it a time page only from its second request on.
+//! gives it a time page only from its second request on, and a `USER`
+//! startup handle with `id` 9.
+
+#![feature(mikros_handles)]
 
 use std::collections::HashMap;
+use std::os::mikros::startup;
 use std::panic;
 use std::process::ExitCode;
 use std::thread;
@@ -14,6 +18,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// 1 January 2024 in seconds since the Unix epoch, the time on the
 /// probe's time page when the monotonic clock is 0, and a day.
 const JANUARY_2024: u64 = 1_704_067_200;
+/// The `USER` role of startup handles.
+const USER: u32 = 16;
 const DAY: u64 = 86_400;
 
 fn main() -> ExitCode {
@@ -61,6 +67,12 @@ fn checks() -> Result<String, u8> {
     check(first.is_err())?;
     let since = SystemTime::now().duration_since(UNIX_EPOCH);
     check(since.is_ok_and(|t| (JANUARY_2024..JANUARY_2024 + DAY).contains(&t.as_secs())))?;
+    // The USER startup handle 9 that the probe gives is the program's to
+    // take, once; one it did not give is not there. The directory
+    // connection is the C library's, and open.
+    check(startup::take_handle(USER, 9).is_some())?;
+    check(startup::take_handle(USER, 9).is_none() && startup::take_handle(USER, 10).is_none())?;
+    check(std::os::mikros::directory().as_raw_handle() != 0)?;
     // A panic unwinds to `catch_unwind`.
     panic::set_hook(Box::new(|_| {}));
     let caught = panic::catch_unwind(|| panic!("unwinding"));
