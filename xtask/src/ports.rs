@@ -45,6 +45,17 @@ pub const XKBCOMMON: Port = Port {
     test_data: &["test/data"],
 };
 
+/// xkeyboard-config, the keymap data that xkbcommon compiles keyboard
+/// layouts from, without translations of its layout descriptions.
+pub const XKEYBOARD_CONFIG: Port = Port {
+    name: "xkeyboard-config",
+    url: "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config/-/archive/xkeyboard-config-2.48/xkeyboard-config-xkeyboard-config-2.48.tar.gz",
+    sha256: "1e304d3c7a74bfbad0bae16b25d4c2b2eda06714b988953607a06cc013bf3077",
+    source: "xkeyboard-config-xkeyboard-config-2.48",
+    options: &["-Dnls=false"],
+    test_data: &[],
+};
+
 /// Where a port was built.
 pub struct Built {
     /// Its patched source.

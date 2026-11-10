@@ -9,6 +9,10 @@ use std::process::Command;
 
 /// The patches in `dir`, in the order they apply.
 pub fn patches(dir: &Path) -> Result<Vec<PathBuf>> {
+    // A project that needs no patches has no directory of them.
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
     let mut patches: Vec<PathBuf> = fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
         .map(|e| e.map(|e| e.path()))

@@ -117,6 +117,17 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         ],
     )?;
     println!("built    {}", xkbcommon.install.display());
+    let keymaps = crate::ports::build(&crate::ports::XKEYBOARD_CONFIG)?;
+    crate::build_systems::check_installed(
+        &keymaps.install,
+        &[
+            "share/xkeyboard-config-2/rules/evdev",
+            "share/xkeyboard-config-2/symbols/us",
+            "share/xkeyboard-config-2/keycodes/evdev",
+        ],
+        &[],
+    )?;
+    println!("built    {}", keymaps.install.display());
     let boot_image = match boot {
         BootImage::System => {
             let init = user_build("init", kind)?;
