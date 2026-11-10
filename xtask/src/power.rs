@@ -25,11 +25,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// The lines that the service manager logs once it watches the power
-/// button, and the power probe once it runs, before the button is
-/// pressed.
-const READY: [&str; 2] = [
+/// button, the power probe once it runs, and the device manager once it
+/// added a disk's partition, a device `DEPTH` levels below a root
+/// device, before the button is pressed.
+const READY: [&str; 3] = [
     "watching the power button",
     "power-probe: running until it is stopped",
+    ", part-1, as ",
 ];
 /// The lines the serial port must show, in this order, before QEMU exits:
 /// the services stop in the reverse of their start order, the probe
