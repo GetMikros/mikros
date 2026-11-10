@@ -40,7 +40,11 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
             let s = server.server();
             let _ = match request {
                 R::AddDevice(request, responder) => {
-                    let added = add_device(&m, caller, request).await;
+                    // A driver whose device is gone gets no reply: it is
+                    // ending, and nothing may be added below that device.
+                    let Some(added) = add_device(&m, caller, request).await else {
+                        return;
+                    };
                     let reply = added.map(|(id, _)| DeviceManagerAddDeviceResponse { id });
                     let replied = responder.reply(s, reply);
                     // Its driver starts, or a kept device's driver gets a
@@ -101,19 +105,19 @@ enum Added {
 /// was kept for `caller`'s restarted driver, with the same name and
 /// hardware IDs, is given back instead. Fails with `INVALID_ARGS` when a
 /// hardware ID does not have the form of one. Returns its ID and what
-/// was done.
+/// was done, or None, adding nothing, once device `caller` is gone.
 async fn add_device(
     m: &Manager,
     caller: u64,
     request: DeviceManagerAddDeviceRequest,
-) -> Result<(u64, Added), Status> {
+) -> Option<Result<(u64, Added), Status>> {
     let ids = &request.hardware_ids;
     if !ids.iter().all(|id| mikros_manifest::is_hardware_id(id)) {
-        return Err(Status::InvalidArgs);
+        return Some(Err(Status::InvalidArgs));
     }
     let kept = m.devices.borrow_mut().take_kept(caller, &request.name, ids);
     if let Some(id) = kept {
-        return Ok((id, Added::Again));
+        return Some(Ok((id, Added::Again)));
     }
     let mut properties: Vec<(alloc::string::String, alloc::string::String)> = request
         .properties
@@ -125,6 +129,8 @@ async fn add_device(
         false => Vec::new(),
     };
     let mut devices = m.devices.borrow_mut();
+    // The device may have been removed while its driver's request waited.
+    devices.get(caller)?;
     cache::set(ids, &mut properties, devices.get(caller), &profiles);
     let id = devices.add(
         request.name,
@@ -137,7 +143,7 @@ async fn add_device(
         true => Added::Bound,
         false => Added::Unbound,
     };
-    Ok((id, added))
+    Some(Ok((id, added)))
 }
 
 /// When the `filesystem` service with ID `id`, its instance name, that

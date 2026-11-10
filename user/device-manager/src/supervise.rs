@@ -324,7 +324,8 @@ pub async fn reconnect(m: Rc<Manager>, id: u64) {
 /// Removes device `id`: first the devices below it, deepest first, then
 /// the device itself. Its driver, when it has one, is called `Stop` and
 /// terminated when `Stop` replies, when the channel fails, or after
-/// `STOP_LIMIT`, and it is not started again.
+/// `STOP_LIMIT`, and it is not started again; devices that it added
+/// meanwhile are removed after it ended, before the device.
 pub fn remove(m: Rc<Manager>, id: u64) -> Pin<Box<dyn Future<Output = ()>>> {
     remove_within(m, id, STOP_LIMIT)
 }
@@ -350,6 +351,17 @@ pub fn remove_within(m: Rc<Manager>, id: u64, limit: i64) -> Pin<Box<dyn Future<
         }
         if let Some(pid) = pid {
             m.starter.kill(pid).await;
+        }
+        // Devices that the driver added after the others were listed,
+        // until it stopped.
+        loop {
+            let late = m.devices.borrow().children(id);
+            if late.is_empty() {
+                break;
+            }
+            for child in late {
+                remove_within(m.clone(), child, limit).await;
+            }
         }
         m.devices.borrow_mut().remove(id);
     })
