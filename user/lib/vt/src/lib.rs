@@ -10,4 +10,5 @@ pub mod cell;
 pub mod parser;
 #[cfg(test)]
 mod parser_tests;
+pub mod screen;
 pub mod sgr;
