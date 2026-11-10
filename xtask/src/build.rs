@@ -640,11 +640,19 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", time_image.display());
             // The terminal service test serves this image: the service
             // manager, the broker, the terminal service and its probe,
-            // with their manifests.
+            // with their manifests, and the C program that the probe
+            // runs on a terminal.
             let term_service = user_build("termsvc", kind)?;
             println!("built    {}", term_service.display());
             let term_probe = user_build("term-probe", kind)?;
             println!("built    {}", term_probe.display());
+            let term_c = c_build(
+                "term-c",
+                &["user/tests/term-c/term.c"],
+                Linking::Static,
+                &[],
+            )?;
+            println!("built    {}", term_c.display());
             let term_image = test_image(
                 kind,
                 "term.img",
@@ -663,6 +671,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                             .as_path(),
                     ),
                     ("usr/bin/term-probe", term_probe.as_path()),
+                    ("usr/bin/term-c", term_c.as_path()),
                     (
                         "usr/lib/services/term-probe.yaml",
                         crate::workspace_root()

@@ -4,7 +4,9 @@
 //! of it, started with an argument, are the processes that job control
 //! acts on: `sleep` waits until it is killed, and `read` reads the
 //! terminal whose token it gets as its `USER` startup handle 1. It exits
-//! with 0 once every check passed, and logs what failed otherwise.
+//! with 0 once every check passed, and logs what failed otherwise. It
+//! also runs the C program `term-c` on a terminal and types what that
+//! program waits for.
 
 #![no_std]
 #![no_main]
@@ -32,6 +34,10 @@ const TOKEN_ID: u32 = 1;
 const FACTORY: &str = "mikros.terminal.Factory";
 const TERMINAL: &str = "mikros.terminal.Terminal";
 const BINARY: &str = "/usr/bin/term-probe";
+/// The C program run on a terminal, and the descriptor kind of a slave
+/// terminal.
+const C_PROGRAM: &str = "/usr/bin/term-c";
+const TERMINAL_KIND: u32 = 8;
 const FOREVER: i64 = i64::MAX;
 const MS: i64 = 1_000_000;
 const SECOND: i64 = 1000 * MS;
@@ -396,5 +402,65 @@ fn probe(directory: &DirectoryClient, launcher: &LauncherClient) -> Option<()> {
         .ok()?
         .data;
     check("the end of input after the master closed", r.is_empty())?;
-    Some(())
+    c_program(&factory, launcher)
+}
+
+/// Runs the C program on a new terminal, as its standard input, output
+/// and error, and types what it waits for.
+fn c_program(factory: &FactoryClient, launcher: &LauncherClient) -> Option<()> {
+    let size = WindowSize {
+        rows: 24,
+        columns: 80,
+        width: 0,
+        height: 0,
+    };
+    let Ok(Ok(opened)) = factory.open(size, FOREVER) else {
+        return failed("a third Open");
+    };
+    let (master, token) = (opened.master, opened.terminal);
+    // Descriptors 0, 1 and 2, of kind 8, a slave terminal.
+    let standard = |role, fd: u32| {
+        duplicate(&token).map(|handle| StartupHandle {
+            role,
+            id: TERMINAL_KIND << 28 | fd,
+            handle,
+        })
+    };
+    let handles = vec![
+        standard(HandleRole::Stdin, 0)?,
+        standard(HandleRole::Stdout, 1)?,
+        standard(HandleRole::Stderr, 2)?,
+    ];
+    let request = SpawnRequest {
+        path: C_PROGRAM.into(),
+        arguments: argument_memory(&[C_PROGRAM])?,
+        handles,
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+    };
+    let pid = reply("starting the C program", launcher.spawn(request, FOREVER))?.pid;
+    check(
+        "the C program's first line",
+        shown(&master, 7) == b"ready\r\n",
+    )?;
+    type_in(&master, b"line\r")?;
+    check(
+        "the echo of the typed line",
+        shown(&master, 6) == b"line\r\n",
+    )?;
+    check("the C program's raw mode", shown(&master, 5) == b"raw\r\n")?;
+    type_in(&master, b"x")?;
+    let done = shown(&master, 6);
+    let waited = launcher.wait(pid as i32, WaitOptions(0), now() + 10 * SECOND, FOREVER);
+    let status = reply("waiting for the C program", waited)?.status;
+    if status.kind != StatusKind::Exited || status.exit_code != 0 {
+        mikros_rt::log!(
+            Error,
+            "term-probe: the C program ended with {}",
+            status.exit_code
+        );
+        return None;
+    }
+    check("the C program's last line", done == b"done\r\n")
 }
