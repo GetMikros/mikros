@@ -5,7 +5,9 @@
 //! the role `USER` and ID 1, and its description from the device's
 //! properties, and publishes the service class `gpu`. It serves the
 //! `Display` part of `mikros.gpu` with one connector, CRTC and primary
-//! plane in the framebuffer's mode, and dumb buffers in XRGB8888.
+//! plane in the framebuffer's mode, dumb buffers in XRGB8888, and
+//! commits that it presents by copying the plane's buffer into the
+//! framebuffer, converting each pixel to the framebuffer's format.
 //! One client at a time, holding `gpu.display`, owns the display.
 
 #![no_std]
@@ -152,7 +154,12 @@ async fn start(
         mikros_rt::log!(Error, "basicdisplay: mapping the framebuffer failed");
         Status::NotSupported
     })?;
-    let display = Rc::new(Display::new(framebuffer, process));
+    let display = Rc::new(Display::new(
+        framebuffer,
+        process,
+        reactor.clone(),
+        spawner.clone(),
+    ));
     let gpu = Rc::new(Gpu {
         display,
         broker: broker(directory, reactor).await,

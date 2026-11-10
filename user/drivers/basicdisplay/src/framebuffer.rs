@@ -62,6 +62,7 @@ impl Description {
 /// The mapped framebuffer, which the driver only writes.
 pub struct Framebuffer {
     pub description: Description,
+    converter: Converter,
     address: u64,
     len: u64,
     memory: OwnedHandle,
@@ -75,8 +76,7 @@ impl Framebuffer {
         process: sys::Handle,
     ) -> Option<Framebuffer> {
         let [red, green, blue, _] = description.masks;
-        // Presenting converts pixels to this format.
-        Converter::new(description.format, red, green, blue)?;
+        let converter = Converter::new(description.format, red, green, blue)?;
         let len = description.size.next_multiple_of(PAGE_SIZE);
         let mut address = 0;
         // SAFETY: the out pointer is valid for the call.
@@ -93,6 +93,7 @@ impl Framebuffer {
         };
         (status == mikros_rt::OK).then_some(Framebuffer {
             description,
+            converter,
             address,
             len,
             memory,
@@ -104,5 +105,22 @@ impl Framebuffer {
         // SAFETY: nothing else refers to the mapping.
         unsafe { sys::vm_unmap(process, self.address, self.len) };
         drop(self.memory);
+    }
+
+    /// Writes `pixels`, XRGB8888 values, into line `y` from pixel `x`,
+    /// leaving out what lies beyond the visible width.
+    pub fn write_row(&self, x: u32, y: u32, pixels: impl Iterator<Item = u32>) {
+        let d = &self.description;
+        if y >= d.height {
+            return;
+        }
+        let line = self.address + u64::from(y) * u64::from(d.stride) * 4;
+        for (at, pixel) in (x..d.width).zip(pixels) {
+            let value = self.converter.convert(pixel);
+            let target = (line + u64::from(at) * 4) as *mut u32;
+            // SAFETY: the line and pixel lie within the mapping, which
+            // `Description::from` checked against the size.
+            unsafe { target.write_volatile(value) };
+        }
     }
 }
