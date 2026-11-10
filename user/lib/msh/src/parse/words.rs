@@ -1,0 +1,327 @@
+//! Commands, pipelines, words, quoted strings and redirections.
+
+use super::{Parser, Result};
+use crate::ast::*;
+
+/// Whether `c` ends a bare word.
+fn special(c: char) -> bool {
+    c.is_whitespace() || "|;&><(){}[]".contains(c)
+}
+
+impl Parser<'_> {
+    /// A pipeline, up to the end of its statement, or up to `{` when
+    /// `before_block`, as a condition is.
+    pub(super) fn pipeline(&mut self, before_block: bool) -> Result<Pipeline> {
+        let mut pipeline = Pipeline {
+            commands: vec![self.command(before_block)?],
+            background: false,
+        };
+        self.rest_of_pipeline(&mut pipeline, before_block)?;
+        Ok(pipeline)
+    }
+
+    /// The commands after a pipeline's first, and its `&`.
+    pub(super) fn rest_of_pipeline(
+        &mut self,
+        pipeline: &mut Pipeline,
+        before_block: bool,
+    ) -> Result<()> {
+        loop {
+            self.skip_spaces();
+            match self.peek() {
+                Some('|') if self.peek_at(1) != Some('|') => {
+                    self.pos += 1;
+                    self.skip_blank();
+                    if self.peek().is_none() {
+                        return Err(self.incomplete("a command is missing after `|`"));
+                    }
+                    pipeline.commands.push(self.command(before_block)?);
+                }
+                Some('&') if self.peek_at(1) != Some('&') => {
+                    self.pos += 1;
+                    pipeline.background = true;
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    /// A command: an expression in parentheses, or a simple command.
+    fn command(&mut self, before_block: bool) -> Result<Command> {
+        self.skip_spaces();
+        if self.peek() == Some('(') {
+            return Err(self.error("parentheses are not parsed yet"));
+        }
+        let mut simple = Simple {
+            environment: Vec::new(),
+            words: Vec::new(),
+            redirections: Vec::new(),
+            propagate: false,
+        };
+        // NAME=value words before the command.
+        while let Some(name) = self.peek_name() {
+            let after = self.pos + name.chars().count();
+            if self.chars.get(after) != Some(&'=') || name.contains('-') {
+                break;
+            }
+            self.pos = after + 1;
+            let value = match self.peek() {
+                Some(c) if !special(c) => self.word()?,
+                _ => Word { parts: Vec::new() },
+            };
+            simple.environment.push((name, value));
+            self.skip_spaces();
+        }
+        loop {
+            self.skip_spaces();
+            match self.peek() {
+                None | Some('\n' | '\r' | ';' | '|' | '&' | ')' | '}') => break,
+                Some('{') if before_block => break,
+                Some('{' | '[' | '(') => {
+                    return Err(self.error("blocks, lists and parentheses are not parsed yet"));
+                }
+                Some(']') => return Err(self.error("this `]` closes nothing")),
+                _ => {
+                    if let Some(redirection) = self.redirection()? {
+                        simple.redirections.push(redirection);
+                        continue;
+                    }
+                    let word = self.word()?;
+                    simple.words.push(Argument::Word(word));
+                }
+            }
+        }
+        if simple.words.is_empty() {
+            if simple.environment.is_empty() && simple.redirections.is_empty() {
+                return Err(match self.peek() {
+                    None => self.incomplete("a command is missing"),
+                    _ => self.error("a command is expected here"),
+                });
+            }
+            return Err(self.error("a command is missing after these words"));
+        }
+        // `command?`: a last argument that is a lone `?`.
+        if let Some(Argument::Word(Word { parts })) = simple.words.last()
+            && matches!(parts.as_slice(), [WordPart::Bare(q)] if q == "?")
+            && simple.words.len() > 1
+        {
+            simple.words.pop();
+            simple.propagate = true;
+        }
+        Ok(Command::Simple(simple))
+    }
+
+    /// A redirection, if one starts here.
+    fn redirection(&mut self) -> Result<Option<Redirection>> {
+        let (kind, length, target) = if self.looking_at("2>&1") {
+            (RedirectionKind::ErrorToOutput, 4, false)
+        } else if self.looking_at(">&2") {
+            (RedirectionKind::OutputToError, 3, false)
+        } else if self.looking_at("2>") {
+            (RedirectionKind::Error, 2, true)
+        } else if self.looking_at(">>") {
+            (RedirectionKind::Append, 2, true)
+        } else if self.looking_at(">") {
+            (RedirectionKind::Output, 1, true)
+        } else if self.looking_at("<") {
+            (RedirectionKind::Input, 1, true)
+        } else {
+            return Ok(None);
+        };
+        self.pos += length;
+        if !target {
+            return Ok(Some(Redirection {
+                kind,
+                target: Word { parts: Vec::new() },
+            }));
+        }
+        self.skip_spaces();
+        match self.peek() {
+            Some(c) if !special(c) => {}
+            None => return Err(self.incomplete("a redirection's file is missing")),
+            _ => return Err(self.error("a redirection's file is expected here")),
+        }
+        let target = self.word()?;
+        Ok(Some(Redirection { kind, target }))
+    }
+
+    /// A word: bare text, quoted strings and variables up to whitespace or
+    /// a special character.
+    fn word(&mut self) -> Result<Word> {
+        let start = self.pos;
+        let mut parts: Vec<WordPart> = Vec::new();
+        let mut bare = String::new();
+        let flush = |bare: &mut String, parts: &mut Vec<WordPart>| {
+            if !bare.is_empty() {
+                parts.push(WordPart::Bare(std::mem::take(bare)));
+            }
+        };
+        while let Some(c) = self.peek() {
+            if special(c) {
+                break;
+            }
+            match c {
+                '\\' if matches!(self.peek_at(1), Some('\n' | '\r')) => break,
+                '\'' => {
+                    flush(&mut bare, &mut parts);
+                    parts.push(WordPart::Quoted(self.single_quoted()?));
+                }
+                '"' => {
+                    flush(&mut bare, &mut parts);
+                    let string = self.double_quoted()?;
+                    for part in string {
+                        parts.push(match part {
+                            StringPart::Text(text) => WordPart::Quoted(text),
+                            StringPart::Expr(expr) => WordPart::Expr(expr),
+                        });
+                    }
+                }
+                '$' if self
+                    .peek_at(1)
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_') =>
+                {
+                    flush(&mut bare, &mut parts);
+                    parts.push(WordPart::Variable(self.variable()?));
+                }
+                _ => {
+                    bare.push(c);
+                    self.pos += 1;
+                }
+            }
+        }
+        flush(&mut bare, &mut parts);
+        if parts.is_empty() {
+            return Err(self.error_at(start, "a word is expected here"));
+        }
+        Ok(Word { parts })
+    }
+
+    /// `$name`, `$name.field.0`, `$env.NAME` or `$list...`.
+    fn variable(&mut self) -> Result<Variable> {
+        self.expect('$', "`$`")?;
+        let name = self.variable_name()?;
+        let (environment, name) = match name.as_str() {
+            "env" if self.peek() == Some('.') => {
+                self.pos += 1;
+                (true, self.variable_name()?)
+            }
+            _ => (false, name),
+        };
+        let mut path = Vec::new();
+        while self.peek() == Some('.') && !self.looking_at("...") {
+            match self.peek_at(1) {
+                Some(c) if c.is_ascii_digit() => {
+                    self.pos += 1;
+                    let digits = self.take_while(|c| c.is_ascii_digit());
+                    let index = digits
+                        .parse()
+                        .map_err(|_| self.error("the index is too large"))?;
+                    path.push(Access::Item(index));
+                }
+                Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                    self.pos += 1;
+                    path.push(Access::Field(self.variable_name()?));
+                }
+                _ => break,
+            }
+        }
+        let spread = self.looking_at("...");
+        if spread {
+            self.pos += 3;
+        }
+        Ok(Variable {
+            environment,
+            name,
+            path,
+            spread,
+        })
+    }
+
+    /// A variable's name: letters, digits and `_`.
+    fn variable_name(&mut self) -> Result<String> {
+        match self.peek() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                Ok(self.take_while(|c| c.is_ascii_alphanumeric() || c == '_'))
+            }
+            _ => Err(self.error("a variable's name is expected here")),
+        }
+    }
+
+    /// A single-quoted string, which has no escapes.
+    fn single_quoted(&mut self) -> Result<String> {
+        self.pos += 1;
+        let mut text = String::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.incomplete("the closing `'` is missing")),
+                Some('\'') => {
+                    self.pos += 1;
+                    return Ok(text);
+                }
+                Some(c) => {
+                    text.push(c);
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    /// A double-quoted string, with its escapes and `{expr}`
+    /// interpolations.
+    fn double_quoted(&mut self) -> Result<Vec<StringPart>> {
+        self.pos += 1;
+        let mut parts = Vec::new();
+        let mut text = String::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.incomplete("the closing `\"` is missing")),
+                Some('"') => {
+                    self.pos += 1;
+                    break;
+                }
+                Some('\\') => {
+                    let at = self.pos;
+                    self.pos += 1;
+                    let escaped = match self.peek() {
+                        Some('n') => '\n',
+                        Some('t') => '\t',
+                        Some('r') => '\r',
+                        Some('0') => '\0',
+                        Some(c @ ('"' | '\\' | '$' | '{' | '}')) => c,
+                        Some('u') => {
+                            self.pos += 1;
+                            self.expect('{', "`{` after `\\u`")?;
+                            let hex = self.take_while(|c| c.is_ascii_hexdigit());
+                            if hex.is_empty() || hex.len() > 6 || self.peek() != Some('}') {
+                                return Err(self
+                                    .error_at(at, "`\\u{…}` needs one to six hexadecimal digits"));
+                            }
+                            let code = u32::from_str_radix(&hex, 16).unwrap_or(u32::MAX);
+                            let c = char::from_u32(code)
+                                .ok_or_else(|| self.error_at(at, "not a Unicode scalar value"))?;
+                            text.push(c);
+                            self.pos += 1;
+                            continue;
+                        }
+                        None => return Err(self.incomplete("the closing `\"` is missing")),
+                        Some(other) => {
+                            return Err(self.error_at(at, &format!("`\\{other}` is not an escape")));
+                        }
+                    };
+                    text.push(escaped);
+                    self.pos += 1;
+                }
+                Some('{') => return Err(self.error("interpolation is not parsed yet")),
+                Some(c) => {
+                    text.push(c);
+                    self.pos += 1;
+                }
+            }
+        }
+        if !text.is_empty() {
+            parts.push(StringPart::Text(text));
+        }
+        Ok(parts)
+    }
+}
