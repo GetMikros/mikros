@@ -5,6 +5,7 @@ pub(crate) mod gpt;
 mod root;
 
 use crate::build::{self, Kind};
+use crate::secure_boot::{self, Key};
 use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -36,6 +37,14 @@ pub struct Args {
     /// whole system from the boot image.
     #[arg(long)]
     pub live: bool,
+    /// Sign the EFI executables for Secure Boot and add the files for
+    /// enrolling the signing key in the firmware.
+    #[arg(long)]
+    pub signed: bool,
+    /// The directory of the signing key, instead of
+    /// ~/.local/share/mikros/secure-boot.
+    #[arg(long, value_name = "DIRECTORY", requires = "signed")]
+    pub key: Option<PathBuf>,
 }
 
 /// Where the image of a build kind is written.
@@ -126,39 +135,64 @@ fn write_image(path: &Path, parts: &[Part]) -> Result<()> {
 pub use root::live_dirs;
 
 pub fn run(args: &Args) -> Result<()> {
+    let key = match (args.signed, &args.key) {
+        (false, _) => None,
+        (true, Some(dir)) => Some(secure_boot::key::load_or_create(dir)?),
+        (true, None) => Some(secure_boot::key::load_or_create(
+            &secure_boot::key::default_dir()?,
+        )?),
+    };
     let built = build::build(args.kind)?;
     if args.live {
         let boot_image = build::live_boot_image(args.kind, &built.boot_image)?;
-        return create_live(&built, &boot_image, &path(args.kind, true));
+        return create_live(&built, &boot_image, &path(args.kind, true), key.as_ref());
     }
-    create(args.kind, &built, &path(args.kind, false))
+    let out = path(args.kind, false);
+    create_parts(args.kind, &built, &out, "", &[], false, key.as_ref())
 }
 
 /// The files of the EFI system partition: the boot manager, also at the
 /// fallback path, the bootloader, the kernel, `boot_image` and
-/// `command_line`.
+/// `command_line`. With `key`, the EFI executables are signed with it
+/// and the files for enrolling it are added.
 fn esp_files(
     built: &build::Built,
     boot_image: &Path,
     command_line: String,
-) -> Result<Vec<(&'static str, Vec<u8>)>> {
+    key: Option<&Key>,
+) -> Result<Vec<(String, Vec<u8>)>> {
     let read = |path: &Path| fs::read(path).with_context(|| format!("reading {}", path.display()));
     let bootmenu = read(&built.bootmenu)?;
-    Ok(vec![
+    let mut files: Vec<(String, Vec<u8>)> = [
         ("EFI/Mikros/bootmenu.efi", bootmenu.clone()),
         ("EFI/BOOT/BOOTX64.EFI", bootmenu),
         ("EFI/Mikros/mikrosboot.efi", read(&built.bootloader)?),
         ("EFI/Mikros/kernel", read(&built.kernel)?),
         ("EFI/Mikros/boot.img", read(boot_image)?),
         ("EFI/Mikros/boot.conf", command_line.into_bytes()),
-    ])
+    ]
+    .into_iter()
+    .map(|(path, data)| (path.to_owned(), data))
+    .collect();
+    if let Some(key) = key {
+        secure_boot::sign_esp(&mut files, key)?;
+    }
+    Ok(files)
 }
 
 /// Writes a live image to `out`: only the EFI system partition, with the
 /// live system's `boot_image` and `root=bootfs` on the command line.
-fn create_live(built: &build::Built, boot_image: &Path, out: &Path) -> Result<()> {
-    let contents = esp_files(built, boot_image, "root=bootfs".to_owned())?;
-    let files: Vec<(&str, &[u8])> = contents.iter().map(|(p, d)| (*p, d.as_slice())).collect();
+fn create_live(
+    built: &build::Built,
+    boot_image: &Path,
+    out: &Path,
+    key: Option<&Key>,
+) -> Result<()> {
+    let contents = esp_files(built, boot_image, "root=bootfs".to_owned(), key)?;
+    let files: Vec<(&str, &[u8])> = contents
+        .iter()
+        .map(|(p, d)| (p.as_str(), d.as_slice()))
+        .collect();
     let total = files.iter().map(|(_, d)| d.len() as u64).sum();
     let esp = esp::build(esp::size_for(total), &files)?;
     write_image(
@@ -196,13 +230,19 @@ pub fn create_with(
     extra: &str,
     more: &[(&str, &[u8])],
 ) -> Result<()> {
-    create_parts(kind, built, out, extra, more, false)
+    create_parts(kind, built, out, extra, more, false, None)
+}
+
+/// Like `create`, with the EFI executables signed with `key` and the
+/// files for enrolling it on the EFI system partition.
+pub fn create_signed(kind: Kind, built: &build::Built, out: &Path, key: &Key) -> Result<()> {
+    create_parts(kind, built, out, "", &[], false, Some(key))
 }
 
 /// Like `create_with`, for `cargo xtask test`: the disk also has the
 /// partitions of `TEST_TYPES`.
 pub fn create_for_tests(kind: Kind, built: &build::Built, out: &Path, extra: &str) -> Result<()> {
-    create_parts(kind, built, out, extra, &[], true)
+    create_parts(kind, built, out, extra, &[], true, None)
 }
 
 fn create_parts(
@@ -212,6 +252,7 @@ fn create_parts(
     extra: &str,
     more: &[(&str, &[u8])],
     test_partition: bool,
+    key: Option<&Key>,
 ) -> Result<()> {
     let root_guid = Uuid::new_v4();
     let mut command_line = format!("root=PARTUUID={root_guid}");
@@ -221,10 +262,10 @@ fn create_parts(
     if kind == Kind::Fuzz && !extra.split(' ').any(|w| w == KASLR_OFF) {
         command_line = format!("{command_line} {KASLR_OFF}");
     }
-    let contents = esp_files(built, &built.boot_image, command_line)?;
+    let contents = esp_files(built, &built.boot_image, command_line, key)?;
     let files: Vec<(&str, &[u8])> = contents
         .iter()
-        .map(|(p, d)| (*p, d.as_slice()))
+        .map(|(p, d)| (p.as_str(), d.as_slice()))
         .chain(more.iter().copied())
         .collect();
     let total = files.iter().map(|(_, d)| d.len() as u64).sum();
