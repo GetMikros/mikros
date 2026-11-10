@@ -56,6 +56,27 @@ pub const XKEYBOARD_CONFIG: Port = Port {
     test_data: &[],
 };
 
+/// FreeType, which rasterises the system fonts, with its own zlib for
+/// compressed fonts and without the libraries Mikros does not have:
+/// Brotli, bzip2, HarfBuzz and libpng. Its tests need fonts that it does
+/// not ship, and are left out.
+pub const FREETYPE: Port = Port {
+    name: "freetype",
+    url: "https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.gz",
+    sha256: "9186627467a616d9a9e3e574748ac0c45fa77398e6364edef3041a8ba8d92f64",
+    source: "freetype-2.15.0",
+    options: &[
+        "-Dbrotli=disabled",
+        "-Dbzip2=disabled",
+        "-Dharfbuzz=disabled",
+        "-Dpng=disabled",
+        "-Dzlib=internal",
+        "-Dhvf=disabled",
+        "-Dtests=disabled",
+    ],
+    test_data: &[],
+};
+
 /// Where a port was built.
 pub struct Built {
     /// Its patched source.

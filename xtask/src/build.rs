@@ -128,6 +128,20 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         &[],
     )?;
     println!("built    {}", keymaps.install.display());
+    let freetype = crate::ports::build(&crate::ports::FREETYPE)?;
+    crate::build_systems::check_installed(
+        &freetype.install,
+        &[
+            "lib/libfreetype.6.20.7.dlib",
+            "include/freetype2/ft2build.h",
+            "include/freetype2/freetype/freetype.h",
+        ],
+        &[
+            ("lib/libfreetype.6.dlib", "libfreetype.6.20.7.dlib"),
+            ("lib/libfreetype.dlib", "libfreetype.6.dlib"),
+        ],
+    )?;
+    println!("built    {}", freetype.install.display());
     let boot_image = match boot {
         BootImage::System => {
             let init = user_build("init", kind)?;
