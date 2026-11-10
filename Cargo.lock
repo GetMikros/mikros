@@ -796,6 +796,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-display"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-evdev"
 version = "0.0.0"
 

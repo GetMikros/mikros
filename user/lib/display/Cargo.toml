@@ -1,0 +1,7 @@
+[package]
+name = "mikros-display"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+workspace = "../../.."
