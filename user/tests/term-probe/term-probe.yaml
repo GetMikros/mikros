@@ -1,0 +1,7 @@
+# The service manifest of the terminal probe as the boot service of
+# tests/term.img, installed as usr/lib/services/term-probe.yaml. It
+# logs through the kernel log.
+name: term-probe
+binary: /usr/bin/term-probe
+start: boot
+boot_handles: [log_manage]

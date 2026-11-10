@@ -693,6 +693,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "term-probe"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "termsvc"
 version = "0.0.0"
 dependencies = [

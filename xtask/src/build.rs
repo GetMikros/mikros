@@ -638,6 +638,40 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", time_image.display());
+            // The terminal service test serves this image: the service
+            // manager, the broker, the terminal service and its probe,
+            // with their manifests.
+            let term_service = user_build("termsvc", kind)?;
+            println!("built    {}", term_service.display());
+            let term_probe = user_build("term-probe", kind)?;
+            println!("built    {}", term_probe.display());
+            let term_image = test_image(
+                kind,
+                "term.img",
+                &[
+                    ("usr/bin/servicemgr", services.as_path()),
+                    ("usr/bin/permbroker", broker.as_path()),
+                    (
+                        "usr/lib/services/permissions.yaml",
+                        broker_manifest.as_path(),
+                    ),
+                    ("usr/bin/termsvc", term_service.as_path()),
+                    (
+                        "usr/lib/services/terminal.yaml",
+                        crate::workspace_root()
+                            .join("user/services/termsvc/terminal.yaml")
+                            .as_path(),
+                    ),
+                    ("usr/bin/term-probe", term_probe.as_path()),
+                    (
+                        "usr/lib/services/term-probe.yaml",
+                        crate::workspace_root()
+                            .join("user/tests/term-probe/term-probe.yaml")
+                            .as_path(),
+                    ),
+                ],
+            )?;
+            println!("built    {}", term_image.display());
             // The namespace test serves this image, with root=bootfs: the
             // service manager, the broker, the temporary file system and a
             // probe of its namespace, with their manifests, files in /etc,
@@ -1202,6 +1236,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/services.img", services_image.as_path()),
                 ("tests/tmpfs.img", tmpfs_image.as_path()),
                 ("tests/log.img", log_image.as_path()),
+                ("tests/term.img", term_image.as_path()),
                 ("tests/time.img", time_image.as_path()),
                 ("tests/namespaces.img", namespaces_image.as_path()),
                 ("tests/devices.img", devices_image.as_path()),

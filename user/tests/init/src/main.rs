@@ -9281,6 +9281,79 @@ mod manager {
     }
 
     /// From a boot image with the service manager, the permission broker,
+    /// the terminal service and its probe, with their manifests, the
+    /// service manager starts the probe, and the terminal service once
+    /// the probe connects to it. The probe opens terminals, types on
+    /// their master streams and checks what they read, echo and write,
+    /// deadlines and limits, a controlling terminal of its session, ^C
+    /// interrupting the foreground group, a background reader being
+    /// stopped, and input after the master closed. It exits with 0 once
+    /// every check passed, as the service manager logs.
+    pub fn terminal_service_serves_terminals(s: &Startup) -> Result {
+        const PASSED: &[u8] = b"service term-probe exited with code 0";
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service term-probe exited",
+            b"service term-probe ended",
+            b"service terminal exited",
+            b"service terminal ended",
+        ];
+        let (m, init, reader) = serving(s, b"tests/term.img")?;
+        let deadline = super::within(super::PROBE_SECONDS);
+        let handles = alloc::vec![
+            StartupHandle {
+                role: HandleRole::User,
+                id: 1,
+                handle: copy(s.root_resource, SAME_RIGHTS)?,
+            },
+            StartupHandle {
+                role: HandleRole::User,
+                id: 2,
+                handle: copy(s.log, SAME_RIGHTS)?,
+            },
+            StartupHandle {
+                role: HandleRole::User,
+                id: 3,
+                handle: copy(s.budget, SAME_RIGHTS)?,
+            },
+        ];
+        let reply = init.start_service_manager(handles, deadline);
+        let Ok(Ok(started)) = reply else {
+            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
+            return Err(Failure {
+                what: "starting the service manager",
+                status: 0,
+            });
+        };
+        let deadline = super::within(super::PROBE_SECONDS);
+        let outcome = loop {
+            let (status, record) = super::read_record(reader.raw());
+            if status == super::SHOULD_WAIT {
+                if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
+                    break None;
+                }
+                continue;
+            }
+            check("reading the log", status)?;
+            let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
+            let message = &record[0x20..0x20 + len.min(256)];
+            if super::contains(message, PASSED) {
+                break Some(true);
+            }
+            if FAILED.iter().any(|f| super::contains(message, f)) {
+                mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));
+                break Some(false);
+            }
+        };
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::task_kill(started.process.raw()) };
+        drop((m, init));
+        ensure("logging an outcome in time", outcome.is_some())?;
+        ensure("passing every check of the probe", outcome == Some(true))
+    }
+
+    /// From a boot image with the service manager, the permission broker,
     /// the time service and the time probe as two services, with their
     /// manifests, the service manager starts the time service with init's
     /// platform information, and the probes. The one that holds
@@ -10833,6 +10906,7 @@ mod bootfs {
                         "restart.img",
                         "root.img",
                         "services.img",
+                        "term.img",
                         "time.img",
                         "tmpfs.img",
                         "volumes.img",
@@ -11016,7 +11090,7 @@ mod executor {
     }
 }
 
-const TESTS: [(&str, Test); 146] = [
+const TESTS: [(&str, Test); 147] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -11090,6 +11164,10 @@ const TESTS: [(&str, Test); 146] = [
     (
         "log_service_collects_records",
         manager::log_service_collects_records,
+    ),
+    (
+        "terminal_service_serves_terminals",
+        manager::terminal_service_serves_terminals,
     ),
     ("time_service_keeps_utc", manager::time_service_keeps_utc),
     (
