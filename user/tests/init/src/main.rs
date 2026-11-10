@@ -9798,7 +9798,9 @@ mod manager {
     /// `platform:acpi` device, the server starts ACPICA on the machine's
     /// tables, publishes the `acpi` service and adds the devices of the
     /// namespace, among them the real-time clock, whose driver publishes
-    /// the `rtc` service, from which the time service takes UTC; and
+    /// the `rtc` service, from which the time service takes UTC, and the
+    /// PS/2 controller, whose driver publishes QEMU's keyboard and its
+    /// five-button wheel mouse as `input` services; and
     /// `test-acpi` starts once it found the ACPI service routing PCI
     /// interrupt pins and refusing power control, and the clock reading
     /// and setting its time.
@@ -9830,6 +9832,11 @@ mod manager {
             (b"device-manager: started driver rtc for device ", 1),
             (b"device-manager: published device.rtc ", 1),
             (b"time: UTC set from the real-time clock", 1),
+            (b"device-manager: bound driver ps2 to device ", 1),
+            (b"device-manager: started driver ps2 for device ", 1),
+            (b"ps2: published the keyboard", 1),
+            (b"ps2: published the mouse, protocol 4", 1),
+            (b"device-manager: published device.input ", 2),
             (
                 b"device-manager: bound driver test-acpi to device 1, pci-host-0, as platform:pci-host-ecam",
                 1,
@@ -9844,6 +9851,8 @@ mod manager {
             b"acpi: starting ACPICA failed",
             b"driver rtc declined",
             b"time: reading the real-time clock failed",
+            b"driver ps2 declined",
+            b"ps2: setting up",
         ];
         let logged = device_manager_logs(
             s,
@@ -9877,7 +9886,8 @@ mod manager {
     /// the one on port 2 of the AHCI controller, as `disk-2`. The xHCI
     /// driver drives the controller at 00:1d.0 and adds the interface of
     /// the USB mass storage device on it and that of the keyboard behind
-    /// the USB hub on it, and the USB mass storage driver
+    /// the USB hub on it, which the USB HID driver publishes as an input
+    /// device, and the USB mass storage driver
     /// adds the scratch disk behind it as `disk-0`. Each disk device has
     /// the properties `serial`, here `mikros`, and `removable`, here
     /// `false` and for the USB disk `true`, and the device manager gives
@@ -10008,9 +10018,13 @@ mod manager {
             (b", pci-0000:00:1d.0, as pci:v1b36d000dsv", 1),
             (b"device-manager: started driver xhci for device", 1),
             (b", as usb:v46f4p0001i00, under", 1),
-            // The keyboard behind the USB hub, whose interface has no
-            // driver here; the hub itself adds no device.
+            // The keyboard behind the USB hub, whose interface the USB
+            // HID driver publishes as an input device; the hub itself
+            // adds no device.
             (b".1-0, as usb:v0627p0001i00, under", 1),
+            (b"device-manager: bound driver usbhid to device", 1),
+            (b"usbhid: published a Keyboard on interface 0", 1),
+            (b"device-manager: published device.input ", 1),
             (b"device-manager: bound driver usbstorage to device", 1),
             (b"device-manager: started driver usbstorage for device", 1),
             (b", disk-0, as storage:disk, under", 2),
@@ -10054,6 +10068,8 @@ mod manager {
             b"driver test-fat declined",
             b"driver btrfs declined",
             b"driver test-btrfs declined",
+            b"driver usbhid declined",
+            b"usbhid: reading interface",
             // The only file systems are the root's and the ESP's, which
             // are not volumes.
             b"published device.filesystem volume-",

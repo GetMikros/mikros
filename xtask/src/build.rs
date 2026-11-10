@@ -765,6 +765,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let acpi = acpi_build(kind)?;
             let rtc = user_build("rtc", kind)?;
             println!("built    {}", rtc.display());
+            let ps2 = user_build("ps2", kind)?;
+            println!("built    {}", ps2.display());
+            let usb_hid = user_build("usbhid", kind)?;
+            println!("built    {}", usb_hid.display());
             let power_probe = user_build("power-probe", kind)?;
             println!("built    {}", power_probe.display());
             let devices_manifest =
@@ -853,6 +857,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     (
                         "usr/lib/services/time.yaml".to_owned(),
                         time_manifest.clone(),
+                    ),
+                    // The PS/2 driver for the i8042 device that the
+                    // server adds.
+                    ("usr/lib/drivers/ps2/ps2".to_owned(), ps2.clone()),
+                    (
+                        "usr/lib/drivers/ps2/driver.yaml".to_owned(),
+                        crate::workspace_root().join("user/drivers/ps2/driver.yaml"),
                     ),
                 ],
             )?;
@@ -1014,6 +1025,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "usr/lib/services/time.yaml".to_owned(),
                     time_manifest.clone(),
+                ),
+                // The USB HID driver, for the keyboard behind the hub.
+                ("usr/lib/drivers/usbhid/usbhid".to_owned(), usb_hid.clone()),
+                (
+                    "usr/lib/drivers/usbhid/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/usbhid/driver.yaml"),
                 ),
             ];
             // The time zones, for the FAT and exFAT servers' local times.
