@@ -3,11 +3,10 @@
 
 mod connection;
 mod memory;
+mod pager;
 
-use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
-use core::cell::RefCell;
-use mikros_bootfs::Tree;
+use mikros_bootfs::{NodeKind, Tree};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{Node, Rights};
@@ -25,15 +24,16 @@ pub struct Fs {
     image: &'static [u8],
     reactor: Reactor,
     spawner: Spawner,
-    pager: OwnedHandle,
-    /// The paged memory objects of files, by node.
-    paged: RefCell<BTreeMap<usize, OwnedHandle>>,
+    /// The pager of the files' paged objects, which a thread of its own
+    /// answers for.
+    pager: &'static pager::Pager,
 }
 
 impl Fs {
     /// The file system of the boot image `image`, which stays mapped
     /// into `process` for good. Its connections run on the executor of
-    /// `reactor` and `spawner`.
+    /// `reactor` and `spawner`, and a thread of `process` supplies the
+    /// pages of its files' paged objects.
     pub fn new(
         process: Handle,
         image: &OwnedHandle,
@@ -41,15 +41,16 @@ impl Fs {
         spawner: Spawner,
     ) -> Result<Rc<Fs>, Status> {
         let image = map(process, image)?;
-        let mut pager = 0;
-        // SAFETY: the out pointer is valid for the call.
-        let status = unsafe { sys::pager_create(0, &mut pager) };
-        if status != mikros_rt::OK {
-            return Err(status);
-        }
-        // SAFETY: the kernel just created the handle for us.
-        let pager = unsafe { OwnedHandle::from_raw(pager) };
         let tree = Tree::new(image);
+        let files = tree
+            .nodes
+            .iter()
+            .map(|node| match node.kind {
+                NodeKind::File { offset, size } => (offset, size),
+                _ => (0, 0),
+            })
+            .collect();
+        let pager = pager::Pager::start(process, image, files)?;
         for (path, flag) in &tree.skipped {
             mikros_rt::log!(
                 Warning,
@@ -64,7 +65,6 @@ impl Fs {
             reactor,
             spawner,
             pager,
-            paged: RefCell::new(BTreeMap::new()),
         }))
     }
 
@@ -238,7 +238,7 @@ impl Fs {
             matches!(usr, Ok(mikros_bootfs::Resolved::Node(usr)) if self.tree.contains(usr, node));
         Ok(Executable {
             file: &self.image[offset..offset + size],
-            shared: self.paged_memory(node, offset, size, rights)?,
+            shared: self.paged_memory(node, size, rights)?,
             system,
             offset,
         })

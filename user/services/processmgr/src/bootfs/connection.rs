@@ -279,7 +279,7 @@ impl Connection {
             return Err(self.write_denied());
         } else {
             let rights = super::memory::rights(false, execute);
-            self.fs.paged_memory(self.node, offset, size, rights)
+            self.fs.paged_memory(self.node, size, rights)
         };
         match memory {
             Ok(memory) => Ok(NodeGetMemoryObjectResponse { memory }),

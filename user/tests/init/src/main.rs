@@ -10679,7 +10679,6 @@ mod bootfs {
 
     use alloc::string::String;
     use alloc::vec::Vec;
-    use core::sync::atomic::{AtomicU32, Ordering};
     use mikros_rt::Startup;
     use mikros_rt::exec::Executor;
     use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
@@ -10688,26 +10687,6 @@ mod bootfs {
     use mikros_test::{Failure, Result, check, ensure};
     use processmgr::bootfs::Fs;
 
-    /// The first four bytes that the helper thread read from a paged
-    /// object, and its status.
-    static PAGED_HEAD: AtomicU32 = AtomicU32::new(0);
-    static PAGED_STATUS: AtomicU32 = AtomicU32::new(u32::MAX);
-
-    /// Reads the start of the memory object `mem`, which this thread's
-    /// process supplies pages for, then signals `event` and ends.
-    extern "sysv64" fn read_paged(mem: u64, event: u64) -> ! {
-        let mut head = [0u8; 4];
-        // SAFETY: the pointer describes `head`.
-        let status = unsafe { sys::mem_read(mem as sys::Handle, 0, head.as_mut_ptr(), 4) };
-        PAGED_HEAD.store(u32::from_le_bytes(head), Ordering::Release);
-        PAGED_STATUS.store(status as u32, Ordering::Release);
-        // SAFETY: the calls take no pointers.
-        unsafe {
-            sys::object_signal(event as sys::Handle, 0, super::USER0);
-            sys::thread_exit();
-        }
-        unreachable!("thread_exit returned");
-    }
     const MANAGER: &str = "usr/bin/processmgr";
 
     fn failed(what: &'static str) -> Failure {
@@ -10852,8 +10831,8 @@ mod bootfs {
             )?;
 
             // Memory objects hold the file's contents: a private copy, and
-            // a paged object whose pages this thread's executor supplies
-            // while another thread reads it.
+            // a paged object whose pages come even while this thread, the
+            // executor's, waits for them.
             let private = MemoryFlags::PRIVATE | MemoryFlags::WRITE;
             let private = reply("getting memory", file.get_memory_object(private).await)?
                 .map_err(|_| failed("getting a private memory object"))?;
@@ -10866,20 +10845,12 @@ mod bootfs {
             let flags = MemoryFlags::EXECUTE;
             let paged = reply("getting memory", file.get_memory_object(flags).await)?
                 .map_err(|_| failed("getting a paged memory object"))?;
-            let mut event = 0;
-            // SAFETY: the out pointer is valid for the call.
-            check("creating an event", unsafe {
-                sys::event_create(0, &mut event)
+            let mut head = [0u8; 4];
+            // SAFETY: the pointer describes `head`.
+            check("reading paged memory", unsafe {
+                sys::mem_read(paged.memory.raw(), 0, head.as_mut_ptr(), 4)
             })?;
-            let mem = paged.memory.raw();
-            super::spawn2(s, read_paged, u64::from(mem), u64::from(event))?;
-            let signalled = reactor.signals(event, super::USER0).await;
-            ensure("reading paged memory", signalled.is_ok())?;
-            ensure(
-                "supplying the file's pages",
-                PAGED_STATUS.load(Ordering::Acquire) == 0
-                    && PAGED_HEAD.load(Ordering::Acquire).to_le_bytes() == *b"\x7fELF",
-            )?;
+            ensure("supplying the file's pages", head == *b"\x7fELF")?;
             let shared = MemoryFlags::WRITE;
             let shared = reply("getting memory", file.get_memory_object(shared).await)?;
             ensure(
