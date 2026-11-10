@@ -26,7 +26,11 @@ repository. Code and commits refer to them by ID, such as `MIKSPEC-0012.R3`.
 | `kernel/arch/x86_64/` | x86_64 support |
 | `kernel/fuzz/` | Host fuzz targets |
 | `kernel/gdb/` | GDB commands for inspecting the kernel |
-| `user/init/` | The initial process |
+| `user/services/` | System services, starting with `init`, the initial process |
+| `user/drivers/` | Device and file system drivers |
+| `user/runtime/` | C library, Rust runtime and standard library port, ACPICA |
+| `user/lib/` | Libraries for formats, file systems and hardware, host-tested |
+| `user/tests/` | Programs the integration tests run |
 
 Folders appear as work on them starts.
 

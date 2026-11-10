@@ -6,5 +6,5 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
-mikros-rt = { path = "../runtime/mikros-rt" }
-mikros-userdb = { path = "../lib/userdb" }
+mikros-rt = { path = "../../runtime/mikros-rt" }
+mikros-userdb = { path = "../../lib/userdb" }

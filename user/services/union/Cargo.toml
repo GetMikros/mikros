@@ -1,10 +1,9 @@
 [package]
-name = "tmpfs"
+name = "union"
 version.workspace = true
 edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
 [dependencies]
-mikros-memfs = { path = "../lib/memfs" }
-mikros-rt = { path = "../runtime/mikros-rt" }
+mikros-rt = { path = "../../runtime/mikros-rt" }

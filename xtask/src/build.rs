@@ -167,20 +167,21 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let btrfs_manifest = crate::workspace_root().join("user/drivers/btrfs/driver.yaml");
             let tmpfs = user_build("tmpfs", kind)?;
             println!("built    {}", tmpfs.display());
-            let tmpfs_manifest = crate::workspace_root().join("user/tmpfs/tmpfs.yaml");
+            let tmpfs_manifest = crate::workspace_root().join("user/services/tmpfs/tmpfs.yaml");
             let union = user_build("union", kind)?;
             println!("built    {}", union.display());
-            let union_manifest = crate::workspace_root().join("user/union/union.yaml");
+            let union_manifest = crate::workspace_root().join("user/services/union/union.yaml");
             let log_service = user_build("log-service", kind)?;
             println!("built    {}", log_service.display());
-            let log_manifest = crate::workspace_root().join("user/log-service/log.yaml");
+            let log_manifest = crate::workspace_root().join("user/services/log-service/log.yaml");
             let time_service = user_build("time-service", kind)?;
             println!("built    {}", time_service.display());
-            let time_manifest = crate::workspace_root().join("user/time-service/time.yaml");
+            let time_manifest =
+                crate::workspace_root().join("user/services/time-service/time.yaml");
             let broker_manifest =
-                crate::workspace_root().join("user/permissions-broker/permissions.yaml");
+                crate::workspace_root().join("user/services/permissions-broker/permissions.yaml");
             let devices_manifest =
-                crate::workspace_root().join("user/device-manager/device-manager.yaml");
+                crate::workspace_root().join("user/services/device-manager/device-manager.yaml");
             let pci_bus_manifest = crate::workspace_root().join("user/drivers/pci-bus/driver.yaml");
             let members = [
                 ("init", init.as_path()),
@@ -489,7 +490,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // system's services and their manifests, and a probe that
             // starts as a boot service.
             let broker_manifest =
-                crate::workspace_root().join("user/permissions-broker/permissions.yaml");
+                crate::workspace_root().join("user/services/permissions-broker/permissions.yaml");
             let services_image = test_image(
                 kind,
                 "services.img",
@@ -528,14 +529,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", tmpfs.display());
             let tmpfs_probe = user_build("tmpfs-probe", kind)?;
             println!("built    {}", tmpfs_probe.display());
-            let tmpfs_manifest = crate::workspace_root().join("user/tmpfs/tmpfs.yaml");
+            let tmpfs_manifest = crate::workspace_root().join("user/services/tmpfs/tmpfs.yaml");
             let tmpfs_probe_manifest =
                 crate::workspace_root().join("user/tests/tmpfs-probe/tmpfs-probe.yaml");
             let union = user_build("union", kind)?;
             println!("built    {}", union.display());
             let union_probe = user_build("union-probe", kind)?;
             println!("built    {}", union_probe.display());
-            let union_manifest = crate::workspace_root().join("user/union/union.yaml");
+            let union_manifest = crate::workspace_root().join("user/services/union/union.yaml");
             let union_probe_manifest =
                 crate::workspace_root().join("user/tests/union-probe/union-probe.yaml");
             let tmpfs_image = test_image(
@@ -570,7 +571,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // the log, with their manifests.
             let log_service = user_build("log-service", kind)?;
             println!("built    {}", log_service.display());
-            let log_manifest = crate::workspace_root().join("user/log-service/log.yaml");
+            let log_manifest = crate::workspace_root().join("user/services/log-service/log.yaml");
             let log_probe = user_build("log-probe", kind)?;
             println!("built    {}", log_probe.display());
             let log_probe_manifest =
@@ -600,7 +601,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // services, with their manifests.
             let time_service = user_build("time-service", kind)?;
             println!("built    {}", time_service.display());
-            let time_manifest = crate::workspace_root().join("user/time-service/time.yaml");
+            let time_manifest =
+                crate::workspace_root().join("user/services/time-service/time.yaml");
             let time_probe = user_build("time-probe", kind)?;
             println!("built    {}", time_probe.display());
             let probe_dir = crate::workspace_root().join("user/tests/time-probe");
@@ -673,7 +675,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", accounts.display());
             let accounts_probe = user_build("accounts-probe", kind)?;
             println!("built    {}", accounts_probe.display());
-            let accounts_manifest = crate::workspace_root().join("user/accounts/accounts.yaml");
+            let accounts_manifest =
+                crate::workspace_root().join("user/services/accounts/accounts.yaml");
             let probe_dir = crate::workspace_root().join("user/tests/accounts-probe");
             let accounts_probe_manifest = probe_dir.join("accounts-probe.yaml");
             let accounts_guest_manifest = probe_dir.join("accounts-guest.yaml");
@@ -757,7 +760,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let power_probe = user_build("power-probe", kind)?;
             println!("built    {}", power_probe.display());
             let devices_manifest =
-                crate::workspace_root().join("user/device-manager/device-manager.yaml");
+                crate::workspace_root().join("user/services/device-manager/device-manager.yaml");
             let device_image = |file: &str,
                                 drivers: &[(&str, bool)],
                                 more: &[(String, PathBuf)]|

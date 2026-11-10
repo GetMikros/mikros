@@ -8,4 +8,4 @@ publish = false
 [dependencies]
 mikros-ata = { path = "../../lib/ata" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
-mikros-storage = { path = "../../storage" }
+mikros-storage = { path = "../../services/storage" }
