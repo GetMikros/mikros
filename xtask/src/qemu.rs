@@ -132,10 +132,16 @@ pub fn args(
     };
     let venus = machine.gpu == Gpu::Venus;
     let memory_backend = if venus { ",memory-backend=ram" } else { "" };
+    // The Secure Boot firmware keeps its variables in System Management
+    // Mode, where only it can write the flash.
+    let smm = if firmware.secure_boot { ",smm=on" } else { "" };
     push(&[
         "-machine",
-        &format!("q35,accel={accel}{irqchip}{memory_backend}"),
+        &format!("q35,accel={accel}{irqchip}{memory_backend}{smm}"),
     ]);
+    if firmware.secure_boot {
+        push(&["-global", "driver=cfi.pflash01,property=secure,value=on"]);
+    }
     push(&[
         "-cpu",
         match processor {
@@ -206,6 +212,7 @@ mod tests {
         Firmware {
             code: PathBuf::from("code.fd"),
             vars: PathBuf::from("vars.fd"),
+            secure_boot: false,
         }
     }
 
@@ -342,6 +349,30 @@ mod tests {
         assert_eq!(
             after(&a, "-machine"),
             ["q35,accel=tcg,kernel-irqchip=split,memory-backend=ram"]
+        );
+        assert!(after(&a, "-global").is_empty());
+    }
+
+    #[test]
+    fn gives_secure_boot_firmware_smm_and_a_secure_flash() {
+        let firmware = Firmware {
+            secure_boot: true,
+            ..firmware()
+        };
+        let a = args(
+            &machine(),
+            Processor::Host,
+            &firmware,
+            Path::new("v.fd"),
+            Path::new("disk.img"),
+        );
+        assert_eq!(
+            after(&a, "-machine"),
+            ["q35,accel=kvm,kernel-irqchip=split,smm=on"]
+        );
+        assert_eq!(
+            after(&a, "-global"),
+            ["driver=cfi.pflash01,property=secure,value=on"]
         );
     }
 }

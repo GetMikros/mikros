@@ -4,6 +4,7 @@ pub mod authenticode;
 pub mod der;
 pub mod enroll;
 pub mod key;
+pub mod vars;
 
 use anyhow::{Context, Result};
 pub use key::Key;
