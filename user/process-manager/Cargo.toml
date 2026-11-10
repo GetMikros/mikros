@@ -6,7 +6,7 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
-mikros-bootfs = { path = "../bootfs" }
+mikros-bootfs = { path = "../lib/bootfs" }
 mikros-loader = { path = "../loader" }
-mikros-manifest = { path = "../manifest" }
+mikros-manifest = { path = "../lib/manifest" }
 mikros-rt = { path = "../mikros-rt" }

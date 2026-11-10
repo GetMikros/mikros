@@ -1,0 +1,8 @@
+[package]
+name = "mikros-btrfs"
+version.workspace = true
+edition.workspace = true
+license = "GPL-2.0-only"
+publish = false
+workspace = "../../.."
+build = "build.rs"

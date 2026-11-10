@@ -7,6 +7,6 @@ publish = false
 
 [dependencies]
 fat = { path = "../fat" }
-mikros-exfat = { path = "../../exfat" }
-mikros-fat = { path = "../../fat" }
+mikros-exfat = { path = "../../lib/exfat" }
+mikros-fat = { path = "../../lib/fat" }
 mikros-rt = { path = "../../mikros-rt" }

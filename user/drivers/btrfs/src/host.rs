@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The btrfs shim's host layer on Mikros: the `mikros_host_` functions of
-//! `user/btrfs/shim/host.h`, on the system calls of the kernel.
+//! `user/lib/btrfs/shim/host.h`, on the system calls of the kernel.
 //!
 //! Each thread of the shim is a thread of this process with a block of
 //! thread-local storage of its own, laid out from the program's TLS

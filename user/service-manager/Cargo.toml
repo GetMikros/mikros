@@ -6,6 +6,6 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
-mikros-manifest = { path = "../manifest" }
+mikros-manifest = { path = "../lib/manifest" }
 mikros-rt = { path = "../mikros-rt" }
-mikros-yaml = { path = "../yaml" }
+mikros-yaml = { path = "../lib/yaml" }

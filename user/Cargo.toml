@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["accounts", "acpica", "device-manager", "drivers/acpi", "drivers/ahci", "drivers/btrfs", "drivers/exfat", "drivers/fat", "drivers/nvme", "drivers/partition", "drivers/pci-bus", "drivers/rtc", "drivers/usb-storage", "drivers/virtio-blk", "drivers/xhci", "storage", "time-service", "virtio", "init", "libc", "loader", "log-service", "mikros-rt", "permissions-broker", "process-manager", "service-manager", "tmpfs", "union", "tests/accounts-probe", "tests/broker-probe", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/directory-probe", "tests/drivers/test-driver", "tests/init", "tests/launcher-probe", "tests/log-probe", "tests/managed", "tests/namespace-probe", "tests/time-probe", "tests/tmpfs-probe", "tests/union-probe", "tests/volumes-probe", "tests/pie", "tests/port-tests", "tests/power-probe", "tests/restart-probe", "tests/support"]
+members = ["accounts", "acpica", "device-manager", "drivers/acpi", "drivers/ahci", "drivers/btrfs", "drivers/exfat", "drivers/fat", "drivers/nvme", "drivers/partition", "drivers/pci-bus", "drivers/rtc", "drivers/usb-storage", "drivers/virtio-blk", "drivers/xhci", "storage", "time-service", "lib/virtio", "init", "libc", "loader", "log-service", "mikros-rt", "permissions-broker", "process-manager", "service-manager", "tmpfs", "union", "tests/accounts-probe", "tests/broker-probe", "tests/call-server", "tests/channel-echo", "tests/debuggee", "tests/directory-probe", "tests/drivers/test-driver", "tests/init", "tests/launcher-probe", "tests/log-probe", "tests/managed", "tests/namespace-probe", "tests/time-probe", "tests/tmpfs-probe", "tests/union-probe", "tests/volumes-probe", "tests/pie", "tests/port-tests", "tests/power-probe", "tests/restart-probe", "tests/support"]
 # Built here as a dependency, and host-tested in the root workspace,
 # except `std`, a workspace of its own for programs that use the
 # standard library.
-exclude = ["ata", "bootfs", "btrfs", "casefold", "cmos", "exfat", "fat", "gpt", "logstore", "manifest", "memfs", "nvme", "pci", "permissions", "std", "tz", "userdb", "ustar", "yaml"]
+exclude = ["lib/ata", "lib/bootfs", "lib/btrfs", "lib/casefold", "lib/cmos", "lib/exfat", "lib/fat", "lib/gpt", "lib/logstore", "lib/manifest", "lib/memfs", "lib/nvme", "lib/pci", "lib/permissions", "std", "lib/tz", "lib/userdb", "lib/ustar", "lib/yaml"]
 
 [workspace.package]
 version = "0.0.0"

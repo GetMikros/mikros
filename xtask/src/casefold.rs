@@ -16,7 +16,7 @@ pub struct Args {}
 
 /// The generated table's path.
 fn table() -> PathBuf {
-    crate::workspace_root().join("user/casefold/src/table.rs")
+    crate::workspace_root().join("user/lib/casefold/src/table.rs")
 }
 
 pub fn run(_args: &Args) -> Result<()> {

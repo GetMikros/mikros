@@ -6,5 +6,5 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
-mikros-cmos = { path = "../../cmos" }
+mikros-cmos = { path = "../../lib/cmos" }
 mikros-rt = { path = "../../mikros-rt" }

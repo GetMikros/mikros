@@ -1,0 +1,10 @@
+[package]
+name = "mikros-manifest"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+workspace = "../../.."
+
+[dependencies]
+mikros-yaml = { path = "../yaml" }

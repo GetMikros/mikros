@@ -6,8 +6,8 @@ publish = false
 
 [dependencies]
 syscall-table = { path = "../kernel/syscalls" }
-mikros-userdb = { path = "../user/userdb" }
-mikros-exfat = { path = "../user/exfat" }
+mikros-userdb = { path = "../user/lib/userdb" }
+mikros-exfat = { path = "../user/lib/exfat" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1.5.4"

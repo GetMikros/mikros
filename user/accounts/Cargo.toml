@@ -7,4 +7,4 @@ publish = false
 
 [dependencies]
 mikros-rt = { path = "../mikros-rt" }
-mikros-userdb = { path = "../userdb" }
+mikros-userdb = { path = "../lib/userdb" }

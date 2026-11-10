@@ -10,6 +10,6 @@ publish = false
 name = "fat_server"
 
 [dependencies]
-mikros-fat = { path = "../../fat" }
+mikros-fat = { path = "../../lib/fat" }
 mikros-rt = { path = "../../mikros-rt" }
-mikros-tz = { path = "../../tz" }
+mikros-tz = { path = "../../lib/tz" }

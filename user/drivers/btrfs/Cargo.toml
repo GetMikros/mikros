@@ -6,6 +6,6 @@ license = "GPL-2.0-only"
 publish = false
 
 [dependencies]
-mikros-btrfs = { path = "../../btrfs" }
-mikros-casefold = { path = "../../casefold" }
+mikros-btrfs = { path = "../../lib/btrfs" }
+mikros-casefold = { path = "../../lib/casefold" }
 mikros-rt = { path = "../../mikros-rt" }
