@@ -1,0 +1,28 @@
+diff --git a/std/src/os/mikros/process.rs b/std/src/os/mikros/process.rs
+index 77fc545..400cdb2 100644
+--- a/std/src/os/mikros/process.rs
++++ b/std/src/os/mikros/process.rs
+@@ -5,13 +5,22 @@
+ 
+ #![unstable(feature = "mikros_handles", issue = "none")]
+ 
+-use super::io::{OwnedHandle, owned};
++use super::io::{BorrowedHandle, OwnedHandle, RawHandle, owned};
+ use crate::ffi::c_int;
+ use crate::io;
+ use crate::process::Child;
+ 
+ unsafe extern "C" {
+     fn mikros_process_handle(pid: c_int) -> i64;
++    fn mikros_process_self() -> RawHandle;
++}
++
++/// The process's own handle, with the `MAP` right, which the C library
++/// keeps open for as long as the process runs.
++pub fn current() -> BorrowedHandle<'static> {
++    // SAFETY: the call takes no pointers, and the C library never closes
++    // the handle.
++    unsafe { BorrowedHandle::borrow_raw(mikros_process_self()) }
+ }
+ 
+ /// The kernel handle of a child process.
