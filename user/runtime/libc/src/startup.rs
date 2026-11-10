@@ -1,6 +1,6 @@
 //! The startup handles that the C library did not install as
 //! descriptors, which the program takes, and the process's `Directory`
-//! connection, which the C library keeps.
+//! connection and own handle, which the C library keeps.
 
 use crate::lock::Lock;
 use alloc::vec::Vec;
@@ -46,4 +46,11 @@ extern "C" fn mikros_take_startup_handle(role: u32, id: u32) -> sys::Handle {
 #[unsafe(no_mangle)]
 extern "C" fn mikros_directory() -> sys::Handle {
     directory()
+}
+
+/// `mikros_process_self`: the process's own handle from its startup
+/// transfer, which the C library keeps owning.
+#[unsafe(no_mangle)]
+extern "C" fn mikros_process_self() -> sys::Handle {
+    crate::syscall::process()
 }
