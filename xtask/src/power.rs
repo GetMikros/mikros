@@ -7,7 +7,10 @@
 //! which runs the PCI bus driver with the drivers of the disks, their
 //! partitions and the USB disk below it, must have removed every device
 //! but the ACPI device when it stopped, each after the devices below
-//! it.
+//! it. The machine has an extra ACPI table, `PTS_TABLE`, whose method run
+//! before power-off writes an I/O port that nothing used before, as some
+//! firmware's does: the ACPI server can only reach it because it took
+//! every operation region before the device manager exited.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -28,12 +31,37 @@ const READY: [&str; 2] = [
 /// The lines the serial port must show, in this order, before QEMU exits:
 /// the services stop in the reverse of their start order, the probe
 /// first and the permission broker last.
-const SHUTDOWN: [&str; 5] = [
+const SHUTDOWN: [&str; 6] = [
     "the power button was pressed: shutting down",
     "shutting down: stopping the services",
     "stopped service power-probe",
+    "device-manager: the ACPI server prepared for shutdown",
     "stopped service device-manager",
     "stopped service permissions",
+];
+/// An SSDT, compiled with ACPICA's iasl from:
+///
+/// ```text
+/// DefinitionBlock ("", "SSDT", 2, "MIKROS", "PTSPORT", 1)
+/// {
+///     OperationRegion (PTSP, SystemIO, 0x80, 1)
+///     Field (PTSP, ByteAcc, NoLock, Preserve)
+///     {
+///         PTSB, 8
+///     }
+///
+///     Method (\_PTS, 1, NotSerialized)
+///     {
+///         PTSB = Arg0
+///     }
+/// }
+/// ```
+const PTS_TABLE: [u8; 73] = [
+    0x53, 0x53, 0x44, 0x54, 0x49, 0x00, 0x00, 0x00, 0x02, 0xac, 0x4d, 0x49, 0x4b, 0x52, 0x4f, 0x53,
+    0x50, 0x54, 0x53, 0x50, 0x4f, 0x52, 0x54, 0x00, 0x01, 0x00, 0x00, 0x00, 0x49, 0x4e, 0x54, 0x4c,
+    0x30, 0x09, 0x26, 0x20, 0x5b, 0x80, 0x50, 0x54, 0x53, 0x50, 0x01, 0x0a, 0x80, 0x01, 0x5b, 0x81,
+    0x0b, 0x50, 0x54, 0x53, 0x50, 0x01, 0x50, 0x54, 0x53, 0x42, 0x08, 0x14, 0x0d, 0x5c, 0x5f, 0x50,
+    0x54, 0x53, 0x01, 0x70, 0x68, 0x50, 0x54, 0x53, 0x42,
 ];
 const PANIC_LINE: &str = "KERNEL PANIC: ";
 /// The device manager's lines once it got `TERM`, and once it removed
@@ -164,7 +192,10 @@ pub fn run(
     image::create_with(kind, built, &dir.join("disk.img"), "test=power-off", &[])?;
     let log = dir.join("serial.log");
     let socket = scenario::monitor_socket(dir);
-    let mut qemu = scenario::start(machine, dir, false)?;
+    let table = dir.join("pts.aml");
+    fs::write(&table, PTS_TABLE)?;
+    let extra = ["-acpitable".to_owned(), format!("file={}", table.display())];
+    let mut qemu = scenario::start_with(machine, dir, false, &|_| Ok(()), &extra, false)?;
     let deadline = Instant::now() + timeout;
     let ended = (|| {
         for line in READY {
@@ -266,6 +297,15 @@ mod tests {
         let early = format!("{}\n{}", SHUTDOWN.join("\n"), devices(&[3, 6, 5, 4, 1]));
         assert!(removals(&early).unwrap_err().contains("stopped before"));
         assert!(removals(&SHUTDOWN.join("\n")).is_err());
+    }
+
+    #[test]
+    fn has_a_valid_table() {
+        assert_eq!(&PTS_TABLE[..4], b"SSDT");
+        let length = u32::from_le_bytes(PTS_TABLE[4..8].try_into().unwrap());
+        assert_eq!(length as usize, PTS_TABLE.len());
+        let sum = PTS_TABLE.iter().fold(0u8, |sum, &b| sum.wrapping_add(b));
+        assert_eq!(sum, 0);
     }
 
     #[test]
