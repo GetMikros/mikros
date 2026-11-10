@@ -24,6 +24,7 @@ mod spawn;
 mod start;
 mod stat;
 mod syscall;
+mod terminal;
 mod thread;
 mod timerfd;
 

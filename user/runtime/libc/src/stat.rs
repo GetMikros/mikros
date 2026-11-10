@@ -11,6 +11,7 @@ use mikros_rt::interfaces::mikros::fs::{Attributes, NodeClient, NodeType, Rights
 
 const S_IFIFO: u32 = 0o010000;
 const S_IFDIR: u32 = 0o040000;
+const S_IFCHR: u32 = 0o020000;
 const S_IFREG: u32 = 0o100000;
 const S_IFLNK: u32 = 0o120000;
 const S_IFSOCK: u32 = 0o140000;
@@ -110,6 +111,13 @@ pub fn fstat(fd: i64, out: *mut Kstat) -> i64 {
         }
         Description::Stream(_) => Ok(Kstat {
             mode: S_IFIFO | 0o600,
+            nlink: 1,
+            blksize: BLOCK_SIZE,
+            ..Kstat::default()
+        }),
+        // A character device, as a terminal is on Linux.
+        Description::Terminal(_) => Ok(Kstat {
+            mode: S_IFCHR | 0o620,
             nlink: 1,
             blksize: BLOCK_SIZE,
             ..Kstat::default()

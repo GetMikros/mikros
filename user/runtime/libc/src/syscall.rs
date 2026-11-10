@@ -176,14 +176,12 @@ extern "C" fn __mikros_syscall(
         SYS_DUP2 => dup2(a1, a2),
         SYS_DUP3 => dup3(a1, a2, a3 as u32),
         SYS_FCNTL => fcntl(a1, a2, a3),
-        // No descriptor is a terminal yet.
-        SYS_IOCTL => {
-            if fd::get(a1).is_some() {
-                -ENOTTY
-            } else {
-                -EBADF
-            }
-        }
+        // Only terminals take requests.
+        SYS_IOCTL => match fd::get(a1).as_deref() {
+            Some(fd::Description::Terminal(t)) => t.ioctl(a2 as u64, a3 as u64),
+            Some(_) => -ENOTTY,
+            None => -EBADF,
+        },
         SYS_MMAP => mmap(a1 as u64, a2 as u64, a3, a4, a5, a6),
         SYS_MPROTECT => mprotect(a1 as u64, a2 as u64, a3),
         // SAFETY: unmapping takes no pointers.
@@ -525,6 +523,7 @@ fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
             let flags = match &*description {
                 Description::File(node) | Description::Directory(node, _) => &node.flags,
                 Description::Timer(timer) => &timer.flags,
+                Description::Terminal(t) => &t.flags,
                 // Streams are read and written, and have no other flags,
                 // nor has an epoll instance.
                 Description::Stream(_) | Description::Epoll(_) => {

@@ -135,12 +135,16 @@ enum Kind {
     Port,
     /// A timer descriptor's timer, which is signaled once it expired.
     Timer,
+    /// A terminal's readiness event, with `USER0` for input and `USER1`
+    /// for output.
+    Terminal,
 }
 
 /// What a watched descriptor is waited on through: its object, and what
 /// kind of object that is.
 struct Watched<'a> {
-    handle: &'a OwnedHandle,
+    handle: sys::Handle,
+    _description: core::marker::PhantomData<&'a Description>,
     kind: Kind,
 }
 
@@ -149,16 +153,26 @@ struct Watched<'a> {
 fn watched(description: &Description) -> Result<Watched<'_>, i64> {
     match description {
         Description::Stream(stream) => Ok(Watched {
-            handle: stream,
+            handle: stream.raw(),
+            _description: core::marker::PhantomData,
             kind: Kind::Stream,
         }),
         Description::Epoll(epoll) => Ok(Watched {
-            handle: &epoll.port,
+            handle: epoll.port.raw(),
+            _description: core::marker::PhantomData,
             kind: Kind::Port,
         }),
         Description::Timer(timer) => Ok(Watched {
-            handle: &timer.timer,
+            handle: timer.timer.raw(),
+            _description: core::marker::PhantomData,
             kind: Kind::Timer,
+        }),
+        // The process's readiness event for the terminal, which lives as
+        // long as the description.
+        Description::Terminal(t) => Ok(Watched {
+            handle: t.readiness()?,
+            _description: core::marker::PhantomData,
+            kind: Kind::Terminal,
         }),
         Description::File(..) | Description::Directory(..) => Err(EPERM),
     }
@@ -183,16 +197,26 @@ fn signals(watched: &Watched, events: u32) -> u32 {
         Kind::Port if input => READABLE,
         Kind::Timer if input => crate::timerfd::SIGNALED,
         Kind::Port | Kind::Timer => 0,
+        Kind::Terminal => {
+            let mut signals = 0;
+            if input {
+                signals |= crate::terminal::USER0;
+            }
+            if events & OUTPUT != 0 {
+                signals |= crate::terminal::USER1;
+            }
+            signals
+        }
     }
 }
 
 /// The events that `observed` signals report for `events`.
 fn reported(events: u32, observed: u32) -> u32 {
     let mut out = 0;
-    if observed & READABLE != 0 {
+    if observed & (READABLE | crate::terminal::USER0) != 0 {
         out |= events & INPUT;
     }
-    if observed & WRITABLE != 0 {
+    if observed & (WRITABLE | crate::terminal::USER1) != 0 {
         out |= events & OUTPUT;
     }
     if observed & PEER_CLOSED != 0 {
@@ -324,7 +348,7 @@ fn control(epfd: i64, op: i64, fd: i64, event: *const Event) -> Result<(), i64> 
             let old = state.entries[at].key;
             // SAFETY: the call takes no pointers. A registration that
             // ended has nothing to cancel.
-            unsafe { sys::port_cancel(epoll.port.raw(), watched.handle.raw(), old) };
+            unsafe { sys::port_cancel(epoll.port.raw(), watched.handle, old) };
             Some(at)
         }
     };
@@ -338,9 +362,8 @@ fn control(epfd: i64, op: i64, fd: i64, event: *const Event) -> Result<(), i64> 
     state.next_key += 1;
     let signals = signals(&watched, event.events);
     // SAFETY: the call takes no pointers.
-    let status = unsafe {
-        sys::object_wait_async(watched.handle.raw(), epoll.port.raw(), key, signals, EDGE)
-    };
+    let status =
+        unsafe { sys::object_wait_async(watched.handle, epoll.port.raw(), key, signals, EDGE) };
     if status != mikros_rt::OK {
         if let Some(at) = at {
             state.entries.swap_remove(at);
@@ -546,6 +569,6 @@ fn look(entry: &Entry) -> u32 {
     let mut observed = 0;
     // SAFETY: the out pointer is valid for the call; the deadline has
     // passed, so it reports the signals that are set.
-    unsafe { sys::object_wait_one(watched.handle.raw(), signals, 0, &mut observed) };
+    unsafe { sys::object_wait_one(watched.handle, signals, 0, &mut observed) };
     observed & signals
 }

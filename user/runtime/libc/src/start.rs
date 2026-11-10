@@ -147,6 +147,7 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
         header.clock_page.raw(),
         header.time_page.as_ref().map(|page| page.raw()),
     );
+    crate::terminal::install(header.directory.handle().raw());
     fd::install(&mut managed.handles);
     fs::install(core::mem::take(&mut managed.namespace));
     crate::library::install(header.bundle.as_deref());

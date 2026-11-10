@@ -55,14 +55,28 @@ fn signals(events: i16) -> u32 {
     signals
 }
 
+/// The signals that `events` waits for on a terminal's readiness event.
+fn terminal_signals(events: i16) -> u32 {
+    let mut signals = 0;
+    if events & INPUT != 0 {
+        signals |= crate::terminal::USER0;
+    }
+    if events & OUTPUT != 0 {
+        signals |= crate::terminal::USER1;
+    }
+    signals
+}
+
 /// The events that `observed` signals on a stream, an epoll instance's
-/// port or a timer descriptor's timer report for `events`.
+/// port, a timer descriptor's timer or a terminal's readiness event
+/// report for `events`.
 fn stream_events(events: i16, observed: u32) -> i16 {
     let mut revents = 0;
-    if observed & (READABLE | crate::timerfd::SIGNALED) != 0 {
+    let input = READABLE | crate::timerfd::SIGNALED | crate::terminal::USER0;
+    if observed & input != 0 {
         revents |= events & INPUT;
     }
-    if observed & WRITABLE != 0 {
+    if observed & (WRITABLE | crate::terminal::USER1) != 0 {
         revents |= events & OUTPUT;
     }
     if observed & PEER_CLOSED != 0 {
@@ -291,6 +305,15 @@ fn wait(fds: &mut [Pollfd], deadline: i64, mut mask: Option<u64>) -> i64 {
                 (timer.timer.raw(), crate::timerfd::SIGNALED)
             }
             Description::Epoll(_) | Description::Timer(_) => continue,
+            // A terminal waits for its readiness event.
+            Description::Terminal(t) => match t.readiness() {
+                Ok(event) => (event, terminal_signals(entry.events)),
+                Err(_) => {
+                    entry.revents = POLLERR;
+                    ready = true;
+                    continue;
+                }
+            },
             Description::File(..) | Description::Directory(..) => {
                 entry.revents = entry.events & (INPUT | OUTPUT);
                 ready |= entry.revents != 0;
@@ -362,6 +385,10 @@ impl Drop for Waits {
                 Description::Stream(stream) => stream.raw(),
                 Description::Epoll(epoll) => epoll.port().raw(),
                 Description::Timer(timer) => timer.timer.raw(),
+                Description::Terminal(t) => match t.readiness() {
+                    Ok(event) => event,
+                    Err(_) => continue,
+                },
                 _ => continue,
             };
             if *pending {

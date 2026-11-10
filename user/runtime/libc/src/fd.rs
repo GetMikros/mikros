@@ -1,6 +1,7 @@
 //! The descriptor table of the process. Each descriptor refers to an open
-//! description: a stream, a connection to a file or directory, an epoll
-//! instance or a timer, which `dup` shares between descriptors.
+//! description: a stream, a connection to a file or directory, a slave
+//! terminal, an epoll instance or a timer, which `dup` shares between
+//! descriptors.
 
 use crate::errno::{EBADF, EINVAL, EMFILE};
 use crate::lock::Lock;
@@ -15,12 +16,16 @@ use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 pub const KIND_FILE: u32 = 1;
 /// The descriptor kind of a stream.
 pub const KIND_STREAM: u32 = 2;
+/// The descriptor kind of a slave terminal, which is its token.
+pub const KIND_TERMINAL: u32 = 8;
 /// The bits of a startup handle's `id` that hold its descriptor number.
 pub const ID_FD: u32 = (1 << 24) - 1;
 /// The object type of a channel.
 const TYPE_CHANNEL: u32 = 4;
-/// The object type of a stream.
+/// The object type of a stream, and that of an event, which a terminal
+/// token is.
 const TYPE_STREAM: u32 = 15;
+const TYPE_EVENT: u32 = 5;
 /// The rights argument that keeps a handle's rights.
 const SAME_RIGHTS: u32 = 1 << 31;
 /// The most descriptors a process has open.
@@ -37,6 +42,8 @@ pub enum Description {
     Epoll(crate::epoll::Epoll),
     /// A timer descriptor, which stays in the process.
     Timer(crate::timerfd::Timerfd),
+    /// A slave terminal, by its token.
+    Terminal(crate::terminal::Terminal),
 }
 
 /// A connection to a file system node, with the status flags it was
@@ -168,7 +175,7 @@ pub fn install(handles: &mut Vec<StartupHandle>) {
             HandleRole::Stdin => Some(0),
             HandleRole::Stdout => Some(1),
             HandleRole::Stderr => Some(2),
-            HandleRole::User if matches!(kind, KIND_FILE | KIND_STREAM) => None,
+            HandleRole::User if matches!(kind, KIND_FILE | KIND_STREAM | KIND_TERMINAL) => None,
             _ => {
                 i += 1;
                 continue;
@@ -190,6 +197,9 @@ fn inherited(handle: OwnedHandle, kind: u32) -> Option<Description> {
     let object = mikros_rt::midl::handle_info(handle.raw()).map(|(object, _)| object);
     match (kind, object) {
         (KIND_STREAM, Some(TYPE_STREAM)) => Some(Description::Stream(handle)),
+        (KIND_TERMINAL, Some(TYPE_EVENT)) => Some(Description::Terminal(
+            crate::terminal::Terminal::new(handle),
+        )),
         (KIND_FILE, Some(TYPE_CHANNEL)) => {
             let node = NodeClient::new(ClientEnd::new(handle));
             let directory = matches!(
@@ -233,6 +243,9 @@ pub fn snapshot() -> Vec<(usize, Arc<Description>, bool)> {
 pub fn shared_handle(description: &Description) -> Option<(mikros_rt::sys::Handle, u32)> {
     match description {
         Description::Stream(stream) => Some((stream.raw(), KIND_STREAM)),
+        // Only the token goes to another process, which makes its own
+        // connection to the terminal service.
+        Description::Terminal(t) => Some((t.token.raw(), KIND_TERMINAL)),
         Description::File(node) | Description::Directory(node, _) => {
             Some((node.node.lock().channel().ok()?, KIND_FILE))
         }
@@ -248,7 +261,8 @@ pub fn passed(description: &Description) -> bool {
 
 /// `mikros_fd_handle`: a new handle, which the caller owns, with the
 /// rights of the descriptor's own, to the object behind descriptor `fd`:
-/// the stream of a pipe, or the connection to a file or directory. Fails
+/// the stream of a pipe, the connection to a file or directory, or the
+/// token of a terminal. Fails
 /// with the negated error number.
 #[unsafe(no_mangle)]
 extern "C" fn mikros_fd_handle(fd: i32) -> i64 {
