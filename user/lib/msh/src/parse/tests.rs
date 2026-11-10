@@ -33,6 +33,17 @@ fn bare(text: &str) -> Argument {
     })
 }
 
+fn expr(source: &str) -> Expr {
+    match one(&format!("let x = {source}")) {
+        StatementKind::Let { value, .. } => value,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn int(n: i64) -> Expr {
+    Expr::Literal(Literal::Int(n))
+}
+
 fn failure(source: &str) -> Error {
     parse(source).expect_err(source)
 }
@@ -87,8 +98,13 @@ fn continues_lines() {
     };
     assert_eq!(p.commands.len(), 2);
     assert_eq!(simple("echo a \\\n b").words.len(), 3);
+    assert_eq!(
+        expr("1 +\n 2"),
+        Expr::Binary(Binary::Add, Box::new(int(1)), Box::new(int(2)))
+    );
     assert!(failure("echo \"open").incomplete);
     assert!(failure("ls |").incomplete);
+    assert!(failure("let x = [1").incomplete);
     assert!(!failure("echo }").incomplete);
 }
 
@@ -111,11 +127,141 @@ fn reads_variables_in_words() {
         panic!()
     };
     assert_eq!(v.path, [Access::Field("name".into()), Access::Item(0)]);
+    // `{` does not interpolate in a bare word: it ends it.
+    assert_eq!(simple("echo a{b}").words.len(), 3);
+}
+
+#[test]
+fn reads_double_quoted_strings() {
+    let Expr::String(parts) = expr(r#""a\tb {1 + 2} \{x\} \u{e9}""#) else {
+        panic!()
+    };
+    assert_eq!(parts[0], StringPart::Text("a\tb ".into()));
+    assert!(matches!(
+        parts[1],
+        StringPart::Expr(Expr::Binary(Binary::Add, ..))
+    ));
+    assert_eq!(parts[2], StringPart::Text(" {x} é".into()));
+    assert_eq!(failure(r#"let x = "\q""#).message, "`\\q` is not an escape");
+    assert_eq!(
+        expr("'a\\n{b}'"),
+        Expr::Literal(Literal::String("a\\n{b}".into()))
+    );
+}
+
+#[test]
+fn reads_let_assignments_and_environment() {
+    assert!(matches!(one("let n = 3"), StatementKind::Let { name, .. } if name == "n"));
+    assert!(matches!(
+        one("n += 1"),
+        StatementKind::Assign { target: Target::Variable(n), append: true, .. } if n == "n"
+    ));
+    assert!(matches!(
+        one("env.PATH = null"),
+        StatementKind::Assign { target: Target::Environment(n), append: false, .. } if n == "PATH"
+    ));
+    let s = simple("LANG=C TZ=UTC date");
+    assert_eq!(s.environment.len(), 2);
+    assert_eq!(s.words, [bare("date")]);
+    // `==` is a comparison, not an assignment.
+    assert!(matches!(one("a == b"), StatementKind::Pipeline(_)));
+}
+
+#[test]
+fn reads_operators_by_precedence() {
+    // 1 + 2 * 3 == 7 and not false
+    let e = expr("1 + 2 * 3 == 7 and not false");
+    let Expr::Binary(Binary::And, left, right) = e else {
+        panic!()
+    };
+    assert!(matches!(*right, Expr::Unary(Unary::Not, _)));
+    let Expr::Binary(Binary::Equal, sum, _) = *left else {
+        panic!()
+    };
+    let Expr::Binary(Binary::Add, _, product) = *sum else {
+        panic!()
+    };
+    assert!(matches!(*product, Expr::Binary(Binary::Multiply, ..)));
+    assert!(matches!(
+        expr("$a ?? 1 + 2"),
+        Expr::Binary(Binary::Default, ..)
+    ));
+    assert!(matches!(
+        expr("$a =~ 'x' or $b"),
+        Expr::Binary(Binary::Or, ..)
+    ));
+    assert!(matches!(expr("-$a"), Expr::Unary(Unary::Negate, _)));
+    assert!(
+        matches!(expr("8 - 2 - 1"), Expr::Binary(Binary::Subtract, l, _) if matches!(*l, Expr::Binary(Binary::Subtract, ..)))
+    );
+}
+
+#[test]
+fn reads_numbers_sizes_durations_and_dates() {
+    assert_eq!(expr("0x2a"), int(42));
+    assert_eq!(expr("1_000"), int(1000));
+    assert_eq!(expr("1.5"), Expr::Literal(Literal::Float(1.5)));
+    assert_eq!(expr("2e3"), Expr::Literal(Literal::Float(2000.0)));
+    assert_eq!(expr("10mb"), Expr::Literal(Literal::Size(10_000_000)));
+    assert_eq!(expr("2kib"), Expr::Literal(Literal::Size(2048)));
+    assert_eq!(
+        expr("1.5s"),
+        Expr::Literal(Literal::Duration(1_500_000_000))
+    );
+    assert_eq!(
+        expr("1day"),
+        Expr::Literal(Literal::Duration(86_400_000_000_000))
+    );
+    let Expr::Literal(Literal::Date(d)) = expr("2026-11-10") else {
+        panic!()
+    };
+    assert_eq!((d.seconds, d.offset), (1_794_268_800, None));
+    let Expr::Literal(Literal::Date(d)) = expr("2026-11-10T12:00:00+01:00") else {
+        panic!()
+    };
+    assert_eq!(
+        (d.seconds, d.offset),
+        (1_794_268_800 + 11 * 3600, Some(3600))
+    );
+    let Expr::Literal(Literal::Date(d)) = expr("1970-01-01T00:00:00.5Z") else {
+        panic!()
+    };
+    assert_eq!((d.seconds, d.nanos), (0, 500_000_000));
+    assert!(failure("let x = 3parsecs").message.contains("parsecs"));
+    assert!(failure("let x = 2026-02-30").message.contains("date"));
+}
+
+#[test]
+fn reads_lists_records_access_and_blocks() {
+    let Expr::List(items) = expr("[a 'b' 3]") else {
+        panic!()
+    };
+    assert!(matches!(items[0], Expr::Words(_)));
+    assert_eq!(items[2], int(3));
+    let Expr::Record(fields) = expr("{name: \"x\", size: 3}") else {
+        panic!()
+    };
+    assert_eq!(fields[1], ("size".into(), int(3)));
+    assert!(matches!(expr("[1 2].0"), Expr::Access(_, Access::Item(0))));
+    assert!(matches!(expr("{ $it + 1 }"), Expr::Block(_)));
+    let s = simple("each { $it + 1 }");
+    assert!(matches!(s.words[1], Argument::Block(_)));
+}
+
+#[test]
+fn reads_parentheses_as_expression_or_command() {
+    assert!(matches!(expr("(1 + 2)"), Expr::Binary(..)));
+    assert!(matches!(expr("(ls | lines)"), Expr::Pipeline(_)));
+    assert!(matches!(one("(1 + 2)"), StatementKind::Expr(_)));
+    let StatementKind::Pipeline(p) = one("(ls) | lines") else {
+        panic!()
+    };
+    assert!(matches!(p.commands[0], Command::Expr(_)));
 }
 
 #[test]
 fn names_the_line_of_an_error() {
-    let e = failure("ls\npwd\necho }");
+    let e = failure("ls\npwd\nlet = 3");
     assert_eq!(e.line, 3);
     let lines: Vec<usize> = parse("a\n\nb; c\n")
         .unwrap()
