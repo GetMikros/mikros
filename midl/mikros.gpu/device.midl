@@ -1,0 +1,25 @@
+// MIKSPEC-0029.R1
+
+library mikros.gpu;
+using mikros.base;
+
+type Capabilities = bits : u32 {
+    DISPLAY = 0x1;
+    RENDER = 0x2;
+};
+
+type DeviceInfo = struct {
+    name string<64>;
+    driver string<64>;
+    driver_version u32;
+    vendor_id u32;
+    device_id u32;
+    capabilities Capabilities;
+};
+
+protocol Device {
+    @1 GetInfo() -> (info DeviceInfo);
+    @2 OpenDisplay(display server_end<Display>,
+                   revoke handle<Event, WAIT>?) -> () error base.Status;
+    @3 OpenRender(render server_end<Render>) -> () error base.Status;
+};

@@ -1,0 +1,123 @@
+// MIKSPEC-0029.R3
+
+library mikros.gpu;
+using mikros.base;
+
+type ConnectorType = enum : u32 {
+    UNKNOWN = 0; VIRTUAL = 1; EDP = 2; HDMI = 3;
+    DISPLAYPORT = 4; DVI = 5; VGA = 6; BOOT_FRAMEBUFFER = 7;
+};
+
+type ModeFlags = bits : u32 { PREFERRED = 0x1; };
+
+type Mode = struct {
+    width u32;
+    height u32;
+    refresh_millihertz u32;
+    flags ModeFlags;
+};
+
+type ConnectorCaps = bits : u32 { VRR = 0x1; HDR = 0x2; ASYNC_FLIP = 0x4; };
+
+type Connector = struct {
+    id u32;
+    type ConnectorType;
+    connected bool;
+    possible_crtcs u32;
+    caps ConnectorCaps;
+    gamma_size u32;
+    modes vector<Mode, 64>;
+    edid vector<u8, 1024>;
+};
+
+type Colorspace = enum : u32 { DEFAULT = 0; BT2020_RGB = 1; };
+
+type Eotf = enum : u32 { SDR = 0; PQ = 2; HLG = 3; };
+
+type HdrMetadata = struct {
+    eotf Eotf;
+    primaries array<u16, 6>;
+    white_point array<u16, 2>;
+    max_luminance u16;
+    min_luminance u16;
+    max_content_light_level u16;
+    max_frame_average_light_level u16;
+};
+
+type PlaneType = enum : u32 { PRIMARY = 1; CURSOR = 2; OVERLAY = 3; };
+
+type FormatModifier = struct {
+    format u32;
+    modifier u64;
+};
+
+type Plane = struct {
+    id u32;
+    type PlaneType;
+    possible_crtcs u32;
+    max_width u32;
+    max_height u32;
+    formats vector<FormatModifier, 64>;
+};
+
+type DisplayFlags = bits : u32 { HAS_VBLANK = 0x1; };
+
+type DisplayResources = struct {
+    flags DisplayFlags;
+    connectors vector<Connector, 8>;
+    crtcs vector<u32, 8>;
+    planes vector<Plane, 16>;
+};
+
+type Rect = struct { x i32; y i32; width u32; height u32; };
+
+type CrtcState = struct {
+    crtc u32;
+    active bool;
+    connector u32;
+    mode Mode;
+    vrr bool;
+    gamma handle<MemoryObject, READ>?;
+    colorspace Colorspace;
+    hdr HdrMetadata?;
+};
+
+type PlaneState = struct {
+    plane u32;
+    crtc u32;
+    buffer u32;
+    src Rect;
+    dst Rect;
+    damage vector<Rect, 16>;
+    acquire_sync u32;
+    acquire_value u64;
+};
+
+type CommitFlags = bits : u32 { TEST_ONLY = 0x1; ASYNC = 0x2; };
+
+type Commit = struct {
+    flags CommitFlags;
+    crtcs vector<CrtcState, 8>;
+    planes vector<PlaneState, 16>;
+};
+
+type DumbBuffer = struct {
+    buffer u32;
+    stride u32;
+    size u64;
+    memory handle<MemoryObject>;
+};
+
+protocol Display {
+    @1 GetResources() -> (resources DisplayResources);
+    @2 CreateDumbBuffer(width u32, height u32,
+                        format u32) -> (buffer DumbBuffer) error base.Status;
+    @3 ImportBuffer(token base.Token, width u32, height u32, format u32,
+                    modifier u64, stride u32, offset u64) -> (buffer u32) error base.Status;
+    @4 DestroyBuffer(buffer u32);
+    @5 ImportSync(timeline handle<Timeline, WAIT>) -> (sync u32) error base.Status;
+    @6 DestroySync(sync u32);
+    @7 Commit(commit Commit) -> (commit_id u64) error base.Status;
+    @8 -> OnCommitComplete(commit_id u64, timestamp base.MonotonicTime);
+    @9 -> OnHotplug();
+};

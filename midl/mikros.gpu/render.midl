@@ -1,0 +1,39 @@
+// MIKSPEC-0029.R10
+
+library mikros.gpu;
+using mikros.base;
+
+type BufferFlags = bits : u32 {
+    CPU_VISIBLE = 0x1;
+    SCANOUT = 0x2;
+    DEVICE_LOCAL = 0x4;
+};
+
+type RenderPriority = enum : u32 { LOW = 0; NORMAL = 1; HIGH = 2; };
+
+type MemoryInfo = struct {
+    device_local_total u64;
+    device_local_used u64;
+    system_total u64;
+    system_used u64;
+    connection_used u64;
+    connection_limit u64;
+};
+
+protocol Render {
+    @1 CreateBuffer(size u64,
+                    flags BufferFlags) -> (buffer u32,
+                                           memory handle<MemoryObject>?) error base.Status;
+    @2 DestroyBuffer(buffer u32);
+    @3 ExportBuffer(buffer u32) -> (token base.Token) error base.Status;
+    @4 ImportBuffer(token base.Token) -> (buffer u32, size u64,
+                                      memory handle<MemoryObject>?) error base.Status;
+    @5 ImportSync(timeline handle<Timeline, WAIT | SIGNAL>) -> (sync u32) error base.Status;
+    @6 DestroySync(sync u32);
+    @7 DriverCommand(op u32, data vector<u8, 16384>,
+                      handles vector<handle, 8>) -> (data vector<u8, 16384>,
+                                                     handles vector<handle, 8>) error base.Status;
+    @8 SetPriority(priority RenderPriority) -> () error base.Status;
+    @9 GetMemoryInfo() -> (info MemoryInfo);
+    @10 -> OnReset(guilty bool);
+};
