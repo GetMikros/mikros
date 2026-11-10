@@ -212,6 +212,99 @@ pub struct Bar {
     pub size: u64,
 }
 
+/// The size of the pages that memory BAR resources cover.
+pub const PAGE: u64 = 4096;
+
+/// What the bus driver obtains for a BAR (MIKSPEC-0026.R23).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// For an I/O BAR, the ports of exactly the BAR.
+    Io { base: u64, size: u64 },
+    /// For a memory BAR, the resource `group` of its function, which
+    /// covers the pages from `start` to `end` and is shared by the memory
+    /// BARs of the function that touch them.
+    Pages { group: usize, start: u64, end: u64 },
+    /// None, as a page that the memory BAR touches is also touched by a
+    /// BAR of another function.
+    Shared,
+}
+
+/// The pages that the memory BAR `bar` touches: its base rounded down to
+/// a page, and its end rounded up.
+pub fn pages(bar: &Bar) -> Range<u64> {
+    let start = bar.base & !(PAGE - 1);
+    let end = bar.base.saturating_add(bar.size.max(1));
+    start..end.checked_next_multiple_of(PAGE).unwrap_or(!(PAGE - 1))
+}
+
+/// What the bus driver obtains for each BAR of each function of
+/// `functions`, in the same order: the ports of an I/O BAR, and for a
+/// memory BAR the pages it touches, merged with those of the function's
+/// other memory BARs that touch the same pages into one resource, or none
+/// when another function's memory BAR touches one of its pages.
+pub fn claims(functions: &[&[Bar]]) -> Vec<Vec<Claim>> {
+    let memory = |bars: &[Bar]| -> Vec<Range<u64>> {
+        bars.iter()
+            .filter(|b| b.kind == BarKind::Mmio)
+            .map(pages)
+            .collect()
+    };
+    let touched: Vec<Vec<Range<u64>>> = functions.iter().map(|bars| memory(bars)).collect();
+    let overlap = |a: &Range<u64>, b: &Range<u64>| a.start < b.end && b.start < a.end;
+    functions
+        .iter()
+        .enumerate()
+        .map(|(f, bars)| {
+            let shared = |range: &Range<u64>| {
+                touched
+                    .iter()
+                    .enumerate()
+                    .any(|(g, others)| g != f && others.iter().any(|o| overlap(o, range)))
+            };
+            // The page ranges of the function's memory BARs that get a
+            // resource, merged where they overlap.
+            let mut groups: Vec<Range<u64>> = Vec::new();
+            let mut own: Vec<Range<u64>> = bars
+                .iter()
+                .filter(|b| b.kind == BarKind::Mmio)
+                .map(pages)
+                .filter(|range| !shared(range))
+                .collect();
+            own.sort_by_key(|r| r.start);
+            for range in own {
+                match groups.last_mut() {
+                    Some(last) if range.start < last.end => last.end = last.end.max(range.end),
+                    _ => groups.push(range),
+                }
+            }
+            bars.iter()
+                .map(|bar| match bar.kind {
+                    BarKind::Io => Claim::Io {
+                        base: bar.base,
+                        size: bar.size,
+                    },
+                    BarKind::Mmio => {
+                        let range = pages(bar);
+                        if shared(&range) {
+                            return Claim::Shared;
+                        }
+                        let (group, covered) = groups
+                            .iter()
+                            .enumerate()
+                            .find(|(_, g)| g.start <= range.start && range.end <= g.end)
+                            .expect("each memory BAR that is not shared is in a group");
+                        Claim::Pages {
+                            group,
+                            start: covered.start,
+                            end: covered.end,
+                        }
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// The implemented BARs of the function at `at`. Each is sized by
 /// writing all ones to it and reading it back while memory and I/O
 /// decoding are disabled, and is then restored, as the command register

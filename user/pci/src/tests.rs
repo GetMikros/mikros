@@ -361,3 +361,96 @@ fn looks_for_the_bridge_above_a_function_only_where_it_can_be() {
     // devices found, rather than every function of every bus.
     assert!(counted.1.get() < 128, "{} reads", counted.1.get());
 }
+
+fn memory(index: u8, base: u64, size: u64) -> Bar {
+    Bar {
+        index,
+        kind: BarKind::Mmio,
+        prefetchable: false,
+        base,
+        size,
+    }
+}
+
+fn pages_claim(group: usize, start: u64, end: u64) -> Claim {
+    Claim::Pages { group, start, end }
+}
+
+#[test]
+fn claims_the_pages_that_memory_bars_touch() {
+    let io = Bar {
+        index: 4,
+        kind: BarKind::Io,
+        prefetchable: false,
+        base: 0xc040,
+        size: 0x20,
+    };
+    // A 2 KiB BAR alone in its page, as an AHCI controller's, gets the
+    // page; an I/O BAR gets exactly its ports; a large BAR its pages.
+    let ahci = [memory(5, 0xfcd0_0000, 0x800), io];
+    let nvme = [memory(0, 0xfcf0_0000, 0x4000)];
+    assert_eq!(
+        claims(&[&ahci, &nvme]),
+        [
+            vec![
+                pages_claim(0, 0xfcd0_0000, 0xfcd0_1000),
+                Claim::Io {
+                    base: 0xc040,
+                    size: 0x20
+                }
+            ],
+            vec![pages_claim(0, 0xfcf0_0000, 0xfcf0_4000)],
+        ]
+    );
+    // A BAR that is not page-aligned touches the pages around it.
+    assert_eq!(pages(&memory(0, 0x1800, 0x1000)), 0x1000..0x3000);
+}
+
+#[test]
+fn shares_one_resource_between_bars_of_a_function_on_a_page() {
+    // Two BARs of one function in one page, a third reaching into the
+    // next page from that one, and a fourth elsewhere.
+    let bars = [
+        memory(0, 0x10_0000, 0x400),
+        memory(1, 0x10_0800, 0x100),
+        memory(2, 0x10_0c00, 0x800),
+        memory(3, 0x20_0000, 0x1000),
+    ];
+    assert_eq!(
+        claims(&[&bars]),
+        [vec![
+            pages_claim(0, 0x10_0000, 0x10_2000),
+            pages_claim(0, 0x10_0000, 0x10_2000),
+            pages_claim(0, 0x10_0000, 0x10_2000),
+            pages_claim(1, 0x20_0000, 0x20_1000),
+        ]]
+    );
+}
+
+#[test]
+fn claims_nothing_for_a_page_that_another_function_touches() {
+    // Two functions' small BARs in one page get nothing; their other BARs
+    // keep their own pages.
+    let a = [memory(0, 0x30_0000, 0x100), memory(1, 0x40_0000, 0x1000)];
+    let b = [memory(0, 0x30_0400, 0x100)];
+    let c = [memory(2, 0x50_0000, 0x100)];
+    assert_eq!(
+        claims(&[&a, &b, &c]),
+        [
+            vec![Claim::Shared, pages_claim(0, 0x40_0000, 0x40_1000)],
+            vec![Claim::Shared],
+            vec![pages_claim(0, 0x50_0000, 0x50_1000)],
+        ]
+    );
+    // A BAR of a function that shares one of its pages gets nothing even
+    // where another BAR of that function goes on to a page of its own.
+    let wide = [memory(0, 0x60_0000, 0x100), memory(1, 0x60_0000, 0x2000)];
+    let small = [memory(0, 0x60_1800, 0x100)];
+    assert_eq!(
+        claims(&[&wide, &small]),
+        [
+            vec![pages_claim(0, 0x60_0000, 0x60_1000), Claim::Shared],
+            vec![Claim::Shared],
+        ]
+    );
+}

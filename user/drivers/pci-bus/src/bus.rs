@@ -1,6 +1,7 @@
 //! The functions behind the host bridge: finding them, sizing their
-//! BARs and claiming those with `RequestResource`, creating their bus
-//! transaction initiators, and adding them as devices.
+//! BARs and claiming those with `RequestResource`, memory BARs in whole
+//! pages, creating their bus transaction initiators, and adding them as
+//! devices.
 
 use crate::ecam::Ecam;
 use crate::interrupts::{Intx, Line};
@@ -12,7 +13,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
-use mikros_pci::{Address, Bar, BarKind, Header, scan, size_bars};
+use mikros_pci::{Address, Bar, Claim, Header, claims, scan, size_bars};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -25,13 +26,13 @@ pub const KIND_IOPORT: u32 = 2;
 pub const KIND_BTI: u32 = 8;
 
 /// A function: its address and header, its BARs, each with the
-/// resource claimed for it or why there is none, its bus transaction
-/// initiator or why there is none, and its INTx once a driver asked for
-/// it.
+/// resource claimed for it, which memory BARs of the function that share
+/// pages share, or why there is none, its bus transaction initiator or
+/// why there is none, and its INTx once a driver asked for it.
 pub struct Function {
     pub at: Address,
     pub header: Header,
-    pub bars: Vec<(Bar, Result<OwnedHandle, Status>)>,
+    pub bars: Vec<(Bar, Result<Rc<OwnedHandle>, Status>)>,
     pub bti: Result<OwnedHandle, Status>,
     pub intx: RefCell<Option<Intx>>,
 }
@@ -114,28 +115,43 @@ pub fn requester_id(segment: u16, at: Address) -> u64 {
         | u64::from(at.function)
 }
 
-/// Finds the functions of `bus`, sizes and claims their BARs, creates
-/// their bus transaction initiators, and adds each one as a device,
-/// named `pci-<segment>:<bus>:<device>.<function>` in hexadecimal, with
-/// its hardware IDs.
+/// Finds the functions of `bus`, sizes their BARs and claims them as
+/// `mikros_pci::claims` plans, a resource for each group of a function's
+/// memory BARs that share pages, creates their bus transaction
+/// initiators, and adds each function as a device, named
+/// `pci-<segment>:<bus>:<device>.<function>` in hexadecimal, with its
+/// hardware IDs. A BAR without a resource has `ACCESS_DENIED`.
 pub async fn enumerate(bus: Rc<Bus>) {
     let ecam = &bus.ecam;
-    for at in scan(&ecam, ecam.bus_start(), ecam.bus_end()) {
-        let header = Header::read(&ecam, at);
+    // Whether a memory BAR gets its pages depends on the BARs of every
+    // other function, so all are sized first.
+    let found: Vec<(Address, Header, Vec<Bar>)> = scan(&ecam, ecam.bus_start(), ecam.bus_end())
+        .into_iter()
+        .map(|at| (at, Header::read(&ecam, at), size_bars(&mut &bus.ecam, at)))
+        .collect();
+    let planned = {
+        let all: Vec<&[Bar]> = found.iter().map(|(_, _, bars)| bars.as_slice()).collect();
+        claims(&all)
+    };
+    for ((at, header, sized), planned) in found.into_iter().zip(planned) {
+        let mut groups: BTreeMap<usize, Result<Rc<OwnedHandle>, Status>> = BTreeMap::new();
         let mut bars = Vec::new();
-        for bar in size_bars(&mut &bus.ecam, at) {
-            let kind = match bar.kind {
-                BarKind::Mmio => KIND_MMIO,
-                BarKind::Io => KIND_IOPORT,
-            };
-            let claimed = bus
-                .manager
-                .request_resource(kind, bar.base, bar.size, false)
-                .await;
-            let claimed = match claimed {
-                Ok(Ok(claimed)) => Ok(claimed.resource),
-                Ok(Err(status)) => Err(status),
-                Err(_) => Err(Status::PeerClosed),
+        for (bar, claim) in sized.into_iter().zip(planned) {
+            let claimed = match claim {
+                Claim::Io { base, size } => {
+                    request(&bus, KIND_IOPORT, base, size).await.map(Rc::new)
+                }
+                Claim::Pages { group, start, end } => match groups.get(&group) {
+                    Some(claimed) => claimed.clone(),
+                    None => {
+                        let claimed = request(&bus, KIND_MMIO, start, end - start)
+                            .await
+                            .map(Rc::new);
+                        groups.insert(group, claimed.clone());
+                        claimed
+                    }
+                },
+                Claim::Shared => Err(Status::AccessDenied),
             };
             bars.push((bar, claimed));
         }
@@ -165,6 +181,15 @@ pub async fn enumerate(bus: Rc<Bus>) {
     }
     bus.complete.set(true);
     bus.wake();
+}
+
+/// An exclusive resource of `kind` from `base` for `size` bytes, through
+/// the device manager: `ACCESS_DENIED` when it is not granted.
+async fn request(bus: &Bus, kind: u32, base: u64, size: u64) -> Result<OwnedHandle, Status> {
+    match bus.manager.request_resource(kind, base, size, false).await {
+        Ok(Ok(claimed)) => Ok(claimed.resource),
+        _ => Err(Status::AccessDenied),
+    }
 }
 
 /// A bus transaction initiator for `requester_id`, made from the `BTI`
