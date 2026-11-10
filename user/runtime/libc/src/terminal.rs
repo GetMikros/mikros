@@ -50,13 +50,6 @@ const TERMIOS_OSPEED: usize = 56;
 const TERMIOS_SIZE: usize = 60;
 const NCCS: usize = 32;
 
-/// The process's directory connection, which `start` installs.
-static DIRECTORY: AtomicU32 = AtomicU32::new(0);
-
-pub fn install(directory: sys::Handle) {
-    DIRECTORY.store(directory, Ordering::Relaxed);
-}
-
 /// A slave terminal descriptor's open description.
 pub struct Terminal {
     pub token: OwnedHandle,
@@ -116,7 +109,7 @@ impl Terminal {
     fn with<T>(&self, call: impl FnOnce(&mut Access) -> T) -> Result<T, i64> {
         let mut access = self.access.lock();
         if access.is_none() {
-            let raw = DIRECTORY.load(Ordering::Relaxed);
+            let raw = crate::startup::directory();
             // The directory connection stays the process's.
             let directory = ManuallyDrop::new(DirectoryClient::new(ClientEnd::new(
                 // SAFETY: `start` installed the process's own directory.

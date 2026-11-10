@@ -147,7 +147,6 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
         header.clock_page.raw(),
         header.time_page.as_ref().map(|page| page.raw()),
     );
-    crate::terminal::install(header.directory.handle().raw());
     fd::install(&mut managed.handles);
     fs::install(core::mem::take(&mut managed.namespace));
     crate::library::install(header.bundle.as_deref());
@@ -190,8 +189,11 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
     }
     let vector = Vec::leak(vector).as_mut_ptr();
     VECTOR.store(vector, core::sync::atomic::Ordering::Relaxed);
-    // The C library keeps the rest of the transfer, such as the
-    // launcher and directory connections, for as long as it runs.
+    // The startup handles left go to the program, which takes them; the
+    // C library keeps the rest of the transfer, such as the launcher and
+    // directory connections, for as long as it runs.
+    let directory = managed.header.directory.handle().raw();
+    crate::startup::install(core::mem::take(&mut managed.handles), directory);
     core::mem::forget(managed);
     vector
 }

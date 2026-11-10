@@ -22,6 +22,7 @@ mod process;
 mod signal;
 mod spawn;
 mod start;
+mod startup;
 mod stat;
 mod syscall;
 mod terminal;
