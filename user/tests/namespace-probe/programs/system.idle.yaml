@@ -1,0 +1,6 @@
+# A program manifest of tests/namespaces.img with the app ID of the
+# on-demand service idle, which the service manager ignores. Nothing
+# connects to idle, so nothing starts it.
+app_id: system.idle
+binary: /usr/bin/namespace-probe
+permissions: [logs.read]

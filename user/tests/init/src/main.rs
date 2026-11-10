@@ -9460,9 +9460,20 @@ mod manager {
     /// `/dev`, with the rights given; a command-line tool of user 0 that
     /// it starts gets its profile without a folder in `/Users`; a native
     /// app of user 0 does not start. The probe exits with 0 once every
-    /// check passed, as the service manager logs.
+    /// check passed, as the service manager logs. The process manager
+    /// tells the service manager that the root file system is available,
+    /// which registers the one valid program manifest of the image's
+    /// `/usr/lib/programs/`, and ignores the one with the app ID of the
+    /// on-demand service `idle` and the one whose app ID is not its file
+    /// name.
     pub fn process_manager_builds_namespaces_from_the_boot_image(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service namespace-probe exited with code 0";
+        const ALSO: [&[u8]; 4] = [
+            b"the root file system is available",
+            b"/usr/lib/programs/system.idle.yaml: system.idle is a service's app ID; ignored",
+            b"/usr/lib/programs/system.misnamed.yaml:",
+            b"registered 1 program manifests",
+        ];
         const FAILED: &[&[u8]] = &[
             b"did not start",
             b"will not start",
@@ -9492,7 +9503,12 @@ mod manager {
             });
         };
         let deadline = super::within(super::PROBE_SECONDS);
+        let mut seen = [false; 4];
+        let mut passed = false;
         let outcome = loop {
+            if passed && seen.iter().all(|&s| s) {
+                break Some(true);
+            }
             let (status, record) = super::read_record(reader.raw());
             if status == super::SHOULD_WAIT {
                 if super::wait(reader.raw(), super::READABLE, deadline).0 != 0 {
@@ -9503,8 +9519,12 @@ mod manager {
             check("reading the log", status)?;
             let len = usize::from(u16::from_le_bytes([record[0x1A], record[0x1B]]));
             let message = &record[0x20..0x20 + len.min(256)];
+            if let Some(at) = ALSO.iter().position(|a| super::contains(message, a)) {
+                seen[at] = true;
+            }
             if super::contains(message, PASSED) {
-                break Some(true);
+                passed = true;
+                continue;
             }
             if FAILED.iter().any(|f| super::contains(message, f)) {
                 mikros_rt::log!(Error, "{}", core::str::from_utf8(message).unwrap_or("?"));

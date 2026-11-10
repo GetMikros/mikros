@@ -735,6 +735,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let namespace_probe_manifest = probe_dir.join("namespace-probe.yaml");
             let probe_conf = probe_dir.join("probe.conf");
             let probe_data = probe_dir.join("data.txt");
+            let programs = probe_dir.join("programs");
             let namespaces_image = test_image(
                 kind,
                 "namespaces.img",
@@ -757,6 +758,22 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("Libraries/probe.txt", probe_data.as_path()),
                     ("Apps/test.native/bin/hello", hello_dynamic.as_path()),
                     ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
+                    (
+                        "usr/lib/programs/system.probe-tool.yaml",
+                        programs.join("system.probe-tool.yaml").as_path(),
+                    ),
+                    (
+                        "usr/lib/programs/system.idle.yaml",
+                        programs.join("system.idle.yaml").as_path(),
+                    ),
+                    (
+                        "usr/lib/services/idle.yaml",
+                        probe_dir.join("idle.yaml").as_path(),
+                    ),
+                    (
+                        "usr/lib/programs/system.misnamed.yaml",
+                        programs.join("system.misnamed.yaml").as_path(),
+                    ),
                 ],
             )?;
             println!("built    {}", namespaces_image.display());

@@ -1,0 +1,4 @@
+# A program manifest of tests/namespaces.img whose app ID is not its file
+# name, which the service manager ignores.
+app_id: system.other
+binary: /usr/bin/namespace-probe

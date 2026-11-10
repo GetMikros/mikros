@@ -1,0 +1,7 @@
+# The manifest of an on-demand service of tests/namespaces.img that
+# nothing connects to, whose app ID a program manifest takes.
+name: idle
+binary: /usr/bin/namespace-probe
+start: on-demand
+provides:
+  - protocol: mikros.test.Idle

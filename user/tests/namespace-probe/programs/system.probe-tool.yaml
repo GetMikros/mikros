@@ -1,0 +1,5 @@
+# A program manifest of tests/namespaces.img, whose permission the service
+# manager registers once the root file system is available.
+app_id: system.probe-tool
+binary: /usr/bin/namespace-probe
+permissions: [logs.read]
