@@ -25,8 +25,9 @@ use mikros_tty::termios::{Attributes, VMIN, VTIME};
 
 /// The most bytes one `Read` or `Write` carries.
 const TRANSFER_MAX: usize = 32768;
-/// The rights of a readiness event as the client gets it.
-const READINESS_RIGHTS: u32 = 1 << 1 | 1 << 9 | 1 << 12;
+/// The rights of a readiness event as the client gets it: TRANSFER,
+/// WAIT and INSPECT.
+const READINESS_RIGHTS: u32 = 1 << 1 | 1 << 6 | 1 << 9;
 const NANOS_PER_DECISECOND: i64 = 100_000_000;
 
 pub fn wire(a: &Attributes) -> Wire {
