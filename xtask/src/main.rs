@@ -18,6 +18,7 @@ mod fetch;
 mod firmware;
 mod fuzz;
 mod image;
+mod input;
 mod llvm;
 mod loader_check;
 mod machine_state;

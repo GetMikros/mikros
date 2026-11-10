@@ -285,7 +285,7 @@ pub fn test_args(mut args: Vec<String>, log: &Path, logged: bool) -> Vec<String>
         "usb-storage,id=stick,bus=usb.0,port=1,drive=scratch-usb,serial=mikros",
     ));
     args.extend(device("usb-hub,bus=usb.0,port=2"));
-    args.extend(device("usb-kbd,bus=usb.0,port=2.1"));
+    args.extend(device("usb-kbd,id=usbkbd,bus=usb.0,port=2.1"));
     // A watchdog whose memory BAR is smaller than a page.
     args.extend(device("i6300esb"));
     if logged {
@@ -552,6 +552,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("ACPI restart run passed");
+    crate::input::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("input"),
+        timeout,
+    )?;
+    println!("input run passed");
     crate::durability::run(
         &args.machine,
         args.kind,
@@ -696,7 +704,7 @@ ffffffff800ccff0 000000000000008b t <kernel_core::ktimer::Armed>::fire
             &"usb-storage,id=stick,bus=usb.0,port=1,drive=scratch-usb,serial=mikros".to_string()
         ));
         assert!(args.contains(&"usb-hub,bus=usb.0,port=2".to_string()));
-        assert!(args.contains(&"usb-kbd,bus=usb.0,port=2.1".to_string()));
+        assert!(args.contains(&"usb-kbd,id=usbkbd,bus=usb.0,port=2.1".to_string()));
         assert!(args.contains(&"i6300esb".to_string()));
         assert!(args.contains(&"-no-reboot".to_string()));
         assert!(!args.iter().any(|a| a.contains("scratch-virtio")));
