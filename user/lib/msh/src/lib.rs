@@ -5,3 +5,4 @@
 pub mod ast;
 pub mod jobs;
 pub mod parse;
+pub mod value;

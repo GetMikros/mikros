@@ -5,6 +5,8 @@ mod expr;
 mod literal;
 mod words;
 
+pub use literal::days_from_civil;
+
 use crate::ast::*;
 use std::fmt;
 
