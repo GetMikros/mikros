@@ -1,9 +1,10 @@
-//! The user's shell of `tests/console.img`, installed as /usr/bin/msh,
-//! which the session manager starts once `bob` logged in on the text
-//! console. It checks that it runs as a user other than 0 with the app ID
-//! `system.cli`, leads a login session of its own, and has exactly the
-//! environment of bob's session, with `/Users/bob` and a `/Libraries`
-//! that holds the README of bob's own Libraries folder in its namespace.
+//! The user's shell of `tests/console.img` and `tests/setup.img`,
+//! installed as /usr/bin/msh, which the session manager starts once a
+//! user logged in on the text console. It checks that it runs as a user
+//! other than 0 with the app ID `system.cli`, leads a login session of
+//! its own, and has exactly the environment of that user's session, with
+//! the user's home and a `/Libraries` in its namespace, which for bob
+//! holds the README of his own Libraries folder.
 //! On the terminal it was given it asks
 //! for the cursor position, which the console answers, and reads the
 //! line that the runner types. It exits with 0 once all of that held,
@@ -15,6 +16,7 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -35,15 +37,17 @@ const SECOND: i64 = 1_000_000_000;
 /// Bits of a terminal's local flags: canonical input and echo.
 const ICANON: u32 = 0o2;
 const ECHO: u32 = 0o10;
-/// The environment that bob's session must have, in order.
-const ENVIRONMENT: [&str; 6] = [
-    "HOME=/Users/bob",
-    "USER=bob",
-    "LOGNAME=bob",
-    "SHELL=/usr/bin/msh",
-    "PATH=/usr/bin",
-    "TERM=xterm-256color",
-];
+/// The environment that the session of user `name` must have, in order.
+fn expected(name: &str) -> [String; 6] {
+    [
+        format!("HOME=/Users/{name}"),
+        format!("USER={name}"),
+        format!("LOGNAME={name}"),
+        "SHELL=/usr/bin/msh".into(),
+        "PATH=/usr/bin".into(),
+        "TERM=xterm-256color".into(),
+    ]
+}
 
 fn now() -> i64 {
     let mut now = 0;
@@ -109,12 +113,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let (pid, user) = (header.pid, header.user);
     let app_ok = header.app_id == "system.cli";
     let environment = strings(&header.arguments).map(|(_, e)| e);
-    let mut home = false;
+    let mut home = None;
     let mut libraries = None;
     for entry in managed.namespace {
         match entry.path.as_str() {
-            "/Users/bob" => home = true,
             "/Libraries" => libraries = Some(entry.directory),
+            path if path.starts_with("/Users/") => home = Some(entry.path),
             _ => {}
         }
     }
@@ -137,14 +141,23 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             .info;
         check(info.login_session == pid, 4)?;
         let environment = environment.ok_or(5)?;
-        check(environment.iter().map(String::as_str).eq(ENVIRONMENT), 5)?;
-        check(home, 12)?;
+        let name = environment
+            .get(1)
+            .and_then(|e| e.strip_prefix("USER="))
+            .map(String::from)
+            .ok_or(5)?;
+        check(environment == expected(&name), 5)?;
+        check(home.as_deref() == Some(&*format!("/Users/{name}")), 12)?;
+        // Only bob's home in tests/console.img holds a Libraries folder
+        // with a README; an account that setup made has an empty one.
         let libraries = NodeAsyncClient::new(libraries.ok_or(13)?, reactor.clone());
-        let (_readme, server) = endpoints::<Node>().map_err(|_| 13)?;
-        let opened = libraries
-            .open("README".into(), OpenFlags(0), 0, Rights::READ, server)
-            .await;
-        check(matches!(opened, Ok(Ok(_))), 13)?;
+        if name == "bob" {
+            let (_readme, server) = endpoints::<Node>().map_err(|_| 13)?;
+            let opened = libraries
+                .open("README".into(), OpenFlags(0), 0, Rights::READ, server)
+                .await;
+            check(matches!(opened, Ok(Ok(_))), 13)?;
+        }
         let token = token.ok_or(6)?;
         let (client, server) = endpoints::<Terminal>().map_err(|_| 6)?;
         let connected = directory
@@ -167,7 +180,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             .await;
         check(matches!(raw, Ok(Ok(_))), 7)?;
         let written = terminal
-            .write(t()?, b"Welcome, bob.\r\n\x1b[6n".to_vec(), FOREVER)
+            .write(t()?, b"Welcome.\r\n\x1b[6n".to_vec(), FOREVER)
             .await;
         check(matches!(written, Ok(Ok(_))), 8)?;
         let mut answer = Vec::new();

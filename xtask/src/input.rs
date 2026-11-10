@@ -71,6 +71,9 @@ pub fn run(
     let deadline = Instant::now() + timeout;
     let ended = (|| {
         scenario::wait_for_line(&log, PAINTED, &mut qemu, deadline)?;
+        // The display driver copies a commit after a frame's time, and
+        // slowly in a debug build, so the dump waits until it has.
+        std::thread::sleep(Duration::from_secs(1));
         let screen = scenario::screen_dump(&socket, &dir.join("screen.ppm"))?;
         scenario::wait_for_line(&log, WAITING, &mut qemu, deadline)?;
         let mut removed = false;

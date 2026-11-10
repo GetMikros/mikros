@@ -576,6 +576,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("console run passed");
+    crate::console::run_setup(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("setup"),
+        timeout,
+    )?;
+    println!("setup run passed");
     crate::durability::run(
         &args.machine,
         args.kind,

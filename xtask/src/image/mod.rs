@@ -144,11 +144,20 @@ pub fn run(args: &Args) -> Result<()> {
     };
     let built = build::build(args.kind)?;
     if args.live {
-        let boot_image = build::live_boot_image(args.kind, &built.boot_image)?;
+        let boot_image = build::live_boot_image(args.kind, &built.system_image)?;
         return create_live(&built, &boot_image, &path(args.kind, true), key.as_ref());
     }
     let out = path(args.kind, false);
-    create_parts(args.kind, &built, &out, "", &[], false, key.as_ref())
+    create_parts(
+        args.kind,
+        &built,
+        &built.system_image,
+        &out,
+        "",
+        &[],
+        false,
+        key.as_ref(),
+    )
 }
 
 /// The files of the EFI system partition: the boot manager, also at the
@@ -230,24 +239,65 @@ pub fn create_with(
     extra: &str,
     more: &[(&str, &[u8])],
 ) -> Result<()> {
-    create_parts(kind, built, out, extra, more, false, None)
+    create_parts(
+        kind,
+        built,
+        &built.system_image,
+        out,
+        extra,
+        more,
+        false,
+        None,
+    )
 }
 
 /// Like `create`, with the EFI executables signed with `key` and the
 /// files for enrolling it on the EFI system partition.
 pub fn create_signed(kind: Kind, built: &build::Built, out: &Path, key: &Key) -> Result<()> {
-    create_parts(kind, built, out, "", &[], false, Some(key))
+    create_parts(
+        kind,
+        built,
+        &built.system_image,
+        out,
+        "",
+        &[],
+        false,
+        Some(key),
+    )
 }
 
 /// Like `create_with`, for `cargo xtask test`: the disk also has the
 /// partitions of `TEST_TYPES`.
 pub fn create_for_tests(kind: Kind, built: &build::Built, out: &Path, extra: &str) -> Result<()> {
-    create_parts(kind, built, out, extra, &[], true, None)
+    create_parts(
+        kind,
+        built,
+        &built.system_image,
+        out,
+        extra,
+        &[],
+        true,
+        None,
+    )
 }
 
+/// Like `create_with`, with the root partition made from the archive
+/// `system` instead of the built system.
+pub fn create_with_system(
+    kind: Kind,
+    built: &build::Built,
+    system: &Path,
+    out: &Path,
+    extra: &str,
+) -> Result<()> {
+    create_parts(kind, built, system, out, extra, &[], false, None)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn create_parts(
     kind: Kind,
     built: &build::Built,
+    system: &Path,
     out: &Path,
     extra: &str,
     more: &[(&str, &[u8])],
@@ -270,7 +320,7 @@ fn create_parts(
         .collect();
     let total = files.iter().map(|(_, d)| d.len() as u64).sum();
     let esp = esp::build(esp::size_for(total), &files)?;
-    let root = root::create(kind, &built.boot_image)?;
+    let root = root::create(kind, system)?;
     let mut parts = vec![
         Part {
             type_guid: ESP_TYPE,

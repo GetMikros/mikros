@@ -10291,6 +10291,10 @@ mod manager {
                 1,
             ),
             (
+                b"device-manager: published device.subvolumes root for device",
+                1,
+            ),
+            (
                 b"process-manager: namespaces come from the root file system",
                 1,
             ),
@@ -10564,6 +10568,58 @@ mod manager {
             Err(f) => mikros_rt::log!(
                 Error,
                 "SCENARIO console FAILED: {} failed ({})",
+                f.what,
+                f.status
+            ),
+        }
+        mikros_test::exit_qemu(mikros_test::FAILED)
+    }
+
+    /// The `setup` scenario: serves `tests/setup.img`, whose services run
+    /// until the root partition is available; the session manager, the
+    /// accounts service and the rest of the login come from the root,
+    /// which has no user yet, so that the session manager runs the setup
+    /// program on the text console, where the runner makes the account
+    /// ada; then the runner logs in as ada and types a line for the
+    /// session shell. Stops QEMU with `PASSED` once setup and ada's
+    /// session ended so, or with `FAILED`.
+    pub fn setup_scenario(s: &Startup) -> i64 {
+        const SECONDS: i64 = 300;
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (b"device-manager: released the kernel console", 1),
+            (
+                b"process-manager: namespaces come from the root file system",
+                1,
+            ),
+            (b"sessionmgr: started the console", 1),
+            (b"sessionmgr: setup exited with Some(0)", 1),
+            (b"sessionmgr: ada logged in", 1),
+            (b"exited with Some(0)", 2),
+            (b"sessionmgr: ended session", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"sessionmgr: starting",
+            b"sessionmgr: the console closed",
+            b"left without a driver",
+            b"did not start",
+            b"declined",
+        ];
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(Error, "SCENARIO setup: {} failed ({})", f.what, f.status);
+            return 1;
+        }
+        // The root file system, on which the accounts service makes the
+        // user's home folder, is the test machine's root partition.
+        let logged = device_manager_logs(s, b"tests/setup.img", true, SECONDS, EXPECTED, FAILED);
+        match logged {
+            Ok(true) => {
+                mikros_rt::log!(Info, "SCENARIO setup PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO setup FAILED"),
+            Err(f) => mikros_rt::log!(
+                Error,
+                "SCENARIO setup FAILED: {} failed ({})",
                 f.what,
                 f.status
             ),
@@ -10970,6 +11026,7 @@ mod bootfs {
                         "restart.img",
                         "root.img",
                         "services.img",
+                        "setup.img",
                         "term.img",
                         "time.img",
                         "tmpfs.img",
@@ -11501,6 +11558,7 @@ fn scenario(s: &Startup) -> Option<i64> {
         "acpi-restart" => manager::acpi_restart_scenario(s),
         "input" => manager::input_scenario(s),
         "console" => manager::console_scenario(s),
+        "setup" => manager::setup_scenario(s),
         // The runner logs the writes and flushes of the scratch disks.
         "durability" => manager::durability_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.

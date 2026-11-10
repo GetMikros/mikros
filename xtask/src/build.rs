@@ -55,7 +55,17 @@ pub struct Built {
     pub bootmenu: PathBuf,
     pub bootloader: PathBuf,
     pub kernel: PathBuf,
+    /// The boot image, which the EFI system partition holds: the files
+    /// that the system needs until the root file system is available.
     pub boot_image: PathBuf,
+    /// The whole system, early services included, which the root
+    /// partition and a live system's boot image hold. For the test build
+    /// it is the boot image.
+    pub system_image: PathBuf,
+    /// For the test build, the whole system of the setup run's root
+    /// partition: the test boot image with the services that need the
+    /// root file system.
+    pub first_boot_image: Option<PathBuf>,
     /// Where xkbcommon was built.
     pub xkbcommon: crate::ports::Built,
 }
@@ -144,7 +154,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", freetype.install.display());
     let fonts = crate::fonts::fetch()?;
     println!("ok       {}", fonts.ttf.display());
-    let boot_image = match boot {
+    let mut first_boot_image = None;
+    let (boot_image, system_image) = match boot {
         BootImage::System => {
             let init = user_build("init", kind)?;
             println!("built    {}", init.display());
@@ -309,11 +320,22 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // The time zones, which the root partition gets with the rest
             // of usr.
             let zones = crate::tzdata::members(&crate::tzdata::zoneinfo()?)?;
-            let members: Vec<(&str, &Path)> = members
+            let early: Vec<(&str, &Path)> = members
                 .into_iter()
                 .chain(zones.iter().map(|(at, path)| (at.as_str(), path.as_path())))
                 .collect();
-            boot_image(kind, "boot.img", &members)?
+            // The services that need the root file system, and what they
+            // load, are only in the whole system, so that the service
+            // manager starts them once the root is available.
+            let login = login_members(kind, &xkbcommon, &freetype, &keymaps)?;
+            let whole: Vec<(&str, &Path)> = early
+                .iter()
+                .copied()
+                .chain(login.iter().map(|(at, path)| (at.as_str(), path.as_path())))
+                .collect();
+            let system_image = boot_image(kind, "system.img", &whole)?;
+            println!("built    {}", system_image.display());
+            (boot_image(kind, "boot.img", &early)?, system_image)
         }
         BootImage::Test => {
             let init = user_build("test-init", kind)?;
@@ -1060,6 +1082,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", sessions.display());
             let session_shell = user_build("session-shell", kind)?;
             println!("built    {}", session_shell.display());
+            let test_sessions_manifest =
+                crate::workspace_root().join("user/tests/session-shell/sessionmgr.yaml");
             let mut console_files: Vec<(String, PathBuf)> = input_files
                 .iter()
                 .filter(|(name, _)| !name.contains("input-probe"))
@@ -1099,7 +1123,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/bin/sessionmgr".to_owned(), sessions.clone()),
                 (
                     "usr/lib/services/sessionmgr.yaml".to_owned(),
-                    crate::workspace_root().join("user/tests/session-shell/sessionmgr.yaml"),
+                    test_sessions_manifest.clone(),
                 ),
                 ("usr/bin/msh".to_owned(), session_shell.clone()),
                 ("usr/bin/union".to_owned(), union.clone()),
@@ -1356,6 +1380,38 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .collect();
             let root_image = device_image("root.img", &[], &root_files)?;
             println!("built    {}", root_image.display());
+            // The setup run serves this image: the drivers and the log
+            // service of the input run, the root disk's drivers of the
+            // root disk runs, tmpfs and the union server, the services
+            // that run until the root file system is available.
+            // The rest of the system comes from the root partition, which
+            // the run makes from the first-boot archive below.
+            let mut setup_files: Vec<(String, PathBuf)> = input_files
+                .iter()
+                .filter(|(name, _)| !name.contains("input-probe"))
+                .cloned()
+                .collect();
+            setup_files.extend(
+                root_files
+                    .iter()
+                    .filter(|(at, _)| !setup_files.iter().any(|(have, _)| have == at))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+            setup_files.extend([
+                ("usr/bin/tmpfs".to_owned(), tmpfs.clone()),
+                (
+                    "usr/lib/services/tmpfs.yaml".to_owned(),
+                    tmpfs_manifest.clone(),
+                ),
+                ("usr/bin/union".to_owned(), union.clone()),
+                (
+                    "usr/lib/services/union.yaml".to_owned(),
+                    union_manifest.clone(),
+                ),
+            ]);
+            let setup_image = device_image("setup.img", &[], &setup_files)?;
+            println!("built    {}", setup_image.display());
             // The bus restart runs serve this image: the root disk runs'
             // with the restart probe.
             let mut bus_files = root_files.clone();
@@ -1417,6 +1473,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/acpi-restart.img", acpi_restart_image.as_path()),
                 ("tests/input.img", input_image.as_path()),
                 ("tests/console.img", console_image.as_path()),
+                ("tests/setup.img", setup_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
                 ("tests/ports.img", ports_image.as_path()),
@@ -1443,7 +1500,42 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .into_iter()
                 .chain(zones.iter().map(|(at, path)| (at.as_str(), path.as_path())))
                 .collect();
-            boot_image(kind, "test-boot.img", &members)?
+            let image = boot_image(kind, "test-boot.img", &members)?;
+            // The root partition of the setup run gets this archive: the
+            // test boot image with the services that need the root file
+            // system and what they load, the session manager's manifest
+            // with the kernel log handle, and the session shell as the
+            // user's shell.
+            let sessions_manifest = "usr/lib/services/sessionmgr.yaml";
+            let console_fonts =
+                ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"].map(|f| fonts.ttf.join(f));
+            let login = login_members(kind, &xkbcommon, &freetype, &keymaps)?;
+            let first_boot: Vec<(&str, &Path)> = members
+                .iter()
+                .copied()
+                .chain(
+                    login
+                        .iter()
+                        .filter(|(at, _)| at != sessions_manifest)
+                        .map(|(at, path)| (at.as_str(), path.as_path())),
+                )
+                .chain([
+                    (sessions_manifest, test_sessions_manifest.as_path()),
+                    ("usr/bin/msh", session_shell.as_path()),
+                    (
+                        "usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+                        console_fonts[0].as_path(),
+                    ),
+                    (
+                        "usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf",
+                        console_fonts[1].as_path(),
+                    ),
+                ])
+                .collect();
+            let first_boot = boot_image(kind, "first-boot.img", &first_boot)?;
+            println!("built    {}", first_boot.display());
+            first_boot_image = Some(first_boot);
+            (image.clone(), image)
         }
     };
     println!("built    {}", boot_image.display());
@@ -1452,6 +1544,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         bootloader,
         kernel,
         boot_image,
+        system_image,
+        first_boot_image,
         xkbcommon,
     })
 }
@@ -1519,6 +1613,81 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
     let path = dir.join("accounts-users");
     fs::write(&path, encode(&users)).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
+}
+
+/// The members of the system image that logging in on the text console
+/// needs: the accounts, terminal and session services with their
+/// manifests, the basic display driver, the text console and the setup
+/// program with their program manifests, and the dynamic linker,
+/// libraries and keymaps they load. The fonts are among the other
+/// members.
+fn login_members(
+    kind: Kind,
+    xkbcommon: &crate::ports::Built,
+    freetype: &crate::ports::Built,
+    keymaps: &crate::ports::Built,
+) -> Result<Vec<(String, PathBuf)>> {
+    let root = crate::workspace_root();
+    let mut members = Vec::new();
+    for (name, manifest) in [
+        ("accounts", "user/services/accounts/accounts.yaml"),
+        ("termsvc", "user/services/termsvc/terminal.yaml"),
+        ("sessionmgr", "user/services/sessionmgr/sessionmgr.yaml"),
+    ] {
+        let binary = user_build(name, kind)?;
+        println!("built    {}", binary.display());
+        let manifest = root.join(manifest);
+        let file = manifest.file_name().context("a manifest's name")?;
+        let file = file.to_str().context("not UTF-8")?;
+        members.push((format!("usr/bin/{name}"), binary));
+        members.push((format!("usr/lib/services/{file}"), manifest));
+    }
+    let basic_display = user_build("basicdisplay", kind)?;
+    println!("built    {}", basic_display.display());
+    members.extend([
+        (
+            "usr/lib/drivers/basicdisplay/basicdisplay".into(),
+            basic_display,
+        ),
+        (
+            "usr/lib/drivers/basicdisplay/driver.yaml".into(),
+            root.join("user/drivers/basicdisplay/driver.yaml"),
+        ),
+    ]);
+    for name in ["console", "setup"] {
+        let binary = crate::rust_std::build(name, kind)?;
+        println!("built    {}", binary.display());
+        members.push((format!("usr/bin/{name}"), binary));
+        members.push((
+            format!("usr/lib/programs/system.{name}.yaml"),
+            root.join(format!("user/runtime/std/{name}/system.{name}.yaml")),
+        ));
+    }
+    members.extend([
+        (
+            "usr/lib/ld-mikros.dlib".into(),
+            crate::sysroot::dir().join("lib/ld-mikros.dlib"),
+        ),
+        (
+            "usr/lib/libfreetype.6.dlib".into(),
+            freetype.install.join("lib/libfreetype.6.20.7.dlib"),
+        ),
+        (
+            "usr/lib/libxkbcommon.0.dlib".into(),
+            xkbcommon.install.join("lib/libxkbcommon.0.13.2.dlib"),
+        ),
+    ]);
+    let keymap_data = keymaps.install.join("share/xkeyboard-config-2");
+    let mut keymap_files = Vec::new();
+    crate::port_tests::collect(&keymap_data, &mut keymap_files)?;
+    for path in keymap_files {
+        let relative = path
+            .strip_prefix(&keymap_data)?
+            .to_str()
+            .context("not UTF-8")?;
+        members.push((format!("usr/share/X11/xkb/{relative}"), path.clone()));
+    }
+    Ok(members)
 }
 
 /// Writes the boot archive `file` with each of `members`, given by name
