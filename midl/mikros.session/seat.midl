@@ -1,0 +1,12 @@
+// MIKSPEC-0066.R10
+
+library mikros.session;
+using mikros.gpu;
+using mikros.input;
+
+protocol Seat {
+    @1 AddDisplay(instance string<64>, display client_end<mikros.gpu.Display>);
+    @2 AddInput(instance string<64>, device client_end<mikros.input.Device>,
+                accepted bool);
+    @3 -> OnAccepted(instance string<64>);
+};

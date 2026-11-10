@@ -1,0 +1,12 @@
+// MIKSPEC-0057.R11
+
+library mikros.session;
+using mikros.base;
+
+protocol TextLogin {
+    @1 NeedsSetup() -> (needed bool);
+    @2 RunSetup(terminal base.Token) -> () error base.Status;
+    @3 Login(name string<32>, password string<1024>,
+             terminal base.Token) -> () error base.Status;
+    @4 -> OnSessionEnded();
+};
