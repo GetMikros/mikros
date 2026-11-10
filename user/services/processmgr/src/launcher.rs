@@ -6,13 +6,14 @@
 //! `SetProcessGroup` and `KillGroup` are served; every other method fails
 //! with `NOT_SUPPORTED`.
 
-use crate::broker::{FULL_DISK, SET_IDENTITY, SIGNAL_ANY};
+use crate::broker::{FULL_DISK, LIST_ALL, SET_IDENTITY, SIGNAL_ANY};
 use crate::processes::{NewProcess, Shared};
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, duplicate};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
+use alloc::vec::Vec;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
@@ -91,19 +92,38 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                 });
                 Ok(())
             }
-            R::GetInfo(request, r) => r.reply(s, get_info(&shared, pid, request.pid)),
+            R::GetInfo(request, r) => {
+                let (shared, server) = (shared.clone(), server.clone());
+                shared.clone().spawner.spawn(async move {
+                    let result = get_info(&shared, pid, request.pid).await;
+                    let _ = r.reply(server.server(), result);
+                });
+                Ok(())
+            }
             R::CreateSession(_, r) => r.reply(s, create_session(&shared, pid)),
             R::SetProcessGroup(request, r) => r.reply(
                 s,
                 set_process_group(&shared, pid, request.pid, request.process_group),
             ),
-            R::KillGroup(request, r) => r.reply(
-                s,
-                kill_group(&shared, pid, request.process_group, request.signo),
-            ),
+            R::KillGroup(request, r) => {
+                let (shared, server) = (shared.clone(), server.clone());
+                shared.clone().spawner.spawn(async move {
+                    let (group, signo) = (request.process_group, request.signo);
+                    let result = kill_group(&shared, pid, group, signo).await;
+                    let _ = r.reply(server.server(), result);
+                });
+                Ok(())
+            }
             R::Fork(_, r) => r.reply(s, Err(no)),
             R::KillLoginSession(_, r) => r.reply(s, Err(no)),
-            R::List(_, r) => r.reply(s, list(&shared, pid)),
+            R::List(_, r) => {
+                let (shared, server) = (shared.clone(), server.clone());
+                shared.clone().spawner.spawn(async move {
+                    let result = list(&shared, pid).await;
+                    let _ = r.reply(server.server(), result);
+                });
+                Ok(())
+            }
         };
     }
 }
@@ -316,17 +336,46 @@ fn report(shared: &Shared, pid: u32, stops: bool) -> Result<LauncherWaitResponse
     Ok(status(StatusKind::Continued, 0, 0, 0))
 }
 
-/// What process `caller` may know of process `target`: the whole record,
-/// when `target` has the caller's user ID. Other processes are reported
-/// missing, as `process.list_all` cannot be held before the permission
-/// broker serves requests.
-fn get_info(shared: &Shared, caller: u32, target: u32) -> Result<LauncherGetInfoResponse, Status> {
+/// Whether the broker says that process `caller` holds `permission`.
+async fn holds(shared: &Shared, caller: u32, permission: &str) -> bool {
+    let client = {
+        let records = shared.records.borrow();
+        let Some(from) = records.get(caller) else {
+            return false;
+        };
+        ClientIdentity {
+            pid: caller,
+            user: from.user,
+            app_id: from.app_id.clone(),
+        }
+    };
+    let bootstrap = shared.identity_setter.get() == Some(caller);
+    shared
+        .permissions
+        .holds(client, bootstrap, permission)
+        .await
+}
+
+/// What process `caller` may learn of process `target`: all of it when
+/// `target` has the caller's user ID, or when the caller holds
+/// `process.list_all`; otherwise the process is reported missing.
+async fn get_info(
+    shared: &Shared,
+    caller: u32,
+    target: u32,
+) -> Result<LauncherGetInfoResponse, Status> {
+    let same_user = {
+        let records = shared.records.borrow();
+        let from = records.get(caller).ok_or(Status::BadState)?;
+        let record = records.get(target).ok_or(Status::NotFound)?;
+        record.user == from.user
+    };
+    if !same_user && !holds(shared, caller, LIST_ALL).await {
+        return Err(Status::NotFound);
+    }
+    // The target may have been collected while the broker answered.
     let records = shared.records.borrow();
-    let from = records.get(caller).ok_or(Status::BadState)?;
-    let record = records
-        .get(target)
-        .filter(|r| r.user == from.user)
-        .ok_or(Status::NotFound)?;
+    let record = records.get(target).ok_or(Status::NotFound)?;
     Ok(LauncherGetInfoResponse {
         info: ProcessInfo {
             pid: target,
@@ -346,14 +395,15 @@ const LIST_MAX: usize = 4096;
 
 /// The process IDs, in order, that process `caller` may see: those of
 /// its user ID, ended ones that their parent has not collected included,
-/// as `process.list_all` cannot be held before the permission broker
-/// serves requests. At most `LIST_MAX` are given.
-fn list(shared: &Shared, caller: u32) -> LauncherListResponse {
+/// or all of them when it holds `process.list_all`. At most `LIST_MAX`
+/// are given.
+async fn list(shared: &Shared, caller: u32) -> LauncherListResponse {
+    let all = holds(shared, caller, LIST_ALL).await;
     let records = shared.records.borrow();
     let user = records.get(caller).map(|r| r.user);
     let pids = records
         .iter()
-        .filter(|(_, r)| Some(r.user) == user)
+        .filter(|(_, r)| all || Some(r.user) == user)
         .map(|(pid, _)| pid)
         .take(LIST_MAX)
         .collect();
@@ -416,26 +466,41 @@ async fn kill(
 }
 
 /// Sends `signo` for process `caller` to every running process of
-/// `group` that it may signal. Fails with `NOT_FOUND` when the group has
-/// no running process, and with `ACCESS_DENIED` when it may signal none.
-fn kill_group(
+/// `group` that it may signal: as `may_signal` says, or all of them when
+/// the broker says that it holds `process.signal_any`, which is asked
+/// only when `may_signal` leaves some out. Fails with `NOT_FOUND` when
+/// the group has no running process, and with `ACCESS_DENIED` when it
+/// may signal none.
+async fn kill_group(
     shared: &Shared,
     caller: u32,
     group: u32,
     signo: u32,
 ) -> Result<LauncherKillGroupResponse, Status> {
+    let left_out = {
+        let records = shared.records.borrow();
+        records.get(caller).ok_or(Status::BadState)?;
+        let members: Vec<u32> = records
+            .iter()
+            .filter(|(_, r)| r.process_group == group && r.exit.is_none())
+            .map(|(pid, _)| pid)
+            .collect();
+        if members.is_empty() {
+            return Err(Status::NotFound);
+        }
+        members
+            .iter()
+            .any(|&pid| !may_signal(&records, caller, pid))
+    };
+    let any = left_out && holds(shared, caller, SIGNAL_ANY).await;
+    // The group may have changed while the broker answered.
     let records = shared.records.borrow();
-    records.get(caller).ok_or(Status::BadState)?;
-    let mut members = records
+    let mut signalled = false;
+    for (pid, record) in records
         .iter()
         .filter(|(_, r)| r.process_group == group && r.exit.is_none())
-        .peekable();
-    if members.peek().is_none() {
-        return Err(Status::NotFound);
-    }
-    let mut signalled = false;
-    for (pid, record) in members {
-        if may_signal(&records, caller, pid) {
+    {
+        if any || may_signal(&records, caller, pid) {
             signal(record, signo)?;
             signalled = true;
         }
