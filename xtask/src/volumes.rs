@@ -15,8 +15,10 @@
 //! The runner then unplugs the disks through QEMU's monitor and waits for
 //! the probe to see the volumes leave. Afterwards each FAT and exFAT
 //! volume must hold what the probe wrote, the first FAT volume also what
-//! it wrote across a restart of the xHCI driver, and fsck.exfat must find
-//! the exFAT volume clean.
+//! it wrote across a restart of the xHCI driver and across the restart
+//! of the USB mass storage drivers, the xHCI driver must have reset each
+//! disk's device for the latter, and fsck.exfat must find the exFAT
+//! volume clean.
 
 use crate::build::{self, Kind};
 use crate::image::{esp, gpt};
@@ -80,6 +82,25 @@ const WHOLE_LABEL: [u8; 11] = *b"WHOLEFAT   ";
 const HELLO: &[u8] = b"hello from the host\n";
 const WRITTEN: &[u8] = b"written on Mikros\n";
 const AGAIN: &[u8] = b"written across an xHCI restart\n";
+const RESET: &[u8] = b"written across a USB device reset\n";
+/// How the device manager logs the xHCI driver's start, and each device
+/// that the driver of a device reset.
+const XHCI_STARTED: &str = "device-manager: started driver xhci for device ";
+const RESET_LINE: &str = "device-manager: the driver of device ";
+
+/// How many devices the first xHCI driver's device reset, by the device
+/// manager's lines in `serial`.
+fn host_resets(serial: &str) -> usize {
+    let host = serial.lines().find_map(|l| {
+        let rest = &l[l.find(XHCI_STARTED)? + XHCI_STARTED.len()..];
+        rest.split(' ').next()
+    });
+    let Some(host) = host else {
+        return 0;
+    };
+    let reset = format!("{RESET_LINE}{host} reset device ");
+    serial.lines().filter(|l| l.contains(&reset)).count()
+}
 
 /// Writes the USB disks in `dir`: the first, `usb.img`, in place of the
 /// scratch disk, and the other two.
@@ -389,6 +410,19 @@ pub fn run(
     if again != AGAIN {
         bail!("AGAIN.TXT on the first FAT volume holds {again:?}");
     }
+    let reset = read_fat(dir, "usb.img", FIRST_LBA, sectors, "RESET.TXT")
+        .context("reading what the probe wrote across the USB device resets")?;
+    if reset != RESET {
+        bail!("RESET.TXT on the first FAT volume holds {reset:?}");
+    }
+    let disks = [DEVICE, MBR_DEVICE, WHOLE_DEVICE].len();
+    let resets = host_resets(&serial);
+    if resets != disks {
+        bail!(
+            "the xHCI driver reset {resets} devices, not the {disks} USB disks'; serial output in {}",
+            log.display()
+        );
+    }
     let written = read_exfat(dir, "WRITTEN.TXT")?;
     if written != WRITTEN {
         bail!("WRITTEN.TXT on the exFAT volume holds {written:?}");
@@ -422,5 +456,20 @@ mod tests {
         assert_eq!(whole.unwrap(), HELLO);
         assert_eq!(read_exfat(&dir, "HELLO.TXT").unwrap(), HELLO);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn counts_the_devices_that_the_xhci_driver_reset() {
+        let serial = "\
+[1.0] I p7: device-manager: started driver pci-bus for device 1 as pid 7
+[1.1] I p7: device-manager: started driver xhci for device 9 as pid 8
+[2.0] I p7: device-manager: the driver of device 1 reset device 9
+[3.0] I p7: device-manager: the driver of device 9 reset device 21
+[3.1] I p7: device-manager: the driver of device 9 cannot reset device 22
+[3.2] I p7: device-manager: the driver of device 9 reset device 23
+[4.0] I p7: device-manager: started driver xhci for device 9 as pid 30
+";
+        assert_eq!(host_resets(serial), 2);
+        assert_eq!(host_resets("no driver started"), 0);
     }
 }
