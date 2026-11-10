@@ -18,13 +18,17 @@
 #define MIKROS_ACPI_SPACE_MEMORY    0
 #define MIKROS_ACPI_SPACE_IO        1
 
-/* Enters sleep state S5. Returns an ACPI_STATUS when it does not. */
-UINT32 mikros_acpi_power_off(void)
+/* Runs the preparation for sleep state S5, which evaluates \_PTS.
+ * Returns an ACPI_STATUS. */
+UINT32 mikros_acpi_prepare_s5(void)
 {
-    ACPI_STATUS status = AcpiEnterSleepStatePrep(ACPI_STATE_S5);
-    if (ACPI_FAILURE(status)) {
-        return status;
-    }
+    return AcpiEnterSleepStatePrep(ACPI_STATE_S5);
+}
+
+/* Enters sleep state S5, which does not return when it works. Returns
+ * an ACPI_STATUS. */
+UINT32 mikros_acpi_enter_s5(void)
+{
     return AcpiEnterSleepState(ACPI_STATE_S5);
 }
 

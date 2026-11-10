@@ -1,13 +1,16 @@
 //! Powering the machine off and restarting it, and the power button,
 //! through the glue, with the resources of the registers that they write
 //! held from the start, and those of every operation region held before
-//! the device manager exits.
+//! the device manager exits. The preparation for S5 can run before the
+//! device manager exits, while resources can still be had; powering off
+//! then only enters S5.
 
+pub use crate::physical::keep_firmware_memory;
 use crate::sync::now;
 use crate::{AE_ERROR, AE_OK, Status, physical, ports};
 use alloc::vec::Vec;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use mikros_rt::sys;
 
 /// The reset control register, and the value that resets the machine.
@@ -24,7 +27,8 @@ const SPACE_MEMORY: u32 = 0;
 const SPACE_IO: u32 = 1;
 
 unsafe extern "C" {
-    fn mikros_acpi_power_off() -> Status;
+    fn mikros_acpi_prepare_s5() -> Status;
+    fn mikros_acpi_enter_s5() -> Status;
     fn mikros_acpi_reset_supported() -> u32;
     fn mikros_acpi_reset() -> Status;
     fn mikros_acpi_power_register(
@@ -127,11 +131,31 @@ pub fn hold_operation_regions() -> (usize, usize) {
     (held, failed)
 }
 
-/// Enters sleep state S5, which does not return: the status of the step
-/// that failed.
-pub fn power_off() -> Status {
+/// Whether `prepare_power_off` ran.
+static PREPARED: AtomicBool = AtomicBool::new(false);
+
+/// Runs the preparation for sleep state S5, which evaluates `\_PTS`, and
+/// returns its status. `power_off` then does not run it again, even when
+/// it failed.
+pub fn prepare_power_off() -> Status {
+    PREPARED.store(true, Ordering::Release);
     // SAFETY: the glue takes no arguments.
-    unsafe { mikros_acpi_power_off() }
+    unsafe { mikros_acpi_prepare_s5() }
+}
+
+/// Enters sleep state S5, which does not return, after running the
+/// preparation for it unless `prepare_power_off` ran: the status of the
+/// step that failed.
+pub fn power_off() -> Status {
+    if !PREPARED.load(Ordering::Acquire) {
+        // SAFETY: the glue takes no arguments.
+        let prepared = unsafe { mikros_acpi_prepare_s5() };
+        if prepared != AE_OK {
+            return prepared;
+        }
+    }
+    // SAFETY: the glue takes no arguments.
+    unsafe { mikros_acpi_enter_s5() }
 }
 
 /// Resets the machine through the FADT's reset register when the FADT

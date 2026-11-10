@@ -3,6 +3,8 @@
 //! device manager grants, shared with other drivers, and physical memory
 //! objects mapped uncached. A mapping that covers a later request is used
 //! for it too, so that tables mapped again and again cost one request.
+//! Memory inside one of the firmware memory resources kept at shutdown
+//! is mapped through that resource, without a request.
 
 use crate::sync::Locked;
 use crate::{AE_BAD_PARAMETER, AE_NO_MEMORY, AE_OK, Status};
@@ -16,6 +18,10 @@ const UNCACHED_DEVICE: u32 = 2;
 const PERM_READ: u32 = 1 << 0;
 const PERM_WRITE: u32 = 1 << 1;
 const PAGE: u64 = 4096;
+/// The information record of a resource: its kind, then its base at
+/// `0x08` and its size at `0x10`.
+const INFO_RESOURCE: u32 = 5;
+const INFO_RESOURCE_SIZE: usize = 0x18;
 
 /// Pages of physical memory mapped for ACPICA.
 struct Mapping {
@@ -26,11 +32,63 @@ struct Mapping {
     at: u64,
     /// The `map` calls not yet given back.
     users: u32,
-    _resource: OwnedHandle,
+    /// The resource requested for the mapping, none when a firmware
+    /// memory resource covers it.
+    _resource: Option<OwnedHandle>,
     _mem: OwnedHandle,
 }
 
 static MAPPINGS: Locked<Vec<Mapping>> = Locked::new(Vec::new());
+
+/// The firmware memory resources kept for the rest of the run, with their
+/// base and size.
+static FIRMWARE: Locked<Vec<(u64, u64, OwnedHandle)>> = Locked::new(Vec::new());
+
+/// The kind, base and size of `resource`.
+fn resource_info(resource: &OwnedHandle) -> Option<(u32, u64, u64)> {
+    let mut info = [0u8; INFO_RESOURCE_SIZE];
+    let mut len = 0;
+    // SAFETY: the pointers describe `info` and `len`.
+    let status = unsafe {
+        sys::object_get_info(
+            resource.raw(),
+            INFO_RESOURCE,
+            info.as_mut_ptr(),
+            info.len() as u64,
+            &mut len,
+        )
+    };
+    if status != mikros_rt::OK {
+        return None;
+    }
+    let u64_at = |at: usize| u64::from_le_bytes(info[at..at + 8].try_into().unwrap_or_default());
+    let kind = u32::from_le_bytes(info[0..4].try_into().unwrap_or_default());
+    Some((kind, u64_at(0x08), u64_at(0x10)))
+}
+
+/// Keeps the `MMIO` resources among `resources` for the rest of the run,
+/// so that `map` uses them for the memory inside them, and returns how
+/// many it kept. Others are dropped.
+pub fn keep_firmware_memory(resources: Vec<OwnedHandle>) -> usize {
+    let mut firmware = FIRMWARE.lock();
+    let before = firmware.len();
+    for resource in resources {
+        if let Some((KIND_MMIO, base, size)) = resource_info(&resource) {
+            firmware.push((base, size, resource));
+        }
+    }
+    firmware.len() - before
+}
+
+/// The raw handle of the firmware memory resource that covers `start` to
+/// `end`, if one does.
+fn firmware_resource(start: u64, end: u64) -> Option<u32> {
+    FIRMWARE
+        .lock()
+        .iter()
+        .find(|(base, size, _)| *base <= start && base.checked_add(*size).is_some_and(|e| end <= e))
+        .map(|(_, _, resource)| resource.raw())
+}
 
 /// Maps the `len` bytes at the physical address `physical`, and gives
 /// their address: None when the device manager or the kernel refused.
@@ -48,11 +106,17 @@ pub fn map(physical: u64, len: u64) -> Option<u64> {
         return Some(m.at + (physical - m.start));
     }
     let size = end - start;
-    let resource = crate::host().request(KIND_MMIO, start, size, true)?;
+    let (resource, raw) = match firmware_resource(start, end) {
+        Some(raw) => (None, raw),
+        None => {
+            let resource = crate::host().request(KIND_MMIO, start, size, true)?;
+            let raw = resource.raw();
+            (Some(resource), raw)
+        }
+    };
     let mut mem = 0;
     // SAFETY: the out pointer is valid for the call.
-    let created =
-        unsafe { sys::mem_create_physical(resource.raw(), start, size, UNCACHED_DEVICE, &mut mem) };
+    let created = unsafe { sys::mem_create_physical(raw, start, size, UNCACHED_DEVICE, &mut mem) };
     if created != mikros_rt::OK {
         return None;
     }
