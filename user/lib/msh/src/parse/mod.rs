@@ -27,7 +27,9 @@ impl fmt::Display for Error {
 type Result<T> = std::result::Result<T, Error>;
 
 /// The keywords that start a statement.
-const KEYWORDS: [&str; 2] = ["let", "return"];
+const KEYWORDS: [&str; 10] = [
+    "let", "if", "for", "while", "match", "fn", "param", "try", "use", "return",
+];
 
 /// Parses `source` into the statements of a block.
 pub fn parse(source: &str) -> Result<Block> {
@@ -216,6 +218,13 @@ impl Parser<'_> {
             }
         }
         Ok(Block { statements })
+    }
+
+    /// A block in braces.
+    fn block(&mut self) -> Result<Block> {
+        self.skip_spaces();
+        self.expect('{', "`{`")?;
+        self.statements(Some('}'))
     }
 
     fn statement(&mut self) -> Result<Statement> {

@@ -104,7 +104,7 @@ fn continues_lines() {
     );
     assert!(failure("echo \"open").incomplete);
     assert!(failure("ls |").incomplete);
-    assert!(failure("let x = [1").incomplete);
+    assert!(failure("if true {").incomplete);
     assert!(!failure("echo }").incomplete);
 }
 
@@ -257,6 +257,92 @@ fn reads_parentheses_as_expression_or_command() {
         panic!()
     };
     assert!(matches!(p.commands[0], Command::Expr(_)));
+}
+
+#[test]
+fn reads_conditions_as_expression_or_command() {
+    let StatementKind::If {
+        condition,
+        otherwise,
+        ..
+    } = one("if $n > 1 { a } else if grep -q x f { b } else { c }")
+    else {
+        panic!()
+    };
+    assert!(matches!(condition, Condition::Expr(_)));
+    let StatementKind::If { condition, .. } = &otherwise.unwrap().statements[0].kind else {
+        panic!()
+    };
+    assert!(matches!(condition, Condition::Command(_)));
+    assert!(matches!(
+        one("while test -f lock { sleep 1 }"),
+        StatementKind::While {
+            condition: Condition::Command(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn reads_loops_functions_params_try_and_use() {
+    let StatementKind::For { name, items, body } = one("for f in *.txt b {\n cat $f\n}") else {
+        panic!()
+    };
+    assert_eq!(name, "f");
+    assert!(matches!(items, Expr::Words(w) if w.len() == 2));
+    assert_eq!(body.statements.len(), 1);
+    assert!(matches!(
+        one("for x in $list { echo $x }"),
+        StatementKind::For {
+            items: Expr::Variable(_),
+            ..
+        }
+    ));
+    let StatementKind::Fn(f) = one("fn greet(name, --loud = false) { return \"hi\" }") else {
+        panic!()
+    };
+    assert_eq!(f.arguments, ["name"]);
+    assert_eq!(f.flags[0].0, "loud");
+    assert!(matches!(
+        f.body.statements[0].kind,
+        StatementKind::Return(Some(_))
+    ));
+    let StatementKind::Param(p) = one("param --count: int = 3") else {
+        panic!()
+    };
+    assert_eq!((p.name.as_str(), p.kind), ("count", ParamType::Int));
+    assert!(failure("param --x: thing").message.contains("thing"));
+    assert!(matches!(
+        one("try { rm x } catch e { echo $e.message }"),
+        StatementKind::Try { .. }
+    ));
+    assert!(matches!(one("use lib/util.msh"), StatementKind::Use(_)));
+    assert!(simple("rm x ?").propagate);
+}
+
+#[test]
+fn reads_match_and_patterns() {
+    let source = "match $v {\n 0 | 1 => { a }\n 2..10 => { b }\n [first ...rest] => { c }\n {name: n} if $n != '' => { d }\n _ => { e }\n}";
+    let StatementKind::Match { arms, .. } = one(source) else {
+        panic!()
+    };
+    assert_eq!(arms.len(), 5);
+    assert!(matches!(&arms[0].pattern, Pattern::Either(p) if p.len() == 2));
+    assert!(matches!(
+        arms[1].pattern,
+        Pattern::Range(Literal::Int(2), Literal::Int(10))
+    ));
+    assert!(
+        matches!(&arms[2].pattern, Pattern::List { items, rest: Some(r) } if items.len() == 1 && r == "rest")
+    );
+    assert!(matches!(&arms[3].pattern, Pattern::Record(f) if f[0].1 == Pattern::Bind("n".into())));
+    assert!(arms[3].guard.is_some());
+    assert_eq!(arms[4].pattern, Pattern::Any);
+    // `match` after `|` is a command.
+    let StatementKind::Pipeline(p) = one("ls | match 'a(.)'") else {
+        panic!()
+    };
+    assert_eq!(p.commands.len(), 2);
 }
 
 #[test]
