@@ -1,7 +1,10 @@
 //! The run of the test image that ends with the machine powered off: the
 //! test init serves `tests/power.img` with `test=power-off`, and once the
 //! service manager watches the power button and the power probe runs,
-//! the runner presses the button through QEMU's monitor. The service
+//! the runner presses the button through QEMU's monitor, again every
+//! `PRESS_WAIT` until the service manager logs that it was pressed: its
+//! connection reaches the ACPI server's events only once the server
+//! serves it, a little after the service manager logs that it watches. The service
 //! manager then stops every service and powers the machine off through
 //! the ACPI server, after which QEMU exits by itself. The device manager,
 //! which runs the PCI bus driver with the drivers of the disks, their
@@ -64,6 +67,10 @@ const PTS_TABLE: [u8; 73] = [
     0x54, 0x53, 0x01, 0x70, 0x68, 0x50, 0x54, 0x53, 0x42,
 ];
 const PANIC_LINE: &str = "KERNEL PANIC: ";
+/// How long the runner waits for the service manager to see a press of
+/// the button before it presses it again, and how often it presses.
+const PRESS_WAIT: Duration = Duration::from_secs(5);
+const PRESSES: u32 = 6;
 /// The device manager's lines once it got `TERM`, and once it removed
 /// the devices, and how it logs a device it added or removed.
 const STOPPING: &str = "device-manager: stopping, removing every device";
@@ -201,7 +208,16 @@ pub fn run(
         for line in READY {
             scenario::wait_for_line(&log, line, &mut qemu, deadline)?;
         }
-        scenario::monitor(&socket, "system_powerdown")?;
+        for press in 1..=PRESSES {
+            scenario::monitor(&socket, "system_powerdown")?;
+            let until = (Instant::now() + PRESS_WAIT).min(deadline);
+            match scenario::wait_for_line(&log, SHUTDOWN[0], &mut qemu, until) {
+                Ok(_) => break,
+                Err(_) if qemu.try_wait()?.is_some() => break,
+                Err(e) if press == PRESSES => return Err(e),
+                Err(_) => {}
+            }
+        }
         // QEMU exits by itself once the machine is off.
         loop {
             if let Some(status) = qemu.try_wait()? {
