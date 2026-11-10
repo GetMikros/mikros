@@ -325,6 +325,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-evdev"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-exfat"
 version = "0.0.0"
 dependencies = [
@@ -343,6 +347,14 @@ name = "mikros-gpt"
 version = "0.0.0"
 dependencies = [
  "mikros-fat",
+]
+
+[[package]]
+name = "mikros-inputdev"
+version = "0.0.0"
+dependencies = [
+ "mikros-evdev",
+ "mikros-rt",
 ]
 
 [[package]]
