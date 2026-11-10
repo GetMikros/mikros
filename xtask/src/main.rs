@@ -35,6 +35,7 @@ mod root_disk;
 mod run;
 mod rust_std;
 mod scenario;
+mod secure_boot;
 mod setup;
 mod symbolize;
 mod sysroot;
