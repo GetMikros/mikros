@@ -10515,25 +10515,24 @@ mod manager {
         mikros_test::exit_qemu(mikros_test::FAILED)
     }
 
-    /// The `console` scenario: serves `tests/console.img`, whose console
-    /// probe starts the text console in the session manager's place and
-    /// serves its logins, while the runner types a login and a line on
-    /// the keyboard; stops QEMU with `PASSED` once the probe passed, or
-    /// with `FAILED`.
+    /// The `console` scenario: serves `tests/console.img`, whose session
+    /// manager starts the text console, while the runner types bob's
+    /// login and then a line for the session shell, which checks its
+    /// session and exits with 0; stops QEMU with `PASSED` once the
+    /// session ended so, or with `FAILED`.
     pub fn console_scenario(s: &Startup) -> i64 {
         const SECONDS: i64 = 300;
         const EXPECTED: &[(&[u8], usize)] = &[
             (b"device-manager: released the kernel console", 1),
-            (b"console-probe: started the console", 1),
-            (b"console-probe: gave the seat", 1),
-            (b"console-probe: Login as sip", 1),
-            (b"console-probe: the console reported the cursor", 1),
-            (b"console-probe: read the typed line", 1),
-            (b"console-probe: ended the session", 1),
-            (b"console-probe: PASSED", 1),
+            (b"sessionmgr: started the console", 1),
+            (b"sessionmgr: gave the console the display", 1),
+            (b"sessionmgr: bob logged in", 1),
+            (b"exited with Some(0)", 1),
+            (b"sessionmgr: ended session", 1),
         ];
         const FAILED: &[&[u8]] = &[
-            b"console-probe: FAILED",
+            b"sessionmgr: starting",
+            b"sessionmgr: the console closed",
             b"left without a driver",
             b"did not start",
             b"declined",
@@ -10542,7 +10541,17 @@ mod manager {
             mikros_rt::log!(Error, "SCENARIO console: {} failed ({})", f.what, f.status);
             return 1;
         }
-        match device_manager_logs(s, b"tests/console.img", true, SECONDS, EXPECTED, FAILED) {
+        // The accounts service keeps its users under the root's /var.
+        let logged = device_manager_logs_with(
+            s,
+            b"tests/console.img",
+            true,
+            "root=bootfs",
+            SECONDS,
+            EXPECTED,
+            FAILED,
+        );
+        match logged {
             Ok(true) => {
                 mikros_rt::log!(Info, "SCENARIO console PASSED");
                 mikros_test::exit_qemu(mikros_test::PASSED)
@@ -10594,6 +10603,20 @@ mod manager {
         expected: &[(&[u8], usize)],
         failed: &[&[u8]],
     ) -> Result<bool> {
+        device_manager_logs_with(s, image, framebuffer, "", seconds, expected, failed)
+    }
+
+    /// As `device_manager_logs`, with the kernel command line
+    /// `command_line` in the process manager's `Start`.
+    fn device_manager_logs_with(
+        s: &Startup,
+        image: &[u8],
+        framebuffer: bool,
+        command_line: &str,
+        seconds: i64,
+        expected: &[(&[u8], usize)],
+        failed: &[&[u8]],
+    ) -> Result<bool> {
         // The processes of earlier tests may still log, so the lines
         // name what they are about.
         const ENDED: &[&[u8]] = &[
@@ -10604,7 +10627,7 @@ mod manager {
             b"service devicemgr exited",
             b"service devicemgr ended",
         ];
-        let (m, _init, reader, process) = services_from(s, image, framebuffer)?;
+        let (m, _init, reader, process) = services_from_with(s, image, framebuffer, command_line)?;
         let deadline = super::within(seconds);
         let mut seen = alloc::vec![0; expected.len()];
         let outcome = loop {

@@ -1,11 +1,11 @@
 //! The console run: the test init serves `tests/console.img` with
-//! `test=console`, on the test machine. The console probe in that image
-//! starts the text console in the session manager's place and gives it
-//! the display and the keyboards. The runner types a login through the
-//! QEMU monitor, which the probe accepts; then, once the probe has
-//! written to the terminal of the session, it checks that the screen
-//! shows text, and types a line that the probe reads. The test init
-//! stops QEMU through `isa-debug-exit` once the run passed or failed.
+//! `test=console`, on the test machine. The session manager in that
+//! image starts the text console and gives it the display and the
+//! keyboards. The runner types bob's login through the QEMU monitor;
+//! once the session manager started bob's session, it checks that the
+//! screen shows text, and types a line that the session shell reads.
+//! The test init stops QEMU through `isa-debug-exit` once the run passed
+//! or failed.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -16,14 +16,12 @@ use std::path::Path;
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-const SEAT: &str = "console-probe: gave the seat";
-const LOGIN: &str = "console-probe: Login as sip";
-const LINE: &str = "console-probe: waiting for a line";
+const SEAT: &str = "sessionmgr: gave the console the display";
+const LOGIN: &str = "sessionmgr: bob logged in";
 const PASSED: &str = "SCENARIO console PASSED";
-/// The keys of the login and of the line: the name, the password and
-/// `ls`, each ended by Enter.
-const NAME: &str = "s i p ret";
-const PASSWORD: &str = "s e c r e t ret";
+/// The keys of the login: bob's name and password, each ended by Enter.
+const NAME: &str = "b o b ret";
+const PASSWORD: &str = "b o b minus p a s s w o r d ret";
 /// How long the console has to open the devices it was given.
 const SETTLE: Duration = Duration::from_secs(3);
 
@@ -70,9 +68,9 @@ pub fn run(
         type_keys(&socket, NAME)?;
         type_keys(&socket, PASSWORD)?;
         scenario::wait_for_line(&log, LOGIN, &mut qemu, deadline)?;
-        scenario::wait_for_line(&log, LINE, &mut qemu, deadline)?;
-        // The display driver copies what changed after a frame's time.
-        std::thread::sleep(Duration::from_secs(1));
+        // The session shell writes its prompt, and the display driver
+        // copies what changed after a frame's time.
+        std::thread::sleep(Duration::from_secs(2));
         let screen = scenario::screen_dump(&socket, &dir.join("screen.ppm"))?;
         type_keys(&socket, "l s ret")?;
         loop {

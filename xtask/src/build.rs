@@ -1048,13 +1048,18 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let input_image = device_image("input.img", &[], &input_files)?;
             println!("built    {}", input_image.display());
             // The console run serves this image: the drivers and the log
-            // service of the input run, the terminal service, the text
-            // console with the libraries, keymaps and fonts it reads, and
-            // the console probe, which stands in for the session manager.
+            // service of the input run, the terminal service, the
+            // temporary file system and the accounts service with the
+            // test users and bob's home folder, the union service, the
+            // session manager, the text console with its program manifest
+            // and the libraries, keymaps and fonts it reads, and the
+            // session shell as the user's shell.
             let console = crate::rust_std::build("console", kind)?;
             println!("built    {}", console.display());
-            let console_probe = user_build("console-probe", kind)?;
-            println!("built    {}", console_probe.display());
+            let sessions = user_build("sessionmgr", kind)?;
+            println!("built    {}", sessions.display());
+            let session_shell = user_build("session-shell", kind)?;
+            println!("built    {}", session_shell.display());
             let mut console_files: Vec<(String, PathBuf)> = input_files
                 .iter()
                 .filter(|(name, _)| !name.contains("input-probe"))
@@ -1076,10 +1081,44 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/libxkbcommon.0.dlib".to_owned(),
                     xkbcommon.install.join("lib/libxkbcommon.0.13.2.dlib"),
                 ),
-                ("usr/bin/console-probe".to_owned(), console_probe.clone()),
                 (
-                    "usr/lib/services/console-probe.yaml".to_owned(),
-                    crate::workspace_root().join("user/tests/console-probe/console-probe.yaml"),
+                    "usr/lib/programs/system.console.yaml".to_owned(),
+                    crate::workspace_root().join("user/runtime/std/console/system.console.yaml"),
+                ),
+                ("usr/bin/tmpfs".to_owned(), tmpfs.clone()),
+                (
+                    "usr/lib/services/tmpfs.yaml".to_owned(),
+                    tmpfs_manifest.clone(),
+                ),
+                ("usr/bin/accounts".to_owned(), accounts.clone()),
+                (
+                    "usr/lib/services/accounts.yaml".to_owned(),
+                    accounts_manifest.clone(),
+                ),
+                ("var/lib/accounts/users".to_owned(), accounts_users(kind)?),
+                ("usr/bin/sessionmgr".to_owned(), sessions.clone()),
+                (
+                    "usr/lib/services/sessionmgr.yaml".to_owned(),
+                    crate::workspace_root().join("user/tests/session-shell/sessionmgr.yaml"),
+                ),
+                ("usr/bin/msh".to_owned(), session_shell.clone()),
+                ("usr/bin/union".to_owned(), union.clone()),
+                (
+                    "usr/lib/services/union.yaml".to_owned(),
+                    union_manifest.clone(),
+                ),
+                (
+                    "Apps/README".to_owned(),
+                    crate::workspace_root().join("user/tests/session-shell/system/Apps/README"),
+                ),
+                (
+                    "Libraries/README".to_owned(),
+                    crate::workspace_root()
+                        .join("user/tests/session-shell/system/Libraries/README"),
+                ),
+                (
+                    "Users/bob/Libraries/README".to_owned(),
+                    crate::workspace_root().join("user/tests/session-shell/home/Libraries/README"),
                 ),
             ]);
             for font in ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"] {
