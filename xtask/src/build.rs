@@ -1162,6 +1162,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/managed", managed.as_path()),
                 ("usr/bin/process-manager", manager.as_path()),
                 ("usr/bin/service-manager", services.as_path()),
+                // A dynamically linked program with its libraries and the
+                // dynamic linker, which the test machine's root partition
+                // gets with the rest of usr, and the nested systems' boot
+                // images lack: the bus restart runs start it from the root.
+                ("usr/bin/library-user", library_user.as_path()),
+                ("usr/lib/libgreet.1.dlib", greet.as_path()),
+                ("usr/lib/libnonote.1.dlib", no_note.as_path()),
+                ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
             ];
             // The time zones, which the test machine's root partition
             // gets with the rest of usr.

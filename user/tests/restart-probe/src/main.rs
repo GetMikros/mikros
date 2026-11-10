@@ -11,7 +11,11 @@
 //!   driver of a disk controller, among them the one of the root's disk.
 //!   Around each kill it writes and syncs part of a file on the root
 //!   before the kill and the rest after it, and the file must read back
-//!   as written.
+//!   as written. Then it starts a dynamically linked program that only the
+//!   root's `/usr` holds, with its dynamic linker and libraries: it
+//!   cannot itself, as its namespace comes from the boot file system, but
+//!   a copy that it starts, with the argument `DYNAMIC`, gets its
+//!   namespace from the root and can, and the program must pass.
 //! - As `system.acpi-restart-probe`, in the ACPI restart run, it kills
 //!   the ACPI server once the real-time clock's driver has published its
 //!   service, which must still read the clock afterwards.
@@ -25,11 +29,15 @@ use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::exec::{Executor, Reactor};
+use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{
     Filesystem, FilesystemAsyncClient, Node, NodeAsyncClient, OpenFlags, Rights,
 };
-use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient};
+use mikros_rt::interfaces::mikros::process::{
+    HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
+};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::time::{Rtc, RtcAsyncClient};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -56,6 +64,17 @@ const ACPI_PROBE: &str = "system.acpi-restart-probe";
 const DRIVER_PREFIX: &str = "system.driver.";
 const KILL: u32 = 9;
 const MS: i64 = 1_000_000;
+const FOREVER: i64 = i64::MAX;
+/// The probe's own binary, the argument that makes a copy of it start
+/// `LIBRARY_USER`, and that dynamically linked program, which the
+/// test machine's root partition holds with its libraries and the dynamic
+/// linker, and the probe's boot file system does not.
+const BINARY: &str = "/usr/bin/restart-probe";
+const DYNAMIC: &str = "dynamic";
+const LIBRARY_USER: &str = "/usr/bin/library-user";
+/// The user of the caller, for `Spawn`, and the rights of a handle copy.
+const CALLER_USER: u32 = u32::MAX;
+const SAME_RIGHTS: u32 = 1 << 31;
 /// How long the root may take to be published, the processor emulated,
 /// and how long the bus driver may take to run again.
 const ROOT_LIMIT: i64 = 240_000 * MS;
@@ -114,12 +133,17 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     if let Some(log) = log {
         mikros_rt::log::set_handle(log.handle.raw());
     }
+    let log = log.and_then(|log| duplicate(&log.handle));
     let header = managed.header;
+    let copy = arguments(&header.arguments).iter().any(|a| a == DYNAMIC);
     let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
     let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
+    if copy {
+        return executor.block_on(library_user(&launcher));
+    }
     let passed = match header.app_id == ACPI_PROBE {
         true => executor.block_on(acpi(&directory, &launcher, &reactor)),
-        false => executor.block_on(bus(&directory, &launcher, &reactor)),
+        false => executor.block_on(bus(&directory, &launcher, &reactor, log)),
     };
     if passed.is_some() {
         mikros_rt::log!(Info, "restart-probe: PASSED");
@@ -298,6 +322,7 @@ async fn bus(
     directory: &DirectoryAsyncClient,
     launcher: &LauncherAsyncClient,
     reactor: &Reactor,
+    log: Option<OwnedHandle>,
 ) -> Option<()> {
     let root = root(directory, reactor).await?;
     let (file, server) = endpoints::<Node>().ok()?;
@@ -359,5 +384,137 @@ async fn bus(
     if !matches!(root.unlink(FILE.into(), false).await, Ok(Ok(_))) {
         return failed("removing the file");
     }
-    Some(())
+    dynamic(launcher, log).await
+}
+
+/// Checks that this probe cannot start `LIBRARY_USER`, which its boot
+/// file system lacks, and that a copy of it started now, whose namespace
+/// comes from the root, starts it from the root's `/usr` and sees it
+/// pass. `log` goes to the copy.
+async fn dynamic(launcher: &LauncherAsyncClient, log: Option<OwnedHandle>) -> Option<()> {
+    if spawn(launcher, LIBRARY_USER, &[LIBRARY_USER], Vec::new()).await
+        != Err(Some(Status::NotFound))
+    {
+        return failed("finding the dynamic program only on the root");
+    }
+    let handles = log
+        .map(|handle| StartupHandle {
+            role: HandleRole::User,
+            id: LOG_ID,
+            handle,
+        })
+        .into_iter()
+        .collect();
+    let Ok(pid) = spawn(launcher, BINARY, &[BINARY, DYNAMIC], handles).await else {
+        return failed("starting a copy of the probe");
+    };
+    match exit_code(launcher, pid).await {
+        Some(0) => {
+            mikros_rt::log!(Info, "restart-probe: ran {LIBRARY_USER} from the root");
+            Some(())
+        }
+        code => {
+            mikros_rt::log!(Error, "restart-probe: the copy ended with {code:?}");
+            failed("running the dynamic program from the root")
+        }
+    }
+}
+
+/// As the copy: starts `LIBRARY_USER` and gives 0 once it exited with 0.
+async fn library_user(launcher: &LauncherAsyncClient) -> i64 {
+    let pid = match spawn(launcher, LIBRARY_USER, &[LIBRARY_USER], Vec::new()).await {
+        Ok(pid) => pid,
+        Err(status) => {
+            mikros_rt::log!(
+                Error,
+                "restart-probe: starting {LIBRARY_USER} failed: {status:?}"
+            );
+            return 1;
+        }
+    };
+    match exit_code(launcher, pid).await {
+        Some(0) => 0,
+        code => {
+            mikros_rt::log!(Error, "restart-probe: {LIBRARY_USER} ended with {code:?}");
+            2
+        }
+    }
+}
+
+/// Starts the program at `path`, resolved in the caller's namespace, with
+/// `arguments` and `handles`, as the caller's app and user.
+async fn spawn(
+    launcher: &LauncherAsyncClient,
+    path: &str,
+    arguments: &[&str],
+    handles: Vec<StartupHandle>,
+) -> Result<u32, Option<Status>> {
+    let request = SpawnRequest {
+        path: path.into(),
+        arguments: argument_memory(arguments).ok_or(None)?,
+        handles,
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+    };
+    match launcher.spawn(request).await {
+        Ok(Ok(spawned)) => Ok(spawned.pid),
+        Ok(Err(status)) => Err(Some(status)),
+        Err(_) => Err(None),
+    }
+}
+
+/// The exit code of child `pid`, once it exits.
+async fn exit_code(launcher: &LauncherAsyncClient, pid: u32) -> Option<i64> {
+    let waited = launcher.wait(pid as i32, WaitOptions(0), FOREVER).await;
+    let status = waited.ok()?.ok()?.status;
+    (status.kind == StatusKind::Exited).then_some(status.exit_code)
+}
+
+/// A memory object of `arguments`: their count, no environment, and each
+/// ended by a zero byte.
+fn argument_memory(arguments: &[&str]) -> Option<OwnedHandle> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(arguments.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    for argument in arguments {
+        bytes.extend_from_slice(argument.as_bytes());
+        bytes.push(0);
+    }
+    let mut mem = 0;
+    // SAFETY: the out pointer is valid for the call.
+    if unsafe { sys::mem_create(4096, 0, &mut mem) } != mikros_rt::OK {
+        return None;
+    }
+    // SAFETY: the kernel just created the handle for us.
+    let mem = unsafe { OwnedHandle::from_raw(mem) };
+    // SAFETY: the pointer describes `bytes`.
+    let written = unsafe { sys::mem_write(mem.raw(), 0, bytes.as_ptr(), bytes.len() as u64) };
+    (written == mikros_rt::OK).then_some(mem)
+}
+
+/// The arguments in the memory object `mem`, as `argument_memory` lays
+/// them out; none when they cannot be read.
+fn arguments(mem: &OwnedHandle) -> Vec<String> {
+    let mut bytes = alloc::vec![0u8; 4096];
+    // SAFETY: the pointer describes `bytes`.
+    let read = unsafe { sys::mem_read(mem.raw(), 0, bytes.as_mut_ptr(), bytes.len() as u64) };
+    if read != mikros_rt::OK {
+        return Vec::new();
+    }
+    let count = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    bytes[8..]
+        .split(|&b| b == 0)
+        .take(count)
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect()
+}
+
+/// A copy of `handle` with the same rights.
+fn duplicate(handle: &OwnedHandle) -> Option<OwnedHandle> {
+    let mut out = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::handle_duplicate(handle.raw(), SAME_RIGHTS, &mut out) };
+    // SAFETY: the kernel just created the handle for us.
+    (status == mikros_rt::OK).then(|| unsafe { OwnedHandle::from_raw(out) })
 }

@@ -9,3 +9,9 @@ boot_handles: [log_manage]
 # To reach the root file system's service, and to kill the PCI bus
 # driver.
 permissions: [filesystem.mount, process.signal_any]
+# The system's programs and libraries: the boot file system's for the
+# probe, which starts before the root, and the root's for the copy that
+# it starts once the root is there, which starts a program from it.
+namespace:
+  - path: /usr
+    rights: rx
