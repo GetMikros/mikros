@@ -1,0 +1,10 @@
+// MIKSPEC-0025.R55
+
+library mikros.driver;
+using mikros.base;
+
+type ShutdownKind = enum : u32 { POWER_OFF = 1; RESTART = 2; };
+
+protocol Shutdown {
+    @1 SetKind(kind ShutdownKind) -> ();
+};

@@ -3,6 +3,7 @@
 //! its manifest names: listing the removable disks, and ejecting one by
 //! removing every device below it.
 
+use crate::shutdown;
 use crate::supervise::{self, EJECT_STOP_LIMIT, Manager};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -21,14 +22,21 @@ const DISK: &str = "storage:disk";
 const REMOVABLE: &str = "removable";
 const SERIAL: &str = "serial";
 
-/// Serves the provider `end` until it closes: each connection for the
-/// protocol, without an instance name, gets `Removal`. Others are
-/// dropped, which closes them.
+/// Serves the provider `end` until it closes: each connection without an
+/// instance name gets `Removal` for this protocol, and
+/// `mikros.driver.Shutdown` for that one. Others are dropped, which
+/// closes them.
 pub async fn serve(m: Rc<Manager>, end: ServerEnd<Provider>) {
     let provider = ProviderAsyncServer::new(end, m.reactor.clone());
     while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
-        if c.protocol == PROTOCOL && c.instance.is_none() {
+        if c.instance.is_some() {
+            continue;
+        }
+        if c.protocol == PROTOCOL {
             let connection = serve_removal(m.clone(), ServerEnd::new(c.server));
+            m.spawner.spawn(connection);
+        } else if c.protocol == shutdown::PROTOCOL {
+            let connection = shutdown::serve_kind(m.clone(), ServerEnd::new(c.server));
             m.spawner.spawn(connection);
         }
     }

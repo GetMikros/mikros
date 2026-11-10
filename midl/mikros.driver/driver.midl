@@ -1,4 +1,4 @@
-// MIKSPEC-0025.R44
+// MIKSPEC-0025.R53
 
 library mikros.driver;
 using mikros.base;
@@ -25,7 +25,9 @@ protocol Driver {
     @3 ResetChild(device u64) -> () error base.Status;
     @4 ConnectChild(device u64, bus handle<Channel>, dma bool) -> () error base.Status;
     @5 Reconnect(bus handle<Channel>) -> () error base.Status;
-    @6 PrepareShutdown() -> () error base.Status;
+    @6 PrepareShutdown(power_off bool,
+                       firmware_memory vector<handle<Resource>, 48>)
+        -> () error base.Status;
 };
 
 protocol DeviceManager {

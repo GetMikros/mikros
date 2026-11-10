@@ -10,6 +10,8 @@ stop_timeout: 600
 provides:
   - protocol: mikros.driver.Removal
     permission: files.volumes
+  - protocol: mikros.driver.Shutdown
+    permission: power.control
 namespace:
   - path: /usr/lib/drivers
     rights: rx

@@ -55,6 +55,12 @@ pub struct Manager {
     pub profiles: Profiles,
     pub reactor: Reactor,
     pub spawner: Spawner,
+    /// The `AcpiNvs` and `Reserved` ranges of the memory map, as start
+    /// and size, adjacent ones merged, in ascending order.
+    pub firmware_memory: Vec<(u64, u64)>,
+    /// Whether the last kind of shutdown set through
+    /// `mikros.driver.Shutdown` was a power-off.
+    pub power_off: Cell<bool>,
 }
 
 /// Something that happens once, which tasks can wait for.

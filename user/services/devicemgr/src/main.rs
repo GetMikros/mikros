@@ -73,6 +73,17 @@ const FRAMEBUFFER: usize = 0x10;
 const CMDLINE_OFFSET: usize = 0x48;
 const CMDLINE_LEN: usize = 0x4C;
 const CMDLINE_MAX: usize = 4096;
+/// Where the header gives the memory map's offset and entry count, the
+/// size of an entry, the offsets of an entry's start, page count and
+/// kind, and the kinds `AcpiNvs` and `Reserved`.
+const MEMORY_MAP_OFFSET: usize = 0x50;
+const MEMORY_MAP_COUNT: usize = 0x54;
+const MAP_ENTRY_SIZE: usize = 24;
+const ENTRY_PAGES: usize = 0x08;
+const ENTRY_KIND: usize = 0x10;
+const KIND_ACPI_NVS: u32 = 8;
+const KIND_RESERVED: u32 = 13;
+const PAGE_SIZE: u64 = 4096;
 const KIND_MMIO: u32 = 1;
 const SHARED: u32 = 1 << 0;
 /// The configuration space of one bus, in an ECAM range.
@@ -114,6 +125,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let command_line = match (&info_memory, &info) {
         (Some(memory), Some(header)) => command_line(memory, header),
         _ => String::new(),
+    };
+    let firmware_memory = match (&info_memory, &info) {
+        (Some(memory), Some(header)) => firmware_memory(memory, header),
+        _ => Vec::new(),
     };
     let mut devices = Devices::new();
     let has_framebuffer = info
@@ -184,6 +199,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         profiles: cache::Profiles::new(&command_line),
         reactor,
         spawner: spawner.clone(),
+        firmware_memory,
+        power_off: core::cell::Cell::new(false),
     });
     spawner.spawn(shutdown::watch(manager.clone()));
     match provider {
@@ -296,6 +313,45 @@ fn command_line(mem: &OwnedHandle, header: &[u8; INFO_HEADER_SIZE]) -> String {
         return String::new();
     }
     String::from_utf8(bytes).unwrap_or_default()
+}
+
+/// The ranges of the memory map in the platform information `mem` with
+/// the header `header` whose kind is `AcpiNvs` or `Reserved`, as start
+/// and size, in ascending order, with ranges that touch merged. Empty
+/// when the map cannot be read.
+fn firmware_memory(mem: &OwnedHandle, header: &[u8; INFO_HEADER_SIZE]) -> Vec<(u64, u64)> {
+    let offset = u64::from(u32_at(header, MEMORY_MAP_OFFSET));
+    let count = u32_at(header, MEMORY_MAP_COUNT) as usize;
+    let mut entries = vec![0u8; count * MAP_ENTRY_SIZE];
+    // SAFETY: the pointer describes `entries`.
+    let status = unsafe {
+        sys::mem_read(
+            mem.raw(),
+            offset,
+            entries.as_mut_ptr(),
+            entries.len() as u64,
+        )
+    };
+    if status != mikros_rt::OK {
+        return Vec::new();
+    }
+    let mut ranges: Vec<(u64, u64)> = entries
+        .chunks_exact(MAP_ENTRY_SIZE)
+        .filter(|e| matches!(u32_at(e, ENTRY_KIND), KIND_ACPI_NVS | KIND_RESERVED))
+        .filter_map(|e| {
+            let size = u64_at(e, ENTRY_PAGES).checked_mul(PAGE_SIZE)?;
+            (size != 0).then_some((u64_at(e, 0), size))
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, size) in ranges {
+        match merged.last_mut() {
+            Some((last, len)) if *last + *len == start => *len += size,
+            _ => merged.push((start, size)),
+        }
+    }
+    merged
 }
 
 /// Removes the `USER` startup handle with `id` from `handles`.

@@ -1,7 +1,9 @@
 //! Stopping the device manager: on `TERM`, which the service manager
 //! sends to stop it, every device but the ACPI device is removed,
 //! children before their parents, the ACPI server prepares for power-off
-//! and restart, and the device manager then exits.
+//! and restart, and the device manager then exits. Before that, the
+//! service manager tells it through `mikros.driver.Shutdown` whether the
+//! machine is to power off.
 
 use crate::supervise::{self, EJECT_STOP_LIMIT, Manager};
 use alloc::rc::Rc;
@@ -9,6 +11,10 @@ use alloc::vec::Vec;
 use core::future::{Future, poll_fn};
 use core::pin::pin;
 use core::task::Poll;
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::mikros::driver::{
+    Shutdown, ShutdownAsyncServer, ShutdownKind, ShutdownRequest, ShutdownSetKindResponse,
+};
 use mikros_rt::sys;
 
 /// The mask bit of `TERM`, signal 15.
@@ -20,6 +26,52 @@ const POLL: i64 = 100_000_000;
 const ACPI: &str = "platform:acpi";
 /// How long the ACPI server has to prepare for power-off and restart.
 const PREPARE_LIMIT: i64 = 60_000_000_000;
+/// The protocol that sets the kind of shutdown.
+pub const PROTOCOL: &str = "mikros.driver.Shutdown";
+/// The most firmware memory ranges given to the ACPI server.
+const FIRMWARE_RANGES_MAX: usize = 48;
+const KIND_MMIO: u32 = 1;
+
+/// Serves `mikros.driver.Shutdown` on `end` until it closes: `SetKind`
+/// records whether the machine is to power off, which `PrepareShutdown`
+/// passes on. The directory has checked the caller's permission.
+pub async fn serve_kind(m: Rc<Manager>, end: ServerEnd<Shutdown>) {
+    let server = ShutdownAsyncServer::new(end, m.reactor.clone());
+    while let Ok(request) = server.next().await {
+        match request {
+            ShutdownRequest::SetKind(request, responder) => {
+                m.power_off
+                    .set(matches!(request.kind, ShutdownKind::PowerOff));
+                let _ = responder.reply(server.server(), ShutdownSetKindResponse {});
+            }
+        }
+    }
+}
+
+/// `MMIO` resources, created with `SHARED`, for the firmware memory
+/// ranges, at most `FIRMWARE_RANGES_MAX` in ascending order. Each range
+/// that the kernel refuses, and each beyond the most, is logged and left
+/// out.
+fn firmware_memory(m: &Manager) -> Vec<OwnedHandle> {
+    let mut resources = Vec::new();
+    for &(base, size) in &m.firmware_memory {
+        if resources.len() == FIRMWARE_RANGES_MAX {
+            mikros_rt::log!(
+                Warning,
+                "device-manager: firmware memory at {base:#x}, {size:#x} long, is beyond the {FIRMWARE_RANGES_MAX} ranges given"
+            );
+            continue;
+        }
+        match m.starter.request(KIND_MMIO, base, size, true) {
+            Ok(resource) => resources.push(resource),
+            Err(status) => mikros_rt::log!(
+                Warning,
+                "device-manager: firmware memory at {base:#x}, {size:#x} long, refused: {status:?}"
+            ),
+        }
+    }
+    resources
+}
 
 /// Blocks `TERM` for the calling thread, the device manager's only one,
 /// so that it stays pending for `watch` instead of terminating the
@@ -42,7 +94,8 @@ fn take_term() -> bool {
 /// `Stop` before it is terminated. Of a `platform:acpi` device, only the
 /// devices below it are removed: it and its driver, the ACPI server,
 /// stay, so that the machine can still be powered off or restarted
-/// through it. The ACPI server is then called `PrepareShutdown`, and has
+/// through it. The ACPI server is then called `PrepareShutdown`, with
+/// whether the machine is to power off and the firmware memory, and has
 /// `PREPARE_LIMIT` to reply, while the device manager still grants its
 /// resources. Then the device manager exits.
 pub async fn watch(m: Rc<Manager>) {
@@ -80,8 +133,10 @@ pub async fn watch(m: Rc<Manager>) {
 }
 
 /// Calls `PrepareShutdown` on the driver of the ACPI device, if it has
-/// one, and waits for the reply for at most `PREPARE_LIMIT`, serving the
-/// driver's requests meanwhile, as the device manager's other tasks do.
+/// one, with whether the last kind of shutdown set was a power-off and
+/// the resources of the firmware memory, and waits for the reply for at
+/// most `PREPARE_LIMIT`, serving the driver's requests meanwhile, as the
+/// device manager's other tasks do.
 async fn prepare_acpi(m: &Manager) {
     let client = m
         .devices
@@ -92,9 +147,10 @@ async fn prepare_acpi(m: &Manager) {
     let Some(client) = client else {
         return;
     };
+    let resources = firmware_memory(m);
     let deadline = supervise::now().saturating_add(PREPARE_LIMIT);
     let (mut call, mut limit) = (
-        pin!(client.prepare_shutdown()),
+        pin!(client.prepare_shutdown(m.power_off.get(), resources)),
         pin!(m.reactor.sleep_until(deadline)),
     );
     let reply = poll_fn(|cx| {
