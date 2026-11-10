@@ -21,7 +21,7 @@ pub const NAME: &str = "permissions";
 const PROTOCOL: &str = "mikros.permissions.Broker";
 /// The app ID of the process manager, and the permissions the service
 /// manager registers for it.
-const PROCESS_MANAGER: &str = "system.process-manager";
+const PROCESS_MANAGER: &str = "system.processmgr";
 const PROCESS_MANAGER_PERMISSIONS: &[&str] = &[
     "device.registry",
     "filesystem.mount",

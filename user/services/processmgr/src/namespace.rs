@@ -47,7 +47,7 @@ use mikros_rt::interfaces::mikros::process::NamespaceEntry;
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, DirectoryAsyncClient, DirectoryEvent,
 };
-use process_manager::bootfs::{Fs, ItemKind};
+use processmgr::bootfs::{Fs, ItemKind};
 
 /// The accounts service's data directory, which no other process's
 /// manifest entry may be, lie in, or hold.

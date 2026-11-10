@@ -21,8 +21,8 @@ use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, ProcessDirectoryAsyncClient,
 };
 use mikros_rt::sys;
-use process_manager::bootfs::Fs;
-use process_manager::devfs::Dev;
+use processmgr::bootfs::Fs;
+use processmgr::devfs::Dev;
 
 const SAME_RIGHTS: u32 = 1 << 31;
 const INFO_BASIC: u32 = 1;

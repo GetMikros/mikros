@@ -531,7 +531,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "process-manager"
+name = "processmgr"
 version = "0.0.0"
 dependencies = [
  "mikros-bootfs",
@@ -607,7 +607,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "service-manager"
+name = "servicemgr"
 version = "0.0.0"
 dependencies = [
  "mikros-manifest",
@@ -648,7 +648,7 @@ dependencies = [
  "mikros-loader",
  "mikros-rt",
  "mikros-test",
- "process-manager",
+ "processmgr",
 ]
 
 [[package]]

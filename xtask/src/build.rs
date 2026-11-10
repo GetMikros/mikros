@@ -121,9 +121,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         BootImage::System => {
             let init = user_build("init", kind)?;
             println!("built    {}", init.display());
-            let manager = user_build("process-manager", kind)?;
+            let manager = user_build("processmgr", kind)?;
             println!("built    {}", manager.display());
-            let services = user_build("service-manager", kind)?;
+            let services = user_build("servicemgr", kind)?;
             println!("built    {}", services.display());
             let broker = user_build("permissions-broker", kind)?;
             println!("built    {}", broker.display());
@@ -185,8 +185,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let pci_bus_manifest = crate::workspace_root().join("user/drivers/pci-bus/driver.yaml");
             let members = [
                 ("init", init.as_path()),
-                ("usr/bin/process-manager", manager.as_path()),
-                ("usr/bin/service-manager", services.as_path()),
+                ("usr/bin/processmgr", manager.as_path()),
+                ("usr/bin/servicemgr", services.as_path()),
                 ("usr/bin/permissions-broker", broker.as_path()),
                 (
                     "usr/lib/services/permissions.yaml",
@@ -276,9 +276,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", pie.display());
             let managed = user_build("managed", kind)?;
             println!("built    {}", managed.display());
-            let manager = user_build("process-manager", kind)?;
+            let manager = user_build("processmgr", kind)?;
             println!("built    {}", manager.display());
-            let services = user_build("service-manager", kind)?;
+            let services = user_build("servicemgr", kind)?;
             println!("built    {}", services.display());
             let probe = user_build("launcher-probe", kind)?;
             println!("built    {}", probe.display());
@@ -389,7 +389,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "launcher.img",
                 &[
-                    ("usr/bin/service-manager", probe.as_path()),
+                    ("usr/bin/servicemgr", probe.as_path()),
                     ("usr/bin/probe", probe.as_path()),
                     ("usr/bin/hello", hello.as_path()),
                     ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
@@ -453,7 +453,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let plan = crate::workspace_root().join("target/ported/port-tests.plan");
             let mut members =
                 crate::port_tests::members(&crate::ports::XKBCOMMON, &xkbcommon, &plan)?;
-            members.push(("usr/bin/service-manager".into(), runner));
+            members.push(("usr/bin/servicemgr".into(), runner));
             members.push(("usr/lib/ld-mikros.dlib".into(), dynamic_linker.clone()));
             let members: Vec<(&str, &Path)> = members
                 .iter()
@@ -471,7 +471,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "broker.img",
                 &[
-                    ("usr/bin/service-manager", broker_probe.as_path()),
+                    ("usr/bin/servicemgr", broker_probe.as_path()),
                     ("usr/bin/permissions-broker", broker.as_path()),
                 ],
             )?;
@@ -495,7 +495,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "services.img",
                 &[
-                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permissions-broker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
@@ -543,7 +543,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "tmpfs.img",
                 &[
-                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permissions-broker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
@@ -580,7 +580,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "log.img",
                 &[
-                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permissions-broker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
@@ -610,7 +610,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "time.img",
                 &[
-                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permissions-broker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
@@ -645,7 +645,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "namespaces.img",
                 &[
-                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permissions-broker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
@@ -688,7 +688,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "accounts.img",
                 &[
-                    ("usr/bin/service-manager", services.as_path()),
+                    ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permissions-broker", broker.as_path()),
                     (
                         "usr/lib/services/permissions.yaml",
@@ -766,7 +766,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                                 more: &[(String, PathBuf)]|
              -> Result<PathBuf> {
                 let mut members: Vec<(String, PathBuf)> = vec![
-                    ("usr/bin/service-manager".into(), services.clone()),
+                    ("usr/bin/servicemgr".into(), services.clone()),
                     ("usr/bin/permissions-broker".into(), broker.clone()),
                     (
                         "usr/lib/services/permissions.yaml".into(),
@@ -1164,8 +1164,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/debuggee", debuggee.as_path()),
                 ("tests/pie", pie.as_path()),
                 ("tests/managed", managed.as_path()),
-                ("usr/bin/process-manager", manager.as_path()),
-                ("usr/bin/service-manager", services.as_path()),
+                ("usr/bin/processmgr", manager.as_path()),
+                ("usr/bin/servicemgr", services.as_path()),
                 // A dynamically linked program with its libraries and the
                 // dynamic linker, which the test machine's root partition
                 // gets with the rest of usr, and the nested systems' boot

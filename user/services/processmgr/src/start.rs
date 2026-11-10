@@ -17,7 +17,7 @@ use mikros_rt::interfaces::mikros::process::{
 };
 use mikros_rt::interfaces::mikros::service::Directory;
 use mikros_rt::sys::{self, Handle};
-use process_manager::bootfs::{Executable, Fs};
+use processmgr::bootfs::{Executable, Fs};
 
 const PAGE_SIZE: u64 = 4096;
 const PERM_READ: u32 = 1 << 0;

@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 
 /// The app ID of the service manager, which the broker trusts from its
 /// start.
-pub const SERVICE_MANAGER: &str = "system.service-manager";
+pub const SERVICE_MANAGER: &str = "system.servicemgr";
 /// The system permissions the service manager holds from the start.
 pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
     "process.set_identity",

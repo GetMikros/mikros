@@ -8708,7 +8708,7 @@ mod manager {
     }
 
     fn start(s: &Startup) -> Result<Manager> {
-        let file = boot_file(s, b"usr/bin/process-manager")?;
+        let file = boot_file(s, b"usr/bin/processmgr")?;
         let fail = |e| Failure {
             what: "loading the process manager",
             status: match e {
@@ -10484,7 +10484,7 @@ mod bootfs {
     use mikros_rt::interfaces::mikros::fs::*;
     use mikros_rt::sys;
     use mikros_test::{Failure, Result, check, ensure};
-    use process_manager::bootfs::Fs;
+    use processmgr::bootfs::Fs;
 
     /// The first four bytes that the helper thread read from a paged
     /// object, and its status.
@@ -10506,7 +10506,7 @@ mod bootfs {
         }
         unreachable!("thread_exit returned");
     }
-    const MANAGER: &str = "usr/bin/process-manager";
+    const MANAGER: &str = "usr/bin/processmgr";
 
     fn failed(what: &'static str) -> Failure {
         Failure { what, status: 0 }

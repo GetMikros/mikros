@@ -203,7 +203,7 @@ async fn usr(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
         .ok()?;
     expect(kind == NodeType::Directory)?;
     // The system image holds the boot image's system.
-    let (manager, kind) = open(root, "usr/bin/process-manager", OpenFlags(0), reactor)
+    let (manager, kind) = open(root, "usr/bin/processmgr", OpenFlags(0), reactor)
         .await
         .ok()?;
     expect(kind == NodeType::File)?;

@@ -1,4 +1,4 @@
 app_id: system.prog
 binary: /usr/bin/probe
 spawned_by:
-  - system.service-manager
+  - system.servicemgr

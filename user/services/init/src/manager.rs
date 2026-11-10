@@ -18,7 +18,7 @@ const PERM_READ: u32 = 1 << 0;
 /// The receivers' bindings reduce them to the rights they declare.
 const SAME_RIGHTS: u32 = 1 << 31;
 /// The boot image member of the process manager.
-const PROCESS_MANAGER: &[u8] = b"usr/bin/process-manager";
+const PROCESS_MANAGER: &[u8] = b"usr/bin/processmgr";
 
 /// A step that failed, and why.
 pub struct Failure {
@@ -196,7 +196,7 @@ fn member(s: &Startup, name: &[u8]) -> Result<Vec<u8>> {
     // SAFETY: nothing refers to the mapping any more.
     unsafe { sys::vm_unmap(s.process, at, size) };
     file.ok_or(Failure {
-        what: "finding usr/bin/process-manager",
+        what: "finding usr/bin/processmgr",
         why: Why::Missing,
     })
 }
@@ -239,7 +239,7 @@ fn load(
         shared: shared.raw(),
         private: &private,
     };
-    let name = b"process-manager";
+    let name = b"processmgr";
     let (mut process, mut thread) = (0, 0);
     // SAFETY: the pointers describe `name` and `process`.
     status("creating the process manager", unsafe {

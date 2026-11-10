@@ -236,7 +236,7 @@ async fn prompter(end: ServerEnd<Prompter>, reactor: Reactor, allowed: bool) {
     }
 }
 
-const MANAGER: &str = "system.service-manager";
+const MANAGER: &str = "system.servicemgr";
 const ADMIN: &str = "test.admin";
 const APP: &str = "test.app";
 

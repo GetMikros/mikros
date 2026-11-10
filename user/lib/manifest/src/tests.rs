@@ -256,7 +256,7 @@ namespace:
   - path: /usr
     rights: rx
 spawned_by:
-  - system.service-manager
+  - system.servicemgr
 ";
 
 #[test]
@@ -273,7 +273,7 @@ fn reads_a_program_manifest() {
             rights: "rx".into()
         }]
     );
-    assert_eq!(p.spawned_by, ["system.service-manager"]);
+    assert_eq!(p.spawned_by, ["system.servicemgr"]);
     assert!(read.unknown.is_empty());
 }
 

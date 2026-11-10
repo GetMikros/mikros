@@ -59,7 +59,7 @@ const EXEC_WAIT_NS: i64 = 60_000_000_000;
 const PROBE: &str = "/usr/bin/probe";
 /// The probe's own path, as init starts it in place of the service
 /// manager; the image holds the probe there too.
-const SELF_PATH: &str = "/usr/bin/service-manager";
+const SELF_PATH: &str = "/usr/bin/servicemgr";
 /// A static C program, which prints a greeting for its argument.
 const HELLO: &str = "/usr/bin/hello";
 /// The same program linked with the shared C library.

@@ -19,16 +19,16 @@ use mikros_rt::interfaces::mikros::service::{
 };
 use mikros_rt::interfaces::mikros::time::{Clock, ClockAsyncClient};
 use mikros_rt::sys;
-use process_manager::bootfs::Fs;
+use processmgr::bootfs::Fs;
 
 const SAME_RIGHTS: u32 = 1 << 31;
 /// The time service's protocol.
 const CLOCK: &str = "mikros.time.Clock";
 /// The service manager's program, which init's namespace resolves.
-const SERVICE_MANAGER_PATH: &str = "/usr/bin/service-manager";
-const SERVICE_MANAGER_APP: &str = "system.service-manager";
+const SERVICE_MANAGER_PATH: &str = "/usr/bin/servicemgr";
+const SERVICE_MANAGER_APP: &str = "system.servicemgr";
 /// The identity of the process manager's own directory.
-const PROCESS_MANAGER_APP: &str = "system.process-manager";
+const PROCESS_MANAGER_APP: &str = "system.processmgr";
 /// The IDs of the boot handles that init passes to the service manager.
 const BOOT_HANDLE_IDS: core::ops::RangeInclusive<u32> = 1..=5;
 /// The `USER` startup handle ID of the service manager's control
