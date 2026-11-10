@@ -11,4 +11,6 @@ pub mod parser;
 #[cfg(test)]
 mod parser_tests;
 pub mod screen;
+#[cfg(test)]
+mod screen_tests;
 pub mod sgr;
