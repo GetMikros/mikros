@@ -2,8 +2,7 @@
 //! and whose slave side is served through `mikros.terminal.Terminal`,
 //! each request naming its terminal by a token that the service made.
 //! `Factory.Open` makes a terminal and returns its master stream, a
-//! `Master` connection for its window size, and its token. `Terminal`
-//! is not served yet.
+//! `Master` connection for its window size, and its token.
 
 #![no_std]
 #![no_main]
@@ -12,6 +11,7 @@ extern crate alloc;
 
 mod jobs;
 mod notify;
+mod serve;
 mod tty;
 
 use alloc::collections::BTreeMap;
@@ -35,6 +35,7 @@ use tty::Tty;
 mikros_rt::raw_main!(main);
 
 const FACTORY: &str = "mikros.terminal.Factory";
+const TERMINAL: &str = "mikros.terminal.Terminal";
 /// `object_get_info`'s basic topic, and the rights of a token.
 const INFO_BASIC: u32 = 1;
 const TOKEN_RIGHTS: u32 = 1 << 0 | 1 << 1 | 1 << 9;
@@ -133,8 +134,15 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
             // Other protocols and named instances are not ours; dropping
             // the server end closes the connection.
-            if c.instance.is_none() && c.protocol == FACTORY {
-                spawner.spawn(serve_factory(service.clone(), ServerEnd::new(c.server)));
+            match (c.instance.is_none(), c.protocol.as_str()) {
+                (true, FACTORY) => {
+                    spawner.spawn(serve_factory(service.clone(), ServerEnd::new(c.server)))
+                }
+                (true, TERMINAL) => {
+                    let end = ServerEnd::new(c.server);
+                    spawner.spawn(serve::serve(service.clone(), end, c.client));
+                }
+                _ => {}
             }
         }
     });
