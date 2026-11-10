@@ -8,3 +8,6 @@ extern crate alloc;
 pub mod descriptor;
 #[cfg(test)]
 mod descriptor_tests;
+pub mod mapping;
+#[cfg(test)]
+mod mapping_tests;

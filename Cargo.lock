@@ -826,6 +826,9 @@ dependencies = [
 [[package]]
 name = "mikros-hid"
 version = "0.0.0"
+dependencies = [
+ "mikros-evdev",
+]
 
 [[package]]
 name = "mikros-logstore"
