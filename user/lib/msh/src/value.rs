@@ -586,3 +586,5 @@ pub fn prompt_text(value: &Value) -> String {
     out
 }
 
+#[cfg(test)]
+mod tests;
