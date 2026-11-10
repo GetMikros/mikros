@@ -459,6 +459,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikros-tty"
+version = "0.0.0"
+
+[[package]]
 name = "mikros-tz"
 version = "0.0.0"
 
@@ -686,6 +690,14 @@ name = "syscall-table"
 version = "0.0.0"
 dependencies = [
  "yaml-rust2",
+]
+
+[[package]]
+name = "termsvc"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-tty",
 ]
 
 [[package]]
