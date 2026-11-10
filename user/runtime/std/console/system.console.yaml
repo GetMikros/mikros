@@ -1,0 +1,6 @@
+# The program manifest of the text console, installed as
+# usr/lib/programs/system.console.yaml.
+app_id: system.console
+binary: /usr/bin/console
+spawned_by:
+  - system.sessionmgr

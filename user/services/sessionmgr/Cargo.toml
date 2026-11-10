@@ -1,0 +1,9 @@
+[package]
+name = "sessionmgr"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-rt = { path = "../../runtime/mikros-rt" }

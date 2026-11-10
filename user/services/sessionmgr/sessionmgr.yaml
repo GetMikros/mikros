@@ -1,0 +1,18 @@
+# The service manifest of the session manager, installed as
+# usr/lib/services/sessionmgr.yaml.
+name: sessionmgr
+binary: /usr/bin/sessionmgr
+start: boot
+after: [devicemgr, accounts]
+# To start the text console, the setup program and users' shells,
+# and the dynamic linker they load.
+namespace:
+  - path: /usr
+    rights: rx
+permissions:
+  - process.set_user
+  - process.set_identity
+  - accounts.authenticate
+  - gpu.display
+  - input.seat
+  - power.control
