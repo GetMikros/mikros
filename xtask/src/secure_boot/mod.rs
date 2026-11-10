@@ -1,6 +1,7 @@
 //! Signed images for UEFI Secure Boot.
 
 pub mod authenticode;
+pub mod check;
 pub mod der;
 pub mod enroll;
 pub mod key;
