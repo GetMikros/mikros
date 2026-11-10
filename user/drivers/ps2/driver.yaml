@@ -1,0 +1,7 @@
+# The manifest of the i8042 PS/2 driver, installed as
+# usr/lib/drivers/ps2/driver.yaml.
+name: ps2
+binary: /usr/lib/drivers/ps2/ps2
+match: [acpi:i8042]
+kind: normal
+needs: [ioports]

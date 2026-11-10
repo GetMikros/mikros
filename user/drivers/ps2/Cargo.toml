@@ -1,0 +1,12 @@
+[package]
+name = "ps2"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-evdev = { path = "../../lib/evdev" }
+mikros-inputdev = { path = "../../lib/inputdev" }
+mikros-ps2 = { path = "../../lib/ps2" }
+mikros-rt = { path = "../../runtime/mikros-rt" }
