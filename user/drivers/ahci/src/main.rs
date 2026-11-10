@@ -255,6 +255,11 @@ async fn start(
         spawner,
     )
     .await?;
+    for port in &ports {
+        let (port, reactor) = (port.clone(), reactor.clone());
+        let spin_up = caps.staggered_spin_up;
+        spawner.spawn(async move { port.watch_timeouts(&reactor, spin_up).await });
+    }
     hba::enable_interrupts(&mmio);
     let page = memory.contiguous(PAGE)?;
     let mut disks = Vec::new();

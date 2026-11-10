@@ -11,6 +11,7 @@ use alloc::string::String;
 
 #[cfg(test)]
 mod tests;
+pub mod timeouts;
 
 /// ATA commands.
 pub const READ_DMA_EXT: u8 = 0x25;

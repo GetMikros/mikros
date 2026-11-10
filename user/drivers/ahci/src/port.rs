@@ -10,6 +10,7 @@ use core::future::poll_fn;
 use core::sync::atomic::{Ordering, fence};
 use core::task::{Poll, Waker};
 use mikros_ata::Ata;
+use mikros_ata::timeouts::{Action, Timeouts};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -60,6 +61,8 @@ const TABLE_SIZE: u64 = 0x80 + 16 * PRD_MAX as u64;
 /// How long a port may take to stop, a link to come up, and the device
 /// to stop being busy.
 const STOP_LIMIT: i64 = 500 * MS;
+/// How often the port looks for commands that take too long.
+const WATCH_EVERY: i64 = 1000 * MS;
 const LINK_LIMIT: i64 = 1000 * MS;
 const BUSY_LIMIT: i64 = 1000 * MS;
 /// The type and command bit of a host to device register FIS.
@@ -82,6 +85,9 @@ struct State {
     /// complete.
     held: u32,
     outstanding: u32,
+    /// The outstanding commands that are queued, and when each was issued.
+    queued: u32,
+    timeouts: Timeouts,
     /// Set while a command that is not queued holds the port, and while
     /// it is being recovered.
     exclusive: bool,
@@ -130,6 +136,8 @@ impl Port {
             state: RefCell::new(State {
                 held: 0,
                 outstanding: 0,
+                queued: 0,
+                timeouts: Timeouts::default(),
                 exclusive: false,
                 recovering: false,
                 results: [None; 32],
@@ -251,6 +259,10 @@ impl Port {
         {
             let mut state = self.state.borrow_mut();
             state.outstanding |= 1 << slot;
+            if queued {
+                state.queued |= 1 << slot;
+            }
+            state.timeouts.issued(slot, now());
             fence(Ordering::SeqCst);
             if queued {
                 self.write(SACT, 1 << slot);
@@ -344,6 +356,7 @@ impl Port {
             false => state.outstanding & !(self.read(CI) | self.read(SACT)),
         };
         for slot in (0..32).filter(|s| done & 1 << s != 0) {
+            state.timeouts.completed(slot as u32);
             state.results[slot] = Some(if failed {
                 Err(Status::Internal)
             } else {
@@ -354,6 +367,7 @@ impl Port {
             }
         }
         state.outstanding &= !done;
+        state.queued &= !done;
         if failed {
             state.recovering = true;
             Event::Error
@@ -365,6 +379,62 @@ impl Port {
     /// Recovers the port after an error: stops it, resets it with
     /// COMRESET through `PxSCTL`, and sets it up and starts it again.
     pub async fn recover(&self, reactor: &Reactor, spin_up: bool) {
+        self.reset(reactor, spin_up, false).await;
+    }
+
+    /// Watches the port's outstanding commands, once every
+    /// `WATCH_EVERY`, for one that has not completed within
+    /// `mikros_ata::timeouts::LIMIT` (MIKSPEC-0048.R12): it then resets the
+    /// port and issues them again, or, once the same command has taken that
+    /// long three times, fails them all and resets the port.
+    pub async fn watch_timeouts(&self, reactor: &Reactor, spin_up: bool) {
+        loop {
+            let _ = reactor.sleep_until(now() + WATCH_EVERY).await;
+            let action = {
+                let mut state = self.state.borrow_mut();
+                match state.recovering {
+                    true => Action::Wait,
+                    false => state.timeouts.check(now()),
+                }
+            };
+            match action {
+                Action::Wait => {}
+                Action::Reissue => {
+                    mikros_rt::log!(
+                        Warning,
+                        "ahci: port {}: a command did not complete in time; resetting the port and issuing its commands again",
+                        self.number
+                    );
+                    self.reset(reactor, spin_up, true).await;
+                }
+                Action::Fail => {
+                    mikros_rt::log!(
+                        Error,
+                        "ahci: port {}: a command did not complete in time three times; failing the port's requests",
+                        self.number
+                    );
+                    {
+                        let mut state = self.state.borrow_mut();
+                        let outstanding = core::mem::take(&mut state.outstanding);
+                        state.queued = 0;
+                        for slot in (0..32).filter(|s| outstanding & 1 << s != 0) {
+                            state.results[slot] = Some(Err(Status::Internal));
+                            if let Some(waker) = state.wakers[slot].take() {
+                                waker.wake();
+                            }
+                        }
+                    }
+                    self.reset(reactor, spin_up, false).await;
+                }
+            }
+        }
+    }
+
+    /// Stops the port, resets it with COMRESET through `PxSCTL`, and sets
+    /// it up and starts it again; with `reissue`, then issues its
+    /// outstanding commands again, before any other may be issued.
+    async fn reset(&self, reactor: &Reactor, spin_up: bool, reissue: bool) {
+        self.state.borrow_mut().recovering = true;
         self.write(CMD, self.read(CMD) & !CMD_ST);
         let _ = wait(reactor, STOP_LIMIT, || self.read(CMD) & CMD_CR == 0).await;
         let sctl = self.read(SCTL) & !0xF;
@@ -374,6 +444,16 @@ impl Port {
         let _ = wait(reactor, LINK_LIMIT, || self.linked()).await;
         if self.set_up(reactor, spin_up).await.is_ok() {
             let _ = self.start(reactor).await;
+        }
+        if reissue {
+            let state = self.state.borrow();
+            fence(Ordering::SeqCst);
+            if state.queued != 0 {
+                self.write(SACT, state.queued);
+            }
+            if state.outstanding != 0 {
+                self.write(CI, state.outstanding);
+            }
         }
         let waiting = {
             let mut state = self.state.borrow_mut();
