@@ -56,6 +56,14 @@ impl Service {
         let id = koid(token)?;
         self.ttys.borrow().get(&id).map(|(t, _)| t.clone())
     }
+
+    /// Whether session `session` has a controlling terminal.
+    pub fn has_controlling(&self, session: u32) -> bool {
+        self.ttys
+            .borrow()
+            .values()
+            .any(|(t, _)| t.session.get() == Some(session))
+    }
 }
 
 /// `w` as rows, columns, width and height.
