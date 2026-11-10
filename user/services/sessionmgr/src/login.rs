@@ -117,7 +117,8 @@ async fn setup(
         &token,
     )
     .await?;
-    exited(launcher, pid).await;
+    let code = exited(launcher, pid).await;
+    mikros_rt::log!(Info, "sessionmgr: setup exited with {code:?}");
     Ok(TextLoginRunSetupResponse {})
 }
 

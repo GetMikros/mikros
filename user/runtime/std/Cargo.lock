@@ -141,6 +141,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "setup"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "spawn-std"
 version = "0.0.0"
 

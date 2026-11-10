@@ -1,0 +1,6 @@
+# The program manifest of the setup program, installed as
+# usr/lib/programs/system.setup.yaml.
+app_id: system.setup
+binary: /usr/bin/setup
+spawned_by:
+  - system.sessionmgr
