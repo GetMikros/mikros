@@ -1,4 +1,4 @@
-// MIKSPEC-0025.R42
+// MIKSPEC-0025.R44
 
 library mikros.driver;
 using mikros.base;
@@ -38,4 +38,5 @@ protocol DeviceManager {
                       provider client_end<mikros.service.Provider>) -> (id u64) error base.Status;
     @4 RequestResource(kind u32, base u64, size u64,
                        shared bool) -> (resource handle<Resource>) error base.Status;
+    @5 GetKeptChild(name string<64>) -> (device DeviceDescription) error base.Status;
 };

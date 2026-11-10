@@ -106,6 +106,14 @@ impl Devices {
         kept.map(|d| d.id).collect()
     }
 
+    /// The child of device `parent` named `name` that is kept for the
+    /// restarted driver of `parent` and has not been added again.
+    pub fn kept_child(&self, parent: u64, name: &str) -> Option<&Device> {
+        self.list
+            .iter()
+            .find(|d| d.parent == Some(parent) && d.kept.is_some() && d.name == name)
+    }
+
     /// The kept child of device `parent` named `name` with the hardware
     /// IDs `ids`, which is no longer kept from then on, and logged as
     /// added again.

@@ -103,19 +103,7 @@ impl Starter {
     /// device's ID, name, hardware IDs and properties, and its resources
     /// as `resources` chooses them.
     pub fn prepare(&self, device: &Device, driver: &Driver) -> Result<Prepared, String> {
-        let description = DeviceDescription {
-            id: device.id,
-            name: device.name.clone(),
-            hardware_ids: device.hardware_ids.clone(),
-            properties: device
-                .properties
-                .iter()
-                .map(|(key, value)| Property {
-                    key: key.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
-        };
+        let description = description(device);
         let resources = self.resources(device, driver)?;
         Ok(Prepared {
             description,
@@ -332,4 +320,22 @@ fn arguments(program: &str) -> Result<OwnedHandle, sys::Status> {
         return Err(status);
     }
     Ok(mem)
+}
+
+/// What a driver is told of `device`: its ID, name, hardware IDs and
+/// properties.
+pub fn description(device: &Device) -> DeviceDescription {
+    DeviceDescription {
+        id: device.id,
+        name: device.name.clone(),
+        hardware_ids: device.hardware_ids.clone(),
+        properties: device
+            .properties
+            .iter()
+            .map(|(key, value)| Property {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+    }
 }

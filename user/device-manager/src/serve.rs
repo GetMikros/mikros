@@ -11,9 +11,9 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::driver::{
     DeviceManager, DeviceManagerAddDeviceRequest, DeviceManagerAddDeviceResponse,
-    DeviceManagerAsyncServer, DeviceManagerPublishServiceResponse,
-    DeviceManagerRemoveDeviceResponse, DeviceManagerRequest, DeviceManagerRequestResourceRequest,
-    DeviceManagerRequestResourceResponse,
+    DeviceManagerAsyncServer, DeviceManagerGetKeptChildResponse,
+    DeviceManagerPublishServiceResponse, DeviceManagerRemoveDeviceResponse, DeviceManagerRequest,
+    DeviceManagerRequestResourceRequest, DeviceManagerRequestResourceResponse,
 };
 
 /// The resource kinds that `RequestResource` creates.
@@ -78,6 +78,17 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
                     let resource = request_resource(&m, caller, &request);
                     let reply =
                         resource.map(|resource| DeviceManagerRequestResourceResponse { resource });
+                    responder.reply(s, reply)
+                }
+                R::GetKeptChild(request, responder) => {
+                    let kept = m
+                        .devices
+                        .borrow()
+                        .kept_child(caller, &request.name)
+                        .map(crate::start::description);
+                    let reply = kept
+                        .map(|device| DeviceManagerGetKeptChildResponse { device })
+                        .ok_or(Status::NotFound);
                     responder.reply(s, reply)
                 }
             };
