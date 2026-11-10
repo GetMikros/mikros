@@ -3,7 +3,7 @@
 name: volumes-probe
 binary: /usr/bin/volumes-probe
 start: boot
-after: [device-manager, tmpfs]
+after: [devicemgr, tmpfs]
 boot_handles: [log_manage]
 # To grant itself files.volumes, which its copy then holds, and for the
 # copy to kill the xHCI driver.

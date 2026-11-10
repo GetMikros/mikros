@@ -39,7 +39,7 @@ const SHUTDOWN: [&str; 6] = [
     "shutting down: stopping the services",
     "stopped service power-probe",
     "device-manager: the ACPI server prepared for shutdown",
-    "stopped service device-manager",
+    "stopped service devicemgr",
     "stopped service permissions",
 ];
 /// An SSDT, compiled with ACPICA's iasl from:
@@ -104,7 +104,7 @@ fn removals(serial: &str) -> Result<(), String> {
         .map(|at| start + at)
         .ok_or("the device manager did not log that it removed the devices")?;
     if serial
-        .find("stopped service device-manager")
+        .find("stopped service devicemgr")
         .is_none_or(|s| s < end)
     {
         return Err("the device manager stopped before it removed the devices".into());

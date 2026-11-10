@@ -5,5 +5,5 @@ name: power-probe
 binary: /usr/bin/power-probe
 start: boot
 # Started after the device manager, so that it is stopped before it.
-after: [device-manager]
+after: [devicemgr]
 boot_handles: [log_manage]

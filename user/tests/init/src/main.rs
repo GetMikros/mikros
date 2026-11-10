@@ -10397,10 +10397,10 @@ mod manager {
         const ENDED: &[&[u8]] = &[
             b"service permissions did not start",
             b"service permissions will not start",
-            b"service device-manager did not start",
-            b"service device-manager will not start",
-            b"service device-manager exited",
-            b"service device-manager ended",
+            b"service devicemgr did not start",
+            b"service devicemgr will not start",
+            b"service devicemgr exited",
+            b"service devicemgr ended",
         ];
         let (m, _init, reader, process) = services_from(s, image, framebuffer)?;
         let deadline = super::within(seconds);

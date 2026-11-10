@@ -127,7 +127,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", services.display());
             let broker = user_build("permissions-broker", kind)?;
             println!("built    {}", broker.display());
-            let devices = user_build("device-manager", kind)?;
+            let devices = user_build("devicemgr", kind)?;
             println!("built    {}", devices.display());
             let pci_bus = user_build("pci-bus", kind)?;
             println!("built    {}", pci_bus.display());
@@ -181,7 +181,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let broker_manifest =
                 crate::workspace_root().join("user/services/permissions-broker/permissions.yaml");
             let devices_manifest =
-                crate::workspace_root().join("user/services/device-manager/device-manager.yaml");
+                crate::workspace_root().join("user/services/devicemgr/devicemgr.yaml");
             let pci_bus_manifest = crate::workspace_root().join("user/drivers/pci-bus/driver.yaml");
             let members = [
                 ("init", init.as_path()),
@@ -200,9 +200,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/lib/services/log.yaml", log_manifest.as_path()),
                 ("usr/bin/time-service", time_service.as_path()),
                 ("usr/lib/services/time.yaml", time_manifest.as_path()),
-                ("usr/bin/device-manager", devices.as_path()),
+                ("usr/bin/devicemgr", devices.as_path()),
                 (
-                    "usr/lib/services/device-manager.yaml",
+                    "usr/lib/services/devicemgr.yaml",
                     devices_manifest.as_path(),
                 ),
                 ("usr/lib/drivers/pci-bus/pci-bus", pci_bus.as_path()),
@@ -731,7 +731,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // their manifests, and test drivers: their manifests from
             // user/tests/drivers/, and the test driver's binary for those
             // that start.
-            let devices = user_build("device-manager", kind)?;
+            let devices = user_build("devicemgr", kind)?;
             println!("built    {}", devices.display());
             let test_driver = user_build("test-driver", kind)?;
             println!("built    {}", test_driver.display());
@@ -760,7 +760,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let power_probe = user_build("power-probe", kind)?;
             println!("built    {}", power_probe.display());
             let devices_manifest =
-                crate::workspace_root().join("user/services/device-manager/device-manager.yaml");
+                crate::workspace_root().join("user/services/devicemgr/devicemgr.yaml");
             let device_image = |file: &str,
                                 drivers: &[(&str, bool)],
                                 more: &[(String, PathBuf)]|
@@ -772,9 +772,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         "usr/lib/services/permissions.yaml".into(),
                         broker_manifest.clone(),
                     ),
-                    ("usr/bin/device-manager".into(), devices.clone()),
+                    ("usr/bin/devicemgr".into(), devices.clone()),
                     (
-                        "usr/lib/services/device-manager.yaml".into(),
+                        "usr/lib/services/devicemgr.yaml".into(),
                         devices_manifest.clone(),
                     ),
                 ];
