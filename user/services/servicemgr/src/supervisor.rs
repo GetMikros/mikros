@@ -23,6 +23,10 @@ use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::acpi::{Acpi, AcpiAsyncClient, AcpiEvent};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::driver::{
+    Shutdown as DriverShutdown, ShutdownAsyncClient as DriverShutdownAsyncClient,
+    ShutdownKind as DriverShutdownKind,
+};
 use mikros_rt::interfaces::mikros::permissions::BrokerAsyncClient;
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::{ClientIdentity, ShutdownKind};
@@ -40,6 +44,11 @@ const NANOS_PER_SECOND: i64 = 1_000_000_000;
 /// The ACPI server's service, which powers the machine off and restarts
 /// it.
 const ACPI: &str = "device.acpi";
+/// The device manager's protocol that is told the kind of shutdown.
+const DRIVER_SHUTDOWN: &str = "mikros.driver.Shutdown";
+/// The protocol by which the log service is known: it keeps running when
+/// the other services stop at shutdown.
+const LOG_WRITER: &str = "mikros.log.Writer";
 
 /// The boot services and what the service manager needs to start them.
 pub struct Supervisor {
@@ -334,11 +343,53 @@ impl Supervisor {
     /// the one started after it has terminated.
     async fn stop_all(&self) {
         loop {
-            let last = self.running.borrow().last().copied();
+            // The log service is passed over, so that what is logged until
+            // the machine powers off or restarts still reaches the kernel
+            // log.
+            let last = self
+                .running
+                .borrow()
+                .iter()
+                .rev()
+                .find(|&&(i, _)| !self.is_log_service(i))
+                .copied();
             let Some((i, pid)) = last else {
                 break;
             };
             self.stop(i, pid).await;
+        }
+    }
+
+    /// Whether service `i` is the log service, which provides
+    /// `LOG_WRITER`.
+    fn is_log_service(&self, i: usize) -> bool {
+        self.services.borrow()[i]
+            .provides
+            .iter()
+            .any(|p| p.protocol == LOG_WRITER)
+    }
+
+    /// Tells the device manager, under the service manager's own identity,
+    /// whether the machine is to power off or restart, for the ACPI
+    /// server's preparation. A failure is logged.
+    async fn set_kind(&self, power_off: bool) {
+        let kind = match power_off {
+            true => DriverShutdownKind::PowerOff,
+            false => DriverShutdownKind::Restart,
+        };
+        let set = async {
+            let (client, server) = endpoints::<DriverShutdown>().map_err(|_| Status::NoMemory)?;
+            self.dir
+                .connect(&self.me, DRIVER_SHUTDOWN.into(), None, server.into_handle())
+                .await?;
+            let client = DriverShutdownAsyncClient::new(client, self.reactor.clone());
+            client.set_kind(kind).await.map_err(|_| Status::PeerClosed)
+        };
+        if let Err(status) = set.await {
+            mikros_rt::log!(
+                Warning,
+                "telling the device manager the kind of shutdown failed: {status:?}"
+            );
         }
     }
 
@@ -387,8 +438,9 @@ impl Supervisor {
         }
     }
 
-    /// Shuts the machine down: connects to the ACPI server, stops every
-    /// service, and then powers the machine off or restarts it through
+    /// Shuts the machine down: connects to the ACPI server, tells the
+    /// device manager the kind of shutdown, stops every service but the
+    /// log service, and then powers the machine off or restarts it through
     /// that connection, which returns only when that failed. Fails,
     /// stopping nothing, with `INVALID_ARGS` for an unknown kind, with
     /// `NOT_SUPPORTED` without an ACPI server, and with `BAD_STATE` once a
@@ -406,6 +458,7 @@ impl Supervisor {
             self.stopping.set(false);
             return Err(Status::NotSupported);
         };
+        self.set_kind(!restart).await;
         mikros_rt::log!(Info, "shutting down: stopping the services");
         self.stop_all().await;
         let done = match restart {

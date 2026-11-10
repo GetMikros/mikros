@@ -44,7 +44,12 @@ const SHUTDOWN: [&str; 6] = [
     "stopped service devicemgr",
     "stopped service permissions",
 ];
-/// An SSDT, compiled with ACPICA's iasl from:
+/// An SSDT, assembled from the following, whose `\_PTS` writes an I/O
+/// port and reads a byte of the ECAM range at `0xE0000000` through a
+/// region that it creates as it runs, as some firmware's does. The read
+/// only works while the device manager still grants resources, so the
+/// run only powers off when the preparation for S5 runs before the
+/// device manager exits:
 ///
 /// ```text
 /// DefinitionBlock ("", "SSDT", 2, "MIKROS", "PTSPORT", 1)
@@ -55,20 +60,36 @@ const SHUTDOWN: [&str; 6] = [
 ///         PTSB, 8
 ///     }
 ///
-///     Method (\_PTS, 1, NotSerialized)
+///     Method (\_PTS, 1, Serialized)
 ///     {
+///         OperationRegion (ECAM, SystemMemory, 0xE0000000, 1)
+///         Field (ECAM, ByteAcc, NoLock, Preserve)
+///         {
+///             VEND, 8
+///         }
+///
 ///         PTSB = Arg0
+///         Local0 = VEND
 ///     }
 /// }
 /// ```
-const PTS_TABLE: [u8; 73] = [
-    0x53, 0x53, 0x44, 0x54, 0x49, 0x00, 0x00, 0x00, 0x02, 0xac, 0x4d, 0x49, 0x4b, 0x52, 0x4f, 0x53,
+const PTS_TABLE: [u8; 105] = [
+    0x53, 0x53, 0x44, 0x54, 0x69, 0x00, 0x00, 0x00, 0x02, 0x56, 0x4d, 0x49, 0x4b, 0x52, 0x4f, 0x53,
     0x50, 0x54, 0x53, 0x50, 0x4f, 0x52, 0x54, 0x00, 0x01, 0x00, 0x00, 0x00, 0x49, 0x4e, 0x54, 0x4c,
     0x30, 0x09, 0x26, 0x20, 0x5b, 0x80, 0x50, 0x54, 0x53, 0x50, 0x01, 0x0a, 0x80, 0x01, 0x5b, 0x81,
-    0x0b, 0x50, 0x54, 0x53, 0x50, 0x01, 0x50, 0x54, 0x53, 0x42, 0x08, 0x14, 0x0d, 0x5c, 0x5f, 0x50,
-    0x54, 0x53, 0x01, 0x70, 0x68, 0x50, 0x54, 0x53, 0x42,
+    0x0b, 0x50, 0x54, 0x53, 0x50, 0x01, 0x50, 0x54, 0x53, 0x42, 0x08, 0x14, 0x2d, 0x5c, 0x5f, 0x50,
+    0x54, 0x53, 0x09, 0x5b, 0x80, 0x45, 0x43, 0x41, 0x4d, 0x00, 0x0c, 0x00, 0x00, 0x00, 0xe0, 0x01,
+    0x5b, 0x81, 0x0b, 0x45, 0x43, 0x41, 0x4d, 0x01, 0x56, 0x45, 0x4e, 0x44, 0x08, 0x70, 0x68, 0x50,
+    0x54, 0x53, 0x42, 0x70, 0x56, 0x45, 0x4e, 0x44, 0x60,
 ];
 const PANIC_LINE: &str = "KERNEL PANIC: ";
+/// The ACPI server's line once it took its resources in
+/// `PrepareShutdown`, which only reaches the serial port while the log
+/// service runs; its line when the preparation for S5 failed; and the
+/// line the service manager would log had it stopped the log service.
+const HOLDING: &str = "acpi: holding ";
+const PREPARE_FAILED: &str = "acpi: preparing S5 failed";
+const LOG_STOPPED: &str = "stopped service log";
 /// How long the runner waits for the service manager to see a press of
 /// the button before it presses it again, and how often it presses.
 const PRESS_WAIT: Duration = Duration::from_secs(5);
@@ -181,6 +202,15 @@ fn verdict(exited: bool, serial: &str) -> Result<(), String> {
             None => return Err(format!("{line:?} is missing or out of order")),
         }
     }
+    if !serial.contains(HOLDING) {
+        return Err(format!("{HOLDING:?} is missing"));
+    }
+    if serial.contains(PREPARE_FAILED) {
+        return Err("the preparation for S5 failed".into());
+    }
+    if serial.contains(LOG_STOPPED) {
+        return Err("the log service was stopped".into());
+    }
     removals(serial)?;
     if !exited {
         return Err("QEMU did not exit successfully".into());
@@ -275,7 +305,7 @@ mod tests {
 
     fn shutdown(devices: &str) -> String {
         format!(
-            "{}\n{devices}\n{}",
+            "{}\n{devices}\n{HOLDING}2 operation regions\n{}",
             SHUTDOWN[..3].join("\n"),
             SHUTDOWN[3..].join("\n")
         )
@@ -292,6 +322,17 @@ mod tests {
         assert!(verdict(true, &SHUTDOWN[..4].join("\n")).is_err());
         let panicked = format!("{serial}\nKERNEL PANIC: page fault");
         assert!(verdict(true, &panicked).is_err());
+    }
+
+    #[test]
+    fn needs_the_acpi_server_prepared_and_the_log_service_kept() {
+        let serial = shutdown(&devices(&[3, 6, 5, 4, 1]));
+        let without = serial.replace(HOLDING, "acpi: ");
+        assert!(verdict(true, &without).unwrap_err().contains("missing"));
+        let failed = format!("{serial}\n{PREPARE_FAILED}: 0x4");
+        assert!(verdict(true, &failed).unwrap_err().contains("S5"));
+        let stopped = format!("{serial}\n{LOG_STOPPED}");
+        assert!(verdict(true, &stopped).unwrap_err().contains("log service"));
     }
 
     #[test]
