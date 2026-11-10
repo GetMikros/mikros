@@ -1163,14 +1163,40 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     })
 }
 
-/// Builds the boot image of a live system for `kind`: `init`, and the
-/// directories of the root file system at their paths there, which hold
-/// the whole system as it stands.
-pub fn live_boot_image(kind: Kind) -> Result<PathBuf> {
-    let init = user_build("init", kind)?;
-    let dirs = crate::image::live_dirs();
-    let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
-    archive(kind, "live-boot.img", &[("init", &init)], &dirs, &[])
+/// Builds the boot image of a live system for `kind` from the system's
+/// boot image `boot_image`: each of its members, `init` and the whole
+/// system at their paths in the namespaces, and then the directories of
+/// the root file system at their paths there.
+pub fn live_boot_image(kind: Kind, boot_image: &Path) -> Result<PathBuf> {
+    let dir = crate::workspace_root()
+        .join("target/boot")
+        .join(kind.name());
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("live-boot.img");
+    let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+    let mut live = tar::Builder::new(file);
+    let source =
+        File::open(boot_image).with_context(|| format!("opening {}", boot_image.display()))?;
+    let mut source = tar::Archive::new(source);
+    let entries = source
+        .entries()
+        .with_context(|| format!("reading {}", boot_image.display()))?;
+    for entry in entries {
+        let mut entry = entry.with_context(|| format!("reading {}", boot_image.display()))?;
+        let header = entry.header().clone();
+        live.append(&header, &mut entry)
+            .context("adding a member to the live boot archive")?;
+    }
+    for dir in crate::image::live_dirs() {
+        let mut header = tar::Header::new_ustar();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Directory);
+        live.append_data(&mut header, dir_name(&dir), std::io::empty())
+            .with_context(|| format!("adding {dir} to the live boot archive"))?;
+    }
+    live.finish().context("finishing the live boot archive")?;
+    Ok(path)
 }
 
 /// Writes the users file of the accounts test for `kind` and returns its

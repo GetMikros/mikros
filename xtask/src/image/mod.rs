@@ -128,7 +128,7 @@ pub use root::live_dirs;
 pub fn run(args: &Args) -> Result<()> {
     let built = build::build(args.kind)?;
     if args.live {
-        let boot_image = build::live_boot_image(args.kind)?;
+        let boot_image = build::live_boot_image(args.kind, &built.boot_image)?;
         return create_live(&built, &boot_image, &path(args.kind, true));
     }
     create(args.kind, &built, &path(args.kind, false))
