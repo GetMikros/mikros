@@ -312,14 +312,23 @@ impl Namespaces {
 
     /// Connects to tmpfs through `directory`, the process manager's own,
     /// asking again until it serves, makes its `boot/` directories, fills
-    /// them from the boot image, and from then on builds namespaces from
-    /// profiles.
-    pub async fn prepare(&self, directory: DirectoryAsyncClient, fs: Rc<Fs>, reactor: Reactor) {
+    /// them from the boot image, from then on builds namespaces from
+    /// profiles, and tells the service manager.
+    pub async fn prepare(
+        &self,
+        shared: &Shared,
+        directory: DirectoryAsyncClient,
+        fs: Rc<Fs>,
+        reactor: Reactor,
+    ) {
         let tmpfs = self.serve_tmpfs(&directory, &reactor).await;
         match fill(&tmpfs.root, &fs, &reactor).await {
-            Ok((etc, var, users)) => self.apply(Ready {
-                roots: Roots::Boot { etc, var, users },
-            }),
+            Ok((etc, var, users)) => {
+                self.apply(Ready {
+                    roots: Roots::Boot { etc, var, users },
+                });
+                self.announce_root(shared).await;
+            }
             Err(e) => mikros_rt::log!(Error, "process-manager: filling tmpfs failed: {e:?}"),
         }
     }
@@ -350,8 +359,14 @@ impl Namespaces {
 
     /// Connects through `directory`, the process manager's own, to the
     /// root file system once it is published, from then on builds
-    /// namespaces from profiles, and connects to tmpfs once it serves.
-    pub async fn prepare_root(&self, directory: DirectoryAsyncClient, reactor: Reactor) {
+    /// namespaces from profiles, tells the service manager, and connects
+    /// to tmpfs once it serves.
+    pub async fn prepare_root(
+        &self,
+        shared: &Shared,
+        directory: DirectoryAsyncClient,
+        reactor: Reactor,
+    ) {
         let root = match root_filesystem(&directory, &reactor).await {
             Ok(root) => root,
             // The system ends before the root file system came.
@@ -368,7 +383,37 @@ impl Namespaces {
             Info,
             "process-manager: namespaces come from the root file system"
         );
+        self.announce_root(shared).await;
         self.serve_tmpfs(&directory, &reactor).await;
+    }
+
+    /// Gives the service manager read-only connections to the `/usr` and
+    /// `/etc` of the profiles that now apply, through the control
+    /// connection, so that it reads its manifests there from then on.
+    async fn announce_root(&self, shared: &Shared) {
+        let Some(ready) = self.ready.borrow().clone() else {
+            return;
+        };
+        let Some(control) = shared.control.borrow().clone() else {
+            return;
+        };
+        let usr = self.entry(shared, &ready, "/usr", Rights::READ).await;
+        let etc = self.entry(shared, &ready, "/etc", Rights::READ).await;
+        let (usr, etc) = match (usr, etc) {
+            (Ok((usr, _)), Ok((etc, _))) => (usr.directory, etc.directory),
+            (Err(e), _) | (_, Err(e)) => {
+                mikros_rt::log!(
+                    Error,
+                    "process-manager: opening /usr and /etc for the service manager failed: {e:?}"
+                );
+                return;
+            }
+        };
+        match control.root_available(usr, etc).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => mikros_rt::log!(Error, "process-manager: RootAvailable failed: {e:?}"),
+            Err(e) => mikros_rt::log!(Error, "process-manager: RootAvailable failed: {e:?}"),
+        }
     }
 
     /// Connects through `directory`, the process manager's own, to the

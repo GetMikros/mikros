@@ -215,10 +215,10 @@ impl Manager {
                 match namespaces.runs_from_boot_image() {
                     true => {
                         namespaces
-                            .prepare(directory, shared.fs.clone(), reactor)
+                            .prepare(&shared, directory, shared.fs.clone(), reactor)
                             .await
                     }
-                    false => namespaces.prepare_root(directory, reactor).await,
+                    false => namespaces.prepare_root(&shared, directory, reactor).await,
                 }
             });
         }
