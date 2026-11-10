@@ -37,6 +37,7 @@ use core::future::poll_fn;
 use core::task::{Poll, Waker};
 use mikros_manifest::path;
 use mikros_rt::exec::Reactor;
+use mikros_rt::files;
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{
@@ -76,6 +77,8 @@ const ESP_INSTANCE: &str = "esp";
 const RETRY: i64 = 20_000_000;
 /// The most bytes one write moves.
 const CHUNK: usize = 32768;
+/// The largest manifest read from the root file system.
+const USR_FILE_MAX: usize = 1 << 16;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 const RX: Rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
 const RWX: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0);
@@ -387,6 +390,29 @@ impl Namespaces {
         self.serve_tmpfs(&directory, &reactor).await;
     }
 
+    /// The file at `path` below `/usr`: the root file system's once
+    /// namespaces come from it, or else, as before, the boot file
+    /// system's, which holds the files of early services at the same
+    /// paths.
+    pub async fn usr_file(&self, shared: &Shared, path: &str) -> Option<Vec<u8>> {
+        let ready = self.ready.borrow().clone();
+        if let Some(Roots::Root(root)) = ready.as_deref().map(|r| &r.roots) {
+            let at = format!("usr/{path}");
+            if let Ok(bytes) = files::read(root, &shared.reactor, &at, USR_FILE_MAX).await {
+                return Some(bytes);
+            }
+        }
+        shared.fs.file(&format!("usr/{path}")).map(<[u8]>::to_vec)
+    }
+
+    /// Whether namespaces come from the root file system.
+    pub fn on_root(&self) -> bool {
+        matches!(
+            self.ready.borrow().as_deref().map(|r| &r.roots),
+            Some(Roots::Root(_))
+        )
+    }
+
     /// Gives the service manager read-only connections to the `/usr` and
     /// `/etc` of the profiles that now apply, through the control
     /// connection, so that it reads its manifests there from then on.
@@ -409,6 +435,24 @@ impl Namespaces {
                 return;
             }
         };
+        // The service manager's programs come from the root's /usr from
+        // now on, so that it starts the services there.
+        if let Some(pid) = shared.identity_setter.get() {
+            let app_id = shared.records.borrow().get(pid).map(|r| r.app_id.clone());
+            if let Some(app_id) = app_id {
+                match self.of(shared, &app_id, 0, true).await {
+                    Ok((_, programs)) => {
+                        if let Some(record) = shared.records.borrow_mut().get_mut(pid) {
+                            record.programs = Rc::new(programs);
+                        }
+                    }
+                    Err(e) => mikros_rt::log!(
+                        Error,
+                        "process-manager: the service manager's programs stay the boot file system's: {e:?}"
+                    ),
+                }
+            }
+        }
         match control.root_available(usr, etc).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => mikros_rt::log!(Error, "process-manager: RootAvailable failed: {e:?}"),
@@ -537,7 +581,7 @@ impl Namespaces {
             // Its profile names the user, whose name is not known yet.
             return Err(Status::NotSupported);
         } else {
-            let (program, listed) = manifest_entries(&shared.fs, app_id);
+            let (program, listed) = manifest_entries(self, shared, app_id).await;
             if program {
                 add(
                     &mut entries,
@@ -976,16 +1020,22 @@ async fn fill(root: &NodeAsyncClient, fs: &Fs, reactor: &Reactor) -> Result<Dirs
 
 /// Whether `app_id` has a program manifest, and the namespace entries of
 /// its manifest, a driver's, a service's or a program's, with their paths
-/// and rights. Without a valid manifest it has none.
-fn manifest_entries(fs: &Fs, app_id: &str) -> (bool, Vec<(String, String)>) {
+/// and rights, read from `/usr` as `namespaces` serves it. Without a valid
+/// manifest it has none.
+async fn manifest_entries(
+    namespaces: &Namespaces,
+    shared: &Shared,
+    app_id: &str,
+) -> (bool, Vec<(String, String)>) {
     let pairs = |entries: Vec<mikros_manifest::NamespaceEntry>| {
         entries.into_iter().map(|e| (e.path, e.rights)).collect()
     };
     if let Some(name) = app_id.strip_prefix("system.driver.") {
-        let path = format!("usr/lib/drivers/{name}/driver.yaml");
-        return match fs
-            .file(&path)
-            .map(|b| mikros_manifest::parse_driver(name, b))
+        let path = format!("lib/drivers/{name}/driver.yaml");
+        return match namespaces
+            .usr_file(shared, &path)
+            .await
+            .map(|b| mikros_manifest::parse_driver(name, &b))
         {
             Some(Ok(m)) => (false, pairs(m.driver.namespace)),
             _ => (false, Vec::new()),
@@ -995,16 +1045,20 @@ fn manifest_entries(fs: &Fs, app_id: &str) -> (bool, Vec<(String, String)>) {
         return (false, Vec::new());
     };
     let service = format!("{name}.yaml");
-    if let Some(bytes) = fs.file(&format!("usr/lib/services/{service}")) {
-        return match mikros_manifest::parse(&service, bytes) {
+    if let Some(bytes) = namespaces
+        .usr_file(shared, &format!("lib/services/{service}"))
+        .await
+    {
+        return match mikros_manifest::parse(&service, &bytes) {
             Ok(m) => (false, pairs(m.service.namespace)),
             Err(_) => (false, Vec::new()),
         };
     }
     let program = format!("{app_id}.yaml");
-    match fs
-        .file(&format!("usr/lib/programs/{program}"))
-        .map(|b| mikros_manifest::parse_program(&program, b))
+    match namespaces
+        .usr_file(shared, &format!("lib/programs/{program}"))
+        .await
+        .map(|b| mikros_manifest::parse_program(&program, &b))
     {
         Some(Ok(m)) => (true, pairs(m.program.namespace)),
         _ => (false, Vec::new()),

@@ -283,12 +283,17 @@ async fn named_app(
     };
     let file_name = format!("{app_id}.yaml");
     let path = format!("usr/lib/programs/{file_name}");
-    let Some(bytes) = shared.fs.file(&path) else {
+    let namespaces = shared.namespaces.clone();
+    let Some(bytes) = namespaces
+        .usr_file(shared, &format!("lib/programs/{file_name}"))
+        .await
+    else {
         return Ok(app_id.into());
     };
     // The app ID is a service's when its service manifest exists, and a
     // program manifest of it is then not valid, as none.
-    if shared.fs.exists(&format!("usr/lib/services/{name}.yaml")) {
+    let service = format!("lib/services/{name}.yaml");
+    if namespaces.usr_file(shared, &service).await.is_some() {
         mikros_rt::log!(
             Error,
             "/{path}: {app_id} is a service's app ID; the program manifest is ignored"
@@ -297,7 +302,7 @@ async fn named_app(
     }
     // A manifest that is not valid counts as none, as the service
     // manager ignores such service manifests.
-    let manifest = match mikros_manifest::parse_program(&file_name, bytes) {
+    let manifest = match mikros_manifest::parse_program(&file_name, &bytes) {
         Ok(manifest) => manifest,
         Err(e) => {
             mikros_rt::log!(Error, "/{path}:{}:{}: {:?}", e.line, e.column, e.kind);
@@ -306,8 +311,12 @@ async fn named_app(
     };
     let program_manifest = manifest.program;
     let binary = program_manifest.binary.trim_start_matches('/');
-    let allowed = shared.fs.same_file(program, binary)
-        && program_manifest.spawned_by.contains(&client.app_id);
+    // On the root file system the program must be the binary by its path.
+    let same = match namespaces.on_root() {
+        true => program == binary,
+        false => shared.fs.same_file(program, binary),
+    };
+    let allowed = same && program_manifest.spawned_by.contains(&client.app_id);
     match allowed {
         true => Ok(app_id.into()),
         false => Err(Status::AccessDenied),
