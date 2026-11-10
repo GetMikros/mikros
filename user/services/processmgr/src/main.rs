@@ -16,6 +16,7 @@ mod namespace;
 mod processes;
 mod records;
 mod start;
+mod users;
 mod volumes;
 
 use mikros_rt::exec::Executor;

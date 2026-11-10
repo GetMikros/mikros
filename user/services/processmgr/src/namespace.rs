@@ -486,12 +486,11 @@ impl Namespaces {
                 self.entry(shared, &ready, "/etc", Rights::READ).await?,
             );
         } else if app_id == CLI_APP {
-            if user != 0 {
-                // The profile names the user, whose name is not known yet.
-                return Err(Status::NotSupported);
-            }
-            // User 0 has no folder in /Users, so /Libraries is only the
-            // system's.
+            // User 0 has no folder in /Users, and so no name is needed.
+            let name = match user {
+                0 => None,
+                _ => Some(crate::users::name(shared, user).await?),
+            };
             add(
                 &mut entries,
                 &mut origins,
@@ -507,12 +506,22 @@ impl Namespaces {
                 &mut origins,
                 self.entry(shared, &ready, "/Apps", Rights::READ).await?,
             );
-            add(
-                &mut entries,
-                &mut origins,
-                self.entry(shared, &ready, "/Libraries", Rights::READ)
-                    .await?,
-            );
+            let libraries = self
+                .entry(shared, &ready, "/Libraries", Rights::READ)
+                .await?;
+            let libraries = match &name {
+                None => libraries,
+                Some(name) => self.libraries(shared, &ready, libraries, name).await?,
+            };
+            add(&mut entries, &mut origins, libraries);
+            if let Some(name) = &name {
+                let home = format!("/Users/{name}");
+                add(
+                    &mut entries,
+                    &mut origins,
+                    self.entry(shared, &ready, &home, RW).await?,
+                );
+            }
             let budget = shared.user_budget(user)?;
             let tmpfs = self.tmpfs().await;
             add(
@@ -603,6 +612,35 @@ impl Namespaces {
     /// when the rights hold `WRITE` and it lies on tmpfs, and fails with
     /// `NOT_FOUND` otherwise; rights beyond those of its root fail with
     /// `ACCESS_DENIED`.
+    /// `/Libraries` for user `name`: a read-only view of `system`, the
+    /// system's, merged with the user's `Libraries` folder, or `system`
+    /// alone when the user has none.
+    async fn libraries(
+        &self,
+        shared: &Shared,
+        ready: &Ready,
+        system: (NamespaceEntry, Origin),
+        name: &str,
+    ) -> Result<(NamespaceEntry, Origin), Status> {
+        let path = format!("/Users/{name}/Libraries");
+        let own = match self.entry(shared, ready, &path, Rights::READ).await {
+            Ok((own, _)) => own,
+            Err(e) => {
+                mikros_rt::log!(
+                    Warning,
+                    "process-manager: {path} cannot be opened ({e:?}); /Libraries is only the system's"
+                );
+                return Ok(system);
+            }
+        };
+        let layers = alloc::vec![system.0.directory, own.directory];
+        let view = crate::users::merged(shared, layers, Rights::READ).await?;
+        Ok(none(NamespaceEntry {
+            path: "/Libraries".into(),
+            directory: view,
+        }))
+    }
+
     async fn entry(
         &self,
         shared: &Shared,

@@ -63,6 +63,11 @@ impl Permissions {
         self.answered(answered.is_ok());
     }
 
+    /// The process manager's own directory, once it connected to it.
+    pub fn directory(&self) -> Option<Rc<DirectoryAsyncClient>> {
+        self.directory.borrow().clone()
+    }
+
     /// Whether `client` holds `permission`, where `bootstrap` says that it
     /// is the service manager that init asked for.
     pub async fn holds(&self, client: ClientIdentity, bootstrap: bool, permission: &str) -> bool {
