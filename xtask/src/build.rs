@@ -884,27 +884,47 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // The power-off run serves this image, with the ACPI server, the
             // log service and the power probe, a boot service that the
             // service manager stops when the power button shuts the
-            // machine down.
-            let power_image = device_image(
-                "power.img",
-                &[],
-                &[
-                    ("usr/lib/drivers/acpi/acpi".to_owned(), acpi.clone()),
+            // machine down, and the PCI bus driver with the drivers of the
+            // disk controllers, of the xHCI controller, of USB mass storage
+            // and of partitions, whose devices the device manager removes
+            // when it stops.
+            let mut power_files: Vec<(String, PathBuf)> = vec![
+                ("usr/lib/drivers/acpi/acpi".to_owned(), acpi.clone()),
+                (
+                    "usr/lib/drivers/acpi/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
+                ),
+            ];
+            for (name, binary) in [
+                ("pci-bus", &pci_bus),
+                ("virtio-blk", &virtio_blk),
+                ("nvme", &nvme),
+                ("ahci", &ahci),
+                ("xhci", &xhci),
+                ("usb-storage", &usb_storage),
+                ("partition", &partition),
+            ] {
+                let manifest = format!("user/drivers/{name}/driver.yaml");
+                power_files.extend([
+                    (format!("usr/lib/drivers/{name}/{name}"), binary.clone()),
                     (
-                        "usr/lib/drivers/acpi/driver.yaml".to_owned(),
-                        crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
+                        format!("usr/lib/drivers/{name}/driver.yaml"),
+                        crate::workspace_root().join(manifest),
                     ),
-                    // The log service, through which the server's messages
-                    // reach the kernel log.
-                    ("usr/bin/log-service".to_owned(), log_service.clone()),
-                    ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
-                    ("usr/bin/power-probe".to_owned(), power_probe.clone()),
-                    (
-                        "usr/lib/services/power-probe.yaml".to_owned(),
-                        crate::workspace_root().join("user/tests/power-probe/power-probe.yaml"),
-                    ),
-                ],
-            )?;
+                ]);
+            }
+            power_files.extend([
+                // The log service, through which the server's messages
+                // reach the kernel log.
+                ("usr/bin/log-service".to_owned(), log_service.clone()),
+                ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                ("usr/bin/power-probe".to_owned(), power_probe.clone()),
+                (
+                    "usr/lib/services/power-probe.yaml".to_owned(),
+                    crate::workspace_root().join("user/tests/power-probe/power-probe.yaml"),
+                ),
+            ]);
+            let power_image = device_image("power.img", &[], &power_files)?;
             println!("built    {}", power_image.display());
             // The PCI bus driver tests serve this image, with the bus
             // driver and test drivers for the host bridge's function, for
