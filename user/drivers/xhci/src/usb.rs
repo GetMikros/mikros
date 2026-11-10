@@ -9,6 +9,7 @@ use crate::descriptors::{
 use crate::device::{Device, FULL, HIGH, LOW, Place, SUPER, setup};
 use crate::hub;
 use crate::regs::{PORT_CCS, PORT_CHANGES, PORT_PED, PORT_PP, PORT_PR, PORT_PRC, Protocol};
+use crate::wait::Waiters;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::{Rc, Weak};
@@ -84,6 +85,8 @@ pub struct Usb {
     attached: RefCell<BTreeMap<u8, Rc<UsbDevice>>>,
     /// The interface devices by their device IDs.
     interfaces: RefCell<BTreeMap<u64, Rc<Interface>>>,
+    /// The tasks waiting for an interface device to be added.
+    added: Waiters,
 }
 
 impl Usb {
@@ -95,6 +98,7 @@ impl Usb {
             protocols,
             attached: RefCell::new(BTreeMap::new()),
             interfaces: RefCell::new(BTreeMap::new()),
+            added: Waiters::default(),
         })
     }
 
@@ -347,6 +351,7 @@ impl Usb {
                         .borrow_mut()
                         .insert(response.id, added.clone());
                     device.interfaces.borrow_mut().push(added);
+                    self.added.wake();
                 }
                 _ => mikros_rt::log!(
                     Warning,
@@ -444,20 +449,24 @@ impl Usb {
         Ok(same)
     }
 
-    /// The interface device with ID `id`, waiting a while for it, since
-    /// the device manager may ask for it before `AddDevice` returned its
-    /// ID here.
+    /// The interface device with ID `id`. The device manager replies to
+    /// `AddDevice` before it asks for the device, but this driver may
+    /// take the request before the reply, so the device is waited for
+    /// until it is added, at most `REQUEST_LIMIT`.
     pub async fn interface(&self, id: u64) -> Option<Rc<Interface>> {
-        let limit = now() + REQUEST_LIMIT;
-        loop {
-            if let Some(found) = self.interfaces.borrow().get(&id).cloned() {
-                return Some(found);
+        let added = self
+            .added
+            .until(|| self.interfaces.borrow().get(&id).cloned());
+        let limit = self.controller.reactor.sleep_until(now() + REQUEST_LIMIT);
+        let mut added = core::pin::pin!(added);
+        let mut limit = core::pin::pin!(limit);
+        core::future::poll_fn(|cx| {
+            if let core::task::Poll::Ready(found) = added.as_mut().poll(cx) {
+                return core::task::Poll::Ready(Some(found));
             }
-            if now() >= limit {
-                return None;
-            }
-            let _ = self.controller.reactor.sleep_until(now() + 10 * MS).await;
-        }
+            limit.as_mut().poll(cx).map(|_| None)
+        })
+        .await
     }
 }
 
