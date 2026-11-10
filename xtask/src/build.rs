@@ -763,6 +763,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         programs.join("system.probe-tool.yaml").as_path(),
                     ),
                     (
+                        "usr/lib/programs/system.tmpfs.yaml",
+                        programs.join("system.tmpfs.yaml").as_path(),
+                    ),
+                    (
                         "usr/lib/programs/system.idle.yaml",
                         programs.join("system.idle.yaml").as_path(),
                     ),

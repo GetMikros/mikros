@@ -9465,10 +9465,12 @@ mod manager {
     /// which registers the one valid program manifest of the image's
     /// `/usr/lib/programs/`, and ignores the one with the app ID of the
     /// on-demand service `idle` and the one whose app ID is not its file
-    /// name.
+    /// name. The program manifest with tmpfs's app ID is not valid either:
+    /// the process manager ignores it, and tmpfs starts.
     pub fn process_manager_builds_namespaces_from_the_boot_image(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service namespace-probe exited with code 0";
-        const ALSO: [&[u8]; 4] = [
+        const ALSO: [&[u8]; 5] = [
+            b"/usr/lib/programs/system.tmpfs.yaml: system.tmpfs is a service's app ID; the program manifest is ignored",
             b"the root file system is available",
             b"/usr/lib/programs/system.idle.yaml: system.idle is a service's app ID; ignored",
             b"/usr/lib/programs/system.misnamed.yaml:",
@@ -9503,7 +9505,7 @@ mod manager {
             });
         };
         let deadline = super::within(super::PROBE_SECONDS);
-        let mut seen = [false; 4];
+        let mut seen = [false; 5];
         let mut passed = false;
         let outcome = loop {
             if passed && seen.iter().all(|&s| s) {

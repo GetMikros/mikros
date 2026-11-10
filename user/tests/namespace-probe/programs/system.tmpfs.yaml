@@ -1,0 +1,4 @@
+# A program manifest of tests/namespaces.img with the app ID of the
+# service tmpfs. It is not valid, and counts as none: tmpfs still starts.
+app_id: system.tmpfs
+binary: /usr/bin/tmpfs

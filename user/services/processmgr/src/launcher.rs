@@ -213,7 +213,8 @@ async fn exec(
 /// to lie in the app's bundle under `/Apps`. A `system.` app ID with a
 /// program manifest needs a manifest that is valid, the program to be
 /// its `binary`, and the caller's app ID in its `spawned_by`; one whose
-/// manifest cannot be used is refused.
+/// manifest cannot be used is refused. A program manifest of a service's
+/// app ID is not valid, and counts as none.
 async fn named_app(
     shared: &Shared,
     caller: u32,
@@ -254,6 +255,15 @@ async fn named_app(
     let Some(bytes) = shared.fs.file(&path) else {
         return Ok(app_id.into());
     };
+    // The app ID is a service's when its service manifest exists, and a
+    // program manifest of it is then not valid, as none.
+    if shared.fs.exists(&format!("usr/lib/services/{name}.yaml")) {
+        mikros_rt::log!(
+            Error,
+            "/{path}: {app_id} is a service's app ID; the program manifest is ignored"
+        );
+        return Ok(app_id.into());
+    }
     // A manifest that is not valid counts as none, as the service
     // manager ignores such service manifests.
     let manifest = match mikros_manifest::parse_program(&file_name, bytes) {
@@ -264,10 +274,8 @@ async fn named_app(
         }
     };
     let program_manifest = manifest.program;
-    let service = shared.fs.exists(&format!("usr/lib/services/{name}.yaml"));
     let binary = program_manifest.binary.trim_start_matches('/');
-    let allowed = !service
-        && shared.fs.same_file(program, binary)
+    let allowed = shared.fs.same_file(program, binary)
         && program_manifest.spawned_by.contains(&client.app_id);
     match allowed {
         true => Ok(app_id.into()),
