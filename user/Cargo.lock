@@ -473,7 +473,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pci-bus"
+name = "pcibus"
 version = "0.0.0"
 dependencies = [
  "mikros-pci",
@@ -709,7 +709,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "usb-storage"
+name = "usbstorage"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
@@ -717,7 +717,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "virtio-blk"
+name = "virtioblk"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",

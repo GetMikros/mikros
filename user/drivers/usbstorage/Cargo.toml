@@ -1,5 +1,5 @@
 [package]
-name = "virtio-blk"
+name = "usbstorage"
 version.workspace = true
 edition.workspace = true
 license = "MPL-2.0"
@@ -8,4 +8,3 @@ publish = false
 [dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-storage = { path = "../../services/storage" }
-mikros-virtio = { path = "../../lib/virtio" }

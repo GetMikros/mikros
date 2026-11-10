@@ -12,7 +12,7 @@ use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 
 /// The app ID of the driver of the disk that the root lies on.
-const DISK_DRIVER: &str = "system.driver.virtio-blk";
+const DISK_DRIVER: &str = "system.driver.virtioblk";
 const KILL: u32 = 9;
 /// The file written across the restart, in pieces of `PIECE` bytes:
 /// `BEFORE` before the kill and `AFTER` after it, each synced.

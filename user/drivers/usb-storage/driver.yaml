@@ -1,7 +1,0 @@
-# The manifest of the USB mass storage driver, installed as
-# usr/lib/drivers/usb-storage/driver.yaml.
-name: usb-storage
-binary: /usr/lib/drivers/usb-storage/usb-storage
-match: [usb:c08s06p50]
-kind: normal
-needs: [dma]

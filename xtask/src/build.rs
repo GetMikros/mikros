@@ -129,17 +129,17 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", broker.display());
             let devices = user_build("devicemgr", kind)?;
             println!("built    {}", devices.display());
-            let pci_bus = user_build("pci-bus", kind)?;
+            let pci_bus = user_build("pcibus", kind)?;
             println!("built    {}", pci_bus.display());
             let acpi = acpi_build(kind)?;
             let acpi_manifest = crate::workspace_root().join("user/drivers/acpi/driver.yaml");
             let rtc = user_build("rtc", kind)?;
             println!("built    {}", rtc.display());
             let rtc_manifest = crate::workspace_root().join("user/drivers/rtc/driver.yaml");
-            let virtio_blk = user_build("virtio-blk", kind)?;
+            let virtio_blk = user_build("virtioblk", kind)?;
             println!("built    {}", virtio_blk.display());
             let virtio_blk_manifest =
-                crate::workspace_root().join("user/drivers/virtio-blk/driver.yaml");
+                crate::workspace_root().join("user/drivers/virtioblk/driver.yaml");
             let nvme = user_build("nvme", kind)?;
             println!("built    {}", nvme.display());
             let nvme_manifest = crate::workspace_root().join("user/drivers/nvme/driver.yaml");
@@ -149,10 +149,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let xhci = user_build("xhci", kind)?;
             println!("built    {}", xhci.display());
             let xhci_manifest = crate::workspace_root().join("user/drivers/xhci/driver.yaml");
-            let usb_storage = user_build("usb-storage", kind)?;
+            let usb_storage = user_build("usbstorage", kind)?;
             println!("built    {}", usb_storage.display());
             let usb_storage_manifest =
-                crate::workspace_root().join("user/drivers/usb-storage/driver.yaml");
+                crate::workspace_root().join("user/drivers/usbstorage/driver.yaml");
             let partition = user_build("partition", kind)?;
             println!("built    {}", partition.display());
             let partition_manifest =
@@ -181,7 +181,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 crate::workspace_root().join("user/services/permbroker/permissions.yaml");
             let devices_manifest =
                 crate::workspace_root().join("user/services/devicemgr/devicemgr.yaml");
-            let pci_bus_manifest = crate::workspace_root().join("user/drivers/pci-bus/driver.yaml");
+            let pci_bus_manifest = crate::workspace_root().join("user/drivers/pcibus/driver.yaml");
             let members = [
                 ("init", init.as_path()),
                 ("usr/bin/processmgr", manager.as_path()),
@@ -204,21 +204,18 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/services/devicemgr.yaml",
                     devices_manifest.as_path(),
                 ),
-                ("usr/lib/drivers/pci-bus/pci-bus", pci_bus.as_path()),
+                ("usr/lib/drivers/pcibus/pcibus", pci_bus.as_path()),
                 (
-                    "usr/lib/drivers/pci-bus/driver.yaml",
+                    "usr/lib/drivers/pcibus/driver.yaml",
                     pci_bus_manifest.as_path(),
                 ),
                 ("usr/lib/drivers/acpi/acpi", acpi.as_path()),
                 ("usr/lib/drivers/acpi/driver.yaml", acpi_manifest.as_path()),
                 ("usr/lib/drivers/rtc/rtc", rtc.as_path()),
                 ("usr/lib/drivers/rtc/driver.yaml", rtc_manifest.as_path()),
+                ("usr/lib/drivers/virtioblk/virtioblk", virtio_blk.as_path()),
                 (
-                    "usr/lib/drivers/virtio-blk/virtio-blk",
-                    virtio_blk.as_path(),
-                ),
-                (
-                    "usr/lib/drivers/virtio-blk/driver.yaml",
+                    "usr/lib/drivers/virtioblk/driver.yaml",
                     virtio_blk_manifest.as_path(),
                 ),
                 ("usr/lib/drivers/nvme/nvme", nvme.as_path()),
@@ -228,11 +225,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("usr/lib/drivers/xhci/xhci", xhci.as_path()),
                 ("usr/lib/drivers/xhci/driver.yaml", xhci_manifest.as_path()),
                 (
-                    "usr/lib/drivers/usb-storage/usb-storage",
+                    "usr/lib/drivers/usbstorage/usbstorage",
                     usb_storage.as_path(),
                 ),
                 (
-                    "usr/lib/drivers/usb-storage/driver.yaml",
+                    "usr/lib/drivers/usbstorage/driver.yaml",
                     usb_storage_manifest.as_path(),
                 ),
                 ("usr/lib/drivers/partition/partition", partition.as_path()),
@@ -733,9 +730,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", devices.display());
             let test_driver = user_build("test-driver", kind)?;
             println!("built    {}", test_driver.display());
-            let pci_bus = user_build("pci-bus", kind)?;
+            let pci_bus = user_build("pcibus", kind)?;
             println!("built    {}", pci_bus.display());
-            let virtio_blk = user_build("virtio-blk", kind)?;
+            let virtio_blk = user_build("virtioblk", kind)?;
             println!("built    {}", virtio_blk.display());
             let nvme = user_build("nvme", kind)?;
             println!("built    {}", nvme.display());
@@ -743,7 +740,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", ahci.display());
             let xhci = user_build("xhci", kind)?;
             println!("built    {}", xhci.display());
-            let usb_storage = user_build("usb-storage", kind)?;
+            let usb_storage = user_build("usbstorage", kind)?;
             println!("built    {}", usb_storage.display());
             let partition = user_build("partition", kind)?;
             println!("built    {}", partition.display());
@@ -897,12 +894,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ),
             ];
             for (name, binary) in [
-                ("pci-bus", &pci_bus),
-                ("virtio-blk", &virtio_blk),
+                ("pcibus", &pci_bus),
+                ("virtioblk", &virtio_blk),
                 ("nvme", &nvme),
                 ("ahci", &ahci),
                 ("xhci", &xhci),
-                ("usb-storage", &usb_storage),
+                ("usbstorage", &usb_storage),
                 ("partition", &partition),
             ] {
                 let manifest = format!("user/drivers/{name}/driver.yaml");
@@ -935,21 +932,18 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // the EFI system partition, a test driver for the root partition
             // that checks it, and one for each scratch partition.
             let pci_bus_files = [
+                ("usr/lib/drivers/pcibus/pcibus".to_owned(), pci_bus.clone()),
                 (
-                    "usr/lib/drivers/pci-bus/pci-bus".to_owned(),
-                    pci_bus.clone(),
+                    "usr/lib/drivers/pcibus/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/pcibus/driver.yaml"),
                 ),
                 (
-                    "usr/lib/drivers/pci-bus/driver.yaml".to_owned(),
-                    crate::workspace_root().join("user/drivers/pci-bus/driver.yaml"),
-                ),
-                (
-                    "usr/lib/drivers/virtio-blk/virtio-blk".to_owned(),
+                    "usr/lib/drivers/virtioblk/virtioblk".to_owned(),
                     virtio_blk.clone(),
                 ),
                 (
-                    "usr/lib/drivers/virtio-blk/driver.yaml".to_owned(),
-                    crate::workspace_root().join("user/drivers/virtio-blk/driver.yaml"),
+                    "usr/lib/drivers/virtioblk/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/virtioblk/driver.yaml"),
                 ),
                 ("usr/lib/drivers/nvme/nvme".to_owned(), nvme.clone()),
                 (
@@ -967,12 +961,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     crate::workspace_root().join("user/drivers/xhci/driver.yaml"),
                 ),
                 (
-                    "usr/lib/drivers/usb-storage/usb-storage".to_owned(),
+                    "usr/lib/drivers/usbstorage/usbstorage".to_owned(),
                     usb_storage.clone(),
                 ),
                 (
-                    "usr/lib/drivers/usb-storage/driver.yaml".to_owned(),
-                    crate::workspace_root().join("user/drivers/usb-storage/driver.yaml"),
+                    "usr/lib/drivers/usbstorage/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/usbstorage/driver.yaml"),
                 ),
                 (
                     "usr/lib/drivers/partition/partition".to_owned(),
@@ -1035,9 +1029,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let volumes_probe = user_build("volumes-probe", kind)?;
             println!("built    {}", volumes_probe.display());
             let volume_drivers = [
-                "pci-bus",
+                "pcibus",
                 "xhci",
-                "usb-storage",
+                "usbstorage",
                 "partition",
                 "fat",
                 "exfat",
@@ -1074,8 +1068,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // drivers, the time zones and the log service, from the PCI
             // test's files, without test drivers.
             let root_drivers = [
-                "pci-bus",
-                "virtio-blk",
+                "pcibus",
+                "virtioblk",
                 "nvme",
                 "ahci",
                 "partition",
@@ -1113,12 +1107,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // partitions, and the log service, from the PCI test's files,
             // with the durability test driver.
             let durable_drivers = [
-                "pci-bus",
-                "virtio-blk",
+                "pcibus",
+                "virtioblk",
                 "nvme",
                 "ahci",
                 "xhci",
-                "usb-storage",
+                "usbstorage",
                 "partition",
             ];
             let durable_files: Vec<(String, PathBuf)> = pci_bus_files

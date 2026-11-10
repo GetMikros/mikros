@@ -1,0 +1,7 @@
+# The manifest of the virtio-blk driver, installed as
+# usr/lib/drivers/virtioblk/driver.yaml.
+name: virtioblk
+binary: /usr/lib/drivers/virtioblk/virtioblk
+match: [pci:v1af4d1042]
+kind: normal
+needs: [dma]

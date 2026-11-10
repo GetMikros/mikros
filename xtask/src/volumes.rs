@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn counts_the_devices_that_the_xhci_driver_reset() {
         let serial = "\
-[1.0] I p7: device-manager: started driver pci-bus for device 1 as pid 7
+[1.0] I p7: device-manager: started driver pcibus for device 1 as pid 7
 [1.1] I p7: device-manager: started driver xhci for device 9 as pid 8
 [2.0] I p7: device-manager: the driver of device 1 reset device 9
 [3.0] I p7: device-manager: the driver of device 9 reset device 21

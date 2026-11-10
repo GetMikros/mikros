@@ -304,15 +304,15 @@ fn refuses_program_manifests_that_break_the_rules() {
 
 #[test]
 fn reads_a_driver_manifest() {
-    let text = "name: pci-bus\nbinary: /usr/lib/drivers/pci-bus/pci-bus\n\
+    let text = "name: pcibus\nbinary: /usr/lib/drivers/pcibus/pcibus\n\
                 match: [platform:pci-host-ecam]\nkind: normal\nneeds: [bus, dma]\n\
                 permissions: [device.registry]\npriority: 20\nfoo: 1\n";
-    let dir = "pci-bus";
+    let dir = "pcibus";
     let m = parse_driver(dir, text.as_bytes()).unwrap();
     let d = &m.driver;
     assert_eq!(
         (d.name.as_str(), d.binary.as_str()),
-        ("pci-bus", "/usr/lib/drivers/pci-bus/pci-bus")
+        ("pcibus", "/usr/lib/drivers/pcibus/pcibus")
     );
     assert_eq!(d.matches, ["platform:pci-host-ecam"]);
     assert_eq!(

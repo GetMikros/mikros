@@ -9919,10 +9919,10 @@ mod manager {
         const PCI_SECONDS: i64 = 300;
         const EXPECTED: &[(&[u8], usize)] = &[
             (
-                b"device-manager: bound driver pci-bus to device 1, pci-host-0, as platform:pci-host-ecam",
+                b"device-manager: bound driver pcibus to device 1, pci-host-0, as platform:pci-host-ecam",
                 1,
             ),
-            (b"device-manager: started driver pci-bus for device 1 as pid", 1),
+            (b"device-manager: started driver pcibus for device 1 as pid", 1),
             (b", pci-0000:00:00.0, as pci:v8086d29c0sv", 1),
             (b", pci-0000:00:1f.0, as pci:v8086d2918sv", 1),
             (b"device-manager: bound driver test-pci to device", 1),
@@ -9935,18 +9935,18 @@ mod manager {
             (b"test-small-bar: mapped BAR 0 at ", 1),
             (b"device-manager: the driver of device 1 ", 6),
             (
-                b"device-manager: bound driver virtio-blk to device 5, pci-0000:00:02.0, as pci:v1af4d1042",
+                b"device-manager: bound driver virtioblk to device 5, pci-0000:00:02.0, as pci:v1af4d1042",
                 1,
             ),
-            (b"device-manager: started driver virtio-blk for device 5 as pid", 2),
+            (b"device-manager: started driver virtioblk for device 5 as pid", 2),
             // The btrfs test driver kills the disk's driver, which is
             // restarted with the disk and its partitions kept; the disk is
             // added again and the partition driver reconnected to it.
             (
-                b"device-manager: driver virtio-blk for device 5 terminated with code -3, signal 9",
+                b"device-manager: driver virtioblk for device 5 terminated with code -3, signal 9",
                 1,
             ),
-            (b"device-manager: restarting driver virtio-blk for device 5", 1),
+            (b"device-manager: restarting driver virtioblk for device 5", 1),
             (b" again, disk-0, under 5", 1),
             (b"device-manager: reconnected device ", 1),
             (
@@ -10011,8 +10011,8 @@ mod manager {
             // The keyboard behind the USB hub, whose interface has no
             // driver here; the hub itself adds no device.
             (b".1-0, as usb:v0627p0001i00, under", 1),
-            (b"device-manager: bound driver usb-storage to device", 1),
-            (b"device-manager: started driver usb-storage for device", 1),
+            (b"device-manager: bound driver usbstorage to device", 1),
+            (b"device-manager: started driver usbstorage for device", 1),
             (b", disk-0, as storage:disk, under", 2),
             // The three fixed disks, each with the serial number
             // `mikros`, and the USB disk.
@@ -10037,18 +10037,18 @@ mod manager {
             ),
         ];
         const FAILED: &[&[u8]] = &[
-            b"driver pci-bus declined",
-            b"driver pci-bus for device 1 terminated",
-            b"driver pci-bus for device 1 did not start",
+            b"driver pcibus declined",
+            b"driver pcibus for device 1 terminated",
+            b"driver pcibus for device 1 did not start",
             b"driver test-pci declined",
             b"driver test-edu declined",
             b"driver test-small-bar declined",
-            b"driver virtio-blk declined",
+            b"driver virtioblk declined",
             b"driver test-disk declined",
             b"driver nvme declined",
             b"driver ahci declined",
             b"driver xhci declined",
-            b"driver usb-storage declined",
+            b"driver usbstorage declined",
             b"driver partition declined",
             b"driver fat declined",
             b"driver test-fat declined",
@@ -10178,8 +10178,8 @@ mod manager {
             ),
         ];
         const FAILED: &[&[u8]] = &[
-            b"driver pci-bus declined",
-            b"driver virtio-blk declined",
+            b"driver pcibus declined",
+            b"driver virtioblk declined",
             b"driver nvme declined",
             b"driver ahci declined",
             b"driver partition declined",
@@ -10221,12 +10221,12 @@ mod manager {
         const EXPECTED: &[(&[u8], usize)] = &[(b"test-durable: wrote the blocks on ", 4)];
         const FAILED: &[&[u8]] = &[
             b"test-durable: FAILED",
-            b"driver pci-bus declined",
-            b"driver virtio-blk declined",
+            b"driver pcibus declined",
+            b"driver virtioblk declined",
             b"driver nvme declined",
             b"driver ahci declined",
             b"driver xhci declined",
-            b"driver usb-storage declined",
+            b"driver usbstorage declined",
             b"driver partition declined",
             b"terminated with code",
         ];
@@ -10269,8 +10269,8 @@ mod manager {
                 b"device-manager: published device.filesystem root for device",
                 1,
             ),
-            (b"restart-probe: killed system.driver.pci-bus", 1),
-            (b"device-manager: restarting driver pci-bus for device", 1),
+            (b"restart-probe: killed system.driver.pcibus", 1),
+            (b"device-manager: restarting driver pcibus for device", 1),
             (b"restart-probe: PASSED", 1),
         ];
         const FAILED: &[&[u8]] = &[

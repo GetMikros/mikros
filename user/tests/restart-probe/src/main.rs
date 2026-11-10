@@ -49,12 +49,12 @@ mikros_rt::raw_main!(main);
 const LOG_ID: u32 = 2;
 const FILESYSTEM: &str = "device.filesystem";
 const RTC: &str = "device.rtc";
-const BUS_DRIVER: &str = "system.driver.pci-bus";
+const BUS_DRIVER: &str = "system.driver.pcibus";
 /// The drivers of the disk controllers that the root's disk can be
 /// behind. The probe kills them all, as it cannot tell which process
 /// serves the root's disk.
 const DISK_DRIVERS: [&str; 3] = [
-    "system.driver.virtio-blk",
+    "system.driver.virtioblk",
     "system.driver.nvme",
     "system.driver.ahci",
 ];

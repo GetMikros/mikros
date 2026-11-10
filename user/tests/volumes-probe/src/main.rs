@@ -60,7 +60,7 @@ const AGAIN_TEXT: &[u8] = b"written across an xHCI restart\n";
 const RESET: &str = "RESET.TXT";
 const RESET_TEXT: &[u8] = b"written across a USB device reset\n";
 const HOST_DRIVER: &str = "system.driver.xhci";
-const STORAGE_DRIVER: &str = "system.driver.usb-storage";
+const STORAGE_DRIVER: &str = "system.driver.usbstorage";
 const DRIVER_PREFIX: &str = "system.driver.";
 const KILL: u32 = 9;
 /// How long a killed driver may take to run again, and then how long
