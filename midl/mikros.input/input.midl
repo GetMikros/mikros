@@ -1,0 +1,54 @@
+// MIKSPEC-0039.R2
+
+library mikros.input;
+using mikros.base;
+
+type Bus = enum : u32 {
+    UNKNOWN = 0; PS2 = 1; USB = 2; VIRTUAL = 3; BLUETOOTH = 4; I2C = 5;
+};
+
+type AbsInfo = struct {
+    code u16;
+    minimum i32;
+    maximum i32;
+    resolution i32;
+};
+
+type AbsValue = struct {
+    code u16;
+    value i32;
+};
+
+type DeviceInfo = struct {
+    name string<128>;
+    bus Bus;
+    vendor u16;
+    product u16;
+    version u16;
+    event_types u32;
+    keys array<u8, 96>;
+    relative_axes u16;
+    absolute_axes vector<AbsInfo, 64>;
+    leds u16;
+};
+
+type Event = struct {
+    timestamp base.MonotonicTime;
+    type u16;
+    code u16;
+    value i32;
+};
+
+protocol Input {
+    @1 Open(device server_end<Device>,
+            revoke handle<Event, WAIT>?) -> () error base.Status;
+};
+
+protocol Device {
+    @1 GetInfo() -> (info DeviceInfo);
+    @2 GetState() -> (keys array<u8, 96>, leds u16,
+                      absolute vector<AbsValue, 64>);
+    @3 SetLeds(leds u16) -> () error base.Status;
+    @4 -> OnEvents(events vector<Event, 1024>);
+    @5 Rumble(strong u16, weak u16, duration base.Duration) -> () error base.Status;
+};
