@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["boot/bootmenu", "boot/mikrosboot", "boot/protocol", "kernel/arch/x86_64", "kernel/core", "kernel/syscalls", "tools/midl-tests", "tools/midlc", "user/lib/ata", "user/lib/bootfs", "user/lib/btrfs", "user/lib/casefold", "user/lib/cmos", "user/lib/display", "user/lib/evdev", "user/lib/exfat", "user/lib/fat", "user/lib/gpt", "user/lib/hid", "user/lib/logstore", "user/lib/manifest", "user/lib/memfs", "user/lib/nvme", "user/lib/pci", "user/lib/ps2", "user/lib/permissions", "user/lib/tty", "user/lib/tz", "user/lib/userdb", "user/lib/ustar", "user/lib/yaml", "xtask"]
+members = ["boot/bootmenu", "boot/mikrosboot", "boot/protocol", "kernel/arch/x86_64", "kernel/core", "kernel/syscalls", "tools/midl-tests", "tools/midlc", "user/lib/ata", "user/lib/bootfs", "user/lib/btrfs", "user/lib/casefold", "user/lib/cmos", "user/lib/display", "user/lib/evdev", "user/lib/exfat", "user/lib/fat", "user/lib/gpt", "user/lib/hid", "user/lib/logstore", "user/lib/manifest", "user/lib/memfs", "user/lib/nvme", "user/lib/pci", "user/lib/ps2", "user/lib/permissions", "user/lib/tty", "user/lib/tz", "user/lib/userdb", "user/lib/vt", "user/lib/ustar", "user/lib/yaml", "xtask"]
 
 [workspace.package]
 version = "0.0.0"
