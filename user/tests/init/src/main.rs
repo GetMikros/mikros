@@ -10072,7 +10072,11 @@ mod manager {
             (b"device-manager: published device.filesystem esp for device", 1),
             (b"process-manager: namespaces come from the root file system", 1),
             (b"process-manager: serving the EFI system partition as /boot/efi", 1),
-            (b"device-manager: published device.subvolumes ", 1),
+            // By its ID, its partition's name and root, as its file
+            // system.
+            (b"device-manager: published device.subvolumes ", 3),
+            (b"device-manager: published device.subvolumes partuuid-", 1),
+            (b"device-manager: published device.subvolumes root for device", 1),
             (b"device-manager: bound driver btrfs to device", 1),
             (b"device-manager: started driver btrfs for device", 1),
             (b"device-manager: bound driver test-btrfs to device", 1),

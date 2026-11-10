@@ -33,6 +33,8 @@ const SUBVOLUMES: &str = "subvolumes";
 /// partition's file system.
 const PARTITION_GUID: &str = "partition_guid";
 const ROOT: &str = "root";
+/// The prefix of the instance name of a partition's file system.
+const PARTUUID: &str = "partuuid-";
 /// The instance name of the file system of the boot's EFI system partition.
 const ESP: &str = "esp";
 /// The property that keeps a partition's file system from being a volume.
@@ -118,6 +120,12 @@ pub async fn publish(
     let permission = Some(String::from(*permission));
     let aliases = match class.as_str() {
         FILESYSTEM => aliases(m, caller),
+        // The subvolumes of a partition's file system go by its
+        // partition's and the root's names too.
+        SUBVOLUMES => aliases(m, caller)
+            .into_iter()
+            .filter(|a| a.starts_with(PARTUUID) || a == ROOT)
+            .collect(),
         _ => Vec::new(),
     };
     let provider = provider.into_handle();
@@ -175,7 +183,7 @@ fn aliases(m: &Manager, caller: u64) -> Vec<String> {
         return Vec::new();
     };
     let guid = guid.to_ascii_lowercase();
-    let mut aliases = alloc::vec![format!("partuuid-{guid}")];
+    let mut aliases = alloc::vec![format!("{PARTUUID}{guid}")];
     let root = m.profiles.claim_root(device, &devices);
     if root {
         aliases.push(String::from(ROOT));
