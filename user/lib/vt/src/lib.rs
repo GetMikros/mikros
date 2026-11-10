@@ -7,6 +7,9 @@
 extern crate alloc;
 
 pub mod cell;
+pub mod keys;
+#[cfg(test)]
+mod keys_tests;
 pub mod parser;
 #[cfg(test)]
 mod parser_tests;
