@@ -1,0 +1,11 @@
+# The service manifest of the console probe as the boot service of
+# tests/console.img, installed as usr/lib/services/console-probe.yaml. It
+# logs through the kernel log.
+name: console-probe
+binary: /usr/bin/console-probe
+start: boot
+after: [devicemgr]
+boot_handles: [log_manage]
+# To own the display and read the input devices, as the session manager
+# does, for the console.
+permissions: [gpu.display, input.seat]
