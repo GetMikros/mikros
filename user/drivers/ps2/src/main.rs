@@ -5,8 +5,8 @@
 //! lower one being the data port, or from one resource covering both,
 //! and the interrupts of its first and second ports from its `IRQ`
 //! resources, in that order. It sets the controller up, puts the
-//! keyboard in scan code set 2, and publishes the keyboard as an input
-//! device.
+//! keyboard in scan code set 2, chooses the mouse's protocol, and
+//! publishes the keyboard and the mouse as input devices.
 
 #![no_std]
 #![no_main]
@@ -18,10 +18,13 @@ mod ports;
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
-use hub::{Hub, KeyboardLeds};
-use mikros_evdev::codes::{EV_KEY, EV_LED, EV_SYN};
+use core::cell::RefCell;
+use hub::{Hub, KeyboardLeds, NoLeds};
+use mikros_evdev::codes::{EV_KEY, EV_LED, EV_REL, EV_SYN, REL_WHEEL, REL_X, REL_Y};
+use mikros_evdev::{KEY_BYTES, set_bit};
 use mikros_inputdev::InputDevice;
 use mikros_ps2::controller::Controller;
+use mikros_ps2::mouse::{self, Protocol};
 use mikros_ps2::scancode::Decoder;
 use mikros_ps2::{KEYBOARD_LEDS, keyboard_set_2};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
@@ -54,6 +57,7 @@ struct Running {
     _interrupts: Rc<Vec<OwnedHandle>>,
     _hub: Rc<Hub>,
     _keyboard: Option<Rc<InputDevice<KeyboardLeds>>>,
+    _mouse: Option<Rc<InputDevice<NoLeds>>>,
 }
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
@@ -204,6 +208,30 @@ fn keyboard_info() -> DeviceInfo {
     }
 }
 
+/// What a mouse in `protocol` reports.
+fn mouse_info(protocol: Protocol) -> DeviceInfo {
+    let mut keys = [0; KEY_BYTES];
+    for &button in protocol.buttons() {
+        set_bit(&mut keys, button);
+    }
+    let mut relative_axes = 1 << REL_X | 1 << REL_Y;
+    if protocol.has_wheel() {
+        relative_axes |= 1 << REL_WHEEL;
+    }
+    DeviceInfo {
+        name: "PS/2 mouse".into(),
+        bus: Bus::Ps2,
+        vendor: 0,
+        product: 0,
+        version: 0,
+        event_types: 1 << EV_SYN | 1 << EV_KEY | 1 << EV_REL,
+        keys,
+        relative_axes,
+        absolute_axes: Vec::new(),
+        leds: 0,
+    }
+}
+
 async fn start(
     request: DriverStartRequest,
     process: sys::Handle,
@@ -232,8 +260,16 @@ async fn start(
         mikros_rt::log!(Error, "ps2: the keyboard refused scan code set 2");
         present.first = false;
     }
-    // The mouse is not driven yet.
-    present.second = false;
+    let mut protocol = Protocol::Standard;
+    if present.second {
+        match mouse::setup(&mut controller, &mut |_, _| {}) {
+            Ok(p) => protocol = p,
+            Err(e) => {
+                mikros_rt::log!(Error, "ps2: setting up the mouse failed: {e:?}");
+                present.second = false;
+            }
+        }
+    }
     let mut interrupts = Vec::new();
     for (wanted, &(at, irq)) in [present.first, present.second].iter().zip(&irqs) {
         if *wanted {
@@ -253,6 +289,19 @@ async fn start(
         mikros_rt::log!(Info, "ps2: published the keyboard");
         keyboard = Some(device);
     }
+    let mut mouse = None;
+    if present.second {
+        let device = InputDevice::new(mouse_info(protocol), NoLeds, reactor.clone());
+        let decoder = RefCell::new(mouse::Decoder::new(protocol));
+        let _ = hub.mouse.set((decoder, Rc::downgrade(&device)));
+        device.publish(&manager, spawner).await?;
+        mikros_rt::log!(
+            Info,
+            "ps2: published the mouse, protocol {}",
+            protocol as u8
+        );
+        mouse = Some(device);
+    }
     let interrupts = Rc::new(interrupts);
     for at in 0..interrupts.len() {
         spawner.spawn(watch(hub.clone(), interrupts.clone(), at, reactor.clone()));
@@ -265,6 +314,7 @@ async fn start(
         _interrupts: interrupts,
         _hub: hub,
         _keyboard: keyboard,
+        _mouse: mouse,
     })
 }
 

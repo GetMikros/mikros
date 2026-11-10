@@ -9,7 +9,7 @@ use std::vec::Vec;
 
 /// A controller with a keyboard on its first port and, when `mouse` is
 /// set, a mouse with that ID on its second.
-struct Fake {
+pub(crate) struct Fake {
     config: u8,
     output: VecDeque<(Port, u8)>,
     expect_config: bool,
@@ -18,13 +18,13 @@ struct Fake {
     /// How many more device writes are answered with a resend.
     resends: usize,
     /// The device bytes written, by port.
-    written: Vec<(Port, u8)>,
+    pub(crate) written: Vec<(Port, u8)>,
     commands: Vec<u8>,
     clock: i64,
 }
 
 impl Fake {
-    fn new(mouse: Option<u8>) -> Fake {
+    pub(crate) fn new(mouse: Option<u8>) -> Fake {
         Fake {
             // Interrupts, translation and the second port's clock off.
             config: 0x01 | 0x02 | 0x40 | 0x20,
@@ -244,4 +244,3 @@ fn led_bits_map_to_the_keyboard_command() {
     assert_eq!(led_byte(1 << LED_CAPSL), 4);
     assert_eq!(led_byte(KEYBOARD_LEDS), 7);
 }
-

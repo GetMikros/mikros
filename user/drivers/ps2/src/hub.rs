@@ -10,6 +10,7 @@ use mikros_evdev::{Event, group};
 use mikros_inputdev::{Backend, InputDevice};
 use mikros_ps2::controller::{Controller, Port};
 use mikros_ps2::keyboard_leds;
+use mikros_ps2::mouse;
 use mikros_ps2::scancode::Decoder;
 use mikros_rt::interfaces::mikros::base::Status;
 
@@ -21,6 +22,8 @@ pub struct Hub {
     pub controller: RefCell<Controller<IoPorts>>,
     decoder: RefCell<Decoder>,
     pub keyboard: OnceCell<Weak<InputDevice<KeyboardLeds>>>,
+    /// The mouse's packet decoder and device, once it is set up.
+    pub mouse: OnceCell<(RefCell<mouse::Decoder>, Weak<InputDevice<NoLeds>>)>,
 }
 
 impl Hub {
@@ -29,6 +32,7 @@ impl Hub {
             controller: RefCell::new(controller),
             decoder: RefCell::new(Decoder::new()),
             keyboard: OnceCell::new(),
+            mouse: OnceCell::new(),
         }
     }
 
@@ -45,7 +49,8 @@ impl Hub {
 
     /// Takes in `byte` from `port`, received at `timestamp`.
     pub fn byte(&self, port: Port, byte: u8, timestamp: i64) {
-        if port != Port::First {
+        if port == Port::Second {
+            self.mouse_byte(byte, timestamp);
             return;
         }
         let Some(keyboard) = self.keyboard.get().and_then(Weak::upgrade) else {
@@ -61,6 +66,35 @@ impl Hub {
             let event = Event::new(timestamp, EV_KEY, key, i32::from(pressed));
             keyboard.report(&group(timestamp, [event]));
         }
+    }
+}
+
+impl Hub {
+    fn mouse_byte(&self, byte: u8, timestamp: i64) {
+        let Some((decoder, device)) = self.mouse.get() else {
+            return;
+        };
+        let Some(events) = decoder.borrow_mut().feed(byte) else {
+            return;
+        };
+        let Some(device) = device.upgrade() else {
+            return;
+        };
+        if !events.is_empty() {
+            let events = events
+                .into_iter()
+                .map(|(kind, code, value)| Event::new(timestamp, kind, code, value));
+            device.report(&group(timestamp, events));
+        }
+    }
+}
+
+/// A device without LEDs.
+pub struct NoLeds;
+
+impl Backend for NoLeds {
+    async fn set_leds(&self, _leds: u16) -> Result<(), Status> {
+        Err(Status::NotSupported)
     }
 }
 
