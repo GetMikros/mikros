@@ -1,6 +1,7 @@
 //! The `Display` connection of the display owner: the resources, dumb
 //! buffers, sync objects, and commits presented by copying the plane's
-//! buffer into the framebuffer.
+//! buffer into the framebuffer; and what the gpudev library needs of the
+//! device.
 
 use crate::framebuffer::{Framebuffer, PERM_READ};
 use alloc::collections::BTreeMap;
@@ -8,15 +9,18 @@ use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::future::Future;
 use mikros_display::rects::{Rect, copied};
+use mikros_gpudev::Backend;
 use mikros_rt::exec::{Reactor, Spawner};
-use mikros_rt::interfaces::__midl::OwnedHandle;
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::gpu::{
-    self as gpu, Colorspace, Commit, CommitFlags, Connector, ConnectorCaps, ConnectorType,
-    DisplayAsyncServer, DisplayCommitResponse, DisplayCreateDumbBufferResponse, DisplayFlags,
-    DisplayGetResourcesResponse, DisplayImportSyncResponse, DisplayRequest, DisplayResources,
-    DumbBuffer, FormatModifier, Mode, ModeFlags, Plane, PlaneType,
+    self as gpu, Capabilities, Colorspace, Commit, CommitFlags, Connector, ConnectorCaps,
+    ConnectorType, DeviceInfo, DisplayAsyncServer, DisplayCommitResponse,
+    DisplayCreateDumbBufferResponse, DisplayFlags, DisplayGetResourcesResponse,
+    DisplayImportSyncResponse, DisplayRequest, DisplayResources, DumbBuffer, FormatModifier, Mode,
+    ModeFlags, Plane, PlaneType, Render,
 };
 use mikros_rt::sys;
 
@@ -255,16 +259,6 @@ impl Display {
         }
     }
 
-    /// Destroys every buffer and sync object of the closed connection.
-    /// The shown buffer stays shown until the next owner commits.
-    pub fn closed(&self) {
-        for b in self.buffers.borrow_mut().values_mut() {
-            b.destroyed = true;
-        }
-        self.syncs.borrow_mut().clear();
-        self.free_unused();
-    }
-
     /// Checks `commit` against the one mode and plane: what the plane
     /// will show, whether the CRTC is active, the damage, and the sync
     /// object and value to wait for.
@@ -428,6 +422,41 @@ impl Display {
                 fb.write_row((r.x + dx) as u32, (y as i64 + dy) as u32, pixels);
             }
         }
+    }
+}
+
+impl Backend for Display {
+    fn info(&self) -> DeviceInfo {
+        DeviceInfo {
+            name: "Basic Display".into(),
+            driver: "basicdisplay".into(),
+            driver_version: 1,
+            vendor_id: 0,
+            device_id: 0,
+            capabilities: Capabilities::DISPLAY,
+        }
+    }
+
+    fn serve(
+        self: Rc<Self>,
+        display: Rc<DisplayAsyncServer>,
+    ) -> impl Future<Output = ()> + 'static {
+        serve(self, display)
+    }
+
+    /// Destroys every buffer and sync object of the closed connection.
+    /// The shown buffer stays shown until the next owner commits.
+    fn closed(&self) {
+        for b in self.buffers.borrow_mut().values_mut() {
+            b.destroyed = true;
+        }
+        self.syncs.borrow_mut().clear();
+        self.free_unused();
+    }
+
+    /// Without `Render` connections no buffer can be exported.
+    fn open_render(&self, _render: ServerEnd<Render>) -> Result<(), Status> {
+        Err(Status::NotSupported)
     }
 }
 

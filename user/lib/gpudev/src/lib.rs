@@ -1,0 +1,195 @@
+//! Serving GPU devices for drivers: publishing one service of class
+//! `gpu`, which serves `mikros.gpu.Device`, and letting one client at a
+//! time that holds `gpu.display` own the display through a `Display`
+//! connection, closing it when its revocation event is signaled.
+
+#![no_std]
+
+extern crate alloc;
+
+use alloc::rc::Rc;
+use core::cell::RefCell;
+use core::future::{Future, poll_fn};
+use core::pin::pin;
+use core::task::Poll;
+use mikros_rt::exec::{Reactor, Spawner};
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
+use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
+use mikros_rt::interfaces::mikros::gpu::{
+    Device, DeviceAsyncServer, DeviceGetInfoResponse, DeviceInfo, DeviceOpenDisplayResponse,
+    DeviceOpenRenderResponse, DeviceRequest, DisplayAsyncServer, Render,
+};
+use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerAsyncClient, Decision};
+use mikros_rt::interfaces::mikros::service::{
+    ClientIdentity, DirectoryAsyncClient, Provider, ProviderAsyncServer, ProviderRequest,
+};
+
+/// The service class of GPU devices, and its protocol in the service
+/// directory.
+const CLASS: &str = "gpu";
+const PROTOCOL: &str = "device.gpu";
+const BROKER: &str = "mikros.permissions.Broker";
+/// The permission that owning the display takes.
+const GPU_DISPLAY: &str = "gpu.display";
+/// The signal of the revocation event.
+const SIGNALED: u32 = 1 << 3;
+
+/// What a driver does for its device beyond what the library does.
+pub trait Backend {
+    /// What `GetInfo` reports.
+    fn info(&self) -> DeviceInfo;
+
+    /// Serves the display owner's `Display` connection until it closes.
+    fn serve(self: Rc<Self>, display: Rc<DisplayAsyncServer>)
+    -> impl Future<Output = ()> + 'static;
+
+    /// Frees what the closed `Display` connection had.
+    fn closed(&self);
+
+    /// Answers `OpenRender` with `render`.
+    fn open_render(&self, render: ServerEnd<Render>) -> Result<(), Status>;
+}
+
+/// A published GPU device.
+pub struct GpuDevice<B> {
+    backend: Rc<B>,
+    broker: Option<BrokerAsyncClient>,
+    /// The open `Display` connection.
+    owner: RefCell<Option<Rc<DisplayAsyncServer>>>,
+    reactor: Reactor,
+    spawner: Spawner,
+}
+
+impl<B: Backend + 'static> GpuDevice<B> {
+    /// Publishes the device of `backend` with `manager`, and serves the
+    /// connections made to it with `spawner`, asking the permission
+    /// broker, through `directory`, who may own the display.
+    pub async fn publish(
+        backend: Rc<B>,
+        manager: &DeviceManagerAsyncClient,
+        directory: Rc<DirectoryAsyncClient>,
+        reactor: Reactor,
+        spawner: Spawner,
+    ) -> Result<Rc<GpuDevice<B>>, Status> {
+        let device = Rc::new(GpuDevice {
+            backend,
+            broker: broker(&directory, &reactor).await,
+            owner: RefCell::new(None),
+            reactor,
+            spawner,
+        });
+        let (client, server) = endpoints::<Provider>().map_err(|_| Status::NoResources)?;
+        match manager.publish_service(CLASS.into(), client).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(status)) => return Err(status),
+            Err(_) => return Err(Status::PeerClosed),
+        }
+        device.spawner.spawn(device.clone().serve_provider(server));
+        Ok(device)
+    }
+
+    pub fn backend(&self) -> &Rc<B> {
+        &self.backend
+    }
+
+    async fn serve_provider(self: Rc<Self>, end: ServerEnd<Provider>) {
+        let provider = ProviderAsyncServer::new(end, self.reactor.clone());
+        while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
+            // Dropping the server end of another protocol closes it.
+            if c.protocol == PROTOCOL {
+                let end = ServerEnd::<Device>::new(c.server);
+                self.spawner.spawn(self.clone().serve_device(end, c.client));
+            }
+        }
+    }
+
+    /// Whether `client` holds `gpu.display`, as the broker says.
+    async fn may_own(&self, client: &ClientIdentity) -> bool {
+        let Some(broker) = &self.broker else {
+            return false;
+        };
+        let client = ClientIdentity {
+            pid: client.pid,
+            user: client.user,
+            app_id: client.app_id.clone(),
+        };
+        let checked = broker.check(client, GPU_DISPLAY.into()).await;
+        matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
+    }
+
+    async fn serve_device(self: Rc<Self>, end: ServerEnd<Device>, client: ClientIdentity) {
+        let server = DeviceAsyncServer::new(end, self.reactor.clone());
+        while let Ok(request) = server.next().await {
+            let s = server.server();
+            let _ = match request {
+                DeviceRequest::GetInfo(_, r) => r.reply(
+                    s,
+                    DeviceGetInfoResponse {
+                        info: self.backend.info(),
+                    },
+                ),
+                DeviceRequest::OpenDisplay(q, r) => {
+                    let result = if !self.may_own(&client).await {
+                        Err(Status::AccessDenied)
+                    } else if self.owner.borrow().is_some() {
+                        Err(Status::AlreadyExists)
+                    } else {
+                        // The owner's place is taken before the connection
+                        // is first served, so that the next `OpenDisplay`
+                        // fails.
+                        let owner =
+                            Rc::new(DisplayAsyncServer::new(q.display, self.reactor.clone()));
+                        *self.owner.borrow_mut() = Some(owner.clone());
+                        self.spawner.spawn(self.clone().own(owner, q.revoke));
+                        Ok(DeviceOpenDisplayResponse {})
+                    };
+                    r.reply(s, result)
+                }
+                DeviceRequest::OpenRender(q, r) => {
+                    let result = self.backend.open_render(q.render);
+                    r.reply(s, result.map(|()| DeviceOpenRenderResponse {}))
+                }
+            };
+        }
+    }
+
+    /// Serves the display owner until it closes its connection or
+    /// `revoke` is signaled, then frees what the connection had.
+    async fn own(self: Rc<Self>, owner: Rc<DisplayAsyncServer>, revoke: Option<OwnedHandle>) {
+        let serving = self.backend.clone().serve(owner);
+        match &revoke {
+            Some(event) => first(serving, self.reactor.signals(event.raw(), SIGNALED)).await,
+            None => serving.await,
+        }
+        *self.owner.borrow_mut() = None;
+        self.backend.closed();
+    }
+}
+
+/// The permission broker, through `directory`: None when it cannot be
+/// reached, so that no client gets the display.
+async fn broker(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<BrokerAsyncClient> {
+    let (client, server) = endpoints::<Broker>().ok()?;
+    match directory
+        .connect(BROKER.into(), None, server.into_handle())
+        .await
+    {
+        Ok(Ok(_)) => Some(BrokerAsyncClient::new(client, reactor.clone())),
+        _ => None,
+    }
+}
+
+/// Completes when the first of `a` and `b` completes.
+async fn first<A: Future, B: Future>(a: A, b: B) {
+    let mut a = pin!(a);
+    let mut b = pin!(b);
+    poll_fn(|cx| {
+        if a.as_mut().poll(cx).is_ready() || b.as_mut().poll(cx).is_ready() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
+}

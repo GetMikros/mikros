@@ -63,6 +63,7 @@ name = "basicdisplay"
 version = "0.0.0"
 dependencies = [
  "mikros-display",
+ "mikros-gpudev",
  "mikros-rt",
 ]
 
@@ -366,6 +367,13 @@ name = "mikros-gpt"
 version = "0.0.0"
 dependencies = [
  "mikros-fat",
+]
+
+[[package]]
+name = "mikros-gpudev"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
 ]
 
 [[package]]

@@ -7,4 +7,5 @@ publish = false
 
 [dependencies]
 mikros-display = { path = "../../lib/display" }
+mikros-gpudev = { path = "../../lib/gpudev" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
