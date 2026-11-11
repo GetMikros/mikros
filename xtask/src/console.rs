@@ -34,12 +34,14 @@ const QUESTION: Duration = Duration::from_secs(1);
 /// Ctrl-Z, which stops it, then `let n = (jobs | lines | len)`, `bg`,
 /// `kill %1`, `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
 /// `if (pwd | lines).0 != '/Users/ada' { exit 2 }`,
+/// `try { files-c . } catch e { exit 5 }`, which makes, changes and
+/// removes files in ada's home,
 /// `cd /; if ((print /*) !~ 'Users') { exit 4 }` and
 /// `exit ($n + 6 + $status)`, which exits with 7 when msh listed the one
 /// job, the kill worked, the host name is the one setup wrote, msh
-/// started in ada's home, and `/`, which no namespace entry covers, is a
-/// folder that lists `Users`.
-const MSH_KEYS: [&str; 9] = [
+/// started in ada's home, files-c's checks passed, and `/`, which no
+/// namespace entry covers, is a folder that lists `Users`.
+const MSH_KEYS: [&str; 10] = [
     "s p a w tab s l e e p ret",
     "ctrl-z",
     "l e t spc n spc equal spc shift-9 j o b s spc shift-backslash spc \
@@ -52,6 +54,8 @@ const MSH_KEYS: [&str; 9] = [
     "i f spc shift-9 p w d spc shift-backslash spc l i n e s shift-0 dot 0 spc shift-1 equal spc \
      apostrophe slash shift-u s e r s slash a d a apostrophe spc \
      shift-bracket_left spc e x i t spc 2 spc shift-bracket_right ret",
+    "t r y spc shift-bracket_left spc f i l e s minus c spc dot spc shift-bracket_right spc \
+     c a t c h spc e spc shift-bracket_left spc e x i t spc 5 spc shift-bracket_right ret",
     "c d spc slash semicolon spc i f spc shift-9 shift-9 p r i n t spc slash shift-8 shift-0 spc \
      shift-1 shift-grave_accent spc apostrophe shift-u s e r s apostrophe shift-0 spc \
      shift-bracket_left spc e x i t spc 4 spc shift-bracket_right ret",
