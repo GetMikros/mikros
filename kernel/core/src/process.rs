@@ -617,6 +617,11 @@ impl Process {
         };
         process.state.store(RUNNING, Ordering::Release);
         process.started.fetch_add(1, Ordering::Relaxed);
+        crate::log::diag!(
+            "process {} ({}) starts",
+            process.header.koid(),
+            process.name().as_str()
+        );
         Thread::start_user(thread, entry, stack, u64::from(handle), arg2);
         drop(threads);
         Ok(())
@@ -690,6 +695,11 @@ impl Process {
             self.state.store(TERMINATED, Ordering::Release);
         }
         terminated(self, code);
+        crate::log::diag!(
+            "process {} ({}) exits with code {code}, signal {signo}",
+            self.header.koid(),
+            self.name().as_str()
+        );
         // This also removes translations made outside regions, whose
         // frames belong to whoever mapped them and are not freed.
         self.aspace.remove_all_regions();

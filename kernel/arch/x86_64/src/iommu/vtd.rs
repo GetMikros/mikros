@@ -396,6 +396,7 @@ impl Unit {
                 pages: nodes::map(),
             };
             self.domains.insert(rid, domain);
+            crate::log::diag!("VT-d: device {rid:#06x} is translated in domain {id}");
         }
         Ok(self.domains.get_mut(&rid).expect("just made"))
     }

@@ -213,6 +213,12 @@ impl Thread {
                 crate::arch::context_prepare(top, crate::arch::user_thread_entry(), 0)
         };
         thread.state.store(RUNNABLE, Ordering::Release);
+        crate::log::diag!(
+            "thread {} ({}) of process {} starts",
+            thread.header.koid(),
+            thread.name().as_str(),
+            thread.process.as_ref().map_or(0, |p| p.header().koid())
+        );
         place(thread);
         queue(thread);
     }
@@ -753,6 +759,7 @@ pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
         *thread.arch.saved_context() =
             crate::arch::context_prepare(top, entry as usize as u64, arg as u64)
     };
+    crate::log::diag!("kernel thread {} starts", thread.header.koid());
     place(&thread);
     queue(&thread);
     Ok(thread)
@@ -1027,6 +1034,12 @@ pub fn exit() -> ! {
         current.state.store(DEAD, Ordering::Release);
     });
     if let Some(current) = current {
+        crate::log::diag!(
+            "thread {} ({}) of process {} exits",
+            current.header.koid(),
+            current.name().as_str(),
+            current.process.as_ref().map_or(0, |p| p.header().koid())
+        );
         crate::signal::thread_ended(&current);
     }
     // A thread made DEAD by another as it stopped may have been queued

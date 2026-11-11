@@ -176,3 +176,17 @@ macro_rules! __kernel_log {
 }
 
 pub use __kernel_log as log;
+
+/// In the diagnostic build, logs a formatted kernel message of severity
+/// debug; in the others, nothing. The crate that uses it needs a `diag`
+/// feature.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __kernel_diag {
+    ($($arg:tt)*) => {{
+        #[cfg(feature = "diag")]
+        $crate::log::write($crate::log::Severity::Debug, format_args!($($arg)*));
+    }};
+}
+
+pub use __kernel_diag as diag;

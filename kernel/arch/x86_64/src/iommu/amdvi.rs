@@ -249,6 +249,7 @@ impl Unit {
                     pages: nodes::map(),
                 },
             );
+            crate::log::diag!("AMD-Vi: device {device:#06x} is translated in domain {id}");
         }
         Ok(self.domains.get_mut(&device).expect("just made"))
     }
