@@ -6,6 +6,7 @@ pub mod command;
 pub mod glob;
 pub mod params;
 pub mod pattern;
+mod sources;
 pub mod system;
 pub mod text;
 pub mod words;

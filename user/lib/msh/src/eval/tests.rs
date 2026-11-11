@@ -358,3 +358,37 @@ fn controls_jobs_and_lists_history() {
     s.history = vec!["ls".into(), "cd /".into()];
     assert_eq!(run(&mut s, "history").unwrap(), "    1  ls\n    2  cd /\n");
 }
+
+#[test]
+fn gives_completion_its_functions_variables_programs_and_options() {
+    use crate::edit::complete::complete;
+    let mut s = shell();
+    s.system.folders.insert(
+        "/bin".into(),
+        vec![
+            ("echo".into(), false),
+            ("shout".into(), false),
+            ("lib".into(), true),
+        ],
+    );
+    s.system
+        .files
+        .insert("job.msh".into(), "param --size: size = 1kb\nprint x".into());
+    run(
+        &mut s,
+        "fn shine(x, --bright = 1) { $x }\nlet shade = 'dark'",
+    )
+    .unwrap();
+    let texts = |s: &Shell<Fake>, line: &str| -> Vec<String> {
+        let c = complete(line, line.len(), s);
+        c.candidates.into_iter().map(|c| c.text).collect()
+    };
+    assert_eq!(texts(&s, "sh"), ["shine", "shout"]);
+    assert_eq!(texts(&s, "shine a --"), ["--bright"]);
+    assert_eq!(texts(&s, "print $sh"), ["$shade"]);
+    assert_eq!(texts(&s, "print $env.HO"), ["$env.HOME"]);
+    let c = complete("job.msh --", 10, &s);
+    assert_eq!(c.candidates[0].text, "--size");
+    assert_eq!(c.candidates[0].description.as_deref(), Some("size = 1kb"));
+    assert_eq!(texts(&s, "cat b"), ["b.txt"]);
+}
