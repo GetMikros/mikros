@@ -150,7 +150,6 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
     fd::install(&mut managed.handles);
     fs::install(core::mem::take(&mut managed.namespace));
     crate::library::install(header.bundle.as_deref());
-    crate::terminal::control_standard_input();
     SYSTEM_PROCESS.store(
         header.app_id.as_bytes().starts_with(SYSTEM),
         core::sync::atomic::Ordering::Relaxed,
@@ -196,6 +195,9 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
     let directory = managed.header.directory.handle().raw();
     crate::startup::install(core::mem::take(&mut managed.handles), directory);
     core::mem::forget(managed);
+    // The terminal service is reached through the directory installed
+    // just above.
+    crate::terminal::control_standard_input();
     vector
 }
 
