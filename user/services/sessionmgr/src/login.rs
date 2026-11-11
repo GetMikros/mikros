@@ -44,27 +44,29 @@ async fn any_user(accounts: &AccountsAsyncClient) -> Result<bool, Status> {
 }
 
 /// Starts `path` with `request`'s fields on the terminal of `token`, and
-/// returns its process ID. A user's session leader, which gets a login
-/// session of its own, also leads a new session, whose controlling
-/// terminal the C library makes that terminal.
+/// returns its process ID. A user's session leader, which is given the
+/// user's `home`, starts in that folder, in a login session of its own,
+/// and as the leader of a new session, whose controlling terminal the C
+/// library makes that terminal.
 async fn start(
     launcher: &LauncherAsyncClient,
     path: &str,
     app_id: &str,
     user: u32,
-    login_session: bool,
+    home: Option<String>,
     environment: &[String],
     token: &OwnedHandle,
 ) -> Result<u32, Status> {
+    let leader = home.is_some();
     let request = SpawnRequest {
         path: path.into(),
         arguments: block(&[path], environment).ok_or(Status::NoResources)?,
         handles: standard(token).ok_or(Status::NoResources)?,
         app_id: Some(app_id.into()),
         user,
-        login_session,
-        new_session: login_session,
-        working_directory: None,
+        login_session: leader,
+        new_session: leader,
+        working_directory: home,
     };
     match launcher.spawn(request).await {
         Ok(Ok(spawned)) => Ok(spawned.pid),
@@ -116,7 +118,7 @@ async fn setup(
         SETUP,
         SETUP_APP,
         CALLER_USER,
-        false,
+        None,
         &environment,
         &token,
     )
@@ -198,7 +200,7 @@ pub async fn serve(
                     SHELL,
                     SHELL_APP,
                     user,
-                    true,
+                    Some(format!("/Users/{}", q.name)),
                     &environment,
                     &q.terminal,
                 )

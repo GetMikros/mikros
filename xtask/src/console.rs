@@ -9,8 +9,8 @@
 //! text. In the console run it then types a line that the session shell
 //! reads; in the setup run, whose shell is msh, it starts a job, stops
 //! it with Ctrl-Z, and has msh count its jobs, continue and kill the
-//! job, check the host name that setup wrote, and exit with 7 when all
-//! of that worked. The test init stops
+//! job, check the host name that setup wrote and that it started in
+//! ada's home, and exit with 7 when all of that worked. The test init stops
 //! QEMU through `isa-debug-exit` once the run passed or failed.
 
 use crate::build::{self, Kind};
@@ -31,10 +31,12 @@ const SETTLE: Duration = Duration::from_secs(3);
 const QUESTION: Duration = Duration::from_secs(1);
 /// What the runner types in ada's msh: a job that runs until it is
 /// killed, Ctrl-Z, which stops it, then `let n = (jobs | lines | len)`,
-/// `bg`, `kill %1`, `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`
-/// and `exit ($n + 6 + $status)`, which exits with 7 when msh listed the
-/// one job, the kill worked and the host name is the one setup wrote.
-const MSH_KEYS: [&str; 7] = [
+/// `bg`, `kill %1`, `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
+/// `if (pwd | lines).0 != '/Users/ada' { exit 2 }` and
+/// `exit ($n + 6 + $status)`, which exits with 7 when msh listed the one
+/// job, the kill worked, the host name is the one setup wrote and msh
+/// started in ada's home.
+const MSH_KEYS: [&str; 8] = [
     "s p a w n minus s t d spc s l e e p ret",
     "ctrl-z",
     "l e t spc n spc equal spc shift-9 j o b s spc shift-backslash spc \
@@ -44,6 +46,9 @@ const MSH_KEYS: [&str; 7] = [
     "i f spc shift-9 s p a w n minus s t d spc h o s t n a m e spc shift-backslash spc \
      l i n e s shift-0 dot 0 spc shift-1 equal spc apostrophe b o x apostrophe spc \
      shift-bracket_left spc e x i t spc 1 spc shift-bracket_right ret",
+    "i f spc shift-9 p w d spc shift-backslash spc l i n e s shift-0 dot 0 spc shift-1 equal spc \
+     apostrophe slash shift-u s e r s slash a d a apostrophe spc \
+     shift-bracket_left spc e x i t spc 2 spc shift-bracket_right ret",
     "e x i t spc shift-9 shift-4 n spc shift-equal spc 6 spc shift-equal spc \
      shift-4 s t a t u s shift-0 ret",
 ];

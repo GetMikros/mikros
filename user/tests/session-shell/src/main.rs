@@ -2,9 +2,9 @@
 //! /usr/bin/msh, which the session manager starts once a
 //! user logged in on the text console. It checks that it runs as a user
 //! other than 0 with the app ID `system.cli`, leads a login session and
-//! a session and process group of its own, and has exactly the
-//! environment of that user's session, with the user's home and a
-//! `/Libraries` in its namespace, which for bob holds the README of his
+//! a session and process group of its own, starts in the user's home,
+//! and has exactly the environment of that user's session, with the
+//! user's home and a `/Libraries` in its namespace, which for bob holds the README of his
 //! own Libraries folder.
 //! On the terminal it was given it asks
 //! for the cursor position, which the console answers, and reads the
@@ -113,6 +113,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let header = managed.header;
     let (pid, user) = (header.pid, header.user);
     let app_ok = header.app_id == "system.cli";
+    let folder = header.working_directory;
     let environment = strings(&header.arguments).map(|(_, e)| e);
     let mut home = None;
     let mut libraries = None;
@@ -150,6 +151,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             .ok_or(5)?;
         check(environment == expected(&name), 5)?;
         check(home.as_deref() == Some(&*format!("/Users/{name}")), 12)?;
+        check(folder == format!("/Users/{name}"), 15)?;
         // Only bob's home in tests/console.img holds a Libraries folder
         // with a README; an account that setup made has an empty one.
         let libraries = NodeAsyncClient::new(libraries.ok_or(13)?, reactor.clone());
