@@ -6,7 +6,8 @@
 //! presses into the terminal's input with the system keyboard layout and
 //! key repeat, and shows either its own login prompt or the terminal of
 //! setup or of the user's session. While no session runs, the system log
-//! fills the rows above the login prompt or setup's terminal.
+//! fills the rows above the login prompt or setup's terminal, and while
+//! Ctrl, Alt and F12 are held, the whole screen.
 
 #![feature(mikros_handles)]
 
@@ -78,6 +79,8 @@ pub struct Console {
     /// Whether the view is the terminal of a session.
     session: Cell<bool>,
     log: LogPane,
+    /// Whether Ctrl, Alt and F12 are held.
+    log_held: Cell<bool>,
     /// The size of the grid of cells, once a display came.
     grid: Cell<(usize, usize)>,
     /// What was typed while the login prompt shows, for it to read.
@@ -125,11 +128,15 @@ impl Console {
         self.with_screen(|s| s.modes)
     }
 
-    /// The rows of the log and of the view: the whole screen is the
-    /// session's terminal while a session runs, and otherwise the log
-    /// fills the rows above the bottom `PROMPT_ROWS`.
+    /// The rows of the log and of the view: the whole screen is the log
+    /// while Ctrl, Alt and F12 are held, and the session's terminal
+    /// while a session runs; otherwise the log fills the rows above the
+    /// bottom `PROMPT_ROWS`.
     fn layout(&self) -> Layout {
         let rows = self.grid.get().1;
+        if self.log_held.get() {
+            return Layout { log: rows, view: 0 };
+        }
         match self.session.get() {
             true => Layout { log: 0, view: rows },
             false => {
@@ -336,6 +343,14 @@ impl Console {
                     .as_mut()
                     .map(|k| k.key(event.code, event.value, now(), &modes));
                 self.keys.notify();
+                let held = self
+                    .keyboard
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(Keyboard::log_view);
+                if self.log_held.replace(held) != held {
+                    self.changed.notify();
+                }
                 match pressed {
                     Some(Pressed::Bytes(bytes)) => self.input(bytes),
                     Some(Pressed::LogView) | Some(Pressed::Nothing) | None => {}
@@ -400,6 +415,7 @@ fn main() {
         view: RefCell::new(View::Login(Screen::new(render::MIN_COLS, PROMPT_ROWS))),
         session: Cell::new(false),
         log: LogPane::new(),
+        log_held: Cell::new(false),
         grid: Cell::new((render::MIN_COLS, render::MIN_ROWS)),
         typed: RefCell::new(VecDeque::new()),
         changed: Rc::new(Notify::default()),

@@ -7,7 +7,8 @@
 //! program's questions to make the account ada, and then logs in as
 //! ada. Before the login, at the prompt or in setup, the screen must
 //! show the log above them; once the user is logged in, it must show the
-//! session's text and no log. In the console run it then types a line that the session shell
+//! session's text and no log, and while the runner holds Ctrl, Alt and
+//! F12, the log on the whole screen. In the console run it then types a line that the session shell
 //! reads; in the setup run, whose shell is msh, it starts a job, stops
 //! it with Ctrl-Z, and has msh count its jobs, continue and kill the
 //! job, check the host name that setup wrote and that it started in
@@ -79,10 +80,23 @@ enum Step {
     /// Sends the monitor command `sendkey` for each key, each line ended
     /// by Enter.
     Keys(&'static str),
+    /// Sends the monitor command `sendkey` for the keys with a hold time
+    /// of as many milliseconds, and returns at once. QEMU waits that
+    /// long after pressing each key, and after releasing each, the last
+    /// first: of `n` keys, all are held from `n - 1` hold times on to `n`.
+    Hold(&'static str, u32),
     /// Dumps the screen into the file of that name in the run's
-    /// directory, which must show the log above the login prompt or
-    /// setup's terminal.
-    Log(&'static str),
+    /// directory, which must show the log where it says.
+    Log(&'static str, Shown),
+}
+
+/// Where a screen dump must show the log.
+#[derive(Clone, Copy, Debug)]
+enum Shown {
+    /// Above the login prompt or setup's terminal.
+    AbovePrompt,
+    /// On the whole screen.
+    Whole,
 }
 
 /// The keys of the setup program's questions: the computer's name, box,
@@ -124,6 +138,19 @@ fn session_problem(ppm: &[u8]) -> Option<&'static str> {
         .then_some("the session's screen shows more than its text")
 }
 
+/// Why the screen `ppm` does not show the log where `shown` says, if it
+/// does not.
+fn shown_problem(ppm: &[u8], shown: Shown) -> Option<&'static str> {
+    scenario::console_problem(ppm)
+        .or_else(|| log_problem(ppm))
+        .or_else(|| match shown {
+            Shown::AbovePrompt => None,
+            Shown::Whole => session_problem(ppm)
+                .is_none()
+                .then_some("the log does not fill the screen"),
+        })
+}
+
 /// Why the run of `scenario` did not pass, if it did not, given QEMU's
 /// exit code, the serial output, the screen dump taken in the session,
 /// and those that must show the log, by file name.
@@ -132,7 +159,7 @@ fn verdict(
     code: Option<i32>,
     serial: &str,
     screen: &[u8],
-    logs: &[(&str, Vec<u8>)],
+    logs: &[(&str, Shown, Vec<u8>)],
 ) -> Result<(), String> {
     crate::test::verdict(code, serial)?;
     let passed = format!("SCENARIO {scenario} PASSED");
@@ -142,8 +169,8 @@ fn verdict(
     if let Some(problem) = scenario::console_problem(screen).or_else(|| session_problem(screen)) {
         return Err(problem.into());
     }
-    for (file, ppm) in logs {
-        if let Some(problem) = scenario::console_problem(ppm).or_else(|| log_problem(ppm)) {
+    for (file, shown, ppm) in logs {
+        if let Some(problem) = shown_problem(ppm, *shown) {
             return Err(format!("{file}: {problem}"));
         }
     }
@@ -162,11 +189,19 @@ pub fn run(
     let steps = [
         Step::Wait(SEAT),
         Step::Sleep(SETTLE),
-        Step::Log("login.ppm"),
+        Step::Log("login.ppm", Shown::AbovePrompt),
         Step::Keys("b o b ret"),
         Step::Keys("b o b minus p a s s w o r d ret"),
     ];
-    let after = [Step::Keys("l s ret")];
+    // Ctrl, Alt and F12 are all held from 4 to 6 seconds on, and all
+    // released by 10.
+    let after = [
+        Step::Hold("ctrl-alt-f12", 2000),
+        Step::Sleep(Duration::from_secs(5)),
+        Step::Log("logview.ppm", Shown::Whole),
+        Step::Sleep(Duration::from_secs(6)),
+        Step::Keys("l s ret"),
+    ];
     session(
         machine, kind, built, dir, timeout, "console", &steps, "bob", &after, None,
     )
@@ -186,7 +221,7 @@ pub fn run_setup(
         steps.extend([Step::Keys(keys), Step::Sleep(QUESTION)]);
     }
     steps.extend([
-        Step::Log("setup.ppm"),
+        Step::Log("setup.ppm", Shown::AbovePrompt),
         Step::Wait(SETUP_DONE),
         Step::Sleep(QUESTION),
         Step::Keys("a d a ret"),
@@ -253,8 +288,12 @@ fn session(
                 }
                 Step::Sleep(time) => std::thread::sleep(*time),
                 Step::Keys(keys) => type_keys(&socket, keys)?,
-                Step::Log(file) => {
-                    logs.push((*file, scenario::screen_dump(&socket, &dir.join(file))?));
+                Step::Hold(keys, ms) => {
+                    scenario::monitor(&socket, &format!("sendkey {keys} {ms}"))?;
+                }
+                Step::Log(file, shown) => {
+                    let ppm = scenario::screen_dump(&socket, &dir.join(file))?;
+                    logs.push((*file, *shown, ppm));
                 }
             }
             Ok(())
@@ -323,10 +362,17 @@ mod tests {
         assert!(session_problem(&log_and_prompt).is_some());
         let serial = "SCENARIO console PASSED";
         let code = Some(crate::test::PASSED);
-        let logs = [("login.ppm", log_and_prompt.clone())];
+        let whole = ppm([LIGHT, DARK, LIGHT, DARK, LIGHT, DARK, LIGHT, DARK]);
+        let logs = [
+            ("login.ppm", Shown::AbovePrompt, log_and_prompt.clone()),
+            ("logview.ppm", Shown::Whole, whole),
+        ];
         assert_eq!(verdict("console", code, serial, &session, &logs), Ok(()));
         assert!(verdict("console", code, serial, &log_and_prompt, &logs).is_err());
-        let blank = [("login.ppm", ppm([DARK; 8]))];
+        let blank = [("login.ppm", Shown::AbovePrompt, ppm([DARK; 8]))];
         assert!(verdict("console", code, serial, &session, &blank).is_err());
+        // The log above the prompt does not fill the screen.
+        let above = [("logview.ppm", Shown::Whole, session.clone())];
+        assert!(verdict("console", code, serial, &session, &above).is_err());
     }
 }
