@@ -87,8 +87,10 @@ fn spawn(launcher: &LauncherClient, path: &str, app_id: &str) -> Result<u32, Opt
 /// checks; a native app of user 0 does not start. Paths are resolved in
 /// the probe's namespace: a program of the boot image outside it is not
 /// found, a file below an entry without `x` may not be started, and a
-/// copy of the probe in its state directory, on tmpfs, is an application
-/// there, which a program without the dynamic linker may not be.
+/// copy of the probe in its state directory, on tmpfs, may not be started
+/// while its mode has no execute bit, and once it has one is an
+/// application there, which a program without the dynamic linker may not
+/// be.
 fn spawns(launcher: &LauncherClient, entries: &[(String, NodeClient)]) -> Result<(), i64> {
     let pid = spawn(launcher, BINARY, CLI).map_err(|_| 20)?;
     let waited = launcher.wait(pid as i32, WaitOptions(0), FOREVER, FOREVER);
@@ -107,8 +109,11 @@ fn spawns(launcher: &LauncherClient, entries: &[(String, NodeClient)]) -> Result
     let entry = |path: &str| entries.iter().find(|(p, _)| p == path).map(|(_, n)| n);
     let bin = entry("/usr/bin").ok_or(25)?;
     let state = entry("/var/lib/namespace-probe").ok_or(25)?;
-    copy(bin, "namespace-probe", state, "copy").ok_or(25)?;
+    copy(bin, "namespace-probe", state, "copy", 0o644).ok_or(25)?;
     let copied = spawn_own(launcher, "/var/lib/namespace-probe/copy");
+    expect(copied == Err(Some(Status::AccessDenied)), 27)?;
+    copy(bin, "namespace-probe", state, "copy-x", 0o755).ok_or(25)?;
+    let copied = spawn_own(launcher, "/var/lib/namespace-probe/copy-x");
     expect(copied == Err(Some(Status::NotSupported)), 26)
 }
 
@@ -134,10 +139,10 @@ fn spawn_own(launcher: &LauncherClient, path: &str) -> Result<u32, Option<Status
 }
 
 /// Copies the file `name` of `from` to a new file `to` of `dir`.
-fn copy(from: &NodeClient, name: &str, dir: &NodeClient, to: &str) -> Option<()> {
+fn copy(from: &NodeClient, name: &str, dir: &NodeClient, to: &str, mode: u32) -> Option<()> {
     let source = open(from, name, OpenFlags(0), Rights::READ).ok()?;
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
-    let target = open(dir, to, create, RW).ok()?;
+    let target = open_with(dir, to, create, mode, RW).ok()?;
     let mut offset = 0;
     loop {
         let data = source.read(offset, 32768, FOREVER).ok()?.ok()?.data;
@@ -186,8 +191,19 @@ fn open(
     flags: OpenFlags,
     rights: Rights,
 ) -> Result<NodeClient, Option<Error>> {
+    open_with(dir, path, flags, 0o644, rights)
+}
+
+/// Opens `path` in `dir`, giving a file it makes the mode `mode`.
+fn open_with(
+    dir: &NodeClient,
+    path: &str,
+    flags: OpenFlags,
+    mode: u32,
+    rights: Rights,
+) -> Result<NodeClient, Option<Error>> {
     let (node, server) = endpoints::<Node>().map_err(|_| None)?;
-    match dir.open(path.into(), flags, 0o644, rights, server, FOREVER) {
+    match dir.open(path.into(), flags, mode, rights, server, FOREVER) {
         Ok(Ok(_)) => Ok(NodeClient::new(node)),
         Ok(Err(e)) => Err(Some(e)),
         Err(_) => Err(None),
@@ -247,11 +263,21 @@ fn check(entries: &[(String, NodeClient)]) -> Result<(), i64> {
 }
 
 /// The entries of a command-line tool of user 0: `/usr`, `/etc`, `/Apps`
-/// and `/Libraries` read only, its user's `/tmp` on tmpfs, and `/dev`.
+/// and `/Libraries` read only, its user's `/tmp` on tmpfs, `/Volumes` and
+/// `/dev`.
 fn check_cli(entries: &[(String, NodeClient)]) -> Result<(), i64> {
     let paths: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
     expect(
-        paths == ["/usr", "/etc", "/Apps", "/Libraries", "/tmp", "/dev"],
+        paths
+            == [
+                "/usr",
+                "/etc",
+                "/Apps",
+                "/Libraries",
+                "/tmp",
+                "/Volumes",
+                "/dev",
+            ],
         30,
     )?;
     let entry = |path: &str| entries.iter().find(|(p, _)| p == path).map(|(_, n)| n);

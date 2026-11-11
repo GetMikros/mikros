@@ -177,8 +177,9 @@ impl Program {
 
 /// The program that the absolute `path` names in `programs`. Fails with
 /// `NOT_FOUND` when no entry holds it, and `ACCESS_DENIED` when its entry
-/// lacks `EXECUTE` or it is not a regular file. `own` is the process
-/// manager's process, which a file on a server is mapped into.
+/// lacks `EXECUTE`, it is not a regular file, or its mode has no execute
+/// bit. `own` is the process manager's process, which a file on a server
+/// is mapped into.
 async fn resolve(
     fs: &Rc<Fs>,
     programs: &Programs,
@@ -205,7 +206,9 @@ async fn resolve(
                 .await
                 .map_err(namespace::status)?;
             let attributes = reply(file.get_attributes().await)?.attributes;
-            if attributes.r#type != NodeType::File {
+            if attributes.r#type != NodeType::File
+                || attributes.mode & processmgr::bootfs::EXECUTE_BITS == 0
+            {
                 return Err(Status::AccessDenied);
             }
             let memory = reply(file.get_memory_object(MemoryFlags::EXECUTE).await)?.memory;

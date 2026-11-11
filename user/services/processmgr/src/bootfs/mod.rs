@@ -18,6 +18,9 @@ const PERM_READ: u32 = 1 << 0;
 const INFO_MEMORY: u32 = 4;
 const INFO_MEMORY_SIZE: usize = 24;
 
+/// The bits of a mode that let its file be executed.
+pub const EXECUTE_BITS: u32 = 0o111;
+
 /// The boot file system.
 pub struct Fs {
     tree: Tree,
@@ -221,7 +224,7 @@ impl Fs {
     /// The regular file at `path`, relative to the root and resolved
     /// without leaving the file system. Fails with `NOT_FOUND` when
     /// there is no node, and `ACCESS_DENIED` when it is not a regular
-    /// file.
+    /// file or its mode has no execute bit.
     pub fn executable(self: &Rc<Self>, path: &str) -> Result<Executable, Status> {
         const NOT_FOUND: Status = -25;
         const ACCESS_DENIED: Status = -13;
@@ -232,6 +235,9 @@ impl Fs {
         let mikros_bootfs::NodeKind::File { offset, size } = self.tree.nodes[node].kind else {
             return Err(ACCESS_DENIED);
         };
+        if self.tree.nodes[node].mode & EXECUTE_BITS == 0 {
+            return Err(ACCESS_DENIED);
+        }
         let rights = memory::rights(false, true);
         let usr = self.tree.resolve(0, b"usr", true);
         let system =

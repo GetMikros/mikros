@@ -25,7 +25,9 @@
 //! `device.filesystem`, once it is published, and from then on gives it
 //! as `/boot/efi` to the processes whose manifests list it
 //! (MIKSPEC-0064.R9, MIKSPEC-0064.R15). Processes whose profiles apply and
-//! that hold `files.volumes` get `/Volumes`, read and write.
+//! that hold `files.volumes` get `/Volumes`, read and write, and so do the
+//! command-line tools of `system.cli`, whose home folder may also hold
+//! programs.
 
 use crate::processes::Shared;
 use alloc::format;
@@ -563,7 +565,7 @@ impl Namespaces {
                 add(
                     &mut entries,
                     &mut origins,
-                    self.entry(shared, &ready, &home, RW).await?,
+                    self.entry(shared, &ready, &home, RWX).await?,
                 );
             }
             let budget = shared.user_budget(user)?;
@@ -633,7 +635,7 @@ impl Namespaces {
                 );
             }
         }
-        if self.holds_volumes(shared, app_id, user).await {
+        if app_id == CLI_APP || self.holds_volumes(shared, app_id, user).await {
             let volumes = NamespaceEntry {
                 path: VOLUMES.into(),
                 directory: shared.volumes.directory()?,

@@ -1,9 +1,10 @@
 /* A C program for the C library tests: it makes, changes, links,
  * renames and removes files and folders in a folder of its own below
- * the folder named by its argument, which must be writable, and exits
- * with 0 when every check below passed, and with the number of the
- * first check that failed otherwise, after printing what failed. Given
- * `--umask`, it exits with its file creation mask instead. */
+ * the folder named by its argument, which must be writable, runs a
+ * program copied there, and exits with 0 when every check below
+ * passed, and with the number of the first check that failed otherwise,
+ * after printing what failed. Given `--umask`, it exits with its file
+ * creation mask instead. */
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -36,9 +37,24 @@ static int fails_with(int result, int error)
 	return result == -1 && errno == error;
 }
 
+/* Copies the file `from` to the new file `to`, and returns 0 when it
+ * did. */
+static int copy(const char *from, const char *to)
+{
+	char buffer[4096];
+	ssize_t n;
+	int in = open(from, O_RDONLY), out = open(to, O_WRONLY | O_CREAT | O_EXCL, 0755);
+	if (in < 0 || out < 0)
+		return -1;
+	while ((n = read(in, buffer, sizeof buffer)) > 0)
+		if (write(out, buffer, n) != n)
+			return -1;
+	return n == 0 && close(in) == 0 && close(out) == 0 ? 0 : -1;
+}
+
 int main(int argc, char **argv)
 {
-	char dir[256], a[300], b[300], c[300], s[300], sub[300], target[64];
+	char dir[256], a[300], b[300], c[300], s[300], sub[300], prog[300], target[64];
 	struct stat st;
 	struct statvfs vfs;
 	pid_t pid;
@@ -53,6 +69,7 @@ int main(int argc, char **argv)
 	snprintf(c, sizeof c, "%s/c", dir);
 	snprintf(s, sizeof s, "%s/s", dir);
 	snprintf(sub, sizeof sub, "%s/sub", dir);
+	snprintf(prog, sizeof prog, "%s/prog", dir);
 
 	/* Folders. */
 	CHECK(mkdir(dir, 0755) == 0);
@@ -114,6 +131,18 @@ int main(int argc, char **argv)
 
 	/* The file system. */
 	CHECK(statvfs(dir, &vfs) == 0 && vfs.f_bsize > 0 && vfs.f_blocks > 0);
+
+	/* A program in the home folder runs once its mode lets it. */
+	char *arguments[] = {prog, NULL};
+	CHECK(copy("/usr/bin/true", prog) == 0 && chmod(prog, 0644) == 0);
+	CHECK(posix_spawn(&pid, prog, NULL, NULL, arguments, environ) == EACCES);
+	CHECK(chmod(prog, 0755) == 0);
+	CHECK(posix_spawn(&pid, prog, NULL, NULL, arguments, environ) == 0);
+	CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	CHECK(unlink(prog) == 0);
+
+	/* Command-line tools have the other volumes. */
+	CHECK(stat("/Volumes", &st) == 0 && S_ISDIR(st.st_mode));
 
 	/* Removing. */
 	CHECK(unlink(s) == 0 && unlink(c) == 0 && unlink(a) == 0);
