@@ -326,34 +326,42 @@ impl<S: System> Shell<S> {
         })
     }
 
-    /// Calls a function or built-in command with `input`, gathering the
-    /// output of the programs it starts when `gather`.
+    /// Calls a function or built-in command with `input`, gathering
+    /// what it and the programs it starts write when `gather`.
     fn call(&mut self, found: Found, input: Option<Value>, gather: bool) -> Result<Value, Flow> {
         match found {
             Found::Expr(value) => match input {
                 None => Ok(value),
                 Some(_) => Err(self.fail("an expression takes no input from a pipe".into())),
             },
-            Found::Builtin(name, args) => builtins::run(self, name, args, input),
-            Found::Function(f, args) => {
-                if gather {
-                    self.captures.push(Vec::new());
-                }
-                let result = self.function(&f, args);
-                let output = match gather {
-                    true => self.captures.pop().unwrap_or_default(),
-                    false => Vec::new(),
-                };
-                let value = result?;
-                Ok(match (value, output.is_empty()) {
-                    (Value::Null, false) => {
-                        Value::String(String::from_utf8_lossy(&output).into_owned())
-                    }
-                    (value, _) => value,
-                })
+            Found::Builtin(name, args) => {
+                self.gathering(gather, |s| builtins::run(s, name, args, input))
             }
+            Found::Function(f, args) => self.gathering(gather, |s| s.function(&f, args)),
             Found::Program(_) => unreachable!("programs are started, not called"),
         }
+    }
+
+    /// Runs `f`, and, when `gather`, gives what it wrote as its value if
+    /// it gave none.
+    fn gathering(
+        &mut self,
+        gather: bool,
+        f: impl FnOnce(&mut Self) -> Result<Value, Flow>,
+    ) -> Result<Value, Flow> {
+        if gather {
+            self.captures.push(Vec::new());
+        }
+        let result = f(self);
+        let output = match gather {
+            true => self.captures.pop().unwrap_or_default(),
+            false => Vec::new(),
+        };
+        let value = result?;
+        Ok(match (value, output.is_empty()) {
+            (Value::Null, false) => Value::String(String::from_utf8_lossy(&output).into_owned()),
+            (value, _) => value,
+        })
     }
 
     /// Calls function `f` with `args`: its arguments in order, and its

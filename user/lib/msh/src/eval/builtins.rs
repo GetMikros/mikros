@@ -107,7 +107,9 @@ pub fn run<S: System>(
         }
         "pwd" => {
             shell.at_most(name, &values, 0)?;
-            Ok(Value::String(shell.system.current_dir()))
+            let folder = shell.system.current_dir();
+            shell.write(Stream::Output, format!("{folder}\n").as_bytes());
+            Ok(Value::Null)
         }
         "exit" => {
             shell.at_most(name, &values, 1)?;

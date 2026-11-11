@@ -510,7 +510,8 @@ fn records(value: &Value) -> Option<Vec<&[(String, Value)]>> {
 
 /// The text `value` is written as to a program: a list one item per
 /// line, a record or a list of records one JSON object per line, and a
-/// scalar as `scalar_text` says, each line ended by a newline.
+/// scalar as `scalar_text` says, each line ended by a newline, which a
+/// string may already end with.
 pub fn program_text(value: &Value) -> String {
     let mut out = String::new();
     match value {
@@ -531,7 +532,9 @@ pub fn program_text(value: &Value) -> String {
             }
             None => {
                 out.push_str(&scalar_text(value));
-                out.push('\n');
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
             }
         },
     }

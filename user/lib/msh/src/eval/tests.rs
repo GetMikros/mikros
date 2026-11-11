@@ -192,13 +192,17 @@ fn keeps_path_a_list_and_passes_the_environment() {
 #[test]
 fn runs_programs_with_pipes_and_captures_output() {
     assert_eq!(ok("echo hello world | shout"), "HELLO WORLD\n");
-    assert_eq!(ok("let x = (echo hi | shout)\nprint $x"), "HI\n\n");
+    assert_eq!(ok("let x = (echo hi | shout)\nprint $x"), "HI\n");
     // A value going to a program is written as text.
     assert_eq!(ok("([a b]) | shout"), "A\nB\n");
     let f = error("nope");
     assert_eq!((f.status, f.message.as_str()), (127, "command not found"));
     let f = error("run false | cat");
     assert_eq!((f.status, f.command.as_str()), (1, "false"));
+    assert_eq!(ok("print (\"ab\" | shout)"), "AB\n");
+    // What a built-in command writes goes down the pipe.
+    assert_eq!(ok("print x | shout"), "X\n");
+    assert_eq!(ok("print x | upper | print"), "X\n");
 }
 
 #[test]
@@ -265,7 +269,7 @@ fn calls_functions_with_arguments_flags_and_returns() {
     );
     // Program output in a function is its output; functions see globals,
     // not their caller's locals.
-    assert_eq!(ok("fn f() { echo a | shout }\nprint (f)"), "A\n\n");
+    assert_eq!(ok("fn f() { echo a | shout }\nprint (f)"), "A\n");
     assert_eq!(ok("let g = 1\nfn f() { ($g + 1) }\nprint (f)"), "2\n");
     assert!(
         error("fn f() { $local }\nfn h() { let local = 1\n f }\nh")
@@ -298,7 +302,7 @@ fn shows_values_only_at_the_prompt() {
 #[test]
 fn changes_folders_and_sources_scripts() {
     let mut s = shell();
-    assert_eq!(run(&mut s, "cd /tmp\npwd").unwrap(), "");
+    assert_eq!(run(&mut s, "cd /tmp\npwd").unwrap(), "/tmp\n");
     assert_eq!(s.system.cwd, "/tmp");
     run(&mut s, "cd -").unwrap();
     assert_eq!(s.system.cwd, "/home/ada");
