@@ -39,14 +39,21 @@ pub fn parse(source: &str) -> Result<Block> {
     let mut parser = Parser {
         chars: &chars,
         pos: 0,
+        continued: false,
     };
     let block = parser.statements(None)?;
+    // A `\` that ends the text continues the line on one not yet typed.
+    if parser.continued {
+        return Err(parser.incomplete("a line is missing after `\\`"));
+    }
     Ok(block)
 }
 
 pub(crate) struct Parser<'a> {
     chars: &'a [char],
     pos: usize,
+    /// Whether a `\` line continuation ended the text.
+    continued: bool,
 }
 
 impl Parser<'_> {
@@ -100,14 +107,19 @@ impl Parser<'_> {
         }
     }
 
-    /// Skips spaces, tabs and `\` line continuations.
+    /// Skips spaces, tabs and `\` line continuations, noting one that
+    /// ends the text.
     fn skip_spaces(&mut self) {
         loop {
             match self.peek() {
                 Some(' ' | '\t') => self.pos += 1,
-                Some('\\') if self.peek_at(1) == Some('\n') => self.pos += 2,
+                Some('\\') if self.peek_at(1) == Some('\n') => {
+                    self.pos += 2;
+                    self.continued = self.pos == self.chars.len();
+                }
                 Some('\\') if self.peek_at(1) == Some('\r') && self.peek_at(2) == Some('\n') => {
-                    self.pos += 3
+                    self.pos += 3;
+                    self.continued = self.pos == self.chars.len();
                 }
                 _ => return,
             }

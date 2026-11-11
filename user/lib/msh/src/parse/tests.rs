@@ -103,6 +103,10 @@ fn continues_lines() {
         Expr::Binary(Binary::Add, Box::new(int(1)), Box::new(int(2)))
     );
     assert!(failure("echo \"open").incomplete);
+    // A `\` at the end asks for the next line, also after a word.
+    assert!(failure("echo a \\\n").incomplete);
+    assert!(failure("echo a\\\n").incomplete);
+    assert!(failure("echo a \\\r\n").incomplete);
     assert!(failure("ls |").incomplete);
     assert!(failure("if true {").incomplete);
     assert!(!failure("echo }").incomplete);
