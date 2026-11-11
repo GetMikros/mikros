@@ -75,6 +75,13 @@ impl Devices {
             kept: None,
         };
         mikros_rt::log!(Info, "device-manager: added {}", describe(&device));
+        mikros_rt::diag!(
+            "device-manager: device {id} has parent {:?}, hardware IDs {:?}, {} properties and {} resources",
+            device.parent,
+            device.hardware_ids,
+            device.properties.len(),
+            device.resources.len()
+        );
         self.list.push(device);
         id
     }
@@ -170,6 +177,12 @@ impl Devices {
         if let Some(at) = self.list.iter().position(|d| d.id == id) {
             let device = self.list.remove(at);
             mikros_rt::log!(Info, "device-manager: removed device {id}, {}", device.name);
+            mikros_rt::diag!(
+                "device-manager: device {id} had driver {:?} as pid {:?} after {} starts",
+                device.driver,
+                device.pid,
+                device.starts
+            );
         }
     }
 
@@ -207,6 +220,11 @@ impl Devices {
             mikros_rt::log!(
                 Info,
                 "device-manager: bound driver {driver} to device {id}, {name}, as {matched}"
+            );
+            mikros_rt::diag!(
+                "device-manager: device {id} has hardware IDs {:?}, of {} drivers",
+                device.hardware_ids,
+                drivers.len()
             );
             device.driver = Some(driver.clone());
         }

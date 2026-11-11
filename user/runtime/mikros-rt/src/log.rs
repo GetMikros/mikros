@@ -147,3 +147,25 @@ macro_rules! log {
         $crate::log::write($crate::log::Severity::$severity, format_args!($($arg)*))
     };
 }
+
+/// In the diagnostic build, which sets the `mikros_diag` cfg, writes a
+/// formatted message of severity debug as `log!` does; in the others,
+/// nothing.
+#[cfg(mikros_diag)]
+#[macro_export]
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        $crate::log!(Debug, $($arg)*)
+    };
+}
+
+/// In the diagnostic build, which sets the `mikros_diag` cfg, writes a
+/// formatted message of severity debug as `log!` does; in the others,
+/// nothing.
+#[cfg(not(mikros_diag))]
+#[macro_export]
+macro_rules! diag {
+    ($($arg:tt)*) => {
+        ()
+    };
+}

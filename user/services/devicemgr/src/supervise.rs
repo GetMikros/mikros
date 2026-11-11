@@ -194,6 +194,7 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
                     Info,
                     "device-manager: started driver {name} for device {id} as pid {pid}"
                 );
+                mikros_rt::diag!("device-manager: start {start} of driver {name} for device {id}");
             }
             Started::Declined(status) => {
                 mikros_rt::log!(
@@ -228,6 +229,7 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
                 Info,
                 "device-manager: stopped driver {name} for device {id}"
             );
+            mikros_rt::diag!("device-manager: driver {name} for device {id} ended as {ended:?}");
             return;
         }
         match ended {
@@ -252,6 +254,9 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
         {
             let mut devices = m.devices.borrow_mut();
             let next = devices.get(id).map_or(0, |d| d.starts + 1);
+            mikros_rt::diag!(
+                "device-manager: driver {name} for device {id} restarts as start {next}"
+            );
             devices.keep_children(id, next);
         }
         if !reset(&m, id).await {

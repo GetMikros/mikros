@@ -20,3 +20,7 @@ fuzz = []
 [build-dependencies]
 midlc = { path = "../../../tools/midlc" }
 syscall-table = { path = "../../../kernel/syscalls" }
+
+# The diagnostic build sets `mikros_diag`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mikros_diag)"] }
