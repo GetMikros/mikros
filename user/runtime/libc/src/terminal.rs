@@ -209,6 +209,22 @@ impl Terminal {
     }
 }
 
+/// Makes standard input's terminal the controlling terminal of the
+/// caller's session when the caller leads it, as a process started in a
+/// new session does. Nothing changes when standard input is no terminal
+/// or the terminal service refuses, as it does for a session that has a
+/// controlling terminal already.
+pub fn control_standard_input() {
+    let Some(description) = crate::fd::get(0) else {
+        return;
+    };
+    if let crate::fd::Description::Terminal(terminal) = &*description
+        && crate::process::leads_session()
+    {
+        let _ = terminal.ioctl(TIOCSCTTY, 0);
+    }
+}
+
 /// Answers `ioctl` request `request` with argument `arg`, a pointer for
 /// most of them.
 fn control(

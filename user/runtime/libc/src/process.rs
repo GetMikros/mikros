@@ -102,6 +102,12 @@ fn info(pid: i64) -> Result<ProcessInfo, i64> {
     }
 }
 
+/// Whether the caller leads its session, as a process started in a new
+/// session does.
+pub fn leads_session() -> bool {
+    info(0).is_ok_and(|i| i.session == i.pid)
+}
+
 /// `getpgid`: the process group of process `pid`, 0 for the caller.
 pub fn getpgid(pid: i64) -> i64 {
     info(pid).map_or_else(|e| -e, |i| i64::from(i.process_group))
