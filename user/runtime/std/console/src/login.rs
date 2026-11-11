@@ -3,7 +3,8 @@
 //! asks for a name and a password, without echoing the password, and
 //! shows the terminal of the session that `Login` starts until the
 //! session ends. Each terminal is closed after its use, and the login
-//! prompt shows again.
+//! prompt shows again. The prompt and setup's terminal take the rows
+//! below the log, and a session's terminal the whole screen.
 
 use crate::term::Term;
 use crate::{Console, View};
@@ -19,10 +20,10 @@ const GREETING: &str = "\x1b[2J\x1b[HMikros\r\n\r\n";
 
 /// Shows the login prompt's screen with `text` written to it.
 fn prompt(console: &Console, text: &str) {
-    let (cols, rows) = console.grid.get();
+    let (cols, rows) = console.prompt_size();
     let mut screen = Screen::new(cols, rows);
     screen.write(text.as_bytes());
-    console.show(View::Login(screen));
+    console.show(View::Login(screen), false);
 }
 
 /// Writes `text` to the login prompt's screen.
@@ -80,10 +81,10 @@ async fn read_line(console: &Console, echo: bool, max: usize) -> String {
     }
 }
 
-/// Opens a terminal of the grid's size and shows it, its output read
+/// Opens setup's terminal, below the log, and shows it, its output read
 /// into its screen.
 async fn show_terminal(console: &Rc<Console>) -> Option<Rc<Term>> {
-    let (cols, rows) = console.grid.get();
+    let (cols, rows) = console.prompt_size();
     let term = Term::open(
         &console.directory,
         &console.reactor,
@@ -95,7 +96,7 @@ async fn show_terminal(console: &Rc<Console>) -> Option<Rc<Term>> {
     console
         .spawner
         .spawn(term.clone().pump(console.reactor.clone()));
-    console.show(View::Terminal(term.clone()));
+    console.show(View::Terminal(term.clone()), false);
     Some(term)
 }
 
@@ -153,7 +154,7 @@ pub async fn run(console: Rc<Console>, text_login: Rc<TextLoginAsyncClient>) {
                 console
                     .spawner
                     .spawn(term.clone().pump(console.reactor.clone()));
-                console.show(View::Terminal(term.clone()));
+                console.show(View::Terminal(term.clone()), true);
                 if !session_ended(&text_login).await {
                     return;
                 }

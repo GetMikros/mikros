@@ -7,5 +7,6 @@ publish = false
 
 [dependencies]
 mikros-evdev = { path = "../../../lib/evdev" }
+mikros-logview = { path = "../../../lib/logview" }
 mikros-rt = { path = "../../mikros-rt", default-features = false }
 mikros-vt = { path = "../../../lib/vt" }

@@ -5,13 +5,15 @@
 //! screen on the first display with the monospaced font, turns key
 //! presses into the terminal's input with the system keyboard layout and
 //! key repeat, and shows either its own login prompt or the terminal of
-//! setup or of the user's session.
+//! setup or of the user's session. While no session runs, the system log
+//! fills the rows above the login prompt or setup's terminal.
 
 #![feature(mikros_handles)]
 
 mod font;
 mod keyboard;
 mod login;
+mod logpane;
 mod notify;
 mod palette;
 mod process;
@@ -20,6 +22,7 @@ mod term;
 mod xkb;
 
 use keyboard::{Keyboard, Pressed};
+use logpane::LogPane;
 use mikros_evdev::codes::{EV_KEY, KEY_A};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd};
@@ -46,8 +49,18 @@ const SEAT_ID: u32 = 7;
 const SAME_RIGHTS: u32 = 1 << 31;
 /// The keyboard layout until `/etc/keyboard.yaml` names one.
 const LAYOUT: &str = "us";
+/// The rows of the login prompt and of setup's terminal, below the log.
+const PROMPT_ROWS: usize = 8;
 
-/// What the screen shows.
+/// How the screen's rows are shared: the log's rows at the top, and
+/// those of the view below them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Layout {
+    log: usize,
+    view: usize,
+}
+
+/// What the screen shows besides the log.
 enum View {
     /// The console's own login prompt.
     Login(Screen),
@@ -62,6 +75,9 @@ pub struct Console {
     renderer: RefCell<Option<Renderer>>,
     keyboard: RefCell<Option<Keyboard>>,
     view: RefCell<View>,
+    /// Whether the view is the terminal of a session.
+    session: Cell<bool>,
+    log: LogPane,
     /// The size of the grid of cells, once a display came.
     grid: Cell<(usize, usize)>,
     /// What was typed while the login prompt shows, for it to read.
@@ -109,9 +125,34 @@ impl Console {
         self.with_screen(|s| s.modes)
     }
 
-    /// Shows `view`, whole.
-    fn show(&self, view: View) {
+    /// The rows of the log and of the view: the whole screen is the
+    /// session's terminal while a session runs, and otherwise the log
+    /// fills the rows above the bottom `PROMPT_ROWS`.
+    fn layout(&self) -> Layout {
+        let rows = self.grid.get().1;
+        match self.session.get() {
+            true => Layout { log: 0, view: rows },
+            false => {
+                let view = PROMPT_ROWS.min(rows);
+                Layout {
+                    log: rows - view,
+                    view,
+                }
+            }
+        }
+    }
+
+    /// The columns and rows of the login prompt and of setup's terminal.
+    fn prompt_size(&self) -> (usize, usize) {
+        let (cols, rows) = self.grid.get();
+        (cols, PROMPT_ROWS.min(rows))
+    }
+
+    /// Shows `view`, whole, which is the terminal of a session when
+    /// `session` is set.
+    fn show(&self, view: View, session: bool) {
         *self.view.borrow_mut() = view;
+        self.session.set(session);
         self.with_screen(|s| s.touch());
         self.changed.notify();
     }
@@ -136,23 +177,51 @@ impl Console {
         }
     }
 
-    /// Redraws the rows that changed, for as long as the console runs.
+    /// Redraws the rows that changed, for as long as the console runs:
+    /// those of the log when lines came, and those of the view.
     async fn redraw(self: Rc<Self>) {
-        // The row the cursor was drawn on, which is drawn again when the
-        // cursor has left it, so that it shows the cursor no more.
+        // The view's row the cursor was drawn on, which is drawn again
+        // when the cursor has left it, so that it shows the cursor no
+        // more.
         let mut drawn_cursor: Option<usize> = None;
+        // The layout and grid drawn, which, when they change, make the
+        // whole screen be drawn again.
+        let mut drawn: Option<(Layout, (usize, usize))> = None;
         loop {
             self.changed.changed().await;
-            let (mut rows, cursor) = self.with_screen(|s| (s.take_dirty(), s.cursor()));
+            let (layout, grid) = (self.layout(), self.grid.get());
+            let whole = drawn != Some((layout, grid));
+            drawn = Some((layout, grid));
+            let log = (layout.log > 0 && (self.log.take_stale() || whole))
+                .then(|| self.log.screen(grid.0, layout.log));
+            let log_rows: Vec<usize> = match log {
+                Some(_) => (0..layout.log).collect(),
+                None => Vec::new(),
+            };
+            let (mut rows, cursor) = self.with_screen(|s| {
+                if whole {
+                    s.touch();
+                }
+                (s.take_dirty(), s.cursor())
+            });
             let cursor_row = cursor.map(|(row, _)| row);
             rows.extend(drawn_cursor.into_iter().chain(cursor_row));
+            rows.retain(|&row| row < layout.view);
             rows.sort_unstable();
             rows.dedup();
             drawn_cursor = cursor_row;
+            let damaged: Vec<usize> = log_rows
+                .iter()
+                .copied()
+                .chain(rows.iter().map(|row| row + layout.log))
+                .collect();
             let mut renderer = self.renderer.borrow_mut().take();
             if let Some(r) = renderer.as_mut() {
-                self.with_screen(|s| r.draw(s, &rows));
-                let _ = r.present(&rows).await;
+                if let Some(log) = &log {
+                    r.draw(log, &log_rows, 0);
+                }
+                self.with_screen(|s| r.draw(s, &rows, layout.log));
+                let _ = r.present(&damaged).await;
             }
             if self.renderer.borrow().is_none() {
                 *self.renderer.borrow_mut() = renderer;
@@ -209,6 +278,7 @@ impl Console {
             View::Terminal(term) => Some(term.clone()),
             View::Login(_) => None,
         };
+        let rows = self.layout().view;
         match term {
             Some(term) => term.resize(cols, rows).await,
             None => self.with_screen(|s| s.resize(cols, rows)),
@@ -327,7 +397,9 @@ fn main() {
         directory: DirectoryAsyncClient::new(ClientEnd::new(directory), reactor.clone()),
         renderer: RefCell::new(None),
         keyboard: RefCell::new(None),
-        view: RefCell::new(View::Login(Screen::new(render::MIN_COLS, render::MIN_ROWS))),
+        view: RefCell::new(View::Login(Screen::new(render::MIN_COLS, PROMPT_ROWS))),
+        session: Cell::new(false),
+        log: LogPane::new(),
         grid: Cell::new((render::MIN_COLS, render::MIN_ROWS)),
         typed: RefCell::new(VecDeque::new()),
         changed: Rc::new(Notify::default()),
@@ -340,6 +412,7 @@ fn main() {
     ));
     spawner.spawn(console.clone().serve_seat(seat));
     spawner.spawn(console.clone().redraw());
+    spawner.spawn(logpane::follow(console.clone()));
     spawner.spawn(console.clone().repeat());
     executor.block_on(login::run(console, text_login));
 }

@@ -208,13 +208,14 @@ impl Renderer {
         }
     }
 
-    /// Draws `rows` of `screen`, and the cursor on its row.
-    pub fn draw(&mut self, screen: &Screen, rows: &[usize]) {
+    /// Draws `rows` of `screen`, and the cursor on its row, with the
+    /// screen's top row on row `top` of the grid.
+    pub fn draw(&mut self, screen: &Screen, rows: &[usize], top: usize) {
         let (cols, grid_rows) = self.grid();
         let reverse = screen.modes.reverse;
         let cursor = screen.cursor();
         for &row in rows {
-            if row >= grid_rows.min(screen.rows()) {
+            if row >= screen.rows() || top + row >= grid_rows {
                 continue;
             }
             for col in 0..cols.min(screen.cols()) {
@@ -223,7 +224,7 @@ impl Renderer {
                     continue;
                 }
                 let at_cursor = cursor == Some((row, col));
-                self.draw_cell(row, col, &cell, reverse != at_cursor);
+                self.draw_cell(top + row, col, &cell, reverse != at_cursor);
             }
         }
     }

@@ -4,3 +4,5 @@ app_id: system.console
 binary: /usr/bin/console
 spawned_by:
   - system.sessionmgr
+# To show the log while no session runs.
+permissions: [logs.read]

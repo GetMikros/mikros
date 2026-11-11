@@ -22,6 +22,7 @@ name = "console"
 version = "0.0.0"
 dependencies = [
  "mikros-evdev",
+ "mikros-logview",
  "mikros-rt",
  "mikros-vt",
 ]
@@ -79,6 +80,10 @@ dependencies = [
 
 [[package]]
 name = "mikros-evdev"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-logview"
 version = "0.0.0"
 
 [[package]]

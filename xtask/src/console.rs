@@ -5,8 +5,9 @@
 //! through the QEMU monitor. In the console run it types bob's login; in
 //! the setup run, which starts with no user, it first answers the setup
 //! program's questions to make the account ada, and then logs in as
-//! ada. Once the user is logged in, it checks that the screen shows
-//! text. In the console run it then types a line that the session shell
+//! ada. Before the login, at the prompt or in setup, the screen must
+//! show the log above them; once the user is logged in, it must show the
+//! session's text and no log. In the console run it then types a line that the session shell
 //! reads; in the setup run, whose shell is msh, it starts a job, stops
 //! it with Ctrl-Z, and has msh count its jobs, continue and kill the
 //! job, check the host name that setup wrote and that it started in
@@ -79,8 +80,9 @@ enum Step {
     /// by Enter.
     Keys(&'static str),
     /// Dumps the screen into the file of that name in the run's
-    /// directory, to look at when the run fails.
-    Dump(&'static str),
+    /// directory, which must show the log above the login prompt or
+    /// setup's terminal.
+    Log(&'static str),
 }
 
 /// The keys of the setup program's questions: the computer's name, box,
@@ -102,18 +104,50 @@ fn type_keys(socket: &Path, keys: &str) -> Result<()> {
     Ok(())
 }
 
+/// Why the screen `ppm` does not show the log above the prompt, if it
+/// does not. The log's lines start on the top row, and it takes all but
+/// the bottom eight rows, so its top quarter shows text.
+fn log_problem(ppm: &[u8]) -> Option<&'static str> {
+    let pixels = scenario::ppm_pixels(ppm)?;
+    let top = &pixels[..pixels.len() / 4];
+    top.iter()
+        .all(|&p| p == top[0])
+        .then_some("the screen shows no log above the prompt")
+}
+
+/// Why the screen `ppm`, of a session that has written a line or two,
+/// shows the log, if it does: its bottom half has text.
+fn session_problem(ppm: &[u8]) -> Option<&'static str> {
+    let pixels = scenario::ppm_pixels(ppm)?;
+    let bottom = &pixels[pixels.len() / 2..];
+    (!bottom.iter().all(|&p| p == bottom[0]))
+        .then_some("the session's screen shows more than its text")
+}
+
 /// Why the run of `scenario` did not pass, if it did not, given QEMU's
-/// exit code, the serial output and the screen dump taken in the session.
-fn verdict(scenario: &str, code: Option<i32>, serial: &str, screen: &[u8]) -> Result<(), String> {
+/// exit code, the serial output, the screen dump taken in the session,
+/// and those that must show the log, by file name.
+fn verdict(
+    scenario: &str,
+    code: Option<i32>,
+    serial: &str,
+    screen: &[u8],
+    logs: &[(&str, Vec<u8>)],
+) -> Result<(), String> {
     crate::test::verdict(code, serial)?;
     let passed = format!("SCENARIO {scenario} PASSED");
     if !serial.contains(&passed) {
         return Err(format!("{passed:?} is missing"));
     }
-    match scenario::console_problem(screen) {
-        Some(problem) => Err(problem.into()),
-        None => Ok(()),
+    if let Some(problem) = scenario::console_problem(screen).or_else(|| session_problem(screen)) {
+        return Err(problem.into());
     }
+    for (file, ppm) in logs {
+        if let Some(problem) = scenario::console_problem(ppm).or_else(|| log_problem(ppm)) {
+            return Err(format!("{file}: {problem}"));
+        }
+    }
+    Ok(())
 }
 
 /// Boots the console run of the components `built` of the build kind
@@ -128,6 +162,7 @@ pub fn run(
     let steps = [
         Step::Wait(SEAT),
         Step::Sleep(SETTLE),
+        Step::Log("login.ppm"),
         Step::Keys("b o b ret"),
         Step::Keys("b o b minus p a s s w o r d ret"),
     ];
@@ -151,7 +186,7 @@ pub fn run_setup(
         steps.extend([Step::Keys(keys), Step::Sleep(QUESTION)]);
     }
     steps.extend([
-        Step::Dump("setup.ppm"),
+        Step::Log("setup.ppm"),
         Step::Wait(SETUP_DONE),
         Step::Sleep(QUESTION),
         Step::Keys("a d a ret"),
@@ -209,16 +244,17 @@ fn session(
     let mut qemu = scenario::start(machine, dir, false)?;
     let deadline = Instant::now() + timeout;
     let logged_in = format!("sessionmgr: {user} logged in");
+    let mut logs = Vec::new();
     let ended = (|| -> Result<(ExitStatus, Vec<u8>)> {
-        let take = |step: &Step, qemu: &mut std::process::Child| -> Result<()> {
+        let mut take = |step: &Step, qemu: &mut std::process::Child| -> Result<()> {
             match step {
                 Step::Wait(line) => {
                     scenario::wait_for_line(&log, line, qemu, deadline)?;
                 }
                 Step::Sleep(time) => std::thread::sleep(*time),
                 Step::Keys(keys) => type_keys(&socket, keys)?,
-                Step::Dump(file) => {
-                    scenario::screen_dump(&socket, &dir.join(file))?;
+                Step::Log(file) => {
+                    logs.push((*file, scenario::screen_dump(&socket, &dir.join(file))?));
                 }
             }
             Ok(())
@@ -253,11 +289,44 @@ fn session(
         )
     })?;
     let serial = String::from_utf8_lossy(&fs::read(&log).unwrap_or_default()).into_owned();
-    if let Err(why) = verdict(scenario, status.code(), &serial, &screen) {
+    if let Err(why) = verdict(scenario, status.code(), &serial, &screen, &logs) {
         bail!(
             "the {scenario} run failed: {why}; serial output in {}",
             log.display()
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A screen of 1 by 8 pixels, top first.
+    fn ppm(rows: [[u8; 3]; 8]) -> Vec<u8> {
+        let mut ppm = b"P6\n1 8\n255\n".to_vec();
+        ppm.extend(rows.iter().flatten());
+        ppm
+    }
+
+    const DARK: [u8; 3] = [0, 0, 0];
+    const LIGHT: [u8; 3] = [200, 200, 200];
+
+    #[test]
+    fn the_log_shows_at_the_top_and_not_in_a_session() {
+        let log_and_prompt = ppm([LIGHT, DARK, LIGHT, DARK, DARK, DARK, LIGHT, DARK]);
+        let session = ppm([LIGHT, DARK, DARK, DARK, DARK, DARK, DARK, DARK]);
+        assert_eq!(log_problem(&log_and_prompt), None);
+        let prompt_only = ppm([DARK, DARK, DARK, DARK, DARK, DARK, LIGHT, DARK]);
+        assert!(log_problem(&prompt_only).is_some());
+        assert_eq!(session_problem(&session), None);
+        assert!(session_problem(&log_and_prompt).is_some());
+        let serial = "SCENARIO console PASSED";
+        let code = Some(crate::test::PASSED);
+        let logs = [("login.ppm", log_and_prompt.clone())];
+        assert_eq!(verdict("console", code, serial, &session, &logs), Ok(()));
+        assert!(verdict("console", code, serial, &log_and_prompt, &logs).is_err());
+        let blank = [("login.ppm", ppm([DARK; 8]))];
+        assert!(verdict("console", code, serial, &session, &blank).is_err());
+    }
 }
