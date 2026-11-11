@@ -12,7 +12,7 @@ use kernel_core::ranges::Ranges;
 use kernel_core::sync::SpinLock;
 
 /// The start of the kernel dynamic region.
-const DYNAMIC_START: u64 = 0xFFFF_C000_0000_0000;
+pub const DYNAMIC_START: u64 = 0xFFFF_C000_0000_0000;
 /// The end of the kernel dynamic region, which leaves out the runtime
 /// window.
 const DYNAMIC_END: u64 = 0xFFFF_FF80_0000_0000;

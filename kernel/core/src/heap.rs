@@ -4,6 +4,11 @@
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
+#[cfg(feature = "diag")]
+mod check;
+#[cfg(feature = "diag")]
+pub use check::Fault;
+
 pub const PAGE_SIZE: usize = 4096;
 /// The smallest block size.
 const MIN_CLASS: usize = 16;
@@ -17,6 +22,11 @@ pub trait Pages {
     fn alloc(&mut self, count: usize) -> Option<NonNull<u8>>;
     /// Returns `count` pages from `alloc`.
     fn free(&mut self, start: NonNull<u8>, count: usize);
+    /// In the diagnostic build, the records of the heap check, one for
+    /// each page from the returned address on. Pages past them go
+    /// unchecked.
+    #[cfg(feature = "diag")]
+    fn records(&mut self) -> (usize, &mut [u32]);
 }
 
 /// A free block, which holds the next free block of its class.
@@ -27,6 +37,11 @@ struct Free {
 pub struct Heap<P: Pages> {
     pages: P,
     free: [Option<NonNull<Free>>; CLASSES],
+    /// In the diagnostic build, the failed check that made the last
+    /// `alloc` or `free` stop, for the caller to report once it no
+    /// longer holds the heap's lock.
+    #[cfg(feature = "diag")]
+    pub fault: Option<Fault>,
 }
 
 // SAFETY: the heap owns the blocks on its free lists; moving it to
@@ -48,6 +63,8 @@ impl<P: Pages> Heap<P> {
         Heap {
             pages,
             free: [None; CLASSES],
+            #[cfg(feature = "diag")]
+            fault: None,
         }
     }
 
@@ -58,15 +75,29 @@ impl<P: Pages> Heap<P> {
             if layout.align() > PAGE_SIZE {
                 return None;
             }
-            return self.pages.alloc(pages_for(layout));
+            let start = self.pages.alloc(pages_for(layout))?;
+            #[cfg(feature = "diag")]
+            check::pages_taken(&mut self.pages, start, pages_for(layout));
+            return Some(start);
         };
         if self.free[c].is_none() {
             self.refill(c)?;
         }
         let block = self.free[c]?;
+        // SAFETY: a block recorded with its class is the heap's.
+        #[cfg(feature = "diag")]
+        if let Err(fault) = unsafe { check::taking(&mut self.pages, block.cast(), c) } {
+            self.fault = Some(fault);
+            return None;
+        }
         // SAFETY: blocks on a free list are unused, belong to the heap
         // and hold a `Free`.
         self.free[c] = unsafe { block.as_ref().next };
+        // SAFETY: the block was checked and is now in use.
+        #[cfg(feature = "diag")]
+        unsafe {
+            check::taken(block.cast())
+        };
         Some(block.cast())
     }
 
@@ -83,6 +114,11 @@ impl<P: Pages> Heap<P> {
                 self.free[c] = Some(block);
             }
         }
+        // SAFETY: the page is the heap's, split into free blocks of `c`.
+        #[cfg(feature = "diag")]
+        unsafe {
+            check::refilled(&mut self.pages, page, c)
+        };
         Some(())
     }
 
@@ -95,13 +131,33 @@ impl<P: Pages> Heap<P> {
     pub unsafe fn free(&mut self, block: NonNull<u8>, layout: Layout) {
         match class(layout) {
             Some(c) => {
+                // SAFETY: a block recorded with its class is the heap's.
+                #[cfg(feature = "diag")]
+                if let Err(fault) =
+                    unsafe { check::freeing(&mut self.pages, block, c, layout.size()) }
+                {
+                    self.fault = Some(fault);
+                    return;
+                }
                 let block = block.cast::<Free>();
                 // SAFETY: the caller gives the block back, so the heap may
                 // write to it; it is aligned for `Free`.
                 unsafe { block.write(Free { next: self.free[c] }) };
                 self.free[c] = Some(block);
+                // SAFETY: the block was checked and is now free.
+                #[cfg(feature = "diag")]
+                unsafe {
+                    check::freed(&mut self.pages, block.cast(), c)
+                };
             }
-            None => self.pages.free(block, pages_for(layout)),
+            None => {
+                #[cfg(feature = "diag")]
+                if let Err(fault) = check::pages_freed(&mut self.pages, block, pages_for(layout)) {
+                    self.fault = Some(fault);
+                    return;
+                }
+                self.pages.free(block, pages_for(layout));
+            }
         }
     }
 }
@@ -109,7 +165,9 @@ impl<P: Pages> Heap<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::alloc::{alloc, dealloc};
+    use std::alloc::alloc;
+    #[cfg(not(feature = "diag"))]
+    use std::alloc::dealloc;
     use std::vec::Vec;
 
     /// Pages from the host allocator, counted.
@@ -117,7 +175,17 @@ mod tests {
     struct HostPages {
         live: Vec<(usize, usize)>,
         limit: usize,
+        /// The start of the pages the heap check's tests use, and their
+        /// records.
+        #[cfg(feature = "diag")]
+        base: usize,
+        #[cfg(feature = "diag")]
+        records: Vec<u32>,
     }
+
+    /// The pages that the heap check's tests take their pages from.
+    #[cfg(feature = "diag")]
+    const ARENA_PAGES: usize = 16;
 
     impl Pages for HostPages {
         fn alloc(&mut self, count: usize) -> Option<NonNull<u8>> {
@@ -125,11 +193,27 @@ mod tests {
             if used + count > self.limit {
                 return None;
             }
-            let layout = Layout::from_size_align(count * PAGE_SIZE, PAGE_SIZE).unwrap();
-            // SAFETY: the layout has a nonzero size.
-            let p = NonNull::new(unsafe { alloc(layout) })?;
-            self.live.push((p.as_ptr() as usize, count));
-            Some(p)
+            #[cfg(feature = "diag")]
+            {
+                // Pages come from one range, which the records cover.
+                let base = self.arena();
+                let at = (0..=ARENA_PAGES - count).find(|&i| {
+                    let (s, e) = (base + i * PAGE_SIZE, base + (i + count) * PAGE_SIZE);
+                    self.live
+                        .iter()
+                        .all(|&(l, n)| l + n * PAGE_SIZE <= s || e <= l)
+                })?;
+                self.live.push((base + at * PAGE_SIZE, count));
+                return NonNull::new((base + at * PAGE_SIZE) as *mut u8);
+            }
+            #[cfg(not(feature = "diag"))]
+            {
+                let layout = Layout::from_size_align(count * PAGE_SIZE, PAGE_SIZE).unwrap();
+                // SAFETY: the layout has a nonzero size.
+                let p = NonNull::new(unsafe { alloc(layout) })?;
+                self.live.push((p.as_ptr() as usize, count));
+                Some(p)
+            }
         }
         fn free(&mut self, start: NonNull<u8>, count: usize) {
             let i = self
@@ -138,9 +222,33 @@ mod tests {
                 .position(|&l| l == (start.as_ptr() as usize, count))
                 .expect("freeing pages that were not allocated");
             self.live.remove(i);
-            let layout = Layout::from_size_align(count * PAGE_SIZE, PAGE_SIZE).unwrap();
-            // SAFETY: the pages came from `alloc` with this layout.
-            unsafe { dealloc(start.as_ptr(), layout) };
+            #[cfg(not(feature = "diag"))]
+            {
+                let layout = Layout::from_size_align(count * PAGE_SIZE, PAGE_SIZE).unwrap();
+                // SAFETY: the pages came from `alloc` with this layout.
+                unsafe { dealloc(start.as_ptr(), layout) };
+            }
+        }
+
+        #[cfg(feature = "diag")]
+        fn records(&mut self) -> (usize, &mut [u32]) {
+            let base = self.arena();
+            (base, &mut self.records)
+        }
+    }
+
+    #[cfg(feature = "diag")]
+    impl HostPages {
+        /// The start of the pages that this heap check's test takes its
+        /// pages from, leaked.
+        fn arena(&mut self) -> usize {
+            if self.base == 0 {
+                let layout = Layout::from_size_align(ARENA_PAGES * PAGE_SIZE, PAGE_SIZE).unwrap();
+                // SAFETY: the layout has a nonzero size.
+                self.base = unsafe { alloc(layout) } as usize;
+                self.records = std::vec![0; ARENA_PAGES];
+            }
+            self.base
         }
     }
 
@@ -192,5 +300,100 @@ mod tests {
         unsafe { h.free(b, big) };
         assert!(h.pages.live.is_empty());
         assert_eq!(h.alloc(Layout::from_size_align(8, 8192).unwrap()), None);
+    }
+
+    #[cfg(feature = "diag")]
+    mod check {
+        use super::*;
+
+        fn small() -> Layout {
+            Layout::from_size_align(40, 8).unwrap()
+        }
+
+        #[test]
+        fn finds_a_double_free() {
+            let mut h = heap(4);
+            let b = h.alloc(small()).unwrap();
+            // SAFETY: the block came from this heap with this layout; the
+            // second free is the fault under test, which the check stops.
+            unsafe {
+                h.free(b, small());
+                h.free(b, small());
+            }
+            let f = h.fault.take().unwrap();
+            assert_eq!(
+                (f.what, f.block),
+                ("freeing a block twice", b.as_ptr() as usize)
+            );
+            assert_eq!(h.alloc(small()), Some(b));
+            assert_eq!(h.fault, None);
+        }
+
+        #[test]
+        fn finds_a_write_after_free() {
+            let mut h = heap(4);
+            let b = h.alloc(small()).unwrap();
+            // SAFETY: as above; the write after the free is the fault
+            // under test.
+            unsafe {
+                h.free(b, small());
+                b.cast::<u64>().add(3).write(7);
+            }
+            assert_eq!(h.alloc(small()), None);
+            let f = h.fault.take().unwrap();
+            assert_eq!(f.what, "a freed block was written after its free");
+            assert_eq!((f.block, f.offset, f.found), (b.as_ptr() as usize, 24, 7));
+            assert!(f.to_string().contains("0x7 at offset 24"));
+        }
+
+        #[test]
+        fn finds_frees_with_another_size() {
+            let mut h = heap(4);
+            let b = h.alloc(small()).unwrap();
+            // SAFETY: the free with the wrong layout is the fault under
+            // test, which the check stops.
+            unsafe { h.free(b, Layout::from_size_align(100, 8).unwrap()) };
+            assert!(
+                h.fault
+                    .take()
+                    .unwrap()
+                    .what
+                    .starts_with("freeing a block that")
+            );
+            let big = Layout::from_size_align(2 * PAGE_SIZE, 8).unwrap();
+            let p = h.alloc(big).unwrap();
+            // SAFETY: as above.
+            unsafe { h.free(p, Layout::from_size_align(PAGE_SIZE, 8).unwrap()) };
+            assert!(
+                h.fault
+                    .take()
+                    .unwrap()
+                    .what
+                    .starts_with("freeing whole pages")
+            );
+            // SAFETY: the block came from this heap with `big`.
+            unsafe { h.free(p, big) };
+            assert_eq!(h.fault, None);
+        }
+
+        #[test]
+        fn finds_a_damaged_free_list() {
+            let mut h = heap(4);
+            let a = h.alloc(small()).unwrap();
+            let big = h
+                .alloc(Layout::from_size_align(PAGE_SIZE, 8).unwrap())
+                .unwrap();
+            // SAFETY: the block came from this heap with this layout; the
+            // link written after its free is the fault under test.
+            unsafe {
+                h.free(a, small());
+                a.cast::<usize>().write(big.as_ptr() as usize);
+            }
+            assert_eq!(h.alloc(small()), Some(a));
+            assert_eq!(h.alloc(small()), None);
+            let f = h.fault.take().unwrap();
+            assert_eq!(f.what, "a free list leads to a block that is not free");
+            assert_eq!(f.block, big.as_ptr() as usize);
+        }
     }
 }
