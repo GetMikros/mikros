@@ -111,6 +111,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             app_id: Some(CONSOLE_APP.into()),
             user: CALLER_USER,
             login_session: false,
+            new_session: false,
         };
         match launcher.spawn(request).await {
             Ok(Ok(spawned)) => {

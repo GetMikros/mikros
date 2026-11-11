@@ -247,6 +247,7 @@ async fn run(launcher: &LauncherAsyncClient, reactor: &Reactor, test: &Test) -> 
         app_id: None,
         user: CALLER_USER,
         login_session: false,
+        new_session: false,
     };
     let pid = match launcher.spawn(request).await {
         Ok(Ok(r)) => r.pid,

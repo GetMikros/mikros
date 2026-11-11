@@ -195,13 +195,15 @@ async fn new_process(
     Ok((new, same))
 }
 
-/// Starts the program of `request` as a child of process `caller`.
+/// Starts the program of `request` as a child of process `caller`: in
+/// a login session of its own when it asks for one, and as the leader of
+/// a new session and process group when it asks for that.
 async fn spawn(
     shared: &Rc<Shared>,
     caller: u32,
     request: SpawnRequest,
 ) -> Result<LauncherSpawnResponse, Status> {
-    let new_session = request.login_session;
+    let (login_session, new_session) = (request.login_session, request.new_session);
     let (mut new_app, same) = new_process(shared, caller, |_| caller, request, true).await?;
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
     let pid = shared
@@ -209,8 +211,12 @@ async fn spawn(
         .borrow_mut()
         .reserve()
         .ok_or(Status::NoResources)?;
-    if new_session {
+    if login_session {
         new_app.login_session = pid;
+    }
+    if new_session {
+        new_app.process_group = pid;
+        new_app.session = pid;
     }
     let process = shared.start(pid, new_app, &control).await?;
     let manage = if same { MANAGE } else { 0 };
@@ -224,13 +230,19 @@ async fn spawn(
 }
 
 /// Replaces process `caller` with the program of `request`, which keeps
-/// its process ID, parent and children.
+/// its process ID, parent and children, and leads a new session and
+/// process group when it asks for that.
 async fn exec(
     shared: &Rc<Shared>,
     caller: u32,
     request: SpawnRequest,
 ) -> Result<LauncherExecResponse, Status> {
-    let (new, _) = new_process(shared, caller, |from| from.parent, request, false).await?;
+    let new_session = request.new_session;
+    let (mut new, _) = new_process(shared, caller, |from| from.parent, request, false).await?;
+    if new_session {
+        new.process_group = caller;
+        new.session = caller;
+    }
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;
     shared.replace(caller, new, &control).await?;
     Ok(LauncherExecResponse {})

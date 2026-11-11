@@ -257,6 +257,7 @@ unsafe fn request(
         app_id: None,
         user: CALLER_USER,
         login_session: false,
+        new_session: false,
     })
 }
 

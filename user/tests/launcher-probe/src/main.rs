@@ -176,6 +176,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     app_id: None,
                     user: CALLER_USER,
                     login_session: false,
+                    new_session: false,
                 };
                 // On success this process is killed before the reply.
                 let _ = launcher.exec(request).await;
@@ -374,6 +375,7 @@ async fn spawn(
         app_id: None,
         user: CALLER_USER,
         login_session: false,
+        new_session: false,
     };
     change(&mut request);
     match launcher.spawn(request).await {
@@ -653,6 +655,18 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
         check("describing a replaced process", path == SELF_PATH)?;
         check("ending it", kill(l, replaced, KILL).await.is_ok())?;
         check("waiting for it", wait(l, replaced as i32).await.is_some())?;
+        // A child started in a new session leads it and its group.
+        let leader = spawn(l, &["sleep"], |r| r.new_session = true)
+            .await
+            .map_or(0, |(pid, _)| pid);
+        check(
+            "starting a child in a new session",
+            get_info(l, leader)
+                .await
+                .is_ok_and(|i| i.process_group == leader && i.session == leader),
+        )?;
+        check("ending it", kill(l, leader, KILL).await.is_ok())?;
+        check("waiting for it", wait(l, leader as i32).await.is_some())?;
         // Sessions and process groups, and CHLD for the children that
         // end, which is blocked to be seen pending.
         let mut mask = 0;

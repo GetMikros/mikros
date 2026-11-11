@@ -88,6 +88,7 @@ pub async fn launch(
         app_id: Some(format!("system.{}", service.name)),
         user: CALLER_USER,
         login_session: false,
+        new_session: false,
     };
     match launcher.spawn(request).await {
         Ok(Ok(spawned)) => Ok(Started {

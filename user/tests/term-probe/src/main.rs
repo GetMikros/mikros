@@ -195,6 +195,7 @@ fn child(launcher: &LauncherClient, mode: &str, handles: Vec<StartupHandle>) -> 
         app_id: None,
         user: CALLER_USER,
         login_session: false,
+        new_session: false,
     };
     let pid = match launcher.spawn(request, FOREVER) {
         Ok(Ok(spawned)) => spawned.pid,
@@ -438,6 +439,7 @@ fn c_program(factory: &FactoryClient, launcher: &LauncherClient) -> Option<()> {
         app_id: None,
         user: CALLER_USER,
         login_session: false,
+        new_session: false,
     };
     let pid = reply("starting the C program", launcher.spawn(request, FOREVER))?.pid;
     check(

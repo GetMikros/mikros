@@ -155,6 +155,7 @@ async fn spawn_broker(
         app_id: Some("system.permissions".into()),
         user: CALLER_USER,
         login_session: false,
+        new_session: false,
     };
     let spawned = launcher.spawn(request).await.ok()?.ok()?;
     Some((spawned.pid, ProviderClient::new(client)))

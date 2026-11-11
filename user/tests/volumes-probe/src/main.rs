@@ -179,6 +179,7 @@ async fn start_copy(
         app_id: None,
         user: CALLER_USER,
         login_session: false,
+        new_session: false,
     };
     match launcher.spawn(request).await {
         Ok(Ok(_)) => Ok(()),

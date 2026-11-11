@@ -183,6 +183,7 @@ impl Starter {
             app_id: Some(app_id),
             user: CALLER_USER,
             login_session: false,
+            new_session: false,
         };
         let spawned = match self.launcher.spawn(request).await {
             Ok(Ok(spawned)) => spawned,

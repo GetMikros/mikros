@@ -456,6 +456,7 @@ async fn spawn(
         app_id: None,
         user: CALLER_USER,
         login_session: false,
+        new_session: false,
     };
     match launcher.spawn(request).await {
         Ok(Ok(spawned)) => Ok(spawned.pid),

@@ -61,6 +61,7 @@ async fn start(
         app_id: Some(app_id.into()),
         user,
         login_session,
+        new_session: false,
     };
     match launcher.spawn(request).await {
         Ok(Ok(spawned)) => Ok(spawned.pid),
