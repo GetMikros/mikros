@@ -8,7 +8,12 @@
 
 mod os;
 mod sys;
+mod term;
 
+use mikros_msh::edit::editor::{Editor, Outcome};
+use mikros_msh::edit::history;
+use mikros_msh::edit::keys::Decoder;
+use mikros_msh::edit::render::{View, draw, finish};
 use mikros_msh::eval::{Failure, Flow, Shell, Stream, System};
 use mikros_msh::parse::parse;
 use mikros_msh::prompt::{self, Context};
@@ -16,6 +21,7 @@ use mikros_msh::value::{Value, scalar_text};
 use os::Os;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Read, Write};
+use term::Terminal;
 
 /// What msh prints before a line that continues the one before it.
 const CONTINUATION: &str = "> ";
@@ -144,19 +150,108 @@ fn prompt(shell: &Shell<Os>) -> String {
     prompt::expand(&template, &cx)
 }
 
-/// Reads a statement at the prompt, over as many lines as it takes, or
-/// `None` at the end of input.
-fn read_entry(shell: &mut Shell<Os>) -> Option<String> {
+/// How reading a line at the prompt ended.
+enum Typed {
+    Line(String),
+    /// Ctrl-C dropped it.
+    Cancelled,
+    End,
+}
+
+/// The milliseconds that an escape waits for the rest of a sequence.
+const ESCAPE_WAIT: i32 = 50;
+
+/// Writes `text` to the terminal at once.
+fn show(text: &str) {
+    let mut out = io::stdout().lock();
+    let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+}
+
+/// Reads a line with the line editor on `terminal`, after `prompt`.
+fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed {
+    terminal.raw();
+    let mut editor = Editor::new(shell.history.clone());
+    let mut decoder = Decoder::new();
+    let mut row = 0;
+    // One byte at a time, so that what follows Enter stays for the
+    // next line or the program that the line runs.
+    let mut buf = [0u8; 1];
+    let ended = loop {
+        let (columns, rows) = term::size();
+        let suggestion = editor.suggestion(&*shell);
+        let below = editor.below(columns, (rows / 2).max(1));
+        let view = View {
+            prompt,
+            line: editor.line().text(),
+            cursor: editor.line().cursor(),
+            suggestion: &suggestion,
+            below: &below,
+        };
+        let frame = draw(&view, columns, row);
+        show(&frame.text);
+        row = frame.cursor_row;
+        let keys = match decoder.waiting() && !term::input_within(ESCAPE_WAIT) {
+            true => decoder.flush(),
+            false => match term::read_input(&mut buf) {
+                Ok(0) | Err(_) => break Typed::End,
+                Ok(n) => decoder.feed(&buf[..n]),
+            },
+        };
+        let mut outcome = None;
+        for key in keys {
+            match editor.key(key, &*shell) {
+                Outcome::Continue => {}
+                Outcome::Clear => {
+                    show("\x1b[H\x1b[2J");
+                    row = 0;
+                }
+                done => {
+                    outcome = Some(done);
+                    break;
+                }
+            }
+        }
+        match outcome {
+            None => {}
+            Some(Outcome::Accept(text)) => break Typed::Line(text),
+            Some(Outcome::Cancel) => break Typed::Cancelled,
+            Some(_) => break Typed::End,
+        }
+    };
+    let (columns, _) = term::size();
+    let text = match &ended {
+        Typed::Line(text) => text.clone(),
+        _ => editor.line().text().to_owned(),
+    };
+    show(&finish(prompt, &text, columns, row));
+    terminal.restore();
+    ended
+}
+
+/// Reads a statement at the prompt, over as many lines as it takes, with
+/// the line editor when standard input is a terminal; an empty one when
+/// Ctrl-C dropped it, and `None` at the end of input.
+fn read_entry(shell: &mut Shell<Os>, terminal: Option<&Terminal>) -> Option<String> {
     let mut entry = String::new();
     let mut shown = prompt(shell);
     loop {
-        shell.system.write(Stream::Output, shown.as_bytes());
-        let mut line = String::new();
-        match io::stdin().lock().read_line(&mut line) {
-            Ok(0) | Err(_) if entry.is_empty() => return None,
-            Ok(0) | Err(_) => return Some(entry),
-            Ok(_) => {}
-        }
+        let line = match terminal {
+            Some(terminal) => match edit_line(shell, terminal, &shown) {
+                Typed::Line(line) => line + "\n",
+                Typed::Cancelled => return Some(String::new()),
+                Typed::End if entry.is_empty() => return None,
+                Typed::End => return Some(entry),
+            },
+            None => {
+                shell.system.write(Stream::Output, shown.as_bytes());
+                let mut line = String::new();
+                match io::stdin().lock().read_line(&mut line) {
+                    Ok(0) | Err(_) if entry.is_empty() => return None,
+                    Ok(0) | Err(_) => return Some(entry),
+                    Ok(_) => line,
+                }
+            }
+        };
         entry.push_str(&line);
         match parse(&entry) {
             Err(e) if e.incomplete => shown = CONTINUATION.into(),
@@ -172,7 +267,7 @@ fn remember(shell: &mut Shell<Os>, entry: &str, file: Option<&str>) {
         return;
     };
     if let Ok(mut f) = OpenOptions::new().append(true).create(true).open(file) {
-        let _ = writeln!(f, "{entry}");
+        let _ = f.write_all(history::encode(entry).as_bytes());
     }
 }
 
@@ -180,6 +275,7 @@ fn remember(shell: &mut Shell<Os>, entry: &str, file: Option<&str>) {
 /// status.
 fn interactive() -> i64 {
     let job_control = take_terminal();
+    let terminal = Terminal::new();
     let mut shell = Shell::new(Os::new(job_control), environment());
     let home = home(&shell);
     if let Some(rc) = home.as_ref().map(|h| format!("{h}/.mshrc"))
@@ -196,7 +292,7 @@ fn interactive() -> i64 {
         .as_ref()
         .and_then(|f| std::fs::read_to_string(f).ok())
     {
-        shell.history = text.lines().map(Into::into).collect();
+        shell.history = history::decode(&text);
     }
     shell.interactive = true;
     loop {
@@ -205,7 +301,7 @@ fn interactive() -> i64 {
                 .system
                 .write(Stream::Error, format!("{line}\n").as_bytes());
         }
-        let Some(entry) = read_entry(&mut shell) else {
+        let Some(entry) = read_entry(&mut shell, terminal.as_ref()) else {
             return shell.status();
         };
         let entry = entry.trim_end_matches('\n');

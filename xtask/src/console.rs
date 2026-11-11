@@ -29,15 +29,16 @@ const SETTLE: Duration = Duration::from_secs(3);
 /// How long the setup program has to ask its next question, and msh
 /// to run a command.
 const QUESTION: Duration = Duration::from_secs(1);
-/// What the runner types in ada's msh: a job that runs until it is
-/// killed, Ctrl-Z, which stops it, then `let n = (jobs | lines | len)`,
-/// `bg`, `kill %1`, `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
+/// What the runner types in ada's msh: `spaw`, which Tab completes to
+/// `spawn-std `, and `sleep`, a job that runs until it is killed,
+/// Ctrl-Z, which stops it, then `let n = (jobs | lines | len)`, `bg`,
+/// `kill %1`, `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
 /// `if (pwd | lines).0 != '/Users/ada' { exit 2 }` and
 /// `exit ($n + 6 + $status)`, which exits with 7 when msh listed the one
 /// job, the kill worked, the host name is the one setup wrote and msh
 /// started in ada's home.
 const MSH_KEYS: [&str; 8] = [
-    "s p a w n minus s t d spc s l e e p ret",
+    "s p a w tab s l e e p ret",
     "ctrl-z",
     "l e t spc n spc equal spc shift-9 j o b s spc shift-backslash spc \
      l i n e s spc shift-backslash spc l e n shift-0 ret",
