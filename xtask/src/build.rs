@@ -1512,9 +1512,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let image = boot_image(kind, "test-boot.img", &members)?;
             // The root partition of the setup run gets this archive: the
             // test boot image with the services that need the root file
-            // system and what they load, the session manager's manifest
-            // with the kernel log handle, and the session shell as the
-            // user's shell.
+            // system and what they load, msh among them, the session
+            // manager's manifest with the kernel log handle, and
+            // spawn-std, which runs as the job that the runner stops in
+            // msh.
             let sessions_manifest = "usr/lib/services/sessionmgr.yaml";
             let console_fonts =
                 ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"].map(|f| fonts.ttf.join(f));
@@ -1525,12 +1526,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .chain(
                     login
                         .iter()
-                        .filter(|(at, _)| at != sessions_manifest && at != "usr/bin/msh")
+                        .filter(|(at, _)| at != sessions_manifest)
                         .map(|(at, path)| (at.as_str(), path.as_path())),
                 )
                 .chain([
                     (sessions_manifest, test_sessions_manifest.as_path()),
-                    ("usr/bin/msh", session_shell.as_path()),
+                    ("usr/bin/spawn-std", spawn_std.as_path()),
                     (
                         "usr/share/fonts/dejavu/DejaVuSansMono.ttf",
                         console_fonts[0].as_path(),

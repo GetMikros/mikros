@@ -10580,9 +10580,9 @@ mod manager {
     /// accounts service and the rest of the login come from the root,
     /// which has no user yet, so that the session manager runs the setup
     /// program on the text console, where the runner makes the account
-    /// ada; then the runner logs in as ada and types a line for the
-    /// session shell. Stops QEMU with `PASSED` once setup and ada's
-    /// session ended so, or with `FAILED`.
+    /// ada; then the runner logs in as ada and has her shell, msh, stop,
+    /// list, continue and kill a job and exit with 7. Stops QEMU with
+    /// `PASSED` once setup and ada's session ended so, or with `FAILED`.
     pub fn setup_scenario(s: &Startup) -> i64 {
         const SECONDS: i64 = 300;
         const EXPECTED: &[(&[u8], usize)] = &[
@@ -10594,7 +10594,7 @@ mod manager {
             (b"sessionmgr: started the console", 1),
             (b"sessionmgr: setup exited with Some(0)", 1),
             (b"sessionmgr: ada logged in", 1),
-            (b"exited with Some(0)", 2),
+            (b"exited with Some(7)", 1),
             (b"sessionmgr: ended session", 1),
         ];
         const FAILED: &[&[u8]] = &[

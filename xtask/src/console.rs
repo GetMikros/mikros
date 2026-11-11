@@ -6,8 +6,11 @@
 //! the setup run, which starts with no user, it first answers the setup
 //! program's questions to make the account ada, and then logs in as
 //! ada. Once the user is logged in, it checks that the screen shows
-//! text, and types a line that the session shell reads. The test init
-//! stops QEMU through `isa-debug-exit` once the run passed or failed.
+//! text. In the console run it then types a line that the session shell
+//! reads; in the setup run, whose shell is msh, it starts a job, stops
+//! it with Ctrl-Z, and has msh count its jobs, continue and kill the
+//! job, and exit with 7 when all of that worked. The test init stops
+//! QEMU through `isa-debug-exit` once the run passed or failed.
 
 use crate::build::{self, Kind};
 use crate::qemu::MachineArgs;
@@ -22,8 +25,23 @@ const SEAT: &str = "sessionmgr: gave the console the display";
 const SETUP_DONE: &str = "sessionmgr: setup exited";
 /// How long the console has to open the devices it was given.
 const SETTLE: Duration = Duration::from_secs(3);
-/// How long the setup program has to ask its next question.
+/// How long the setup program has to ask its next question, and msh
+/// to run a command.
 const QUESTION: Duration = Duration::from_secs(1);
+/// What the runner types in ada's msh: a job that runs until it is
+/// killed, Ctrl-Z, which stops it, then `let n = (jobs | lines | len)`,
+/// `bg`, `kill %1` and `exit ($n + 6 + $status)`, which exits with 7 when
+/// msh listed the one job and the kill worked.
+const MSH_KEYS: [&str; 6] = [
+    "s p a w n minus s t d spc s l e e p ret",
+    "ctrl-z",
+    "l e t spc n spc equal spc shift-9 j o b s spc shift-backslash spc \
+     l i n e s spc shift-backslash spc l e n shift-0 ret",
+    "b g ret",
+    "k i l l spc shift-5 1 ret",
+    "e x i t spc shift-9 shift-4 n spc shift-equal spc 6 spc shift-equal spc \
+     shift-4 s t a t u s shift-0 ret",
+];
 
 /// What the runner does in a run, in order.
 enum Step {
@@ -86,8 +104,9 @@ pub fn run(
         Step::Keys("b o b ret"),
         Step::Keys("b o b minus p a s s w o r d ret"),
     ];
+    let after = [Step::Keys("l s ret")];
     session(
-        machine, kind, built, dir, timeout, "console", &steps, "bob", None,
+        machine, kind, built, dir, timeout, "console", &steps, "bob", &after, None,
     )
 }
 
@@ -111,6 +130,10 @@ pub fn run_setup(
         Step::Keys("a d a ret"),
         Step::Keys("a d a minus p w ret"),
     ]);
+    let after: Vec<Step> = MSH_KEYS
+        .iter()
+        .flat_map(|keys| [Step::Keys(keys), Step::Sleep(QUESTION)])
+        .collect();
     // The root partition holds the services that need it, which start
     // once it is available.
     let system = built
@@ -126,13 +149,14 @@ pub fn run_setup(
         "setup",
         &steps,
         "ada",
+        &after,
         Some(system),
     )
 }
 
 /// Boots the run of `scenario` in `dir`, with the root partition made
 /// from `system` when given, takes `steps`, and once `user` is logged in
-/// takes a screen dump and types the line that the session shell reads.
+/// takes a screen dump and then the steps `after`.
 #[allow(clippy::too_many_arguments)]
 fn session(
     machine: &MachineArgs,
@@ -143,6 +167,7 @@ fn session(
     scenario: &str,
     steps: &[Step],
     user: &str,
+    after: &[Step],
     system: Option<&Path>,
 ) -> Result<()> {
     fs::create_dir_all(dir)?;
@@ -158,10 +183,10 @@ fn session(
     let deadline = Instant::now() + timeout;
     let logged_in = format!("sessionmgr: {user} logged in");
     let ended = (|| -> Result<(ExitStatus, Vec<u8>)> {
-        for step in steps {
+        let take = |step: &Step, qemu: &mut std::process::Child| -> Result<()> {
             match step {
                 Step::Wait(line) => {
-                    scenario::wait_for_line(&log, line, &mut qemu, deadline)?;
+                    scenario::wait_for_line(&log, line, qemu, deadline)?;
                 }
                 Step::Sleep(time) => std::thread::sleep(*time),
                 Step::Keys(keys) => type_keys(&socket, keys)?,
@@ -169,13 +194,19 @@ fn session(
                     scenario::screen_dump(&socket, &dir.join(file))?;
                 }
             }
+            Ok(())
+        };
+        for step in steps {
+            take(step, &mut qemu)?;
         }
         scenario::wait_for_line(&log, &logged_in, &mut qemu, deadline)?;
         // The session shell writes its prompt, and the display driver
         // copies what changed after a frame's time.
         std::thread::sleep(Duration::from_secs(2));
         let screen = scenario::screen_dump(&socket, &dir.join("screen.ppm"))?;
-        type_keys(&socket, "l s ret")?;
+        for step in after {
+            take(step, &mut qemu)?;
+        }
         loop {
             if let Some(status) = qemu.try_wait()? {
                 return Ok((status, screen));

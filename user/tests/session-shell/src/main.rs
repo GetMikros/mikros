@@ -1,5 +1,5 @@
-//! The user's shell of `tests/console.img` and `tests/setup.img`,
-//! installed as /usr/bin/msh, which the session manager starts once a
+//! The user's shell of `tests/console.img`, installed there as
+//! /usr/bin/msh, which the session manager starts once a
 //! user logged in on the text console. It checks that it runs as a user
 //! other than 0 with the app ID `system.cli`, leads a login session and
 //! a session and process group of its own, and has exactly the
