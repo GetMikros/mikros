@@ -7,8 +7,8 @@
 use crate::errno::{self, EACCES, EBADF, EINVAL, ENODEV, ENOSYS, ENOTTY};
 use crate::fd::Description;
 use crate::{
-    clock, dir, epoll, fd, fs, futex, io, poll, process, signal, spawn, stat, thread, timerfd,
-    uname,
+    clock, dir, epoll, fd, files, fs, futex, io, poll, process, signal, spawn, stat, thread,
+    timerfd, uname,
 };
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -88,6 +88,31 @@ const SYS_FACCESSAT: i64 = 269;
 const SYS_DUP3: i64 = 292;
 const SYS_PIPE2: i64 = 293;
 const SYS_GETRANDOM: i64 = 318;
+const SYS_TRUNCATE: i64 = 76;
+const SYS_FTRUNCATE: i64 = 77;
+const SYS_RENAME: i64 = 82;
+const SYS_MKDIR: i64 = 83;
+const SYS_RMDIR: i64 = 84;
+const SYS_LINK: i64 = 86;
+const SYS_UNLINK: i64 = 87;
+const SYS_SYMLINK: i64 = 88;
+const SYS_CHMOD: i64 = 90;
+const SYS_FCHMOD: i64 = 91;
+const SYS_CHOWN: i64 = 92;
+const SYS_FCHOWN: i64 = 93;
+const SYS_LCHOWN: i64 = 94;
+const SYS_STATFS: i64 = 137;
+const SYS_FSTATFS: i64 = 138;
+const SYS_MKDIRAT: i64 = 258;
+const SYS_FCHOWNAT: i64 = 260;
+const SYS_UNLINKAT: i64 = 263;
+const SYS_RENAMEAT: i64 = 264;
+const SYS_LINKAT: i64 = 265;
+const SYS_SYMLINKAT: i64 = 266;
+const SYS_FCHMODAT: i64 = 268;
+const SYS_UTIMENSAT: i64 = 280;
+const SYS_RENAMEAT2: i64 = 316;
+const SYS_FCHMODAT2: i64 = 452;
 const SYS_UNAME: i64 = 63;
 const SYS_SETHOSTNAME: i64 = 170;
 const SYS_FACCESSAT2: i64 = 439;
@@ -163,6 +188,49 @@ extern "C" fn __mikros_syscall(
             )
         }
         SYS_FSTAT => stat::fstat(a1, a2 as *mut stat::Kstat),
+        SYS_MKDIR => files::mkdirat(fs::AT_FDCWD, a1 as *const u8, a2 as u32),
+        SYS_MKDIRAT => files::mkdirat(a1, a2 as *const u8, a3 as u32),
+        SYS_RMDIR => files::unlinkat(fs::AT_FDCWD, a1 as *const u8, files::AT_REMOVEDIR),
+        SYS_UNLINK => files::unlinkat(fs::AT_FDCWD, a1 as *const u8, 0),
+        SYS_UNLINKAT => files::unlinkat(a1, a2 as *const u8, a3),
+        SYS_RENAME => files::renameat(
+            fs::AT_FDCWD,
+            a1 as *const u8,
+            fs::AT_FDCWD,
+            a2 as *const u8,
+            0,
+        ),
+        SYS_RENAMEAT => files::renameat(a1, a2 as *const u8, a3, a4 as *const u8, 0),
+        SYS_RENAMEAT2 => files::renameat(a1, a2 as *const u8, a3, a4 as *const u8, a5),
+        SYS_LINK => files::linkat(
+            fs::AT_FDCWD,
+            a1 as *const u8,
+            fs::AT_FDCWD,
+            a2 as *const u8,
+            0,
+        ),
+        SYS_LINKAT => files::linkat(a1, a2 as *const u8, a3, a4 as *const u8, a5),
+        SYS_SYMLINK => files::symlinkat(a1 as *const u8, fs::AT_FDCWD, a2 as *const u8),
+        SYS_SYMLINKAT => files::symlinkat(a1 as *const u8, a2, a3 as *const u8),
+        SYS_CHMOD => files::fchmodat(fs::AT_FDCWD, a1 as *const u8, a2 as u32, 0),
+        SYS_FCHMOD => files::fchmod(a1, a2 as u32),
+        SYS_FCHMODAT => files::fchmodat(a1, a2 as *const u8, a3 as u32, 0),
+        SYS_FCHMODAT2 => files::fchmodat(a1, a2 as *const u8, a3 as u32, a4),
+        SYS_TRUNCATE => files::truncate(a1 as *const u8, a2),
+        SYS_FTRUNCATE => files::ftruncate(a1, a2),
+        SYS_UTIMENSAT => files::utimensat(a1, a2 as *const u8, a3 as *const files::Timespec, a4),
+        SYS_STATFS => files::statfs(a1 as *const u8, a2 as *mut files::Statfs),
+        SYS_FSTATFS => files::fstatfs(a1, a2 as *mut files::Statfs),
+        SYS_CHOWN => files::fchownat(fs::AT_FDCWD, a1 as *const u8, a2 as u32, a3 as u32, 0),
+        SYS_LCHOWN => files::fchownat(
+            fs::AT_FDCWD,
+            a1 as *const u8,
+            a2 as u32,
+            a3 as u32,
+            files::AT_SYMLINK_NOFOLLOW,
+        ),
+        SYS_FCHOWN => files::fchown(a1, a2 as u32, a3 as u32),
+        SYS_FCHOWNAT => files::fchownat(a1, a2 as *const u8, a3 as u32, a4 as u32, a5),
         SYS_NEWFSTATAT => stat::fstatat(a1, a2 as *const u8, a3 as *mut stat::Kstat, a4),
         SYS_GETDENTS64 => dir::getdents(a1, a2 as *mut u8, a3 as u64),
         SYS_GETCWD => fs::getcwd(a1 as *mut u8, a2 as u64),

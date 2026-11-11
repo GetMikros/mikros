@@ -219,7 +219,7 @@ pub fn monotonic() -> Result<i64, i64> {
 
 /// UTC: the time page's offset plus the monotonic clock. Without a time
 /// page, it is asked for again on every call.
-fn realtime() -> Result<i64, i64> {
+pub(crate) fn realtime() -> Result<i64, i64> {
     let mut page = TIME_PAGE.load(Ordering::Acquire);
     if page == 0 {
         page = acquire()?;

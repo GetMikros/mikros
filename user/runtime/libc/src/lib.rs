@@ -12,6 +12,7 @@ mod dir;
 mod epoll;
 mod errno;
 mod fd;
+mod files;
 mod fs;
 mod futex;
 mod io;
