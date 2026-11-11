@@ -229,7 +229,7 @@ pub fn cargo(dir: &Path, rustflags: &[&str]) -> Result<Command> {
 /// and libunwind.
 pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
     let root = crate::workspace_root();
-    let status = cargo(&root.join("user/runtime/std"), &[])?
+    let status = cargo(&root.join("user/runtime/std"), kind.user_rustflags())?
         .args(["--package", bin, "--bin", bin])
         .args(["--profile", kind.profile()])
         .status()

@@ -25,3 +25,10 @@ panic = "abort"
 
 [profile.fuzz]
 inherits = "dev"
+
+# The diagnostic build kind: the production build's optimization with
+# debug assertions and overflow checks.
+[profile.diag]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true

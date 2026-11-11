@@ -208,6 +208,7 @@ mod tests {
     fn names_the_version_after_the_workspace_and_kind() {
         assert_eq!(version(Kind::Debug), "0.0.0-debug");
         assert_eq!(version(Kind::Production), "0.0.0-production");
+        assert_eq!(version(Kind::Diag), "0.0.0-diag");
     }
 
     #[test]

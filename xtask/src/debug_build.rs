@@ -58,8 +58,8 @@ fn missing(sections: &str, symbols: &str, start: &str) -> Vec<&'static str> {
     missing
 }
 
-/// Fails unless the debug kernel `kernel` has full debug information,
-/// overflow checks, debug assertions and frame pointers.
+/// Fails unless the debug or diagnostic kernel `kernel` has full debug
+/// information, overflow checks, debug assertions and frame pointers.
 pub fn check(kernel: &Path) -> Result<()> {
     let sections = run("llvm-objdump", &["-h"], kernel)?;
     let symbols = run("llvm-nm", &["-C"], kernel)?;

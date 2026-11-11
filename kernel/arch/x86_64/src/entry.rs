@@ -32,6 +32,8 @@ static PROTOCOL_NOTE: Note = Note {
 /// The name of the build kind this kernel was built as.
 const BUILD_KIND: &str = if cfg!(feature = "fuzz") {
     "fuzz"
+} else if cfg!(feature = "diag") {
+    "diag"
 } else if cfg!(debug_assertions) {
     "debug"
 } else {

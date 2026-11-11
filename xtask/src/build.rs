@@ -12,6 +12,9 @@ pub enum Kind {
     Production,
     Debug,
     Fuzz,
+    /// The production build's optimization with checks and diagnostic
+    /// records, for faults that show only in optimized builds.
+    Diag,
 }
 
 impl Kind {
@@ -21,6 +24,7 @@ impl Kind {
             Kind::Production => "production",
             Kind::Debug => "debug",
             Kind::Fuzz => "fuzz",
+            Kind::Diag => "diag",
         }
     }
 
@@ -30,6 +34,7 @@ impl Kind {
             Kind::Production => "release",
             Kind::Debug => "dev",
             Kind::Fuzz => "fuzz",
+            Kind::Diag => "diag",
         }
     }
 
@@ -39,6 +44,17 @@ impl Kind {
             Kind::Production => "release",
             Kind::Debug => "debug",
             Kind::Fuzz => "fuzz",
+            Kind::Diag => "diag",
+        }
+    }
+
+    /// The flags that user-space programs of this kind are built with on
+    /// top of their target's: the diagnostic build keeps frame pointers
+    /// and sets the `mikros_diag` cfg, which turns on its records.
+    pub fn user_rustflags(self) -> &'static [&'static str] {
+        match self {
+            Kind::Diag => &["-Cforce-frame-pointers=yes", "--cfg=mikros_diag"],
+            _ => &[],
         }
     }
 }
@@ -100,11 +116,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     println!("built    {}", kernel.display());
     crate::extended::check(&kernel)?;
     println!("checked  {} uses no x87 or vector state", kernel.display());
-    if kind == Kind::Debug {
+    if matches!(kind, Kind::Debug | Kind::Diag) {
         crate::debug_build::check(&kernel)?;
         println!(
-            "checked  {} has the debug build's settings",
-            kernel.display()
+            "checked  {} has the {} build's settings",
+            kernel.display(),
+            kind.name()
         );
     }
     let debug_info = crate::debuginfo::split(&kernel)?;
@@ -1888,6 +1905,13 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
         .args(["build", "--package", bin, "--bin", bin, "--target"])
         .arg(root.join(USER_TARGET))
         .args(["--profile", kind.profile()]);
+    let flags = kind.user_rustflags();
+    if !flags.is_empty() {
+        let flags: Vec<String> = flags.iter().map(|f| format!("\"{f}\"")).collect();
+        command
+            .arg("--config")
+            .arg(format!("build.rustflags=[{}]", flags.join(", ")));
+    }
     // The test init of a fuzz build also tests the fuzz-only calls.
     if matches!(kind, Kind::Fuzz) && bin == "test-init" {
         command.args(["--features", "fuzz"]);
@@ -1987,9 +2011,16 @@ const COVERAGE_FLAGS: [&str; 3] = [
 
 /// The extra Cargo arguments for building `package` as `kind`: the fuzz
 /// build of the kernel gets its fuzz feature and coverage
-/// instrumentation, added to the kernel target's flags.
-fn kernel_fuzz_args(package: &str, kind: Kind) -> Vec<String> {
-    if package != "kernel-x86_64" || kind != Kind::Fuzz {
+/// instrumentation, added to the kernel target's flags, and the
+/// diagnostic build of the kernel its diag feature.
+fn kernel_args(package: &str, kind: Kind) -> Vec<String> {
+    if package != "kernel-x86_64" {
+        return Vec::new();
+    }
+    if kind == Kind::Diag {
+        return vec!["--features".into(), "diag".into()];
+    }
+    if kind != Kind::Fuzz {
         return Vec::new();
     }
     let flags: Vec<String> = COVERAGE_FLAGS.iter().map(|f| format!("\"{f}\"")).collect();
@@ -2016,7 +2047,7 @@ fn cargo_build(package: &str, bin: &str, target: &str, kind: Kind) -> Result<Pat
             target,
         ])
         .args(["--profile", kind.profile()])
-        .args(kernel_fuzz_args(package, kind))
+        .args(kernel_args(package, kind))
         .status()
         .context("failed to run cargo")?;
     if !status.success() {
@@ -2038,12 +2069,27 @@ mod tests {
 
     #[test]
     fn instruments_only_the_fuzz_kernel() {
-        assert!(kernel_fuzz_args("kernel-x86_64", Kind::Debug).is_empty());
-        assert!(kernel_fuzz_args("mikrosboot", Kind::Fuzz).is_empty());
-        let args = kernel_fuzz_args("kernel-x86_64", Kind::Fuzz);
+        assert!(kernel_args("kernel-x86_64", Kind::Debug).is_empty());
+        assert!(kernel_args("mikrosboot", Kind::Fuzz).is_empty());
+        let args = kernel_args("kernel-x86_64", Kind::Fuzz);
         assert_eq!(args[..3], ["--features", "fuzz", "--config"]);
         assert!(
             args[3].starts_with("target.x86_64-unknown-none.rustflags=[\"-Cpasses=sancov-module\"")
+        );
+    }
+
+    #[test]
+    fn gives_only_the_diag_kernel_its_feature() {
+        assert_eq!(
+            kernel_args("kernel-x86_64", Kind::Diag),
+            ["--features", "diag"]
+        );
+        assert!(kernel_args("mikrosboot", Kind::Diag).is_empty());
+        assert!(Kind::Production.user_rustflags().is_empty());
+        assert!(
+            Kind::Diag
+                .user_rustflags()
+                .contains(&"-Cforce-frame-pointers=yes")
         );
     }
 

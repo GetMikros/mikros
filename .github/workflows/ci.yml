@@ -38,7 +38,7 @@ jobs:
       - name: Build
         id: build
         run: |
-          for kind in production debug fuzz; do
+          for kind in production debug fuzz diag; do
             cargo xtask build --kind "$kind"
           done
       - name: Test

@@ -8,6 +8,9 @@ publish = false
 [features]
 # Keeps the per-processor state of the fuzz build's test hooks.
 fuzz = []
+# Checks the heap, the lock order and spinlock waits in the diagnostic
+# build.
+diag = []
 
 [dependencies]
 boot-protocol = { path = "../../boot/protocol" }
