@@ -165,7 +165,20 @@ impl Parser<'_> {
         self.expect('(', "`(`")?;
         self.skip_blank();
         let expr = if self.at_expression() || self.peek() == Some('-') && self.at_negative() {
-            self.expression()?
+            let expr = self.expression()?;
+            self.skip_blank();
+            // `("text" | wc -c)`: a value piped on.
+            match self.peek() == Some('|') {
+                true => {
+                    let mut pipeline = Pipeline {
+                        commands: vec![Command::Expr(expr)],
+                        background: false,
+                    };
+                    self.rest_of_pipeline(&mut pipeline, false)?;
+                    Expr::Pipeline(Box::new(pipeline))
+                }
+                false => expr,
+            }
         } else {
             Expr::Pipeline(Box::new(self.pipeline(false)?))
         };

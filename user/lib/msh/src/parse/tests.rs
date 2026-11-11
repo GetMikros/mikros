@@ -283,6 +283,12 @@ fn reads_parentheses_as_expression_or_command() {
         panic!()
     };
     assert!(matches!(p.commands[0], Command::Expr(_)));
+    let StatementKind::Let { value, .. } = one("let n = (\"abc\" | wc -c)") else {
+        panic!()
+    };
+    let Expr::Pipeline(p) = value else { panic!() };
+    assert!(matches!(p.commands[0], Command::Expr(Expr::String(_))));
+    assert!(matches!(&p.commands[1], Command::Simple(s) if s.words.len() == 2));
 }
 
 #[test]
