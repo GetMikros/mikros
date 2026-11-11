@@ -1,4 +1,4 @@
-// MIKSPEC-0059.R9
+// MIKSPEC-0059.R14
 
 library mikros.terminal;
 using mikros.base;
@@ -36,4 +36,5 @@ protocol Terminal {
         deadline base.MonotonicTime) -> (written u32) error base.Status;
     @13 GetReadiness(terminal base.Token)
         -> (event handle<Event, WAIT | INSPECT | TRANSFER>) error base.Status;
+    @14 GetNumber(terminal base.Token) -> (number u32) error base.Status;
 };

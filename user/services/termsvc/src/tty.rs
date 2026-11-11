@@ -35,6 +35,9 @@ pub enum Event {
 }
 
 pub struct Tty {
+    /// Its number, the smallest that no open terminal had when it was
+    /// made.
+    pub number: u32,
     pub discipline: RefCell<Discipline>,
     /// The window size: rows, columns, width and height in pixels.
     pub size: Cell<[u16; 4]>,
@@ -57,8 +60,9 @@ pub struct Tty {
 }
 
 impl Tty {
-    pub fn new(master: OwnedHandle, size: [u16; 4]) -> Rc<Tty> {
+    pub fn new(number: u32, master: OwnedHandle, size: [u16; 4]) -> Rc<Tty> {
         Rc::new(Tty {
+            number,
             discipline: RefCell::new(Discipline::new(Attributes::default())),
             size: Cell::new(size),
             master,

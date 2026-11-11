@@ -1,8 +1,9 @@
 //! The boot service of `tests/term.img`, the terminal service's client.
 //! It opens terminals through `Factory`, types on their master streams
-//! and checks what `Terminal` reads, writes, echoes and signals. Copies
-//! of it, started with an argument, are the processes that job control
-//! acts on: `sleep` waits until it is killed, and `read` reads the
+//! and checks what `Terminal` reads, writes, echoes and signals, and the
+//! numbers it gives the terminals. Copies of it, started with an
+//! argument, are the processes that job control acts on: `sleep` waits
+//! until it is killed, and `read` reads the
 //! terminal whose token it gets as its `USER` startup handle 1. It exits
 //! with 0 once every check passed, and logs what failed otherwise. It
 //! also runs the C program `term-c` on a terminal and types what that
@@ -279,6 +280,9 @@ fn probe(directory: &DirectoryClient, launcher: &LauncherClient) -> Option<()> {
     )?;
     let size = reply("step 2", terminal.get_window_size(t(), FOREVER))?.size;
     check("the window size", size.rows == 24 && size.columns == 80)?;
+    // The first terminal is number 0.
+    let first = reply("the number", terminal.get_number(t(), FOREVER))?.number;
+    check("the first terminal's number", first == 0)?;
 
     // A typed line, read as NL and echoed with CR NL.
     let readiness = reply("step 3", terminal.get_readiness(t(), FOREVER))?.event;
@@ -388,6 +392,9 @@ fn probe(directory: &DirectoryClient, launcher: &LauncherClient) -> Option<()> {
     ) else {
         return failed("a second Open");
     };
+    let number = terminal.get_number(duplicate(&second.terminal)?, FOREVER);
+    let second_number = reply("the second number", number)?.number;
+    check("the second terminal's number", second_number == 1)?;
     type_in(&second.master, b"z\n")?;
     let token2 = second.terminal;
     drop(second.master);
@@ -404,6 +411,22 @@ fn probe(directory: &DirectoryClient, launcher: &LauncherClient) -> Option<()> {
         .ok()?
         .data;
     check("the end of input after the master closed", r.is_empty())?;
+    // The number of a terminal whose master closed is free again.
+    let Ok(Ok(third)) = factory.open(
+        WindowSize {
+            rows: 1,
+            columns: 1,
+            width: 0,
+            height: 0,
+        },
+        FOREVER,
+    ) else {
+        return failed("a third Open");
+    };
+    let number = terminal.get_number(duplicate(&third.terminal)?, FOREVER);
+    let third_number = reply("the third number", number)?.number;
+    check("reusing a closed terminal's number", third_number == 1)?;
+    drop(third);
     c_program(&factory, launcher)
 }
 

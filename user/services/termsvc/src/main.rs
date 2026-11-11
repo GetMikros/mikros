@@ -57,6 +57,18 @@ impl Service {
         self.ttys.borrow().get(&id).map(|(t, _)| t.clone())
     }
 
+    /// The smallest number that no open terminal has: one whose master
+    /// stream has not closed.
+    fn free_number(&self) -> u32 {
+        let ttys = self.ttys.borrow();
+        let used: alloc::collections::BTreeSet<u32> = ttys
+            .values()
+            .filter(|(t, _)| !t.hung_up())
+            .map(|(t, _)| t.number)
+            .collect();
+        (0..).find(|n| !used.contains(n)).unwrap_or(0)
+    }
+
     /// Whether session `session` has a controlling terminal.
     pub fn has_controlling(&self, session: u32) -> bool {
         self.ttys
@@ -190,7 +202,7 @@ fn open(service: &Rc<Service>, size: [u16; 4]) -> Result<FactoryOpenResponse, St
     let token = unsafe { OwnedHandle::from_raw(token) };
     let id = koid(&event).ok_or(Status::NoResources)?;
     let (control, control_server) = endpoints::<Master>().map_err(|_| Status::NoResources)?;
-    let tty = Tty::new(ours, size);
+    let tty = Tty::new(service.free_number(), ours, size);
     service.ttys.borrow_mut().insert(id, (tty.clone(), event));
     let reactor = service.reactor.clone();
     service

@@ -14,10 +14,10 @@ use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::interfaces::mikros::terminal::{
     self as proto, Attributes as Wire, Queue, Terminal, TerminalAsyncServer, TerminalDrainResponse,
     TerminalFlushResponse, TerminalGetAttributesResponse, TerminalGetForegroundResponse,
-    TerminalGetReadinessResponse, TerminalGetWindowSizeResponse, TerminalMakeControllingResponse,
-    TerminalReadResponse, TerminalRequest, TerminalSendBreakResponse,
-    TerminalSetAttributesResponse, TerminalSetForegroundResponse, TerminalSetWindowSizeResponse,
-    TerminalWriteResponse, When, WindowSize,
+    TerminalGetNumberResponse, TerminalGetReadinessResponse, TerminalGetWindowSizeResponse,
+    TerminalMakeControllingResponse, TerminalReadResponse, TerminalRequest,
+    TerminalSendBreakResponse, TerminalSetAttributesResponse, TerminalSetForegroundResponse,
+    TerminalSetWindowSizeResponse, TerminalWriteResponse, When, WindowSize,
 };
 use mikros_rt::sys;
 use mikros_tty::discipline::Read;
@@ -162,6 +162,12 @@ pub async fn serve(service: Rc<Service>, end: ServerEnd<Terminal>, client: Clien
             R::GetReadiness(q, r) => {
                 let got =
                     readiness(&c, &q.terminal).map(|event| TerminalGetReadinessResponse { event });
+                r.reply(s, got)
+            }
+            R::GetNumber(q, r) => {
+                let got = c
+                    .tty(&q.terminal)
+                    .map(|t| TerminalGetNumberResponse { number: t.number });
                 r.reply(s, got)
             }
         };
