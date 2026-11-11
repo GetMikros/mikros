@@ -11,6 +11,8 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
+#include <pwd.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <string.h>
@@ -167,6 +169,21 @@ int main(int argc, char **argv)
 	CHECK(uid != 0 && geteuid() == uid && getgid() == uid && getegid() == uid);
 	CHECK(getgroups(0, NULL) == 2 && getgroups(4, groups) == 2);
 	CHECK(groups[0] == uid && groups[1] == 1);
+
+	/* Users and groups, from the accounts service. */
+	struct passwd *pw = getpwuid(uid), entry, *found;
+	CHECK(pw && strcmp(pw->pw_name, "ada") == 0 && strcmp(pw->pw_gecos, "Ada") == 0);
+	CHECK(strcmp(pw->pw_dir, "/Users/ada") == 0 && strcmp(pw->pw_shell, "/usr/bin/msh") == 0);
+	CHECK(pw->pw_gid == uid && (pw = getpwnam("ada")) && pw->pw_uid == uid);
+	CHECK((pw = getpwuid(0)) && strcmp(pw->pw_name, "system") == 0 && strcmp(pw->pw_dir, "/") == 0);
+	errno = 0;
+	CHECK(!getpwnam("nobody") && errno == 0);
+	struct group *gr = getgrgid(1);
+	CHECK(gr && strcmp(gr->gr_name, "admin") == 0 && gr->gr_mem[0] && !gr->gr_mem[1]);
+	CHECK(strcmp(gr->gr_mem[0], "ada") == 0);
+	CHECK((gr = getgrnam("ada")) && gr->gr_gid == uid && !gr->gr_mem[0]);
+	char small[8];
+	CHECK(getpwuid_r(uid, &entry, small, sizeof small, &found) == ERANGE && !found);
 
 	/* Removing. */
 	CHECK(unlink(s) == 0 && unlink(c) == 0 && unlink(a) == 0);
