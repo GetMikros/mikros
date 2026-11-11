@@ -363,6 +363,8 @@ fn start_one(page: u64, id: u32, index: usize) -> bool {
     let cpu = percpu::new_secondary(index as u32, id, (&raw const *core).cast())
         .unwrap_or_else(|| panic!("no memory for processor {index}"));
     let top = space::new_stack(STACK_SIZE);
+    #[cfg(feature = "diag")]
+    crate::panic::others::set_stack(index, top - STACK_SIZE, top);
     SYNC_TURN.store(0, Ordering::Relaxed);
     STAGE.store(WAITING, Ordering::Release);
     let base = space::direct(page) as *mut u8;

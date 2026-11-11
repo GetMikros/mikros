@@ -6,6 +6,8 @@
 //! change to it.
 
 mod fair;
+#[cfg(feature = "diag")]
+pub mod watchdog;
 pub use fair::*;
 
 use crate::arch::ThreadData;
@@ -868,6 +870,8 @@ fn schedule(requeue: bool) {
             rsp
         }
         None => {
+            #[cfg(feature = "diag")]
+            watchdog::started(None, now);
             #[cfg(feature = "fuzz")]
             {
                 crate::fuzz::switch_in(None);
@@ -897,6 +901,8 @@ fn schedule(requeue: bool) {
 fn start_slice(cpu: &mut CpuSched, now: i64, thread: Arc<Thread>) {
     reschedule().store(false, Ordering::Relaxed);
     thread.on_cpu.store(true, Ordering::Release);
+    #[cfg(feature = "diag")]
+    watchdog::started(Some(&thread), now);
     cpu.current = Some(thread);
     cpu.slice_start = now;
     cpu.slice_end = now.saturating_add(cpu.fair.slice());
@@ -919,6 +925,9 @@ fn arm(cpu: &CpuSched) {
         .flatten()
         .chain([cpu.clock_due, cpu.reseed_due])
         .fold(slice_end, i64::min);
+    // The watchdog needs every processor's timer to interrupt it.
+    #[cfg(feature = "diag")]
+    let at = at.min(crate::arch::monotonic_now().saturating_add(watchdog::HEARTBEAT));
     if at == INFINITE {
         crate::arch::timer_disarm();
     } else {
@@ -1304,6 +1313,8 @@ pub fn timer_interrupt() {
     if cpu.current.is_some() && now >= cpu.slice_end {
         reschedule().store(true, Ordering::Relaxed);
     }
+    #[cfg(feature = "diag")]
+    watchdog::tick(now, &cpu);
     arm(&cpu);
     // Expired timers are signalled with the lock released, as setting a
     // signal can wake threads, a few at a time so that nothing allocates.

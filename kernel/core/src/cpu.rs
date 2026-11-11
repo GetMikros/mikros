@@ -37,6 +37,16 @@ pub struct Cpu {
     pub fuzz_running: AtomicU64,
     #[cfg(feature = "fuzz")]
     pub fuzz_alloc_failures: AtomicPtr<()>,
+    /// In the diagnostic build, for the lockup watchdog: when the
+    /// processor last handled its timer interrupt, since when threads
+    /// have waited in its queue, or 0, and the koid of the thread it
+    /// runs, or 0 while it idles.
+    #[cfg(feature = "diag")]
+    pub last_tick: core::sync::atomic::AtomicI64,
+    #[cfg(feature = "diag")]
+    pub waiting_since: core::sync::atomic::AtomicI64,
+    #[cfg(feature = "diag")]
+    pub running: core::sync::atomic::AtomicU64,
 }
 
 impl Cpu {
@@ -55,6 +65,12 @@ impl Cpu {
             fuzz_running: AtomicU64::new(0),
             #[cfg(feature = "fuzz")]
             fuzz_alloc_failures: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(feature = "diag")]
+            last_tick: core::sync::atomic::AtomicI64::new(0),
+            #[cfg(feature = "diag")]
+            waiting_since: core::sync::atomic::AtomicI64::new(0),
+            #[cfg(feature = "diag")]
+            running: core::sync::atomic::AtomicU64::new(0),
         }
     }
 }

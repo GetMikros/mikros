@@ -157,6 +157,8 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
     // does a panic while the report is written.
     if PANICKING.swap(true, Ordering::AcqRel) {
         if crate::percpu::READY.load(Ordering::Acquire) {
+            #[cfg(feature = "diag")]
+            others::stopped(registers);
             STOPPED.insert(crate::percpu::index() as usize);
         }
         crate::cpu::halt();
@@ -182,6 +184,8 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
             STACK_END.load(Ordering::Relaxed),
         ),
         (boot - BOOT_STACK_SIZE, boot),
+        #[cfg(feature = "diag")]
+        others::own_stack(),
     ];
     let stack = backtrace::stack_of(rbp, &stacks).unwrap_or((0, 0));
     // SAFETY: `frames` only reads 8-byte aligned words inside the current
@@ -198,6 +202,8 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
             frames: backtrace::frames(rbp, stack, read).map(linked),
         },
     );
+    #[cfg(feature = "diag")]
+    let _ = others::write(&mut Serial, "\r\n");
     crate::console::panic_screen(|mut screen| {
         let _ = panic::write(
             &mut screen,
@@ -210,6 +216,8 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
                 frames: backtrace::frames(rbp, stack, read).map(linked),
             },
         );
+        #[cfg(feature = "diag")]
+        let _ = others::write(&mut screen, "\n");
     });
     crate::cpu::halt()
 }
@@ -253,4 +261,109 @@ pub fn exception(frame: &Frame) -> ! {
         ("dr7", crate::cpu::read_dr(7)),
     ];
     stop(&Exception(frame), &registers, f.rbp)
+}
+
+/// In the diagnostic build, the state of the processors that stopped for
+/// another's panic, for its report.
+#[cfg(feature = "diag")]
+pub mod others {
+    use super::{STOPPED, linked};
+    use core::fmt::{self, Write};
+    use core::sync::atomic::{AtomicU64, Ordering};
+    use kernel_core::smp::MAX_CPUS;
+
+    /// The most frames written for each processor.
+    const FRAMES: usize = 16;
+
+    /// For each processor: where it was interrupted as it stopped, its
+    /// frame pointer and its code segment, and the bounds of its own
+    /// stack, which it idles on.
+    struct State {
+        rip: AtomicU64,
+        rbp: AtomicU64,
+        cs: AtomicU64,
+        stack: (AtomicU64, AtomicU64),
+    }
+
+    static STATES: [State; MAX_CPUS] = [const {
+        State {
+            rip: AtomicU64::new(0),
+            rbp: AtomicU64::new(0),
+            cs: AtomicU64::new(0),
+            stack: (AtomicU64::new(0), AtomicU64::new(0)),
+        }
+    }; MAX_CPUS];
+
+    /// Records the stack of processor `index`, from `start` to `end`.
+    pub fn set_stack(index: usize, start: u64, end: u64) {
+        if let Some(s) = STATES.get(index) {
+            s.stack.0.store(start, Ordering::Relaxed);
+            s.stack.1.store(end, Ordering::Relaxed);
+        }
+    }
+
+    /// The bounds of this processor's own stack, once it has one.
+    pub fn own_stack() -> (u64, u64) {
+        if !crate::percpu::READY.load(Ordering::Acquire) {
+            return (0, 0);
+        }
+        let s = &STATES[crate::percpu::index() as usize];
+        (
+            s.stack.0.load(Ordering::Relaxed),
+            s.stack.1.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Records the registers this processor stopped with.
+    pub fn stopped(registers: &[(&str, u64)]) {
+        let get = |name| registers.iter().find(|r| r.0 == name).map_or(0, |r| r.1);
+        let s = &STATES[crate::percpu::index() as usize];
+        s.rip.store(get("rip"), Ordering::Relaxed);
+        s.rbp.store(get("rbp"), Ordering::Relaxed);
+        s.cs.store(get("cs"), Ordering::Relaxed);
+    }
+
+    /// Writes, for each other running processor, the thread it ran, where
+    /// it was interrupted and a backtrace from there.
+    pub fn write(out: &mut dyn Write, newline: &str) -> fmt::Result {
+        let me = crate::percpu::index() as usize;
+        for cpu in crate::tlb::RUNNING.iter().filter(|&c| c != me) {
+            let thread = kernel_core::cpu::of(cpu).map_or(0, |c| c.running.load(Ordering::Relaxed));
+            write!(out, "cpu {cpu}: thread {thread}")?;
+            if !STOPPED.iter().any(|s| s == cpu) {
+                write!(out, ", did not stop{newline}")?;
+                continue;
+            }
+            let s = &STATES[cpu];
+            let (rip, rbp) = (s.rip.load(Ordering::Relaxed), s.rbp.load(Ordering::Relaxed));
+            if s.cs.load(Ordering::Relaxed) & 3 != 0 {
+                write!(out, ", in user mode at {rip:#x}{newline}")?;
+                continue;
+            }
+            write!(out, ", rip {:#x}{newline}", linked(rip))?;
+            let top = crate::percpu::of(cpu).map_or(0, |d| d.thread_stack.load(Ordering::Relaxed));
+            let stacks = [
+                (top.saturating_sub(crate::sched::KERNEL_STACK_SIZE), top),
+                (
+                    s.stack.0.load(Ordering::Relaxed),
+                    s.stack.1.load(Ordering::Relaxed),
+                ),
+                (
+                    super::STACK_START.load(Ordering::Relaxed),
+                    super::STACK_END.load(Ordering::Relaxed),
+                ),
+            ];
+            let stack = crate::backtrace::stack_of(rbp, &stacks).unwrap_or((0, 0));
+            // SAFETY: `frames` only reads 8-byte aligned words inside a
+            // processor's stack, which is mapped.
+            let read = |address: u64| unsafe { (address as *const u64).read() };
+            for (n, address) in crate::backtrace::frames(rbp, stack, read)
+                .take(FRAMES)
+                .enumerate()
+            {
+                write!(out, "  #{n} {:#x}{newline}", linked(address))?;
+            }
+        }
+        Ok(())
+    }
 }
