@@ -1,9 +1,12 @@
-//! The parts of msh, the Mikros shell, that do not need the system, so
-//! that they are tested on the host: the syntax tree of its command
-//! language and its parser, and the job table of job control.
+//! msh, the Mikros shell, apart from what only its program on Mikros
+//! does, so that it is tested on the host: the syntax tree of its
+//! command language and its parser, values, the evaluator with its
+//! built-in commands behind the `System` trait, script options, prompt
+//! expansion and the job table of job control.
 
 pub mod ast;
 pub mod eval;
 pub mod jobs;
 pub mod parse;
+pub mod prompt;
 pub mod value;

@@ -4,6 +4,7 @@
 pub mod builtins;
 pub mod command;
 pub mod glob;
+pub mod params;
 pub mod pattern;
 pub mod system;
 pub mod text;
