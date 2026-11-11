@@ -40,6 +40,11 @@ const SYS_ACCESS: i64 = 21;
 const SYS_PIPE: i64 = 22;
 const SYS_DUP: i64 = 32;
 const SYS_GETPID: i64 = 39;
+const SYS_GETUID: i64 = 102;
+const SYS_GETGID: i64 = 104;
+const SYS_GETEUID: i64 = 107;
+const SYS_GETEGID: i64 = 108;
+const SYS_GETGROUPS: i64 = 115;
 const SYS_DUP2: i64 = 33;
 const SYS_NANOSLEEP: i64 = 35;
 const SYS_EXECVE: i64 = 59;
@@ -297,6 +302,8 @@ extern "C" fn __mikros_syscall(
             signal::sigaltstack(a1 as *const signal::Stack, a2 as *mut signal::Stack)
         }
         SYS_GETPID => process::getpid(),
+        SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID => crate::users::user(),
+        SYS_GETGROUPS => crate::users::getgroups(a1, a2 as *mut u32),
         SYS_GETPPID => process::getppid(),
         SYS_SETPGID => process::setpgid(a1, a2),
         SYS_GETPGID => process::getpgid(a1),

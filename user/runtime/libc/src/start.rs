@@ -151,6 +151,7 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
     fs::install(core::mem::take(&mut managed.namespace));
     fs::start_in(&header.working_directory);
     crate::files::start_with_mask(header.umask);
+    crate::users::install(header.user);
     crate::library::install(header.bundle.as_deref());
     SYSTEM_PROCESS.store(
         header.app_id.as_bytes().starts_with(SYSTEM),

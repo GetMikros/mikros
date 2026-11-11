@@ -4,8 +4,9 @@
  * program copied there, and exits with 0 when every check below
  * passed, and with the number of the first check that failed otherwise,
  * after printing what failed. It also checks the machine name, process
- * priorities and the boot clock. Given `--umask`, it exits with its
- * file creation mask instead. */
+ * priorities, the boot clock, and the user and groups of ada, an
+ * administrator, who runs it. Given `--umask`, it exits with its file
+ * creation mask instead. */
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -159,6 +160,13 @@ int main(int argc, char **argv)
 	struct timespec mono, boot;
 	CHECK(clock_gettime(CLOCK_MONOTONIC, &mono) == 0 && clock_gettime(CLOCK_BOOTTIME, &boot) == 0);
 	CHECK(boot.tv_sec > mono.tv_sec || (boot.tv_sec == mono.tv_sec && boot.tv_nsec >= mono.tv_nsec));
+
+	/* The user, also the group, and the groups of an administrator. */
+	uid_t uid = getuid();
+	gid_t groups[4];
+	CHECK(uid != 0 && geteuid() == uid && getgid() == uid && getegid() == uid);
+	CHECK(getgroups(0, NULL) == 2 && getgroups(4, groups) == 2);
+	CHECK(groups[0] == uid && groups[1] == 1);
 
 	/* Removing. */
 	CHECK(unlink(s) == 0 && unlink(c) == 0 && unlink(a) == 0);
