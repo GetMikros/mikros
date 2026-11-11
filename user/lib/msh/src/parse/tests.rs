@@ -264,6 +264,21 @@ fn reads_parentheses_as_expression_or_command() {
     assert!(matches!(expr("(1 + 2)"), Expr::Binary(..)));
     assert!(matches!(expr("(ls | lines)"), Expr::Pipeline(_)));
     assert!(matches!(one("(1 + 2)"), StatementKind::Expr(_)));
+    // A statement that starts like an expression is one.
+    assert!(matches!(
+        one("$x + 1"),
+        StatementKind::Expr(Expr::Binary(..))
+    ));
+    assert!(matches!(one("'a' + 'b'"), StatementKind::Expr(_)));
+    assert!(matches!(
+        one("[1 2] | each { $it }"),
+        StatementKind::Pipeline(_)
+    ));
+    // Fields and items of parentheses, in arguments too.
+    let s = simple("print (f).status");
+    assert!(
+        matches!(&s.words[1], Argument::Word(w) if matches!(w.parts[0], WordPart::Expr(Expr::Access(..))))
+    );
     let StatementKind::Pipeline(p) = one("(ls) | lines") else {
         panic!()
     };

@@ -51,7 +51,7 @@ impl Parser<'_> {
     fn command(&mut self, before_block: bool) -> Result<Command> {
         self.skip_spaces();
         if self.peek() == Some('(') {
-            return Ok(Command::Expr(self.paren()?));
+            return Ok(Command::Expr(self.operand()?));
         }
         let mut simple = Simple {
             environment: Vec::new(),
@@ -90,7 +90,7 @@ impl Parser<'_> {
                     }));
                 }
                 Some('(') => {
-                    let expr = self.paren()?;
+                    let expr = self.operand()?;
                     simple.words.push(Argument::Word(Word {
                         parts: vec![WordPart::Expr(expr)],
                     }));

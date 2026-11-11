@@ -246,8 +246,9 @@ impl Parser<'_> {
         if let Some(assign) = self.assignment()? {
             return Ok(assign);
         }
-        if self.peek() == Some('(') {
-            let expr = self.paren()?;
+        // A statement that starts like an expression is one.
+        if self.at_expression() {
+            let expr = self.expression()?;
             self.skip_spaces();
             if self.peek() != Some('|') {
                 return Ok(StatementKind::Expr(expr));
