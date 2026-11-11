@@ -1,9 +1,15 @@
 //! What each key does to the line, with zsh's Emacs key map: moving,
 //! editing, killing and yanking, browsing the history among the entries
 //! that start as the typed line does, and searching it with Ctrl-R.
+//! As fish does, Tab completes the word, or shows the candidates in a
+//! menu that Tab, Shift-Tab and the arrow keys move through, and the
+//! line shows the most likely rest of it, from the history or else the
+//! one candidate, which Right or End takes.
 
+use super::complete::{Sources, complete};
 use super::keys::Key;
 use super::line::Line;
+use super::menu::{Menu, common_prefix};
 
 /// What the editor did with a key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +48,11 @@ pub struct Editor {
     /// Whether the last key killed text, which the next kill joins.
     killed: bool,
     search: Option<Search>,
+    menu: Option<Menu>,
 }
+
+const DIM: &str = "\x1b[2m";
+const NORMAL: &str = "\x1b[0m";
 
 impl Editor {
     /// An empty line, with `history`, oldest first.
@@ -54,6 +64,7 @@ impl Editor {
             kill: String::new(),
             killed: false,
             search: None,
+            menu: None,
         }
     }
 
@@ -73,12 +84,33 @@ impl Editor {
         self.search.as_ref()
     }
 
-    /// Does what `key` does.
-    pub fn key(&mut self, key: Key) -> Outcome {
+    pub fn menu(&self) -> Option<&Menu> {
+        self.menu.as_ref()
+    }
+
+    /// Does what `key` does, completing from `sources`.
+    pub fn key(&mut self, key: Key, sources: &dyn Sources) -> Outcome {
         if self.search.is_some()
             && let Some(outcome) = self.search_key(key)
         {
             return outcome;
+        }
+        if self.menu.is_some()
+            && let Some(outcome) = self.menu_key(key)
+        {
+            return outcome;
+        }
+        let rest = match key {
+            Key::Right | Key::End | Key::Ctrl('f' | 'e') => self.suggestion(sources),
+            _ => String::new(),
+        };
+        if !rest.is_empty() {
+            self.line.insert(&rest);
+            return Outcome::Continue;
+        }
+        if matches!(key, Key::Tab | Key::BackTab) {
+            self.tab(sources);
+            return Outcome::Continue;
         }
         let killing = matches!(
             key,
@@ -142,6 +174,110 @@ impl Editor {
             _ => {}
         }
         Outcome::Continue
+    }
+
+    /// Tab: the one candidate, with a space when the word is done, or
+    /// what all candidates start with and the menu of them.
+    fn tab(&mut self, sources: &dyn Sources) {
+        let found = complete(self.line.text(), self.line.cursor(), sources);
+        let typed = self.line.cursor() - found.start;
+        match found.candidates.as_slice() {
+            [] => {}
+            [one] => {
+                self.line.replace_before(found.start, &one.text);
+                if one.done && !self.line.text()[self.line.cursor()..].starts_with(' ') {
+                    self.line.insert(" ");
+                }
+            }
+            many => {
+                let prefix = common_prefix(many.iter().map(|c| c.text.as_str()));
+                if prefix.len() > typed {
+                    self.line.replace_before(found.start, &prefix);
+                }
+                self.menu = Some(Menu::new(found.start, found.candidates));
+            }
+        }
+    }
+
+    /// Does what `key` does while the menu shows, or `None` when it
+    /// closes the menu and then does what it does on the line.
+    fn menu_key(&mut self, key: Key) -> Option<Outcome> {
+        let menu = self.menu.as_mut()?;
+        let columns = menu.columns as isize;
+        match key {
+            Key::Tab | Key::Right => menu.select(1),
+            Key::BackTab | Key::Left => menu.select(-1),
+            Key::Down if menu.selected.is_none() => menu.select(1),
+            Key::Down => menu.select(columns),
+            Key::Up => menu.select(-columns),
+            Key::Enter if menu.selected.is_some() => {
+                let done = menu.chosen().is_some_and(|c| c.done);
+                self.menu = None;
+                if done {
+                    self.line.insert(" ");
+                }
+                return Some(Outcome::Continue);
+            }
+            Key::Escape | Key::Ctrl('g') => {
+                self.menu = None;
+                return Some(Outcome::Continue);
+            }
+            _ => {
+                self.menu = None;
+                return None;
+            }
+        }
+        if let Some(chosen) = menu.chosen() {
+            let (start, text) = (menu.start, chosen.text.clone());
+            self.line.replace_before(start, &text);
+        }
+        Some(Outcome::Continue)
+    }
+
+    /// The most likely rest of the line, with the cursor at its end:
+    /// from the newest history entry that starts with it, or else the
+    /// rest of the word's one candidate.
+    pub fn suggestion(&self, sources: &dyn Sources) -> String {
+        let text = self.line.text();
+        if self.menu.is_some() || self.search.is_some() || !self.line.at_end() || text.is_empty() {
+            return String::new();
+        }
+        if let Some(entry) = self
+            .history
+            .iter()
+            .rev()
+            .find(|e| e.len() > text.len() && e.starts_with(text))
+        {
+            return entry[text.len()..].to_owned();
+        }
+        let found = complete(text, text.len(), sources);
+        let word = &text[found.start..];
+        match found.candidates.as_slice() {
+            [one] if !word.is_empty() && one.text.starts_with(word) && one.text != word => {
+                one.text[word.len()..].to_owned()
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The rows to show below the line, at most `height` of them on a
+    /// terminal `width` columns wide: the search, or the menu.
+    pub fn below(&mut self, width: usize, height: usize) -> Vec<String> {
+        if let Some(search) = &self.search {
+            let failing = if search.found.is_none() && !search.query.is_empty() {
+                "failing "
+            } else {
+                ""
+            };
+            return vec![format!(
+                "{DIM}{failing}bck-i-search:{NORMAL} {}_",
+                search.query
+            )];
+        }
+        match &mut self.menu {
+            Some(menu) => menu.rows(width, height),
+            None => Vec::new(),
+        }
     }
 
     /// Keeps `cut` for Ctrl-Y, after or, when it came from before the
@@ -261,6 +397,31 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Param;
+
+    /// Sources with nothing in them.
+    struct Nothing;
+
+    impl Sources for Nothing {
+        fn entries(&self, _: &str) -> Option<Vec<(String, bool)>> {
+            None
+        }
+        fn programs(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn functions(&self) -> Vec<(String, Vec<String>)> {
+            Vec::new()
+        }
+        fn variables(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn environment(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn params(&self, _: &str) -> Option<Vec<Param>> {
+            None
+        }
+    }
 
     fn editor(history: &[&str]) -> Editor {
         Editor::new(history.iter().map(|s| s.to_string()).collect())
@@ -268,7 +429,7 @@ mod tests {
 
     fn typed(e: &mut Editor, text: &str) {
         for c in text.chars() {
-            e.key(Key::Char(c));
+            e.key(Key::Char(c), &Nothing);
         }
     }
 
@@ -276,54 +437,54 @@ mod tests {
     fn edits_and_accepts_the_line() {
         let mut e = editor(&[]);
         typed(&mut e, "ls -la");
-        e.key(Key::Ctrl('a'));
-        e.key(Key::Ctrl('d'));
-        e.key(Key::Ctrl('d'));
+        e.key(Key::Ctrl('a'), &Nothing);
+        e.key(Key::Ctrl('d'), &Nothing);
+        e.key(Key::Ctrl('d'), &Nothing);
         typed(&mut e, "pwd");
-        e.key(Key::Ctrl('k'));
-        assert_eq!(e.key(Key::Enter), Outcome::Accept("pwd".into()));
+        e.key(Key::Ctrl('k'), &Nothing);
+        assert_eq!(e.key(Key::Enter, &Nothing), Outcome::Accept("pwd".into()));
         let mut e = editor(&[]);
-        assert_eq!(e.key(Key::Ctrl('d')), Outcome::Eof);
-        assert_eq!(e.key(Key::Ctrl('c')), Outcome::Cancel);
-        assert_eq!(e.key(Key::Ctrl('l')), Outcome::Clear);
+        assert_eq!(e.key(Key::Ctrl('d'), &Nothing), Outcome::Eof);
+        assert_eq!(e.key(Key::Ctrl('c'), &Nothing), Outcome::Cancel);
+        assert_eq!(e.key(Key::Ctrl('l'), &Nothing), Outcome::Clear);
     }
 
     #[test]
     fn joins_kills_and_yanks_them() {
         let mut e = editor(&[]);
         typed(&mut e, "echo one two");
-        e.key(Key::Ctrl('w'));
-        e.key(Key::Ctrl('w'));
+        e.key(Key::Ctrl('w'), &Nothing);
+        e.key(Key::Ctrl('w'), &Nothing);
         assert_eq!(e.line().text(), "echo ");
-        e.key(Key::Ctrl('a'));
-        e.key(Key::Ctrl('y'));
+        e.key(Key::Ctrl('a'), &Nothing);
+        e.key(Key::Ctrl('y'), &Nothing);
         assert_eq!(e.line().text(), "one twoecho ");
         // Another key in between starts a new kill.
-        e.key(Key::Ctrl('e'));
-        e.key(Key::Ctrl('w'));
-        e.key(Key::Ctrl('y'));
-        e.key(Key::Ctrl('y'));
+        e.key(Key::Ctrl('e'), &Nothing);
+        e.key(Key::Ctrl('w'), &Nothing);
+        e.key(Key::Ctrl('y'), &Nothing);
+        e.key(Key::Ctrl('y'), &Nothing);
         assert_eq!(e.line().text(), "one twoecho twoecho ");
     }
 
     #[test]
     fn browses_the_entries_that_start_like_the_line() {
         let mut e = editor(&["ls /", "cd /tmp", "ls /usr", "ls /usr"]);
-        e.key(Key::Up);
+        e.key(Key::Up, &Nothing);
         assert_eq!(e.line().text(), "ls /usr");
-        e.key(Key::Up);
+        e.key(Key::Up, &Nothing);
         assert_eq!(e.line().text(), "cd /tmp");
-        e.key(Key::Down);
-        e.key(Key::Down);
+        e.key(Key::Down, &Nothing);
+        e.key(Key::Down, &Nothing);
         assert_eq!(e.line().text(), "");
         typed(&mut e, "ls");
-        e.key(Key::Up);
-        e.key(Key::Up);
+        e.key(Key::Up, &Nothing);
+        e.key(Key::Up, &Nothing);
         assert_eq!(e.line().text(), "ls /");
-        e.key(Key::Up);
+        e.key(Key::Up, &Nothing);
         assert_eq!(e.line().text(), "ls /");
-        e.key(Key::Down);
-        e.key(Key::Down);
+        e.key(Key::Down, &Nothing);
+        e.key(Key::Down, &Nothing);
         assert_eq!(e.line().text(), "ls");
     }
 
@@ -331,24 +492,122 @@ mod tests {
     fn searches_the_history_backwards() {
         let mut e = editor(&["make test", "ls", "make run", "cat x"]);
         typed(&mut e, "pw");
-        e.key(Key::Ctrl('r'));
+        e.key(Key::Ctrl('r'), &Nothing);
         typed(&mut e, "make");
         assert_eq!(e.line().text(), "make run");
-        e.key(Key::Ctrl('r'));
+        e.key(Key::Ctrl('r'), &Nothing);
         assert_eq!(e.line().text(), "make test");
-        e.key(Key::Ctrl('r'));
+        e.key(Key::Ctrl('r'), &Nothing);
         assert_eq!(e.line().text(), "make test");
         typed(&mut e, "z");
         assert_eq!(e.line().text(), "pw");
-        e.key(Key::Backspace);
+        e.key(Key::Backspace, &Nothing);
         assert_eq!(e.search().map(|s| s.found), Some(Some(2)));
-        e.key(Key::Escape);
+        e.key(Key::Escape, &Nothing);
         assert_eq!(e.line().text(), "pw");
-        e.key(Key::Ctrl('r'));
+        e.key(Key::Ctrl('r'), &Nothing);
         typed(&mut e, "ls");
-        e.key(Key::Ctrl('e'));
+        e.key(Key::Ctrl('e'), &Nothing);
         typed(&mut e, " -l");
         assert!(e.search().is_none());
-        assert_eq!(e.key(Key::Enter), Outcome::Accept("ls -l".into()));
+        assert_eq!(e.key(Key::Enter, &Nothing), Outcome::Accept("ls -l".into()));
+    }
+
+    /// A folder with two notes and a program.
+    struct Files;
+
+    impl Sources for Files {
+        fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
+            (folder == ".")
+                .then(|| vec![("notes.txt".to_string(), false), ("news".to_string(), true)])
+        }
+        fn programs(&self) -> Vec<String> {
+            vec!["printf".into()]
+        }
+        fn functions(&self) -> Vec<(String, Vec<String>)> {
+            Vec::new()
+        }
+        fn variables(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn environment(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn params(&self, _: &str) -> Option<Vec<Param>> {
+            None
+        }
+    }
+
+    fn press(e: &mut Editor, keys: &[Key]) {
+        for &key in keys {
+            e.key(key, &Files);
+        }
+    }
+
+    #[test]
+    fn completes_one_candidate_or_shows_the_menu() {
+        let mut e = editor(&[]);
+        typed(&mut e, "cat not");
+        press(&mut e, &[Key::Tab]);
+        assert_eq!(e.line().text(), "cat notes.txt ");
+        typed(&mut e, "ne");
+        press(&mut e, &[Key::Tab]);
+        assert_eq!(e.line().text(), "cat notes.txt news/");
+        let mut e = editor(&[]);
+        typed(&mut e, "pr");
+        press(&mut e, &[Key::Tab]);
+        assert_eq!(e.line().text(), "print");
+        assert_eq!(e.menu().map(|m| m.candidates.len()), Some(2));
+        press(&mut e, &[Key::Tab, Key::Tab]);
+        assert_eq!(e.line().text(), "printf");
+        press(&mut e, &[Key::BackTab]);
+        assert_eq!(e.line().text(), "print");
+        press(&mut e, &[Key::Enter]);
+        assert!(e.menu().is_none());
+        assert_eq!(e.line().text(), "print ");
+        // A key that the menu does not use closes it and edits.
+        let mut e = editor(&[]);
+        typed(&mut e, "cat n");
+        press(&mut e, &[Key::Tab, Key::Down, Key::Char('x')]);
+        assert!(e.menu().is_none());
+        assert_eq!(e.line().text(), "cat news/x");
+    }
+
+    #[test]
+    fn suggests_the_rest_from_history_or_a_candidate() {
+        let mut e = editor(&["ls /usr/bin", "cat notes.txt"]);
+        typed(&mut e, "ls /u");
+        assert_eq!(e.suggestion(&Files), "sr/bin");
+        press(&mut e, &[Key::Right]);
+        assert_eq!(e.line().text(), "ls /usr/bin");
+        assert_eq!(e.suggestion(&Files), "");
+        let mut e = editor(&[]);
+        typed(&mut e, "less not");
+        assert_eq!(e.suggestion(&Files), "es.txt");
+        press(&mut e, &[Key::Left]);
+        assert_eq!(e.suggestion(&Files), "");
+        press(&mut e, &[Key::End]);
+        assert_eq!(e.line().text(), "less not");
+        press(&mut e, &[Key::End]);
+        assert_eq!(e.line().text(), "less notes.txt");
+    }
+
+    #[test]
+    fn shows_the_search_or_the_menu_below() {
+        let mut e = editor(&["make"]);
+        press(&mut e, &[Key::Ctrl('r'), Key::Char('q')]);
+        let below = e.below(80, 10);
+        assert_eq!(
+            super::super::render::visible(&below[0]),
+            "failing bck-i-search: q_"
+        );
+        press(&mut e, &[Key::Escape]);
+        typed(&mut e, "pr");
+        press(&mut e, &[Key::Tab]);
+        let below = e.below(80, 10);
+        assert_eq!(
+            super::super::render::visible(&below[0]),
+            "print  (built-in)  printf  (program)"
+        );
     }
 }
