@@ -177,6 +177,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let ps2 = user_build("ps2", kind)?;
             println!("built    {}", ps2.display());
             let ps2_manifest = crate::workspace_root().join("user/drivers/ps2/driver.yaml");
+            // The display driver binds to the boot framebuffer while the
+            // root file system is not yet available: the device manager
+            // reads the drivers of the boot image only.
+            let basic_display = user_build("basicdisplay", kind)?;
+            println!("built    {}", basic_display.display());
+            let basic_display_manifest =
+                crate::workspace_root().join("user/drivers/basicdisplay/driver.yaml");
             let [sans, sans_bold, mono, mono_bold] = crate::fonts::FILES.map(|f| fonts.ttf.join(f));
             let fonts_conf = crate::workspace_root().join("user/data/fonts.conf");
             let usb_hid = user_build("usbhid", kind)?;
@@ -275,6 +282,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("etc/fonts/fonts.conf", fonts_conf.as_path()),
                 ("usr/lib/drivers/ps2/ps2", ps2.as_path()),
                 ("usr/lib/drivers/ps2/driver.yaml", ps2_manifest.as_path()),
+                (
+                    "usr/lib/drivers/basicdisplay/basicdisplay",
+                    basic_display.as_path(),
+                ),
+                (
+                    "usr/lib/drivers/basicdisplay/driver.yaml",
+                    basic_display_manifest.as_path(),
+                ),
                 ("usr/lib/drivers/usbhid/usbhid", usb_hid.as_path()),
                 (
                     "usr/lib/drivers/usbhid/driver.yaml",
@@ -1627,10 +1642,11 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
 
 /// The members of the system image that logging in on the text console
 /// needs: the accounts, terminal and session services with their
-/// manifests, the basic display driver, the text console and the setup
-/// program with their program manifests, the user's shell msh, and the
-/// dynamic linker, libraries and keymaps they load. The fonts are among
-/// the other members.
+/// manifests, the text console and the setup program with their program
+/// manifests, the user's shell msh, and the dynamic linker, libraries
+/// and keymaps they load. The fonts and the basic display driver, which
+/// the device manager must find in the boot image, are among the other
+/// members.
 fn login_members(
     kind: Kind,
     xkbcommon: &crate::ports::Built,
@@ -1652,18 +1668,6 @@ fn login_members(
         members.push((format!("usr/bin/{name}"), binary));
         members.push((format!("usr/lib/services/{file}"), manifest));
     }
-    let basic_display = user_build("basicdisplay", kind)?;
-    println!("built    {}", basic_display.display());
-    members.extend([
-        (
-            "usr/lib/drivers/basicdisplay/basicdisplay".into(),
-            basic_display,
-        ),
-        (
-            "usr/lib/drivers/basicdisplay/driver.yaml".into(),
-            root.join("user/drivers/basicdisplay/driver.yaml"),
-        ),
-    ]);
     for name in ["console", "setup"] {
         let binary = crate::rust_std::build(name, kind)?;
         println!("built    {}", binary.display());
