@@ -7,6 +7,7 @@
 //! - `exit <n>`: exits with `n`;
 //! - `echo`: copies its standard input to its standard output;
 //! - `env <name>`: prints the variable `name`, or `unset`;
+//! - `hostname`: prints the host name that `gethostname` gives;
 //! - `sleep`: sleeps until it is killed.
 
 #![feature(mikros_handles, process_setsid)]
@@ -27,6 +28,7 @@ const SIGKILL: i32 = 9;
 const GREETING: &str = "/usr/share/hello/greeting.txt";
 
 unsafe extern "C" {
+    fn gethostname(name: *mut std::ffi::c_char, len: usize) -> i32;
     fn mikros_stream_write(stream: RawHandle, bytes: *const u8, len: u64, actual: *mut u64) -> i64;
     fn mikros_process_signal(process: RawHandle, signo: u32, value: u64) -> i64;
 }
@@ -55,6 +57,16 @@ fn main() -> ExitCode {
         }
         ["env", name] => {
             println!("{}", std::env::var(name).as_deref().unwrap_or("unset"));
+            ExitCode::SUCCESS
+        }
+        ["hostname"] => {
+            let mut name = [0u8; 256];
+            // SAFETY: the buffer is valid for its length.
+            if unsafe { gethostname(name.as_mut_ptr().cast(), name.len()) } != 0 {
+                return ExitCode::FAILURE;
+            }
+            let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            println!("{}", String::from_utf8_lossy(&name[..end]));
             ExitCode::SUCCESS
         }
         ["sleep"] => loop {

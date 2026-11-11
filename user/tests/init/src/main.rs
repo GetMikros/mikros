@@ -10579,9 +10579,10 @@ mod manager {
     /// until the root partition is available; the session manager, the
     /// accounts service and the rest of the login come from the root,
     /// which has no user yet, so that the session manager runs the setup
-    /// program on the text console, where the runner makes the account
-    /// ada; then the runner logs in as ada and has her shell, msh, stop,
-    /// list, continue and kill a job and exit with 7. Stops QEMU with
+    /// program on the text console, where the runner names the computer
+    /// and makes the account ada; then the runner logs in as ada and has
+    /// her shell, msh, stop, list, continue and kill a job, check the
+    /// host name and exit with 7. Stops QEMU with
     /// `PASSED` once setup and ada's session ended so, or with `FAILED`.
     pub fn setup_scenario(s: &Startup) -> i64 {
         const SECONDS: i64 = 300;
