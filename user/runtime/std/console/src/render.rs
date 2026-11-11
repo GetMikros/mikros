@@ -19,9 +19,11 @@ const PERM_READ: u32 = 1 << 0;
 const PERM_WRITE: u32 = 1 << 1;
 const REGULAR: &str = "/usr/share/fonts/dejavu/DejaVuSansMono.ttf";
 const BOLD_FONT: &str = "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf";
-/// The font sizes tried, largest first; the console takes the largest
-/// that gives at least 80 columns and 24 rows.
+/// The font sizes tried. Of those that give at least 80 columns and 24
+/// rows, the console takes the one whose rows are nearest the kernel
+/// log's, `ROW_TARGET` pixels high, and the larger of two as near.
 const SIZES: std::ops::RangeInclusive<u32> = 8..=32;
+const ROW_TARGET: usize = 16;
 pub const MIN_COLS: usize = 80;
 pub const MIN_ROWS: usize = 24;
 
@@ -52,8 +54,9 @@ fn copy(m: &Mode) -> Mode {
 
 impl Renderer {
     /// Takes `display` over: its first connected connector's preferred
-    /// mode, a dumb buffer of that size, and fonts of the largest size
-    /// that fits `MIN_COLS` by `MIN_ROWS` cells.
+    /// mode, a dumb buffer of that size, and fonts of the size whose rows
+    /// are nearest `ROW_TARGET` pixels among those that fit `MIN_COLS` by
+    /// `MIN_ROWS` cells.
     pub async fn new(
         display: DisplayAsyncClient,
         process: sys::Handle,
@@ -104,14 +107,19 @@ impl Renderer {
         let mut regular = Font::open(REGULAR, *SIZES.start()).ok_or("opening the font")?;
         let mut bold = Font::open(BOLD_FONT, *SIZES.start()).ok_or("opening the bold font")?;
         let (w, h) = (mode.width as usize, mode.height as usize);
-        let size = SIZES
-            .rev()
-            .find(|&s| {
-                regular.resize(s).is_some()
-                    && w / regular.cell.0 >= MIN_COLS
-                    && h / regular.cell.1 >= MIN_ROWS
-            })
-            .unwrap_or(*SIZES.start());
+        let mut fitting = Vec::new();
+        for s in SIZES {
+            let fits = regular.resize(s).is_some()
+                && w / regular.cell.0 >= MIN_COLS
+                && h / regular.cell.1 >= MIN_ROWS;
+            if fits {
+                fitting.push((s, regular.cell.1));
+            }
+        }
+        let size = fitting
+            .iter()
+            .min_by_key(|&&(s, row)| (row.abs_diff(ROW_TARGET), std::cmp::Reverse(s)))
+            .map_or(*SIZES.start(), |&(s, _)| s);
         regular.resize(size).ok_or("sizing the font")?;
         bold.resize(size).ok_or("sizing the bold font")?;
         let stride = buffer.stride as usize / 4;
