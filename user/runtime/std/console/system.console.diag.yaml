@@ -1,0 +1,8 @@
+# The program manifest of the text console in the diagnostic build,
+# installed as usr/lib/programs/system.console.yaml there.
+app_id: system.console
+binary: /usr/bin/console
+spawned_by:
+  - system.sessionmgr
+# To show the log while no session runs, and the system overview.
+permissions: [logs.read, diag.read]

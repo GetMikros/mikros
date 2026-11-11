@@ -7,7 +7,9 @@
 //! key repeat, and shows either its own login prompt or the terminal of
 //! setup or of the user's session. While no session runs, the system log
 //! fills the rows above the login prompt or setup's terminal, and while
-//! Ctrl, Alt and F12 are held, the whole screen.
+//! Ctrl, Alt and F12 are held, the whole screen. In the diagnostic build,
+//! the system overview fills the screen while Ctrl, Alt and F11 are
+//! held.
 
 #![feature(mikros_handles)]
 
@@ -16,6 +18,8 @@ mod keyboard;
 mod login;
 mod logpane;
 mod notify;
+#[cfg(mikros_diag)]
+mod overview;
 mod palette;
 mod process;
 mod render;
@@ -81,6 +85,9 @@ pub struct Console {
     log: LogPane,
     /// Whether Ctrl, Alt and F12 are held.
     log_held: Cell<bool>,
+    /// In the diagnostic build, the system overview.
+    #[cfg(mikros_diag)]
+    overview: overview::Overview,
     /// The size of the grid of cells, once a display came.
     grid: Cell<(usize, usize)>,
     /// What was typed while the login prompt shows, for it to read.
@@ -92,7 +99,7 @@ pub struct Console {
     keys: Notify,
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     let mut now = 0;
     // SAFETY: the out pointer is valid for the call.
     unsafe { sys::clock_get_monotonic(&mut now) };
@@ -134,7 +141,7 @@ impl Console {
     /// bottom `PROMPT_ROWS`.
     fn layout(&self) -> Layout {
         let rows = self.grid.get().1;
-        if self.log_held.get() {
+        if self.log_held.get() || self.overview_shown() {
             return Layout { log: rows, view: 0 };
         }
         match self.session.get() {
@@ -147,6 +154,25 @@ impl Console {
                 }
             }
         }
+    }
+
+    /// Whether the system overview of the diagnostic build fills the
+    /// screen, in the place of the log.
+    fn overview_shown(&self) -> bool {
+        #[cfg(mikros_diag)]
+        return self.overview.shown();
+        #[cfg(not(mikros_diag))]
+        false
+    }
+
+    /// The screen of the log's rows, `cols` by `rows`, when it changed
+    /// or `whole` is set: the system overview's while it shows.
+    fn top_screen(&self, cols: usize, rows: usize, whole: bool) -> Option<Screen> {
+        #[cfg(mikros_diag)]
+        if self.overview.shown() {
+            return (self.overview.take_stale() || whole).then(|| self.overview.screen(cols, rows));
+        }
+        (rows > 0 && (self.log.take_stale() || whole)).then(|| self.log.screen(cols, rows))
     }
 
     /// The columns and rows of the login prompt and of setup's terminal.
@@ -199,8 +225,7 @@ impl Console {
             let (layout, grid) = (self.layout(), self.grid.get());
             let whole = drawn != Some((layout, grid));
             drawn = Some((layout, grid));
-            let log = (layout.log > 0 && (self.log.take_stale() || whole))
-                .then(|| self.log.screen(grid.0, layout.log));
+            let log = self.top_screen(grid.0, layout.log, whole);
             let log_rows: Vec<usize> = match log {
                 Some(_) => (0..layout.log).collect(),
                 None => Vec::new(),
@@ -351,9 +376,22 @@ impl Console {
                 if self.log_held.replace(held) != held {
                     self.changed.notify();
                 }
+                #[cfg(mikros_diag)]
+                {
+                    let shown = self
+                        .keyboard
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(Keyboard::overview);
+                    if self.overview.set_shown(shown) {
+                        self.changed.notify();
+                    }
+                }
                 match pressed {
                     Some(Pressed::Bytes(bytes)) => self.input(bytes),
                     Some(Pressed::LogView) | Some(Pressed::Nothing) | None => {}
+                    #[cfg(mikros_diag)]
+                    Some(Pressed::Overview) => {}
                 }
             }
         }
@@ -380,7 +418,7 @@ impl Console {
 }
 
 /// Completes when the first of `a` and `b` completes.
-async fn first<A: std::future::Future, B: std::future::Future>(a: A, b: B) {
+pub(crate) async fn first<A: std::future::Future, B: std::future::Future>(a: A, b: B) {
     let mut a = std::pin::pin!(a);
     let mut b = std::pin::pin!(b);
     std::future::poll_fn(|cx| {
@@ -416,6 +454,8 @@ fn main() {
         session: Cell::new(false),
         log: LogPane::new(),
         log_held: Cell::new(false),
+        #[cfg(mikros_diag)]
+        overview: overview::Overview::default(),
         grid: Cell::new((render::MIN_COLS, render::MIN_ROWS)),
         typed: RefCell::new(VecDeque::new()),
         changed: Rc::new(Notify::default()),
@@ -429,6 +469,8 @@ fn main() {
     spawner.spawn(console.clone().serve_seat(seat));
     spawner.spawn(console.clone().redraw());
     spawner.spawn(logpane::follow(console.clone()));
+    #[cfg(mikros_diag)]
+    spawner.spawn(overview::follow(console.clone()));
     spawner.spawn(console.clone().repeat());
     executor.block_on(login::run(console, text_login));
 }

@@ -1709,9 +1709,14 @@ fn login_members(
         let binary = crate::rust_std::build(name, kind)?;
         println!("built    {}", binary.display());
         members.push((format!("usr/bin/{name}"), binary));
+        // The diagnostic build's console may read the system overview.
+        let manifest = match (kind, name) {
+            (Kind::Diag, "console") => "system.console.diag.yaml".to_owned(),
+            _ => format!("system.{name}.yaml"),
+        };
         members.push((
             format!("usr/lib/programs/system.{name}.yaml"),
-            root.join(format!("user/runtime/std/{name}/system.{name}.yaml")),
+            root.join(format!("user/runtime/std/{name}/{manifest}")),
         ));
     }
     // The diagnostic build's service, which no other build has.

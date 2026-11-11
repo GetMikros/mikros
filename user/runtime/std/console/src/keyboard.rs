@@ -37,6 +37,12 @@ fn special(keysym: u32) -> Option<Key> {
 /// that xkb's PC layouts give F12 while Ctrl and Alt are held.
 pub const F12: u32 = 0xFFC9;
 const SWITCH_VT_12: u32 = 0x1008_FE0C;
+/// In the diagnostic build, the keysyms of F11, which with Ctrl and Alt
+/// shows the system overview.
+#[cfg(mikros_diag)]
+const F11: u32 = 0xFFC8;
+#[cfg(mikros_diag)]
+const SWITCH_VT_11: u32 = 0x1008_FE0B;
 
 /// What a key press means for the console.
 pub enum Pressed {
@@ -44,6 +50,10 @@ pub enum Pressed {
     Bytes(Vec<u8>),
     /// Ctrl, Alt and F12, which show the log while held.
     LogView,
+    /// In the diagnostic build, Ctrl, Alt and F11, which show the system
+    /// overview while held.
+    #[cfg(mikros_diag)]
+    Overview,
     Nothing,
 }
 
@@ -53,6 +63,10 @@ pub struct Keyboard {
     repeat: Option<(u16, i64)>,
     /// The F12 key held since it was pressed with Ctrl and Alt.
     log_key: Option<u16>,
+    /// In the diagnostic build, the F11 key held since it was pressed
+    /// with Ctrl and Alt.
+    #[cfg(mikros_diag)]
+    overview_key: Option<u16>,
 }
 
 impl Keyboard {
@@ -61,6 +75,8 @@ impl Keyboard {
             keymap,
             repeat: None,
             log_key: None,
+            #[cfg(mikros_diag)]
+            overview_key: None,
         }
     }
 
@@ -79,6 +95,10 @@ impl Keyboard {
         let keysym = self.keymap.keysym(code);
         if matches!(keysym, F12 | SWITCH_VT_12) && mods.ctrl && mods.alt {
             return Pressed::LogView;
+        }
+        #[cfg(mikros_diag)]
+        if matches!(keysym, F11 | SWITCH_VT_11) && mods.ctrl && mods.alt {
+            return Pressed::Overview;
         }
         if let Some(key) = special(keysym) {
             return Pressed::Bytes(encode(key, mods, modes));
@@ -115,6 +135,10 @@ impl Keyboard {
                 self.repeat = Some((code, now + REPEAT_DELAY));
             }
             (true, Pressed::LogView) => self.log_key = Some(code),
+            #[cfg(mikros_diag)]
+            (true, Pressed::Overview) => self.overview_key = Some(code),
+            #[cfg(mikros_diag)]
+            (false, _) if self.overview_key == Some(code) => self.overview_key = None,
             (false, _) if self.repeat.is_some_and(|(c, _)| c == code) => self.repeat = None,
             (false, _) if self.log_key == Some(code) => self.log_key = None,
             _ => {}
@@ -126,6 +150,14 @@ impl Keyboard {
     pub fn log_view(&self) -> bool {
         let mods = self.modifiers();
         self.log_key.is_some() && mods.ctrl && mods.alt
+    }
+
+    /// In the diagnostic build, whether Ctrl, Alt and F11 are held, which
+    /// shows the system overview.
+    #[cfg(mikros_diag)]
+    pub fn overview(&self) -> bool {
+        let mods = self.modifiers();
+        self.overview_key.is_some() && mods.ctrl && mods.alt
     }
 
     /// When the held key next repeats.
