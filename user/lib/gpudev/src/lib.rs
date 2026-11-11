@@ -1,17 +1,24 @@
 //! Serving GPU devices for drivers: publishing one service of class
-//! `gpu`, which serves `mikros.gpu.Device`, and letting one client at a
-//! time that holds `gpu.display` own the display through a `Display`
-//! connection, closing it when its revocation event is signaled.
+//! `gpu`, which serves `mikros.gpu.Device`, letting one client at a time
+//! that holds `gpu.display` own the display through a `Display`
+//! connection, closing it when its revocation event is signaled, and
+//! showing the system log on the driver's screen while no client owns
+//! the display.
 
 #![no_std]
 
 extern crate alloc;
+
+mod log;
+
+pub use log::Screen;
 
 use alloc::rc::Rc;
 use core::cell::RefCell;
 use core::future::{Future, poll_fn};
 use core::pin::pin;
 use core::task::Poll;
+use log::Log;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -49,6 +56,10 @@ pub trait Backend {
 
     /// Answers `OpenRender` with `render`.
     fn open_render(&self, render: ServerEnd<Render>) -> Result<(), Status>;
+
+    /// Calls `draw` with the screen that shows the log while no client
+    /// owns the display, when the driver has one.
+    fn with_screen(&self, draw: &mut dyn FnMut(&dyn Screen));
 }
 
 /// A published GPU device.
@@ -57,14 +68,15 @@ pub struct GpuDevice<B> {
     broker: Option<BrokerAsyncClient>,
     /// The open `Display` connection.
     owner: RefCell<Option<Rc<DisplayAsyncServer>>>,
+    log: Log,
     reactor: Reactor,
     spawner: Spawner,
 }
 
 impl<B: Backend + 'static> GpuDevice<B> {
-    /// Publishes the device of `backend` with `manager`, and serves the
-    /// connections made to it with `spawner`, asking the permission
-    /// broker, through `directory`, who may own the display.
+    /// Publishes the device of `backend` with `manager`, serves the
+    /// connections made to it with `spawner`, and reads the log through
+    /// `directory`, which also leads to the permission broker.
     pub async fn publish(
         backend: Rc<B>,
         manager: &DeviceManagerAsyncClient,
@@ -76,6 +88,7 @@ impl<B: Backend + 'static> GpuDevice<B> {
             backend,
             broker: broker(&directory, &reactor).await,
             owner: RefCell::new(None),
+            log: Log::new(),
             reactor,
             spawner,
         });
@@ -86,11 +99,21 @@ impl<B: Backend + 'static> GpuDevice<B> {
             Err(_) => return Err(Status::PeerClosed),
         }
         device.spawner.spawn(device.clone().serve_provider(server));
+        device.spawner.spawn(log::follow(device.clone(), directory));
         Ok(device)
     }
 
     pub fn backend(&self) -> &Rc<B> {
         &self.backend
+    }
+
+    /// Draws what changed of the log, while no client owns the display.
+    fn draw_log(&self) {
+        if self.owner.borrow().is_some() {
+            return;
+        }
+        self.backend
+            .with_screen(&mut |screen| self.log.draw(screen));
     }
 
     async fn serve_provider(self: Rc<Self>, end: ServerEnd<Provider>) {
@@ -137,7 +160,8 @@ impl<B: Backend + 'static> GpuDevice<B> {
                     } else {
                         // The owner's place is taken before the connection
                         // is first served, so that the next `OpenDisplay`
-                        // fails.
+                        // fails, and before the reply, so that the log is
+                        // no longer drawn.
                         let owner =
                             Rc::new(DisplayAsyncServer::new(q.display, self.reactor.clone()));
                         *self.owner.borrow_mut() = Some(owner.clone());
@@ -155,7 +179,8 @@ impl<B: Backend + 'static> GpuDevice<B> {
     }
 
     /// Serves the display owner until it closes its connection or
-    /// `revoke` is signaled, then frees what the connection had.
+    /// `revoke` is signaled, then frees what the connection had and
+    /// draws the whole log.
     async fn own(self: Rc<Self>, owner: Rc<DisplayAsyncServer>, revoke: Option<OwnedHandle>) {
         let serving = self.backend.clone().serve(owner);
         match &revoke {
@@ -164,6 +189,8 @@ impl<B: Backend + 'static> GpuDevice<B> {
         }
         *self.owner.borrow_mut() = None;
         self.backend.closed();
+        self.log.forget();
+        self.draw_log();
     }
 }
 

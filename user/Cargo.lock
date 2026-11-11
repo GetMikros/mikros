@@ -373,6 +373,8 @@ dependencies = [
 name = "mikros-gpudev"
 version = "0.0.0"
 dependencies = [
+ "mikros-display",
+ "mikros-logview",
  "mikros-rt",
 ]
 
@@ -408,6 +410,10 @@ dependencies = [
 
 [[package]]
 name = "mikros-logstore"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-logview"
 version = "0.0.0"
 
 [[package]]

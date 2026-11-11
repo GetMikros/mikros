@@ -6,4 +6,6 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
+mikros-display = { path = "../display" }
+mikros-logview = { path = "../logview" }
 mikros-rt = { path = "../../runtime/mikros-rt" }

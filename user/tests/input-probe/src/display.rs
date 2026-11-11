@@ -64,9 +64,13 @@ async fn open(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<Dev
     Some(DeviceAsyncClient::new(channel, reactor.clone()))
 }
 
-/// Owns the display, fills it with `PAINT`, and returns once the commit
-/// that shows it completed: None when any step fails.
-pub async fn paint(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()> {
+/// Owns the display, fills it with `PAINT`, and returns the display's
+/// connection once the commit that shows it completed: None when any
+/// step fails. Closing the connection gives the display up.
+pub async fn paint(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+) -> Option<DisplayAsyncClient> {
     let Some(device) = open(directory, reactor).await else {
         return failed("connecting to the gpu service");
     };
@@ -165,7 +169,7 @@ pub async fn paint(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Optio
         let timeout = reactor.sleep_until(deadline);
         match crate::first(event, timeout).await {
             Some(Ok(DisplayEvent::OnCommitComplete(c))) if c.commit_id == shown.commit_id => {
-                return Some(());
+                return Some(display);
             }
             Some(Ok(_)) => {}
             _ => return failed("OnCommitComplete"),

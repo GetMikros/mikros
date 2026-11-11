@@ -4,5 +4,6 @@ name: basicdisplay
 binary: /usr/lib/drivers/basicdisplay/basicdisplay
 match: [platform:boot-framebuffer]
 kind: fallback
-# To ask the permission broker whether a client may own the display.
-permissions: [permissions.check]
+# To ask the permission broker whether a client may own the display, and
+# to read the log that it shows while none does.
+permissions: [permissions.check, logs.read]

@@ -22,6 +22,7 @@ const DEVICES: usize = 3;
 const EV_KEY: u16 = 1;
 const EV_REL: u16 = 2;
 const KEY_A: u16 = 30;
+const KEY_B: u16 = 48;
 const BTN_LEFT: u16 = 0x110;
 const REL_X: u16 = 0;
 const LED_CAPSL: u16 = 1;
@@ -33,6 +34,7 @@ const EVENTS_LIMIT: i64 = 120_000_000_000;
 #[derive(Default)]
 struct Seen {
     key_a: bool,
+    key_b: bool,
     moved: bool,
     clicked: bool,
 }
@@ -73,13 +75,33 @@ fn duplicate(handle: &OwnedHandle) -> Option<OwnedHandle> {
     (status == mikros_rt::OK).then(|| unsafe { OwnedHandle::from_raw(out) })
 }
 
+/// What the input devices reported, which their watchers go on
+/// recording.
+pub struct Watched {
+    seen: Rc<RefCell<Vec<Seen>>>,
+}
+
+impl Watched {
+    /// Waits for a press of B on a keyboard.
+    pub async fn pressed_b(&self, reactor: &Reactor) -> Option<()> {
+        let deadline = now() + EVENTS_LIMIT;
+        while !self.seen.borrow().iter().any(|s| s.key_b) {
+            if now() >= deadline {
+                return failed("receiving B");
+            }
+            let _ = reactor.sleep_until(now() + 100_000_000).await;
+        }
+        Some(())
+    }
+}
+
 /// Checks each input device and waits for a press of A on every
 /// keyboard and a move and left click of every mouse.
 pub async fn works(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Option<()> {
+) -> Option<Watched> {
     let Some(names) = instances(directory, reactor, INPUT, DEVICES).await else {
         return failed("finding the input services");
     };
@@ -152,7 +174,7 @@ pub async fn works(
                 false => s.moved && s.clicked,
             });
         if done {
-            return Some(());
+            return Some(Watched { seen });
         }
         if now() >= deadline {
             for (s, o) in seen.borrow().iter().zip(&opened) {
@@ -181,6 +203,10 @@ async fn watch(
                 (EV_KEY, KEY_A, 1) if !s.key_a => {
                     s.key_a = true;
                     mikros_rt::log!(Info, "input-probe: A pressed on {name}");
+                }
+                (EV_KEY, KEY_B, 1) if !s.key_b => {
+                    s.key_b = true;
+                    mikros_rt::log!(Info, "input-probe: B pressed on {name}");
                 }
                 (EV_KEY, BTN_LEFT, 1) if !s.clicked => {
                     s.clicked = true;

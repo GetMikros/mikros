@@ -1,7 +1,8 @@
 //! The `Display` connection of the display owner: the resources, dumb
 //! buffers, sync objects, and commits presented by copying the plane's
 //! buffer into the framebuffer; and what the gpudev library needs of the
-//! device.
+//! device, the framebuffer among it, which shows the log while no client
+//! owns the display.
 
 use crate::framebuffer::{Framebuffer, PERM_READ};
 use alloc::collections::BTreeMap;
@@ -11,7 +12,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::Future;
 use mikros_display::rects::{Rect, copied};
-use mikros_gpudev::Backend;
+use mikros_gpudev::{Backend, Screen};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -385,7 +386,11 @@ impl Display {
             let _ = self.reactor.sleep_until(earliest).await;
         }
         let changed = shown != self.shown.get();
-        if let Some(fb) = self.framebuffer.borrow().as_ref() {
+        // Once the owner closed its connection, the screen shows the log.
+        let owner = owner.upgrade();
+        if let Some(fb) = self.framebuffer.borrow().as_ref()
+            && owner.is_some()
+        {
             match shown {
                 Some(s) => {
                     // A new buffer or place is copied whole.
@@ -400,7 +405,7 @@ impl Display {
         self.shown.set(shown);
         self.pending.set(None);
         self.free_unused();
-        if let Some(owner) = owner.upgrade() {
+        if let Some(owner) = owner {
             let _ = owner.server().send_on_commit_complete(id, done);
         }
     }
@@ -445,7 +450,6 @@ impl Backend for Display {
     }
 
     /// Destroys every buffer and sync object of the closed connection.
-    /// The shown buffer stays shown until the next owner commits.
     fn closed(&self) {
         for b in self.buffers.borrow_mut().values_mut() {
             b.destroyed = true;
@@ -457,6 +461,22 @@ impl Backend for Display {
     /// Without `Render` connections no buffer can be exported.
     fn open_render(&self, _render: ServerEnd<Render>) -> Result<(), Status> {
         Err(Status::NotSupported)
+    }
+
+    fn with_screen(&self, draw: &mut dyn FnMut(&dyn Screen)) {
+        if let Some(fb) = self.framebuffer.borrow().as_ref() {
+            draw(fb);
+        }
+    }
+}
+
+impl Screen for Framebuffer {
+    fn size(&self) -> (u32, u32) {
+        (self.description.width, self.description.height)
+    }
+
+    fn write_row(&self, y: u32, pixels: &mut dyn Iterator<Item = u32>) {
+        Framebuffer::write_row(self, 0, y, pixels);
     }
 }
 

@@ -3,8 +3,11 @@
 //! basic display driver's display and fills it with `display::PAINT`,
 //! logging `input-probe: painted` once that commit completed, and then
 //! opens the input devices of the PS/2 and USB HID drivers and waits for
-//! the keys and mouse movement that the runner sends. It logs `PASSED`,
-//! or `FAILED` with what failed.
+//! the keys and mouse movement that the runner sends. Then it gives the
+//! display up, so that the driver shows the log again, logs
+//! `input-probe: closed the display`, and waits for B, which the runner
+//! presses once it has looked at the screen. It logs `PASSED`, or
+//! `FAILED` with what failed.
 
 #![no_std]
 #![no_main]
@@ -127,9 +130,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     unsafe { PROCESS = header.process.raw() };
     let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
     let passed = executor.block_on(async {
-        display::paint(&directory, &reactor).await?;
+        let display = display::paint(&directory, &reactor).await?;
         mikros_rt::log!(Info, "input-probe: painted");
-        input::works(&directory, &reactor, &spawner).await
+        let watched = input::works(&directory, &reactor, &spawner).await?;
+        drop(display);
+        mikros_rt::log!(Info, "input-probe: closed the display");
+        watched.pressed_b(&reactor).await
     });
     if passed.is_some() {
         mikros_rt::log!(Info, "input-probe: PASSED");
