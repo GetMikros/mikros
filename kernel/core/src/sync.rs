@@ -9,6 +9,8 @@
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(feature = "diag")]
+use core::{panic::Location, ptr, sync::atomic::AtomicPtr};
 
 /// Whether the running thread holds no spin lock.
 pub fn none_held() -> bool {
@@ -53,6 +55,9 @@ pub struct SpinLock<T> {
     /// The class that orders the lock among the kernel's locks.
     #[cfg_attr(not(lock_check), allow(dead_code))]
     class: crate::lock_order::Class,
+    /// In the diagnostic build, where the lock was last taken, or null.
+    #[cfg(feature = "diag")]
+    taken_at: AtomicPtr<Location<'static>>,
     value: UnsafeCell<T>,
 }
 
@@ -66,10 +71,13 @@ impl<T> SpinLock<T> {
         SpinLock {
             locked: AtomicBool::new(false),
             class,
+            #[cfg(feature = "diag")]
+            taken_at: AtomicPtr::new(ptr::null_mut()),
             value: UnsafeCell::new(value),
         }
     }
 
+    #[cfg_attr(feature = "diag", track_caller)]
     pub fn lock(&self) -> Guard<'_, T> {
         #[cfg(lock_check)]
         crate::lock_order::acquire(self.class, crate::lock_order::Check::Order);
@@ -79,13 +87,17 @@ impl<T> SpinLock<T> {
     /// Takes the lock while another lock of its class may be held. The
     /// caller documents the order among the locks of the class that makes
     /// this safe.
+    #[cfg_attr(feature = "diag", track_caller)]
     pub fn lock_nested(&self) -> Guard<'_, T> {
         #[cfg(lock_check)]
         crate::lock_order::acquire(self.class, crate::lock_order::Check::Nested);
         self.spin()
     }
 
+    #[cfg_attr(feature = "diag", track_caller)]
     fn spin(&self) -> Guard<'_, T> {
+        #[cfg(feature = "diag")]
+        let mut wait = Wait::default();
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -93,7 +105,11 @@ impl<T> SpinLock<T> {
         {
             crate::arch::spin_wait();
             core::hint::spin_loop();
+            #[cfg(feature = "diag")]
+            wait.turn(self);
         }
+        #[cfg(feature = "diag")]
+        self.taken();
         crate::cpu::this()
             .locks_held
             .fetch_add(1, Ordering::Relaxed);
@@ -106,7 +122,17 @@ impl<T> SpinLock<T> {
         self.value.get_mut()
     }
 
+    /// In the diagnostic build, records where the lock was taken.
+    #[cfg(feature = "diag")]
+    #[track_caller]
+    fn taken(&self) {
+        let at: &'static Location<'static> = Location::caller();
+        self.taken_at
+            .store(ptr::from_ref(at).cast_mut(), Ordering::Relaxed);
+    }
+
     /// The lock, if it is free now.
+    #[cfg_attr(feature = "diag", track_caller)]
     pub fn try_lock(&self) -> Option<Guard<'_, T>> {
         self.locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -116,11 +142,55 @@ impl<T> SpinLock<T> {
                 // held must still come after it.
                 #[cfg(lock_check)]
                 crate::lock_order::acquire(self.class, crate::lock_order::Check::None);
+                #[cfg(feature = "diag")]
+                self.taken();
                 crate::cpu::this()
                     .locks_held
                     .fetch_add(1, Ordering::Relaxed);
                 Guard { lock: self }
             })
+    }
+}
+
+/// In the diagnostic build, how long a thread has waited for a lock,
+/// which the monotonic clock tells every `Wait::TURNS` turns.
+#[cfg(feature = "diag")]
+#[derive(Default)]
+struct Wait {
+    turns: u32,
+    since: Option<i64>,
+}
+
+#[cfg(feature = "diag")]
+impl Wait {
+    const TURNS: u32 = 1024;
+    /// The longest wait, in nanoseconds.
+    const LIMIT: i64 = 5_000_000_000;
+
+    /// Counts a turn of waiting for `lock`, and stops the kernel once
+    /// the wait has lasted `LIMIT`.
+    fn turn<T>(&mut self, lock: &SpinLock<T>) {
+        self.turns += 1;
+        if self.turns % Self::TURNS != 0 {
+            return;
+        }
+        let now = crate::arch::monotonic_now();
+        let since = *self.since.get_or_insert(now);
+        if now.saturating_sub(since) < Self::LIMIT {
+            return;
+        }
+        let at = lock.taken_at.load(Ordering::Relaxed);
+        // SAFETY: `taken` stores only `&'static Location`s.
+        match unsafe { at.as_ref() } {
+            Some(at) => panic!(
+                "waited 5 s for the spin lock of class {}, which its holder took at {at}",
+                lock.class.name()
+            ),
+            None => panic!(
+                "waited 5 s for the spin lock of class {}, which was never taken",
+                lock.class.name()
+            ),
+        }
     }
 }
 
@@ -171,5 +241,25 @@ mod tests {
             }
         });
         assert_eq!(*counter.lock(), 40_000);
+    }
+
+    #[cfg(feature = "diag")]
+    #[test]
+    fn names_where_a_lock_waited_for_too_long_was_taken() {
+        let _mock = crate::arch::mock::lock();
+        crate::arch::mock::set_now(0);
+        let lock = SpinLock::new(crate::lock_order::TEST, ());
+        let (held, line) = (lock.lock(), line!());
+        std::thread::scope(|s| {
+            let waiter = s.spawn(|| drop(lock.lock()));
+            // The waiter reads the clock after its first turns.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            crate::arch::mock::set_now(Wait::LIMIT);
+            let panic = waiter.join().unwrap_err();
+            let message = panic.downcast_ref::<String>().unwrap();
+            assert!(message.starts_with("waited 5 s for the spin lock of class TEST"));
+            assert!(message.contains(&format!("sync.rs:{line}:")), "{message}");
+        });
+        drop(held);
     }
 }
