@@ -1,0 +1,24 @@
+On Mikros, have more copy its input when its output is not a terminal.
+
+--- a/src/uu/more/src/more.rs
++++ b/src/uu/more/src/more.rs
+@@ -431,6 +431,19 @@
+ ) -> UResult<()> {
+     // Initialize output
+     let out = setup_term()?;
++    // Mikros: without a terminal for its output, the input is copied as
++    // it is, since the window size it would be paged by comes from a
++    // terminal, and there is no /dev/tty to ask for it.
++    #[cfg(target_os = "mikros")]
++    let out = match out {
++        OutputType::Pipe(mut stdout) => {
++            let mut input = input;
++            std::io::copy(&mut input.reader, &mut stdout)?;
++            stdout.flush()?;
++            return Ok(());
++        }
++        out => out,
++    };
+     // Ensure raw mode is disabled on drop
+     let _guard = TerminalGuard;
+     // Create pager

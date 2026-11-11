@@ -18,7 +18,7 @@ const SOURCE: &str = "coreutils-0.12.0";
 /// The crates that need Mikros changes, by name and version, with the
 /// checksums that the release's `Cargo.lock` gives them, and whether the
 /// rewrite rules apply to them.
-const CRATES: [(&str, &str, &str, bool); 7] = [
+const CRATES: [(&str, &str, &str, bool); 10] = [
     (
         "libc",
         "0.2.189",
@@ -55,12 +55,30 @@ const CRATES: [(&str, &str, &str, bool); 7] = [
         "e6401bf7b6af22f78b563665d15a22e9aef27775b79b149a66ca022468a4e405",
         true,
     ),
-    // Rewritten, it would make its own Linux system calls; its patch
-    // has it use the C library's getrandom instead.
+    (
+        "socket2",
+        "0.6.5",
+        "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4",
+        true,
+    ),
+    (
+        "mio",
+        "1.2.2",
+        "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427",
+        true,
+    ),
+    // Rewritten, they would make their own Linux system calls; their
+    // patches have them use the C library's getrandom instead.
     (
         "getrandom",
         "0.4.3",
         "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099",
+        false,
+    ),
+    (
+        "getrandom",
+        "0.2.17",
+        "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0",
         false,
     ),
 ];
@@ -81,11 +99,23 @@ const REWRITES: [(&str, &str); 2] = [
 /// library, not its own Linux system calls.
 const RUSTFLAGS: [&str; 1] = ["--cfg=rustix_use_libc"];
 
-/// The utilities that the system installs, by their upstream names.
-pub const UTILITIES: [&str; 31] = [
-    "basename", "cat", "chmod", "cp", "cut", "date", "df", "dirname", "du", "echo", "env", "false",
-    "head", "ln", "ls", "mkdir", "mv", "pwd", "realpath", "rm", "rmdir", "sleep", "sort", "stat",
-    "tail", "tee", "touch", "tr", "true", "uniq", "wc",
+/// The utilities that the system installs, by their upstream names: all
+/// of the release's but `stdbuf`, whose preloaded library Mikros cannot
+/// load, `chcon` and `runcon`, which need SELinux, `mkfifo` and `mknod`,
+/// since its file systems have no FIFOs or device files, and `chroot`,
+/// since it has namespaces instead.
+#[rustfmt::skip]
+pub const UTILITIES: [&str; 102] = [
+    "arch", "b2sum", "base32", "base64", "basename", "basenc", "cat", "chgrp", "chmod", "chown",
+    "cksum", "comm", "cp", "csplit", "cut", "date", "dd", "df", "dir", "dircolors", "dirname", "du",
+    "echo", "env", "expand", "expr", "factor", "false", "fmt", "fold", "groups", "head", "hostid",
+    "hostname", "id", "install", "join", "kill", "link", "ln", "logname", "ls", "md5sum", "mkdir",
+    "mktemp", "more", "mv", "nice", "nl", "nohup", "nproc", "numfmt", "od", "paste", "pathchk",
+    "pinky", "pr", "printenv", "printf", "ptx", "pwd", "readlink", "realpath", "rm", "rmdir", "seq",
+    "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "shred", "shuf", "sleep", "sort",
+    "split", "stat", "stty", "sum", "sync", "tac", "tail", "tee", "test", "timeout", "touch", "tr",
+    "true", "truncate", "tsort", "tty", "uname", "unexpand", "uniq", "unlink", "uptime", "users",
+    "vdir", "wc", "who", "whoami", "yes",
 ];
 
 /// The file in an unpacked source that records the changes it has.

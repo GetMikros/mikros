@@ -1,0 +1,15 @@
+On Mikros, start timeout's command without code run in the child first.
+
+--- a/src/uu/timeout/src/platform/unix.rs
++++ b/src/uu/timeout/src/platform/unix.rs
+@@ -53,6 +53,10 @@
+         let _ = setpgid(Pid::from_raw(0), Pid::from_raw(0));
+     }
+ 
++    // Mikros: a new program starts with its signals unblocked and at
++    // their default actions, and there is no fork to run code in the
++    // child before it does.
++    #[cfg(not(target_os = "mikros"))]
+     {
+         #[cfg(any(target_os = "linux", target_os = "mikros"))]
+         let death_sig = signal_from_raw(signal as i32);

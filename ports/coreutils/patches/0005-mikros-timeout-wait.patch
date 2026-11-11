@@ -1,0 +1,55 @@
+On Mikros, wait for timeout's signals with sigtimedwait, since no timer raises SIGALRM.
+
+--- a/src/uucore/src/lib/features/process/unix.rs
++++ b/src/uucore/src/lib/features/process/unix.rs
+@@ -136,6 +136,7 @@
+     target_vendor = "apple",
+     target_os = "fuchsia",
+     target_os = "haiku",
++    target_os = "mikros",
+     target_os = "openbsd",
+     windows
+ )))]
+@@ -300,7 +301,41 @@
+     }
+ }
+ 
+-#[cfg(not(any(target_os = "fuchsia", target_os = "haiku")))]
++/// Mikros has no timer that raises SIGALRM, and waits for the signals
++/// with the timeout itself instead.
++#[cfg(target_os = "mikros")]
++mod timer {
++    use std::io;
++
++    pub(super) struct Timer;
++
++    impl Timer {
++        #[allow(clippy::unnecessary_wraps)]
++        pub(super) fn new() -> io::Result<Self> {
++            Ok(Self)
++        }
++    }
++}
++
++#[cfg(target_os = "mikros")]
++impl Timer {
++    fn timed_sigwait(&mut self, timeout: Duration) -> io::Result<Option<Signal>> {
++        let set = timeout_signal_set();
++        let timeout = libc::timespec {
++            tv_sec: timeout.as_secs() as _,
++            tv_nsec: timeout.subsec_nanos() as _,
++        };
++        // SAFETY: All values are properly initialized.
++        let sig = unsafe { libc::sigtimedwait(set.as_ref(), std::ptr::null_mut(), &raw const timeout) };
++        match sig {
++            -1 if io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN) => Ok(None),
++            -1 => Err(io::Error::last_os_error()),
++            sig => Ok(Some(Signal::try_from(sig)?)),
++        }
++    }
++}
++
++#[cfg(not(any(target_os = "fuchsia", target_os = "haiku", target_os = "mikros")))]
+ impl Timer {
+     fn timed_sigwait(&mut self, timeout: Duration) -> io::Result<Option<Signal>> {
+         self.arm(timeout)?;

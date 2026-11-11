@@ -1,0 +1,32 @@
+Give Unix sockets no abstract names on Mikros, whose standard library has no
+std::os::linux.
+
+diff -ru a/src/sys/unix/uds/mod.rs b/src/sys/unix/uds/mod.rs
+--- a/src/sys/unix/uds/mod.rs	2026-11-11 08:32:41.837775203 +0000
++++ b/src/sys/unix/uds/mod.rs	2026-11-11 08:32:41.871807090 +0000
+@@ -1,6 +1,6 @@
+ #[cfg(target_os = "android")]
+ use std::os::android::net::SocketAddrExt;
+-#[cfg(any(target_os = "linux", target_os = "mikros"))]
++#[cfg(target_os = "linux")]
+ use std::os::linux::net::SocketAddrExt;
+ use std::os::unix::ffi::OsStrExt;
+ use std::os::unix::io::FromRawFd;
+@@ -42,7 +42,7 @@
+     let mut offset = 0;
+     let addr = match address.as_pathname() {
+         Some(path) => path.as_os_str().as_bytes(),
+-        #[cfg(any(target_os = "android", any(target_os = "linux", target_os = "mikros")))]
++        #[cfg(any(target_os = "android", target_os = "linux"))]
+         None => match address.as_abstract_name() {
+             Some(name) => {
+                 offset += 1;
+@@ -50,7 +50,7 @@
+             }
+             None => UNNAMED_ADDRESS,
+         },
+-        #[cfg(not(any(target_os = "android", any(target_os = "linux", target_os = "mikros"))))]
++        #[cfg(not(any(target_os = "android", target_os = "linux")))]
+         None => UNNAMED_ADDRESS,
+     };
+ 
