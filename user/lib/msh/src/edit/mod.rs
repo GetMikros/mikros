@@ -2,3 +2,4 @@
 //! map and the history, and drawing the line on the terminal.
 
 pub mod keys;
+pub mod line;
