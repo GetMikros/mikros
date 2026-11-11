@@ -36,6 +36,9 @@ Folders appear as work on them starts.
 
 ## Development environment
 
+> [!IMPORTANT]
+> Mikros can only be built on a Linux computer on x86_64 as of right now.
+
 All development tasks are subcommands of `cargo xtask`. The Rust toolchain is
 pinned in `rust-toolchain.toml` and installed by rustup on first use.
 
