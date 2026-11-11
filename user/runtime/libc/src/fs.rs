@@ -7,10 +7,11 @@
 //! rest is opened on that entry. A relative path is resolved against the
 //! current directory, and a redirect from the server as a new path.
 
-use crate::dir::Listing;
-use crate::errno::{self, EINVAL, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR};
+use crate::dir::{Folder, Listing};
+use crate::errno::{self, EINVAL, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EROFS};
 use crate::fd::{self, Description, Node};
 use crate::lock::Lock;
+use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -117,6 +118,58 @@ fn entry(path: &str) -> Option<(String, Arc<Lock<NodeClient>>, String, u64)> {
     Some((prefix.clone(), node.clone(), String::from(rest), device))
 }
 
+/// Whether an entry covers `path`: its path is `/`, `path` itself, or a
+/// prefix of it at a component boundary.
+fn covered(namespace: &[Entry], path: &str) -> bool {
+    namespace.iter().any(|(prefix, _)| {
+        prefix == "/"
+            || path == prefix
+            || path
+                .strip_prefix(prefix.as_str())
+                .is_some_and(|r| r.starts_with('/'))
+    })
+}
+
+/// The names in the folder that `path` is when no entry covers it but
+/// entries lie below it (MIKSPEC-0050.R31): the next component of each
+/// such entry's path, each once, in order.
+pub fn folder_names(path: &str) -> Option<Vec<String>> {
+    let namespace = NAMESPACE.lock();
+    if covered(&namespace, path) {
+        return None;
+    }
+    let base = match path {
+        "/" => String::from("/"),
+        path => format!("{path}/"),
+    };
+    let mut names: Vec<String> = namespace
+        .iter()
+        .filter_map(|(prefix, _)| prefix.strip_prefix(base.as_str()))
+        .filter_map(|rest| rest.split('/').next())
+        .filter(|name| !name.is_empty())
+        .map(String::from)
+        .collect();
+    names.sort();
+    names.dedup();
+    (!names.is_empty()).then_some(names)
+}
+
+/// Whether `path` would be created or changed in a folder above entries,
+/// which is read-only: its parent is one.
+fn in_folder(path: &str) -> bool {
+    let parent = match path.rfind('/') {
+        Some(0) => "/",
+        Some(at) => &path[..at],
+        None => return false,
+    };
+    path != "/" && folder_names(parent).is_some()
+}
+
+/// Whether `flags` create, truncate or open for writing.
+fn writes(flags: u32) -> bool {
+    flags & O_ACCMODE != 0 || flags & (O_CREAT | O_TRUNC) != 0
+}
+
 /// The C string at `path`, as bytes without its NUL.
 ///
 /// # Safety
@@ -145,6 +198,7 @@ pub fn absolute(dirfd: i64, path: &[u8]) -> Result<String, i64> {
     } else {
         match fd::get(dirfd).as_deref() {
             Some(Description::Directory(node, _)) => node.path.clone(),
+            Some(Description::Folder(folder)) => folder.path.clone(),
             Some(_) => return Err(ENOTDIR),
             None => return Err(errno::EBADF),
         }
@@ -199,7 +253,11 @@ pub fn connect(
     let wanted = rights;
     let mut path = String::from(path);
     for _ in 0..=REDIRECTS_MAX {
-        let (prefix, directory, rest, device) = entry(&path).ok_or(ENOENT)?;
+        let Some((prefix, directory, rest, device)) = entry(&path) else {
+            let read_only = writes(flags) || wanted.is_some_and(|r| r.contains(Rights::WRITE));
+            let changes = read_only && (in_folder(&path) || folder_names(&path).is_some());
+            return Err(if changes { EROFS } else { ENOENT });
+        };
         let mut rights = wanted.unwrap_or_else(|| self::rights(flags));
         loop {
             let (client, server) = endpoints::<NodeProtocol>().map_err(|_| errno::ENOMEM)?;
@@ -265,6 +323,12 @@ pub fn open_description(
     // SAFETY: musl passes a NUL-terminated path.
     let bytes = unsafe { c_path(path) }?;
     let path = absolute(dirfd, bytes)?;
+    if let Some(names) = folder_names(&path) {
+        if writes(flags) {
+            return Err(EROFS);
+        }
+        return Ok(Arc::new(Description::Folder(Folder::new(path, names))));
+    }
     let Connection { node, kind, device } = connect(&path, flags, mode, None)?;
     let node = Node {
         node: Lock::new(node),
@@ -302,6 +366,9 @@ pub fn getcwd(buf: *mut u8, size: u64) -> i64 {
 /// when it names a directory.
 pub fn directory_at(base: &str, path: &[u8]) -> Result<String, i64> {
     let path = normalize(base, path).ok_or(ENOENT)?;
+    if folder_names(&path).is_some() {
+        return Ok(path);
+    }
     match connect(&path, O_DIRECTORY, 0, Some(Rights(0))) {
         Ok(c) if c.kind == NodeType::Directory => Ok(path),
         Ok(_) => Err(ENOTDIR),
@@ -324,6 +391,10 @@ pub fn chdir(path: *const u8) -> i64 {
         Ok(path) => path,
         Err(e) => return -e,
     };
+    if folder_names(&path).is_some() {
+        *CWD.lock() = path;
+        return 0;
+    }
     match connect(&path, O_DIRECTORY, 0, Some(Rights(0))) {
         Ok(c) if c.kind == NodeType::Directory => {
             *CWD.lock() = path;
@@ -339,6 +410,10 @@ pub fn fchdir(fd: i64) -> i64 {
     match fd::get(fd).as_deref() {
         Some(Description::Directory(node, _)) => {
             *CWD.lock() = node.path.clone();
+            0
+        }
+        Some(Description::Folder(folder)) => {
+            *CWD.lock() = folder.path.clone();
             0
         }
         Some(_) => -ENOTDIR,
@@ -358,6 +433,10 @@ pub fn readlink(dirfd: i64, path: *const u8, buf: *mut u8, size: u64) -> i64 {
         Ok(path) => path,
         Err(e) => return -e,
     };
+    // A folder above entries is no link.
+    if folder_names(&path).is_some() {
+        return -EINVAL;
+    }
     let link = match connect(&path, O_NOFOLLOW, 0, Some(Rights::READ)) {
         Ok(c) => c,
         Err(e) => return -e,
@@ -405,7 +484,12 @@ pub fn access(dirfd: i64, path: *const u8, amode: i64, flag: i64) -> i64 {
     // SAFETY: musl passes a NUL-terminated path.
     let connected = unsafe { c_path(path) }
         .and_then(|p| absolute(dirfd, p))
-        .and_then(|p| connect(&p, follow, 0, Some(Rights(rights))));
+        .and_then(|p| match folder_names(&p) {
+            // A folder above entries is read and searched, never written.
+            Some(_) if amode & W_OK != 0 => Err(EROFS),
+            Some(_) => Ok(()),
+            None => connect(&p, follow, 0, Some(Rights(rights))).map(drop),
+        });
     match connected {
         Ok(_) => 0,
         Err(e) => -e,

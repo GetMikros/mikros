@@ -1,7 +1,8 @@
 //! Listing directories with `getdents64`.
 //!
 //! A directory descriptor reads its listing in the batches of
-//! `ReadDirectory` and hands out each entry once. Its position, which
+//! `ReadDirectory` and hands out each entry once. A folder above
+//! namespace entries holds its whole listing from the start. Its position, which
 //! `d_off` and `lseek` use, is the number of entries handed out, since
 //! the listing has a stable order; seeking elsewhere lists again from the
 //! start and skips that many.
@@ -10,6 +11,7 @@ use crate::errno::{self, EINVAL, EIO, ENOTDIR};
 use crate::fd::{self, Description};
 use crate::io::{SEEK_CUR, SEEK_SET};
 use crate::lock::Lock;
+use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::interfaces::mikros::fs::{DirEntry, NodeType};
 
@@ -36,6 +38,40 @@ pub struct Listing {
     position: u64,
     /// The position that a seek asked for, until it is reached.
     target: u64,
+    /// Whether `batch` is the whole listing, which a seek back keeps.
+    held: bool,
+}
+
+/// A folder above namespace entries that no entry covers: its path, and
+/// a listing of the next component of each entry below it, as folders.
+pub struct Folder {
+    pub path: String,
+    pub listing: Lock<Listing>,
+}
+
+impl Folder {
+    pub fn new(path: String, names: Vec<String>) -> Folder {
+        let batch = names
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| DirEntry {
+                name,
+                r#type: NodeType::Directory,
+                inode: i as u64 + 1,
+                attributes: None,
+            })
+            .collect();
+        let listing = Listing {
+            batch,
+            ended: true,
+            held: true,
+            ..Listing::default()
+        };
+        Folder {
+            path,
+            listing: Lock::new(listing),
+        }
+    }
 }
 
 fn dirent_type(kind: NodeType) -> u8 {
@@ -54,17 +90,19 @@ pub fn getdents(fd: i64, buf: *mut u8, len: u64) -> i64 {
     let Some(description) = fd::get(fd) else {
         return -errno::EBADF;
     };
-    let Description::Directory(node, listing) = &*description else {
-        return -ENOTDIR;
+    let (node, listing) = match &*description {
+        Description::Directory(node, listing) => (Some(node), listing),
+        Description::Folder(folder) => (None, &folder.listing),
+        _ => return -ENOTDIR,
     };
     let mut guard = listing.lock();
     let l = &mut *guard;
     let mut filled = 0;
     loop {
         if l.used == l.batch.len() {
-            if l.ended {
+            let Some(node) = node.filter(|_| !l.ended) else {
                 break;
-            }
+            };
             let read = node.node.lock().read_directory(l.next, false, FOREVER);
             let error = match read {
                 Ok(Ok(r)) => {
@@ -120,7 +158,10 @@ pub fn seek(listing: &Lock<Listing>, offset: i64, whence: i64) -> i64 {
         SEEK_CUR if offset == 0 => l.target as i64,
         SEEK_SET if offset >= 0 => {
             let offset = offset as u64;
-            if offset < l.position {
+            if offset < l.position && l.held {
+                l.used = 0;
+                l.position = 0;
+            } else if offset < l.position {
                 *l = Listing::default();
             }
             l.target = offset;

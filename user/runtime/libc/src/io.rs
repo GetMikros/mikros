@@ -68,7 +68,7 @@ pub fn read(fd: i64, buf: *mut u8, len: u64) -> i64 {
                 Err(_) => -EIO,
             }
         }
-        Description::Directory(..) => -EISDIR,
+        Description::Directory(..) | Description::Folder(_) => -EISDIR,
         Description::Epoll(_) => -EINVAL,
         Description::Timer(timer) => crate::timerfd::read(timer, buf, len),
         Description::Terminal(t) => t.read(buf, len),
@@ -123,7 +123,7 @@ pub fn write(fd: i64, buf: *const u8, len: u64) -> i64 {
             Ok(Err(e)) => -errno::from_fs(e),
             Err(_) => -EIO,
         },
-        Description::Directory(..) => -EISDIR,
+        Description::Directory(..) | Description::Folder(_) => -EISDIR,
         Description::Epoll(_) | Description::Timer(_) => -EINVAL,
         Description::Terminal(t) => t.write(buf, len),
     }
@@ -148,7 +148,7 @@ pub fn pread(fd: i64, buf: *mut u8, len: u64, offset: i64) -> i64 {
                 Err(_) => -EIO,
             }
         }
-        Description::Directory(..) => -EISDIR,
+        Description::Directory(..) | Description::Folder(_) => -EISDIR,
         Description::Stream(_)
         | Description::Terminal(_)
         | Description::Epoll(_)
@@ -170,7 +170,7 @@ pub fn pwrite(fd: i64, buf: *const u8, len: u64, offset: i64) -> i64 {
             Ok(Err(e)) => -errno::from_fs(e),
             Err(_) => -EIO,
         },
-        Description::Directory(..) => -EISDIR,
+        Description::Directory(..) | Description::Folder(_) => -EISDIR,
         Description::Stream(_)
         | Description::Terminal(_)
         | Description::Epoll(_)
@@ -195,6 +195,7 @@ pub fn lseek(fd: i64, offset: i64, whence: i64) -> i64 {
             Err(_) => -EIO,
         },
         Description::Directory(_, listing) => crate::dir::seek(listing, offset, whence),
+        Description::Folder(folder) => crate::dir::seek(&folder.listing, offset, whence),
         Description::Stream(_)
         | Description::Terminal(_)
         | Description::Epoll(_)

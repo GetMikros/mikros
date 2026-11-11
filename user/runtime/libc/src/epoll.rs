@@ -174,7 +174,7 @@ fn watched(description: &Description) -> Result<Watched<'_>, i64> {
             _description: core::marker::PhantomData,
             kind: Kind::Terminal,
         }),
-        Description::File(..) | Description::Directory(..) => Err(EPERM),
+        Description::File(..) | Description::Directory(..) | Description::Folder(_) => Err(EPERM),
     }
 }
 

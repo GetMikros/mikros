@@ -164,6 +164,7 @@ unsafe fn apply(descriptors: &mut Descriptors, actions: *const Fdop) -> Result<S
                 }
                 FDOP_FCHDIR => match descriptors.get(&fd()?).map(|(d, _)| &**d) {
                     Some(Description::Directory(node, _)) => folder = node.path.clone(),
+                    Some(Description::Folder(f)) => folder = f.path.clone(),
                     Some(_) => return Err(ENOTDIR),
                     None => return Err(EBADF),
                 },

@@ -44,6 +44,9 @@ pub enum Description {
     Timer(crate::timerfd::Timerfd),
     /// A slave terminal, by its token.
     Terminal(crate::terminal::Terminal),
+    /// A folder above namespace entries that no entry covers, which the
+    /// C library lists itself.
+    Folder(crate::dir::Folder),
 }
 
 /// A connection to a file system node, with the status flags it was
@@ -249,14 +252,17 @@ pub fn shared_handle(description: &Description) -> Option<(mikros_rt::sys::Handl
         Description::File(node) | Description::Directory(node, _) => {
             Some((node.node.lock().channel().ok()?, KIND_FILE))
         }
-        Description::Epoll(_) | Description::Timer(_) => None,
+        Description::Epoll(_) | Description::Timer(_) | Description::Folder(_) => None,
     }
 }
 
 /// Whether `description` may be passed to another process, which an
 /// epoll instance and a timer descriptor are not.
 pub fn passed(description: &Description) -> bool {
-    !matches!(description, Description::Epoll(_) | Description::Timer(_))
+    !matches!(
+        description,
+        Description::Epoll(_) | Description::Timer(_) | Description::Folder(_)
+    )
 }
 
 /// `mikros_fd_handle`: a new handle, which the caller owns, with the

@@ -530,8 +530,8 @@ fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
                 Description::Timer(timer) => &timer.flags,
                 Description::Terminal(t) => &t.flags,
                 // Streams are read and written, and have no other flags,
-                // nor has an epoll instance.
-                Description::Stream(_) | Description::Epoll(_) => {
+                // nor has an epoll instance or a folder above entries.
+                Description::Stream(_) | Description::Epoll(_) | Description::Folder(_) => {
                     return if cmd == F_GETFL {
                         i64::from(fs::O_RDWR)
                     } else {

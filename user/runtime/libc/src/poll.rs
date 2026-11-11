@@ -314,7 +314,7 @@ fn wait(fds: &mut [Pollfd], deadline: i64, mut mask: Option<u64>) -> i64 {
                     continue;
                 }
             },
-            Description::File(..) | Description::Directory(..) => {
+            Description::File(..) | Description::Directory(..) | Description::Folder(_) => {
                 entry.revents = entry.events & (INPUT | OUTPUT);
                 ready |= entry.revents != 0;
                 continue;

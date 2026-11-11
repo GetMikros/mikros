@@ -79,6 +79,17 @@ fn from_attributes(a: &Attributes, device: u64) -> Kstat {
 }
 
 /// The attributes of `node` as a `struct stat`.
+/// What a folder above namespace entries reports: a directory that only
+/// user 0 owns, read and searched by all.
+fn folder() -> Kstat {
+    Kstat {
+        mode: S_IFDIR | 0o555,
+        nlink: 2,
+        blksize: BLOCK_SIZE,
+        ..Kstat::default()
+    }
+}
+
 fn attributes(node: &NodeClient, device: u64) -> Result<Kstat, i64> {
     match node.get_attributes(FOREVER) {
         Ok(Ok(r)) => Ok(from_attributes(&r.attributes, device)),
@@ -109,6 +120,7 @@ pub fn fstat(fd: i64, out: *mut Kstat) -> i64 {
         Description::File(node) | Description::Directory(node, _) => {
             attributes(&node.node.lock(), node.device)
         }
+        Description::Folder(_) => Ok(folder()),
         Description::Stream(_) => Ok(Kstat {
             mode: S_IFIFO | 0o600,
             nlink: 1,
@@ -150,8 +162,11 @@ pub fn fstatat(dirfd: i64, path: *const u8, out: *mut Kstat, flag: i64) -> i64 {
     // SAFETY: musl passes a NUL-terminated path.
     let st = unsafe { fs::c_path(path) }
         .and_then(|bytes| fs::absolute(dirfd, bytes))
-        // Attributes need no rights.
-        .and_then(|path| fs::connect(&path, follow, 0, Some(Rights(0))))
-        .and_then(|c| attributes(&c.node, c.device));
+        .and_then(|path| match fs::folder_names(&path) {
+            Some(_) => Ok(folder()),
+            // Attributes need no rights.
+            None => fs::connect(&path, follow, 0, Some(Rights(0)))
+                .and_then(|c| attributes(&c.node, c.device)),
+        });
     store(out, st)
 }
