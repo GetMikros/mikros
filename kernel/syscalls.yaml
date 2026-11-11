@@ -455,7 +455,7 @@ syscalls:
     number: 43
     arch: [x86_64]
     fuzz_only: false
-    spec: [MIKSPEC-0011.R3, MIKSPEC-0011.R4, MIKSPEC-0011.R5, MIKSPEC-0011.R6]
+    spec: [MIKSPEC-0011.R28, MIKSPEC-0011.R4, MIKSPEC-0011.R5, MIKSPEC-0011.R6]
     args:
       - {name: parent, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
       - {name: kind, type: u32, dir: in}

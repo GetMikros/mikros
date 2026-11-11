@@ -17,6 +17,8 @@ pub const KIND_PRIORITY: u32 = 5;
 pub const KIND_MSI: u32 = 6;
 pub const KIND_POLICY: u32 = 7;
 pub const KIND_BTI: u32 = 8;
+/// Grants `diag_snapshot`; only the diagnostic build makes these.
+pub const KIND_DIAG: u32 = 9;
 
 /// The option that lets the range overlap other `SHARED` resources.
 pub const SHARED: u32 = 1 << 0;
@@ -57,7 +59,7 @@ pub struct Resource {
 
 /// Whether the kinds have no range.
 fn rangeless(kind: u32) -> bool {
-    matches!(kind, KIND_DMA | KIND_MSI | KIND_POLICY)
+    matches!(kind, KIND_DMA | KIND_MSI | KIND_POLICY | KIND_DIAG)
 }
 
 impl Resource {
@@ -93,7 +95,7 @@ impl Resource {
             size,
             options,
         } = request;
-        let known = (KIND_MMIO..=KIND_BTI).contains(&kind);
+        let known = (KIND_MMIO..=KIND_DIAG).contains(&kind);
         let fits_kind = parent.kind == KIND_ROOT || parent.kind == kind;
         let size_ok = if rangeless(kind) {
             base == 0 && size == 0
@@ -114,6 +116,9 @@ impl Resource {
             if end > IOPORT_COUNT {
                 return Err(Error::OutOfRange);
             }
+        }
+        if kind == KIND_DIAG && !cfg!(feature = "diag") {
+            return Err(Error::NotSupported);
         }
         if parent.kind != KIND_ROOT && (base < parent.base || end > parent.base + parent.size) {
             return Err(Error::OutOfRange);
@@ -249,7 +254,14 @@ mod tests {
         let root = Resource::root();
         let e = |r: Result<Arc<Resource>, Error>| r.err();
         assert_eq!(e(make(&root, KIND_ROOT, 0, 1, 0)), Some(Error::InvalidArgs));
-        assert_eq!(e(make(&root, 9, 0, 1, 0)), Some(Error::InvalidArgs));
+        assert_eq!(e(make(&root, 10, 0, 1, 0)), Some(Error::InvalidArgs));
+        assert_eq!(e(make(&root, KIND_DIAG, 0, 1, 0)), Some(Error::InvalidArgs));
+        let diag = make(&root, KIND_DIAG, 0, 0, 0);
+        if cfg!(feature = "diag") {
+            assert_eq!(diag.unwrap().kind(), KIND_DIAG);
+        } else {
+            assert_eq!(diag.err(), Some(Error::NotSupported));
+        }
         assert_eq!(
             e(make(&root, KIND_IRQ, 0x1000, 0, 0)),
             Some(Error::InvalidArgs)
