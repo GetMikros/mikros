@@ -58,6 +58,7 @@ mod env {
 
     pub struct UserIn<T>(u64, PhantomData<T>);
     pub struct UserOut<T>(u64, PhantomData<T>);
+    #[allow(dead_code, reason = "the generated harness uses the arguments that system calls have")]
     pub struct UserInOut<T>(u64, PhantomData<T>);
 
     impl<T> UserIn<T> {
@@ -72,6 +73,7 @@ mod env {
         }
     }
 
+    #[allow(dead_code, reason = "the generated harness uses the arguments that system calls have")]
     impl<T> UserInOut<T> {
         pub fn new(addr: u64) -> Self {
             UserInOut(addr, PhantomData)
@@ -146,6 +148,7 @@ mod env {
         pub args: &'static [ArgModel],
     }
 
+    #[allow(dead_code, reason = "the generated harness uses the models that system calls need")]
     pub enum ArgModel {
         U32,
         U64,

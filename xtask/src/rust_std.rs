@@ -201,6 +201,9 @@ pub fn cargo(dir: &Path, rustflags: &[&str]) -> Result<Command> {
         format!("-Clinker={}", linker.display()),
         "-Clinker-flavor=gcc".to_owned(),
         format!("-Clink-arg=--config={}", config.display()),
+        // Clang links every Mikros executable as position-independent,
+        // and so has no use for the `-pie` that rustc passes.
+        "-Clink-arg=-Wno-unused-command-line-argument".to_owned(),
     ];
     flags.extend(rustflags.iter().map(|f| f.to_string()));
     let mut command = Command::new(cargo);

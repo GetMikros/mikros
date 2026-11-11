@@ -14,7 +14,6 @@ use kernel_core::status::Error;
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 use libfuzzer_sys::fuzz_target;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
 
 /// The process's set and those of three threads.
 const SETS: usize = 4;

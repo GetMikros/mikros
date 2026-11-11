@@ -96,8 +96,9 @@ const REWRITES: [(&str, &str); 2] = [
 ];
 
 /// The flags of the build besides the standard ones: rustix uses the C
-/// library, not its own Linux system calls.
-const RUSTFLAGS: [&str; 1] = ["--cfg=rustix_use_libc"];
+/// library, not its own Linux system calls, and the warnings of the
+/// release and its crates, which are not Mikros' code, are not shown.
+const RUSTFLAGS: [&str; 2] = ["--cfg=rustix_use_libc", "--cap-lints=allow"];
 
 /// The utilities that the system installs, by their upstream names: all
 /// of the release's but `stdbuf`, whose preloaded library Mikros cannot
