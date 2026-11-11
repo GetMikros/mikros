@@ -44,7 +44,9 @@ async fn any_user(accounts: &AccountsAsyncClient) -> Result<bool, Status> {
 }
 
 /// Starts `path` with `request`'s fields on the terminal of `token`, and
-/// returns its process ID.
+/// returns its process ID. A user's session leader, which gets a login
+/// session of its own, also leads a new session, whose controlling
+/// terminal the C library makes that terminal.
 async fn start(
     launcher: &LauncherAsyncClient,
     path: &str,
@@ -61,7 +63,7 @@ async fn start(
         app_id: Some(app_id.into()),
         user,
         login_session,
-        new_session: false,
+        new_session: login_session,
     };
     match launcher.spawn(request).await {
         Ok(Ok(spawned)) => Ok(spawned.pid),

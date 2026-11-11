@@ -1,10 +1,11 @@
 //! The user's shell of `tests/console.img` and `tests/setup.img`,
 //! installed as /usr/bin/msh, which the session manager starts once a
 //! user logged in on the text console. It checks that it runs as a user
-//! other than 0 with the app ID `system.cli`, leads a login session of
-//! its own, and has exactly the environment of that user's session, with
-//! the user's home and a `/Libraries` in its namespace, which for bob
-//! holds the README of his own Libraries folder.
+//! other than 0 with the app ID `system.cli`, leads a login session and
+//! a session and process group of its own, and has exactly the
+//! environment of that user's session, with the user's home and a
+//! `/Libraries` in its namespace, which for bob holds the README of his
+//! own Libraries folder.
 //! On the terminal it was given it asks
 //! for the cursor position, which the console answers, and reads the
 //! line that the runner types. It exits with 0 once all of that held,
@@ -140,6 +141,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             .ok_or(4)?
             .info;
         check(info.login_session == pid, 4)?;
+        check(info.session == pid && info.process_group == pid, 14)?;
         let environment = environment.ok_or(5)?;
         let name = environment
             .get(1)
