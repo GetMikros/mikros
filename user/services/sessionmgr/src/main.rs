@@ -112,6 +112,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             user: CALLER_USER,
             login_session: false,
             new_session: false,
+            working_directory: None,
         };
         match launcher.spawn(request).await {
             Ok(Ok(spawned)) => {

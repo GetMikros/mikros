@@ -123,6 +123,12 @@ fn main() -> ExitCode {
             "",
             ran("/usr/share\n", "", 0),
         ),
+        // A program starts in msh's current folder.
+        (
+            vec!["-c", "cd /usr/share\nspawn-std cwd"],
+            "",
+            ran("/usr/share\n", "", 0),
+        ),
         (
             vec!["-c", "run spawn-std exit 3"],
             "",

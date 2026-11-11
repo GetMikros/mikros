@@ -96,6 +96,8 @@ pub struct NewProcess {
     pub handles: Vec<StartupHandle>,
     /// Whether it is the service manager that init asked for.
     pub service_manager: bool,
+    /// The folder it starts in, as its spawner named it, or `/`.
+    pub working_directory: String,
 }
 
 impl Shared {
@@ -197,6 +199,7 @@ impl Shared {
             login_session,
             arguments,
             handles,
+            working_directory,
             ..
         } = new;
         let identity = ClientIdentity {
@@ -207,7 +210,14 @@ impl Shared {
         let started_app = app_id.clone();
         let transferred = self
             .transfer(
-                &started, identity, parent, arguments, handles, namespace, control,
+                &started,
+                identity,
+                parent,
+                arguments,
+                handles,
+                namespace,
+                working_directory,
+                control,
             )
             .await;
         let recorded = transferred.and_then(|()| {
@@ -288,6 +298,7 @@ impl Shared {
         arguments: OwnedHandle,
         handles: Vec<StartupHandle>,
         namespace: Vec<NamespaceEntry>,
+        working_directory: String,
         control: &ProcessDirectoryAsyncClient,
     ) -> Result<(), Status> {
         let channel = |_| Status::NoResources;
@@ -307,6 +318,7 @@ impl Shared {
             clock_page: self.clock_page.raw(),
             time_page: self.time_page.borrow().as_ref().map(|page| page.raw()),
             namespace,
+            working_directory,
         })?;
         bind(control, identity, directory_end).await?;
         started.complete()

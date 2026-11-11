@@ -191,6 +191,7 @@ async fn new_process(
         arguments: duplicate(request.arguments.raw(), SAME_RIGHTS)?,
         handles: request.handles,
         service_manager: false,
+        working_directory: request.working_directory.unwrap_or_else(|| "/".into()),
     };
     Ok((new, same))
 }

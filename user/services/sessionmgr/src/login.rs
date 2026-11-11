@@ -64,6 +64,7 @@ async fn start(
         user,
         login_session,
         new_session: login_session,
+        working_directory: None,
     };
     match launcher.spawn(request).await {
         Ok(Ok(spawned)) => Ok(spawned.pid),

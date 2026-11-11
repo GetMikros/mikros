@@ -8,6 +8,7 @@
 //! - `echo`: copies its standard input to its standard output;
 //! - `env <name>`: prints the variable `name`, or `unset`;
 //! - `hostname`: prints the host name that `gethostname` gives;
+//! - `cwd`: prints its current folder;
 //! - `sleep`: sleeps until it is killed.
 
 #![feature(mikros_handles, process_setsid)]
@@ -59,6 +60,13 @@ fn main() -> ExitCode {
             println!("{}", std::env::var(name).as_deref().unwrap_or("unset"));
             ExitCode::SUCCESS
         }
+        ["cwd"] => match std::env::current_dir() {
+            Ok(folder) => {
+                println!("{}", folder.display());
+                ExitCode::SUCCESS
+            }
+            Err(_) => ExitCode::FAILURE,
+        },
         ["hostname"] => {
             let mut name = [0u8; 256];
             // SAFETY: the buffer is valid for its length.
@@ -146,10 +154,24 @@ fn checks() -> Result<(), u8> {
     check(unsupported(Command::new(ME).uid(0)))?;
     check(unsupported(Command::new(ME).gid(0)))?;
     check(unsupported(Command::new(ME).setsid(true)))?;
-    // Neither can a child be given a working directory or process group.
-    check(unsupported(Command::new(ME).current_dir("/usr")))?;
+    // Nor can a child be given a process group.
     check(unsupported(Command::new(ME).process_group(0)))?;
+    // A child starts in the folder it is given, or else in its parent's.
+    check(cwd(Command::new(ME).current_dir("/usr/share")).as_deref() == Some("/usr/share"))?;
+    check(cwd(Command::new(ME).current_dir("share")).is_none())?;
+    check(std::env::set_current_dir("/usr").is_ok())?;
+    check(cwd(Command::new(ME).current_dir("share")).as_deref() == Some("/usr/share"))?;
+    check(cwd(&mut Command::new(ME)).as_deref() == Some("/usr"))?;
+    check(std::env::set_current_dir("/").is_ok())?;
     Ok(())
+}
+
+/// The folder that the `cwd` child of `command` printed, or `None` when
+/// it could not start or failed.
+fn cwd(command: &mut Command) -> Option<String> {
+    let output = command.arg("cwd").output().ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    output.status.success().then(|| text.trim_end().to_owned())
 }
 
 /// What the `echo` child printed for `input`.

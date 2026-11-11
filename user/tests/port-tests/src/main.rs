@@ -248,6 +248,7 @@ async fn run(launcher: &LauncherAsyncClient, reactor: &Reactor, test: &Test) -> 
         user: CALLER_USER,
         login_session: false,
         new_session: false,
+        working_directory: None,
     };
     let pid = match launcher.spawn(request).await {
         Ok(Ok(r)) => r.pid,

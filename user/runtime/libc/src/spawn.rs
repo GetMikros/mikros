@@ -10,7 +10,7 @@
 //! that change directory, and the attributes that ask for a mask, a
 //! process group, a session or a scheduler, are not supported.
 
-use crate::errno::{self, E2BIG, EBADF, ECHILD, EINTR, EINVAL, EIO, ENOSYS};
+use crate::errno::{self, E2BIG, EBADF, ECHILD, EINTR, EINVAL, EIO, ENOENT, ENOSYS, ENOTDIR};
 use crate::fd::{self, Description};
 use crate::lock::Lock;
 use crate::{clock, fs, process};
@@ -29,6 +29,8 @@ use mikros_rt::sys;
 const FDOP_CLOSE: i32 = 1;
 const FDOP_DUP2: i32 = 2;
 const FDOP_OPEN: i32 = 3;
+const FDOP_CHDIR: i32 = 4;
+const FDOP_FCHDIR: i32 = 5;
 const POSIX_SPAWN_RESETIDS: i32 = 1;
 const POSIX_SPAWN_SETSIGDEF: i32 = 4;
 const POSIX_SPAWN_SETSIGMASK: i32 = 8;
@@ -120,12 +122,15 @@ fn arguments(args: &[&[u8]], env: &[&[u8]]) -> Result<OwnedHandle, i64> {
 }
 
 /// Applies the file actions from `actions`, the most recent, back to the
-/// first, in the order they were added.
+/// first, in the order they were added, and returns the working folder
+/// they leave the child in: the caller's current one unless one of them
+/// changes it. Paths that do not start with `/` are relative to it.
 ///
 /// # Safety
 ///
 /// `actions` must be null or the newest of musl's list of file actions.
-unsafe fn apply(descriptors: &mut Descriptors, actions: *const Fdop) -> Result<(), i64> {
+unsafe fn apply(descriptors: &mut Descriptors, actions: *const Fdop) -> Result<String, i64> {
+    let mut folder = fs::cwd();
     let mut op = actions;
     // SAFETY: the list is linked both ways and ends in null.
     unsafe {
@@ -145,18 +150,29 @@ unsafe fn apply(descriptors: &mut Descriptors, actions: *const Fdop) -> Result<(
                     descriptors.insert(fd()?, (description, false));
                 }
                 FDOP_OPEN => {
-                    let path = action.path.as_ptr().cast();
+                    let path = CStr::from_ptr(action.path.as_ptr()).to_bytes();
+                    let mut at = fs::normalize(&folder, path).ok_or(ENOENT)?.into_bytes();
+                    at.push(0);
                     let flags = action.oflag as u32;
-                    let opened = fs::open_description(fs::AT_FDCWD, path, flags, action.mode)?;
+                    let opened =
+                        fs::open_description(fs::AT_FDCWD, at.as_ptr(), flags, action.mode)?;
                     descriptors.insert(fd()?, (opened, flags & fs::O_CLOEXEC != 0));
                 }
-                // A new working directory cannot be given to the child.
+                FDOP_CHDIR => {
+                    let path = CStr::from_ptr(action.path.as_ptr()).to_bytes();
+                    folder = fs::directory_at(&folder, path)?;
+                }
+                FDOP_FCHDIR => match descriptors.get(&fd()?).map(|(d, _)| &**d) {
+                    Some(Description::Directory(node, _)) => folder = node.path.clone(),
+                    Some(_) => return Err(ENOTDIR),
+                    None => return Err(EBADF),
+                },
                 _ => return Err(ENOSYS),
             }
             op = action.prev;
         }
     }
-    Ok(())
+    Ok(folder)
 }
 
 /// The startup handles for `descriptors` that do not close on `exec`.
@@ -232,7 +248,7 @@ fn descriptors() -> Descriptors {
 }
 
 /// The request that starts the program at `path` with `argv`, `envp` and
-/// `descriptors`.
+/// `descriptors`, in the working folder `folder`.
 ///
 /// # Safety
 ///
@@ -241,6 +257,7 @@ fn descriptors() -> Descriptors {
 unsafe fn request(
     path: *const c_char,
     descriptors: &Descriptors,
+    folder: String,
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> Result<SpawnRequest, i64> {
@@ -258,13 +275,14 @@ unsafe fn request(
         user: CALLER_USER,
         login_session: false,
         new_session: false,
+        working_directory: Some(folder),
     })
 }
 
 /// `execve`: replaces the process with the program at `path`, given
 /// `argv`, `envp` and the descriptors that do not close on `exec`. It
-/// returns only on failure. The new program starts in `/`, with every
-/// signal unblocked and at its default action.
+/// returns only on failure. The new program starts in the current
+/// folder, with every signal unblocked and at its default action.
 ///
 /// # Safety
 ///
@@ -275,7 +293,7 @@ pub unsafe fn execve(
     envp: *const *const c_char,
 ) -> i64 {
     // SAFETY: the caller passes what `execve` takes.
-    let request = match unsafe { request(path, &descriptors(), argv, envp) } {
+    let request = match unsafe { request(path, &descriptors(), fs::cwd(), argv, envp) } {
         Ok(request) => request,
         Err(e) => return -e,
     };
@@ -315,9 +333,9 @@ unsafe fn spawn(
     }
     let mut descriptors = descriptors();
     // SAFETY: the caller passes musl's list of file actions.
-    unsafe { apply(&mut descriptors, actions) }?;
+    let folder = unsafe { apply(&mut descriptors, actions) }?;
     // SAFETY: the caller passes what `posix_spawn` takes.
-    let request = unsafe { request(path, &descriptors, argv, envp) }?;
+    let request = unsafe { request(path, &descriptors, folder, argv, envp) }?;
     let client = process::launcher();
     match process::unsignalled(|| client.spawn(request, FOREVER)) {
         Ok(Ok(spawned)) => {

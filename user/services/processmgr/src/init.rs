@@ -181,6 +181,7 @@ impl Manager {
             arguments: start::arguments(&[SERVICE_MANAGER_PATH])?,
             handles,
             service_manager: true,
+            working_directory: "/".into(),
         };
         // The service manager may spawn as soon as its transfer is
         // complete, and its children are bound over the same endpoint.

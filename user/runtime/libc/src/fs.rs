@@ -298,6 +298,25 @@ pub fn getcwd(buf: *mut u8, size: u64) -> i64 {
     len as i64
 }
 
+/// The absolute form of `path` relative to the absolute path `base`,
+/// when it names a directory.
+pub fn directory_at(base: &str, path: &[u8]) -> Result<String, i64> {
+    let path = normalize(base, path).ok_or(ENOENT)?;
+    match connect(&path, O_DIRECTORY, 0, Some(Rights(0))) {
+        Ok(c) if c.kind == NodeType::Directory => Ok(path),
+        Ok(_) => Err(ENOTDIR),
+        Err(e) => Err(e),
+    }
+}
+
+/// Makes `path`, the working folder that the startup transfer names, the
+/// current directory when it is a directory, and leaves `/` otherwise.
+pub fn start_in(path: &str) {
+    if let Ok(path) = directory_at("/", path.as_bytes()) {
+        *CWD.lock() = path;
+    }
+}
+
 /// `chdir`: makes `path` the current directory, if it is a directory.
 pub fn chdir(path: *const u8) -> i64 {
     // SAFETY: musl passes a NUL-terminated path.

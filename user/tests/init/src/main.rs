@@ -8451,6 +8451,7 @@ mod managed {
             program_phdr: 0,
             program_phnum: 3,
             interpreter_base: 0,
+            working_directory: "/".into(),
         })
     }
 
@@ -8520,7 +8521,7 @@ mod managed {
         use Step::*;
         let full = [
             Begin {
-                version: 1,
+                version: 2,
                 counts: (3, 2),
             },
             Handles {
@@ -8539,7 +8540,7 @@ mod managed {
         ensure("receiving every batch", run(s, &full)? == 132)?;
         let empty = [
             Begin {
-                version: 1,
+                version: 2,
                 counts: (0, 0),
             },
             Complete,
@@ -8553,7 +8554,7 @@ mod managed {
     pub fn startup_transfer_refused(s: &Startup) -> Result {
         use Step::*;
         let begin = |handles, names| Begin {
-            version: 1,
+            version: 2,
             counts: (handles, names),
         };
         let cases: [(&'static str, Vec<Step>); 10] = [
@@ -8572,7 +8573,7 @@ mod managed {
                 "refusing another version",
                 alloc::vec![
                     Begin {
-                        version: 2,
+                        version: 1,
                         counts: (0, 0)
                     },
                     Complete,

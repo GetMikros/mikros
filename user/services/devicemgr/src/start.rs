@@ -184,6 +184,7 @@ impl Starter {
             user: CALLER_USER,
             login_session: false,
             new_session: false,
+            working_directory: None,
         };
         let spawned = match self.launcher.spawn(request).await {
             Ok(Ok(spawned)) => spawned,

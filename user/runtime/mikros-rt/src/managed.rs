@@ -16,7 +16,7 @@ use crate::{heap, sys};
 use alloc::vec::Vec;
 
 /// The only version of the transfer.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// The most handles, and the most namespace entries, a transfer holds.
 const COUNT_MAX: u32 = 32;
 
