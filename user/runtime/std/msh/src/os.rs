@@ -233,6 +233,22 @@ impl Os {
             self.changed(pid, change);
         }
     }
+
+    /// The lines that report the jobs that ended since the last report,
+    /// which are then forgotten.
+    pub fn finished(&mut self) -> Vec<String> {
+        self.poll();
+        let lines = self
+            .jobs
+            .all()
+            .filter(|j| matches!(j.state, State::Done(_)))
+            .map(|j| self.jobs.report(j).to_string())
+            .collect();
+        for job in self.jobs.remove_done() {
+            self.started.remove(&job.number);
+        }
+        lines
+    }
 }
 
 impl Folders for Os {
