@@ -1,6 +1,8 @@
 //! msh's values: their kinds, the operators on them by kind, how they
 //! compare, and the text they are written as.
 
+pub mod read;
+
 use crate::ast::{Binary, Date, Literal, Unary};
 use std::cmp::Ordering;
 use std::fmt::Write;
@@ -245,10 +247,19 @@ pub fn binary(op: Binary, a: &Value, b: &Value) -> Result<Value, String> {
             Null => b.clone(),
             _ => a.clone(),
         },
-        Binary::Matches | Binary::NotMatches => {
-            return Err("regular expressions are not supported yet".into());
-        }
+        Binary::Matches | Binary::NotMatches => match (a, b) {
+            (String(text), String(pattern)) => {
+                let matched = regex(pattern)?.is_match(text);
+                Bool(matched == (op == Binary::Matches))
+            }
+            _ => return Err(mismatch(name, a, b)),
+        },
     })
+}
+
+/// The regular expression `pattern`, or why it is not one.
+pub fn regex(pattern: &str) -> Result<regex::Regex, String> {
+    regex::Regex::new(pattern).map_err(|e| format!("`{pattern}` is not a regular expression: {e}"))
 }
 
 /// The operator's symbol, for messages.

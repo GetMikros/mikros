@@ -1,5 +1,6 @@
 //! Built-in commands: `cd`, `pwd`, `exit`, `print`, `source`, `env`,
-//! `jobs`, `fg`, `bg`, `kill`, `exec` and `history`.
+//! `jobs`, `fg`, `bg`, `kill`, `exec` and `history`, and those of
+//! `text`.
 
 use super::{Flow, Shell, Stream, System};
 use crate::ast::Block;
@@ -41,7 +42,11 @@ fn signal(name: &str) -> Option<i32> {
 
 /// The built-in command `name`, if there is one.
 pub fn find(name: &str) -> Option<&'static str> {
-    BUILTINS.iter().find(|b| **b == name).copied()
+    BUILTINS
+        .iter()
+        .chain(super::text::COMMANDS.iter())
+        .find(|b| **b == name)
+        .copied()
 }
 
 impl<S: System> Shell<S> {
@@ -70,10 +75,13 @@ impl<S: System> Shell<S> {
 /// Runs built-in command `name` with `args` and the pipe's `input`.
 pub fn run<S: System>(
     shell: &mut Shell<S>,
-    name: &str,
+    name: &'static str,
     args: Vec<Arg>,
     input: Option<Value>,
 ) -> Result<Value, Flow> {
+    if super::text::COMMANDS.contains(&name) {
+        return super::text::run(shell, name, args, input);
+    }
     let values = shell.values(name, args)?;
     match name {
         "cd" => {

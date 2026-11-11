@@ -6,6 +6,7 @@ pub mod command;
 pub mod glob;
 pub mod pattern;
 pub mod system;
+pub mod text;
 pub mod words;
 
 use crate::ast::*;
