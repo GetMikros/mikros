@@ -3,6 +3,7 @@
 //! language and its parser, and the job table of job control.
 
 pub mod ast;
+pub mod eval;
 pub mod jobs;
 pub mod parse;
 pub mod value;
