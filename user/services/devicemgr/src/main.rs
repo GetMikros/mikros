@@ -335,9 +335,10 @@ fn firmware_memory(mem: &OwnedHandle, header: &[u8; INFO_HEADER_SIZE]) -> Vec<(u
     if status != mikros_rt::OK {
         return Vec::new();
     }
+    let (entries, _) = entries.as_chunks::<MAP_ENTRY_SIZE>();
     let mut ranges: Vec<(u64, u64)> = entries
-        .chunks_exact(MAP_ENTRY_SIZE)
-        .filter(|e| matches!(u32_at(e, ENTRY_KIND), KIND_ACPI_NVS | KIND_RESERVED))
+        .iter()
+        .filter(|e| matches!(u32_at(*e, ENTRY_KIND), KIND_ACPI_NVS | KIND_RESERVED))
         .filter_map(|e| {
             let size = u64_at(e, ENTRY_PAGES).checked_mul(PAGE_SIZE)?;
             (size != 0).then_some((u64_at(e, 0), size))
