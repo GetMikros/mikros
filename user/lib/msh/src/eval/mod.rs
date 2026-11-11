@@ -1,7 +1,8 @@
 //! Running msh's syntax tree: statements, expressions, variables and the
-//! environment, with the system behind the `System` trait. Running
-//! pipelines comes next.
+//! environment, with the system behind the `System` trait.
 
+pub mod builtins;
+pub mod command;
 pub mod glob;
 pub mod pattern;
 pub mod system;
@@ -331,11 +332,6 @@ impl<S: System> Shell<S> {
                 other => other?,
             },
         })
-    }
-
-    /// Runs pipeline `p`, which is not supported yet.
-    pub fn pipeline(&mut self, _p: &Pipeline, _capture: bool) -> Result<Value, Flow> {
-        Err(self.fail("pipelines are not run yet".into()))
     }
 
     /// Whether a function is running.
