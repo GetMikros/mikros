@@ -568,3 +568,5 @@ impl<S: System> Shell<S> {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod tests;
