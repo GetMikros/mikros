@@ -97,6 +97,8 @@ pub struct Call {
     pub args: Vec<Arg>,
     pub arches: Vec<String>,
     pub fuzz_only: bool,
+    /// Whether the call exists only in the diagnostic build.
+    pub diag_only: bool,
     /// The IDs of the requirements that define the call.
     pub spec: Vec<String>,
 }
@@ -285,6 +287,15 @@ impl Reader {
             arches.push(arch);
         }
         let fuzz_only = map.require("fuzz_only")?.as_bool()?;
+        let diag_only = match map.get("diag_only") {
+            Some(v) => v.as_bool()?,
+            None => false,
+        };
+        if fuzz_only && diag_only {
+            return Err(map
+                .at()
+                .error(format!("`{name}` cannot be both fuzz_only and diag_only")));
+        }
         let mut spec = Vec::new();
         for (id, at) in self.strings(map.require("spec")?)? {
             if !is_requirement_id(&id) {
@@ -323,6 +334,7 @@ impl Reader {
             args,
             arches,
             fuzz_only,
+            diag_only,
             spec,
         })
     }

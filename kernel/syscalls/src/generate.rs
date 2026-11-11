@@ -20,11 +20,25 @@ fn constant(call: &Call) -> String {
     call.name.to_ascii_uppercase()
 }
 
-fn fuzz_cfg(call: &Call) -> &'static str {
+/// The condition on a call of the kernel's dispatch: the kernel's fuzz
+/// or diag feature for a call that exists only in that build.
+fn kernel_cfg(call: &Call) -> &'static str {
     if call.fuzz_only {
         "#[cfg(feature = \"fuzz\")]\n"
+    } else if call.diag_only {
+        "#[cfg(feature = \"diag\")]\n"
     } else {
         ""
+    }
+}
+
+/// The condition on a call of the user-space bindings: their crate's
+/// fuzz feature, or the `mikros_diag` cfg of the diagnostic build.
+fn user_cfg(call: &Call) -> &'static str {
+    if call.diag_only {
+        "#[cfg(mikros_diag)]\n"
+    } else {
+        kernel_cfg(call)
     }
 }
 
@@ -111,7 +125,9 @@ fn arg_model(arg: &Arg) -> String {
 pub fn fuzz_harness(table: &Table, arch: &str) -> String {
     let mut out = String::from(HEADER);
     out.push_str("pub mod handlers {\n    #[allow(unused_imports)]\n    use super::*;\n");
-    for call in calls_for(table, arch) {
+    // The fuzz build has no calls of the diagnostic build.
+    let calls = || calls_for(table, arch).filter(|c| !c.diag_only);
+    for call in calls() {
         let params = call
             .args
             .iter()
@@ -124,7 +140,7 @@ pub fn fuzz_harness(table: &Table, arch: &str) -> String {
             .map(|a| format!("{}.record()", a.name))
             .collect::<Vec<_>>()
             .join(", ");
-        let cfg = fuzz_cfg(call).replace('\n', "\n    ");
+        let cfg = kernel_cfg(call).replace('\n', "\n    ");
         let _ = writeln!(
             out,
             "\n    {cfg}pub fn {}({params}) -> Result<(), kernel_core::status::Error> {{\n        \
@@ -135,7 +151,7 @@ pub fn fuzz_harness(table: &Table, arch: &str) -> String {
         );
     }
     out.push_str("}\n\n/// The model of every call.\npub static CALLS: &[CallModel] = &[\n");
-    for call in calls_for(table, arch) {
+    for call in calls() {
         let args = call
             .args
             .iter()
@@ -172,7 +188,7 @@ pub fn kernel_dispatch(table: &Table, arch: &str) -> String {
             "/// `{}`: {}.\n{}pub const {}: u64 = {};",
             call.name,
             call.spec.join(", "),
-            fuzz_cfg(call),
+            kernel_cfg(call),
             constant(call),
             call.number
         );
@@ -188,7 +204,7 @@ pub fn kernel_dispatch(table: &Table, arch: &str) -> String {
          match number {\n",
     );
     for call in calls_for(table, arch) {
-        let cfg = fuzz_cfg(call).replace('\n', "\n        ");
+        let cfg = kernel_cfg(call).replace('\n', "\n        ");
         let _ = writeln!(out, "        {cfg}{} => {{", constant(call));
         let mut names = Vec::new();
         for (i, arg) in call.args.iter().enumerate() {
@@ -311,7 +327,7 @@ pub fn user_bindings_x86_64(table: &Table) -> String {
              status\n}}\n",
             name = call.name,
             spec = call.spec.join(", "),
-            cfg = fuzz_cfg(call),
+            cfg = user_cfg(call),
             number = call.number,
         );
     }

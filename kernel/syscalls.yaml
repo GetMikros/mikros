@@ -8,6 +8,8 @@
 #   number     the number user space passes, unique in the table
 #   arch       the architectures that provide the call
 #   fuzz_only  true when the call exists only in fuzz builds
+#   diag_only  true when the call exists only in diagnostic builds; false
+#              when left out
 #   spec       the IDs of the requirements that define the call
 #   args       the arguments in the order they are passed, each with:
 #     name           the argument's name

@@ -3,7 +3,7 @@
 //! the C library that defines them on the user-space bindings.
 //!
 //! Only the calls of production builds get a function, so calls that
-//! exist only for fuzzing are left out.
+//! exist only for fuzzing or diagnosis are left out.
 
 use crate::table::{Call, Table, Type};
 use std::fmt::Write;
@@ -12,7 +12,7 @@ fn production_calls<'t>(table: &'t Table, arch: &'t str) -> impl Iterator<Item =
     table
         .calls
         .iter()
-        .filter(move |c| !c.fuzz_only && c.arches.iter().any(|a| a == arch))
+        .filter(move |c| !c.fuzz_only && !c.diag_only && c.arches.iter().any(|a| a == arch))
 }
 
 /// The C type of a value type of the table.

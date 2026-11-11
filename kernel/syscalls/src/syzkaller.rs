@@ -74,6 +74,8 @@ fn arg_type(call: &Call, i: usize) -> String {
 /// The syzkaller description of the calls of `arch`: one resource for
 /// handles, one derived from it for each object type, and one call
 /// description per call.
+/// Calls of the diagnostic build are left out: syzkaller runs the fuzz
+/// build, which has none.
 pub fn descriptions(table: &Table, arch: &str) -> String {
     let mut out = String::from(HEADER);
     out.push_str("resource handle[int32]: 0\n");
@@ -84,7 +86,7 @@ pub fn descriptions(table: &Table, arch: &str) -> String {
     for call in table
         .calls
         .iter()
-        .filter(|c| c.arches.iter().any(|a| a == arch))
+        .filter(|c| !c.diag_only && c.arches.iter().any(|a| a == arch))
     {
         let args: Vec<String> = (0..call.args.len())
             .map(|i| format!("{} {}", call.args[i].name, arg_type(call, i)))
@@ -102,7 +104,7 @@ pub fn constants(table: &Table, arch: &str) -> String {
     for call in table
         .calls
         .iter()
-        .filter(|c| c.arches.iter().any(|a| a == arch))
+        .filter(|c| !c.diag_only && c.arches.iter().any(|a| a == arch))
     {
         let _ = writeln!(out, "__NR_{} = {}", call.name, call.number);
     }

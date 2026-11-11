@@ -164,6 +164,19 @@ fn refuses_bad_entries() {
     assert_eq!(error(&arch), "unknown architecture `vax`");
     let fuzz = format!("syscalls:\n{}", ENTRY.replace("false", "'false'"));
     assert_eq!(error(&fuzz), "expected `true` or `false`");
+    let both = format!(
+        "syscalls:\n{}",
+        ENTRY.replace("fuzz_only: false", "fuzz_only: true\n    diag_only: true")
+    );
+    assert_eq!(
+        error(&both),
+        "`obj_op` cannot be both fuzz_only and diag_only"
+    );
+    let diag = format!(
+        "syscalls:\n{}",
+        ENTRY.replace("fuzz_only: false", "fuzz_only: false\n    diag_only: true")
+    );
+    assert!(read(diag.as_bytes()).unwrap().table.calls[0].diag_only);
 }
 
 #[test]
@@ -195,6 +208,15 @@ fn generates_handle_checks_and_bindings() {
     assert!(user.contains("in(\"rdi\") a as u64"));
     assert!(user.contains("in(\"rdx\") c as u32 as u64"));
     assert!(user.contains("in(\"r10\") d as u64"));
+
+    table.calls[0].diag_only = true;
+    let kernel = kernel_dispatch(&table, "x86_64");
+    assert_eq!(kernel.matches("#[cfg(feature = \"diag\")]").count(), 2);
+    assert!(user_bindings_x86_64(&table).contains("#[cfg(mikros_diag)]\n#[inline]"));
+    assert!(!fuzz_harness(&table, "x86_64").contains("obj_op"));
+    assert!(!c::header(&table, "x86_64").contains("obj_op"));
+    assert!(!crate::syzkaller::descriptions(&table, "x86_64").contains("obj_op"));
+    table.calls[0].diag_only = false;
 
     table.calls[0].fuzz_only = true;
     let kernel = kernel_dispatch(&table, "x86_64");
@@ -243,7 +265,8 @@ fn generates_a_c_function_per_production_call() {
     let rust = c::definitions(&table, "x86_64");
     for call in &table.calls {
         let declared = format!("mikros_{}(", call.name);
-        assert_eq!(header.contains(&declared), !call.fuzz_only, "{}", call.name);
-        assert_eq!(rust.contains(&declared), !call.fuzz_only, "{}", call.name);
+        let production = !call.fuzz_only && !call.diag_only;
+        assert_eq!(header.contains(&declared), production, "{}", call.name);
+        assert_eq!(rust.contains(&declared), production, "{}", call.name);
     }
 }

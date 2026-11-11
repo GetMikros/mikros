@@ -20,6 +20,8 @@ syscall-table = { path = "../syscalls" }
 # generated dispatch leaves out unless this is enabled.
 [features]
 fuzz = []
+# The calls of the diagnostic build, which the harness never enables.
+diag = []
 
 # The targets run with debug assertions and overflow checks.
 [profile.release]
