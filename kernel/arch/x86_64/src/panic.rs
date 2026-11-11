@@ -18,7 +18,7 @@ unsafe extern "C" {
 const BOOT_STACK_SIZE: u64 = 64 << 10;
 
 /// The descriptor of the GNU build ID note.
-fn build_id() -> &'static [u8] {
+pub fn build_id() -> &'static [u8] {
     let start = &raw const __build_id_note;
     let end = &raw const __build_id_note_end;
     // SAFETY: the linker script places the build ID note, and nothing
@@ -329,18 +329,18 @@ pub mod others {
         let me = crate::percpu::index() as usize;
         for cpu in crate::tlb::RUNNING.iter().filter(|&c| c != me) {
             let thread = kernel_core::cpu::of(cpu).map_or(0, |c| c.running.load(Ordering::Relaxed));
-            write!(out, "cpu {cpu}: thread {thread}")?;
+            write!(out, "cpu {cpu} thread {thread}")?;
             if !STOPPED.iter().any(|s| s == cpu) {
-                write!(out, ", did not stop{newline}")?;
+                write!(out, " did not stop{newline}")?;
                 continue;
             }
             let s = &STATES[cpu];
             let (rip, rbp) = (s.rip.load(Ordering::Relaxed), s.rbp.load(Ordering::Relaxed));
             if s.cs.load(Ordering::Relaxed) & 3 != 0 {
-                write!(out, ", in user mode at {rip:#x}{newline}")?;
+                write!(out, " in user mode at {rip:#x}{newline}")?;
                 continue;
             }
-            write!(out, ", rip {:#x}{newline}", linked(rip))?;
+            write!(out, " rip {:#x}", linked(rip))?;
             let top = crate::percpu::of(cpu).map_or(0, |d| d.thread_stack.load(Ordering::Relaxed));
             let stacks = [
                 (top.saturating_sub(crate::sched::KERNEL_STACK_SIZE), top),
@@ -357,13 +357,35 @@ pub mod others {
             // SAFETY: `frames` only reads 8-byte aligned words inside a
             // processor's stack, which is mapped.
             let read = |address: u64| unsafe { (address as *const u64).read() };
-            for (n, address) in crate::backtrace::frames(rbp, stack, read)
-                .take(FRAMES)
-                .enumerate()
-            {
-                write!(out, "  #{n} {:#x}{newline}", linked(address))?;
+            for address in crate::backtrace::frames(rbp, stack, read).take(FRAMES) {
+                write!(out, " < {:#x}", linked(address))?;
             }
+            out.write_str(newline)?;
         }
-        Ok(())
+        // The account of the kernel's state that needs no lock that a
+        // stopped processor may hold, as one paragraph, so that the
+        // report fits on the screen.
+        out.write_str("state: ")?;
+        let mut records = Records(out);
+        kernel_core::diag::summary(&mut records)?;
+        crate::diag::records(&mut records, false)?;
+        out.write_str(newline)
+    }
+
+    /// Writes records to the report with spaces between their fields and
+    /// a semicolon between records.
+    struct Records<'a>(&'a mut dyn Write);
+
+    impl Write for Records<'_> {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            for c in s.chars() {
+                match c {
+                    '\n' => self.0.write_char(';')?,
+                    '\t' => self.0.write_char(' ')?,
+                    c => self.0.write_char(c)?,
+                }
+            }
+            Ok(())
+        }
     }
 }
