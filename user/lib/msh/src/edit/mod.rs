@@ -3,6 +3,7 @@
 
 pub mod complete;
 pub mod editor;
+pub mod history;
 pub mod keys;
 pub mod line;
 pub mod menu;
