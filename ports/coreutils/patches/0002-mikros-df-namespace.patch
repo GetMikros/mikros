@@ -1,0 +1,137 @@
+List the entries of the process's namespace as df's file systems on Mikros, which has no mount table, each also when it reports no size.
+
+--- a/src/uu/df/src/df.rs	2026-09-16 22:12:14.000000000 +0000
++++ b/src/uu/df/src/df.rs	2026-11-11 06:39:22.303677823 +0000
+@@ -364,7 +364,9 @@
+     Ok(mounts
+         .iter()
+         .filter_map(maybe_mount)
+-        .filter(|fs| opt.show_all_fs || fs.usage.blocks > 0)
++        // On Mikros every namespace entry is listed, also one, such as
++        // a tmpfs, that reports no size.
++        .filter(|fs| opt.show_all_fs || fs.usage.blocks > 0 || cfg!(target_os = "mikros"))
+         .collect())
+ }
+ 
+--- a/src/uu/df/src/table.rs	2026-11-11 06:53:48.561595623 +0000
++++ b/src/uu/df/src/table.rs	2026-11-11 06:53:48.561761677 +0000
+@@ -492,7 +492,9 @@
+             // If the filesystem is not empty, or if the options require
+             // showing all filesystems, then print the data as a row in
+             // the output table.
+-            if options.show_all_fs || filesystem.usage.blocks > 0 {
++            // On Mikros every namespace entry is a row, also one, such as
++            // a tmpfs, that reports no size.
++            if options.show_all_fs || filesystem.usage.blocks > 0 || cfg!(target_os = "mikros") {
+                 let row = Row::from_filesystem(filesystem, &options.block_size);
+                 let fmt = RowFormatter::new(&row, options, false);
+                 let values = fmt.get_cells();
+--- a/src/uucore/src/lib/features/fsext/mod.rs	2026-11-11 06:11:01.685908140 +0000
++++ b/src/uucore/src/lib/features/fsext/mod.rs	2026-11-11 06:39:22.302732305 +0000
+@@ -361,7 +361,16 @@
+     expect(clippy::unnecessary_wraps)
+ )]
+ pub fn read_fs_list() -> UResult<Vec<MountInfo>> {
+-    #[cfg(any(any(target_os = "linux", target_os = "mikros"), target_os = "android", target_os = "cygwin"))]
++    // Mikros has no mount table: its file systems are the entries of the
++    // process's namespace.
++    #[cfg(target_os = "mikros")]
++    {
++        Ok(mikros::entries())
++    }
++    #[cfg(all(
++        any(any(target_os = "linux", target_os = "mikros"), target_os = "android", target_os = "cygwin"),
++        not(target_os = "mikros")
++    ))]
+     {
+         let (file_name, f) = File::open(LINUX_MOUNTINFO)
+             .map(|f| (LINUX_MOUNTINFO, f))
+@@ -411,6 +420,88 @@
+     }
+ }
+ 
++/// The namespace entries of a Mikros process as mounted file systems.
++/// Each entry is a device of its own, and the folders above entries that
++/// no entry covers, `/` among them when no entry is `/`, are device 0:
++/// the entries are the folders whose device differs from their folder's,
++/// found below `/` through the folders of device 0, and one level below
++/// `/` when `/` is an entry.
++#[cfg(target_os = "mikros")]
++mod mikros {
++    use super::MountInfo;
++    use std::fs;
++    use std::os::unix::fs::MetadataExt;
++    use std::path::Path;
++
++    /// The name of the type of the file system at `path`, from the magic
++    /// number that `statfs` gives.
++    fn fs_type(path: &Path) -> String {
++        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
++            return "-".into();
++        };
++        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
++        if unsafe { libc::statfs(c.as_ptr(), &raw mut st) } != 0 {
++            return "-".into();
++        }
++        match st.f_type as u64 {
++            0x9123_683e => "btrfs",
++            0x0102_1994 => "tmpfs",
++            0x4d44 => "vfat",
++            0x2011_bab0 => "exfat",
++            _ => "-",
++        }
++        .into()
++    }
++
++    fn info(path: &Path, dev: u64) -> MountInfo {
++        let fs_type = fs_type(path);
++        MountInfo {
++            dev_id: dev.to_string(),
++            dev_name: fs_type.clone(),
++            fs_type,
++            mount_root: "/".into(),
++            mount_dir: path.into(),
++            mount_option: String::new(),
++            remote: false,
++            dummy: false,
++        }
++    }
++
++    /// The folders below `dir` whose device differs from `dev`: entries
++    /// for a device other than 0, and folders above entries, searched in
++    /// turn, for device 0.
++    fn below(dir: &Path, dev: u64, found: &mut Vec<MountInfo>) {
++        let Ok(children) = fs::read_dir(dir) else {
++            return;
++        };
++        for child in children.flatten() {
++            let path = child.path();
++            let Ok(meta) = fs::symlink_metadata(&path) else {
++                continue;
++            };
++            match meta.dev() {
++                _ if !meta.is_dir() => {}
++                0 => below(&path, 0, found),
++                same if same == dev => {}
++                other => found.push(info(&path, other)),
++            }
++        }
++    }
++
++    pub(super) fn entries() -> Vec<MountInfo> {
++        let root = Path::new("/");
++        let mut found = Vec::new();
++        match fs::metadata(root).map(|m| m.dev()) {
++            Ok(0) | Err(_) => {}
++            Ok(dev) => found.push(info(root, dev)),
++        }
++        let dev = found.first().map_or(0, |r| r.dev_id.parse().unwrap_or(0));
++        below(root, dev, &mut found);
++        found.sort_by(|a, b| a.mount_dir.cmp(&b.mount_dir));
++        found
++    }
++}
++
+ #[derive(Debug, Clone)]
+ pub struct FsUsage {
+     pub blocksize: u64,
