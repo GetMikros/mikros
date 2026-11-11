@@ -40,6 +40,17 @@ fn signal(name: &str) -> Option<i32> {
     SIGNALS.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
 }
 
+/// The names of the built-in commands, `run` among them.
+pub fn names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = BUILTINS
+        .iter()
+        .chain(super::text::COMMANDS.iter())
+        .copied()
+        .collect();
+    names.push("run");
+    names
+}
+
 /// The built-in command `name`, if there is one.
 pub fn find(name: &str) -> Option<&'static str> {
     BUILTINS
