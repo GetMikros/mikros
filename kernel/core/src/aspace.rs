@@ -338,6 +338,12 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// In the diagnostic build, the bytes of every region.
+    #[cfg(feature = "diag")]
+    pub fn mapped_bytes(&self) -> u64 {
+        self.regions.lock().iter().map(|r| r.len).sum()
+    }
+
     /// Removes every region and its pages, as `remove_regions` does with
     /// the whole user range, which cannot fail. This also removes the
     /// translations made outside regions, whose frames belong to whoever

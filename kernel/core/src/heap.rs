@@ -14,7 +14,7 @@ pub const PAGE_SIZE: usize = 4096;
 const MIN_CLASS: usize = 16;
 /// The largest block size served from a size class.
 pub const MAX_CLASS: usize = 2048;
-const CLASSES: usize = (MAX_CLASS / MIN_CLASS).trailing_zeros() as usize + 1;
+pub const CLASSES: usize = (MAX_CLASS / MIN_CLASS).trailing_zeros() as usize + 1;
 
 /// Where the heap gets its pages.
 pub trait Pages {
@@ -42,6 +42,12 @@ pub struct Heap<P: Pages> {
     /// longer holds the heap's lock.
     #[cfg(feature = "diag")]
     pub fault: Option<Fault>,
+    /// In the diagnostic build, the blocks in use of each class and the
+    /// pages of whole-page blocks.
+    #[cfg(feature = "diag")]
+    in_use: [usize; CLASSES],
+    #[cfg(feature = "diag")]
+    pages_in_use: usize,
 }
 
 // SAFETY: the heap owns the blocks on its free lists; moving it to
@@ -65,7 +71,19 @@ impl<P: Pages> Heap<P> {
             free: [None; CLASSES],
             #[cfg(feature = "diag")]
             fault: None,
+            #[cfg(feature = "diag")]
+            in_use: [0; CLASSES],
+            #[cfg(feature = "diag")]
+            pages_in_use: 0,
         }
+    }
+
+    /// In the diagnostic build, the size and the blocks in use of each
+    /// class, and the pages of whole-page blocks.
+    #[cfg(feature = "diag")]
+    pub fn usage(&self) -> ([(usize, usize); CLASSES], usize) {
+        let classes = core::array::from_fn(|c| (MIN_CLASS << c, self.in_use[c]));
+        (classes, self.pages_in_use)
     }
 
     /// A block for `layout`, or `None` when no memory is left. Blocks
@@ -77,7 +95,10 @@ impl<P: Pages> Heap<P> {
             }
             let start = self.pages.alloc(pages_for(layout))?;
             #[cfg(feature = "diag")]
-            check::pages_taken(&mut self.pages, start, pages_for(layout));
+            {
+                check::pages_taken(&mut self.pages, start, pages_for(layout));
+                self.pages_in_use += pages_for(layout);
+            }
             return Some(start);
         };
         if self.free[c].is_none() {
@@ -93,11 +114,12 @@ impl<P: Pages> Heap<P> {
         // SAFETY: blocks on a free list are unused, belong to the heap
         // and hold a `Free`.
         self.free[c] = unsafe { block.as_ref().next };
-        // SAFETY: the block was checked and is now in use.
         #[cfg(feature = "diag")]
-        unsafe {
-            check::taken(block.cast())
-        };
+        {
+            // SAFETY: the block was checked and is now in use.
+            unsafe { check::taken(block.cast()) };
+            self.in_use[c] += 1;
+        }
         Some(block.cast())
     }
 
@@ -144,17 +166,22 @@ impl<P: Pages> Heap<P> {
                 // write to it; it is aligned for `Free`.
                 unsafe { block.write(Free { next: self.free[c] }) };
                 self.free[c] = Some(block);
-                // SAFETY: the block was checked and is now free.
                 #[cfg(feature = "diag")]
-                unsafe {
-                    check::freed(&mut self.pages, block.cast(), c)
-                };
+                {
+                    // SAFETY: the block was checked and is now free.
+                    unsafe { check::freed(&mut self.pages, block.cast(), c) };
+                    self.in_use[c] = self.in_use[c].saturating_sub(1);
+                }
             }
             None => {
                 #[cfg(feature = "diag")]
                 if let Err(fault) = check::pages_freed(&mut self.pages, block, pages_for(layout)) {
                     self.fault = Some(fault);
                     return;
+                }
+                #[cfg(feature = "diag")]
+                {
+                    self.pages_in_use = self.pages_in_use.saturating_sub(pages_for(layout));
                 }
                 self.pages.free(block, pages_for(layout));
             }

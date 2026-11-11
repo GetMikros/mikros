@@ -47,6 +47,9 @@ pub struct Cpu {
     pub waiting_since: core::sync::atomic::AtomicI64,
     #[cfg(feature = "diag")]
     pub running: core::sync::atomic::AtomicU64,
+    /// In the diagnostic build, the nanoseconds the processor has idled.
+    #[cfg(feature = "diag")]
+    pub idle: core::sync::atomic::AtomicI64,
 }
 
 impl Cpu {
@@ -71,6 +74,8 @@ impl Cpu {
             waiting_since: core::sync::atomic::AtomicI64::new(0),
             #[cfg(feature = "diag")]
             running: core::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "diag")]
+            idle: core::sync::atomic::AtomicI64::new(0),
         }
     }
 }

@@ -91,6 +91,8 @@ pub fn wait_one(
 ) -> Result<u32, Error> {
     let thread = sched::current().ok_or(Error::BadState)?;
     let header = object.header();
+    #[cfg(feature = "diag")]
+    let _waiting = crate::diag::Waiting::on(header.koid());
     let _charge = process.budget().hold_kernel(record_cost::<Waiter>())?;
     let waiter = crate::fallible::try_arc(Waiter {
         koid: header.koid(),
@@ -163,6 +165,8 @@ pub fn wait_call(
 ) -> Result<Message, Error> {
     let thread = sched::current().ok_or(Error::BadState)?;
     let header = endpoint.header();
+    #[cfg(feature = "diag")]
+    let _waiting = crate::diag::Waiting::on(header.koid());
     let _charge = process
         .budget()
         .hold_kernel(record_cost::<Waiter>() + 2 * size_of::<Caller>() as u64)?;
@@ -256,6 +260,8 @@ pub fn futex_wait(addr: u64, expected: u32, deadline: i64) -> Result<(), Error> 
     let thread = sched::current().ok_or(Error::BadState)?;
     let process = thread.process().cloned().ok_or(Error::BadState)?;
     let key = futex_key(&process, addr)?;
+    #[cfg(feature = "diag")]
+    let _waiting = crate::diag::Waiting::on(crate::diag::FUTEX);
     let _charge = process.budget().hold_kernel(record_cost::<FutexWaiter>())?;
     let waiter = crate::fallible::try_arc(FutexWaiter {
         key,

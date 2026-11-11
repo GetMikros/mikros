@@ -73,6 +73,10 @@ pub struct Thread {
     priority: AtomicU32,
     /// Nanoseconds the thread has run.
     cpu_time: AtomicI64,
+    /// In the diagnostic build, the koid of the object the thread waits
+    /// on, `diag::FUTEX`, or 0.
+    #[cfg(feature = "diag")]
+    waits_on: AtomicU64,
     /// The number of `thread_suspend` calls not yet undone.
     suspend_count: AtomicU64,
     /// Set when a wait ended because the thread is to be suspended, so
@@ -147,6 +151,8 @@ impl Thread {
             ),
             priority: AtomicU32::new(DEFAULT_PRIORITY),
             cpu_time: AtomicI64::new(0),
+            #[cfg(feature = "diag")]
+            waits_on: AtomicU64::new(0),
             suspend_count: AtomicU64::new(0),
             restart: AtomicBool::new(false),
             woken: AtomicU32::new(0),
@@ -366,6 +372,24 @@ impl Thread {
         };
         process.aspace().activate();
         self.arch.switch_in(top, true);
+    }
+
+    /// In the diagnostic build, records the object the thread waits on.
+    #[cfg(feature = "diag")]
+    pub fn set_waits_on(&self, koid: u64) {
+        self.waits_on.store(koid, Ordering::Relaxed);
+    }
+
+    /// In the diagnostic build, the object the thread waits on.
+    #[cfg(feature = "diag")]
+    pub fn waits_on(&self) -> u64 {
+        self.waits_on.load(Ordering::Relaxed)
+    }
+
+    /// The processor that owns the thread.
+    #[cfg(feature = "diag")]
+    pub fn owner_cpu(&self) -> u32 {
+        self.cpu.load(Ordering::Relaxed)
     }
 
     /// The nanoseconds the thread has run, including the slice it is
@@ -1434,5 +1458,12 @@ fn halt_until_interrupt() {
         crate::sync::none_held(),
         "enabling interrupts with a spin lock held"
     );
+    #[cfg(feature = "diag")]
+    let start = crate::arch::monotonic_now();
     crate::arch::wait_for_interrupt();
+    #[cfg(feature = "diag")]
+    crate::cpu::this().idle.fetch_add(
+        crate::arch::monotonic_now().saturating_sub(start),
+        Ordering::Relaxed,
+    );
 }

@@ -116,6 +116,27 @@ fn unregister(process: &Process) {
     }
 }
 
+/// In the diagnostic build, every process that still exists, newest
+/// first.
+#[cfg(feature = "diag")]
+pub fn all() -> Result<Vec<Arc<Process>>, Error> {
+    let _registry = REGISTRY.lock();
+    let mut all = Vec::new();
+    let mut at = FIRST_PROCESS.load(Ordering::Acquire);
+    while !at.is_null() {
+        // SAFETY: the list holds a weak reference to each listed process,
+        // whose memory stays until it leaves the list under the lock.
+        let weak = ManuallyDrop::new(unsafe { Weak::from_raw(at) });
+        if let Some(process) = weak.upgrade() {
+            all.try_reserve(1).map_err(|_| Error::NoMemory)?;
+            all.push(process);
+        }
+        // SAFETY: as above.
+        at = unsafe { &*at }.next.load(Ordering::Relaxed);
+    }
+    Ok(all)
+}
+
 /// Terminates with exit code -1 every process that belongs to `budget` or
 /// to a budget below it, also those created there meanwhile, and returns
 /// once a look at all processes finds none of them that has not
@@ -377,6 +398,18 @@ impl Process {
 
     pub fn signals(&self) -> &SpinLock<crate::signal::ProcessSignals> {
         &self.signals
+    }
+
+    /// In the diagnostic build, the number of handles the process holds.
+    #[cfg(feature = "diag")]
+    pub fn handle_count(&self) -> usize {
+        self.handles.lock().len()
+    }
+
+    /// In the diagnostic build, the bytes of the process's mappings.
+    #[cfg(feature = "diag")]
+    pub fn mapped_bytes(&self) -> u64 {
+        self.aspace.mapped_bytes()
     }
 
     /// The threads of the process that still exist, listed in room

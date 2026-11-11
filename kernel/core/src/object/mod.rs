@@ -170,9 +170,19 @@ pub struct Header {
     watchers: AtomicU32,
 }
 
+/// In the diagnostic build, counts the object gone.
+#[cfg(feature = "diag")]
+impl Drop for Header {
+    fn drop(&mut self) {
+        crate::diag::gone(self.kind);
+    }
+}
+
 impl Header {
     /// The header of a new object of type `kind`, with no signals set.
     pub fn new(kind: ObjectType) -> Header {
+        #[cfg(feature = "diag")]
+        crate::diag::made(kind);
         Header {
             koid: new_koid(),
             kind,

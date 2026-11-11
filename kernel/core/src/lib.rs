@@ -24,6 +24,8 @@ pub mod console;
 pub mod coverage;
 pub mod cpu;
 pub mod deadline;
+#[cfg(feature = "diag")]
+pub mod diag;
 pub mod elf;
 pub mod exception;
 pub mod fallible;

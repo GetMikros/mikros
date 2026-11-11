@@ -196,6 +196,8 @@ fn framebuffer(info: &BootInfo) -> Option<Arc<MemoryObject>> {
 /// here is charged to it.
 pub fn start(info: &BootInfo) {
     let budget = Budget::root();
+    #[cfg(feature = "diag")]
+    crate::diag::set_root_budget(&budget);
     let loaded = load(info, &budget);
     // SAFETY: the bootloader leaves the command line in the direct map
     // until the kernel reclaims boot memory, which happens later.

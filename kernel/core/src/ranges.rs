@@ -144,6 +144,12 @@ impl<const N: usize> Ranges<N> {
         self.len
     }
 
+    /// In the diagnostic build, the bytes of the free ranges.
+    #[cfg(feature = "diag")]
+    pub fn free_bytes(&self) -> u64 {
+        self.free[..self.len].iter().map(|(s, e)| e - s).sum()
+    }
+
     fn remove(&mut self, i: usize) {
         self.free.copy_within(i + 1..self.len, i);
         self.len -= 1;
