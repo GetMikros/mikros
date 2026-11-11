@@ -2,9 +2,10 @@
 //! does, so that it is tested on the host: the syntax tree of its
 //! command language and its parser, values, the evaluator with its
 //! built-in commands behind the `System` trait, script options, prompt
-//! expansion and the job table of job control.
+//! expansion, the job table of job control and the line editor.
 
 pub mod ast;
+pub mod edit;
 pub mod eval;
 pub mod jobs;
 pub mod parse;
