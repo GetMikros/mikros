@@ -57,9 +57,10 @@ enum Step {
     Dump(&'static str),
 }
 
-/// The keys of the setup program's questions: ada's name, full name and
-/// password twice, each ended by Enter.
-const SETUP_KEYS: [&str; 4] = [
+/// The keys of the setup program's questions: the computer's name, box,
+/// then ada's name, full name and password twice, each ended by Enter.
+const SETUP_KEYS: [&str; 5] = [
+    "b o x ret",
     "a d a ret",
     "shift-a d a ret",
     "a d a minus p w ret",

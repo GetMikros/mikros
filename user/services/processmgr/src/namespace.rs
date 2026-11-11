@@ -588,11 +588,18 @@ impl Namespaces {
                     &mut origins,
                     self.entry(shared, &ready, "/usr", RX).await?,
                 );
-                add(
-                    &mut entries,
-                    &mut origins,
-                    self.entry(shared, &ready, "/etc", Rights::READ).await?,
-                );
+                // A program whose manifest lists `/etc` gets it with the
+                // rights listed there instead.
+                let lists_etc = listed
+                    .iter()
+                    .any(|(path, _)| path::normalize(path).as_deref() == Some("/etc"));
+                if !lists_etc {
+                    add(
+                        &mut entries,
+                        &mut origins,
+                        self.entry(shared, &ready, "/etc", Rights::READ).await?,
+                    );
+                }
                 let path = format!("apps/{user}/{app_id}");
                 let budget = shared.budget_of(user, app_id)?;
                 let tmpfs = self.tmpfs().await;

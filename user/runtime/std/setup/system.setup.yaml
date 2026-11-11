@@ -4,3 +4,7 @@ app_id: system.setup
 binary: /usr/bin/setup
 spawned_by:
   - system.sessionmgr
+# It writes the computer's name to /etc/hostname, and nothing else there.
+namespace:
+  - path: /etc
+    rights: rw

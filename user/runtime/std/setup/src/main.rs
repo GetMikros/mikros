@@ -1,10 +1,12 @@
 //! The setup program, which the session manager runs on the text
 //! console's terminal on the first boot, while no user account exists.
-//! It asks for the name, full name and password of the first
-//! administrator and creates that account with the accounts service,
-//! which accepts this one call from the app ID `system.setup`. It exits
-//! with 0 once the account exists, and with 1 when it cannot be made or
-//! input ends.
+//! It asks for the computer's name, suggesting `mikros`, and writes it
+//! to /etc/hostname. Then it asks for the name, full name and password
+//! of the first administrator and creates that account with the
+//! accounts service, which accepts this one call from the app ID
+//! `system.setup`. It exits with 0 once the account exists, and with 1
+//! when the name cannot be written, the account cannot be made or input
+//! ends.
 
 #![feature(mikros_handles)]
 
@@ -18,6 +20,11 @@ use std::io::{BufRead, Write};
 const ACCOUNTS: &str = "mikros.session.Accounts";
 const FOREVER: i64 = i64::MAX;
 const SAME_RIGHTS: u32 = 1 << 31;
+/// The file of the computer's name, the name suggested for it, and the
+/// longest one.
+const HOSTNAME: &str = "/etc/hostname";
+const HOST_SUGGESTED: &str = "mikros";
+const HOST_MAX: usize = 63;
 /// The longest name and full name the accounts service takes.
 const NAME_MAX: usize = 32;
 const FULL_NAME_MAX: usize = 128;
@@ -52,6 +59,33 @@ fn valid_name(name: &str) -> bool {
     matches!(bytes.next(), Some(b'a'..=b'z'))
         && name.len() <= NAME_MAX
         && bytes.all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+}
+
+/// Whether `name` is a valid computer name: 1 to 63 ASCII letters,
+/// digits and hyphens, not starting or ending with a hyphen.
+fn valid_host(name: &str) -> bool {
+    (1..=HOST_MAX).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
+/// Asks for the computer's name until it is valid, taking an empty
+/// answer as the suggested name, or `None` at the end of input.
+fn host_name() -> Option<String> {
+    loop {
+        let name = ask(&format!("Computer name [{HOST_SUGGESTED}]: "))?;
+        let name = match name.trim() {
+            "" => HOST_SUGGESTED.to_owned(),
+            name => name.to_owned(),
+        };
+        if valid_host(&name) {
+            return Some(name);
+        }
+        println!(
+            "A computer name has 1 to {HOST_MAX} letters, digits and hyphens, and does not start or end with a hyphen."
+        );
+    }
 }
 
 /// Writes `prompt` and reads a line without its end, or `None` at the
@@ -140,6 +174,15 @@ fn account() -> Option<(String, String, String)> {
 
 fn main() {
     println!("Welcome to Mikros.");
+    println!();
+    let Some(host) = host_name() else {
+        std::process::exit(1);
+    };
+    if let Err(e) = std::fs::write(HOSTNAME, format!("{host}\n")) {
+        println!("Writing the computer's name failed: {e}.");
+        std::process::exit(1);
+    }
+    println!();
     println!("Create the first account, which administers this computer.");
     println!();
     let Some(accounts) = accounts() else {
