@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -1180,6 +1181,20 @@ static int epolls_nest(void)
 	return ok;
 }
 
+/* The boot image has no /etc/hostname, so the host name is mikros. */
+static int host_name_defaults(void)
+{
+	char name[65];
+	struct utsname uts;
+	if (gethostname(name, sizeof name) != 0 || strcmp(name, "mikros") != 0)
+		return 0;
+	if (uname(&uts) != 0 || strcmp(uts.sysname, "Mikros") != 0
+	    || strcmp(uts.nodename, "mikros") != 0)
+		return 0;
+	errno = 0;
+	return sethostname("other", 5) == -1 && errno == EPERM;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2)
@@ -1255,6 +1270,8 @@ int main(int argc, char **argv)
 		return 36;
 	if (!timerfds_count_expirations())
 		return 37;
+	if (!host_name_defaults())
+		return 38;
 	char *copy = malloc(64);
 	if (!copy)
 		return 34;

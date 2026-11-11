@@ -8,6 +8,7 @@ use crate::errno::{self, EACCES, EBADF, EINVAL, ENODEV, ENOSYS, ENOTTY};
 use crate::fd::Description;
 use crate::{
     clock, dir, epoll, fd, fs, futex, io, poll, process, signal, spawn, stat, thread, timerfd,
+    uname,
 };
 use core::sync::atomic::{AtomicU32, Ordering};
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -87,6 +88,8 @@ const SYS_FACCESSAT: i64 = 269;
 const SYS_DUP3: i64 = 292;
 const SYS_PIPE2: i64 = 293;
 const SYS_GETRANDOM: i64 = 318;
+const SYS_UNAME: i64 = 63;
+const SYS_SETHOSTNAME: i64 = 170;
 const SYS_FACCESSAT2: i64 = 439;
 
 const PROT_READ: i64 = 1;
@@ -265,6 +268,8 @@ extern "C" fn __mikros_syscall(
             a6 as *const [u64; 2],
         ),
         SYS_GETRANDOM => getrandom(a1 as *mut u8, a2 as u64),
+        SYS_UNAME => uname::uname(a1 as *mut u8),
+        SYS_SETHOSTNAME => uname::sethostname(),
         SYS_CLOCK_GETTIME => clock::gettime(a1, a2 as *mut clock::Timespec),
         SYS_NANOSLEEP => clock::nanosleep(
             clock::CLOCK_REALTIME,

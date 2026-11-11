@@ -28,6 +28,7 @@ mod syscall;
 mod terminal;
 mod thread;
 mod timerfd;
+mod uname;
 
 /// The `mikros_<name>` function of every system call of production
 /// builds, which `<mikros/syscalls.h>` declares.
