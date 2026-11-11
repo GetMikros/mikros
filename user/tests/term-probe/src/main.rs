@@ -428,12 +428,16 @@ fn probe(directory: &DirectoryClient, launcher: &LauncherClient) -> Option<()> {
     let third_number = reply("the third number", number)?.number;
     check("reusing a closed terminal's number", third_number == 1)?;
     drop(third);
-    c_program(&factory, launcher)
+    c_program(&factory, &terminal, launcher)
 }
 
 /// Runs the C program on a new terminal, as its standard input, output
 /// and error, and types what it waits for.
-fn c_program(factory: &FactoryClient, launcher: &LauncherClient) -> Option<()> {
+fn c_program(
+    factory: &FactoryClient,
+    terminal: &TerminalClient,
+    launcher: &LauncherClient,
+) -> Option<()> {
     let size = WindowSize {
         rows: 24,
         columns: 80,
@@ -469,9 +473,13 @@ fn c_program(factory: &FactoryClient, launcher: &LauncherClient) -> Option<()> {
         umask: u32::MAX,
     };
     let pid = reply("starting the C program", launcher.spawn(request, FOREVER))?.pid;
+    // It names its terminal by the terminal's number.
+    let number = terminal.get_number(duplicate(&token)?, FOREVER);
+    let number = reply("the C program's terminal number", number)?.number;
+    let ready = alloc::format!("ready /dev/pts/{number}\r\n");
     check(
         "the C program's first line",
-        shown(&master, 7) == b"ready\r\n",
+        shown(&master, ready.len()) == ready.as_bytes(),
     )?;
     type_in(&master, b"line\r")?;
     check(

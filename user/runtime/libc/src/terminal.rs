@@ -38,6 +38,8 @@ const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
 const TIOCGWINSZ: u64 = 0x5413;
 const TIOCSWINSZ: u64 = 0x5414;
+/// The terminal's number, which `ptsname` and `ttyname` name it by.
+const TIOCGPTN: u64 = 0x8004_5430;
 /// `TCFLSH`'s queues.
 const TCIFLUSH: u64 = 0;
 const TCOFLUSH: u64 = 1;
@@ -336,6 +338,15 @@ fn control(
                 let words = [s.rows, s.columns, s.width, s.height];
                 // SAFETY: musl passes a `struct winsize` of four shorts.
                 unsafe { core::ptr::copy_nonoverlapping(words.as_ptr(), ptr as *mut u16, 4) };
+                Ok(0)
+            }
+            Ok(Err(status)) => Err(errno(status)),
+            Err(_) => Err(EIO),
+        },
+        TIOCGPTN => match client.get_number(token, FOREVER) {
+            Ok(Ok(r)) => {
+                // SAFETY: musl passes an `unsigned int`.
+                unsafe { (ptr as *mut u32).write_unaligned(r.number) };
                 Ok(0)
             }
             Ok(Err(status)) => Err(errno(status)),

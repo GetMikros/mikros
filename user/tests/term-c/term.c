@@ -1,12 +1,14 @@
 /* A program that the terminal probe starts on a terminal, as its
  * standard input, output and error. It checks the terminal through the C
- * library's terminal functions, reads the lines the probe types, and
- * exits with 0 when every check passed, and otherwise with the number of
- * the first check that failed. */
+ * library's terminal functions, says the terminal's name, reads the lines
+ * the probe types, and exits with 0 when every check passed, and
+ * otherwise with the number of the first check that failed. */
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -33,7 +35,13 @@ int main(void)
 		return 12;
 	if (fstat(0, &st) || !S_ISCHR(st.st_mode))
 		return 13;
-	if (!say("ready\n"))
+	/* The terminal's name, from its number, as both functions give it. */
+	char *name = ttyname(0), pts[32];
+	if (!name || ptsname_r(0, pts, sizeof pts) || strcmp(name, pts) != 0)
+		return 22;
+	if (strncmp(name, "/dev/pts/", 9) != 0)
+		return 23;
+	if (!say("ready ") || !say(name) || !say("\n"))
 		return 14;
 	/* A canonical read returns the line the probe typed. */
 	ssize_t n = read(0, buf, sizeof buf);
