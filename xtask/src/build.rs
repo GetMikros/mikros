@@ -1516,7 +1516,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .chain(
                     login
                         .iter()
-                        .filter(|(at, _)| at != sessions_manifest)
+                        .filter(|(at, _)| at != sessions_manifest && at != "usr/bin/msh")
                         .map(|(at, path)| (at.as_str(), path.as_path())),
                 )
                 .chain([
@@ -1618,9 +1618,9 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
 /// The members of the system image that logging in on the text console
 /// needs: the accounts, terminal and session services with their
 /// manifests, the basic display driver, the text console and the setup
-/// program with their program manifests, and the dynamic linker,
-/// libraries and keymaps they load. The fonts are among the other
-/// members.
+/// program with their program manifests, the user's shell msh, and the
+/// dynamic linker, libraries and keymaps they load. The fonts are among
+/// the other members.
 fn login_members(
     kind: Kind,
     xkbcommon: &crate::ports::Built,
@@ -1663,6 +1663,11 @@ fn login_members(
             root.join(format!("user/runtime/std/{name}/system.{name}.yaml")),
         ));
     }
+    // The session manager names the shell's app ID, `system.cli`, which
+    // needs no program manifest.
+    let msh = crate::rust_std::build("msh", kind)?;
+    println!("built    {}", msh.display());
+    members.push(("usr/bin/msh".into(), msh));
     members.extend([
         (
             "usr/lib/ld-mikros.dlib".into(),
