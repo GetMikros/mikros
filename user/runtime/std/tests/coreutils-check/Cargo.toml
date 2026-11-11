@@ -1,0 +1,8 @@
+[package]
+name = "coreutils-check"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "coreutils-check"
+path = "src/main.rs"

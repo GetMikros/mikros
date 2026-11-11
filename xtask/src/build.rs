@@ -378,6 +378,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", hello.display());
+            let coreutils_check = crate::rust_std::build("coreutils-check", kind)?;
             let files_c = c_build(
                 "files-c",
                 &["user/tests/files-c/files.c"],
@@ -1430,6 +1431,16 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     .collect::<Vec<_>>(),
             );
             setup_files.extend([
+                ("usr/bin/timesvc".to_owned(), time_service.clone()),
+                (
+                    "usr/lib/services/time.yaml".to_owned(),
+                    time_manifest.clone(),
+                ),
+                ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
+                (
+                    "usr/lib/drivers/rtc/driver.yaml".to_owned(),
+                    crate::workspace_root().join("user/drivers/rtc/driver.yaml"),
+                ),
                 ("usr/bin/tmpfs".to_owned(), tmpfs.clone()),
                 (
                     "usr/lib/services/tmpfs.yaml".to_owned(),
@@ -1555,6 +1566,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     (sessions_manifest, test_sessions_manifest.as_path()),
                     ("usr/bin/spawn-std", spawn_std.as_path()),
                     ("usr/bin/files-c", files_c.as_path()),
+                    ("usr/bin/coreutils-check", coreutils_check.as_path()),
                     (
                         "usr/share/fonts/dejavu/DejaVuSansMono.ttf",
                         console_fonts[0].as_path(),

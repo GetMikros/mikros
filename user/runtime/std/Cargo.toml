@@ -3,7 +3,7 @@
 # Cargo alone cannot build them.
 [workspace]
 resolver = "3"
-members = ["console", "msh", "setup", "tests/hello-std", "tests/msh-check", "tests/spawn-std"]
+members = ["console", "msh", "setup", "tests/coreutils-check", "tests/hello-std", "tests/msh-check", "tests/spawn-std"]
 
 [workspace.package]
 version = "0.0.0"
