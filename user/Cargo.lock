@@ -168,6 +168,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "diagsvc"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-snapshot",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -456,6 +464,10 @@ dependencies = [
  "midlc",
  "syscall-table",
 ]
+
+[[package]]
+name = "mikros-snapshot"
+version = "0.0.0"
 
 [[package]]
 name = "mikros-storage"

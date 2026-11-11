@@ -1,0 +1,17 @@
+[package]
+name = "diagsvc"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-rt = { path = "../../runtime/mikros-rt" }
+
+# Only the diagnostic build serves the overview.
+[target.'cfg(mikros_diag)'.dependencies]
+mikros-snapshot = { path = "../../lib/snapshot" }
+
+# The diagnostic build sets `mikros_diag`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mikros_diag)"] }

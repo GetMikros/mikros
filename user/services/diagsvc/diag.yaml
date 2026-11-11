@@ -1,0 +1,10 @@
+# The service manifest of the diagnostic service, installed as
+# usr/lib/services/diag.yaml in the diagnostic build only.
+name: diag
+binary: /usr/bin/diagsvc
+start: boot
+boot_handles: [root_resource]
+# permissions.check to check its clients' diag.read.
+permissions: [process.list_all, permissions.check]
+provides:
+  - protocol: mikros.diag.Overview

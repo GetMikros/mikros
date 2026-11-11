@@ -20,6 +20,7 @@ pub const PERMISSIONS: &[(&str, Kind)] = &[
     ("background.run", Kind::User),
     ("camera", Kind::User),
     ("device.registry", Kind::System),
+    ("diag.read", Kind::System),
     ("files.desktop", Kind::User),
     ("files.documents", Kind::User),
     ("files.downloads", Kind::User),

@@ -1,0 +1,8 @@
+// MIKSPEC-0022.R17
+
+library mikros.diag;
+using mikros.base;
+
+protocol Overview {
+    @1 Snapshot() -> (text string<60000>) error base.Status;
+};

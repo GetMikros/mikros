@@ -1714,6 +1714,16 @@ fn login_members(
             root.join(format!("user/runtime/std/{name}/system.{name}.yaml")),
         ));
     }
+    // The diagnostic build's service, which no other build has.
+    if kind == Kind::Diag {
+        let binary = user_build("diagsvc", kind)?;
+        println!("built    {}", binary.display());
+        members.push(("usr/bin/diagsvc".into(), binary));
+        members.push((
+            "usr/lib/services/diag.yaml".into(),
+            root.join("user/services/diagsvc/diag.yaml"),
+        ));
+    }
     // The session manager names the shell's app ID, `system.cli`, which
     // needs no program manifest.
     let msh = crate::rust_std::build("msh", kind)?;
