@@ -1,0 +1,14 @@
+Build procfs for Mikros, whose /proc files are missing, so that what reads them fails at run time.
+
+diff -ruN procfs-0.18.0/build.rs ../b/procfs-0.18.0/build.rs
+--- a/build.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/build.rs	2026-11-11 06:09:06.053934861 +0000
+@@ -1,7 +1,7 @@
+ fn main() {
+     // Filters are extracted from `libc` filters
+     let target_os = std::env::var("CARGO_CFG_TARGET_OS").expect("Missing CARGO_CFG_TARGET_OS envvar");
+-    if !["android", "linux", "l4re"].contains(&target_os.as_str()) {
++    if !["android", "linux", "l4re", "mikros"].contains(&target_os.as_str()) {
+         eprintln!("Building {} on an for a unsupported platform. Currently only linux and android are supported", env!("CARGO_PKG_NAME"));
+         eprintln!("(Your current target_os is {})", target_os);
+         std::process::exit(1)

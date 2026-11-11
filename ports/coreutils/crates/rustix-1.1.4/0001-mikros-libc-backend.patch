@@ -1,0 +1,32 @@
+Take rustix's libc backend on Mikros, with linux-raw-sys for its constants, and its Linux-like and Linux kernel interfaces.
+
+diff -ruN rustix-1.1.4/build.rs ../b/rustix-1.1.4/build.rs
+--- a/build.rs	2006-07-24 01:21:28.000000000 +0000
++++ b/build.rs	2026-11-11 06:09:06.053272909 +0000
+@@ -117,7 +117,7 @@
+             || arch.starts_with("mips"))
+             && !rustix_use_experimental_asm);
+     if libc {
+-        if (os == "linux" || os == "android") && !cfg_no_linux_raw {
++        if (os == "linux" || os == "android" || os == "mikros") && !cfg_no_linux_raw {
+             use_feature("linux_raw_dep");
+         }
+ 
+@@ -151,7 +151,7 @@
+     if apple {
+         use_feature("apple");
+     }
+-    if os == "linux" || os == "l4re" || os == "android" || os == "emscripten" {
++    if os == "linux" || os == "mikros" || os == "l4re" || os == "android" || os == "emscripten" {
+         use_feature("linux_like");
+     }
+     if os == "solaris" || os == "illumos" {
+@@ -164,7 +164,7 @@
+     // Add some additional common target combinations.
+ 
+     // Android and "regular" Linux both use the Linux kernel.
+-    if os == "android" || os == "linux" {
++    if os == "android" || os == "linux" || os == "mikros" {
+         use_feature("linux_kernel");
+     }
+ 

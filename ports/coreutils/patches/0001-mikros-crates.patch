@@ -1,0 +1,18 @@
+Take the crates that need Mikros changes from where xtask unpacks them.
+
+--- a/Cargo.toml	2026-11-11 06:09:14.298537792 +0000
++++ b/Cargo.toml	2026-11-11 06:09:14.302183578 +0000
+@@ -711,3 +711,13 @@
+ inherits = "release"
+ panic = "unwind"
+ debug = true
++
++# Mikros: the crates that xtask unpacks with their Mikros changes.
++[patch.crates-io]
++errno = { path = "../crates/errno-0.3.14" }
++getrandom = { path = "../crates/getrandom-0.4.3" }
++libc = { path = "../crates/libc-0.2.189" }
++nix = { path = "../crates/nix-0.31.3" }
++procfs = { path = "../crates/procfs-0.18.0" }
++procfs-core = { path = "../crates/procfs-core-0.18.0" }
++rustix = { path = "../crates/rustix-1.1.4" }

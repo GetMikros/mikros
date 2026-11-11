@@ -9,6 +9,7 @@ mod casefold;
 mod check;
 mod cmake;
 mod console;
+mod coreutils;
 mod debug;
 mod debug_build;
 mod debuginfo;

@@ -1651,10 +1651,10 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
 /// The members of the system image that logging in on the text console
 /// needs: the accounts, terminal and session services with their
 /// manifests, the text console and the setup program with their program
-/// manifests, the user's shell msh, and the dynamic linker, libraries
-/// and keymaps they load. The fonts and the basic display driver, which
-/// the device manager must find in the boot image, are among the other
-/// members.
+/// manifests, the user's shell msh, the command-line utilities, and the
+/// dynamic linker, libraries and keymaps they load. The fonts and the
+/// basic display driver, which the device manager must find in the boot
+/// image, are among the other members.
 fn login_members(
     kind: Kind,
     xkbcommon: &crate::ports::Built,
@@ -1690,6 +1690,10 @@ fn login_members(
     let msh = crate::rust_std::build("msh", kind)?;
     println!("built    {}", msh.display());
     members.push(("usr/bin/msh".into(), msh));
+    // The command-line utilities, each its own program.
+    for (name, program) in crate::coreutils::build()? {
+        members.push((format!("usr/bin/{name}"), program));
+    }
     members.extend([
         (
             "usr/lib/ld-mikros.dlib".into(),

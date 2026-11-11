@@ -186,34 +186,48 @@ fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Builds the program `bin` of the package of the same name in the
-/// `user/runtime/std` workspace, which uses the standard library, and returns
-/// its path. It is linked by the sysroot's Clang, with the C library
-/// and libunwind.
-pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
+/// `cargo build` in the workspace `dir` for the Mikros target, with the
+/// standard library built from the patched source, linked by the
+/// sysroot's Clang with the C library and libunwind, and with
+/// `rustflags` besides.
+pub fn cargo(dir: &Path, rustflags: &[&str]) -> Result<Command> {
     let root = crate::workspace_root();
     let sysroot = crate::sysroot::build()?;
     let library = source()?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let linker = crate::llvm::tool("clang");
     let config = crate::sysroot::config(&sysroot);
-    let rustflags = [
+    let mut flags = vec![
         format!("-Clinker={}", linker.display()),
         "-Clinker-flavor=gcc".to_owned(),
         format!("-Clink-arg=--config={}", config.display()),
     ];
-    let status = Command::new(cargo)
-        .current_dir(root.join("user/runtime/std"))
+    flags.extend(rustflags.iter().map(|f| f.to_string()));
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(dir)
         .env("__CARGO_TESTS_ONLY_SRC_ROOT", &library)
-        .env("CARGO_ENCODED_RUSTFLAGS", rustflags.join("\x1f"))
+        .env("CARGO_ENCODED_RUSTFLAGS", flags.join("\x1f"))
         // These replace the `user` workspace's settings, which build
         // only the core library and its memory functions.
         .args([
+            "-Zjson-target-spec",
             "-Zbuild-std=std,panic_unwind",
             "-Zbuild-std-features=panic-unwind",
         ])
-        .args(["build", "--package", bin, "--bin", bin, "--target"])
-        .arg(root.join(crate::build::USER_TARGET))
+        .args(["build", "--target"])
+        .arg(root.join(crate::build::USER_TARGET));
+    Ok(command)
+}
+
+/// Builds the program `bin` of the package of the same name in the
+/// `user/runtime/std` workspace, which uses the standard library, and returns
+/// its path. It is linked by the sysroot's Clang, with the C library
+/// and libunwind.
+pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
+    let root = crate::workspace_root();
+    let status = cargo(&root.join("user/runtime/std"), &[])?
+        .args(["--package", bin, "--bin", bin])
         .args(["--profile", kind.profile()])
         .status()
         .context("failed to run cargo")?;
