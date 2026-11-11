@@ -451,6 +451,7 @@ async fn get_info(
             user: record.user,
             app_id: record.app_id.clone(),
             path: record.path.clone(),
+            koid: record.koid,
         },
     })
 }

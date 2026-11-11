@@ -1,4 +1,4 @@
-// MIKSPEC-0034.R37
+// MIKSPEC-0034.R38
 
 library mikros.process;
 using mikros.base;
@@ -35,6 +35,7 @@ type ProcessInfo = struct {
     user u32;
     app_id string<128>;
     path string<1024>;
+    koid u64;
 };
 
 type StatusKind = enum : u32 { EXITED = 1; STOPPED = 2; CONTINUED = 3; };
