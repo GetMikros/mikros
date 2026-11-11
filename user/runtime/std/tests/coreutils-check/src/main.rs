@@ -2,14 +2,22 @@
 //! on Mikros. Given a writable folder, it makes `coreutils-check` in it,
 //! runs each utility there against files it creates, and checks what
 //! each writes and how it exits, for one ordinary use and, except for
-//! `echo` and `true`, one error. It
+//! `echo`, `true` and `yes`, one error. It
 //! prints each check that failed, removes its folder, and exits with 0
 //! and a greeting when all passed, and with the number that failed
 //! otherwise.
 
-use std::io::Write;
+mod files;
+mod sums;
+mod system;
+mod text;
+
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+/// A variable every run has, for `printenv`.
+const VARIABLE: (&str, &str) = ("COREUTILS_CHECK", "set");
 
 /// What a run wrote and how it ended.
 struct Ran {
@@ -20,10 +28,20 @@ struct Ran {
 
 /// Runs `args` in `dir` with `input` on standard input.
 fn run(dir: &Path, args: &[&str], input: &str) -> Ran {
+    run_with(dir, args, Some(input))
+}
+
+/// Runs `args` in `dir` with `input` on standard input, or with the
+/// terminal that this program has when there is no input.
+fn run_with(dir: &Path, args: &[&str], input: Option<&str>) -> Ran {
     let child = Command::new(args[0])
         .args(&args[1..])
         .current_dir(dir)
-        .stdin(Stdio::piped())
+        .env(VARIABLE.0, VARIABLE.1)
+        .stdin(match input {
+            Some(_) => Stdio::piped(),
+            None => Stdio::inherit(),
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
@@ -37,7 +55,7 @@ fn run(dir: &Path, args: &[&str], input: &str) -> Ran {
             };
         }
     };
-    if let Some(mut stdin) = child.stdin.take() {
+    if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
         let _ = stdin.write_all(input.as_bytes());
     }
     match child.wait_with_output() {
@@ -69,11 +87,35 @@ impl Checks<'_> {
         }
     }
 
+    /// Checks that `args` with `input` exits with 0 and writes what
+    /// `good` accepts, which `what` describes.
+    fn ok_if(&mut self, args: &[&str], input: &str, good: impl Fn(&str) -> bool, what: &str) {
+        let r = run(self.dir, args, input);
+        if r.code != Some(0) || !good(&r.out) {
+            self.fail(args, &r, &format!("{what} and status 0"));
+        }
+    }
+
     /// Checks that `args` fails with status `code` and an error message.
     fn err(&mut self, args: &[&str], code: i32) {
-        let r = run(self.dir, args, "");
+        self.err_with(args, "", code);
+    }
+
+    /// Checks that `args` with `input` fails with status `code` and an
+    /// error message.
+    fn err_with(&mut self, args: &[&str], input: &str, code: i32) {
+        let r = run(self.dir, args, input);
         if r.code != Some(code) || r.err.is_empty() {
             self.fail(args, &r, &format!("an error and status {code}"));
+        }
+    }
+
+    /// Checks that `args` fails with status `code` and writes `out`,
+    /// for a utility that fails without a message.
+    fn fails(&mut self, args: &[&str], code: i32, out: &str) {
+        let r = run(self.dir, args, "");
+        if r.code != Some(code) || r.out != out {
+            self.fail(args, &r, &format!("{out:?} and status {code}"));
         }
     }
 
@@ -88,10 +130,33 @@ impl Checks<'_> {
     fn fail(&mut self, args: &[&str], r: &Ran, wanted: &str) {
         println!(
             "coreutils-check: {args:?} wrote {:?} and {:?} and ended with {:?}, not {wanted}",
-            r.out, r.err, r.code
+            short(&r.out),
+            short(&r.err),
+            r.code
         );
         self.failed += 1;
     }
+}
+
+/// The start of `text`, at most 60 characters.
+fn short(text: &str) -> String {
+    text.chars().take(60).collect()
+}
+
+/// The first `n` bytes that `args` writes, after which it is killed.
+fn first_bytes(dir: &Path, args: &[&str], n: usize) -> Option<Vec<u8>> {
+    let mut child = Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut bytes = vec![0; n];
+    let read = child.stdout.take()?.read_exact(&mut bytes);
+    let _ = child.kill();
+    let _ = child.wait();
+    read.ok().map(|()| bytes)
 }
 
 fn main() {
@@ -236,6 +301,10 @@ fn main() {
         ),
     );
     c.err(&["df", "missing"], 1);
+    sums::check(&mut c);
+    text::check(&mut c);
+    files::check(&mut c);
+    system::check(&mut c);
 
     let _ = std::fs::remove_dir_all(&dir);
     if c.failed > 0 {
