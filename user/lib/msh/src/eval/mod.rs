@@ -142,6 +142,14 @@ impl<S: System> Shell<S> {
             .chain((boundary > 0).then_some(0))
     }
 
+    /// The value of `$status`.
+    pub fn status(&self) -> i64 {
+        match self.lookup("status") {
+            Some(Value::Int(n)) => *n,
+            _ => 0,
+        }
+    }
+
     fn lookup(&self, name: &str) -> Option<&Value> {
         self.visible()
             .find_map(|i| self.frames[i].variables.get(name))

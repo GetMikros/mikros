@@ -64,3 +64,12 @@ fn reports_as_jobs_lists() {
     assert_eq!(lines[0], format!("[1]-  {:<24}sleep 10 | cat", "Running"));
     assert_eq!(lines[1], format!("[2]+  {:<24}vim notes.txt", "Stopped"));
 }
+
+#[test]
+fn a_removed_job_leaves_the_others_current() {
+    let mut jobs = two();
+    assert_eq!(jobs.remove(2).map(|j| j.number), Some(2));
+    assert_eq!(jobs.current(), Some(1));
+    assert!(jobs.get(2).is_none());
+    assert!(jobs.remove(2).is_none());
+}

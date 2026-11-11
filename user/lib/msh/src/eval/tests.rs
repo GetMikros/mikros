@@ -203,6 +203,9 @@ fn runs_programs_with_pipes_and_captures_output() {
     // What a built-in command writes goes down the pipe.
     assert_eq!(ok("print x | shout"), "X\n");
     assert_eq!(ok("print x | upper | print"), "X\n");
+    let mut s = shell();
+    run(&mut s, "echo a 'b c' | shout").unwrap();
+    assert_eq!(s.system.runs[0].text, "echo a b c | shout");
 }
 
 #[test]

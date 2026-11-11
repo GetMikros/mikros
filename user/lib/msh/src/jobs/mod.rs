@@ -191,6 +191,14 @@ impl Jobs {
         Some(number)
     }
 
+    /// Removes job `number`, as for a pipeline that ended in the
+    /// foreground, which is not reported.
+    pub fn remove(&mut self, number: usize) -> Option<Job> {
+        let index = self.jobs.iter().position(|j| j.number == number)?;
+        self.recent.retain(|&n| n != number);
+        Some(self.jobs.remove(index))
+    }
+
     /// Removes the jobs that are done, after they were reported, and
     /// returns them.
     pub fn remove_done(&mut self) -> Vec<Job> {

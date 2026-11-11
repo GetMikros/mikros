@@ -53,7 +53,7 @@ impl<S: System> Shell<S> {
             if !found.iter().all(|f| matches!(f, Found::Program(_))) {
                 return Err(self.fail("only programs run in the background".into()));
             }
-            let programs = found
+            let programs: Vec<Program> = found
                 .into_iter()
                 .map(|f| match f {
                     Found::Program(p) => p,
@@ -61,11 +61,11 @@ impl<S: System> Shell<S> {
                 })
                 .collect();
             let run = Run {
+                text: text(&programs),
                 programs,
                 input: Input::Inherit,
                 capture: false,
                 background: true,
-                text: self.command.clone(),
             };
             self.system.run(run).map_err(|e| self.fail(e))?;
             return Ok(Value::Null);
@@ -139,11 +139,11 @@ impl<S: System> Shell<S> {
         let gathered = !capture && !self.captures.is_empty();
         let names: Vec<String> = programs.iter().map(|p| p.args[0].clone()).collect();
         let run = Run {
+            text: text(&programs),
             programs,
             input,
             capture: capture || gathered,
             background: false,
-            text: self.command.clone(),
         };
         let Ran { ended, output } = self.system.run(run).map_err(|e| self.fail(e))?;
         if let Some(f) = self.ended(&names, &ended) {
@@ -435,4 +435,11 @@ impl<S: System> Shell<S> {
             other => other,
         }
     }
+}
+
+/// The command line of `programs` for job control: each one's arguments,
+/// joined by pipes.
+fn text(programs: &[Program]) -> String {
+    let texts: Vec<String> = programs.iter().map(|p| p.args.join(" ")).collect();
+    texts.join(" | ")
 }
