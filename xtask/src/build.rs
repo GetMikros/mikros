@@ -449,6 +449,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", hello_std.display());
             let spawn_std = crate::rust_std::build("spawn-std", kind)?;
             println!("built    {}", spawn_std.display());
+            let msh = crate::rust_std::build("msh", kind)?;
+            println!("built    {}", msh.display());
+            let msh_check = crate::rust_std::build("msh-check", kind)?;
+            println!("built    {}", msh_check.display());
+            let msh_options =
+                crate::workspace_root().join("user/runtime/std/tests/msh-check/options.msh");
             let programs = crate::workspace_root().join("user/tests/launcher-probe/programs");
             let (prog, closed, bad) = (
                 programs.join("system.prog.yaml"),
@@ -479,6 +485,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/lib/programs/system.bad.yaml", bad.as_path()),
                     ("usr/bin/hello-std", hello_std.as_path()),
                     ("usr/bin/spawn-std", spawn_std.as_path()),
+                    ("usr/bin/msh", msh.as_path()),
+                    ("usr/bin/msh-check", msh_check.as_path()),
+                    ("usr/share/msh/options.msh", msh_options.as_path()),
                     ("usr/bin/spawn-child", spawn_child.as_path()),
                     ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
                     ("usr/bin/library-user", library_user.as_path()),

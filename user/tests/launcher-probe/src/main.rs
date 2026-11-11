@@ -13,7 +13,8 @@
 //! It also spawns `/usr/bin/hello`, a static C program, and
 //! `/usr/bin/hello-std`, a Rust program that uses the standard library,
 //! with a stream as their standard output, and checks what they print,
-//! and reads more than the process manager's small heap blocks hold of
+//! runs `/usr/bin/msh-check`, which runs msh's scripts and checks what
+//! they do, and reads more than the process manager's small heap blocks hold of
 //! `/usr/bin/hello` with one `Read`.
 //!
 //! It logs each check that failed to the `USER` startup handle with ID 2,
@@ -86,6 +87,8 @@ const RAW_SYSCALL: &str = "/usr/bin/raw-syscall";
 const APP_RAW_SYSCALL: &str = "/Apps/test/bin/raw-syscall";
 /// A Rust program that starts processes with `std::process::Command`.
 const SPAWN_STD: &str = "/usr/bin/spawn-std";
+/// A Rust program that runs msh, the shell, and checks its scripts.
+const MSH_CHECK: &str = "/usr/bin/msh-check";
 /// A dynamic C program in the bundle of the app `test.app`.
 const BUNDLED: &str = "/Apps/test.app/bin/hello";
 /// The `id` of a stream as descriptor 1.
@@ -821,6 +824,12 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
         check(
             "reading what it printed",
             output.as_slice() == b"spawned, world\n",
+        )?;
+        let (output, code) = run_c(l, MSH_CHECK).await;
+        check("running msh's scripts", code == Some(0))?;
+        check(
+            "reading what it printed",
+            output.as_slice() == b"msh, world\n",
         )?;
         // The process manager's heap maps larger blocks of their own.
         let read = read_at_once(root, reactor, &HELLO[1..]).await;

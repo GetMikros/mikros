@@ -1,0 +1,8 @@
+[package]
+name = "msh-check"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "msh-check"
+path = "src/main.rs"

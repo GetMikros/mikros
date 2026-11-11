@@ -1,0 +1,3 @@
+# A script with an option, for msh-check.
+param --n: int
+print ($n + 1) $args
