@@ -1,6 +1,8 @@
 //! The terminals the console makes with the terminal service: the master
 //! stream, whose output the console's screen shows and which takes what
-//! is typed, and the token that names the terminal.
+//! is typed, and the token that names the terminal. Output that comes in
+//! pieces, as a program's redraw larger than the terminal service's
+//! chunks does, is drawn once it pauses, not piece by piece.
 
 use crate::notify::Notify;
 use mikros_rt::exec::Reactor;
@@ -12,7 +14,10 @@ use mikros_rt::interfaces::mikros::terminal::{
 use mikros_rt::sys;
 use mikros_vt::screen::Screen;
 use std::cell::{Cell, RefCell};
+use std::future::{Future, poll_fn};
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::Poll;
 
 const FACTORY: &str = "mikros.terminal.Factory";
 const READABLE: u32 = 1 << 0;
@@ -21,6 +26,11 @@ const PEER_CLOSED: u32 = 1 << 2;
 const SHOULD_WAIT: i64 = -22;
 const SAME_RIGHTS: u32 = 1 << 31;
 const CHUNK: usize = 4096;
+/// How long output may pause and still be drawn with what came before
+/// it, and the longest the screen goes undrawn while output keeps
+/// coming, in nanoseconds.
+const SETTLE: i64 = 4_000_000;
+const DRAW_INTERVAL: i64 = 33_000_000;
 
 pub struct Term {
     master: OwnedHandle,
@@ -125,6 +135,8 @@ impl Term {
     /// and answers the requests the output makes.
     pub async fn pump(self: Rc<Self>, reactor: Reactor) {
         let mut buffer = [0u8; CHUNK];
+        // When the output not drawn yet began to come.
+        let mut pending: Option<i64> = None;
         while !self.closed.get() {
             let mut actual = 0;
             // SAFETY: the pointers describe `buffer` and `actual`.
@@ -146,7 +158,18 @@ impl Term {
                     if !responses.is_empty() {
                         self.type_in(&reactor, &responses).await;
                     }
-                    self.changed.notify();
+                    let since = *pending.get_or_insert_with(crate::now);
+                    if crate::now() - since >= DRAW_INTERVAL {
+                        pending = None;
+                        self.changed.notify();
+                    }
+                }
+                SHOULD_WAIT if pending.is_some() => {
+                    let settle = crate::now() + SETTLE;
+                    if !readable_by(&reactor, self.master.raw(), settle).await {
+                        pending = None;
+                        self.changed.notify();
+                    }
                 }
                 SHOULD_WAIT => {
                     if reactor
@@ -160,10 +183,29 @@ impl Term {
                 _ => break,
             }
         }
+        if pending.is_some() {
+            self.changed.notify();
+        }
     }
 
     /// Stops reading: the terminal closes once the console drops it.
     pub fn close(&self) {
         self.closed.set(true);
     }
+}
+
+/// Whether `stream` becomes readable, or its writer goes, by `deadline`.
+async fn readable_by(reactor: &Reactor, stream: sys::Handle, deadline: i64) -> bool {
+    let mut signals = pin!(reactor.signals(stream, READABLE | PEER_CLOSED));
+    let mut sleep = pin!(reactor.sleep_until(deadline));
+    poll_fn(|cx| {
+        if signals.as_mut().poll(cx).is_ready() {
+            Poll::Ready(true)
+        } else if sleep.as_mut().poll(cx).is_ready() {
+            Poll::Ready(false)
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
 }

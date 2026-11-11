@@ -3,6 +3,9 @@
 //! over what was drawn before, and putting the cursor back in the line.
 //! Every character takes one column; the terminal wraps at the right
 //! margin, and a line feed in the prompt or the line starts a new row.
+//! The cursor is hidden while a frame is drawn, so that a terminal that
+//! shows the frame before all of it came shows no cursor where the
+//! drawing has got to.
 
 /// What to draw.
 pub struct View<'a> {
@@ -28,6 +31,8 @@ pub struct Frame {
 
 const DIM: &str = "\x1b[2m";
 const NORMAL: &str = "\x1b[0m";
+const HIDE_CURSOR: &str = "\x1b[?25l";
+const SHOW_CURSOR: &str = "\x1b[?25h";
 
 /// The length of the escape sequence that starts `s`, or 0.
 fn escape_len(s: &str) -> usize {
@@ -135,7 +140,8 @@ fn shown(c: char) -> char {
 /// `previous_row` rows below its first row.
 pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
     let columns = columns.max(1);
-    let mut text = String::from("\r");
+    let mut text = String::from(HIDE_CURSOR);
+    text.push('\r');
     if previous_row > 0 {
         text.push_str(&format!("\x1b[{previous_row}A"));
     }
@@ -188,6 +194,7 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
     if cursor.column > 0 {
         text.push_str(&format!("\x1b[{}C", cursor.column));
     }
+    text.push_str(SHOW_CURSOR);
     Frame {
         text,
         cursor_row: cursor.row,
@@ -233,13 +240,16 @@ mod tests {
     #[test]
     fn draws_the_line_and_puts_the_cursor_back() {
         let f = draw(&view("% ", "ls -l", 2), 80, 0);
-        assert_eq!(f.text, "\r\x1b[J% ls -l\r\x1b[4C");
+        assert_eq!(f.text, "\x1b[?25l\r\x1b[J% ls -l\r\x1b[4C\x1b[?25h");
         assert_eq!(f.cursor_row, 0);
         // A suggestion is dimmed, and the cursor stays before it.
         let mut v = view("% ", "ls", 2);
         v.suggestion = " -l";
         let f = draw(&v, 80, 2);
-        assert_eq!(f.text, "\r\x1b[2A\x1b[J% ls\x1b[2m -l\x1b[0m\r\x1b[4C");
+        assert_eq!(
+            f.text,
+            "\x1b[?25l\r\x1b[2A\x1b[J% ls\x1b[2m -l\x1b[0m\r\x1b[4C\x1b[?25h"
+        );
     }
 
     #[test]
@@ -247,10 +257,13 @@ mod tests {
         // 4 + 6 characters on 5 columns: two rows, the cursor at the end
         // on the third.
         let f = draw(&view("ab% ", "cdefgh", 6), 5, 0);
-        assert_eq!(f.text, "\r\x1b[Jab% cdefgh\r\n\r");
+        assert_eq!(f.text, "\x1b[?25l\r\x1b[Jab% cdefgh\r\n\r\x1b[?25h");
         assert_eq!(f.cursor_row, 2);
         let f = draw(&view("ab% ", "cdefgh", 2), 5, 0);
-        assert_eq!(f.text, "\r\x1b[Jab% cdefgh\r\n\x1b[1A\r\x1b[1C");
+        assert_eq!(
+            f.text,
+            "\x1b[?25l\r\x1b[Jab% cdefgh\r\n\x1b[1A\r\x1b[1C\x1b[?25h"
+        );
         assert_eq!(f.cursor_row, 1);
     }
 
@@ -262,15 +275,18 @@ mod tests {
         let f = draw(&v, 6, 0);
         assert_eq!(
             f.text,
-            "\r\x1b[J% x\r\none\x1b[0m\r\n\x1b[7mtwo t\x1b[0m\x1b[2A\r\x1b[3C"
+            "\x1b[?25l\r\x1b[J% x\r\none\x1b[0m\r\n\x1b[7mtwo t\x1b[0m\x1b[2A\r\x1b[3C\x1b[?25h"
         );
-        assert_eq!(finish("% ", "x", 6, 0), "\r\x1b[J% x\r\x1b[3C\r\n");
+        assert_eq!(
+            finish("% ", "x", 6, 0),
+            "\x1b[?25l\r\x1b[J% x\r\x1b[3C\x1b[?25h\r\n"
+        );
     }
 
     #[test]
     fn starts_rows_at_line_feeds() {
         let f = draw(&view("% ", "if x {\n  y", 10), 80, 0);
-        assert_eq!(f.text, "\r\x1b[J% if x {\r\n  y\r\x1b[3C");
+        assert_eq!(f.text, "\x1b[?25l\r\x1b[J% if x {\r\n  y\r\x1b[3C\x1b[?25h");
         assert_eq!(f.cursor_row, 1);
     }
 }
