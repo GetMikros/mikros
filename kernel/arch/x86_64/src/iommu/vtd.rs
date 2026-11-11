@@ -358,6 +358,18 @@ impl Unit {
         self.submit(&[[CONTEXT_GLOBAL, 0], [iotlb, 0]])
     }
 
+    /// In the diagnostic build, calls `each` with the device, ID and
+    /// pinned pages of each domain.
+    #[cfg(feature = "diag")]
+    pub fn domains(
+        &self,
+        each: &mut dyn FnMut(u64, u16, usize) -> core::fmt::Result,
+    ) -> core::fmt::Result {
+        self.domains
+            .iter()
+            .try_for_each(|(rid, d)| each(*rid, d.id, d.pages.len()))
+    }
+
     /// The domain of `rid`, made with empty tables and a context entry on
     /// first use.
     fn domain(&mut self, rid: u64) -> Result<&mut Domain, Error> {

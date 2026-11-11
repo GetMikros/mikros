@@ -29,6 +29,8 @@ use kernel_core::coverage;
 mod coverage_hook;
 #[cfg(target_os = "none")]
 mod cpu;
+#[cfg(feature = "diag")]
+mod diag;
 #[cfg(target_os = "none")]
 mod entropy;
 #[cfg(target_os = "none")]

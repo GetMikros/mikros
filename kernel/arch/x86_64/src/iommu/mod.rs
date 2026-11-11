@@ -474,6 +474,27 @@ impl Iommu {
     }
 }
 
+/// In the diagnostic build, calls `each` with the device, domain ID and
+/// pinned pages of every domain. Without `wait`, does nothing while the
+/// IOMMUs are locked.
+#[cfg(feature = "diag")]
+pub fn domains(
+    wait: bool,
+    each: &mut dyn FnMut(u64, u16, usize) -> core::fmt::Result,
+) -> core::fmt::Result {
+    let iommu = match wait {
+        true => Some(IOMMU.lock()),
+        false => IOMMU.try_lock(),
+    };
+    let Some(Some(iommu)) = iommu.as_deref() else {
+        return Ok(());
+    };
+    match &iommu.units {
+        Units::Vtd(v) => v.units.iter().try_for_each(|u| u.domains(each)),
+        Units::Amd(a) => a.units.iter().try_for_each(|u| u.domains(each)),
+    }
+}
+
 /// Whether DMA is isolated and the device `rid` is behind none of the
 /// units, so that pins for it cannot take effect.
 pub fn unknown(rid: u64) -> bool {

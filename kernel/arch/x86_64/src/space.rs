@@ -73,6 +73,18 @@ impl Tables for FrameTables {
     }
 }
 
+/// In the diagnostic build, the bytes of the dynamic region in use and
+/// its size, or `None` without `wait` while it is locked.
+#[cfg(feature = "diag")]
+pub fn dynamic_use(wait: bool) -> Option<(u64, u64)> {
+    let dynamic = match wait {
+        true => Some(DYNAMIC.lock()),
+        false => DYNAMIC.try_lock(),
+    }?;
+    let size = DYNAMIC_END - DYNAMIC_START - RUNTIME_WINDOW_SIZE;
+    Some((size - dynamic.free_bytes(), size))
+}
+
 /// Reserves `size` bytes of the dynamic region with an unmapped page
 /// below them, and returns the start of the reserved range.
 pub fn reserve_dynamic(size: u64) -> u64 {

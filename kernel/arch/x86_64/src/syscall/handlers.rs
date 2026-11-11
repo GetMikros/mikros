@@ -1819,6 +1819,8 @@ pub fn port_wait(port: Checked, deadline: i64, out: UserOut<u8>) -> Result<(), E
     }
     let process = current_process()?;
     let port = object::<crate::port::Port>(port);
+    #[cfg(feature = "diag")]
+    let _waiting = kernel_core::diag::Waiting::on(port.header().koid());
     // The packet leaves the queue only once its output is prepared; when
     // another waiter takes it meanwhile, this one waits again.
     loop {
@@ -2299,4 +2301,40 @@ pub fn fuzz_preempt_at(
     let thread = crate::sched::current().ok_or(Error::BadState)?;
     let event = event.map(|e| (e.object, e.value));
     crate::fuzz::preempt_at(&thread, point, count, event, deadline)
+}
+
+/// In the diagnostic build, writes the account of the kernel's state of
+/// `kernel_core::diag` and `crate::diag` into `buffer`, or only its size
+/// into `actual` when it does not fit in `size` bytes.
+#[cfg(feature = "diag")]
+pub fn diag_snapshot(
+    resource: Checked,
+    buffer: UserOut<u8>,
+    size: u64,
+    actual: UserOut<u64>,
+) -> Result<(), Error> {
+    use kernel_core::object::resource::KIND_DIAG;
+    if !object::<Resource>(resource).grants(KIND_DIAG, 0, 0) {
+        return Err(Error::AccessDenied);
+    }
+    let mut text = kernel_core::diag::Text::default();
+    let written = kernel_core::diag::summary(&mut text)
+        .and_then(|()| crate::diag::records(&mut text, true))
+        .and_then(|()| kernel_core::diag::tasks(&mut text));
+    written.map_err(|_| Error::NoMemory)?;
+    let text = &text.0[..];
+    let needed = text.len() as u64;
+    // Both addresses are checked before anything is written.
+    if !actual.fits(1) || (size >= needed && !buffer.fits(needed)) {
+        return Err(Error::InvalidArgs);
+    }
+    let process = current_process()?;
+    if size < needed {
+        let outputs = prepare(&process, &[actual.range(1)])?;
+        publish(outputs, &[bytes_of(&[needed])]);
+        return Err(Error::BufferTooSmall);
+    }
+    let outputs = prepare(&process, &[buffer.range(needed), actual.range(1)])?;
+    publish(outputs, &[text, bytes_of(&[needed])]);
+    Ok(())
 }

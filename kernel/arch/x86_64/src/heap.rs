@@ -39,6 +39,17 @@ unsafe impl Sync for Records {}
 #[cfg(feature = "diag")]
 static RECORDS: Records = Records(core::cell::UnsafeCell::new([0; 1 << 20]));
 
+/// In the diagnostic build, the heap's use by class and its whole pages,
+/// or `None` without `wait` while the heap is locked.
+#[cfg(feature = "diag")]
+pub fn usage(wait: bool) -> Option<([(usize, usize); kernel_core::heap::CLASSES], usize)> {
+    let heap = match wait {
+        true => Some(HEAP.0.lock()),
+        false => HEAP.0.try_lock(),
+    };
+    heap.map(|h| h.usage())
+}
+
 /// The global allocator. Its lock does not disable interrupts, so
 /// interrupt handlers must not allocate.
 struct KernelHeap(SpinLock<Heap<DynamicPages>>);

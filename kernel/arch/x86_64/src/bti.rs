@@ -162,6 +162,11 @@ impl Pin {
                 return Err(e);
             }
         }
+        #[cfg(feature = "diag")]
+        crate::diag::PINNED.fetch_add(
+            self.frames.len() as u64,
+            core::sync::atomic::Ordering::Relaxed,
+        );
         iommu::sync(self.rid)
     }
 
@@ -176,6 +181,11 @@ impl Pin {
     /// Takes the device's access back, and returns once the IOMMU no
     /// longer uses it. The object goes with the pin.
     fn remove(self) -> Result<(), Error> {
+        #[cfg(feature = "diag")]
+        crate::diag::PINNED.fetch_sub(
+            self.frames.len() as u64,
+            core::sync::atomic::Ordering::Relaxed,
+        );
         self.unmap(&self.frames);
         iommu::sync(self.rid)
     }

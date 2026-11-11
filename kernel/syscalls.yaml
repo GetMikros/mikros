@@ -1154,3 +1154,15 @@ syscalls:
       - {name: len, type: u64, dir: in}
       - {name: source, type: Handle, dir: in, object: MemoryObject, rights: [READ, WRITE]}
       - {name: source_offset, type: u64, dir: in}
+
+  - name: diag_snapshot
+    number: 112
+    arch: [x86_64]
+    fuzz_only: false
+    diag_only: true
+    spec: [MIKSPEC-0022.R16]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: buffer, type: "*mut u8", dir: out}
+      - {name: size, type: u64, dir: in}
+      - {name: actual, type: "*mut u64", dir: out}

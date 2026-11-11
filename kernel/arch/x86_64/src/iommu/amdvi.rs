@@ -220,6 +220,18 @@ impl Unit {
         (space::direct(self.devtab) + u64::from(device) * DTE_SIZE) as *mut u64
     }
 
+    /// In the diagnostic build, calls `each` with the device, ID and
+    /// pinned pages of each domain.
+    #[cfg(feature = "diag")]
+    pub fn domains(
+        &self,
+        each: &mut dyn FnMut(u64, u16, usize) -> core::fmt::Result,
+    ) -> core::fmt::Result {
+        self.domains
+            .iter()
+            .try_for_each(|(device, d)| each(u64::from(*device), d.id, d.pages.len()))
+    }
+
     /// The domain of `device`, made with empty tables and a device table
     /// entry on first use.
     fn domain(&mut self, device: u16) -> Result<&mut Domain, Error> {
