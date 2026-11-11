@@ -4,7 +4,9 @@
 //! folder that holds the name, opened with the right to write it; one in
 //! a folder above namespace entries fails with `EROFS`. Owners do not
 //! change: the `chown` calls succeed only when they would change nothing,
-//! and every group is 0.
+//! and every group is 0. The file creation mask, which the startup
+//! transfer gives and `umask` changes, clears its bits from the mode of
+//! each file and folder made.
 
 use crate::errno::{self, EBADF, EEXIST, EINVAL, EIO, ENOTDIR, EPERM, EROFS};
 use crate::fd::{self, Description};
@@ -16,6 +18,8 @@ use mikros_rt::interfaces::mikros::fs::{
 };
 
 const FOREVER: i64 = i64::MAX;
+/// The file creation mask until the startup transfer gives one.
+const UMASK: u32 = 0o022;
 pub const AT_REMOVEDIR: i64 = 0x200;
 pub const AT_SYMLINK_NOFOLLOW: i64 = 0x100;
 const AT_SYMLINK_FOLLOW: i64 = 0x400;
@@ -376,4 +380,29 @@ pub fn fchownat(dirfd: i64, path: *const u8, uid: u32, gid: u32, flags: i64) -> 
 /// `fchown`.
 pub fn fchown(fd: i64, uid: u32, gid: u32) -> i64 {
     result(node_of(fd, Rights(0)).and_then(|node| chown_node(&node, uid, gid)))
+}
+
+/// The file creation mask.
+static CREATION_MASK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(UMASK);
+
+/// Makes `mask`, from the startup transfer, the file creation mask.
+pub fn start_with_mask(mask: u32) {
+    CREATION_MASK.store(mask & 0o777, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// `umask`: makes `mask` the file creation mask, and returns the mask it
+/// had.
+pub fn umask(mask: u32) -> i64 {
+    i64::from(CREATION_MASK.swap(mask & 0o777, core::sync::atomic::Ordering::Relaxed))
+}
+
+/// The file creation mask, which `Spawn` and `Exec` pass on.
+pub fn creation_mask() -> u32 {
+    CREATION_MASK.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// `mode` without the bits of the file creation mask, for a file or
+/// folder being made.
+pub fn masked(mode: u32) -> u32 {
+    mode & !creation_mask()
 }

@@ -198,6 +198,7 @@ fn child(launcher: &LauncherClient, mode: &str, handles: Vec<StartupHandle>) -> 
         login_session: false,
         new_session: false,
         working_directory: None,
+        umask: u32::MAX,
     };
     let pid = match launcher.spawn(request, FOREVER) {
         Ok(Ok(spawned)) => spawned.pid,
@@ -440,7 +441,7 @@ fn c_program(factory: &FactoryClient, launcher: &LauncherClient) -> Option<()> {
         height: 0,
     };
     let Ok(Ok(opened)) = factory.open(size, FOREVER) else {
-        return failed("a third Open");
+        return failed("the C program's Open");
     };
     let (master, token) = (opened.master, opened.terminal);
     // Descriptors 0, 1 and 2, of kind 8, a slave terminal.
@@ -465,6 +466,7 @@ fn c_program(factory: &FactoryClient, launcher: &LauncherClient) -> Option<()> {
         login_session: false,
         new_session: false,
         working_directory: None,
+        umask: u32::MAX,
     };
     let pid = reply("starting the C program", launcher.spawn(request, FOREVER))?.pid;
     check(

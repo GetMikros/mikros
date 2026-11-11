@@ -98,6 +98,7 @@ const SYS_UNLINK: i64 = 87;
 const SYS_SYMLINK: i64 = 88;
 const SYS_CHMOD: i64 = 90;
 const SYS_FCHMOD: i64 = 91;
+const SYS_UMASK: i64 = 95;
 const SYS_CHOWN: i64 = 92;
 const SYS_FCHOWN: i64 = 93;
 const SYS_LCHOWN: i64 = 94;
@@ -174,8 +175,8 @@ extern "C" fn __mikros_syscall(
         SYS_PREAD64 => io::pread(a1, a2 as *mut u8, a3 as u64, a4),
         SYS_PWRITE64 => io::pwrite(a1, a2 as *const u8, a3 as u64, a4),
         SYS_LSEEK => io::lseek(a1, a2, a3),
-        SYS_OPEN => fs::open(fs::AT_FDCWD, a1 as *const u8, a2 as u32, a3 as u32),
-        SYS_OPENAT => fs::open(a1, a2 as *const u8, a3 as u32, a4 as u32),
+        SYS_OPEN => fs::open(fs::AT_FDCWD, a1 as *const u8, a2 as u32, created(a2, a3)),
+        SYS_OPENAT => fs::open(a1, a2 as *const u8, a3 as u32, created(a3, a4)),
         SYS_CLOSE => fd::close(a1),
         SYS_STAT => stat::fstatat(fs::AT_FDCWD, a1 as *const u8, a2 as *mut stat::Kstat, 0),
         SYS_LSTAT => {
@@ -188,8 +189,9 @@ extern "C" fn __mikros_syscall(
             )
         }
         SYS_FSTAT => stat::fstat(a1, a2 as *mut stat::Kstat),
-        SYS_MKDIR => files::mkdirat(fs::AT_FDCWD, a1 as *const u8, a2 as u32),
-        SYS_MKDIRAT => files::mkdirat(a1, a2 as *const u8, a3 as u32),
+        SYS_MKDIR => files::mkdirat(fs::AT_FDCWD, a1 as *const u8, files::masked(a2 as u32)),
+        SYS_MKDIRAT => files::mkdirat(a1, a2 as *const u8, files::masked(a3 as u32)),
+        SYS_UMASK => files::umask(a1 as u32),
         SYS_RMDIR => files::unlinkat(fs::AT_FDCWD, a1 as *const u8, files::AT_REMOVEDIR),
         SYS_UNLINK => files::unlinkat(fs::AT_FDCWD, a1 as *const u8, 0),
         SYS_UNLINKAT => files::unlinkat(a1, a2 as *const u8, a3),
@@ -359,6 +361,15 @@ extern "C" fn __mikros_syscall(
 
 pub(crate) fn process() -> Handle {
     PROCESS.load(Ordering::Relaxed)
+}
+
+/// The mode of `open` with `flags`: for a file it may make, `mode`
+/// without the bits of the file creation mask.
+fn created(flags: i64, mode: i64) -> u32 {
+    match flags as u32 & fs::O_CREAT {
+        0 => mode as u32,
+        _ => files::masked(mode as u32),
+    }
 }
 
 fn exit(code: i64) -> ! {

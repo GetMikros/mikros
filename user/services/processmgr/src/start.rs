@@ -22,7 +22,11 @@ use processmgr::bootfs::{Executable, Fs};
 const PAGE_SIZE: u64 = 4096;
 const PERM_READ: u32 = 1 << 0;
 /// The only version of the transfer.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
+/// The file creation mask of a program whose spawner asks for the
+/// default, which it does with `DEFAULT_UMASK`.
+pub const UMASK: u32 = 0o022;
+pub const DEFAULT_UMASK: u32 = u32::MAX;
 /// The most entries one `Handles` or `Namespace` batch carries.
 const BATCH_MAX: usize = 32;
 const SAME_RIGHTS: u32 = 1 << 31;
@@ -386,6 +390,8 @@ pub struct Transfer {
     pub namespace: Vec<NamespaceEntry>,
     /// The folder the program starts in.
     pub working_directory: String,
+    /// The program's file creation mask.
+    pub umask: u32,
 }
 
 impl Started {
@@ -418,6 +424,7 @@ impl Started {
             program_phnum: self.phnum,
             interpreter_base: self.interpreter_base,
             working_directory: transfer.working_directory,
+            umask: transfer.umask,
         };
         sent(self.bootstrap.begin(header))?;
         let mut handles = transfer.handles;

@@ -185,6 +185,7 @@ impl Starter {
             login_session: false,
             new_session: false,
             working_directory: None,
+            umask: u32::MAX,
         };
         let spawned = match self.launcher.spawn(request).await {
             Ok(Ok(spawned)) => spawned,

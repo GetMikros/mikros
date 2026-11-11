@@ -67,6 +67,7 @@ async fn start(
         login_session: leader,
         new_session: leader,
         working_directory: home,
+        umask: u32::MAX,
     };
     match launcher.spawn(request).await {
         Ok(Ok(spawned)) => Ok(spawned.pid),

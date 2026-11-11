@@ -249,6 +249,7 @@ async fn run(launcher: &LauncherAsyncClient, reactor: &Reactor, test: &Test) -> 
         login_session: false,
         new_session: false,
         working_directory: None,
+        umask: u32::MAX,
     };
     let pid = match launcher.spawn(request).await {
         Ok(Ok(r)) => r.pid,

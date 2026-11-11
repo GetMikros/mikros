@@ -277,6 +277,7 @@ unsafe fn request(
         login_session: false,
         new_session: false,
         working_directory: Some(folder),
+        umask: crate::files::creation_mask(),
     })
 }
 

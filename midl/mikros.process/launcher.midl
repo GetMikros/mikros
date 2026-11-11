@@ -1,4 +1,4 @@
-// MIKSPEC-0034.R32
+// MIKSPEC-0034.R37
 
 library mikros.process;
 using mikros.base;
@@ -23,6 +23,7 @@ type SpawnRequest = struct {
     login_session bool;
     new_session bool;
     working_directory string<1024>?;
+    umask u32;
 };
 
 type ProcessInfo = struct {

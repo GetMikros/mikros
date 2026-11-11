@@ -182,6 +182,7 @@ impl Manager {
             handles,
             service_manager: true,
             working_directory: "/".into(),
+            umask: start::UMASK,
         };
         // The service manager may spawn as soon as its transfer is
         // complete, and its children are bound over the same endpoint.

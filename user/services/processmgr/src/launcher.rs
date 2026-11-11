@@ -192,6 +192,10 @@ async fn new_process(
         handles: request.handles,
         service_manager: false,
         working_directory: request.working_directory.unwrap_or_else(|| "/".into()),
+        umask: match request.umask {
+            start::DEFAULT_UMASK => start::UMASK,
+            mask => mask & 0o777,
+        },
     };
     Ok((new, same))
 }

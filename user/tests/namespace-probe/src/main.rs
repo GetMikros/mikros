@@ -74,6 +74,7 @@ fn spawn(launcher: &LauncherClient, path: &str, app_id: &str) -> Result<u32, Opt
         login_session: false,
         new_session: false,
         working_directory: None,
+        umask: u32::MAX,
     };
     match launcher.spawn(request, FOREVER) {
         Ok(Ok(spawned)) => Ok(spawned.pid),
@@ -123,6 +124,7 @@ fn spawn_own(launcher: &LauncherClient, path: &str) -> Result<u32, Option<Status
         login_session: false,
         new_session: false,
         working_directory: None,
+        umask: u32::MAX,
     };
     match launcher.spawn(request, FOREVER) {
         Ok(Ok(spawned)) => Ok(spawned.pid),

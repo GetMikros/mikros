@@ -181,6 +181,7 @@ async fn start_copy(
         login_session: false,
         new_session: false,
         working_directory: None,
+        umask: u32::MAX,
     };
     match launcher.spawn(request).await {
         Ok(Ok(_)) => Ok(()),

@@ -2,17 +2,22 @@
  * renames and removes files and folders in a folder of its own below
  * the folder named by its argument, which must be writable, and exits
  * with 0 when every check below passed, and with the number of the
- * first check that failed otherwise, after printing what failed. */
+ * first check that failed otherwise, after printing what failed. Given
+ * `--umask`, it exits with its file creation mask instead. */
 
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+extern char **environ;
 
 static int step;
 
@@ -36,6 +41,10 @@ int main(int argc, char **argv)
 	char dir[256], a[300], b[300], c[300], s[300], sub[300], target[64];
 	struct stat st;
 	struct statvfs vfs;
+	pid_t pid;
+	int status;
+	if (argc == 2 && strcmp(argv[1], "--umask") == 0)
+		return umask(0);
 	if (argc != 2)
 		return 100;
 	snprintf(dir, sizeof dir, "%s/files-c", argv[1]);
@@ -52,6 +61,19 @@ int main(int argc, char **argv)
 	CHECK(mkdir(sub, 0700) == 0);
 	CHECK(rmdir(sub) == 0);
 	CHECK(fails_with(rmdir(sub), ENOENT));
+
+	/* The file creation mask, 022 from the session, clears its bits from
+	 * what is made, and a child starts with it. */
+	char *child[] = {"files-c", "--umask", NULL};
+	CHECK(umask(077) == 022);
+	CHECK(mkdir(sub, 0777) == 0 && stat(sub, &st) == 0 && (st.st_mode & 0777) == 0700);
+	CHECK(rmdir(sub) == 0);
+	int made = open(a, O_CREAT | O_WRONLY | O_EXCL, 0666);
+	CHECK(made >= 0 && fstat(made, &st) == 0 && (st.st_mode & 0777) == 0600);
+	CHECK(close(made) == 0 && unlink(a) == 0);
+	CHECK(posix_spawn(&pid, "/usr/bin/files-c", NULL, NULL, child, environ) == 0);
+	CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 077);
+	CHECK(umask(022) == 077);
 
 	/* A file, its size, mode and times. */
 	int fd = open(a, O_CREAT | O_WRONLY | O_TRUNC, 0644);

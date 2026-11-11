@@ -178,6 +178,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     login_session: false,
                     new_session: false,
                     working_directory: None,
+                    umask: u32::MAX,
                 };
                 // On success this process is killed before the reply.
                 let _ = launcher.exec(request).await;
@@ -378,6 +379,7 @@ async fn spawn(
         login_session: false,
         new_session: false,
         working_directory: None,
+        umask: u32::MAX,
     };
     change(&mut request);
     match launcher.spawn(request).await {

@@ -98,6 +98,9 @@ pub struct NewProcess {
     pub service_manager: bool,
     /// The folder it starts in, as its spawner named it, or `/`.
     pub working_directory: String,
+    /// Its file creation mask, as its spawner named it, or 0o022 for the
+    /// default.
+    pub umask: u32,
 }
 
 impl Shared {
@@ -200,6 +203,7 @@ impl Shared {
             arguments,
             handles,
             working_directory,
+            umask,
             ..
         } = new;
         let identity = ClientIdentity {
@@ -217,6 +221,7 @@ impl Shared {
                 handles,
                 namespace,
                 working_directory,
+                umask,
                 control,
             )
             .await;
@@ -299,6 +304,7 @@ impl Shared {
         handles: Vec<StartupHandle>,
         namespace: Vec<NamespaceEntry>,
         working_directory: String,
+        umask: u32,
         control: &ProcessDirectoryAsyncClient,
     ) -> Result<(), Status> {
         let channel = |_| Status::NoResources;
@@ -319,6 +325,7 @@ impl Shared {
             time_page: self.time_page.borrow().as_ref().map(|page| page.raw()),
             namespace,
             working_directory,
+            umask,
         })?;
         bind(control, identity, directory_end).await?;
         started.complete()
