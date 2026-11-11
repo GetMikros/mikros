@@ -45,6 +45,10 @@ pub struct Cpu {
     pub last_tick: core::sync::atomic::AtomicI64,
     #[cfg(feature = "diag")]
     pub waiting_since: core::sync::atomic::AtomicI64,
+    /// In the diagnostic build, the latest time the timer may be armed
+    /// for, or 0 before it first is.
+    #[cfg(feature = "diag")]
+    pub heartbeat_due: core::sync::atomic::AtomicI64,
     #[cfg(feature = "diag")]
     pub running: core::sync::atomic::AtomicU64,
     /// In the diagnostic build, the nanoseconds the processor has idled.
@@ -72,6 +76,8 @@ impl Cpu {
             last_tick: core::sync::atomic::AtomicI64::new(0),
             #[cfg(feature = "diag")]
             waiting_since: core::sync::atomic::AtomicI64::new(0),
+            #[cfg(feature = "diag")]
+            heartbeat_due: core::sync::atomic::AtomicI64::new(0),
             #[cfg(feature = "diag")]
             running: core::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "diag")]

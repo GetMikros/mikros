@@ -1,5 +1,6 @@
 //! The lockup watchdog of the diagnostic build. Every processor's timer
-//! interrupts it at least every `HEARTBEAT`. At each interrupt the
+//! interrupts it at least every `HEARTBEAT` after the last time it did,
+//! however often the timer is armed meanwhile. At each interrupt the
 //! processor records the time and whether threads wait in its queue,
 //! and checks every processor: the kernel stops when one has not handled
 //! its timer interrupt for `LIMIT`, or when no user thread has run for
@@ -8,7 +9,7 @@
 use super::{CpuSched, Thread};
 use core::sync::atomic::{AtomicI64, Ordering};
 
-/// The longest a processor's timer stays unarmed.
+/// The longest a processor's timer interrupts stay apart.
 pub const HEARTBEAT: i64 = 1_000_000_000;
 /// How long a processor may go without its timer interrupt, and user
 /// threads without running while one is runnable.
@@ -27,11 +28,29 @@ pub fn started(thread: Option<&Thread>, now: i64) {
     }
 }
 
+/// The latest time at `now` that this processor's timer may be armed
+/// for: `HEARTBEAT` after its last timer interrupt, or after its first
+/// arming. Arming the timer again does not move it, so that a processor
+/// woken often by other interrupts still takes its timer interrupt.
+pub fn heartbeat(now: i64) -> i64 {
+    let me = crate::cpu::this();
+    match me.heartbeat_due.load(Ordering::Relaxed) {
+        0 => {
+            let due = now.saturating_add(HEARTBEAT);
+            me.heartbeat_due.store(due, Ordering::Relaxed);
+            due
+        }
+        due => due,
+    }
+}
+
 /// Handles this processor's timer interrupt at `now`, with its scheduler
 /// state `sched`, and stops the kernel when a check fails.
 pub fn tick(now: i64, sched: &CpuSched) {
     let me = crate::cpu::this();
     me.last_tick.store(now, Ordering::Relaxed);
+    me.heartbeat_due
+        .store(now.saturating_add(HEARTBEAT), Ordering::Relaxed);
     if sched
         .current
         .as_ref()
@@ -111,5 +130,19 @@ mod tests {
         cpu.last_tick.store(0, Ordering::Relaxed);
         cpu.waiting_since.store(0, Ordering::Relaxed);
         USER_RAN.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn arming_again_does_not_put_the_heartbeat_off() {
+        let _mock = crate::arch::mock::lock();
+        let cpu = crate::cpu::of(0).unwrap();
+        cpu.heartbeat_due.store(0, Ordering::Relaxed);
+        assert_eq!(heartbeat(5), 5 + HEARTBEAT);
+        assert_eq!(heartbeat(HEARTBEAT / 2), 5 + HEARTBEAT);
+        assert_eq!(heartbeat(2 * HEARTBEAT), 5 + HEARTBEAT);
+        cpu.heartbeat_due
+            .store(3 * HEARTBEAT + HEARTBEAT, Ordering::Relaxed);
+        assert_eq!(heartbeat(3 * HEARTBEAT + 1), 4 * HEARTBEAT);
+        cpu.heartbeat_due.store(0, Ordering::Relaxed);
     }
 }

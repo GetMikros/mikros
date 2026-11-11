@@ -951,7 +951,7 @@ fn arm(cpu: &CpuSched) {
         .fold(slice_end, i64::min);
     // The watchdog needs every processor's timer to interrupt it.
     #[cfg(feature = "diag")]
-    let at = at.min(crate::arch::monotonic_now().saturating_add(watchdog::HEARTBEAT));
+    let at = at.min(watchdog::heartbeat(crate::arch::monotonic_now()));
     if at == INFINITE {
         crate::arch::timer_disarm();
     } else {
