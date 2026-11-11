@@ -3,8 +3,9 @@
  * the folder named by its argument, which must be writable, runs a
  * program copied there, and exits with 0 when every check below
  * passed, and with the number of the first check that failed otherwise,
- * after printing what failed. Given `--umask`, it exits with its file
- * creation mask instead. */
+ * after printing what failed. It also checks the machine name, process
+ * priorities and the boot clock. Given `--umask`, it exits with its
+ * file creation mask instead. */
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -13,7 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <sys/statvfs.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -113,6 +116,7 @@ int main(int argc, char **argv)
 		CHECK(fails_with(futimens(fd, NULL), EAGAIN));
 	struct timespec later[2] = {{4000, 0}, {5000, 0}};
 	CHECK(futimens(fd, later) == 0 && fstat(fd, &st) == 0 && st.st_mtime == 5000);
+	CHECK(fsync(fd) == 0 && fdatasync(fd) == 0);
 	CHECK(close(fd) == 0);
 
 	/* Owners do not change. */
@@ -143,6 +147,18 @@ int main(int argc, char **argv)
 
 	/* Command-line tools have the other volumes. */
 	CHECK(stat("/Volumes", &st) == 0 && S_ISDIR(st.st_mode));
+
+	/* The machine, priorities, which never change, and the time since
+	 * boot, which is the monotonic clock's. */
+	struct utsname names;
+	CHECK(uname(&names) == 0 && strcmp(names.machine, "x86_64") == 0);
+	errno = 0;
+	CHECK(getpriority(PRIO_PROCESS, 0) == 0 && errno == 0);
+	CHECK(fails_with(setpriority(PRIO_PROCESS, 0, 0), EPERM));
+	CHECK(nice(0) == 0 && fails_with(nice(1), EPERM));
+	struct timespec mono, boot;
+	CHECK(clock_gettime(CLOCK_MONOTONIC, &mono) == 0 && clock_gettime(CLOCK_BOOTTIME, &boot) == 0);
+	CHECK(boot.tv_sec > mono.tv_sec || (boot.tv_sec == mono.tv_sec && boot.tv_nsec >= mono.tv_nsec));
 
 	/* Removing. */
 	CHECK(unlink(s) == 0 && unlink(c) == 0 && unlink(a) == 0);

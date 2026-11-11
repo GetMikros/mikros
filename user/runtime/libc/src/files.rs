@@ -406,3 +406,9 @@ pub fn creation_mask() -> u32 {
 pub fn masked(mode: u32) -> u32 {
     mode & !creation_mask()
 }
+
+/// `fsync` and `fdatasync`: has the file system write the descriptor's
+/// node to its storage, and returns once it has replied.
+pub fn fsync(fd: i64) -> i64 {
+    result(node_of(fd, Rights(0)).and_then(|node| done(node.sync(FOREVER)).map(|_| ())))
+}

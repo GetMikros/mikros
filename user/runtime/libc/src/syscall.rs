@@ -99,6 +99,10 @@ const SYS_SYMLINK: i64 = 88;
 const SYS_CHMOD: i64 = 90;
 const SYS_FCHMOD: i64 = 91;
 const SYS_UMASK: i64 = 95;
+const SYS_FSYNC: i64 = 74;
+const SYS_FDATASYNC: i64 = 75;
+const SYS_GETPRIORITY: i64 = 140;
+const SYS_SETPRIORITY: i64 = 141;
 const SYS_CHOWN: i64 = 92;
 const SYS_FCHOWN: i64 = 93;
 const SYS_LCHOWN: i64 = 94;
@@ -192,6 +196,11 @@ extern "C" fn __mikros_syscall(
         SYS_MKDIR => files::mkdirat(fs::AT_FDCWD, a1 as *const u8, files::masked(a2 as u32)),
         SYS_MKDIRAT => files::mkdirat(a1, a2 as *const u8, files::masked(a3 as u32)),
         SYS_UMASK => files::umask(a1 as u32),
+        SYS_FSYNC | SYS_FDATASYNC => files::fsync(a1),
+        // Every process has the priority 0, which none may change. The
+        // system call gives 20 minus the priority, as Linux's does.
+        SYS_GETPRIORITY => 20,
+        SYS_SETPRIORITY => -errno::EPERM,
         SYS_RMDIR => files::unlinkat(fs::AT_FDCWD, a1 as *const u8, files::AT_REMOVEDIR),
         SYS_UNLINK => files::unlinkat(fs::AT_FDCWD, a1 as *const u8, 0),
         SYS_UNLINKAT => files::unlinkat(a1, a2 as *const u8, a3),

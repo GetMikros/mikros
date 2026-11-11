@@ -11,6 +11,9 @@ use crate::errno::{EFAULT, EPERM};
 const FIELD: usize = 65;
 const FIELDS: usize = 6;
 const SYSNAME: &[u8] = b"Mikros";
+/// The machine's name, the fifth field.
+const MACHINE: &[u8] = b"x86_64";
+const MACHINE_FIELD: usize = 4;
 const HOSTNAME: &[u8] = b"/etc/hostname\0";
 const DEFAULT_HOST: &[u8] = b"mikros";
 /// The longest host name.
@@ -51,8 +54,8 @@ fn read_host_file(buf: &mut [u8; NAME_MAX + 2]) -> usize {
     len
 }
 
-/// `uname`: `Mikros` as the system's name and the host name as the
-/// node's, with the other fields empty.
+/// `uname`: `Mikros` as the system's name, the host name as the node's
+/// and `x86_64` as the machine's, with the other fields empty.
 pub fn uname(buf: *mut u8) -> i64 {
     if buf.is_null() {
         return -EFAULT;
@@ -63,6 +66,8 @@ pub fn uname(buf: *mut u8) -> i64 {
     let len = read_host_file(&mut file);
     let name = host_name(&file[..len]);
     fields[FIELD..FIELD + name.len()].copy_from_slice(name);
+    let machine = FIELD * MACHINE_FIELD;
+    fields[machine..machine + MACHINE.len()].copy_from_slice(MACHINE);
     // SAFETY: musl passes a `struct utsname`, which is as large.
     unsafe { core::ptr::copy_nonoverlapping(fields.as_ptr(), buf, fields.len()) };
     0

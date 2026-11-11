@@ -1,0 +1,11 @@
+--- a/src/unistd/nice.c
++++ b/src/unistd/nice.c
+@@ -7,6 +7,8 @@
+ int nice(int inc)
+ {
+ 	int prio = inc;
++	/* Mikros: no priority changes, so asking for none succeeds. */
++	if (!inc) return getpriority(PRIO_PROCESS, 0);
+ 	// Only query old priority if it can affect the result.
+ 	// This also avoids issues with integer overflow.
+ 	if (inc > -2*NZERO && inc < 2*NZERO)

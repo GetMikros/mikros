@@ -17,6 +17,8 @@ pub const CLOCK_REALTIME: i64 = 0;
 pub const CLOCK_MONOTONIC: i64 = 1;
 pub const CLOCK_PROCESS_CPUTIME_ID: i64 = 2;
 pub const CLOCK_THREAD_CPUTIME_ID: i64 = 3;
+/// The time since boot, which is the monotonic clock's on Mikros.
+pub const CLOCK_BOOTTIME: i64 = 7;
 
 const PERM_READ: u32 = 1 << 0;
 const PAGE_SIZE: u64 = 4096;
@@ -81,7 +83,7 @@ pub struct Timespec {
 /// `clock_gettime`: stores the time of `clock` in `ts`.
 pub fn gettime(clock: i64, ts: *mut Timespec) -> i64 {
     let ns = match clock {
-        CLOCK_MONOTONIC => monotonic(),
+        CLOCK_MONOTONIC | CLOCK_BOOTTIME => monotonic(),
         CLOCK_REALTIME => realtime(),
         CLOCK_PROCESS_CPUTIME_ID => cpu_time(PROCESS.load(Ordering::Relaxed), INFO_PROCESS),
         CLOCK_THREAD_CPUTIME_ID => cpu_time(THREAD.load(Ordering::Relaxed), INFO_THREAD),
