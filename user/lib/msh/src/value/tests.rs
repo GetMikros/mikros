@@ -144,3 +144,23 @@ fn writes_values_for_programs_and_the_prompt() {
     assert_eq!(prompt_text(&Int(3)), "3\n");
     assert_eq!(json(&String("a\"\n".into())), "\"a\\\"\\n\"");
 }
+
+#[test]
+fn matches_regular_expressions() {
+    use Value::*;
+    let text = String("file-12.txt".into());
+    assert_eq!(
+        ok(B::Matches, text.clone(), String(r"-\d+\.".into())),
+        Bool(true)
+    );
+    assert_eq!(
+        ok(B::NotMatches, text.clone(), String("^x".into())),
+        Bool(true)
+    );
+    assert!(
+        binary(B::Matches, &text, &String("(".into()))
+            .unwrap_err()
+            .contains("not a regular expression")
+    );
+    assert!(binary(B::Matches, &Int(1), &String("1".into())).is_err());
+}

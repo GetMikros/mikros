@@ -392,3 +392,5 @@ fn table<S: System>(shell: &Shell<S>, text: &str) -> Result<Value, Flow> {
     Ok(Value::List(rows))
 }
 
+#[cfg(test)]
+mod tests;
