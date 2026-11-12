@@ -50,6 +50,10 @@ pub struct MachineArgs {
     /// Leave out the IOMMU.
     #[arg(long)]
     pub no_iommu: bool,
+    /// Give the machine QEMU's AMD IOMMU instead of its Intel one, as the
+    /// AMD-Vi run of `cargo xtask test` does.
+    #[arg(skip)]
+    pub amd_iommu: bool,
 }
 
 /// Whether KVM can be used: `/dev/kvm` opens for reading and writing.
@@ -160,7 +164,10 @@ pub fn args(
     }
     if !machine.no_iommu {
         // The IOMMU must come before the devices it translates for.
-        push(&["-device", "intel-iommu,intremap=on"]);
+        match machine.amd_iommu {
+            true => push(&["-device", "amd-iommu,intremap=on,xtsup=on,dma-remap=on"]),
+            false => push(&["-device", "intel-iommu,intremap=on"]),
+        }
     }
 
     let code = format!(
@@ -205,6 +212,7 @@ mod tests {
             gpu: Gpu::Virtio,
             disk: Disk::Virtio,
             no_iommu: false,
+            amd_iommu: false,
         }
     }
 
@@ -311,6 +319,23 @@ mod tests {
                 .any(|d| d.starts_with("intel-iommu"))
         );
         assert_eq!(after(&a, "-machine"), ["q35,accel=tcg"]);
+        m.no_iommu = false;
+        m.amd_iommu = true;
+        let a = args(
+            &m,
+            Processor::Emulated,
+            &firmware(),
+            Path::new("v.fd"),
+            image,
+        );
+        assert_eq!(
+            after(&a, "-device")[0],
+            "amd-iommu,intremap=on,xtsup=on,dma-remap=on"
+        );
+        assert_eq!(
+            after(&a, "-machine"),
+            ["q35,accel=tcg,kernel-irqchip=split"]
+        );
     }
 
     #[test]

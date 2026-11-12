@@ -457,6 +457,30 @@ pub fn run(args: &Args) -> Result<()> {
         "",
         UEFI_SELFTEST_PASSED,
     )?;
+    // The kernel's tests once more on QEMU's AMD IOMMU, without the suites
+    // of ported projects, which do not depend on the IOMMU. Emulated, its
+    // DMA translation is about three times slower than the Intel one's.
+    if !args.machine.no_iommu {
+        let mut amd = args.clone();
+        amd.machine.amd_iommu = true;
+        let amd_disk = dir.join("amd-iommu-disk.img");
+        let amd_cmdline = [cmdline.as_str(), SKIP_PORTED].join(" ");
+        image::create_for_tests(args.kind, &built, &amd_disk, amd_cmdline.trim())?;
+        let timeout = match processor {
+            qemu::Processor::Host => args.timeout,
+            _ => args.timeout * 3,
+        };
+        let amd_log = dir.join("amd-iommu-serial.log");
+        integration(
+            &amd,
+            processor,
+            timeout,
+            &amd_disk,
+            &amd_log,
+            " on AMD-Vi",
+            "AMD-Vi units",
+        )?;
+    }
     // Kernel page-table isolation applies only to Intel processors that do
     // not report RDCL_NO: the host's under KVM with the bit hidden, or
     // QEMU's emulated processor when it names that vendor. Emulation takes
