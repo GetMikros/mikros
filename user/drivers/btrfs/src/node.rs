@@ -136,7 +136,7 @@ impl Connection {
                 )
             }
             R::Seek(q, r) => r.reply(s, self.seek(q.offset, q.origin)),
-            R::ReadLink(_, r) => r.reply(s, self.read_link()),
+            R::ReadLink(_, r) => r.reply(s, self.read_link().await),
             R::CloneRange(q, r) => {
                 let cloned = self.clone_range(q);
                 r.reply(
@@ -150,15 +150,15 @@ impl Connection {
             R::Open(q, r) => {
                 let changes =
                     q.flags.contains(OpenFlags::CREATE) || q.flags.contains(OpenFlags::TRUNCATE);
-                let opened = self.open(q);
+                let opened = self.open(q).await;
                 match changes {
                     true => r.reply(s, self.fs.durable(opened).await),
                     false => r.reply(s, opened),
                 }
             }
-            R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes)),
+            R::ReadDirectory(q, r) => r.reply(s, self.read_directory(q.cookie, q.attributes).await),
             R::Unlink(q, r) => {
-                let unlinked = self.unlink(&q.name, q.directory);
+                let unlinked = self.unlink(&q.name, q.directory).await;
                 r.reply(
                     s,
                     self.fs
@@ -169,7 +169,7 @@ impl Connection {
             }
             R::GetToken(_, r) => r.reply(s, self.token()),
             R::Rename(q, r) => {
-                let renamed = self.rename(q);
+                let renamed = self.rename(q).await;
                 r.reply(
                     s,
                     self.fs
@@ -179,14 +179,14 @@ impl Connection {
                 )
             }
             R::Link(q, r) => {
-                let linked = self.link(q);
+                let linked = self.link(q).await;
                 r.reply(
                     s,
                     self.fs.durable(linked).await.map(|()| NodeLinkResponse {}),
                 )
             }
             R::CreateSymlink(q, r) => {
-                let made = self.create_symlink(&q.name, &q.target);
+                let made = self.create_symlink(&q.name, &q.target).await;
                 r.reply(
                     s,
                     self.fs

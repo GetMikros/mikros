@@ -232,10 +232,10 @@ impl Connection {
         })
     }
 
-    pub(crate) fn read_link(&self) -> Result<NodeReadLinkResponse, Error> {
+    pub(crate) async fn read_link(&self) -> Result<NodeReadLinkResponse, Error> {
         self.require(Rights::READ)?;
         Ok(NodeReadLinkResponse {
-            target: link_target(&self.open)?,
+            target: link_target(&self.open, &self.fs.reactor).await?,
         })
     }
 }

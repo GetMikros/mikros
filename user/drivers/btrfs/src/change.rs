@@ -30,11 +30,11 @@ impl Connection {
         node.set_attributes(&changes).map_err(error)
     }
 
-    pub(crate) fn unlink(&self, name: &str, directory: bool) -> Result<(), Error> {
+    pub(crate) async fn unlink(&self, name: &str, directory: bool) -> Result<(), Error> {
         self.require_write()?;
         self.directory()?;
         check_component(name)?;
-        let (removed, name) = match self.find(&self.open, name)? {
+        let (removed, name) = match self.find(&self.open, name).await? {
             Some((open, name)) => (Some(open), name),
             None => (None, String::from(name)),
         };
@@ -70,18 +70,21 @@ impl Connection {
         })
     }
 
-    pub(crate) fn rename(&self, q: NodeRenameRequest) -> Result<(), Error> {
+    pub(crate) async fn rename(&self, q: NodeRenameRequest) -> Result<(), Error> {
         self.require_write()?;
         self.directory()?;
         check_component(&q.name)?;
         check_component(&q.new_name)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
-        let (moved, name) = self.find(&self.open, &q.name)?.ok_or(Error::NotFound)?;
+        let (moved, name) = self
+            .find(&self.open, &q.name)
+            .await?
+            .ok_or(Error::NotFound)?;
         // An entry equal to the new name under case folding is replaced as
         // one of exactly that name: the moved entry first takes that
         // entry's own name, which replaces it atomically, and then the new
         // name as given. The moved entry itself only changes its case.
-        let replacing = match self.find(&to, &q.new_name)? {
+        let replacing = match self.find(&to, &q.new_name).await? {
             Some((found, own))
                 if own != q.new_name && !(found.key == moved.key && to.key == self.open.key) =>
             {
@@ -95,7 +98,7 @@ impl Connection {
         if self.fs.is_usr(&self.open, &q.name) || usr {
             return Err(Error::AccessDenied);
         }
-        let replaced = self.lookup(&to, target)?;
+        let replaced = self.lookup(&to, target).await?;
         self.open
             .node
             .rename(q.name.as_bytes(), &to.node, target.as_bytes(), 0)
@@ -137,7 +140,7 @@ impl Connection {
         renamed
     }
 
-    pub(crate) fn link(&self, q: NodeLinkRequest) -> Result<(), Error> {
+    pub(crate) async fn link(&self, q: NodeLinkRequest) -> Result<(), Error> {
         self.require_write()?;
         self.directory()?;
         check_component(&q.name)?;
@@ -146,8 +149,11 @@ impl Connection {
         if self.fs.is_usr(&to, &q.new_name) {
             return Err(Error::AccessDenied);
         }
-        let (node, _) = self.find(&self.open, &q.name)?.ok_or(Error::NotFound)?;
-        self.free_folded(&to, &q.new_name)?;
+        let (node, _) = self
+            .find(&self.open, &q.name)
+            .await?
+            .ok_or(Error::NotFound)?;
+        self.free_folded(&to, &q.new_name).await?;
         node.node
             .link(&to.node, q.new_name.as_bytes())
             .map_err(error)?;
@@ -158,7 +164,7 @@ impl Connection {
         Ok(())
     }
 
-    pub(crate) fn create_symlink(&self, name: &str, target: &str) -> Result<(), Error> {
+    pub(crate) async fn create_symlink(&self, name: &str, target: &str) -> Result<(), Error> {
         self.require_write()?;
         self.directory()?;
         check_component(name)?;
@@ -168,7 +174,7 @@ impl Connection {
         if target.is_empty() || target.len() > TARGET_MAX || target.contains('\0') {
             return Err(Error::Invalid);
         }
-        self.free_folded(&self.open, name)?;
+        self.free_folded(&self.open, name).await?;
         let target = alloc::ffi::CString::new(target).map_err(|_| Error::Invalid)?;
         let node = self
             .open

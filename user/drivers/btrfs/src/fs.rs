@@ -177,10 +177,10 @@ impl Fs {
     ) -> Result<Fs, Error> {
         let node = mount.root().map_err(error)?;
         let key = key(&node)?;
-        let root = Rc::new(Open::new(node, key));
+        let root = Rc::new(Open::new(Arc::new(node), key));
         let mut opens = BTreeMap::from([(key, Rc::downgrade(&root))]);
         let usr = current_version(&root.node).map(|node| {
-            let usr = Rc::new(Open::new(node.0, node.1));
+            let usr = Rc::new(Open::new(Arc::new(node.0), node.1));
             usr.names.borrow_mut().push((key, String::from(USR)));
             opens.insert(usr.key, Rc::downgrade(&usr));
             usr
@@ -216,6 +216,18 @@ impl Fs {
     /// connections to the same node share, if there is one.
     pub fn open(&self, node: BtrfsNode<'static>, dir: Key, name: &str) -> Result<Rc<Open>, Error> {
         let key = key(&node)?;
+        Ok(self.open_shared(Arc::new(node), key, dir, name))
+    }
+
+    /// The open node for `node`, whose key is `key`, found as `name` in
+    /// `dir`, as `open` gives it.
+    pub fn open_shared(
+        &self,
+        node: Arc<BtrfsNode<'static>>,
+        key: Key,
+        dir: Key,
+        name: &str,
+    ) -> Rc<Open> {
         let mut opens = self.opens.borrow_mut();
         let open = match opens.get(&key).and_then(Weak::upgrade) {
             Some(open) => open,
@@ -231,7 +243,19 @@ impl Fs {
             names.push((dir, String::from(name)));
         }
         drop(names);
-        Ok(open)
+        open
+    }
+
+    /// Notes that the node with `key`, when connections have it open, is
+    /// also named `name` in `dir`.
+    pub fn note_name(&self, key: Key, dir: Key, name: &str) {
+        let Some(open) = self.opens.borrow().get(&key).and_then(Weak::upgrade) else {
+            return;
+        };
+        let mut names = open.names.borrow_mut();
+        if !names.iter().any(|(d, n)| *d == dir && n == name) {
+            names.push((dir, String::from(name)));
+        }
     }
 
     /// Forgets that a node is named `name` in `dir`, which it no longer
@@ -348,9 +372,9 @@ impl Fs {
 }
 
 impl Open {
-    fn new(node: BtrfsNode<'static>, key: Key) -> Open {
+    fn new(node: Arc<BtrfsNode<'static>>, key: Key) -> Open {
         Open {
-            node: Arc::new(node),
+            node,
             key,
             names: RefCell::new(Vec::new()),
             locks: RefCell::new(Vec::new()),
@@ -375,7 +399,7 @@ fn current_version(root: &BtrfsNode<'static>) -> Option<(BtrfsNode<'static>, Key
     Some((version, key))
 }
 
-fn key(node: &BtrfsNode<'_>) -> Result<Key, Error> {
+pub(crate) fn key(node: &BtrfsNode<'_>) -> Result<Key, Error> {
     let a = node.attributes().map_err(error)?;
     Ok((a.device, a.inode))
 }
