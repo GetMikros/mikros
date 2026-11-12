@@ -32,6 +32,13 @@ static struct list_head free_area[MAX_PAGE_ORDER + 1];
 static unsigned long high_water;
 static DEFINE_SPINLOCK(zone_lock);
 
+/* Free blocks of the largest order beyond the first KEPT_LARGEST go back
+ * to the host, onto `released`, which blocks are taken from before the
+ * untouched arena. `largest_free` counts those in free_area. */
+#define KEPT_LARGEST	8
+static LIST_HEAD(released);
+static unsigned long largest_free;
+
 static void init_kmalloc(void);
 
 void mikros_mm_init(void)
@@ -88,7 +95,14 @@ static struct page *take(unsigned int order)
 	for (o = order; o <= MAX_PAGE_ORDER; o++)
 		if (!list_empty(&free_area[o]))
 			break;
-	if (o > MAX_PAGE_ORDER) {
+	if (o > MAX_PAGE_ORDER && !list_empty(&released)) {
+		/* A block that went back to the host, which fills it again. */
+		page = list_first_entry(&released, struct page, buddy_list);
+		list_del(&page->buddy_list);
+		__ClearPageBuddy(page);
+		set_page_private(page, 0);
+		o = MAX_PAGE_ORDER;
+	} else if (o > MAX_PAGE_ORDER) {
 		/* A block of the largest order from the untouched arena. */
 		unsigned long size = PAGE_SIZE << MAX_PAGE_ORDER;
 
@@ -103,6 +117,8 @@ static struct page *take(unsigned int order)
 		list_del(&page->buddy_list);
 		__ClearPageBuddy(page);
 		set_page_private(page, 0);
+		if (o == MAX_PAGE_ORDER)
+			largest_free--;
 	}
 	/* The halves that are left over go to the lists below. */
 	while (o > order) {
@@ -139,6 +155,41 @@ static void give_back(struct page *page, unsigned int order)
 	set_page_private(page, order);
 	__SetPageBuddy(page);
 	list_add(&page->buddy_list, &free_area[order]);
+	if (order == MAX_PAGE_ORDER)
+		largest_free++;
+}
+
+/* Gives the free blocks of the largest order beyond KEPT_LARGEST back to
+ * the host, each off every list while it goes, so that nothing takes it
+ * meanwhile. They stay buddy pages, as they are free. */
+static void release_surplus(void)
+{
+	unsigned long size = PAGE_SIZE << MAX_PAGE_ORDER;
+	struct page *page;
+
+	while (READ_ONCE(largest_free) > KEPT_LARGEST) {
+		spin_lock(&zone_lock);
+		page = NULL;
+		if (largest_free > KEPT_LARGEST) {
+			page = list_first_entry(&free_area[MAX_PAGE_ORDER], struct page,
+						buddy_list);
+			list_del(&page->buddy_list);
+			largest_free--;
+		}
+		spin_unlock(&zone_lock);
+		if (!page)
+			return;
+		mikros_host_release(page_address(page), size);
+		spin_lock(&zone_lock);
+		list_add(&page->buddy_list, &released);
+		spin_unlock(&zone_lock);
+	}
+}
+
+/* The bytes in free blocks of the largest order that the shim keeps. */
+u64 mikros_btrfs_memory_kept(void)
+{
+	return (u64)READ_ONCE(largest_free) << (MAX_PAGE_ORDER + PAGE_SHIFT);
 }
 
 void prep_compound_page(struct page *page, unsigned int order)
@@ -223,6 +274,7 @@ static void free_block(struct page *page, unsigned int order)
 		for (i = 0; i < 1U << order; i += 1U << MAX_PAGE_ORDER)
 			give_back(page + i, MAX_PAGE_ORDER);
 	spin_unlock(&zone_lock);
+	release_surplus();
 }
 
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_nid,

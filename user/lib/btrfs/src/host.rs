@@ -22,7 +22,10 @@ unsafe extern "C" {
     fn clock_gettime(clock: c_int, ts: *mut Timespec) -> c_int;
     fn getrandom(buf: *mut c_void, len: usize, flags: u32) -> isize;
     fn fallocate(fd: c_int, mode: c_int, offset: i64, len: i64) -> c_int;
+    fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
 }
+
+const MADV_DONTNEED: c_int = 4;
 
 #[repr(C)]
 struct Timespec {
@@ -62,6 +65,13 @@ extern "C" fn mikros_host_reserve(size: usize) -> *mut c_void {
     } else {
         addr
     }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_release(addr: *mut c_void, len: usize) {
+    // SAFETY: the range lies in a private anonymous mapping of
+    // `mikros_host_reserve`, whose pages then read as zero again.
+    unsafe { madvise(addr, len, MADV_DONTNEED) };
 }
 
 /// The tests' budget of memory, which tests/memory.rs reads and writes

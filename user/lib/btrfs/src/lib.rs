@@ -39,6 +39,7 @@ unsafe extern "C" {
     fn mikros_btrfs_statfs(mount: *mut c_void, statfs: *mut Statfs) -> i32;
     fn mikros_btrfs_sync_mount(mount: *mut c_void) -> i32;
     fn mikros_btrfs_memory_used() -> u64;
+    fn mikros_btrfs_memory_kept() -> u64;
 }
 
 fn result(ret: i32) -> Result<(), i32> {
@@ -62,6 +63,13 @@ pub fn start() -> Result<(), i32> {
 pub fn memory_used() -> u64 {
     // SAFETY: the call takes no arguments.
     unsafe { mikros_btrfs_memory_used() }
+}
+
+/// The bytes of free memory that the shim keeps in whole blocks of its
+/// largest size, rather than give it back to the host.
+pub fn memory_kept() -> u64 {
+    // SAFETY: the call takes no arguments.
+    unsafe { mikros_btrfs_memory_kept() }
 }
 
 /// Adds the host's disk `handle`, of `size` bytes in blocks of

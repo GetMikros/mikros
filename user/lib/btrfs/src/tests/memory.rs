@@ -4,7 +4,7 @@
 use super::{Image, noise, start};
 use crate::host::{Disk, MEMORY};
 use crate::node::Kind;
-use crate::{Mount, memory_used};
+use crate::{Mount, memory_kept, memory_used};
 
 /// Puts the number of MiB `i` of a file in each 4 KiB block of `buf`.
 fn tag(buf: &mut [u8], i: u64) {
@@ -53,5 +53,29 @@ fn reclaims_the_page_cache() {
         assert_within_memory("after reading");
     }
     drop(mount);
+    image.check();
+}
+
+/// Once the pages of a file of half the shim's memory are dropped, the
+/// shim keeps 8 free blocks of 4 MiB and gives the rest back to the host;
+/// up to 8 more may be on their way back for other tests meanwhile.
+#[test]
+fn gives_free_memory_back() {
+    start();
+    let image = Image::new("gives-back", 1 << 30, &[]);
+    Disk::add(c"gives-back", image.open(), false).unwrap();
+    let mount = Mount::new(c"/dev/gives-back", false, None).unwrap();
+    {
+        let root = mount.root().unwrap();
+        let file = root.create(b"big", Kind::File, 0o644).unwrap();
+        let buf = noise(5, 1 << 20);
+        for i in 0..(MEMORY as u64 / 2) >> 20 {
+            assert_eq!(file.write(i << 20, &buf), Ok(1 << 20));
+        }
+        file.sync().unwrap();
+    }
+    drop(mount);
+    let kept = memory_kept();
+    assert!(kept <= 64 << 20, "the shim keeps {kept} free bytes");
     image.check();
 }

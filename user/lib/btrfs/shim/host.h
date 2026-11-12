@@ -16,6 +16,11 @@
  * written and take memory only once touched; NULL when there are none. */
 void *mikros_host_reserve(unsigned long size);
 
+/* Gives the memory of `len` bytes at `addr`, page-aligned in what
+ * mikros_host_reserve() gave, back to the host: they read as zero again
+ * and take memory again once touched. */
+void mikros_host_release(void *addr, unsigned long len);
+
 /* How many bytes of memory the shim may hold, which it sizes its caches
  * and the page cache's dirty limits by. */
 unsigned long mikros_host_memory(void);

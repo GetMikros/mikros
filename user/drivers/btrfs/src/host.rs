@@ -98,6 +98,18 @@ extern "C" fn mikros_host_reserve(size: u64) -> *mut c_void {
     }
 }
 
+/// The `mem_op` operation that gives a range's memory back.
+const DECOMMIT: u32 = 2;
+
+#[unsafe(no_mangle)]
+extern "C" fn mikros_host_release(addr: *mut c_void, len: u64) {
+    if let Some((mem, offset)) = backing(addr as u64) {
+        // SAFETY: the call takes no pointers; the range lies in the
+        // object, whose pages then read as zero again.
+        unsafe { sys::mem_op(mem, DECOMMIT, offset, len) };
+    }
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn mikros_host_memory() -> u64 {
     MEMORY.load(Ordering::Relaxed)
