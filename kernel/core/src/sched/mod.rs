@@ -1017,6 +1017,11 @@ pub fn wake_sleeper(thread: &Arc<Thread>) {
         thread.state.store(RUNNABLE, Ordering::Release);
         let entity = *thread.entity.lock();
         cpu.enqueue(index, queued, entity);
+        drop(cpu);
+        // One whose affinity changed as it slept moves, as in `queue`.
+        if !allowed(thread, index) {
+            relocate(thread);
+        }
     } else if thread.state() == RUNNABLE {
         // It runs, maybe on another processor about to sleep; with the
         // owner's state locked, the sleep sees this.
@@ -1324,12 +1329,39 @@ pub fn timer_interrupt() {
     maintain(now);
     let me = crate::arch::cpu_index() as usize;
     let mut cpu = this_cpu().lock();
-    while let Some(sleeper) = cpu.sleepers.pop_expired(now) {
-        let thread = sleeper.take();
-        thread.state.store(RUNNABLE, Ordering::Release);
-        let entity = *thread.entity.lock();
-        // Every thread has room in its owner's queue, which this is.
-        cpu.enqueue(me, Queued::new(thread), entity);
+    // Sleepers whose deadline has passed are queued here, their owner.
+    // One whose affinity changed as it slept moves on, as in `queue`,
+    // with this processor's state unlocked, a few at a time so that
+    // nothing allocates.
+    loop {
+        let mut moving: [Option<Arc<Thread>>; 8] = Default::default();
+        let mut count = 0;
+        let mut more = true;
+        while count < moving.len() {
+            let Some(sleeper) = cpu.sleepers.pop_expired(now) else {
+                more = false;
+                break;
+            };
+            let thread = sleeper.take();
+            thread.state.store(RUNNABLE, Ordering::Release);
+            let entity = *thread.entity.lock();
+            if !allowed(&thread, me) {
+                moving[count] = Some(thread.clone());
+                count += 1;
+            }
+            // Every thread has room in its owner's queue, which this is.
+            cpu.enqueue(me, Queued::new(thread), entity);
+        }
+        if count > 0 {
+            drop(cpu);
+            for thread in moving.iter().flatten() {
+                relocate(thread);
+            }
+            cpu = this_cpu().lock();
+        }
+        if !more {
+            break;
+        }
     }
     if cpu.current.is_some() && now >= cpu.slice_end {
         reschedule().store(true, Ordering::Relaxed);
