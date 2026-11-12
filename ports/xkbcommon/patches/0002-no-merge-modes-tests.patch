@@ -1,0 +1,16 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -1069,9 +1069,9 @@
+ )
+ 
+ # The merge modes tests are optional and generated locally on-the-fly
+-pymod = import('python')
+-python = pymod.find_installation('python3', modules: ['jinja2'], required: false)
+-has_merge_modes_tests = python.found() and python.language_version().version_compare('>=3.11')
++# when the build host's Python has jinja2. Mikros leaves them out, so that
++# the test suite is the same whatever the build host has.
++has_merge_modes_tests = false
+ if has_merge_modes_tests
+     script = find_program('scripts/update-merge-modes-tests.py')
+     merge_modes_tests = [meson.project_name()]
