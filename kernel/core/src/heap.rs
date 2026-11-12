@@ -78,6 +78,11 @@ impl<P: Pages> Heap<P> {
         }
     }
 
+    /// The source of the heap's pages.
+    pub fn pages_mut(&mut self) -> &mut P {
+        &mut self.pages
+    }
+
     /// In the diagnostic build, the size and the blocks in use of each
     /// class, and the pages of whole-page blocks.
     #[cfg(feature = "diag")]

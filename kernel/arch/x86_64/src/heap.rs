@@ -5,8 +5,36 @@ use core::ptr::NonNull;
 use kernel_core::heap::{Heap, PAGE_SIZE, Pages};
 use kernel_core::sync::SpinLock;
 
-/// Pages mapped into the dynamic region on demand.
-struct DynamicPages;
+/// The most whole-page blocks freed with the heap locked that wait to be
+/// given back once it is unlocked.
+const DEFERRED: usize = 8;
+
+/// Pages mapped into the dynamic region on demand. Pages freed with the
+/// heap locked are given back once it is unlocked, as unmapping them
+/// waits for every processor to drop their translations, which must not
+/// hold up every other allocation.
+struct DynamicPages {
+    /// The start and page count of each block waiting to be given back.
+    deferred: [(usize, usize); DEFERRED],
+    count: usize,
+}
+
+impl DynamicPages {
+    /// Takes the blocks waiting to be given back.
+    fn take_deferred(&mut self) -> ([(usize, usize); DEFERRED], usize) {
+        let taken = (self.deferred, self.count);
+        self.count = 0;
+        taken
+    }
+}
+
+/// Gives back the pages of the blocks `deferred` took. The heap must not
+/// be locked.
+fn give_back((blocks, count): ([(usize, usize); DEFERRED], usize)) {
+    for &(start, pages) in &blocks[..count] {
+        crate::space::free_pages(start as u64, (pages * PAGE_SIZE) as u64);
+    }
+}
 
 impl Pages for DynamicPages {
     fn alloc(&mut self, count: usize) -> Option<NonNull<u8>> {
@@ -15,7 +43,14 @@ impl Pages for DynamicPages {
     }
 
     fn free(&mut self, start: NonNull<u8>, count: usize) {
-        crate::space::free_pages(start.as_ptr() as u64, (count * PAGE_SIZE) as u64);
+        match self.deferred.get_mut(self.count) {
+            Some(slot) => {
+                *slot = (start.as_ptr() as usize, count);
+                self.count += 1;
+            }
+            // Without room, the pages go at once.
+            None => crate::space::free_pages(start.as_ptr() as u64, (count * PAGE_SIZE) as u64),
+        }
     }
 
     #[cfg(feature = "diag")]
@@ -57,7 +92,10 @@ struct KernelHeap(SpinLock<Heap<DynamicPages>>);
 #[global_allocator]
 static HEAP: KernelHeap = KernelHeap(SpinLock::new(
     kernel_core::lock_order::HEAP,
-    Heap::new(DynamicPages),
+    Heap::new(DynamicPages {
+        deferred: [(0, 0); DEFERRED],
+        count: 0,
+    }),
 ));
 
 // SAFETY: blocks come from `Heap`, which hands each out once until it is
@@ -94,18 +132,26 @@ unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if let Some(block) = NonNull::new(ptr) {
             #[cfg(not(feature = "diag"))]
-            // SAFETY: the caller passes a block from `alloc` with its layout.
-            unsafe {
-                self.0.lock().free(block, layout)
-            };
+            {
+                let deferred = {
+                    let mut heap = self.0.lock();
+                    // SAFETY: the caller passes a block from `alloc` with
+                    // its layout.
+                    unsafe { heap.free(block, layout) };
+                    heap.pages_mut().take_deferred()
+                };
+                give_back(deferred);
+            }
             #[cfg(feature = "diag")]
             {
-                let fault = {
+                let (fault, deferred) = {
                     let mut heap = self.0.lock();
-                    // SAFETY: as above.
+                    // SAFETY: the caller passes a block from `alloc` with
+                    // its layout.
                     unsafe { heap.free(block, layout) };
-                    heap.fault.take()
+                    (heap.fault.take(), heap.pages_mut().take_deferred())
                 };
+                give_back(deferred);
                 if let Some(fault) = fault {
                     panic!("{fault} freeing {layout:?}");
                 }
