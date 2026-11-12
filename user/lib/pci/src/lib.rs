@@ -305,6 +305,17 @@ pub fn claims(functions: &[&[Bar]]) -> Vec<Vec<Claim>> {
         .collect()
 }
 
+/// The base class of display functions.
+pub const CLASS_DISPLAY: u8 = 0x03;
+
+/// Whether the function at `at` is a display function with memory
+/// decoding enabled, which the bus driver leaves unsized until a driver
+/// asks for one of its BARs. Only reads the configuration space.
+pub fn decoding_display(config: &impl Config, at: Address) -> bool {
+    Header::read(config, at).class == CLASS_DISPLAY
+        && config.read(at, COMMAND, 2) & u32::from(COMMAND_MEMORY) != 0
+}
+
 /// The implemented BARs of the function at `at`. Each is sized by
 /// writing all ones to it and reading it back while memory and I/O
 /// decoding are disabled, and is then restored, as the command register
