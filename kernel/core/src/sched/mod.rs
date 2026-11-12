@@ -775,7 +775,6 @@ fn reschedule() -> &'static AtomicBool {
 }
 
 /// Creates a kernel thread that runs `entry(arg)` and queues it.
-#[allow(dead_code, reason = "nothing starts kernel threads yet")]
 pub fn spawn(entry: fn(usize), arg: usize) -> Result<Arc<Thread>, Error> {
     let thread = Thread::new(None, Name::EMPTY, RUNNABLE, 0)?;
     let top = thread.stack_top.load(Ordering::Relaxed);

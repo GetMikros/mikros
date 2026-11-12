@@ -265,6 +265,21 @@ impl<const SLOTS: usize> Log<SLOTS> {
         None
     }
 
+    /// Passes each record not yet drained, in order, to `out`, whether or
+    /// not another caller drains: only for a panic, once nothing else
+    /// runs. Records that a stopped drain passed on already may be passed
+    /// again.
+    pub fn flush(&self, mut out: impl FnMut(&Record)) {
+        let mut drained = self.drained.load(Ordering::Relaxed);
+        while drained < self.head() {
+            if let Lookup::Found(record) = self.get(drained + 1) {
+                out(&record);
+            }
+            drained += 1;
+        }
+        self.drained.store(drained, Ordering::Relaxed);
+    }
+
     /// Passes each record not yet drained, in order, to `out`. Only one
     /// caller drains at a time; a caller that finds another one draining
     /// returns at once, and the other one also drains its records. A record

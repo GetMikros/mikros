@@ -39,6 +39,12 @@ pub fn start(mut info: BootInfo) -> ! {
     crate::random::init(&info);
     crate::sched::start_maintenance();
     crate::init::start(&info);
+    // The log writer starts after the initial process, which so keeps
+    // the boot processor. Without the writer, records go on being written
+    // out by whoever appends them.
+    if let Err(e) = crate::log::start_writer() {
+        log!(Warning, "the kernel log writer did not start: {e:?}");
+    }
     // SAFETY: once; the initial process has the memory map and the
     // command line in its startup message, and nothing reads them after.
     let free = unsafe { crate::arch::boot_memory_reclaim(&info) };

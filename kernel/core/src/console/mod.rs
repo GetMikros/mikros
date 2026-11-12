@@ -19,6 +19,9 @@ const REPLACED: u8 = 0xFF;
 /// Pixels the console draws into, addressed as `y * stride + x`.
 pub trait Surface {
     fn set(&mut self, index: usize, value: u32);
+    /// Called between the rows of a whole-screen drawing, which can be
+    /// slow, so that the surface's owner can do urgent work meanwhile.
+    fn between_rows(&mut self) {}
 }
 
 /// The geometry and pixel layout of a framebuffer.
@@ -82,6 +85,16 @@ impl Gate {
         }
         self.busy.store(false, Ordering::SeqCst);
         open
+    }
+
+    /// Stops drawing for good; lines being drawn are finished.
+    pub fn close(&self) {
+        self.released.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a line is being drawn.
+    pub fn busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
     }
 
     /// Stops drawing for good, and returns once no line is being drawn.
@@ -175,6 +188,7 @@ impl<'a> Console<'a> {
         self.cells.copy_within(self.columns..used, 0);
         self.cells[used - self.columns..used].fill(b' ');
         for row in 0..self.rows {
+            s.between_rows();
             for column in 0..self.columns {
                 self.draw(column, row, self.cells[row * self.columns + column], s);
             }

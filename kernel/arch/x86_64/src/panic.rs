@@ -97,6 +97,11 @@ fn control_registers() -> [u64; 4] {
 
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
+/// Whether the kernel is stopping on a panic.
+pub fn panicking() -> bool {
+    PANICKING.load(Ordering::Acquire)
+}
+
 /// The processors that stopped for another's panic.
 static STOPPED: crate::tlb::CpuMask = crate::tlb::CpuMask::new();
 
@@ -191,6 +196,8 @@ fn stop(title: &dyn core::fmt::Display, registers: &[(&str, u64)], rbp: u64) -> 
     // SAFETY: `frames` only reads 8-byte aligned words inside the current
     // stack, which is mapped.
     let read = |address: u64| unsafe { (address as *const u64).read() };
+    // The records the log writer had not written out yet come first.
+    kernel_core::log::flush_for_panic(&mut crate::serial::write);
     let _ = panic::write(
         &mut Serial,
         "\r\n",

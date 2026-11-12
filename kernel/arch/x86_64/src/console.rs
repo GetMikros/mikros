@@ -18,6 +18,17 @@ impl Surface for Framebuffer {
         // was made with, which the mapping covers.
         unsafe { self.0.add(index).write_volatile(value) };
     }
+
+    /// Lets other threads run, when the log writer draws, and otherwise
+    /// answers shootdowns, which drawing with interrupts disabled would
+    /// hold up for as long as the screen takes to draw.
+    fn between_rows(&mut self) {
+        if kernel_core::log::writing() && !crate::panic::panicking() {
+            kernel_core::sched::preempt_point();
+        } else {
+            crate::tlb::service();
+        }
+    }
 }
 
 struct State {
@@ -89,7 +100,12 @@ pub fn write(line: &[u8]) {
 /// Stops drawing log records for good, and returns once no line is being
 /// drawn. Never called from an interrupt handler.
 pub fn release() {
-    GATE.release();
+    // The log writer may have stopped in the middle of a line to let
+    // other threads run, so this waits for it by giving way.
+    GATE.close();
+    while GATE.busy() {
+        kernel_core::sched::yield_now();
+    }
 }
 
 /// Writes formatted text to the console.
