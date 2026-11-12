@@ -1384,6 +1384,24 @@ pub fn arm_timer(timer: crate::ktimer::Armed, deadline: i64) -> Result<(), Error
     Ok(())
 }
 
+/// The number of armed `Timer` deadlines in processor `cpu`'s list.
+#[cfg(test)]
+pub fn armed_timers(cpu: usize) -> usize {
+    crate::cpu::of(cpu).map_or(0, |data| data.sched.lock().timers.len())
+}
+
+/// Removes the entry of `timer`, which is being destroyed, from processor
+/// `cpu`'s list, if it is there. Another processor's timer may interrupt
+/// early once, as with `disarm_timer`.
+pub fn forget_timer(cpu: usize, timer: *const crate::ktimer::Timer) {
+    let Some(data) = crate::cpu::of(cpu) else {
+        return;
+    };
+    let removed = data.sched.lock().timers.remove_where(|a| a.is_of(timer));
+    // Its reference goes with no lock held.
+    drop(removed);
+}
+
 /// Removes the deadline of `timer` from processor `cpu`'s list, if it is
 /// there.
 pub fn disarm_timer(cpu: usize, timer: &crate::ktimer::Armed) {

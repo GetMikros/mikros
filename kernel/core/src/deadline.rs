@@ -71,11 +71,27 @@ impl<T: PartialEq> Deadlines<T> {
         self.items.remove(i);
         true
     }
+
+    /// Removes the first item for which `matches` holds and returns it.
+    pub fn remove_where(&mut self, matches: impl Fn(&T) -> bool) -> Option<T> {
+        let i = self.items.iter().position(|(_, it)| matches(it))?;
+        Some(self.items.remove(i).1)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removes_an_item_found_by_a_test() {
+        let mut d = Deadlines::new();
+        d.insert(5, 1u32).unwrap();
+        d.insert(INFINITE, 2).unwrap();
+        assert_eq!(d.remove_where(|&i| i == 2), Some(2));
+        assert_eq!(d.remove_where(|&i| i == 2), None);
+        assert_eq!(d.len(), 1);
+    }
 
     #[test]
     fn expires_in_deadline_order() {

@@ -77,6 +77,11 @@ impl Timer {
 
 impl Drop for Timer {
     fn drop(&mut self) {
+        // A deadline left in a processor's list would keep the timer's
+        // memory until it passes, which for `INFINITE` is never.
+        if let Some(cpu) = self.state.get_mut().cpu.take() {
+            crate::sched::forget_timer(cpu, self);
+        }
         self.budget.release_kernel(Self::COST);
     }
 }
@@ -98,6 +103,11 @@ impl PartialEq for Armed {
 }
 
 impl Armed {
+    /// Whether this is the entry of `timer`.
+    pub fn is_of(&self, timer: *const Timer) -> bool {
+        core::ptr::eq(Weak::as_ptr(&self.0), timer)
+    }
+
     /// Sets `SIGNALED` on the timer, if it still exists and was not set
     /// or cancelled again since it was armed.
     pub fn fire(self) {
@@ -108,5 +118,23 @@ impl Armed {
                 timer.header.update_signals(0, signals::SIGNALED);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deadline::INFINITE;
+
+    #[test]
+    fn a_dropped_timer_leaves_no_deadline_behind() {
+        let _mock = crate::arch::mock::lock();
+        let budget = Budget::root();
+        let before = crate::sched::armed_timers(0);
+        let timer = Timer::new(&budget).unwrap();
+        timer.set(INFINITE).unwrap();
+        assert_eq!(crate::sched::armed_timers(0), before + 1);
+        drop(timer);
+        assert_eq!(crate::sched::armed_timers(0), before);
     }
 }
