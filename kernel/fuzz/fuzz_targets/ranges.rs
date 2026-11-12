@@ -1,17 +1,45 @@
-//! Allocates and frees ranges of a small space with room for few free
-//! ranges, and compares every result and the number of free ranges with
-//! a model that keeps one bit per address.
+//! Allocates and frees ranges of a small space, whose free ranges are
+//! more than fit in the ranges themselves, at times without memory for
+//! more room, and compares every result and the number of free ranges
+//! with a model that keeps one bit per address.
 
 #![no_main]
 
-use kernel_core::ranges::{Error, Ranges};
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
+use kernel_core::ranges::{Error, INLINE, Ranges, Room};
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 use libfuzzer_sys::fuzz_target;
+use std::alloc::Layout;
 
-/// The room for free ranges, small so that it runs out.
-const N: usize = 4;
 /// The largest space, in addresses.
 const SPACE: u64 = 512;
+
+/// Whether room for more free ranges runs out.
+static NO_MEMORY: AtomicBool = AtomicBool::new(false);
+
+/// Room on the heap, which runs out while `NO_MEMORY` says so.
+struct HeapRoom;
+
+impl Room for HeapRoom {
+    type Handle = NonNull<(u64, u64)>;
+
+    fn take(count: usize) -> Option<(NonNull<(u64, u64)>, Self::Handle)> {
+        if NO_MEMORY.load(Ordering::Relaxed) {
+            return None;
+        }
+        let layout = Layout::array::<(u64, u64)>(count).ok()?;
+        // SAFETY: the layout is not empty.
+        let room = NonNull::new(unsafe { std::alloc::alloc(layout) }.cast())?;
+        Some((room, room))
+    }
+
+    unsafe fn give(room: Self::Handle, count: usize) {
+        let layout = Layout::array::<(u64, u64)>(count).unwrap();
+        // SAFETY: the room came from the heap with this layout.
+        unsafe { std::alloc::dealloc(room.as_ptr().cast(), layout) };
+    }
+}
 
 #[derive(Arbitrary, Debug)]
 enum Op {
@@ -19,6 +47,8 @@ enum Op {
     /// Frees `size` addresses at `offset` from the start of the space.
     Free { offset: u16, size: u16 },
     FreeRaw { start: u64, size: u64 },
+    /// Makes room for more free ranges run out, or not.
+    NoMemory(bool),
 }
 
 #[derive(Arbitrary, Debug)]
@@ -33,6 +63,8 @@ struct Model {
     start: u64,
     /// Whether each address of the space is free.
     free: Vec<bool>,
+    /// How many free ranges there is room for, which doubles as needed.
+    room: usize,
 }
 
 impl Model {
@@ -56,7 +88,8 @@ impl Model {
     }
 
     /// The lowest aligned start in a free range that has room, skipping
-    /// ranges it would have to split when there is no room for another.
+    /// ranges it would have to split when there is no room for another
+    /// and no memory for more.
     fn alloc(&mut self, size: u64, align: u64) -> Option<u64> {
         if size == 0 || !align.is_power_of_two() {
             return None;
@@ -69,8 +102,11 @@ impl Model {
             if at.checked_add(size).is_none_or(|e| e > end) {
                 continue;
             }
-            if at > start && at + size < end && runs.len() == N {
-                continue;
+            if at > start && at + size < end && runs.len() == self.room {
+                if NO_MEMORY.load(Ordering::Relaxed) {
+                    continue;
+                }
+                self.room *= 2;
             }
             self.set(at, size, false);
             return Some(at);
@@ -93,10 +129,13 @@ impl Model {
         }
         let before = self.runs().len();
         self.set(start, size, true);
-        if self.runs().len() > N {
-            self.set(start, size, false);
-            assert_eq!(before, N);
-            return Err(Error::Full);
+        if self.runs().len() > self.room {
+            assert_eq!(before, self.room);
+            if NO_MEMORY.load(Ordering::Relaxed) {
+                self.set(start, size, false);
+                return Err(Error::NoMemory);
+            }
+            self.room *= 2;
         }
         Ok(())
     }
@@ -105,10 +144,12 @@ impl Model {
 fuzz_target!(|input: Input| {
     let len = u64::from(input.len) % (SPACE + 1);
     let start = input.start.min(u64::MAX - len);
-    let mut ranges = Ranges::<N>::new(start, start + len);
+    NO_MEMORY.store(false, Ordering::Relaxed);
+    let mut ranges = Ranges::<HeapRoom>::new(start, start + len);
     let mut model = Model {
         start,
         free: vec![true; len as usize],
+        room: INLINE,
     };
     for op in input.ops.iter().take(256) {
         match *op {
@@ -129,6 +170,7 @@ fuzz_target!(|input: Input| {
             Op::FreeRaw { start, size } => {
                 assert_eq!(ranges.free(start, size), model.free(start, size));
             }
+            Op::NoMemory(none) => NO_MEMORY.store(none, Ordering::Relaxed),
         }
         assert_eq!(ranges.count(), model.runs().len());
     }

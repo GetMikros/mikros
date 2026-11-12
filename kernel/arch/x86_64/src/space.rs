@@ -8,7 +8,7 @@ use boot_protocol::x86_64::{RUNTIME_WINDOW_BASE, RUNTIME_WINDOW_SIZE};
 use boot_protocol::{BootInfo, CMDLINE_MAX, Kind, flags};
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
-use kernel_core::ranges::Ranges;
+use kernel_core::ranges::{FrameRoom, Ranges};
 use kernel_core::sync::SpinLock;
 
 /// The start of the kernel dynamic region.
@@ -33,7 +33,7 @@ unsafe extern "C" {
 /// The direct map base, from BootInfo.
 static DIRECT_MAP_BASE: AtomicU64 = AtomicU64::new(0);
 /// The unused parts of the kernel dynamic region.
-static DYNAMIC: SpinLock<Ranges<DYNAMIC_RANGES>> = SpinLock::new(
+static DYNAMIC: SpinLock<Ranges<FrameRoom>> = SpinLock::new(
     kernel_core::lock_order::SPACE_DYNAMIC,
     Ranges::with_hole(
         DYNAMIC_START,
@@ -42,8 +42,6 @@ static DYNAMIC: SpinLock<Ranges<DYNAMIC_RANGES>> = SpinLock::new(
         RUNTIME_WINDOW_BASE + RUNTIME_WINDOW_SIZE,
     ),
 );
-/// The most free ranges the dynamic region keeps track of.
-const DYNAMIC_RANGES: usize = 256;
 /// The physical address of the kernel's top-level table.
 static ROOT: AtomicU64 = AtomicU64::new(0);
 /// The kernel's top-level table, once it runs on it.
@@ -92,7 +90,7 @@ pub fn reserve_dynamic(size: u64) -> u64 {
     let start = DYNAMIC
         .lock()
         .alloc(size, PAGE_SIZE)
-        .unwrap_or_else(|| panic!("the kernel dynamic region is full"));
+        .unwrap_or_else(|| panic!("no kernel address space for {size:#x} bytes"));
     start + PAGE_SIZE
 }
 
