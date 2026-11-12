@@ -11382,10 +11382,6 @@ const TESTS: [(&str, Test); 147] = [
         executor::executor_waits_on_objects,
     ),
     (
-        "bootfs_serves_the_boot_image",
-        bootfs::bootfs_serves_the_boot_image,
-    ),
-    (
         "queued_signals_of_ended_thread",
         queued_signals_of_ended_thread,
     ),
@@ -11541,6 +11537,13 @@ const TESTS: [(&str, Test); 147] = [
     (
         "device_manager_starts_the_pci_bus_driver",
         manager::device_manager_starts_the_pci_bus_driver,
+    ),
+    // After the others: its pager thread stays for good and blocks no
+    // signals, so it could take a process-directed signal that a test
+    // blocks on its own thread, whose default action then ends init.
+    (
+        "bootfs_serves_the_boot_image",
+        bootfs::bootfs_serves_the_boot_image,
     ),
     // Runs last: it closes the boot image.
     ("boot_image_object", boot_image_object),
