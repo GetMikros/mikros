@@ -34,6 +34,27 @@ fn adds_disks() {
     assert_eq!(Disk::add(c"adds-disks", file, false), Ok(()));
 }
 
+/// Writable filesystems mounted at once, whose threads are more than the
+/// shim's 256 CPUs, which they hold only while they do not sleep.
+const MOUNTS: usize = 100;
+
+#[test]
+fn mounts_more_filesystems_than_the_shim_has_cpus_for() {
+    start();
+    let mounts: std::vec::Vec<crate::Mount> = (0..MOUNTS)
+        .map(|i| {
+            let name = format!("many-mounts-{i}");
+            let disk = std::ffi::CString::new(name.as_str()).unwrap();
+            Disk::add(&disk, image(&name, 256 << 20, &[]), false).unwrap();
+            let source = std::ffi::CString::new(format!("/dev/{name}")).unwrap();
+            crate::Mount::new(&source, false, None).unwrap()
+        })
+        .collect();
+    for mount in &mounts {
+        mount.sync().unwrap();
+    }
+}
+
 /// Bytes that do not compress, from xorshift64 seeded with `seed`.
 fn noise(seed: u64, len: usize) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;

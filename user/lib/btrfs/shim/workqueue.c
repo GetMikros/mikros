@@ -99,7 +99,7 @@ static void worker(void *arg)
 				goto out;
 			wq->idle++;
 			spin_unlock(&wq->lock);
-			mikros_wait(&wq->changed, seq, deadline);
+			mikros_sleep(&wq->changed, seq, deadline);
 			spin_lock(&wq->lock);
 			wq->idle--;
 			if (list_empty(&wq->pending) && mikros_host_monotonic() >= deadline)
@@ -216,7 +216,7 @@ static bool wait_for(struct work_struct *work)
 		if (!busy)
 			return waited;
 		waited = true;
-		mikros_wait(&wq->changed, seq, MIKROS_HOST_FOREVER);
+		mikros_sleep(&wq->changed, seq, MIKROS_HOST_FOREVER);
 	}
 }
 
@@ -290,7 +290,7 @@ void __flush_workqueue(struct workqueue_struct *wq)
 
 		if (READ_ONCE(wq->finished) >= target)
 			return;
-		mikros_wait(&wq->changed, seq, MIKROS_HOST_FOREVER);
+		mikros_sleep(&wq->changed, seq, MIKROS_HOST_FOREVER);
 	}
 }
 
@@ -361,7 +361,7 @@ void destroy_workqueue(struct workqueue_struct *wq)
 		u32 seq = __atomic_load_n(&wq->changed, __ATOMIC_ACQUIRE);
 
 		spin_unlock(&wq->lock);
-		mikros_wait(&wq->changed, seq, MIKROS_HOST_FOREVER);
+		mikros_sleep(&wq->changed, seq, MIKROS_HOST_FOREVER);
 		spin_lock(&wq->lock);
 	}
 	spin_unlock(&wq->lock);

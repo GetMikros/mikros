@@ -102,7 +102,7 @@ static void grace_period(void)
 			left += !s->out;
 		}
 		if (left) {
-			mikros_wait(&nap, 0, mikros_host_monotonic() + sleep * NSEC_PER_MSEC);
+			mikros_sleep(&nap, 0, mikros_host_monotonic() + sleep * NSEC_PER_MSEC);
 			sleep = min(sleep * 2, 10u);
 		}
 	} while (left);
@@ -166,7 +166,7 @@ void rcu_barrier(void)
 		seq = __atomic_load_n(&done_changed, __ATOMIC_ACQUIRE);
 		if (READ_ONCE(done) >= target)
 			return;
-		mikros_wait(&done_changed, seq, MIKROS_HOST_FOREVER);
+		mikros_sleep(&done_changed, seq, MIKROS_HOST_FOREVER);
 	}
 }
 
@@ -184,7 +184,7 @@ static void rcu_thread(void *arg)
 		queue_tail = &queue;
 		spin_unlock(&queue_lock);
 		if (!batch) {
-			mikros_wait(&queue_changed, seq, MIKROS_HOST_FOREVER);
+			mikros_sleep(&queue_changed, seq, MIKROS_HOST_FOREVER);
 			continue;
 		}
 		grace_period();

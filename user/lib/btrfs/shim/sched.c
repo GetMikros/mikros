@@ -53,10 +53,15 @@ static inline struct mikros_task *to_mikros(struct task_struct *task)
 	return container_of(task, struct mikros_task, task);
 }
 
-/* The tasks, and the CPUs that running ones hold. */
+/* The tasks, and the CPUs that running ones hold: a thread holds one
+ * while it runs Linux code and gives it back while it sleeps. Those that
+ * wait for one count in `cpus_wanted`, and wait on `cpus_given`, which
+ * changes each time one is given back while they do. */
 static LIST_HEAD(tasks);
 static DEFINE_SPINLOCK(tasks_lock);
 static DECLARE_BITMAP(cpus_held, NR_CPUS);
+static int cpus_wanted;
+static u32 cpus_given;
 static atomic_t next_pid = ATOMIC_INIT(1);
 
 DEFINE_RWLOCK(tasklist_lock);
@@ -109,35 +114,87 @@ struct task_struct *mikros_task_createf(const char *fmt, ...)
 	return task;
 }
 
-void mikros_task_enter(struct task_struct *task)
+/* Takes a CPU that no thread holds, and waits until one is given back
+ * when all are held. */
+static int take_cpu(void)
 {
+	bool waited = false;
 	int cpu;
+	u32 given;
 
 	spin_lock(&tasks_lock);
-	cpu = find_first_zero_bit(cpus_held, NR_CPUS);
-	if (cpu < NR_CPUS)
-		__set_bit(cpu, cpus_held);
+	for (;;) {
+		cpu = find_first_zero_bit(cpus_held, NR_CPUS);
+		if (cpu < NR_CPUS)
+			break;
+		if (!waited)
+			cpus_wanted++;
+		waited = true;
+		given = cpus_given;
+		spin_unlock(&tasks_lock);
+		mikros_wait(&cpus_given, given, MIKROS_HOST_FOREVER);
+		spin_lock(&tasks_lock);
+	}
+	if (waited)
+		cpus_wanted--;
+	__set_bit(cpu, cpus_held);
 	spin_unlock(&tasks_lock);
-	if (cpu >= NR_CPUS)
-		panic("the shim runs more than %d threads", NR_CPUS);
+	return cpu;
+}
+
+/* Gives back CPU `cpu`, to a thread that waits for one if any does. */
+static void give_cpu(int cpu)
+{
+	bool wanted;
+
+	spin_lock(&tasks_lock);
+	__clear_bit(cpu, cpus_held);
+	wanted = cpus_wanted > 0;
+	if (wanted)
+		cpus_given++;
+	spin_unlock(&tasks_lock);
+	if (wanted)
+		mikros_wake(&cpus_given, 1);
+}
+
+/* Makes CPU `cpu` the running thread's. */
+static void run_on(struct task_struct *task, int cpu)
+{
 	mikros_cpu = cpu;
-	mikros_irq_flags = ARCH_IRQ_ENABLED;
 	task->thread_info.cpu = cpu;
 	task->wake_cpu = cpu;
+}
+
+void mikros_task_enter(struct task_struct *task)
+{
+	int cpu = take_cpu();
+
+	mikros_irq_flags = ARCH_IRQ_ENABLED;
+	run_on(task, cpu);
 	mikros_current_task = task;
+}
+
+void mikros_sleep(u32 *word, u32 value, s64 deadline)
+{
+	if (!mikros_current_task) {
+		mikros_wait(word, value, deadline);
+		return;
+	}
+	give_cpu(mikros_cpu);
+	mikros_wait(word, value, deadline);
+	run_on(current, take_cpu());
 }
 
 void mikros_task_exit(void)
 {
 	struct task_struct *task = current;
 
-	spin_lock(&tasks_lock);
-	__clear_bit(mikros_cpu, cpus_held);
-	spin_unlock(&tasks_lock);
 	WRITE_ONCE(task->__state, TASK_DEAD);
 	/* The thread's reference: the task goes once nothing else holds it. */
 	put_task_struct(task);
 	mikros_current_task = NULL;
+	/* Last, as freeing may use the CPU's data. */
+	give_cpu(mikros_cpu);
 }
 
 /* The last reference to a task went: it leaves the list and is freed. */
@@ -241,7 +298,7 @@ static bool sleep_until(s64 deadline)
 			return true;
 		if (deadline != MIKROS_HOST_FOREVER && mikros_host_monotonic() >= deadline)
 			return false;
-		mikros_wait(&mt->wake, seq, deadline);
+		mikros_sleep(&mt->wake, seq, deadline);
 	}
 }
 

@@ -57,6 +57,12 @@ static inline void mikros_wait(u32 *word, u32 value, s64 deadline)
 	mikros_host_wait(word, value, deadline);
 }
 
+/* Waits as mikros_wait does, where a task may sleep: the thread gives
+ * back its CPU meanwhile, as a sleeping task holds none, and takes one
+ * again, maybe another. Not where it holds a spinlock, which the shim's
+ * preempt count does not show. */
+void mikros_sleep(u32 *word, u32 value, s64 deadline);
+
 static inline void mikros_wake(u32 *word, int count)
 {
 	mikros_host_wake(word, count);

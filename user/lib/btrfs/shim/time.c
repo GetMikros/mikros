@@ -236,7 +236,7 @@ static void timer_thread(void *arg)
 		/* jiffies advances at least each tick. */
 		next = min(next, READ_ONCE(jiffies) + 1);
 		deadline = start + (s64)(next - INITIAL_JIFFIES) * TICK_NSEC;
-		mikros_wait(&changed, seq, deadline);
+		mikros_sleep(&changed, seq, deadline);
 	}
 }
 
