@@ -12,6 +12,8 @@ pub const ENTRY_SIZE: usize = 24;
 pub const FRAMEBUFFER_PRESENT: u32 = 1 << 0;
 /// Header flag: `boot_time` is valid.
 pub const BOOT_TIME_VALID: u32 = 1 << 1;
+/// Header flag: `framebuffer_pci` is valid.
+pub const FRAMEBUFFER_PCI_VALID: u32 = 1 << 2;
 
 /// The startup message for `info`, with the command line `cmdline` and
 /// the entries of `memory_map`.
@@ -28,6 +30,14 @@ pub fn message(
     }
     if info.flags & flags::BOOT_TIME_VALID != 0 {
         header_flags |= BOOT_TIME_VALID;
+    }
+    // The framebuffer's PCI function: segment, bus and devfn in one word.
+    let mut framebuffer_pci = 0;
+    if info.flags & flags::FRAMEBUFFER_PRESENT != 0 && info.framebuffer_pci_valid == 1 {
+        header_flags |= FRAMEBUFFER_PCI_VALID;
+        framebuffer_pci = (u32::from(info.framebuffer_pci_segment) << 16)
+            | (u32::from(info.framebuffer_pci_bus) << 8)
+            | u32::from(info.framebuffer_pci_devfn);
     }
     let fb = &info.framebuffer;
     let put =
@@ -52,6 +62,7 @@ pub fn message(
     }
     put(&mut m, 0x40, &info.boot_image_size.to_le_bytes());
     put(&mut m, 0x58, &info.arch.to_le_bytes());
+    put(&mut m, 0x5C, &framebuffer_pci.to_le_bytes());
     put(&mut m, 0x60, &info.boot_time.to_le_bytes());
 
     let cmdline_offset = m.len();
@@ -106,6 +117,10 @@ mod tests {
                 blue_mask: 0xFF,
                 reserved_mask: 0xFF00_0000,
             },
+            framebuffer_pci_segment: 1,
+            framebuffer_pci_bus: 3,
+            framebuffer_pci_devfn: 2 * 8 + 1,
+            framebuffer_pci_valid: 1,
             ..BootInfo::default()
         };
         let map = [
@@ -124,7 +139,10 @@ mod tests {
         ];
         let m = message(&info, b"root=x", map.into_iter());
         assert_eq!(u32_at(&m, 0x00), 1);
-        assert_eq!(u32_at(&m, 0x04), FRAMEBUFFER_PRESENT | BOOT_TIME_VALID);
+        assert_eq!(
+            u32_at(&m, 0x04),
+            FRAMEBUFFER_PRESENT | BOOT_TIME_VALID | FRAMEBUFFER_PCI_VALID
+        );
         assert_eq!(u64_at(&m, 0x08), 0xE_0000);
         assert_eq!(u64_at(&m, 0x10), 0x8000_0000);
         assert_eq!(u64_at(&m, 0x18), 0x30_0000);
@@ -136,7 +154,7 @@ mod tests {
         assert_eq!(&m[0x68..0x6E], b"root=x");
         assert_eq!((u32_at(&m, 0x50), u32_at(&m, 0x54)), (0x70, 2));
         assert_eq!(u32_at(&m, 0x58), 1);
-        assert_eq!(u32_at(&m, 0x5C), 0);
+        assert_eq!(u32_at(&m, 0x5C), 0x1_0311);
         assert_eq!(u64_at(&m, 0x60), (-7i64) as u64);
         assert_eq!(u64_at(&m, 0x88), 0x10_0000);
         assert_eq!(u64_at(&m, 0x90), 3);
@@ -152,5 +170,13 @@ mod tests {
         assert_eq!((u32_at(&m, 0x48), u32_at(&m, 0x4C)), (0x68, 0));
         assert_eq!((u32_at(&m, 0x50), u32_at(&m, 0x54)), (0x68, 0));
         assert_eq!(m.len(), HEADER_SIZE);
+        // A PCI function without a framebuffer is not given.
+        let info = BootInfo {
+            framebuffer_pci_bus: 3,
+            framebuffer_pci_valid: 1,
+            ..BootInfo::default()
+        };
+        let m = message(&info, b"", core::iter::empty());
+        assert_eq!((u32_at(&m, 0x04), u32_at(&m, 0x5C)), (0, 0));
     }
 }
