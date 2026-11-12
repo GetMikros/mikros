@@ -176,13 +176,18 @@ impl<'a> Frames<'a> {
     }
 
     /// Frees `count` frames from the physical address `phys`, which an
-    /// allocation returned.
+    /// allocation returned. In every build, a frame of them that is free
+    /// already panics, with its address and the number of frames freed,
+    /// rather than counting as free twice.
     pub fn free(&mut self, phys: u64, count: u64) {
         let first = phys / PAGE_SIZE;
-        debug_assert!(
-            (first..first + count).all(|f| !self.is_free(f)),
-            "freeing a free frame"
-        );
+        let end = first.saturating_add(count).min(self.frames());
+        if let Some(frame) = (first..end).find(|&f| self.is_free(f)) {
+            panic!(
+                "freeing frame {:#x}, which is free already, in a free of {count} frames from {phys:#x}",
+                frame * PAGE_SIZE
+            );
+        }
         self.add(first, count);
     }
 }
@@ -230,6 +235,20 @@ mod tests {
                 .all(|&f| (2..8).contains(&f) || (12..1112).contains(&f))
         );
         assert_eq!(frames.free_count(), 0);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "freeing frame 0x3000, which is free already, in a free of 2 frames from 0x2000"
+    )]
+    fn panics_on_a_frame_freed_twice() {
+        let mut bits = vec![0; 1];
+        let mut frames = Frames::new(&mut bits);
+        frames.add(2, 4);
+        let first = frames.alloc_contiguous(2, 1, u64::MAX).unwrap();
+        assert_eq!(first, 2 * PAGE_SIZE);
+        frames.free(first + PAGE_SIZE, 1);
+        frames.free(first, 2);
     }
 
     #[test]
