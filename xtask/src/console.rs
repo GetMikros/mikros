@@ -31,6 +31,16 @@ const SETTLE: Duration = Duration::from_secs(3);
 /// How long the setup program has to ask its next question, and msh
 /// to run a command.
 const QUESTION: Duration = Duration::from_secs(1);
+/// How long msh has to start `spawn-std sleep` and give it the terminal
+/// before the runner types Ctrl-Z. Until then the shell's own process
+/// group is in the terminal's foreground, and a Ctrl-Z goes to the shell,
+/// which ignores it, as other shells do; the job then runs on in the
+/// foreground and takes the rest of the input. While the command word is
+/// typed, msh lists the programs of `PATH` again for its suggestion after
+/// each key, so in a debug build the line reaches it about 1 s after the
+/// last key; starting the job and handing it the terminal takes about
+/// 70 ms more.
+const JOB_START: Duration = Duration::from_secs(5);
 /// What the runner types in ada's msh: `spaw`, which Tab completes to
 /// `spawn-std `, and `sleep`, a job that runs until it is killed,
 /// Ctrl-Z, which stops it, then `let n = (jobs | lines | len)`, `bg`,
@@ -227,9 +237,14 @@ pub fn run_setup(
         Step::Keys("a d a ret"),
         Step::Keys("a d a minus p w ret"),
     ]);
+    // The first keys start the job that Ctrl-Z stops next.
     let after: Vec<Step> = MSH_KEYS
         .iter()
-        .flat_map(|keys| [Step::Keys(keys), Step::Sleep(QUESTION)])
+        .enumerate()
+        .flat_map(|(i, keys)| {
+            let wait = if i == 0 { JOB_START } else { QUESTION };
+            [Step::Keys(keys), Step::Sleep(wait)]
+        })
         .collect();
     // The root partition holds the services that need it, which start
     // once it is available.
