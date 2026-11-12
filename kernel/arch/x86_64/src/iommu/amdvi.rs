@@ -183,9 +183,15 @@ impl Unit {
         let wait = [COMPLETION_WAIT | self.status | 1, 1];
         for c in commands.iter().chain([&wait]) {
             let at = space::direct(self.cmd) + self.cmd_tail * 16;
+            let slot = at as *mut u64;
             // SAFETY: the slot lies in the buffer, which the unit has read
-            // up to the tail, as each submission waits for its end.
-            unsafe { *(at as *mut [u64; 2]) = *c };
+            // up to the tail, as each submission waits for its end. The
+            // stores are volatile, so that they come before the tail's,
+            // which tells the unit to read them.
+            unsafe {
+                slot.write_volatile(c[0]);
+                slot.add(1).write_volatile(c[1]);
+            }
             self.cmd_tail = (self.cmd_tail + 1) % RING_ENTRIES;
         }
         self.write(CMD_TAIL, self.cmd_tail * 16);
