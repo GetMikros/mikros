@@ -1,6 +1,8 @@
 //! The basic display driver.
 //!
-//! It is the fallback driver of the `platform:boot-framebuffer` device.
+//! It is the fallback driver of the device that has the boot framebuffer:
+//! `platform:boot-framebuffer`, or the PCI function that provides it, with
+//! `display:boot-framebuffer`. It never uses its bus channel.
 //! It takes the framebuffer's memory object from its startup handle with
 //! the role `USER` and ID 1, and its description from the device's
 //! properties, and publishes its GPU device with the gpudev library,
@@ -70,11 +72,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         reactor.clone(),
     ));
     let mut running: Option<(Rc<GpuDevice<Display>>, DeviceManagerAsyncClient)> = None;
+    // The bus channel that a PCI function's driver gets: never used, but
+    // kept open, as the bus driver stops the function decoding once it
+    // closes, which would leave the framebuffer unreachable.
+    let mut bus = None;
     executor.block_on(async {
         while let Ok(request) = server.next().await {
             let s = server.server();
             let _ = match request {
-                DriverRequest::Start(request, responder) => {
+                DriverRequest::Start(mut request, responder) => {
+                    bus = request.bus.take();
                     let Some(memory) = memory.take() else {
                         let _ = responder.reply(s, Err(Status::BadState));
                         continue;

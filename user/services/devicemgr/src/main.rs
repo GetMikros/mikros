@@ -21,6 +21,7 @@
 extern crate alloc;
 
 mod acpi;
+mod boot_display;
 mod cache;
 mod devices;
 mod drivers;
@@ -66,6 +67,10 @@ const INFO_HEADER_SIZE: usize = 0x68;
 const FIRMWARE_TABLE: usize = 0x08;
 const FLAGS: usize = 0x04;
 const HAS_FRAMEBUFFER: u32 = 1 << 0;
+/// The flag set when the header names the framebuffer's PCI function,
+/// and where it does, as segment, bus and devfn in one word.
+const HAS_FRAMEBUFFER_PCI: u32 = 1 << 2;
+const FRAMEBUFFER_PCI: usize = 0x5C;
 /// Where the header holds the framebuffer's description.
 const FRAMEBUFFER: usize = 0x10;
 /// Where the header gives the command line's offset and length, and the
@@ -134,25 +139,52 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let has_framebuffer = info
         .as_ref()
         .is_some_and(|i| u32_at(i, FLAGS) & HAS_FRAMEBUFFER != 0);
-    if framebuffer.is_some()
-        && let Some(header) = info.as_ref().filter(|_| has_framebuffer)
-    {
-        devices.add(
-            "boot-framebuffer".into(),
-            vec!["platform:boot-framebuffer".into()],
-            framebuffer_properties(header),
-            None,
-            Vec::new(),
-        );
-    }
     let memory = acpi::Memory {
         root: &root,
         process: managed.header.process.raw(),
     };
     let rsdp = info.map(|i| u64_at(&i, FIRMWARE_TABLE)).filter(|&r| r != 0);
-    match rsdp.and_then(|rsdp| memory.find(rsdp, b"MCFG")) {
-        Some(mcfg) => add_host_bridges(&mut devices, &root, &mcfg),
-        None => mikros_rt::log!(Warning, "device-manager: no MCFG table, so no PCI"),
+    let mcfg = rsdp.and_then(|rsdp| memory.find(rsdp, b"MCFG"));
+    // The framebuffer's PCI function, when the header names one and an
+    // MCFG entry covers it.
+    let pci = info
+        .as_ref()
+        .filter(|i| u32_at(&i[..], FLAGS) & HAS_FRAMEBUFFER_PCI != 0)
+        .map(|i| u32_at(&i[..], FRAMEBUFFER_PCI))
+        .filter(|&pci| {
+            mcfg.as_ref().is_some_and(|mcfg| {
+                acpi::ecams(mcfg)
+                    .any(|e| boot_display::covers(e.segment, e.bus_start, e.bus_end, pci))
+            })
+        });
+    let framebuffer_header = info
+        .as_ref()
+        .filter(|_| framebuffer.is_some() && has_framebuffer);
+    if pci.is_none()
+        && let Some(header) = framebuffer_header
+    {
+        add_boot_framebuffer(&mut devices, header);
+    }
+    let hosts = match &mcfg {
+        Some(mcfg) => add_host_bridges(&mut devices, &root, mcfg),
+        None => {
+            mikros_rt::log!(Warning, "device-manager: no MCFG table, so no PCI");
+            Vec::new()
+        }
+    };
+    let mut boot_display = None;
+    if let (Some(pci), Some(header)) = (pci, framebuffer_header) {
+        let host = hosts
+            .iter()
+            .find(|(segment, start, end, _)| boot_display::covers(*segment, *start, *end, pci));
+        if let Some(&(_, _, _, host)) = host {
+            boot_display = Some(boot_display::BootDisplay {
+                name: boot_display::function_name(pci),
+                properties: framebuffer_properties(header),
+                host,
+                given: core::cell::Cell::new(boot_display::Given::Waiting),
+            });
+        }
     }
     // After the host bridges, so that they keep their IDs.
     if let Some(rsdp) = rsdp {
@@ -179,6 +211,18 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         }
     };
     devices.bind(&drivers);
+    // Without a bus driver for its host bridge, the framebuffer's PCI
+    // function is never added, so the framebuffer gets a device of its own.
+    if let Some(boot) = &boot_display
+        && devices
+            .get(boot.host)
+            .is_none_or(|host| host.driver.is_none())
+        && let Some(header) = framebuffer_header
+    {
+        boot.given.set(boot_display::Given::Platform);
+        let id = add_boot_framebuffer(&mut devices, header);
+        devices.bind_device(id, &drivers);
+    }
     let header = managed.header;
     let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
     let broker = executor.block_on(connect::<Broker>(&directory, BROKER));
@@ -201,6 +245,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         spawner: spawner.clone(),
         firmware_memory,
         power_off: core::cell::Cell::new(false),
+        boot_display,
     });
     spawner.spawn(shutdown::watch(manager.clone()));
     match provider {
@@ -245,8 +290,14 @@ async fn connect<P>(directory: &DirectoryAsyncClient, protocol: &str) -> Option<
 }
 
 /// Adds a `platform:pci-host-ecam` root device for each entry of `mcfg`,
-/// with a shared `MMIO` resource from `root` for its buses' range.
-fn add_host_bridges(devices: &mut Devices, root: &OwnedHandle, mcfg: &[u8]) {
+/// with a shared `MMIO` resource from `root` for its buses' range, and
+/// returns the segment, first and last bus, and device ID of each.
+fn add_host_bridges(
+    devices: &mut Devices,
+    root: &OwnedHandle,
+    mcfg: &[u8],
+) -> Vec<(u16, u8, u8, u64)> {
+    let mut added = Vec::new();
     for ecam in acpi::ecams(mcfg) {
         let buses = u64::from(ecam.bus_end - ecam.bus_start) + 1;
         let base = ecam.base + u64::from(ecam.bus_start) * BUS_SIZE;
@@ -277,14 +328,28 @@ fn add_host_bridges(devices: &mut Devices, root: &OwnedHandle, mcfg: &[u8]) {
             property("bus_end", format!("{}", ecam.bus_end)),
             property("ecam_base", format!("{:#x}", ecam.base)),
         ];
-        devices.add(
+        let id = devices.add(
             format!("pci-host-{}", ecam.segment),
             vec!["platform:pci-host-ecam".into()],
             properties,
             None,
             vec![resource],
         );
+        added.push((ecam.segment, ecam.bus_start, ecam.bus_end, id));
     }
+    added
+}
+
+/// Adds the root device that has the boot framebuffer, described by the
+/// platform information's `header`, and returns its ID.
+fn add_boot_framebuffer(devices: &mut Devices, header: &[u8]) -> u64 {
+    devices.add(
+        "boot-framebuffer".into(),
+        vec![boot_display::PLATFORM_BOOT_FRAMEBUFFER.into()],
+        framebuffer_properties(header),
+        None,
+        Vec::new(),
+    )
 }
 
 fn property(key: &str, value: String) -> (String, String) {

@@ -3,6 +3,7 @@
 //! manager with its `Driver` channel as the `PROVIDER` startup handle,
 //! and calling `Start` on that channel.
 
+use crate::boot_display::{DISPLAY_BOOT_FRAMEBUFFER, PLATFORM_BOOT_FRAMEBUFFER};
 use crate::devices::Device;
 use alloc::format;
 use alloc::rc::Rc;
@@ -39,16 +40,19 @@ const INFO_RESOURCE_SIZE: usize = 0x18;
 /// The priorities that a driver's `priority` may reach beyond 16.
 const PRIORITY_FIRST: i64 = 17;
 const PRIORITY_LAST: i64 = 31;
-/// The boot framebuffer's hardware ID, and the start of PCI display
-/// controllers' class IDs.
-const BOOT_FRAMEBUFFER: &str = "platform:boot-framebuffer";
+/// The start of PCI display controllers' class IDs.
 const PCI_DISPLAY: &str = "pci:c03";
 /// The `id` of the framebuffer's `USER` startup handle.
 const FRAMEBUFFER_ID: u32 = 1;
 
 /// Whether `hardware_id` is that of a display device.
 fn is_display(hardware_id: &str) -> bool {
-    hardware_id == BOOT_FRAMEBUFFER || hardware_id.starts_with(PCI_DISPLAY)
+    hardware_id == PLATFORM_BOOT_FRAMEBUFFER || hardware_id.starts_with(PCI_DISPLAY)
+}
+
+/// Whether `hardware_id` marks the device that has the boot framebuffer.
+fn has_framebuffer(hardware_id: &str) -> bool {
+    hardware_id == PLATFORM_BOOT_FRAMEBUFFER || hardware_id == DISPLAY_BOOT_FRAMEBUFFER
 }
 
 /// What starting drivers takes: the process manager's `Launcher`, the
@@ -136,8 +140,8 @@ impl Starter {
     /// Spawns `driver` for the device with `hardware_ids`, with app ID
     /// `system.driver.<name>`, after registering its permissions with
     /// the broker. Before the first driver of a display device, the
-    /// kernel console is released; the boot framebuffer's driver gets
-    /// the framebuffer's memory object.
+    /// kernel console is released; the driver of the device that has the
+    /// boot framebuffer gets the framebuffer's memory object.
     pub async fn spawn(&self, driver: &Driver, hardware_ids: &[String]) -> Result<Spawned, String> {
         if hardware_ids.iter().any(|id| is_display(id)) {
             self.release_console();
@@ -162,7 +166,7 @@ impl Starter {
             handle: server.into_handle(),
         }];
         handles.extend(self.priority(driver.priority)?);
-        if hardware_ids.iter().any(|id| id == BOOT_FRAMEBUFFER) {
+        if hardware_ids.iter().any(|id| has_framebuffer(id)) {
             let framebuffer = self
                 .framebuffer
                 .as_ref()
@@ -200,7 +204,7 @@ impl Starter {
     }
 
     /// Releases the kernel console, once.
-    fn release_console(&self) {
+    pub fn release_console(&self) {
         let Some(log) = self.console.borrow_mut().take() else {
             return;
         };

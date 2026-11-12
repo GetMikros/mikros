@@ -2,6 +2,7 @@
 //! a `Start` that fails and a driver process that terminates without
 //! being stopped, and removing devices.
 
+use crate::boot_display::{Given, PLATFORM_BOOT_FRAMEBUFFER};
 use crate::cache::Profiles;
 use crate::devices::Devices;
 use crate::publish::ServiceIds;
@@ -12,6 +13,7 @@ use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::Cell;
 use core::cell::RefCell;
@@ -61,6 +63,9 @@ pub struct Manager {
     /// Whether the last kind of shutdown set through
     /// `mikros.driver.Shutdown` was a power-off.
     pub power_off: Cell<bool>,
+    /// The boot framebuffer while its PCI function is expected, or once
+    /// that function has it.
+    pub boot_display: Option<crate::boot_display::BootDisplay>,
 }
 
 /// Something that happens once, which tasks can wait for.
@@ -151,6 +156,11 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
                 }
             }
         };
+        // Nothing may draw on the framebuffer while the bus that has its
+        // PCI function is first sized.
+        if m.boot_display.as_ref().is_some_and(|boot| boot.host == id) {
+            m.starter.release_console();
+        }
         let spawned = match m.starter.spawn(driver, &hardware_ids).await {
             Ok(spawned) => spawned,
             Err(why) => return did_not_start(&why),
@@ -188,6 +198,9 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             .starter
             .start(&spawned.driver, prepared, bus, manager)
             .await;
+        if matches!(started, Started::Yes | Started::Declined(_)) {
+            boot_framebuffer_fallback(&m, id);
+        }
         match started {
             Started::Yes => {
                 mikros_rt::log!(
@@ -427,6 +440,40 @@ fn channel() -> Result<(OwnedHandle, OwnedHandle), String> {
 }
 
 /// The driver bound to device `id`, if it has one.
+/// Once the bus driver of device `id` replied to `Start`: when it is the
+/// host bridge of the boot framebuffer's PCI function and did not add that
+/// function, gives the framebuffer to a root device of its own, and
+/// supervises that device's driver.
+fn boot_framebuffer_fallback(m: &Rc<Manager>, id: u64) {
+    let Some(boot) = m
+        .boot_display
+        .as_ref()
+        .filter(|boot| boot.host == id && boot.given.get() == Given::Waiting)
+    else {
+        return;
+    };
+    boot.given.set(Given::Platform);
+    mikros_rt::log!(
+        Info,
+        "device-manager: {} was not added, so the framebuffer gets a device of its own",
+        boot.name
+    );
+    let added = {
+        let mut devices = m.devices.borrow_mut();
+        let added = devices.add(
+            "boot-framebuffer".into(),
+            vec![PLATFORM_BOOT_FRAMEBUFFER.into()],
+            boot.properties.clone(),
+            None,
+            Vec::new(),
+        );
+        devices.bind_device(added, &m.drivers).then_some(added)
+    };
+    if let Some(added) = added {
+        m.spawner.spawn(supervise(m.clone(), added));
+    }
+}
+
 fn bound_driver(m: &Manager, id: u64) -> Option<&Driver> {
     let devices = m.devices.borrow();
     let name = devices.get(id)?.driver.as_ref()?;

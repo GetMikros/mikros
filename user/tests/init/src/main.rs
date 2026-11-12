@@ -10211,6 +10211,9 @@ mod manager {
         if framebuffer {
             message[0x04] |= 1;
         }
+        // The framebuffer gets a device of its own, as the tests expect,
+        // whether or not this boot's framebuffer has a PCI function.
+        message[0x04] &= !(1 << 2);
         let memory = |what, bytes: &[u8]| -> Result<OwnedHandle> {
             let mut mem = 0;
             let size = (bytes.len() as u64)

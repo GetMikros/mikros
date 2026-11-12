@@ -2,7 +2,9 @@
 # usr/lib/drivers/basicdisplay/driver.yaml.
 name: basicdisplay
 binary: /usr/lib/drivers/basicdisplay/basicdisplay
-match: [platform:boot-framebuffer]
+# The boot framebuffer's own device, or the PCI function that provides it,
+# which a GPU driver, as a normal driver, takes instead.
+match: [platform:boot-framebuffer, display:boot-framebuffer]
 kind: fallback
 # To ask the permission broker whether a client may own the display, and
 # to read the log that it shows while none does.

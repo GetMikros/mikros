@@ -1,5 +1,6 @@
 //! Serving the `DeviceManager` channel of each driver while it runs.
 
+use crate::boot_display;
 use crate::cache;
 use crate::devices::Device;
 use crate::publish::{self, Published};
@@ -114,9 +115,12 @@ enum Added {
 /// `cache` property when it is a disk or partition, from the storage
 /// profiles read again for it, and binds a driver to it. A device that
 /// was kept for `caller`'s restarted driver, with the same name and
-/// hardware IDs, is given back instead. Fails with `INVALID_ARGS` when a
-/// hardware ID does not have the form of one. Returns its ID and what
-/// was done, or None, adding nothing, once device `caller` is gone.
+/// hardware IDs, is given back instead. The PCI function that has the
+/// boot framebuffer also gets `display:boot-framebuffer` after its own
+/// hardware IDs, and the framebuffer's properties. Fails with
+/// `INVALID_ARGS` when a hardware ID does not have the form of one.
+/// Returns its ID and what was done, or None, adding nothing, once
+/// device `caller` is gone.
 async fn add_device(
     m: &Manager,
     caller: u64,
@@ -126,7 +130,18 @@ async fn add_device(
     if !ids.iter().all(|id| mikros_manifest::is_hardware_id(id)) {
         return Some(Err(Status::InvalidArgs));
     }
-    let kept = m.devices.borrow_mut().take_kept(caller, &request.name, ids);
+    let boot = m
+        .boot_display
+        .as_ref()
+        .filter(|boot| boot.is(caller, &request.name));
+    let mut hardware_ids = request.hardware_ids;
+    if boot.is_some() {
+        hardware_ids.push(boot_display::DISPLAY_BOOT_FRAMEBUFFER.into());
+    }
+    let kept = m
+        .devices
+        .borrow_mut()
+        .take_kept(caller, &request.name, &hardware_ids);
     if let Some(id) = kept {
         return Some(Ok((id, Added::Again)));
     }
@@ -135,6 +150,11 @@ async fn add_device(
         .into_iter()
         .map(|p| (p.key, p.value))
         .collect();
+    if let Some(boot) = boot {
+        properties.extend(boot.properties.iter().cloned());
+        boot.given.set(boot_display::Given::Function);
+    }
+    let ids = &hardware_ids;
     let profiles = match cache::applies(ids) {
         true => m.profiles.load(&m.reactor).await.unwrap_or_default(),
         false => Vec::new(),
@@ -145,7 +165,7 @@ async fn add_device(
     cache::set(ids, &mut properties, devices.get(caller), &profiles);
     let id = devices.add(
         request.name,
-        request.hardware_ids,
+        hardware_ids.clone(),
         properties,
         Some(caller),
         request.resources,
