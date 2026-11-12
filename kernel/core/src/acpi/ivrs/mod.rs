@@ -33,6 +33,9 @@ pub struct Unit {
     /// Devices whose DMA reaches the unit with another device ID, with
     /// that ID.
     pub aliases: Vec<(RangeInclusive<u16>, u16)>,
+    /// The DTE setting byte of each device entry, with the device IDs it
+    /// covers, in the order of the entries.
+    pub settings: Vec<(RangeInclusive<u16>, u8)>,
 }
 
 impl Unit {
@@ -46,6 +49,19 @@ impl Unit {
             .filter(|&alias| alias != device)
     }
 
+    /// The DTE setting that the device entries give the device with ID
+    /// `device`: that of the last entry that covers it, or 0 when none
+    /// does. Bits 0, 1 and 2 let its INIT, ExtInt and NMI interrupts
+    /// pass, bits 4 and 5 are its SysMgt mode, and bits 6 and 7 let its
+    /// LINT0 and LINT1 interrupts pass.
+    pub fn setting(&self, device: u16) -> u8 {
+        self.settings
+            .iter()
+            .rev()
+            .find(|(r, _)| r.contains(&device))
+            .map_or(0, |&(_, setting)| setting)
+    }
+
     /// Whether the unit handles the device with requester ID `rid`.
     pub fn covers(&self, rid: u64) -> bool {
         let segment = (rid >> 16) as u16;
@@ -54,8 +70,18 @@ impl Unit {
     }
 }
 
+/// The bits of an AMD-Vi device table entry's second and third quadwords
+/// that the DTE setting `setting` gives: its SysMgt mode at bits 40 and 41
+/// of the second, and the INIT, ExtInt and NMI pass bits at 56 to 58 and
+/// the LINT0 and LINT1 pass bits at 62 and 63 of the third.
+pub fn dte_bits(setting: u8) -> [u64; 2] {
+    let s = u64::from(setting);
+    [(s >> 4 & 0b11) << 40, (s & 0b111) << 56 | (s >> 6) << 62]
+}
+
 /// The device entries of an IVHD block from `at`, added to `unit`. A
-/// range opened by a start entry ends at the next end entry.
+/// range opened by a start entry ends at the next end entry, and has the
+/// start entry's DTE setting, which an alias's ID has too.
 fn device_entries(bytes: &[u8], unit: &mut Unit) {
     let mut at = 0;
     let mut start = None;
@@ -73,23 +99,24 @@ fn device_entries(bytes: &[u8], unit: &mut Unit) {
             break;
         };
         let id = u16_at(entry, 1).unwrap_or(0);
+        let setting = entry[3];
         // Alias entries give the ID the devices' DMA arrives with.
         let alias = u16_at(entry, 5).filter(|_| kind == 66 || kind == 67);
-        match kind {
-            1 => unit.devices.push(0..=u16::MAX),
-            2 | 66 | 70 => {
-                unit.devices.push(id..=id);
-                if let Some(alias) = alias {
-                    unit.aliases.push((id..=id, alias));
-                }
+        let add = |unit: &mut Unit, ids: RangeInclusive<u16>, alias: Option<u16>, setting| {
+            unit.devices.push(ids.clone());
+            unit.settings.push((ids.clone(), setting));
+            if let Some(alias) = alias {
+                unit.aliases.push((ids, alias));
+                unit.settings.push((alias..=alias, setting));
             }
-            3 | 67 | 71 => start = Some((id, alias)),
+        };
+        match kind {
+            1 => add(unit, 0..=u16::MAX, None, setting),
+            2 | 66 | 70 => add(unit, id..=id, alias, setting),
+            3 | 67 | 71 => start = Some((id, alias, setting)),
             4 => {
-                if let Some((first, alias)) = start.take() {
-                    unit.devices.push(first..=id);
-                    if let Some(alias) = alias {
-                        unit.aliases.push((first..=id, alias));
-                    }
+                if let Some((first, alias, setting)) = start.take() {
+                    add(unit, first..=id, alias, setting);
                 }
             }
             72 => {
@@ -98,7 +125,7 @@ fn device_entries(bytes: &[u8], unit: &mut Unit) {
                 if entry[7] == 1 {
                     unit.io_apics.push((entry[4], device));
                 }
-                unit.devices.push(device..=device);
+                add(unit, device..=device, None, setting);
             }
             _ => {}
         }
@@ -136,6 +163,7 @@ pub fn units(ivrs: &[u8]) -> Vec<Unit> {
             devices: Vec::new(),
             io_apics: Vec::new(),
             aliases: Vec::new(),
+            settings: Vec::new(),
         };
         device_entries(b.get(entries..).unwrap_or(&[]), &mut unit);
         match units.iter_mut().find(|u| u.base == base) {

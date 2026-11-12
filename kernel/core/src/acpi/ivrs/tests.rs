@@ -81,6 +81,54 @@ fn reads_device_entries() {
     assert!(!u.covers(0x1_0150), "another segment");
 }
 
+/// Each device entry's DTE setting covers the IDs it names: a range from
+/// its start entry, both IDs of an alias, and a special device's ID. The
+/// last entry that covers an ID decides, and an ID that none covers gets
+/// 0.
+#[test]
+fn reads_dte_settings() {
+    let with = |mut e: Vec<u8>, setting: u8| {
+        e[3] = setting;
+        e
+    };
+    let alias = [66, 0x40, 0, 0x04, 0, 0x41, 0, 0];
+    let special = [72, 0, 0, 0xD7, 9, 0xA0, 0, 1];
+    let table = ivrs(&[ivhd(
+        0x10,
+        0x02,
+        0xFEB8_0000,
+        &[
+            &with(entry4(1, 0), 0x01),
+            &with(entry4(2, 0x10), 0xC7),
+            &with(entry4(3, 0x20), 0x30),
+            &entry4(4, 0x2F),
+            &alias,
+            &special,
+        ],
+    )]);
+    let u = &units(&table)[0];
+    assert_eq!(u.setting(0x10), 0xC7);
+    assert_eq!((u.setting(0x20), u.setting(0x2F)), (0x30, 0x30));
+    assert_eq!((u.setting(0x40), u.setting(0x41)), (0x04, 0x04));
+    assert_eq!(u.setting(0xA0), 0xD7);
+    assert_eq!(u.setting(0x30), 0x01, "the entry for all devices");
+    let table = ivrs(&[ivhd(0x10, 0x02, 0x1000, &[&with(entry4(2, 0x10), 0xC7)])]);
+    assert_eq!(units(&table)[0].setting(0x11), 0);
+}
+
+#[test]
+fn places_dte_settings_in_the_device_table_entry() {
+    assert_eq!(dte_bits(0), [0, 0]);
+    // INITPass, EIntPass and NMIPass.
+    assert_eq!(dte_bits(0b111), [0, 0b111 << 56]);
+    // SysMgt.
+    assert_eq!(dte_bits(0b10 << 4), [0b10 << 40, 0]);
+    // Lint0Pass and Lint1Pass.
+    assert_eq!(dte_bits(0b11 << 6), [0, 0b11 << 62]);
+    // Bit 3 is reserved.
+    assert_eq!(dte_bits(1 << 3), [0, 0]);
+}
+
 #[test]
 fn prefers_the_block_of_the_highest_type() {
     let all = entry4(1, 0);

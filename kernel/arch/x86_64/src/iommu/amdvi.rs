@@ -3,6 +3,7 @@
 //! event log.
 
 use crate::space::{self, map_device};
+use kernel_core::acpi::ivrs;
 use kernel_core::nodes::{self, Map};
 use kernel_core::object::memory::PAGE_SIZE;
 use kernel_core::status::Error;
@@ -107,20 +108,25 @@ pub struct Unit {
     /// The interrupt remapping table of each device that has one.
     int_tables: Map<u16, u64>,
     remapping: bool,
+    /// The IVRS description of the unit, with the DTE setting of each
+    /// device.
+    cover: ivrs::Unit,
 }
 
 impl Unit {
-    /// Sets up the IOMMU whose registers are at `phys` with a device
-    /// table that blocks the DMA of every device, a command buffer and an
-    /// event log, and turns it on.
-    pub fn new(phys: u64) -> Result<Unit, Error> {
+    /// Sets up the IOMMU that `cover` describes with a device table that
+    /// blocks the DMA of every device, a command buffer and an event log,
+    /// and turns it on.
+    pub fn new(cover: &ivrs::Unit) -> Result<Unit, Error> {
+        let phys = cover.base;
         crate::reserved::reserve_mmio(phys, REGISTERS);
         let regs = map_device(phys, REGISTERS);
         let devtab = crate::memory::alloc_contiguous(DEVICES * DTE_SIZE / PAGE_SIZE, 1, u64::MAX)
             .ok_or(Error::NoMemory)?;
-        let blocked = [DTE_V | DTE_TV, 0, 0, 0];
         for device in 0..DEVICES {
             let at = space::direct(devtab) + device * DTE_SIZE;
+            let [sys_mgt, passes] = ivrs::dte_bits(cover.setting(device as u16));
+            let blocked = [DTE_V | DTE_TV, sys_mgt, passes, 0];
             // SAFETY: the table was just allocated for the unit.
             unsafe { *(at as *mut [u64; 4]) = blocked };
         }
@@ -136,6 +142,7 @@ impl Unit {
             next_domain: 1,
             int_tables: nodes::map(),
             remapping: false,
+            cover: cover.clone(),
         };
         unit.efr = unit.read(EFR);
         // The unit is set up anew, as firmware may have used it.
@@ -221,6 +228,12 @@ impl Unit {
         Ok(())
     }
 
+    /// The bits of `device`'s device table entry that its IVRS DTE
+    /// setting gives, in its second and third quads.
+    fn setting_bits(&self, device: u16) -> [u64; 2] {
+        ivrs::dte_bits(self.cover.setting(device))
+    }
+
     /// The device table entry of `device`, as four quads.
     fn dte(&self, device: u16) -> *mut u64 {
         (space::direct(self.devtab) + u64::from(device) * DTE_SIZE) as *mut u64
@@ -251,11 +264,12 @@ impl Unit {
             let id = self.next_domain;
             self.next_domain += 1;
             let dte = self.dte(device);
+            let [sys_mgt, _] = self.setting_bits(device);
             // SAFETY: the entry lies in the unit's device table; the
             // domain ID is written before the entry points at the tables,
             // and the unit rereads it after the invalidation below.
             unsafe {
-                dte.add(1).write_volatile(u64::from(id));
+                dte.add(1).write_volatile(u64::from(id) | sys_mgt);
                 let mode = u64::from(LEVELS) << 9;
                 dte.write_volatile(DTE_V | DTE_TV | mode | root | DTE_IR | DTE_IW);
             }
@@ -365,9 +379,14 @@ impl Unit {
     /// blocks them until an entry is written.
     pub fn enable_remapping(&mut self) -> Result<(), Error> {
         for device in 0..DEVICES {
+            let [_, passes] = self.setting_bits(device as u16);
             // SAFETY: the entry lies in the unit's device table; with no
             // table, remapped interrupts are blocked.
-            unsafe { self.dte(device as u16).add(2).write_volatile(DTE_IV) };
+            unsafe {
+                self.dte(device as u16)
+                    .add(2)
+                    .write_volatile(DTE_IV | passes)
+            };
         }
         self.remapping = true;
         self.invalidate_all()
@@ -385,7 +404,8 @@ impl Unit {
                 let table = table_frame()?;
                 let _claim = nodes::claim_insert()?;
                 self.int_tables.insert(device, table);
-                let control = DTE_IV | INT_TABLE_LEN << 1 | table | DTE_REMAPPED;
+                let [_, passes] = self.setting_bits(device);
+                let control = DTE_IV | INT_TABLE_LEN << 1 | table | DTE_REMAPPED | passes;
                 // SAFETY: the entry lies in the unit's device table.
                 unsafe { self.dte(device).add(2).write_volatile(control) };
                 table

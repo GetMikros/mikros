@@ -337,7 +337,7 @@ fn enable_amd(ivrs: &[u8], config: &Config) -> Result<Iommu, Error> {
             unreachable!()
         };
         for cover in &a.covers {
-            a.units.push(amdvi::Unit::new(cover.base)?);
+            a.units.push(amdvi::Unit::new(cover)?);
         }
         // Memory reserved for every device is given to each function
         // that configuration space shows.
