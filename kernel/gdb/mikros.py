@@ -62,17 +62,21 @@ def static(name):
 
 def needs_kernel(invoke):
     """Wraps a command's `invoke` so that it reads memory through the boot
-    processor, the only one the kernel runs on, and fails with a short
-    message when the kernel's memory cannot be read yet, as before the
-    boot loader has started the kernel.
+    processor, and fails with a short message when the kernel's memory
+    cannot be read yet, as before the boot loader has started the kernel.
+    The processor GDB had selected is noted first, as the one whose
+    running thread has GDB's registers; QEMU numbers its processors in
+    the order the kernel indexes them, the boot processor first.
 
     QEMU's GDB stub reads memory through the page tables of the selected
     processor. Ctrl-C can leave another processor selected, still running
     the firmware, where no kernel address is mapped."""
 
     def wrapped(self, arg, from_tty):
+        global _stopped_cpu
         selected = gdb.selected_thread()
         boot = min(gdb.selected_inferior().threads(), key=lambda t: t.num, default=None)
+        _stopped_cpu = selected.num - boot.num if selected is not None and boot is not None else 0
         if boot is not None and boot != selected:
             boot.switch()
         try:
@@ -164,10 +168,26 @@ def arch_thread(thread):
     return gdb.Value(pointer).cast(arch.pointer()).dereference()
 
 
+# The kernel's index of the processor GDB had selected when the running
+# command started, before `needs_kernel` switched to the boot processor.
+_stopped_cpu = 0
+
+
+def cpu(index):
+    """Processor `index`'s `Cpu`, or None when it is not registered."""
+    if index == 0:
+        return static("kernel_core::cpu::BOOT")
+    pointer = scalar(static("kernel_core::cpu::ALL")[index])
+    if int(pointer) == 0:
+        return None
+    return pointer.dereference()
+
+
 def running_thread():
-    """The address of the `ArcInner` of the thread running on the boot
-    processor, or 0."""
-    sched = locked(static("kernel_core::cpu::BOOT")["sched"])
+    """The address of the `ArcInner` of the thread running on the processor
+    GDB stopped on, or 0."""
+    stopped = cpu(_stopped_cpu) or static("kernel_core::cpu::BOOT")
+    sched = locked(stopped["sched"])
     return word(int(sched["current"].address))
 
 
