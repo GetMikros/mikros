@@ -1,6 +1,7 @@
 //! What the kernel is given: the memory map and `BootInfo`, from where the
 //! bootloader placed things.
 
+use crate::display::PciLocation;
 use crate::elf::Kernel;
 use crate::load::{self, Layout};
 use crate::memmap::{self, Map, Region};
@@ -39,6 +40,8 @@ pub struct Prepared {
     /// The number of pages for page tables.
     pub tables: u64,
     pub framebuffer: Option<Framebuffer>,
+    /// The PCI function that provides the framebuffer, when one was found.
+    pub framebuffer_pci: Option<PciLocation>,
     pub rsdp: u64,
     pub system_table: u64,
     pub rng_seed: Option<[u8; 32]>,
@@ -108,6 +111,8 @@ impl Prepared {
     /// absent is zero.
     pub fn boot_info(&self, entries: &[MemoryMapEntry]) -> BootInfo {
         let optional = crate::info::optional(self.framebuffer, self.rng_seed, self.boot_time);
+        // Only a framebuffer that is reported has a PCI function.
+        let pci = self.framebuffer.and(self.framebuffer_pci);
         let runtime = if self.runtime_services_mapped {
             flags::RUNTIME_SERVICES_MAPPED
         } else {
@@ -143,6 +148,11 @@ impl Prepared {
             arch_data0: self.trampoline.unwrap_or(0),
             arch_data1: 0,
             boot_time_ns: optional.boot_time_ns,
+            framebuffer_pci_segment: pci.map_or(0, |p| p.segment),
+            framebuffer_pci_bus: pci.map_or(0, |p| p.bus),
+            framebuffer_pci_devfn: pci.map_or(0, |p| p.devfn),
+            framebuffer_pci_valid: u8::from(pci.is_some()),
+            reserved: [0; 3],
         }
     }
 }

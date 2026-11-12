@@ -40,7 +40,21 @@ fn sample() -> BootInfo {
         arch_data0: 0x9f000,
         arch_data1: 0,
         boot_time_ns: 1_793_577_600_000_000_000,
+        framebuffer_pci_segment: 0,
+        framebuffer_pci_bus: 3,
+        framebuffer_pci_devfn: 2 * 8,
+        framebuffer_pci_valid: 1,
+        reserved: [0; 3],
     }
+}
+
+/// `info` without a framebuffer PCI function.
+fn without_pci(mut info: BootInfo) -> BootInfo {
+    info.framebuffer_pci_segment = 0;
+    info.framebuffer_pci_bus = 0;
+    info.framebuffer_pci_devfn = 0;
+    info.framebuffer_pci_valid = 0;
+    info
 }
 
 fn encode(info: &BootInfo) -> Vec<u8> {
@@ -59,8 +73,26 @@ fn encode(info: &BootInfo) -> Vec<u8> {
 fn decodes_every_field() {
     let info = sample();
     let data = encode(&info);
-    assert_eq!(size(&data[..HEADER_SIZE]), Ok(0xF0));
+    assert_eq!(size(&data[..HEADER_SIZE]), Ok(0xF8));
     assert_eq!(decode(&data), Ok(info));
+}
+
+#[test]
+fn reads_the_framebuffer_pci_function_only_from_version_1_3() {
+    // Version 1.2, in its 0xF0 bytes.
+    let mut info = sample();
+    (info.version_minor, info.size) = (2, 0xF0);
+    let mut data = encode(&info);
+    data.truncate(0xF0);
+    assert_eq!(decode(&data), Ok(without_pci(info)));
+    // Version 1.3 with the function marked not valid.
+    let mut info = sample();
+    info.framebuffer_pci_valid = 0;
+    assert_eq!(decode(&encode(&info)), Ok(without_pci(info)));
+    // A version 1.2 structure of the new size still counts as without.
+    let mut info = sample();
+    info.version_minor = 2;
+    assert_eq!(decode(&encode(&info)), Ok(without_pci(info)));
 }
 
 /// `sample` as version 1.0, in its 0xE8 bytes, with the flags `flags`.
@@ -69,7 +101,7 @@ fn version_1_0(flags: u32) -> (BootInfo, Vec<u8>) {
     (info.version_minor, info.size, info.flags) = (0, 0xE8, flags);
     let mut data = encode(&info);
     data.truncate(0xE8);
-    (info, data)
+    (without_pci(info), data)
 }
 
 #[test]
@@ -95,7 +127,7 @@ fn reads_boot_time_ns_only_with_version_and_size() {
     info.boot_time_ns = 7;
     let data = encode(&info);
     info.boot_time_ns = given;
-    assert_eq!(decode(&data), Ok(info));
+    assert_eq!(decode(&data), Ok(without_pci(info)));
 }
 
 #[test]
@@ -150,7 +182,7 @@ fn refuses_bad_headers() {
     assert_eq!(decode(&encode(&info)), Err(Error::BadSize(0xE0)));
 
     info = sample();
-    info.size = 0xF8;
+    info.size = 0x100;
     assert_eq!(decode(&encode(&info)), Err(Error::Truncated));
     assert_eq!(size(&[0; 4]), Err(Error::Truncated));
 }

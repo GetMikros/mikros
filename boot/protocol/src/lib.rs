@@ -9,7 +9,7 @@
 pub const MAGIC: [u8; 8] = *b"MIKROSBI";
 /// The protocol version this crate describes.
 pub const VERSION_MAJOR: u16 = 1;
-pub const VERSION_MINOR: u16 = 2;
+pub const VERSION_MINOR: u16 = 3;
 
 /// The name and type of the ELF note that gives the protocol version a
 /// kernel was built for. Its descriptor is a `u16` major version followed
@@ -79,6 +79,14 @@ pub struct BootInfo {
     /// Added in version 1.1: `boot_time` in nanoseconds, or zero when
     /// `BOOT_TIME_VALID` is clear.
     pub boot_time_ns: i64,
+    /// Added in version 1.3: the PCI segment, bus, and device times 8
+    /// plus function, of the function that provides the framebuffer,
+    /// valid when `framebuffer_pci_valid` is 1.
+    pub framebuffer_pci_segment: u16,
+    pub framebuffer_pci_bus: u8,
+    pub framebuffer_pci_devfn: u8,
+    pub framebuffer_pci_valid: u8,
+    pub reserved: [u8; 3],
 }
 
 impl BootInfo {
@@ -90,7 +98,10 @@ impl BootInfo {
 }
 
 /// The value of `BootInfo::size` for this version.
-pub const BOOT_INFO_SIZE: u32 = 0xF0;
+pub const BOOT_INFO_SIZE: u32 = 0xF8;
+/// The size of a version 1.1 or 1.2 `BootInfo`, which ends before
+/// `framebuffer_pci_segment`.
+pub const BOOT_INFO_SIZE_1_1: u32 = 0xF0;
 /// The size of a version 1.0 `BootInfo`, which ends before
 /// `boot_time_ns`.
 pub const BOOT_INFO_SIZE_1_0: u32 = 0xE8;
@@ -236,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_info_has_the_version_1_1_layout() {
+    fn boot_info_has_the_version_1_3_layout() {
         assert_eq!(size_of::<BootInfo>(), BOOT_INFO_SIZE as usize);
         assert_eq!(align_of::<BootInfo>(), 8);
         let offsets = [
@@ -265,6 +276,11 @@ mod tests {
             (offset_of!(BootInfo, arch_data0), 0xD8),
             (offset_of!(BootInfo, arch_data1), 0xE0),
             (offset_of!(BootInfo, boot_time_ns), 0xE8),
+            (offset_of!(BootInfo, framebuffer_pci_segment), 0xF0),
+            (offset_of!(BootInfo, framebuffer_pci_bus), 0xF2),
+            (offset_of!(BootInfo, framebuffer_pci_devfn), 0xF3),
+            (offset_of!(BootInfo, framebuffer_pci_valid), 0xF4),
+            (offset_of!(BootInfo, reserved), 0xF5),
         ];
         for (i, (actual, expected)) in offsets.into_iter().enumerate() {
             assert_eq!(actual, expected, "field {i}");

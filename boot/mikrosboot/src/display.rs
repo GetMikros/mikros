@@ -181,6 +181,38 @@ pub fn describe(mode: Mode) -> Framebuffer {
     }
 }
 
+/// The location of a PCI function: its segment, bus, and device times 8
+/// plus function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciLocation {
+    pub segment: u16,
+    pub bus: u8,
+    pub devfn: u8,
+}
+
+impl PciLocation {
+    /// The location from the four numbers `GetLocation` gives, or `None`
+    /// when one is out of range.
+    pub fn new(segment: usize, bus: usize, device: usize, function: usize) -> Option<Self> {
+        if device >= 32 || function >= 8 {
+            return None;
+        }
+        Some(PciLocation {
+            segment: u16::try_from(segment).ok()?,
+            bus: u8::try_from(bus).ok()?,
+            devfn: (device * 8 + function) as u8,
+        })
+    }
+}
+
+/// The one location among `found`, which may repeat it, or `None` when
+/// there is none or more than one.
+pub fn only_location(found: impl IntoIterator<Item = PciLocation>) -> Option<PciLocation> {
+    let mut found = found.into_iter();
+    let first = found.next()?;
+    found.all(|other| other == first).then_some(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,5 +522,32 @@ mod tests {
         let mut out = Fake::new(&sized(), 2);
         out.refuse = true;
         assert_eq!(framebuffer(&mut out, None), Err("refused"));
+    }
+
+    #[test]
+    fn takes_a_pci_location_in_range() {
+        let at = PciLocation::new(1, 3, 2, 1);
+        assert_eq!(
+            at,
+            Some(PciLocation {
+                segment: 1,
+                bus: 3,
+                devfn: 17
+            })
+        );
+        assert_eq!(PciLocation::new(0x1_0000, 0, 0, 0), None);
+        assert_eq!(PciLocation::new(0, 256, 0, 0), None);
+        assert_eq!(PciLocation::new(0, 0, 32, 0), None);
+        assert_eq!(PciLocation::new(0, 0, 0, 8), None);
+    }
+
+    #[test]
+    fn takes_only_a_single_location() {
+        let a = PciLocation::new(0, 3, 0, 0).unwrap();
+        let b = PciLocation::new(0, 4, 0, 0).unwrap();
+        assert_eq!(only_location([]), None);
+        assert_eq!(only_location([a]), Some(a));
+        assert_eq!(only_location([a, a]), Some(a));
+        assert_eq!(only_location([a, b]), None);
     }
 }

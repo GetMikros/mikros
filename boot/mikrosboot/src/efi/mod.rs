@@ -2,6 +2,7 @@
 
 mod enter;
 mod gather;
+mod pci;
 
 use core::fmt::{Arguments, Write};
 use core::time::Duration;

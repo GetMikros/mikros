@@ -43,6 +43,7 @@ fn prepared() -> Prepared {
             width: 1024,
             ..Framebuffer::default()
         }),
+        framebuffer_pci: PciLocation::new(0, 3, 2, 0),
         rsdp: 0x7fe_0014,
         system_table: 0x7f0_0000,
         rng_seed: None,
@@ -186,7 +187,16 @@ fn fills_boot_info_with_physical_addresses() {
     assert_eq!(info.arch_data0, 0x8000);
     assert_eq!(info.framebuffer.phys_base, 0xfd00_0000);
     assert_eq!(info.flags, flags::FRAMEBUFFER_PRESENT);
-    assert_eq!((info.version_major, info.version_minor), (1, 2));
+    assert_eq!((info.version_major, info.version_minor), (1, 3));
+    assert_eq!(
+        (
+            info.framebuffer_pci_segment,
+            info.framebuffer_pci_bus,
+            info.framebuffer_pci_devfn,
+            info.framebuffer_pci_valid
+        ),
+        (0, 3, 16, 1)
+    );
     let mapped = Prepared {
         runtime_services_mapped: true,
         ..prepared()
@@ -218,6 +228,8 @@ fn gives_zero_addresses_for_what_is_absent() {
         ..prepared()
     };
     let info = p.boot_info(&[]);
+    // Without a framebuffer, its PCI function is not given either.
+    assert_eq!(info.framebuffer_pci_valid, 0);
     assert_eq!(info.cmdline_phys, 0);
     assert_eq!(info.arch_data0, 0);
     assert_eq!(info.framebuffer, Framebuffer::default());

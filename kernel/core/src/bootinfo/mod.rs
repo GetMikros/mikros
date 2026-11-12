@@ -2,8 +2,8 @@
 //! passes to the kernel.
 
 use boot_protocol::{
-    BOOT_INFO_SIZE, BOOT_INFO_SIZE_1_0, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry,
-    NANOS_PER_SECOND, VERSION_MAJOR, flags,
+    BOOT_INFO_SIZE, BOOT_INFO_SIZE_1_0, BOOT_INFO_SIZE_1_1, BootInfo, Framebuffer, Kind, MAGIC,
+    MemoryMapEntry, NANOS_PER_SECOND, VERSION_MAJOR, flags,
 };
 use core::fmt;
 
@@ -82,7 +82,10 @@ pub fn size(header: &[u8]) -> Result<usize, Error> {
 /// read only from a structure of version 1.1 or later that is large
 /// enough to hold it, and otherwise derived from `boot_time`; a boot time
 /// whose nanoseconds do not fit an `i64` then counts as none.
-/// `RUNTIME_SERVICES_MAPPED` counts only from version 1.2 on.
+/// `RUNTIME_SERVICES_MAPPED` counts only from version 1.2 on. The
+/// framebuffer's PCI function is read only from a structure of version
+/// 1.3 or later that is large enough to hold it, and otherwise counts as
+/// not valid.
 pub fn decode(data: &[u8]) -> Result<BootInfo, Error> {
     let size = size(data)?;
     // The fields of version 1.0 lie below the checked size.
@@ -93,7 +96,7 @@ pub fn decode(data: &[u8]) -> Result<BootInfo, Error> {
         info_flags &= !flags::RUNTIME_SERVICES_MAPPED;
     }
     let mut boot_time = u64_at(d, 0xD0)? as i64;
-    let boot_time_ns = if size >= BOOT_INFO_SIZE as usize && minor >= 1 {
+    let boot_time_ns = if size >= BOOT_INFO_SIZE_1_1 as usize && minor >= 1 {
         u64_at(d, 0xE8)? as i64
     } else if info_flags & flags::BOOT_TIME_VALID != 0 {
         // A time whose nanoseconds do not fit an i64 counts as none.
@@ -104,6 +107,11 @@ pub fn decode(data: &[u8]) -> Result<BootInfo, Error> {
         })
     } else {
         0
+    };
+    let pci = if size >= BOOT_INFO_SIZE as usize && minor >= 3 && d[0xF4] == 1 {
+        (u16_at(d, 0xF0)?, d[0xF2], d[0xF3], 1)
+    } else {
+        (0, 0, 0, 0)
     };
     let framebuffer = Framebuffer {
         phys_base: u64_at(d, 0x80)?,
@@ -143,6 +151,11 @@ pub fn decode(data: &[u8]) -> Result<BootInfo, Error> {
         arch_data0: u64_at(d, 0xD8)?,
         arch_data1: u64_at(d, 0xE0)?,
         boot_time_ns,
+        framebuffer_pci_segment: pci.0,
+        framebuffer_pci_bus: pci.1,
+        framebuffer_pci_devfn: pci.2,
+        framebuffer_pci_valid: pci.3,
+        reserved: [0; 3],
     })
 }
 

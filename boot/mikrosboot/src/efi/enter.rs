@@ -251,6 +251,7 @@ fn prepare(g: Gathered) -> Result<(Prepared, Words), Failure> {
         tables_phys,
         tables,
         framebuffer: g.framebuffer,
+        framebuffer_pci: g.framebuffer_pci,
         rsdp: g.rsdp,
         system_table: table::system_table_raw().map_or(0, |st| st.as_ptr() as u64),
         rng_seed: g.rng_seed,

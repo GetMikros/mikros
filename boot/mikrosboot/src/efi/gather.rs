@@ -4,7 +4,7 @@ use super::Failure;
 use alloc::string::String;
 use alloc::vec::Vec;
 use boot_protocol::Framebuffer;
-use mikrosboot::display::{self, ModeInfo, Output, Pixels};
+use mikrosboot::display::{self, ModeInfo, Output, PciLocation, Pixels};
 use mikrosboot::elf::{self, Kernel};
 use mikrosboot::firmware::{self, RSDP_SIZE};
 use mikrosboot::{cmdline, load, placement};
@@ -32,6 +32,8 @@ pub struct Gathered {
     pub boot_image: Vec<u8>,
     pub cmdline: String,
     pub framebuffer: Option<Framebuffer>,
+    /// The PCI function that provides the framebuffer, when one was found.
+    pub framebuffer_pci: Option<PciLocation>,
     pub rsdp: u64,
     pub rng_seed: Option<[u8; 32]>,
     pub boot_time: Option<u64>,
@@ -92,7 +94,7 @@ fn boot_partition(image: &LoadedImage) -> Option<[u8; 16]> {
     cmdline::gpt_partition_guid(last.device_type().0, last.sub_type().0, last.data())
 }
 
-fn open_gop() -> Option<ScopedProtocol<GraphicsOutput>> {
+fn open_gop() -> Option<(Handle, ScopedProtocol<GraphicsOutput>)> {
     let console = table::system_table_raw().and_then(|st| {
         // SAFETY: the system table pointer is valid while boot services run,
         // and its console output handle is either null or a valid handle.
@@ -110,6 +112,7 @@ fn open_gop() -> Option<ScopedProtocol<GraphicsOutput>> {
             boot::open_protocol::<GraphicsOutput>(params, OpenProtocolAttributes::GetProtocol)
         }
         .ok()
+        .map(|gop| (handle, gop))
     };
     display::find(console, open, || {
         boot::get_handle_for_protocol::<GraphicsOutput>().ok()
@@ -186,14 +189,18 @@ impl Output for Gop {
 }
 
 /// Picks the display mode and describes its framebuffer, or gives `None`
-/// when there is no usable one.
-fn framebuffer(cmdline: &str) -> Result<Option<Framebuffer>, Failure> {
-    let Some(gop) = open_gop() else {
-        return Ok(None);
+/// when there is no usable one, with the PCI function that provides it,
+/// when one is found.
+fn framebuffer(cmdline: &str) -> Result<(Option<Framebuffer>, Option<PciLocation>), Failure> {
+    let Some((handle, gop)) = open_gop() else {
+        return Ok((None, None));
     };
     let modes = gop.modes().collect();
-    display::framebuffer(&mut Gop { gop, modes }, cmdline::video_mode(cmdline))
-        .map_err(|e| Failure::new("switching the display mode", alloc::format!("{e}")))
+    let framebuffer =
+        display::framebuffer(&mut Gop { gop, modes }, cmdline::video_mode(cmdline))
+            .map_err(|e| Failure::new("switching the display mode", alloc::format!("{e}")))?;
+    let pci = framebuffer.and_then(|fb| super::pci::framebuffer_function(handle, fb.phys_base));
+    Ok((framebuffer, pci))
 }
 
 fn rsdp() -> Result<u64, Failure> {
@@ -303,7 +310,7 @@ pub fn gather() -> Result<Gathered, Failure> {
     let boot_image = read(&mut fs, BOOT_IMAGE_PATH, "reading \\EFI\\Mikros\\boot.img")?;
     let cmdline = command_line(&mut fs)?;
     drop(fs);
-    let framebuffer = framebuffer(&cmdline)?;
+    let (framebuffer, framebuffer_pci) = framebuffer(&cmdline)?;
     let random = match kernel.relocatable && !placement::kaslr_off(cmdline.as_bytes()) {
         true => random_words(),
         false => Vec::new(),
@@ -315,6 +322,7 @@ pub fn gather() -> Result<Gathered, Failure> {
         boot_image,
         cmdline,
         framebuffer,
+        framebuffer_pci,
         rsdp: rsdp()?,
         rng_seed: rng_seed(),
         boot_time: boot_time(),
