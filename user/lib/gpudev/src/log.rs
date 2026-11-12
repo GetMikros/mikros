@@ -42,8 +42,11 @@ struct Drawn {
     size: (u32, u32),
     /// The sequence number of the record on the top row, if any.
     top: Option<u64>,
-    /// The rows that show records, from the top.
+    /// The rows drawn, from the top: those that show records, or, while
+    /// `whole`, those of the whole screen drawn so far.
     rows: usize,
+    /// Set while the whole screen is being drawn again.
+    whole: bool,
 }
 
 pub struct Log {
@@ -79,12 +82,14 @@ impl Log {
         self.drawn.set(None);
     }
 
-    /// Draws on `screen` what changed since the last drawing, once the
-    /// log service has answered: the new rows, or the whole screen once
-    /// it scrolled, changed size or showed something else.
-    pub fn draw(&self, screen: &dyn Screen) {
+    /// Draws on `screen` at most `budget` rows of what changed since the
+    /// last drawing, once the log service has answered: the new rows, or
+    /// the whole screen once it scrolled, changed size or showed
+    /// something else. Returns whether the screen is up to date, so that
+    /// a slow screen is drawn a part at a time with other work between.
+    pub fn draw(&self, screen: &dyn Screen, budget: usize) -> bool {
         if !self.started.get() {
-            return;
+            return true;
         }
         let size = screen.size();
         let (width, height) = size;
@@ -93,11 +98,12 @@ impl Log {
         let tail = self.tail.borrow();
         let lines: Vec<(u64, &str)> = tail.last(rows).collect();
         let top = lines.first().map(|l| l.0);
-        let from = match self.drawn.get() {
-            Some(d) if d.size == size && d.top == top => d.rows,
-            _ => 0,
+        let (from, whole) = match self.drawn.get() {
+            Some(d) if d.size == size && d.top == top => (d.rows, d.whole),
+            _ => (0, true),
         };
-        let to = if from == 0 { rows } else { lines.len() };
+        let target = if whole { rows } else { lines.len() };
+        let to = target.min(from.saturating_add(budget));
         for row in from..to {
             let line = lines
                 .get(row)
@@ -107,7 +113,8 @@ impl Log {
                 screen.write_row((row * CELL_HEIGHT + y) as u32, &mut pixels);
             }
         }
-        if from == 0 {
+        let done = to >= target;
+        if whole && done {
             // The pixels below the last row.
             for y in (rows * CELL_HEIGHT) as u32..height {
                 screen.write_row(y, &mut core::iter::repeat_n(BACKGROUND, width as usize));
@@ -116,8 +123,10 @@ impl Log {
         self.drawn.set(Some(Drawn {
             size,
             top,
-            rows: lines.len(),
+            rows: if done { lines.len() } else { to },
+            whole: whole && !done,
         }));
+        done
     }
 }
 
@@ -162,6 +171,8 @@ pub async fn follow<B: Backend + 'static>(
     }
     log.started.set(true);
     device.draw_log();
+    // Records only mark the screen out of date: drawing is the drawing
+    // task's, which catches up with all of them at once.
     while let Ok(ReaderEvent::OnRecords(event)) = reader.next_event().await {
         log.take(&event.records);
         device.draw_log();

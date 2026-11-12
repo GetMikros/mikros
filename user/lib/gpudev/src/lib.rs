@@ -14,10 +14,10 @@ mod log;
 pub use log::Screen;
 
 use alloc::rc::Rc;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::future::{Future, poll_fn};
 use core::pin::pin;
-use core::task::Poll;
+use core::task::{Poll, Waker};
 use log::Log;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
@@ -69,6 +69,10 @@ pub struct GpuDevice<B> {
     /// The open `Display` connection.
     owner: RefCell<Option<Rc<DisplayAsyncServer>>>,
     log: Log,
+    /// Set when the log's drawing is out of date, with the drawing task
+    /// to wake.
+    stale: Cell<bool>,
+    drawer: RefCell<Option<Waker>>,
     reactor: Reactor,
     spawner: Spawner,
 }
@@ -89,6 +93,8 @@ impl<B: Backend + 'static> GpuDevice<B> {
             broker: broker(&directory, &reactor).await,
             owner: RefCell::new(None),
             log: Log::new(),
+            stale: Cell::new(false),
+            drawer: RefCell::new(None),
             reactor,
             spawner,
         });
@@ -100,6 +106,7 @@ impl<B: Backend + 'static> GpuDevice<B> {
         }
         device.spawner.spawn(device.clone().serve_provider(server));
         device.spawner.spawn(log::follow(device.clone(), directory));
+        device.spawner.spawn(device.clone().draw_logs());
         Ok(device)
     }
 
@@ -107,13 +114,42 @@ impl<B: Backend + 'static> GpuDevice<B> {
         &self.backend
     }
 
-    /// Draws what changed of the log, while no client owns the display.
+    /// Marks the log's drawing out of date, for `draw_logs` to bring up to
+    /// date while no client owns the display.
     fn draw_log(&self) {
-        if self.owner.borrow().is_some() {
-            return;
+        self.stale.set(true);
+        if let Some(drawer) = self.drawer.borrow_mut().take() {
+            drawer.wake();
         }
-        self.backend
-            .with_screen(&mut |screen| self.log.draw(screen));
+    }
+
+    /// Draws what changed of the log whenever it is out of date, while no
+    /// client owns the display, `ROWS_PER_TURN` rows at a time with other
+    /// tasks running between: drawing the whole screen can take seconds,
+    /// and the display's owner must not wait for it.
+    async fn draw_logs(self: Rc<Self>) {
+        loop {
+            core::future::poll_fn(|cx| {
+                if self.stale.replace(false) {
+                    return Poll::Ready(());
+                }
+                *self.drawer.borrow_mut() = Some(cx.waker().clone());
+                Poll::Pending
+            })
+            .await;
+            loop {
+                if self.owner.borrow().is_some() {
+                    break;
+                }
+                let mut done = true;
+                self.backend
+                    .with_screen(&mut |screen| done = self.log.draw(screen, ROWS_PER_TURN));
+                if done {
+                    break;
+                }
+                yield_now().await;
+            }
+        }
     }
 
     async fn serve_provider(self: Rc<Self>, end: ServerEnd<Provider>) {
@@ -219,4 +255,21 @@ async fn first<A: Future, B: Future>(a: A, b: B) {
         }
     })
     .await
+}
+
+/// The most log rows drawn before other tasks get to run.
+const ROWS_PER_TURN: usize = 4;
+
+/// Lets the executor run the other ready tasks once.
+async fn yield_now() {
+    let mut yielded = false;
+    core::future::poll_fn(|cx| {
+        if yielded {
+            return Poll::Ready(());
+        }
+        yielded = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .await;
 }
