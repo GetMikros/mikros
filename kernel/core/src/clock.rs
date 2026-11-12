@@ -26,6 +26,11 @@ impl Extender {
         }
     }
 
+    /// The newest extended value, or 0 before the first.
+    pub fn latest(&self) -> u64 {
+        self.last.load(Ordering::Relaxed)
+    }
+
     pub fn extend(&self, raw: u64) -> u64 {
         if self.bits >= 64 {
             return raw;

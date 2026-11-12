@@ -70,6 +70,9 @@ fn hpet_read(virt: u64, register: u64) -> u64 {
     unsafe { ((virt + register) as *const u64).read_volatile() }
 }
 
+/// The reads of the HPET's counter after one that failed.
+const HPET_RETRIES: u32 = 3;
+
 fn pm_read() -> u64 {
     let address = ADDRESS.load(Ordering::Relaxed);
     if PM_IN_MEMORY.load(Ordering::Relaxed) != 0 {
@@ -86,7 +89,24 @@ fn pm_read() -> u64 {
 fn counter() -> u64 {
     match SOURCE.load(Ordering::Relaxed) {
         TSC => rdtsc(),
-        HPET => extender().extend(hpet_read(ADDRESS.load(Ordering::Relaxed), HPET_COUNTER)),
+        HPET => {
+            let address = ADDRESS.load(Ordering::Relaxed);
+            // A read of all ones means the HPET did not answer; no
+            // counter of 64 bits or fewer shows that in its register.
+            // It is read again a few times, and while it keeps failing
+            // the clock holds its last value rather than going back.
+            let mut raw = hpet_read(address, HPET_COUNTER);
+            for _ in 0..HPET_RETRIES {
+                if raw != u64::MAX {
+                    break;
+                }
+                raw = hpet_read(address, HPET_COUNTER);
+            }
+            if raw == u64::MAX {
+                return extender().latest();
+            }
+            extender().extend(raw)
+        }
         PM => extender().extend(pm_read()),
         _ => 0,
     }
