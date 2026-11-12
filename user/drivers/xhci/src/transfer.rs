@@ -32,10 +32,11 @@ pub enum Direction {
     Out,
 }
 
-/// A TD on the ring: its TRBs' addresses and data lengths, whether it
-/// is a control transfer, the bytes of a short data stage, the enqueue
-/// pointer after it, and where its result goes.
+/// A TD on the ring: its ID, its TRBs' addresses and data lengths,
+/// whether it is a control transfer, the bytes of a short data stage, the
+/// enqueue pointer after it, and where its result goes.
 struct Td {
+    id: u64,
     addresses: Vec<u64>,
     lengths: Vec<u32>,
     control: bool,
@@ -44,14 +45,12 @@ struct Td {
     sender: Sender<Result<u32, Status>>,
 }
 
-impl Td {
-    fn id(&self) -> u64 {
-        self.addresses[0]
-    }
-}
-
 struct State {
     pending: VecDeque<Td>,
+    /// The ID of the last TD enqueued. TDs are told apart by these, which
+    /// the endpoint never gives twice, and not by their addresses on the
+    /// ring, which a later TD takes once the ring wraps.
+    last: u64,
     /// Set while the endpoint is being recovered after it halted: no new
     /// TD is enqueued meanwhile.
     recovering: bool,
@@ -167,6 +166,7 @@ impl Endpoint {
             ring,
             state: RefCell::new(State {
                 pending: VecDeque::new(),
+                last: 0,
                 recovering: false,
                 gone: false,
             }),
@@ -180,7 +180,8 @@ impl Endpoint {
     /// is not being recovered, and rings its doorbell. TDs are enqueued
     /// in the order of the calls. Fails with `PEER_CLOSED` once the
     /// device is gone, and with `NO_RESOURCES` for a TD that the ring
-    /// cannot hold at all. The receiver gives the bytes transferred.
+    /// cannot hold at all. Gives the TD's ID, which `wait` takes, and the
+    /// receiver of the bytes transferred.
     pub async fn enqueue(
         self: &Rc<Self>,
         request: Request,
@@ -204,8 +205,11 @@ impl Endpoint {
         }
         let (addresses, after) = self.ring.push(&request.trbs);
         let (sender, receiver) = oneshot();
-        let id = addresses[0];
-        self.state.borrow_mut().pending.push_back(Td {
+        let mut state = self.state.borrow_mut();
+        state.last += 1;
+        let id = state.last;
+        state.pending.push_back(Td {
+            id,
             addresses,
             lengths: request.lengths,
             control: request.control,
@@ -213,6 +217,7 @@ impl Endpoint {
             after,
             sender,
         });
+        drop(state);
         self.controller.regs.ring(self.slot, self.id);
         Ok((id, receiver))
     }
@@ -254,7 +259,7 @@ impl Endpoint {
                 return result;
             }
         }
-        let pending = self.state.borrow().pending.iter().any(|td| td.id() == id);
+        let pending = self.state.borrow().pending.iter().any(|td| td.id == id);
         if pending {
             self.cancel(id).await;
         }
@@ -268,7 +273,7 @@ impl Endpoint {
         let _ = self.controller.command(stop).await;
         let td = {
             let mut state = self.state.borrow_mut();
-            let Some(at) = state.pending.iter().position(|td| td.id() == id) else {
+            let Some(at) = state.pending.iter().position(|td| td.id == id) else {
                 return;
             };
             let td = state.pending.remove(at).expect("the TD is pending");
