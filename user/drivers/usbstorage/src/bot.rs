@@ -37,6 +37,9 @@ const COMMAND_LIMIT: i64 = 20_000 * MS;
 const RECONNECT_LIMIT: i64 = 15_000 * MS;
 /// How often a command goes on a new channel before it fails.
 const CHANNELS_MAX: u32 = 3;
+/// How often a command whose transfer timed out is sent again before the
+/// reset recovery.
+const RESENDS_MAX: u32 = 2;
 const PERM_READ: u32 = 1 << 0;
 const PERM_WRITE: u32 = 1 << 1;
 const SAME_RIGHTS: u32 = 1 << 31;
@@ -281,12 +284,29 @@ impl Bot {
     /// data stage `data`, and reads its status, as `command_once` does.
     /// When the interface channel closed without a reply, the command
     /// goes again on the next channel that comes, as long as one comes in
-    /// time.
+    /// time. When a transfer of it timed out, it is sent again, up to
+    /// `RESENDS_MAX` times, and after that the reset recovery follows and
+    /// it fails with `INTERNAL`.
     pub async fn command(&self, lun: u8, command: &[u8], data: Data<'_>) -> Result<u32, Failure> {
         let mut tries = 0;
+        let mut resends = 0;
         loop {
             let channel = self.channels.get();
             let result = self.command_once(lun, command, data).await;
+            if result == Err(Failure::Transport(Status::TimedOut)) {
+                if resends < RESENDS_MAX {
+                    resends += 1;
+                    mikros_rt::log!(
+                        Warning,
+                        "usb-storage: interface {} sends a command again, as it timed out",
+                        self.number
+                    );
+                    continue;
+                }
+                let _held = self.lock.lock().await;
+                self.reset_recovery().await;
+                return Err(Failure::Transport(Status::Internal));
+            }
             tries += 1;
             if result != Err(Failure::Transport(Status::PeerClosed))
                 || self.closed.get() != Some(channel)
@@ -306,7 +326,9 @@ impl Bot {
     /// Sends the command block `command` to logical unit `lun` with the
     /// data stage `data`, and reads its status. Returns the bytes the
     /// data stage moved. A stalled data stage has its endpoint's halt
-    /// cleared; an invalid status wrapper leads to the reset recovery.
+    /// cleared; an invalid status wrapper leads to the reset recovery, as
+    /// does a failed transfer, unless it timed out, which `command`
+    /// handles.
     async fn command_once(&self, lun: u8, command: &[u8], data: Data<'_>) -> Result<u32, Failure> {
         let _held = self.lock.lock().await;
         let transport = Failure::Transport;
@@ -328,7 +350,7 @@ impl Bot {
         self.write(CBW_AT, &cbw);
         let sent = self.bulk(self.bulk_out, &self.page, CBW_AT, CBW_SIZE).await;
         if let Err(status) = sent {
-            if status != Status::PeerClosed {
+            if !matches!(status, Status::PeerClosed | Status::TimedOut) {
                 self.reset_recovery().await;
             }
             return Err(transport(status));
@@ -351,7 +373,7 @@ impl Bot {
                 0
             }
             Err(status) => {
-                if status != Status::PeerClosed {
+                if !matches!(status, Status::PeerClosed | Status::TimedOut) {
                     self.reset_recovery().await;
                 }
                 return Err(transport(status));
@@ -366,7 +388,7 @@ impl Bot {
         }
         let got = match read {
             Ok(got) => got,
-            Err(Status::PeerClosed) => return Err(transport(Status::PeerClosed)),
+            Err(status @ (Status::PeerClosed | Status::TimedOut)) => return Err(transport(status)),
             Err(status) => {
                 self.reset_recovery().await;
                 return Err(transport(status));
