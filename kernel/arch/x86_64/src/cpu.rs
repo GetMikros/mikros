@@ -323,3 +323,44 @@ pub unsafe fn write_dr(n: u8, value: u64) {
         }
     }
 }
+
+/// AMD's `DE_CFG` register, and its bit that makes LFENCE dispatch
+/// serializing.
+const AMD_DE_CFG: u32 = 0xC001_1029;
+const DE_CFG_LFENCE_SERIALIZE: u64 = 1 << 1;
+
+/// Makes LFENCE dispatch serializing on this processor where it is not
+/// always: on AMD processors of family 10h and later, through `DE_CFG`,
+/// as Linux does. Without it LFENCE does not keep RDTSC from running
+/// early on Zen and Zen+, so reads of the TSC come out of order, and the
+/// speculation barriers that use LFENCE do not hold.
+pub fn serialize_lfence() {
+    use core::arch::x86_64::__cpuid;
+    let leaf0 = __cpuid(0);
+    if crate::mitigations::Vendor::of(leaf0.ebx, leaf0.edx, leaf0.ecx)
+        != crate::mitigations::Vendor::Amd
+    {
+        return;
+    }
+    let eax = __cpuid(1).eax;
+    let base = (eax >> 8) & 0xF;
+    let family = if base == 0xF {
+        base + ((eax >> 20) & 0xFF)
+    } else {
+        base
+    };
+    // Processors that report LFENCE as always serializing need nothing.
+    let always =
+        __cpuid(0x8000_0000).eax >= 0x8000_0021 && __cpuid(0x8000_0021).eax & (1 << 2) != 0;
+    if family < 0x10 || always {
+        return;
+    }
+    // SAFETY: AMD processors of family 10h and later have DE_CFG, and
+    // the bit only makes LFENCE serializing.
+    unsafe {
+        let value = read_msr(AMD_DE_CFG);
+        if value & DE_CFG_LFENCE_SERIALIZE == 0 {
+            write_msr(AMD_DE_CFG, value | DE_CFG_LFENCE_SERIALIZE);
+        }
+    }
+}

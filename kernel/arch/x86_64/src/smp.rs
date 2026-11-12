@@ -433,6 +433,7 @@ extern "sysv64" fn ap_entry(cpu: &'static PerCpu) -> ! {
         crate::cpu::halt();
     }
     space::load_pat();
+    crate::cpu::serialize_lfence();
     crate::cpu::init();
     let ist = || space::new_stack(gdt::IST_STACK_SIZE);
     gdt::init(ist(), ist(), ist(), ist());

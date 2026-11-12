@@ -507,6 +507,7 @@ pub fn enter(info: BootInfo, next: extern "sysv64" fn() -> !) -> ! {
     DIRECT_MAP_BASE.store(info.direct_map_base, Ordering::Relaxed);
     copy_cmdline(&info);
     load_pat();
+    crate::cpu::serialize_lfence();
 
     let mut tables = FrameTables;
     let mut mapper = Mapper::new(&mut tables, gib_pages())
