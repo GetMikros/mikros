@@ -584,6 +584,14 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("setup run passed");
+    crate::takeover::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("takeover"),
+        timeout,
+    )?;
+    println!("takeover run passed");
     crate::durability::run(
         &args.machine,
         args.kind,

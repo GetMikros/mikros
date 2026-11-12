@@ -71,6 +71,8 @@
 //! - As `system.driver.test-close`, the driver publishes a `storage`
 //!   service and ends without replying.
 //! - As `system.driver.test-reset`, the driver ends without replying.
+//! - As `system.driver.test-takeover`, the driver replies to `Start` and
+//!   waits for `Stop`.
 //! - As any other, it fails with `INVALID_ARGS`.
 //!
 //! Drivers other than `test-host` fail `ResetChild` and `ConnectChild`
@@ -130,6 +132,7 @@ const MODELS: [&str; 4] = [
 ];
 const DECLINE: &str = "system.driver.test-decline";
 const CLOSE: &str = "system.driver.test-close";
+const TAKEOVER: &str = "system.driver.test-takeover";
 const RESET: &str = "system.driver.test-reset";
 const KIND_MMIO: u32 = 1;
 const KIND_DMA: u32 = 4;
@@ -285,6 +288,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             kept.borrow_mut().extend(bus);
                             signalled.map(|()| DriverStartResponse {})
                         }
+                        TAKEOVER => Ok(DriverStartResponse {}),
                         DECLINE => Err(Status::NotSupported),
                         RESET => return 0,
                         CLOSE => {

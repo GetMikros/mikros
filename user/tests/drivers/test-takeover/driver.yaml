@@ -1,0 +1,6 @@
+# A normal driver for QEMU's standard VGA function, only on the root file
+# system of the takeover run, which takes the function over from the basic
+# display driver once the root is available.
+name: test-takeover
+binary: /usr/lib/drivers/test-takeover/test-takeover
+match: [pci:v1234d1111]

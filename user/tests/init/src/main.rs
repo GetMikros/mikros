@@ -9770,8 +9770,11 @@ mod manager {
 
     /// From a boot image like that of
     /// `device_manager_adds_platform_devices` with other test drivers,
-    /// and the boot framebuffer, the device manager adds
-    /// the framebuffer as device 1 and the host bridge as device 2. The
+    /// and the boot framebuffer, the device manager adds the framebuffer
+    /// as device 1 and the host bridge as device 2. When the startup
+    /// message names the framebuffer's PCI function, it adds the host
+    /// bridge as device 1 instead, and the framebuffer gets device 3 once
+    /// the host bridge's driver failed without adding that function. The
     /// host bridge's driver fails `Start`: the device manager terminates
     /// it, and the device fails without a restart. The framebuffer's
     /// driver publishes a service and ends without replying: the device
@@ -9779,41 +9782,56 @@ mod manager {
     /// driver, five times, and then the device fails. The service gets
     /// the same ID each time. It says all of it in the log.
     pub fn device_manager_handles_failing_drivers(s: &Startup) -> Result {
-        const EXPECTED: &[(&[u8], usize)] = &[
+        let on_pci = super::u32_at(s.message(), 0x04) & (1 << 2) != 0;
+        let (host, framebuffer) = if on_pci { (1, 3) } else { (2, 1) };
+        let expected: alloc::vec::Vec<(alloc::string::String, usize)> = [
             (
-                b"device-manager: driver test-decline declined device 2: NotSupported",
+                alloc::format!("device-manager: driver test-decline declined device {host}: NotSupported"),
                 1,
             ),
             (
-                b"device-manager: device 2, pci-host-0, failed; it is left without a driver",
+                alloc::format!(
+                    "device-manager: device {host}, pci-host-0, failed; it is left without a driver"
+                ),
                 1,
             ),
             (
-                b"device-manager: driver test-close for device 1 closed its channel before Start replied",
+                alloc::format!(
+                    "device-manager: driver test-close for device {framebuffer} closed its channel before Start replied"
+                ),
                 6,
             ),
             (
-                b"device-manager: driver test-close for device 1 terminated",
+                alloc::format!("device-manager: driver test-close for device {framebuffer} terminated"),
                 6,
             ),
             (
-                b"device-manager: restarting driver test-close for device 1",
+                alloc::format!("device-manager: restarting driver test-close for device {framebuffer}"),
                 5,
             ),
             (
-                b"device-manager: published device.storage 1 for device 1",
+                alloc::format!("device-manager: published device.storage 1 for device {framebuffer}"),
                 6,
             ),
-            (b"device-manager: unregistered device.storage 1", 6),
+            ("device-manager: unregistered device.storage 1".into(), 6),
             (
-                b"device-manager: driver test-close for device 1 failed after 5 restarts within 60 s",
+                alloc::format!(
+                    "device-manager: driver test-close for device {framebuffer} failed after 5 restarts within 60 s"
+                ),
                 1,
             ),
             (
-                b"device-manager: device 1, boot-framebuffer, failed; it is left without a driver",
+                alloc::format!(
+                    "device-manager: device {framebuffer}, boot-framebuffer, failed; it is left without a driver"
+                ),
                 1,
             ),
-        ];
+        ]
+        .into();
+        let expected: alloc::vec::Vec<(&[u8], usize)> = expected
+            .iter()
+            .map(|(line, n)| (line.as_bytes(), *n))
+            .collect();
         const FAILED: &[&[u8]] = &[
             b"started driver test-decline",
             b"started driver test-close",
@@ -9825,7 +9843,7 @@ mod manager {
             b"tests/failing.img",
             true,
             super::PROBE_SECONDS,
-            EXPECTED,
+            &expected,
             FAILED,
         )?;
         ensure(
@@ -10211,9 +10229,6 @@ mod manager {
         if framebuffer {
             message[0x04] |= 1;
         }
-        // The framebuffer gets a device of its own, as the tests expect,
-        // whether or not this boot's framebuffer has a PCI function.
-        message[0x04] &= !(1 << 2);
         let memory = |what, bytes: &[u8]| -> Result<OwnedHandle> {
             let mut mem = 0;
             let size = (bytes.len() as u64)
@@ -10573,6 +10588,51 @@ mod manager {
             Err(f) => mikros_rt::log!(
                 Error,
                 "SCENARIO console FAILED: {} failed ({})",
+                f.what,
+                f.status
+            ),
+        }
+        mikros_test::exit_qemu(mikros_test::FAILED)
+    }
+
+    /// The `takeover` scenario: serves `tests/setup.img`, with the boot
+    /// framebuffer, on a machine whose root partition also holds
+    /// `test-takeover`, a normal driver for QEMU's VGA function. The basic
+    /// display driver runs that function as its fallback driver until the
+    /// root file system is available; the device manager then stops it
+    /// and starts `test-takeover` on the function. Stops QEMU with
+    /// `PASSED` once the log says so, or with `FAILED`. The runner checks
+    /// the order of the lines.
+    pub fn takeover_scenario(s: &Startup) -> i64 {
+        const SECONDS: i64 = 300;
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (b", as display:boot-framebuffer", 1),
+            (
+                b"process-manager: namespaces come from the root file system",
+                1,
+            ),
+            (b"device-manager: driver test-takeover takes over device", 1),
+            (b"which another driver takes over", 1),
+            (
+                b"device-manager: started driver test-takeover for device",
+                1,
+            ),
+        ];
+        const FAILED: &[&[u8]] = &[b"did not start", b"declined"];
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(Error, "SCENARIO takeover: {} failed ({})", f.what, f.status);
+            return 1;
+        }
+        let logged = device_manager_logs(s, b"tests/setup.img", true, SECONDS, EXPECTED, FAILED);
+        match logged {
+            Ok(true) => {
+                mikros_rt::log!(Info, "SCENARIO takeover PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO takeover FAILED"),
+            Err(f) => mikros_rt::log!(
+                Error,
+                "SCENARIO takeover FAILED: {} failed ({})",
                 f.what,
                 f.status
             ),
@@ -11565,6 +11625,7 @@ fn scenario(s: &Startup) -> Option<i64> {
         "input" => manager::input_scenario(s),
         "console" => manager::console_scenario(s),
         "setup" => manager::setup_scenario(s),
+        "takeover" => manager::takeover_scenario(s),
         // The runner logs the writes and flushes of the scratch disks.
         "durability" => manager::durability_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.

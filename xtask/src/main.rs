@@ -40,6 +40,7 @@ mod secure_boot;
 mod setup;
 mod symbolize;
 mod sysroot;
+mod takeover;
 mod test;
 mod tools;
 mod tzdata;

@@ -82,6 +82,9 @@ pub struct Built {
     /// partition: the test boot image with the services that need the
     /// root file system.
     pub first_boot_image: Option<PathBuf>,
+    /// For the test build, the root partition of the takeover run: the
+    /// test boot image with a normal driver for QEMU's VGA function.
+    pub takeover_image: Option<PathBuf>,
     /// Where xkbcommon was built.
     pub xkbcommon: crate::ports::Built,
 }
@@ -172,6 +175,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     let fonts = crate::fonts::fetch()?;
     println!("ok       {}", fonts.ttf.display());
     let mut first_boot_image = None;
+    let mut takeover_image = None;
     let (boot_image, system_image) = match boot {
         BootImage::System => {
             let init = user_build("init", kind)?;
@@ -1597,6 +1601,28 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let first_boot = boot_image(kind, "first-boot.img", &first_boot)?;
             println!("built    {}", first_boot.display());
             first_boot_image = Some(first_boot);
+            // The takeover run's root partition: the test boot image with
+            // a normal driver for QEMU's VGA function, which the root alone
+            // holds.
+            let takeover_manifest =
+                crate::workspace_root().join("user/tests/drivers/test-takeover/driver.yaml");
+            let takeover: Vec<(&str, &Path)> = members
+                .iter()
+                .copied()
+                .chain([
+                    (
+                        "usr/lib/drivers/test-takeover/driver.yaml",
+                        takeover_manifest.as_path(),
+                    ),
+                    (
+                        "usr/lib/drivers/test-takeover/test-takeover",
+                        test_driver.as_path(),
+                    ),
+                ])
+                .collect();
+            let takeover = boot_image(kind, "takeover.img", &takeover)?;
+            println!("built    {}", takeover.display());
+            takeover_image = Some(takeover);
             (image.clone(), image)
         }
     };
@@ -1608,6 +1634,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         boot_image,
         system_image,
         first_boot_image,
+        takeover_image,
         xkbcommon,
     })
 }
