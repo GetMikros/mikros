@@ -277,23 +277,31 @@ pub fn alloc_pages(size: u64) -> Option<u64> {
         mapped += PAGE_SIZE;
     }
     if mapped < size {
+        // All of the reservation goes back, not just the part mapped.
         if mapped > 0 {
-            free_pages(virt, mapped);
+            unmap_and_free(virt, mapped);
         }
+        release_dynamic(virt, size);
         return None;
     }
     Some(virt)
+}
+
+/// Unmaps `size` bytes of memory from `alloc_pages` at `start` and frees
+/// their frames.
+fn unmap_and_free(start: u64, size: u64) {
+    unmap(start, size, |phys, page| {
+        if let Some(frames) = FRAMES.lock().as_mut() {
+            frames.free(phys, page / PAGE_SIZE);
+        }
+    });
 }
 
 /// Frees `size` bytes from `alloc_pages` at `start`: unmaps them, frees
 /// their frames and releases the address space.
 pub fn free_pages(start: u64, size: u64) {
     let size = size.next_multiple_of(PAGE_SIZE);
-    unmap(start, size, |phys, page| {
-        if let Some(frames) = FRAMES.lock().as_mut() {
-            frames.free(phys, page / PAGE_SIZE);
-        }
-    });
+    unmap_and_free(start, size);
     release_dynamic(start, size);
 }
 
