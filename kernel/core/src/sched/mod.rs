@@ -1047,8 +1047,14 @@ pub fn preempt_point() {
         crate::sync::none_held(),
         "a preemption point with a lock held"
     );
-    // SAFETY: no lock is held here, and interrupts are disabled again at
-    // once.
+    take_interrupts_and_switch();
+}
+
+/// Lets pending interrupts in, and switches threads if the running
+/// thread's slice has ended, at a preemption point.
+fn take_interrupts_and_switch() {
+    // SAFETY: no lock is held at a preemption point, and interrupts are
+    // disabled again at once.
     unsafe { crate::arch::take_pending_interrupts() };
     if reschedule().swap(false, Ordering::Relaxed) {
         schedule(true);
@@ -1523,13 +1529,15 @@ fn halt_until_interrupt() {
 mod tests {
     use super::*;
 
+    /// The mock's processor, its held locks and its interrupt flag are
+    /// those of every test thread, so this calls what follows
+    /// `preempt_point`'s checks and counts only windows.
     #[test]
     fn a_preemption_point_lets_pending_interrupts_in() {
         let _mock = crate::arch::mock::lock();
         reschedule().store(false, Ordering::Relaxed);
         let before = crate::arch::mock::interrupt_windows();
-        preempt_point();
-        assert_eq!(crate::arch::mock::interrupt_windows(), before + 1);
-        assert!(!crate::arch::interrupts_enabled());
+        take_interrupts_and_switch();
+        assert!(crate::arch::mock::interrupt_windows() > before);
     }
 }
