@@ -137,4 +137,23 @@ mod tests {
         drop(timer);
         assert_eq!(crate::sched::armed_timers(0), before);
     }
+
+    #[test]
+    fn the_timer_interrupt_arms_no_deadline_that_has_passed() {
+        let _mock = crate::arch::mock::lock();
+        let budget = Budget::root();
+        crate::arch::mock::set_now(1_000);
+        let expiring = Timer::new(&budget).unwrap();
+        let waiting = Timer::new(&budget).unwrap();
+        expiring.set(2_000).unwrap();
+        waiting.set(3_000).unwrap();
+        crate::arch::mock::set_now(2_500);
+        crate::sched::timer_interrupt();
+        assert_ne!(expiring.header.signals() & signals::SIGNALED, 0);
+        assert_eq!(waiting.header.signals() & signals::SIGNALED, 0);
+        // Armed for the expired deadline, the timer would interrupt again
+        // at once.
+        let armed = crate::arch::mock::timer_deadline();
+        assert!(armed.is_some_and(|at| at > 2_500), "armed for {armed:?}");
+    }
 }
