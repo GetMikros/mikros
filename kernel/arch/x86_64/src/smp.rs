@@ -131,10 +131,31 @@ const SYNC_ROUNDS: u64 = 1000;
 /// The turn of the comparison: odd for the starting processor, even for
 /// processor 0, and the value the last one read.
 static SYNC_TURN: AtomicU64 = AtomicU64::new(0);
+/// The turn processor 0 sets when it gives up on a comparison, so that
+/// the starting processor stops waiting for its next turn.
+const GAVE_UP: u64 = u64::MAX;
 static SYNC_LAST: AtomicU64 = AtomicU64::new(0);
 /// Set when a processor's TSC lay before processor 0's by more than the
 /// clock's resolution, or the comparison did not end.
 static TSC_DISAGREES: AtomicBool = AtomicBool::new(false);
+/// The most cycles a processor's TSC lay from processor 0's after the
+/// corrections, among those that disagree.
+static TSC_WARP: AtomicU64 = AtomicU64::new(0);
+/// In one comparison, the most cycles the starting processor's TSC lay
+/// behind processor 0's, as it saw, and ahead of it, as processor 0 saw.
+static TSC_BEHIND: AtomicU64 = AtomicU64::new(0);
+static TSC_AHEAD: AtomicU64 = AtomicU64::new(0);
+/// Processor 0's verdict after a comparison, and the cycles to add to the
+/// starting processor's TSC with `CORRECT`.
+static VERDICT: AtomicU8 = AtomicU8::new(PENDING);
+const PENDING: u8 = 0;
+const CORRECT: u8 = 1;
+const AGREE: u8 = 2;
+const DISAGREE: u8 = 3;
+static TSC_CORRECTION: AtomicU64 = AtomicU64::new(0);
+/// The most corrections of one processor's TSC.
+const TSC_CORRECTIONS: u32 = 3;
+const IA32_TSC_ADJUST: u32 = 0x3B;
 /// Set once every processor started and the clock source is final; the
 /// started processors use the clock only then.
 static RELEASED: AtomicBool = AtomicBool::new(false);
@@ -242,6 +263,13 @@ pub fn start(info: &BootInfo) {
         MADT.store(core::ptr::null_mut(), Ordering::Release);
     }
     if used.len() > 1 {
+        if TSC_DISAGREES.load(Ordering::Relaxed) {
+            let warp = TSC_WARP.load(Ordering::Relaxed);
+            log!(
+                Info,
+                "TSC comparison: up to {warp} cycles apart after corrections"
+            );
+        }
         match TSC_DISAGREES.load(Ordering::Relaxed) {
             false => log!(Info, "the TSCs of all {} processors agree", used.len()),
             true if crate::time::from_tsc() && crate::time::leave_tsc() => {
@@ -315,9 +343,10 @@ fn tolerance() -> u64 {
 
 /// Processor 0's part of the comparison with a starting processor: it
 /// reads its TSC and gives the turn over, then checks its next value
-/// against the one the other processor read. A comparison that does not
-/// end within 100 ms counts as a disagreement.
-fn compare_tsc_boot() {
+/// against the one the other processor read, recording in `TSC_AHEAD` how
+/// far the other one's lay ahead. Returns false when the comparison did
+/// not end within 100 ms.
+fn compare_tsc_boot() -> bool {
     let (tolerance, deadline) = (tolerance(), crate::time::now() + 100_000_000);
     for round in 0..SYNC_ROUNDS {
         SYNC_LAST.store(ordered_tsc(), Ordering::Release);
@@ -325,12 +354,103 @@ fn compare_tsc_boot() {
         if !wait_until(deadline, || {
             SYNC_TURN.load(Ordering::Acquire) == 2 * round + 2
         }) {
-            TSC_DISAGREES.store(true, Ordering::Relaxed);
+            SYNC_TURN.store(GAVE_UP, Ordering::Release);
+            return false;
+        }
+        let (mine, theirs) = (ordered_tsc(), SYNC_LAST.load(Ordering::Acquire));
+        if mine + tolerance < theirs {
+            TSC_AHEAD.fetch_max(theirs - mine, Ordering::Relaxed);
+        }
+    }
+    true
+}
+
+/// Compares the TSC of the starting processor `index` with processor 0's
+/// and, where they differ and the processor has `TSC_ADJUST`, has it
+/// correct its TSC by the difference measured and compares again, at most
+/// `TSC_CORRECTIONS` times. The TSCs disagree when they still differ.
+fn sync_tsc(index: usize) {
+    let mut corrected: i64 = 0;
+    let mut attempt = 0;
+    // The largest difference of the first comparison, before corrections.
+    let mut first = None;
+    let (behind, ahead, agree) = loop {
+        TSC_BEHIND.store(0, Ordering::Relaxed);
+        TSC_AHEAD.store(0, Ordering::Relaxed);
+        let completed = compare_tsc_boot();
+        let behind = TSC_BEHIND.load(Ordering::Relaxed);
+        let ahead = TSC_AHEAD.load(Ordering::Relaxed);
+        first.get_or_insert(behind.max(ahead));
+        if completed && behind == 0 && ahead == 0 {
+            break (behind, ahead, true);
+        }
+        if !completed || attempt == TSC_CORRECTIONS || !tsc_adjust() {
+            break (behind, ahead, false);
+        }
+        // A processor behind moves forward by what it saw; one ahead,
+        // which processor 0 saw, moves back by that.
+        let by = if behind >= ahead {
+            behind as i64
+        } else {
+            -(ahead as i64)
+        };
+        TSC_CORRECTION.store(by as u64, Ordering::Relaxed);
+        SYNC_TURN.store(0, Ordering::Release);
+        VERDICT.store(CORRECT, Ordering::Release);
+        let deadline = crate::time::now() + 100_000_000;
+        if !wait_until(deadline, || VERDICT.load(Ordering::Acquire) == PENDING) {
+            break (behind, ahead, false);
+        }
+        corrected += by;
+        attempt += 1;
+    };
+    let worst = behind.max(ahead);
+    let first = first.unwrap_or(worst);
+    let ns =
+        |cycles: u64| u128::from(cycles) * 1_000_000_000 / u128::from(crate::time::tsc_hz().max(1));
+    log!(
+        Info,
+        "processor {index}: TSC up to {first} cycles ({} ns) from processor 0's, TSC_ADJUST {}, corrected by {corrected} cycles: {} ({worst} cycles, {} ns, apart)",
+        ns(first),
+        if tsc_adjust() { "present" } else { "absent" },
+        if agree { "they agree" } else { "they disagree" },
+        ns(worst)
+    );
+    if !agree {
+        TSC_DISAGREES.store(true, Ordering::Relaxed);
+        TSC_WARP.fetch_max(worst, Ordering::Relaxed);
+    }
+    VERDICT.store(if agree { AGREE } else { DISAGREE }, Ordering::Release);
+}
+
+/// Whether this processor has `IA32_TSC_ADJUST`.
+fn tsc_adjust() -> bool {
+    core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 1) != 0
+}
+
+/// The starting processor's part of `sync_tsc`: compares, and corrects
+/// its TSC as processor 0 says until it gives its verdict.
+fn sync_tsc_secondary() {
+    loop {
+        compare_tsc_secondary();
+        let verdict = loop {
+            match VERDICT.load(Ordering::Acquire) {
+                PENDING => core::hint::spin_loop(),
+                verdict => break verdict,
+            }
+        };
+        if verdict != CORRECT {
             return;
         }
-        if ordered_tsc() + tolerance < SYNC_LAST.load(Ordering::Acquire) {
-            TSC_DISAGREES.store(true, Ordering::Relaxed);
+        let by = TSC_CORRECTION.load(Ordering::Relaxed);
+        // SAFETY: processor 0 asks for this only of a processor that has
+        // TSC_ADJUST; changing it moves this processor's TSC, which
+        // nothing uses before the comparison ends.
+        unsafe {
+            let adjust = crate::cpu::read_msr(IA32_TSC_ADJUST);
+            crate::cpu::write_msr(IA32_TSC_ADJUST, adjust.wrapping_add(by));
         }
+        VERDICT.store(PENDING, Ordering::Release);
     }
 }
 
@@ -340,22 +460,41 @@ fn compare_tsc_boot() {
 fn compare_tsc_secondary() {
     let tolerance = tolerance();
     for round in 0..SYNC_ROUNDS {
-        while SYNC_TURN.load(Ordering::Acquire) != 2 * round + 1 {
-            core::hint::spin_loop();
+        loop {
+            match SYNC_TURN.load(Ordering::Acquire) {
+                GAVE_UP => return,
+                turn if turn == 2 * round + 1 => break,
+                _ => core::hint::spin_loop(),
+            }
         }
         let theirs = SYNC_LAST.load(Ordering::Acquire);
         let mine = ordered_tsc();
         if mine + tolerance < theirs {
-            TSC_DISAGREES.store(true, Ordering::Relaxed);
+            TSC_BEHIND.fetch_max(theirs - mine, Ordering::Relaxed);
         }
         SYNC_LAST.store(mine, Ordering::Release);
-        SYNC_TURN.store(2 * round + 2, Ordering::Release);
+        // Processor 0 may have given up meanwhile; then the turn stays.
+        if SYNC_TURN
+            .compare_exchange(
+                2 * round + 1,
+                2 * round + 2,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
     }
 }
 
 /// Starts the processor whose APIC ID is `id` as processor `index`.
 /// Returns whether it runs.
 fn start_one(page: u64, id: u32, index: usize) -> bool {
+    // A comparison that processor 0 gave up on leaves no turn behind, and
+    // the last processor's verdict is not this one's.
+    SYNC_TURN.store(0, Ordering::Release);
+    VERDICT.store(PENDING, Ordering::Release);
     let core = alloc::boxed::Box::leak(
         kernel_core::fallible::try_box(Cpu::new())
             .unwrap_or_else(|_| panic!("no memory for processor {index}")),
@@ -395,7 +534,7 @@ fn start_one(page: u64, id: u32, index: usize) -> bool {
     loop {
         match STAGE.load(Ordering::Acquire) {
             SYNCING => {
-                compare_tsc_boot();
+                sync_tsc(index);
                 // The processor goes on to READY.
                 while STAGE.load(Ordering::Acquire) == SYNCING {
                     core::hint::spin_loop();
@@ -450,7 +589,7 @@ extern "sysv64" fn ap_entry(cpu: &'static PerCpu) -> ! {
     apic::init_secondary(madt);
     crate::tlb::join();
     STAGE.store(SYNCING, Ordering::Release);
-    compare_tsc_secondary();
+    sync_tsc_secondary();
     STAGE.store(READY, Ordering::Release);
     // Processor 0 may still move the clock to another source; until it is
     // final, this processor only answers TLB shootdowns.
