@@ -1337,16 +1337,20 @@ pub fn timer_interrupt() {
     }
     #[cfg(feature = "diag")]
     watchdog::tick(now, &cpu);
-    arm(&cpu);
     // Expired timers are signalled with the lock released, as setting a
     // signal can wake threads, a few at a time so that nothing allocates.
+    // The timer is armed once the last of them are out of the list, or its
+    // deadline would be one of theirs, past, and interrupt again at once.
     loop {
         let mut expired: [Option<crate::ktimer::Armed>; 8] = Default::default();
         for slot in &mut expired {
             *slot = cpu.timers.pop_expired(now);
         }
-        drop(cpu);
         let more = expired[7].is_some();
+        if !more {
+            arm(&cpu);
+        }
+        drop(cpu);
         for timer in expired.into_iter().flatten() {
             timer.fire();
         }
