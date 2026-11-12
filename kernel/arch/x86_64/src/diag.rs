@@ -33,16 +33,17 @@ pub fn records(out: &mut dyn Write, wait: bool) -> fmt::Result {
         true => Some(crate::memory::FRAMES.lock()),
         false => crate::memory::FRAMES.try_lock(),
     };
-    if let Some(Some(frames)) = frames.as_deref() {
-        let pinned = PINNED.load(Ordering::Relaxed);
-        writeln!(
-            out,
-            "F\t{}\t{}\t{pinned}",
-            frames.total_count(),
-            frames.free_count()
-        )?;
-    }
+    // The counts are read with the allocator locked and written after: the
+    // text may grow, and the heap may take frames to grow it.
+    let counts = frames
+        .as_deref()
+        .and_then(|f| f.as_ref())
+        .map(|f| (f.total_count(), f.free_count()));
     drop(frames);
+    if let Some((total, free)) = counts {
+        let pinned = PINNED.load(Ordering::Relaxed);
+        writeln!(out, "F\t{total}\t{free}\t{pinned}")?;
+    }
     if let Some((used, size)) = crate::space::dynamic_use(wait) {
         writeln!(out, "D\t{used}\t{size}")?;
     }
