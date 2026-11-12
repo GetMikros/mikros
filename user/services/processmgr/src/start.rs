@@ -283,21 +283,50 @@ fn load_image(fs: &Rc<Fs>, process: Handle, program: &Program) -> Result<Image, 
     })
 }
 
-/// Loads the program that the absolute `path` names in `programs`, the
-/// spawner's, into a new process charged to `budget`, and starts it with
+/// Where a program is looked for: in `first`, when given, for a path
+/// under `/usr`, and then in `then`, the spawner's programs.
+#[derive(Clone, Copy)]
+pub struct Lookup<'a> {
+    pub first: Option<&'a Programs>,
+    pub then: &'a Programs,
+}
+
+/// The program that the absolute `path` names: in `lookup.first`, when
+/// given and `path` is under `/usr`, and when it does not exist there, in
+/// `lookup.then`, as `resolve` finds it.
+async fn resolve_first(
+    fs: &Rc<Fs>,
+    lookup: Lookup<'_>,
+    own: Handle,
+    path: &str,
+    reactor: &Reactor,
+) -> Result<Program, Status> {
+    let under_usr = path::normalize(path).is_some_and(|p| p.starts_with("/usr/"));
+    if let Some(first) = lookup.first.filter(|_| under_usr) {
+        match resolve(fs, first, own, path, reactor).await {
+            Err(Status::NotFound) => {}
+            found => return found,
+        }
+    }
+    resolve(fs, lookup.then, own, path, reactor).await
+}
+
+/// Loads the program that the absolute `path` names where `lookup` says
+/// (`resolve_first`), into a new process
+/// charged to `budget`, and starts it with
 /// a new bootstrap channel: at the entry of the dynamic linker, which is
 /// loaded from the same namespace, when the program names one, and at
 /// its own entry otherwise. `own` is the process manager's process.
 pub async fn load(
     fs: &Rc<Fs>,
-    programs: &Programs,
+    lookup: Lookup<'_>,
     own: Handle,
     reactor: &Reactor,
     budget: Handle,
     path: &str,
     name: &str,
 ) -> Result<Started, Status> {
-    let executable = resolve(fs, programs, own, path, reactor).await?;
+    let executable = resolve_first(fs, lookup, own, path, reactor).await?;
     // An application makes system calls only through the dynamic linker,
     // which is also the C library, so one that has none is refused.
     let application = !executable.system();
@@ -313,7 +342,7 @@ pub async fn load(
     // The loader accepts only the one dynamic linker.
     let (entry, interpreter_base) = if loaded.dynamic {
         let path = core::str::from_utf8(mikros_loader::INTERPRETER).expect("an ASCII path");
-        let linker = resolve(fs, programs, own, path, reactor).await?;
+        let linker = resolve_first(fs, lookup, own, path, reactor).await?;
         let linked = load_image(fs, process.raw(), &linker)?;
         // The dynamic linker is not itself linked dynamically.
         if linked.dynamic {

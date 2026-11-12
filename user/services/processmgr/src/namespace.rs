@@ -154,6 +154,21 @@ pub struct Programs {
 }
 
 impl Programs {
+    /// The root file system `root` as `/`, which the device manager's
+    /// programs under `/usr` are looked for in first once namespaces come
+    /// from it.
+    pub fn root(root: Rc<NodeAsyncClient>) -> Programs {
+        Programs {
+            entries: alloc::vec![(
+                String::from("/"),
+                Origin::Dir {
+                    dir: root,
+                    system: true
+                }
+            )],
+        }
+    }
+
     /// The boot file system as `/`, with `/dev`: the namespace of init,
     /// in which its programs are resolved (MIKSPEC-0034.R27), and of the
     /// processes that go without their profiles.
@@ -405,6 +420,15 @@ impl Namespaces {
             }
         }
         shared.fs.file(&format!("usr/{path}")).map(<[u8]>::to_vec)
+    }
+
+    /// Where the device manager's programs under `/usr` are looked for
+    /// first: the root file system, once namespaces come from it.
+    pub fn root_programs(&self) -> Option<Programs> {
+        match self.ready.borrow().as_deref().map(|r| &r.roots) {
+            Some(Roots::Root(root)) => Some(Programs::root(root.clone())),
+            _ => None,
+        }
     }
 
     /// Whether namespaces come from the root file system.

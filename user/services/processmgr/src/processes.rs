@@ -86,6 +86,10 @@ pub struct NewProcess {
     pub path: String,
     /// The namespace that `path` is resolved in: the spawner's.
     pub programs: Rc<Programs>,
+    /// Where `path`, when it is under `/usr`, is looked for before
+    /// `programs`: the root file system for the device manager's programs
+    /// once namespaces come from it.
+    pub programs_first: Option<Rc<Programs>>,
     pub parent: u32,
     pub process_group: u32,
     pub session: u32,
@@ -182,9 +186,13 @@ impl Shared {
         let (namespace, programs) = namespaces
             .of(self, &new.app_id, new.user, new.service_manager)
             .await?;
+        let lookup = start::Lookup {
+            first: new.programs_first.as_deref(),
+            then: &new.programs,
+        };
         let started = start::load(
             &self.fs,
-            &new.programs,
+            lookup,
             self.process.raw(),
             &self.reactor,
             budget.raw(),

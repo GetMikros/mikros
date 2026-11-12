@@ -172,6 +172,7 @@ impl Manager {
             path: SERVICE_MANAGER_PATH.into(),
             // As init's programs, it comes from the boot file system.
             programs: Rc::new(Programs::boot()),
+            programs_first: None,
             parent: INIT_PID,
             process_group: INIT_GROUP,
             session: INIT_GROUP,

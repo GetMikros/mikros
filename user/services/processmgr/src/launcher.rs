@@ -33,6 +33,8 @@ const WAIT: u32 = 1 << 6;
 const SIGNAL: u32 = 1 << 7;
 const MANAGE: u32 = 1 << 8;
 const INSPECT: u32 = 1 << 9;
+/// The device manager's app ID.
+const DEVICE_MANAGER: &str = "system.devicemgr";
 /// A `user` that means the caller's user ID.
 const CALLER_USER: u32 = u32::MAX;
 /// The signal that ends a process at once.
@@ -179,9 +181,16 @@ async fn new_process(
         user => user,
     };
     let same = app_id == from.app_id && user == from.user;
+    // The device manager starts drivers that only the root file system
+    // holds, and those of the boot image.
+    let programs_first = match from.app_id == DEVICE_MANAGER {
+        true => shared.namespaces.root_programs().map(Rc::new),
+        false => None,
+    };
     let new = NewProcess {
         path: request.path.clone(),
         programs: from.programs.clone(),
+        programs_first,
         parent: parent(from),
         process_group: from.process_group,
         session: from.session,
