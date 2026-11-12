@@ -225,25 +225,40 @@ impl Endpoint {
     }
 
     /// Waits for the TD `id`, which gives its result to `receiver`, and
-    /// cancels it when it has not completed by `deadline`.
+    /// cancels it when it has not completed by `deadline`, `i64::MAX` for
+    /// none. The timer is dropped, and with it its kernel objects, as soon
+    /// as the TD completes.
     pub async fn wait(
         self: &Rc<Self>,
         id: u64,
         receiver: Receiver<Result<u32, Status>>,
         deadline: i64,
     ) -> Result<u32, Status> {
-        let endpoint = self.clone();
-        let reactor = self.controller.reactor.clone();
-        self.controller.spawner.spawn(async move {
-            let pending = |e: &Endpoint| e.state.borrow().pending.iter().any(|td| td.id() == id);
-            if deadline > now() {
-                let _ = reactor.sleep_until(deadline).await;
+        let mut result = core::pin::pin!(receiver.recv());
+        // A transfer with no deadline, such as a HID report read, needs no
+        // timer.
+        if deadline == i64::MAX {
+            return result.await;
+        }
+        if deadline > now() {
+            let limit = self.controller.reactor.sleep_until(deadline);
+            let mut limit = core::pin::pin!(limit);
+            let done = core::future::poll_fn(|cx| {
+                if let core::task::Poll::Ready(result) = result.as_mut().poll(cx) {
+                    return core::task::Poll::Ready(Some(result));
+                }
+                limit.as_mut().poll(cx).map(|_| None)
+            })
+            .await;
+            if let Some(result) = done {
+                return result;
             }
-            if pending(&endpoint) {
-                endpoint.cancel(id).await;
-            }
-        });
-        receiver.recv().await
+        }
+        let pending = self.state.borrow().pending.iter().any(|td| td.id() == id);
+        if pending {
+            self.cancel(id).await;
+        }
+        result.await
     }
 
     /// Stops the endpoint, takes TD `id` off the ring and fails it with
