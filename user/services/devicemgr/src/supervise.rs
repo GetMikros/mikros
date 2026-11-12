@@ -20,11 +20,11 @@ use core::cell::RefCell;
 use core::future::{Future, poll_fn};
 use core::pin::{Pin, pin};
 use core::task::{Poll, Waker};
-use mikros_manifest::{Driver, Need};
+use mikros_manifest::{Driver, DriverKind, Need};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::driver::DeviceManager;
+use mikros_rt::interfaces::mikros::driver::{DeviceManager, DriverAsyncClient};
 use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, RegistrarAsyncClient};
 use mikros_rt::sys;
 
@@ -49,7 +49,9 @@ const READD_LIMIT: i64 = 10_000_000_000;
 /// the storage profiles, and the executor's reactor and spawner.
 pub struct Manager {
     pub devices: RefCell<Devices>,
-    pub drivers: Vec<Driver>,
+    /// The drivers read at startup, and from the root file system once
+    /// the service manager gives its `/usr`.
+    pub drivers: RefCell<Vec<Driver>>,
     pub starter: Starter,
     pub registrar: Option<RegistrarAsyncClient>,
     pub service_ids: ServiceIds,
@@ -66,6 +68,10 @@ pub struct Manager {
     /// The boot framebuffer while its PCI function is expected, or once
     /// that function has it.
     pub boot_display: Option<crate::boot_display::BootDisplay>,
+    /// Whether the service manager gave the root's `/usr` for drivers.
+    pub root_drivers: Cell<bool>,
+    /// The boot framebuffer's physical start and size, when there is one.
+    pub framebuffer_range: Option<(u64, u64)>,
 }
 
 /// Something that happens once, which tasks can wait for.
@@ -123,6 +129,7 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
         let Some(driver) = bound_driver(&m, id) else {
             return;
         };
+        let driver = &driver;
         let name = &driver.name;
         let (prepared, parent, hardware_ids) = match m.devices.borrow().get(id) {
             Some(device) => (
@@ -142,6 +149,9 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             Ok(prepared) => prepared,
             Err(why) => return did_not_start(&why),
         };
+        if driver.kind == DriverKind::Normal {
+            take_boot_framebuffer(&m, id).await;
+        }
         let bus = match parent {
             None => None,
             Some(parent) => {
@@ -244,6 +254,20 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
             );
             mikros_rt::diag!("device-manager: driver {name} for device {id} ended as {ended:?}");
             return;
+        }
+        // Stopped for the normal driver now bound to the device, which
+        // starts next.
+        let taken_over = match m.devices.borrow_mut().get_mut(id) {
+            Some(device) => core::mem::take(&mut device.taken_over),
+            None => false,
+        };
+        if taken_over {
+            mikros_rt::log!(
+                Info,
+                "device-manager: stopped driver {name} for device {id}, which another driver takes over"
+            );
+            restarts.clear();
+            continue;
         }
         match ended {
             Some((code, signal)) => mikros_rt::log!(
@@ -373,13 +397,7 @@ pub fn remove_within(m: Rc<Manager>, id: u64, limit: i64) -> Pin<Box<dyn Future<
             }
             None => return,
         };
-        if let Some(client) = client {
-            let deadline = now().saturating_add(limit);
-            first(client.stop(), m.reactor.sleep_until(deadline)).await;
-        }
-        if let Some(pid) = pid {
-            m.starter.kill(pid).await;
-        }
+        stop_within(&m, client, pid, limit).await;
         // Devices that the driver added after the others were listed,
         // until it stopped.
         loop {
@@ -393,6 +411,29 @@ pub fn remove_within(m: Rc<Manager>, id: u64, limit: i64) -> Pin<Box<dyn Future<
         }
         m.devices.borrow_mut().remove(id);
     })
+}
+
+/// Calls `Stop` on the driver `client`, when there is one, and then
+/// terminates its process `pid`, when `Stop` replies, when the channel
+/// fails, or after `STOP_LIMIT`.
+pub async fn stop(m: &Manager, client: Option<Rc<DriverAsyncClient>>, pid: Option<u32>) {
+    stop_within(m, client, pid, STOP_LIMIT).await;
+}
+
+/// Stops a driver as `stop` does, but after `limit` nanoseconds.
+async fn stop_within(
+    m: &Manager,
+    client: Option<Rc<DriverAsyncClient>>,
+    pid: Option<u32>,
+    limit: i64,
+) {
+    if let Some(client) = client {
+        let deadline = now().saturating_add(limit);
+        first(client.stop(), m.reactor.sleep_until(deadline)).await;
+    }
+    if let Some(pid) = pid {
+        m.starter.kill(pid).await;
+    }
 }
 
 /// Waits until `a` or `b` is done.
@@ -467,17 +508,71 @@ fn boot_framebuffer_fallback(m: &Rc<Manager>, id: u64) {
             None,
             Vec::new(),
         );
-        devices.bind_device(added, &m.drivers).then_some(added)
+        devices
+            .bind_device(added, &m.drivers.borrow())
+            .then_some(added)
     };
     if let Some(added) = added {
         m.spawner.spawn(supervise(m.clone(), added));
     }
 }
 
-fn bound_driver(m: &Manager, id: u64) -> Option<&Driver> {
+/// Before a normal driver starts for device `id`: when the device's
+/// `MMIO` resources hold the boot framebuffer of the
+/// `platform:boot-framebuffer` device, removes that device, which stops
+/// its driver.
+async fn take_boot_framebuffer(m: &Rc<Manager>, id: u64) {
+    let Some((base, size)) = m.framebuffer_range else {
+        return;
+    };
+    let platform = {
+        let devices = m.devices.borrow();
+        let holds = devices
+            .get(id)
+            .is_some_and(|device| device.resources.iter().any(|r| mmio_holds(r, base, size)));
+        devices
+            .with_hardware_id(PLATFORM_BOOT_FRAMEBUFFER)
+            .filter(|&platform| holds && platform != id)
+    };
+    if let Some(platform) = platform {
+        mikros_rt::log!(
+            Info,
+            "device-manager: device {id} holds the boot framebuffer, so device {platform} is removed first"
+        );
+        remove(m.clone(), platform).await;
+    }
+}
+
+/// Whether `resource` is an `MMIO` resource that covers `size` bytes
+/// from `base`, by its `RESOURCE` information.
+fn mmio_holds(resource: &OwnedHandle, base: u64, size: u64) -> bool {
+    const INFO_RESOURCE: u32 = 5;
+    const KIND_MMIO: u32 = 1;
+    let mut record = [0u8; 24];
+    let mut len = 0;
+    // SAFETY: the pointers describe `record` and `len`.
+    let status = unsafe {
+        sys::object_get_info(
+            resource.raw(),
+            INFO_RESOURCE,
+            record.as_mut_ptr(),
+            record.len() as u64,
+            &mut len,
+        )
+    };
+    if status != mikros_rt::OK || len < record.len() as u64 {
+        return false;
+    }
+    let word = |at: usize| u64::from_le_bytes(record[at..at + 8].try_into().expect("8 bytes"));
+    let kind = u32::from_le_bytes(record[..4].try_into().expect("4 bytes"));
+    let (start, length) = (word(0x08), word(0x10));
+    kind == KIND_MMIO && start <= base && base.saturating_add(size) <= start.saturating_add(length)
+}
+
+fn bound_driver(m: &Manager, id: u64) -> Option<Driver> {
     let devices = m.devices.borrow();
     let name = devices.get(id)?.driver.as_ref()?;
-    m.drivers.iter().find(|d| &d.name == name)
+    m.drivers.borrow().iter().find(|d| &d.name == name).cloned()
 }
 
 /// Whether a driver that `restarts` holds the times of earlier restarts

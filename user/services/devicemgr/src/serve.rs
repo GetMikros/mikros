@@ -170,7 +170,7 @@ async fn add_device(
         Some(caller),
         request.resources,
     );
-    let added = match devices.bind_device(id, &m.drivers) {
+    let added = match devices.bind_device(id, &m.drivers.borrow()) {
         true => Added::Bound,
         false => Added::Unbound,
     };
@@ -223,7 +223,8 @@ fn request_resource(
     let devices = m.devices.borrow();
     let device = devices.get(caller).ok_or(Status::BadState)?;
     let bound = device.driver.as_ref().ok_or(Status::BadState)?;
-    let driver = m.drivers.iter().find(|d| &d.name == bound);
+    let drivers = m.drivers.borrow();
+    let driver = drivers.iter().find(|d| &d.name == bound);
     let driver = driver.ok_or(Status::BadState)?;
     if !driver.needs.contains(&Need::Bus) {
         return Err(Status::AccessDenied);

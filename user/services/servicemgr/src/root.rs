@@ -1,7 +1,8 @@
 //! The root file system, once the process manager says it is available:
 //! the service manager's `/usr` and `/etc` are then the root's, it
 //! registers the permissions of the program manifests in
-//! `/usr/lib/programs/`, and starts the services whose manifests in
+//! `/usr/lib/programs/`, gives the device manager the root's `/usr` for
+//! its drivers, and starts the services whose manifests in
 //! `/usr/lib/services/` it had not read before.
 
 use crate::broker;
@@ -13,13 +14,17 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use mikros_manifest::{Start, order};
 use mikros_rt::files::{self, Failure};
-use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient, NodeType};
+use mikros_rt::interfaces::__midl::endpoints;
+use mikros_rt::interfaces::mikros::driver::{RootDrivers, RootDriversAsyncClient};
+use mikros_rt::interfaces::mikros::fs::{Error, Node, NodeAsyncClient, NodeType, Rights};
 
 /// The program manifests' directory, below the root's `/usr`.
 const PROGRAMS: &str = "lib/programs";
 const PROGRAMS_PATH: &str = "/usr/lib/programs";
 const SERVICES: &str = "lib/services";
 const SUFFIX: &str = ".yaml";
+/// The device manager's protocol for the root's drivers.
+const ROOT_DRIVERS: &str = "mikros.driver.RootDrivers";
 
 /// Waits for the root file system, and then acts on its manifests.
 pub async fn follow(supervisor: Rc<Supervisor>) {
@@ -38,8 +43,40 @@ pub async fn follow(supervisor: Rc<Supervisor>) {
         .chain(new.iter().map(|s| s.0.name.clone()))
         .collect();
     register_programs(&supervisor, &usr, &names).await;
+    give_drivers(&supervisor, &usr).await;
     start_services(&supervisor, new).await;
     *supervisor.root.borrow_mut() = Some((usr, etc));
+}
+
+/// Gives the device manager a new read-only connection to the root's
+/// `usr`, for the drivers there, under the service manager's own
+/// identity. A failure is logged.
+async fn give_drivers(supervisor: &Supervisor, usr: &NodeAsyncClient) {
+    let given = async {
+        let (node, server) = endpoints::<Node>().map_err(|e| alloc::format!("{e:?}"))?;
+        match usr.clone(server, Rights::READ).await {
+            Ok(Ok(_)) => {}
+            failed => return Err(alloc::format!("opening /usr: {failed:?}")),
+        }
+        let (client, server) = endpoints::<RootDrivers>().map_err(|e| alloc::format!("{e:?}"))?;
+        let me = &supervisor.me;
+        let connected = supervisor
+            .dir
+            .connect(me, ROOT_DRIVERS.into(), None, server.into_handle())
+            .await;
+        connected.map_err(|status| alloc::format!("connecting: {status:?}"))?;
+        let client = RootDriversAsyncClient::new(client, supervisor.reactor.clone());
+        match client.root_available(node).await {
+            Ok(Ok(_)) => Ok(()),
+            failed => Err(alloc::format!("{failed:?}")),
+        }
+    };
+    if let Err(why) = given.await {
+        mikros_rt::log!(
+            Warning,
+            "giving the device manager the root's drivers failed: {why}"
+        );
+    }
 }
 
 /// The services of the root's manifests that were not read before.

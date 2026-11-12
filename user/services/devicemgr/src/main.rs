@@ -27,6 +27,7 @@ mod devices;
 mod drivers;
 mod publish;
 mod removal;
+mod root;
 mod serve;
 mod shutdown;
 mod start;
@@ -160,6 +161,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let framebuffer_header = info
         .as_ref()
         .filter(|_| framebuffer.is_some() && has_framebuffer);
+    let framebuffer_range = framebuffer_header.map(|header| {
+        let base = u64_at(&header[..], FRAMEBUFFER);
+        (base, u64_at(&header[..], FRAMEBUFFER + 0x08))
+    });
     if pci.is_none()
         && let Some(header) = framebuffer_header
     {
@@ -235,7 +240,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let starter = Starter::new(launcher, broker, root, shared, console, reactor.clone());
     let manager = Rc::new(Manager {
         devices: RefCell::new(devices),
-        drivers,
+        drivers: RefCell::new(drivers),
         starter,
         registrar,
         service_ids: publish::ServiceIds::new(),
@@ -246,6 +251,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         firmware_memory,
         power_off: core::cell::Cell::new(false),
         boot_display,
+        root_drivers: core::cell::Cell::new(false),
+        framebuffer_range,
     });
     spawner.spawn(shutdown::watch(manager.clone()));
     match provider {

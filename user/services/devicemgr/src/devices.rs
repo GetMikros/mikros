@@ -31,6 +31,9 @@ pub struct Device {
     pub removing: bool,
     pub starts: u64,
     pub kept: Option<u64>,
+    /// Set while its driver is stopped for a normal driver that takes
+    /// the device over.
+    pub taken_over: bool,
 }
 
 /// The devices, with the ID the next one gets.
@@ -73,6 +76,7 @@ impl Devices {
             removing: false,
             starts: 0,
             kept: None,
+            taken_over: false,
         };
         mikros_rt::log!(Info, "device-manager: added {}", describe(&device));
         mikros_rt::diag!(
@@ -184,6 +188,32 @@ impl Devices {
                 device.starts
             );
         }
+    }
+
+    /// The first device with the hardware ID `hardware_id` that is not
+    /// being removed.
+    pub fn with_hardware_id(&self, hardware_id: &str) -> Option<u64> {
+        let found = self
+            .list
+            .iter()
+            .find(|d| !d.removing && d.hardware_ids.iter().any(|h| h == hardware_id));
+        found.map(|d| d.id)
+    }
+
+    /// The devices without a driver that have not failed.
+    pub fn unbound(&self) -> Vec<u64> {
+        let unbound = self.list.iter().filter(|d| d.driver.is_none() && !d.failed);
+        unbound.map(|d| d.id).collect()
+    }
+
+    /// The devices whose driver runs and that are not being removed, with
+    /// that driver's name and their hardware IDs.
+    pub fn running(&self) -> Vec<(u64, String, Vec<String>)> {
+        self.list
+            .iter()
+            .filter(|d| d.pid.is_some() && !d.removing && !d.taken_over)
+            .filter_map(|d| Some((d.id, d.driver.clone()?, d.hardware_ids.clone())))
+            .collect()
     }
 
     /// Binds a driver of `drivers` to each device without one that has

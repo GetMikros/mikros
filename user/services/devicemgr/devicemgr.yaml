@@ -12,6 +12,8 @@ provides:
     permission: files.volumes
   - protocol: mikros.driver.Shutdown
     permission: power.control
+  # For the service manager alone, which the device manager checks.
+  - protocol: mikros.driver.RootDrivers
 namespace:
   - path: /usr/lib/drivers
     rights: rx
