@@ -34,7 +34,9 @@ pub enum Direction {
 
 /// A TD on the ring: its ID, its TRBs' addresses and data lengths,
 /// whether it is a control transfer, the bytes of a short data stage, the
-/// enqueue pointer after it, and where its result goes.
+/// enqueue pointer after it, and where its result goes: `None` once it
+/// was cancelled behind other TDs, when its TRBs are no-op TRBs that keep
+/// their room on the ring until the controller has passed them.
 struct Td {
     id: u64,
     addresses: Vec<u64>,
@@ -42,7 +44,7 @@ struct Td {
     control: bool,
     short: Option<u32>,
     after: Position,
-    sender: Sender<Result<u32, Status>>,
+    sender: Option<Sender<Result<u32, Status>>>,
 }
 
 struct State {
@@ -215,7 +217,7 @@ impl Endpoint {
             control: request.control,
             short: None,
             after,
-            sender,
+            sender: Some(sender),
         });
         drop(state);
         self.controller.regs.ring(self.slot, self.id);
@@ -259,7 +261,12 @@ impl Endpoint {
                 return result;
             }
         }
-        let pending = self.state.borrow().pending.iter().any(|td| td.id == id);
+        let pending = self
+            .state
+            .borrow()
+            .pending
+            .iter()
+            .any(|td| td.id == id && td.sender.is_some());
         if pending {
             self.cancel(id).await;
         }
@@ -267,27 +274,40 @@ impl Endpoint {
     }
 
     /// Stops the endpoint, takes TD `id` off the ring and fails it with
-    /// `TIMED_OUT`, and starts the endpoint again.
+    /// `TIMED_OUT`, and starts the endpoint again. With only cancelled TDs
+    /// ahead of it, the dequeue pointer moves past it and them, and their
+    /// room goes back; behind others, it becomes no-op TRBs, whose room
+    /// goes back once the controller has passed them.
     async fn cancel(self: &Rc<Self>, id: u64) {
         let stop = [0, 0, 0, self.command(TRB_STOP_ENDPOINT)];
         let _ = self.controller.command(stop).await;
-        let td = {
+        let (sender, skip) = {
             let mut state = self.state.borrow_mut();
-            let Some(at) = state.pending.iter().position(|td| td.id == id) else {
+            let pending = &mut state.pending;
+            let Some(at) = pending
+                .iter()
+                .position(|td| td.id == id && td.sender.is_some())
+            else {
                 return;
             };
-            let td = state.pending.remove(at).expect("the TD is pending");
-            if at > 0 {
+            if pending.iter().take(at).all(|td| td.sender.is_none()) {
+                let mut skipped: Vec<Td> = pending.drain(..=at).collect();
+                let count = skipped.iter().map(|td| td.addresses.len()).sum();
+                let td = skipped.last_mut().expect("the TD is skipped");
+                (td.sender.take(), Some((td.after, count)))
+            } else {
+                let td = &mut pending[at];
                 self.ring.cancel(&td.addresses);
+                (td.sender.take(), None)
             }
-            (td, at == 0)
         };
-        let (td, first) = td;
-        if first {
-            let _ = self.set_dequeue(td.after).await;
+        if let Some((after, count)) = skip {
+            let _ = self.set_dequeue(after).await;
+            self.ring.release(count);
         }
-        self.ring.release(td.addresses.len());
-        td.sender.send(Err(Status::TimedOut));
+        if let Some(sender) = sender {
+            sender.send(Err(Status::TimedOut));
+        }
         self.changed.wake();
         self.controller.regs.ring(self.slot, self.id);
     }
@@ -336,8 +356,8 @@ impl Endpoint {
             state.gone = true;
             core::mem::take(&mut state.pending)
         };
-        for td in pending {
-            td.sender.send(Err(Status::PeerClosed));
+        for sender in pending.into_iter().filter_map(|td| td.sender) {
+            sender.send(Err(Status::PeerClosed));
         }
         self.controller.set_endpoint(self.slot, self.id, None);
         self.changed.wake();
@@ -348,21 +368,38 @@ impl Endpoint {
     /// reset.
     pub fn restart(&self, status: Status) {
         let pending = core::mem::take(&mut self.state.borrow_mut().pending);
-        for td in pending {
-            td.sender.send(Err(status));
+        for sender in pending.into_iter().filter_map(|td| td.sender) {
+            sender.send(Err(status));
         }
         self.ring.clear();
         self.changed.wake();
     }
 
-    /// Completes the TD at `index`.
+    /// Completes the TD at `index`, and gives back its room and that of
+    /// the cancelled TDs ahead of it, which the controller has passed.
     fn complete(&self, index: usize, result: Result<u32, Status>) {
-        let td = self.state.borrow_mut().pending.remove(index);
-        if let Some(td) = td {
-            self.ring.release(td.addresses.len());
-            td.sender.send(result);
-            self.changed.wake();
+        let (td, passed) = {
+            let mut state = self.state.borrow_mut();
+            let Some(td) = state.pending.remove(index) else {
+                return;
+            };
+            let mut passed = td.addresses.len();
+            let mut at = 0;
+            state.pending.retain(|ahead| {
+                let skipped = at < index && ahead.sender.is_none();
+                at += 1;
+                if skipped {
+                    passed += ahead.addresses.len();
+                }
+                !skipped
+            });
+            (td, passed)
+        };
+        self.ring.release(passed);
+        if let Some(sender) = td.sender {
+            sender.send(result);
         }
+        self.changed.wake();
     }
 }
 
@@ -374,7 +411,13 @@ impl Endpoint {
         let residual = trb[2] & 0xFF_FFFF;
         let found = {
             let state = self.state.borrow();
-            state.pending.iter().enumerate().find_map(|(i, td)| {
+            // Cancelled TDs are no-op TRBs, which give no events.
+            let mut live = state
+                .pending
+                .iter()
+                .enumerate()
+                .filter(|(_, td)| td.sender.is_some());
+            live.find_map(|(i, td)| {
                 let at = td.addresses.iter().position(|&a| a == pointer)?;
                 Some((i, at))
             })
