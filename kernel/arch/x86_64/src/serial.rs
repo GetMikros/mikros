@@ -58,18 +58,33 @@ pub fn present() -> bool {
     PRESENT.load(Ordering::Relaxed)
 }
 
-/// Writes `bytes`, waiting for the transmitter before each one.
+/// The most line status reads that wait for the transmitter, about 100 ms
+/// of port reads, before the port counts as gone.
+const TRANSMIT_POLLS: u32 = 100_000;
+
+/// Writes `bytes`, waiting for the transmitter before each one, and
+/// answering TLB shootdowns while it waits: the log is written with
+/// interrupts disabled, and a slow port must not hold up the other
+/// processors. A port whose transmitter does not empty within
+/// `TRANSMIT_POLLS` reads is no longer written to.
 pub fn write(bytes: &[u8]) {
     if !PRESENT.load(Ordering::Relaxed) {
         return;
     }
-    for &b in bytes {
+    'bytes: for &b in bytes {
+        let mut polls = 0;
         // SAFETY: as in `init`; reading the line status and writing the data
         // register only transmit a byte.
-        unsafe {
-            while in8(LINE_STATUS) & TRANSMIT_EMPTY == 0 {}
-            out8(DATA, b);
+        while unsafe { in8(LINE_STATUS) } & TRANSMIT_EMPTY == 0 {
+            crate::tlb::service();
+            polls += 1;
+            if polls == TRANSMIT_POLLS {
+                PRESENT.store(false, Ordering::Relaxed);
+                break 'bytes;
+            }
         }
+        // SAFETY: as above.
+        unsafe { out8(DATA, b) };
     }
 }
 
