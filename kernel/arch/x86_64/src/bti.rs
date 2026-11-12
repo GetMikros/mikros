@@ -2,6 +2,7 @@
 //! which keep pages pinned for one.
 
 use crate::iommu;
+use crate::log::log;
 use crate::memory_object::MemoryObject;
 use crate::publish::Work;
 use alloc::sync::Arc;
@@ -100,7 +101,7 @@ impl Bti {
                 return Err(e);
             }
         };
-        pin.apply()?;
+        let pin = pin.apply()?;
         *pmt.pin.lock() = Some(pin);
         Ok(pmt)
     }
@@ -120,10 +121,16 @@ impl Bti {
                 }
             }
         }
-        for (pin, _) in released {
-            pin.remove()?;
+        // Every pin is tried; one whose release the IOMMU did not confirm
+        // keeps its charge too.
+        let mut result = Ok(());
+        for (pin, charge) in released {
+            if let Err(e) = pin.remove() {
+                core::mem::forget(charge);
+                result = result.and(Err(e));
+            }
         }
-        Ok(())
+        result
     }
 }
 
@@ -150,24 +157,38 @@ struct Pin {
 }
 
 impl Pin {
-    /// Lets the device reach the pages, taking back what it gave when
-    /// that fails.
-    fn apply(&self) -> Result<(), Error> {
+    /// Lets the device reach the pages and returns the pin, or takes back
+    /// what it gave when that fails. A pin whose access the IOMMU did not
+    /// confirm taken back is kept forever.
+    fn apply(self) -> Result<Pin, Error> {
         let mut work = Work::new(crate::sched::preempt_point);
+        let mut failed = None;
         for (i, &phys) in self.frames.iter().enumerate() {
             work.item();
             if let Err(e) = iommu::map(self.rid, phys, self.read, self.write) {
-                self.unmap(&self.frames[..i]);
-                let _ = iommu::sync(self.rid);
-                return Err(e);
+                failed = Some((i, e));
+                break;
             }
         }
-        #[cfg(feature = "diag")]
-        crate::diag::PINNED.fetch_add(
-            self.frames.len() as u64,
-            core::sync::atomic::Ordering::Relaxed,
-        );
-        iommu::sync(self.rid)
+        let (mapped, e) = match failed {
+            Some(failure) => failure,
+            None => match iommu::sync(self.rid) {
+                Ok(()) => {
+                    #[cfg(feature = "diag")]
+                    crate::diag::PINNED.fetch_add(
+                        self.frames.len() as u64,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    return Ok(self);
+                }
+                Err(e) => (self.frames.len(), e),
+            },
+        };
+        self.unmap(&self.frames[..mapped]);
+        if let Err(sync) = iommu::sync(self.rid) {
+            keep_forever(self, sync);
+        }
+        Err(e)
     }
 
     fn unmap(&self, frames: &[u64]) {
@@ -179,7 +200,8 @@ impl Pin {
     }
 
     /// Takes the device's access back, and returns once the IOMMU no
-    /// longer uses it. The object goes with the pin.
+    /// longer uses it. The object goes with the pin, unless the IOMMU did
+    /// not confirm it: then the pin is kept forever.
     fn remove(self) -> Result<(), Error> {
         #[cfg(feature = "diag")]
         crate::diag::PINNED.fetch_sub(
@@ -187,8 +209,21 @@ impl Pin {
             core::sync::atomic::Ordering::Relaxed,
         );
         self.unmap(&self.frames);
-        iommu::sync(self.rid)
+        iommu::sync(self.rid).inspect_err(|&e| keep_forever(self, e))
     }
+}
+
+/// Keeps `pin`, whose access the IOMMU did not confirm taken back, with
+/// its object forever, so that the device can never reach pages handed
+/// out again.
+fn keep_forever(pin: Pin, e: Error) {
+    log!(
+        Warning,
+        "iommu: device {:#06x} keeps {} pages forever: {e:?}",
+        pin.rid,
+        pin.frames.len()
+    );
+    core::mem::forget(pin);
 }
 
 /// The pins of `Pmt` objects closed without `pmt_unpin`, with the budget
