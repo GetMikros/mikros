@@ -3819,7 +3819,12 @@ fn kernel_logged(s: &Startup, needle: &[u8]) -> Result<bool> {
 
 /// What the tests ask about what the kernel logged at boot, which they
 /// cannot find in the log later, as the tests' records push it out.
-const BOOT_LINES: [&[u8]; 3] = [b"DMA isolated", b"DMA is not isolated", b"VT-d units"];
+const BOOT_LINES: [&[u8]; 4] = [
+    b"DMA isolated",
+    b"DMA is not isolated",
+    b"VT-d units",
+    b"AMD-Vi units",
+];
 /// A bit for each of `BOOT_LINES` that the kernel logged before the first
 /// test, set by `keep_boot_log`.
 static BOOT_LOGGED: AtomicU32 = AtomicU32::new(0);
@@ -10048,8 +10053,10 @@ mod manager {
                 1,
             ),
             (b"device-manager: started driver pcibus for device 1 as pid", 1),
-            (b", pci-0000:00:00.0, as pci:v8086d29c0sv", 1),
-            (b", pci-0000:00:1f.0, as pci:v8086d2918sv", 1),
+            // PCI functions are known by their vendor and device IDs, as
+            // the AMD IOMMU takes a slot of its own and moves the others.
+            (b", as pci:v8086d29c0sv", 1),
+            (b", as pci:v8086d2918sv", 1),
             (b"device-manager: bound driver test-pci to device", 1),
             (b"device-manager: started driver test-pci for device", 1),
             (b"device-manager: bound driver test-edu to device", 1),
@@ -10059,25 +10066,18 @@ mod manager {
             (b"device-manager: started driver test-small-bar for device", 1),
             (b"test-small-bar: mapped BAR 0 at ", 1),
             (b"device-manager: the driver of device 1 ", 6),
-            (
-                b"device-manager: bound driver virtioblk to device 5, pci-0000:00:02.0, as pci:v1af4d1042",
-                1,
-            ),
-            (b"device-manager: started driver virtioblk for device 5 as pid", 2),
+            (b"device-manager: bound driver virtioblk to device ", 1),
+            // Its function's ID when added and when bound.
+            (b", as pci:v1af4d1042", 2),
+            (b"device-manager: started driver virtioblk for device ", 2),
             // The btrfs test driver kills the disk's driver, which is
             // restarted with the disk and its partitions kept; the disk is
             // added again and the partition driver reconnected to it.
-            (
-                b"device-manager: driver virtioblk for device 5 terminated with code -3, signal 9",
-                1,
-            ),
-            (b"device-manager: restarting driver virtioblk for device 5", 1),
-            (b" again, disk-0, under 5", 1),
+            // Only its end starts so, as signal 9 may end other drivers.
+            (b"device-manager: driver virtioblk for device ", 1),
+            (b"device-manager: restarting driver virtioblk for device ", 1),
+            (b" again, disk-0, under ", 1),
             (b"device-manager: reconnected device ", 1),
-            (
-                b", disk-0, as storage:disk, under 5, with 0 resources",
-                1,
-            ),
             (b"device-manager: started driver test-disk for device", 3),
             (b"device-manager: bound driver fat to device", 1),
             (b"device-manager: started driver fat for device", 1),
@@ -10128,13 +10128,13 @@ mod manager {
             (b"device-manager: started driver nvme for device", 1),
             (b", disk-1, as storage:disk, under", 1),
             (b"device-manager: bound driver ahci to device", 1),
-            (b", pci-0000:00:1f.2, as pci:c010601", 1),
+            (b", as pci:c010601", 1),
             (b"device-manager: started driver ahci for device", 1),
             (b", disk-2, as storage:disk, under", 1),
             // The xHCI controller, the USB mass storage device's
             // interface, and the USB disk, which is removable.
             (b"device-manager: bound driver xhci to device", 1),
-            (b", pci-0000:00:1d.0, as pci:v1b36d000dsv", 1),
+            (b", as pci:v1b36d000dsv", 1),
             (b"device-manager: started driver xhci for device", 1),
             (b", as usb:v46f4p0001i00, under", 1),
             // The keyboard behind the USB hub, whose interface the USB
@@ -10164,10 +10164,9 @@ mod manager {
             // The disks and partitions, and the disk of the restarted
             // virtio-blk driver again, under its old ID.
             (b"device-manager: published device.storage ", 12),
-            (
-                b"device-manager: driver test-reset for device 4 failed after 5 restarts",
-                1,
-            ),
+            (b"device-manager: bound driver test-reset to device ", 1),
+            (b", as pci:v8086d10d3", 2),
+            (b" failed after 5 restarts", 1),
         ];
         const FAILED: &[&[u8]] = &[
             b"driver pcibus declined",

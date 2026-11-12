@@ -193,8 +193,14 @@ pub fn dma_through_pins(s: &Startup) -> Result {
     let copied = mem_read_at::<8>(dst, 0)? == [0xA5; 8];
     ensure("blocking an unpinned page", copied != isolated)?;
     if isolated {
+        // QEMU's AMD IOMMU does not report the direction of an access, so
+        // on AMD-Vi a blocked access from the device is what counts.
+        let blocked = match crate::boot_logged(b"AMD-Vi units") {
+            true => alloc::format!("from requester {:#x} at ", edu.rid),
+            false => alloc::string::String::from("blocked DMA write"),
+        };
         let deadline = in_time();
-        while !crate::kernel_logged(s, b"blocked DMA write")? {
+        while !crate::kernel_logged(s, blocked.as_bytes())? {
             ensure("logging the blocked DMA", now() < deadline)?;
             sleep_ms(5);
         }
