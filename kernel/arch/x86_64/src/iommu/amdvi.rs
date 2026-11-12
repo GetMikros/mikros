@@ -100,6 +100,8 @@ pub struct Unit {
     devtab: u64,
     cmd: u64,
     cmd_tail: u64,
+    /// The value that the last completion wait stores.
+    waits: u64,
     events: u64,
     status: u64,
     efr: u64,
@@ -135,6 +137,7 @@ impl Unit {
             devtab,
             cmd: table_frame()?,
             cmd_tail: 0,
+            waits: 0,
             events: table_frame()?,
             status: table_frame()?,
             efr: 0,
@@ -180,21 +183,38 @@ impl Unit {
         self.write(CONTROL, self.read(CONTROL) & !IOMMU_EN);
     }
 
+    /// The commands the buffer has room for: those the unit has read, up
+    /// to the slot before its head.
+    fn room(&self) -> u64 {
+        let head = (self.read(CMD_HEAD) >> 4) % RING_ENTRIES;
+        (head + RING_ENTRIES - self.cmd_tail - 1) % RING_ENTRIES
+    }
+
     /// Submits `commands` followed by a completion wait, and returns once
-    /// the unit has written the wait's word.
+    /// the unit has written the wait's word. Fails with `TimedOut`, writing
+    /// nothing, while the unit has not read enough of the buffer, as after
+    /// a submission that timed out.
     fn submit(&mut self, commands: &[[u64; 2]]) -> Result<(), Error> {
-        let word = space::direct(self.status) as *mut u64;
-        // SAFETY: the word is the unit's own frame.
-        unsafe { word.write_volatile(0) };
-        // Store the value 1 at the word's address.
-        let wait = [COMPLETION_WAIT | self.status | 1, 1];
+        let count = commands.len() as u64 + 1;
+        let mut polls = 0;
+        while self.room() < count {
+            polls += 1;
+            if polls == POLLS {
+                return Err(Error::TimedOut);
+            }
+            core::hint::spin_loop();
+        }
+        // Each wait stores a value of its own, so that one that timed out
+        // and ends late does not end a later one's.
+        self.waits += 1;
+        let value = self.waits;
+        let wait = [COMPLETION_WAIT | self.status | 1, value];
         for c in commands.iter().chain([&wait]) {
             let at = space::direct(self.cmd) + self.cmd_tail * 16;
             let slot = at as *mut u64;
-            // SAFETY: the slot lies in the buffer, which the unit has read
-            // up to the tail, as each submission waits for its end. The
-            // stores are volatile, so that they come before the tail's,
-            // which tells the unit to read them.
+            // SAFETY: the slot lies in the buffer, where the unit has read,
+            // as `room` showed. The stores are volatile, so that they come
+            // before the tail's, which tells the unit to read them.
             unsafe {
                 slot.write_volatile(c[0]);
                 slot.add(1).write_volatile(c[1]);
@@ -202,9 +222,10 @@ impl Unit {
             self.cmd_tail = (self.cmd_tail + 1) % RING_ENTRIES;
         }
         self.write(CMD_TAIL, self.cmd_tail * 16);
+        let word = space::direct(self.status) as *mut u64;
         for _ in 0..POLLS {
-            // SAFETY: as above; the unit writes the word.
-            if unsafe { word.read_volatile() } == 1 {
+            // SAFETY: the word is the unit's own frame, which it writes.
+            if unsafe { word.read_volatile() } == value {
                 return Ok(());
             }
             core::hint::spin_loop();
