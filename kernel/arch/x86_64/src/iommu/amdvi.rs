@@ -407,8 +407,19 @@ impl Unit {
             let [low, high] = unsafe { *(at as *const [u64; 2]) };
             if low >> 60 == IO_PAGE_FAULT {
                 report(low as u16, high & !0xFFF, low & FAULT_WRITE != 0);
+            } else {
+                // Other events, such as command errors that stop the
+                // command processor, are recorded as they are.
+                crate::log::log!(
+                    Error,
+                    "AMD-Vi: event {:#x}: {low:#018x} {high:#018x}",
+                    low >> 60
+                );
             }
             head = (head + 16) % (RING_ENTRIES * 16);
+        }
+        if self.read(STATUS) & EVENT_OVERFLOW != 0 {
+            crate::log::log!(Error, "AMD-Vi: the event log overflowed");
         }
         self.write(EVENT_HEAD, head);
         self.write(STATUS, EVENT_OVERFLOW | EVENT_LOG_INT);
