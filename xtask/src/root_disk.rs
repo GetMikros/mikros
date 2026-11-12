@@ -27,15 +27,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// A kind of run: its name, the test init's scenario, the line the
-/// test init logs once it passed, other lines it must log, how many
-/// times the PCI bus driver starts, and the controllers the boot disk is
-/// put on, with the name of each run.
+/// test init logs once it passed, other lines it must log, and the
+/// controllers the boot disk is put on, with the name of each run.
 struct Runs {
     name: &'static str,
     scenario: &'static str,
     passed: &'static str,
     also: &'static [&'static str],
-    bus_starts: usize,
     disks: &'static [(&'static str, Disk)],
 }
 
@@ -44,7 +42,6 @@ const ROOT_DISK: Runs = Runs {
     scenario: "test=root-disk",
     passed: "SCENARIO root-disk PASSED",
     also: &[],
-    bus_starts: 1,
     disks: &[("nvme", Disk::Nvme), ("ahci", Disk::Ahci)],
 };
 
@@ -53,8 +50,6 @@ const ACPI_RESTART: Runs = Runs {
     scenario: "test=acpi-restart",
     passed: "SCENARIO acpi-restart PASSED",
     also: &[],
-    // Its image has no PCI bus driver.
-    bus_starts: 0,
     disks: &[("virtio", Disk::Virtio)],
 };
 
@@ -65,7 +60,6 @@ const BUS_RESTART: Runs = Runs {
     // The restarted PCI bus driver takes the BAR sizes of the functions
     // whose drivers run on from the device manager, without sizing them.
     also: &["pci-bus: took the BAR sizes of "],
-    bus_starts: 2,
     disks: &[
         ("virtio", Disk::Virtio),
         ("nvme", Disk::Nvme),
@@ -83,40 +77,6 @@ fn verdict(code: Option<i32>, serial: &str, passed: &str, also: &[&str]) -> Resu
         .find(|l| !serial.contains(*l))
     {
         return Err(format!("{line:?} is missing"));
-    }
-    Ok(())
-}
-
-/// What the PCI bus driver logs for each display function that it
-/// leaves unsized when it starts, before the function's name.
-const LEFT_UNSIZED: &str = "pci-bus: left the display function ";
-
-/// Why the PCI bus driver did not leave QEMU's display function, which
-/// shows the boot framebuffer, unsized each of the `starts` times it
-/// started, or why such a function was added with BAR sizes, if so,
-/// given the serial output. QEMU's display keeps working when it is
-/// sized, so only this shows that the bus driver left it alone.
-fn display_unsized(serial: &str, starts: usize) -> Result<(), String> {
-    let names: Vec<&str> = serial
-        .lines()
-        .filter_map(|line| line.split_once(LEFT_UNSIZED)?.1.split_whitespace().next())
-        .collect();
-    if names.len() != starts {
-        return Err(format!(
-            "{LEFT_UNSIZED:?} was logged {} times, not {starts}",
-            names.len()
-        ));
-    }
-    for name in &names {
-        let added = format!(", {name}, as ");
-        let sized = serial.lines().find(|line| {
-            line.contains("device-manager: added device ")
-                && line.contains(&added)
-                && (0..6).any(|i| line.contains(&format!(", bar{i} ")))
-        });
-        if let Some(line) = sized {
-            return Err(format!("{name} was added with BAR sizes: {line}"));
-        }
     }
     Ok(())
 }
@@ -191,9 +151,7 @@ fn run_all(
             );
         };
         let serial = String::from_utf8_lossy(&fs::read(&log).unwrap_or_default()).into_owned();
-        let checked = verdict(status.code(), &serial, runs.passed, runs.also)
-            .and_then(|()| display_unsized(&serial, runs.bus_starts));
-        if let Err(why) = checked {
+        if let Err(why) = verdict(status.code(), &serial, runs.passed, runs.also) {
             bail!(
                 "the {name} {what} run failed: {why}; serial output in {}",
                 log.display()
@@ -228,27 +186,5 @@ mod tests {
                 assert!(verdict(Some(passed), line, line, also).is_err());
             }
         }
-    }
-
-    #[test]
-    fn needs_the_display_function_left_unsized_at_every_start() {
-        let left = "[0.85] I p858: pci-bus: left the display function pci-0000:00:03.0 \
-                    unsized until a driver asks for a BAR";
-        let added = "[0.86] I p0: device-manager: added device 5, pci-0000:00:03.0, \
-                     as pci:v1234d1111sv1af4sd1100r02, under 2, with 0 resources";
-        let sized = format!("{added}, bar0 0x1000000, bar2 0x1000");
-        let other = "[0.86] I p0: device-manager: added device 6, pci-0000:00:04.0, \
-                     as pci:v1af4d1042sv1af4sd1100r01, under 2, with 0 resources, bar1 0x1000";
-        let once = [left, added, other].join("\n");
-        assert_eq!(display_unsized(&once, 1), Ok(()));
-        let twice = [left, added, other, left].join("\n");
-        assert_eq!(display_unsized(&twice, 2), Ok(()));
-        // Missing at a start, or logged more often than the bus starts.
-        assert!(display_unsized(&once, 2).is_err());
-        assert!(display_unsized(&twice, 1).is_err());
-        assert!(display_unsized(other, 1).is_err());
-        // Added with BAR sizes.
-        let with_bars = [left, &sized, other].join("\n");
-        assert!(display_unsized(&with_bars, 1).is_err());
     }
 }

@@ -25,8 +25,7 @@ const WRITABLE_FROM: u16 = 0x40;
 
 /// Serves `Device` for `function` of `bus` on the bus channel `end` of
 /// its driver, whose manifest needs `dma` when `dma` is true, until the
-/// channel closes. The function decodes memory and I/O meanwhile, from
-/// its first `GetBar` on if its BARs were not sized before; once
+/// channel closes. The function decodes memory and I/O meanwhile; once
 /// the channel closes, its message-signaled interrupts are disabled,
 /// bus mastering and decoding are disabled and the quarantine of its
 /// bus transaction initiator is released. `process` is the bus
@@ -49,11 +48,7 @@ pub async fn serve(
         let value = config.read(at, COMMAND, 2);
         config.write(at, COMMAND, 2, change(value));
     };
-    // A function whose BARs are not sized yet keeps its command register
-    // until they are.
-    if function.bars.borrow().is_some() {
-        command(&|c| c | u32::from(COMMAND_IO | COMMAND_MEMORY));
-    }
+    command(&|c| c | u32::from(COMMAND_IO | COMMAND_MEMORY));
     let server = DeviceAsyncServer::new(ServerEnd::<Device>::new(end), bus.reactor.clone());
     let mut msi: Option<Msi> = None;
     while let Ok(request) = server.next().await {
@@ -74,16 +69,10 @@ pub async fn serve(
                 let written = write_config(&bus, at, q.offset, q.width, q.value);
                 r.reply(s, written.map(|()| DeviceWriteConfigResponse {}))
             }
-            R::GetBar(q, r) => {
-                if function.bars.borrow().is_none() {
-                    crate::bus::size_unsized(&bus, &function).await;
-                    command(&|c| c | u32::from(COMMAND_IO | COMMAND_MEMORY));
-                }
-                r.reply(
-                    s,
-                    bar(&function, q.index).map(|bar| DeviceGetBarResponse { bar }),
-                )
-            }
+            R::GetBar(q, r) => r.reply(
+                s,
+                bar(&function, q.index).map(|bar| DeviceGetBarResponse { bar }),
+            ),
             R::SetBusMaster(q, r) => {
                 let set = match q.enabled && !dma {
                     true => Err(Status::AccessDenied),
@@ -212,10 +201,8 @@ fn write_config(
 
 /// BAR `index` of `function`, with a copy of its resource.
 fn bar(function: &Function, index: u8) -> Result<pci::Bar, Status> {
-    let bars = function.bars.borrow();
-    let (bar, resource) = bars
-        .as_deref()
-        .unwrap_or(&[])
+    let (bar, resource) = function
+        .bars
         .iter()
         .find(|(bar, _)| bar.index == index)
         .ok_or(Status::NotFound)?;

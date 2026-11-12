@@ -371,10 +371,8 @@ fn map_table(
 ) -> Result<(u64, u64, u64), Status> {
     let index = (table & MSIX_BIR) as u8;
     let offset = u64::from(table & !MSIX_BIR);
-    let bars = function.bars.borrow();
-    let (bar, resource) = bars
-        .as_deref()
-        .unwrap_or(&[])
+    let (bar, resource) = function
+        .bars
         .iter()
         .find(|(bar, _)| bar.index == index)
         .ok_or(Status::NotSupported)?;

@@ -520,28 +520,3 @@ fn sizes_again_unless_the_bar_properties_fit() {
         assert_eq!(kept_bars(&fake, f, &properties), None, "{properties:?}");
     }
 }
-
-#[test]
-fn only_a_display_function_that_decodes_memory_is_left_unsized() {
-    let mut fake = Fake::default();
-    let display = Header {
-        class: CLASS_DISPLAY,
-        subclass: 0x00,
-        ..VIRTIO_BLOCK
-    };
-    let (shown, idle, block) = (at(0, 2, 0), at(0, 3, 0), at(0, 4, 0));
-    for (f, header) in [(shown, &display), (idle, &display), (block, &VIRTIO_BLOCK)] {
-        let function = fake.add(f, header, 0);
-        function.bar(0, 0, 0xe000_0000, 0x100_0000, u32::MAX);
-    }
-    let decode = |fake: &mut Fake, f: Address| {
-        let function = fake.functions.get_mut(&f).unwrap();
-        function.space[usize::from(COMMAND)] = COMMAND_MEMORY as u8;
-    };
-    decode(&mut fake, shown);
-    decode(&mut fake, block);
-    // A shared reference to the configuration space: reads only.
-    assert!(decoding_display(&fake, shown));
-    assert!(!decoding_display(&fake, idle));
-    assert!(!decoding_display(&fake, block));
-}

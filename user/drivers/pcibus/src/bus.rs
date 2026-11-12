@@ -14,10 +14,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
-use mikros_pci::{
-    Address, Bar, Claim, Header, bar_properties, claims, decoding_display, kept_bars, scan,
-    size_bars,
-};
+use mikros_pci::{Address, Bar, Claim, Header, bar_properties, claims, kept_bars, scan, size_bars};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -29,9 +26,6 @@ pub const KIND_MMIO: u32 = 1;
 pub const KIND_IOPORT: u32 = 2;
 pub const KIND_BTI: u32 = 8;
 
-/// A sized BAR with its resource, or why it has none.
-pub type SizedBar = (Bar, Result<Rc<OwnedHandle>, Status>);
-
 /// A function: its address and header, its BARs, each with the
 /// resource claimed for it, which memory BARs of the function that share
 /// pages share, or why there is none, its bus transaction initiator or
@@ -39,10 +33,7 @@ pub type SizedBar = (Bar, Result<Rc<OwnedHandle>, Status>);
 pub struct Function {
     pub at: Address,
     pub header: Header,
-    /// The BARs with their resources, or `None` while they are not
-    /// sized: for a display function that decoded memory when the bus
-    /// driver started, until its driver asks for a BAR.
-    pub bars: RefCell<Option<Vec<SizedBar>>>,
+    pub bars: Vec<(Bar, Result<Rc<OwnedHandle>, Status>)>,
     pub bti: Result<OwnedHandle, Status>,
     pub intx: RefCell<Option<Intx>>,
 }
@@ -138,7 +129,7 @@ pub async fn enumerate(bus: Rc<Bus>) {
     // manager keeps for this restarted driver has a driver that may be
     // using it, so its BARs are taken from the sizes found before when
     // they still fit, rather than written to size them.
-    let mut found: Vec<(Address, Header, Option<Vec<Bar>>)> = Vec::new();
+    let mut found: Vec<(Address, Header, Vec<Bar>)> = Vec::new();
     let mut taken = 0;
     for at in scan(&ecam, ecam.bus_start(), ecam.bus_end()) {
         let kept = match bus.manager.get_kept_child(name(bus.segment, at)).await {
@@ -154,21 +145,7 @@ pub async fn enumerate(bus: Rc<Bus>) {
             _ => None,
         };
         taken += usize::from(kept.is_some());
-        // Sizing turns decoding off, and firmware may show the boot
-        // framebuffer through a display function that decodes memory, so
-        // such a function is sized only once its driver asks for a BAR.
-        let bars = match kept {
-            Some(kept) => Some(kept),
-            None if decoding_display(&ecam, at) => {
-                mikros_rt::log!(
-                    Info,
-                    "pci-bus: left the display function {} unsized until a driver asks for a BAR",
-                    name(bus.segment, at)
-                );
-                None
-            }
-            None => Some(size_bars(&mut &bus.ecam, at)),
-        };
+        let bars = kept.unwrap_or_else(|| size_bars(&mut &bus.ecam, at));
         found.push((at, Header::read(&ecam, at), bars));
     }
     if taken > 0 {
@@ -178,21 +155,35 @@ pub async fn enumerate(bus: Rc<Bus>) {
         );
     }
     let planned = {
-        let all: Vec<&[Bar]> = found
-            .iter()
-            .map(|(_, _, bars)| bars.as_deref().unwrap_or(&[]))
-            .collect();
+        let all: Vec<&[Bar]> = found.iter().map(|(_, _, bars)| bars.as_slice()).collect();
         claims(&all)
     };
     for ((at, header, sized), planned) in found.into_iter().zip(planned) {
-        let properties = bar_properties(sized.as_deref().unwrap_or(&[]))
+        let properties = bar_properties(&sized)
             .into_iter()
             .map(|(key, value)| Property { key, value })
             .collect();
-        let bars = match sized {
-            Some(sized) => Some(obtain(&bus, sized, planned).await),
-            None => None,
-        };
+        let mut groups: BTreeMap<usize, Result<Rc<OwnedHandle>, Status>> = BTreeMap::new();
+        let mut bars = Vec::new();
+        for (bar, claim) in sized.into_iter().zip(planned) {
+            let claimed = match claim {
+                Claim::Io { base, size } => {
+                    request(&bus, KIND_IOPORT, base, size).await.map(Rc::new)
+                }
+                Claim::Pages { group, start, end } => match groups.get(&group) {
+                    Some(claimed) => claimed.clone(),
+                    None => {
+                        let claimed = request(&bus, KIND_MMIO, start, end - start)
+                            .await
+                            .map(Rc::new);
+                        groups.insert(group, claimed.clone());
+                        claimed
+                    }
+                },
+                Claim::Shared => Err(Status::AccessDenied),
+            };
+            bars.push((bar, claimed));
+        }
         let bti = match &bus.bti_resource {
             Ok(resource) => bti_create(resource, requester_id(bus.segment, at)),
             Err(status) => Err(*status),
@@ -206,7 +197,7 @@ pub async fn enumerate(bus: Rc<Bus>) {
             let function = Function {
                 at,
                 header,
-                bars: RefCell::new(bars),
+                bars,
                 bti,
                 intx: RefCell::new(None),
             };
@@ -218,57 +209,6 @@ pub async fn enumerate(bus: Rc<Bus>) {
     }
     bus.complete.set(true);
     bus.wake();
-}
-
-/// Sizes the BARs of `function` if they are not sized yet, and obtains
-/// their resources as planned with the BARs of every other function
-/// sized so far.
-pub async fn size_unsized(bus: &Bus, function: &Function) {
-    if function.bars.borrow().is_some() {
-        return;
-    }
-    let sized = size_bars(&mut &bus.ecam, function.at);
-    let others: Vec<Vec<Bar>> = bus
-        .functions
-        .borrow()
-        .values()
-        .filter(|other| other.at != function.at)
-        .filter_map(|other| {
-            let bars = other.bars.borrow();
-            bars.as_ref()
-                .map(|bars| bars.iter().map(|(bar, _)| *bar).collect())
-        })
-        .collect();
-    let mut all: Vec<&[Bar]> = vec![&sized];
-    all.extend(others.iter().map(Vec::as_slice));
-    let planned = claims(&all).swap_remove(0);
-    let bars = obtain(bus, sized, planned).await;
-    *function.bars.borrow_mut() = Some(bars);
-}
-
-/// The resources of the BARs `sized` of a function, as `planned`: the
-/// memory BARs of one group share the group's resource.
-async fn obtain(bus: &Bus, sized: Vec<Bar>, planned: Vec<Claim>) -> Vec<SizedBar> {
-    let mut groups: BTreeMap<usize, Result<Rc<OwnedHandle>, Status>> = BTreeMap::new();
-    let mut bars = Vec::new();
-    for (bar, claim) in sized.into_iter().zip(planned) {
-        let claimed = match claim {
-            Claim::Io { base, size } => request(bus, KIND_IOPORT, base, size).await.map(Rc::new),
-            Claim::Pages { group, start, end } => match groups.get(&group) {
-                Some(claimed) => claimed.clone(),
-                None => {
-                    let claimed = request(bus, KIND_MMIO, start, end - start)
-                        .await
-                        .map(Rc::new);
-                    groups.insert(group, claimed.clone());
-                    claimed
-                }
-            },
-            Claim::Shared => Err(Status::AccessDenied),
-        };
-        bars.push((bar, claimed));
-    }
-    bars
 }
 
 /// The device name of the function at `at` in `segment`.
