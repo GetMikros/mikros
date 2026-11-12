@@ -78,6 +78,49 @@ fn lets_go_of_pages_the_object_evicted() {
     }
 }
 
+/// Reclaim that finds a lend under way has the lent pages that the object
+/// no longer has let go of once it ends, while new lends wait.
+#[test]
+fn lets_go_of_pages_once_the_lends_under_way_end() {
+    const COOKIE: u64 = 47;
+    start();
+    let image = Image::new("unpins-later", 256 << 20, &[]);
+    Disk::add(c"unpins-later", image.open(), false).unwrap();
+    let data = noise(13, 4 * PAGE);
+    let mount = Mount::new(c"/dev/unpins-later", false, None).unwrap();
+    let root = mount.root().unwrap();
+    let file = root.create(b"f", Kind::File, 0o644).unwrap();
+    assert_eq!(file.write(0, &data), Ok(data.len()));
+    let shared = file.share(COOKIE).unwrap();
+    OBJECTS.lock().unwrap().entry(COOKIE).or_default().evictable = true;
+    let evicts = || ops(COOKIE).iter().filter(|op| op.0 == EVICT).count();
+    // SAFETY: the node lives until the end of the test.
+    unsafe {
+        for index in 0..3 {
+            shared.lend_page(index).unwrap();
+            shared.lent();
+        }
+        shared.lend_page(3).unwrap();
+        assert_eq!(shared.unpin(16), 0, "a lend is under way");
+        assert_eq!(evicts(), 0);
+        shared.lent();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while evicts() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "nothing let go of the pages"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // A new lend waits until the pages are let go of; of them, only
+        // the page lent anew is left.
+        shared.lend_page(0).unwrap();
+        shared.lent();
+        assert_eq!(shared.unpin(16), 1);
+        shared.unshare();
+    }
+}
+
 /// A lent page is the page cache's: it reads as the file, and writes
 /// through the node show in it. A write through it, which the object
 /// calls dirty, reaches the disk, after a writeback that evicts the

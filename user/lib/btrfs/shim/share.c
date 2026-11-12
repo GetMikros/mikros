@@ -66,7 +66,14 @@ struct mikros_share {
 	bool window;
 	unsigned int lending;
 	wait_queue_head_t wait;
+	/* Whether new lends wait, as they do for a window, so that the lends
+	 * under way end and `unpinning` can let go of lent pages that reclaim
+	 * could not let go of while they were. */
+	bool held;
+	struct work_struct unpinning;
 };
+
+static void unpin_held(struct work_struct *work);
 
 /* The shares, by mapping, and by the frame number of each folio that
  * holds a lent page; and the address space operations of btrfs, which
@@ -224,6 +231,7 @@ int mikros_btrfs_share(struct mikros_node *node, u64 cookie)
 	xa_init(&share->lent);
 	mutex_init(&share->lock);
 	init_waitqueue_head(&share->wait);
+	INIT_WORK(&share->unpinning, unpin_held);
 	ret = xa_err(xa_store(&shares, mapping_key(mapping), share, GFP_KERNEL));
 	if (ret) {
 		kfree(share);
@@ -256,9 +264,9 @@ int mikros_btrfs_lend_page(struct mikros_node *node, u64 index, void **page)
 	if (!share)
 		goto out;
 	mutex_lock(&share->lock);
-	while (share->window) {
+	while (share->window || share->held) {
 		mutex_unlock(&share->lock);
-		wait_event(share->wait, !READ_ONCE(share->window));
+		wait_event(share->wait, !READ_ONCE(share->window) && !READ_ONCE(share->held));
 		mutex_lock(&share->lock);
 	}
 	share->lending++;
@@ -368,6 +376,7 @@ void mikros_btrfs_unshare(struct mikros_node *node)
 	if (!share)
 		goto unlock;
 	WRITE_ONCE(mapping->a_ops, btrfs_ops);
+	cancel_work_sync(&share->unpinning);
 	xa_for_each(&share->lent, index, folio) {
 		xa_cmpxchg(&lent_folios, folio_pfn(folio), share, NULL, GFP_KERNEL);
 		atomic_long_dec(&lent_pages);
@@ -425,24 +434,21 @@ static bool walk_dirty(struct dirty_walk *w, u64 index)
 
 /* Lets go of the folios of at most `max` lent pages of `share` that its
  * object no longer has, after evicting the object's clean pages: the
- * pages that are not dirty, as the object keeps only those. It does
- * nothing rather than wait for the share's lock, and nothing while lends
- * are under way or a writeback window is open, as a writeback that ends
- * meanwhile makes pages clean that the object still has. The lock keeps
- * new lends and windows out while it works. How many it let go of. */
-static unsigned long unpin(struct mikros_share *share, unsigned long max)
+ * pages that are not dirty, as the object keeps only those. The caller
+ * holds the share's lock, which keeps new lends and windows out, with no
+ * lend under way nor window open, as a writeback that ends meanwhile
+ * makes pages clean that the object still has. How many it let go of. */
+static unsigned long unpin_locked(struct mikros_share *share, unsigned long max)
 {
 	struct dirty_walk walk = { .share = share };
 	unsigned long index, freed = 0;
 	struct folio *folio;
 
-	if (!mutex_trylock(&share->lock))
-		return 0;
 	walk.end = DIV_ROUND_UP(i_size_read(share->mapping->host), PAGE_SIZE);
-	if (share->window || share->lending || xa_empty(&share->lent) || !walk.end)
-		goto out;
+	if (xa_empty(&share->lent) || !walk.end)
+		return 0;
 	if (mikros_host_share_op(share->cookie, SHARE_EVICT, 0, walk.end))
-		goto out;
+		return 0;
 	xa_for_each(&share->lent, index, folio) {
 		if (freed >= max)
 			break;
@@ -454,9 +460,47 @@ static unsigned long unpin(struct mikros_share *share, unsigned long max)
 		folio_put(folio);
 		freed++;
 	}
-out:
-	mutex_unlock(&share->lock);
 	return freed;
+}
+
+/* Lets go of lent pages of `share` as unpin_locked() does, at most `max`,
+ * when it can without waiting. While the share's lock is taken, lends
+ * are under way or a writeback window is open, it has `unpinning` do it
+ * once they have ended instead. How many it let go of. */
+static unsigned long unpin(struct mikros_share *share, unsigned long max)
+{
+	unsigned long freed = 0;
+	bool later = true;
+
+	if (mutex_trylock(&share->lock)) {
+		later = share->window || share->lending;
+		if (!later)
+			freed = unpin_locked(share, max);
+		mutex_unlock(&share->lock);
+	}
+	if (later && !xa_empty(&share->lent))
+		schedule_work(&share->unpinning);
+	return freed;
+}
+
+/* Holds off new lends of the share of `work` until the lends under way
+ * have ended and no writeback window is open, then lets go of its lent
+ * pages that the object no longer has, and lets lends go on. */
+static void unpin_held(struct work_struct *work)
+{
+	struct mikros_share *share = container_of(work, struct mikros_share, unpinning);
+
+	mutex_lock(&share->lock);
+	share->held = true;
+	while (share->lending || share->window) {
+		mutex_unlock(&share->lock);
+		wait_event(share->wait, !READ_ONCE(share->lending) && !READ_ONCE(share->window));
+		mutex_lock(&share->lock);
+	}
+	unpin_locked(share, ULONG_MAX);
+	share->held = false;
+	mutex_unlock(&share->lock);
+	wake_up_all(&share->wait);
 }
 
 static unsigned long shares_count(struct shrinker *shrinker, struct shrink_control *sc)
