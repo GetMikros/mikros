@@ -107,6 +107,15 @@ interface! {
     /// disabled, such as a held lock that interrupt handlers also take.
     [unsafe] fn interrupts_restore(enabled: bool);
 
+    /// Enables interrupts on this processor long enough for it to take
+    /// those that are pending, and disables them again: it returns with
+    /// them disabled.
+    ///
+    /// # Safety
+    ///
+    /// As for `interrupts_restore`.
+    [unsafe] fn take_pending_interrupts();
+
     /// Whether this processor is handling an interrupt or exception, in
     /// which it may neither enable interrupts nor switch threads.
     [] fn handling_interrupt() -> bool;

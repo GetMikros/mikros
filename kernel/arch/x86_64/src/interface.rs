@@ -46,6 +46,14 @@ impl Arch for X86 {
         }
     }
 
+    unsafe fn take_pending_interrupts() {
+        // SAFETY: the caller guarantees nothing still needs interrupts
+        // disabled. The processor takes interrupts only after the
+        // instruction that follows `sti`, so a `nop` comes before `cli`.
+        // The handlers that run may change memory.
+        unsafe { asm!("sti", "nop", "cli", options(nostack)) };
+    }
+
     fn handling_interrupt() -> bool {
         idt::handling()
     }

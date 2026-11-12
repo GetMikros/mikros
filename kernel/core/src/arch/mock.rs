@@ -9,12 +9,14 @@
 use super::Arch;
 use crate::sync::SpinLock;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU64, Ordering};
 
 /// The value of `TIMER` while the timer is not armed.
 const DISARMED: i64 = i64::MIN;
 
 static INTERRUPTS: AtomicBool = AtomicBool::new(false);
+/// How many times interrupts were enabled for pending ones to be taken.
+static WINDOWS: AtomicU64 = AtomicU64::new(0);
 // In host tests each test thread is a processor of its own, so that a
 // test that sets the per-processor data does not change it for others.
 #[cfg(test)]
@@ -59,6 +61,11 @@ pub fn set_now(now: i64) {
     NOW.store(now, Ordering::Relaxed);
 }
 
+/// How many times interrupts were enabled for pending ones to be taken.
+pub fn interrupt_windows() -> u64 {
+    WINDOWS.load(Ordering::Relaxed)
+}
+
 /// The deadline the timer is armed for, if any.
 pub fn timer_deadline() -> Option<i64> {
     Some(TIMER.load(Ordering::Relaxed)).filter(|&t| t != DISARMED)
@@ -93,6 +100,11 @@ impl Arch for Mock {
         if enabled {
             INTERRUPTS.store(true, Ordering::Relaxed);
         }
+    }
+
+    unsafe fn take_pending_interrupts() {
+        INTERRUPTS.store(false, Ordering::Relaxed);
+        WINDOWS.fetch_add(1, Ordering::Relaxed);
     }
 
     fn handling_interrupt() -> bool {

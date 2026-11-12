@@ -1042,10 +1042,9 @@ pub fn preempt_point() {
         crate::sync::none_held(),
         "a preemption point with a lock held"
     );
-    // SAFETY: enabling interrupts lets the processor take pending ones;
-    // no lock is held here, and they are disabled again at once.
-    unsafe { crate::arch::interrupts_restore(true) };
-    crate::arch::interrupts_disable();
+    // SAFETY: no lock is held here, and interrupts are disabled again at
+    // once.
+    unsafe { crate::arch::take_pending_interrupts() };
     if reschedule().swap(false, Ordering::Relaxed) {
         schedule(true);
     }
@@ -1486,4 +1485,19 @@ fn halt_until_interrupt() {
         crate::arch::monotonic_now().saturating_sub(start),
         Ordering::Relaxed,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_preemption_point_lets_pending_interrupts_in() {
+        let _mock = crate::arch::mock::lock();
+        reschedule().store(false, Ordering::Relaxed);
+        let before = crate::arch::mock::interrupt_windows();
+        preempt_point();
+        assert_eq!(crate::arch::mock::interrupt_windows(), before + 1);
+        assert!(!crate::arch::interrupts_enabled());
+    }
 }
