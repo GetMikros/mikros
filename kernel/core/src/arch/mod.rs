@@ -407,6 +407,20 @@ interface! {
         unmapped: &mut dyn FnMut(u64),
     ) -> Result<Option<u64>, ::kernel_core::arch::PageError>;
 
+    /// Unlinks the tables of `table` that map nothing and hold entries
+    /// for the `size` bytes from `virt`, and passes each table frame to
+    /// `free` once no processor can use a translation through it.
+    ///
+    /// # Safety
+    ///
+    /// As for `page_table_map`.
+    [unsafe] fn page_table_trim(
+        table: *mut (),
+        virt: u64,
+        size: u64,
+        free: &mut dyn FnMut(u64),
+    );
+
     /// Loads `table` on this processor.
     ///
     /// # Safety
@@ -522,6 +536,14 @@ impl PageTable {
     ) -> Result<Option<u64>, PageError> {
         // SAFETY: as for `map`.
         unsafe { page_table_unmap(self.0.as_ptr(), virt, size, limit, unmapped) }
+    }
+
+    /// Frees the tables that map nothing among those for the `size` bytes
+    /// from `virt`, as `page_table_trim` does. The caller keeps other
+    /// changes of the tables out meanwhile.
+    pub fn trim(&self, virt: u64, size: u64, free: &mut dyn FnMut(u64)) {
+        // SAFETY: as for `map`.
+        unsafe { page_table_trim(self.0.as_ptr(), virt, size, free) }
     }
 
     /// Loads the tables on this processor.

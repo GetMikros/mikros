@@ -227,6 +227,24 @@ impl AddressSpace {
             .map_err(|_| Error::Internal)
     }
 
+    /// Frees the tables that map nothing among those for the `size` bytes
+    /// from `virt`, which no region maps any more, and releases their
+    /// charges.
+    fn trim_tables(&self, virt: u64, size: u64) {
+        let mut inner = self.inner.lock();
+        let mut freed = 0;
+        inner.tables.trim(virt, size, &mut |table| {
+            free_frame(table);
+            freed += 1;
+        });
+        // Only tables that `map` added are unlinked, and with a charged
+        // space each of them is charged.
+        let released = freed.min(inner.charged);
+        inner.charged -= released;
+        drop(inner);
+        self.budget.release_kernel(released * PAGE_SIZE);
+    }
+
     /// Chooses a start for a mapping of `size` bytes, a multiple of the
     /// page size, as `add_region` does without `SPECIFIC`.
     pub fn choose(&self, size: u64) -> Result<u64, Error> {
@@ -375,6 +393,7 @@ impl AddressSpace {
                 };
                 self.unmap_in_steps(start, len)
                     .expect("regions are page-aligned and in the user range");
+                self.trim_tables(start, len);
                 at = start + len;
             }
             loop {

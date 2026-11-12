@@ -292,6 +292,9 @@ impl Arch for Mock {
         Ok(None)
     }
 
+    unsafe fn page_table_trim(_table: *mut (), _virt: u64, _size: u64, _free: &mut dyn FnMut(u64)) {
+    }
+
     unsafe fn page_table_activate(_table: *mut ()) {}
 
     fn page_table_activate_kernel() {}

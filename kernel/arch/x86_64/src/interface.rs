@@ -319,6 +319,11 @@ impl Arch for X86 {
         unsafe { (*table.cast::<SpaceTables>()).unmap(virt, size, limit, unmapped) }
     }
 
+    unsafe fn page_table_trim(table: *mut (), virt: u64, size: u64, free: &mut dyn FnMut(u64)) {
+        // SAFETY: as for `page_table_map`.
+        unsafe { (*table.cast::<SpaceTables>()).trim(virt, size, free) }
+    }
+
     unsafe fn page_table_activate(table: *mut ()) {
         // SAFETY: as for `page_table_map`.
         unsafe { (*table.cast::<SpaceTables>()).activate() };

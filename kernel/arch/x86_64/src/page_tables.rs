@@ -246,6 +246,57 @@ impl SpaceTables {
         next
     }
 
+    /// Unlinks the tables that map nothing among those holding entries for
+    /// the `size` bytes from `virt`, and passes each to `free` once no
+    /// processor can use a translation through it.
+    pub fn trim(&self, virt: u64, size: u64, free: &mut dyn FnMut(u64)) {
+        let mut none = || None;
+        // A batch at a time: the tables of a batch are freed only after
+        // the flush, and those past it stay linked for the next pass.
+        loop {
+            let mut unlinked = [0u64; BATCH];
+            let mut count = 0;
+            let cleared = Mapper::existing(&mut Frames(&mut none), self.root, false).unlink_empty(
+                virt,
+                size,
+                |table| match unlinked.get_mut(count) {
+                    Some(slot) => {
+                        *slot = table;
+                        count += 1;
+                        true
+                    }
+                    None => false,
+                },
+            );
+            if count == 0 {
+                return;
+            }
+            // The tables for user mode share the top-level entries.
+            if self.user_root != 0 {
+                let mut frames = Frames(&mut none);
+                let user = frames.table(self.user_root);
+                for i in 0..256 {
+                    if cleared[i / 64] & (1 << (i % 64)) != 0 {
+                        user[i] = 0;
+                    }
+                }
+            }
+            // Processors may cache entries of the unlinked tables: each
+            // that has the space flushes its PCID, here at once and
+            // elsewhere by the shootdown or at its next load, before the
+            // frames go.
+            self.generation.fetch_add(1, Ordering::AcqRel);
+            serve_shootdown(self.id, false);
+            tlb::shootdown(self.id, 0, 0, false, &self.loaded);
+            for &table in &unlinked[..count] {
+                free(table);
+            }
+            if count < BATCH {
+                return;
+            }
+        }
+    }
+
     /// Drops the removed translations on every processor, then passes
     /// `frames` to `unmapped`.
     fn flush_removed(&self, here: Here, frames: &[u64], unmapped: &mut dyn FnMut(u64)) {

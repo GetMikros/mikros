@@ -364,6 +364,69 @@ impl<'t, T: Tables> Mapper<'t, T> {
         }
     }
 
+    /// Unlinks the tables below the top level that map nothing and that
+    /// hold entries for addresses among the `size` bytes from `virt`, in
+    /// the lower half, lowest level first: each that `take` accepts is
+    /// unlinked, and stays linked otherwise. Returns the indices of the
+    /// top-level entries it cleared as a mask of 256 bits. The caller
+    /// frees the tables once no processor can use a translation through
+    /// them.
+    pub fn unlink_empty(
+        &mut self,
+        virt: u64,
+        size: u64,
+        mut take: impl FnMut(u64) -> bool,
+    ) -> [u64; 4] {
+        fn trim<T: Tables>(
+            tables: &mut T,
+            table: u64,
+            level: u32,
+            (from, to): (u64, u64),
+            take: &mut impl FnMut(u64) -> bool,
+        ) {
+            let span = 1u64 << (12 + 9 * level);
+            let base = from & !((span << 9) - 1);
+            for i in index(from, level)..=index(to, level) {
+                let entry = tables.table(table)[i];
+                if entry & PRESENT == 0 || entry & HUGE != 0 {
+                    continue;
+                }
+                let child = entry & ADDR_MASK;
+                let start = base + i as u64 * span;
+                let range = (from.max(start), to.min(start + span - 1));
+                if level > 1 {
+                    trim(tables, child, level - 1, range, take);
+                }
+                if tables.table(child).iter().all(|&e| e & PRESENT == 0) && take(child) {
+                    tables.table(table)[i] = 0;
+                }
+            }
+        }
+        let mut cleared = [0u64; 4];
+        if size == 0 {
+            return cleared;
+        }
+        let last = virt.saturating_add(size - 1).min((1 << 47) - 1);
+        if virt > last {
+            return cleared;
+        }
+        for i in index(virt, 3)..=index(last, 3) {
+            let entry = self.tables.table(self.root)[i];
+            if entry & PRESENT == 0 {
+                continue;
+            }
+            let child = entry & ADDR_MASK;
+            let start = i as u64 * (1 << 39);
+            let range = (virt.max(start), last.min(start + (1 << 39) - 1));
+            trim(self.tables, child, 2, range, &mut take);
+            if self.tables.table(child).iter().all(|&e| e & PRESENT == 0) && take(child) {
+                self.tables.table(self.root)[i] = 0;
+                cleared[i / 64] |= 1 << (i % 64);
+            }
+        }
+        cleared
+    }
+
     /// Maps `size` bytes from `virt` to `phys` with the largest pages their
     /// alignment allows. All three are multiples of the page size.
     pub fn map(&mut self, virt: u64, phys: u64, size: u64, flags: Flags) -> Result<(), Error> {
@@ -566,6 +629,61 @@ mod tests {
             again.map(dm, 0, PAGE_SIZE, KERNEL_DATA),
             Err(Error::AlreadyMapped(dm))
         );
+    }
+
+    #[test]
+    fn unlinks_only_tables_that_map_nothing() {
+        let mut pool = Pool(Vec::new());
+        let kernel = Mapper::new(&mut pool, false).unwrap().root();
+        let mut m = Mapper::user(&mut pool, kernel).unwrap();
+        let flags = Flags {
+            writable: true,
+            executable: false,
+            global: false,
+            user: true,
+            policy: Policy::Cached,
+        };
+        let (a, b, c) = (0x1000_0000, 0x1000_1000, 0x7f00_0000_0000);
+        for v in [a, b, c] {
+            m.map(v, 0x5000, PAGE_SIZE, flags).unwrap();
+        }
+        let tables = pool_len(&m);
+        // A table that still maps a page stays.
+        m.unmap(a, PAGE_SIZE, |_, _, _| {}).unwrap();
+        let mut freed = Vec::new();
+        assert_eq!(
+            m.unlink_empty(a, PAGE_SIZE, |t| {
+                freed.push(t);
+                true
+            }),
+            [0; 4]
+        );
+        assert!(freed.is_empty());
+        assert!(m.translate(b).is_some());
+        // Once nothing is mapped there, the PT, PD and PDPT go, and the
+        // tables of other ranges stay.
+        m.unmap(b, PAGE_SIZE, |_, _, _| {}).unwrap();
+        let cleared = m.unlink_empty(a, 2 * PAGE_SIZE, |t| {
+            freed.push(t);
+            true
+        });
+        assert_eq!(freed.len(), 3);
+        assert_eq!(cleared[0], 1);
+        assert_eq!(m.translate(c), Some(0x5000));
+        assert_eq!(tables, pool_len(&m));
+        // The kernel half is never visited.
+        assert_eq!(
+            m.unlink_empty(1 << 47, 1 << 46, |t| {
+                freed.push(t);
+                true
+            }),
+            [0; 4]
+        );
+        assert_eq!(freed.len(), 3);
+    }
+
+    fn pool_len(m: &Mapper<'_, Pool>) -> usize {
+        m.tables.0.len()
     }
 
     #[test]
