@@ -5,7 +5,8 @@
 //! device memory, and obtains a `BTI` resource for the requester IDs of
 //! the bridge's buses with `RequestResource`. The driver then adds each
 //! function with a type 0 header as a child device, with its BARs
-//! claimed and a bus transaction initiator of its own. For each child,
+//! claimed and a bus transaction initiator of its own, and replies to
+//! `Start` once the device manager has replied to each. For each child,
 //! it serves `Device` on the bus channel that `ConnectChild` gives it;
 //! `ConnectChild` for a device it did not add fails with `NOT_FOUND`.
 //! It holds the INTx lines that the functions use and shares each one
@@ -83,8 +84,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     match start(request, process, directory, &reactor, &spawner).await {
                         Ok(started) => {
                             let started = Rc::new(started);
-                            spawner.spawn(bus::enumerate(started.clone()));
-                            bus = Some(started);
+                            bus = Some(started.clone());
+                            // Start replies once every function found is
+                            // added, so that the device manager knows which
+                            // ones there are. The device manager answers
+                            // AddDevice on another channel meanwhile.
+                            bus::enumerate(started).await;
                             responder.reply(s, Ok(DriverStartResponse {}))
                         }
                         Err(status) => responder.reply(s, Err(status)),
