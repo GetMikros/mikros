@@ -22,6 +22,12 @@ unsafe extern "C" {
         len: u32,
         node: *mut *mut c_void,
     ) -> i32;
+    fn mikros_btrfs_lookup_cached(
+        dir: *mut c_void,
+        name: *const c_char,
+        len: u32,
+        node: *mut *mut c_void,
+    ) -> i32;
     fn mikros_btrfs_put(node: *mut c_void);
     fn mikros_btrfs_get_attributes(node: *mut c_void, attributes: *mut Attributes) -> i32;
     fn mikros_btrfs_read(
@@ -204,6 +210,23 @@ impl<'m> Node<'m> {
         // SAFETY: the node is alive, and the pointers are valid for the
         // call.
         result(unsafe { mikros_btrfs_lookup(self.node, name.as_ptr().cast(), len, &mut node) })?;
+        Ok(Node {
+            node,
+            mount: PhantomData,
+        })
+    }
+
+    /// The node that `name` names in this directory, as `lookup` finds
+    /// it, but only from the dentry cache, so that it never waits for the
+    /// disk: `-ENOENT` when the cache knows there is none, and `-EAGAIN`
+    /// when the cache does not know the name.
+    pub fn lookup_cached(&self, name: &[u8]) -> Result<Node<'m>, i32> {
+        let len = u32::try_from(name.len()).map_err(|_| -36)?;
+        let mut node = core::ptr::null_mut();
+        // SAFETY: as for `lookup()`.
+        result(unsafe {
+            mikros_btrfs_lookup_cached(self.node, name.as_ptr().cast(), len, &mut node)
+        })?;
         Ok(Node {
             node,
             mount: PhantomData,

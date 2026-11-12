@@ -103,6 +103,50 @@ out:
 	return ret;
 }
 
+/* Looks `name` up in the directory `dir` in the dentry cache alone,
+ * without calling into the file system, so that it never waits for the
+ * disk: -ENOENT for a name the cache knows is missing, and -EAGAIN for one
+ * that the cache does not know, which `mikros_btrfs_lookup()` finds. */
+int mikros_btrfs_lookup_cached(struct mikros_node *dir, const char *name, unsigned int len,
+			       struct mikros_node **nodep)
+{
+	bool adopted = mikros_task_adopt("lookup");
+	struct dentry *dentry;
+	struct mikros_node *node;
+	int ret;
+
+	ret = -ENOTDIR;
+	if (!d_can_lookup(dir->path.dentry))
+		goto out;
+	ret = -EACCES;
+	if (memchr(name, '\0', len))
+		goto out;
+	dentry = try_lookup_noperm(&QSTR_LEN(name, len), dir->path.dentry);
+	ret = PTR_ERR_OR_ZERO(dentry);
+	if (ret)
+		goto out;
+	ret = -EAGAIN;
+	if (!dentry)
+		goto out;
+	ret = -ENOENT;
+	if (d_is_negative(dentry)) {
+		dput(dentry);
+		goto out;
+	}
+	node = mikros_node_new(dir->path.mnt, dentry);
+	ret = -ENOMEM;
+	if (!node) {
+		dput(dentry);
+		goto out;
+	}
+	*nodep = node;
+	ret = 0;
+out:
+	if (adopted)
+		mikros_task_exit();
+	return ret;
+}
+
 /* Lets go of a node. */
 void mikros_btrfs_put(struct mikros_node *node)
 {
