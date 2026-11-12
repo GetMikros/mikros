@@ -1206,11 +1206,10 @@ pub fn leave_exception(thread: &Thread) {
 /// put in state `EXCEPTION`, is resumed or made DEAD. Returns why it left
 /// the state, or 0 when it was made DEAD.
 pub fn wait_exception(thread: &Thread) -> u32 {
-    // Nothing else runs on this processor before the thread switches
-    // out, so nothing can have queued it yet.
-    if thread.state() == EXCEPTION {
-        schedule(false);
-    }
+    // The thread switches out even when it was resumed or made DEAD since
+    // `enter_exception`, as `block` does: such a change queued it while it
+    // still ran, which only its switch puts in place.
+    schedule(false);
     thread.woken.load(Ordering::Acquire)
 }
 

@@ -241,6 +241,12 @@ impl<T: Copy + PartialEq> Fair<T> {
 
     /// Queues the running thread again, under `id`, as it stays runnable.
     pub fn requeue(&mut self, id: T) {
+        // A thread made runnable again while it ran stops before it can
+        // be preempted, which takes the record.
+        debug_assert!(
+            self.rewoken.is_none(),
+            "a running thread was made runnable again"
+        );
         if let Some((_, entity)) = self.running.take() {
             self.insert(id, entity);
         }
