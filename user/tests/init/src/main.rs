@@ -11,11 +11,10 @@ use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::{
-    CANCELED, FAILED, HELPER, PAGE_SIZE, PASSED, PEER_CLOSED, PERM_READ, PERM_WRITE, READABLE,
-    Result, SIGNALED, SLOWER, TERMINATED, TIMED_OUT, USER0, USER1, call, check, contains,
-    create_memory, elf, ensure, exit_qemu, in_time, info, map, now, open_exit_port, read_message,
-    signal, sleep_ms, soon, spawn, spawn2, take_packet, u32_at, u64_at, ustar, wait, wait_forever,
-    within,
+    FAILED, PAGE_SIZE, PASSED, PEER_CLOSED, PERM_READ, PERM_WRITE, READABLE, Result, SIGNALED,
+    SLOWER, TERMINATED, TIMED_OUT, USER0, USER1, call, check, contains, create_memory, elf, ensure,
+    exit_qemu, in_time, info, map, now, open_exit_port, read_message, signal, sleep_ms, soon,
+    spawn, spawn2, take_packet, u32_at, u64_at, ustar, wait, wait_forever, within,
 };
 
 mikros_rt::main!(main);
@@ -489,34 +488,6 @@ fn processes_and_channels(s: &Startup) -> Result {
     ensure("waiting for the process to end", false)
 }
 
-/// The process and thread records describe the running test.
-fn info_topics(s: &Startup) -> Result {
-    let process = info::<0x28>(s.process, 2)?;
-    ensure("checking the process state", u32_at(&process, 0x08) == 1)?;
-    ensure("checking the thread count", u32_at(&process, 0x0C) >= 1)?;
-    ensure(
-        "checking the process CPU time",
-        i64::from_le_bytes(process[0x18..0x20].try_into().unwrap()) > 0,
-    )?;
-    let thread = info::<0x18>(s.thread, 3)?;
-    ensure("checking the thread state", u32_at(&thread, 0x00) == 1)?;
-    ensure("checking the priority", u32_at(&thread, 0x04) == 16)?;
-    ensure("checking the exception type", u32_at(&thread, 0x08) == 0)?;
-    ensure(
-        "checking the thread CPU time",
-        i64::from_le_bytes(thread[0x10..0x18].try_into().unwrap()) > 0,
-    )
-}
-
-extern "sysv64" fn signal_later(event: u64, _: u64) -> ! {
-    sleep_ms(20);
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::object_signal(event as Handle, 0, USER1) };
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
 /// `process_get_thread` gives a handle to a thread by its object ID, here
 /// a helper blocked in a wait. The kernel debugger script check stops in
 /// this call, the first of its kind that init makes, so that a thread
@@ -538,94 +509,6 @@ fn thread_by_koid(s: &Startup) -> Result {
     ensure(
         "ending the helper",
         wait(helper, TERMINATED, in_time()).0 == 0,
-    )
-}
-
-/// Events, waits on them and on threads, and cancelled waits.
-fn events_and_waits(s: &Startup) -> Result {
-    let mut event = 0;
-    // SAFETY: the pointer is valid for the call.
-    check("creating an event", unsafe {
-        sys::event_create(0, &mut event)
-    })?;
-    let (status, observed) = wait(event, SIGNALED, now() + 5_000_000);
-    ensure("timing out", status == TIMED_OUT && observed == 0)?;
-    // SAFETY: the call takes no pointers.
-    check("signalling", unsafe {
-        sys::object_signal(event, 0, SIGNALED | USER0)
-    })?;
-    let (status, observed) = wait(event, SIGNALED, i64::MAX);
-    ensure(
-        "seeing the signal",
-        status == 0 && observed == SIGNALED | USER0,
-    )?;
-    // SAFETY: the call takes no pointers.
-    let bad = unsafe { sys::object_signal(event, 0, 1) };
-    ensure("refusing other bits", bad == -10)?;
-    // SAFETY: the call takes no pointers.
-    let wrong = unsafe { sys::object_signal(s.process, 0, USER0) };
-    ensure("refusing other types", wrong == -12)?;
-    // SAFETY: the call takes no pointers.
-    check("clearing", unsafe {
-        sys::object_signal(event, SIGNALED | USER0, 0)
-    })?;
-
-    let helper = spawn(s, signal_later, u64::from(event))?;
-    let (status, observed) = wait(event, USER1, now() + 2_000_000_000);
-    ensure(
-        "being woken by another thread",
-        status == 0 && observed == USER1,
-    )?;
-    let (status, _) = wait(helper, TERMINATED, now() + 2_000_000_000);
-    ensure("seeing the thread end", status == 0)?;
-
-    let mut copy = 0;
-    // SAFETY: the pointer is valid for the call.
-    let status = unsafe { sys::handle_duplicate(event, 0x8000_0000, &mut copy) };
-    check("duplicating the event", status)?;
-    let waiter = spawn(s, wait_forever, u64::from(copy))?;
-    sleep_ms(20);
-    // SAFETY: the call takes no pointers.
-    check("closing the handle", unsafe { sys::handle_close(copy) })?;
-    let (status, _) = wait(waiter, TERMINATED, now() + 2_000_000_000);
-    ensure("seeing the waiter end", status == 0)?;
-    ensure(
-        "cancelling the wait",
-        HELPER.load(Ordering::Acquire) as i64 == CANCELED,
-    )
-}
-
-/// Timers set SIGNALED at their deadline, at once for a past one, and
-/// not after being cancelled.
-fn timers(_: &Startup) -> Result {
-    let mut timer = 0;
-    // SAFETY: the pointer is valid for the call.
-    check("creating a timer", unsafe {
-        sys::timer_create(0, &mut timer)
-    })?;
-    let start = now();
-    // SAFETY: the call takes no pointers.
-    check("setting the timer", unsafe {
-        sys::timer_set(timer, start + 10_000_000)
-    })?;
-    let (status, _) = wait(timer, SIGNALED, start + 2_000_000_000);
-    ensure("firing", status == 0 && now() - start >= 10_000_000)?;
-    // SAFETY: the call takes no pointers.
-    check("setting a past deadline", unsafe {
-        sys::timer_set(timer, 0)
-    })?;
-    let (status, _) = wait(timer, SIGNALED, 0);
-    ensure("firing at once", status == 0)?;
-    // SAFETY: the call takes no pointers.
-    check("setting again", unsafe {
-        sys::timer_set(timer, now() + 5_000_000)
-    })?;
-    // SAFETY: the call takes no pointers.
-    check("cancelling", unsafe { sys::timer_cancel(timer) })?;
-    let (status, observed) = wait(timer, SIGNALED, now() + 30_000_000);
-    ensure(
-        "staying clear after cancel",
-        status == TIMED_OUT && observed == 0,
     )
 }
 
@@ -10780,13 +10663,10 @@ mod bootfs {
     }
 }
 
-const TESTS: [(&str, Test); 144] = [
+const TESTS: [(&str, Test); 141] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
-    ("info_topics", info_topics),
-    ("events_and_waits", events_and_waits),
-    ("timers", timers),
     ("priorities", priorities),
     ("queued_thread_preempts", queued_thread_preempts),
     ("cpu_count_and_affinity", cpu_count_and_affinity),

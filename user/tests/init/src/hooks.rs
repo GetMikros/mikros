@@ -1,7 +1,7 @@
 //! The tests that use the test hooks of the fuzz build.
 
 use crate::{
-    ACCESS_DENIED, INVALID, PAGER, READABLE, TERMINATE, TERMINATED, Test, USER0, USER1, act,
+    ACCESS_DENIED, INVALID, PAGER, READABLE, TERMINATE, TERMINATED, Test, USER0, act,
     budget_kernel, budget_pages, create_memory, exit_code, get_thread, in_time, koid, map,
     mem_read_at, now, paged_object, report_bytes, seal, signal, signal_restorer, skip_fault,
     spawn2, start_program_with, thread_list, touch_stack, u32_at, wait, wait_until_blocked,
@@ -11,6 +11,7 @@ use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
+use mikros_test::USER1;
 use mikros_test::{
     Failure, PAGE_SIZE, PERM_READ, PERM_WRITE, Result, SPECIFIC, check, ensure, sleep_ms,
 };
