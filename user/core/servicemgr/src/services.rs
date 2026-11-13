@@ -9,6 +9,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use mikros_manifest::{Service, order};
@@ -33,6 +34,7 @@ const SUFFIX: &str = ".yaml";
 /// handles of `boot` that its manifest lists, and is restarted as its
 /// manifest says. On-demand services then start at the first connection
 /// to one of their protocols.
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     fs: NodeAsyncClient,
     at: &'static str,
@@ -41,6 +43,7 @@ pub async fn start(
     me: ClientIdentity,
     dir: Rc<Dir>,
     boot: Rc<BootHandles>,
+    selftest: Option<Vec<String>>,
 ) {
     let (services, manifests): (Vec<Service>, Vec<Vec<u8>>) =
         read_all(&fs, at, &reactor).await.into_iter().unzip();
@@ -91,6 +94,7 @@ pub async fn start(
         running: RefCell::new(Vec::new()),
         stopping: Cell::new(false),
         root: RefCell::new(None),
+        selftest,
     });
     let weak = Rc::downgrade(&supervisor);
     supervisor.dir.set_demand(Rc::new(move |name: &str| {

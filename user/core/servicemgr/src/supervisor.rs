@@ -85,6 +85,9 @@ pub struct Supervisor {
             mikros_rt::interfaces::mikros::fs::NodeAsyncClient,
         )>,
     >,
+    /// The tests of an automated run of selftest, none for every test,
+    /// which the kernel command line asked for.
+    pub selftest: Option<Vec<String>>,
 }
 
 /// What happens to a service that ended.

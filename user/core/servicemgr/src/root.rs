@@ -46,6 +46,10 @@ pub async fn follow(supervisor: Rc<Supervisor>) {
     give_drivers(&supervisor, &usr).await;
     start_services(&supervisor, new).await;
     *supervisor.root.borrow_mut() = Some((usr, etc));
+    // Every service that starts at boot runs now.
+    if let Some(names) = supervisor.selftest.clone() {
+        crate::selftest::start(&supervisor, &names).await;
+    }
 }
 
 /// Gives the device manager a new read-only connection to the root's

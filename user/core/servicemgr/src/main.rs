@@ -20,6 +20,7 @@ mod directory;
 mod launch;
 mod registrar;
 mod root;
+mod selftest;
 mod services;
 mod sources;
 mod supervisor;
@@ -92,6 +93,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 user: header.user,
                 app_id: core::mem::take(&mut header.app_id),
             };
+            let selftest = selftest::requested(managed.header.arguments.raw());
             let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());
             spawner.spawn(services::start(
                 fs,
@@ -101,6 +103,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 me,
                 dir,
                 boot.clone(),
+                selftest,
             ));
         }
         None => mikros_rt::log!(Error, "the namespace has no {}", services::SERVICES),

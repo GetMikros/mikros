@@ -16,7 +16,7 @@ use mikros_rt::interfaces::mikros::service::{Provider, ProviderClient};
 use mikros_rt::sys;
 
 /// `user` in a Spawn request: the caller's own user.
-const CALLER_USER: u32 = u32::MAX;
+pub const CALLER_USER: u32 = u32::MAX;
 const PAGE_SIZE: u64 = 4096;
 const TERMINATED: u32 = 1 << 4;
 const INFO_PROCESS: u32 = 2;
@@ -35,11 +35,11 @@ pub struct Started {
 
 /// The `id` of standard output and error among the startup handles:
 /// descriptors 1 and 2, of the pipe kind 2 (MIKSPEC-0058.R3).
-const STDOUT_ID: u32 = 1 + (2 << 28);
-const STDERR_ID: u32 = 2 + (2 << 28);
+pub const STDOUT_ID: u32 = 1 + (2 << 28);
+pub const STDERR_ID: u32 = 2 + (2 << 28);
 
 /// A new stream: the service's end and the other.
-fn stream() -> Result<(OwnedHandle, OwnedHandle), String> {
+pub fn stream() -> Result<(OwnedHandle, OwnedHandle), String> {
     let (mut ours, mut theirs) = (0, 0);
     // SAFETY: the out pointers are valid for the call.
     let status = unsafe { sys::stream_create(0, &mut theirs, &mut ours) };
@@ -83,7 +83,7 @@ pub async fn launch(
     });
     let request = SpawnRequest {
         path: service.binary.clone(),
-        arguments: arguments(&service.binary).map_err(|s| format!("arguments: {s}"))?,
+        arguments: arguments(&[&service.binary]).map_err(|s| format!("arguments: {s}"))?,
         handles,
         app_id: Some(format!("system.{}", service.name)),
         user: CALLER_USER,
@@ -147,12 +147,15 @@ pub fn memory(bytes: &[u8]) -> Result<OwnedHandle, sys::Status> {
     Ok(mem)
 }
 
-/// An `arguments` memory object that holds only `program`.
-fn arguments(program: &str) -> Result<OwnedHandle, sys::Status> {
+/// An `arguments` memory object that holds `args`, the program's path
+/// first, and no environment.
+pub fn arguments(args: &[&str]) -> Result<OwnedHandle, sys::Status> {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&(args.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(program.as_bytes());
-    bytes.push(0);
+    for arg in args {
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
+    }
     memory(&bytes)
 }

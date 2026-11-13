@@ -6,6 +6,7 @@ use crate::processes::{NewProcess, Shared, bind, koid};
 use crate::records::{INIT_PID, Record};
 use crate::start::{self, duplicate};
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_bootfs::server::Fs;
 use mikros_rt::exec::{Reactor, Spawner};
@@ -49,6 +50,10 @@ pub struct Manager {
     init: Option<ServerEnd<InitBootstrap>>,
     /// The process ID of the service manager, once its start began.
     service_manager: Option<u32>,
+    /// The kernel command line's word that asks for an automated run of
+    /// selftest, `selftest` or `selftest=<names>`, which the service
+    /// manager gets as its argument.
+    selftest: Option<String>,
 }
 
 impl Manager {
@@ -72,6 +77,10 @@ impl Manager {
         } = startup;
         let fs = Fs::new(process.raw(), &boot_image, reactor.clone(), spawner.clone())?;
         let namespaces = Rc::new(Namespaces::new(&command_line));
+        let selftest = command_line
+            .split_whitespace()
+            .find(|w| *w == "selftest" || w.starts_with("selftest="))
+            .map(String::from);
         let mut own = 0;
         // SAFETY: the out pointer is valid for the call.
         let status = unsafe { sys::handle_duplicate(process.raw(), SAME_RIGHTS, &mut own) };
@@ -87,6 +96,7 @@ impl Manager {
             init_process: Some(init_process),
             init: Some(init_bootstrap),
             service_manager: None,
+            selftest,
         })
     }
 
@@ -179,7 +189,10 @@ impl Manager {
             app_id: SERVICE_MANAGER_APP.into(),
             user: 0,
             login_session: 0,
-            arguments: start::arguments(&[SERVICE_MANAGER_PATH])?,
+            arguments: match &self.selftest {
+                Some(word) => start::arguments(&[SERVICE_MANAGER_PATH, word])?,
+                None => start::arguments(&[SERVICE_MANAGER_PATH])?,
+            },
             handles,
             service_manager: true,
             working_directory: "/".into(),
