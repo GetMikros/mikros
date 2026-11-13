@@ -4,9 +4,9 @@
 //! and ERROR from the error, which is also copied into the kernel log.
 
 use crate::log::Log;
+use crate::store::Lines;
 use alloc::rc::Rc;
 use alloc::string::String;
-use mikros_logstore::Lines;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::log::{

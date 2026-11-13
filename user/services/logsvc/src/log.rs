@@ -1,11 +1,11 @@
 //! The log that every source adds to and every reader reads.
 
+use crate::store::{Entry, Store};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
-use mikros_logstore::{Entry, Store};
 use mikros_rt::interfaces::mikros::log::{Record, Severity};
 use mikros_rt::sys;
 
@@ -106,7 +106,7 @@ impl Log {
         let mut lines = Vec::new();
         let mut last = None;
         for entry in store.after(after, usize::MAX) {
-            let line = mikros_logstore::line(entry);
+            let line = crate::store::line(entry);
             if last.is_some() && lines.len() + line.len() > max {
                 break;
             }

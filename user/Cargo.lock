@@ -468,7 +468,6 @@ dependencies = [
 name = "logsvc"
 version = "0.0.0"
 dependencies = [
- "mikros-logstore",
  "mikros-rt",
 ]
 
@@ -569,10 +568,6 @@ version = "0.0.0"
 dependencies = [
  "mikros-rt",
 ]
-
-[[package]]
-name = "mikros-logstore"
-version = "0.0.0"
 
 [[package]]
 name = "mikros-logview"

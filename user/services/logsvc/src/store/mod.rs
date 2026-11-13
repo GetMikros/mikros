@@ -3,10 +3,6 @@
 //! store's limit, when the oldest go; the text lines of records in the
 //! log's files; and the lines of streams, as records take them.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -99,7 +95,9 @@ impl Store {
         self.latest
     }
 
-    /// The bytes that the records count for together.
+    /// The bytes that the records count for together, which the tests
+    /// check.
+    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.bytes
     }
