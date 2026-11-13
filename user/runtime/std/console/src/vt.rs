@@ -13,7 +13,7 @@ use std::rc::Rc;
 /// What a console shows besides the log.
 pub enum View {
     /// The console's own login prompt.
-    Login(Screen),
+    Login(Box<Screen>),
     /// The terminal of setup or of a session.
     Terminal(Rc<Term>),
 }
@@ -39,7 +39,7 @@ impl Vt {
     pub fn new(number: u8, cols: usize, rows: usize) -> Rc<Vt> {
         Rc::new(Vt {
             number,
-            view: RefCell::new(View::Login(Screen::new(cols, rows))),
+            view: RefCell::new(View::Login(Box::new(Screen::new(cols, rows)))),
             session: Cell::new(false),
             log_only: Cell::new(false),
             typed: RefCell::new(VecDeque::new()),

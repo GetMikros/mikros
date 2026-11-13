@@ -29,7 +29,7 @@ fn prompt(console: &Console, vt: &Vt, text: &str) {
     let (cols, rows) = console.prompt_size();
     let mut screen = Screen::new(cols, rows);
     screen.write(text.as_bytes());
-    console.show(vt, View::Login(screen), false);
+    console.show(vt, View::Login(Box::new(screen)), false);
 }
 
 /// Writes `text` to the login prompt's screen of `vt`.

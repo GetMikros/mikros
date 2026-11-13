@@ -44,7 +44,7 @@ pub fn blend(fg: u32, bg: u32, coverage: u8) -> u32 {
     let mix = |shift: u32| {
         let f = fg >> shift & 0xFF;
         let b = bg >> shift & 0xFF;
-        (f * a + b * (255 - a)) / 255 << shift
+        ((f * a + b * (255 - a)) / 255) << shift
     };
     mix(16) | mix(8) | mix(0)
 }
