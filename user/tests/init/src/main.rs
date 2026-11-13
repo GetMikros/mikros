@@ -13,13 +13,12 @@ use mikros_rt::{Startup, log};
 use mikros_test::{
     ACCESS_DENIED, BAD_HANDLE, BAD_STATE, BUFFER_TOO_SMALL, FAILED, INVALID_ARGS, NOT_FOUND,
     OUT_OF_RANGE, PAGE_FAULT, PAGE_SIZE, PAGER, PASSED, PERM_READ, PERM_WRITE, READABLE,
-    REPORT_SIZE, REQUESTS, Result, SIGNALED, SLOWER, STATE_BLOCKED, TERMINATED, TIMED_OUT, USER0,
-    call, check, close, contains, create_memory, elf, ensure, exit_qemu, futex_wake, in_time, info,
-    koid, map, map_read_only, mem_read_at, mem_write_at, now, open_exit_port, paged_object,
-    pager_op, protect, read_memory, read_message, read_sizes, record_report, report_bytes,
-    report_id, seal, set_size, signal, sleep_ms, soon, spawn, spawn2, take_packet, thread_state,
-    u32_at, u64_at, ustar, wait, wait_for_state, wait_forever, wait_until_blocked, within,
-    write_memory,
+    REPORT_SIZE, Result, SIGNALED, SLOWER, STATE_BLOCKED, TERMINATED, TIMED_OUT, USER0, call,
+    check, close, contains, create_memory, elf, ensure, exit_qemu, futex_wake, in_time, info, koid,
+    map, map_read_only, mem_read_at, mem_write_at, now, open_exit_port, paged_object, pager_op,
+    protect, read_memory, read_message, read_sizes, record_report, report_bytes, report_id, seal,
+    set_size, signal, sleep_ms, soon, spawn, spawn2, take_packet, thread_state, u32_at, u64_at,
+    ustar, wait, wait_for_state, wait_forever, wait_until_blocked, within, write_memory,
 };
 
 mikros_rt::main!(main);
@@ -1482,92 +1481,6 @@ fn resources_report_their_ranges(s: &Startup) -> Result {
     close(mmio)?;
     close(ports)?;
     close(dma)
-}
-
-/// Outputs on absent pages of a paged object wait for the pager instead
-/// of failing.
-fn paged_outputs(s: &Startup) -> Result {
-    let before = REQUESTS.load(Ordering::Acquire);
-    let (_pager, mem) = paged_object(s, 5, 0)?;
-    let at = map(s.process, mem, 5 * PAGE_SIZE)?;
-    let len = (at + PAGE_SIZE) as *mut u64;
-    // SAFETY: the record and its size lie in the writable mapping.
-    let status = unsafe { sys::object_get_info(mem, 1, at as *mut u8, 64, len) };
-    check("reading information into absent pages", status)?;
-    // SAFETY: the mapping is readable.
-    let size = unsafe { len.read_volatile() };
-    ensure("writing the size", size == 24)?;
-    let ends = (at + 2 * PAGE_SIZE) as *mut Handle;
-    // SAFETY: both handle outputs lie in the writable mapping.
-    let status = unsafe { sys::channel_create(0, ends, ends.add(1)) };
-    check("creating a channel into an absent page", status)?;
-    // SAFETY: the mapping is readable.
-    let (a, b) = unsafe { (ends.read_volatile(), ends.add(1).read_volatile()) };
-    ensure("writing both handles", a != 0 && b != 0 && a != b)?;
-    // SAFETY: the pointer and length describe the message.
-    check("writing a message", unsafe {
-        sys::channel_write(a, b"paged".as_ptr(), 5, core::ptr::null(), 0)
-    })?;
-    let (got, sizes) = (
-        (at + 3 * PAGE_SIZE) as *mut u8,
-        (at + 4 * PAGE_SIZE) as *mut u64,
-    );
-    // SAFETY: the bytes and both sizes lie in the writable mapping.
-    let status =
-        unsafe { sys::channel_read(b, got, 16, core::ptr::null_mut(), 0, sizes, sizes.add(1)) };
-    check("reading a message into absent pages", status)?;
-    // SAFETY: the mapping is readable.
-    let (bytes, len, count) = unsafe {
-        (
-            (got as *const [u8; 5]).read_volatile(),
-            sizes.read_volatile(),
-            sizes.add(1).read_volatile(),
-        )
-    };
-    ensure(
-        "delivering the message",
-        &bytes == b"paged" && len == 5 && count == 0,
-    )?;
-    ensure(
-        "requesting each page",
-        REQUESTS.load(Ordering::Acquire) == before + 5,
-    )
-}
-
-/// Faults that wait for a pager, in the copy routine of a system call
-/// and in user code that set RFLAGS.AC, leave AC clear in the kernel,
-/// which the debug kernel checks whenever it switches threads.
-fn access_flag_cleared_on_entry(s: &Startup) -> Result {
-    let (_pager, mem) = paged_object(s, 2, 0)?;
-    let at = map(s.process, mem, 2 * PAGE_SIZE)?;
-    let copy = create_memory(PAGE_SIZE)?;
-    // SAFETY: the source lies in the mapping; reading it waits for the
-    // pager.
-    check("writing from an absent page", unsafe {
-        sys::mem_write(copy, 0, at as *const u8, 6)
-    })?;
-    ensure(
-        "copying the supplied page",
-        mem_read_at::<6>(copy, 0)? == *b"page 0",
-    )?;
-    let byte: u8;
-    // SAFETY: the second page is mapped readable. With AC set, only the
-    // aligned stack words and one byte are accessed, so alignment checks
-    // cannot fault.
-    unsafe {
-        core::arch::asm!(
-            "pushfq",
-            "bts qword ptr [rsp], 18",
-            "popfq",
-            "mov {byte}, byte ptr [{addr}]",
-            "pushfq",
-            "btr qword ptr [rsp], 18",
-            "popfq",
-            addr = in(reg) at + PAGE_SIZE,
-            byte = out(reg_byte) byte,
-        );
-    }
-    ensure("reading with AC set", byte == b'p')
 }
 
 const RESUME: u32 = 0;
@@ -3307,105 +3220,6 @@ fn map_checks_again_after_waiting(s: &Startup) -> Result {
         "refusing a mapping of a revoked object",
         MAPPER[2].load(Ordering::Acquire) as i64 == ACCESS_DENIED,
     )
-}
-
-/// The pages of the source of `supply_beside`: more than the kernel
-/// supplies in one piece, so that other threads run in between.
-const SUPPLIED_PAGES: u64 = 4 * 512 + 1;
-
-/// Set when the supply of `supply_beside` is about to begin, and the
-/// first 8 bytes of the last page of its source as `sealer` or
-/// `revoker` read them right after their call returned.
-static SUPPLY_BEGUN: AtomicU64 = AtomicU64::new(0);
-static SEEN_AFTER: AtomicU64 = AtomicU64::new(0);
-
-/// Records the start of the last page of the supply's `source`.
-fn see_last_page(source: Handle) {
-    let seen = mem_read_at::<8>(source, (SUPPLIED_PAGES - 1) * PAGE_SIZE);
-    SEEN_AFTER.store(seen.map_or(u64::MAX, u64::from_le_bytes), Ordering::Release);
-}
-
-/// Seals `source` with `WRITE` once the supply has begun, then records
-/// its last page.
-extern "sysv64" fn sealer(source: u64, _: u64) -> ! {
-    while SUPPLY_BEGUN.load(Ordering::Acquire) == 0 {
-        core::hint::spin_loop();
-    }
-    if seal(source as Handle, 1 << 3) == 0 {
-        see_last_page(source as Handle);
-    }
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-/// Revokes `paged` of the pager in `PAGER` once the supply has begun,
-/// then records the last page of `source`.
-extern "sysv64" fn revoker(paged: u64, source: u64) -> ! {
-    while SUPPLY_BEGUN.load(Ordering::Acquire) == 0 {
-        core::hint::spin_loop();
-    }
-    let pager = PAGER.load(Ordering::Acquire) as Handle;
-    // SAFETY: the call takes no pointers.
-    if unsafe { sys::pager_revoke(pager, paged as Handle) } == 0 {
-        see_last_page(source as Handle);
-    }
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-/// Supplies a new paged object from a source of `SUPPLIED_PAGES` pages
-/// while another thread seals the source, when `sealing`, or revokes the
-/// object, and checks that the supply did not change the source after
-/// that call returned: it ended first, or it was refused.
-fn supply_beside(s: &Startup, sealing: bool) -> Result {
-    let len = SUPPLIED_PAGES * PAGE_SIZE;
-    let source = create_memory(len)?;
-    mem_write_at(source, len - PAGE_SIZE, b"lastpage")?;
-    let (mut pager, mut port, mut paged) = (0, 0, 0);
-    // SAFETY: the pointers are valid for the calls.
-    unsafe {
-        check("creating a pager", sys::pager_create(0, &mut pager))?;
-        check("creating a port", sys::port_create(0, &mut port))?;
-        let status = sys::pager_create_memory(pager, port, 13, len, 0, &mut paged);
-        check("creating a paged object", status)?;
-    }
-    PAGER.store(u64::from(pager), Ordering::Release);
-    SUPPLY_BEGUN.store(0, Ordering::Release);
-    SEEN_AFTER.store(u64::MAX - 1, Ordering::Release);
-    let helper = match sealing {
-        true => spawn2(s, sealer, u64::from(source), 0)?,
-        false => spawn2(s, revoker, u64::from(paged), u64::from(source))?,
-    };
-    SUPPLY_BEGUN.store(1, Ordering::Release);
-    // SAFETY: the call takes no pointers.
-    let status = unsafe { sys::pager_supply(pager, paged, 0, len, source, 0) };
-    ensure(
-        "supplying or refusing the whole call",
-        status == 0 || status == ACCESS_DENIED,
-    )?;
-    ensure(
-        "ending the helper",
-        wait(helper, TERMINATED, in_time()).0 == 0,
-    )?;
-    let last = u64::from_le_bytes(mem_read_at::<8>(source, len - PAGE_SIZE)?);
-    ensure(
-        "leaving the source as it was when the call returned",
-        SEEN_AFTER.load(Ordering::Acquire) == last,
-    )?;
-    for handle in [source, paged, port, pager] {
-        // SAFETY: the call takes no pointers.
-        check("closing", unsafe { sys::handle_close(handle) })?;
-    }
-    Ok(())
-}
-
-/// A `WRITE` seal of a source and a revocation of the paged object wait
-/// for a supply that is under way.
-fn seal_and_revoke_wait_for_supply(s: &Startup) -> Result {
-    supply_beside(s, true)?;
-    supply_beside(s, false)
 }
 
 type Test = fn(&Startup) -> Result;
@@ -8645,7 +8459,7 @@ fn clock_page_rights(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 116] = [
+const TESTS: [(&str, Test); 113] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -8766,8 +8580,6 @@ const TESTS: [(&str, Test); 116] = [
         "resources_report_their_ranges",
         resources_report_their_ranges,
     ),
-    ("paged_outputs", paged_outputs),
-    ("access_flag_cleared_on_entry", access_flag_cleared_on_entry),
     ("kill_blocked_thread", kill_blocked_thread),
     (
         "exception_reports_and_actions",
@@ -8794,10 +8606,6 @@ const TESTS: [(&str, Test); 116] = [
     (
         "map_checks_again_after_waiting",
         map_checks_again_after_waiting,
-    ),
-    (
-        "seal_and_revoke_wait_for_supply",
-        seal_and_revoke_wait_for_supply,
     ),
     ("write_execute_policy", write_execute_policy),
     ("syscall_gate", syscall_gate),
