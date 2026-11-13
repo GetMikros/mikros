@@ -1,6 +1,6 @@
 extern crate std;
 
-use crate::scancode::{Change, Decoder};
+use crate::ps2::scancode::{Change, Decoder};
 use mikros_evdev::bit;
 use mikros_evdev::codes::*;
 use std::vec;

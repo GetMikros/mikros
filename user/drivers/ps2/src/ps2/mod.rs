@@ -1,10 +1,6 @@
 //! PS/2 for the i8042 driver: the controller, the keyboard's scan code
 //! set 2 and LEDs, mice, independent of how the driver reaches the ports.
 
-#![no_std]
-
-extern crate alloc;
-
 pub mod controller;
 #[cfg(test)]
 mod controller_tests;

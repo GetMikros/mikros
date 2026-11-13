@@ -85,6 +85,8 @@ impl<P: Ports> Controller<P> {
         Controller { ports, config: 0 }
     }
 
+    /// The ports, which the tests inspect.
+    #[cfg(test)]
     pub fn ports(&mut self) -> &mut P {
         &mut self.ports
     }

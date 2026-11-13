@@ -8,25 +8,18 @@
 //! keyboard in scan code set 2, chooses the mouse's protocol, and
 //! publishes the keyboard and the mouse as input devices.
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-mod hub;
-mod ports;
-
+use crate::hub::{Hub, KeyboardLeds, NoLeds};
+use crate::ports::IoPorts;
+use crate::ps2::controller::Controller;
+use crate::ps2::mouse::{self, Protocol};
+use crate::ps2::scancode::Decoder;
+use crate::ps2::{KEYBOARD_LEDS, keyboard_set_2};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use hub::{Hub, KeyboardLeds, NoLeds};
 use mikros_evdev::codes::{EV_KEY, EV_LED, EV_REL, EV_SYN, REL_WHEEL, REL_X, REL_Y};
 use mikros_evdev::{KEY_BYTES, set_bit};
 use mikros_inputdev::InputDevice;
-use mikros_ps2::controller::Controller;
-use mikros_ps2::mouse::{self, Protocol};
-use mikros_ps2::scancode::Decoder;
-use mikros_ps2::{KEYBOARD_LEDS, keyboard_set_2};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -37,7 +30,6 @@ use mikros_rt::interfaces::mikros::driver::{
 use mikros_rt::interfaces::mikros::input::{Bus, DeviceInfo};
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
-use ports::IoPorts;
 
 mikros_rt::raw_main!(main);
 

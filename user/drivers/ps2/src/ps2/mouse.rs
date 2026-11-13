@@ -1,7 +1,7 @@
 //! PS/2 mice: choosing the protocol with the sample rate sequences, and
 //! decoding their packets into evdev events.
 
-use crate::controller::{ACK_TIMEOUT, Controller, Error, Port, Ports};
+use crate::ps2::controller::{ACK_TIMEOUT, Controller, Error, Port, Ports};
 use alloc::vec::Vec;
 use mikros_evdev::codes::*;
 

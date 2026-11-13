@@ -5,17 +5,18 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
-[[bin]]
-name = "ps2"
-path = "src/driver.rs"
-
 [dependencies]
 mikros-evdev = { path = "../../lib/evdev" }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
 mikros-inputdev = { path = "../../lib/inputdev" }
-mikros-ps2 = { path = "../../lib/ps2" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 
 [package.metadata.mikros]
 kind = "driver"
 image = "boot"
 runtime = "rt"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

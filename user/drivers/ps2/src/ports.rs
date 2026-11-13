@@ -1,6 +1,6 @@
 //! The controller's I/O ports, reached with `in` and `out`.
 
-use mikros_ps2::controller::Ports;
+use crate::ps2::controller::Ports;
 use mikros_rt::sys;
 
 pub struct IoPorts {

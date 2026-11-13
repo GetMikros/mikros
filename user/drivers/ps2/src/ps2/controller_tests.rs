@@ -1,7 +1,7 @@
 extern crate std;
 
-use crate::controller::*;
-use crate::*;
+use crate::ps2::controller::*;
+use crate::ps2::*;
 use mikros_evdev::codes::*;
 use std::collections::VecDeque;
 use std::vec;

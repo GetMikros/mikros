@@ -1,8 +1,8 @@
 extern crate std;
 
-use crate::controller::Controller;
-use crate::controller_tests::Fake;
-use crate::mouse::{Decoder, Protocol, setup};
+use crate::ps2::controller::Controller;
+use crate::ps2::controller_tests::Fake;
+use crate::ps2::mouse::{Decoder, Protocol, setup};
 use mikros_evdev::codes::*;
 use std::vec;
 use std::vec::Vec;
@@ -11,7 +11,7 @@ fn written_to_mouse(c: &mut Controller<Fake>) -> Vec<u8> {
     c.ports()
         .written
         .iter()
-        .filter(|(p, _)| *p == crate::controller::Port::Second)
+        .filter(|(p, _)| *p == crate::ps2::controller::Port::Second)
         .map(|&(_, b)| b)
         .collect()
 }

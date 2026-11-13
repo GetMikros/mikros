@@ -623,13 +623,6 @@ name = "mikros-permissions"
 version = "0.0.0"
 
 [[package]]
-name = "mikros-ps2"
-version = "0.0.0"
-dependencies = [
- "mikros-evdev",
-]
-
-[[package]]
 name = "mikros-rt"
 version = "0.0.0"
 dependencies = [
@@ -822,7 +815,6 @@ version = "0.0.0"
 dependencies = [
  "mikros-evdev",
  "mikros-inputdev",
- "mikros-ps2",
  "mikros-rt",
 ]
 

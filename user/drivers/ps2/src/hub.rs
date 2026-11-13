@@ -2,16 +2,16 @@
 //! send and turning them into events.
 
 use crate::ports::{IoPorts, now};
+use crate::ps2::controller::{Controller, Port};
+use crate::ps2::keyboard_leds;
+use crate::ps2::mouse;
+use crate::ps2::scancode::Decoder;
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
 use core::cell::{OnceCell, RefCell};
 use mikros_evdev::codes::EV_KEY;
 use mikros_evdev::{Event, group};
 use mikros_inputdev::{Backend, InputDevice};
-use mikros_ps2::controller::{Controller, Port};
-use mikros_ps2::keyboard_leds;
-use mikros_ps2::mouse;
-use mikros_ps2::scancode::Decoder;
 use mikros_rt::interfaces::mikros::base::Status;
 
 /// The most bytes read for one interrupt, so that a device that never
