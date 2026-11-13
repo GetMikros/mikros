@@ -267,6 +267,19 @@ impl Process {
         };
         budget.add_process();
         // The process undoes both when it goes, also on failure.
+        Self::assemble(budget, name, charged, aspace)
+    }
+
+    /// The new process of `new`, in a frame of its own: unoptimized, the
+    /// value takes several copies' worth of stack, which would otherwise
+    /// stay reserved while `new` builds the address space.
+    #[inline(never)]
+    fn assemble(
+        budget: &Arc<Budget>,
+        name: Name,
+        charged: u64,
+        aspace: Arc<AddressSpace>,
+    ) -> Result<Arc<Process>, Error> {
         crate::fallible::try_arc(Process {
             header: Header::new(ObjectType::Process),
             name,
