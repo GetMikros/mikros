@@ -22,6 +22,14 @@ fn main(m: &Managed) -> i64 {
             ("ports", ports),
             ("ports_are_readable", ports_are_readable),
             ("port_registration_limit", port_registration_limit),
+            ("timelines", timelines),
+            (
+                "timeline_registrations_removed",
+                timeline_registrations_removed,
+            ),
+            ("streams", streams),
+            ("random_bytes", random_bytes),
+            ("monotonic_clock_and_page", monotonic_clock_and_page),
         ],
     )
 }
@@ -355,4 +363,272 @@ fn ports_are_readable(_: &Own) -> Result {
         check("closing a port", sys::handle_close(watcher))?;
         check("closing the other", sys::handle_close(port))
     }
+}
+
+/// `system_get_random` fills buffers up to 4096 bytes and refuses more.
+fn random_bytes(_: &Own) -> Result {
+    let mut a = [0u8; 4096];
+    let mut b = [0u8; 64];
+    // SAFETY: the pointers and lengths describe the arrays.
+    unsafe {
+        check(
+            "filling 4096 bytes",
+            sys::system_get_random(a.as_mut_ptr(), 4096),
+        )?;
+        check(
+            "filling 64 bytes",
+            sys::system_get_random(b.as_mut_ptr(), 64),
+        )?;
+        ensure(
+            "refusing more than 4096 bytes",
+            sys::system_get_random(a.as_mut_ptr(), 4097) == -14,
+        )?;
+        ensure(
+            "filling nothing",
+            sys::system_get_random(b.as_mut_ptr(), 0) == 0,
+        )?;
+    }
+    // Two draws of 64 bytes, or a draw of all zeros, mean no generator.
+    ensure("drawing different bytes", a[..64] != b && b != [0; 64])?;
+    ensure("filling every byte", a[4032..] != [0; 64])
+}
+
+extern "sysv64" fn raise_later(timeline: u64, _: u64) -> ! {
+    sleep_ms(20);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::timeline_signal(timeline as Handle, 10) };
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Timelines only grow, wake waiters that their value reaches and queue
+/// TIMELINE packets.
+fn timelines(s: &Own) -> Result {
+    let (mut timeline, mut port) = (0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating", sys::timeline_create(3, 0, &mut timeline))?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+    }
+    let mut value = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("reading", unsafe {
+        sys::timeline_get(timeline, &mut value)
+    })?;
+    ensure("starting at the initial value", value == 3)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        ensure(
+            "refusing to go back",
+            sys::timeline_signal(timeline, 2) == -10,
+        )?;
+        check("raising", sys::timeline_signal(timeline, 5))?;
+        check("reached already", sys::timeline_wait(timeline, 4, 0))?;
+        ensure(
+            "timing out",
+            sys::timeline_wait(timeline, 6, soon()) == TIMED_OUT,
+        )?;
+        check(
+            "waiting asynchronously",
+            sys::timeline_wait_async(timeline, port, 21, 8),
+        )?;
+        check(
+            "waiting for a reached value",
+            sys::timeline_wait_async(timeline, port, 22, 1),
+        )?;
+    }
+    let (status, p) = take_packet(port, soon());
+    ensure(
+        "queueing at once",
+        status == 0 && u64_at(&p, 0) == 22 && u32_at(&p, 8) == 4,
+    )?;
+    ensure("carrying the value", u64_at(&p, 16) == 5)?;
+    ensure(
+        "zeroing the status and the rest",
+        u32_at(&p, 12) == 0 && p[24..].iter().all(|&b| b == 0),
+    )?;
+    spawn(s, raise_later, u64::from(timeline))?;
+    // SAFETY: the call takes no pointers.
+    check("waiting for 9", unsafe {
+        sys::timeline_wait(timeline, 9, now() + 2_000_000_000)
+    })?;
+    let (status, p) = take_packet(port, soon());
+    ensure(
+        "queueing when reached",
+        status == 0 && u64_at(&p, 0) == 21 && u64_at(&p, 16) == 10,
+    )
+}
+
+/// Streams carry bytes without boundaries, fill up, keep small writes
+/// whole and keep queued bytes after the peer closes.
+fn streams(_: &Own) -> Result {
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the pointers are valid for the call.
+    check("creating", unsafe { sys::stream_create(0, &mut a, &mut b) })?;
+    ensure("writing", stream_io(a, true, &mut { *b"hello " }) == (0, 6))?;
+    ensure(
+        "writing more",
+        stream_io(a, true, &mut { *b"world" }) == (0, 5),
+    )?;
+    let mut buf = [0u8; 8];
+    ensure(
+        "reading across writes",
+        stream_io(b, false, &mut buf) == (0, 8) && &buf == b"hello wo",
+    )?;
+    ensure("being readable", wait(b, READABLE, 0).0 == 0)?;
+    let mut rest = [0u8; 8];
+    ensure(
+        "reading the rest",
+        stream_io(b, false, &mut rest) == (0, 3) && &rest[..3] == b"rld",
+    )?;
+    ensure(
+        "being empty",
+        stream_io(b, false, &mut rest).0 == SHOULD_WAIT,
+    )?;
+
+    let mut chunk = [7u8; 4096];
+    for _ in 0..15 {
+        ensure("filling", stream_io(a, true, &mut chunk) == (0, 4096))?;
+    }
+    let mut big = [1u8; 4097];
+    let (status, written) = stream_io(a, true, &mut big[..4000]);
+    ensure(
+        "keeping a small write whole",
+        status == 0 && written == 4000,
+    )?;
+    let (status, written) = stream_io(a, true, &mut big);
+    ensure(
+        "taking what fits of a large write",
+        status == 0 && written == 96,
+    )?;
+    ensure(
+        "being full",
+        stream_io(a, true, &mut chunk[..1]).0 == SHOULD_WAIT,
+    )?;
+    ensure("clearing WRITABLE", wait(a, 1 << 1, 0).0 == TIMED_OUT)?;
+
+    // SAFETY: the call takes no pointers.
+    check("closing the writer", unsafe { sys::handle_close(a) })?;
+    ensure("setting PEER_CLOSED", wait(b, 1 << 2, 0).0 == 0)?;
+    let (status, got) = stream_io(b, false, &mut chunk);
+    ensure("keeping queued bytes", status == 0 && got == 4096)
+}
+
+/// A `timeline_wait_async` registration that `port_cancel` removed or
+/// whose timeline was closed queues no packet, while one that is met
+/// queues a `TIMELINE` packet with its key.
+fn timeline_registrations_removed(_: &Own) -> Result {
+    let (mut timeline, mut port) = (0, 0);
+    // SAFETY: the out pointers are valid for the calls; the others take
+    // no pointers.
+    unsafe {
+        check(
+            "creating a timeline",
+            sys::timeline_create(0, 0, &mut timeline),
+        )?;
+        check("creating a port", sys::port_create(0, &mut port))?;
+        check(
+            "registering",
+            sys::timeline_wait_async(timeline, port, 7, 5),
+        )?;
+        check("canceling", sys::port_cancel(port, timeline, 7))?;
+        check("signalling", sys::timeline_signal(timeline, 10))?;
+    }
+    ensure(
+        "queueing nothing once canceled",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check(
+            "registering again",
+            sys::timeline_wait_async(timeline, port, 8, 20),
+        )?;
+        check("closing the timeline", sys::handle_close(timeline))?;
+    }
+    ensure(
+        "queueing nothing once closed",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    // SAFETY: the out pointer is valid for the call; the others take no
+    // pointers.
+    unsafe {
+        check(
+            "creating another timeline",
+            sys::timeline_create(0, 0, &mut timeline),
+        )?;
+        check(
+            "registering on it",
+            sys::timeline_wait_async(timeline, port, 9, 1),
+        )?;
+        check("meeting the value", sys::timeline_signal(timeline, 1))?;
+    }
+    let (status, packet) = take_packet(port, soon());
+    ensure(
+        "queueing the packet of the registration met",
+        status == 0 && u64_at(&packet, 0) == 9 && u32_at(&packet, 8) == 4,
+    )?;
+    for h in [timeline, port] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// The monotonic clock never goes back and resolves less than a
+/// microsecond, and the clock page has its header: version 1, an even
+/// sequence, and the counter as source only with the time stamp counter,
+/// whose values then lie between those of the clock before and after.
+fn monotonic_clock_and_page(s: &Own) -> Result {
+    let mut last = now();
+    let mut finer = false;
+    for _ in 0..1000 {
+        let t = now();
+        ensure("never going back", t >= last)?;
+        // A clock counting whole microseconds or coarser never shows a
+        // value between them.
+        finer |= t % 1000 != 0;
+        last = t;
+    }
+    ensure("resolving under a microsecond", finer)?;
+    let at = map_read_only(s, s.clock_page)?;
+    // SAFETY: the page is mapped readable, and only the kernel writes it.
+    let page = unsafe { (at as *const [u8; 0x28]).read_volatile() };
+    ensure(
+        "starting the header",
+        u32_at(&page, 0x00) % 2 == 0 && u32_at(&page, 0x04) == 1,
+    )?;
+    match u32_at(&page, 0x08) {
+        0 => {}
+        1 => {
+            let before = now();
+            let tsc: u64;
+            // SAFETY: RDTSC only reads the counter.
+            unsafe {
+                core::arch::asm!(
+                    "rdtsc",
+                    "shl rdx, 32",
+                    "or rax, rdx",
+                    out("rax") tsc,
+                    out("rdx") _,
+                    options(nomem, nostack),
+                )
+            };
+            let after = now();
+            let (mult, shift) = (u32_at(&page, 0x10), u32_at(&page, 0x14));
+            let (tsc_base, ns_base) = (u64_at(&page, 0x18), u64_at(&page, 0x20) as i64);
+            let delta = (u128::from(tsc - tsc_base) * u128::from(mult)) >> shift;
+            let computed = ns_base + delta as i64;
+            ensure(
+                "computing the clock from the page",
+                (before..=after).contains(&computed),
+            )?;
+        }
+        _ => ensure("naming a defined source", false)?,
+    }
+    // SAFETY: the call takes no pointers.
+    check("unmapping the clock page", unsafe {
+        sys::vm_unmap(s.process, at, PAGE_SIZE)
+    })
 }

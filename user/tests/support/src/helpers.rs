@@ -2,7 +2,7 @@
 //! waits and deadlines, memory objects and mappings, and threads of the
 //! test's own process.
 
-use crate::{Context, PERM_READ, PERM_WRITE, Result, check, ensure};
+use crate::{Context, PAGE_SIZE, PERM_READ, PERM_WRITE, Result, check, ensure};
 use core::sync::atomic::{AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 
@@ -197,4 +197,26 @@ pub extern "sysv64" fn wait_forever(event: u64, _: u64) -> ! {
     // SAFETY: the call takes no pointers.
     unsafe { sys::thread_exit() };
     unreachable!("thread_exit returned");
+}
+
+pub fn stream_io(stream: Handle, write: bool, buf: &mut [u8]) -> (i64, u64) {
+    let mut actual = 0;
+    // SAFETY: the pointers describe `buf` and `actual`.
+    let status = unsafe {
+        if write {
+            sys::stream_write(stream, buf.as_ptr(), buf.len() as u64, &mut actual)
+        } else {
+            sys::stream_read(stream, buf.as_mut_ptr(), buf.len() as u64, &mut actual)
+        }
+    };
+    (status, actual)
+}
+
+/// Maps the page of `mem` read-only into this process.
+pub fn map_read_only(s: &impl Context, mem: Handle) -> Result<u64> {
+    let mut at = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::vm_map(s.process(), PERM_READ, 0, mem, 0, PAGE_SIZE, &mut at) };
+    check("mapping read-only", status)?;
+    Ok(at)
 }
