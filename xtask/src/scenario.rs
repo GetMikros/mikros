@@ -272,6 +272,20 @@ pub fn start_with(
     extra: &[String],
     logged: bool,
 ) -> Result<Child> {
+    let processor = qemu::Processor::available();
+    start_on(machine, processor, dir, reboot, prepare, extra, logged)
+}
+
+/// Like `start_with`, on the processor `processor`.
+pub fn start_on(
+    machine: &MachineArgs,
+    processor: qemu::Processor,
+    dir: &Path,
+    reboot: bool,
+    prepare: &dyn Fn(&Path) -> Result<()>,
+    extra: &[String],
+    logged: bool,
+) -> Result<Child> {
     let disk = dir.join("disk.img");
     for name in ["serial.log", "screen.ppm", "console.ppm"] {
         let _ = fs::remove_file(dir.join(name));
@@ -286,13 +300,7 @@ pub fn start_with(
     crate::test::scratch_disks(&dir.join("serial.log"))?;
     prepare(dir)?;
     let mut args = crate::test::test_args(
-        qemu::args(
-            &machine,
-            qemu::Processor::available(),
-            &firmware,
-            &vars,
-            &disk,
-        ),
+        qemu::args(&machine, processor, &firmware, &vars, &disk),
         &dir.join("serial.log"),
         logged,
     );

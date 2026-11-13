@@ -7,7 +7,7 @@
 //! the counts.
 
 use crate::build::{self, Kind};
-use crate::qemu::MachineArgs;
+use crate::qemu::{MachineArgs, Processor};
 use crate::{image, scenario};
 use anyhow::{Context, Result};
 use std::fs;
@@ -23,14 +23,21 @@ const MARK: &str = "selftest: ";
 const POWER_OFF_WAIT: Duration = Duration::from_secs(20);
 
 /// Builds a test image of the build kind `kind`, boots it in `dir` with
-/// `selftest`, and fails unless every system test passed within
-/// `timeout`. Returns the number of tests that passed.
-pub fn run(machine: &MachineArgs, kind: Kind, dir: &Path, timeout: Duration) -> Result<usize> {
+/// `selftest` on the machine `machine` with the processor `processor`,
+/// and fails unless every system test passed within `timeout`. Returns
+/// the number of tests that passed.
+pub fn run(
+    machine: &MachineArgs,
+    processor: Processor,
+    kind: Kind,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<usize> {
     let built = build::build_tests(kind)?;
     fs::create_dir_all(dir)?;
     image::create_with(kind, &built, &dir.join("disk.img"), "selftest", &[])?;
     let log = dir.join("serial.log");
-    let mut qemu = scenario::start_with(machine, dir, false, &|_| Ok(()), &[], false)?;
+    let mut qemu = scenario::start_on(machine, processor, dir, false, &|_| Ok(()), &[], false)?;
     let mut deadline = Instant::now() + timeout;
     let mut counted = false;
     let ended = loop {

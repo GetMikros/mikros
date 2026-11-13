@@ -59,6 +59,48 @@ const INTERRUPT_FUNCTIONS: [&str; 6] = [
     "<kernel_core::ktimer::Armed>::fire",
 ];
 
+/// Runs the system tests in a test image as the kernel's tests run: on
+/// the machine of `args`, on QEMU's AMD IOMMU, and with kernel page-table
+/// isolation, with the same allowances for emulation.
+fn system_tests(args: &Args, dir: &Path) -> Result<()> {
+    let processor = qemu::Processor::available();
+    let timeout = Duration::from_secs(args.timeout);
+    let passed = crate::system_tests::run(
+        &args.machine,
+        processor,
+        args.kind,
+        &dir.join("system"),
+        timeout,
+    )?;
+    println!("system tests passed: {passed}");
+    if !args.machine.no_iommu {
+        let mut amd = args.machine.clone();
+        amd.amd_iommu = true;
+        let timeout = match processor {
+            qemu::Processor::Host => timeout,
+            _ => timeout * 3,
+        };
+        let dir = dir.join("system-amd-iommu");
+        let passed = crate::system_tests::run(&amd, processor, args.kind, &dir, timeout)?;
+        println!("system tests passed on AMD-Vi: {passed}");
+    }
+    if args.kind != Kind::Fuzz {
+        let isolating = if args.emulated_isolation {
+            qemu::Processor::EmulatedIntel
+        } else {
+            qemu::Processor::isolating()
+        };
+        let timeout = match (processor, isolating) {
+            (qemu::Processor::Host, qemu::Processor::EmulatedIntel) => timeout * 5,
+            _ => timeout,
+        };
+        let dir = dir.join("system-isolation");
+        let passed = crate::system_tests::run(&args.machine, isolating, args.kind, &dir, timeout)?;
+        println!("system tests passed with kernel page-table isolation: {passed}");
+    }
+    Ok(())
+}
+
 /// The kernel function that only the idle loop runs. The fuzz build's
 /// coverage must record none of its code, as the idle loop runs on behalf
 /// of no thread.
@@ -556,8 +598,7 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("power-off run passed");
-    let passed = crate::system_tests::run(&args.machine, args.kind, &dir.join("system"), timeout)?;
-    println!("system tests passed: {passed}");
+    system_tests(args, &dir)?;
     crate::volumes::run(
         &args.machine,
         args.kind,
