@@ -376,8 +376,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", msh.display());
             let msh_check = crate::rust_std::build("msh-check", kind)?;
             println!("built    {}", msh_check.display());
-            let msh_options =
-                crate::workspace_root().join("user/runtime/std/tests/msh-check/options.msh");
+            let msh_options = crate::workspace_root().join("user/tests/msh-check/options.msh");
             let programs = crate::workspace_root().join("user/tests/launcher-probe/programs");
             let (prog, closed, bad) = (
                 programs.join("system.prog.yaml"),
