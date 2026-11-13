@@ -5,6 +5,10 @@ edition.workspace = true
 license = "GPL-2.0-only"
 publish = false
 
+[[bin]]
+name = "btrfs"
+path = "src/driver/mod.rs"
+
 [dependencies]
 mikros-btrfs = { path = "../../lib/btrfs" }
 mikros-casefold = { path = "../../lib/casefold" }
