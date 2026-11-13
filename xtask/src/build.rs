@@ -179,199 +179,53 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     let mut takeover_image = None;
     let (boot_image, system_image) = match boot {
         BootImage::System => {
-            let init = user_build("init", kind)?;
-            println!("built    {}", init.display());
-            let manager = user_build("processmgr", kind)?;
-            println!("built    {}", manager.display());
-            let services = user_build("servicemgr", kind)?;
-            println!("built    {}", services.display());
-            let broker = user_build("permbroker", kind)?;
-            println!("built    {}", broker.display());
-            let devices = user_build("devicemgr", kind)?;
-            println!("built    {}", devices.display());
-            let pci_bus = user_build("pcibus", kind)?;
-            println!("built    {}", pci_bus.display());
-            let acpi = acpi_build(kind)?;
-            let acpi_manifest = crate::workspace_root().join("user/drivers/acpi/driver.yaml");
-            let rtc = user_build("rtc", kind)?;
-            println!("built    {}", rtc.display());
-            let rtc_manifest = crate::workspace_root().join("user/drivers/rtc/driver.yaml");
-            let ps2 = user_build("ps2", kind)?;
-            println!("built    {}", ps2.display());
-            let ps2_manifest = crate::workspace_root().join("user/drivers/ps2/driver.yaml");
-            // The display driver binds to the boot framebuffer while the
-            // root file system is not yet available: the device manager
-            // reads the drivers of the boot image only.
-            let basic_display = user_build("basicdisplay", kind)?;
-            println!("built    {}", basic_display.display());
-            let basic_display_manifest =
-                crate::workspace_root().join("user/drivers/basicdisplay/driver.yaml");
-            let [sans, sans_bold, mono, mono_bold] = crate::fonts::FILES.map(|f| fonts.ttf.join(f));
-            let fonts_conf = crate::workspace_root().join("user/data/fonts.conf");
-            let usb_hid = user_build("usbhid", kind)?;
-            println!("built    {}", usb_hid.display());
-            let usb_hid_manifest = crate::workspace_root().join("user/drivers/usbhid/driver.yaml");
-            let virtio_blk = user_build("virtioblk", kind)?;
-            println!("built    {}", virtio_blk.display());
-            let virtio_blk_manifest =
-                crate::workspace_root().join("user/drivers/virtioblk/driver.yaml");
-            let nvme = user_build("nvme", kind)?;
-            println!("built    {}", nvme.display());
-            let nvme_manifest = crate::workspace_root().join("user/drivers/nvme/driver.yaml");
-            let ahci = user_build("ahci", kind)?;
-            println!("built    {}", ahci.display());
-            let ahci_manifest = crate::workspace_root().join("user/drivers/ahci/driver.yaml");
-            let xhci = user_build("xhci", kind)?;
-            println!("built    {}", xhci.display());
-            let xhci_manifest = crate::workspace_root().join("user/drivers/xhci/driver.yaml");
-            let usb_storage = user_build("usbstorage", kind)?;
-            println!("built    {}", usb_storage.display());
-            let usb_storage_manifest =
-                crate::workspace_root().join("user/drivers/usbstorage/driver.yaml");
-            let partition = user_build("partition", kind)?;
-            println!("built    {}", partition.display());
-            let partition_manifest =
-                crate::workspace_root().join("user/drivers/partition/driver.yaml");
-            let fat = user_build("fat", kind)?;
-            println!("built    {}", fat.display());
-            let fat_manifest = crate::workspace_root().join("user/drivers/fat/driver.yaml");
-            let exfat = user_build("exfat", kind)?;
-            println!("built    {}", exfat.display());
-            let exfat_manifest = crate::workspace_root().join("user/drivers/exfat/driver.yaml");
-            let btrfs = btrfs_build(kind)?;
-            let btrfs_manifest = crate::workspace_root().join("user/drivers/btrfs/driver.yaml");
-            let tmpfs = user_build("tmpfs", kind)?;
-            println!("built    {}", tmpfs.display());
-            let tmpfs_manifest = crate::workspace_root().join("user/services/tmpfs/tmpfs.yaml");
-            let union = user_build("union", kind)?;
-            println!("built    {}", union.display());
-            let union_manifest = crate::workspace_root().join("user/services/union/union.yaml");
-            let log_service = user_build("logsvc", kind)?;
-            println!("built    {}", log_service.display());
-            let log_manifest = crate::workspace_root().join("user/services/logsvc/log.yaml");
-            let time_service = user_build("timesvc", kind)?;
-            println!("built    {}", time_service.display());
-            let time_manifest = crate::workspace_root().join("user/services/timesvc/time.yaml");
-            let broker_manifest =
-                crate::workspace_root().join("user/services/permbroker/permissions.yaml");
-            let devices_manifest =
-                crate::workspace_root().join("user/services/devicemgr/devicemgr.yaml");
-            let pci_bus_manifest = crate::workspace_root().join("user/drivers/pcibus/driver.yaml");
-            let members = [
-                ("init", init.as_path()),
-                ("usr/bin/processmgr", manager.as_path()),
-                ("usr/bin/servicemgr", services.as_path()),
-                ("usr/bin/permbroker", broker.as_path()),
+            // The components of the boot image: init, the managers, the
+            // services that start before the root file system is
+            // available, and the drivers, which the device manager reads
+            // from the boot image only until then.
+            let mut early = Vec::new();
+            for component in crate::components::all()? {
+                if component.image == Image::Boot && component.in_kind(kind) {
+                    let program = component_build(&component, kind)?;
+                    early.extend(component.members(kind, &program)?);
+                }
+            }
+            // The system fonts and the fontconfig configuration that names
+            // them as the defaults.
+            for file in crate::fonts::FILES {
+                early.push((
+                    format!("usr/share/fonts/dejavu/{file}"),
+                    fonts.ttf.join(file),
+                ));
+            }
+            early.extend([
                 (
-                    "usr/lib/services/permissions.yaml",
-                    broker_manifest.as_path(),
-                ),
-                ("usr/bin/tmpfs", tmpfs.as_path()),
-                ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
-                ("usr/bin/union", union.as_path()),
-                ("usr/lib/services/union.yaml", union_manifest.as_path()),
-                ("usr/bin/logsvc", log_service.as_path()),
-                ("usr/lib/services/log.yaml", log_manifest.as_path()),
-                ("usr/bin/timesvc", time_service.as_path()),
-                ("usr/lib/services/time.yaml", time_manifest.as_path()),
-                ("usr/bin/devicemgr", devices.as_path()),
-                (
-                    "usr/lib/services/devicemgr.yaml",
-                    devices_manifest.as_path(),
-                ),
-                ("usr/lib/drivers/pcibus/pcibus", pci_bus.as_path()),
-                (
-                    "usr/lib/drivers/pcibus/driver.yaml",
-                    pci_bus_manifest.as_path(),
-                ),
-                ("usr/lib/drivers/acpi/acpi", acpi.as_path()),
-                ("usr/lib/drivers/acpi/driver.yaml", acpi_manifest.as_path()),
-                ("usr/lib/drivers/rtc/rtc", rtc.as_path()),
-                ("usr/lib/drivers/rtc/driver.yaml", rtc_manifest.as_path()),
-                // The system fonts and the fontconfig configuration that
-                // names them as the defaults.
-                ("usr/share/fonts/dejavu/DejaVuSans.ttf", sans.as_path()),
-                (
-                    "usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-                    sans_bold.as_path(),
-                ),
-                ("usr/share/fonts/dejavu/DejaVuSansMono.ttf", mono.as_path()),
-                (
-                    "usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf",
-                    mono_bold.as_path(),
-                ),
-                ("usr/share/fonts/dejavu/LICENSE", fonts.license.as_path()),
-                ("etc/fonts/fonts.conf", fonts_conf.as_path()),
-                ("usr/lib/drivers/ps2/ps2", ps2.as_path()),
-                ("usr/lib/drivers/ps2/driver.yaml", ps2_manifest.as_path()),
-                (
-                    "usr/lib/drivers/basicdisplay/basicdisplay",
-                    basic_display.as_path(),
+                    "usr/share/fonts/dejavu/LICENSE".to_owned(),
+                    fonts.license.clone(),
                 ),
                 (
-                    "usr/lib/drivers/basicdisplay/driver.yaml",
-                    basic_display_manifest.as_path(),
+                    "etc/fonts/fonts.conf".to_owned(),
+                    crate::workspace_root().join("user/data/fonts.conf"),
                 ),
-                ("usr/lib/drivers/usbhid/usbhid", usb_hid.as_path()),
-                (
-                    "usr/lib/drivers/usbhid/driver.yaml",
-                    usb_hid_manifest.as_path(),
-                ),
-                ("usr/lib/drivers/virtioblk/virtioblk", virtio_blk.as_path()),
-                (
-                    "usr/lib/drivers/virtioblk/driver.yaml",
-                    virtio_blk_manifest.as_path(),
-                ),
-                ("usr/lib/drivers/nvme/nvme", nvme.as_path()),
-                ("usr/lib/drivers/nvme/driver.yaml", nvme_manifest.as_path()),
-                ("usr/lib/drivers/ahci/ahci", ahci.as_path()),
-                ("usr/lib/drivers/ahci/driver.yaml", ahci_manifest.as_path()),
-                ("usr/lib/drivers/xhci/xhci", xhci.as_path()),
-                ("usr/lib/drivers/xhci/driver.yaml", xhci_manifest.as_path()),
-                (
-                    "usr/lib/drivers/usbstorage/usbstorage",
-                    usb_storage.as_path(),
-                ),
-                (
-                    "usr/lib/drivers/usbstorage/driver.yaml",
-                    usb_storage_manifest.as_path(),
-                ),
-                ("usr/lib/drivers/partition/partition", partition.as_path()),
-                (
-                    "usr/lib/drivers/partition/driver.yaml",
-                    partition_manifest.as_path(),
-                ),
-                ("usr/lib/drivers/fat/fat", fat.as_path()),
-                ("usr/lib/drivers/fat/driver.yaml", fat_manifest.as_path()),
-                ("usr/lib/drivers/exfat/exfat", exfat.as_path()),
-                (
-                    "usr/lib/drivers/exfat/driver.yaml",
-                    exfat_manifest.as_path(),
-                ),
-                ("usr/lib/drivers/btrfs/btrfs", btrfs.as_path()),
-                (
-                    "usr/lib/drivers/btrfs/driver.yaml",
-                    btrfs_manifest.as_path(),
-                ),
-            ];
+            ]);
             // The time zones, which the root partition gets with the rest
             // of usr.
-            let zones = crate::tzdata::members(&crate::tzdata::zoneinfo()?)?;
-            let early: Vec<(&str, &Path)> = members
-                .into_iter()
-                .chain(zones.iter().map(|(at, path)| (at.as_str(), path.as_path())))
-                .collect();
+            early.extend(crate::tzdata::members(&crate::tzdata::zoneinfo()?)?);
             // The services that need the root file system, and what they
             // load, are only in the whole system, so that the service
             // manager starts them once the root is available.
             let login = login_members(kind, &xkbcommon, &freetype, &keymaps)?;
             let whole: Vec<(&str, &Path)> = early
                 .iter()
-                .copied()
-                .chain(login.iter().map(|(at, path)| (at.as_str(), path.as_path())))
+                .chain(&login)
+                .map(|(at, path)| (at.as_str(), path.as_path()))
                 .collect();
             let system_image = boot_image(kind, "system.img", &whole)?;
             println!("built    {}", system_image.display());
+            let early: Vec<(&str, &Path)> = early
+                .iter()
+                .map(|(at, path)| (at.as_str(), path.as_path()))
+                .collect();
             (boot_image(kind, "boot.img", &early)?, system_image)
         }
         BootImage::Test => {
