@@ -13,11 +13,6 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The pinned release, by the SHA-256 of its archive.
-const RELEASE: &str = "linux-6.18.62";
-const URL: &str = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.62.tar.gz";
-const SHA256: &str = "b3db543d71c7334292b37b9da58fbd10339f558ad4b7aaa0ebc4e5c18279534c";
-
 /// The parts of the release that the shim builds from, as prefixes of
 /// their paths.
 const PARTS: &[&str] = &[
@@ -289,9 +284,16 @@ pub fn run(args: &Args) -> Result<()> {
 /// extracting them unless they already are.
 pub fn source() -> Result<PathBuf> {
     let dir = crate::workspace_root().join("target/sources/linux");
-    let archive = dir.join(format!("{RELEASE}.tar.gz"));
-    crate::fetch::cached(&format!("{RELEASE} source"), URL, SHA256, &archive)?;
-    let source = dir.join(RELEASE);
+    let port = crate::ports::load("linux")?;
+    let release = port.source.as_str();
+    let archive = dir.join(format!("{release}.tar.gz"));
+    crate::fetch::cached(
+        &format!("{release} source"),
+        &port.url,
+        &port.sha256,
+        &archive,
+    )?;
+    let source = dir.join(release);
     let stamp = source.join(".mikros-parts");
     let parts = PARTS.join("\n");
     if fs::read_to_string(&stamp).ok().as_deref() == Some(parts.as_str()) {
@@ -306,7 +308,7 @@ pub fn source() -> Result<PathBuf> {
     for entry in tar.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
-        let Ok(inside) = path.strip_prefix(RELEASE) else {
+        let Ok(inside) = path.strip_prefix(release) else {
             continue;
         };
         let inside = inside.to_string_lossy();

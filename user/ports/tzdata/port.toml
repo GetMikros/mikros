@@ -1,0 +1,8 @@
+# The time zone database, which the host's zic compiles into the zone
+# files of /usr/share/zoneinfo. The archive has no directory of its own;
+# `dir` names the one that xtask unpacks and compiles it in.
+
+[source]
+url = "https://data.iana.org/time-zones/releases/tzdata2026f.tar.gz"
+sha256 = "01b4a91cec5167ed48c11e8ab78f2048cead78ce94b0cafcad0ae8c5a3044d3d"
+dir = "tzdata2026f"

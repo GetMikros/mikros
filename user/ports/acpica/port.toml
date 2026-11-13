@@ -1,0 +1,7 @@
+# ACPICA, which the ACPI driver runs. The driver's glue and platform
+# header, in user/drivers/acpi, are compiled with it.
+
+[source]
+url = "https://github.com/open-acpica/acpica/releases/download/20260930/acpica-unix-20260930.tar.gz"
+sha256 = "aa18901b92e30749be0edc3081c8d550c61fce4fa37546fc6a65d367a4ae71a5"
+dir = "acpica-unix-20260930"

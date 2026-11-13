@@ -1,0 +1,6 @@
+# The DejaVu fonts, the system fonts.
+
+[source]
+url = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2"
+sha256 = "fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7"
+dir = "dejavu-fonts-ttf-2.37"

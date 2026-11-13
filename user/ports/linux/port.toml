@@ -1,0 +1,8 @@
+# Linux, whose btrfs code the btrfs driver runs on the shim in
+# user/drivers/btrfs. Only the parts of the tree that the shim compiles
+# are unpacked.
+
+[source]
+url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.62.tar.gz"
+sha256 = "b3db543d71c7334292b37b9da58fbd10339f558ad4b7aaa0ebc4e5c18279534c"
+dir = "linux-6.18.62"

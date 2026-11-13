@@ -18,10 +18,6 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const RELEASE: &str = "acpica-unix-20260930";
-const URL: &str =
-    "https://github.com/open-acpica/acpica/releases/download/20260930/acpica-unix-20260930.tar.gz";
-const SHA256: &str = "aa18901b92e30749be0edc3081c8d550c61fce4fa37546fc6a65d367a4ae71a5";
 /// The components of the release that the server needs: all but the
 /// debugger and the disassembler.
 const COMPONENTS: [&str; 9] = [
@@ -87,9 +83,15 @@ impl Flavor {
 /// unless it already is.
 fn source() -> Result<PathBuf> {
     let dir = crate::workspace_root().join("target/sources/acpica");
-    let archive = dir.join(format!("{RELEASE}.tar.gz"));
-    crate::fetch::cached(&format!("{RELEASE} source"), URL, SHA256, &archive)?;
-    let source = dir.join(RELEASE);
+    let port = crate::ports::load("acpica")?;
+    let archive = dir.join(format!("{}.tar.gz", port.source));
+    crate::fetch::cached(
+        &format!("{} source", port.source),
+        &port.url,
+        &port.sha256,
+        &archive,
+    )?;
+    let source = dir.join(&port.source);
     let stamp = source.join(".mikros-extracted");
     if stamp.exists() {
         return Ok(source);
@@ -168,7 +170,8 @@ pub fn build(flavor: Flavor) -> Result<PathBuf> {
     }
     glue_files.sort();
     // The glue's headers change the stamp, and its C files are compiled.
-    let mut stamp = format!("{RELEASE}\n{mikros}");
+    let release = crate::ports::load("acpica")?.source;
+    let mut stamp = format!("{release}\n{mikros}");
     for file in &glue_files {
         stamp.push_str(&fs::read_to_string(file)?);
     }
