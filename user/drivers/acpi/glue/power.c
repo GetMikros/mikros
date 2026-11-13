@@ -91,21 +91,33 @@ UINT32 mikros_acpi_watch_power_button(void (*on_press)(void *context), void *con
 }
 
 /* The power register `index`: 0 the PM1a control register, 1 the PM1b
- * control register and 2 the reset register, with its address space, a
- * MIKROS_ACPI_SPACE_ value, its address and its size in bytes. Returns
- * AE_NOT_EXIST when the FADT has no such register, the reset register
- * only when the FADT reports it, or one in another address space. */
+ * control register, 2 the reset register, 3 and 4 the PM1a and PM1b event
+ * blocks, with their status and enable registers, and 5 and 6 the GPE0 and
+ * GPE1 blocks, which entering a sleep state clears and disables, with its
+ * address space, a MIKROS_ACPI_SPACE_ value, its address and its size in
+ * bytes. Returns AE_NOT_EXIST when the FADT has no such register, the
+ * reset register only when the FADT reports it, or one in another address
+ * space. */
 UINT32 mikros_acpi_power_register(UINT32 index, UINT32 *space, UINT64 *address, UINT32 *bytes)
 {
-    ACPI_GENERIC_ADDRESS *registers[] = {
-        &AcpiGbl_FADT.XPm1aControlBlock,
-        &AcpiGbl_FADT.XPm1bControlBlock,
-        (AcpiGbl_FADT.Flags & ACPI_FADT_RESET_REGISTER) ? &AcpiGbl_FADT.ResetRegister : NULL,
+    struct {
+        ACPI_GENERIC_ADDRESS *at;
+        /* The size in bytes for a block, whose size the FADT gives apart
+         * from its address; 0 for a register, whose width it gives. */
+        UINT32 length;
+    } registers[] = {
+        {&AcpiGbl_FADT.XPm1aControlBlock, 0},
+        {&AcpiGbl_FADT.XPm1bControlBlock, 0},
+        {(AcpiGbl_FADT.Flags & ACPI_FADT_RESET_REGISTER) ? &AcpiGbl_FADT.ResetRegister : NULL, 0},
+        {&AcpiGbl_FADT.XPm1aEventBlock, AcpiGbl_FADT.Pm1EventLength},
+        {&AcpiGbl_FADT.XPm1bEventBlock, AcpiGbl_FADT.Pm1EventLength},
+        {&AcpiGbl_FADT.XGpe0Block, AcpiGbl_FADT.Gpe0BlockLength},
+        {&AcpiGbl_FADT.XGpe1Block, AcpiGbl_FADT.Gpe1BlockLength},
     };
     if (index >= ACPI_ARRAY_LENGTH(registers)) {
         return AE_BAD_PARAMETER;
     }
-    ACPI_GENERIC_ADDRESS *r = registers[index];
+    ACPI_GENERIC_ADDRESS *r = registers[index].at;
     if (!r || !r->Address) {
         return AE_NOT_EXIST;
     }
@@ -120,7 +132,11 @@ UINT32 mikros_acpi_power_register(UINT32 index, UINT32 *space, UINT64 *address, 
         return AE_NOT_EXIST;
     }
     *address = r->Address;
-    *bytes = r->BitWidth > 8 ? (UINT32)(r->BitWidth + 7) / 8 : 1;
+    if (registers[index].length) {
+        *bytes = registers[index].length;
+    } else {
+        *bytes = r->BitWidth > 8 ? (UINT32)(r->BitWidth + 7) / 8 : 1;
+    }
     return AE_OK;
 }
 

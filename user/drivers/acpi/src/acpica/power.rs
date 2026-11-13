@@ -20,8 +20,9 @@ const RESET: u32 = 0x06;
 /// reset control register is written.
 const RESET_WAIT: i64 = 1_000_000_000;
 /// The power registers of `mikros_acpi_power_register`: the PM1a and PM1b
-/// control registers and the reset register, and their address spaces.
-const POWER_REGISTERS: u32 = 3;
+/// control registers, the reset register, the PM1a and PM1b event blocks
+/// and the GPE0 and GPE1 blocks.
+const POWER_REGISTERS: u32 = 7;
 /// ACPI's address spaces of system memory and system I/O.
 const SPACE_MEMORY: u32 = 0;
 const SPACE_IO: u32 = 1;
@@ -48,10 +49,12 @@ unsafe extern "C" {
 }
 
 /// Obtains and keeps the resources of the FADT's PM1a and PM1b control
-/// registers, of its reset register when it reports one, and of the reset
-/// control register: their ports stay enabled and their memory mapped, so
-/// that the machine can be powered off and restarted once no more
-/// resources can be had. One that cannot be had is logged.
+/// registers, of its reset register when it reports one, of its PM1a and
+/// PM1b event blocks and GPE0 and GPE1 blocks, which entering a sleep
+/// state clears and disables, and of the reset control register: their
+/// ports stay enabled and their memory mapped, so that the machine can be
+/// powered off and restarted once no more resources can be had. One that
+/// cannot be had is logged.
 pub(crate) fn hold_resources() {
     for index in 0..POWER_REGISTERS {
         let (mut space, mut address, mut bytes) = (0, 0, 0);
