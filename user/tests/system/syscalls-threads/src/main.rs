@@ -1,7 +1,7 @@
 //! The kernel's threads, as a system test: starting threads of the
 //! test's own process, their FS and GS bases, the state a new thread
-//! starts with, registers kept across preemption, the thread list of a
-//! process, and futexes.
+//! starts with, registers kept across preemption, suspending threads
+//! and their extended state, the thread list of a process, and futexes.
 
 #![no_std]
 #![no_main]
@@ -25,6 +25,8 @@ fn main(m: &Managed) -> i64 {
             ("futexes", futexes),
             ("new_thread_starts_clean", new_thread_starts_clean),
             ("registers_survive_preemption", registers_survive_preemption),
+            ("extended_state_round_trip", extended_state_round_trip),
+            ("suspend_threads", suspend_threads),
         ],
     )
 }
@@ -535,4 +537,156 @@ unsafe extern "sysv64" {
     safe fn start_probe(a: u64, b: u64) -> !;
     safe fn register_keeper(a: u64, b: u64) -> !;
     safe fn register_clobberer(a: u64, b: u64) -> !;
+}
+
+/// A suspended thread stops running until every suspension is undone,
+/// shows its registers, and can be killed.
+fn suspend_threads(s: &Own) -> Result {
+    let mut fresh = 0;
+    let name = b"fresh";
+    // SAFETY: the pointers describe `name` and `fresh`.
+    check("creating a thread", unsafe {
+        sys::thread_create(s.process, name.as_ptr(), name.len() as u64, &mut fresh)
+    })?;
+    ensure("refusing a new thread", suspend(fresh) == BAD_STATE)?;
+    ensure(
+        "refusing to resume a new thread",
+        resume_thread(fresh) == BAD_STATE,
+    )?;
+    let thread = spawn(s, spin, 0)?;
+    sleep_ms(5);
+    ensure("spinning", SPINS.load(Ordering::Acquire) > 0)?;
+    ensure(
+        "hiding the registers of a running thread",
+        general_registers(thread).0 == BAD_STATE,
+    )?;
+    suspend_and_wait(thread)?;
+    let (status, regs) = general_registers(thread);
+    check("reading the registers", status)?;
+    ensure(
+        "stopping in user code",
+        (0x1_0000..0x7FFF_FFFF_F000).contains(&u64_at(&regs, 0x80)),
+    )?;
+    let count = SPINS.load(Ordering::Acquire);
+    sleep_ms(20);
+    ensure("not running", SPINS.load(Ordering::Acquire) == count)?;
+    check("suspending again", suspend(thread))?;
+    check("resuming once", resume_thread(thread))?;
+    sleep_ms(10);
+    ensure(
+        "counting suspensions",
+        SPINS.load(Ordering::Acquire) == count && thread_state(thread)? == STATE_SUSPENDED,
+    )?;
+    check("resuming", resume_thread(thread))?;
+    sleep_ms(10);
+    ensure("running again", SPINS.load(Ordering::Acquire) > count)?;
+    let (_, observed) = wait(thread, SUSPENDED, 0);
+    ensure("clearing SUSPENDED", observed & SUSPENDED == 0)?;
+    ensure("refusing a zero count", resume_thread(thread) == BAD_STATE)?;
+    suspend_and_wait(thread)?;
+    // SAFETY: the call takes no pointers.
+    check("killing", unsafe { sys::task_kill(thread) })?;
+    ensure("ending", wait(thread, TERMINATED, in_time()).0 == 0)?;
+    ensure("refusing a dead thread", suspend(thread) == BAD_STATE)
+}
+
+/// The values `extended_keeper` loads into XMM0 and XMM1; set by it once
+/// they are loaded, and by the test to let it go on; and what it then
+/// finds in XMM0 and XMM1.
+static EXTENDED_PATTERN: [[u64; 2]; 2] = [
+    [0x0011_2233_4455_6677, 0x8899_AABB_CCDD_EEFF],
+    [0x0F0E_0D0C_0B0A_0908, 0x0706_0504_0302_0100],
+];
+
+static EXTENDED_READY: AtomicU64 = AtomicU64::new(0);
+
+static EXTENDED_GO: AtomicU64 = AtomicU64::new(0);
+
+/// A suspended thread's `EXTENDED` state is an 8-byte size and its
+/// registers in `XSAVE` format, and a changed state written back is what
+/// the thread finds when it resumes. A state whose MXCSR would make
+/// `XRSTOR` fault, a buffer too short, a kind that does not exist and a
+/// thread that is not suspended are refused.
+fn extended_state_round_trip(s: &Own) -> Result {
+    EXTENDED_READY.store(0, Ordering::Release);
+    EXTENDED_GO.store(0, Ordering::Release);
+    let thread = spawn2(s, extended_keeper, 0, 0)?;
+    let deadline = in_time();
+    while EXTENDED_READY.load(Ordering::Acquire) == 0 {
+        ensure("starting the keeper", now() < deadline)?;
+        sleep_ms(1);
+    }
+    let read = |buf: &mut [u8], kind| {
+        // SAFETY: the pointer and length describe `buf`.
+        unsafe { sys::thread_read_state(thread, kind, buf.as_mut_ptr(), buf.len() as u64) }
+    };
+    let mut state = [0u8; 4096];
+    ensure(
+        "refusing a thread that is not suspended",
+        read(&mut state, 1) == BAD_STATE,
+    )?;
+    suspend_and_wait(thread)?;
+    ensure(
+        "refusing a buffer too short",
+        read(&mut state[..8], 1) == BUFFER_TOO_SMALL,
+    )?;
+    ensure("refusing another kind", read(&mut state, 3) == INVALID_ARGS)?;
+    check("reading the extended state", read(&mut state, 1))?;
+    let size = u64_at(&state, 0) as usize;
+    ensure("giving the size", (576..=state.len() - 8).contains(&size))?;
+    // The XSAVE image follows the size; its legacy region keeps MXCSR at
+    // offset 24 and XMM0 and XMM1 at 160 and 176.
+    let (mxcsr, xmm0, xmm1) = (8 + 24, 8 + 160, 8 + 176);
+    ensure(
+        "holding XMM0",
+        [u64_at(&state, xmm0), u64_at(&state, xmm0 + 8)] == EXTENDED_PATTERN[0],
+    )?;
+    state.copy_within(xmm0..xmm0 + 16, xmm1);
+    let write = |buf: &[u8]| {
+        // SAFETY: the pointer and length lie in `buf`.
+        unsafe { sys::thread_write_state(thread, 1, buf.as_ptr(), 8 + size as u64) }
+    };
+    let mut bad = state;
+    bad[mxcsr..mxcsr + 4].copy_from_slice(&(0x1F80u32 | 1 << 31).to_le_bytes());
+    ensure("refusing a reserved MXCSR bit", write(&bad) == INVALID_ARGS)?;
+    check("writing the extended state", write(&state))?;
+    check("resuming", resume_thread(thread))?;
+    EXTENDED_GO.store(1, Ordering::Release);
+    ensure(
+        "ending the keeper",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    // SAFETY: the keeper wrote what it found and ended.
+    let found = unsafe { core::ptr::read_volatile(&raw const EXTENDED_FOUND) };
+    ensure("keeping XMM0", found[..2] == EXTENDED_PATTERN[0])?;
+    ensure(
+        "loading the XMM1 written",
+        found[2..] == EXTENDED_PATTERN[0],
+    )
+}
+
+static mut EXTENDED_FOUND: [u64; 4] = [0; 4];
+
+core::arch::global_asm!(
+    ".global extended_keeper",
+    "extended_keeper:",
+    "movdqu xmm0, [rip + {pattern}]",
+    "movdqu xmm1, [rip + {pattern} + 16]",
+    "mov qword ptr [rip + {ready}], 1",
+    "2:",
+    "pause",
+    "cmp qword ptr [rip + {go}], 0",
+    "je 2b",
+    "movdqu [rip + {found}], xmm0",
+    "movdqu [rip + {found} + 16], xmm1",
+    "jmp {done}",
+    pattern = sym EXTENDED_PATTERN,
+    ready = sym EXTENDED_READY,
+    go = sym EXTENDED_GO,
+    found = sym EXTENDED_FOUND,
+    done = sym end_asm_thread,
+);
+
+unsafe extern "sysv64" {
+    safe fn extended_keeper(a: u64, b: u64) -> !;
 }
