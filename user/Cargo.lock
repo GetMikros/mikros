@@ -811,6 +811,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime"
+version = "0.0.0"
+dependencies = [
+ "midlc",
+ "mikros-rt",
+ "mikros-test",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -965,7 +974,6 @@ dependencies = [
 name = "test-init"
 version = "0.0.0"
 dependencies = [
- "midlc",
  "mikros-bootfs",
  "mikros-loader",
  "mikros-rt",

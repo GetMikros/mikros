@@ -7,11 +7,6 @@
 
 extern crate alloc;
 
-#[allow(clippy::all, unused)]
-mod midl {
-    include!(concat!(env!("OUT_DIR"), "/midl.rs"));
-}
-
 use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
@@ -7926,140 +7921,6 @@ fn mappings_outlive_handles(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-/// The global allocator serves small and large blocks of any common
-/// alignment, keeps their contents, and reuses freed memory.
-fn heap_allocates_and_frees(_: &Startup) -> Result {
-    use alloc::boxed::Box;
-    use alloc::vec::Vec;
-    #[repr(align(256))]
-    struct Aligned([u8; 300]);
-    let mut blocks: Vec<Vec<u8>> = Vec::new();
-    for (i, size) in [1, 15, 16, 17, 100, 2048, 2049, 5000, 1 << 20]
-        .into_iter()
-        .enumerate()
-    {
-        let mut v = Vec::with_capacity(size);
-        v.resize(size, i as u8 + 1);
-        blocks.push(v);
-    }
-    for (i, v) in blocks.iter().enumerate() {
-        ensure(
-            "keeping block contents",
-            v.iter().all(|&b| b == i as u8 + 1),
-        )?;
-    }
-    let aligned = Box::new(Aligned([7; 300]));
-    ensure(
-        "aligning blocks",
-        (&*aligned as *const Aligned as usize).is_multiple_of(256),
-    )?;
-    ensure(
-        "keeping aligned contents",
-        aligned.0.iter().all(|&b| b == 7),
-    )?;
-    drop(blocks);
-    let first = Box::new([0u8; 64]);
-    let at = &*first as *const [u8; 64] as usize;
-    drop(first);
-    let again = Box::new([1u8; 64]);
-    ensure(
-        "reusing a freed block",
-        &*again as *const [u8; 64] as usize == at,
-    )?;
-    // Far more than the static arena, in blocks that are each freed.
-    for round in 0..64 {
-        let big: Vec<u64> = (0..64 * 1024).map(|n| n ^ round).collect();
-        ensure("filling a large block", big[4095] == 4095 ^ round)?;
-    }
-    Ok(())
-}
-
-/// Serves `Echo` on the server end `raw` until the client closes it.
-extern "sysv64" fn echo_server(raw: u64, _: u64) -> ! {
-    use midl::__midl::{OwnedHandle, ServerEnd};
-    use midl::test::kernel::*;
-    // SAFETY: the test hands this thread the server end.
-    let server = EchoServer::new(ServerEnd::new(unsafe {
-        OwnedHandle::from_raw(raw as Handle)
-    }));
-    while let Ok(request) = server.next(i64::MAX) {
-        if let EchoRequest::Twice(r, responder) = request {
-            let _ = responder.reply(&server, EchoTwiceResponse { value: r.value * 2 });
-        }
-    }
-    drop(server);
-    // SAFETY: thread_exit takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-/// Generated MIDL bindings send one-way requests with handles, reduce
-/// handle rights, deliver events, and call a server on another thread.
-fn midl_bindings_on_channels(s: &Startup) -> Result {
-    use midl::__midl::{self as rt, OwnedHandle};
-    use midl::test::kernel::*;
-    let (client_end, server_end) = rt::endpoints::<Echo>().map_err(|_| mikros_test::Failure {
-        what: "creating endpoints",
-        status: 0,
-    })?;
-    let client = EchoClient::new(client_end);
-    let server = EchoServer::new(server_end);
-    let mem = create_memory(PAGE_SIZE)?;
-    // SAFETY: the handle is new, and `memory` is its only owner.
-    let memory = unsafe { OwnedHandle::from_raw(mem) };
-    let note = Note {
-        text: "over a channel".into(),
-        memory,
-    };
-    ensure("sending a note", client.send(note).is_ok())?;
-    let request = server.try_next();
-    let Ok(Some(EchoRequest::Send(r))) = request else {
-        return ensure("receiving the note", false);
-    };
-    ensure("keeping the text", r.note.text == "over a channel")?;
-    // Only READ is left: reading works, and writing or inspecting fails.
-    let mut byte = [0u8; 1];
-    let raw = r.note.memory.raw();
-    // SAFETY: the pointers describe `byte`.
-    check("reading the memory", unsafe {
-        sys::mem_read(raw, 0, byte.as_mut_ptr(), 1)
-    })?;
-    // SAFETY: the pointers describe `byte`.
-    let status = unsafe { sys::mem_write(raw, 0, byte.as_ptr(), 1) };
-    ensure("reducing the rights to READ", status == ACCESS_DENIED)?;
-    ensure(
-        "dropping INSPECT",
-        mikros_rt::midl::handle_info(raw).is_none(),
-    )?;
-    ensure(
-        "sending an event",
-        server.send_sent(r.note.text.clone(), PAGE_SIZE).is_ok(),
-    )?;
-    let event = client.next_event(in_time());
-    let ok = matches!(event, Ok(EchoEvent::Sent(ref e)) if e.text == "over a channel" && e.size == PAGE_SIZE);
-    ensure("receiving the event", ok)?;
-    drop((r, client, server));
-    let (client_end, server_end) = rt::endpoints::<Echo>().map_err(|_| mikros_test::Failure {
-        what: "creating endpoints",
-        status: 0,
-    })?;
-    let client = EchoClient::new(client_end);
-    let raw = server_end.into_handle().into_raw();
-    let thread = spawn(s, echo_server, u64::from(raw))?;
-    let reply = client.twice(21, in_time());
-    ensure(
-        "calling another thread",
-        matches!(reply, Ok(EchoTwiceResponse { value: 42 })),
-    )?;
-    drop(client);
-    ensure(
-        "ending the server",
-        wait(thread, TERMINATED, in_time()).0 == 0,
-    )?;
-    // SAFETY: closing takes no pointers.
-    check("closing the thread", unsafe { sys::handle_close(thread) })
-}
-
 /// The bytes of the boot image member `name`, copied out of the image.
 fn boot_file(s: &Startup, name: &[u8]) -> Result<alloc::vec::Vec<u8>> {
     let image_size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
@@ -11015,172 +10876,7 @@ mod bootfs {
     }
 }
 
-mod executor {
-    //! The runtime's executor, waiting on one port.
-
-    use super::{USER0, now, spawn2};
-    use alloc::boxed::Box;
-    use alloc::rc::Rc;
-    use core::cell::Cell;
-    use core::future::{Future, poll_fn};
-    use core::sync::atomic::{AtomicBool, Ordering};
-    use core::task::{Poll, Waker};
-    use mikros_rt::Startup;
-    use mikros_rt::exec::Executor;
-    use mikros_rt::sys::{self, Handle};
-    use mikros_test::{Failure, Result, check, ensure};
-
-    fn new_event() -> Result<Handle> {
-        let mut event = 0;
-        // SAFETY: the out pointer is valid for the call.
-        check("creating an event", unsafe {
-            sys::event_create(0, &mut event)
-        })?;
-        Ok(event)
-    }
-
-    fn close(handle: Handle) {
-        // SAFETY: closing takes no pointers.
-        unsafe { sys::handle_close(handle) };
-    }
-
-    static WOKEN_ELSEWHERE: AtomicBool = AtomicBool::new(false);
-
-    /// Wakes the boxed waker at `waker` from this thread, then ends.
-    extern "sysv64" fn wake_from_thread(waker: u64, _: u64) -> ! {
-        // SAFETY: the test boxed the waker for this thread alone.
-        let waker = unsafe { Box::from_raw(waker as *mut Waker) };
-        WOKEN_ELSEWHERE.store(true, Ordering::Release);
-        waker.wake();
-        // SAFETY: the call takes no pointers.
-        unsafe { sys::thread_exit() };
-        unreachable!("thread_exit returned");
-    }
-
-    /// Futures for object signals, channel messages, timers and
-    /// timelines complete when their packets arrive; spawned tasks run
-    /// beside the main future; a waker used on another thread ends the
-    /// wait on the port; and a dropped wait is cancelled.
-    pub fn executor_waits_on_objects(s: &Startup) -> Result {
-        let mut ex = Executor::new().map_err(|status| Failure {
-            what: "creating an executor",
-            status,
-        })?;
-        let reactor = ex.reactor().clone();
-
-        // A spawned task waits for an event that the main future signals.
-        let event = new_event()?;
-        let done = Rc::new(Cell::new(false));
-        let (r, d) = (reactor.clone(), done.clone());
-        ex.spawner().spawn(async move {
-            let observed = r.signals(event, USER0).await;
-            d.set(observed.is_ok_and(|o| o & USER0 != 0));
-        });
-        let signalled = ex.block_on(async {
-            // SAFETY: the call takes no pointers.
-            unsafe { sys::object_signal(event, 0, USER0) };
-            reactor.signals(event, USER0).await
-        });
-        ensure(
-            "observing the event",
-            signalled.is_ok_and(|o| o & USER0 != 0),
-        )?;
-        ex.block_on(poll_fn(|cx| {
-            if done.get() {
-                Poll::Ready(())
-            } else {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        }));
-        ensure("running the spawned task", done.get())?;
-
-        // A dropped wait leaves nothing behind that a later wait trips on.
-        let other = new_event()?;
-        drop(reactor.signals(other, USER0));
-        let mut pending = Box::pin(reactor.signals(other, USER0));
-        let first = ex.block_on(poll_fn(|cx| {
-            Poll::Ready(pending.as_mut().poll(cx).is_pending())
-        }));
-        drop(pending);
-        ensure("waiting before the signal", first)?;
-        // SAFETY: the call takes no pointers.
-        unsafe { sys::object_signal(other, 0, USER0) };
-        ensure(
-            "waiting after a cancelled wait",
-            ex.block_on(reactor.signals(other, USER0)).is_ok(),
-        )?;
-
-        // A channel becomes readable.
-        let (mut a, mut b) = (0, 0);
-        // SAFETY: the out pointers are valid for the call.
-        check("creating a channel", unsafe {
-            sys::channel_create(0, &mut a, &mut b)
-        })?;
-        // SAFETY: the pointer describes one byte; no handles are sent.
-        check("writing", unsafe {
-            sys::channel_write(a, [1u8].as_ptr(), 1, core::ptr::null(), 0)
-        })?;
-        ensure(
-            "reading a message",
-            ex.block_on(reactor.readable(b)).is_ok(),
-        )?;
-
-        // A timer ends no earlier than its deadline.
-        let deadline = now() + 20_000_000;
-        ensure(
-            "sleeping",
-            ex.block_on(reactor.sleep_until(deadline)).is_ok(),
-        )?;
-        ensure("sleeping until the deadline", now() >= deadline)?;
-
-        // A timeline reaches a value.
-        let mut timeline = 0;
-        // SAFETY: the out pointer is valid for the call.
-        check("creating a timeline", unsafe {
-            sys::timeline_create(1, 0, &mut timeline)
-        })?;
-        // SAFETY: the call takes no pointers.
-        check("signalling the timeline", unsafe {
-            sys::timeline_signal(timeline, 3)
-        })?;
-        let value = ex.block_on(reactor.timeline(timeline, 2));
-        ensure("reaching the timeline value", value == Ok(3))?;
-
-        // A waker used on another thread ends the wait on the port.
-        WOKEN_ELSEWHERE.store(false, Ordering::Release);
-        let mut started = false;
-        let mut failed = None;
-        ex.block_on(poll_fn(|cx| {
-            if WOKEN_ELSEWHERE.load(Ordering::Acquire) {
-                return Poll::Ready(());
-            }
-            if !started {
-                started = true;
-                let waker = Box::into_raw(Box::new(cx.waker().clone())) as u64;
-                if let Err(e) = spawn2(s, wake_from_thread, waker, 0) {
-                    failed = Some(e);
-                    return Poll::Ready(());
-                }
-            }
-            Poll::Pending
-        }));
-        if let Some(e) = failed {
-            return Err(e);
-        }
-        ensure(
-            "waking from another thread",
-            WOKEN_ELSEWHERE.load(Ordering::Acquire),
-        )?;
-
-        for h in [event, other, a, b, timeline] {
-            close(h);
-        }
-        Ok(())
-    }
-}
-
-const TESTS: [(&str, Test); 147] = [
+const TESTS: [(&str, Test); 144] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -11211,8 +10907,6 @@ const TESTS: [(&str, Test); 147] = [
     ("temporary_mask_ends_a_wait", temporary_mask_ends_a_wait),
     ("stop_continue_and_kill", stop_continue_and_kill),
     ("stopped_wait_goes_on", stopped_wait_goes_on),
-    ("heap_allocates_and_frees", heap_allocates_and_frees),
-    ("midl_bindings_on_channels", midl_bindings_on_channels),
     ("loader_runs_pie", loader_runs_pie),
     ("loader_refuses_bad_images", loader_refuses_bad_images),
     (
@@ -11279,10 +10973,6 @@ const TESTS: [(&str, Test); 147] = [
     (
         "device_manager_keeps_children_across_a_restart",
         manager::device_manager_keeps_children_across_a_restart,
-    ),
-    (
-        "executor_waits_on_objects",
-        executor::executor_waits_on_objects,
     ),
     (
         "queued_signals_of_ended_thread",

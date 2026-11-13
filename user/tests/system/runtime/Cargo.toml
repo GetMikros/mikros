@@ -1,0 +1,19 @@
+[package]
+name = "runtime"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-rt = { path = "../../../runtime/mikros-rt" }
+mikros-test = { path = "../../support" }
+
+[build-dependencies]
+midlc = { path = "../../../../tools/midlc" }
+
+# A system test, which test images alone hold.
+[package.metadata.mikros]
+kind = "test"
+image = "tests"
+runtime = "rt"

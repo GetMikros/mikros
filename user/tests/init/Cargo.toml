@@ -15,8 +15,5 @@ mikros-bootfs = { path = "../../lib/bootfs" }
 # Tests the system calls that exist only in fuzz builds.
 fuzz = ["mikros-rt/fuzz"]
 
-[build-dependencies]
-midlc = { path = "../../../tools/midlc" }
-
 [package.metadata.mikros]
 runtime = "rt"
