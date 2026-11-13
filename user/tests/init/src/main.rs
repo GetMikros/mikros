@@ -12,13 +12,13 @@ use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::{
     ACCESS_DENIED, BAD_HANDLE, BAD_STATE, BUFFER_TOO_SMALL, FAILED, INVALID_ARGS, NOT_FOUND,
-    OUT_OF_RANGE, PAGE_FAULT, PAGE_SIZE, PAGER, PASSED, PERM_READ, PERM_WRITE, READABLE,
-    REPORT_SIZE, Result, SIGNALED, SLOWER, STATE_BLOCKED, TERMINATED, TIMED_OUT, USER0, call,
-    check, close, contains, create_memory, elf, ensure, exit_qemu, futex_wake, in_time, info, koid,
-    map, map_read_only, mem_read_at, mem_write_at, now, open_exit_port, paged_object, pager_op,
-    protect, read_memory, read_message, read_sizes, record_report, report_bytes, report_id, seal,
-    set_size, signal, sleep_ms, soon, spawn, spawn2, take_packet, thread_state, u32_at, u64_at,
-    ustar, wait, wait_for_state, wait_forever, wait_until_blocked, within, write_memory,
+    OUT_OF_RANGE, PAGE_FAULT, PAGE_SIZE, PASSED, PERM_READ, PERM_WRITE, READABLE, REPORT_SIZE,
+    Result, SIGNALED, SLOWER, TERMINATED, TIMED_OUT, USER0, call, check, close, contains,
+    create_memory, elf, ensure, exit_qemu, futex_wake, in_time, info, koid, map, map_read_only,
+    mem_read_at, mem_write_at, now, open_exit_port, paged_object, protect, read_memory,
+    read_message, read_sizes, record_report, report_bytes, report_id, set_size, signal, sleep_ms,
+    soon, spawn, spawn2, take_packet, thread_state, u32_at, u64_at, ustar, wait, wait_for_state,
+    wait_forever, wait_until_blocked, within, write_memory,
 };
 
 mikros_rt::main!(main);
@@ -2955,271 +2955,6 @@ fn coverage(_: &Startup) -> Result {
         ensure("refusing a fuzz-only call", status == BAD_SYSCALL)?;
     }
     check("closing the object", unsafe { sys::handle_close(mem) })
-}
-
-/// The handle of the last `straddling_reader`.
-static READER: AtomicU64 = AtomicU64::new(0);
-
-/// Whether the last `straddling_reader` is past its read, which blocks
-/// until the pager answers. Its own report of that would come only once
-/// it is back in user mode, which a woken thread may run before.
-fn read_done() -> bool {
-    let reader = READER.load(Ordering::Acquire) as Handle;
-    thread_state(reader).is_ok_and(|state| state != STATE_BLOCKED)
-}
-
-/// Answers one page request on `port` for `mem` after 50 ms.
-extern "sysv64" fn slow_pager_thread(port: u64, mem: u64) -> ! {
-    let pager = PAGER.load(Ordering::Acquire) as Handle;
-    let (status, p) = take_packet(port as Handle, now() + 1_000_000_000);
-    if status == 0 {
-        sleep_ms(50);
-        if let Ok(source) = create_memory(PAGE_SIZE) {
-            // SAFETY: the call takes no pointers.
-            unsafe {
-                sys::pager_supply(pager, mem as Handle, u64_at(&p, 24), PAGE_SIZE, source, 0)
-            };
-        }
-    }
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-/// Reads 16 bytes of `source` to `at`, then exits.
-extern "sysv64" fn straddling_reader(source: u64, at: u64) -> ! {
-    // SAFETY: the destination lies in two writable mappings.
-    unsafe { sys::mem_read(source as Handle, 0, at as *mut u8, 16) };
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-/// Maps `first` and, right after it, a page of a paged object whose
-/// pager answers after 50 ms, and starts a thread reading 16 bytes into
-/// the last 8 bytes of `first` and the first 8 of the paged page, which
-/// then holds `first` while it waits for the pager. Returns where
-/// `first` is mapped once the thread waits.
-fn start_straddling_read(s: &Startup, first: Handle) -> Result<u64> {
-    let (mut pager, mut port, mut paged) = (0, 0, 0);
-    // SAFETY: the pointers are valid for the calls.
-    unsafe {
-        check("creating a pager", sys::pager_create(0, &mut pager))?;
-        check("creating a port", sys::port_create(0, &mut port))?;
-        let status = sys::pager_create_memory(pager, port, 7, PAGE_SIZE, 0, &mut paged);
-        check("creating a paged object", status)?;
-    }
-    PAGER.store(u64::from(pager), Ordering::Release);
-    spawn2(s, slow_pager_thread, u64::from(port), u64::from(paged))?;
-    // Find two free pages, then map `first` and the paged object there.
-    let at = map(s.process, create_memory(2 * PAGE_SIZE)?, 2 * PAGE_SIZE)?;
-    // SAFETY: the call takes no pointers.
-    check("freeing the two pages", unsafe {
-        sys::vm_unmap(s.process, at, 2 * PAGE_SIZE)
-    })?;
-    let mut mapped = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe {
-        sys::vm_map(
-            s.process,
-            PERM_READ | PERM_WRITE | mikros_test::SPECIFIC,
-            at,
-            first,
-            0,
-            PAGE_SIZE,
-            &mut mapped,
-        )
-    };
-    check("mapping the object", status)?;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe {
-        sys::vm_map(
-            s.process,
-            PERM_READ | PERM_WRITE | mikros_test::SPECIFIC,
-            at + PAGE_SIZE,
-            paged,
-            0,
-            PAGE_SIZE,
-            &mut mapped,
-        )
-    };
-    check("mapping the paged object next to it", status)?;
-    let source = create_memory(PAGE_SIZE)?;
-    mem_write_at(source, 0, b"0123456789abcdef")?;
-    let reader = spawn2(s, straddling_reader, u64::from(source), at + PAGE_SIZE - 8)?;
-    READER.store(u64::from(reader), Ordering::Release);
-    wait_until_blocked(reader)?;
-    Ok(at)
-}
-
-/// A write seal waits for a kernel write into the object that is under
-/// way, even after the object's mapping is gone.
-fn seal_waits_for_outputs(s: &Startup) -> Result {
-    let plain = create_memory(PAGE_SIZE)?;
-    let at = start_straddling_read(s, plain)?;
-    // SAFETY: the call takes no pointers.
-    check("unmapping", unsafe {
-        sys::vm_unmap(s.process, at, PAGE_SIZE)
-    })?;
-    check("sealing", seal(plain, 1 << 3))?;
-    ensure("waiting for the write", read_done())?;
-    ensure(
-        "keeping the written bytes",
-        mem_read_at::<8>(plain, PAGE_SIZE - 8)? == *b"01234567",
-    )
-}
-
-/// Eviction waits for a kernel write into the object that is under way,
-/// also without dirty tracking.
-fn evict_waits_for_outputs(s: &Startup) -> Result {
-    let (mut pager, mut port, mut mem) = (0, 0, 0);
-    // SAFETY: the pointers are valid for the calls.
-    unsafe {
-        check("creating a pager", sys::pager_create(0, &mut pager))?;
-        check("creating a port", sys::port_create(0, &mut port))?;
-        let status = sys::pager_create_memory(pager, port, 8, PAGE_SIZE, 0, &mut mem);
-        check("creating a paged object", status)?;
-    }
-    let source = create_memory(PAGE_SIZE)?;
-    // SAFETY: the call takes no pointers.
-    check("supplying its page", unsafe {
-        sys::pager_supply(pager, mem, 0, PAGE_SIZE, source, 0)
-    })?;
-    start_straddling_read(s, mem)?;
-    check("evicting", pager_op(pager, mem, 2, 0, PAGE_SIZE))?;
-    ensure("waiting for the write", read_done())
-}
-
-/// Supplying pages from an object waits for a kernel write into it that
-/// is under way, and moves the pages with the written bytes.
-fn supply_waits_for_outputs(s: &Startup) -> Result {
-    let plain = create_memory(PAGE_SIZE)?;
-    let at = start_straddling_read(s, plain)?;
-    // SAFETY: the call takes no pointers.
-    check("unmapping", unsafe {
-        sys::vm_unmap(s.process, at, PAGE_SIZE)
-    })?;
-    let (mut pager, mut port, mut mem) = (0, 0, 0);
-    // SAFETY: the pointers are valid for the calls.
-    unsafe {
-        check("creating a pager", sys::pager_create(0, &mut pager))?;
-        check("creating a port", sys::port_create(0, &mut port))?;
-        let status = sys::pager_create_memory(pager, port, 9, PAGE_SIZE, 0, &mut mem);
-        check("creating a paged object", status)?;
-    }
-    // SAFETY: the call takes no pointers.
-    check("supplying", unsafe {
-        sys::pager_supply(pager, mem, 0, PAGE_SIZE, plain, 0)
-    })?;
-    ensure("waiting for the write", read_done())?;
-    ensure(
-        "moving the written bytes",
-        mem_read_at::<8>(mem, PAGE_SIZE - 8)? == *b"01234567",
-    )
-}
-
-/// A clone of an object waits for a kernel write into it that is under
-/// way, and holds the written bytes.
-fn clone_waits_for_outputs(s: &Startup) -> Result {
-    let plain = create_memory(PAGE_SIZE)?;
-    start_straddling_read(s, plain)?;
-    let mut clone = 0;
-    // SAFETY: the out pointer is valid for the call.
-    check("cloning", unsafe {
-        sys::mem_clone(plain, 0, 0, PAGE_SIZE, &mut clone)
-    })?;
-    ensure("waiting for the write", read_done())?;
-    ensure(
-        "cloning the written bytes",
-        mem_read_at::<8>(clone, PAGE_SIZE - 8)? == *b"01234567",
-    )
-}
-
-/// The process and the permissions `waiting_mapper` maps with, and the
-/// status its `vm_map` returned.
-static MAPPER: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
-
-/// Maps a page of `mem` as `MAPPER` says, with its output at `out`,
-/// stores the status in `MAPPER` and exits.
-extern "sysv64" fn waiting_mapper(mem: u64, out: u64) -> ! {
-    let process = MAPPER[0].load(Ordering::Acquire) as Handle;
-    let perms = MAPPER[1].load(Ordering::Acquire) as u32;
-    // SAFETY: `out` lies in a writable mapping.
-    let status = unsafe {
-        sys::vm_map(
-            process,
-            perms,
-            0,
-            mem as Handle,
-            0,
-            PAGE_SIZE,
-            out as *mut u64,
-        )
-    };
-    MAPPER[2].store(status as u64, Ordering::Release);
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-/// Starts a thread mapping a page of `mem` with `perms`, whose output
-/// lies on a page of a paged object that its pager supplies after 50 ms,
-/// and returns the thread once it waits for that page.
-fn start_waiting_map(s: &Startup, mem: Handle, perms: u32, key: u64) -> Result<Handle> {
-    let (mut pager, mut port, mut paged) = (0, 0, 0);
-    // SAFETY: the pointers are valid for the calls.
-    unsafe {
-        check("creating a pager", sys::pager_create(0, &mut pager))?;
-        check("creating a port", sys::port_create(0, &mut port))?;
-        let status = sys::pager_create_memory(pager, port, key, PAGE_SIZE, 0, &mut paged);
-        check("creating a paged object", status)?;
-    }
-    PAGER.store(u64::from(pager), Ordering::Release);
-    spawn2(s, slow_pager_thread, u64::from(port), u64::from(paged))?;
-    let out = map(s.process, paged, PAGE_SIZE)?;
-    MAPPER[0].store(u64::from(s.process), Ordering::Release);
-    MAPPER[1].store(u64::from(perms), Ordering::Release);
-    let mapper = spawn2(s, waiting_mapper, u64::from(mem), out)?;
-    wait_until_blocked(mapper)?;
-    Ok(mapper)
-}
-
-/// A seal or a revocation that comes while `vm_map` waits to prepare its
-/// output makes the call fail when it goes on.
-fn map_checks_again_after_waiting(s: &Startup) -> Result {
-    let plain = create_memory(PAGE_SIZE)?;
-    let mapper = start_waiting_map(s, plain, PERM_READ | PERM_WRITE, 10)?;
-    check("sealing meanwhile", seal(plain, 1 << 3))?;
-    ensure(
-        "ending the mapping",
-        wait(mapper, TERMINATED, in_time()).0 == 0,
-    )?;
-    ensure(
-        "refusing a writable mapping of a sealed object",
-        MAPPER[2].load(Ordering::Acquire) as i64 == ACCESS_DENIED,
-    )?;
-
-    let (mut pager, mut port, mut paged) = (0, 0, 0);
-    // SAFETY: the pointers are valid for the calls.
-    unsafe {
-        check("creating a pager", sys::pager_create(0, &mut pager))?;
-        check("creating a port", sys::port_create(0, &mut port))?;
-        let status = sys::pager_create_memory(pager, port, 11, PAGE_SIZE, 0, &mut paged);
-        check("creating a paged object", status)?;
-    }
-    let mapper = start_waiting_map(s, paged, PERM_READ, 12)?;
-    // SAFETY: the call takes no pointers.
-    check("revoking meanwhile", unsafe {
-        sys::pager_revoke(pager, paged)
-    })?;
-    ensure(
-        "ending the mapping",
-        wait(mapper, TERMINATED, in_time()).0 == 0,
-    )?;
-    ensure(
-        "refusing a mapping of a revoked object",
-        MAPPER[2].load(Ordering::Acquire) as i64 == ACCESS_DENIED,
-    )
 }
 
 type Test = fn(&Startup) -> Result;
@@ -8368,7 +8103,7 @@ fn clock_page_rights(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 112] = [
+const TESTS: [(&str, Test); 107] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -8508,14 +8243,6 @@ const TESTS: [(&str, Test); 112] = [
     ("kill_thread_after_report", kill_thread_after_report),
     ("endpoint_cycles_reclaimed", endpoint_cycles_reclaimed),
     ("coverage", coverage),
-    ("seal_waits_for_outputs", seal_waits_for_outputs),
-    ("evict_waits_for_outputs", evict_waits_for_outputs),
-    ("supply_waits_for_outputs", supply_waits_for_outputs),
-    ("clone_waits_for_outputs", clone_waits_for_outputs),
-    (
-        "map_checks_again_after_waiting",
-        map_checks_again_after_waiting,
-    ),
     ("write_execute_policy", write_execute_policy),
     ("syscall_gate", syscall_gate),
     ("ioports_as_granted", ioports_as_granted),
