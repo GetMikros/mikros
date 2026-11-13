@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+[[bin]]
+name = "ahci"
+path = "src/driver.rs"
+
 [dependencies]
 mikros-ata = { path = "../../lib/ata" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
