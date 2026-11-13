@@ -990,6 +990,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "syscalls-smp"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-test",
+]
+
+[[package]]
 name = "syscalls-threads"
 version = "0.0.0"
 dependencies = [
