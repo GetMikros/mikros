@@ -974,6 +974,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "syscalls-pagers"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-test",
+]
+
+[[package]]
 name = "term-probe"
 version = "0.0.0"
 dependencies = [
