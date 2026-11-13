@@ -2,7 +2,7 @@
 //! registers until two reads in a row agree, each once an update is not
 //! in progress, and setting them with updates stopped.
 
-use mikros_cmos::{
+use crate::cmos::{
     DAY, Format, HOURS, MINUTES, MONTH, Registers, SECONDS, SET, STATUS_A, STATUS_B,
     UPDATE_IN_PROGRESS, WEEKDAY, YEAR,
 };
@@ -92,7 +92,7 @@ impl Clock {
             }
             let read = self.registers();
             if last == Some(read) {
-                let seconds = mikros_cmos::decode(&read, format).ok_or(Status::Io)?;
+                let seconds = crate::cmos::decode(&read, format).ok_or(Status::Io)?;
                 return seconds.checked_mul(NANOS_PER_SECOND).ok_or(Status::Io);
             }
             last = Some(read);
@@ -106,7 +106,7 @@ impl Clock {
     pub fn set(&self, time: i64) -> Result<(), Status> {
         let status_b = self.read(STATUS_B);
         let seconds = time.div_euclid(NANOS_PER_SECOND);
-        let registers = mikros_cmos::encode(seconds, Format::of(status_b), self.century.is_some())
+        let registers = crate::cmos::encode(seconds, Format::of(status_b), self.century.is_some())
             .ok_or(Status::OutOfRange)?;
         self.write(STATUS_B, status_b | SET);
         self.write(SECONDS, registers.seconds);

@@ -4,8 +4,6 @@
 //! a time in that format. Times are seconds since 1970-01-01T00:00:00 of
 //! whatever standard the clock keeps; nothing here converts them.
 
-#![no_std]
-
 #[cfg(test)]
 mod tests;
 
