@@ -211,7 +211,7 @@ fn generates_handle_checks_and_bindings() {
 
     table.calls[0].diag_only = true;
     let kernel = kernel_dispatch(&table, "x86_64");
-    assert_eq!(kernel.matches("#[cfg(feature = \"diag\")]").count(), 2);
+    assert_eq!(kernel.matches("#[cfg(feature = \"diag\")]").count(), 3);
     assert!(user_bindings_x86_64(&table).contains("#[cfg(mikros_diag)]\n#[inline]"));
     assert!(!fuzz_harness(&table, "x86_64").contains("obj_op"));
     assert!(!c::header(&table, "x86_64").contains("obj_op"));
@@ -220,7 +220,7 @@ fn generates_handle_checks_and_bindings() {
 
     table.calls[0].fuzz_only = true;
     let kernel = kernel_dispatch(&table, "x86_64");
-    assert_eq!(kernel.matches("#[cfg(feature = \"fuzz\")]").count(), 2);
+    assert_eq!(kernel.matches("#[cfg(feature = \"fuzz\")]").count(), 3);
     table.calls[0].arches.clear();
     assert!(!kernel_dispatch(&table, "x86_64").contains("OBJ_OP"));
     assert!(!user_bindings_x86_64(&table).contains("obj_op"));

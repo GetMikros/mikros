@@ -193,19 +193,40 @@ pub fn kernel_dispatch(table: &Table, arch: &str) -> String {
             call.number
         );
     }
+    // Each call decodes its arguments in a function of its own, so that
+    // `dispatch` does not reserve the locals of every call at once, which
+    // unoptimized builds do, on the stack below every handler.
     out.push_str(
         "\n/// Runs system call `number` with the argument registers `args` and\n\
          /// returns its status.\n\
          pub fn dispatch(number: u64, args: &[u64; 8]) -> i64 {\n    \
-         #[allow(unused_imports)]\n    \
-         use kernel_core::object::{ObjectType, rights};\n    \
-         use kernel_core::status::{Error, status};\n    \
          let _ = args;\n    \
          match number {\n",
     );
     for call in calls_for(table, arch) {
         let cfg = kernel_cfg(call).replace('\n', "\n        ");
-        let _ = writeln!(out, "        {cfg}{} => {{", constant(call));
+        let _ = writeln!(
+            out,
+            "        {cfg}{} => call_{}(args),",
+            constant(call),
+            call.name
+        );
+    }
+    out.push_str("        _ => kernel_core::status::Error::BadSyscall as i64,\n    }\n}\n");
+    for call in calls_for(table, arch) {
+        let _ = writeln!(
+            out,
+            "\n/// Decodes the arguments of `{}` and runs it.\n\
+             {}#[inline(never)]\n\
+             fn call_{}(args: &[u64; 8]) -> i64 {{\n    \
+             #[allow(unused_imports)]\n    \
+             use kernel_core::object::{{ObjectType, rights}};\n    \
+             use kernel_core::status::status;\n    \
+             let _ = args;",
+            call.name,
+            kernel_cfg(call),
+            call.name
+        );
         let mut names = Vec::new();
         for (i, arg) in call.args.iter().enumerate() {
             let raw = format!("args[{i}]");
@@ -254,12 +275,11 @@ pub fn kernel_dispatch(table: &Table, arch: &str) -> String {
         }
         let _ = writeln!(
             out,
-            "            status(handlers::{}({}))\n        }}",
+            "            status(handlers::{}({}))\n}}",
             call.name,
             names.join(", ")
         );
     }
-    out.push_str("        _ => Error::BadSyscall as i64,\n    }\n}\n");
     out
 }
 
