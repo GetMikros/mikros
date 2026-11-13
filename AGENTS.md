@@ -71,10 +71,8 @@ as `MIKSPEC-0012`, and a requirement ID such as `MIKSPEC-0012.R3`.
 
 ## Layout of user space
 
-The maintainers chose this layout for `user/` on 2026-11-13. One part of it
-is not done yet: third-party sources are still pinned in xtask and kept in
-the top-level `ports/` and in `user/runtime/libc/patches`, not in
-`user/ports/` (rule 13). Put new components where this layout says.
+The maintainers chose this layout for `user/` on 2026-11-13. Put new
+components where it says.
 
 | Path | Holds |
 |---|---|
@@ -122,10 +120,13 @@ the top-level `ports/` and in `user/runtime/libc/patches`, not in
     `user/Cargo.toml`, and is built through `cargo xtask`, which passes the
     build-std flags. Do not add another workspace or a `.cargo/config.toml`
     that sets build-std.
-13. Third-party code is pinned in its `user/ports/<name>/port.toml`, with
-    its changes as patch files or rewrite rules there (MIKSPEC-0062.R7). Do
-    not add download URLs or checksums elsewhere in xtask. The host tools
-    LLVM, Meson and CMake stay in `tools/`.
+13. Third-party code of user space is pinned in its
+    `user/ports/<name>/port.toml`, with its changes as patch files or
+    rewrite rules there (MIKSPEC-0062.R7); `xtask/src/ports.rs` describes
+    the file. Do not add its download URLs or checksums to xtask's sources.
+    What only the build host uses stays pinned in xtask: the host tools
+    LLVM, Meson and CMake, with their patches in `tools/`, the OVMF
+    firmware, and the Unicode case-folding data.
 14. Where xtask installs a component in the system image, and from which
     manifest, comes from its `[package.metadata.mikros]`. Do not add
     hard-coded install lists. The test images' lists in xtask/src/build.rs

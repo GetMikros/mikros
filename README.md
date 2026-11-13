@@ -32,6 +32,7 @@ repository. Code and commits refer to them by ID, such as `MIKSPEC-0012.R3`.
 | `user/drivers/` | Device and file system drivers, each with its `driver.yaml` |
 | `user/lib/` | Libraries that two or more packages, or xtask, use |
 | `user/runtime/` | C library, Rust runtime, and the patches of the standard library port |
+| `user/ports/` | Third-party projects: each one's `port.toml` pin and Mikros patches |
 | `user/tests/` | The test init and the programs the integration tests run |
 
 Folders appear as work on them starts.
