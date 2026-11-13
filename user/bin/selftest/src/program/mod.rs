@@ -1,7 +1,8 @@
-//! Running the tests of `/usr/bin/tests/` one at a time, each with a
-//! timeout, writing a line for each and a summary, and, with
-//! `--poweroff`, then powering the machine off through the service
-//! manager's `mikros.service.Control`.
+//! Measuring how fast the machine is, running the tests of
+//! `/usr/bin/tests/` one at a time, each with a timeout scaled to that
+//! speed, writing a line for each and a summary, and, with `--poweroff`,
+//! then powering the machine off through the service manager's
+//! `mikros.service.Control`.
 
 use crate::report::{self, Ending};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
@@ -17,8 +18,18 @@ use std::time::{Duration, Instant};
 
 /// The directory of the tests.
 const TESTS: &str = "/usr/bin/tests";
-/// How long a test may run.
-const TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the calibration workload takes at best on the reference
+/// machine, a debug build under KVM, where it took 61 to 68 ms. It took
+/// 3 s on QEMU's emulated processor, and 0.21 s in a fuzz build.
+const REFERENCE: Duration = Duration::from_millis(60);
+/// How many times the workload runs, of which the fastest counts.
+const ROUNDS: usize = 5;
+/// The workload: system calls, pages touched for the first time, and
+/// round trips between two threads.
+const CALLS: usize = 20_000;
+const PAGES: usize = 256;
+const TRIPS: usize = 1_000;
+const PAGE: usize = 4096;
 /// How often a running test is looked at.
 const POLL: Duration = Duration::from_millis(50);
 /// The status that a test which could not be started counts as, which
@@ -32,7 +43,11 @@ pub fn main() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let poweroff = args.iter().any(|a| a == "--poweroff");
     let status = match report::options(&args) {
-        Ok(options) => run_tests(&options.names),
+        Ok(options) => {
+            let factor = options.factor.unwrap_or_else(measure);
+            say(&report::factor_line(factor));
+            run_tests(&options.names, report::timeout(factor))
+        }
         Err(e) => {
             eprintln!("selftest: {e}");
             1
@@ -46,9 +61,57 @@ pub fn main() -> i32 {
     status
 }
 
-/// Runs the tests `names`, every test when there are none, and returns
-/// selftest's exit status.
-fn run_tests(names: &[String]) -> i32 {
+/// The machine's speed factor: how much longer than on the reference
+/// machine the calibration workload takes at best.
+fn measure() -> f64 {
+    let fastest = (0..ROUNDS)
+        .map(|_| workload())
+        .min()
+        .unwrap_or(Duration::MAX);
+    report::factor(fastest, REFERENCE)
+}
+
+/// How long one run of the calibration workload takes.
+fn workload() -> Duration {
+    let start = Instant::now();
+    let mut event = 0;
+    // SAFETY: the out pointer is valid for the call.
+    if unsafe { sys::event_create(0, &mut event) } == mikros_rt::OK {
+        for _ in 0..CALLS {
+            // SAFETY: the call takes no pointers.
+            unsafe { sys::object_signal(event, 0, 0) };
+        }
+        // SAFETY: the call takes no pointers.
+        unsafe { sys::handle_close(event) };
+    }
+    let mut pages = vec![0u8; PAGES * PAGE];
+    for page in pages.chunks_mut(PAGE) {
+        page[0] = 1;
+    }
+    std::hint::black_box(&pages);
+    drop(pages);
+    let (to_echo, echo_in) = std::sync::mpsc::channel::<usize>();
+    let (echo_out, back) = std::sync::mpsc::channel::<usize>();
+    let echo = std::thread::spawn(move || {
+        for n in echo_in {
+            if echo_out.send(n).is_err() {
+                break;
+            }
+        }
+    });
+    for n in 0..TRIPS {
+        if to_echo.send(n).is_err() || back.recv().is_err() {
+            break;
+        }
+    }
+    drop(to_echo);
+    let _ = echo.join();
+    start.elapsed()
+}
+
+/// Runs the tests `names`, every test when there are none, each for at
+/// most `timeout`, and returns selftest's exit status.
+fn run_tests(names: &[String], timeout: Duration) -> i32 {
     let available = match tests() {
         Ok(available) => available,
         Err(e) => {
@@ -65,7 +128,7 @@ fn run_tests(names: &[String]) -> i32 {
     };
     let mut endings = Vec::new();
     for name in &chosen {
-        let ending = run(&Path::new(TESTS).join(name));
+        let ending = run(&Path::new(TESTS).join(name), timeout);
         say(&report::line(name, ending));
         endings.push(ending);
     }
@@ -95,8 +158,8 @@ fn tests() -> std::io::Result<Vec<String>> {
     Ok(names)
 }
 
-/// Runs the test at `path` until it ends or its time is up.
-fn run(path: &Path) -> Ending {
+/// Runs the test at `path` until it ends or `timeout` is up.
+fn run(path: &Path, timeout: Duration) -> Ending {
     let mut child = match Command::new(path).spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -108,7 +171,7 @@ fn run(path: &Path) -> Ending {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return ending(status),
-            Ok(None) if start.elapsed() >= TIMEOUT => {
+            Ok(None) if start.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Ending::Timeout;
