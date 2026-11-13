@@ -1,6 +1,0 @@
-[package]
-name = "mikros-ata"
-version.workspace = true
-edition.workspace = true
-license = "MPL-2.0"
-publish = false

@@ -3,10 +3,6 @@
 //!
 //! Nothing here touches hardware, so that the host tests can check it.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::string::String;
 
 #[cfg(test)]

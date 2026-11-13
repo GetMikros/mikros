@@ -1,13 +1,13 @@
 //! A SATA disk on a port: identifying it, and its reads, writes,
 //! flushes and discards.
 
+use crate::ata::{
+    Ata, DATA_SET_MANAGEMENT, DEVICE_LBA, FLUSH_CACHE_EXT, IDENTIFY_DEVICE, Identity, read_write,
+};
 use crate::port::{PRD_MAX, Port};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use mikros_ata::{
-    Ata, DATA_SET_MANAGEMENT, DEVICE_LBA, FLUSH_CACHE_EXT, IDENTIFY_DEVICE, Identity, read_write,
-};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockFlags, BlockInfo};

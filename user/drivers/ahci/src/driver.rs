@@ -8,15 +8,8 @@
 //! class `storage`. `ResetChild` fails with `NOT_SUPPORTED`. `Stop`
 //! flushes the disks with a volatile write cache and stops the ports.
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-mod disk;
-mod hba;
-mod port;
-
+use crate::disk::{Disk, Memory};
+use crate::port::{Event, Port};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
@@ -25,7 +18,6 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
-use disk::{Disk, Memory};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -38,7 +30,6 @@ use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::Provider;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 use mikros_storage::{Mmio, PAGE, PciBus};
-use port::{Event, Port};
 
 mikros_rt::raw_main!(main);
 
@@ -213,11 +204,11 @@ async fn start(
     let mmio = Rc::new(Mmio::map(process, &bar.resource, bar.base, bar.size)?);
     bus(device.set_bus_master(true).await)?;
     let bti = bus(device.get_bti().await)?.bti;
-    hba::take_over(&mmio, reactor).await;
-    hba::reset(&mmio, reactor)
+    crate::hba::take_over(&mmio, reactor).await;
+    crate::hba::reset(&mmio, reactor)
         .await
         .map_err(|_| Status::Internal)?;
-    let caps = hba::capabilities(&mmio);
+    let caps = crate::hba::capabilities(&mmio);
     let memory = Rc::new(Memory {
         dma,
         bti,
@@ -225,7 +216,7 @@ async fn start(
         below_4g: !caps.addressing_64,
     });
     let mut ports = Vec::new();
-    for number in hba::ports(&mmio) {
+    for number in crate::hba::ports(&mmio) {
         let port = Port::new(
             number,
             mmio.clone(),
@@ -240,7 +231,7 @@ async fn start(
             .map_err(|_| Status::Internal)?;
         ports.push(port);
     }
-    port::wait_for_links(&ports, reactor).await;
+    crate::port::wait_for_links(&ports, reactor).await;
     for port in &ports {
         // A port that cannot start has no disk to identify.
         let _ = port.start(reactor).await;
@@ -260,11 +251,11 @@ async fn start(
         let spin_up = caps.staggered_spin_up;
         spawner.spawn(async move { port.watch_timeouts(&reactor, spin_up).await });
     }
-    hba::enable_interrupts(&mmio);
+    crate::hba::enable_interrupts(&mmio);
     let page = memory.contiguous(PAGE)?;
     let mut disks = Vec::new();
     for port in ports.iter().filter(|p| p.has_disk()) {
-        let Ok(identity) = disk::identify(port, &page).await else {
+        let Ok(identity) = crate::disk::identify(port, &page).await else {
             continue;
         };
         if !identity.lba48 {
@@ -331,7 +322,7 @@ async fn interrupts(
                 if matches!(event, Event::None) {
                     continue;
                 }
-                mmio.write32(hba::IS, 1 << port.number);
+                mmio.write32(crate::hba::IS, 1 << port.number);
                 if matches!(event, Event::Error) {
                     let (port, reactor) = (port.clone(), reactor.clone());
                     tasks.spawn(async move { port.recover(&reactor, spin_up).await });

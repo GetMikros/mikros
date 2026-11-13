@@ -2,6 +2,8 @@
 //! it up, issuing commands in its slots, taking their completions, and
 //! recovering from errors with COMRESET.
 
+use crate::ata::Ata;
+use crate::ata::timeouts::{Action, Timeouts};
 use crate::hba::{TimedOut, wait};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -9,8 +11,6 @@ use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::sync::atomic::{Ordering, fence};
 use core::task::{Poll, Waker};
-use mikros_ata::Ata;
-use mikros_ata::timeouts::{Action, Timeouts};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -384,7 +384,7 @@ impl Port {
 
     /// Watches the port's outstanding commands, once every
     /// `WATCH_EVERY`, for one that has not completed within
-    /// `mikros_ata::timeouts::LIMIT` (MIKSPEC-0048.R12): it then resets the
+    /// `crate::ata::timeouts::LIMIT` (MIKSPEC-0048.R12): it then resets the
     /// port and issues them again, or, once the same command has taken that
     /// long three times, fails them all and resets the port.
     pub async fn watch_timeouts(&self, reactor: &Reactor, spin_up: bool) {
