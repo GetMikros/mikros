@@ -53,10 +53,12 @@ impl Kind {
 
     /// The flags that user-space programs of this kind are built with on
     /// top of their target's: the diagnostic build keeps frame pointers
-    /// and sets the `mikros_diag` cfg, which turns on its records.
+    /// and sets the `mikros_diag` cfg, which turns on its records, and the
+    /// fuzz build sets `mikros_fuzz`, by which tests allow more time.
     pub fn user_rustflags(self) -> &'static [&'static str] {
         match self {
             Kind::Diag => &["-Cforce-frame-pointers=yes", "--cfg=mikros_diag"],
+            Kind::Fuzz => &["--cfg=mikros_fuzz"],
             _ => &[],
         }
     }

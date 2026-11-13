@@ -1,12 +1,22 @@
 //! Support for the integration tests: calling the kernel with error
-//! results, finding programs in the boot image, starting them, and
-//! reporting the result to QEMU.
+//! results, the clock, waits, memory and threads that the kernel's tests
+//! and the system tests share, finding programs in the boot image,
+//! starting them, reporting the result to QEMU, and running a system
+//! test's checks.
 
 #![no_std]
 
+extern crate alloc;
+
 use mikros_rt::sys::{self, Handle, Status};
 
+mod context;
 pub mod elf;
+mod harness;
+mod helpers;
+pub use context::{Context, Own};
+pub use harness::{Check, run};
+pub use helpers::*;
 pub use mikros_ustar as ustar;
 
 /// The `isa-debug-exit` port the test boot image is run with.

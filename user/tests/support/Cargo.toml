@@ -8,3 +8,7 @@ publish = false
 [dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-ustar = { path = "../../lib/ustar" }
+
+# A fuzz build sets `mikros_fuzz`.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mikros_fuzz)"] }
