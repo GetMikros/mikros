@@ -4,11 +4,11 @@
 //! of its own, in the terminal's foreground unless it runs in the
 //! background.
 
-use crate::sys::{self, Change};
-use mikros_msh::ast::RedirectionKind;
-use mikros_msh::eval::glob::Folders;
-use mikros_msh::eval::{Input, Program, Ran, Run, Stream, System};
-use mikros_msh::jobs::{Ended, Jobs, Lookup, State};
+use crate::ast::RedirectionKind;
+use crate::eval::glob::Folders;
+use crate::eval::{Input, Program, Ran, Run, Stream, System};
+use crate::jobs::{Ended, Jobs, Lookup, State};
+use crate::program::sys::{self, Change};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};

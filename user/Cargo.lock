@@ -579,13 +579,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mikros-msh"
-version = "0.0.0"
-dependencies = [
- "regex",
-]
-
-[[package]]
 name = "mikros-rt"
 version = "0.0.0"
 dependencies = [
@@ -638,7 +631,7 @@ version = "0.0.0"
 name = "msh"
 version = "0.0.0"
 dependencies = [
- "mikros-msh",
+ "regex",
 ]
 
 [[package]]

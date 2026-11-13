@@ -72,18 +72,14 @@ impl Editor {
         &self.line
     }
 
-    pub fn line_mut(&mut self) -> &mut Line {
-        &mut self.line
-    }
-
-    pub fn history(&self) -> &[String] {
-        &self.history
-    }
-
+    /// The search in progress, which the tests check.
+    #[cfg(test)]
     pub fn search(&self) -> Option<&Search> {
         self.search.as_ref()
     }
 
+    /// The menu shown, which the tests check.
+    #[cfg(test)]
     pub fn menu(&self) -> Option<&Menu> {
         self.menu.as_ref()
     }

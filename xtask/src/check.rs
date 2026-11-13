@@ -347,7 +347,7 @@ pub fn run(args: &Args) -> Result<()> {
 
     // User programs are only compiled for the user target, those with std
     // apart from those without. The test init has code that only fuzz
-    // builds compile. msh's library uses std.
+    // builds compile.
     let with_std: Vec<String> = crate::components::programs()?
         .into_iter()
         .filter(|(_, runtime)| *runtime == crate::components::Runtime::Std)
@@ -355,7 +355,7 @@ pub fn run(args: &Args) -> Result<()> {
         .collect();
     let target = crate::workspace_root().join(crate::build::USER_TARGET);
     let target = target.to_str().context("the workspace path is not UTF-8")?;
-    let mut without_std = vec!["clippy", "--workspace", "--exclude", "mikros-msh"];
+    let mut without_std = vec!["clippy", "--workspace"];
     for name in &with_std {
         without_std.extend(["--exclude", name.as_str()]);
     }

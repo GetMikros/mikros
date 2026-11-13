@@ -3,21 +3,21 @@
 //! `~/.mshrc` when that exists, then reads lines at a prompt, keeping
 //! them in `~/.msh_history`. Otherwise it runs a script: the file named
 //! by its first argument, the text after `-c`, or its standard input.
-//! The language is that of the `mikros-msh` library; this program gives
-//! the library its system and reports the errors that nothing caught.
+//! The language is that of the rest of the crate; this module gives it
+//! its system and reports the errors that nothing caught.
 
 mod os;
 mod sys;
 mod term;
 
-use mikros_msh::edit::editor::{Editor, Outcome};
-use mikros_msh::edit::history;
-use mikros_msh::edit::keys::Decoder;
-use mikros_msh::edit::render::{View, draw, finish};
-use mikros_msh::eval::{Failure, Flow, Shell, Stream, System};
-use mikros_msh::parse::parse;
-use mikros_msh::prompt::{self, Context};
-use mikros_msh::value::{Value, scalar_text};
+use crate::edit::editor::{Editor, Outcome};
+use crate::edit::history;
+use crate::edit::keys::Decoder;
+use crate::edit::render::{View, draw, finish};
+use crate::eval::{Failure, Flow, Shell, Stream, System};
+use crate::parse::parse;
+use crate::prompt::{self, Context};
+use crate::value::{Value, scalar_text};
 use os::Os;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Read, Write};
@@ -26,7 +26,7 @@ use term::Terminal;
 /// What msh prints before a line that continues the one before it.
 const CONTINUATION: &str = "> ";
 
-fn main() {
+pub fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     std::process::exit(start(&args) as i32);
 }
