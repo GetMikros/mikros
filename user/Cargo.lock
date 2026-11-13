@@ -892,6 +892,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "services-tmpfs"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-test",
+]
+
+[[package]]
 name = "session-shell"
 version = "0.0.0"
 dependencies = [
