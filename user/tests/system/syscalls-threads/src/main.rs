@@ -1,5 +1,6 @@
 //! The kernel's threads, as a system test: starting threads of the
-//! test's own process, their FS and GS bases, the thread list of a
+//! test's own process, their FS and GS bases, the state a new thread
+//! starts with, registers kept across preemption, the thread list of a
 //! process, and futexes.
 
 #![no_std]
@@ -22,6 +23,8 @@ fn main(m: &Managed) -> i64 {
             ("user_bases_set_and_kept", user_bases_set_and_kept),
             ("thread_lists", thread_lists),
             ("futexes", futexes),
+            ("new_thread_starts_clean", new_thread_starts_clean),
+            ("registers_survive_preemption", registers_survive_preemption),
         ],
     )
 }
@@ -240,4 +243,296 @@ fn user_bases_set_and_kept(_: &Own) -> Result {
     ensure("keeping the bases when refusing", user_bases() == wanted)?;
     set(0, before.0)?;
     set(1, before.1)
+}
+
+/// The values `register_keeper` holds in RAX to R15, without RSP, in
+/// that order, and in the YMM registers.
+const GENERAL_PATTERN: [u64; 15] = {
+    let mut p = [0; 15];
+    let mut k = 0;
+    while k < 15 {
+        p[k] = (k as u64 + 1) * 0x0101_0101_0101_0101;
+        k += 1;
+    }
+    p
+};
+
+static YMM_PATTERN: [[u64; 4]; 16] = {
+    let mut p = [[0; 4]; 16];
+    let mut n = 0;
+    while n < 16 {
+        let mut lane = 0;
+        while lane < 4 {
+            p[n][lane] = 0xA5A5_0000_0000_0000 | (n as u64) << 16 | lane as u64;
+            lane += 1;
+        }
+        n += 1;
+    }
+    p
+};
+
+/// A new thread starts with its arguments in RDI and RSI, its stack in
+/// RSP, every other general-purpose register, the FS and GS bases and
+/// every vector register zero, RFLAGS 0x202, the x87 control word 0x037F
+/// and MXCSR 0x1F80.
+fn new_thread_starts_clean(s: &Own) -> Result {
+    let (a, b) = (0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
+    let thread = spawn2(s, start_probe, a, b)?;
+    ensure(
+        "ending the probe",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    // SAFETY: the probe wrote the state and ended.
+    let (state, ymm) = unsafe {
+        (
+            core::ptr::read_volatile(&raw const START_STATE),
+            core::ptr::read_volatile(&raw const START_YMM),
+        )
+    };
+    let (rsi, rdi, rsp) = (state[4], state[5], state[7]);
+    ensure("passing the arguments", rdi == a && rsi == b)?;
+    ensure("aligning the stack as after a call", rsp % 16 == 8)?;
+    let others = state[..16]
+        .iter()
+        .enumerate()
+        .all(|(i, &v)| matches!(i, 4 | 5 | 7) || v == 0);
+    ensure("clearing the other registers", others)?;
+    ensure("starting with RFLAGS 0x202", state[16] == 0x202)?;
+    ensure("clearing the bases", state[17] == 0 && state[18] == 0)?;
+    ensure(
+        "starting the x87 unit and SSE in their initial state",
+        state[19] == 0x037F && state[20] == 0x1F80,
+    )?;
+    ensure("clearing the vector registers", ymm == [[0; 4]; 16])
+}
+
+/// A thread switched out by preemption gets every general-purpose and
+/// vector register back as it was, although another thread changed them
+/// all meanwhile.
+fn registers_survive_preemption(s: &Own) -> Result {
+    KEEPER_READY.store(0, Ordering::Release);
+    CLOBBERER_RAN.store(0, Ordering::Release);
+    let keeper = spawn2(s, register_keeper, 0, 0)?;
+    // This thread runs again only once the keeper, holding its patterns,
+    // has been switched out.
+    let deadline = in_time();
+    while KEEPER_READY.load(Ordering::Acquire) == 0 {
+        ensure("starting the keeper", now() < deadline)?;
+        sleep_ms(1);
+    }
+    let clobberer = spawn2(s, register_clobberer, 0, 0)?;
+    for thread in [keeper, clobberer] {
+        ensure(
+            "ending the threads",
+            wait(thread, TERMINATED, in_time()).0 == 0,
+        )?;
+    }
+    // SAFETY: the keeper wrote what it found and ended.
+    let (kept, kept_ymm) = unsafe {
+        (
+            core::ptr::read_volatile(&raw const KEPT),
+            core::ptr::read_volatile(&raw const KEPT_YMM),
+        )
+    };
+    ensure("keeping the general registers", kept == GENERAL_PATTERN)?;
+    ensure("keeping the vector registers", kept_ymm == YMM_PATTERN)
+}
+
+/// What `start_probe` finds at its first instruction: RAX to R15 in the
+/// order of the `GENERAL` layout, RFLAGS, the FS and GS bases, the x87
+/// control word and MXCSR, and the 16 YMM registers.
+static mut START_STATE: [u64; 21] = [0; 21];
+static mut START_YMM: [[u64; 4]; 16] = [[0; 4]; 16];
+
+/// Set by `register_keeper` once its registers hold the patterns, and by
+/// `register_clobberer` once it ran; and what `register_keeper` found in
+/// its registers afterwards.
+static KEEPER_READY: AtomicU64 = AtomicU64::new(0);
+static CLOBBERER_RAN: AtomicU64 = AtomicU64::new(0);
+static mut KEPT: [u64; 15] = [0; 15];
+static mut KEPT_YMM: [[u64; 4]; 16] = [[0; 4]; 16];
+
+// `start_probe` records the state a thread starts with before any
+// instruction changes it. `register_keeper` fills every general and
+// vector register with patterns, spins until `register_clobberer` has
+// run with other values in them, and records what it finds. All three
+// then end their thread.
+core::arch::global_asm!(
+    ".global start_probe",
+    "start_probe:",
+    "mov [rip + {state}], rax",
+    "mov [rip + {state} + 8], rbx",
+    "mov [rip + {state} + 16], rcx",
+    "mov [rip + {state} + 24], rdx",
+    "mov [rip + {state} + 32], rsi",
+    "mov [rip + {state} + 40], rdi",
+    "mov [rip + {state} + 48], rbp",
+    "mov [rip + {state} + 56], rsp",
+    "mov [rip + {state} + 64], r8",
+    "mov [rip + {state} + 72], r9",
+    "mov [rip + {state} + 80], r10",
+    "mov [rip + {state} + 88], r11",
+    "mov [rip + {state} + 96], r12",
+    "mov [rip + {state} + 104], r13",
+    "mov [rip + {state} + 112], r14",
+    "mov [rip + {state} + 120], r15",
+    "pushfq",
+    "pop qword ptr [rip + {state} + 128]",
+    "rdfsbase rax",
+    "mov [rip + {state} + 136], rax",
+    "rdgsbase rax",
+    "mov [rip + {state} + 144], rax",
+    "fnstcw word ptr [rip + {state} + 152]",
+    "stmxcsr dword ptr [rip + {state} + 160]",
+    "vmovdqu [rip + {start_ymm}], ymm0",
+    "vmovdqu [rip + {start_ymm} + 32], ymm1",
+    "vmovdqu [rip + {start_ymm} + 64], ymm2",
+    "vmovdqu [rip + {start_ymm} + 96], ymm3",
+    "vmovdqu [rip + {start_ymm} + 128], ymm4",
+    "vmovdqu [rip + {start_ymm} + 160], ymm5",
+    "vmovdqu [rip + {start_ymm} + 192], ymm6",
+    "vmovdqu [rip + {start_ymm} + 224], ymm7",
+    "vmovdqu [rip + {start_ymm} + 256], ymm8",
+    "vmovdqu [rip + {start_ymm} + 288], ymm9",
+    "vmovdqu [rip + {start_ymm} + 320], ymm10",
+    "vmovdqu [rip + {start_ymm} + 352], ymm11",
+    "vmovdqu [rip + {start_ymm} + 384], ymm12",
+    "vmovdqu [rip + {start_ymm} + 416], ymm13",
+    "vmovdqu [rip + {start_ymm} + 448], ymm14",
+    "vmovdqu [rip + {start_ymm} + 480], ymm15",
+    "jmp {done}",
+    ".global register_keeper",
+    "register_keeper:",
+    "mov rax, {g0}",
+    "mov rbx, {g1}",
+    "mov rcx, {g2}",
+    "mov rdx, {g3}",
+    "mov rsi, {g4}",
+    "mov rdi, {g5}",
+    "mov rbp, {g6}",
+    "mov r8, {g7}",
+    "mov r9, {g8}",
+    "mov r10, {g9}",
+    "mov r11, {g10}",
+    "mov r12, {g11}",
+    "mov r13, {g12}",
+    "mov r14, {g13}",
+    "mov r15, {g14}",
+    "vmovdqu ymm0, [rip + {pattern}]",
+    "vmovdqu ymm1, [rip + {pattern} + 32]",
+    "vmovdqu ymm2, [rip + {pattern} + 64]",
+    "vmovdqu ymm3, [rip + {pattern} + 96]",
+    "vmovdqu ymm4, [rip + {pattern} + 128]",
+    "vmovdqu ymm5, [rip + {pattern} + 160]",
+    "vmovdqu ymm6, [rip + {pattern} + 192]",
+    "vmovdqu ymm7, [rip + {pattern} + 224]",
+    "vmovdqu ymm8, [rip + {pattern} + 256]",
+    "vmovdqu ymm9, [rip + {pattern} + 288]",
+    "vmovdqu ymm10, [rip + {pattern} + 320]",
+    "vmovdqu ymm11, [rip + {pattern} + 352]",
+    "vmovdqu ymm12, [rip + {pattern} + 384]",
+    "vmovdqu ymm13, [rip + {pattern} + 416]",
+    "vmovdqu ymm14, [rip + {pattern} + 448]",
+    "vmovdqu ymm15, [rip + {pattern} + 480]",
+    "mov qword ptr [rip + {ready}], 1",
+    "2:",
+    "pause",
+    "cmp qword ptr [rip + {ran}], 0",
+    "je 2b",
+    "mov [rip + {kept}], rax",
+    "mov [rip + {kept} + 8], rbx",
+    "mov [rip + {kept} + 16], rcx",
+    "mov [rip + {kept} + 24], rdx",
+    "mov [rip + {kept} + 32], rsi",
+    "mov [rip + {kept} + 40], rdi",
+    "mov [rip + {kept} + 48], rbp",
+    "mov [rip + {kept} + 56], r8",
+    "mov [rip + {kept} + 64], r9",
+    "mov [rip + {kept} + 72], r10",
+    "mov [rip + {kept} + 80], r11",
+    "mov [rip + {kept} + 88], r12",
+    "mov [rip + {kept} + 96], r13",
+    "mov [rip + {kept} + 104], r14",
+    "mov [rip + {kept} + 112], r15",
+    "vmovdqu [rip + {kept_ymm}], ymm0",
+    "vmovdqu [rip + {kept_ymm} + 32], ymm1",
+    "vmovdqu [rip + {kept_ymm} + 64], ymm2",
+    "vmovdqu [rip + {kept_ymm} + 96], ymm3",
+    "vmovdqu [rip + {kept_ymm} + 128], ymm4",
+    "vmovdqu [rip + {kept_ymm} + 160], ymm5",
+    "vmovdqu [rip + {kept_ymm} + 192], ymm6",
+    "vmovdqu [rip + {kept_ymm} + 224], ymm7",
+    "vmovdqu [rip + {kept_ymm} + 256], ymm8",
+    "vmovdqu [rip + {kept_ymm} + 288], ymm9",
+    "vmovdqu [rip + {kept_ymm} + 320], ymm10",
+    "vmovdqu [rip + {kept_ymm} + 352], ymm11",
+    "vmovdqu [rip + {kept_ymm} + 384], ymm12",
+    "vmovdqu [rip + {kept_ymm} + 416], ymm13",
+    "vmovdqu [rip + {kept_ymm} + 448], ymm14",
+    "vmovdqu [rip + {kept_ymm} + 480], ymm15",
+    "jmp {done}",
+    ".global register_clobberer",
+    "register_clobberer:",
+    "mov rax, -1",
+    "mov rbx, rax",
+    "mov rcx, rax",
+    "mov rdx, rax",
+    "mov rsi, rax",
+    "mov rdi, rax",
+    "mov rbp, rax",
+    "mov r8, rax",
+    "mov r9, rax",
+    "mov r10, rax",
+    "mov r11, rax",
+    "mov r12, rax",
+    "mov r13, rax",
+    "mov r14, rax",
+    "mov r15, rax",
+    "vpcmpeqd ymm0, ymm0, ymm0",
+    "vmovdqa ymm1, ymm0",
+    "vmovdqa ymm2, ymm0",
+    "vmovdqa ymm3, ymm0",
+    "vmovdqa ymm4, ymm0",
+    "vmovdqa ymm5, ymm0",
+    "vmovdqa ymm6, ymm0",
+    "vmovdqa ymm7, ymm0",
+    "vmovdqa ymm8, ymm0",
+    "vmovdqa ymm9, ymm0",
+    "vmovdqa ymm10, ymm0",
+    "vmovdqa ymm11, ymm0",
+    "vmovdqa ymm12, ymm0",
+    "vmovdqa ymm13, ymm0",
+    "vmovdqa ymm14, ymm0",
+    "vmovdqa ymm15, ymm0",
+    "mov qword ptr [rip + {ran}], 1",
+    "jmp {done}",
+    state = sym START_STATE,
+    start_ymm = sym START_YMM,
+    pattern = sym YMM_PATTERN,
+    ready = sym KEEPER_READY,
+    ran = sym CLOBBERER_RAN,
+    kept = sym KEPT,
+    kept_ymm = sym KEPT_YMM,
+    done = sym end_asm_thread,
+    g0 = const GENERAL_PATTERN[0],
+    g1 = const GENERAL_PATTERN[1],
+    g2 = const GENERAL_PATTERN[2],
+    g3 = const GENERAL_PATTERN[3],
+    g4 = const GENERAL_PATTERN[4],
+    g5 = const GENERAL_PATTERN[5],
+    g6 = const GENERAL_PATTERN[6],
+    g7 = const GENERAL_PATTERN[7],
+    g8 = const GENERAL_PATTERN[8],
+    g9 = const GENERAL_PATTERN[9],
+    g10 = const GENERAL_PATTERN[10],
+    g11 = const GENERAL_PATTERN[11],
+    g12 = const GENERAL_PATTERN[12],
+    g13 = const GENERAL_PATTERN[13],
+    g14 = const GENERAL_PATTERN[14],
+);
+
+unsafe extern "sysv64" {
+    safe fn start_probe(a: u64, b: u64) -> !;
+    safe fn register_keeper(a: u64, b: u64) -> !;
+    safe fn register_clobberer(a: u64, b: u64) -> !;
 }
