@@ -8,7 +8,8 @@
 //!   manifest in `usr/lib/services/`; a `driver` goes to
 //!   `usr/lib/drivers/<name>/<name>` with its `driver.yaml`.
 //! - `image`: `boot` for the boot image, which the system image holds
-//!   as well, or `system` for the system image only.
+//!   as well, `system` for the system image only, or `tests` for test
+//!   images only.
 //! - `manifest`: the file name of a service's or program's manifest in
 //!   its package. A `<stem>.diag.yaml` beside it replaces it in the
 //!   diagnostic build.
@@ -39,6 +40,8 @@ pub enum Image {
     Boot,
     /// Only the system image.
     System,
+    /// Only test images.
+    Tests,
 }
 
 /// The library a program is built on.
@@ -210,6 +213,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
         let image = match text("image")?.as_deref() {
             Some("boot") => Image::Boot,
             Some("system") => Image::System,
+            Some("tests") => Image::Tests,
             Some(other) => bail!("{name}: unknown image `{other}`"),
             None => bail!("{name}: a component names its image"),
         };

@@ -183,10 +183,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     let (boot_image, system_image) = match boot {
         BootImage::System => {
             let components = crate::components::all()?;
+            // What only test images hold is not built for the system.
             let built = |runtime| -> Vec<String> {
                 components
                     .iter()
-                    .filter(|c| c.runtime == runtime && c.in_kind(kind))
+                    .filter(|c| c.runtime == runtime && c.in_kind(kind) && c.image != Image::Tests)
                     .map(|c| c.name.clone())
                     .collect()
             };

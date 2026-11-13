@@ -1,0 +1,9 @@
+# The program manifest of selftest, installed as
+# usr/lib/programs/system.selftest.yaml in test images only. The service
+# manager starts it for an automated run, after which it powers the
+# machine off; run by hand, it keeps the identity of whoever ran it.
+app_id: system.selftest
+binary: /usr/bin/selftest
+spawned_by:
+  - system.servicemgr
+permissions: [power.control]
