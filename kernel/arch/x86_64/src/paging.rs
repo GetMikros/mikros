@@ -137,8 +137,12 @@ impl<'t, T: Tables> Mapper<'t, T> {
     /// top-level entries 256 to 511 of the hierarchy at `kernel_root`.
     pub fn user(tables: &'t mut T, kernel_root: u64) -> Result<Self, Error> {
         let root = Self::new_table(tables)?;
-        let kernel = *tables.table(kernel_root);
-        tables.table(root)[256..].copy_from_slice(&kernel[256..]);
+        // Entry by entry rather than through a copy of the whole table,
+        // which takes a page of stack in unoptimized builds.
+        for i in 256..512 {
+            let entry = tables.table(kernel_root)[i];
+            tables.table(root)[i] = entry;
+        }
         Ok(Mapper {
             tables,
             root,
