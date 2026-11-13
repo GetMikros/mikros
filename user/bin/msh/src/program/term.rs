@@ -118,6 +118,38 @@ pub fn input_within(ms: i32) -> bool {
     unsafe { poll(&mut fd, 1, ms) > 0 }
 }
 
+/// What has something to read first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Ready {
+    /// Standard input, which comes first when both have.
+    Input,
+    /// The other descriptor waited for.
+    Other,
+}
+
+/// Waits until standard input or the descriptor `other` has something
+/// to read, and says which.
+pub fn wait_for_input_or(other: c_int) -> Ready {
+    let mut fds = [
+        Pollfd {
+            fd: 0,
+            events: POLLIN,
+            revents: 0,
+        },
+        Pollfd {
+            fd: other,
+            events: POLLIN,
+            revents: 0,
+        },
+    ];
+    // SAFETY: the pointer is valid for the two `Pollfd`s.
+    let ready = unsafe { poll(fds.as_mut_ptr(), 2, -1) };
+    match ready > 0 && fds[0].revents == 0 && fds[1].revents != 0 {
+        true => Ready::Other,
+        false => Ready::Input,
+    }
+}
+
 /// Reads what standard input has, waiting for at least one byte; none
 /// at its end.
 pub fn read_input(buf: &mut [u8]) -> std::io::Result<usize> {

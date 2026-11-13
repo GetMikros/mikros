@@ -21,6 +21,9 @@ use crate::value::{Value, scalar_text};
 use os::Os;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Read, Write};
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use term::Terminal;
 
 /// What msh prints before a line that continues the one before it.
@@ -167,6 +170,53 @@ fn show(text: &str) {
     let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
 }
 
+/// The pipe through which the thread that lists folders for suggestions
+/// wakes the line editor, once that thread runs.
+static WAKE: OnceLock<Wake> = OnceLock::new();
+
+/// A pipe on which a byte means that the folders listed for suggestions
+/// changed, written once until it is read.
+struct Wake {
+    reader: io::PipeReader,
+    writer: io::PipeWriter,
+    rung: AtomicBool,
+}
+
+impl Wake {
+    /// Starts the thread that lists folders for the suggestions of
+    /// `shell`, which wakes the line editor through the pipe.
+    fn start(shell: &mut Shell<Os>) {
+        let Ok((reader, writer)) = io::pipe() else {
+            return;
+        };
+        let wake = Wake {
+            reader,
+            writer,
+            rung: AtomicBool::new(false),
+        };
+        if WAKE.set(wake).is_ok() {
+            shell.read_folders_in_background(Arc::new(os::Disk), || {
+                if let Some(wake) = WAKE.get() {
+                    wake.ring();
+                }
+            });
+        }
+    }
+
+    fn ring(&self) {
+        if !self.rung.swap(true, Ordering::AcqRel) {
+            let _ = (&self.writer).write_all(b"!");
+        }
+    }
+
+    /// Takes the byte that woke the line editor.
+    fn answer(&self) {
+        let mut byte = [0u8; 1];
+        let _ = (&self.reader).read(&mut byte);
+        self.rung.store(false, Ordering::Release);
+    }
+}
+
 /// Reads a line with the line editor on `terminal`, after `prompt`.
 fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed {
     terminal.raw();
@@ -183,7 +233,7 @@ fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed 
         // would make it come in slower than it was typed.
         if !term::input_within(0) {
             let (columns, rows) = term::size();
-            let suggestion = editor.suggestion(&*shell);
+            let suggestion = editor.suggestion(&shell.without_waiting());
             let below = editor.below(columns, (rows / 2).max(1));
             let view = View {
                 prompt,
@@ -198,10 +248,20 @@ fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed 
         }
         let keys = match decoder.waiting() && !term::input_within(ESCAPE_WAIT) {
             true => decoder.flush(),
-            false => match term::read_input(&mut buf) {
-                Ok(0) | Err(_) => break Typed::End,
-                Ok(n) => decoder.feed(&buf[..n]),
-            },
+            false => {
+                // Folders listed anew can change the suggestion, which
+                // is worked out and drawn again.
+                if let Some(wake) = WAKE.get()
+                    && term::wait_for_input_or(wake.reader.as_raw_fd()) == term::Ready::Other
+                {
+                    wake.answer();
+                    continue;
+                }
+                match term::read_input(&mut buf) {
+                    Ok(0) | Err(_) => break Typed::End,
+                    Ok(n) => decoder.feed(&buf[..n]),
+                }
+            }
         };
         let mut outcome = None;
         for key in keys {
@@ -283,6 +343,9 @@ fn interactive() -> i64 {
     let job_control = take_terminal();
     let terminal = Terminal::new();
     let mut shell = Shell::new(Os::new(job_control), environment());
+    if terminal.is_some() {
+        Wake::start(&mut shell);
+    }
     let home = home(&shell);
     if let Some(rc) = home.as_ref().map(|h| format!("{h}/.mshrc"))
         && let Ok(text) = std::fs::read_to_string(&rc)

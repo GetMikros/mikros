@@ -7,9 +7,16 @@
 //! change a folder's time when its names change; the programs of the
 //! folders of `PATH` are kept across lines, and on such a file system
 //! show a new program only once the folder's time changes.
+//!
+//! Tab reads what it needs on the spot. A suggestion does not wait: it
+//! takes what is kept, and once a reader thread is started, has the
+//! thread read what is missing or changed, which calls back when it
+//! kept something new, so that the suggestion can be worked out again.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 /// The most folders whose listings are kept; past them, all are dropped,
@@ -19,14 +26,39 @@ const KEPT_MAX: usize = 64;
 /// change within the same tick of its time would not show.
 const SETTLED: Duration = Duration::from_secs(2);
 
-/// The kept listings, by the absolute path of their folder.
+/// Where the reader thread reads folders.
+pub trait Disk: Send + Sync {
+    /// When the folder at `path` last changed, if that is known.
+    fn modified(&self, path: &str) -> Option<SystemTime>;
+    /// The names in the folder at `path`, each with whether it is a
+    /// folder; `None` when it cannot be read.
+    fn entries(&self, path: &str) -> Option<Vec<(String, bool)>>;
+    /// Whether the file at `path` may be run.
+    fn runnable(&self, path: &str) -> bool;
+}
+
+/// The kept listings, by the absolute path of their folder, and the
+/// reader thread, once started.
 #[derive(Default)]
 pub struct Listings {
-    kept: RefCell<HashMap<String, Listing>>,
+    kept: Arc<Mutex<Kept>>,
+    reader: Option<Sender<Ask>>,
+}
+
+/// A folder for the reader thread to read, and whether with its
+/// programs.
+type Ask = (String, bool);
+
+#[derive(Default)]
+struct Kept {
+    listings: HashMap<String, Listing>,
+    /// What the reader thread was asked for and has not read yet.
+    asked: HashSet<Ask>,
 }
 
 /// A folder's names, and the programs among them once asked for, as
 /// they were when it was modified at `modified`.
+#[derive(Clone, PartialEq)]
 struct Listing {
     modified: SystemTime,
     entries: Option<Option<Vec<(String, bool)>>>,
@@ -34,6 +66,20 @@ struct Listing {
 }
 
 impl Listings {
+    /// Starts the reader thread, which reads from `disk` and calls
+    /// `changed` each time it keeps a listing other than the one kept
+    /// before.
+    pub fn start_reader(&mut self, disk: Arc<dyn Disk>, changed: impl Fn() + Send + 'static) {
+        let (ask, asked) = mpsc::channel();
+        let kept = self.kept.clone();
+        let started = thread::Builder::new()
+            .name("listings".into())
+            .spawn(move || read_asked(&*disk, &kept, &asked, &changed));
+        if started.is_ok() {
+            self.reader = Some(ask);
+        }
+    }
+
     /// The names in `folder`, an absolute path, each with whether it is a
     /// folder: the kept ones when the folder, last modified at
     /// `modified` as of `now`, has not changed since, or else `read`'s.
@@ -74,11 +120,52 @@ impl Listings {
         programs
     }
 
+    /// Whether a reader thread was started, so that suggestions need not
+    /// read folders themselves.
+    pub fn reading_in_background(&self) -> bool {
+        self.reader.is_some()
+    }
+
+    /// The names in `folder`, an absolute path, without waiting: those
+    /// kept, if any, after asking the reader thread to check them.
+    pub fn entries_now(&self, folder: &str) -> Option<Vec<(String, bool)>> {
+        self.ask(folder, false);
+        let kept = self.lock();
+        kept.listings
+            .get(folder)
+            .and_then(|l| l.entries.clone())
+            .flatten()
+    }
+
+    /// The programs in `folder` without waiting, as `entries_now` gives
+    /// the names.
+    pub fn programs_now(&self, folder: &str) -> Vec<String> {
+        self.ask(folder, true);
+        let kept = self.lock();
+        kept.listings
+            .get(folder)
+            .and_then(|l| l.programs.clone())
+            .unwrap_or_default()
+    }
+
     /// Drops the kept names of folders, keeping their programs, so that
     /// a new line lists folders as they are now.
     pub fn forget_entries(&self) {
-        for listing in self.kept.borrow_mut().values_mut() {
+        for listing in self.lock().listings.values_mut() {
             listing.entries = None;
+        }
+    }
+
+    /// Asks the reader thread for `folder`, with its programs when
+    /// `programs`, unless it was asked already.
+    fn ask(&self, folder: &str, programs: bool) {
+        let Some(reader) = &self.reader else {
+            return;
+        };
+        let ask = (folder.to_owned(), programs);
+        let mut kept = self.lock();
+        if kept.asked.insert(ask.clone()) && reader.send(ask.clone()).is_err() {
+            kept.asked.remove(&ask);
         }
     }
 
@@ -90,35 +177,106 @@ impl Listings {
         modified: SystemTime,
         take: impl FnOnce(&Listing) -> Option<T>,
     ) -> Option<T> {
-        let kept = self.kept.borrow();
-        kept.get(folder)
+        let kept = self.lock();
+        kept.listings
+            .get(folder)
             .filter(|l| l.modified == modified)
             .and_then(take)
     }
 
     /// Keeps, with `set`, part of the listing of `folder` as of the time
-    /// `modified`, dropping what was kept for another time.
+    /// `modified`.
     fn keep(&self, folder: &str, modified: SystemTime, set: impl FnOnce(&mut Listing)) {
-        let mut kept = self.kept.borrow_mut();
-        if kept.len() >= KEPT_MAX && !kept.contains_key(folder) {
-            kept.clear();
-        }
-        let fresh = || Listing {
-            modified,
-            entries: None,
-            programs: None,
-        };
-        let listing = kept.entry(folder.to_owned()).or_insert_with(fresh);
-        if listing.modified != modified {
-            *listing = fresh();
-        }
-        set(listing);
+        keep(&mut self.lock(), folder, modified, set);
     }
+
+    fn lock(&self) -> MutexGuard<'_, Kept> {
+        lock(&self.kept)
+    }
+}
+
+fn lock(kept: &Mutex<Kept>) -> MutexGuard<'_, Kept> {
+    kept.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Keeps, with `set`, part of the listing of `folder` as of the time
+/// `modified`, dropping what was kept for another time.
+fn keep(kept: &mut Kept, folder: &str, modified: SystemTime, set: impl FnOnce(&mut Listing)) {
+    if kept.listings.len() >= KEPT_MAX && !kept.listings.contains_key(folder) {
+        kept.listings.clear();
+    }
+    let fresh = || Listing {
+        modified,
+        entries: None,
+        programs: None,
+    };
+    let listing = kept.listings.entry(folder.to_owned()).or_insert_with(fresh);
+    if listing.modified != modified {
+        *listing = fresh();
+    }
+    set(listing);
 }
 
 /// `modified`, when it is known and lies `SETTLED` or more before `now`.
 fn settled(modified: Option<SystemTime>, now: SystemTime) -> Option<SystemTime> {
     modified.filter(|&m| now.duration_since(m).is_ok_and(|age| age >= SETTLED))
+}
+
+/// The reader thread: checks each folder it is asked for on `disk`,
+/// reads it when what is kept of it is missing or older than the
+/// folder, keeps what it read when the folder's time is settled, and
+/// calls `changed` when that differs from what was kept.
+fn read_asked(disk: &dyn Disk, kept: &Mutex<Kept>, asked: &Receiver<Ask>, changed: &dyn Fn()) {
+    for (folder, programs) in asked {
+        let modified = disk.modified(&folder);
+        // A folder read again for its names keeps its programs too.
+        let programs = programs
+            || lock(kept)
+                .listings
+                .get(&folder)
+                .is_some_and(|l| l.programs.is_some());
+        {
+            let mut k = lock(kept);
+            let current = settled(modified, SystemTime::now()).is_some_and(|m| {
+                k.listings.get(&folder).is_some_and(|l| {
+                    l.modified == m && l.entries.is_some() && (!programs || l.programs.is_some())
+                })
+            });
+            if current {
+                k.asked.remove(&(folder.clone(), false));
+                k.asked.remove(&(folder.clone(), true));
+                continue;
+            }
+        }
+        let entries = disk.entries(&folder);
+        let found = programs.then(|| {
+            let base = folder.trim_end_matches('/');
+            entries
+                .iter()
+                .flatten()
+                .filter(|(name, is_folder)| !is_folder && disk.runnable(&format!("{base}/{name}")))
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        });
+        let mut k = lock(kept);
+        k.asked.remove(&(folder.clone(), false));
+        k.asked.remove(&(folder.clone(), true));
+        let Some(modified) = settled(modified, SystemTime::now()) else {
+            continue;
+        };
+        let before = k.listings.get(&folder).cloned();
+        keep(&mut k, &folder, modified, |l| {
+            l.entries = Some(entries);
+            if let Some(found) = found {
+                l.programs = Some(found);
+            }
+        });
+        let differs = k.listings.get(&folder) != before.as_ref();
+        drop(k);
+        if differs {
+            changed();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -213,6 +371,64 @@ mod tests {
         for n in 0..=KEPT_MAX {
             listings.programs(&format!("/f{n}"), Some(at(1)), at(100), Vec::new);
         }
-        assert!(listings.kept.borrow().len() <= KEPT_MAX);
+        assert!(listings.lock().listings.len() <= KEPT_MAX);
+    }
+
+    /// Folders by path, each with its modification time in seconds and
+    /// its names, where a name ending in `*` may be run and one ending in
+    /// `/` is a folder.
+    #[derive(Default)]
+    struct Fake {
+        folders: Mutex<HashMap<String, (u64, Vec<&'static str>)>>,
+    }
+
+    impl Fake {
+        fn set(&self, path: &str, time: u64, names: &[&'static str]) {
+            let mut folders = self.folders.lock().unwrap();
+            folders.insert(path.into(), (time, names.to_vec()));
+        }
+    }
+
+    impl Disk for Fake {
+        fn modified(&self, path: &str) -> Option<SystemTime> {
+            let folders = self.folders.lock().unwrap();
+            folders.get(path).map(|(time, _)| at(*time))
+        }
+        fn entries(&self, path: &str) -> Option<Vec<(String, bool)>> {
+            let folders = self.folders.lock().unwrap();
+            let (_, names) = folders.get(path)?;
+            let entry = |n: &&str| (n.trim_end_matches(['*', '/']).to_owned(), n.ends_with('/'));
+            Some(names.iter().map(entry).collect())
+        }
+        fn runnable(&self, path: &str) -> bool {
+            let (folder, name) = path.rsplit_once('/').unwrap();
+            let folders = self.folders.lock().unwrap();
+            folders[folder].1.contains(&format!("{name}*").as_str())
+        }
+    }
+
+    #[test]
+    fn suggestions_take_what_is_kept_while_the_thread_reads() {
+        let fake = Arc::new(Fake::default());
+        let (tell, told) = mpsc::channel();
+        let mut listings = Listings::default();
+        assert!(!listings.reading_in_background());
+        listings.start_reader(fake.clone(), move || {
+            let _ = tell.send(());
+        });
+        assert!(listings.reading_in_background());
+        fake.set("/bin", 1, &["cat*", "notes", "lib/"]);
+        assert!(listings.programs_now("/bin").is_empty());
+        told.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(listings.programs_now("/bin"), ["cat"]);
+        assert_eq!(listings.entries_now("/bin").map(|n| n.len()), Some(3));
+        // A changed folder shows what was kept until the thread read it.
+        fake.set("/bin", 2, &["cat*", "ls*"]);
+        assert_eq!(listings.programs_now("/bin"), ["cat"]);
+        told.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(listings.programs_now("/bin"), ["cat", "ls"]);
+        // An unchanged folder is not read again, and tells nothing.
+        assert_eq!(listings.programs_now("/bin"), ["cat", "ls"]);
+        assert!(told.recv_timeout(Duration::from_millis(200)).is_err());
     }
 }

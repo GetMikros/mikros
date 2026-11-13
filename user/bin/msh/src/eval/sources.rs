@@ -3,10 +3,12 @@
 //! `$env.PATH`, folders, and the options that scripts declare. Folders
 //! are listed through the listings the shell keeps between keys.
 
+use super::listings::Disk;
 use super::{Shell, System};
 use crate::ast::{Param, StatementKind};
 use crate::edit::complete::Sources;
 use crate::value::{Value, scalar_text};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 impl<S: System> Shell<S> {
@@ -14,6 +16,42 @@ impl<S: System> Shell<S> {
     /// `PATH`, which are listed again once their folder changes.
     pub fn new_line(&self) {
         self.listings.forget_entries();
+    }
+
+    /// Starts the thread that reads folders on `disk` for suggestions,
+    /// which calls `changed` when it read something new.
+    pub fn read_folders_in_background(
+        &mut self,
+        disk: Arc<dyn Disk>,
+        changed: impl Fn() + Send + 'static,
+    ) {
+        self.listings.start_reader(disk, changed);
+    }
+
+    /// The shell as the source of a suggestion, which does not wait for
+    /// folders to be read once the reader thread runs.
+    pub fn without_waiting(&self) -> WithoutWaiting<'_, S> {
+        WithoutWaiting(self)
+    }
+
+    /// The folders of `$env.PATH`, in order.
+    fn path_folders(&self) -> Vec<String> {
+        match self.environment.get("PATH") {
+            Some(Value::List(folders)) => folders.iter().map(scalar_text).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The programs in `folder`, read now.
+    fn read_programs(&self, folder: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for (name, is_folder) in self.system.entries(folder).unwrap_or_default() {
+            let path = format!("{}/{name}", folder.trim_end_matches('/'));
+            if !is_folder && self.system.executable(&path) == Some(true) {
+                found.push(name);
+            }
+        }
+        found
     }
 
     /// `folder` from the root, as the listings are kept.
@@ -39,24 +77,13 @@ impl<S: System> Sources for Shell<S> {
     }
 
     fn programs(&self) -> Vec<String> {
-        let Some(Value::List(folders)) = self.environment.get("PATH") else {
-            return Vec::new();
-        };
         let now = SystemTime::now();
         let mut programs = Vec::new();
-        for folder in folders.iter().map(scalar_text) {
+        for folder in self.path_folders() {
             let path = self.absolute(&folder);
             let modified = self.system.modified(&path);
-            programs.extend(self.listings.programs(&path, modified, now, || {
-                let mut found = Vec::new();
-                for (name, is_folder) in self.system.entries(&folder).unwrap_or_default() {
-                    let path = format!("{}/{name}", folder.trim_end_matches('/'));
-                    if !is_folder && self.system.executable(&path) == Some(true) {
-                        found.push(name);
-                    }
-                }
-                found
-            }));
+            let read = || self.read_programs(&folder);
+            programs.extend(self.listings.programs(&path, modified, now, read));
         }
         programs
     }
@@ -101,5 +128,46 @@ impl<S: System> Sources for Shell<S> {
             })
             .collect();
         Some(params)
+    }
+}
+
+/// The shell as the source of a suggestion: with the reader thread
+/// running, it takes the folders' kept listings and has the thread check
+/// them, instead of reading them; it is the shell otherwise.
+pub struct WithoutWaiting<'a, S: System>(&'a Shell<S>);
+
+impl<S: System> Sources for WithoutWaiting<'_, S> {
+    fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
+        let shell = self.0;
+        match shell.listings.reading_in_background() {
+            true => shell.listings.entries_now(&shell.absolute(folder)),
+            false => Sources::entries(shell, folder),
+        }
+    }
+
+    fn programs(&self) -> Vec<String> {
+        let shell = self.0;
+        if !shell.listings.reading_in_background() {
+            return Sources::programs(shell);
+        }
+        let folders = shell.path_folders();
+        let listed = |f: &String| shell.listings.programs_now(&shell.absolute(f));
+        folders.iter().flat_map(listed).collect()
+    }
+
+    fn functions(&self) -> Vec<(String, Vec<String>)> {
+        Sources::functions(self.0)
+    }
+
+    fn variables(&self) -> Vec<(String, String)> {
+        Sources::variables(self.0)
+    }
+
+    fn environment(&self) -> Vec<(String, String)> {
+        Sources::environment(self.0)
+    }
+
+    fn params(&self, path: &str) -> Option<Vec<Param>> {
+        Sources::params(self.0, path)
     }
 }

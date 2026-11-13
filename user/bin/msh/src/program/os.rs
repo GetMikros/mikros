@@ -251,21 +251,44 @@ impl Os {
     }
 }
 
+/// The names in the folder at `path`, each with whether it is a folder.
+fn read_entries(path: &str) -> Option<Vec<(String, bool)>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(path).ok()?.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let folder = match entry.file_type() {
+            Ok(t) if t.is_symlink() => entry.path().is_dir(),
+            Ok(t) => t.is_dir(),
+            Err(_) => false,
+        };
+        entries.push((name, folder));
+    }
+    Some(entries)
+}
+
 impl Folders for Os {
     fn entries(&self, path: &str) -> Option<Vec<(String, bool)>> {
-        let mut entries = Vec::new();
-        for entry in fs::read_dir(path).ok()?.flatten() {
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
-            let folder = match entry.file_type() {
-                Ok(t) if t.is_symlink() => entry.path().is_dir(),
-                Ok(t) => t.is_dir(),
-                Err(_) => false,
-            };
-            entries.push((name, folder));
-        }
-        Some(entries)
+        read_entries(path)
+    }
+}
+
+/// The file system, as the shell's thread that lists folders for
+/// suggestions reads it.
+pub struct Disk;
+
+impl crate::eval::listings::Disk for Disk {
+    fn modified(&self, path: &str) -> Option<std::time::SystemTime> {
+        fs::metadata(path).ok()?.modified().ok()
+    }
+
+    fn entries(&self, path: &str) -> Option<Vec<(String, bool)>> {
+        read_entries(path)
+    }
+
+    fn runnable(&self, path: &str) -> bool {
+        fs::metadata(path).is_ok_and(|m| !m.is_dir()) && sys::may_run(path)
     }
 }
 
