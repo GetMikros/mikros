@@ -68,3 +68,59 @@ as `MIKSPEC-0012`, and a requirement ID such as `MIKSPEC-0012.R3`.
 
 8. Do not modify anything under `spec/`. Do not update the `spec/` submodule
    to a different commit unless a maintainer explicitly asks you to.
+
+## Layout of user space
+
+The maintainers chose this layout for `user/` on 2026-11-13. The tree is
+being moved to it in steps. Until the move is finished, some components are
+still at their old paths: libraries split from their program under
+`user/lib/`, std programs under `user/runtime/std/`, and init, processmgr
+and servicemgr under `user/services/`. Likewise, xtask does not yet read
+`port.toml` files or package metadata (rules 13 and 14). Put new components
+where this layout says, and do not add new splits.
+
+| Path | Holds |
+|---|---|
+| `user/bin/<name>/` | Programs: the shell, the console, setup, command-line utilities |
+| `user/core/<name>/` | init, processmgr and servicemgr, which start the system before any service runs |
+| `user/services/<name>/` | Services, each with its service manifest |
+| `user/drivers/<name>/` | Drivers, each with its `driver.yaml` |
+| `user/lib/<name>/` | Libraries that two or more packages, or xtask, use |
+| `user/runtime/` | The C library, `mikros-rt`, and the patches of the Rust standard library port |
+| `user/ports/<name>/` | Third-party sources: `port.toml` (pinned source, checksum, rewrite rules) and `patches/` |
+| `user/tests/` | Test programs and the test init |
+
+9. A component is one package with one binary, `src/main.rs` and its
+   modules. Do not split a component into a library and a program so that
+   its code can be tested on the host. Test it on the host the way
+   `boot/mikrosboot/src/main.rs` does, with the Mikros-only parts left out:
+
+       #![cfg_attr(target_os = "mikros", no_std, no_main)]
+       #![cfg_attr(not(target_os = "mikros"), allow(dead_code))]
+       #[cfg(not(target_os = "mikros"))]
+       fn main() {}
+       #[cfg(target_os = "mikros")]
+       mod device;
+
+   Dependencies that only build for Mikros go under
+   `[target.'cfg(target_os = "mikros")'.dependencies]`.
+10. A crate goes in `user/lib/` only when two or more packages, or xtask,
+    use it. Code with one user lives in that user's package. `gpudev`,
+    `display`, `virtio` and `logview` stay libraries for the GPU and virtio
+    drivers still to come.
+11. Programs use the Rust standard library unless they must not. Only the
+    components that run before the C library and the root file system are
+    available use `mikros-rt` without std (MIKSPEC-0060.R2): init, the
+    managers, and the services and drivers of the boot image. Services
+    already written for `mikros-rt` keep it until they are rewritten. Such a
+    package says so with `runtime = "rt"` in `[package.metadata.mikros]`.
+12. Every package under `user/` belongs to the one workspace in
+    `user/Cargo.toml`, and is built through `cargo xtask`, which passes the
+    build-std flags. Do not add another workspace or a `.cargo/config.toml`
+    that sets build-std.
+13. Third-party code is pinned in its `user/ports/<name>/port.toml`, with
+    its changes as patch files or rewrite rules there (MIKSPEC-0062.R7). Do
+    not add download URLs or checksums elsewhere in xtask. The host tools
+    LLVM, Meson and CMake stay in `tools/`.
+14. Where xtask installs a component, and from which manifest, comes from
+    its `[package.metadata.mikros]`. Do not add hard-coded install lists.
