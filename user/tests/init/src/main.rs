@@ -11,15 +11,15 @@ use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::{
-    ACCESS_DENIED, BAD_HANDLE, BAD_STATE, BUFFER_TOO_SMALL, FAILED, INVALID_ARGS, NOT_FOUND,
+    ACCESS_DENIED, BAD_HANDLE, BAD_STATE, BUFFER_TOO_SMALL, FAILED, INVALID_ARGS, IO, NOT_FOUND,
     OUT_OF_RANGE, PAGE_FAULT, PAGE_SIZE, PAGER, PASSED, PERM_READ, PERM_WRITE, READABLE,
     REPORT_SIZE, REQUESTS, Result, SIGNALED, SLOWER, STATE_BLOCKED, TERMINATED, TIMED_OUT, USER0,
     call, check, close, contains, create_memory, dirty, elf, ensure, exit_qemu, futex_wake,
     in_time, info, koid, map, map_read_only, mem_read_at, mem_write_at, now, open_exit_port,
-    paged_object, pager_thread, protect, read_memory, read_message, read_sizes, record_report,
-    report_bytes, report_id, seal, set_size, signal, sleep_ms, soon, spawn, spawn2, take_packet,
-    thread_state, u32_at, u64_at, ustar, wait, wait_for_state, wait_forever, wait_until_blocked,
-    within, write_memory,
+    paged_object, pager_op, pager_thread, protect, read_memory, read_message, read_sizes,
+    record_report, report_bytes, report_id, seal, set_size, signal, sleep_ms, soon, spawn, spawn2,
+    take_packet, thread_state, u32_at, u64_at, ustar, wait, wait_for_state, wait_forever,
+    wait_until_blocked, within, write_memory,
 };
 
 mikros_rt::main!(main);
@@ -1607,12 +1607,6 @@ fn paged_outputs(s: &Startup) -> Result {
         "requesting each page",
         REQUESTS.load(Ordering::Acquire) == before + 5,
     )
-}
-
-const IO: i64 = -28;
-fn pager_op(pager: Handle, mem: Handle, op: u32, offset: u64, len: u64) -> i64 {
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::pager_op(pager, mem, op, offset, len) }
 }
 
 /// Faults that wait for a pager, in the copy routine of a system call

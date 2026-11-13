@@ -21,6 +21,7 @@ pub const TIMED_OUT: i64 = -21;
 pub const CANCELED: i64 = -23;
 pub const PEER_CLOSED: i64 = -24;
 pub const NOT_FOUND: i64 = -25;
+pub const IO: i64 = -28;
 
 /// How many times longer things may take in a fuzz build, whose kernel
 /// checks every lock it takes and calls the coverage hook in every block,
