@@ -2,7 +2,7 @@
 //! of the `rsdp` property, and the device manager's resources, which any
 //! of the layer's threads may ask for.
 
-use mikros_acpica::Locked;
+use crate::acpica::Locked;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::driver::{DeviceManager, DeviceManagerClient};
 
@@ -22,12 +22,12 @@ impl Host {
         }
     }
 
-    pub fn manager(&self) -> mikros_acpica::Guard<'_, DeviceManagerClient> {
+    pub fn manager(&self) -> crate::acpica::Guard<'_, DeviceManagerClient> {
         self.manager.lock()
     }
 }
 
-impl mikros_acpica::Host for Host {
+impl crate::acpica::Host for Host {
     fn root_pointer(&self) -> u64 {
         self.rsdp
     }

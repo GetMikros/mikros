@@ -2,9 +2,9 @@
 //! nothing of the hardware: memory, locks, mutexes and semaphores, time,
 //! queued work, signals from AML, the table overrides, and output.
 
-use crate::sync::{FOREVER, Lock, Locked, Semaphore, now};
-use crate::threads::{self, Callback};
-use crate::{AE_BAD_PARAMETER, AE_LIMIT, AE_OK, AE_TIME, Status};
+use crate::acpica::sync::{FOREVER, Lock, Locked, Semaphore, now};
+use crate::acpica::threads::{self, Callback};
+use crate::acpica::{AE_BAD_PARAMETER, AE_LIMIT, AE_OK, AE_TIME, Status};
 use alloc::boxed::Box;
 use alloc::string::String;
 use core::alloc::Layout;
@@ -47,7 +47,7 @@ extern "C" fn AcpiOsTerminate() -> Status {
 
 #[unsafe(no_mangle)]
 extern "C" fn AcpiOsGetRootPointer() -> u64 {
-    crate::host().root_pointer()
+    crate::acpica::host().root_pointer()
 }
 
 #[unsafe(no_mangle)]

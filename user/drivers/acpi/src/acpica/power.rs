@@ -5,9 +5,9 @@
 //! device manager exits, while resources can still be had; powering off
 //! then only enters S5.
 
-pub use crate::physical::keep_firmware_memory;
-use crate::sync::now;
-use crate::{AE_ERROR, AE_OK, Status, physical, ports};
+pub use crate::acpica::physical::keep_firmware_memory;
+use crate::acpica::sync::now;
+use crate::acpica::{AE_ERROR, AE_OK, Status, physical, ports};
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

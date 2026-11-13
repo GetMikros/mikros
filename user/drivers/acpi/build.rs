@@ -1,5 +1,5 @@
-//! Links ACPICA with the ACPI server's glue, which `cargo xtask acpica`
-//! builds into target/acpica/mikros.
+//! Links ACPICA with the ACPI server's glue, `glue/` and `platform/`,
+//! which `cargo xtask acpica` builds into target/acpica/mikros.
 
 use std::env;
 use std::path::PathBuf;

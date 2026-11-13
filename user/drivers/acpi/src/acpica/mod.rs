@@ -8,10 +8,6 @@
 //! may be called from the thread that called [`install`], and runs its
 //! own work on threads that the layer starts.
 
-#![no_std]
-
-extern crate alloc;
-
 pub mod devices;
 mod interrupts;
 mod osl;

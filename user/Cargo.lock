@@ -21,7 +21,6 @@ dependencies = [
 name = "acpi"
 version = "0.0.0"
 dependencies = [
- "mikros-acpica",
  "mikros-rt",
 ]
 
@@ -486,13 +485,6 @@ name = "midlc"
 version = "0.0.0"
 dependencies = [
  "serde_json",
-]
-
-[[package]]
-name = "mikros-acpica"
-version = "0.0.0"
-dependencies = [
- "mikros-rt",
 ]
 
 [[package]]

@@ -3,11 +3,11 @@
 //! as the broker says once for each connection, and `OnPowerButton` to
 //! every client each time the power button is pressed.
 
+use crate::acpica::Status as AcpiStatus;
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
-use mikros_acpica::Status as AcpiStatus;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::acpi::{
@@ -66,11 +66,11 @@ impl Acpi {
 /// The status of the base library for an ACPICA status.
 pub fn status(status: AcpiStatus) -> Status {
     match status {
-        mikros_acpica::AE_NOT_FOUND | mikros_acpica::AE_NOT_EXIST => Status::NotFound,
-        mikros_acpica::AE_BAD_PARAMETER => Status::InvalidArgs,
-        mikros_acpica::AE_NO_MEMORY => Status::NoMemory,
-        mikros_acpica::AE_SUPPORT => Status::NotSupported,
-        mikros_acpica::AE_TIME => Status::TimedOut,
+        crate::acpica::AE_NOT_FOUND | crate::acpica::AE_NOT_EXIST => Status::NotFound,
+        crate::acpica::AE_BAD_PARAMETER => Status::InvalidArgs,
+        crate::acpica::AE_NO_MEMORY => Status::NoMemory,
+        crate::acpica::AE_SUPPORT => Status::NotSupported,
+        crate::acpica::AE_TIME => Status::TimedOut,
         _ => Status::Io,
     }
 }
@@ -110,7 +110,7 @@ async fn serve(
         let s = server.server();
         let _ = match request {
             AcpiRequest::GetPciRoute(r, responder) => {
-                let routed = mikros_acpica::route::pci_route(r.segment, r.bus, r.device, r.pin);
+                let routed = crate::acpica::route::pci_route(r.segment, r.bus, r.device, r.pin);
                 let routed = routed.map_err(status).map(|route| AcpiGetPciRouteResponse {
                     route: PciRoute {
                         gsi: route.gsi,
@@ -124,7 +124,7 @@ async fn serve(
                 if !may_control {
                     responder.reply(s, Err(Status::AccessDenied))
                 } else {
-                    let failed = mikros_acpica::power::power_off();
+                    let failed = crate::acpica::power::power_off();
                     mikros_rt::log!(Error, "acpi: entering S5 failed: {failed:#x}");
                     responder.reply(s, Err(status(failed)))
                 }
@@ -133,7 +133,7 @@ async fn serve(
                 if !may_control {
                     responder.reply(s, Err(Status::AccessDenied))
                 } else {
-                    let failed = mikros_acpica::power::restart();
+                    let failed = crate::acpica::power::restart();
                     mikros_rt::log!(Error, "acpi: restarting failed: {failed:#x}");
                     responder.reply(s, Err(status(failed)))
                 }
@@ -162,7 +162,7 @@ pub fn watch_button(acpi: Rc<Acpi>, reactor: Reactor, spawner: &Spawner) -> bool
     // SAFETY: the kernel just created the handle for us.
     let event = unsafe { OwnedHandle::from_raw(event) };
     BUTTON.store(event.raw(), Ordering::Release);
-    if let Err(failed) = mikros_acpica::power::watch_power_button(button_pressed) {
+    if let Err(failed) = crate::acpica::power::watch_power_button(button_pressed) {
         mikros_rt::log!(
             Warning,
             "acpi: watching the power button failed: {failed:#x}"

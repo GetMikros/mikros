@@ -3,8 +3,8 @@
 //! interrupt source override of the MADT says otherwise, and a thread
 //! that waits for it and runs ACPICA's handler each time it comes.
 
-use crate::sync::{Locked, now};
-use crate::{AE_ALREADY_EXISTS, AE_BAD_PARAMETER, AE_ERROR, AE_NOT_EXIST, AE_OK, Status};
+use crate::acpica::sync::{Locked, now};
+use crate::acpica::{AE_ALREADY_EXISTS, AE_BAD_PARAMETER, AE_ERROR, AE_NOT_EXIST, AE_OK, Status};
 use alloc::boxed::Box;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -129,7 +129,7 @@ extern "C" fn AcpiOsInstallInterruptHandler(
 
 fn install(sci: Sci, handler: Handler, context: *mut c_void) -> Status {
     let gsi = u64::from(sci.gsi);
-    let Some(resource) = crate::host().request(KIND_IRQ, gsi, 1, false) else {
+    let Some(resource) = crate::acpica::host().request(KIND_IRQ, gsi, 1, false) else {
         return AE_ERROR;
     };
     let mut interrupt = 0;
@@ -146,7 +146,12 @@ fn install(sci: Sci, handler: Handler, context: *mut c_void) -> Status {
         interrupt: unsafe { OwnedHandle::from_raw(interrupt) },
         _resource: resource,
     }));
-    if crate::threads::spawn(crate::process(), b"acpi-sci", wait, waiting as usize) {
+    if crate::acpica::threads::spawn(
+        crate::acpica::process(),
+        b"acpi-sci",
+        wait,
+        waiting as usize,
+    ) {
         AE_OK
     } else {
         // SAFETY: the thread did not start, so the box is still ours.

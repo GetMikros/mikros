@@ -2,8 +2,8 @@
 //! MCFG, which `ranges` reads once the tables are found, and which are
 //! mapped a bus at a time, the first time a function of the bus is used.
 
-use crate::sync::Locked;
-use crate::{AE_BAD_PARAMETER, AE_NOT_EXIST, AE_OK, Status, physical};
+use crate::acpica::sync::Locked;
+use crate::acpica::{AE_BAD_PARAMETER, AE_NOT_EXIST, AE_OK, Status, physical};
 use alloc::vec::Vec;
 
 /// The configuration space of one bus, and of one function.

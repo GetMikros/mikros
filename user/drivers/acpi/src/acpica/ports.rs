@@ -2,8 +2,8 @@
 //! that the device manager grants, shared with other drivers, each
 //! enabled for the process the first time one of its ports is used.
 
-use crate::sync::Locked;
-use crate::{AE_BAD_PARAMETER, AE_ERROR, AE_OK, Status};
+use crate::acpica::sync::Locked;
+use crate::acpica::{AE_BAD_PARAMETER, AE_ERROR, AE_OK, Status};
 use alloc::vec::Vec;
 use core::arch::asm;
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -31,12 +31,18 @@ pub(crate) fn enable(port: u16, count: u16) -> bool {
         return true;
     }
     let base = u64::from(port);
-    let Some(resource) = crate::host().request(KIND_IOPORT, base, u64::from(count), true) else {
+    let Some(resource) = crate::acpica::host().request(KIND_IOPORT, base, u64::from(count), true)
+    else {
         return false;
     };
     // SAFETY: the call takes no pointers.
     let status = unsafe {
-        sys::process_ioports_enable(crate::process(), resource.raw(), base, u64::from(count))
+        sys::process_ioports_enable(
+            crate::acpica::process(),
+            resource.raw(),
+            base,
+            u64::from(count),
+        )
     };
     if status != mikros_rt::OK {
         return false;

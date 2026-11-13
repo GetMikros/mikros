@@ -1,7 +1,7 @@
 //! The routing of PCI interrupt pins, through the glue: the GSI, trigger
 //! mode and polarity of a device's pin.
 
-use crate::{AE_OK, Status};
+use crate::acpica::{AE_OK, Status};
 
 const LEVEL: u32 = 1 << 0;
 const ACTIVE_LOW: u32 = 1 << 1;

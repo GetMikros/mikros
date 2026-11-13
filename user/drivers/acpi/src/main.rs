@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+mod acpica;
 mod devices;
 mod host;
 mod service;
@@ -103,17 +104,17 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 // is kept for the regions that methods create as they run,
                 // and a power-off is prepared while that still works.
                 DriverRequest::PrepareShutdown(request, responder) => {
-                    let kept = mikros_acpica::power::keep_firmware_memory(
+                    let kept = crate::acpica::power::keep_firmware_memory(
                         request.firmware_memory,
                     );
-                    let (held, failed) = mikros_acpica::power::hold_operation_regions();
+                    let (held, failed) = crate::acpica::power::hold_operation_regions();
                     mikros_rt::log!(
                         Info,
                         "acpi: holding {held} operation regions for power-off and restart, {failed} refused, and {kept} firmware memory ranges"
                     );
                     if request.power_off {
-                        let prepared = mikros_acpica::power::prepare_power_off();
-                        if prepared != mikros_acpica::AE_OK {
+                        let prepared = crate::acpica::power::prepare_power_off();
+                        if prepared != crate::acpica::AE_OK {
                             mikros_rt::log!(
                                 Error,
                                 "acpi: preparing S5 failed: {prepared:#x}"
@@ -169,10 +170,10 @@ async fn start(
         return Err(Status::InvalidArgs);
     };
     let host: &'static Host = Box::leak(Box::new(Host::new(rsdp, request.manager)));
-    if !mikros_acpica::install(host, process) {
+    if !crate::acpica::install(host, process) {
         return Err(Status::NoResources);
     }
-    if let Err(failed) = mikros_acpica::start() {
+    if let Err(failed) = crate::acpica::start() {
         mikros_rt::log!(Error, "acpi: starting ACPICA failed: {failed:#x}");
         return Err(service::status(failed));
     }

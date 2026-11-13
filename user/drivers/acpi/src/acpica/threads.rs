@@ -5,7 +5,7 @@
 //! stack of its own, by which `AcpiOsGetThreadId` tells the threads apart
 //! without a system call.
 
-use crate::sync::{FOREVER, Locked, Semaphore, wait, wake};
+use crate::acpica::sync::{FOREVER, Locked, Semaphore, wait, wake};
 use alloc::collections::VecDeque;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};

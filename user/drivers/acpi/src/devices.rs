@@ -7,12 +7,12 @@
 //! resources of both. A CMOS real-time clock also has the property
 //! `century`, the index of its century register, when the FADT names one.
 
+use crate::acpica::Host as _;
+use crate::acpica::devices::{Device, Kind, Resource};
 use crate::host::Host;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::{format, vec};
-use mikros_acpica::Host as _;
-use mikros_acpica::devices::{Device, Kind, Resource};
 use mikros_rt::interfaces::mikros::driver::Property;
 
 const FOREVER: i64 = i64::MAX;
@@ -64,7 +64,7 @@ fn hardware_ids(device: &Device) -> Vec<String> {
 
 /// Adds the devices of the namespace, and gives their IDs.
 pub fn add(host: &Host) -> Vec<u64> {
-    let devices = match mikros_acpica::devices::devices() {
+    let devices = match crate::acpica::devices::devices() {
         Ok(devices) => devices,
         Err(failed) => {
             mikros_rt::log!(Error, "acpi: walking the namespace failed: {failed:#x}");
@@ -81,7 +81,7 @@ pub fn add(host: &Host) -> Vec<u64> {
         } else {
             let ids = hardware_ids(&device);
             let century = match is_one_of(&device, &CLOCKS) {
-                true => mikros_acpica::devices::century(),
+                true => crate::acpica::devices::century(),
                 false => None,
             };
             let name = name_of(&device.path);

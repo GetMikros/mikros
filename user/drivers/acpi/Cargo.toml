@@ -6,7 +6,6 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
-mikros-acpica = { path = "../../runtime/acpica" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 
 [package.metadata.mikros]

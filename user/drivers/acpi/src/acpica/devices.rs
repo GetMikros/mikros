@@ -4,7 +4,7 @@
 //! below PCI host bridges and the objects of PCI functions, so that the
 //! devices of an LPC bridge are found.
 
-use crate::{AE_OK, Status};
+use crate::acpica::{AE_OK, Status};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::{CStr, c_char, c_void};

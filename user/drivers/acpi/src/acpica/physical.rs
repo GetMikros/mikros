@@ -6,8 +6,8 @@
 //! Memory inside one of the firmware memory resources kept at shutdown
 //! is mapped through that resource, without a request.
 
-use crate::sync::Locked;
-use crate::{AE_BAD_PARAMETER, AE_NO_MEMORY, AE_OK, Status};
+use crate::acpica::sync::Locked;
+use crate::acpica::{AE_BAD_PARAMETER, AE_NO_MEMORY, AE_OK, Status};
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -109,7 +109,7 @@ pub fn map(physical: u64, len: u64) -> Option<u64> {
     let (resource, raw) = match firmware_resource(start, end) {
         Some(raw) => (None, raw),
         None => {
-            let resource = crate::host().request(KIND_MMIO, start, size, true)?;
+            let resource = crate::acpica::host().request(KIND_MMIO, start, size, true)?;
             let raw = resource.raw();
             (Some(resource), raw)
         }
@@ -126,7 +126,7 @@ pub fn map(physical: u64, len: u64) -> Option<u64> {
     // SAFETY: the out pointer is valid; the kernel picks a free range.
     let mapped = unsafe {
         sys::vm_map(
-            crate::process(),
+            crate::acpica::process(),
             PERM_READ | PERM_WRITE,
             0,
             mem.raw(),
@@ -163,7 +163,7 @@ pub fn unmap(at: u64) {
     if mappings[i].users == 0 {
         let mapping = mappings.swap_remove(i);
         // SAFETY: nothing of ACPICA uses the range any more.
-        unsafe { sys::vm_unmap(crate::process(), mapping.at, mapping.len) };
+        unsafe { sys::vm_unmap(crate::acpica::process(), mapping.at, mapping.len) };
     }
 }
 
