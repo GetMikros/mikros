@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+[[bin]]
+name = "msh"
+path = "src/program/mod.rs"
+
 [dependencies]
 mikros-msh = { path = "../../../lib/msh" }
 
