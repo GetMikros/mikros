@@ -80,8 +80,8 @@ pub struct Shell<S: System> {
     /// The output of the functions running in a pipeline, innermost
     /// last.
     captures: Vec<Vec<u8>>,
-    /// The lines entered at the prompt, oldest first, for `history`.
-    pub history: Vec<String>,
+    /// The entries made at the prompt, oldest first, for `history`.
+    pub history: Vec<crate::edit::history::Entry>,
     /// The folder listings kept for completion and suggestions.
     listings: listings::Listings,
 }

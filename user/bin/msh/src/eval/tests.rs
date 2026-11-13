@@ -357,6 +357,11 @@ fn controls_jobs_and_lists_history() {
     assert!(matches!(failed, Err(Flow::Error(f)) if f.message.contains("cannot replace")));
     s.history = vec!["ls".into(), "cd /".into()];
     assert_eq!(run(&mut s, "history").unwrap(), "    1  ls\n    2  cd /\n");
+    s.history[1].folder = Some("/Users/ada".into());
+    assert_eq!(
+        run(&mut s, "history --folders").unwrap(),
+        "    1  -  ls\n    2  /Users/ada  cd /\n"
+    );
 }
 
 #[test]

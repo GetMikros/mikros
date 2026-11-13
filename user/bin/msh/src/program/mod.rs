@@ -326,15 +326,39 @@ fn read_entry(shell: &mut Shell<Os>, terminal: Option<&Terminal>) -> Option<Stri
     }
 }
 
-/// Adds `entry` to the history and to the history file.
-fn remember(shell: &mut Shell<Os>, entry: &str, file: Option<&str>) {
-    shell.history.push(entry.into());
+/// The most words of an entry whose paths are recorded with it.
+const PATHS_MAX: usize = 16;
+
+/// Adds `line` to the history and to the history file, with the folder
+/// it was entered in and its words that name files or folders there.
+fn remember(shell: &mut Shell<Os>, line: &str, file: Option<&str>) {
+    let folder = shell.system.current_dir();
+    let entry = history::Entry {
+        line: line.into(),
+        paths: relative_paths(line, &folder),
+        folder: Some(folder),
+    };
+    let encoded = history::encode(&entry);
+    shell.history.push(entry);
     let Some(file) = file else {
         return;
     };
     if let Ok(mut f) = OpenOptions::new().append(true).create(true).open(file) {
-        let _ = f.write_all(history::encode(entry).as_bytes());
+        let _ = f.write_all(encoded.as_bytes());
     }
+}
+
+/// The words of `line`, unquoted, that name a file or folder relative to
+/// `folder`.
+fn relative_paths(line: &str, folder: &str) -> Vec<String> {
+    let base = std::path::Path::new(folder);
+    line.split_whitespace()
+        .map(|w| w.trim_matches(['\'', '"']))
+        .filter(|w| !w.is_empty() && !w.starts_with(['/', '~', '-', '$']))
+        .filter(|w| std::fs::symlink_metadata(base.join(w)).is_ok())
+        .take(PATHS_MAX)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Runs msh at the prompt until input ends or `exit`, and gives its exit

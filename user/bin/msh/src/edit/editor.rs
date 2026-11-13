@@ -7,6 +7,7 @@
 //! one candidate, which Right or End takes.
 
 use super::complete::{Sources, complete};
+use super::history::Entry;
 use super::keys::Key;
 use super::line::Line;
 use super::menu::{Menu, common_prefix};
@@ -40,6 +41,7 @@ pub struct Search {
 /// The line editor's state for one line.
 pub struct Editor {
     line: Line,
+    /// The history's lines, oldest first.
     history: Vec<String>,
     /// While browsing the history: the entry shown, and the line typed
     /// before, whose start the entries shown begin with.
@@ -59,10 +61,10 @@ const NORMAL: &str = "\x1b[0m";
 
 impl Editor {
     /// An empty line, with `history`, oldest first.
-    pub fn new(history: Vec<String>) -> Editor {
+    pub fn new(history: Vec<Entry>) -> Editor {
         Editor {
             line: Line::default(),
-            history,
+            history: history.into_iter().map(|e| e.line).collect(),
             browse: None,
             kill: String::new(),
             killed: false,
@@ -442,7 +444,7 @@ mod tests {
     }
 
     fn editor(history: &[&str]) -> Editor {
-        Editor::new(history.iter().map(|s| s.to_string()).collect())
+        Editor::new(history.iter().map(|&s| Entry::from(s)).collect())
     }
 
     fn typed(e: &mut Editor, text: &str) {

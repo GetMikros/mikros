@@ -231,12 +231,20 @@ pub fn run<S: System>(
             Err(shell.fail(why))
         }
         "history" => {
-            shell.at_most(name, &values, 0)?;
+            let folders =
+                matches!(values.first(), Some(Value::String(flag)) if flag == "--folders");
+            shell.at_most(name, &values[usize::from(folders)..], 0)?;
             let lines: Vec<String> = shell
                 .history
                 .iter()
                 .enumerate()
-                .map(|(i, line)| format!("{:5}  {line}\n", i + 1))
+                .map(|(i, entry)| match folders {
+                    true => {
+                        let folder = entry.folder.as_deref().unwrap_or("-");
+                        format!("{:5}  {folder}  {}\n", i + 1, entry.line)
+                    }
+                    false => format!("{:5}  {}\n", i + 1, entry.line),
+                })
                 .collect();
             for line in lines {
                 shell.write(Stream::Output, line.as_bytes());
