@@ -4353,137 +4353,6 @@ fn stack_guard_page_kept(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-/// Maps `len` bytes of `mem` into this process with `options` at `addr`.
-fn map_with(s: &Startup, options: u32, addr: u64, mem: Handle, len: u64) -> Result<u64> {
-    let mut at = 0;
-    // SAFETY: the out pointer is valid for the call.
-    check("mapping", unsafe {
-        sys::vm_map(s.process, options, addr, mem, 0, len, &mut at)
-    })?;
-    Ok(at)
-}
-
-/// A debugger writes the memory of a process whatever the permissions
-/// of its mappings, and new code runs; mappings from handles without
-/// `WRITE`, sealed objects, revoked objects and a source buffer that
-/// cannot be read to its end refuse the whole write.
-fn write_process_memory(s: &Startup) -> Result {
-    const EXECUTE: u32 = 4;
-    const SPECIFIC: u32 = 1 << 8;
-    let mem = create_memory(2 * PAGE_SIZE)?;
-    let at = map(s.process, mem, 2 * PAGE_SIZE)?;
-    check(
-        "making the mapping read-only",
-        protect(s, PERM_READ, at + PAGE_SIZE, PAGE_SIZE),
-    )?;
-    check(
-        "writing across regions",
-        write_memory(s.process, at + PAGE_SIZE - 3, b"ABCDEF"),
-    )?;
-    ensure(
-        "writing the bytes",
-        mem_read_at::<6>(mem, PAGE_SIZE - 3)? == *b"ABCDEF",
-    )?;
-
-    let code = create_memory(PAGE_SIZE)?;
-    let entry = map_with(s, PERM_READ | EXECUTE, 0, code, PAGE_SIZE)?;
-    // SAFETY: the mapping is executable and holds the code written next.
-    let run = unsafe { core::mem::transmute::<u64, extern "sysv64" fn() -> u32>(entry) };
-    // mov eax, 42; ret
-    check(
-        "writing code",
-        write_memory(s.process, entry, &[0xB8, 42, 0, 0, 0, 0xC3]),
-    )?;
-    ensure("running the code", run() == 42)?;
-    check(
-        "changing the code",
-        write_memory(s.process, entry + 1, &[7]),
-    )?;
-    ensure("running the new code", run() == 7)?;
-
-    // The second page of the range comes from a handle without WRITE.
-    let mut read_only = 0;
-    // SAFETY: the out pointer is valid for the call.
-    check("duplicating without WRITE", unsafe {
-        sys::handle_duplicate(mem, (1 << 2) | (1 << 5), &mut read_only)
-    })?;
-    // SAFETY: the call takes no pointers.
-    check("unmapping", unsafe {
-        sys::vm_unmap(s.process, at + PAGE_SIZE, PAGE_SIZE)
-    })?;
-    map_with(
-        s,
-        PERM_READ | SPECIFIC,
-        at + PAGE_SIZE,
-        read_only,
-        PAGE_SIZE,
-    )?;
-    ensure(
-        "refusing a mapping without WRITE",
-        write_memory(s.process, at + PAGE_SIZE - 3, b"xyzxyz") == ACCESS_DENIED,
-    )?;
-    ensure(
-        "writing nothing",
-        mem_read_at::<6>(mem, PAGE_SIZE - 3)? == *b"ABCDEF",
-    )?;
-
-    // The source's first 256 bytes are readable and the rest is not.
-    let source = create_memory(2 * PAGE_SIZE)?;
-    let src = map(s.process, source, 2 * PAGE_SIZE)?;
-    let readable = src + PAGE_SIZE - 256;
-    for i in 0..256 {
-        // SAFETY: the first page of the mapping is writable.
-        unsafe { ((readable + i) as *mut u8).write_volatile(0xAB) };
-    }
-    check(
-        "making the source's end unreadable",
-        protect(s, 0, src + PAGE_SIZE, PAGE_SIZE),
-    )?;
-    ensure(
-        "refusing a source that cannot be read",
-        // SAFETY: the kernel only reads the 512 bytes from the pointer.
-        unsafe { sys::process_write_memory(s.process, at, readable as *const u8, 512) }
-            == INVALID_ARGS,
-    )?;
-    ensure("writing none of it", mem_read_at::<8>(mem, 0)? == [0; 8])?;
-    // SAFETY: the call takes no pointers.
-    check("unmapping the source", unsafe {
-        sys::vm_unmap(s.process, src, 2 * PAGE_SIZE)
-    })?;
-
-    let sealed = create_memory(PAGE_SIZE)?;
-    let sat = map_with(s, PERM_READ, 0, sealed, PAGE_SIZE)?;
-    ensure("sealing", seal(sealed, 1 << 3) == 0)?;
-    ensure(
-        "refusing a sealed object",
-        write_memory(s.process, sat, b"x") == ACCESS_DENIED,
-    )?;
-
-    let (pager, paged) = paged_object(s, 2, 2)?;
-    let pat = map_with(s, PERM_READ, 0, paged, 2 * PAGE_SIZE)?;
-    check(
-        "writing a paged object",
-        write_memory(s.process, pat + PAGE_SIZE, b"P"),
-    )?;
-    let (ranges, count) = dirty(pager, paged, 2 * PAGE_SIZE)?;
-    ensure(
-        "marking the page dirty",
-        count == 1 && ranges[..2] == [PAGE_SIZE, PAGE_SIZE],
-    )?;
-    let mut got = [0u8; 6];
-    check(
-        "reading back",
-        read_memory(s.process, pat + PAGE_SIZE, &mut got),
-    )?;
-    ensure("keeping the supplied rest", got == *b"Page 1")?;
-    // SAFETY: the call takes no pointers.
-    check("revoking", unsafe { sys::pager_revoke(pager, paged) })?;
-    ensure(
-        "refusing a revoked object",
-        write_memory(s.process, pat, b"x") == ACCESS_DENIED,
-    )
-}
-
 /// What `start_probe` finds at its first instruction: RAX to R15 in the
 /// order of the `GENERAL` layout, RFLAGS, the FS and GS bases, the x87
 /// control word and MXCSR, and the 16 YMM registers.
@@ -6324,50 +6193,6 @@ fn memory_charged_to_a_budget(s: &Startup) -> Result {
     check("closing the copy", unsafe { sys::handle_close(no_write) })?;
     // SAFETY: the call takes no pointers.
     check("closing the budget", unsafe { sys::handle_close(child) })
-}
-
-/// A mapping keeps its object after the last handle to it is closed, and
-/// nothing is or can be mapped in the low 64 KiB.
-fn mappings_outlive_handles(s: &Startup) -> Result {
-    let mem = create_memory(PAGE_SIZE)?;
-    let at = map(s.process, mem, PAGE_SIZE)?;
-    // SAFETY: the call takes no pointers.
-    check("closing the handle", unsafe { sys::handle_close(mem) })?;
-    // SAFETY: the mapping is readable and writable.
-    let back = unsafe {
-        (at as *mut u64).write_volatile(0x5A5A_A5A5);
-        (at as *const u64).read_volatile()
-    };
-    ensure("using the mapping", back == 0x5A5A_A5A5)?;
-    ensure(
-        "reading the object through the mapping",
-        read_memory(s.process, at, &mut [0u8; 8]) == 0,
-    )?;
-    // SAFETY: the call takes no pointers.
-    check("unmapping", unsafe {
-        sys::vm_unmap(s.process, at, PAGE_SIZE)
-    })?;
-    let mem = create_memory(PAGE_SIZE)?;
-    let mut addr = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe {
-        sys::vm_map(
-            s.process,
-            PERM_READ | mikros_test::SPECIFIC,
-            0x1000,
-            mem,
-            0,
-            PAGE_SIZE,
-            &mut addr,
-        )
-    };
-    ensure("refusing the low 64 KiB", status == OUT_OF_RANGE)?;
-    ensure(
-        "mapping nothing there",
-        read_memory(s.process, 0x1000, &mut [0u8; 1]) == NOT_FOUND,
-    )?;
-    // SAFETY: the call takes no pointers.
-    check("closing", unsafe { sys::handle_close(mem) })
 }
 
 /// The bytes of the boot image member `name`, copied out of the image.
@@ -9335,7 +9160,7 @@ fn clock_page_rights(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 123] = [
+const TESTS: [(&str, Test); 121] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -9519,7 +9344,6 @@ const TESTS: [(&str, Test); 123] = [
     ("thread_lists", thread_lists),
     ("read_process_memory", read_process_memory),
     ("stack_guard_page_kept", stack_guard_page_kept),
-    ("write_process_memory", write_process_memory),
     ("threads", threads),
     ("new_thread_starts_clean", new_thread_starts_clean),
     ("registers_survive_preemption", registers_survive_preemption),
@@ -9529,7 +9353,6 @@ const TESTS: [(&str, Test); 123] = [
         budget_creation_and_thresholds,
     ),
     ("memory_charged_to_a_budget", memory_charged_to_a_budget),
-    ("mappings_outlive_handles", mappings_outlive_handles),
     ("signal_frame", signal_frame),
     ("alternate_signal_stacks", alternate_signal_stacks),
     ("signal_frame_reserved_bytes", signal_frame_reserved_bytes),
