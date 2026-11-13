@@ -14,15 +14,16 @@ use mikros_test::{
     ACCESS_DENIED, BAD_HANDLE, BAD_STATE, BUFFER_TOO_SMALL, FAILED, HANDLED, INVALID_ARGS,
     NOT_FOUND, OUT_OF_RANGE, PAGE_FAULT, PAGE_SIZE, PASSED, PERM_READ, PERM_WRITE, READABLE,
     REPORT_SIZE, Result, SIGNAL_ARGS, SIGNAL_ENTRY, SIGNAL_MASK, SIGNAL_PENDING, SIGNALED,
-    SLEEP_RESULT, SLOWER, SPINNER_LOOPS, SPINNER_LOOPS_HANDLED, SPINS, STARTED, SUSPENDED,
-    TERMINATED, THREAD_RAN, TIMED_OUT, USER0, USR1, call, catch_usr1, check, close, contains,
-    create_memory, elf, ensure, exit_qemu, futex_wake, general_registers, get_thread, in_time,
-    info, koid, map, map_read_only, mem_read_at, mem_write_at, now, open_exit_port, paged_object,
-    protect, read_memory, read_message, read_sizes, record_report, report_bytes, report_id,
-    restore_usr1, set_size, signal, signal_frame_copy, signal_probe, signal_restorer,
-    signal_sleeper, sleep_ms, soon, spawn, spawn2, spin, spin_until_handled, take_packet,
-    thread_entry, thread_list, thread_state, u32_at, u64_at, ustar, wait, wait_for_state,
-    wait_forever, wait_until_blocked, within, write_memory,
+    SLEEP_RESULT, SLOWER, SPINNER_LOOPS, SPINNER_LOOPS_HANDLED, SPINS, STARTED, STATE_SUSPENDED,
+    SUSPENDED, TERMINATED, THREAD_RAN, TIMED_OUT, USER0, USR1, call, catch_usr1, check, close,
+    contains, create_memory, elf, end_asm_thread, ensure, exit_qemu, futex_wake, general_registers,
+    get_thread, in_time, info, koid, map, map_read_only, mem_read_at, mem_write_at, now,
+    open_exit_port, paged_object, protect, read_memory, read_message, read_sizes, record_report,
+    report_bytes, report_id, restore_usr1, resume_thread, set_size, signal, signal_frame_copy,
+    signal_probe, signal_restorer, signal_sleeper, sleep_ms, soon, spawn, spawn2, spin,
+    spin_until_handled, suspend, suspend_and_wait, take_packet, thread_entry, thread_list,
+    thread_state, u32_at, u64_at, ustar, wait, wait_for_state, wait_forever, wait_until_blocked,
+    within, write_memory,
 };
 
 mikros_rt::main!(main);
@@ -2951,26 +2952,6 @@ fn coverage(_: &Startup) -> Result {
 
 type Test = fn(&Startup) -> Result;
 
-const STATE_SUSPENDED: u32 = 5;
-
-fn suspend(thread: Handle) -> i64 {
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_suspend(thread) }
-}
-
-fn resume_thread(thread: Handle) -> i64 {
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_resume(thread) }
-}
-
-/// Suspends `thread` and waits until it is suspended.
-fn suspend_and_wait(thread: Handle) -> Result {
-    check("suspending", suspend(thread))?;
-    let (status, _) = wait(thread, SUSPENDED, now() + 1_000_000_000);
-    check("becoming suspended", status)?;
-    ensure("being SUSPENDED", thread_state(thread)? == STATE_SUSPENDED)
-}
-
 /// A thread that often blocked after running briefly still runs soon
 /// after waking while another thread spins.
 fn sleeper_runs_beside_spinner(s: &Startup) -> Result {
@@ -3559,13 +3540,6 @@ unsafe extern "sysv64" {
     safe fn start_probe(a: u64, b: u64) -> !;
     safe fn register_keeper(a: u64, b: u64) -> !;
     safe fn register_clobberer(a: u64, b: u64) -> !;
-}
-
-/// Ends a thread whose entry is written in assembly.
-extern "sysv64" fn end_asm_thread() -> ! {
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
 }
 
 /// A new thread starts with its arguments in RDI and RSI, its stack in
