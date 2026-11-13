@@ -164,7 +164,7 @@ fn mikros_layer(shared: bool) -> Result<PathBuf> {
         root.join("user/target")
     };
     let mut command = Command::new(cargo);
-    command
+    crate::build::without_std(&mut command)
         .current_dir(root.join("user"))
         .args(["build", "--release", "--package", "mikros-libc", "--lib"])
         .arg("--target-dir")

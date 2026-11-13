@@ -1860,14 +1860,22 @@ fn prebuild(bins: &[String], kind: Kind) -> Result<()> {
     Ok(())
 }
 
+/// Sets Cargo up in `command` for programs without std for the Mikros
+/// target, whose core and alloc libraries it builds from source, with
+/// the memory functions of compiler_builtins.
+pub fn without_std(command: &mut Command) -> &mut Command {
+    command
+        .env("CARGO_UNSTABLE_BUILD_STD", "core,alloc,compiler_builtins")
+        .env("CARGO_UNSTABLE_BUILD_STD_FEATURES", "compiler-builtins-mem")
+        .env("CARGO_UNSTABLE_JSON_TARGET_SPEC", "true")
+}
+
 /// `cargo build` in the `user` workspace for the build kind `kind`.
 fn user_cargo(kind: Kind) -> Command {
     let root = crate::workspace_root();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    // The user workspace has its own configuration, which Cargo reads
-    // from the directory it runs in.
     let mut command = Command::new(cargo);
-    command
+    without_std(&mut command)
         .current_dir(root.join("user"))
         .args(["build", "--target"])
         .arg(root.join(USER_TARGET))

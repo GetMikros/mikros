@@ -420,13 +420,17 @@ pub fn run(args: &Args) -> Result<()> {
         // The btrfs crate's tests link the host's library of the shim.
         crate::btrfs::build(crate::btrfs::Flavor::Host)?;
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-        let status = Command::new(cargo)
-            .current_dir(crate::workspace_root())
-            .args(["test", "--workspace"])
-            .status()
-            .context("failed to run cargo")?;
-        if !status.success() {
-            bail!("the host unit tests failed");
+        // The root workspace, and the user workspace's packages with
+        // tests that run on the host, its default members.
+        for (dir, args) in [("", &["test", "--workspace"][..]), ("user", &["test"])] {
+            let status = Command::new(&cargo)
+                .current_dir(crate::workspace_root().join(dir))
+                .args(args)
+                .status()
+                .context("failed to run cargo")?;
+            if !status.success() {
+                bail!("the host unit tests failed");
+            }
         }
         crate::fuzz::replay_corpora()?;
     }

@@ -21,12 +21,67 @@ fn cargo() -> Command {
     command
 }
 
-/// Cargo in the user workspace, whose own configuration Cargo reads from
-/// the directory it runs in.
+/// Cargo in the user workspace.
 fn user_cargo() -> Command {
     let mut command = cargo();
     command.current_dir(crate::workspace_root().join("user"));
     command
+}
+
+/// The members of the user workspace whose sources have tests but which
+/// are not among its default members, so that `cargo test` in the
+/// workspace would leave their tests out.
+fn untested_members() -> Result<Vec<String>> {
+    let output = user_cargo()
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .context("failed to run cargo metadata")?;
+    if !output.status.success() {
+        bail!("cargo metadata failed in the user workspace");
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let default = metadata["workspace_default_members"]
+        .as_array()
+        .context("no default members")?;
+    let mut problems = Vec::new();
+    for package in metadata["packages"].as_array().context("no packages")? {
+        if default.contains(&package["id"]) {
+            continue;
+        }
+        let manifest = package["manifest_path"]
+            .as_str()
+            .context("no manifest path")?;
+        let dir = std::path::Path::new(manifest)
+            .parent()
+            .context("no directory")?;
+        if has_tests(&dir.join("src"))? {
+            let name = package["name"].as_str().unwrap_or("?");
+            problems.push(format!(
+                "{name} has tests but is not a default member of the user workspace"
+            ));
+        }
+    }
+    Ok(problems)
+}
+
+/// Whether a Rust file under `dir` has a `#[test]`.
+fn has_tests(dir: &std::path::Path) -> Result<bool> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(false);
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() {
+            if has_tests(&path)? {
+                return Ok(true);
+            }
+        } else if path.extension().is_some_and(|e| e == "rs")
+            && std::fs::read_to_string(&path)?.contains("#[test]")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Runs `command` and returns whether it succeeded.
@@ -277,12 +332,32 @@ pub fn run(args: &Args) -> Result<()> {
         problems.push("the user workspace is not formatted with rustfmt".to_owned());
     }
 
+    // The user workspace's packages with tests that run on the host, its
+    // default members, are checked on the host with their tests.
+    let mut clippy = user_cargo();
+    clippy
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .args(MODULE_LAYOUT);
+    if !passes(clippy)? {
+        problems.push(
+            "`cargo clippy --all-targets` in the user workspace reported warnings".to_owned(),
+        );
+    }
+    problems.extend(untested_members()?);
+
     // User programs are only compiled for the user target. The test init
-    // has code that only fuzz builds compile.
+    // has code that only fuzz builds compile. msh's library uses std.
     let target = crate::workspace_root().join(crate::build::USER_TARGET);
     let target = target.to_str().context("the workspace path is not UTF-8")?;
     let user_clippy_runs: [&[&str]; 2] = [
-        &["clippy", "--workspace", "--target", target],
+        &[
+            "clippy",
+            "--workspace",
+            "--exclude",
+            "mikros-msh",
+            "--target",
+            target,
+        ],
         &[
             "clippy",
             "--package",
@@ -295,7 +370,7 @@ pub fn run(args: &Args) -> Result<()> {
     ];
     for clippy_args in user_clippy_runs {
         let mut clippy = user_cargo();
-        clippy
+        crate::build::without_std(&mut clippy)
             .args(clippy_args)
             .args(["--", "-D", "warnings"])
             .args(MODULE_LAYOUT);

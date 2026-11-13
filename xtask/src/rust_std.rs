@@ -218,8 +218,6 @@ pub fn cargo(dir: &Path, rustflags: &[&str]) -> Result<Command> {
         .current_dir(dir)
         .env("__CARGO_TESTS_ONLY_SRC_ROOT", &library)
         .env("CARGO_ENCODED_RUSTFLAGS", flags.join("\x1f"))
-        // These replace the `user` workspace's settings, which build
-        // only the core library and its memory functions.
         .args([
             "-Zjson-target-spec",
             "-Zbuild-std=std,panic_unwind",

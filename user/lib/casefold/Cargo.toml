@@ -5,4 +5,3 @@ edition.workspace = true
 # The table holds data of the Unicode Character Database.
 license = "MPL-2.0 AND Unicode-3.0"
 publish = false
-workspace = "../../.."
