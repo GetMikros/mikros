@@ -52,11 +52,9 @@ const QUESTION: Duration = Duration::from_secs(1);
 /// it the terminal before the runner types Ctrl-C or Ctrl-Z. Until then
 /// the shell's own process group is in the terminal's foreground, and the
 /// key goes to the shell, which ignores it, as other shells do; the job
-/// then runs on in the foreground and takes the rest of the input. While the command word is
-/// typed, msh lists the programs of `PATH` again for its suggestion after
-/// each key, so in a debug build the line reaches it about 1 s after the
-/// last key; starting the job and handing it the terminal takes about
-/// 70 ms more.
+/// then runs on in the foreground and takes the rest of the input.
+/// Starting the job and handing it the terminal takes about 70 ms; the
+/// rest leaves room for a loaded machine.
 const JOB_START: Duration = Duration::from_secs(5);
 /// What the runner types in ada's msh, each with the time it then waits:
 /// first, while msh keeps up with what is typed, `yes`, which writes
