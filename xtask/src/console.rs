@@ -26,6 +26,23 @@ use std::time::{Duration, Instant};
 
 const SEAT: &str = "sessionmgr: gave the console the display";
 const SETUP_DONE: &str = "sessionmgr: setup exited";
+/// How many times the run's timeout the setup run may take. Its msh
+/// session also runs files-c and coreutils-check: in a debug build under
+/// KVM the run takes about 210 s from boot to power-off, and a fuzz
+/// build is about 3.3 times slower.
+const SETUP_TIMES: u32 = 2;
+const SETUP_TIMES_FUZZ: u32 = 6;
+
+/// How many times longer than the pauses of the steps the runner waits in
+/// a build of the kind `kind`: the pauses suit a debug build, and a fuzz
+/// build, whose kernel checks every lock and calls the coverage hook in
+/// every block, is about 3.3 times slower.
+fn pace(kind: Kind) -> u32 {
+    match kind {
+        Kind::Fuzz => 4,
+        _ => 1,
+    }
+}
 /// How long the console has to open the devices it was given.
 const SETTLE: Duration = Duration::from_secs(3);
 /// How long the setup program has to ask its next question, and msh
@@ -234,7 +251,8 @@ pub fn run(
 }
 
 /// Boots the setup run of the components `built` of the build kind
-/// `kind` in `dir`.
+/// `kind` in `dir`, which may take `timeout` times `SETUP_TIMES`, or
+/// `SETUP_TIMES_FUZZ` in a fuzz build.
 pub fn run_setup(
     machine: &MachineArgs,
     kind: Kind,
@@ -242,6 +260,11 @@ pub fn run_setup(
     dir: &Path,
     timeout: Duration,
 ) -> Result<()> {
+    let timeout = timeout
+        * match kind {
+            Kind::Fuzz => SETUP_TIMES_FUZZ,
+            _ => SETUP_TIMES,
+        };
     let mut steps = vec![Step::Wait(SEAT), Step::Sleep(SETTLE)];
     for keys in SETUP_KEYS {
         steps.extend([Step::Keys(keys), Step::Sleep(QUESTION)]);
@@ -317,7 +340,7 @@ fn session(
                 Step::Wait(line) => {
                     scenario::wait_for_line(&log, line, qemu, deadline)?;
                 }
-                Step::Sleep(time) => std::thread::sleep(*time),
+                Step::Sleep(time) => std::thread::sleep(*time * pace(kind)),
                 Step::Keys(keys) => type_keys(&socket, keys)?,
                 Step::Hold(keys, ms) => {
                     scenario::monitor(&socket, &format!("sendkey {keys} {ms}"))?;
