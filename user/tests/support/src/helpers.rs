@@ -329,3 +329,16 @@ pub fn write_memory(process: Handle, addr: u64, bytes: &[u8]) -> i64 {
     // SAFETY: the pointer and length describe `bytes`.
     unsafe { sys::process_write_memory(process, addr, bytes.as_ptr(), bytes.len() as u64) }
 }
+
+/// The rights of handles by name.
+pub mod right {
+    pub const DUPLICATE: u32 = 1 << 0;
+    pub const TRANSFER: u32 = 1 << 1;
+    pub const READ: u32 = 1 << 2;
+    pub const WRITE: u32 = 1 << 3;
+    pub const MAP: u32 = 1 << 5;
+    pub const WAIT: u32 = 1 << 6;
+    pub const SIGNAL: u32 = 1 << 7;
+    pub const MANAGE: u32 = 1 << 8;
+    pub const INSPECT: u32 = 1 << 9;
+}

@@ -1,7 +1,9 @@
 //! The kernel's threads, as a system test: starting threads of the
 //! test's own process, their FS and GS bases, the state a new thread
 //! starts with, registers kept across preemption, suspending threads
-//! and their extended state, the thread list of a process, and futexes.
+//! and their extended state, waits, calls and sleeps that a suspension
+//! interrupts, the right that debugging needs, the thread list of a
+//! process, and futexes.
 
 #![no_std]
 #![no_main]
@@ -10,7 +12,7 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use mikros_rt::Managed;
-use mikros_rt::sys;
+use mikros_rt::sys::{self, Handle};
 use mikros_test::*;
 
 mikros_rt::managed_main!(main);
@@ -27,6 +29,10 @@ fn main(m: &Managed) -> i64 {
             ("registers_survive_preemption", registers_survive_preemption),
             ("extended_state_round_trip", extended_state_round_trip),
             ("suspend_threads", suspend_threads),
+            ("suspend_blocked_waits", suspend_blocked_waits),
+            ("suspend_in_call", suspend_in_call),
+            ("suspended_sleep_goes_on", suspended_sleep_goes_on),
+            ("debugging_needs_manage", debugging_needs_manage),
         ],
     )
 }
@@ -689,4 +695,173 @@ core::arch::global_asm!(
 
 unsafe extern "sysv64" {
     safe fn extended_keeper(a: u64, b: u64) -> !;
+}
+
+/// What the waiting thread's wait returned.
+static WAIT_STATUS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+extern "sysv64" fn wait_for_user0(event: u64, _: u64) -> ! {
+    let (status, _) = wait(event as Handle, USER0, i64::MAX);
+    WAIT_STATUS.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread suspended in a wait waits again once resumed, without
+/// noticing the suspension.
+fn suspend_blocked_waits(s: &Own) -> Result {
+    let mut event = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let thread = spawn(s, wait_for_user0, u64::from(event))?;
+    wait_until_blocked(thread)?;
+    suspend_and_wait(thread)?;
+    check("resuming", resume_thread(thread))?;
+    wait_until_blocked(thread)?;
+    ensure(
+        "waiting again",
+        WAIT_STATUS.load(Ordering::Acquire) == u64::MAX,
+    )?;
+    suspend_and_wait(thread)?;
+    signal(event, 0, USER0)?;
+    sleep_ms(10);
+    ensure(
+        "not returning while suspended",
+        WAIT_STATUS.load(Ordering::Acquire) == u64::MAX,
+    )?;
+    check("resuming", resume_thread(thread))?;
+    ensure("ending", wait(thread, TERMINATED, in_time()).0 == 0)?;
+    ensure(
+        "completing the wait",
+        WAIT_STATUS.load(Ordering::Acquire) == 0,
+    )
+}
+
+/// What the calling thread's call returned: 0 with the expected reply.
+static CALL_STATUS: AtomicU64 = AtomicU64::new(u64::MAX);
+
+extern "sysv64" fn call_peer(channel: u64, _: u64) -> ! {
+    let (status, _, reply, _) = call(channel as Handle, b"ping", None, 64, i64::MAX);
+    let result = match status {
+        0 if &reply[4..8] == b"pong" => 0,
+        0 => 1,
+        e => e,
+    };
+    CALL_STATUS.store(result as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A thread suspended in `channel_call` keeps its call outstanding and
+/// takes the reply once resumed; the request is written once.
+fn suspend_in_call(s: &Own) -> Result {
+    let (mut ours, mut theirs) = (0, 0);
+    // SAFETY: the pointers are valid for the call.
+    check("creating a channel", unsafe {
+        sys::channel_create(0, &mut ours, &mut theirs)
+    })?;
+    let thread = spawn(s, call_peer, u64::from(theirs))?;
+    let request = read_message(ours, 1000)?;
+    ensure(
+        "receiving the request",
+        &request.bytes[4..request.len] == b"ping",
+    )?;
+    wait_until_blocked(thread)?;
+    suspend_and_wait(thread)?;
+    let (status, regs) = general_registers(thread);
+    check("reading the registers", status)?;
+    ensure("showing the call's number", u64_at(&regs, 0) == 65)?;
+    let mut reply = [0u8; 8];
+    reply[..4].copy_from_slice(&request.bytes[..4]);
+    reply[4..].copy_from_slice(b"pong");
+    // SAFETY: the pointer and length describe `reply`.
+    check("replying", unsafe {
+        sys::channel_write(ours, reply.as_ptr(), 8, core::ptr::null(), 0)
+    })?;
+    sleep_ms(10);
+    ensure(
+        "not returning while suspended",
+        CALL_STATUS.load(Ordering::Acquire) == u64::MAX,
+    )?;
+    check("resuming", resume_thread(thread))?;
+    ensure("ending", wait(thread, TERMINATED, in_time()).0 == 0)?;
+    ensure("taking the reply", CALL_STATUS.load(Ordering::Acquire) == 0)?;
+    let mut probe = [0u8; 64];
+    let (mut len, mut count) = (0u64, 0u64);
+    // SAFETY: the pointers describe `probe`, `len` and `count`.
+    let status = unsafe {
+        sys::channel_read(
+            ours,
+            probe.as_mut_ptr(),
+            64,
+            core::ptr::null_mut(),
+            0,
+            &mut len,
+            &mut count,
+        )
+    };
+    ensure("writing the request once", status == SHOULD_WAIT)
+}
+
+/// Suspending, resuming and inspecting threads and processes needs the
+/// `MANAGE` right.
+fn debugging_needs_manage(s: &Own) -> Result {
+    use right::*;
+    let (mut thread, mut process, mut out) = (0, 0, 0);
+    // SAFETY: the out pointers are valid for the calls.
+    unsafe {
+        check(
+            "duplicating the thread",
+            sys::handle_duplicate(s.thread, DUPLICATE | WAIT | INSPECT, &mut thread),
+        )?;
+        check(
+            "duplicating the process",
+            sys::handle_duplicate(s.process, DUPLICATE | WAIT | INSPECT, &mut process),
+        )?;
+    }
+    ensure("refusing to suspend", suspend(thread) == ACCESS_DENIED)?;
+    ensure("refusing to resume", resume_thread(thread) == ACCESS_DENIED)?;
+    let koid = koid(s.thread)?;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::process_get_thread(process, koid, &mut out) };
+    ensure("refusing to get a thread", status == ACCESS_DENIED)?;
+    let at = &raw const HANDLED as u64;
+    ensure(
+        "refusing to read memory",
+        read_memory(process, at, &mut [0u8; 8]) == ACCESS_DENIED,
+    )?;
+    ensure(
+        "refusing to write memory",
+        write_memory(process, at, &[0u8; 8]) == ACCESS_DENIED,
+    )?;
+    for h in [thread, process] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
+}
+
+/// A thread suspended while it sleeps in `thread_sleep` goes on sleeping
+/// once resumed, until its deadline, and sees no interruption.
+fn suspended_sleep_goes_on(s: &Own) -> Result {
+    let deadline = now() + 100_000_000;
+    let thread = spawn2(s, signal_sleeper, deadline as u64, 0)?;
+    wait_until_blocked(thread)?;
+    suspend_and_wait(thread)?;
+    check("resuming", resume_thread(thread))?;
+    ensure(
+        "ending the sleeper",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    let [status, ended] = SLEEP_RESULT
+        .each_ref()
+        .map(|a| a.load(Ordering::Acquire) as i64);
+    ensure(
+        "sleeping until the deadline",
+        status == 0 && ended >= deadline,
+    )
 }
