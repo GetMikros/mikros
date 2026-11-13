@@ -97,6 +97,9 @@ pub struct Built {
 pub enum BootImage {
     /// The system's boot image.
     System,
+    /// The system's boot image, with a test image's system: the system
+    /// tests and selftest besides the system's components.
+    SystemTests,
     /// The boot image of the integration tests, whose init runs them.
     Test,
 }
@@ -104,6 +107,12 @@ pub enum BootImage {
 /// Builds every component of the build kind `kind`.
 pub fn build(kind: Kind) -> Result<Built> {
     build_for(kind, BootImage::System)
+}
+
+/// Builds every component of the build kind `kind`, and a test image's
+/// system as its system image.
+pub fn build_tests(kind: Kind) -> Result<Built> {
+    build_for(kind, BootImage::SystemTests)
 }
 
 /// Builds every component of the build kind `kind`, with `boot` as the
@@ -181,13 +190,15 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     let mut first_boot_image = None;
     let mut takeover_image = None;
     let (boot_image, system_image) = match boot {
-        BootImage::System => {
+        BootImage::System | BootImage::SystemTests => {
+            let tests = boot == BootImage::SystemTests;
             let components = crate::components::all()?;
-            // What only test images hold is not built for the system.
+            // What only test images hold is built for them alone.
             let built = |runtime| -> Vec<String> {
                 components
                     .iter()
-                    .filter(|c| c.runtime == runtime && c.in_kind(kind) && c.image != Image::Tests)
+                    .filter(|c| c.runtime == runtime && c.in_kind(kind))
+                    .filter(|c| tests || c.image != Image::Tests)
                     .map(|c| c.name.clone())
                     .collect()
             };
@@ -198,11 +209,15 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // available, and the drivers, which the device manager reads
             // from the boot image only until then.
             let mut early = Vec::new();
-            for component in components {
-                if component.image == Image::Boot && component.in_kind(kind) {
-                    let program = component_build(&component, kind)?;
-                    early.extend(component.members(kind, &program)?);
-                }
+            let mut only_tests = Vec::new();
+            for component in components.iter().filter(|c| c.in_kind(kind)) {
+                let members = match component.image {
+                    Image::Boot => &mut early,
+                    Image::Tests if tests => &mut only_tests,
+                    _ => continue,
+                };
+                let program = component_build(component, kind)?;
+                members.extend(component.members(kind, &program)?);
             }
             // The system fonts and the fontconfig configuration that names
             // them as the defaults.
@@ -232,9 +247,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let whole: Vec<(&str, &Path)> = early
                 .iter()
                 .chain(&login)
+                .chain(&only_tests)
                 .map(|(at, path)| (at.as_str(), path.as_path()))
                 .collect();
-            let system_image = boot_image(kind, "system.img", &whole)?;
+            let name = match tests {
+                true => "system-tests.img",
+                false => "system.img",
+            };
+            let system_image = boot_image(kind, name, &whole)?;
             println!("built    {}", system_image.display());
             let early: Vec<(&str, &Path)> = early
                 .iter()

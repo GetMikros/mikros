@@ -6,7 +6,9 @@
 //!   goes to `usr/bin/<name>`, a program with its manifest in
 //!   `usr/lib/programs/`; a `service` goes to `usr/bin/<name>` with its
 //!   manifest in `usr/lib/services/`; a `driver` goes to
-//!   `usr/lib/drivers/<name>/<name>` with its `driver.yaml`.
+//!   `usr/lib/drivers/<name>/<name>` with its `driver.yaml`; a `test`, a
+//!   system test, which only test images hold, goes to
+//!   `usr/bin/tests/<name>`.
 //! - `image`: `boot` for the boot image, which the system image holds
 //!   as well, `system` for the system image only, or `tests` for test
 //!   images only.
@@ -31,6 +33,7 @@ pub enum Role {
     Service,
     Driver,
     Program,
+    Test,
 }
 
 /// The image that holds a component.
@@ -83,6 +86,7 @@ impl Component {
         let at = match (&self.path, self.role) {
             (Some(path), _) => path.clone(),
             (None, Role::Driver) => format!("usr/lib/drivers/{name}/{name}"),
+            (None, Role::Test) => format!("usr/bin/tests/{name}"),
             (None, _) => format!("usr/bin/{name}"),
         };
         let mut members = vec![(at, program.to_path_buf())];
@@ -100,8 +104,8 @@ impl Component {
                 self.manifest_source(kind, file),
             )),
             (Role::Service, None) => bail!("the service {name} names no manifest"),
-            (Role::Core | Role::Program, None) => None,
-            (Role::Core, Some(_)) => bail!("the core component {name} has a manifest"),
+            (Role::Core | Role::Program | Role::Test, None) => None,
+            (Role::Core | Role::Test, Some(_)) => bail!("{name} cannot have a manifest"),
         };
         members.extend(manifest);
         Ok(members)
@@ -208,6 +212,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             Some("service") => Role::Service,
             Some("driver") => Role::Driver,
             Some("program") => Role::Program,
+            Some("test") => Role::Test,
             Some(other) => bail!("{name}: unknown kind `{other}`"),
         };
         let image = match text("image")?.as_deref() {
@@ -217,6 +222,9 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             Some(other) => bail!("{name}: unknown image `{other}`"),
             None => bail!("{name}: a component names its image"),
         };
+        if role == Role::Test && image != Image::Tests {
+            bail!("{name}: a test is in test images only, `image = \"tests\"`");
+        }
         let kinds = match table.get("kinds") {
             None => None,
             Some(Value::Array(kinds)) => Some(
@@ -304,6 +312,21 @@ mod tests {
             let metadata = serde_json::json!({ "packages": [package("x", mikros)] });
             assert!(parse(&metadata).is_err());
         }
+    }
+
+    #[test]
+    fn installs_system_tests_in_test_images_only() {
+        let metadata = serde_json::json!({ "packages": [package("files",
+            serde_json::json!({"kind": "test", "image": "tests"}))]});
+        let components = parse(&metadata).unwrap();
+        let members = components[0]
+            .members(Kind::Debug, Path::new("/bin"))
+            .unwrap();
+        assert_eq!(members[0].0, "usr/bin/tests/files");
+        assert_eq!(members.len(), 1);
+        let elsewhere = serde_json::json!({ "packages": [package("files",
+            serde_json::json!({"kind": "test", "image": "system"}))]});
+        assert!(parse(&elsewhere).is_err());
     }
 
     #[test]

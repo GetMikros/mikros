@@ -45,14 +45,20 @@ pub struct Args {
     /// ~/.local/share/mikros/secure-boot.
     #[arg(long, value_name = "DIRECTORY", requires = "signed")]
     pub key: Option<PathBuf>,
+    /// Create a test image: the system with its system tests and
+    /// selftest, which runs them.
+    #[arg(long)]
+    pub tests: bool,
 }
 
-/// Where the image of a build kind is written.
-pub fn path(kind: Kind, live: bool) -> PathBuf {
+/// Where the image of a build kind is written: a live one with `live`,
+/// a test image with `tests`.
+pub fn path(kind: Kind, live: bool, tests: bool) -> PathBuf {
     let name = format!(
-        "mikros-{}{}.img",
+        "mikros-{}{}{}.img",
         kind.name(),
-        if live { "-live" } else { "" }
+        if live { "-live" } else { "" },
+        if tests { "-tests" } else { "" }
     );
     crate::workspace_root().join("target/image").join(name)
 }
@@ -142,12 +148,16 @@ pub fn run(args: &Args) -> Result<()> {
             &secure_boot::key::default_dir()?,
         )?),
     };
-    let built = build::build(args.kind)?;
+    let built = match args.tests {
+        true => build::build_tests(args.kind)?,
+        false => build::build(args.kind)?,
+    };
     if args.live {
         let boot_image = build::live_boot_image(args.kind, &built.system_image)?;
-        return create_live(&built, &boot_image, &path(args.kind, true), key.as_ref());
+        let out = path(args.kind, true, args.tests);
+        return create_live(&built, &boot_image, &out, key.as_ref());
     }
-    let out = path(args.kind, false);
+    let out = path(args.kind, false, args.tests);
     create_parts(
         args.kind,
         &built,

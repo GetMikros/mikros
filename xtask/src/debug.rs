@@ -134,7 +134,7 @@ pub fn start_halted(
 
 pub fn run(args: &Args) -> Result<()> {
     let built = build::build(args.kind)?;
-    let disk = image::path(args.kind, false);
+    let disk = image::path(args.kind, false, false);
     // The kernel runs at the addresses of its debug information.
     image::create_with(args.kind, &built, &disk, image::KASLR_OFF, &[])?;
     let log = disk.with_extension("serial.log");

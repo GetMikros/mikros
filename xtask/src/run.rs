@@ -26,7 +26,7 @@ pub fn run(args: &Args) -> Result<()> {
     if args.vnc.is_some() && args.machine.gpu == qemu::Gpu::Venus {
         bail!("VNC is not supported with --gpu venus; use --gpu virtio or --gpu basic");
     }
-    let disk = image::path(args.kind, args.live);
+    let disk = image::path(args.kind, args.live, false);
     if !disk.exists() {
         bail!(
             "{} does not exist; create it with `cargo xtask image`",
