@@ -71,13 +71,10 @@ as `MIKSPEC-0012`, and a requirement ID such as `MIKSPEC-0012.R3`.
 
 ## Layout of user space
 
-The maintainers chose this layout for `user/` on 2026-11-13. The tree is
-being moved to it in steps. Until the move is finished, some components are
-still at their old paths: libraries split from their program under
-`user/lib/`, std programs under `user/runtime/std/`, and init, processmgr
-and servicemgr under `user/services/`. Likewise, xtask does not yet read
-`port.toml` files or package metadata (rules 13 and 14). Put new components
-where this layout says, and do not add new splits.
+The maintainers chose this layout for `user/` on 2026-11-13. One part of it
+is not done yet: third-party sources are still pinned in xtask and kept in
+the top-level `ports/` and in `user/runtime/libc/patches`, not in
+`user/ports/` (rule 13). Put new components where this layout says.
 
 | Path | Holds |
 |---|---|
@@ -92,18 +89,25 @@ where this layout says, and do not add new splits.
 
 9. A component is one package with one binary, `src/main.rs` and its
    modules. Do not split a component into a library and a program so that
-   its code can be tested on the host. Test it on the host the way
-   `boot/mikrosboot/src/main.rs` does, with the Mikros-only parts left out:
+   its code can be tested on the host. Keep what only runs on Mikros in one
+   module, `driver`, `service` or `program`, with the modules that only it
+   uses below it, and leave that module out on the host, as
+   `user/services/termsvc/src/main.rs` does:
 
        #![cfg_attr(target_os = "mikros", no_std, no_main)]
        #![cfg_attr(not(target_os = "mikros"), allow(dead_code))]
+       #[cfg(target_os = "mikros")]
+       mod service;
+       mod terminal;
        #[cfg(not(target_os = "mikros"))]
        fn main() {}
-       #[cfg(target_os = "mikros")]
-       mod device;
 
    Dependencies that only build for Mikros go under
-   `[target.'cfg(target_os = "mikros")'.dependencies]`.
+   `[target.'cfg(target_os = "mikros")'.dependencies]`, and the package
+   declares the `mikros` target OS among its cfgs in `[lints.rust]`. Code
+   that only the tests use is `#[cfg(test)]`. A package whose code all
+   needs Mikros, such as the ACPI driver, has no host tests and needs none
+   of this.
 10. A crate goes in `user/lib/` only when two or more packages, or xtask,
     use it. Code with one user lives in that user's package. `gpudev`,
     `display`, `virtio` and `logview` stay libraries for the GPU and virtio
@@ -122,5 +126,7 @@ where this layout says, and do not add new splits.
     its changes as patch files or rewrite rules there (MIKSPEC-0062.R7). Do
     not add download URLs or checksums elsewhere in xtask. The host tools
     LLVM, Meson and CMake stay in `tools/`.
-14. Where xtask installs a component, and from which manifest, comes from
-    its `[package.metadata.mikros]`. Do not add hard-coded install lists.
+14. Where xtask installs a component in the system image, and from which
+    manifest, comes from its `[package.metadata.mikros]`. Do not add
+    hard-coded install lists. The test images' lists in xtask/src/build.rs
+    are the exception until the tests are reorganised.

@@ -26,11 +26,13 @@ repository. Code and commits refer to them by ID, such as `MIKSPEC-0012.R3`.
 | `kernel/arch/x86_64/` | x86_64 support |
 | `kernel/fuzz/` | Host fuzz targets |
 | `kernel/gdb/` | GDB commands for inspecting the kernel |
-| `user/services/` | System services, starting with `init`, the initial process |
-| `user/drivers/` | Device and file system drivers |
-| `user/runtime/` | C library, Rust runtime and standard library port, ACPICA |
-| `user/lib/` | Libraries for formats, file systems and hardware, host-tested |
-| `user/tests/` | Programs the integration tests run |
+| `user/bin/` | Programs: the shell `msh`, the text console, setup |
+| `user/core/` | `init`, the initial process, and the process and service managers |
+| `user/services/` | System services, each with its manifest |
+| `user/drivers/` | Device and file system drivers, each with its `driver.yaml` |
+| `user/lib/` | Libraries that two or more packages, or xtask, use |
+| `user/runtime/` | C library, Rust runtime, and the patches of the standard library port |
+| `user/tests/` | The test init and the programs the integration tests run |
 
 Folders appear as work on them starts.
 
@@ -50,6 +52,17 @@ The host needs these tools, which `cargo xtask setup` checks:
 | GDB | 12.1.0 |
 | `mkfs.btrfs` (btrfs-progs) | 6.12.0 |
 | `mkfs.exfat` (exfatprogs) | 1.2.0 |
+
+All of user space is one Cargo workspace, `user/`, which `cargo xtask`
+builds for Mikros. Its packages test the code that does not need Mikros on
+the host: `cargo test` and `cargo clippy` in `user/` run them. For
+rust-analyzer to show the code that only Mikros builds, set
+`rust-analyzer.cargo.target` to `targets/x86_64-unknown-mikros.json` and
+`rust-analyzer.cargo.extraEnv` to
+`CARGO_UNSTABLE_BUILD_STD=core,alloc,compiler_builtins`,
+`CARGO_UNSTABLE_BUILD_STD_FEATURES=compiler-builtins-mem`,
+`CARGO_UNSTABLE_JSON_TARGET_SPEC=true` and `CARGO_PROFILE_DEV_PANIC=abort`,
+which is how xtask builds the programs without std.
 
 `cargo xtask debug` boots the disk image in QEMU halted and starts GDB
 attached to the kernel, with the `mikros` commands of `kernel/gdb/mikros.py`
