@@ -5,7 +5,7 @@
 //! The thread that made a call queues a packet on the executor's port
 //! once it is done, which wakes the request that waits for it.
 
-use crate::host::{self, Spin};
+use crate::driver::host::{self, Spin};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ffi::c_void;

@@ -14,7 +14,7 @@
 //! other, each copying what it writes into the new buffer. When no new
 //! channel is up within 10 seconds, or the driver stops, they fail.
 
-use crate::host::Spin;
+use crate::driver::host::Spin;
 use alloc::collections::{BTreeSet, VecDeque};
 use alloc::sync::Arc;
 use core::ffi::{c_int, c_void};

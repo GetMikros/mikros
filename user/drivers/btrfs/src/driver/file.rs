@@ -5,14 +5,14 @@
 //! (MIKSPEC-0049.R18, MIKSPEC-0053.R5), setting attributes, cloning the
 //! connection, and reading symbolic links.
 
-use crate::change::koids;
-use crate::dir::link_target;
-use crate::fs::{self, error};
-use crate::node::{Connection, MODE_BITS};
-use crate::work::blocking;
+use crate::driver::change::koids;
+use crate::driver::dir::link_target;
+use crate::driver::fs::{self, error};
+use crate::driver::node::{Connection, MODE_BITS};
+use crate::driver::work::blocking;
+use crate::linux::node::Changes;
 use alloc::vec;
 use alloc::vec::Vec;
-use mikros_btrfs::node::Changes;
 use mikros_rt::interfaces::mikros::fs::*;
 
 /// The most bytes one read returns, the limit of its reply.
@@ -193,7 +193,7 @@ impl Connection {
             self.require_write()?;
         }
         let file = self.fs.shared(&self.open)?;
-        let rights = crate::share::rights(write, execute);
+        let rights = crate::driver::share::rights(write, execute);
         let memory = match private {
             true if write || !self.open.node.unchangeable() => file.clone_private(rights)?,
             true => file.handle_pinned(rights)?,

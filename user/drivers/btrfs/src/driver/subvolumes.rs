@@ -7,12 +7,12 @@
 //! top-level subvolume, one component at a time, the server's own `usr`
 //! left aside.
 
-use crate::fs::{Fs, error};
-use crate::watch::event;
+use crate::driver::fs::{Fs, error};
+use crate::driver::watch::event;
+use crate::linux::node::Node;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use mikros_btrfs::node::Node;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::btrfs::*;
 use mikros_rt::interfaces::mikros::fs::{Error, WatchKind};

@@ -3,8 +3,8 @@
 //! made from a tree of the host, and comparing them with the tree.
 
 use super::{image, noise, start, text};
-use crate::host::Disk;
-use crate::node::{
+use crate::linux::host::Disk;
+use crate::linux::node::{
     ENTRY_DIRECTORY, ENTRY_FILE, ENTRY_SYMLINK, MODE_DIRECTORY, MODE_FILE, MODE_SYMLINK, MODE_TYPE,
     Node,
 };
@@ -82,7 +82,7 @@ fn reads(name: &str, options: &[&OsStr], more: impl FnOnce(&Node<'_>)) {
     Disk::add(&disk, image(name, 256 << 20, &all), true).unwrap();
     drop(tree);
     let source = CString::new(format!("/dev/{name}")).unwrap();
-    let mount = crate::Mount::new(&source, true, None).unwrap();
+    let mount = crate::linux::Mount::new(&source, true, None).unwrap();
     let root = mount.root().unwrap();
     for (path, data) in files() {
         check_file(&walk(&root, &path), &path, &data);

@@ -4,7 +4,7 @@
 //! one at a time, so that the server resolves paths as MIKSPEC-0049.R4
 //! and R5 have them.
 
-use crate::fs::{self, Fs, Open};
+use crate::driver::fs::{self, Fs, Open};
 use alloc::rc::Rc;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;

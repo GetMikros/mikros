@@ -2,7 +2,7 @@
 //! The nodes of a mounted btrfs, which the program walks one name at a
 //! time: the calls of `shim/file.c`.
 
-use crate::{Mount, result};
+use crate::linux::{Mount, result};
 use core::ffi::{c_char, c_int, c_long, c_void};
 use core::marker::PhantomData;
 
@@ -15,6 +15,7 @@ unsafe extern "C" {
     fn mikros_btrfs_unpin(node: *mut c_void, max: usize) -> usize;
     fn mikros_btrfs_harvest(node: *mut c_void);
     fn mikros_btrfs_unchangeable(node: *mut c_void) -> bool;
+    #[allow(dead_code)]
     fn mikros_btrfs_unshare(node: *mut c_void);
     fn mikros_btrfs_lookup(
         dir: *mut c_void,
@@ -127,8 +128,11 @@ pub struct Changes {
     pub group: Option<u32>,
 }
 
-/// Flags of `Node::rename()`, as Linux's `RENAME_` flags.
+/// Flags of `Node::rename()`, as Linux's `RENAME_` flags. The driver
+/// passes neither yet; the tests do.
+#[allow(dead_code)]
 pub const RENAME_NOREPLACE: u32 = 1;
+#[allow(dead_code)]
 pub const RENAME_EXCHANGE: u32 = 2;
 
 /// The attributes of a node.
@@ -157,12 +161,17 @@ pub struct Attributes {
 /// The type bits of `Attributes::mode`.
 pub const MODE_TYPE: u32 = 0o170000;
 pub const MODE_DIRECTORY: u32 = 0o040000;
+#[allow(dead_code)]
 pub const MODE_FILE: u32 = 0o100000;
 pub const MODE_SYMLINK: u32 = 0o120000;
 
-/// The types of directory entries, as Linux's `DT_` values.
+/// The types of directory entries, as Linux's `DT_` values, which the
+/// tests use. The driver has its own constants for the types it serves.
+#[allow(dead_code)]
 pub const ENTRY_DIRECTORY: u32 = 4;
+#[allow(dead_code)]
 pub const ENTRY_FILE: u32 = 8;
+#[allow(dead_code)]
 pub const ENTRY_SYMLINK: u32 = 10;
 
 /// A node of a mount, which it cannot outlive.
@@ -544,6 +553,9 @@ impl Shared {
     /// # Safety
     ///
     /// As for `lend_page()`, and the pages lent must no longer be used.
+    ///
+    /// The driver does not call it yet, so a shared file keeps its pages.
+    #[allow(dead_code)]
     pub unsafe fn unshare(&self) {
         // SAFETY: the caller vouches for the node and the pages.
         unsafe { mikros_btrfs_unshare(self.0) }

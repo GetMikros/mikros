@@ -1,9 +1,9 @@
 //! Linux's btrfs code on the btrfs shim (MIKSPEC-0053.R1): the pinned
 //! Linux release, fetched once and extracted in the parts the shim
 //! builds from, and compiled, for Mikros or for the build host, against
-//! the Mikros architecture in `user/lib/btrfs/linux` into a static library,
+//! the Mikros architecture in `user/drivers/btrfs/linux` into a static library,
 //! with the library code of the release that btrfs uses and the shim's
-//! own files in `user/lib/btrfs/shim`.
+//! own files in `user/drivers/btrfs/shim`.
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -327,11 +327,11 @@ pub fn build(flavor: Flavor) -> Result<PathBuf> {
     // has yet to build; the flags name its headers too.
     crate::llvm::build()?;
     let source = source()?;
-    let linux = crate::workspace_root().join("user/lib/btrfs/linux");
+    let linux = crate::workspace_root().join("user/drivers/btrfs/linux");
     let out = crate::workspace_root()
         .join("target/btrfs")
         .join(flavor.name());
-    let shim = crate::workspace_root().join("user/lib/btrfs/shim");
+    let shim = crate::workspace_root().join("user/drivers/btrfs/shim");
     let library = out.join("libbtrfs.a");
     let mut files = btrfs_files(&source)?;
     files.extend(LINUX.iter().map(|f| f.to_string()));

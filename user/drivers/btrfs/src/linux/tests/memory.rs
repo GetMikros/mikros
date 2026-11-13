@@ -2,9 +2,9 @@
 //! The shim's memory, which reclaim keeps within what the host gave.
 
 use super::{Image, noise, start};
-use crate::host::{Disk, MEMORY};
-use crate::node::Kind;
-use crate::{Mount, memory_kept, memory_used};
+use crate::linux::host::{Disk, MEMORY};
+use crate::linux::node::Kind;
+use crate::linux::{Mount, memory_kept, memory_used};
 
 /// Puts the number of MiB `i` of a file in each 4 KiB block of `buf`.
 fn tag(buf: &mut [u8], i: u64) {

@@ -4,8 +4,6 @@
 //! The program that links it provides the shim's host layer, the
 //! `mikros_host_` functions of `shim/host.h`.
 
-#![no_std]
-
 #[cfg(test)]
 extern crate std;
 
@@ -38,7 +36,9 @@ unsafe extern "C" {
     fn mikros_btrfs_unmount(mount: *mut c_void);
     fn mikros_btrfs_statfs(mount: *mut c_void, statfs: *mut Statfs) -> i32;
     fn mikros_btrfs_sync_mount(mount: *mut c_void) -> i32;
+    #[cfg(test)]
     fn mikros_btrfs_memory_used() -> u64;
+    #[cfg(test)]
     fn mikros_btrfs_memory_kept() -> u64;
 }
 
@@ -59,14 +59,17 @@ pub fn start() -> Result<(), i32> {
 
 /// The bytes of memory that the shim holds. Reclaim keeps them below
 /// what the host layer's `mikros_host_memory` gives, unless the shim
-/// needs more than it can free.
+/// needs more than it can free. The tests check it.
+#[cfg(test)]
 pub fn memory_used() -> u64 {
     // SAFETY: the call takes no arguments.
     unsafe { mikros_btrfs_memory_used() }
 }
 
 /// The bytes of free memory that the shim keeps in whole blocks of its
-/// largest size, rather than give it back to the host.
+/// largest size, rather than give it back to the host. The tests check
+/// it.
+#[cfg(test)]
 pub fn memory_kept() -> u64 {
     // SAFETY: the call takes no arguments.
     unsafe { mikros_btrfs_memory_kept() }

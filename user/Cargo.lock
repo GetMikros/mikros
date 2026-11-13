@@ -125,7 +125,6 @@ dependencies = [
 name = "btrfs"
 version = "0.0.0"
 dependencies = [
- "mikros-btrfs",
  "mikros-casefold",
  "mikros-rt",
 ]
@@ -502,10 +501,6 @@ version = "0.0.0"
 dependencies = [
  "mikros-ustar",
 ]
-
-[[package]]
-name = "mikros-btrfs"
-version = "0.0.0"
 
 [[package]]
 name = "mikros-casefold"

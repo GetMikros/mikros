@@ -3,19 +3,19 @@
 //! (MIKSPEC-0071.R17), opening and creating nodes (MIKSPEC-0049.R6), and
 //! listing directories (MIKSPEC-0049.R12).
 
-use crate::fs::{self, Key, Open, error};
-use crate::node::{Connection, MODE_BITS, NAME_MAX, TARGET_MAX};
-use crate::watch::event;
-use crate::work::blocking;
+use crate::driver::fs::{self, Key, Open, error};
+use crate::driver::node::{Connection, MODE_BITS, NAME_MAX, TARGET_MAX};
+use crate::driver::watch::event;
+use crate::driver::work::blocking;
+use crate::linux::node::{
+    Attributes as BtrfsAttributes, Kind, MODE_DIRECTORY, MODE_SYMLINK, MODE_TYPE, Node as BtrfsNode,
+};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use mikros_btrfs::node::{
-    Attributes as BtrfsAttributes, Kind, MODE_DIRECTORY, MODE_SYMLINK, MODE_TYPE, Node as BtrfsNode,
-};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::mikros::fs::*;
 

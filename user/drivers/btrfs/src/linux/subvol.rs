@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 //! Subvolumes: the calls of `shim/subvol.c` on nodes.
 
-use crate::node::Node;
-use crate::result;
+use crate::linux::node::Node;
+use crate::linux::result;
 use core::ffi::{c_char, c_int, c_void};
 
 unsafe extern "C" {

@@ -9,14 +9,14 @@
 //! clients wrote. A thread of its own answers the objects' page requests,
 //! so that the executor may wait for pages, as `mem_clone` does.
 
-use crate::fs::{Fs, Key, Open};
-use crate::host::{self, Spin};
+use crate::driver::fs::{Fs, Key, Open};
+use crate::driver::host::{self, Spin};
+use crate::linux::node::Shared;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 use core::ffi::{c_int, c_long, c_void};
 use core::sync::atomic::{AtomicU32, Ordering};
-use mikros_btrfs::node::Shared;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::Error;
 use mikros_rt::sys;
@@ -213,7 +213,7 @@ impl Fs {
             unsafe { sys::pager_create_memory(pager, port, cookie, len, OPTIONS, &mut raw) },
             raw,
         )?;
-        let shared = open.node.share(cookie).map_err(crate::fs::error)?;
+        let shared = open.node.share(cookie).map_err(crate::driver::fs::error)?;
         OBJECTS.lock().insert(cookie, (mem.raw(), shared));
         let file = Rc::new(File {
             mem,

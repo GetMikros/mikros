@@ -243,7 +243,7 @@ impl Disk {
         let size = file.metadata().map_err(errno)?.len();
         let handle = Box::into_raw(Box::new(Disk(file)));
         // SAFETY: the handle points to a disk that is never freed.
-        unsafe { crate::add_disk(name, handle.cast(), size, 512, read_only, true) }
+        unsafe { crate::linux::add_disk(name, handle.cast(), size, 512, read_only, true) }
     }
 }
 

@@ -7,7 +7,7 @@ mod shares;
 mod subvolumes;
 mod writes;
 
-use crate::host::Disk;
+use crate::linux::host::Disk;
 use std::format;
 use std::sync::OnceLock;
 use std::vec::Vec;
@@ -15,7 +15,7 @@ use std::vec::Vec;
 /// Starts the shim, once for all the tests, which share it.
 fn start() {
     static STARTED: OnceLock<Result<(), i32>> = OnceLock::new();
-    assert_eq!(*STARTED.get_or_init(crate::start), Ok(()));
+    assert_eq!(*STARTED.get_or_init(crate::linux::start), Ok(()));
 }
 
 #[test]
@@ -41,13 +41,13 @@ const MOUNTS: usize = 100;
 #[test]
 fn mounts_more_filesystems_than_the_shim_has_cpus_for() {
     start();
-    let mounts: std::vec::Vec<crate::Mount> = (0..MOUNTS)
+    let mounts: std::vec::Vec<crate::linux::Mount> = (0..MOUNTS)
         .map(|i| {
             let name = format!("many-mounts-{i}");
             let disk = std::ffi::CString::new(name.as_str()).unwrap();
             Disk::add(&disk, image(&name, 256 << 20, &[]), false).unwrap();
             let source = std::ffi::CString::new(format!("/dev/{name}")).unwrap();
-            crate::Mount::new(&source, false, None).unwrap()
+            crate::linux::Mount::new(&source, false, None).unwrap()
         })
         .collect();
     for mount in &mounts {
@@ -152,7 +152,7 @@ fn mounts_read_only() {
         true,
     )
     .unwrap();
-    let mount = crate::Mount::new(c"/dev/mounts-read-only", true, None).unwrap();
+    let mount = crate::linux::Mount::new(c"/dev/mounts-read-only", true, None).unwrap();
     let statfs = mount.statfs().unwrap();
     assert_eq!(statfs.kind, BTRFS_SUPER_MAGIC);
     assert_eq!(statfs.block_size, 4096);

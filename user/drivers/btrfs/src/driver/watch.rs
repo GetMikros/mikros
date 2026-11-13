@@ -2,8 +2,8 @@
 //! Watches (MIKSPEC-0049.R15): which connections watch which nodes for
 //! which changes, and sending them the events of each change.
 
-use crate::fs::Key;
-use crate::node::Connection;
+use crate::driver::fs::Key;
+use crate::driver::node::Connection;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};

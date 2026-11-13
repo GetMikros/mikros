@@ -2,8 +2,8 @@
 //! Byte-range locks of connections (MIKSPEC-0049.R10), as POSIX `fcntl`
 //! record locks.
 
-use crate::fs::{Fs, Open};
-use crate::node::Connection;
+use crate::driver::fs::{Fs, Open};
+use crate::driver::node::Connection;
 use alloc::vec::Vec;
 use core::future::poll_fn;
 use core::task::Poll;

@@ -2,9 +2,9 @@
 //! Managing subvolumes through the shim.
 
 use super::{Image, start};
-use crate::Mount;
-use crate::host::Disk;
-use crate::node::{Kind, Node};
+use crate::linux::Mount;
+use crate::linux::host::Disk;
+use crate::linux::node::{Kind, Node};
 use std::vec::Vec;
 
 const EEXIST: i32 = -17;

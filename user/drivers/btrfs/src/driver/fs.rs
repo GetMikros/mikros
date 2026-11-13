@@ -9,13 +9,17 @@
 //! MIKSPEC-0053.R9); any other file system's root is the top-level
 //! subvolume as it is.
 
-use crate::change::koids;
-use crate::disk::Disk;
-use crate::lock::Lock;
-use crate::node;
-use crate::share::Shares;
-use crate::watch::{Watches, event};
-use crate::work::{self, blocking};
+use crate::driver::change::koids;
+use crate::driver::disk::Disk;
+use crate::driver::lock::Lock;
+use crate::driver::node;
+use crate::driver::share::Shares;
+use crate::driver::watch::{Watches, event};
+use crate::driver::work::{self, blocking};
+use crate::linux::Mount;
+use crate::linux::node::{
+    Attributes as BtrfsAttributes, MODE_DIRECTORY, MODE_SYMLINK, MODE_TYPE, Node as BtrfsNode, Time,
+};
 use alloc::collections::BTreeMap;
 use alloc::rc::{Rc, Weak};
 use alloc::string::String;
@@ -23,10 +27,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
-use mikros_btrfs::Mount;
-use mikros_btrfs::node::{
-    Attributes as BtrfsAttributes, MODE_DIRECTORY, MODE_SYMLINK, MODE_TYPE, Node as BtrfsNode, Time,
-};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;

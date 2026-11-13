@@ -5,9 +5,9 @@
 //! were made.
 
 use super::{Image, noise, start, text};
-use crate::Mount;
-use crate::host::Disk;
-use crate::node::{
+use crate::linux::Mount;
+use crate::linux::host::Disk;
+use crate::linux::node::{
     Changes, Kind, MODE_DIRECTORY, MODE_FILE, MODE_SYMLINK, MODE_TYPE, Node, RENAME_EXCHANGE,
     RENAME_NOREPLACE, Time,
 };

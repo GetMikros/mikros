@@ -18,11 +18,6 @@
 //! (MIKSPEC-0044.R19).
 //! `ResetChild` and `ConnectChild` fail with `NOT_SUPPORTED`.
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
 mod change;
 mod dir;
 mod disk;
@@ -37,12 +32,12 @@ mod time;
 mod watch;
 mod work;
 
+use crate::linux::Mount;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::ffi::{CStr, c_void};
 use disk::Disk;
 use fs::Fs;
-use mikros_btrfs::Mount;
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -182,7 +177,7 @@ fn start(
         memory(),
         time::page(directory, process).unwrap_or(0),
     );
-    mikros_btrfs::start().map_err(|_| Status::Internal)?;
+    crate::linux::start().map_err(|_| Status::Internal)?;
     // The shim keeps the disk for the rest of the program.
     let disk: &'static Disk = Box::leak(Box::new(disk));
     let read_only = disk.read_only();
@@ -190,7 +185,7 @@ fn start(
     // SAFETY: the handle points to a disk that is never freed, which the
     // host layer's disk calls take.
     unsafe {
-        mikros_btrfs::add_disk(
+        crate::linux::add_disk(
             c"partition",
             handle,
             disk.size(),

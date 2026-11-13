@@ -4,9 +4,9 @@
 //! for.
 
 use super::{Image, noise, start};
-use crate::Mount;
-use crate::host::{Disk, OBJECTS};
-use crate::node::{Kind, Node};
+use crate::linux::Mount;
+use crate::linux::host::{Disk, OBJECTS};
+use crate::linux::node::{Kind, Node};
 use std::vec::Vec;
 
 const PAGE: usize = 4096;

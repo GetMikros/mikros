@@ -6,12 +6,12 @@
 //! finds them, and new names may not equal existing ones under case
 //! folding (MIKSPEC-0071.R17).
 
-use crate::fs::{Fs, Open, error};
-use crate::node::{Connection, NAME_MAX, TARGET_MAX};
-use crate::watch::event;
+use crate::driver::fs::{Fs, Open, error};
+use crate::driver::node::{Connection, NAME_MAX, TARGET_MAX};
+use crate::driver::watch::event;
+use crate::linux::node::{Changes, Kind};
 use alloc::rc::Rc;
 use alloc::string::String;
-use mikros_btrfs::node::{Changes, Kind};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::fs::*;
 use mikros_rt::sys;
@@ -22,7 +22,7 @@ const TOKEN_RIGHTS: u32 = 1 << 0 | 1 << 1 | 1 << 9;
 
 impl Connection {
     /// Makes the connection's user the owner of a node it created.
-    pub(crate) fn own(&self, node: &mikros_btrfs::node::Node<'_>) -> Result<(), Error> {
+    pub(crate) fn own(&self, node: &crate::linux::node::Node<'_>) -> Result<(), Error> {
         let changes = Changes {
             owner: Some(self.user),
             ..Changes::default()
