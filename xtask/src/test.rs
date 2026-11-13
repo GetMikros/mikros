@@ -556,6 +556,8 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("power-off run passed");
+    let passed = crate::system_tests::run(&args.machine, args.kind, &dir.join("system"), timeout)?;
+    println!("system tests passed: {passed}");
     crate::volumes::run(
         &args.machine,
         args.kind,
