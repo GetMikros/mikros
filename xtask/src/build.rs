@@ -136,7 +136,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         let dir = syzkaller_descriptions()?;
         println!("built    {}", dir.display());
     }
-    let xkbcommon = crate::ports::build(&crate::ports::XKBCOMMON)?;
+    let xkbcommon_port = crate::ports::load("xkbcommon")?;
+    let xkbcommon = crate::ports::build(&xkbcommon_port)?;
     crate::build_systems::check_installed(
         &xkbcommon.install,
         &[
@@ -150,7 +151,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         ],
     )?;
     println!("built    {}", xkbcommon.install.display());
-    let keymaps = crate::ports::build(&crate::ports::XKEYBOARD_CONFIG)?;
+    let keymaps = crate::ports::build(&crate::ports::load("xkeyboard-config")?)?;
     crate::build_systems::check_installed(
         &keymaps.install,
         &[
@@ -161,7 +162,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         &[],
     )?;
     println!("built    {}", keymaps.install.display());
-    let freetype = crate::ports::build(&crate::ports::FREETYPE)?;
+    let freetype = crate::ports::build(&crate::ports::load("freetype")?)?;
     crate::build_systems::check_installed(
         &freetype.install,
         &[
@@ -456,8 +457,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // runner of the ported projects' tests takes the service
             // manager's place.
             let plan = crate::workspace_root().join("target/ported/port-tests.plan");
-            let mut members =
-                crate::port_tests::members(&crate::ports::XKBCOMMON, &xkbcommon, &plan)?;
+            let mut members = crate::port_tests::members(&xkbcommon_port, &xkbcommon, &plan)?;
             members.push(("usr/bin/servicemgr".into(), runner));
             members.push(("usr/lib/ld-mikros.dlib".into(), dynamic_linker.clone()));
             let members: Vec<(&str, &Path)> = members

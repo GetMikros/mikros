@@ -1,6 +1,6 @@
 //! The test suites of the ported projects, which the `port-tests` runner
 //! runs on Mikros from the boot image `ports.img`: the tests Meson lists
-//! for a port, checked against what `ports/<name>/tests.txt` expects of
+//! for a port, checked against what `user/ports/<name>/tests.txt` expects of
 //! them, the plan the runner follows, the files the tests need, and the
 //! tests that run on the build host instead.
 
@@ -149,7 +149,7 @@ fn tests(
             Some(Expected::Pass) => false,
             Some(Expected::Fail) => true,
             Some(Expected::Host | Expected::Excluded) => continue,
-            None => bail!("ports/{}/tests.txt does not list {name}", port.name),
+            None => bail!("user/ports/{}/tests.txt does not list {name}", port.name),
         };
         if field("protocol")?.as_str() != Some("exitcode") {
             bail!("{name} does not report its result by its exit code");
@@ -193,7 +193,7 @@ fn tests(
     }
     if let Some(name) = expected.keys().find(|n| !seen.contains(&n.as_str())) {
         bail!(
-            "ports/{}/tests.txt lists {name}, which the suite lacks",
+            "user/ports/{}/tests.txt lists {name}, which the suite lacks",
             port.name
         );
     }
@@ -201,7 +201,7 @@ fn tests(
 }
 
 /// Meson's list of the tests of `port`, built in `built`, and what
-/// `ports/<name>/tests.txt` expects of them.
+/// `user/ports/<name>/tests.txt` expects of them.
 fn suite(port: &Port, built: &Built) -> Result<(Value, BTreeMap<String, Expected>)> {
     let listed = crate::port::output(
         crate::meson::command()?
@@ -210,10 +210,7 @@ fn suite(port: &Port, built: &Built) -> Result<(Value, BTreeMap<String, Expected
     )
     .with_context(|| format!("listing the tests of {}", port.name))?;
     let listed: Value = serde_json::from_str(&listed).context("reading Meson's test list")?;
-    let file = crate::workspace_root()
-        .join("ports")
-        .join(port.name)
-        .join("tests.txt");
+    let file = port.dir.join("tests.txt");
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
     let expected = expectations(&text).with_context(|| format!("in {}", file.display()))?;
     Ok((listed, expected))
@@ -278,7 +275,7 @@ pub fn members(port: &Port, built: &Built, plan_file: &Path) -> Result<Vec<(Stri
             members.push((format!("usr/lib/{name}"), built.build.join(&name)));
         }
     }
-    for dir in port.test_data {
+    for dir in &port.test_data {
         let mut files = Vec::new();
         collect(&built.source.join(dir), &mut files)?;
         for path in files {
@@ -373,7 +370,13 @@ mod tests {
         .unwrap();
         let text = "a pass\nb excluded MIKSPEC-0033.R8\nc expected-fail MIKSPEC-0050.R9\nd host\n";
         let expected = expectations(text).unwrap();
-        let tests = tests(&ports::XKBCOMMON, &paths(), &listed, &expected).unwrap();
+        let tests = tests(
+            &ports::load("xkbcommon").unwrap(),
+            &paths(),
+            &listed,
+            &expected,
+        )
+        .unwrap();
         assert_eq!(
             tests,
             [
@@ -403,9 +406,25 @@ mod tests {
         );
         assert!(plan(&tests[1..]).ends_with("expect fail\ntimeout 50\nend\n"));
         let missing = expectations("a pass\n").unwrap();
-        assert!(super::tests(&ports::XKBCOMMON, &paths(), &listed, &missing).is_err());
+        assert!(
+            super::tests(
+                &ports::load("xkbcommon").unwrap(),
+                &paths(),
+                &listed,
+                &missing
+            )
+            .is_err()
+        );
         let extra = expectations(&format!("{text}e pass\n")).unwrap();
-        assert!(super::tests(&ports::XKBCOMMON, &paths(), &listed, &extra).is_err());
+        assert!(
+            super::tests(
+                &ports::load("xkbcommon").unwrap(),
+                &paths(),
+                &listed,
+                &extra
+            )
+            .is_err()
+        );
     }
 
     #[test]

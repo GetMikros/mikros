@@ -97,7 +97,7 @@ runs:
           target/cmake
           target/musl
           target/sources
-        key: tools-${{ hashFiles('xtask/src/firmware.rs', 'xtask/src/meson.rs', 'xtask/src/cmake.rs', 'xtask/src/musl.rs', 'xtask/src/ports.rs', 'tools/meson/patches/**', 'tools/cmake/patches/**', 'user/runtime/libc/patches/**', 'ports/*/patches/**') }}
+        key: tools-${{ hashFiles('xtask/src/firmware.rs', 'xtask/src/meson.rs', 'xtask/src/cmake.rs', 'xtask/src/musl.rs', 'xtask/src/ports.rs', 'tools/meson/patches/**', 'tools/cmake/patches/**', 'user/runtime/libc/patches/**', 'user/ports/**') }}
         restore-keys: tools-
     # The target directories of every Rust build, and the standard library
     # that the programs with std build from the patched copy in

@@ -1,0 +1,27 @@
+# libxkbcommon, without the parts that need X11, Wayland or libxml2, none
+# of which Mikros has, and without its documentation and shell
+# completions. It is given the directories of keymap extensions, which it
+# derives itself only from an installed xkeyboard-config, next to its
+# default keymap directory, /usr/share/X11/xkb, and the directory its
+# tests read their data from on Mikros, below the port's test source.
+
+[source]
+url = "https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-1.13.2.tar.gz"
+sha256 = "acc4d5f7c3cbba5f9f8d08d8bdbeede84ecede46792f47929aa9321873385528"
+dir = "libxkbcommon-xkbcommon-1.13.2"
+
+[build]
+options = [
+    "-Denable-x11=false",
+    "-Denable-wayland=false",
+    "-Denable-xkbregistry=false",
+    "-Denable-docs=false",
+    "-Denable-bash-completion=false",
+    "-Dxkb-config-versioned-extensions-path=/usr/share/X11/xkb.d",
+    "-Dxkb-config-unversioned-extensions-path=/usr/share/xkeyboard-config.d",
+    "-Dtest-data-dir=/usr/share/xkbcommon-tests/test/data",
+]
+
+[tests]
+# The directories of the source that the tests read.
+data = ["test/data"]

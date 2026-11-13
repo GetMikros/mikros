@@ -1,81 +1,158 @@
-//! The ported C and C++ projects: each is pinned to a release archive by
-//! its SHA-256, patched with the files in `ports/<name>/patches/`, and
-//! built for Mikros with Meson through the sysroot's cross file.
+//! The third-party projects of user space, each pinned in
+//! `user/ports/<name>/port.toml` with its Mikros changes beside it:
+//!
+//! - `[source]`: the `url` of the archive of its source, the archive's
+//!   `sha256`, the directory `dir` that holds the source once it is
+//!   unpacked, and `rewrites`, pairs of texts: the first of each is
+//!   replaced with the second in every file of the source when it is
+//!   unpacked;
+//! - `[[crate]]`: for a Rust project, each crate it depends on that needs
+//!   changes too, by `name`, `version` and `sha256`, and whether the
+//!   rewrites apply to it, `rewritten`;
+//! - `[build]`: the `options` that a Meson project is configured with;
+//! - `[tests]`: `data`, the directories of its source that its tests read.
+//!
+//! The changes that are not rewrites are patch files, in `patches/`. The
+//! Meson projects are built here, the others by modules of their own.
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
+use std::fs;
 use std::path::PathBuf;
 
 /// A ported project.
 pub struct Port {
     /// Its name, which names its directories.
-    pub name: &'static str,
-    url: &'static str,
+    pub name: String,
+    /// Its directory in `user/ports`.
+    pub dir: PathBuf,
+    pub url: String,
     /// SHA-256 of the archive at `url`.
-    sha256: &'static str,
-    /// The directory the archive holds the source in.
-    source: &'static str,
+    pub sha256: String,
+    /// The directory that holds the source once it is unpacked.
+    pub source: String,
+    pub rewrites: Vec<(String, String)>,
+    pub crates: Vec<Crate>,
     /// The options it is configured with.
-    options: &'static [&'static str],
+    pub options: Vec<String>,
     /// The directories of its source, relative to it, that its tests
     /// read.
-    pub test_data: &'static [&'static str],
+    pub test_data: Vec<String>,
 }
 
-/// libxkbcommon, without the parts that need X11, Wayland or libxml2,
-/// none of which Mikros has, and without its documentation and shell
-/// completions. It is given the directories of keymap extensions, which
-/// it derives itself only from an installed xkeyboard-config, next to
-/// its default keymap directory, `/usr/share/X11/xkb`, and the directory
-/// its tests read their data from on Mikros, below `test_source`.
-pub const XKBCOMMON: Port = Port {
-    name: "xkbcommon",
-    url: "https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-1.13.2.tar.gz",
-    sha256: "acc4d5f7c3cbba5f9f8d08d8bdbeede84ecede46792f47929aa9321873385528",
-    source: "libxkbcommon-xkbcommon-1.13.2",
-    options: &[
-        "-Denable-x11=false",
-        "-Denable-wayland=false",
-        "-Denable-xkbregistry=false",
-        "-Denable-docs=false",
-        "-Denable-bash-completion=false",
-        "-Dxkb-config-versioned-extensions-path=/usr/share/X11/xkb.d",
-        "-Dxkb-config-unversioned-extensions-path=/usr/share/xkeyboard-config.d",
-        "-Dtest-data-dir=/usr/share/xkbcommon-tests/test/data",
-    ],
-    test_data: &["test/data"],
-};
+/// A crate that a ported Rust project depends on, which needs changes.
+pub struct Crate {
+    pub name: String,
+    pub version: String,
+    pub sha256: String,
+    /// Whether the port's rewrites apply to it.
+    pub rewritten: bool,
+}
 
-/// xkeyboard-config, the keymap data that xkbcommon compiles keyboard
-/// layouts from, without translations of its layout descriptions.
-pub const XKEYBOARD_CONFIG: Port = Port {
-    name: "xkeyboard-config",
-    url: "https://gitlab.freedesktop.org/xkeyboard-config/xkeyboard-config/-/archive/xkeyboard-config-2.48/xkeyboard-config-xkeyboard-config-2.48.tar.gz",
-    sha256: "1e304d3c7a74bfbad0bae16b25d4c2b2eda06714b988953607a06cc013bf3077",
-    source: "xkeyboard-config-xkeyboard-config-2.48",
-    options: &["-Dnls=false"],
-    test_data: &[],
-};
+/// The port `name`, from its `port.toml`.
+pub fn load(name: &str) -> Result<Port> {
+    let dir = crate::workspace_root().join("user/ports").join(name);
+    let path = dir.join("port.toml");
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    parse(name, dir, &text).with_context(|| format!("in {}", path.display()))
+}
 
-/// FreeType, which rasterises the system fonts, with its own zlib for
-/// compressed fonts and without the libraries Mikros does not have:
-/// Brotli, bzip2, HarfBuzz and libpng. Its tests need fonts that it does
-/// not ship, and are left out.
-pub const FREETYPE: Port = Port {
-    name: "freetype",
-    url: "https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.gz",
-    sha256: "9186627467a616d9a9e3e574748ac0c45fa77398e6364edef3041a8ba8d92f64",
-    source: "freetype-2.15.0",
-    options: &[
-        "-Dbrotli=disabled",
-        "-Dbzip2=disabled",
-        "-Dharfbuzz=disabled",
-        "-Dpng=disabled",
-        "-Dzlib=internal",
-        "-Dhvf=disabled",
-        "-Dtests=disabled",
-    ],
-    test_data: &[],
-};
+fn parse(name: &str, dir: PathBuf, text: &str) -> Result<Port> {
+    let table: toml::Table = text.parse()?;
+    only(&table, "the file", &["source", "crate", "build", "tests"])?;
+    let source = table
+        .get("source")
+        .and_then(|s| s.as_table())
+        .context("no [source] table")?;
+    only(source, "[source]", &["url", "sha256", "dir", "rewrites"])?;
+    let mut rewrites = Vec::new();
+    for pair in array(source, "rewrites")? {
+        match pair.as_array().map(|p| p.as_slice()) {
+            Some([toml::Value::String(from), toml::Value::String(to)]) => {
+                rewrites.push((from.clone(), to.clone()));
+            }
+            _ => bail!("a rewrite is not a pair of strings"),
+        }
+    }
+    let mut crates = Vec::new();
+    if let Some(list) = table.get("crate") {
+        for c in list
+            .as_array()
+            .context("`crate` is not an array of tables")?
+        {
+            let c = c.as_table().context("a [[crate]] is not a table")?;
+            only(c, "[[crate]]", &["name", "version", "sha256", "rewritten"])?;
+            crates.push(Crate {
+                name: string(c, "name")?,
+                version: string(c, "version")?,
+                sha256: string(c, "sha256")?,
+                rewritten: c
+                    .get("rewritten")
+                    .and_then(|r| r.as_bool())
+                    .context("a [[crate]] does not say whether it is `rewritten`")?,
+            });
+        }
+    }
+    let section = |key: &str, keys: &[&str]| -> Result<Vec<String>> {
+        match table.get(key) {
+            None => Ok(Vec::new()),
+            Some(t) => {
+                let t = t
+                    .as_table()
+                    .with_context(|| format!("[{key}] is not a table"))?;
+                only(t, &format!("[{key}]"), keys)?;
+                strings(t, keys[0])
+            }
+        }
+    };
+    Ok(Port {
+        name: name.to_owned(),
+        dir,
+        url: string(source, "url")?,
+        sha256: string(source, "sha256")?,
+        source: string(source, "dir")?,
+        rewrites,
+        crates,
+        options: section("build", &["options"])?,
+        test_data: section("tests", &["data"])?,
+    })
+}
+
+/// Fails if `table`, which `what` names, has a key other than `keys`.
+fn only(table: &toml::Table, what: &str, keys: &[&str]) -> Result<()> {
+    match table.keys().find(|k| !keys.contains(&k.as_str())) {
+        Some(key) => bail!("{what} has an unknown key `{key}`"),
+        None => Ok(()),
+    }
+}
+
+fn string(table: &toml::Table, key: &str) -> Result<String> {
+    table
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .with_context(|| format!("no string `{key}`"))
+}
+
+/// The array `key` of `table`, empty when it has none.
+fn array<'t>(table: &'t toml::Table, key: &str) -> Result<&'t [toml::Value]> {
+    match table.get(key) {
+        None => Ok(&[]),
+        Some(v) => Ok(v
+            .as_array()
+            .with_context(|| format!("`{key}` is not an array"))?),
+    }
+}
+
+fn strings(table: &toml::Table, key: &str) -> Result<Vec<String>> {
+    array(table, key)?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .with_context(|| format!("`{key}` holds a value that is not a string"))
+        })
+        .collect()
+}
 
 /// Where a port was built.
 pub struct Built {
@@ -97,20 +174,19 @@ pub fn test_programs(port: &Port) -> String {
     format!("/usr/libexec/{}-tests", port.name)
 }
 
-/// Fetches, patches and builds `port`.
+/// Fetches, patches and builds `port`, a Meson project.
 pub fn build(port: &Port) -> Result<Built> {
     let root = crate::workspace_root();
-    let dir = root.join("target/sources").join(port.name);
+    let dir = root.join("target/sources").join(&port.name);
     let archive = dir.join(format!("{}.tar.gz", port.source));
     let what = format!("{} source", port.name);
-    crate::fetch::cached(&what, port.url, port.sha256, &archive)?;
-    let patches = root.join("ports").join(port.name).join("patches");
-    let source = crate::port::patched_source(&archive, &dir, port.source, &patches, &[])?;
-    let options: Vec<String> = port.options.iter().map(|o| o.to_string()).collect();
-    let install = crate::build_systems::meson(port.name, &source, &options)?;
+    crate::fetch::cached(&what, &port.url, &port.sha256, &archive)?;
+    let patches = port.dir.join("patches");
+    let source = crate::port::patched_source(&archive, &dir, &port.source, &patches, &[])?;
+    let install = crate::build_systems::meson(&port.name, &source, &port.options)?;
     Ok(Built {
         source,
-        build: crate::build_systems::build_dir(port.name),
+        build: crate::build_systems::build_dir(&port.name),
         install,
     })
 }
@@ -121,7 +197,27 @@ mod tests {
 
     #[test]
     fn xkbcommon_tests_read_their_data_from_their_source() {
-        let option = format!("-Dtest-data-dir={}/test/data", test_source(&XKBCOMMON));
-        assert!(XKBCOMMON.options.contains(&option.as_str()));
+        let xkbcommon = load("xkbcommon").unwrap();
+        let option = format!("-Dtest-data-dir={}/test/data", test_source(&xkbcommon));
+        assert!(xkbcommon.options.contains(&option));
+    }
+
+    #[test]
+    fn every_port_reads() {
+        let dir = crate::workspace_root().join("user/ports");
+        for entry in fs::read_dir(dir).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            load(&name).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_keys() {
+        let ok = "[source]\nurl = \"u\"\nsha256 = \"s\"\ndir = \"d\"\n";
+        assert!(parse("x", PathBuf::new(), ok).is_ok());
+        let typo = "[source]\nurl = \"u\"\nsha265 = \"s\"\ndir = \"d\"\n";
+        assert!(parse("x", PathBuf::new(), typo).is_err());
+        let rewrite = format!("{ok}rewrites = [[\"a\"]]\n");
+        assert!(parse("x", PathBuf::new(), &rewrite).is_err());
     }
 }
