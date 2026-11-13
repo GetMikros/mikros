@@ -1,0 +1,11 @@
+[package]
+name = "mikros-fatserver"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-fat = { path = "../fat" }
+mikros-rt = { path = "../../runtime/mikros-rt" }
+mikros-tz = { path = "../tz" }

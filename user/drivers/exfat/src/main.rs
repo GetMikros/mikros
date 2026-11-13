@@ -8,14 +8,14 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use fat_server::{BlockDevice, Format};
 use mikros_exfat::{Dir, Error, Local, Node, Stamp, Volume};
+use mikros_fatserver::{BlockDevice, Format};
 use mikros_rt::sys;
 
 mikros_rt::raw_main!(main);
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
-    fat_server::run::<Exfat>(bootstrap)
+    mikros_fatserver::run::<Exfat>(bootstrap)
 }
 
 /// A mounted exFAT volume.

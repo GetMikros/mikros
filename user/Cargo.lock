@@ -283,9 +283,9 @@ dependencies = [
 name = "exfat"
 version = "0.0.0"
 dependencies = [
- "fat",
  "mikros-exfat",
  "mikros-fat",
+ "mikros-fatserver",
  "mikros-rt",
 ]
 
@@ -294,8 +294,8 @@ name = "fat"
 version = "0.0.0"
 dependencies = [
  "mikros-fat",
+ "mikros-fatserver",
  "mikros-rt",
- "mikros-tz",
 ]
 
 [[package]]
@@ -520,6 +520,15 @@ name = "mikros-fat"
 version = "0.0.0"
 dependencies = [
  "fatfs",
+ "mikros-tz",
+]
+
+[[package]]
+name = "mikros-fatserver"
+version = "0.0.0"
+dependencies = [
+ "mikros-fat",
+ "mikros-rt",
  "mikros-tz",
 ]
 
