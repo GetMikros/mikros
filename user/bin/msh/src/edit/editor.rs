@@ -49,6 +49,9 @@ pub struct Editor {
     killed: bool,
     search: Option<Search>,
     menu: Option<Menu>,
+    /// The line the last suggestion was found for, and that suggestion,
+    /// which goes on as long as what is typed after the line follows it.
+    suggested: Option<(String, String)>,
 }
 
 const DIM: &str = "\x1b[2m";
@@ -65,6 +68,7 @@ impl Editor {
             killed: false,
             search: None,
             menu: None,
+            suggested: None,
         }
     }
 
@@ -232,12 +236,30 @@ impl Editor {
 
     /// The most likely rest of the line, with the cursor at its end:
     /// from the newest history entry that starts with it, or else the
-    /// rest of the word's one candidate.
-    pub fn suggestion(&self, sources: &dyn Sources) -> String {
+    /// rest of the word's one candidate. While what is typed after the
+    /// line of the last suggestion follows that suggestion, the rest of
+    /// it goes on without being looked for again.
+    pub fn suggestion(&mut self, sources: &dyn Sources) -> String {
         let text = self.line.text();
         if self.menu.is_some() || self.search.is_some() || !self.line.at_end() || text.is_empty() {
+            self.suggested = None;
             return String::new();
         }
+        if let Some((line, suggestion)) = &self.suggested
+            && let Some(typed) = text.strip_prefix(line.as_str())
+            && let Some(rest) = suggestion.strip_prefix(typed)
+            && !rest.is_empty()
+        {
+            return rest.to_owned();
+        }
+        let found = self.find_suggestion(sources);
+        self.suggested = (!found.is_empty()).then(|| (text.to_owned(), found.clone()));
+        found
+    }
+
+    /// The suggestion for the line, found anew.
+    fn find_suggestion(&self, sources: &dyn Sources) -> String {
+        let text = self.line.text();
         if let Some(entry) = self
             .history
             .iter()
@@ -586,6 +608,54 @@ mod tests {
         assert_eq!(e.line().text(), "less not");
         press(&mut e, &[Key::End]);
         assert_eq!(e.line().text(), "less notes.txt");
+    }
+
+    /// Sources that count how often they are asked for programs.
+    struct Counting(std::cell::Cell<usize>);
+
+    impl Sources for Counting {
+        fn entries(&self, _folder: &str) -> Option<Vec<(String, bool)>> {
+            None
+        }
+        fn programs(&self) -> Vec<String> {
+            self.0.set(self.0.get() + 1);
+            vec!["zz-tool".to_string()]
+        }
+        fn functions(&self) -> Vec<(String, Vec<String>)> {
+            Vec::new()
+        }
+        fn variables(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn environment(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn params(&self, _path: &str) -> Option<Vec<Param>> {
+            None
+        }
+    }
+
+    #[test]
+    fn keeps_a_suggestion_while_the_typing_follows_it() {
+        let sources = Counting(std::cell::Cell::new(0));
+        let mut e = editor(&[]);
+        typed(&mut e, "zz");
+        assert_eq!(e.suggestion(&sources), "-tool");
+        assert_eq!(e.suggestion(&sources), "-tool");
+        typed(&mut e, "-t");
+        assert_eq!(e.suggestion(&sources), "ool");
+        assert_eq!(sources.0.get(), 1);
+        // Another character looks for a suggestion again.
+        typed(&mut e, "x");
+        assert_eq!(e.suggestion(&sources), "");
+        assert_eq!(sources.0.get(), 2);
+        press(&mut e, &[Key::Backspace]);
+        assert_eq!(e.suggestion(&sources), "ool");
+        assert_eq!(sources.0.get(), 3);
+        // Typed to its end, the suggestion is looked for again.
+        typed(&mut e, "ool");
+        assert_eq!(e.suggestion(&sources), "");
+        assert_eq!(sources.0.get(), 4);
     }
 
     #[test]
