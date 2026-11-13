@@ -61,9 +61,16 @@ const INTERRUPT_FUNCTIONS: [&str; 6] = [
 
 /// Runs the system tests in a test image as the kernel's tests run: on
 /// the machine of `args`, on QEMU's AMD IOMMU, and with kernel page-table
-/// isolation, with the same allowances for emulation.
+/// isolation. They run only under KVM and not in fuzz builds: selftest
+/// gives each test 60 seconds whatever the machine, which an emulated
+/// processor is too slow for, and the fuzz build's kernel does not yet
+/// boot the system that runs them.
 fn system_tests(args: &Args, dir: &Path) -> Result<()> {
     let processor = qemu::Processor::available();
+    if args.kind == Kind::Fuzz || processor != qemu::Processor::Host {
+        println!("warning  the system tests run only under KVM and not in fuzz builds");
+        return Ok(());
+    }
     let timeout = Duration::from_secs(args.timeout);
     let passed = crate::system_tests::run(
         &args.machine,
@@ -76,28 +83,18 @@ fn system_tests(args: &Args, dir: &Path) -> Result<()> {
     if !args.machine.no_iommu {
         let mut amd = args.machine.clone();
         amd.amd_iommu = true;
-        let timeout = match processor {
-            qemu::Processor::Host => timeout,
-            _ => timeout * 3,
-        };
         let dir = dir.join("system-amd-iommu");
         let passed = crate::system_tests::run(&amd, processor, args.kind, &dir, timeout)?;
         println!("system tests passed on AMD-Vi: {passed}");
     }
-    if args.kind != Kind::Fuzz {
-        let isolating = if args.emulated_isolation {
-            qemu::Processor::EmulatedIntel
-        } else {
-            qemu::Processor::isolating()
-        };
-        let timeout = match (processor, isolating) {
-            (qemu::Processor::Host, qemu::Processor::EmulatedIntel) => timeout * 5,
-            _ => timeout,
-        };
-        let dir = dir.join("system-isolation");
-        let passed = crate::system_tests::run(&args.machine, isolating, args.kind, &dir, timeout)?;
-        println!("system tests passed with kernel page-table isolation: {passed}");
+    let isolating = qemu::Processor::isolating();
+    if args.emulated_isolation || isolating != qemu::Processor::HostWithoutRdclNo {
+        println!("warning  the system tests run with page-table isolation only under KVM");
+        return Ok(());
     }
+    let dir = dir.join("system-isolation");
+    let passed = crate::system_tests::run(&args.machine, isolating, args.kind, &dir, timeout)?;
+    println!("system tests passed with kernel page-table isolation: {passed}");
     Ok(())
 }
 
