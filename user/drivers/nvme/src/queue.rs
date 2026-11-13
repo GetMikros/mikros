@@ -19,7 +19,7 @@ use mikros_storage::{Contiguous, now};
 const SQE: u64 = 64;
 const CQE: u64 = 16;
 
-pub use mikros_nvme::Command;
+pub use crate::command::Command;
 
 /// Why a command did not succeed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

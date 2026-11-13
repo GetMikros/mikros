@@ -8,22 +8,13 @@
 //! `storage`. `ResetChild` fails with `NOT_SUPPORTED`, and `Stop` shuts
 //! the controller down.
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-mod controller;
-mod namespace;
-mod queue;
-mod regs;
-
+use crate::controller::Controller;
+use crate::namespace::Namespace;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use controller::Controller;
 use core::cell::RefCell;
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
@@ -39,7 +30,6 @@ use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::Provider;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 use mikros_storage::PciBus;
-use namespace::Namespace;
 
 mikros_rt::raw_main!(main);
 

@@ -3,8 +3,6 @@
 //!
 //! Nothing here touches hardware, so that the host tests can check it.
 
-#![no_std]
-
 #[cfg(test)]
 mod tests;
 
