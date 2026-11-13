@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+[[bin]]
+name = "partition"
+path = "src/driver.rs"
+
 [dependencies]
 mikros-gpt = { path = "../../lib/gpt" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
