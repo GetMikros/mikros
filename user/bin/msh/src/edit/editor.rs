@@ -41,8 +41,9 @@ pub struct Search {
 /// The line editor's state for one line.
 pub struct Editor {
     line: Line,
-    /// The history's lines, oldest first.
+    /// The history's lines, oldest first, and its entries.
     history: Vec<String>,
+    entries: Vec<Entry>,
     /// While browsing the history: the entry shown, and the line typed
     /// before, whose start the entries shown begin with.
     browse: Option<(usize, String)>,
@@ -64,7 +65,8 @@ impl Editor {
     pub fn new(history: Vec<Entry>) -> Editor {
         Editor {
             line: Line::default(),
-            history: history.into_iter().map(|e| e.line).collect(),
+            history: history.iter().map(|e| e.line.clone()).collect(),
+            entries: history,
             browse: None,
             kill: String::new(),
             killed: false,
@@ -237,8 +239,10 @@ impl Editor {
     }
 
     /// The most likely rest of the line, with the cursor at its end:
-    /// from the newest history entry that starts with it, or else the
-    /// rest of the word's one candidate. While what is typed after the
+    /// from the newest history entry that starts with it and was entered
+    /// in the current folder, or else from the newest such entry whose
+    /// paths are valid in the current folder, or else the rest of the
+    /// word's one candidate. While what is typed after the
     /// line of the last suggestion follows that suggestion, the rest of
     /// it goes on without being looked for again.
     pub fn suggestion(&mut self, sources: &dyn Sources) -> String {
@@ -262,13 +266,20 @@ impl Editor {
     /// The suggestion for the line, found anew.
     fn find_suggestion(&self, sources: &dyn Sources) -> String {
         let text = self.line.text();
-        if let Some(entry) = self
-            .history
-            .iter()
-            .rev()
-            .find(|e| e.len() > text.len() && e.starts_with(text))
-        {
-            return entry[text.len()..].to_owned();
+        let here = sources.current_folder();
+        let here = here.as_deref();
+        let starting = || {
+            self.entries
+                .iter()
+                .rev()
+                .filter(|e| e.line.len() > text.len() && e.line.starts_with(text))
+        };
+        let entered_here = |e: &Entry| here.is_some() && e.folder.as_deref() == here;
+        let found = starting()
+            .find(|e| entered_here(e))
+            .or_else(|| starting().find(|e| !entered_here(e) && valid_here(e, sources)));
+        if let Some(entry) = found {
+            return entry.line[text.len()..].to_owned();
         }
         let found = complete(text, text.len(), sources);
         let word = &text[found.start..];
@@ -412,6 +423,34 @@ impl Editor {
         };
         self.line.set(&text);
     }
+}
+
+/// Whether the paths of `entry` are valid in the current folder: the
+/// target of a `cd`, unless it is absolute, names a folder there, and the
+/// words recorded as naming files or folders name ones there.
+fn valid_here(entry: &Entry, sources: &dyn Sources) -> bool {
+    let mut words = entry.line.split_whitespace();
+    if words.next() == Some("cd")
+        && let Some(target) = words.next().map(|w| w.trim_matches(['\'', '"']))
+        && !target.starts_with(['/', '~', '-', '$'])
+        && kind(target, sources) != Some(true)
+    {
+        return false;
+    }
+    entry.paths.iter().all(|p| kind(p, sources).is_some())
+}
+
+/// Whether `path`, relative to the current folder, is a folder; `None`
+/// when it is not there.
+fn kind(path: &str, sources: &dyn Sources) -> Option<bool> {
+    let path = path.trim_end_matches('/');
+    let last = path.rsplit('/').next().unwrap_or(path);
+    if path.is_empty() || last == "." || last == ".." {
+        return Some(true);
+    }
+    let (folder, name) = path.rsplit_once('/').unwrap_or((".", path));
+    let entries = sources.entries(if folder.is_empty() { "/" } else { folder })?;
+    entries.into_iter().find(|(n, _)| n == name).map(|(_, f)| f)
 }
 
 #[cfg(test)]
@@ -635,6 +674,78 @@ mod tests {
         fn params(&self, _path: &str) -> Option<Vec<Param>> {
             None
         }
+    }
+
+    /// Sources whose current folder is ada's `Developer`, holding `src`
+    /// and `notes.txt`.
+    struct InDeveloper;
+
+    impl Sources for InDeveloper {
+        fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
+            match folder {
+                "." => Some(vec![("src".into(), true), ("notes.txt".into(), false)]),
+                _ => None,
+            }
+        }
+        fn programs(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn functions(&self) -> Vec<(String, Vec<String>)> {
+            Vec::new()
+        }
+        fn variables(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn environment(&self) -> Vec<(String, String)> {
+            Vec::new()
+        }
+        fn params(&self, _path: &str) -> Option<Vec<Param>> {
+            None
+        }
+        fn current_folder(&self) -> Option<String> {
+            Some("/Users/ada/Developer".into())
+        }
+    }
+
+    fn entry(line: &str, folder: Option<&str>, paths: &[&str]) -> Entry {
+        Entry {
+            line: line.into(),
+            folder: folder.map(str::to_owned),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn suggests_from_the_history_by_folder() {
+        let entries = vec![
+            entry(
+                "cat notes.txt",
+                Some("/Users/ada/Developer"),
+                &["notes.txt"],
+            ),
+            entry("cd Developer", Some("/Users/ada"), &["Developer"]),
+            entry("cat notes.old", Some("/elsewhere"), &["notes.old"]),
+            entry("cd src", Some("/elsewhere"), &["src"]),
+            entry("ls", None, &[]),
+        ];
+        let mut e = Editor::new(entries);
+        // The entry of another folder, whose cd target is not here, is
+        // not suggested.
+        typed(&mut e, "cd D");
+        assert_eq!(e.suggestion(&InDeveloper), "");
+        // One of another folder whose paths are here is.
+        let mut e = Editor::new(e.entries.clone());
+        typed(&mut e, "cd ");
+        assert_eq!(e.suggestion(&InDeveloper), "src");
+        // An entry made here comes before a newer one from elsewhere
+        // whose paths are not here.
+        let mut e = Editor::new(e.entries.clone());
+        typed(&mut e, "cat n");
+        assert_eq!(e.suggestion(&InDeveloper), "otes.txt");
+        // An entry without a folder counts as from elsewhere.
+        let mut e = Editor::new(e.entries.clone());
+        typed(&mut e, "l");
+        assert_eq!(e.suggestion(&InDeveloper), "s");
     }
 
     #[test]

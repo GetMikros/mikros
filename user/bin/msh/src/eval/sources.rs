@@ -116,6 +116,10 @@ impl<S: System> Sources for Shell<S> {
         self.program_environment(&[])
     }
 
+    fn current_folder(&self) -> Option<String> {
+        Some(self.system.current_dir())
+    }
+
     fn params(&self, path: &str) -> Option<Vec<Param>> {
         let source = self.system.read_file(path).ok()?;
         let block = crate::parse::parse(&source).ok()?;
@@ -169,5 +173,9 @@ impl<S: System> Sources for WithoutWaiting<'_, S> {
 
     fn params(&self, path: &str) -> Option<Vec<Param>> {
         Sources::params(self.0, path)
+    }
+
+    fn current_folder(&self) -> Option<String> {
+        Sources::current_folder(self.0)
     }
 }

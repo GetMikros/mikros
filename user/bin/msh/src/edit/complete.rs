@@ -44,6 +44,11 @@ pub trait Sources {
     fn environment(&self) -> Vec<(String, String)>;
     /// The options that the script at `path` declares.
     fn params(&self, path: &str) -> Option<Vec<Param>>;
+    /// The current folder, which suggestions from the history prefer
+    /// the entries of; none when it is not known.
+    fn current_folder(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The options of built-in commands, with what they do.
