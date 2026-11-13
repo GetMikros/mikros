@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+[[bin]]
+name = "pcibus"
+path = "src/driver.rs"
+
 [dependencies]
 mikros-pci = { path = "../../lib/pci" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
