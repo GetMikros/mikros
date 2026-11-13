@@ -1,6 +1,7 @@
 //! The Rust standard library for Mikros: the toolchain's `library/`
 //! source with the Mikros patches in `user/runtime/std/patches/`, and the
-//! programs of the `user/runtime/std` workspace built against it.
+//! programs of the `user` workspace that use it, built against it in
+//! `user/target/std`.
 //!
 //! Cargo builds the standard library from source (`-Zbuild-std`) out
 //! of the copy in `target/rust-std/library`. In that copy, the vendored
@@ -44,8 +45,8 @@ fn toolchain_library() -> Result<PathBuf> {
 /// The patched copy of the standard library source, made again from
 /// the toolchain's whenever the toolchain or the patches changed. Cargo
 /// does not see changes in it, so the target directories of everything
-/// built with it, `user/runtime/std` and coreutils, are removed then as
-/// well.
+/// built with it, the user workspace's programs with std and coreutils,
+/// are removed then as well.
 pub fn source() -> Result<PathBuf> {
     let root = crate::workspace_root();
     let toolchain = toolchain_library()?;
@@ -59,11 +60,7 @@ pub fn source() -> Result<PathBuf> {
     if fs::read_to_string(dir().join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
         return Ok(library);
     }
-    for stale in [
-        dir(),
-        root.join("user/runtime/std/target"),
-        crate::coreutils::target_dir(),
-    ] {
+    for stale in [dir(), target_dir(), crate::coreutils::target_dir()] {
         if stale.exists() {
             fs::remove_dir_all(&stale).with_context(|| format!("removing {}", stale.display()))?;
         }
@@ -228,15 +225,51 @@ pub fn cargo(dir: &Path, rustflags: &[&str]) -> Result<Command> {
     Ok(command)
 }
 
+/// The target directory of the user workspace's programs with std, apart
+/// from that of its programs without, whose core library differs.
+fn target_dir() -> PathBuf {
+    crate::workspace_root().join("user/target/std")
+}
+
+/// `cargo build` in the `user` workspace for its programs with std.
+fn user_cargo(kind: Kind) -> Result<Command> {
+    let root = crate::workspace_root();
+    let mut command = cargo(&root.join("user"), kind.user_rustflags())?;
+    command.arg("--target-dir").arg(target_dir());
+    Ok(command)
+}
+
+/// `cargo clippy` in the `user` workspace for its programs with std,
+/// which needs the patched source of the standard library, but neither
+/// the sysroot nor a linker.
+pub fn clippy() -> Result<Command> {
+    let root = crate::workspace_root();
+    let library = source()?;
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let mut command = Command::new(cargo);
+    // Clippy runs Cargo again, which takes the unstable settings from the
+    // environment, not from flags given to it.
+    command
+        .current_dir(root.join("user"))
+        .env("__CARGO_TESTS_ONLY_SRC_ROOT", &library)
+        .env("CARGO_UNSTABLE_JSON_TARGET_SPEC", "true")
+        .env("CARGO_UNSTABLE_BUILD_STD", "std,panic_unwind")
+        .env("CARGO_UNSTABLE_BUILD_STD_FEATURES", "panic-unwind")
+        .args(["clippy", "--target"])
+        .arg(root.join(crate::build::USER_TARGET))
+        .arg("--target-dir")
+        .arg(target_dir());
+    Ok(command)
+}
+
 /// The programs that `prebuild` built, by build kind and name.
 static PREBUILT: Mutex<BTreeSet<(&str, String)>> = Mutex::new(BTreeSet::new());
 
-/// Builds the programs `bins` of the packages of the same names in the
-/// `user/runtime/std` workspace in one run of Cargo. `build` then finds
-/// them built.
+/// Builds the programs `bins` with std, of the packages of the same
+/// names in the `user` workspace, in one run of Cargo. `build` then
+/// finds them built.
 pub fn prebuild(bins: &[String], kind: Kind) -> Result<()> {
-    let root = crate::workspace_root();
-    let mut command = cargo(&root.join("user/runtime/std"), kind.user_rustflags())?;
+    let mut command = user_cargo(kind)?;
     for bin in bins {
         command.args(["--package", bin]);
     }
@@ -252,14 +285,12 @@ pub fn prebuild(bins: &[String], kind: Kind) -> Result<()> {
     Ok(())
 }
 
-/// Builds the program `bin` of the package of the same name in the
-/// `user/runtime/std` workspace, which uses the standard library, unless
-/// `prebuild` did, and returns its path. It is linked by the sysroot's
-/// Clang, with the C library and libunwind.
+/// Builds the program `bin` with std, of the package of the same name in
+/// the `user` workspace, unless `prebuild` did, and returns its path. It
+/// is linked by the sysroot's Clang, with the C library and libunwind.
 pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
-    let root = crate::workspace_root();
-    let path = root
-        .join("user/runtime/std/target/x86_64-unknown-mikros")
+    let path = target_dir()
+        .join("x86_64-unknown-mikros")
         .join(kind.profile_dir())
         .join(bin);
     if PREBUILT
@@ -269,7 +300,7 @@ pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
     {
         return Ok(path);
     }
-    let status = cargo(&root.join("user/runtime/std"), kind.user_rustflags())?
+    let status = user_cargo(kind)?
         .args(["--package", bin, "--bin", bin])
         .args(["--profile", kind.profile()])
         .status()

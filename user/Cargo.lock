@@ -195,10 +195,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
+name = "console"
+version = "0.0.0"
+dependencies = [
+ "mikros-evdev",
+ "mikros-logview",
+ "mikros-rt",
+ "mikros-vt",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "coreutils-check"
+version = "0.0.0"
 
 [[package]]
 name = "cpufeatures"
@@ -354,6 +368,10 @@ checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
  "hashbrown",
 ]
+
+[[package]]
+name = "hello-std"
+version = "0.0.0"
 
 [[package]]
 name = "hybrid-array"
@@ -689,6 +707,17 @@ name = "mikros-yaml"
 version = "0.0.0"
 
 [[package]]
+name = "msh"
+version = "0.0.0"
+dependencies = [
+ "mikros-msh",
+]
+
+[[package]]
+name = "msh-check"
+version = "0.0.0"
+
+[[package]]
 name = "namespace-probe"
 version = "0.0.0"
 dependencies = [
@@ -939,6 +968,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "setup"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -949,6 +985,10 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "spawn-std"
+version = "0.0.0"
 
 [[package]]
 name = "syn"

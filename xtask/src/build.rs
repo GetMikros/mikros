@@ -243,12 +243,16 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         BootImage::Test => {
             // Every program of the workspaces, but the test init of a fuzz
             // build, which is built with a feature of its own.
-            let programs: Vec<String> = crate::components::programs("user")?
-                .into_iter()
-                .filter(|p| !(kind == Kind::Fuzz && p == "test-init"))
-                .collect();
-            prebuild(&programs, kind)?;
-            crate::rust_std::prebuild(&crate::components::programs("user/runtime/std")?, kind)?;
+            let programs = crate::components::programs()?;
+            let built = |runtime| -> Vec<String> {
+                programs
+                    .iter()
+                    .filter(|(p, r)| *r == runtime && !(kind == Kind::Fuzz && p == "test-init"))
+                    .map(|(p, _)| p.clone())
+                    .collect()
+            };
+            prebuild(&built(Runtime::Rt), kind)?;
+            crate::rust_std::prebuild(&built(Runtime::Std), kind)?;
             let init = user_build("test-init", kind)?;
             println!("built    {}", init.display());
             let echo = user_build("channel-echo", kind)?;
@@ -1862,12 +1866,17 @@ fn prebuild(bins: &[String], kind: Kind) -> Result<()> {
 
 /// Sets Cargo up in `command` for programs without std for the Mikros
 /// target, whose core and alloc libraries it builds from source, with
-/// the memory functions of compiler_builtins.
+/// the memory functions of compiler_builtins, and which abort on panic
+/// in every profile.
 pub fn without_std(command: &mut Command) -> &mut Command {
     command
         .env("CARGO_UNSTABLE_BUILD_STD", "core,alloc,compiler_builtins")
         .env("CARGO_UNSTABLE_BUILD_STD_FEATURES", "compiler-builtins-mem")
-        .env("CARGO_UNSTABLE_JSON_TARGET_SPEC", "true")
+        .env("CARGO_UNSTABLE_JSON_TARGET_SPEC", "true");
+    for profile in ["DEV", "RELEASE", "FUZZ", "DIAG"] {
+        command.env(format!("CARGO_PROFILE_{profile}_PANIC"), "abort");
+    }
+    command
 }
 
 /// `cargo build` in the `user` workspace for the build kind `kind`.

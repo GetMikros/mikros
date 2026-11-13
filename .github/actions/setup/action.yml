@@ -60,7 +60,7 @@ runs:
           ~/.cargo/registry/index
           ~/.cargo/registry/cache
           ~/.cargo/git/db
-        key: cargo-home-fuzz-0.13.2-${{ hashFiles('Cargo.lock', 'user/Cargo.lock', 'user/runtime/std/Cargo.lock', 'kernel/fuzz/Cargo.lock', 'boot/mikrosboot/fuzz/Cargo.lock') }}
+        key: cargo-home-fuzz-0.13.2-${{ hashFiles('Cargo.lock', 'user/Cargo.lock', 'kernel/fuzz/Cargo.lock', 'boot/mikrosboot/fuzz/Cargo.lock') }}
         restore-keys: cargo-home-fuzz-0.13.2-
     # Building Clang and LLD takes about an hour, so the LLVM directory,
     # with its source and build tree, is kept between runs. Ninja compiles
@@ -100,7 +100,8 @@ runs:
         key: tools-${{ hashFiles('xtask/src/firmware.rs', 'xtask/src/meson.rs', 'xtask/src/cmake.rs', 'xtask/src/musl.rs', 'xtask/src/ports.rs', 'tools/meson/patches/**', 'tools/cmake/patches/**', 'user/runtime/libc/patches/**', 'ports/*/patches/**') }}
         restore-keys: tools-
     # The target directories of every Rust build, and the standard library
-    # that user/runtime/std builds from the patched copy in target/rust-std. Cargo
+    # that the programs with std build from the patched copy in
+    # target/rust-std. Cargo
     # reuses the builds of the crates from the registry and of the
     # standard library; the repository's own crates are built again,
     # since the checkout gives their sources new times. An older entry is
@@ -117,10 +118,9 @@ runs:
           target/x86_64-unknown-uefi
           target/rust-std
           user/target
-          user/runtime/std/target
           kernel/fuzz/target
           boot/mikrosboot/fuzz/target
-        key: rust-build-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'user/Cargo.lock', 'user/runtime/std/Cargo.lock', 'kernel/fuzz/Cargo.lock', 'boot/mikrosboot/fuzz/Cargo.lock', 'user/runtime/std/patches/**', 'xtask/src/rust_std.rs') }}
+        key: rust-build-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'user/Cargo.lock', 'kernel/fuzz/Cargo.lock', 'boot/mikrosboot/fuzz/Cargo.lock', 'user/runtime/std/patches/**', 'xtask/src/rust_std.rs') }}
         restore-keys: rust-build-${{ hashFiles('rust-toolchain.toml') }}-
     - name: Install Rust
       shell: sh

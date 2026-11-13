@@ -345,19 +345,23 @@ pub fn run(args: &Args) -> Result<()> {
     }
     problems.extend(untested_members()?);
 
-    // User programs are only compiled for the user target. The test init
-    // has code that only fuzz builds compile. msh's library uses std.
+    // User programs are only compiled for the user target, those with std
+    // apart from those without. The test init has code that only fuzz
+    // builds compile. msh's library uses std.
+    let with_std: Vec<String> = crate::components::programs()?
+        .into_iter()
+        .filter(|(_, runtime)| *runtime == crate::components::Runtime::Std)
+        .map(|(name, _)| name)
+        .collect();
     let target = crate::workspace_root().join(crate::build::USER_TARGET);
     let target = target.to_str().context("the workspace path is not UTF-8")?;
+    let mut without_std = vec!["clippy", "--workspace", "--exclude", "mikros-msh"];
+    for name in &with_std {
+        without_std.extend(["--exclude", name.as_str()]);
+    }
+    without_std.extend(["--target", target]);
     let user_clippy_runs: [&[&str]; 2] = [
-        &[
-            "clippy",
-            "--workspace",
-            "--exclude",
-            "mikros-msh",
-            "--target",
-            target,
-        ],
+        &without_std,
         &[
             "clippy",
             "--package",
@@ -380,6 +384,15 @@ pub fn run(args: &Args) -> Result<()> {
                 clippy_args.join(" ")
             ));
         }
+    }
+
+    let mut clippy = crate::rust_std::clippy()?;
+    for name in &with_std {
+        clippy.args(["--package", name]);
+    }
+    clippy.args(["--", "-D", "warnings"]).args(MODULE_LAYOUT);
+    if !passes(clippy)? {
+        problems.push("`cargo clippy` of the programs with std reported warnings".to_owned());
     }
 
     problems.extend(check_commits(&args.base)?);

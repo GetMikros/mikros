@@ -17,3 +17,6 @@ fuzz = ["mikros-rt/fuzz"]
 
 [build-dependencies]
 midlc = { path = "../../../tools/midlc" }
+
+[package.metadata.mikros]
+runtime = "rt"

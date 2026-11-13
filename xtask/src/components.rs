@@ -23,10 +23,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The workspaces whose packages can be components, relative to the
-/// repository.
-pub const WORKSPACES: [&str; 2] = ["user", "user/runtime/std"];
-
 /// What a component is, which says where it is installed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -124,36 +120,44 @@ impl Component {
 
 /// Every component, in the order of `cargo metadata`, which is by name.
 pub fn all() -> Result<Vec<Component>> {
-    let mut components = Vec::new();
-    for workspace in WORKSPACES {
-        components.extend(parse(&metadata(workspace)?)?);
-    }
-    Ok(components)
+    parse(&metadata()?)
 }
 
-/// The names of the programs of every package of the workspace
-/// `workspace`, relative to the repository.
-pub fn programs(workspace: &str) -> Result<Vec<String>> {
-    let metadata = metadata(workspace)?;
+/// The programs of every package of the `user` workspace, by name, with
+/// the runtime each is built on.
+pub fn programs() -> Result<Vec<(String, Runtime)>> {
+    let metadata = metadata()?;
     let mut programs = Vec::new();
     for package in metadata["packages"].as_array().context("no packages")? {
+        let runtime = runtime(package)?;
         for target in package["targets"].as_array().context("no targets")? {
             let kinds = target["kind"]
                 .as_array()
                 .context("a target without kinds")?;
             if kinds.iter().any(|k| k == "bin") {
                 let name = target["name"].as_str().context("a target without a name")?;
-                programs.push(name.to_owned());
+                programs.push((name.to_owned(), runtime));
             }
         }
     }
     Ok(programs)
 }
 
-/// The output of `cargo metadata` for the workspace `workspace`,
-/// relative to the repository, without dependencies.
-fn metadata(workspace: &str) -> Result<Value> {
-    let manifest = crate::workspace_root().join(workspace).join("Cargo.toml");
+/// The runtime that the package `package` of `cargo metadata`'s output
+/// declares, or the standard library.
+fn runtime(package: &Value) -> Result<Runtime> {
+    let name = package["name"].as_str().unwrap_or("?");
+    match &package["metadata"]["mikros"]["runtime"] {
+        Value::Null => Ok(Runtime::Std),
+        Value::String(s) if s == "rt" => Ok(Runtime::Rt),
+        other => bail!("{name}: unknown runtime {other}"),
+    }
+}
+
+/// The output of `cargo metadata` for the `user` workspace, without
+/// dependencies.
+fn metadata() -> Result<Value> {
+    let manifest = crate::workspace_root().join("user/Cargo.toml");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     let output = Command::new(cargo)
         .args(["metadata", "--no-deps", "--format-version", "1"])
@@ -194,11 +198,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
                 bail!("{name}: unknown key `{key}` in [package.metadata.mikros]");
             }
         }
-        let runtime = match text("runtime")?.as_deref() {
-            None => Runtime::Std,
-            Some("rt") => Runtime::Rt,
-            Some(other) => bail!("{name}: unknown runtime `{other}`"),
-        };
+        let runtime = runtime(package)?;
         let role = match text("kind")?.as_deref() {
             None => continue,
             Some("core") => Role::Core,
