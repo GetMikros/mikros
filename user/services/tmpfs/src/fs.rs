@@ -2,6 +2,7 @@
 //! tokens and budgets of directories, and the `Filesystem` service.
 
 use crate::file::File;
+use crate::memfs::{Id, ROOT, Tree};
 use crate::node;
 use crate::watch::{Watches, event};
 use alloc::collections::BTreeMap;
@@ -9,7 +10,6 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
-use mikros_memfs::{Id, ROOT, Tree};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{
@@ -67,8 +67,8 @@ pub struct Fs {
 }
 
 /// The protocol's error for the tree's.
-pub fn error(e: mikros_memfs::Error) -> Error {
-    use mikros_memfs::Error as E;
+pub fn error(e: crate::memfs::Error) -> Error {
+    use crate::memfs::Error as E;
     match e {
         E::NotFound => Error::NotFound,
         E::Exists => Error::Exists,
@@ -79,7 +79,6 @@ pub fn error(e: mikros_memfs::Error) -> Error {
         E::AccessDenied => Error::AccessDenied,
         E::NameTooLong => Error::NameTooLong,
         E::Loop => Error::Loop,
-        E::NotSupported => Error::NotSupported,
     }
 }
 

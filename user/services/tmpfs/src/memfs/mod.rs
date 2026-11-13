@@ -3,10 +3,6 @@
 //! and links, and path resolution. What files hold, `C`, and what
 //! sockets refer to, `S`, are the server's.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -31,7 +27,6 @@ pub enum Error {
     AccessDenied,
     NameTooLong,
     Loop,
-    NotSupported,
 }
 
 /// A node's times, in nanoseconds since 1970 in UTC.

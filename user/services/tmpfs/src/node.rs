@@ -2,6 +2,7 @@
 
 use crate::file::{Failed, File};
 use crate::fs::{self, Fs, Socket};
+use crate::memfs::{Directory, Id, Kind, Resolved};
 use crate::watch::event;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -9,7 +10,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::poll_fn;
 use core::task::Poll;
-use mikros_memfs::{Directory, Id, Kind, Resolved};
 use mikros_rt::interfaces::__midl::{Error as MidlError, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::*;
 

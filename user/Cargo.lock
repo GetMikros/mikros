@@ -581,13 +581,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mikros-memfs"
-version = "0.0.0"
-dependencies = [
- "mikros-casefold",
-]
-
-[[package]]
 name = "mikros-msh"
 version = "0.0.0"
 dependencies = [
@@ -1023,7 +1016,7 @@ dependencies = [
 name = "tmpfs"
 version = "0.0.0"
 dependencies = [
- "mikros-memfs",
+ "mikros-casefold",
  "mikros-rt",
 ]
 

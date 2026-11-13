@@ -6,7 +6,9 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
-mikros-memfs = { path = "../../lib/memfs" }
+mikros-casefold = { path = "../../lib/casefold" }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
 
 [package.metadata.mikros]
@@ -14,3 +16,7 @@ kind = "service"
 image = "boot"
 runtime = "rt"
 manifest = "tmpfs.yaml"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

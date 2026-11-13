@@ -2,8 +2,8 @@
 //! is charged to, and the `TemporaryFilesystem` service that sets them.
 
 use crate::fs::Fs;
+use crate::memfs::{Id, ROOT, Resolved};
 use alloc::rc::Rc;
-use mikros_memfs::{Id, ROOT, Resolved};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{
     Error, TemporaryFilesystem, TemporaryFilesystemAsyncServer, TemporaryFilesystemRequest,

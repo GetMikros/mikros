@@ -1,10 +1,10 @@
 //! Watches: which connections watch which nodes for which changes, and
 //! sending them the events of each change.
 
+use crate::memfs::Id;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
-use mikros_memfs::Id;
 use mikros_rt::interfaces::__midl::{ClientEnd, Error as MidlError};
 use mikros_rt::interfaces::mikros::fs::{WatchEvent, WatchKind, WatchMask, Watcher, WatcherClient};
 
