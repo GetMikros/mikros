@@ -548,13 +548,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mikros-hid"
-version = "0.0.0"
-dependencies = [
- "mikros-evdev",
-]
-
-[[package]]
 name = "mikros-inputdev"
 version = "0.0.0"
 dependencies = [
@@ -1077,7 +1070,6 @@ name = "usbhid"
 version = "0.0.0"
 dependencies = [
  "mikros-evdev",
- "mikros-hid",
  "mikros-inputdev",
  "mikros-rt",
 ]

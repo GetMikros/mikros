@@ -12,21 +12,14 @@
 //! channel once the host controller's driver restarted, on which the
 //! transfers start again.
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-mod usb;
-
+use crate::hid::descriptor::{self, Kind};
+use crate::hid::mapping::{self, Application, Device};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use mikros_evdev::{Event, group};
-use mikros_hid::descriptor::{self, Kind};
-use mikros_hid::mapping::{self, Application, Device};
 use mikros_inputdev::{Backend, InputDevice};
 use mikros_rt::exec::{Executor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd};
@@ -82,10 +75,10 @@ impl Backend for Leds {
             .ok_or(Status::NotSupported)?;
         let bus = self.hid.bus.borrow().clone();
         match self.hid.output {
-            Some(endpoint) => usb::interrupt_out(&bus, endpoint, report).await,
+            Some(endpoint) => crate::usb::interrupt_out(&bus, endpoint, report).await,
             None => {
                 let id = if self.hid.report_ids { report[0] } else { 0 };
-                usb::set_report(&bus, self.hid.number, id, report).await
+                crate::usb::set_report(&bus, self.hid.number, id, report).await
             }
         }
     }
@@ -222,14 +215,14 @@ async fn start(
         Err(_) => return Err(Status::PeerClosed),
     };
     let number = info.number;
-    let len = usb::report_descriptor_len(&configuration, number).ok_or_else(|| {
+    let len = crate::usb::report_descriptor_len(&configuration, number).ok_or_else(|| {
         mikros_rt::log!(Error, "usbhid: interface {number} has no HID descriptor");
         Status::NotSupported
     })?;
     let input = endpoint(&info, true).ok_or(Status::NotSupported)?;
-    let bytes = usb::report_descriptor(&bus, number, len).await?;
+    let bytes = crate::usb::report_descriptor(&bus, number, len).await?;
     if info.subclass == BOOT {
-        usb::set_report_protocol(&bus, number).await?;
+        crate::usb::set_report_protocol(&bus, number).await?;
     }
     let parsed = descriptor::parse(&bytes).map_err(|e| {
         mikros_rt::log!(Error, "usbhid: the report descriptor is not valid: {e:?}");
@@ -241,7 +234,7 @@ async fn start(
         .any(|&(_, a)| a == Application::Keyboard)
     {
         // A device that does not support idle rates stalls the request.
-        let _ = usb::set_idle(&bus, number).await;
+        let _ = crate::usb::set_idle(&bus, number).await;
     }
     let hid = Rc::new(Hid {
         bus: RefCell::new(bus),
@@ -255,7 +248,7 @@ async fn start(
     });
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     for (at, application) in applications {
-        let device = Rc::new(RefCell::new(Device::new(&parsed, at, application)));
+        let device = Rc::new(RefCell::new(Device::new(&parsed, at)));
         let device_info = device_info(&info, application, &device.borrow());
         let leds = Leds {
             hid: hid.clone(),
@@ -280,11 +273,11 @@ async fn read(hid: Rc<Hid>) {
     hid.generation.set(generation);
     let bus = hid.bus.borrow().clone();
     let reader = hid.clone();
-    let status = usb::poll(bus, hid.input, hid.input_len, move |report| {
+    let status = crate::usb::poll(bus, hid.input, hid.input_len, move |report| {
         if reader.generation.get() != generation {
             return;
         }
-        let timestamp = usb::now();
+        let timestamp = crate::usb::now();
         for (device, input) in reader.devices.borrow().iter() {
             let events = device.borrow_mut().decode(&report);
             if !events.is_empty() {

@@ -1,6 +1,6 @@
-use crate::descriptor::parse;
-use crate::descriptor_tests::{KEYBOARD, TABLET};
-use crate::mapping::*;
+use crate::hid::descriptor::parse;
+use crate::hid::descriptor_tests::{KEYBOARD, TABLET};
+use crate::hid::mapping::*;
 use alloc::vec;
 use mikros_evdev::bit;
 use mikros_evdev::codes::*;
@@ -8,7 +8,7 @@ use mikros_evdev::codes::*;
 fn keyboard() -> Device {
     let d = parse(KEYBOARD).unwrap();
     assert_eq!(applications(&d), [(0, Application::Keyboard)]);
-    Device::new(&d, 0, Application::Keyboard)
+    Device::new(&d, 0)
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn led_output_reports() {
 fn an_absolute_pointer_with_a_wheel() {
     let d = parse(TABLET).unwrap();
     assert_eq!(applications(&d), [(0, Application::Mouse)]);
-    let mut t = Device::new(&d, 0, Application::Mouse);
+    let mut t = Device::new(&d, 0);
     let c = t.capabilities();
     assert_eq!(
         c.event_types,
@@ -137,7 +137,7 @@ fn a_relative_mouse_with_report_ids_and_horizontal_scrolling() {
         0xC0,
     ])
     .unwrap();
-    let mut m = Device::new(&d, 0, Application::Mouse);
+    let mut m = Device::new(&d, 0);
     let c = m.capabilities();
     assert_eq!(
         c.relative_axes,

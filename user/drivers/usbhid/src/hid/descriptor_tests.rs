@@ -1,4 +1,4 @@
-use crate::descriptor::*;
+use crate::hid::descriptor::*;
 
 /// A boot keyboard's report descriptor: modifier bits, a reserved byte,
 /// LED output bits with padding, and a six-key array.
@@ -53,7 +53,7 @@ fn a_boot_keyboard() {
     assert!(d.fields.iter().all(|f| f.application == Some(0)));
 }
 
-const KEYBOARD_PAGE: u16 = crate::descriptor::KEYBOARD;
+const KEYBOARD_PAGE: u16 = crate::hid::descriptor::KEYBOARD;
 
 #[test]
 fn an_absolute_pointer() {

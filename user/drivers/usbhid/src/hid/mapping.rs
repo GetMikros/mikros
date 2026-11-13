@@ -2,7 +2,7 @@
 //! application collection into evdev events, and its LEDs into output
 //! reports.
 
-use crate::descriptor::{
+use crate::hid::descriptor::{
     BUTTON, CONSUMER, Descriptor, Field, GENERIC_DESKTOP, KEYBOARD, Kind, LED, usage,
 };
 use alloc::vec;
@@ -147,7 +147,6 @@ pub struct Capabilities {
 
 /// The input device of one application collection.
 pub struct Device {
-    pub application: Application,
     fields: Vec<Field>,
     report_ids: bool,
     /// The previous values of each variable field, and the keys of each
@@ -165,7 +164,7 @@ type LedReport = (u8, usize, Vec<(u16, usize, u32)>);
 
 impl Device {
     /// The device of application `at` of `descriptor`.
-    pub fn new(descriptor: &Descriptor, at: usize, application: Application) -> Device {
+    pub fn new(descriptor: &Descriptor, at: usize) -> Device {
         let fields: Vec<Field> = descriptor
             .fields
             .iter()
@@ -178,7 +177,6 @@ impl Device {
             .collect();
         let held = fields.iter().map(|_| Vec::new()).collect();
         let mut device = Device {
-            application,
             fields,
             report_ids: descriptor.report_ids,
             values,

@@ -5,13 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
-[[bin]]
-name = "usbhid"
-path = "src/driver.rs"
-
 [dependencies]
 mikros-evdev = { path = "../../lib/evdev" }
-mikros-hid = { path = "../../lib/hid" }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
 mikros-inputdev = { path = "../../lib/inputdev" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 
@@ -19,3 +16,7 @@ mikros-rt = { path = "../../runtime/mikros-rt" }
 kind = "driver"
 image = "boot"
 runtime = "rt"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }
