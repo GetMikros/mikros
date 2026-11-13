@@ -48,20 +48,25 @@ const SETTLE: Duration = Duration::from_secs(3);
 /// How long the setup program has to ask its next question, and msh
 /// to run a command.
 const QUESTION: Duration = Duration::from_secs(1);
-/// How long msh has to start `spawn-std sleep` and give it the terminal
-/// before the runner types Ctrl-Z. Until then the shell's own process
-/// group is in the terminal's foreground, and a Ctrl-Z goes to the shell,
-/// which ignores it, as other shells do; the job then runs on in the
-/// foreground and takes the rest of the input. While the command word is
+/// How long msh has to start a job, `yes` or `spawn-std sleep`, and give
+/// it the terminal before the runner types Ctrl-C or Ctrl-Z. Until then
+/// the shell's own process group is in the terminal's foreground, and the
+/// key goes to the shell, which ignores it, as other shells do; the job
+/// then runs on in the foreground and takes the rest of the input. While the command word is
 /// typed, msh lists the programs of `PATH` again for its suggestion after
 /// each key, so in a debug build the line reaches it about 1 s after the
 /// last key; starting the job and handing it the terminal takes about
 /// 70 ms more.
 const JOB_START: Duration = Duration::from_secs(5);
-/// What the runner types in ada's msh: `spaw`, which Tab completes to
-/// `spawn-std `, and `sleep`, a job that runs until it is killed,
-/// Ctrl-Z, which stops it, then `let n = (jobs | lines | len)`, `bg`,
-/// `kill %1`, `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
+/// What the runner types in ada's msh, each with the time it then waits:
+/// first, while msh keeps up with what is typed, `yes`, which writes
+/// without end, Ctrl-C, which must reach it while the console draws its
+/// output, and Ctrl-L, which clears the screen, so that what follows
+/// does not scroll the whole screen line by line, which is slow in a
+/// debug build; then `spaw`, which Tab completes to `spawn-std `, and
+/// `sleep`, a job that runs until it is killed, Ctrl-Z, which stops it,
+/// `let n = (jobs | lines | len)`, `bg`, `kill %1`,
+/// `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
 /// `if (pwd | lines).0 != '/Users/ada' { exit 2 }`,
 /// `try { files-c . } catch e { exit 5 }`, which makes, changes and
 /// removes files in ada's home,
@@ -73,29 +78,53 @@ const JOB_START: Duration = Duration::from_secs(5);
 /// started in ada's home, files-c's and coreutils-check's checks
 /// passed, and `/`, which no namespace entry covers, is a folder that
 /// lists `Users`.
-const MSH_KEYS: [&str; 11] = [
-    "s p a w tab s l e e p ret",
-    "ctrl-z",
-    "l e t spc n spc equal spc shift-9 j o b s spc shift-backslash spc \
-     l i n e s spc shift-backslash spc l e n shift-0 ret",
-    "b g ret",
-    "k i l l spc shift-5 1 ret",
-    "i f spc shift-9 s p a w n minus s t d spc h o s t n a m e spc shift-backslash spc \
-     l i n e s shift-0 dot 0 spc shift-1 equal spc apostrophe b o x apostrophe spc \
-     shift-bracket_left spc e x i t spc 1 spc shift-bracket_right ret",
-    "i f spc shift-9 p w d spc shift-backslash spc l i n e s shift-0 dot 0 spc shift-1 equal spc \
-     apostrophe slash shift-u s e r s slash a d a apostrophe spc \
-     shift-bracket_left spc e x i t spc 2 spc shift-bracket_right ret",
-    "t r y spc shift-bracket_left spc f i l e s minus c spc dot spc shift-bracket_right spc \
-     c a t c h spc e spc shift-bracket_left spc e x i t spc 5 spc shift-bracket_right ret",
-    "t r y spc shift-bracket_left spc c o r e u t i l s minus c h e c k spc dot spc \
-     shift-bracket_right spc c a t c h spc e spc shift-bracket_left spc e x i t spc 6 spc \
-     shift-bracket_right ret",
-    "c d spc slash semicolon spc i f spc shift-9 shift-9 p r i n t spc slash shift-8 shift-0 spc \
-     shift-1 shift-grave_accent spc apostrophe shift-u s e r s apostrophe shift-0 spc \
-     shift-bracket_left spc e x i t spc 4 spc shift-bracket_right ret",
-    "e x i t spc shift-9 shift-4 n spc shift-equal spc 6 spc shift-equal spc \
-     shift-4 s t a t u s shift-0 ret",
+const MSH_KEYS: [(&str, Duration); 14] = [
+    ("y e s ret", JOB_START),
+    ("ctrl-c", QUESTION),
+    ("ctrl-l", QUESTION),
+    ("s p a w tab s l e e p ret", JOB_START),
+    ("ctrl-z", QUESTION),
+    (
+        "l e t spc n spc equal spc shift-9 j o b s spc shift-backslash spc \
+         l i n e s spc shift-backslash spc l e n shift-0 ret",
+        QUESTION,
+    ),
+    ("b g ret", QUESTION),
+    ("k i l l spc shift-5 1 ret", QUESTION),
+    (
+        "i f spc shift-9 s p a w n minus s t d spc h o s t n a m e spc shift-backslash spc \
+         l i n e s shift-0 dot 0 spc shift-1 equal spc apostrophe b o x apostrophe spc \
+         shift-bracket_left spc e x i t spc 1 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "i f spc shift-9 p w d spc shift-backslash spc l i n e s shift-0 dot 0 spc shift-1 equal spc \
+         apostrophe slash shift-u s e r s slash a d a apostrophe spc \
+         shift-bracket_left spc e x i t spc 2 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "t r y spc shift-bracket_left spc f i l e s minus c spc dot spc shift-bracket_right spc \
+         c a t c h spc e spc shift-bracket_left spc e x i t spc 5 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "t r y spc shift-bracket_left spc c o r e u t i l s minus c h e c k spc dot spc \
+         shift-bracket_right spc c a t c h spc e spc shift-bracket_left spc e x i t spc 6 spc \
+         shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "c d spc slash semicolon spc i f spc shift-9 shift-9 p r i n t spc slash shift-8 shift-0 spc \
+         shift-1 shift-grave_accent spc apostrophe shift-u s e r s apostrophe shift-0 spc \
+         shift-bracket_left spc e x i t spc 4 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "e x i t spc shift-9 shift-4 n spc shift-equal spc 6 spc shift-equal spc \
+         shift-4 s t a t u s shift-0 ret",
+        QUESTION,
+    ),
 ];
 
 /// What the runner does in a run, in order.
@@ -276,14 +305,9 @@ pub fn run_setup(
         Step::Keys("a d a ret"),
         Step::Keys("a d a minus p w ret"),
     ]);
-    // The first keys start the job that Ctrl-Z stops next.
     let after: Vec<Step> = MSH_KEYS
         .iter()
-        .enumerate()
-        .flat_map(|(i, keys)| {
-            let wait = if i == 0 { JOB_START } else { QUESTION };
-            [Step::Keys(keys), Step::Sleep(wait)]
-        })
+        .flat_map(|&(keys, wait)| [Step::Keys(keys), Step::Sleep(wait)])
         .collect();
     // The root partition holds the services that need it, which start
     // once it is available.
