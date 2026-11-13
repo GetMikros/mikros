@@ -2,6 +2,9 @@
 //! the kernel's tests, or from the process manager's startup transfer in
 //! the system tests.
 
+use core::mem::ManuallyDrop;
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
+use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::sys::Handle;
 
 /// The handles of a test's own process.
@@ -35,6 +38,8 @@ pub struct Own {
     pub process: Handle,
     pub thread: Handle,
     pub clock_page: Handle,
+    /// The service directory, through which it connects to services.
+    pub directory: Handle,
 }
 
 impl Own {
@@ -45,7 +50,17 @@ impl Own {
             process: header.process.raw(),
             thread: header.thread.raw(),
             clock_page: header.clock_page.raw(),
+            directory: header.directory.handle().raw(),
         }
+    }
+
+    /// A client of the service directory that borrows its handle, which
+    /// stays open for as long as the test runs.
+    pub fn services(&self) -> ManuallyDrop<DirectoryClient> {
+        // SAFETY: the client is never dropped, so it never closes the
+        // handle, which the startup transfer keeps open.
+        let handle = unsafe { OwnedHandle::from_raw(self.directory) };
+        ManuallyDrop::new(DirectoryClient::new(ClientEnd::new(handle)))
     }
 }
 
