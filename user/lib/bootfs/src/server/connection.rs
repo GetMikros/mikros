@@ -1,11 +1,11 @@
 //! One connection to a node of the boot file system.
 
 use super::Fs;
+use crate::{NodeKind, Resolved};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use mikros_bootfs::{NodeKind, Resolved};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;
 
@@ -209,7 +209,7 @@ impl Connection {
                     redirect: Some(String::from_utf8_lossy(&target).into_owned()),
                 });
             }
-            Err(mikros_bootfs::Error::NotFound) if q.flags.contains(OpenFlags::CREATE) => {
+            Err(crate::Error::NotFound) if q.flags.contains(OpenFlags::CREATE) => {
                 return Err(self.write_denied());
             }
             Err(e) => return Err(resolve_error(e)),
@@ -301,8 +301,8 @@ impl Connection {
     }
 }
 
-fn resolve_error(e: mikros_bootfs::Error) -> Error {
-    use mikros_bootfs::Error as E;
+fn resolve_error(e: crate::Error) -> Error {
+    use crate::Error as E;
     match e {
         E::NotFound => Error::NotFound,
         E::NotDirectory => Error::NotDirectory,

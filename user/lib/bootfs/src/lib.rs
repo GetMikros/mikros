@@ -1,4 +1,6 @@
-//! The node tree of the boot image, and path resolution in it.
+//! The node tree of the boot image, and path resolution in it, and on
+//! Mikros the file system server that serves it, `server`, which the
+//! process manager and the test init run.
 //!
 //! The tree is read-only. Node 0 is the root directory; a node's inode
 //! number is its index plus 1.
@@ -6,6 +8,9 @@
 #![no_std]
 
 extern crate alloc;
+
+#[cfg(target_os = "mikros")]
+pub mod server;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

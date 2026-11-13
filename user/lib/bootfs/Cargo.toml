@@ -7,3 +7,10 @@ publish = false
 
 [dependencies]
 mikros-ustar = { path = "../ustar" }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-rt = { path = "../../runtime/mikros-rt" }
+
+# The server only runs on Mikros, and is left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

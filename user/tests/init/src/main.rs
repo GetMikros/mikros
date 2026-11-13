@@ -10828,13 +10828,13 @@ mod bootfs {
 
     use alloc::string::String;
     use alloc::vec::Vec;
+    use mikros_bootfs::server::Fs;
     use mikros_rt::Startup;
     use mikros_rt::exec::Executor;
     use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
     use mikros_rt::interfaces::mikros::fs::*;
     use mikros_rt::sys;
     use mikros_test::{Failure, Result, check, ensure};
-    use processmgr::bootfs::Fs;
 
     const MANAGER: &str = "usr/bin/processmgr";
 

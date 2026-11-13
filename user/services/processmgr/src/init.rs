@@ -7,6 +7,7 @@ use crate::records::{INIT_PID, Record};
 use crate::start::{self, duplicate};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use mikros_bootfs::server::Fs;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -19,7 +20,6 @@ use mikros_rt::interfaces::mikros::service::{
 };
 use mikros_rt::interfaces::mikros::time::{Clock, ClockAsyncClient};
 use mikros_rt::sys;
-use processmgr::bootfs::Fs;
 
 const SAME_RIGHTS: u32 = 1 << 31;
 /// The time service's protocol.

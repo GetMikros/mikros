@@ -37,6 +37,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
+use mikros_bootfs::server::{Fs, ItemKind};
 use mikros_manifest::path;
 use mikros_rt::exec::Reactor;
 use mikros_rt::files;
@@ -50,7 +51,6 @@ use mikros_rt::interfaces::mikros::process::NamespaceEntry;
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, DirectoryAsyncClient, DirectoryEvent,
 };
-use processmgr::bootfs::{Fs, ItemKind};
 
 /// The accounts service's data directory, which no other process's
 /// manifest entry may be, lie in, or hold.

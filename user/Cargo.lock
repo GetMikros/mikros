@@ -491,6 +491,7 @@ dependencies = [
 name = "mikros-bootfs"
 version = "0.0.0"
 dependencies = [
+ "mikros-rt",
  "mikros-ustar",
 ]
 
@@ -950,10 +951,10 @@ name = "test-init"
 version = "0.0.0"
 dependencies = [
  "midlc",
+ "mikros-bootfs",
  "mikros-loader",
  "mikros-rt",
  "mikros-test",
- "processmgr",
 ]
 
 [[package]]

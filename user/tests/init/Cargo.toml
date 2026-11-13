@@ -9,7 +9,7 @@ publish = false
 mikros-loader = { path = "../../services/loader" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-test = { path = "../support" }
-processmgr = { path = "../../services/processmgr" }
+mikros-bootfs = { path = "../../lib/bootfs" }
 
 [features]
 # Tests the system calls that exist only in fuzz builds.

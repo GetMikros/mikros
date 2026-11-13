@@ -5,8 +5,8 @@ mod connection;
 mod memory;
 mod pager;
 
+use crate::{NodeKind, Tree};
 use alloc::rc::Rc;
-use mikros_bootfs::{NodeKind, Tree};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::{Node, Rights};
@@ -113,12 +113,7 @@ impl Fs {
             false => self.node(path),
         };
         match node {
-            Some(node)
-                if matches!(
-                    self.tree.nodes[node].kind,
-                    mikros_bootfs::NodeKind::Directory(_)
-                ) =>
-            {
+            Some(node) if matches!(self.tree.nodes[node].kind, crate::NodeKind::Directory(_)) => {
                 self.serve(end, node, rights);
                 true
             }
@@ -131,13 +126,13 @@ impl Fs {
     /// None without a directory there.
     pub fn subtree(&self, path: &str) -> Option<alloc::vec::Vec<Item>> {
         let top = self.node(path)?;
-        let mikros_bootfs::NodeKind::Directory(_) = &self.tree.nodes[top].kind else {
+        let crate::NodeKind::Directory(_) = &self.tree.nodes[top].kind else {
             return None;
         };
         let mut items = alloc::vec::Vec::new();
         let mut pending = alloc::vec![(alloc::string::String::new(), top)];
         while let Some((prefix, dir)) = pending.pop() {
-            let mikros_bootfs::NodeKind::Directory(entries) = &self.tree.nodes[dir].kind else {
+            let crate::NodeKind::Directory(entries) = &self.tree.nodes[dir].kind else {
                 continue;
             };
             for (name, &node) in entries {
@@ -148,14 +143,14 @@ impl Fs {
                 };
                 let n = &self.tree.nodes[node];
                 let kind = match &n.kind {
-                    mikros_bootfs::NodeKind::Directory(_) => {
+                    crate::NodeKind::Directory(_) => {
                         pending.push((path.clone(), node));
                         ItemKind::Directory
                     }
-                    mikros_bootfs::NodeKind::File { offset, size } => {
+                    crate::NodeKind::File { offset, size } => {
                         ItemKind::File(&self.image[*offset..offset + size])
                     }
-                    mikros_bootfs::NodeKind::Symlink(target) => ItemKind::Symlink(target.clone()),
+                    crate::NodeKind::Symlink(target) => ItemKind::Symlink(target.clone()),
                 };
                 items.push(Item {
                     path,
@@ -191,7 +186,7 @@ impl Fs {
     /// links that stay within the file system.
     fn node(&self, path: &str) -> Option<usize> {
         match self.tree.resolve(0, path.as_bytes(), false) {
-            Ok(mikros_bootfs::Resolved::Node(node)) => Some(node),
+            Ok(crate::Resolved::Node(node)) => Some(node),
             _ => None,
         }
     }
@@ -199,9 +194,7 @@ impl Fs {
     /// The bytes of the regular file at `path`, relative to the root.
     pub fn file(&self, path: &str) -> Option<&'static [u8]> {
         match self.tree.nodes[self.node(path)?].kind {
-            mikros_bootfs::NodeKind::File { offset, size } => {
-                Some(&self.image[offset..offset + size])
-            }
+            crate::NodeKind::File { offset, size } => Some(&self.image[offset..offset + size]),
             _ => None,
         }
     }
@@ -211,7 +204,7 @@ impl Fs {
     pub fn lies_in(&self, path: &str, dir: &str) -> bool {
         let dir = self.tree.resolve(0, dir.as_bytes(), true);
         match (self.node(path), dir) {
-            (Some(node), Ok(mikros_bootfs::Resolved::Node(dir))) => self.tree.contains(dir, node),
+            (Some(node), Ok(crate::Resolved::Node(dir))) => self.tree.contains(dir, node),
             _ => false,
         }
     }
@@ -229,10 +222,10 @@ impl Fs {
         const NOT_FOUND: Status = -25;
         const ACCESS_DENIED: Status = -13;
         let node = match self.tree.resolve(0, path.as_bytes(), false) {
-            Ok(mikros_bootfs::Resolved::Node(node)) => node,
+            Ok(crate::Resolved::Node(node)) => node,
             _ => return Err(NOT_FOUND),
         };
-        let mikros_bootfs::NodeKind::File { offset, size } = self.tree.nodes[node].kind else {
+        let crate::NodeKind::File { offset, size } = self.tree.nodes[node].kind else {
             return Err(ACCESS_DENIED);
         };
         if self.tree.nodes[node].mode & EXECUTE_BITS == 0 {
@@ -240,8 +233,7 @@ impl Fs {
         }
         let rights = memory::rights(false, true);
         let usr = self.tree.resolve(0, b"usr", true);
-        let system =
-            matches!(usr, Ok(mikros_bootfs::Resolved::Node(usr)) if self.tree.contains(usr, node));
+        let system = matches!(usr, Ok(crate::Resolved::Node(usr)) if self.tree.contains(usr, node));
         Ok(Executable {
             file: &self.image[offset..offset + size],
             shared: self.paged_memory(node, size, rights)?,

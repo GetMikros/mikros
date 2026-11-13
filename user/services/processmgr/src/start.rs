@@ -7,6 +7,7 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use mikros_bootfs::server::{Executable, Fs};
 use mikros_manifest::path;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
@@ -17,7 +18,6 @@ use mikros_rt::interfaces::mikros::process::{
 };
 use mikros_rt::interfaces::mikros::service::Directory;
 use mikros_rt::sys::{self, Handle};
-use processmgr::bootfs::{Executable, Fs};
 
 const PAGE_SIZE: u64 = 4096;
 const PERM_READ: u32 = 1 << 0;
@@ -207,7 +207,7 @@ async fn resolve(
                 .map_err(namespace::status)?;
             let attributes = reply(file.get_attributes().await)?.attributes;
             if attributes.r#type != NodeType::File
-                || attributes.mode & processmgr::bootfs::EXECUTE_BITS == 0
+                || attributes.mode & mikros_bootfs::server::EXECUTE_BITS == 0
             {
                 return Err(Status::AccessDenied);
             }
