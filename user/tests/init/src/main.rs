@@ -14,12 +14,12 @@ use mikros_test::{
     ACCESS_DENIED, BAD_HANDLE, BAD_STATE, BUFFER_TOO_SMALL, FAILED, INVALID_ARGS, NOT_FOUND,
     OUT_OF_RANGE, PAGE_FAULT, PAGE_SIZE, PAGER, PASSED, PERM_READ, PERM_WRITE, READABLE,
     REPORT_SIZE, REQUESTS, Result, SIGNALED, SLOWER, STATE_BLOCKED, TERMINATED, TIMED_OUT, USER0,
-    call, check, close, contains, create_memory, elf, ensure, exit_qemu, futex_wake, in_time, info,
-    koid, map, map_read_only, mem_read_at, mem_write_at, now, open_exit_port, paged_object,
-    pager_thread, protect, read_memory, read_message, read_sizes, record_report, report_bytes,
-    report_id, seal, set_size, signal, sleep_ms, soon, spawn, spawn2, take_packet, thread_state,
-    u32_at, u64_at, ustar, wait, wait_for_state, wait_forever, wait_until_blocked, within,
-    write_memory,
+    call, check, close, contains, create_memory, dirty, elf, ensure, exit_qemu, futex_wake,
+    in_time, info, koid, map, map_read_only, mem_read_at, mem_write_at, now, open_exit_port,
+    paged_object, pager_thread, protect, read_memory, read_message, read_sizes, record_report,
+    report_bytes, report_id, seal, set_size, signal, sleep_ms, soon, spawn, spawn2, take_packet,
+    thread_state, u32_at, u64_at, ustar, wait, wait_for_state, wait_forever, wait_until_blocked,
+    within, write_memory,
 };
 
 mikros_rt::main!(main);
@@ -1791,18 +1791,6 @@ const IO: i64 = -28;
 fn pager_op(pager: Handle, mem: Handle, op: u32, offset: u64, len: u64) -> i64 {
     // SAFETY: the call takes no pointers.
     unsafe { sys::pager_op(pager, mem, op, offset, len) }
-}
-
-/// The dirty ranges of `mem` as byte offsets and lengths.
-fn dirty(pager: Handle, mem: Handle, len: u64) -> Result<([u64; 8], u64)> {
-    let mut out = [0u64; 8];
-    let mut count = 0;
-    // SAFETY: the pointers describe `out` and `count`.
-    let status = unsafe {
-        sys::pager_query_dirty(pager, mem, 0, len, out.as_mut_ptr().cast(), 4, &mut count)
-    };
-    check("querying dirty pages", status)?;
-    Ok((out, count))
 }
 
 /// Faults that wait for a pager, in the copy routine of a system call

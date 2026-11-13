@@ -1,5 +1,6 @@
-//! A pager thread that answers the page requests of a paged object,
-//! for the tests of pagers in both tiers.
+//! A pager thread that answers the page requests of a paged object, and
+//! the dirty ranges of a paged object, for the tests of pagers in both
+//! tiers.
 
 use crate::{
     Context, PAGE_SIZE, Result, check, create_memory, mem_write_at, now, spawn2, take_packet,
@@ -59,4 +60,16 @@ pub fn paged_object(s: &impl Context, pages: u64, options: u32) -> Result<(Handl
     PAGER.store(u64::from(pager), Ordering::Release);
     spawn2(s, pager_thread, u64::from(port), u64::from(mem))?;
     Ok((pager, mem))
+}
+
+/// The dirty ranges of `mem` as byte offsets and lengths.
+pub fn dirty(pager: Handle, mem: Handle, len: u64) -> Result<([u64; 8], u64)> {
+    let mut out = [0u64; 8];
+    let mut count = 0;
+    // SAFETY: the pointers describe `out` and `count`.
+    let status = unsafe {
+        sys::pager_query_dirty(pager, mem, 0, len, out.as_mut_ptr().cast(), 4, &mut count)
+    };
+    check("querying dirty pages", status)?;
+    Ok((out, count))
 }
