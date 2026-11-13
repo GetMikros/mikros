@@ -1039,7 +1039,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ),
                 (
                     "usr/lib/programs/system.console.yaml".to_owned(),
-                    crate::workspace_root().join("user/runtime/std/console/system.console.yaml"),
+                    crate::workspace_root().join("user/bin/console/system.console.yaml"),
                 ),
                 ("usr/bin/tmpfs".to_owned(), tmpfs.clone()),
                 (

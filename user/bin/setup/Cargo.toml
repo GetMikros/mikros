@@ -6,7 +6,7 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
-mikros-rt = { path = "../../mikros-rt", default-features = false }
+mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 
 [package.metadata.mikros]
 kind = "program"
