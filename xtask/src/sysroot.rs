@@ -31,6 +31,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 /// The target triple of C and C++ code.
 pub const TRIPLE: &str = "x86_64-unknown-mikros";
@@ -59,7 +60,20 @@ pub fn dir() -> PathBuf {
 }
 
 /// Builds the toolchain and the sysroot, returning the sysroot's path.
+/// Nothing the sysroot is made from changes while xtask runs, so it is
+/// built once per run.
 pub fn build() -> Result<PathBuf> {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(sysroot) = BUILT.get() {
+        return Ok(sysroot.clone());
+    }
+    let sysroot = make()?;
+    Ok(BUILT.get_or_init(|| sysroot).clone())
+}
+
+/// Builds the sysroot. Its files are written only when their contents
+/// change, so that what is built from them is not built again.
+fn make() -> Result<PathBuf> {
     llvm::build()?;
     check_llvm(&llvm::tool("clang"))?;
     check_llvm(&llvm::tool("ld.lld"))?;
@@ -70,7 +84,7 @@ pub fn build() -> Result<PathBuf> {
         fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
     }
     let cfg = config(&sysroot);
-    fs::write(&cfg, driver_config()).with_context(|| format!("writing {}", cfg.display()))?;
+    write(&cfg, driver_config().as_bytes())?;
     let llvm = llvm_from_sysroot()?;
     for (file, contents) in [
         (meson_cross_file(), meson_cross(&llvm)),
@@ -80,11 +94,10 @@ pub fn build() -> Result<PathBuf> {
             CMAKE_PLATFORM.to_owned(),
         ),
     ] {
-        fs::write(&file, contents).with_context(|| format!("writing {}", file.display()))?;
+        write(&file, contents.as_bytes())?;
     }
     let header = sysroot.join("include/mikros/syscalls.h");
-    fs::write(&header, syscalls_header()?)
-        .with_context(|| format!("writing {}", header.display()))?;
+    write(&header, syscalls_header()?.as_bytes())?;
     for header in ["abi.h", "process.h", "startup.h"] {
         let from = crate::workspace_root()
             .join("user/runtime/libc/include/mikros")
@@ -107,15 +120,17 @@ pub fn build() -> Result<PathBuf> {
     copy(&musl.shared, &lib.join("ld-mikros.dlib"))?;
     // Every executable and shared library links crti.o, and so gets the
     // ABI note.
+    let crti = lib.join("crti.o");
     crate::port::run(
         Command::new(llvm::tool("ld.lld"))
             .arg("-r")
             .arg(&musl.crti)
             .arg(&abi_note)
             .arg("-o")
-            .arg(lib.join("crti.o")),
+            .arg(fresh(&crti)),
     )
     .context("adding the ABI note to crti.o")?;
+    keep_if_unchanged(&crti)?;
     copy(&musl.crtn, &lib.join("crtn.o"))?;
     copy(&llvm::build_unwinder(&cfg)?, &lib.join("libunwind.slib"))?;
     assemble(&cfg, "user/runtime/libc/crt/crt1.S", &lib.join("crt1.o"))?;
@@ -131,9 +146,10 @@ fn assemble(cfg: &Path, source: &str, object: &Path) -> Result<()> {
             .arg("-c")
             .arg(crate::workspace_root().join(source))
             .arg("-o")
-            .arg(object),
+            .arg(fresh(object)),
     )
-    .with_context(|| format!("assembling {source}"))
+    .with_context(|| format!("assembling {source}"))?;
+    keep_if_unchanged(object)
 }
 
 /// Builds the Mikros layer of the C library, a static library of the
@@ -169,12 +185,13 @@ fn mikros_layer(shared: bool) -> Result<PathBuf> {
 /// and the Rust code and runtime functions they use are not.
 fn exported_object(archive: &Path) -> Result<PathBuf> {
     let object = archive.with_extension("o");
+    let linked = fresh(&object);
     crate::port::run(
         Command::new(llvm::tool("ld.lld"))
             .args(["-r", "--whole-archive"])
             .arg(archive)
             .arg("-o")
-            .arg(&object),
+            .arg(&linked),
     )
     .context("linking the Mikros layer into one object")?;
     crate::port::run(
@@ -184,16 +201,17 @@ fn exported_object(archive: &Path) -> Result<PathBuf> {
                 "--keep-global-symbol=mikros_*",
                 "--keep-global-symbol=__mikros_*",
             ])
-            .arg(&object),
+            .arg(&linked),
     )
     .context("hiding the Rust symbols of the Mikros layer")?;
+    keep_if_unchanged(&object)?;
     Ok(object)
 }
 
 /// Writes the static library `to` with the members of every archive of
 /// `from`.
 fn combine(to: &Path, from: &[&Path]) -> Result<()> {
-    let mut script = format!("create {}\n", to.display());
+    let mut script = format!("create {}\n", fresh(to).display());
     for archive in from {
         script += &format!("addlib {}\n", archive.display());
     }
@@ -211,13 +229,43 @@ fn combine(to: &Path, from: &[&Path]) -> Result<()> {
     if !child.wait()?.success() {
         bail!("combining the archives of {} failed", to.display());
     }
-    Ok(())
+    keep_if_unchanged(to)
 }
 
+/// Copies `from` to `to`, unless `to` already has its contents.
 fn copy(from: &Path, to: &Path) -> Result<()> {
-    fs::copy(from, to)
-        .map(drop)
-        .with_context(|| format!("copying {} to {}", from.display(), to.display()))
+    let data = fs::read(from).with_context(|| format!("reading {}", from.display()))?;
+    write(to, &data)
+}
+
+/// Writes `data` to `path`, unless `path` already holds it, so that its
+/// modification time changes only with its contents.
+fn write(path: &Path, data: &[u8]) -> Result<()> {
+    if fs::read(path).is_ok_and(|old| old == data) {
+        return Ok(());
+    }
+    fs::write(path, data).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Where a tool writes the new version of `path`, which
+/// `keep_if_unchanged` then moves to `path`.
+fn fresh(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".new");
+    PathBuf::from(name)
+}
+
+/// Replaces `path` with its new version from `fresh`, unless the two are
+/// the same, in which case `path` and its modification time stay.
+fn keep_if_unchanged(path: &Path) -> Result<()> {
+    let new = fresh(path);
+    let data = fs::read(&new).with_context(|| format!("reading {}", new.display()))?;
+    if fs::read(path).is_ok_and(|old| old == data) {
+        fs::remove_file(&new).with_context(|| format!("removing {}", new.display()))
+    } else {
+        fs::rename(&new, path)
+            .with_context(|| format!("moving {} to {}", new.display(), path.display()))
+    }
 }
 
 /// `<mikros/syscalls.h>`, generated from the system call table.

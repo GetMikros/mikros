@@ -55,11 +55,20 @@ pub fn install_headers(cfg: &Path, sysroot: &Path) -> Result<()> {
 /// library.
 pub fn build(cfg: &Path, extra: &[&Path]) -> Result<Built> {
     let build = configured(cfg)?;
-    // The shared library is linked again every time, since make does not
-    // see the Mikros layer change.
+    // make does not see the objects it links into the shared library
+    // besides musl's own, so the library is linked again when one of them
+    // is newer than it.
     let shared = build.join("lib/libc.so");
-    if shared.exists() {
-        fs::remove_file(&shared)?;
+    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    if let Some(linked) = modified(&shared) {
+        let builtins = crate::llvm::builtins();
+        let linked_in = extra.iter().copied().chain([builtins.as_path()]);
+        if linked_in
+            .into_iter()
+            .any(|p| modified(p).is_none_or(|m| m > linked))
+        {
+            fs::remove_file(&shared)?;
+        }
     }
     let jobs = format!(
         "-j{}",
