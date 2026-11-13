@@ -287,6 +287,10 @@ impl System for Os {
         Some(!metadata.is_dir() && sys::may_run(path))
     }
 
+    fn modified(&self, path: &str) -> Option<std::time::SystemTime> {
+        fs::metadata(path).ok()?.modified().ok()
+    }
+
     fn run(&mut self, run: Run) -> Result<Ran, String> {
         let mut input = None;
         let mut feeder = None;

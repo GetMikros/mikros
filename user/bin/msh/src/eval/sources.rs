@@ -1,29 +1,62 @@
 //! The shell as the source of what Tab completes: its functions with
 //! their flags, its variables and environment, the programs of
-//! `$env.PATH`, folders, and the options that scripts declare.
+//! `$env.PATH`, folders, and the options that scripts declare. Folders
+//! are listed through the listings the shell keeps between keys.
 
 use super::{Shell, System};
 use crate::ast::{Param, StatementKind};
 use crate::edit::complete::Sources;
 use crate::value::{Value, scalar_text};
+use std::time::SystemTime;
+
+impl<S: System> Shell<S> {
+    /// Lists folders anew for the next line, keeping the programs of
+    /// `PATH`, which are listed again once their folder changes.
+    pub fn new_line(&self) {
+        self.listings.forget_entries();
+    }
+
+    /// `folder` from the root, as the listings are kept.
+    fn absolute(&self, folder: &str) -> String {
+        if folder.starts_with('/') {
+            return folder.to_owned();
+        }
+        let current = self.system.current_dir();
+        match folder {
+            "" | "." => current,
+            f => format!("{}/{f}", current.trim_end_matches('/')),
+        }
+    }
+}
 
 impl<S: System> Sources for Shell<S> {
     fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
-        self.system.entries(folder)
+        let path = self.absolute(folder);
+        let modified = self.system.modified(&path);
+        let now = SystemTime::now();
+        self.listings
+            .entries(&path, modified, now, || self.system.entries(folder))
     }
 
     fn programs(&self) -> Vec<String> {
         let Some(Value::List(folders)) = self.environment.get("PATH") else {
             return Vec::new();
         };
+        let now = SystemTime::now();
         let mut programs = Vec::new();
         for folder in folders.iter().map(scalar_text) {
-            for (name, is_folder) in self.system.entries(&folder).unwrap_or_default() {
-                let path = format!("{}/{name}", folder.trim_end_matches('/'));
-                if !is_folder && self.system.executable(&path) == Some(true) {
-                    programs.push(name);
+            let path = self.absolute(&folder);
+            let modified = self.system.modified(&path);
+            programs.extend(self.listings.programs(&path, modified, now, || {
+                let mut found = Vec::new();
+                for (name, is_folder) in self.system.entries(&folder).unwrap_or_default() {
+                    let path = format!("{}/{name}", folder.trim_end_matches('/'));
+                    if !is_folder && self.system.executable(&path) == Some(true) {
+                        found.push(name);
+                    }
                 }
-            }
+                found
+            }));
         }
         programs
     }

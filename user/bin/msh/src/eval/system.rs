@@ -61,6 +61,11 @@ pub trait System: glob::Folders {
     fn read_file(&self, path: &str) -> Result<String, String>;
     /// Whether a file is at `path`, and if so whether it may be run.
     fn executable(&self, path: &str) -> Option<bool>;
+    /// When the folder at `path` last changed, if the system tells; the
+    /// shell then keeps its listing until it changes again.
+    fn modified(&self, _path: &str) -> Option<std::time::SystemTime> {
+        None
+    }
     fn run(&mut self, run: Run) -> Result<Ran, String>;
     fn write(&mut self, stream: Stream, bytes: &[u8]);
     /// The jobs, one line each as `jobs` lists them.

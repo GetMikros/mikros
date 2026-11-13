@@ -170,6 +170,7 @@ fn show(text: &str) {
 /// Reads a line with the line editor on `terminal`, after `prompt`.
 fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed {
     terminal.raw();
+    shell.new_line();
     let mut editor = Editor::new(shell.history.clone());
     let mut decoder = Decoder::new();
     let mut row = 0;
@@ -177,19 +178,24 @@ fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed 
     // next line or the program that the line runs.
     let mut buf = [0u8; 1];
     let ended = loop {
-        let (columns, rows) = term::size();
-        let suggestion = editor.suggestion(&*shell);
-        let below = editor.below(columns, (rows / 2).max(1));
-        let view = View {
-            prompt,
-            line: editor.line().text(),
-            cursor: editor.line().cursor(),
-            suggestion: &suggestion,
-            below: &below,
-        };
-        let frame = draw(&view, columns, row);
-        show(&frame.text);
-        row = frame.cursor_row;
+        // What was typed ahead or pasted is taken in before the line is
+        // drawn again: a suggestion and a frame for each of its keys
+        // would make it come in slower than it was typed.
+        if !term::input_within(0) {
+            let (columns, rows) = term::size();
+            let suggestion = editor.suggestion(&*shell);
+            let below = editor.below(columns, (rows / 2).max(1));
+            let view = View {
+                prompt,
+                line: editor.line().text(),
+                cursor: editor.line().cursor(),
+                suggestion: &suggestion,
+                below: &below,
+            };
+            let frame = draw(&view, columns, row);
+            show(&frame.text);
+            row = frame.cursor_row;
+        }
         let keys = match decoder.waiting() && !term::input_within(ESCAPE_WAIT) {
             true => decoder.flush(),
             false => match term::read_input(&mut buf) {

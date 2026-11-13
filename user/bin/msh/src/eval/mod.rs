@@ -4,6 +4,7 @@
 pub mod builtins;
 pub mod command;
 pub mod glob;
+mod listings;
 pub mod params;
 pub mod pattern;
 mod sources;
@@ -81,6 +82,8 @@ pub struct Shell<S: System> {
     captures: Vec<Vec<u8>>,
     /// The lines entered at the prompt, oldest first, for `history`.
     pub history: Vec<String>,
+    /// The folder listings kept for completion and suggestions.
+    listings: listings::Listings,
 }
 
 impl<S: System> Shell<S> {
@@ -114,6 +117,7 @@ impl<S: System> Shell<S> {
             command: String::new(),
             captures: Vec::new(),
             history: Vec::new(),
+            listings: listings::Listings::default(),
         };
         shell.set_global("status", Value::Int(0));
         shell.set_global("args", Value::List(Vec::new()));
