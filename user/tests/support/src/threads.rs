@@ -1,19 +1,9 @@
 //! Threads that the tests start in their own process, and what they
-//! leave behind, suspending and resuming them, and the threads of a
-//! process and their registers.
+//! leave behind, and the threads of a process and their registers.
 
-use crate::{Result, STATE_SUSPENDED, SUSPENDED, check, ensure, now, thread_state, u64_at, wait};
+use crate::{Result, check, now, u64_at};
 use core::sync::atomic::{AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
-
-pub static THREAD_RAN: AtomicU64 = AtomicU64::new(0);
-
-pub extern "sysv64" fn thread_entry(value: u64, _arg2: u64) -> ! {
-    THREAD_RAN.store(value, Ordering::Release);
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
 
 /// Set by a thread when it starts, for a test that waits for it.
 pub static STARTED: AtomicU64 = AtomicU64::new(0);
@@ -68,31 +58,6 @@ pub extern "sysv64" fn signal_sleeper(deadline: u64, _: u64) -> ! {
     let status = unsafe { sys::thread_sleep(deadline as i64) };
     SLEEP_RESULT[0].store(status as u64, Ordering::Release);
     SLEEP_RESULT[1].store(now() as u64, Ordering::Release);
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-pub fn suspend(thread: Handle) -> i64 {
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_suspend(thread) }
-}
-
-pub fn resume_thread(thread: Handle) -> i64 {
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_resume(thread) }
-}
-
-/// Suspends `thread` and waits until it is suspended.
-pub fn suspend_and_wait(thread: Handle) -> Result {
-    check("suspending", suspend(thread))?;
-    let (status, _) = wait(thread, SUSPENDED, now() + 1_000_000_000);
-    check("becoming suspended", status)?;
-    ensure("being SUSPENDED", thread_state(thread)? == STATE_SUSPENDED)
-}
-
-/// Ends a thread whose entry is written in assembly.
-pub extern "sysv64" fn end_asm_thread() -> ! {
     // SAFETY: the call takes no pointers.
     unsafe { sys::thread_exit() };
     unreachable!("thread_exit returned");

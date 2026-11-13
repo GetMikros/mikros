@@ -308,7 +308,6 @@ pub fn close(handle: Handle) -> Result {
 }
 
 pub const STATE_BLOCKED: u32 = 2;
-pub const STATE_SUSPENDED: u32 = 5;
 
 /// The state of `thread`.
 pub fn thread_state(thread: Handle) -> Result<u32> {

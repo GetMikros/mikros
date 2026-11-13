@@ -37,6 +37,42 @@ fn main(m: &Managed) -> i64 {
     )
 }
 
+const STATE_SUSPENDED: u32 = 5;
+
+static THREAD_RAN: AtomicU64 = AtomicU64::new(0);
+
+extern "sysv64" fn thread_entry(value: u64, _arg2: u64) -> ! {
+    THREAD_RAN.store(value, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+fn suspend(thread: Handle) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_suspend(thread) }
+}
+
+fn resume_thread(thread: Handle) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_resume(thread) }
+}
+
+/// Suspends `thread` and waits until it is suspended.
+fn suspend_and_wait(thread: Handle) -> Result {
+    check("suspending", suspend(thread))?;
+    let (status, _) = wait(thread, SUSPENDED, now() + 1_000_000_000);
+    check("becoming suspended", status)?;
+    ensure("being SUSPENDED", thread_state(thread)? == STATE_SUSPENDED)
+}
+
+/// Ends a thread whose entry is written in assembly.
+extern "sysv64" fn end_asm_thread() -> ! {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
 /// A second thread of this process runs and exits.
 fn threads(s: &Own) -> Result {
     let stack_size = 16 * 1024;
