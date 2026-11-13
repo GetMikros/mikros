@@ -1569,7 +1569,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // system and what they load, msh among them, the session
             // manager's manifest with the kernel log handle,
             // spawn-std, which runs as the job that the runner stops in
-            // msh, and files-c, which ada's msh runs in her home.
+            // msh, and files-c, which ada's msh runs in her home. The
+            // dynamic linker is in both lists, and goes in once.
             let sessions_manifest = "usr/lib/services/sessionmgr.yaml";
             let console_fonts =
                 ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"].map(|f| fonts.ttf.join(f));
@@ -1581,6 +1582,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     login
                         .iter()
                         .filter(|(at, _)| at != sessions_manifest)
+                        .filter(|(at, _)| !members.iter().any(|(m, _)| m == at))
                         .map(|(at, path)| (at.as_str(), path.as_path())),
                 )
                 .chain([
@@ -1855,6 +1857,7 @@ fn without_debug_info(kind: Kind, source: &Path) -> Result<PathBuf> {
 
 /// Like `boot_image`, with the directories `dirs` after the files, and
 /// the symbolic links `links`, given by name and target, after those.
+/// Beside the archive, `<file>.list` lists its members (see `Listing`).
 fn archive(
     kind: Kind,
     file: &str,
@@ -1867,10 +1870,12 @@ fn archive(
         .join(kind.name());
     fs::create_dir_all(&dir)?;
     let path = dir.join(file);
+    let mut listing = Listing::default();
     let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
     let mut archive = tar::Builder::new(file);
     for &(name, source) in members {
         let data = fs::read(source).with_context(|| format!("reading {}", source.display()))?;
+        listing.add(name, format!("file 755 {} {}", data.len(), sha256(&data)))?;
         let mut header = tar::Header::new_ustar();
         header.set_size(data.len() as u64);
         header.set_mode(0o755);
@@ -1880,6 +1885,7 @@ fn archive(
             .with_context(|| format!("adding {name} to the boot archive"))?;
     }
     for &dir in dirs {
+        listing.add(&dir_name(dir), "dir 755".to_owned())?;
         let mut header = tar::Header::new_ustar();
         header.set_size(0);
         header.set_mode(0o755);
@@ -1889,6 +1895,7 @@ fn archive(
             .with_context(|| format!("adding {dir} to the boot archive"))?;
     }
     for &(name, target) in links {
+        listing.add(name, format!("link 777 {target}"))?;
         let mut header = tar::Header::new_ustar();
         header.set_size(0);
         header.set_mode(0o777);
@@ -1898,7 +1905,38 @@ fn archive(
             .with_context(|| format!("adding {name} to the boot archive"))?;
     }
     archive.finish().context("finishing the boot archive")?;
+    listing.write(&path)?;
     Ok(path)
+}
+
+/// The members of an archive, one line each, sorted by name: the name,
+/// its type, mode and, for files, the size and the SHA-256 of the
+/// contents. Two builds' images can be compared by their listings.
+#[derive(Default)]
+struct Listing(std::collections::BTreeMap<String, String>);
+
+impl Listing {
+    /// Adds the member `name`, which must not be in the archive yet.
+    fn add(&mut self, name: &str, line: String) -> Result<()> {
+        if self.0.insert(name.to_owned(), line).is_some() {
+            bail!("{name} is in the archive twice");
+        }
+        Ok(())
+    }
+
+    /// Writes the listing beside the archive at `archive`, as
+    /// `<archive>.list`.
+    fn write(&self, archive: &Path) -> Result<()> {
+        let mut path = archive.as_os_str().to_owned();
+        path.push(".list");
+        let text: String = self.0.iter().map(|(n, l)| format!("{n} {l}\n")).collect();
+        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+fn sha256(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    crate::fetch::hex(&Sha256::digest(data))
 }
 
 /// The archive name of directory `dir`, which ends in a slash.
