@@ -66,6 +66,7 @@ const JOB_START: Duration = Duration::from_secs(5);
 /// `let n = (jobs | lines | len)`, `bg`, `kill %1`,
 /// `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
 /// `if (pwd | lines).0 != '/Users/ada' { exit 2 }`,
+/// `if ((history --folders | lines).0 !~ '/Users/ada') { exit 3 }`,
 /// `try { files-c . } catch e { exit 5 }`, which makes, changes and
 /// removes files in ada's home,
 /// `try { coreutils-check . } catch e { exit 6 }`, which runs the
@@ -73,10 +74,11 @@ const JOB_START: Duration = Duration::from_secs(5);
 /// `cd /; if ((print /*) !~ 'Users') { exit 4 }` and
 /// `exit ($n + 6 + $status)`, which exits with 7 when msh listed the one
 /// job, the kill worked, the host name is the one setup wrote, msh
-/// started in ada's home, files-c's and coreutils-check's checks
+/// started in ada's home, the history gives that home as the folder of
+/// its first entry, files-c's and coreutils-check's checks
 /// passed, and `/`, which no namespace entry covers, is a folder that
 /// lists `Users`.
-const MSH_KEYS: [(&str, Duration); 14] = [
+const MSH_KEYS: [(&str, Duration); 15] = [
     ("y e s ret", JOB_START),
     ("ctrl-c", QUESTION),
     ("ctrl-l", QUESTION),
@@ -99,6 +101,13 @@ const MSH_KEYS: [(&str, Duration); 14] = [
         "i f spc shift-9 p w d spc shift-backslash spc l i n e s shift-0 dot 0 spc shift-1 equal spc \
          apostrophe slash shift-u s e r s slash a d a apostrophe spc \
          shift-bracket_left spc e x i t spc 2 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "i f spc shift-9 shift-9 h i s t o r y spc minus minus f o l d e r s spc \
+         shift-backslash spc l i n e s shift-0 dot 0 spc shift-1 shift-grave_accent spc \
+         apostrophe slash shift-u s e r s slash a d a apostrophe shift-0 spc \
+         shift-bracket_left spc e x i t spc 3 spc shift-bracket_right ret",
         QUESTION,
     ),
     (
