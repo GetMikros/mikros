@@ -11,11 +11,11 @@ use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::{
-    FAILED, PAGE_SIZE, PASSED, PEER_CLOSED, PERM_READ, PERM_WRITE, READABLE, Result, SIGNALED,
-    SLOWER, TERMINATED, TIMED_OUT, USER0, call, check, contains, create_memory, elf, ensure,
-    exit_qemu, in_time, info, map, map_read_only, now, open_exit_port, read_message, signal,
-    sleep_ms, soon, spawn, spawn2, stream_io, take_packet, u32_at, u64_at, ustar, wait,
-    wait_forever, within,
+    BAD_HANDLE, BUFFER_TOO_SMALL, FAILED, INVALID_ARGS, OUT_OF_RANGE, PAGE_SIZE, PASSED,
+    PEER_CLOSED, PERM_READ, PERM_WRITE, READABLE, Result, SIGNALED, SLOWER, TERMINATED, TIMED_OUT,
+    USER0, call, check, contains, create_memory, elf, ensure, exit_qemu, futex_wake, in_time, info,
+    map, map_read_only, now, open_exit_port, read_message, read_sizes, signal, sleep_ms, soon,
+    spawn, spawn2, stream_io, take_packet, u32_at, u64_at, ustar, wait, wait_forever, within,
 };
 
 mikros_rt::main!(main);
@@ -1220,15 +1220,6 @@ fn futex_woken(at: usize) -> Result<u64> {
     }
 }
 
-fn futex_wake(addr: u64, count: u32) -> Result<u32> {
-    let mut woken = 0;
-    // SAFETY: the pointers are valid for the call.
-    check("waking", unsafe {
-        sys::futex_wake(addr as *const u32, count, &mut woken)
-    })?;
-    Ok(woken)
-}
-
 /// `STOP` sent to a process stops its thread, which spins in user mode,
 /// sets the process `STOPPED` and `SUSPENDED` on it, and records the
 /// signal and a stop; `CONT` lets the thread run again, clears both, sets
@@ -1440,8 +1431,6 @@ fn futexes(s: &Startup) -> Result {
     ensure("waking the last", futex_woken(2)? == 3)?;
     ensure("waking nobody", futex_wake(word, 1)? == 0)
 }
-
-const INVALID_ARGS: i64 = -10;
 
 /// Waits on the word at `addr` until woken, then exits.
 extern "sysv64" fn word_waiter(addr: u64, _: u64) -> ! {
@@ -3753,29 +3742,6 @@ fn own_endpoints_not_sent(_: &Startup) -> Result {
         check("closing", unsafe { sys::handle_close(h) })?;
     }
     Ok(())
-}
-
-const BAD_HANDLE: i64 = -11;
-const OUT_OF_RANGE: i64 = -14;
-const BUFFER_TOO_SMALL: i64 = -15;
-/// Reads the next message of `channel` into buffers of `cap` bytes and
-/// `handles_cap` handles, and returns the status and the two sizes.
-fn read_sizes(channel: Handle, cap: usize, handles_cap: usize) -> (i64, u64, u64) {
-    let (mut bytes, mut handles) = ([0u8; 16], [0 as Handle; 2]);
-    let (mut len, mut count) = (0, 0);
-    // SAFETY: the capacities are at most the sizes of the buffers.
-    let status = unsafe {
-        sys::channel_read(
-            channel,
-            bytes.as_mut_ptr(),
-            cap.min(bytes.len()) as u64,
-            handles.as_mut_ptr(),
-            handles_cap.min(handles.len()) as u64,
-            &mut len,
-            &mut count,
-        )
-    };
-    (status, len, count)
 }
 
 /// A read whose handles the caller's table cannot hold fails with

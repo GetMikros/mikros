@@ -10,6 +10,10 @@ pub const SIGNALED: u32 = 1 << 3;
 pub const TERMINATED: u32 = 1 << 4;
 pub const USER0: u32 = 1 << 24;
 pub const USER1: u32 = 1 << 25;
+pub const INVALID_ARGS: i64 = -10;
+pub const BAD_HANDLE: i64 = -11;
+pub const OUT_OF_RANGE: i64 = -14;
+pub const BUFFER_TOO_SMALL: i64 = -15;
 pub const TIMED_OUT: i64 = -21;
 pub const CANCELED: i64 = -23;
 
@@ -219,4 +223,33 @@ pub fn map_read_only(s: &impl Context, mem: Handle) -> Result<u64> {
     let status = unsafe { sys::vm_map(s.process(), PERM_READ, 0, mem, 0, PAGE_SIZE, &mut at) };
     check("mapping read-only", status)?;
     Ok(at)
+}
+
+pub fn futex_wake(addr: u64, count: u32) -> Result<u32> {
+    let mut woken = 0;
+    // SAFETY: the pointers are valid for the call.
+    check("waking", unsafe {
+        sys::futex_wake(addr as *const u32, count, &mut woken)
+    })?;
+    Ok(woken)
+}
+
+/// Reads the next message of `channel` into buffers of `cap` bytes and
+/// `handles_cap` handles, and returns the status and the two sizes.
+pub fn read_sizes(channel: Handle, cap: usize, handles_cap: usize) -> (i64, u64, u64) {
+    let (mut bytes, mut handles) = ([0u8; 16], [0 as Handle; 2]);
+    let (mut len, mut count) = (0, 0);
+    // SAFETY: the capacities are at most the sizes of the buffers.
+    let status = unsafe {
+        sys::channel_read(
+            channel,
+            bytes.as_mut_ptr(),
+            cap.min(bytes.len()) as u64,
+            handles.as_mut_ptr(),
+            handles_cap.min(handles.len()) as u64,
+            &mut len,
+            &mut count,
+        )
+    };
+    (status, len, count)
 }
