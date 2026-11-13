@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+[[bin]]
+name = "termsvc"
+path = "src/service/mod.rs"
+
 [dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-tty = { path = "../../lib/tty" }
