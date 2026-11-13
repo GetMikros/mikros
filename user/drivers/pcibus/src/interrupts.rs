@@ -3,10 +3,10 @@
 //! interrupts.
 
 use crate::bus::{Bus, Function};
+use crate::pci::{Address, CAP_MSI, CAP_MSIX, COMMAND, Config, STATUS, capabilities};
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use mikros_pci::{Address, CAP_MSI, CAP_MSIX, COMMAND, Config, STATUS, capabilities};
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::acpi::{Acpi, AcpiAsyncClient};
 use mikros_rt::interfaces::mikros::base::Status;

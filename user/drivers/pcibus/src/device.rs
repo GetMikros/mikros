@@ -3,10 +3,10 @@
 
 use crate::bus::{Bus, Function};
 use crate::interrupts::{self, Msi};
-use alloc::rc::Rc;
-use mikros_pci::{
+use crate::pci::{
     BarKind, COMMAND, COMMAND_BUS_MASTER, COMMAND_IO, COMMAND_MEMORY, Config, msi_registers,
 };
+use alloc::rc::Rc;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::pci::{
@@ -181,7 +181,7 @@ fn checked(offset: u16, width: u8) -> Result<(), Status> {
 /// fail with `ACCESS_DENIED`.
 fn write_config(
     bus: &Bus,
-    at: mikros_pci::Address,
+    at: crate::pci::Address,
     offset: u16,
     width: u8,
     value: u32,

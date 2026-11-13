@@ -1,7 +1,7 @@
 //! Resetting a function before its driver is started again.
 
 use crate::bus::{Bus, Function};
-use mikros_pci::{
+use crate::pci::{
     BAR0, BRIDGE_CONTROL, COMMAND, COMMAND_BUS_MASTER, COMMAND_IO, COMMAND_MEMORY, Config, Reset,
     VENDOR_ID, reset_method,
 };

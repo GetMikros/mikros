@@ -13,20 +13,9 @@
 //! between the functions on it. `ResetChild` resets a function before
 //! its driver is started again.
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-mod bus;
-mod device;
-mod ecam;
-mod interrupts;
-mod reset;
-
+use crate::bus::{Bus, KIND_BTI, KIND_MMIO};
+use crate::ecam::Ecam;
 use alloc::rc::Rc;
-use bus::{Bus, KIND_BTI, KIND_MMIO};
-use ecam::Ecam;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -89,7 +78,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                             // added, so that the device manager knows which
                             // ones there are. The device manager answers
                             // AddDevice on another channel meanwhile.
-                            bus::enumerate(started).await;
+                            crate::bus::enumerate(started).await;
                             responder.reply(s, Ok(DriverStartResponse {}))
                         }
                         Err(status) => responder.reply(s, Err(status)),
@@ -114,7 +103,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     let server = server.clone();
                     spawner.spawn(async move {
                         let reset = match bus.function(request.device).await {
-                            Some(function) => reset::reset(&bus, &function).await,
+                            Some(function) => crate::reset::reset(&bus, &function).await,
                             None => Err(Status::NotFound),
                         };
                         let reset = reset.map(|()| DriverResetChildResponse {});
@@ -135,7 +124,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         };
                         let connected = Ok(DriverConnectChildResponse {});
                         let _ = responder.reply(server.server(), connected);
-                        device::serve(bus, function, request.bus, request.dma, process).await;
+                        crate::device::serve(bus, function, request.bus, request.dma, process)
+                            .await;
                     });
                     Ok(())
                 }

@@ -5,6 +5,7 @@
 
 use crate::ecam::Ecam;
 use crate::interrupts::{Intx, Line};
+use crate::pci::{Address, Bar, Claim, Header, bar_properties, claims, kept_bars, scan, size_bars};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
@@ -14,7 +15,6 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
-use mikros_pci::{Address, Bar, Claim, Header, bar_properties, claims, kept_bars, scan, size_bars};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -117,7 +117,7 @@ pub fn requester_id(segment: u16, at: Address) -> u64 {
 }
 
 /// Finds the functions of `bus`, sizes their BARs and claims them as
-/// `mikros_pci::claims` plans, a resource for each group of a function's
+/// `crate::pci::claims` plans, a resource for each group of a function's
 /// memory BARs that share pages, creates their bus transaction
 /// initiators, and adds each function as a device, named
 /// `pci-<segment>:<bus>:<device>.<function>` in hexadecimal, with its

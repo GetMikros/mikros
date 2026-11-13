@@ -1,7 +1,7 @@
 //! Configuration space through the ECAM range of the host bridge,
 //! mapped uncached as device memory.
 
-use mikros_pci::{Address, Config, ecam_offset};
+use crate::pci::{Address, Config, ecam_offset};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::sys;
 

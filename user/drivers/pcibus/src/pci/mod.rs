@@ -5,10 +5,6 @@
 //! The configuration space is reached through `Config`, which the bus
 //! driver implements over its ECAM range and the tests over memory.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
