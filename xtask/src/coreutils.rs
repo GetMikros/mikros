@@ -122,6 +122,11 @@ pub const UTILITIES: [&str; 102] = [
 /// The file in an unpacked source that records the changes it has.
 const STAMP: &str = ".mikros-changes";
 
+/// Cargo's target directory for the port.
+pub fn target_dir() -> PathBuf {
+    dir().join("target")
+}
+
 fn dir() -> PathBuf {
     crate::workspace_root().join("target/ported/coreutils")
 }
@@ -243,7 +248,7 @@ pub fn build() -> Result<Vec<(String, PathBuf)>> {
     let mut cargo = crate::rust_std::cargo(&source, &RUSTFLAGS)?;
     cargo
         .env("RUSTUP_TOOLCHAIN", toolchain()?)
-        .env("CARGO_TARGET_DIR", dir().join("target"))
+        .env("CARGO_TARGET_DIR", target_dir())
         .arg("--release");
     for package in &packages {
         cargo.args(["--package", package]);

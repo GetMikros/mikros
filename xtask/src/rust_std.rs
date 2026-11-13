@@ -41,8 +41,9 @@ fn toolchain_library() -> Result<PathBuf> {
 
 /// The patched copy of the standard library source, made again from
 /// the toolchain's whenever the toolchain or the patches changed. Cargo
-/// does not see changes in it, so the target directory of `user/runtime/std` is
-/// removed then as well.
+/// does not see changes in it, so the target directories of everything
+/// built with it, `user/runtime/std` and coreutils, are removed then as
+/// well.
 pub fn source() -> Result<PathBuf> {
     let root = crate::workspace_root();
     let toolchain = toolchain_library()?;
@@ -56,7 +57,11 @@ pub fn source() -> Result<PathBuf> {
     if fs::read_to_string(dir().join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
         return Ok(library);
     }
-    for stale in [dir(), root.join("user/runtime/std/target")] {
+    for stale in [
+        dir(),
+        root.join("user/runtime/std/target"),
+        crate::coreutils::target_dir(),
+    ] {
         if stale.exists() {
             fs::remove_dir_all(&stale).with_context(|| format!("removing {}", stale.display()))?;
         }
