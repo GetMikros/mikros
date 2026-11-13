@@ -10544,16 +10544,17 @@ mod manager {
 
     /// The `console` scenario: serves `tests/console.img`, whose session
     /// manager starts the text console, while the runner types bob's
-    /// login and then a line for the session shell, which checks its
-    /// session and exits with 0; stops QEMU with `PASSED` once the
-    /// session ended so, or with `FAILED`.
+    /// login on console 1, cy's on console 2, and then a line for bob's
+    /// session shell, which checks its session and exits with 0; stops
+    /// QEMU with `PASSED` once that session ended so, or with `FAILED`.
     pub fn console_scenario(s: &Startup) -> i64 {
         const SECONDS: i64 = 300;
         const EXPECTED: &[(&[u8], usize)] = &[
             (b"device-manager: released the kernel console", 1),
             (b"sessionmgr: started the console", 1),
             (b"sessionmgr: gave the console the display", 1),
-            (b"sessionmgr: bob logged in", 1),
+            (b"sessionmgr: bob logged in on console 1", 1),
+            (b"sessionmgr: cy logged in on console 2", 1),
             (b"exited with Some(0)", 1),
             (b"sessionmgr: ended session", 1),
         ];

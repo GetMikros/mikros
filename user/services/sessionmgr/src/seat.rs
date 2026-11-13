@@ -1,18 +1,25 @@
 //! The seat: the display and the input devices that the session manager
-//! opens and gives to the text console through `Seat`.
+//! opens and gives to the text console through `Seat`, with the screen
+//! that it shows. No desktop is installed, so every screen is one of the
+//! console's, and a request to switch to another owner's is ignored.
 
 use crate::{SECOND, now};
 use alloc::collections::BTreeSet;
 use alloc::string::String;
+use core::future::{Future, poll_fn};
+use core::pin::pin;
+use core::task::Poll;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::gpu::{Device as Gpu, DeviceAsyncClient as GpuClient, Display};
 use mikros_rt::interfaces::mikros::input::{Device, Input, InputAsyncClient};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
-use mikros_rt::interfaces::mikros::session::SeatAsyncClient;
+use mikros_rt::interfaces::mikros::session::{SeatAsyncClient, SeatEvent};
 
 const GPU: &str = "device.gpu";
 const INPUT: &str = "device.input";
+/// The screen that the console shows first, its first console.
+const FIRST_SCREEN: u8 = 1;
 /// How often the input devices are looked for.
 const POLL: i64 = SECOND;
 
@@ -91,8 +98,34 @@ async fn inputs(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &Seat
     }
 }
 
-/// Gives the console the display and the input devices.
+/// Reads the console's events until it closes the seat, ignoring a
+/// request to switch to a screen, since none is another owner's.
+async fn switches(seat: &SeatAsyncClient) {
+    while let Ok(event) = seat.next_event().await {
+        if let SeatEvent::OnSwitchRequested(e) = event {
+            mikros_rt::log!(Info, "sessionmgr: there is no screen {}", e.screen);
+        }
+    }
+}
+
+/// Gives the console the display, the screen to show and the input
+/// devices.
 pub async fn serve(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: SeatAsyncClient) {
     display(directory, reactor, &seat).await;
-    inputs(directory, reactor, &seat).await;
+    let _ = seat.set_screen(FIRST_SCREEN);
+    first(inputs(directory, reactor, &seat), switches(&seat)).await;
+}
+
+/// Completes when the first of `a` and `b` completes.
+async fn first<A: Future, B: Future>(a: A, b: B) {
+    let mut a = pin!(a);
+    let mut b = pin!(b);
+    poll_fn(|cx| {
+        if a.as_mut().poll(cx).is_ready() || b.as_mut().poll(cx).is_ready() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
 }

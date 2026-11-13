@@ -5,7 +5,10 @@
 //! screen on the first display with the monospaced font, turns key
 //! presses into the terminal's input with the system keyboard layout and
 //! key repeat, and shows either its own login prompt or the terminal of
-//! setup or of the user's session. While no session runs, the system log
+//! setup or of the user's session. It runs six such text consoles, each
+//! with its own login prompt, setup or session, and shows one at a time:
+//! Ctrl, Alt and F1 to F6 show the others, which keep their contents
+//! meanwhile. While no session runs on the console shown, the system log
 //! fills the rows above the login prompt or setup's terminal, and while
 //! Ctrl, Alt and F12 are held, the whole screen. In the diagnostic build,
 //! the system overview fills the screen while Ctrl, Alt and F11 are
@@ -24,6 +27,7 @@ mod palette;
 mod process;
 mod render;
 mod term;
+mod vt;
 mod xkb;
 
 use keyboard::{Keyboard, Pressed};
@@ -42,10 +46,9 @@ use mikros_vt::screen::{Modes, Screen};
 use notify::Notify;
 use render::Renderer;
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::os::mikros::startup;
 use std::rc::Rc;
-use term::Term;
+use vt::{View, Vt};
 
 /// The `USER` role, and the `id`s of the `TextLogin` and `Seat` channels.
 const USER: u32 = 16;
@@ -56,6 +59,8 @@ const SAME_RIGHTS: u32 = 1 << 31;
 const LAYOUT: &str = "us";
 /// The rows of the login prompt and of setup's terminal, below the log.
 const PROMPT_ROWS: usize = 8;
+/// The number of text consoles.
+const CONSOLES: u8 = 6;
 
 /// How the screen's rows are shared: the log's rows at the top, and
 /// those of the view below them.
@@ -65,23 +70,17 @@ struct Layout {
     view: usize,
 }
 
-/// What the screen shows besides the log.
-enum View {
-    /// The console's own login prompt.
-    Login(Screen),
-    /// The terminal of setup or of a session.
-    Terminal(Rc<Term>),
-}
-
 pub struct Console {
     reactor: Reactor,
     spawner: Spawner,
     directory: DirectoryAsyncClient,
     renderer: RefCell<Option<Renderer>>,
     keyboard: RefCell<Option<Keyboard>>,
-    view: RefCell<View>,
-    /// Whether the view is the terminal of a session.
-    session: Cell<bool>,
+    /// The text consoles, 1 to 6, and the index of the one shown.
+    vts: Vec<Rc<Vt>>,
+    shown: Cell<usize>,
+    /// Whether the session manager closed `TextLogin`.
+    closed: Cell<bool>,
     log: LogPane,
     /// Whether Ctrl, Alt and F12 are held.
     log_held: Cell<bool>,
@@ -90,12 +89,8 @@ pub struct Console {
     overview: overview::Overview,
     /// The size of the grid of cells, once a display came.
     grid: Cell<(usize, usize)>,
-    /// What was typed while the login prompt shows, for it to read.
-    typed: RefCell<VecDeque<u8>>,
-    /// Woken when the screen changed, when something was typed for the
-    /// prompt, and when the held key changed.
+    /// Woken when the screen changed, and when the held key changed.
     changed: Rc<Notify>,
-    typed_in: Notify,
     keys: Notify,
 }
 
@@ -125,9 +120,25 @@ fn take(id: u32) -> Option<OwnedHandle> {
 impl Console {
     /// The screen shown now, for `f`.
     fn with_screen<T>(&self, f: impl FnOnce(&mut Screen) -> T) -> T {
-        match &mut *self.view.borrow_mut() {
-            View::Login(screen) => f(screen),
-            View::Terminal(term) => f(&mut term.screen.borrow_mut()),
+        self.vt().with_screen(f)
+    }
+
+    /// The text console shown.
+    fn vt(&self) -> &Rc<Vt> {
+        &self.vts[self.shown.get()]
+    }
+
+    /// Shows text console `number`, 1 to 6, as it was left.
+    fn switch_to(&self, number: u8) {
+        let Some(index) = usize::from(number)
+            .checked_sub(1)
+            .filter(|&i| i < self.vts.len())
+        else {
+            return;
+        };
+        if self.shown.replace(index) != index {
+            self.with_screen(|s| s.touch());
+            self.changed.notify();
         }
     }
 
@@ -141,10 +152,10 @@ impl Console {
     /// bottom `PROMPT_ROWS`.
     fn layout(&self) -> Layout {
         let rows = self.grid.get().1;
-        if self.log_held.get() || self.overview_shown() {
+        if self.log_held.get() || self.overview_shown() || self.vt().log_only.get() {
             return Layout { log: rows, view: 0 };
         }
-        match self.session.get() {
+        match self.vt().session.get() {
             true => Layout { log: 0, view: rows },
             false => {
                 let view = PROMPT_ROWS.min(rows);
@@ -181,31 +192,28 @@ impl Console {
         (cols, PROMPT_ROWS.min(rows))
     }
 
-    /// Shows `view`, whole, which is the terminal of a session when
-    /// `session` is set.
-    fn show(&self, view: View, session: bool) {
-        *self.view.borrow_mut() = view;
-        self.session.set(session);
-        self.with_screen(|s| s.touch());
+    /// Makes `view` what text console `vt` shows, whole, which is the
+    /// terminal of a session when `session` is set.
+    fn show(&self, vt: &Vt, view: View, session: bool) {
+        *vt.view.borrow_mut() = view;
+        vt.session.set(session);
+        vt.with_screen(|s| s.touch());
         self.changed.notify();
     }
 
-    /// Takes in `bytes` typed: the terminal shown gets them, or the login
-    /// prompt.
+    /// Takes in `bytes` typed: the terminal of the console shown gets
+    /// them, or its login prompt.
     fn input(self: &Rc<Self>, bytes: Vec<u8>) {
-        let term = match &*self.view.borrow() {
-            View::Terminal(term) => Some(term.clone()),
-            View::Login(_) => None,
-        };
-        match term {
+        let vt = self.vt().clone();
+        match vt.term() {
             Some(term) => {
                 let reactor = self.reactor.clone();
                 self.spawner
                     .spawn(async move { term.type_in(&reactor, &bytes).await });
             }
             None => {
-                self.typed.borrow_mut().extend(bytes);
-                self.typed_in.notify();
+                vt.typed.borrow_mut().extend(bytes);
+                vt.typed_in.notify();
             }
         }
     }
@@ -306,14 +314,17 @@ impl Console {
         let (cols, rows) = renderer.grid();
         self.grid.set((cols, rows));
         *self.renderer.borrow_mut() = Some(renderer);
-        let term = match &*self.view.borrow() {
-            View::Terminal(term) => Some(term.clone()),
-            View::Login(_) => None,
-        };
-        let rows = self.layout().view;
-        match term {
-            Some(term) => term.resize(cols, rows).await,
-            None => self.with_screen(|s| s.resize(cols, rows)),
+        // Every console gets the grid: a session's terminal all its rows,
+        // the login prompt and setup's terminal those below the log.
+        for vt in self.vts.clone() {
+            let vt_rows = match vt.session.get() {
+                true => rows,
+                false => PROMPT_ROWS.min(rows),
+            };
+            match vt.term() {
+                Some(term) => term.resize(cols, vt_rows).await,
+                None => vt.with_screen(|s| s.resize(cols, vt_rows)),
+            }
         }
         self.with_screen(|s| s.touch());
         self.changed.notify();
@@ -389,6 +400,7 @@ impl Console {
                 }
                 match pressed {
                     Some(Pressed::Bytes(bytes)) => self.input(bytes),
+                    Some(Pressed::Switch(number)) => self.switch_to(number),
                     Some(Pressed::LogView) | Some(Pressed::Nothing) | None => {}
                     #[cfg(mikros_diag)]
                     Some(Pressed::Overview) => {}
@@ -412,6 +424,9 @@ impl Console {
                     self.spawner
                         .spawn(self.clone().add_input(instance, device, accepted));
                 }
+                // No desktop is installed, so screens 1 to 6 are the
+                // consoles 1 to 6.
+                SeatRequest::SetScreen(screen) => self.switch_to(screen.screen),
             }
         }
     }
@@ -450,16 +465,17 @@ fn main() {
         directory: DirectoryAsyncClient::new(ClientEnd::new(directory), reactor.clone()),
         renderer: RefCell::new(None),
         keyboard: RefCell::new(None),
-        view: RefCell::new(View::Login(Screen::new(render::MIN_COLS, PROMPT_ROWS))),
-        session: Cell::new(false),
+        vts: (1..=CONSOLES)
+            .map(|n| Vt::new(n, render::MIN_COLS, PROMPT_ROWS))
+            .collect(),
+        shown: Cell::new(0),
+        closed: Cell::new(false),
         log: LogPane::new(),
         log_held: Cell::new(false),
         #[cfg(mikros_diag)]
         overview: overview::Overview::default(),
         grid: Cell::new((render::MIN_COLS, render::MIN_ROWS)),
-        typed: RefCell::new(VecDeque::new()),
         changed: Rc::new(Notify::default()),
-        typed_in: Notify::default(),
         keys: Notify::default(),
     });
     let text_login = Rc::new(TextLoginAsyncClient::new(
@@ -472,5 +488,8 @@ fn main() {
     #[cfg(mikros_diag)]
     spawner.spawn(overview::follow(console.clone()));
     spawner.spawn(console.clone().repeat());
-    executor.block_on(login::run(console, text_login));
+    for vt in console.vts.clone() {
+        spawner.spawn(login::run(console.clone(), vt, text_login.clone()));
+    }
+    executor.block_on(login::events(console, text_login));
 }

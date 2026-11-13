@@ -44,12 +44,30 @@ const F11: u32 = 0xFFC8;
 #[cfg(mikros_diag)]
 const SWITCH_VT_11: u32 = 0x1008_FE0B;
 
+/// The keysyms of F1, which with Ctrl and Alt shows text console 1, and
+/// of `XF86Switch_VT_1`, which xkb's PC layouts give it while Ctrl and Alt
+/// are held; those of F2 to F6 follow them.
+const F1: u32 = 0xFFBE;
+const SWITCH_VT_1: u32 = 0x1008_FE01;
+/// The number of text consoles that keys show.
+const CONSOLES: u32 = 6;
+
+/// The text console, 1 to 6, that `keysym` shows with Ctrl and Alt.
+fn console_key(keysym: u32) -> Option<u8> {
+    [F1, SWITCH_VT_1]
+        .into_iter()
+        .find_map(|first| keysym.checked_sub(first).filter(|&i| i < CONSOLES))
+        .map(|i| i as u8 + 1)
+}
+
 /// What a key press means for the console.
 pub enum Pressed {
     /// Bytes for the terminal.
     Bytes(Vec<u8>),
     /// Ctrl, Alt and F12, which show the log while held.
     LogView,
+    /// Ctrl, Alt and one of F1 to F6, which show that text console.
+    Switch(u8),
     /// In the diagnostic build, Ctrl, Alt and F11, which show the system
     /// overview while held.
     #[cfg(mikros_diag)]
@@ -95,6 +113,12 @@ impl Keyboard {
         let keysym = self.keymap.keysym(code);
         if matches!(keysym, F12 | SWITCH_VT_12) && mods.ctrl && mods.alt {
             return Pressed::LogView;
+        }
+        if mods.ctrl
+            && mods.alt
+            && let Some(number) = console_key(keysym)
+        {
+            return Pressed::Switch(number);
         }
         #[cfg(mikros_diag)]
         if matches!(keysym, F11 | SWITCH_VT_11) && mods.ctrl && mods.alt {

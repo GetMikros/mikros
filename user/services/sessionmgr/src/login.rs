@@ -1,15 +1,18 @@
-//! `TextLogin`, which the text console calls: first-boot setup, and
-//! logins, which start the user's session on the console's terminal and
-//! end it once its leader exits.
+//! `TextLogin`, which the text console calls for each of its consoles,
+//! numbered 1 to 6: first-boot setup, and logins, which start the user's
+//! session on the console's terminal and end it once its leader exits.
+//! Each console has at most one session, and the sessions of different
+//! consoles run at the same time.
 
 use crate::spawn::{block, standard};
 use crate::{SECOND, now};
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -34,6 +37,9 @@ const KILL: u32 = 9;
 const GRACE: i64 = 5 * SECOND;
 const PATH: &str = "PATH=/usr/bin";
 const TERM_VALUE: &str = "TERM=xterm-256color";
+/// The numbers of the consoles, and the one that setup runs on.
+const CONSOLES: core::ops::RangeInclusive<u8> = 1..=6;
+const SETUP_CONSOLE: u8 = 1;
 
 /// Whether a user account exists.
 async fn any_user(accounts: &AccountsAsyncClient) -> Result<bool, Status> {
@@ -158,8 +164,8 @@ async fn end_session(launcher: &LauncherAsyncClient, reactor: &Reactor, pid: u32
 }
 
 /// Serves `TextLogin` on `end` for as long as the console keeps it open.
-/// One session runs at a time; its end is awaited by a task of its own,
-/// which then sends `OnSessionEnded`.
+/// Setup, and the end of each session, are awaited by tasks of their
+/// own; the end of a session sends `OnSessionEnded` with its console.
 pub async fn serve(
     end: ServerEnd<TextLogin>,
     accounts: AccountsAsyncClient,
@@ -168,7 +174,11 @@ pub async fn serve(
     spawner: Spawner,
 ) {
     let server = Rc::new(TextLoginAsyncServer::new(end, reactor.clone()));
-    let running = Rc::new(Cell::new(false));
+    let accounts = Rc::new(accounts);
+    // The consoles on which a session runs.
+    let running: Rc<RefCell<BTreeSet<u8>>> = Rc::new(RefCell::new(BTreeSet::new()));
+    // Whether the setup program runs.
+    let in_setup = Rc::new(Cell::new(false));
     while let Ok(request) = server.next().await {
         let s = server.server();
         match request {
@@ -177,10 +187,27 @@ pub async fn serve(
                 let _ = r.reply(s, TextLoginNeedsSetupResponse { needed });
             }
             TextLoginRequest::RunSetup(q, r) => {
-                let _ = r.reply(s, setup(&accounts, &launcher, q.terminal).await);
+                // Setup runs on console 1 only, once at a time.
+                if q.console != SETUP_CONSOLE || in_setup.get() {
+                    let _ = r.reply(s, Err(Status::BadState));
+                    continue;
+                }
+                in_setup.set(true);
+                let (accounts, launcher, server) =
+                    (accounts.clone(), launcher.clone(), server.clone());
+                let in_setup = in_setup.clone();
+                spawner.spawn(async move {
+                    let done = setup(&accounts, &launcher, q.terminal).await;
+                    in_setup.set(false);
+                    let _ = r.reply(server.server(), done);
+                });
             }
             TextLoginRequest::Login(q, r) => {
-                if running.get() {
+                if !CONSOLES.contains(&q.console) {
+                    let _ = r.reply(s, Err(Status::InvalidArgs));
+                    continue;
+                }
+                if running.borrow().contains(&q.console) {
                     let _ = r.reply(s, Err(Status::BadState));
                     continue;
                 }
@@ -214,16 +241,21 @@ pub async fn serve(
                         continue;
                     }
                 };
-                mikros_rt::log!(Info, "sessionmgr: {} logged in, session {pid}", q.name);
-                running.set(true);
+                let console = q.console;
+                mikros_rt::log!(
+                    Info,
+                    "sessionmgr: {} logged in on console {console}, session {pid}",
+                    q.name
+                );
+                running.borrow_mut().insert(console);
                 let _ = r.reply(s, Ok(TextLoginLoginResponse {}));
                 let (launcher, reactor) = (launcher.clone(), reactor.clone());
                 let (server, running) = (server.clone(), running.clone());
                 spawner.spawn(async move {
                     end_session(&launcher, &reactor, pid).await;
                     mikros_rt::log!(Info, "sessionmgr: ended session {pid}");
-                    running.set(false);
-                    let _ = server.server().send_on_session_ended();
+                    running.borrow_mut().remove(&console);
+                    let _ = server.server().send_on_session_ended(console);
                 });
             }
         }

@@ -101,12 +101,14 @@ enum Step {
 }
 
 /// Where a screen dump must show the log.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shown {
     /// Above the login prompt or setup's terminal.
     AbovePrompt,
     /// On the whole screen.
     Whole,
+    /// Not at all: a session's terminal fills the screen.
+    Session,
 }
 
 /// The keys of the setup program's questions: the computer's name, box,
@@ -151,10 +153,13 @@ fn session_problem(ppm: &[u8]) -> Option<&'static str> {
 /// Why the screen `ppm` does not show the log where `shown` says, if it
 /// does not.
 fn shown_problem(ppm: &[u8], shown: Shown) -> Option<&'static str> {
+    if shown == Shown::Session {
+        return scenario::console_problem(ppm).or_else(|| session_problem(ppm));
+    }
     scenario::console_problem(ppm)
         .or_else(|| log_problem(ppm))
         .or_else(|| match shown {
-            Shown::AbovePrompt => None,
+            Shown::AbovePrompt | Shown::Session => None,
             Shown::Whole => session_problem(ppm)
                 .is_none()
                 .then_some("the log does not fill the screen"),
@@ -204,12 +209,23 @@ pub fn run(
         Step::Keys("b o b minus p a s s w o r d ret"),
     ];
     // Ctrl, Alt and F12 are all held from 4 to 6 seconds on, and all
-    // released by 10.
+    // released by 10. Then console 2 shows its own login prompt below the
+    // log, cy logs in there while bob's session goes on, and console 1
+    // shows bob's session again, whose shell then gets its line.
     let after = [
         Step::Hold("ctrl-alt-f12", 2000),
         Step::Sleep(Duration::from_secs(5)),
         Step::Log("logview.ppm", Shown::Whole),
         Step::Sleep(Duration::from_secs(6)),
+        Step::Keys("ctrl-alt-f2"),
+        Step::Sleep(SETTLE),
+        Step::Log("console2.ppm", Shown::AbovePrompt),
+        Step::Keys("c y ret"),
+        Step::Keys("c y minus p a s s w o r d ret"),
+        Step::Wait("sessionmgr: cy logged in on console 2"),
+        Step::Keys("ctrl-alt-f1"),
+        Step::Sleep(SETTLE),
+        Step::Log("console1.ppm", Shown::Session),
         Step::Keys("l s ret"),
     ];
     session(
