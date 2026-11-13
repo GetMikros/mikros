@@ -34,7 +34,7 @@ jobs:
         id: setup
         uses: ./.github/actions/setup
       - name: Check
-        run: cargo xtask check --base "origin/${{ github.base_ref || 'main' }}"
+        run: cargo xtask check --ci --base "origin/${{ github.base_ref || 'main' }}"
       - name: Build
         id: build
         run: |

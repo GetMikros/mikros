@@ -13,6 +13,10 @@ pub struct Args {
     /// The branch the commits to check are based on.
     #[arg(long, default_value = "origin/main")]
     pub base: String,
+    /// Also check that the last commit since the base branch has the
+    /// `Tested` trailer, as continuous integration does.
+    #[arg(long)]
+    pub ci: bool,
 }
 
 fn cargo() -> Command {
@@ -209,10 +213,10 @@ fn generated_paths(commit: &str) -> Result<Vec<String>> {
 }
 
 /// Checks the commits since `base`, returning a description of each problem:
-/// each commit's `Spec` trailer and size, and the `Tested` trailer of the
-/// last one, unless every commit of the range changes only Markdown files
-/// and the specification submodule.
-fn check_commits(base: &str) -> Result<Vec<String>> {
+/// each commit's `Spec` trailer and size, and, with `ci`, the `Tested`
+/// trailer of the last one, unless every commit of the range changes only
+/// Markdown files and the specification submodule.
+fn check_commits(base: &str, ci: bool) -> Result<Vec<String>> {
     let range = format!("{base}..HEAD");
     let commits = git(&["rev-list", "--no-merges", "--reverse", &range])?;
     let mut problems = Vec::new();
@@ -252,6 +256,7 @@ fn check_commits(base: &str) -> Result<Vec<String>> {
     }
     if let Some(last) = commits.lines().last()
         && range_needs_tested
+        && ci
     {
         let subject = git(&["log", "-1", "--format=%h %s", last])?;
         let tested = git(&[
@@ -395,7 +400,7 @@ pub fn run(args: &Args) -> Result<()> {
         problems.push("`cargo clippy` of the programs with std reported warnings".to_owned());
     }
 
-    problems.extend(check_commits(&args.base)?);
+    problems.extend(check_commits(&args.base, args.ci)?);
 
     if problems.is_empty() {
         println!("ok       all checks passed");
