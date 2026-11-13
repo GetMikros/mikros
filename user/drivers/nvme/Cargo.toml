@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+[[bin]]
+name = "nvme"
+path = "src/driver.rs"
+
 [dependencies]
 mikros-nvme = { path = "../../lib/nvme" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
