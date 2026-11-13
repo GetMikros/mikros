@@ -9,3 +9,8 @@ publish = false
 mikros-display = { path = "../../lib/display" }
 mikros-gpudev = { path = "../../lib/gpudev" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
+
+[package.metadata.mikros]
+kind = "driver"
+image = "boot"
+runtime = "rt"

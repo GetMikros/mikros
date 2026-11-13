@@ -10,3 +10,8 @@ mikros-bootfs = { path = "../../lib/bootfs" }
 mikros-loader = { path = "../loader" }
 mikros-manifest = { path = "../../lib/manifest" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
+
+[package.metadata.mikros]
+kind = "core"
+image = "boot"
+runtime = "rt"

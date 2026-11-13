@@ -8,3 +8,9 @@ publish = false
 [dependencies]
 mikros-memfs = { path = "../../lib/memfs" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
+
+[package.metadata.mikros]
+kind = "service"
+image = "boot"
+runtime = "rt"
+manifest = "tmpfs.yaml"

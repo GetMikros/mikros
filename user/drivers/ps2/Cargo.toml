@@ -10,3 +10,8 @@ mikros-evdev = { path = "../../lib/evdev" }
 mikros-inputdev = { path = "../../lib/inputdev" }
 mikros-ps2 = { path = "../../lib/ps2" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
+
+[package.metadata.mikros]
+kind = "driver"
+image = "boot"
+runtime = "rt"

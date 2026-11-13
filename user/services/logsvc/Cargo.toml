@@ -8,3 +8,9 @@ publish = false
 [dependencies]
 mikros-logstore = { path = "../../lib/logstore" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
+
+[package.metadata.mikros]
+kind = "service"
+image = "boot"
+runtime = "rt"
+manifest = "log.yaml"

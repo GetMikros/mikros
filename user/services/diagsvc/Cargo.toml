@@ -15,3 +15,10 @@ mikros-snapshot = { path = "../../lib/snapshot" }
 # The diagnostic build sets `mikros_diag`.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mikros_diag)"] }
+
+[package.metadata.mikros]
+kind = "service"
+image = "system"
+runtime = "rt"
+manifest = "diag.yaml"
+kinds = ["diag"]

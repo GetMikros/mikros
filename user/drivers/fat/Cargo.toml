@@ -13,3 +13,8 @@ name = "fat_server"
 mikros-fat = { path = "../../lib/fat" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-tz = { path = "../../lib/tz" }
+
+[package.metadata.mikros]
+kind = "driver"
+image = "boot"
+runtime = "rt"

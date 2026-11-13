@@ -8,3 +8,8 @@ publish = false
 [dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-storage = { path = "../../services/storage" }
+
+[package.metadata.mikros]
+kind = "driver"
+image = "boot"
+runtime = "rt"

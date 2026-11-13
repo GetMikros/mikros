@@ -9,3 +9,9 @@ publish = false
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-loader = { path = "../loader" }
 mikros-ustar = { path = "../../lib/ustar" }
+
+[package.metadata.mikros]
+kind = "core"
+image = "boot"
+runtime = "rt"
+path = "init"

@@ -8,3 +8,9 @@ publish = false
 [dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-tty = { path = "../../lib/tty" }
+
+[package.metadata.mikros]
+kind = "service"
+image = "system"
+runtime = "rt"
+manifest = "terminal.yaml"

@@ -7,3 +7,9 @@ publish = false
 
 [dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
+
+[package.metadata.mikros]
+kind = "service"
+image = "boot"
+runtime = "rt"
+manifest = "union.yaml"

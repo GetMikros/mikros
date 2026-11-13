@@ -9,3 +9,9 @@ publish = false
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-tz = { path = "../../lib/tz" }
 mikros-yaml = { path = "../../lib/yaml" }
+
+[package.metadata.mikros]
+kind = "service"
+image = "boot"
+runtime = "rt"
+manifest = "time.yaml"

@@ -9,3 +9,8 @@ publish = false
 mikros-btrfs = { path = "../../lib/btrfs" }
 mikros-casefold = { path = "../../lib/casefold" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
+
+[package.metadata.mikros]
+kind = "driver"
+image = "boot"
+runtime = "rt"

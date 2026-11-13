@@ -8,3 +8,9 @@ publish = false
 [dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-userdb = { path = "../../lib/userdb" }
+
+[package.metadata.mikros]
+kind = "service"
+image = "system"
+runtime = "rt"
+manifest = "accounts.yaml"

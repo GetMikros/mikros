@@ -1,5 +1,6 @@
 //! `cargo xtask build`: builds the system components.
 
+use crate::components::{Component, Image, Runtime};
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use std::fs::{self, File};
@@ -1707,62 +1708,25 @@ fn accounts_users(kind: Kind) -> Result<PathBuf> {
 }
 
 /// The members of the system image that logging in on the text console
-/// needs: the accounts, terminal and session services with their
-/// manifests, the text console and the setup program with their program
-/// manifests, the user's shell msh, the command-line utilities, and the
-/// dynamic linker, libraries and keymaps they load. The fonts and the
-/// basic display driver, which the device manager must find in the boot
-/// image, are among the other members.
+/// needs: the components that only the system image holds, among them
+/// the accounts, terminal and session services, the text console, the
+/// setup program and the user's shell msh, then the command-line
+/// utilities, and the dynamic linker, libraries and keymaps they load.
+/// The fonts and the basic display driver, which the device manager
+/// must find in the boot image, are among the other members.
 fn login_members(
     kind: Kind,
     xkbcommon: &crate::ports::Built,
     freetype: &crate::ports::Built,
     keymaps: &crate::ports::Built,
 ) -> Result<Vec<(String, PathBuf)>> {
-    let root = crate::workspace_root();
     let mut members = Vec::new();
-    for (name, manifest) in [
-        ("accounts", "user/services/accounts/accounts.yaml"),
-        ("termsvc", "user/services/termsvc/terminal.yaml"),
-        ("sessionmgr", "user/services/sessionmgr/sessionmgr.yaml"),
-    ] {
-        let binary = user_build(name, kind)?;
-        println!("built    {}", binary.display());
-        let manifest = root.join(manifest);
-        let file = manifest.file_name().context("a manifest's name")?;
-        let file = file.to_str().context("not UTF-8")?;
-        members.push((format!("usr/bin/{name}"), binary));
-        members.push((format!("usr/lib/services/{file}"), manifest));
+    for component in crate::components::all()? {
+        if component.image == Image::System && component.in_kind(kind) {
+            let program = component_build(&component, kind)?;
+            members.extend(component.members(kind, &program)?);
+        }
     }
-    for name in ["console", "setup"] {
-        let binary = crate::rust_std::build(name, kind)?;
-        println!("built    {}", binary.display());
-        members.push((format!("usr/bin/{name}"), binary));
-        // The diagnostic build's console may read the system overview.
-        let manifest = match (kind, name) {
-            (Kind::Diag, "console") => "system.console.diag.yaml".to_owned(),
-            _ => format!("system.{name}.yaml"),
-        };
-        members.push((
-            format!("usr/lib/programs/system.{name}.yaml"),
-            root.join(format!("user/runtime/std/{name}/{manifest}")),
-        ));
-    }
-    // The diagnostic build's service, which no other build has.
-    if kind == Kind::Diag {
-        let binary = user_build("diagsvc", kind)?;
-        println!("built    {}", binary.display());
-        members.push(("usr/bin/diagsvc".into(), binary));
-        members.push((
-            "usr/lib/services/diag.yaml".into(),
-            root.join("user/services/diagsvc/diag.yaml"),
-        ));
-    }
-    // The session manager names the shell's app ID, `system.cli`, which
-    // needs no program manifest.
-    let msh = crate::rust_std::build("msh", kind)?;
-    println!("built    {}", msh.display());
-    members.push(("usr/bin/msh".into(), msh));
     // The command-line utilities, each its own program.
     for (name, program) in crate::coreutils::build()? {
         members.push((format!("usr/bin/{name}"), program));
@@ -1970,6 +1934,25 @@ fn acpi_build(kind: Kind) -> Result<PathBuf> {
     let acpi = user_build("acpi", kind)?;
     println!("built    {}", acpi.display());
     Ok(acpi)
+}
+
+/// Builds the program of `component`, with the library that its build
+/// links first for the ACPI and btrfs drivers, and returns its path.
+fn component_build(component: &Component, kind: Kind) -> Result<PathBuf> {
+    match (component.name.as_str(), component.runtime) {
+        ("acpi", _) => acpi_build(kind),
+        ("btrfs", _) => btrfs_build(kind),
+        (name, Runtime::Rt) => {
+            let program = user_build(name, kind)?;
+            println!("built    {}", program.display());
+            Ok(program)
+        }
+        (name, Runtime::Std) => {
+            let program = crate::rust_std::build(name, kind)?;
+            println!("built    {}", program.display());
+            Ok(program)
+        }
+    }
 }
 
 /// Builds the user-space program `bin`, a package of the `user`

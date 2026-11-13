@@ -14,3 +14,8 @@ mikros-vt = { path = "../../../lib/vt" }
 # The diagnostic build sets `mikros_diag`.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mikros_diag)"] }
+
+[package.metadata.mikros]
+kind = "program"
+image = "system"
+manifest = "system.console.yaml"

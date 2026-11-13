@@ -7,3 +7,9 @@ publish = false
 
 [dependencies]
 mikros-msh = { path = "../../../lib/msh" }
+
+# No program manifest: the session manager starts msh with the app ID
+# `system.cli`, which needs none.
+[package.metadata.mikros]
+kind = "program"
+image = "system"

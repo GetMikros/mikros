@@ -10,3 +10,9 @@ mikros-manifest = { path = "../../lib/manifest" }
 mikros-permissions = { path = "../../lib/permissions" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-yaml = { path = "../../lib/yaml" }
+
+[package.metadata.mikros]
+kind = "service"
+image = "boot"
+runtime = "rt"
+manifest = "permissions.yaml"

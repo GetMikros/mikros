@@ -9,3 +9,8 @@ publish = false
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-storage = { path = "../../services/storage" }
 mikros-virtio = { path = "../../lib/virtio" }
+
+[package.metadata.mikros]
+kind = "driver"
+image = "boot"
+runtime = "rt"
