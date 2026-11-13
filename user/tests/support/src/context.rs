@@ -4,6 +4,7 @@
 
 use core::mem::ManuallyDrop;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
+use mikros_rt::interfaces::mikros::fs::NodeClient;
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::sys::Handle;
 
@@ -40,6 +41,8 @@ pub struct Own {
     pub clock_page: Handle,
     /// The service directory, through which it connects to services.
     pub directory: Handle,
+    /// The directory of its namespace's `/tmp`, or 0 when it has none.
+    pub tmp: Handle,
 }
 
 impl Own {
@@ -51,6 +54,11 @@ impl Own {
             thread: header.thread.raw(),
             clock_page: header.clock_page.raw(),
             directory: header.directory.handle().raw(),
+            tmp: managed
+                .namespace
+                .iter()
+                .find(|entry| entry.path == "/tmp")
+                .map_or(0, |entry| entry.directory.handle().raw()),
         }
     }
 
@@ -61,6 +69,18 @@ impl Own {
         // handle, which the startup transfer keeps open.
         let handle = unsafe { OwnedHandle::from_raw(self.directory) };
         ManuallyDrop::new(DirectoryClient::new(ClientEnd::new(handle)))
+    }
+
+    /// A client of the namespace's `/tmp`, borrowing its handle as
+    /// `services` does, or none when the namespace has no `/tmp`.
+    pub fn tmp(&self) -> Option<ManuallyDrop<NodeClient>> {
+        if self.tmp == 0 {
+            return None;
+        }
+        // SAFETY: the client is never dropped, so it never closes the
+        // handle, which the startup transfer keeps open.
+        let handle = unsafe { OwnedHandle::from_raw(self.tmp) };
+        Some(ManuallyDrop::new(NodeClient::new(ClientEnd::new(handle))))
     }
 }
 
