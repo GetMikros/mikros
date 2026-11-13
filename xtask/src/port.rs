@@ -39,7 +39,7 @@ pub fn stamp(patches: &[PathBuf]) -> Result<String> {
 }
 
 /// The file in a patched source that records which patches it has.
-const STAMP: &str = ".mikros-patches";
+pub const STAMP: &str = ".mikros-patches";
 
 /// The source `dir/<source>`, extracted from the gzip-compressed tar
 /// `archive`, with every patch in `patches` applied. It is extracted
