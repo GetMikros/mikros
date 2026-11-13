@@ -1,8 +1,8 @@
 //! The kernel's pagers, as a system test: paged objects that a pager
 //! thread of the test answers, the pager's operations on them, frames
 //! lent to them, writebacks and discards, operations on large objects,
-//! paged buffers as the outputs of calls, the access flag, and revoking
-//! during a supply.
+//! paged buffers as the outputs of calls, the access flag, revoking
+//! during a supply, and the faults on pages that cannot be supplied.
 
 #![no_std]
 #![no_main]
@@ -30,6 +30,10 @@ fn main(m: &Managed) -> i64 {
             (
                 "seal_and_revoke_wait_for_supply",
                 seal_and_revoke_wait_for_supply,
+            ),
+            (
+                "faults_on_failed_revoked_and_cut_pages",
+                faults_on_failed_revoked_and_cut_pages,
             ),
         ],
     )
@@ -729,4 +733,95 @@ fn supply_beside(s: &Own, sealing: bool) -> Result {
 fn seal_and_revoke_wait_for_supply(s: &Own) -> Result {
     supply_beside(s, true)?;
     supply_beside(s, false)
+}
+
+/// Reads the byte at `addr`, which the test expects to fault, and exits.
+extern "sysv64" fn fault_reader(addr: u64, _: u64) -> ! {
+    // SAFETY: `addr` lies in a mapping; a fault is reported, and the test
+    // kills the thread.
+    unsafe { (addr as *const u8).read_volatile() };
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Starts a thread reading `addr` and checks that it reports a
+/// `PAGE_FAULT` at that address on `channel`; then kills the thread.
+fn expect_page_fault(s: &Own, channel: Handle, addr: u64) -> Result {
+    let thread = spawn2(s, fault_reader, addr, 0)?;
+    let (r, reported) = report_bytes(channel)?;
+    ensure(
+        "reporting a page fault at the address",
+        u32_at(&r, 0) == PAGE_FAULT
+            && u64_at(&r, 0x18) == addr
+            && u64_at(&r, 0x10) == koid(thread)?,
+    )?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("killing the thread", sys::task_kill(thread))?;
+        check("closing the reported thread", sys::handle_close(reported))?;
+    }
+    ensure(
+        "ending the thread",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )
+}
+
+/// A user access faults with a `PAGE_FAULT` report on a page its pager
+/// failed, on a page that was present when its object was revoked, and on
+/// a page that a shrink cut off. The test gives this process an exception
+/// channel, so that the faults are reported instead of ending it.
+fn faults_on_failed_revoked_and_cut_pages(s: &Own) -> Result {
+    const FAIL: u32 = 1;
+    let mut channel = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating an exception channel", unsafe {
+        sys::exception_channel_create(s.process, 0, &mut channel)
+    })?;
+    let paged_object = || -> Result<(Handle, Handle)> {
+        let (mut pager, mut port, mut mem) = (0, 0, 0);
+        // SAFETY: the pointers are valid for the calls.
+        unsafe {
+            check("creating a pager", sys::pager_create(0, &mut pager))?;
+            check("creating a port", sys::port_create(0, &mut port))?;
+            let status = sys::pager_create_memory(pager, port, 14, PAGE_SIZE, 0, &mut mem);
+            check("creating a paged object", status)?;
+        }
+        Ok((pager, mem))
+    };
+
+    let (pager, failed) = paged_object()?;
+    check(
+        "failing the page",
+        pager_op(pager, failed, FAIL, 0, PAGE_SIZE),
+    )?;
+    expect_page_fault(s, channel, map(s.process, failed, PAGE_SIZE)?)?;
+
+    let (pager, revoked) = paged_object()?;
+    // SAFETY: the call takes no pointers.
+    check("supplying the page", unsafe {
+        sys::pager_supply(pager, revoked, 0, PAGE_SIZE, create_memory(PAGE_SIZE)?, 0)
+    })?;
+    let at = map(s.process, revoked, PAGE_SIZE)?;
+    // SAFETY: the page is mapped and present.
+    unsafe { (at as *const u8).read_volatile() };
+    // SAFETY: the call takes no pointers.
+    check("revoking", unsafe { sys::pager_revoke(pager, revoked) })?;
+    expect_page_fault(s, channel, at)?;
+
+    let mut cut = 0;
+    // SAFETY: the out pointer is valid for the call.
+    check("creating a resizable object", unsafe {
+        sys::mem_create(2 * PAGE_SIZE, 1, &mut cut)
+    })?;
+    let at = map(s.process, cut, 2 * PAGE_SIZE)?;
+    // SAFETY: both pages are mapped writable.
+    unsafe { ((at + PAGE_SIZE) as *mut u8).write_volatile(1) };
+    // SAFETY: the call takes no pointers.
+    check("shrinking", unsafe { sys::mem_set_size(cut, PAGE_SIZE) })?;
+    expect_page_fault(s, channel, at + PAGE_SIZE)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the exception channel", unsafe {
+        sys::handle_close(channel)
+    })
 }
