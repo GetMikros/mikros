@@ -2,7 +2,10 @@
 //! stream, whose output the console's screen shows and which takes what
 //! is typed, and the token that names the terminal. Output that comes in
 //! pieces, as a program's redraw larger than the terminal service's
-//! chunks does, is drawn once it pauses, not piece by piece.
+//! chunks does, is drawn once it pauses, not piece by piece. Output that
+//! never pauses, from a program that writes without end, is still drawn,
+//! and what is typed meanwhile still reaches the terminal: the console
+//! takes turns with its other work after each piece it reads.
 
 use crate::emulator::screen::Screen;
 use crate::program::notify::Notify;
@@ -163,6 +166,10 @@ impl Term {
                         pending = None;
                         self.changed.notify();
                     }
+                    // While output keeps coming, every read succeeds, and
+                    // the console would draw nothing and read no key, ^C
+                    // among them, until it stops.
+                    yield_now().await;
                 }
                 SHOULD_WAIT if pending.is_some() => {
                     let settle = crate::program::now() + SETTLE;
@@ -192,6 +199,22 @@ impl Term {
     pub fn close(&self) {
         self.closed.set(true);
     }
+}
+
+/// Lets the console's other tasks, and the packets queued for them, have
+/// a turn before the task goes on.
+async fn yield_now() {
+    let mut yielded = false;
+    poll_fn(|cx| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 /// Whether `stream` becomes readable, or its writer goes, by `deadline`.
