@@ -2,7 +2,8 @@
 //! waits and deadlines, memory objects and mappings, and threads of the
 //! test's own process.
 
-use crate::{Context, PERM_READ, PERM_WRITE, Result, check};
+use crate::{Context, PERM_READ, PERM_WRITE, Result, check, ensure};
+use core::sync::atomic::{AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 
 pub const SIGNALED: u32 = 1 << 3;
@@ -97,4 +98,103 @@ pub fn spawn2(
         unsafe { sys::thread_start(thread, entry as *const () as u64, at + stack_size - 8, a, b) };
     check("starting the thread", status)?;
     Ok(thread)
+}
+
+/// Makes a call with `request` after a 4-byte placeholder ID, room for
+/// `cap` reply bytes and `handle`, if any, and returns the status, the
+/// sizes stored, the reply and the handle received.
+pub fn call(
+    channel: Handle,
+    request: &[u8],
+    handle: Option<Handle>,
+    cap: u64,
+    deadline: i64,
+) -> (i64, [u64; 2], [u8; 64], Handle) {
+    let mut bytes = [0u8; 64];
+    bytes[4..4 + request.len()].copy_from_slice(request);
+    let handles = [handle.unwrap_or(0)];
+    let mut reply = [0u8; 64];
+    let mut reply_handles = [0 as Handle; 1];
+    let fields: [u64; 8] = [
+        bytes.as_ptr() as u64,
+        4 + request.len() as u64,
+        handles.as_ptr() as u64,
+        u64::from(handle.is_some()),
+        reply.as_mut_ptr() as u64,
+        cap,
+        reply_handles.as_mut_ptr() as u64,
+        1,
+    ];
+    let mut out = [0u64; 2];
+    // SAFETY: the structure and the buffers it points to are valid.
+    let status = unsafe {
+        sys::channel_call(
+            channel,
+            0,
+            deadline,
+            fields.as_ptr().cast(),
+            out.as_mut_ptr().cast(),
+        )
+    };
+    (status, out, reply, reply_handles[0])
+}
+
+/// The information record of `topic` for `handle`.
+pub fn info<const N: usize>(handle: Handle, topic: u32) -> Result<[u8; N]> {
+    let mut record = [0u8; N];
+    let mut len = 0u64;
+    // SAFETY: the pointers and length describe `record` and `len`.
+    let status =
+        unsafe { sys::object_get_info(handle, topic, record.as_mut_ptr(), N as u64, &mut len) };
+    check("reading information", status)?;
+    ensure("checking the record size", len == N as u64)?;
+    Ok(record)
+}
+
+pub fn signal(event: Handle, clear: u32, set: u32) -> Result {
+    // SAFETY: the call takes no pointers.
+    check("signalling", unsafe {
+        sys::object_signal(event, clear, set)
+    })
+}
+
+/// Whether `needle` occurs in `haystack`.
+pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+pub fn soon() -> i64 {
+    now() + 5_000_000
+}
+
+/// Waits for a packet on `port` until `deadline`. The buffer starts
+/// filled with 0xAA, so that bytes the kernel leaves alone show.
+pub fn take_packet(port: Handle, deadline: i64) -> (i64, [u8; 48]) {
+    let mut packet = [0xAAu8; 48];
+    // SAFETY: the pointer describes `packet`.
+    let status = unsafe { sys::port_wait(port, deadline, packet.as_mut_ptr()) };
+    (status, packet)
+}
+
+pub fn u32_at(record: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(record[at..at + 4].try_into().unwrap())
+}
+
+pub fn u64_at(record: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(record[at..at + 8].try_into().unwrap())
+}
+
+pub const READABLE: u32 = 1 << 0;
+
+pub const PEER_CLOSED: i64 = -24;
+
+/// The result a helper thread leaves for the test.
+pub static HELPER: AtomicU64 = AtomicU64::new(0);
+
+pub extern "sysv64" fn wait_forever(event: u64, _: u64) -> ! {
+    let (status, _) = wait(event as Handle, USER0, i64::MAX);
+    HELPER.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
 }

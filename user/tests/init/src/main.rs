@@ -11,9 +11,11 @@ use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::{
-    CANCELED, FAILED, PAGE_SIZE, PASSED, PERM_READ, PERM_WRITE, Result, SIGNALED, SLOWER,
-    TERMINATED, TIMED_OUT, USER0, USER1, check, create_memory, elf, ensure, exit_qemu, in_time,
-    map, now, open_exit_port, read_message, sleep_ms, spawn, spawn2, ustar, wait, within,
+    CANCELED, FAILED, HELPER, PAGE_SIZE, PASSED, PEER_CLOSED, PERM_READ, PERM_WRITE, READABLE,
+    Result, SIGNALED, SLOWER, TERMINATED, TIMED_OUT, USER0, USER1, call, check, contains,
+    create_memory, elf, ensure, exit_qemu, in_time, info, map, now, open_exit_port, read_message,
+    signal, sleep_ms, soon, spawn, spawn2, take_packet, u32_at, u64_at, ustar, wait, wait_forever,
+    within,
 };
 
 mikros_rt::main!(main);
@@ -487,22 +489,6 @@ fn processes_and_channels(s: &Startup) -> Result {
     ensure("waiting for the process to end", false)
 }
 
-/// The information record of `topic` for `handle`.
-fn info<const N: usize>(handle: Handle, topic: u32) -> Result<[u8; N]> {
-    let mut record = [0u8; N];
-    let mut len = 0u64;
-    // SAFETY: the pointers and length describe `record` and `len`.
-    let status =
-        unsafe { sys::object_get_info(handle, topic, record.as_mut_ptr(), N as u64, &mut len) };
-    check("reading information", status)?;
-    ensure("checking the record size", len == N as u64)?;
-    Ok(record)
-}
-
-fn u32_at(record: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(record[at..at + 4].try_into().unwrap())
-}
-
 /// The process and thread records describe the running test.
 fn info_topics(s: &Startup) -> Result {
     let process = info::<0x28>(s.process, 2)?;
@@ -522,21 +508,10 @@ fn info_topics(s: &Startup) -> Result {
     )
 }
 
-/// The result a helper thread leaves for the test.
-static HELPER: AtomicU64 = AtomicU64::new(0);
-
 extern "sysv64" fn signal_later(event: u64, _: u64) -> ! {
     sleep_ms(20);
     // SAFETY: the call takes no pointers.
     unsafe { sys::object_signal(event as Handle, 0, USER1) };
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-extern "sysv64" fn wait_forever(event: u64, _: u64) -> ! {
-    let (status, _) = wait(event as Handle, USER0, i64::MAX);
-    HELPER.store(status as u64, Ordering::Release);
     // SAFETY: the call takes no pointers.
     unsafe { sys::thread_exit() };
     unreachable!("thread_exit returned");
@@ -767,19 +742,6 @@ fn cpu_count_and_affinity(s: &Startup) -> Result {
     check("allowing every processor", set(&[0xFF; 32]))
 }
 
-/// Waits for a packet on `port` until `deadline`. The buffer starts
-/// filled with 0xAA, so that bytes the kernel leaves alone show.
-fn take_packet(port: Handle, deadline: i64) -> (i64, [u8; 48]) {
-    let mut packet = [0xAAu8; 48];
-    // SAFETY: the pointer describes `packet`.
-    let status = unsafe { sys::port_wait(port, deadline, packet.as_mut_ptr()) };
-    (status, packet)
-}
-
-fn soon() -> i64 {
-    now() + 5_000_000
-}
-
 /// The seconds that the service manager, or a probe started in its
 /// place, has to finish what a test waits for. Emulated with page-table
 /// isolation, the launcher probe takes about half a minute on a fast
@@ -803,13 +765,6 @@ fn wait_for_state(thread: Handle, state: u32) -> Result {
         sleep_ms(1);
     }
     Ok(())
-}
-
-fn signal(event: Handle, clear: u32, set: u32) -> Result {
-    // SAFETY: the call takes no pointers.
-    check("signalling", unsafe {
-        sys::object_signal(event, clear, set)
-    })
 }
 
 fn wait_async(object: Handle, port: Handle, key: u64, signals: u32, options: u32) -> Result {
@@ -1027,11 +982,6 @@ fn ports_are_readable(_: &Startup) -> Result {
     }
 }
 
-fn u64_at(record: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(record[at..at + 8].try_into().unwrap())
-}
-
-const READABLE: u32 = 1 << 0;
 const SHOULD_WAIT: i64 = -22;
 
 /// Reads the next record of `reader`.
@@ -1532,45 +1482,6 @@ fn seals(s: &Startup) -> Result {
     ensure("reporting the seals", u32_at(&record, 0x10) == 2 | 4 | 8)?;
     check("sealing sealing", seal(mem, 1))?;
     ensure("refusing more seals", seal(mem, 0) == -13)
-}
-
-/// Makes a call with `request` after a 4-byte placeholder ID, room for
-/// `cap` reply bytes and `handle`, if any, and returns the status, the
-/// sizes stored, the reply and the handle received.
-fn call(
-    channel: Handle,
-    request: &[u8],
-    handle: Option<Handle>,
-    cap: u64,
-    deadline: i64,
-) -> (i64, [u64; 2], [u8; 64], Handle) {
-    let mut bytes = [0u8; 64];
-    bytes[4..4 + request.len()].copy_from_slice(request);
-    let handles = [handle.unwrap_or(0)];
-    let mut reply = [0u8; 64];
-    let mut reply_handles = [0 as Handle; 1];
-    let fields: [u64; 8] = [
-        bytes.as_ptr() as u64,
-        4 + request.len() as u64,
-        handles.as_ptr() as u64,
-        u64::from(handle.is_some()),
-        reply.as_mut_ptr() as u64,
-        cap,
-        reply_handles.as_mut_ptr() as u64,
-        1,
-    ];
-    let mut out = [0u64; 2];
-    // SAFETY: the structure and the buffers it points to are valid.
-    let status = unsafe {
-        sys::channel_call(
-            channel,
-            0,
-            deadline,
-            fields.as_ptr().cast(),
-            out.as_mut_ptr().cast(),
-        )
-    };
-    (status, out, reply, reply_handles[0])
 }
 
 /// Calls deliver replies to their callers, also with handles, and end
@@ -4341,8 +4252,6 @@ fn own_endpoints_not_sent(_: &Startup) -> Result {
 const BAD_HANDLE: i64 = -11;
 const OUT_OF_RANGE: i64 = -14;
 const BUFFER_TOO_SMALL: i64 = -15;
-const PEER_CLOSED: i64 = -24;
-
 /// Reads the next message of `channel` into buffers of `cap` bytes and
 /// `handles_cap` handles, and returns the status and the two sizes.
 fn read_sizes(channel: Handle, cap: usize, handles_cap: usize) -> (i64, u64, u64) {
@@ -7623,11 +7532,6 @@ fn faults_on_failed_revoked_and_cut_pages(s: &Startup) -> Result {
     check("closing the exception channel", unsafe {
         sys::handle_close(channel)
     })
-}
-
-/// Whether `needle` occurs in `haystack`.
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// `log_write` refuses a severity above 3, a message longer than 256
