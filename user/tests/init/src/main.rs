@@ -4335,14 +4335,13 @@ mod manager {
     }
 
     /// From a boot image with the service manager, the permission broker,
-    /// the terminal service and its probe, with their manifests, the
-    /// service manager starts the probe, and the terminal service once
-    /// the probe connects to it. The probe opens terminals, types on
-    /// their master streams and checks what they read, echo and write,
-    /// deadlines and limits, a controlling terminal of its session, ^C
-    /// interrupting the foreground group, a background reader being
-    /// stopped, and input after the master closed. It exits with 0 once
-    /// every check passed, as the service manager logs.
+    /// the terminal service, its probe and the C program `term-c`, with
+    /// their manifests, the service manager starts the probe, and the
+    /// terminal service once the probe connects to it. The probe runs
+    /// the C program on a terminal, types what it waits for and checks
+    /// what it shows; the system test services-terminal checks the rest
+    /// of the terminal service. The probe exits with 0 once every check
+    /// passed, as the service manager logs.
     pub fn terminal_service_serves_terminals(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service term-probe exited with code 0";
         const FAILED: &[&[u8]] = &[
