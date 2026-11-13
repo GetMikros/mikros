@@ -9,6 +9,7 @@ use mikros_rt::sys::{self, Handle};
 pub const READABLE: u32 = 1 << 0;
 pub const SIGNALED: u32 = 1 << 3;
 pub const TERMINATED: u32 = 1 << 4;
+pub const SUSPENDED: u32 = 1 << 5;
 pub const USER0: u32 = 1 << 24;
 pub const USER1: u32 = 1 << 25;
 pub const INVALID_ARGS: i64 = -10;
