@@ -958,6 +958,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "syscalls-memory"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-test",
+]
+
+[[package]]
 name = "syscalls-objects"
 version = "0.0.0"
 dependencies = [
