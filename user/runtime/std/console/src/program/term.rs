@@ -4,7 +4,8 @@
 //! pieces, as a program's redraw larger than the terminal service's
 //! chunks does, is drawn once it pauses, not piece by piece.
 
-use crate::notify::Notify;
+use crate::emulator::screen::Screen;
+use crate::program::notify::Notify;
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
@@ -12,7 +13,6 @@ use mikros_rt::interfaces::mikros::terminal::{
     Factory, FactoryAsyncClient, MasterAsyncClient, WindowSize,
 };
 use mikros_rt::sys;
-use mikros_vt::screen::Screen;
 use std::cell::{Cell, RefCell};
 use std::future::{Future, poll_fn};
 use std::pin::pin;
@@ -158,14 +158,14 @@ impl Term {
                     if !responses.is_empty() {
                         self.type_in(&reactor, &responses).await;
                     }
-                    let since = *pending.get_or_insert_with(crate::now);
-                    if crate::now() - since >= DRAW_INTERVAL {
+                    let since = *pending.get_or_insert_with(crate::program::now);
+                    if crate::program::now() - since >= DRAW_INTERVAL {
                         pending = None;
                         self.changed.notify();
                     }
                 }
                 SHOULD_WAIT if pending.is_some() => {
-                    let settle = crate::now() + SETTLE;
+                    let settle = crate::program::now() + SETTLE;
                     if !readable_by(&reactor, self.master.raw(), settle).await {
                         pending = None;
                         self.changed.notify();

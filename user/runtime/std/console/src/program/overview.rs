@@ -2,12 +2,12 @@
 //! diagnostic service's `Overview.Snapshot`, on a screen of its own while
 //! Ctrl, Alt and F11 are held, taken again every second.
 
-use crate::Console;
-use crate::notify::Notify;
+use crate::emulator::cell::columns;
+use crate::emulator::screen::Screen;
+use crate::program::Console;
+use crate::program::notify::Notify;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::diag::{Overview as Protocol, OverviewAsyncClient};
-use mikros_vt::cell::columns;
-use mikros_vt::screen::Screen;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -98,8 +98,8 @@ pub async fn follow(console: Rc<Console>) {
         console.changed.notify();
         let sleep = console
             .reactor
-            .sleep_until(crate::now().saturating_add(REFRESH));
-        crate::first(sleep, overview.wake.changed()).await;
+            .sleep_until(crate::program::now().saturating_add(REFRESH));
+        crate::program::first(sleep, overview.wake.changed()).await;
     }
 }
 

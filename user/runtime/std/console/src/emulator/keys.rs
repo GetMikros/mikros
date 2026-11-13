@@ -1,7 +1,7 @@
 //! The bytes that keys send to the program, as the terminfo entry
 //! `xterm-256color` describes them, and pasted text.
 
-use crate::screen::Modes;
+use crate::emulator::screen::Modes;
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -123,6 +123,8 @@ fn character(c: char, ctrl: bool) -> Vec<u8> {
 }
 
 /// What pasting `text` sends: bracketed when the program asked for it.
+/// Nothing in the console pastes yet.
+#[allow(dead_code)]
 pub fn paste(text: &[u8], modes: &Modes) -> Vec<u8> {
     match modes.bracketed_paste {
         true => [b"\x1b[200~", text, b"\x1b[201~"].concat(),

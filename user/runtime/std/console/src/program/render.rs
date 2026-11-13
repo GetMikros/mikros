@@ -2,16 +2,16 @@
 //! preferred mode, cells drawn with the monospaced font, and commits of
 //! the rows that changed.
 
-use crate::font::{Font, Glyph};
-use crate::palette::{BACKGROUND, FOREGROUND, blend, pixel};
+use crate::emulator::cell::{BOLD, Cell, INVISIBLE, REVERSE, UNDERLINE, Width};
+use crate::emulator::screen::Screen;
+use crate::program::font::{Font, Glyph};
+use crate::program::palette::{BACKGROUND, FOREGROUND, blend, pixel};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::gpu::{
     Colorspace, Commit, CommitFlags, CrtcState, DisplayAsyncClient, DisplayEvent, DumbBuffer, Mode,
     PlaneState, Rect,
 };
 use mikros_rt::sys;
-use mikros_vt::cell::{BOLD, Cell, INVISIBLE, REVERSE, UNDERLINE, Width};
-use mikros_vt::screen::Screen;
 use std::collections::HashMap;
 
 const XRGB8888: u32 = u32::from_le_bytes(*b"XR24");

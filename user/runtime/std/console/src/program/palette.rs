@@ -1,7 +1,7 @@
 //! The colours of cells as XRGB8888 pixels: xterm's 256 indexed colours
 //! and the console's default foreground and background.
 
-use mikros_vt::cell::Color;
+use crate::emulator::cell::Color;
 
 pub const FOREGROUND: u32 = 0x00D0_D0D0;
 pub const BACKGROUND: u32 = 0x0000_0000;

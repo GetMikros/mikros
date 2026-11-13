@@ -1,5 +1,5 @@
-use crate::keys::{Key, Modifiers, encode, paste};
-use crate::screen::Modes;
+use crate::emulator::keys::{Key, Modifiers, encode, paste};
+use crate::emulator::screen::Modes;
 
 const NONE: Modifiers = Modifiers {
     shift: false,

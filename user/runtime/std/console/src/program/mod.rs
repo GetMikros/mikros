@@ -14,8 +14,6 @@
 //! the system overview fills the screen while Ctrl, Alt and F11 are
 //! held.
 
-#![feature(mikros_handles)]
-
 mod font;
 mod keyboard;
 mod login;
@@ -30,6 +28,7 @@ mod term;
 mod vt;
 mod xkb;
 
+use crate::emulator::screen::{Modes, Screen};
 use keyboard::{Keyboard, Pressed};
 use logpane::LogPane;
 use mikros_evdev::codes::{EV_KEY, KEY_A};
@@ -42,7 +41,6 @@ use mikros_rt::interfaces::mikros::session::{
     SeatAddDisplayRequest, SeatAddInputRequest, SeatAsyncServer, SeatRequest, TextLoginAsyncClient,
 };
 use mikros_rt::sys;
-use mikros_vt::screen::{Modes, Screen};
 use notify::Notify;
 use render::Renderer;
 use std::cell::{Cell, RefCell};
@@ -446,7 +444,7 @@ pub(crate) async fn first<A: std::future::Future, B: std::future::Future>(a: A, 
     .await
 }
 
-fn main() {
+pub fn main() {
     let (Some(text_login), Some(seat)) = (take(TEXT_LOGIN_ID), take(SEAT_ID)) else {
         eprintln!("console: the TextLogin and Seat channels are missing");
         std::process::exit(1);

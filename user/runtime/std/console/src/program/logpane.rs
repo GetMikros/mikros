@@ -2,12 +2,12 @@
 //! the log service's `Reader` and then followed, kept as lines, of which
 //! the console shows the most recent in a screen of their own.
 
-use crate::Console;
+use crate::emulator::cell::columns;
+use crate::emulator::screen::Screen;
+use crate::program::Console;
 use mikros_logview::Tail;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::log::{Reader, ReaderAsyncClient, ReaderEvent, Record};
-use mikros_vt::cell::columns;
-use mikros_vt::screen::Screen;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 

@@ -7,12 +7,12 @@
 //! prompt shows again. The prompt and setup's terminal take the rows
 //! below the log, and a session's terminal the whole screen.
 
-use crate::Console;
-use crate::term::Term;
-use crate::vt::{View, Vt};
+use crate::emulator::screen::Screen;
+use crate::program::Console;
+use crate::program::term::Term;
+use crate::program::vt::{View, Vt};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::session::{TextLoginAsyncClient, TextLoginEvent};
-use mikros_vt::screen::Screen;
 use std::rc::Rc;
 
 /// The longest name and password that `Login` takes.
@@ -144,7 +144,7 @@ pub async fn run(console: Rc<Console>, vt: Rc<Vt>, text_login: Rc<TextLoginAsync
             console.changed.notify();
             let _ = console
                 .reactor
-                .sleep_until(crate::now().saturating_add(SETUP_POLL))
+                .sleep_until(crate::program::now().saturating_add(SETUP_POLL))
                 .await;
             continue;
         }
@@ -201,7 +201,7 @@ pub async fn run(console: Rc<Console>, vt: Rc<Vt>, text_login: Rc<TextLoginAsync
                 write(&console, vt, b"\r\nLogin incorrect\r\n");
                 console
                     .reactor
-                    .sleep_until(crate::now() + 1_000_000_000)
+                    .sleep_until(crate::program::now() + 1_000_000_000)
                     .await
                     .ok();
             }
@@ -213,7 +213,7 @@ pub async fn run(console: Rc<Console>, vt: Rc<Vt>, text_login: Rc<TextLoginAsync
                 );
                 console
                     .reactor
-                    .sleep_until(crate::now() + 1_000_000_000)
+                    .sleep_until(crate::program::now() + 1_000_000_000)
                     .await
                     .ok();
             }

@@ -1,5 +1,5 @@
-use crate::cell::{BOLD, Color, REVERSE, UNDERLINE, Width};
-use crate::screen::Screen;
+use crate::emulator::cell::{BOLD, Color, REVERSE, UNDERLINE, Width};
+use crate::emulator::screen::Screen;
 use alloc::string::String;
 use alloc::vec;
 
@@ -117,7 +117,7 @@ fn attributes_and_colours() {
     assert_eq!(s.cell(0, 1).attrs, REVERSE);
     assert_eq!(
         *s.cell(0, 2),
-        crate::cell::Cell {
+        crate::emulator::cell::Cell {
             ch: 'c',
             ..Default::default()
         }

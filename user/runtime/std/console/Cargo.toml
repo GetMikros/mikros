@@ -5,19 +5,15 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
-[[bin]]
-name = "console"
-path = "src/program/mod.rs"
-
-[dependencies]
+[target.'cfg(target_os = "mikros")'.dependencies]
 mikros-evdev = { path = "../../../lib/evdev" }
 mikros-logview = { path = "../../../lib/logview" }
 mikros-rt = { path = "../../mikros-rt", default-features = false }
-mikros-vt = { path = "../../../lib/vt" }
 
-# The diagnostic build sets `mikros_diag`.
+# The diagnostic build sets `mikros_diag`, and the parts that only run on
+# Mikros are left out of the host's tests.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(mikros_diag)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))', "cfg(mikros_diag)"] }
 
 [package.metadata.mikros]
 kind = "program"

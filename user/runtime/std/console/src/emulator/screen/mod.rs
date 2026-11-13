@@ -3,9 +3,9 @@
 //! tab stops and modes, which rows changed, and what the terminal
 //! answers to requests.
 
-use crate::cell::Cell;
-use crate::cell::{Width, columns, line_drawing};
-use crate::parser::{Action, Parser};
+use crate::emulator::cell::Cell;
+use crate::emulator::cell::{Width, columns, line_drawing};
+use crate::emulator::parser::{Action, Parser};
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -129,6 +129,8 @@ impl Screen {
         self.modes.cursor_visible.then_some((self.cursor.row, col))
     }
 
+    /// Whether the alternate screen is shown, which the tests check.
+    #[cfg(test)]
     pub fn on_alternate(&self) -> bool {
         self.on_alternate
     }
@@ -559,7 +561,7 @@ impl Screen {
                     self.set_mode(private, mode, last == b'h');
                 }
             }
-            (b"", b'm') => crate::sgr::sgr(&mut self.cursor.pen, params, sub),
+            (b"", b'm') => crate::emulator::sgr::sgr(&mut self.cursor.pen, params, sub),
             (b"", b'n') => match p(0) {
                 5 => self.responses.extend_from_slice(b"\x1b[0n"),
                 6 => {

@@ -1,7 +1,9 @@
 //! SGR, select graphic rendition: the attributes and colours that
 //! characters are written with.
 
-use crate::cell::{BLINK, BOLD, Cell, Color, DIM, INVISIBLE, ITALIC, REVERSE, STRIKE, UNDERLINE};
+use crate::emulator::cell::{
+    BLINK, BOLD, Cell, Color, DIM, INVISIBLE, ITALIC, REVERSE, STRIKE, UNDERLINE,
+};
 use alloc::vec::Vec;
 
 /// SGR: sets `pen`'s attributes and colours from `params` and their

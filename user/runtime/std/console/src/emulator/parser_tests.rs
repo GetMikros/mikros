@@ -1,4 +1,4 @@
-use crate::parser::{Action, Parser};
+use crate::emulator::parser::{Action, Parser};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -126,5 +126,5 @@ fn bounded_parameters() {
     let Action::Csi { params, .. } = &out[0] else {
         panic!("{out:?}")
     };
-    assert_eq!(params.len(), crate::parser::PARAMS_MAX);
+    assert_eq!(params.len(), crate::emulator::parser::PARAMS_MAX);
 }

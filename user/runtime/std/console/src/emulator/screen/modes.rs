@@ -3,7 +3,7 @@
 //! set.
 
 use super::Screen;
-use crate::cell::Cell;
+use crate::emulator::cell::Cell;
 
 impl Screen {
     pub(super) fn esc(&mut self, intermediates: &[u8], last: u8) {

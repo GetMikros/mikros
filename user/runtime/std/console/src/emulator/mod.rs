@@ -2,10 +2,6 @@
 //! drawn: parsing what programs write, the screen it changes, and the
 //! bytes that keys send.
 
-#![no_std]
-
-extern crate alloc;
-
 pub mod cell;
 pub mod keys;
 #[cfg(test)]

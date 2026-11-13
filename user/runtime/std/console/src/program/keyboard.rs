@@ -2,9 +2,9 @@
 //! that the terminal gets, and key repeat, which the console makes since
 //! drivers do not.
 
-use crate::xkb::Keymap;
-use mikros_vt::keys::{Key, Modifiers, encode};
-use mikros_vt::screen::Modes;
+use crate::emulator::keys::{Key, Modifiers, encode};
+use crate::emulator::screen::Modes;
+use crate::program::xkb::Keymap;
 
 /// How long a key is held before it repeats, and how often it then does,
 /// in nanoseconds of the monotonic clock.

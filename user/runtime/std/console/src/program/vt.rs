@@ -3,9 +3,9 @@
 //! typed at its login prompt, and when its session ended. A console that
 //! is not shown keeps all of it.
 
-use crate::notify::Notify;
-use crate::term::Term;
-use mikros_vt::screen::Screen;
+use crate::emulator::screen::Screen;
+use crate::program::notify::Notify;
+use crate::program::term::Term;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
