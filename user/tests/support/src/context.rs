@@ -5,6 +5,7 @@
 use core::mem::ManuallyDrop;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle};
 use mikros_rt::interfaces::mikros::fs::NodeClient;
+use mikros_rt::interfaces::mikros::process::LauncherClient;
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::sys::Handle;
 
@@ -43,6 +44,8 @@ pub struct Own {
     pub directory: Handle,
     /// The directory of its namespace's `/tmp`, or 0 when it has none.
     pub tmp: Handle,
+    /// The process manager's `Launcher`.
+    pub launcher: Handle,
 }
 
 impl Own {
@@ -59,6 +62,7 @@ impl Own {
                 .iter()
                 .find(|entry| entry.path == "/tmp")
                 .map_or(0, |entry| entry.directory.handle().raw()),
+            launcher: header.launcher.handle().raw(),
         }
     }
 
@@ -69,6 +73,15 @@ impl Own {
         // handle, which the startup transfer keeps open.
         let handle = unsafe { OwnedHandle::from_raw(self.directory) };
         ManuallyDrop::new(DirectoryClient::new(ClientEnd::new(handle)))
+    }
+
+    /// A client of the process manager's `Launcher` that borrows its
+    /// handle as `services` does.
+    pub fn launcher(&self) -> ManuallyDrop<LauncherClient> {
+        // SAFETY: the client is never dropped, so it never closes the
+        // handle, which the startup transfer keeps open.
+        let handle = unsafe { OwnedHandle::from_raw(self.launcher) };
+        ManuallyDrop::new(LauncherClient::new(ClientEnd::new(handle)))
     }
 
     /// A client of the namespace's `/tmp`, borrowing its handle as
