@@ -19,6 +19,9 @@ fn main(m: &Managed) -> i64 {
             ("info_topics", info_topics),
             ("events_and_waits", events_and_waits),
             ("timers", timers),
+            ("ports", ports),
+            ("ports_are_readable", ports_are_readable),
+            ("port_registration_limit", port_registration_limit),
         ],
     )
 }
@@ -137,4 +140,219 @@ fn timers(_: &Own) -> Result {
         "staying clear after cancel",
         status == TIMED_OUT && observed == 0,
     )
+}
+
+fn wait_async(object: Handle, port: Handle, key: u64, signals: u32, options: u32) -> Result {
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::object_wait_async(object, port, key, signals, options) };
+    check("registering a wait", status)
+}
+
+/// A port takes 65536 registrations and refuses the next with
+/// `ERR_NO_RESOURCES`; closing the handle they were made through removes
+/// them.
+fn port_registration_limit(_: &Own) -> Result {
+    const NO_RESOURCES: i64 = -3;
+    const LIMIT: u64 = 65536;
+    let (mut port, mut event) = (0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a port", sys::port_create(0, &mut port))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    for key in 0..LIMIT {
+        wait_async(event, port, key, USER0, 0)?;
+    }
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::object_wait_async(event, port, LIMIT, USER0, 0) };
+    ensure("refusing one more", status == NO_RESOURCES)?;
+    // SAFETY: the call takes no pointers.
+    check("closing the event", unsafe { sys::handle_close(event) })?;
+    // SAFETY: the pointer is valid for the call.
+    check("creating another event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    wait_async(event, port, 0, USER0, 0)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("closing the event", sys::handle_close(event))?;
+        check("closing the port", sys::handle_close(port))
+    }
+}
+
+/// Ports with user packets, one-shot and edge waits, cancelling and
+/// closing.
+fn ports(_: &Own) -> Result {
+    let (mut port, mut event) = (0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    check("creating a port", unsafe { sys::port_create(0, &mut port) })?;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    ensure(
+        "timing out on an empty port",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+
+    let mut user = [0u8; 48];
+    user[..8].copy_from_slice(&7u64.to_le_bytes());
+    user[8..16].copy_from_slice(&[9; 8]);
+    user[16..20].copy_from_slice(b"ping");
+    // SAFETY: the pointer describes `user`.
+    check("queueing", unsafe { sys::port_queue(port, user.as_ptr()) })?;
+    let (status, p) = take_packet(port, soon());
+    ensure(
+        "reading a user packet",
+        status == 0 && u64_at(&p, 0) == 7 && u32_at(&p, 8) == 2,
+    )?;
+    ensure(
+        "clearing the status",
+        u32_at(&p, 12) == 0 && &p[16..20] == b"ping",
+    )?;
+
+    wait_async(event, port, 1, USER0, 0)?;
+    ensure("not firing early", take_packet(port, soon()).0 == TIMED_OUT)?;
+    signal(event, 0, USER0)?;
+    let (status, p) = take_packet(port, soon());
+    ensure(
+        "firing",
+        status == 0 && u64_at(&p, 0) == 1 && u32_at(&p, 8) == 1,
+    )?;
+    ensure(
+        "reporting the signals",
+        u32_at(&p, 16) == USER0 && u32_at(&p, 20) == USER0,
+    )?;
+    ensure("zeroing the rest", p[24..].iter().all(|&b| b == 0))?;
+    signal(event, USER0, 0)?;
+    signal(event, 0, USER0)?;
+    ensure("firing only once", take_packet(port, soon()).0 == TIMED_OUT)?;
+    wait_async(event, port, 2, USER0, 0)?;
+    ensure("firing at once", take_packet(port, soon()).0 == 0)?;
+    signal(event, USER0, 0)?;
+
+    wait_async(event, port, 3, USER1, 1)?;
+    signal(event, 0, USER1)?;
+    signal(event, USER1, 0)?;
+    signal(event, 0, USER1)?;
+    let (status, p) = take_packet(port, soon());
+    ensure("firing on an edge", status == 0 && u64_at(&p, 0) == 3)?;
+    ensure(
+        "queueing one packet at a time",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    signal(event, USER1, 0)?;
+    signal(event, 0, USER1)?;
+    ensure("firing on the next edge", take_packet(port, soon()).0 == 0)?;
+    signal(event, USER1, 0)?;
+    signal(event, 0, USER1)?;
+    // SAFETY: the call takes no pointers.
+    check("cancelling", unsafe { sys::port_cancel(port, event, 3) })?;
+    ensure(
+        "dropping the cancelled packet",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    signal(event, USER1, 0)?;
+
+    // A one-shot registration that fired has ended, but its unread packet
+    // is still cancelled.
+    wait_async(event, port, 5, USER0, 0)?;
+    signal(event, 0, USER0)?;
+    // A new registration removes the ended one from the kernel's list.
+    wait_async(event, port, 6, USER1, 0)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("cancelling a fired wait", sys::port_cancel(port, event, 5))?;
+        check("cancelling the other", sys::port_cancel(port, event, 6))?;
+    }
+    ensure(
+        "dropping its packet",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+    signal(event, USER0, 0)?;
+
+    let mut copy = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("duplicating", unsafe {
+        sys::handle_duplicate(event, 0x8000_0000, &mut copy)
+    })?;
+    wait_async(copy, port, 4, USER1, 0)?;
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(copy) })?;
+    signal(event, 0, USER1)?;
+    ensure(
+        "ending with the handle",
+        take_packet(port, soon()).0 == TIMED_OUT,
+    )?;
+
+    for _ in 0..4096 {
+        // SAFETY: the pointer describes `user`.
+        check("filling the port", unsafe {
+            sys::port_queue(port, user.as_ptr())
+        })?;
+    }
+    // SAFETY: the pointer describes `user`.
+    let full = unsafe { sys::port_queue(port, user.as_ptr()) };
+    ensure("limiting user packets", full == -22)
+}
+
+/// A port is `READABLE` while a packet is queued on it, which
+/// `object_wait_one` and the waits of other ports see: a user packet and a
+/// wait that fires on an event's signal make it readable, and reading the
+/// last packet makes it unreadable. Two ports wait on each other here.
+fn ports_are_readable(_: &Own) -> Result {
+    const EDGE: u32 = 1;
+    let (mut port, mut watcher, mut event) = (0, 0, 0);
+    // SAFETY: the pointers are valid for the calls.
+    unsafe {
+        check("creating a port", sys::port_create(0, &mut port))?;
+        check("creating another", sys::port_create(0, &mut watcher))?;
+        check("creating an event", sys::event_create(0, &mut event))?;
+    }
+    let readable = |p: Handle| {
+        let mut observed = 0;
+        // SAFETY: the out pointer is valid for the call.
+        let status = unsafe { sys::object_wait_one(p, READABLE, 0, &mut observed) };
+        (status, observed)
+    };
+    let key = |p: Handle| {
+        let (status, packet) = take_packet(p, soon());
+        (status == 0).then(|| u64_at(&packet, 0))
+    };
+    ensure("waiting on an empty port", readable(port) == (TIMED_OUT, 0))?;
+    wait_async(port, watcher, 1, READABLE, EDGE)?;
+    wait_async(watcher, port, 2, READABLE, EDGE)?;
+    ensure(
+        "queueing nothing for empty ports",
+        take_packet(watcher, 0).0 == TIMED_OUT,
+    )?;
+    let mut user = [0u8; 48];
+    user[..8].copy_from_slice(&9u64.to_le_bytes());
+    // SAFETY: the pointer describes `user`.
+    check("queueing", unsafe { sys::port_queue(port, user.as_ptr()) })?;
+    ensure("making it readable", readable(port) == (0, READABLE))?;
+    // The watcher's packet made it readable, so the port got one too.
+    ensure("telling the other port", key(watcher) == Some(1))?;
+    ensure(
+        "being told back",
+        key(port) == Some(9) && key(port) == Some(2),
+    )?;
+    ensure("emptying it", readable(port) == (TIMED_OUT, 0))?;
+    // A wait that fires on the event queues on the port, which the other
+    // port hears of as before.
+    wait_async(event, port, 3, USER0, 0)?;
+    signal(event, 0, USER0)?;
+    ensure("firing into it", readable(port) == (0, READABLE))?;
+    ensure("telling the other port again", key(watcher) == Some(1))?;
+    ensure(
+        "being told back again",
+        key(port) == Some(3) && key(port) == Some(2),
+    )?;
+    ensure("emptying it again", readable(port) == (TIMED_OUT, 0))?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        check("closing the event", sys::handle_close(event))?;
+        check("closing a port", sys::handle_close(watcher))?;
+        check("closing the other", sys::handle_close(port))
+    }
 }
