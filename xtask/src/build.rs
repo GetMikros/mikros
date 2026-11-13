@@ -625,8 +625,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             )?;
             println!("built    {}", log_image.display());
             // The time service test serves this image: the service manager,
-            // the broker, the time service and the time probe as two
-            // services, with their manifests.
+            // the broker, the time service and the time probe, with their
+            // manifests.
             let time_service = user_build("timesvc", kind)?;
             println!("built    {}", time_service.display());
             let time_manifest = crate::workspace_root().join("user/services/timesvc/time.yaml");
@@ -649,10 +649,6 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     (
                         "usr/lib/services/time-probe.yaml",
                         probe_dir.join("time-probe.yaml").as_path(),
-                    ),
-                    (
-                        "usr/lib/services/time-guest.yaml",
-                        probe_dir.join("time-guest.yaml").as_path(),
                     ),
                 ],
             )?;

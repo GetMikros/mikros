@@ -1,13 +1,12 @@
-//! A program that the service manager starts as two boot services after
-//! the time service, to drive it as a client. As `time-probe`, which
-//! holds `time.set` and gets the platform information, it checks that
-//! UTC is the boot time plus the monotonic clock, as the time page also
-//! says, that the page cannot be written, that setting the time changes
-//! it and is sent to watchers, and that without a root file system the
-//! zone is UTC and cannot be set, and that the time page of its startup,
-//! when the process manager had one to give, says the same as the
-//! service. As `time-guest`, which holds no
-//! permission, it checks that it can neither set the time nor the zone.
+//! A program that the service manager starts as a boot service after
+//! the time service, to drive it as a client. It holds `time.set` and
+//! gets the platform information, and checks that UTC is the boot time
+//! plus the monotonic clock, as the time page also says, that the page
+//! cannot be written, that setting the time changes it and is sent to
+//! watchers, and that without a root file system the zone is UTC and
+//! cannot be set, and that the time page of its startup, when the process
+//! manager had one to give, says the same as the service. The system
+//! test services-time checks what a program without `time.set` can do.
 //! It exits with 0 when every check passed, or with the number of the
 //! first that failed.
 
@@ -38,7 +37,6 @@ const BOOT_TIME_VALID: u32 = 1 << 1;
 const PERM_READ: u32 = 1 << 0;
 const PERM_WRITE: u32 = 1 << 1;
 const PAGE: u64 = 4096;
-const GUEST: &str = "system.time-guest";
 
 fn now() -> i64 {
     let mut now = 0;
@@ -62,11 +60,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let process = managed.header.process.raw();
     let startup_page = managed.header.time_page.as_ref().map(|page| page.raw());
-    let result = match managed.header.app_id.as_str() {
-        GUEST => guest(&clock),
-        _ => probe(&clock, &managed.handles, process, startup_page),
-    };
-    match result {
+    match probe(&clock, &managed.handles, process, startup_page) {
         Ok(()) => 0,
         Err(failed) => failed,
     }
@@ -211,15 +205,4 @@ fn probe(
         }
     }
     Ok(())
-}
-
-fn guest(clock: &ClockClient) -> Result<(), i64> {
-    match clock.set_utc(0, FOREVER) {
-        Ok(Err(Status::AccessDenied)) => {}
-        _ => return Err(20),
-    }
-    match clock.set_timezone("UTC".into(), FOREVER) {
-        Ok(Err(Status::AccessDenied)) => Ok(()),
-        _ => Err(21),
-    }
 }

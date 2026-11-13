@@ -4409,27 +4409,21 @@ mod manager {
     }
 
     /// From a boot image with the service manager, the permission broker,
-    /// the time service and the time probe as two services, with their
-    /// manifests, the service manager starts the time service with init's
-    /// platform information, and the probes. The one that holds
-    /// `time.set` and gets the platform information finds UTC to be its
-    /// boot time plus the monotonic clock, as the time page says, which
-    /// it cannot write; sets the time and hears of it as a watcher; and,
-    /// without a root file system, finds the zone UTC and cannot set it.
-    /// The other cannot set the time or the zone. Each exits with 0 once
-    /// every check passed, as the service manager logs.
+    /// the time service and the time probe, with their manifests, the
+    /// service manager starts the time service with init's platform
+    /// information, and the probe, which holds `time.set` and gets the
+    /// platform information. It finds UTC to be its boot time plus the
+    /// monotonic clock, as the time page says, which it cannot write;
+    /// sets the time and hears of it as a watcher; and, without a root
+    /// file system, finds the zone UTC and cannot set it. It exits with 0
+    /// once every check passed, as the service manager logs.
     pub fn time_service_keeps_utc(s: &Startup) -> Result {
-        const PASSED: [&[u8]; 2] = [
-            b"service time-probe exited with code 0",
-            b"service time-guest exited with code 0",
-        ];
+        const PASSED: [&[u8]; 1] = [b"service time-probe exited with code 0"];
         const FAILED: &[&[u8]] = &[
             b"did not start",
             b"will not start",
             b"service time-probe exited",
             b"service time-probe ended",
-            b"service time-guest exited",
-            b"service time-guest ended",
             b"service time exited",
             b"service time ended",
         ];
@@ -4474,7 +4468,7 @@ mod manager {
             });
         };
         let deadline = super::within(super::PROBE_SECONDS);
-        let mut passed = [false; 2];
+        let mut passed = [false; PASSED.len()];
         let outcome = loop {
             if passed.iter().all(|&p| p) {
                 break Some(true);
@@ -4502,7 +4496,7 @@ mod manager {
         unsafe { sys::task_kill(started.process.raw()) };
         drop(m);
         ensure("logging an outcome in time", outcome.is_some())?;
-        ensure("passing every check of the probes", outcome == Some(true))
+        ensure("passing every check of the probe", outcome == Some(true))
     }
 
     /// With `root=bootfs` on the command line, from a boot image with the
