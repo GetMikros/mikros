@@ -2,9 +2,9 @@
 
 use crate::{
     ACCESS_DENIED, INVALID, READABLE, TERMINATE, TERMINATED, Test, USER0, act, budget_kernel,
-    budget_pages, create_memory, exit_code, get_thread, in_time, koid, map, mem_read_at, now,
-    paged_object, report_bytes, signal, signal_restorer, skip_fault, spawn2, start_program_with,
-    thread_list, touch_stack, u32_at, wait, wait_until_blocked, write_faults,
+    budget_pages, create_memory, exit_code, in_time, koid, map, mem_read_at, now, paged_object,
+    report_bytes, signal, signal_restorer, skip_fault, spawn2, start_program_with, thread_list,
+    touch_stack, u32_at, wait, wait_until_blocked, write_faults,
 };
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -12,8 +12,8 @@ use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::USER1;
 use mikros_test::{
-    Failure, PAGE_SIZE, PAGER, PERM_READ, PERM_WRITE, Result, SPECIFIC, check, ensure, seal,
-    sleep_ms,
+    Failure, PAGE_SIZE, PAGER, PERM_READ, PERM_WRITE, Result, SPECIFIC, check, ensure, get_thread,
+    seal, sleep_ms,
 };
 
 /// The tests, which `main` runs before the last of its own.
