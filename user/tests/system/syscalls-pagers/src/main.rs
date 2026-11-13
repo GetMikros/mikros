@@ -48,6 +48,13 @@ fn main(m: &Managed) -> i64 {
     )
 }
 
+const IO: i64 = -28;
+
+fn pager_op(pager: Handle, mem: Handle, op: u32, offset: u64, len: u64) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::pager_op(pager, mem, op, offset, len) }
+}
+
 /// A paged object requests each absent page once, from mappings and
 /// system calls, and gets the frames its pager supplies.
 fn pagers(s: &Own) -> Result {
