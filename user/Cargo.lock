@@ -588,10 +588,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mikros-permissions"
-version = "0.0.0"
-
-[[package]]
 name = "mikros-rt"
 version = "0.0.0"
 dependencies = [
@@ -717,7 +713,6 @@ name = "permbroker"
 version = "0.0.0"
 dependencies = [
  "mikros-manifest",
- "mikros-permissions",
  "mikros-rt",
  "mikros-yaml",
 ]

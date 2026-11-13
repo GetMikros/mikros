@@ -1,10 +1,10 @@
 //! The `Broker` protocol, served over the broker's store.
 
+use crate::permissions::{Call, Decision, Failure, Grant, Identity, Requested, Revoked, Store};
 use alloc::rc::{Rc, Weak};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use mikros_permissions::{Call, Decision, Failure, Grant, Identity, Requested, Revoked, Store};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
@@ -135,7 +135,7 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
             }
             R::Watch(q, r) => {
                 let result = inner.authorize(&caller, Call::Watch).and_then(|()| {
-                    mikros_permissions::kind(&q.permission).ok_or(Status::NotFound)?;
+                    crate::permissions::kind(&q.permission).ok_or(Status::NotFound)?;
                     let watcher = (q.permission, Rc::downgrade(&server));
                     inner.watchers.borrow_mut().push(watcher);
                     Ok(BrokerWatchResponse {})

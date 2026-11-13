@@ -7,15 +7,13 @@
 //! permission away, for the connections that watch it. Grants are kept
 //! in memory only.
 
-#![no_std]
-
-extern crate alloc;
-
 mod table;
 #[cfg(test)]
 mod tests;
 
-pub use table::{Kind, PERMISSIONS, kind};
+#[cfg(test)]
+pub use table::PERMISSIONS;
+pub use table::{Kind, kind};
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;

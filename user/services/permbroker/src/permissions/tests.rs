@@ -1,6 +1,6 @@
 extern crate std;
 
-use crate::*;
+use crate::permissions::*;
 use alloc::string::ToString;
 use alloc::vec;
 
