@@ -19,6 +19,11 @@ edition = "2024"
 opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
+# Unoptimized, the text console draws a program's output some 16 times
+# slower, and still shows the output of `yes` for seconds after ^C ended
+# it.
+[profile.dev.package.console]
+opt-level = 2
 
 [profile.fuzz]
 inherits = "dev"
