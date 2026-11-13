@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 mikros-bootfs = { path = "../../lib/bootfs" }
-mikros-loader = { path = "../loader" }
+mikros-loader = { path = "../../lib/loader" }
 mikros-manifest = { path = "../../lib/manifest" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 
