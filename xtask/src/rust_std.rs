@@ -9,9 +9,11 @@
 
 use crate::build::Kind;
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 /// The file in the copy that records the toolchain and patches it was
 /// made from.
@@ -228,12 +230,47 @@ pub fn cargo(dir: &Path, rustflags: &[&str]) -> Result<Command> {
     Ok(command)
 }
 
+/// The programs that `prebuild` built, by build kind and name.
+static PREBUILT: Mutex<BTreeSet<(&str, String)>> = Mutex::new(BTreeSet::new());
+
+/// Builds the programs `bins` of the packages of the same names in the
+/// `user/runtime/std` workspace in one run of Cargo. `build` then finds
+/// them built.
+pub fn prebuild(bins: &[String], kind: Kind) -> Result<()> {
+    let root = crate::workspace_root();
+    let mut command = cargo(&root.join("user/runtime/std"), kind.user_rustflags())?;
+    for bin in bins {
+        command.args(["--package", bin]);
+    }
+    let status = command
+        .args(["--bins", "--profile", kind.profile()])
+        .status()
+        .context("failed to run cargo")?;
+    if !status.success() {
+        bail!("building the programs with the standard library failed");
+    }
+    let mut prebuilt = PREBUILT.lock().expect("not poisoned");
+    prebuilt.extend(bins.iter().map(|b| (kind.name(), b.clone())));
+    Ok(())
+}
+
 /// Builds the program `bin` of the package of the same name in the
-/// `user/runtime/std` workspace, which uses the standard library, and returns
-/// its path. It is linked by the sysroot's Clang, with the C library
-/// and libunwind.
+/// `user/runtime/std` workspace, which uses the standard library, unless
+/// `prebuild` did, and returns its path. It is linked by the sysroot's
+/// Clang, with the C library and libunwind.
 pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
     let root = crate::workspace_root();
+    let path = root
+        .join("user/runtime/std/target/x86_64-unknown-mikros")
+        .join(kind.profile_dir())
+        .join(bin);
+    if PREBUILT
+        .lock()
+        .expect("not poisoned")
+        .contains(&(kind.name(), bin.to_owned()))
+    {
+        return Ok(path);
+    }
     let status = cargo(&root.join("user/runtime/std"), kind.user_rustflags())?
         .args(["--package", bin, "--bin", bin])
         .args(["--profile", kind.profile()])
@@ -242,10 +279,7 @@ pub fn build(bin: &str, kind: Kind) -> Result<PathBuf> {
     if !status.success() {
         bail!("building {bin} failed");
     }
-    Ok(root
-        .join("user/runtime/std/target/x86_64-unknown-mikros")
-        .join(kind.profile_dir())
-        .join(bin))
+    Ok(path)
 }
 
 #[cfg(test)]

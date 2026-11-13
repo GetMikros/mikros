@@ -3,9 +3,11 @@
 use crate::components::{Component, Image, Runtime};
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 /// The build kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -179,12 +181,22 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     let mut takeover_image = None;
     let (boot_image, system_image) = match boot {
         BootImage::System => {
+            let components = crate::components::all()?;
+            let built = |runtime| -> Vec<String> {
+                components
+                    .iter()
+                    .filter(|c| c.runtime == runtime && c.in_kind(kind))
+                    .map(|c| c.name.clone())
+                    .collect()
+            };
+            prebuild(&built(Runtime::Rt), kind)?;
+            crate::rust_std::prebuild(&built(Runtime::Std), kind)?;
             // The components of the boot image: init, the managers, the
             // services that start before the root file system is
             // available, and the drivers, which the device manager reads
             // from the boot image only until then.
             let mut early = Vec::new();
-            for component in crate::components::all()? {
+            for component in components {
                 if component.image == Image::Boot && component.in_kind(kind) {
                     let program = component_build(&component, kind)?;
                     early.extend(component.members(kind, &program)?);
@@ -229,6 +241,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             (boot_image(kind, "boot.img", &early)?, system_image)
         }
         BootImage::Test => {
+            // Every program of the workspaces, but the test init of a fuzz
+            // build, which is built with a feature of its own.
+            let programs: Vec<String> = crate::components::programs("user")?
+                .into_iter()
+                .filter(|p| !(kind == Kind::Fuzz && p == "test-init"))
+                .collect();
+            prebuild(&programs, kind)?;
+            crate::rust_std::prebuild(&crate::components::programs("user/runtime/std")?, kind)?;
             let init = user_build("test-init", kind)?;
             println!("built    {}", init.display());
             let echo = user_build("channel-echo", kind)?;
@@ -1809,9 +1829,39 @@ fn component_build(component: &Component, kind: Kind) -> Result<PathBuf> {
     }
 }
 
-/// Builds the user-space program `bin`, a package of the `user`
-/// workspace of the same name, and returns its path.
-fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
+/// The user-space programs that `prebuild` built, by build kind and
+/// name.
+static PREBUILT: Mutex<BTreeSet<(&str, String)>> = Mutex::new(BTreeSet::new());
+
+/// Builds the user-space programs `bins`, packages of the `user`
+/// workspace of the same names, in one run of Cargo, which compiles
+/// their crates in parallel, after the libraries that the ACPI and btrfs
+/// drivers link. `user_build` then finds them built.
+fn prebuild(bins: &[String], kind: Kind) -> Result<()> {
+    if bins.iter().any(|b| b == "acpi") {
+        crate::acpica::build(crate::acpica::Flavor::Mikros)?;
+    }
+    if bins.iter().any(|b| b == "btrfs") {
+        crate::btrfs::build(crate::btrfs::Flavor::Mikros)?;
+    }
+    let mut command = user_cargo(kind);
+    for bin in bins {
+        command.args(["--package", bin]);
+    }
+    let status = command
+        .arg("--bins")
+        .status()
+        .context("failed to run cargo")?;
+    if !status.success() {
+        bail!("building the user-space programs failed");
+    }
+    let mut prebuilt = PREBUILT.lock().expect("not poisoned");
+    prebuilt.extend(bins.iter().map(|b| (kind.name(), b.clone())));
+    Ok(())
+}
+
+/// `cargo build` in the `user` workspace for the build kind `kind`.
+fn user_cargo(kind: Kind) -> Command {
     let root = crate::workspace_root();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
     // The user workspace has its own configuration, which Cargo reads
@@ -1819,7 +1869,7 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
     let mut command = Command::new(cargo);
     command
         .current_dir(root.join("user"))
-        .args(["build", "--package", bin, "--bin", bin, "--target"])
+        .args(["build", "--target"])
         .arg(root.join(USER_TARGET))
         .args(["--profile", kind.profile()]);
     let flags = kind.user_rustflags();
@@ -1829,6 +1879,25 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
             .arg("--config")
             .arg(format!("build.rustflags=[{}]", flags.join(", ")));
     }
+    command
+}
+
+/// Builds the user-space program `bin`, a package of the `user`
+/// workspace of the same name, unless `prebuild` did, and returns its
+/// path.
+fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
+    let root = crate::workspace_root();
+    let path = root
+        .join("user/target/x86_64-unknown-mikros")
+        .join(kind.profile_dir())
+        .join(bin);
+    let prebuilt = PREBUILT.lock().expect("not poisoned");
+    if prebuilt.contains(&(kind.name(), bin.to_owned())) {
+        return Ok(path);
+    }
+    drop(prebuilt);
+    let mut command = user_cargo(kind);
+    command.args(["--package", bin, "--bin", bin]);
     // The test init of a fuzz build also tests the fuzz-only calls.
     if matches!(kind, Kind::Fuzz) && bin == "test-init" {
         command.args(["--features", "fuzz"]);
@@ -1837,10 +1906,7 @@ fn user_build(bin: &str, kind: Kind) -> Result<PathBuf> {
     if !status.success() {
         bail!("building {bin} failed");
     }
-    Ok(root
-        .join("user/target/x86_64-unknown-mikros")
-        .join(kind.profile_dir())
-        .join(bin))
+    Ok(path)
 }
 
 /// How a C program is linked with the C library.

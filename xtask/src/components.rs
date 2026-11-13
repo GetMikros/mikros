@@ -25,7 +25,7 @@ use std::process::Command;
 
 /// The workspaces whose packages can be components, relative to the
 /// repository.
-const WORKSPACES: [&str; 2] = ["user", "user/runtime/std"];
+pub const WORKSPACES: [&str; 2] = ["user", "user/runtime/std"];
 
 /// What a component is, which says where it is installed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,25 +126,49 @@ impl Component {
 pub fn all() -> Result<Vec<Component>> {
     let mut components = Vec::new();
     for workspace in WORKSPACES {
-        let manifest = crate::workspace_root().join(workspace).join("Cargo.toml");
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-        let output = Command::new(cargo)
-            .args(["metadata", "--no-deps", "--format-version", "1"])
-            .arg("--manifest-path")
-            .arg(&manifest)
-            .output()
-            .context("running cargo metadata")?;
-        if !output.status.success() {
-            bail!(
-                "cargo metadata for {} failed: {}",
-                manifest.display(),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let metadata: Value = serde_json::from_slice(&output.stdout)?;
-        components.extend(parse(&metadata)?);
+        components.extend(parse(&metadata(workspace)?)?);
     }
     Ok(components)
+}
+
+/// The names of the programs of every package of the workspace
+/// `workspace`, relative to the repository.
+pub fn programs(workspace: &str) -> Result<Vec<String>> {
+    let metadata = metadata(workspace)?;
+    let mut programs = Vec::new();
+    for package in metadata["packages"].as_array().context("no packages")? {
+        for target in package["targets"].as_array().context("no targets")? {
+            let kinds = target["kind"]
+                .as_array()
+                .context("a target without kinds")?;
+            if kinds.iter().any(|k| k == "bin") {
+                let name = target["name"].as_str().context("a target without a name")?;
+                programs.push(name.to_owned());
+            }
+        }
+    }
+    Ok(programs)
+}
+
+/// The output of `cargo metadata` for the workspace `workspace`,
+/// relative to the repository, without dependencies.
+fn metadata(workspace: &str) -> Result<Value> {
+    let manifest = crate::workspace_root().join(workspace).join("Cargo.toml");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let output = Command::new(cargo)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .output()
+        .context("running cargo metadata")?;
+    if !output.status.success() {
+        bail!(
+            "cargo metadata for {} failed: {}",
+            manifest.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
 }
 
 /// The components among the packages of `cargo metadata`'s output.
