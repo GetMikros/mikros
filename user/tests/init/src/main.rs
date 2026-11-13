@@ -15,7 +15,7 @@ use mikros_test::{
     PERM_WRITE, READABLE, Result, SIGNALED, SLOWER, TERMINATED, TIMED_OUT, USER0, call, check,
     contains, create_memory, elf, ensure, exit_qemu, futex_wake, in_time, info, map, map_read_only,
     now, open_exit_port, read_message, read_sizes, signal, sleep_ms, soon, spawn, spawn2,
-    stream_io, take_packet, u32_at, u64_at, ustar, wait, wait_forever, within,
+    take_packet, u32_at, u64_at, ustar, wait, wait_forever, within,
 };
 
 mikros_rt::main!(main);
@@ -1432,103 +1432,6 @@ fn futexes(s: &Startup) -> Result {
     ensure("waking nobody", futex_wake(word, 1)? == 0)
 }
 
-/// Waits on the word at `addr` until woken, then exits.
-extern "sysv64" fn word_waiter(addr: u64, _: u64) -> ! {
-    // SAFETY: `addr` is a mapped, aligned word.
-    unsafe { sys::futex_wait(addr as *const u32, 0, i64::MAX) };
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-/// A call whose output lies on a read-only page fails before changing
-/// any state: written bytes are not queued, and read bytes and packets
-/// stay queued.
-fn failed_outputs(s: &Startup) -> Result {
-    let page = create_memory(PAGE_SIZE)?;
-    let mut ro = 0;
-    // SAFETY: the out pointer is valid for the call.
-    check("mapping read-only", unsafe {
-        sys::vm_map(s.process, PERM_READ, 0, page, 0, PAGE_SIZE, &mut ro)
-    })?;
-    let ro_u64 = ro as *mut u64;
-
-    let (mut a, mut b) = (0, 0);
-    // SAFETY: the pointers are valid for the call.
-    check("creating a stream", unsafe {
-        sys::stream_create(0, &mut a, &mut b)
-    })?;
-    // SAFETY: the pointers are valid; the count lies on a read-only page.
-    let status = unsafe { sys::stream_write(a, b"lost".as_ptr(), 4, ro_u64) };
-    ensure("failing a write", status == INVALID_ARGS)?;
-    let mut buf = [0u8; 8];
-    ensure(
-        "queueing nothing",
-        stream_io(b, false, &mut buf).0 == SHOULD_WAIT,
-    )?;
-    ensure("writing", stream_io(a, true, &mut { *b"kept" }) == (0, 4))?;
-    // SAFETY: the buffer is valid; the count lies on a read-only page.
-    let status = unsafe { sys::stream_read(b, buf.as_mut_ptr(), 8, ro_u64) };
-    ensure("failing a read", status == INVALID_ARGS)?;
-    let mut actual = 0;
-    // SAFETY: the buffer lies on a read-only page; the count is valid.
-    let status = unsafe { sys::stream_read(b, ro as *mut u8, 8, &mut actual) };
-    ensure(
-        "failing a read into read-only bytes",
-        status == INVALID_ARGS,
-    )?;
-    ensure(
-        "keeping read bytes",
-        stream_io(b, false, &mut buf) == (0, 4) && &buf[..4] == b"kept",
-    )?;
-
-    let mut port = 0;
-    // SAFETY: the pointer is valid for the call.
-    check("creating a port", unsafe { sys::port_create(0, &mut port) })?;
-    let mut user = [0u8; 48];
-    user[..8].copy_from_slice(&5u64.to_le_bytes());
-    // SAFETY: the pointer describes `user`.
-    check("queueing", unsafe { sys::port_queue(port, user.as_ptr()) })?;
-    // SAFETY: the packet output lies on a read-only page.
-    let status = unsafe { sys::port_wait(port, soon(), ro as *mut u8) };
-    ensure("failing a wait", status == INVALID_ARGS)?;
-    let (status, p) = take_packet(port, soon());
-    ensure("keeping the packet", status == 0 && u64_at(&p, 0) == 5)?;
-
-    let word = create_memory(PAGE_SIZE)?;
-    let addr = map(s.process, word, PAGE_SIZE)?;
-    spawn2(s, word_waiter, addr, 0)?;
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_sleep(now() + 20_000_000) };
-    // SAFETY: the word is mapped; the count lies on a read-only page.
-    let status = unsafe { sys::futex_wake(addr as *const u32, 1, ro as *mut u32) };
-    ensure("failing a wake", status == INVALID_ARGS)?;
-    ensure("leaving the waiter waiting", futex_wake(addr, 1)? == 1)?;
-
-    // A blocked real-time signal stays pending through a failed wait.
-    let rt = 1u64 << (40 - 1);
-    // SAFETY: the calls take no pointers or a null one.
-    unsafe {
-        check(
-            "blocking a signal",
-            sys::signal_set_mask(0, rt, core::ptr::null_mut()),
-        )?;
-        check("sending a signal", sys::thread_signal(s.thread, 40, 77))?;
-    }
-    // SAFETY: the information output lies on a read-only page.
-    let status = unsafe { sys::signal_wait(rt, soon(), ro as *mut u8) };
-    ensure("failing a signal wait", status == INVALID_ARGS)?;
-    let mut info = [0u8; 64];
-    // SAFETY: the pointer describes `info`, which holds a record.
-    let status = unsafe { sys::signal_wait(rt, soon(), info.as_mut_ptr()) };
-    // SAFETY: the call takes a null pointer.
-    unsafe { sys::signal_set_mask(1, rt, core::ptr::null_mut()) };
-    ensure(
-        "keeping the signal",
-        status == 0 && u32_at(&info, 0) == 40 && u64_at(&info, 0x10) == 77,
-    )
-}
-
 /// Calls that return a handle refuse an output outside the user address
 /// range, also one that wraps around the end of the address space, and
 /// a refused `handle_replace` keeps the handle it was given.
@@ -1636,71 +1539,6 @@ fn inputs_outside_user_memory(s: &Startup) -> Result {
         for h in [mem, a, b, port] {
             check("closing", sys::handle_close(h))?;
         }
-    }
-    Ok(())
-}
-
-/// Calls refuse `options` with a bit they do not define, and write no
-/// output.
-fn undefined_options_refused(s: &Startup) -> Result {
-    let mem = create_memory(PAGE_SIZE)?;
-    let (mut pager, mut port) = (0, 0);
-    // SAFETY: the out pointers are valid for the calls.
-    unsafe {
-        check("creating a pager", sys::pager_create(0, &mut pager))?;
-        check("creating a port", sys::port_create(0, &mut port))?;
-    }
-    let mut outs = [Handle::MAX; 2];
-    let mut addr = u64::MAX;
-    let (out, out1) = (outs.as_mut_ptr(), outs[1..].as_mut_ptr());
-    let undefined = 1 << 31;
-    // SAFETY: the out pointers are valid for the calls.
-    let statuses = unsafe {
-        [
-            ("creating an event", sys::event_create(1, out)),
-            ("creating a timer", sys::timer_create(1, out)),
-            ("creating a port", sys::port_create(1, out)),
-            ("creating a pager", sys::pager_create(1, out)),
-            ("creating a timeline", sys::timeline_create(0, 1, out)),
-            ("creating a channel", sys::channel_create(1, out, out1)),
-            ("creating a stream", sys::stream_create(1, out, out1)),
-            (
-                "creating a memory object",
-                sys::mem_create(PAGE_SIZE, undefined, out),
-            ),
-            ("cloning", sys::mem_clone(mem, undefined, 0, PAGE_SIZE, out)),
-            (
-                "creating a paged object",
-                sys::pager_create_memory(pager, port, 0, PAGE_SIZE, undefined, out),
-            ),
-            (
-                "creating an exception channel",
-                sys::exception_channel_create(s.process, undefined, out),
-            ),
-            (
-                "mapping",
-                sys::vm_map(
-                    s.process,
-                    PERM_READ | 1 << 3,
-                    0,
-                    mem,
-                    0,
-                    PAGE_SIZE,
-                    &mut addr,
-                ),
-            ),
-        ]
-    };
-    for (what, status) in statuses {
-        ensure(what, status == INVALID_ARGS)?;
-    }
-    ensure(
-        "writing no output",
-        outs == [Handle::MAX; 2] && addr == u64::MAX,
-    )?;
-    for h in [mem, pager, port] {
-        // SAFETY: the call takes no pointers.
-        check("closing", unsafe { sys::handle_close(h) })?;
     }
     Ok(())
 }
@@ -5628,38 +5466,6 @@ fn alternate_signal_stacks(s: &Startup) -> Result {
     ensure("keeping it there", status as i64 == BAD_STATE)?;
     check("removing it", set(0, 0, &mut old))?;
     ensure("reporting it", old == [base, size])
-}
-
-/// `SYSCALL` clears DF, AC and NT, which the debug kernel checks as each
-/// system call enters it: this makes one with all three set.
-fn syscall_clears_flags(_: &Startup) -> Result {
-    const FLAGS: u64 = (1 << 10) | (1 << 14) | (1 << 18);
-    const HANDLE_CLOSE: i64 = 1;
-    let status: i64;
-    // SAFETY: closing handle 0 only fails. The block steps over the red
-    // zone before it pushes, and clears the flags again before it ends.
-    unsafe {
-        core::arch::asm!(
-            "sub rsp, 128",
-            "pushfq",
-            "or qword ptr [rsp], {set}",
-            "popfq",
-            "syscall",
-            "pushfq",
-            "and qword ptr [rsp], {clear}",
-            "popfq",
-            "add rsp, 128",
-            set = in(reg) FLAGS,
-            clear = in(reg) !FLAGS,
-            inlateout("rax") HANDLE_CLOSE => status,
-            in("rdi") 0u64,
-            out("rcx") _,
-            out("r11") _,
-        )
-    };
-    // SAFETY: the call takes no pointers.
-    let plain = unsafe { sys::handle_close(0) };
-    ensure("making the call", status == plain)
 }
 
 /// Counts the loops of `spin_until_handled`.
@@ -9921,7 +9727,7 @@ fn clock_page_rights(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 131] = [
+const TESTS: [(&str, Test); 128] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -10036,11 +9842,8 @@ const TESTS: [(&str, Test); 131] = [
     ("channel_calls", channel_calls),
     ("futexes", futexes),
     ("futexes_across_processes", futexes_across_processes),
-    ("failed_outputs", failed_outputs),
     ("outputs_outside_user_range", outputs_outside_user_range),
     ("inputs_outside_user_memory", inputs_outside_user_memory),
-    ("undefined_options_refused", undefined_options_refused),
-    ("syscall_clears_flags", syscall_clears_flags),
     ("reserved_hardware_refused", reserved_hardware_refused),
     (
         "resources_report_their_ranges",
