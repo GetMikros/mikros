@@ -1,9 +1,11 @@
 //! The `Terminal` connections: each request names its terminal by token,
 //! and comes from the client identity of the connection.
 
-use crate::jobs;
-use crate::tty::Tty;
-use crate::{Service, now};
+use crate::service::jobs;
+use crate::service::tty::Tty;
+use crate::terminal::discipline::Read;
+use crate::terminal::termios::{Attributes, VMIN, VTIME};
+use crate::{service::Service, service::now};
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -20,8 +22,6 @@ use mikros_rt::interfaces::mikros::terminal::{
     TerminalSetWindowSizeResponse, TerminalWriteResponse, When, WindowSize,
 };
 use mikros_rt::sys;
-use mikros_tty::discipline::Read;
-use mikros_tty::termios::{Attributes, VMIN, VTIME};
 
 /// The most bytes one `Read` or `Write` carries.
 const TRANSFER_MAX: usize = 32768;
@@ -106,7 +106,9 @@ pub async fn serve(service: Rc<Service>, end: ServerEnd<Terminal>, client: Clien
                 r.reply(s, got)
             }
             R::SetWindowSize(q, r) => {
-                let set = c.tty(&q.terminal).map(|t| t.set_size(crate::size(&q.size)));
+                let set = c
+                    .tty(&q.terminal)
+                    .map(|t| t.set_size(crate::service::size(&q.size)));
                 r.reply(s, set.map(|()| TerminalSetWindowSizeResponse {}))
             }
             R::GetForeground(q, r) => {
@@ -213,7 +215,7 @@ async fn set_attributes(
 
 fn readiness(c: &Connection, token: &OwnedHandle) -> Result<OwnedHandle, Status> {
     let t = c.tty(token)?;
-    let id = crate::koid(token).ok_or(Status::BadHandle)?;
+    let id = crate::service::koid(token).ok_or(Status::BadHandle)?;
     let event = match c.readiness.borrow().get(&id) {
         Some(event) => event.clone(),
         None => {
@@ -243,7 +245,9 @@ async fn wait(c: &Connection, t: &Tty, deadline: i64) -> bool {
         return false;
     }
     let timeout = c.service.reactor.sleep_until(deadline);
-    crate::first(t.changed.changed(), timeout).await.is_some()
+    crate::service::first(t.changed.changed(), timeout)
+        .await
+        .is_some()
 }
 
 async fn read(
@@ -269,7 +273,7 @@ async fn read(
         let (canonical, min, time, available) = {
             let d = t.discipline.borrow();
             let a = d.attributes;
-            let canonical = a.local(mikros_tty::termios::ICANON);
+            let canonical = a.local(crate::terminal::termios::ICANON);
             let cc = a.control_chars;
             (
                 canonical,

@@ -21,8 +21,11 @@ pub const VLNEXT: usize = 15;
 pub const VEOL2: usize = 16;
 pub const NCCS: usize = 32;
 
-/// Input flags.
+/// Input flags. The discipline keeps `IGNBRK`, `BRKINT` and `IXOFF` as they
+/// are set, but does not act on them.
+#[allow(dead_code)]
 pub const IGNBRK: u32 = 0o1;
+#[allow(dead_code)]
 pub const BRKINT: u32 = 0o2;
 pub const ISTRIP: u32 = 0o40;
 pub const INLCR: u32 = 0o100;
@@ -30,6 +33,7 @@ pub const IGNCR: u32 = 0o200;
 pub const ICRNL: u32 = 0o400;
 pub const IXON: u32 = 0o2000;
 pub const IXANY: u32 = 0o4000;
+#[allow(dead_code)]
 pub const IXOFF: u32 = 0o10000;
 pub const IUTF8: u32 = 0o40000;
 

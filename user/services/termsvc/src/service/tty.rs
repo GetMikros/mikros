@@ -2,7 +2,9 @@
 //! queued for it, the readiness events of its connections, and the
 //! process session and foreground group it belongs to.
 
-use crate::notify::Notify;
+use crate::service::notify::Notify;
+use crate::terminal::discipline::{Discipline, Effects, Signal};
+use crate::terminal::termios::Attributes;
 use alloc::collections::VecDeque;
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
@@ -10,8 +12,6 @@ use core::cell::{Cell, RefCell};
 use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::sys;
-use mikros_tty::discipline::{Discipline, Effects, Signal};
-use mikros_tty::termios::Attributes;
 
 /// Stream signals, and the event signals of readiness.
 const READABLE: u32 = 1 << 0;

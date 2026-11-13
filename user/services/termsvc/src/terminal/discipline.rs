@@ -3,7 +3,7 @@
 //! erasing, signals and stopping output, and what written bytes become
 //! on their way to the master side.
 
-use crate::termios::*;
+use crate::terminal::termios::*;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 

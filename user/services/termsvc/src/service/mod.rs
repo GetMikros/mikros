@@ -4,11 +4,6 @@
 //! `Factory.Open` makes a terminal and returns its master stream, a
 //! `Master` connection for its window size, and its token.
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
 mod jobs;
 mod notify;
 mod serve;

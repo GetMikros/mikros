@@ -1,5 +1,5 @@
-use crate::discipline::*;
-use crate::termios::*;
+use crate::terminal::discipline::*;
+use crate::terminal::termios::*;
 use alloc::vec;
 use alloc::vec::Vec;
 

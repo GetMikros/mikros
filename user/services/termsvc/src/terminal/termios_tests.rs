@@ -1,4 +1,4 @@
-use crate::termios::*;
+use crate::terminal::termios::*;
 
 #[test]
 fn defaults_match_the_c_library() {

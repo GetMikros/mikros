@@ -5,13 +5,13 @@
 //! connection's client identity, and the process manager says which
 //! group and session they are in now.
 
-use crate::Service;
-use crate::tty::{Event, Tty};
+use crate::service::Service;
+use crate::service::tty::{Event, Tty};
+use crate::terminal::discipline::Signal;
+use crate::terminal::termios::TOSTOP;
 use alloc::rc::Rc;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
-use mikros_tty::discipline::Signal;
-use mikros_tty::termios::TOSTOP;
 
 const SIGHUP: u32 = 1;
 const SIGINT: u32 = 2;
