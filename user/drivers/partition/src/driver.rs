@@ -15,17 +15,11 @@
 //! disk, on which they go again (MIKSPEC-0044.R19). `ResetChild` fails
 //! with `NOT_SUPPORTED`. The driver never writes the table.
 
-#![no_std]
-#![no_main]
-
-extern crate alloc;
-
-mod link;
-mod partition;
-mod service;
-mod table;
-mod writers;
-
+use crate::gpt::{guid_string, mbr};
+use crate::link::Link;
+use crate::partition::{Access, Partition};
+use crate::table::{Layout, Table};
+use crate::writers::Writers;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -34,8 +28,6 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
-use link::Link;
-use mikros_gpt::{guid_string, mbr};
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -48,9 +40,6 @@ use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::Provider;
 use mikros_rt::interfaces::mikros::storage::{BlockAsyncClient, BlockFlags, BlockInfo};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
-use partition::{Access, Partition};
-use table::{Layout, Table};
-use writers::Writers;
 
 mikros_rt::raw_main!(main);
 
@@ -86,7 +75,7 @@ struct Slot {
 const NO_AUTOMOUNT: u64 = 1 << 63;
 
 impl Slot {
-    fn gpt(entry: &mikros_gpt::Partition) -> Slot {
+    fn gpt(entry: &crate::gpt::Partition) -> Slot {
         Slot {
             number: entry.index,
             type_id: Some(format!("gpt:{}", guid_string(&entry.type_guid))),
@@ -281,7 +270,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                         };
                         let _ = responder.reply(s, Ok(DriverConnectChildResponse {}));
                         let (bus, access) = (request.bus, Access::Bus);
-                        partition::serve(
+                        crate::partition::serve(
                             disk,
                             partition,
                             bus,
@@ -317,7 +306,7 @@ async fn start(
     let block = BlockAsyncClient::new(ClientEnd::new(bus), reactor.clone());
     let info = block.get_info().await.map_err(|_| Status::PeerClosed)?.info;
     let name = &request.device.name;
-    let mut slots: Vec<Slot> = match table::layout(&block, &info, process).await {
+    let mut slots: Vec<Slot> = match crate::table::layout(&block, &info, process).await {
         Layout::Gpt(table, partitions) => {
             let count = partitions.len();
             match table {
@@ -362,7 +351,7 @@ async fn start(
     let block_size = u64::from(info.block_size);
     for slot in slots.iter_mut().filter(|s| s.fs.is_none()) {
         let bytes = (slot.last_lba - slot.first_lba + 1).saturating_mul(block_size);
-        let found = table::find(&block, &info, process, slot.first_lba, bytes).await;
+        let found = crate::table::find(&block, &info, process, slot.first_lba, bytes).await;
         slot.fs = found.map(|f| f.id);
     }
     let partitions = slots
@@ -374,7 +363,7 @@ async fn start(
                     block_count: slot.last_lba - slot.first_lba + 1,
                     flags: BlockFlags(info.flags.0 & FLAGS.0),
                     serial: slot.partition_guid.clone(),
-                    ..partition::copy(&info)
+                    ..crate::partition::copy(&info)
                 },
             };
             (slot, Rc::new(partition))
@@ -421,7 +410,7 @@ async fn add_partitions(
             continue;
         };
         if let Ok(Ok(_)) = manager.publish_service(SERVICE_CLASS.into(), client).await {
-            spawner.spawn(service::serve_provider(
+            spawner.spawn(crate::service::serve_provider(
                 disk.link.clone(),
                 partition.clone(),
                 server,

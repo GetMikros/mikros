@@ -2,9 +2,9 @@
 //! partition table, or else its master boot record, or else a file
 //! system on the whole disk.
 
+use crate::gpt::probe::{self, Found};
+use crate::gpt::{Header, Partition, mbr};
 use alloc::vec::Vec;
-use mikros_gpt::probe::{self, Found};
-use mikros_gpt::{Header, Partition, mbr};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::storage::{BlockAsyncClient, BlockInfo};
 use mikros_rt::sys;
@@ -229,7 +229,7 @@ async fn read_one(
     let header: Header = {
         let buffer = Mapped::new(disk, process, u64::from(size)).await.ok()?;
         let block = buffer.read(lba, u64::from(size), size, max).await.ok()?;
-        mikros_gpt::header(block, lba)?
+        crate::gpt::header(block, lba)?
     };
     let bytes = header.entries_size();
     let blocks = bytes.div_ceil(u64::from(size));

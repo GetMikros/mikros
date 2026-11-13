@@ -5,15 +5,20 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
-[[bin]]
-name = "partition"
-path = "src/driver.rs"
-
 [dependencies]
-mikros-gpt = { path = "../../lib/gpt" }
+mikros-fat = { path = "../../lib/fat" }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt" }
+
+[dev-dependencies]
+fatfs = "0.3.6"
 
 [package.metadata.mikros]
 kind = "driver"
 image = "boot"
 runtime = "rt"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

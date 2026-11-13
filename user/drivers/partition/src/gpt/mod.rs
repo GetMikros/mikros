@@ -4,10 +4,6 @@
 //! records (`mbr`), and finding the file system a partition holds
 //! (`probe`).
 
-#![no_std]
-
-extern crate alloc;
-
 pub mod mbr;
 pub mod probe;
 
