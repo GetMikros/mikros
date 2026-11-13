@@ -151,12 +151,12 @@ impl Service {
         let identity = |koid| {
             identities
                 .get(&koid)
-                .map(|(user, app_id)| mikros_snapshot::Identity {
+                .map(|(user, app_id)| crate::snapshot::Identity {
                     user: *user,
                     app_id: app_id.clone(),
                 })
         };
-        Ok(mikros_snapshot::render(text, &identity, TEXT_MAX))
+        Ok(crate::snapshot::render(text, &identity, TEXT_MAX))
     }
 
     /// The user and app ID of each process the process manager knows, by

@@ -3,10 +3,6 @@
 //! for people: one table per section, each with a header row, and the
 //! user and app ID of each process from the process manager.
 
-#![no_std]
-
-extern crate alloc;
-
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
