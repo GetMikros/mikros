@@ -30,13 +30,25 @@ const SAME_RIGHTS: u32 = 1 << 31;
 
 pub fn main() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let options = match report::options(&args) {
-        Ok(options) => options,
+    let poweroff = args.iter().any(|a| a == "--poweroff");
+    let status = match report::options(&args) {
+        Ok(options) => run_tests(&options.names),
         Err(e) => {
             eprintln!("selftest: {e}");
-            return 1;
+            1
         }
     };
+    // An automated run ends with the machine off, whatever happened.
+    if poweroff && let Err(e) = power_off() {
+        eprintln!("selftest: powering off: {e}");
+        return 1;
+    }
+    status
+}
+
+/// Runs the tests `names`, every test when there are none, and returns
+/// selftest's exit status.
+fn run_tests(names: &[String]) -> i32 {
     let available = match tests() {
         Ok(available) => available,
         Err(e) => {
@@ -44,7 +56,7 @@ pub fn main() -> i32 {
             return 1;
         }
     };
-    let chosen = match report::selected(&available, &options.names) {
+    let chosen = match report::selected(&available, names) {
         Ok(chosen) => chosen,
         Err(e) => {
             eprintln!("selftest: {e}");
@@ -58,14 +70,7 @@ pub fn main() -> i32 {
         endings.push(ending);
     }
     say(&report::summary(&endings));
-    let status = report::status(&endings);
-    if options.poweroff
-        && let Err(e) = power_off()
-    {
-        eprintln!("selftest: powering off: {e}");
-        return 1;
-    }
-    status
+    report::status(&endings)
 }
 
 /// Writes `line` to standard output at once.
@@ -75,10 +80,16 @@ fn say(line: &str) {
     let _ = out.flush();
 }
 
-/// The names of the programs in `/usr/bin/tests/`.
+/// The names of the programs in `/usr/bin/tests/`, none when there is no
+/// such directory.
 fn tests() -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();
-    for entry in std::fs::read_dir(TESTS)? {
+    let entries = match std::fs::read_dir(TESTS) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(names),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
         names.push(entry?.file_name().to_string_lossy().into_owned());
     }
     Ok(names)
