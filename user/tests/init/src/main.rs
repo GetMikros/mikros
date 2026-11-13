@@ -4181,12 +4181,11 @@ mod manager {
     /// the temporary file system, the union server and their probes, with
     /// their manifests, the service manager starts the temporary file
     /// system and the union server, and then the probes, which hold the
-    /// permissions to connect to them. The tmpfs probe drives files,
-    /// directories, links, names, memory objects, locks, watches, sockets
-    /// and the budgets of directories, with a budget under the one that
-    /// init gives, and the union probe views of two layers on the
-    /// temporary file system. Each exits with 0 once every check passed,
-    /// as the service manager logs.
+    /// permissions to connect to them. The tmpfs probe drives the budgets
+    /// of directories, with a budget under the one that init gives, and
+    /// the union probe views of two layers on the temporary file system;
+    /// the system test services-tmpfs checks the rest of tmpfs. Each
+    /// exits with 0 once every check passed, as the service manager logs.
     pub fn tmpfs_serves_its_clients(s: &Startup) -> Result {
         const PASSED: [&[u8]; 2] = [
             b"service tmpfs-probe exited with code 0",
