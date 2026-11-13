@@ -13,14 +13,14 @@ use mikros_rt::{Startup, log};
 use mikros_test::{
     ACCESS_DENIED, BAD_HANDLE, BAD_STATE, FAILED, HANDLED, INVALID_ARGS, NOT_FOUND, OUT_OF_RANGE,
     PAGE_FAULT, PAGE_SIZE, PASSED, PERM_READ, PERM_WRITE, READABLE, REPORT_SIZE, Result, SIGNALED,
-    SLEEP_RESULT, SLOWER, SPINNER_LOOPS, SPINNER_LOOPS_HANDLED, STARTED, SUSPENDED, TERMINATED,
-    TIMED_OUT, USER0, USR1, call, catch_usr1, check, close, contains, create_memory, elf, ensure,
-    exit_qemu, futex_wake, general_registers, in_time, info, koid, map, map_read_only, mem_read_at,
+    SLOWER, SPINNER_LOOPS, SPINNER_LOOPS_HANDLED, STARTED, SUSPENDED, TERMINATED, TIMED_OUT, USER0,
+    USR1, call, catch_usr1, check, close, contains, create_memory, elf, ensure, exit_qemu,
+    futex_wake, general_registers, in_time, info, koid, map, map_read_only, mem_read_at,
     mem_write_at, now, open_exit_port, paged_object, protect, read_memory, read_message,
     read_sizes, record_report, report_bytes, report_id, restore_usr1, right, set_size, signal,
-    signal_frame_copy, signal_restorer, signal_sleeper, sleep_ms, soon, spawn, spawn2, spin,
-    spin_until_handled, take_packet, thread_list, thread_state, u32_at, u64_at, ustar, wait,
-    wait_for_state, wait_forever, wait_until_blocked, within, write_memory,
+    signal_restorer, sleep_ms, soon, spawn, spawn2, spin, spin_until_handled, take_packet,
+    thread_list, thread_state, u32_at, u64_at, ustar, wait, wait_for_state, wait_forever,
+    wait_until_blocked, within, write_memory,
 };
 
 mikros_rt::main!(main);
@@ -2989,8 +2989,6 @@ fn stack_guard_page_kept(s: &Startup) -> Result {
     check("closing", unsafe { sys::handle_close(mem) })
 }
 
-const INTERRUPTED: i64 = -27;
-
 /// `signal_return` refuses a context with a reserved byte set, which the
 /// debuggee's handler sets before it returns past the instruction that
 /// raised the signal, and the process ends as `SEGV` ends it.
@@ -3239,60 +3237,6 @@ fn futexes_across_processors(s: &Startup) -> Result {
     check("allowing every processor", set(s.thread, &[0xFF; 32]))
 }
 
-/// A temporary mask that `signal_set_wait_mask` gives applies to the next
-/// call when it is a wait: a pending signal it does not block ends
-/// `thread_sleep` at once with `ERR_INTERRUPTED`, even though the action
-/// has `RESTART`, the handler runs, and the thread's own mask, which
-/// blocks the signal, is back afterwards. Another call in between drops
-/// the temporary mask.
-fn temporary_mask_ends_a_wait(s: &Startup) -> Result {
-    const RESTART: u32 = 1 << 0;
-    let usr1 = 1u64 << (USR1 - 1);
-    let mut own = 0;
-    // SAFETY: the pointer is valid for the call.
-    check("blocking USR1", unsafe {
-        sys::signal_set_mask(0, usr1, &mut own)
-    })?;
-    let old = catch_usr1(RESTART)?;
-    // SAFETY: the call takes no pointers.
-    check("making USR1 pending", unsafe {
-        sys::thread_signal(s.thread, USR1, 1)
-    })?;
-    let soon = now() + 2_000_000;
-    // SAFETY: the calls take no pointers.
-    let status = unsafe {
-        sys::signal_set_wait_mask(0);
-        now();
-        sys::thread_sleep(soon)
-    };
-    ensure(
-        "dropping the temporary mask for another call",
-        status == 0 && HANDLED.load(Ordering::Acquire) == 0,
-    )?;
-    let deadline = in_time();
-    // SAFETY: the calls take no pointers.
-    let status = unsafe {
-        sys::signal_set_wait_mask(0);
-        sys::thread_sleep(deadline)
-    };
-    ensure(
-        "ending the sleep with ERR_INTERRUPTED",
-        status == INTERRUPTED,
-    )?;
-    ensure("running the handler", HANDLED.load(Ordering::Acquire) == 1)?;
-    let mut mask = 0;
-    // SAFETY: the pointer is valid for the call.
-    check("reading the mask", unsafe {
-        sys::signal_set_mask(0, 0, &mut mask)
-    })?;
-    ensure("restoring the thread's mask", mask & usr1 != 0)?;
-    restore_usr1(&old)?;
-    // SAFETY: the old mask may be null.
-    check("restoring the mask", unsafe {
-        sys::signal_set_mask(2, own, core::ptr::null_mut())
-    })
-}
-
 /// The turn of `clock_partner` and `clock_agrees_across_processors`, the
 /// clock value the last one read, and how often a reading lay before the
 /// other processor's last one.
@@ -3415,139 +3359,6 @@ fn threads_run_on_every_processor(s: &Startup) -> Result {
     )
 }
 
-/// What the waits of `waiter_with_index` returned, by index.
-static WAIT_STATUSES: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
-
-/// Waits for `USER0` on `event`, records the status at `index` and exits.
-extern "sysv64" fn waiter_with_index(event: u64, index: u64) -> ! {
-    let (status, _) = wait(event as Handle, USER0, in_time());
-    WAIT_STATUSES[index as usize].store(status as u64, Ordering::Release);
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-/// A signal sent to the process while two of its threads wait runs its
-/// handler on one of them, whose wait ends with `ERR_INTERRUPTED`; the
-/// other thread goes on waiting until the event is signalled.
-fn process_signal_interrupts_one_wait(s: &Startup) -> Result {
-    let usr1 = 1u64 << (USR1 - 1);
-    let mut mask = 0;
-    // SAFETY: the pointer is valid for the call.
-    check("blocking USR1 here", unsafe {
-        sys::signal_set_mask(0, usr1, &mut mask)
-    })?;
-    let old = catch_usr1(0)?;
-    let mut event = 0;
-    // SAFETY: the pointer is valid for the call.
-    check("creating an event", unsafe {
-        sys::event_create(0, &mut event)
-    })?;
-    let mut threads = [0; 2];
-    for (index, (thread, status)) in threads.iter_mut().zip(&WAIT_STATUSES).enumerate() {
-        status.store(u64::MAX, Ordering::Release);
-        *thread = spawn2(s, waiter_with_index, u64::from(event), index as u64)?;
-    }
-    for &thread in &threads {
-        wait_until_blocked(thread)?;
-    }
-    // SAFETY: the call takes no pointers.
-    check("signalling the process", unsafe {
-        sys::process_signal(s.process, USR1, 7)
-    })?;
-    let deadline = in_time();
-    while HANDLED.load(Ordering::Acquire) == 0 {
-        ensure("running the handler", now() < deadline)?;
-        sleep_ms(1);
-    }
-    sleep_ms(20);
-    let statuses = || {
-        WAIT_STATUSES
-            .each_ref()
-            .map(|s| s.load(Ordering::Acquire) as i64)
-    };
-    let ended = statuses();
-    ensure(
-        "ending one wait",
-        ended.contains(&INTERRUPTED) && ended.contains(&(u64::MAX as i64)),
-    )?;
-    signal(event, 0, USER0)?;
-    for &thread in &threads {
-        ensure(
-            "ending the waiter",
-            wait(thread, TERMINATED, in_time()).0 == 0,
-        )?;
-    }
-    let ended = statuses();
-    ensure(
-        "completing the other wait",
-        ended.contains(&INTERRUPTED) && ended.contains(&0),
-    )?;
-    ensure(
-        "running the handler once",
-        HANDLED.load(Ordering::Acquire) == 1,
-    )?;
-    restore_usr1(&old)?;
-    // SAFETY: the pointer may be null.
-    check("restoring the mask", unsafe {
-        sys::signal_set_mask(2, mask, core::ptr::null_mut())
-    })
-}
-
-/// Signals a thread sleeping for 100 ms with `USR1` handled with `flags`,
-/// and returns the status of its sleep, its deadline and when it ended.
-fn signal_sleeping_thread(s: &Startup, flags: u32) -> Result<(i64, i64, i64)> {
-    let old = catch_usr1(flags)?;
-    let deadline = now() + 100_000_000;
-    let thread = spawn2(s, signal_sleeper, deadline as u64, 0)?;
-    wait_until_blocked(thread)?;
-    // SAFETY: the call takes no pointers.
-    check("signalling the sleeper", unsafe {
-        sys::thread_signal(thread, USR1, 1)
-    })?;
-    ensure(
-        "ending the sleeper",
-        wait(thread, TERMINATED, in_time()).0 == 0,
-    )?;
-    ensure(
-        "running the handler once",
-        HANDLED.load(Ordering::Acquire) == 1,
-    )?;
-    restore_usr1(&old)?;
-    let [status, ended] = SLEEP_RESULT
-        .each_ref()
-        .map(|a| a.load(Ordering::Acquire) as i64);
-    Ok((status, deadline, ended))
-}
-
-/// A handler for a thread sleeping in `thread_sleep` ends the sleep with
-/// `ERR_INTERRUPTED`, unless its action has `RESTART`: then the frame
-/// resumes the thread at its `SYSCALL` instruction with the arguments in
-/// place, and the sleep goes on until its deadline.
-fn signal_interrupts_and_restarts(s: &Startup) -> Result {
-    const RESTART: u32 = 1 << 0;
-    let (status, deadline, ended) = signal_sleeping_thread(s, 0)?;
-    ensure(
-        "interrupting the sleep",
-        status == INTERRUPTED && ended < deadline,
-    )?;
-    let (status, deadline, ended) = signal_sleeping_thread(s, RESTART)?;
-    ensure("restarting the sleep", status == 0 && ended >= deadline)?;
-    let frame = signal_frame_copy();
-    let (rdi, rip) = (frame[9 + 5], frame[9 + 16]);
-    ensure(
-        "keeping the deadline as the argument",
-        rdi == deadline as u64,
-    )?;
-    // SAFETY: the instruction lies in this program's code, which is
-    // mapped readable.
-    let instruction = unsafe { (rip as *const [u8; 2]).read_volatile() };
-    ensure(
-        "resuming at the SYSCALL instruction",
-        instruction == [0x0F, 0x05],
-    )
-}
-
 const NOT_SUPPORTED: i64 = -2;
 
 /// The handles of the startup message refer to objects of the right types
@@ -3596,61 +3407,6 @@ fn closed_exception_channel(s: &Startup) -> Result {
     // SAFETY: the call takes no pointers.
     check("closing the channel", unsafe { sys::handle_close(channel) })?;
     ensure("ending with exit code -2", exit_code(process)? == -2)
-}
-
-/// The status of the call `interrupted_caller` made.
-static INTERRUPTED_STATUS: AtomicU64 = AtomicU64::new(0);
-
-/// Calls through `channel` with no deadline, records the status and exits.
-extern "sysv64" fn interrupted_caller(channel: u64, _: u64) -> ! {
-    let (status, ..) = call(channel as Handle, b"wait", None, 64, i64::MAX);
-    INTERRUPTED_STATUS.store(status as u64, Ordering::Release);
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
-}
-
-/// A handler without `RESTART` ends a `channel_call` waiting for its reply
-/// with `ERR_INTERRUPTED`, and a reply that comes later is discarded.
-fn call_interrupted_by_signal(s: &Startup) -> Result {
-    let old = catch_usr1(0)?;
-    let (mut a, mut b) = (0, 0);
-    // SAFETY: the out pointers are valid for the call.
-    check("creating a channel", unsafe {
-        sys::channel_create(0, &mut a, &mut b)
-    })?;
-    let caller = spawn2(s, interrupted_caller, u64::from(a), 0)?;
-    let request = read_message(b, 2000)?;
-    wait_until_blocked(caller)?;
-    // SAFETY: the call takes no pointers.
-    check("signalling the caller", unsafe {
-        sys::thread_signal(caller, USR1, 0)
-    })?;
-    ensure(
-        "ending the caller",
-        wait(caller, TERMINATED, in_time()).0 == 0,
-    )?;
-    ensure(
-        "interrupting the call",
-        INTERRUPTED_STATUS.load(Ordering::Acquire) as i64 == INTERRUPTED,
-    )?;
-    ensure("running the handler", HANDLED.load(Ordering::Acquire) == 1)?;
-    let mut reply = *b"....late";
-    reply[..4].copy_from_slice(&request.bytes[..4]);
-    // SAFETY: the pointer and length describe `reply`.
-    check("replying late", unsafe {
-        sys::channel_write(b, reply.as_ptr(), 8, core::ptr::null(), 0)
-    })?;
-    ensure(
-        "discarding the late reply",
-        read_sizes(a, 16, 2).0 == SHOULD_WAIT,
-    )?;
-    restore_usr1(&old)?;
-    for h in [a, b] {
-        // SAFETY: the call takes no pointers.
-        check("closing", unsafe { sys::handle_close(h) })?;
-    }
-    Ok(())
 }
 
 /// The debugger calls refuse a range that a physical memory object backs,
@@ -6814,7 +6570,7 @@ fn clock_page_rights(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 91] = [
+const TESTS: [(&str, Test); 87] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6836,11 +6592,6 @@ const TESTS: [(&str, Test); 91] = [
         "threads_run_on_every_processor",
         threads_run_on_every_processor,
     ),
-    (
-        "process_signal_interrupts_one_wait",
-        process_signal_interrupts_one_wait,
-    ),
-    ("temporary_mask_ends_a_wait", temporary_mask_ends_a_wait),
     ("stop_continue_and_kill", stop_continue_and_kill),
     ("stopped_wait_goes_on", stopped_wait_goes_on),
     ("loader_runs_pie", loader_runs_pie),
@@ -6972,13 +6723,8 @@ const TESTS: [(&str, Test); 91] = [
     ),
     ("memory_charged_to_a_budget", memory_charged_to_a_budget),
     ("signal_frame_reserved_bytes", signal_frame_reserved_bytes),
-    (
-        "signal_interrupts_and_restarts",
-        signal_interrupts_and_restarts,
-    ),
     ("startup_handle_rights", startup_handle_rights),
     ("closed_exception_channel", closed_exception_channel),
-    ("call_interrupted_by_signal", call_interrupted_by_signal),
     ("physical_memory_not_debugged", physical_memory_not_debugged),
     ("processes_and_channels", processes_and_channels),
     ("init_segments_as_loaded", init_segments_as_loaded),

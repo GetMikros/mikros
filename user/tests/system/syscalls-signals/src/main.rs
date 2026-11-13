@@ -1,6 +1,7 @@
 //! The kernel's signals, as a system test: the frame a handler gets,
-//! alternate signal stacks, resetting a handler, and the signals queued
-//! for a thread that ended.
+//! alternate signal stacks, resetting a handler, the signals queued for
+//! a thread that ended, and the sleeps, calls and waits that a signal
+//! interrupts.
 
 #![no_std]
 #![no_main]
@@ -28,6 +29,16 @@ fn main(m: &Managed) -> i64 {
                 "queued_signals_of_ended_thread",
                 queued_signals_of_ended_thread,
             ),
+            (
+                "signal_interrupts_and_restarts",
+                signal_interrupts_and_restarts,
+            ),
+            ("call_interrupted_by_signal", call_interrupted_by_signal),
+            (
+                "process_signal_interrupts_one_wait",
+                process_signal_interrupts_one_wait,
+            ),
+            ("temporary_mask_ends_a_wait", temporary_mask_ends_a_wait),
         ],
     )
 }
@@ -268,4 +279,248 @@ fn reset_handler_discards_ignored(s: &Own) -> Result {
     check("restoring the mask", unsafe {
         sys::signal_set_mask(2, mask, core::ptr::null_mut())
     })
+}
+
+const INTERRUPTED: i64 = -27;
+
+/// A temporary mask that `signal_set_wait_mask` gives applies to the next
+/// call when it is a wait: a pending signal it does not block ends
+/// `thread_sleep` at once with `ERR_INTERRUPTED`, even though the action
+/// has `RESTART`, the handler runs, and the thread's own mask, which
+/// blocks the signal, is back afterwards. Another call in between drops
+/// the temporary mask.
+fn temporary_mask_ends_a_wait(s: &Own) -> Result {
+    const RESTART: u32 = 1 << 0;
+    let usr1 = 1u64 << (USR1 - 1);
+    let mut own = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking USR1", unsafe {
+        sys::signal_set_mask(0, usr1, &mut own)
+    })?;
+    let old = catch_usr1(RESTART)?;
+    // SAFETY: the call takes no pointers.
+    check("making USR1 pending", unsafe {
+        sys::thread_signal(s.thread, USR1, 1)
+    })?;
+    let soon = now() + 2_000_000;
+    // SAFETY: the calls take no pointers.
+    let status = unsafe {
+        sys::signal_set_wait_mask(0);
+        now();
+        sys::thread_sleep(soon)
+    };
+    ensure(
+        "dropping the temporary mask for another call",
+        status == 0 && HANDLED.load(Ordering::Acquire) == 0,
+    )?;
+    let deadline = in_time();
+    // SAFETY: the calls take no pointers.
+    let status = unsafe {
+        sys::signal_set_wait_mask(0);
+        sys::thread_sleep(deadline)
+    };
+    ensure(
+        "ending the sleep with ERR_INTERRUPTED",
+        status == INTERRUPTED,
+    )?;
+    ensure("running the handler", HANDLED.load(Ordering::Acquire) == 1)?;
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("reading the mask", unsafe {
+        sys::signal_set_mask(0, 0, &mut mask)
+    })?;
+    ensure("restoring the thread's mask", mask & usr1 != 0)?;
+    restore_usr1(&old)?;
+    // SAFETY: the old mask may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, own, core::ptr::null_mut())
+    })
+}
+
+/// What the waits of `waiter_with_index` returned, by index.
+static WAIT_STATUSES: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
+
+/// Waits for `USER0` on `event`, records the status at `index` and exits.
+extern "sysv64" fn waiter_with_index(event: u64, index: u64) -> ! {
+    let (status, _) = wait(event as Handle, USER0, in_time());
+    WAIT_STATUSES[index as usize].store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A signal sent to the process while two of its threads wait runs its
+/// handler on one of them, whose wait ends with `ERR_INTERRUPTED`; the
+/// other thread goes on waiting until the event is signalled.
+fn process_signal_interrupts_one_wait(s: &Own) -> Result {
+    let usr1 = 1u64 << (USR1 - 1);
+    let mut mask = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("blocking USR1 here", unsafe {
+        sys::signal_set_mask(0, usr1, &mut mask)
+    })?;
+    let old = catch_usr1(0)?;
+    let mut event = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating an event", unsafe {
+        sys::event_create(0, &mut event)
+    })?;
+    let mut threads = [0; 2];
+    for (index, (thread, status)) in threads.iter_mut().zip(&WAIT_STATUSES).enumerate() {
+        status.store(u64::MAX, Ordering::Release);
+        *thread = spawn2(s, waiter_with_index, u64::from(event), index as u64)?;
+    }
+    for &thread in &threads {
+        wait_until_blocked(thread)?;
+    }
+    // SAFETY: the call takes no pointers.
+    check("signalling the process", unsafe {
+        sys::process_signal(s.process, USR1, 7)
+    })?;
+    let deadline = in_time();
+    while HANDLED.load(Ordering::Acquire) == 0 {
+        ensure("running the handler", now() < deadline)?;
+        sleep_ms(1);
+    }
+    sleep_ms(20);
+    let statuses = || {
+        WAIT_STATUSES
+            .each_ref()
+            .map(|s| s.load(Ordering::Acquire) as i64)
+    };
+    let ended = statuses();
+    ensure(
+        "ending one wait",
+        ended.contains(&INTERRUPTED) && ended.contains(&(u64::MAX as i64)),
+    )?;
+    signal(event, 0, USER0)?;
+    for &thread in &threads {
+        ensure(
+            "ending the waiter",
+            wait(thread, TERMINATED, in_time()).0 == 0,
+        )?;
+    }
+    let ended = statuses();
+    ensure(
+        "completing the other wait",
+        ended.contains(&INTERRUPTED) && ended.contains(&0),
+    )?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    restore_usr1(&old)?;
+    // SAFETY: the pointer may be null.
+    check("restoring the mask", unsafe {
+        sys::signal_set_mask(2, mask, core::ptr::null_mut())
+    })
+}
+
+/// Signals a thread sleeping for 100 ms with `USR1` handled with `flags`,
+/// and returns the status of its sleep, its deadline and when it ended.
+fn signal_sleeping_thread(s: &Own, flags: u32) -> Result<(i64, i64, i64)> {
+    let old = catch_usr1(flags)?;
+    let deadline = now() + 100_000_000;
+    let thread = spawn2(s, signal_sleeper, deadline as u64, 0)?;
+    wait_until_blocked(thread)?;
+    // SAFETY: the call takes no pointers.
+    check("signalling the sleeper", unsafe {
+        sys::thread_signal(thread, USR1, 1)
+    })?;
+    ensure(
+        "ending the sleeper",
+        wait(thread, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "running the handler once",
+        HANDLED.load(Ordering::Acquire) == 1,
+    )?;
+    restore_usr1(&old)?;
+    let [status, ended] = SLEEP_RESULT
+        .each_ref()
+        .map(|a| a.load(Ordering::Acquire) as i64);
+    Ok((status, deadline, ended))
+}
+
+/// A handler for a thread sleeping in `thread_sleep` ends the sleep with
+/// `ERR_INTERRUPTED`, unless its action has `RESTART`: then the frame
+/// resumes the thread at its `SYSCALL` instruction with the arguments in
+/// place, and the sleep goes on until its deadline.
+fn signal_interrupts_and_restarts(s: &Own) -> Result {
+    const RESTART: u32 = 1 << 0;
+    let (status, deadline, ended) = signal_sleeping_thread(s, 0)?;
+    ensure(
+        "interrupting the sleep",
+        status == INTERRUPTED && ended < deadline,
+    )?;
+    let (status, deadline, ended) = signal_sleeping_thread(s, RESTART)?;
+    ensure("restarting the sleep", status == 0 && ended >= deadline)?;
+    let frame = signal_frame_copy();
+    let (rdi, rip) = (frame[9 + 5], frame[9 + 16]);
+    ensure(
+        "keeping the deadline as the argument",
+        rdi == deadline as u64,
+    )?;
+    // SAFETY: the instruction lies in this program's code, which is
+    // mapped readable.
+    let instruction = unsafe { (rip as *const [u8; 2]).read_volatile() };
+    ensure(
+        "resuming at the SYSCALL instruction",
+        instruction == [0x0F, 0x05],
+    )
+}
+
+/// The status of the call `interrupted_caller` made.
+static INTERRUPTED_STATUS: AtomicU64 = AtomicU64::new(0);
+
+/// Calls through `channel` with no deadline, records the status and exits.
+extern "sysv64" fn interrupted_caller(channel: u64, _: u64) -> ! {
+    let (status, ..) = call(channel as Handle, b"wait", None, 64, i64::MAX);
+    INTERRUPTED_STATUS.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// A handler without `RESTART` ends a `channel_call` waiting for its reply
+/// with `ERR_INTERRUPTED`, and a reply that comes later is discarded.
+fn call_interrupted_by_signal(s: &Own) -> Result {
+    let old = catch_usr1(0)?;
+    let (mut a, mut b) = (0, 0);
+    // SAFETY: the out pointers are valid for the call.
+    check("creating a channel", unsafe {
+        sys::channel_create(0, &mut a, &mut b)
+    })?;
+    let caller = spawn2(s, interrupted_caller, u64::from(a), 0)?;
+    let request = read_message(b, 2000)?;
+    wait_until_blocked(caller)?;
+    // SAFETY: the call takes no pointers.
+    check("signalling the caller", unsafe {
+        sys::thread_signal(caller, USR1, 0)
+    })?;
+    ensure(
+        "ending the caller",
+        wait(caller, TERMINATED, in_time()).0 == 0,
+    )?;
+    ensure(
+        "interrupting the call",
+        INTERRUPTED_STATUS.load(Ordering::Acquire) as i64 == INTERRUPTED,
+    )?;
+    ensure("running the handler", HANDLED.load(Ordering::Acquire) == 1)?;
+    let mut reply = *b"....late";
+    reply[..4].copy_from_slice(&request.bytes[..4]);
+    // SAFETY: the pointer and length describe `reply`.
+    check("replying late", unsafe {
+        sys::channel_write(b, reply.as_ptr(), 8, core::ptr::null(), 0)
+    })?;
+    ensure(
+        "discarding the late reply",
+        read_sizes(a, 16, 2).0 == SHOULD_WAIT,
+    )?;
+    restore_usr1(&old)?;
+    for h in [a, b] {
+        // SAFETY: the call takes no pointers.
+        check("closing", unsafe { sys::handle_close(h) })?;
+    }
+    Ok(())
 }
