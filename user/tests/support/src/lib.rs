@@ -16,12 +16,14 @@ mod harness;
 mod helpers;
 mod pagers;
 mod reports;
+mod signals;
 pub use context::{Context, Own};
 pub use harness::{Check, run};
 pub use helpers::*;
 pub use mikros_ustar as ustar;
 pub use pagers::*;
 pub use reports::*;
+pub use signals::*;
 
 /// The `isa-debug-exit` port the test boot image is run with.
 pub const DEBUG_EXIT_PORT: u16 = 0xF4;
