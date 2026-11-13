@@ -5,6 +5,10 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+[[bin]]
+name = "ps2"
+path = "src/driver.rs"
+
 [dependencies]
 mikros-evdev = { path = "../../lib/evdev" }
 mikros-inputdev = { path = "../../lib/inputdev" }
