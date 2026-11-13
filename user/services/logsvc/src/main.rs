@@ -9,20 +9,8 @@
 extern crate alloc;
 
 #[cfg(target_os = "mikros")]
-mod files;
-#[cfg(target_os = "mikros")]
-mod kernel;
-#[cfg(target_os = "mikros")]
-mod log;
-#[cfg(target_os = "mikros")]
-mod reader;
-#[cfg(target_os = "mikros")]
 mod service;
-#[cfg(target_os = "mikros")]
-mod sources;
 mod store;
-#[cfg(target_os = "mikros")]
-mod writer;
 
 #[cfg(not(target_os = "mikros"))]
 fn main() {}

@@ -9,8 +9,6 @@
 #[cfg(target_os = "mikros")]
 extern crate alloc;
 
-#[cfg(target_os = "mikros")]
-mod clock;
 mod cmos;
 #[cfg(target_os = "mikros")]
 mod driver;

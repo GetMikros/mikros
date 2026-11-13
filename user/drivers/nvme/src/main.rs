@@ -9,15 +9,7 @@ extern crate alloc;
 
 mod command;
 #[cfg(target_os = "mikros")]
-mod controller;
-#[cfg(target_os = "mikros")]
 mod driver;
-#[cfg(target_os = "mikros")]
-mod namespace;
-#[cfg(target_os = "mikros")]
-mod queue;
-#[cfg(target_os = "mikros")]
-mod regs;
 
 #[cfg(not(target_os = "mikros"))]
 fn main() {}

@@ -8,18 +8,8 @@
 extern crate alloc;
 
 #[cfg(target_os = "mikros")]
-mod bus;
-#[cfg(target_os = "mikros")]
-mod device;
-#[cfg(target_os = "mikros")]
 mod driver;
-#[cfg(target_os = "mikros")]
-mod ecam;
-#[cfg(target_os = "mikros")]
-mod interrupts;
 mod pci;
-#[cfg(target_os = "mikros")]
-mod reset;
 
 #[cfg(not(target_os = "mikros"))]
 fn main() {}

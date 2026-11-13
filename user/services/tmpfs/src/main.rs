@@ -7,19 +7,9 @@
 
 extern crate alloc;
 
-#[cfg(target_os = "mikros")]
-mod budget;
-#[cfg(target_os = "mikros")]
-mod file;
-#[cfg(target_os = "mikros")]
-mod fs;
 mod memfs;
 #[cfg(target_os = "mikros")]
-mod node;
-#[cfg(target_os = "mikros")]
 mod service;
-#[cfg(target_os = "mikros")]
-mod watch;
 
 #[cfg(not(target_os = "mikros"))]
 fn main() {}

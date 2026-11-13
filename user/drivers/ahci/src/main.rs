@@ -9,13 +9,7 @@ extern crate alloc;
 
 mod ata;
 #[cfg(target_os = "mikros")]
-mod disk;
-#[cfg(target_os = "mikros")]
 mod driver;
-#[cfg(target_os = "mikros")]
-mod hba;
-#[cfg(target_os = "mikros")]
-mod port;
 
 #[cfg(not(target_os = "mikros"))]
 fn main() {}

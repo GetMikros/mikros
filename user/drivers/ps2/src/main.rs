@@ -10,10 +10,6 @@ extern crate alloc;
 
 #[cfg(target_os = "mikros")]
 mod driver;
-#[cfg(target_os = "mikros")]
-mod hub;
-#[cfg(target_os = "mikros")]
-mod ports;
 mod ps2;
 
 #[cfg(not(target_os = "mikros"))]

@@ -11,8 +11,6 @@ extern crate alloc;
 #[cfg(target_os = "mikros")]
 mod driver;
 mod hid;
-#[cfg(target_os = "mikros")]
-mod usb;
 
 #[cfg(not(target_os = "mikros"))]
 fn main() {}

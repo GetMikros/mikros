@@ -8,8 +8,6 @@
 
 extern crate alloc;
 
-#[cfg(target_os = "mikros")]
-mod broker;
 mod permissions;
 #[cfg(target_os = "mikros")]
 mod service;

@@ -10,16 +10,6 @@ extern crate alloc;
 #[cfg(target_os = "mikros")]
 mod driver;
 mod gpt;
-#[cfg(target_os = "mikros")]
-mod link;
-#[cfg(target_os = "mikros")]
-mod partition;
-#[cfg(target_os = "mikros")]
-mod service;
-#[cfg(target_os = "mikros")]
-mod table;
-#[cfg(target_os = "mikros")]
-mod writers;
 
 #[cfg(not(target_os = "mikros"))]
 fn main() {}
