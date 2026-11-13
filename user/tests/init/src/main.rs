@@ -11,11 +11,15 @@ use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 use mikros_rt::{Startup, log};
 use mikros_test::{
-    BAD_HANDLE, BUFFER_TOO_SMALL, FAILED, INVALID_ARGS, OUT_OF_RANGE, PAGE_SIZE, PASSED, PERM_READ,
-    PERM_WRITE, READABLE, Result, SIGNALED, SLOWER, TERMINATED, TIMED_OUT, USER0, call, check,
-    contains, create_memory, elf, ensure, exit_qemu, futex_wake, in_time, info, map, map_read_only,
-    now, open_exit_port, read_message, read_sizes, signal, sleep_ms, soon, spawn, spawn2,
-    take_packet, u32_at, u64_at, ustar, wait, wait_forever, within,
+    ACCESS_DENIED, BAD_HANDLE, BAD_STATE, BUFFER_TOO_SMALL, FAILED, INVALID_ARGS, NOT_FOUND,
+    OUT_OF_RANGE, PAGE_FAULT, PAGE_SIZE, PAGER, PASSED, PERM_READ, PERM_WRITE, READABLE,
+    REPORT_SIZE, REQUESTS, Result, SIGNALED, SLOWER, STATE_BLOCKED, TERMINATED, TIMED_OUT, USER0,
+    call, check, close, contains, create_memory, elf, ensure, exit_qemu, futex_wake, in_time, info,
+    koid, map, map_read_only, mem_read_at, mem_write_at, now, open_exit_port, paged_object,
+    pager_thread, protect, read_memory, read_message, read_sizes, record_report, report_bytes,
+    report_id, seal, set_size, signal, sleep_ms, soon, spawn, spawn2, take_packet, thread_state,
+    u32_at, u64_at, ustar, wait, wait_for_state, wait_forever, wait_until_blocked, within,
+    write_memory,
 };
 
 mikros_rt::main!(main);
@@ -608,21 +612,6 @@ const PROBE_SECONDS: i64 = 120;
 /// them all, each of which it kills after its own timeout.
 const PORT_TESTS_SECONDS: i64 = 1200;
 
-/// Waits until `thread` is blocked, or fails after `in_time`.
-fn wait_until_blocked(thread: Handle) -> Result {
-    wait_for_state(thread, STATE_BLOCKED)
-}
-
-/// Waits until `thread` is in state `state`, or fails after `in_time`.
-fn wait_for_state(thread: Handle, state: u32) -> Result {
-    let deadline = in_time();
-    while thread_state(thread)? != state {
-        ensure("reaching the thread state", now() < deadline)?;
-        sleep_ms(1);
-    }
-    Ok(())
-}
-
 const SHOULD_WAIT: i64 = -22;
 
 /// Reads the next record of `reader`.
@@ -862,11 +851,6 @@ fn region_charges_reach_the_limit(s: &Startup) -> Result {
     result
 }
 
-fn protect(s: &Startup, perms: u32, addr: u64, len: u64) -> i64 {
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::vm_protect(s.process, perms, addr, len) }
-}
-
 /// Committing, decommitting and shrinking away a range of many pages
 /// reaches every page and frees every frame.
 fn large_memory_operations(s: &Startup) -> Result {
@@ -1055,16 +1039,6 @@ fn memory_operations(s: &Startup) -> Result {
         "staying within the rights",
         protect(s, PERM_READ | PERM_WRITE, ro, PAGE_SIZE) == -13,
     )
-}
-
-fn seal(mem: Handle, seals: u32) -> i64 {
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::mem_seal(mem, seals) }
-}
-
-fn set_size(mem: Handle, size: u64) -> i64 {
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::mem_set_size(mem, size) }
 }
 
 /// Seals stop resizing, every way of writing, and further sealing.
@@ -1632,22 +1606,6 @@ fn resources_report_their_ranges(s: &Startup) -> Result {
     close(dma)
 }
 
-fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
-    // SAFETY: the pointer and length describe `bytes`.
-    check("writing", unsafe {
-        sys::mem_write(mem, offset, bytes.as_ptr(), bytes.len() as u64)
-    })
-}
-
-fn mem_read_at<const N: usize>(mem: Handle, offset: u64) -> Result<[u8; N]> {
-    let mut bytes = [0u8; N];
-    // SAFETY: the pointer and length describe `bytes`.
-    check("reading", unsafe {
-        sys::mem_read(mem, offset, bytes.as_mut_ptr(), N as u64)
-    })?;
-    Ok(bytes)
-}
-
 /// A clone starts with the source range's bytes and is separate from it
 /// afterwards.
 fn clones(_: &Startup) -> Result {
@@ -1702,43 +1660,6 @@ fn clones(_: &Startup) -> Result {
     // SAFETY: the pointer is valid for the call.
     let bad = unsafe { sys::mem_clone(source, 2, 0, 1, &mut clone) };
     ensure("refusing other options", bad == -10)
-}
-
-/// The pager handle of the pager test, and how many page requests its
-/// pager thread answered.
-static PAGER: AtomicU64 = AtomicU64::new(0);
-static REQUESTS: AtomicU64 = AtomicU64::new(0);
-
-/// Answers the page requests on `port` for `mem` until none comes for a
-/// second, supplying pages that start with "page N".
-extern "sysv64" fn pager_thread(port: u64, mem: u64) -> ! {
-    let pager = PAGER.load(Ordering::Acquire) as Handle;
-    loop {
-        let (status, p) = take_packet(port as Handle, now() + 1_000_000_000);
-        if status != 0 || u32_at(&p, 8) != 3 || u32_at(&p, 16) != 1 {
-            break;
-        }
-        REQUESTS.fetch_add(1, Ordering::AcqRel);
-        let offset = u64_at(&p, 24);
-        let Ok(source) = create_memory(PAGE_SIZE) else {
-            break;
-        };
-        let text = [
-            b'p',
-            b'a',
-            b'g',
-            b'e',
-            b' ',
-            // Tests check the label of the first pages only.
-            b'0'.wrapping_add((offset / PAGE_SIZE) as u8),
-        ];
-        let _ = mem_write_at(source, 0, &text);
-        // SAFETY: the call takes no pointers.
-        unsafe { sys::pager_supply(pager, mem as Handle, offset, PAGE_SIZE, source, 0) };
-    }
-    // SAFETY: the call takes no pointers.
-    unsafe { sys::thread_exit() };
-    unreachable!("thread_exit returned");
 }
 
 /// A paged object requests each absent page once, from mappings and
@@ -1867,9 +1788,6 @@ fn paged_outputs(s: &Startup) -> Result {
 }
 
 const IO: i64 = -28;
-const BAD_STATE: i64 = -20;
-const NOT_FOUND: i64 = -25;
-
 fn pager_op(pager: Handle, mem: Handle, op: u32, offset: u64, len: u64) -> i64 {
     // SAFETY: the call takes no pointers.
     unsafe { sys::pager_op(pager, mem, op, offset, len) }
@@ -1885,22 +1803,6 @@ fn dirty(pager: Handle, mem: Handle, len: u64) -> Result<([u64; 8], u64)> {
     };
     check("querying dirty pages", status)?;
     Ok((out, count))
-}
-
-/// A new paged object of `pages` pages with `options`, answered by a
-/// pager thread, and its pager.
-fn paged_object(s: &Startup, pages: u64, options: u32) -> Result<(Handle, Handle)> {
-    let (mut pager, mut port, mut mem) = (0, 0, 0);
-    // SAFETY: the pointers are valid for the calls.
-    unsafe {
-        check("creating a pager", sys::pager_create(0, &mut pager))?;
-        check("creating a port", sys::port_create(0, &mut port))?;
-        let status = sys::pager_create_memory(pager, port, 6, pages * PAGE_SIZE, options, &mut mem);
-        check("creating a paged object", status)?;
-    }
-    PAGER.store(u64::from(pager), Ordering::Release);
-    spawn2(s, pager_thread, u64::from(port), u64::from(mem))?;
-    Ok((pager, mem))
 }
 
 /// Faults that wait for a pager, in the copy routine of a system call
@@ -2401,39 +2303,6 @@ fn next_report(channel: Handle) -> Result<(u32, Handle)> {
     Ok((u32_at(&m.bytes, 0), m.handles[0]))
 }
 
-/// The size of an exception report.
-const REPORT_SIZE: usize = 0x30;
-
-/// The report ID of the latest report read for each thread handle, as
-/// pairs of handle and ID.
-static REPORT_IDS: [(AtomicU64, AtomicU64); 32] =
-    [const { (AtomicU64::new(0), AtomicU64::new(0)) }; 32];
-
-/// Keeps the report ID of a report that came with `thread`.
-fn record_report(thread: Handle, bytes: &[u8]) {
-    let id = u64_at(bytes, 0x28);
-    let slot = REPORT_IDS
-        .iter()
-        .find(|(h, _)| h.load(Ordering::Relaxed) == u64::from(thread))
-        .or_else(|| {
-            REPORT_IDS
-                .iter()
-                .min_by_key(|(_, id)| id.load(Ordering::Relaxed))
-        });
-    if let Some((h, i)) = slot {
-        h.store(u64::from(thread), Ordering::Relaxed);
-        i.store(id, Ordering::Relaxed);
-    }
-}
-
-/// The report ID of the latest report read with `thread`, or 0.
-fn report_id(thread: Handle) -> u64 {
-    REPORT_IDS
-        .iter()
-        .find(|(h, _)| h.load(Ordering::Relaxed) == u64::from(thread))
-        .map_or(0, |(_, id)| id.load(Ordering::Relaxed))
-}
-
 fn resume(thread: Handle) -> Result {
     // SAFETY: the call takes no pointers.
     check("resuming", unsafe {
@@ -2584,11 +2453,6 @@ fn grant(s: &Startup, kind: u32, base: u64, size: u64) -> Result<Handle> {
         sys::resource_create(s.root_resource, kind, base, size, 0, &mut resource)
     })?;
     Ok(resource)
-}
-
-fn close(handle: Handle) -> Result {
-    // SAFETY: the call takes no pointers.
-    check("closing", unsafe { sys::handle_close(handle) })
 }
 
 fn interrupt_create(resource: Handle, irq: u32, options: u32) -> (i64, Handle) {
@@ -3258,22 +3122,10 @@ fn kill_blocked_thread(s: &Startup) -> Result {
     )
 }
 
-const PAGE_FAULT: u32 = 2;
 const ARITHMETIC: u32 = 4;
 const TERMINATE: u32 = 1;
 const DELIVER_SIGNAL: u32 = 2;
 const ALREADY_EXISTS: i64 = -26;
-
-/// The bytes of the next report on exception channel `channel` and the
-/// handle of its thread.
-fn report_bytes(channel: Handle) -> Result<([u8; 0x30], Handle)> {
-    let m = read_message(channel, 2000)?;
-    ensure("receiving a report", m.len == REPORT_SIZE && m.count == 1)?;
-    record_report(m.handles[0], &m.bytes);
-    let mut bytes = [0; 0x30];
-    bytes.copy_from_slice(&m.bytes[..0x30]);
-    Ok((bytes, m.handles[0]))
-}
 
 fn act(thread: Handle, action: u32) -> i64 {
     // SAFETY: the call takes no pointers.
@@ -4295,13 +4147,7 @@ fn seal_and_revoke_wait_for_supply(s: &Startup) -> Result {
 type Test = fn(&Startup) -> Result;
 
 const SUSPENDED: u32 = 1 << 5;
-const STATE_BLOCKED: u32 = 2;
 const STATE_SUSPENDED: u32 = 5;
-
-/// The state of `thread`.
-fn thread_state(thread: Handle) -> Result<u32> {
-    Ok(u32_at(&info::<0x18>(thread, 3)?, 0))
-}
 
 fn suspend(thread: Handle) -> i64 {
     // SAFETY: the call takes no pointers.
@@ -4516,11 +4362,6 @@ fn suspend_in_call(s: &Startup) -> Result {
     ensure("writing the request once", status == SHOULD_WAIT)
 }
 
-/// The object ID of the object of `handle`.
-fn koid(handle: Handle) -> Result<u64> {
-    Ok(u64_at(&info::<0x18>(handle, 1)?, 0))
-}
-
 /// The `THREADS` record of `process`: up to 128 object IDs and their
 /// count.
 fn thread_list(process: Handle) -> Result<([u64; 128], usize)> {
@@ -4592,13 +4433,6 @@ fn thread_lists(s: &Startup) -> Result {
         "not finding another object",
         get_thread(s.process, koid(event)?).0 == NOT_FOUND,
     )
-}
-
-const ACCESS_DENIED: i64 = -13;
-
-fn read_memory(process: Handle, addr: u64, buf: &mut [u8]) -> i64 {
-    // SAFETY: the pointer and length describe `buf`.
-    unsafe { sys::process_read_memory(process, addr, buf.as_mut_ptr(), buf.len() as u64) }
 }
 
 /// A debugger reads the memory of a process across regions and from
@@ -4738,11 +4572,6 @@ fn stack_guard_page_kept(s: &Startup) -> Result {
     )?;
     // SAFETY: the call takes no pointers.
     check("closing", unsafe { sys::handle_close(mem) })
-}
-
-fn write_memory(process: Handle, addr: u64, bytes: &[u8]) -> i64 {
-    // SAFETY: the pointer and length describe `bytes`.
-    unsafe { sys::process_write_memory(process, addr, bytes.as_ptr(), bytes.len() as u64) }
 }
 
 /// Maps `len` bytes of `mem` into this process with `options` at `addr`.

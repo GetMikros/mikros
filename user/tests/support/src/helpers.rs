@@ -2,20 +2,25 @@
 //! waits and deadlines, memory objects and mappings, and threads of the
 //! test's own process.
 
-use crate::{Context, PAGE_SIZE, PERM_READ, PERM_WRITE, Result, check, ensure};
+use crate::{Context, PAGE_SIZE, PERM_READ, PERM_WRITE, Result, check, ensure, sleep_ms};
 use core::sync::atomic::{AtomicU64, Ordering};
 use mikros_rt::sys::{self, Handle};
 
+pub const READABLE: u32 = 1 << 0;
 pub const SIGNALED: u32 = 1 << 3;
 pub const TERMINATED: u32 = 1 << 4;
 pub const USER0: u32 = 1 << 24;
 pub const USER1: u32 = 1 << 25;
 pub const INVALID_ARGS: i64 = -10;
 pub const BAD_HANDLE: i64 = -11;
+pub const ACCESS_DENIED: i64 = -13;
 pub const OUT_OF_RANGE: i64 = -14;
 pub const BUFFER_TOO_SMALL: i64 = -15;
+pub const BAD_STATE: i64 = -20;
 pub const TIMED_OUT: i64 = -21;
 pub const CANCELED: i64 = -23;
+pub const PEER_CLOSED: i64 = -24;
+pub const NOT_FOUND: i64 = -25;
 
 /// How many times longer things may take in a fuzz build, whose kernel
 /// checks every lock it takes and calls the coverage hook in every block,
@@ -188,10 +193,6 @@ pub fn u64_at(record: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(record[at..at + 8].try_into().unwrap())
 }
 
-pub const READABLE: u32 = 1 << 0;
-
-pub const PEER_CLOSED: i64 = -24;
-
 /// The result a helper thread leaves for the test.
 pub static HELPER: AtomicU64 = AtomicU64::new(0);
 
@@ -252,4 +253,77 @@ pub fn read_sizes(channel: Handle, cap: usize, handles_cap: usize) -> (i64, u64,
         )
     };
     (status, len, count)
+}
+
+/// Waits until `thread` is blocked, or fails after `in_time`.
+pub fn wait_until_blocked(thread: Handle) -> Result {
+    wait_for_state(thread, STATE_BLOCKED)
+}
+
+/// Waits until `thread` is in state `state`, or fails after `in_time`.
+pub fn wait_for_state(thread: Handle, state: u32) -> Result {
+    let deadline = in_time();
+    while thread_state(thread)? != state {
+        ensure("reaching the thread state", now() < deadline)?;
+        sleep_ms(1);
+    }
+    Ok(())
+}
+
+pub fn protect(s: &impl Context, perms: u32, addr: u64, len: u64) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::vm_protect(s.process(), perms, addr, len) }
+}
+
+pub fn seal(mem: Handle, seals: u32) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::mem_seal(mem, seals) }
+}
+
+pub fn set_size(mem: Handle, size: u64) -> i64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::mem_set_size(mem, size) }
+}
+
+pub fn mem_write_at(mem: Handle, offset: u64, bytes: &[u8]) -> Result {
+    // SAFETY: the pointer and length describe `bytes`.
+    check("writing", unsafe {
+        sys::mem_write(mem, offset, bytes.as_ptr(), bytes.len() as u64)
+    })
+}
+
+pub fn mem_read_at<const N: usize>(mem: Handle, offset: u64) -> Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    // SAFETY: the pointer and length describe `bytes`.
+    check("reading", unsafe {
+        sys::mem_read(mem, offset, bytes.as_mut_ptr(), N as u64)
+    })?;
+    Ok(bytes)
+}
+
+pub fn close(handle: Handle) -> Result {
+    // SAFETY: the call takes no pointers.
+    check("closing", unsafe { sys::handle_close(handle) })
+}
+
+pub const STATE_BLOCKED: u32 = 2;
+
+/// The state of `thread`.
+pub fn thread_state(thread: Handle) -> Result<u32> {
+    Ok(u32_at(&info::<0x18>(thread, 3)?, 0))
+}
+
+/// The object ID of the object of `handle`.
+pub fn koid(handle: Handle) -> Result<u64> {
+    Ok(u64_at(&info::<0x18>(handle, 1)?, 0))
+}
+
+pub fn read_memory(process: Handle, addr: u64, buf: &mut [u8]) -> i64 {
+    // SAFETY: the pointer and length describe `buf`.
+    unsafe { sys::process_read_memory(process, addr, buf.as_mut_ptr(), buf.len() as u64) }
+}
+
+pub fn write_memory(process: Handle, addr: u64, bytes: &[u8]) -> i64 {
+    // SAFETY: the pointer and length describe `bytes`.
+    unsafe { sys::process_write_memory(process, addr, bytes.as_ptr(), bytes.len() as u64) }
 }
