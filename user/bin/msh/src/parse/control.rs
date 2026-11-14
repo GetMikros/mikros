@@ -100,7 +100,7 @@ impl Parser<'_> {
                 }
             }
             "delete" => match self.peek() {
-                Some('$') => StatementKind::Delete(self.variable_path()?),
+                Some('$') => StatementKind::Delete(self.variable_path(true)?),
                 _ if self.looking_at("env.") => {
                     self.pos += 4;
                     StatementKind::Delete(Variable {

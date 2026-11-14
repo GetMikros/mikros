@@ -260,6 +260,26 @@ fn reads_right_sides_as_statements() {
 }
 
 #[test]
+fn reads_and_changes_fields_with_quoted_names() {
+    let foo = "let foo = {\"hello\": 'world', \"yoo sup\": 621}\n";
+    let out = |source: &str| ok(&format!("{foo}{source}"));
+    assert_eq!(out("print $foo.\"yoo sup\" $foo.'yoo sup'"), "621 621\n");
+    assert_eq!(out("echo $foo.\"yoo sup\"/x"), "621/x\n");
+    assert_eq!(out("print ($foo).'yoo sup'"), "621\n");
+    assert_eq!(
+        out("foo.\"yoo sup\" = 1\nfoo.'a b' = 2\nprint $foo.\"yoo sup\" $foo.\"a b\""),
+        "1 2\n"
+    );
+    assert_eq!(
+        out("delete $foo.\"yoo sup\"\nprint ($foo | to json)"),
+        "{\"hello\":\"world\"}\n"
+    );
+    assert_eq!(ok("print ({\"hello\": 1} == {hello: 1})"), "true\n");
+    // In a double-quoted string, a quote after a dot ends the string.
+    assert_eq!(out("echo \"$foo.hello.\""), "world.\n");
+}
+
+#[test]
 fn keeps_path_a_list_and_passes_the_environment() {
     let mut s = shell();
     run(

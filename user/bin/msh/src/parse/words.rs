@@ -256,7 +256,7 @@ impl Parser<'_> {
 
     /// `$name`, `$name.field.0`, `$env.NAME` or `$list...`.
     pub(super) fn variable(&mut self) -> Result<Variable> {
-        let mut variable = self.variable_path()?;
+        let mut variable = self.variable_path(true)?;
         if self.looking_at("...") {
             self.pos += 3;
             variable.spread = true;
@@ -264,8 +264,9 @@ impl Parser<'_> {
         Ok(variable)
     }
 
-    /// `$name`, `$name.field.0` or `$env.NAME`, without `...`.
-    pub(super) fn variable_path(&mut self) -> Result<Variable> {
+    /// `$name`, `$name.field.0` or `$env.NAME`, without `...`, and with
+    /// fields named in quotes, as in `$r."a b"`, when `quoted_names`.
+    pub(super) fn variable_path(&mut self, quoted_names: bool) -> Result<Variable> {
         self.expect('$', "`$`")?;
         let name = self.variable_name()?;
         let (environment, name) = match name.as_str() {
@@ -278,13 +279,14 @@ impl Parser<'_> {
         Ok(Variable {
             environment,
             name,
-            path: self.path()?,
+            path: self.path(quoted_names)?,
             spread: false,
         })
     }
 
-    /// The `.name` and `.0` accesses that follow a variable's name.
-    pub(super) fn path(&mut self) -> Result<Vec<Access>> {
+    /// The `.name` and `.0` accesses that follow a variable's name or an
+    /// operand, and `."name"` too when `quoted_names`.
+    pub(super) fn path(&mut self, quoted_names: bool) -> Result<Vec<Access>> {
         let mut path = Vec::new();
         while self.peek() == Some('.') && !self.looking_at("...") {
             match self.peek_at(1) {
@@ -300,10 +302,28 @@ impl Parser<'_> {
                     self.pos += 1;
                     path.push(Access::Field(self.variable_name()?));
                 }
+                Some('"' | '\'') if quoted_names => {
+                    self.pos += 1;
+                    path.push(Access::Field(self.quoted_text("a field's name")?));
+                }
                 _ => break,
             }
         }
         Ok(path)
+    }
+
+    /// A quoted string without interpolations, as a record's key or a
+    /// field's name, which `what` names for the error.
+    pub(super) fn quoted_text(&mut self, what: &str) -> Result<String> {
+        let at = self.pos;
+        if self.peek() == Some('\'') {
+            return self.single_quoted();
+        }
+        match self.double_quoted()?.as_slice() {
+            [] => Ok(String::new()),
+            [StringPart::Text(text)] => Ok(text.clone()),
+            _ => Err(self.error_at(at, &format!("{what} cannot interpolate"))),
+        }
     }
 
     /// A variable's name: letters, digits and `_`.
@@ -389,7 +409,9 @@ impl Parser<'_> {
                     if !text.is_empty() {
                         parts.push(StringPart::Text(std::mem::take(&mut text)));
                     }
-                    parts.push(StringPart::Expr(Expr::Variable(self.variable_path()?)));
+                    // In a string, a quote after a dot ends it.
+                    let variable = self.variable_path(false)?;
+                    parts.push(StringPart::Expr(Expr::Variable(variable)));
                 }
                 Some('{') => {
                     if !text.is_empty() {

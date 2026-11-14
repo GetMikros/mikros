@@ -301,7 +301,7 @@ impl Parser<'_> {
             (false, name)
         };
         // A word such as `file.99999999999999999999` is no target.
-        let Ok(path) = self.path() else {
+        let Ok(path) = self.path(true) else {
             self.pos = start;
             return Ok(None);
         };
@@ -408,15 +408,7 @@ impl Parser<'_> {
     /// A record's key: a name or a quoted string.
     fn key(&mut self) -> Result<String> {
         match self.peek() {
-            Some('"' | '\'') => match self.operand()? {
-                Expr::String(parts) => match parts.as_slice() {
-                    [] => Ok(String::new()),
-                    [StringPart::Text(text)] => Ok(text.clone()),
-                    _ => Err(self.error("a key cannot interpolate")),
-                },
-                Expr::Literal(Literal::String(text)) => Ok(text),
-                _ => Err(self.error("a key is expected here")),
-            },
+            Some('"' | '\'') => self.quoted_text("a key"),
             _ => self.name(),
         }
     }

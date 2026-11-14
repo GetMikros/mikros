@@ -229,6 +229,25 @@ fn reads_right_sides_as_statements() {
 }
 
 #[test]
+fn reads_quoted_field_names() {
+    let Expr::Variable(v) = expr("$foo.\"yoo sup\".0.'a'") else {
+        panic!()
+    };
+    assert_eq!(
+        v.path,
+        [
+            Access::Field("yoo sup".into()),
+            Access::Item(0),
+            Access::Field("a".into())
+        ]
+    );
+    assert_eq!(
+        failure("print $foo.\"{1}\"").message,
+        "a field's name cannot interpolate"
+    );
+}
+
+#[test]
 fn reads_delete() {
     let StatementKind::Delete(v) = one("delete $env.PATH.1") else {
         panic!()

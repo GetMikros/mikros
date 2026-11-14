@@ -137,23 +137,8 @@ impl Parser<'_> {
             }
         };
         // Variables took their accesses already.
-        while self.peek() == Some('.') && !self.looking_at("..") {
-            match self.peek_at(1) {
-                Some(c) if c.is_ascii_digit() => {
-                    self.pos += 1;
-                    let digits = self.take_while(|c| c.is_ascii_digit());
-                    let index = digits
-                        .parse()
-                        .map_err(|_| self.error("the index is too large"))?;
-                    expr = Expr::Access(Box::new(expr), Access::Item(index));
-                }
-                Some(c) if c.is_ascii_alphabetic() || c == '_' => {
-                    self.pos += 1;
-                    let field = self.take_while(|c| c.is_ascii_alphanumeric() || c == '_');
-                    expr = Expr::Access(Box::new(expr), Access::Field(field));
-                }
-                _ => break,
-            }
+        for access in self.path(true)? {
+            expr = Expr::Access(Box::new(expr), access);
         }
         Ok(expr)
     }
