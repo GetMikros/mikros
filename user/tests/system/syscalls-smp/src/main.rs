@@ -1,8 +1,8 @@
 //! The kernel on several processors, as a system test: the processor
 //! count and affinity, a signal that reaches a thread on another
 //! processor, killing a thread as it sleeps, a sleeper beside a spinning
-//! thread, futexes and the clock across processors, and threads that run
-//! on every processor.
+//! thread, yielding to a thread on the same processor, futexes and the
+//! clock across processors, and threads that run on every processor.
 
 #![no_std]
 #![no_main]
@@ -27,6 +27,7 @@ fn main(m: &Managed) -> i64 {
             ),
             ("killed_as_it_sleeps", killed_as_it_sleeps),
             ("sleeper_runs_beside_spinner", sleeper_runs_beside_spinner),
+            ("yield_hands_over", yield_hands_over),
             ("futexes_across_processors", futexes_across_processors),
             (
                 "clock_agrees_across_processors",
@@ -79,6 +80,87 @@ fn sleeper_runs_beside_spinner(s: &Own) -> Result {
     check("killing the spinner", unsafe { sys::task_kill(thread) })?;
     ensure("ending", wait(thread, TERMINATED, in_time()).0 == 0)?;
     ensure("waking in time", slept < 100_000_000)
+}
+
+/// The turn of `yield_partner` and `yield_hands_over`: odd for the
+/// partner, even for the test, and `YIELD_STOP` once the partner must end.
+static YIELD_TURN: AtomicU32 = AtomicU32::new(0);
+
+const YIELD_STOP: u32 = u32::MAX;
+
+/// Takes `rounds` odd turns, each handed back as the next even one,
+/// yielding while it waits.
+extern "sysv64" fn yield_partner(rounds: u64, _: u64) -> ! {
+    'rounds: for round in 0..rounds as u32 {
+        loop {
+            match YIELD_TURN.load(Ordering::Acquire) {
+                turn if turn == 2 * round + 1 => break,
+                YIELD_STOP => break 'rounds,
+                // SAFETY: the call takes no pointers.
+                _ => unsafe { sys::thread_yield() },
+            };
+        }
+        YIELD_TURN.store(2 * round + 2, Ordering::Release);
+    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// `thread_yield` returns OK, and lets another runnable thread on the same
+/// processor run before the caller's slice ends. This thread and a partner,
+/// both on processor 0, hand a turn back and forth, each yielding while it
+/// waits for the other.
+///
+/// The rounds are counted in yields, not in time, so that the host pausing
+/// an emulated processor does not fail them. A round is quick when the turn
+/// comes back within `QUICK_YIELDS` yields; were the partner to run only
+/// once this thread's slice of 4 ms ended, a round would take hundreds. At
+/// least `QUICK` of the rounds after the first `WARMUP` must be quick: the
+/// partner may start on another processor and move only as it yields, and
+/// other threads on processor 0 may run in between.
+fn yield_hands_over(s: &Own) -> Result {
+    const ROUNDS: u32 = 200;
+    const WARMUP: u32 = 10;
+    const QUICK: u32 = 170;
+    const QUICK_YIELDS: u32 = 8;
+    for _ in 0..100 {
+        // SAFETY: the call takes no pointers.
+        check("yielding", unsafe { sys::thread_yield() })?;
+    }
+    let set = |thread: Handle, mask: &[u8]| {
+        // SAFETY: the pointer and length describe `mask`.
+        unsafe { sys::thread_set_affinity(thread, mask.as_ptr(), mask.len() as u64) }
+    };
+    check("keeping this thread on processor 0", set(s.thread, &[1]))?;
+    YIELD_TURN.store(0, Ordering::Release);
+    let partner = spawn2(s, yield_partner, ROUNDS.into(), 0)?;
+    let rounds = (|| -> Result {
+        check("keeping the partner on processor 0", set(partner, &[1]))?;
+        let mut quick = 0;
+        for round in 0..ROUNDS {
+            YIELD_TURN.store(2 * round + 1, Ordering::Release);
+            let deadline = in_time();
+            let mut yields = 0;
+            while YIELD_TURN.load(Ordering::Acquire) != 2 * round + 2 {
+                ensure("getting the turn back", now() < deadline)?;
+                // SAFETY: the call takes no pointers.
+                check("yielding to the partner", unsafe { sys::thread_yield() })?;
+                yields += 1;
+            }
+            if round >= WARMUP && yields <= QUICK_YIELDS {
+                quick += 1;
+            }
+        }
+        ensure("handing over at once", quick >= QUICK)
+    })();
+    if rounds.is_err() {
+        YIELD_TURN.store(YIELD_STOP, Ordering::Release);
+    }
+    let ended = wait(partner, TERMINATED, in_time()).0 == 0;
+    check("allowing every processor", set(s.thread, &[0xFF; 32]))?;
+    rounds?;
+    ensure("ending the partner", ended)
 }
 
 /// A signal sent to a thread that spins in user mode on another processor
