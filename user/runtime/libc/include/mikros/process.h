@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +26,30 @@ int64_t mikros_process_handle(int pid);
    descriptor fd: the stream of a pipe, or the connection to a file or
    directory, or a negated error number. */
 int64_t mikros_fd_handle(int fd);
+
+/* A process as the process manager describes it. app_id and path end
+   in a NUL byte. */
+struct mikros_process_info {
+	pid_t pid;
+	pid_t parent;
+	pid_t process_group;
+	pid_t session;
+	uint32_t login_session;
+	uid_t user;
+	uint64_t koid;
+	char app_id[129];
+	char path[1025];
+};
+
+/* Stores the first max of the process IDs that the process manager
+   lists to the caller in pids, and returns how many it listed, or -1
+   with errno set. */
+ssize_t mikros_process_list(pid_t *pids, size_t max);
+
+/* Fills info with what the process manager knows of process pid, and
+   returns 0, or -1 with errno set: ESRCH when there is no such process
+   or the caller may not see it. */
+int mikros_process_info(pid_t pid, struct mikros_process_info *info);
 
 #ifdef __cplusplus
 }

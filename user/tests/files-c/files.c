@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <mikros/process.h>
 #include <pwd.h>
 #include <sched.h>
 #include <spawn.h>
@@ -164,6 +165,20 @@ int main(int argc, char **argv)
 	 * C library exports without a header declaring it. */
 	extern int pthread_yield(void);
 	CHECK(sched_yield() == 0 && pthread_yield() == 0);
+	/* The process manager lists the caller and describes it, and has
+	 * no process 999999. */
+	pid_t pids[256];
+	ssize_t listed = mikros_process_list(pids, 256);
+	int listed_self = 0;
+	for (ssize_t i = 0; i < listed && i < 256; i++)
+		listed_self |= pids[i] == getpid();
+	CHECK(listed > 0 && listed_self && mikros_process_list(NULL, 0) > 0);
+	struct mikros_process_info own;
+	CHECK(mikros_process_info(getpid(), &own) == 0 && own.pid == getpid()
+	      && own.parent == getppid() && own.user == getuid()
+	      && strcmp(own.app_id, "system.cli") == 0
+	      && strstr(own.path, "files-c") != NULL);
+	CHECK(fails_with(mikros_process_info(999999, &own), ESRCH));
 	struct timespec mono, boot;
 	CHECK(clock_gettime(CLOCK_MONOTONIC, &mono) == 0 && clock_gettime(CLOCK_BOOTTIME, &boot) == 0);
 	CHECK(boot.tv_sec > mono.tv_sec || (boot.tv_sec == mono.tv_sec && boot.tv_nsec >= mono.tv_nsec));

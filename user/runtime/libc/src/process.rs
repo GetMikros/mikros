@@ -79,6 +79,90 @@ unsafe extern "C" fn mikros_executable_path(buf: *mut u8, len: usize) -> i64 {
     path.len() as i64
 }
 
+/// `struct mikros_process_info` of `<mikros/process.h>`.
+#[repr(C)]
+pub struct CProcessInfo {
+    pid: i32,
+    parent: i32,
+    process_group: i32,
+    session: i32,
+    login_session: u32,
+    user: u32,
+    koid: u64,
+    app_id: [u8; 129],
+    path: [u8; 1025],
+}
+
+unsafe extern "C" {
+    fn __errno_location() -> *mut i32;
+}
+
+/// Sets `errno` to `e` and returns -1.
+fn failed(e: i64) -> i64 {
+    // SAFETY: musl gives the calling thread's `errno`.
+    unsafe { *__errno_location() = e as i32 };
+    -1
+}
+
+/// Copies `text` into `out`, cut to leave room for the NUL byte that
+/// ends it, and fills the rest with NUL bytes.
+fn c_string(out: &mut [u8], text: &str) {
+    let count = text.len().min(out.len() - 1);
+    out[..count].copy_from_slice(&text.as_bytes()[..count]);
+    out[count..].fill(0);
+}
+
+/// `mikros_process_list`: stores the first `max` process IDs that the
+/// process manager's `List` gives in `pids`, and returns how many it
+/// gave, or -1 with `errno` set.
+///
+/// # Safety
+///
+/// `pids` must have room for `max` process IDs.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mikros_process_list(pids: *mut i32, max: usize) -> isize {
+    let Ok(listed) = unsignalled(|| launcher().list(FOREVER)) else {
+        return failed(EIO) as isize;
+    };
+    for (i, &pid) in listed.pids.iter().take(max).enumerate() {
+        // SAFETY: the caller gives room for `max` IDs, and `i` is below.
+        unsafe { *pids.add(i) = pid as i32 };
+    }
+    listed.pids.len() as isize
+}
+
+/// `mikros_process_info`: fills `out` with what `GetInfo` gives of
+/// process `pid`, and returns 0, or -1 with `errno` set: `ESRCH` when the
+/// process does not exist or the caller may not see it.
+///
+/// # Safety
+///
+/// `out` must point to a `struct mikros_process_info`.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mikros_process_info(pid: i32, out: *mut CProcessInfo) -> i32 {
+    let Ok(pid) = u32::try_from(pid) else {
+        return failed(ESRCH) as i32;
+    };
+    let info = match unsignalled(|| launcher().get_info(pid, FOREVER)) {
+        Ok(Ok(reply)) => reply.info,
+        Ok(Err(Status::NotFound | Status::AccessDenied)) => return failed(ESRCH) as i32,
+        Ok(Err(status)) => return failed(errno::from_status(i64::from(status.into_raw()))) as i32,
+        Err(_) => return failed(EIO) as i32,
+    };
+    // SAFETY: the caller gives a `struct mikros_process_info`.
+    let out = unsafe { &mut *out };
+    out.pid = info.pid as i32;
+    out.parent = info.parent as i32;
+    out.process_group = info.process_group as i32;
+    out.session = info.session as i32;
+    out.login_session = info.login_session;
+    out.user = info.user;
+    out.koid = info.koid;
+    c_string(&mut out.app_id, &info.app_id);
+    c_string(&mut out.path, &info.path);
+    0
+}
+
 /// The error number of a failed `Kill`: those of POSIX `kill` for a
 /// process that does not exist or may not be signalled.
 fn kill_error(status: Status) -> i64 {
