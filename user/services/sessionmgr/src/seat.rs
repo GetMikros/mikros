@@ -71,15 +71,15 @@ async fn display(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &Sea
 
 /// Opens every input device as it is published and gives it to `seat`,
 /// accepted, for as long as the console runs. Each device is opened under
-/// its service ID: the device manager also registers it under its name,
-/// which starts with a letter where an ID is a number, and a device has
-/// one reader at a time.
+/// its name, which starts with a letter: the device manager also
+/// registers it under its service ID, a number, and a device has one
+/// reader at a time.
 async fn inputs(directory: &DirectoryAsyncClient, reactor: &Reactor, seat: &SeatAsyncClient) {
     let mut given = BTreeSet::new();
     loop {
         for instance in instances(directory, INPUT).await {
             let name = instance.starts_with(|c: char| c.is_ascii_lowercase());
-            if name || given.contains(&instance) {
+            if !name || given.contains(&instance) {
                 continue;
             }
             let Some(input) = connect::<Input>(directory, INPUT, &instance).await else {
