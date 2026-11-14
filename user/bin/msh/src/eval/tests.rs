@@ -206,6 +206,38 @@ fn removes_from_lists_and_assigns_to_items_and_fields() {
 }
 
 #[test]
+fn deletes_variables_fields_and_items() {
+    assert_eq!(ok("let x = 1\ndelete $x\nprint ($x ?? 'gone')"), "gone\n");
+    assert_eq!(
+        ok("let r = {a: 1, b: [1 2]}\ndelete $r.a\ndelete $r.b.0\nprint ($r | to json)"),
+        "{\"b\":[2]}\n"
+    );
+    let mut s = shell();
+    run(
+        &mut s,
+        "env.EDITOR = 'vi'\ndelete env.EDITOR\ndelete $env.PATH.1",
+    )
+    .unwrap();
+    assert!(s.env("EDITOR").is_none());
+    assert_eq!(run(&mut s, "print $env.PATH").unwrap(), "/bin\n");
+    // Deleting what does not exist is an error.
+    assert_eq!(error("delete $nope").message, "`$nope` is not set");
+    assert_eq!(error("delete env.NOPE").message, "`$env.NOPE` is not set");
+    assert_eq!(
+        error("let r = {a: 1}\ndelete $r.c").message,
+        "the record has no field `c`"
+    );
+    assert_eq!(
+        error("let l = [1]\ndelete $l.3").message,
+        "the list has no item 3"
+    );
+    assert_eq!(
+        error("let n = 1\ndelete $n.0").message,
+        "a int has no items"
+    );
+}
+
+#[test]
 fn keeps_path_a_list_and_passes_the_environment() {
     let mut s = shell();
     run(

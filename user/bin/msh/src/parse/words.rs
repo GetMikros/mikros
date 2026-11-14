@@ -265,7 +265,7 @@ impl Parser<'_> {
     }
 
     /// `$name`, `$name.field.0` or `$env.NAME`, without `...`.
-    fn variable_path(&mut self) -> Result<Variable> {
+    pub(super) fn variable_path(&mut self) -> Result<Variable> {
         self.expect('$', "`$`")?;
         let name = self.variable_name()?;
         let (environment, name) = match name.as_str() {

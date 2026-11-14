@@ -58,6 +58,9 @@ pub enum StatementKind {
     },
     Use(Word),
     Return(Option<Expr>),
+    /// `delete $name`, `delete env.NAME`, or with a path, as in
+    /// `delete $env.PATH.1`.
+    Delete(Variable),
 }
 
 /// How an assignment changes its target.

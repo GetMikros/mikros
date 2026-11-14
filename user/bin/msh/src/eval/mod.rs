@@ -504,6 +504,10 @@ impl<S: System> Shell<S> {
                 self.collect_functions(&block);
                 Ok(Value::Null)
             }
+            StatementKind::Delete(target) => {
+                self.delete(target)?;
+                Ok(Value::Null)
+            }
             StatementKind::Return(value) => {
                 let value = match value {
                     Some(e) => self.eval(e)?,
@@ -544,6 +548,58 @@ impl<S: System> Shell<S> {
         Ok(())
     }
 
+    /// Removes `target`: the variable, or the item or field its path
+    /// names.
+    fn delete(&mut self, target: &Variable) -> Result<(), Flow> {
+        let unset = || match target.environment {
+            true => format!("`$env.{}` is not set", target.name),
+            false => format!("`${}` is not set", target.name),
+        };
+        let Some((last, parents)) = target.path.split_last() else {
+            let frame = self
+                .visible()
+                .find(|&i| self.frames[i].variables.contains_key(&target.name));
+            let removed = match (target.environment, frame) {
+                (true, _) => self.environment.remove(&target.name).is_some(),
+                (false, Some(i)) => self.frames[i].variables.remove(&target.name).is_some(),
+                (false, None) => false,
+            };
+            return match removed {
+                true => Ok(()),
+                false => Err(self.fail(unset())),
+            };
+        };
+        let current = match target.environment {
+            true => self.env(&target.name).cloned(),
+            false => self.lookup(&target.name).cloned(),
+        };
+        let mut whole = current.ok_or_else(|| self.fail(unset()))?;
+        let mut parent = &mut whole;
+        for access in parents {
+            parent = slot(parent, access).map_err(|e| self.fail(e))?;
+        }
+        match (last, parent) {
+            (Access::Field(name), Value::Record(fields)) => {
+                let at = fields.iter().position(|(k, _)| k == name);
+                let at =
+                    at.ok_or_else(|| self.fail(format!("the record has no field `{name}`")))?;
+                fields.remove(at);
+            }
+            (Access::Item(index), Value::List(items)) if *index < items.len() => {
+                items.remove(*index);
+            }
+            (access, other) => {
+                let message = slot(other, access).err().unwrap_or_default();
+                return Err(self.fail(message));
+            }
+        }
+        match target.environment {
+            true => self.set_env(&target.name, whole),
+            false => *self.lookup_mut(&target.name).expect("looked up") = whole,
+        }
+        Ok(())
+    }
+
     /// Whether the condition of `if` or `while` holds: a boolean
     /// expression, or a command that exits with 0, whose failure does
     /// not stop the script.
@@ -569,21 +625,28 @@ fn change(value: &mut Value, path: &[Access], op: AssignOp, new: Value) -> Resul
         *value = combine(op, std::mem::replace(value, Value::Null), new)?;
         return Ok(());
     };
+    if let (Access::Field(name), Value::Record(fields)) = (access, &mut *value)
+        && rest.is_empty()
+        && op == AssignOp::Set
+        && !fields.iter().any(|(k, _)| k == name)
+    {
+        fields.push((name.clone(), new));
+        return Ok(());
+    }
+    change(slot(value, access)?, rest, op, new)
+}
+
+/// The item or field of `value` that `access` names.
+fn slot<'a>(value: &'a mut Value, access: &Access) -> Result<&'a mut Value, String> {
     match (access, value) {
-        (Access::Field(name), Value::Record(fields)) => {
-            match fields.iter_mut().find(|(k, _)| k == name) {
-                Some((_, v)) => change(v, rest, op, new),
-                None if rest.is_empty() && op == AssignOp::Set => {
-                    fields.push((name.clone(), new));
-                    Ok(())
-                }
-                None => Err(format!("the record has no field `{name}`")),
-            }
-        }
-        (Access::Item(index), Value::List(items)) => match items.get_mut(*index) {
-            Some(v) => change(v, rest, op, new),
-            None => Err(format!("the list has no item {index}")),
-        },
+        (Access::Field(name), Value::Record(fields)) => fields
+            .iter_mut()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
+            .ok_or_else(|| format!("the record has no field `{name}`")),
+        (Access::Item(index), Value::List(items)) => items
+            .get_mut(*index)
+            .ok_or_else(|| format!("the list has no item {index}")),
         (Access::Field(_), other) => Err(format!("a {} has no fields", other.kind())),
         (Access::Item(_), other) => Err(format!("a {} has no items", other.kind())),
     }

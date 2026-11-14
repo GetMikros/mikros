@@ -211,6 +211,20 @@ fn reads_paths_and_removal_in_assignments() {
 }
 
 #[test]
+fn reads_delete() {
+    let StatementKind::Delete(v) = one("delete $env.PATH.1") else {
+        panic!()
+    };
+    assert_eq!((v.environment, v.name.as_str()), (true, "PATH"));
+    assert_eq!(v.path, [Access::Item(1)]);
+    assert!(matches!(one("delete env.EDITOR"), StatementKind::Delete(v) if v.environment));
+    assert_eq!(
+        failure("delete x").message,
+        "`delete` takes `$name` or `env.NAME`"
+    );
+}
+
+#[test]
 fn reads_operators_by_precedence() {
     // 1 + 2 * 3 == 7 and not false
     let e = expr("1 + 2 * 3 == 7 and not false");

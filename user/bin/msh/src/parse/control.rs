@@ -1,5 +1,5 @@
 //! Keywords: `let`, `if`, `while`, `for`, `match` and its patterns,
-//! `fn`, `param`, `try`, `use` and `return`.
+//! `fn`, `param`, `try`, `use`, `return` and `delete`.
 
 use super::{Parser, Result};
 use crate::ast::*;
@@ -99,6 +99,20 @@ impl Parser<'_> {
                     _ => StatementKind::Return(Some(self.expression()?)),
                 }
             }
+            "delete" => match self.peek() {
+                Some('$') => StatementKind::Delete(self.variable_path()?),
+                _ if self.looking_at("env.") => {
+                    self.pos += 4;
+                    StatementKind::Delete(Variable {
+                        environment: true,
+                        name: self.name()?,
+                        path: Vec::new(),
+                        spread: false,
+                    })
+                }
+                None => return Err(self.incomplete("what to delete is missing")),
+                _ => return Err(self.error("`delete` takes `$name` or `env.NAME`")),
+            },
             _ => unreachable!("not a keyword"),
         })
     }
