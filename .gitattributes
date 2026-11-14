@@ -3,3 +3,6 @@
 user/lib/btrfs/linux/include/generated/autoconf.h linguist-generated
 user/lib/btrfs/linux/include/generated/timeconst.h linguist-generated
 user/lib/casefold/src/table.rs linguist-generated
+# crossterm's sources end their lines with CR LF, and so must the
+# lines of the patch that changes them.
+user/ports/coreutils/crates/crossterm-0.29.0/*.patch -text

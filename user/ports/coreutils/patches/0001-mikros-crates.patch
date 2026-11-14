@@ -2,13 +2,14 @@ Take the crates that need Mikros changes from where xtask unpacks them.
 
 --- a/Cargo.toml	2026-11-11 06:09:14.298537792 +0000
 +++ b/Cargo.toml	2026-11-11 06:09:14.302183578 +0000
-@@ -711,3 +711,16 @@
+@@ -711,3 +711,17 @@
  inherits = "release"
  panic = "unwind"
  debug = true
 +
 +# Mikros: the crates that xtask unpacks with their Mikros changes.
 +[patch.crates-io]
++crossterm = { path = "../crates/crossterm-0.29.0" }
 +errno = { path = "../crates/errno-0.3.14" }
 +getrandom = { path = "../crates/getrandom-0.4.3" }
 +getrandom02 = { package = "getrandom", path = "../crates/getrandom-0.2.17" }

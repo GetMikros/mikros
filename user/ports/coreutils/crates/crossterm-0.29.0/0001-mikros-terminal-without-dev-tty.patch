@@ -1,0 +1,93 @@
+On Mikros, have crossterm use standard error or output as the terminal
+when standard input is not one, and report no window size changes.
+
+diff -ru a/src/event/source/unix/mio.rs b/src/event/source/unix/mio.rs
+--- a/src/event/source/unix/mio.rs	2026-11-14 00:27:08.741809064 +0000
++++ b/src/event/source/unix/mio.rs	2026-11-14 00:29:12.394289445 +0000
+@@ -27,7 +27,9 @@
+     parser: Parser,
+     tty_buffer: [u8; TTY_BUFFER_SIZE],
+     tty_fd: FileDesc<'static>,
+-    signals: Signals,
++    // None on Mikros, whose C library has no socketpair for the pipe that
++    // signal-hook-mio makes, so that resizes are not reported there.
++    signals: Option<Signals>,
+     #[cfg(feature = "event-stream")]
+     waker: Waker,
+ }
+@@ -45,8 +47,13 @@
+         let mut tty_ev = SourceFd(&tty_raw_fd);
+         registry.register(&mut tty_ev, TTY_TOKEN, Interest::READABLE)?;
+ 
+-        let mut signals = Signals::new([signal_hook::consts::SIGWINCH])?;
+-        registry.register(&mut signals, SIGNAL_TOKEN, Interest::READABLE)?;
++        let signals = if cfg!(target_os = "mikros") {
++            None
++        } else {
++            let mut signals = Signals::new([signal_hook::consts::SIGWINCH])?;
++            registry.register(&mut signals, SIGNAL_TOKEN, Interest::READABLE)?;
++            Some(signals)
++        };
+ 
+         #[cfg(feature = "event-stream")]
+         let waker = Waker::new(registry, WAKE_TOKEN)?;
+@@ -120,7 +127,8 @@
+                         }
+                     }
+                     SIGNAL_TOKEN => {
+-                        if self.signals.pending().next() == Some(signal_hook::consts::SIGWINCH) {
++                        let resized = self.signals.as_mut().and_then(|s| s.pending().next());
++                        if resized == Some(signal_hook::consts::SIGWINCH) {
+                             // TODO Should we remove tput?
+                             //
+                             // This can take a really long time, because terminal::size can
+diff -ru a/src/terminal/sys/file_descriptor.rs b/src/terminal/sys/file_descriptor.rs
+--- a/src/terminal/sys/file_descriptor.rs	2026-11-14 00:27:08.749102519 +0000
++++ b/src/terminal/sys/file_descriptor.rs	2026-11-14 00:29:12.398929014 +0000
+@@ -124,6 +124,18 @@
+ pub fn tty_fd() -> io::Result<FileDesc<'static>> {
+     let (fd, close_on_drop) = if unsafe { libc::isatty(libc::STDIN_FILENO) == 1 } {
+         (libc::STDIN_FILENO, false)
++    } else if cfg!(target_os = "mikros") {
++        // Mikros has no /dev/tty: standard error or output, when it is a
++        // terminal, is the terminal instead.
++        let terminal = [libc::STDERR_FILENO, libc::STDOUT_FILENO]
++            .into_iter()
++            .find(|&fd| unsafe { libc::isatty(fd) == 1 })
++            .ok_or_else(no_terminal)?;
++        let copy = unsafe { libc::dup(terminal) };
++        if copy < 0 {
++            return Err(io::Error::last_os_error());
++        }
++        (copy, true)
+     } else {
+         (
+             fs::OpenOptions::new()
+@@ -146,9 +158,27 @@
+     let stdin = rustix::stdio::stdin();
+     let fd = if rustix::termios::isatty(stdin) {
+         FileDesc::Borrowed(stdin)
++    } else if cfg!(target_os = "mikros") {
++        // Mikros has no /dev/tty: standard error or output, when it is a
++        // terminal, is the terminal instead.
++        let terminal = [rustix::stdio::stderr(), rustix::stdio::stdout()]
++            .into_iter()
++            .find(|&fd| rustix::termios::isatty(fd))
++            .ok_or_else(no_terminal)?;
++        FileDesc::Owned(rustix::io::dup(terminal)?)
+     } else {
+         let dev_tty = File::options().read(true).write(true).open("/dev/tty")?;
+         FileDesc::Owned(dev_tty.into())
+     };
+     Ok(fd)
+ }
++
++/// The error when no standard stream is a terminal, on Mikros, which has
++/// no /dev/tty to open instead.
++#[allow(dead_code)]
++fn no_terminal() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::NotFound,
++        "no terminal: standard input, output and error are not terminals, and Mikros has no /dev/tty",
++    )
++}

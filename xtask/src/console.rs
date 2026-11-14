@@ -61,7 +61,10 @@ const JOB_START: Duration = Duration::from_secs(5);
 /// without end, Ctrl-C, which must reach it while the console draws its
 /// output, and Ctrl-L, which clears the screen, so that what follows
 /// does not scroll the whole screen line by line, which is slow in a
-/// debug build; then `spaw`, which Tab completes to `spawn-std `, and
+/// debug build; then `ls /usr/bin | more`, which must page its input
+/// with keys read from the terminal, `q`, which quits it, and
+/// `if $status != 0 { exit 8 }`; then `spaw`, which Tab completes to
+/// `spawn-std `, and
 /// `sleep`, a job that runs until it is killed, Ctrl-Z, which stops it,
 /// `let n = (jobs | lines | len)`, `bg`, `kill %1`,
 /// `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
@@ -78,10 +81,20 @@ const JOB_START: Duration = Duration::from_secs(5);
 /// its first entry, files-c's and coreutils-check's checks
 /// passed, and `/`, which no namespace entry covers, is a folder that
 /// lists `Users`.
-const MSH_KEYS: [(&str, Duration); 15] = [
+const MSH_KEYS: [(&str, Duration); 18] = [
     ("y e s ret", JOB_START),
     ("ctrl-c", QUESTION),
     ("ctrl-l", QUESTION),
+    (
+        "l s spc slash u s r slash b i n spc shift-backslash spc m o r e ret",
+        JOB_START,
+    ),
+    ("q", QUESTION),
+    (
+        "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
+         shift-bracket_left spc e x i t spc 8 spc shift-bracket_right ret",
+        QUESTION,
+    ),
     ("s p a w tab s l e e p ret", JOB_START),
     ("ctrl-z", QUESTION),
     (
