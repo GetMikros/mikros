@@ -187,6 +187,7 @@ impl Manager {
             process_group: INIT_GROUP,
             session: INIT_GROUP,
             app_id: SERVICE_MANAGER_APP.into(),
+            namespace_of: SERVICE_MANAGER_APP.into(),
             user: 0,
             login_session: 0,
             arguments: match &self.selftest {

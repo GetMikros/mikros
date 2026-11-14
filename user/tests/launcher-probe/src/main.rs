@@ -58,6 +58,9 @@ const LOG_ID: u32 = 2;
 /// seconds when emulated.
 const EXEC_WAIT_NS: i64 = 60_000_000_000;
 const PROBE: &str = "/usr/bin/probe";
+/// The probe as the binary of a command, and the command's app ID.
+const COMMAND: &str = "/usr/bin/probe-command";
+const COMMAND_APP: &str = "system.probe-command";
 /// The probe's own path, as init starts it in place of the service
 /// manager; the image holds the probe there too.
 const SELF_PATH: &str = "/usr/bin/servicemgr";
@@ -161,6 +164,33 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             [_] => probe(&launcher, &root, &reactor, me).await,
             [_, "exit", code] => code.parse().unwrap_or(PANIC_EXIT_CODE),
             [_, "sleep"] => core::future::pending().await,
+            // Run as a command: with its app ID, and starting nothing.
+            [_, "command"] => {
+                let own = get_info(&launcher, me).await;
+                let named = own.is_ok_and(|i| i.app_id == COMMAND_APP);
+                let spawned = spawn(&launcher, &["exit", "0"], |_| {}).await;
+                let request = SpawnRequest {
+                    path: SELF_PATH.into(),
+                    arguments: arguments_from(&[SELF_PATH, "exit", "0"]),
+                    handles: Vec::new(),
+                    app_id: None,
+                    user: CALLER_USER,
+                    login_session: false,
+                    new_session: false,
+                    working_directory: None,
+                    umask: u32::MAX,
+                };
+                let execed = launcher.exec(request).await;
+                let forked = launcher.fork(0, 0, 0).await;
+                let refused = spawned.err() == Some(Status::AccessDenied)
+                    && matches!(execed, Ok(Err(Status::AccessDenied)))
+                    && matches!(forked, Ok(Err(Status::AccessDenied)));
+                match (named, refused) {
+                    (true, true) => 0,
+                    (false, _) => 1,
+                    (true, false) => 2,
+                }
+            }
             [_, "rename"] => {
                 let named = spawn(&launcher, &["exit", "0"], |r| {
                     r.app_id = Some("system.renamed".into())
@@ -601,6 +631,19 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
         check(
             "naming an app ID whose manifest is invalid",
             wait(l, unmanifested as i32).await == Some((unmanifested, 0, 0)),
+        )?;
+        // A command's binary runs with the command's app ID, which no
+        // caller may name, and starts nothing.
+        let command = spawn(l, &["command"], |r| r.path = COMMAND.into())
+            .await
+            .map_or(0, |(pid, _)| pid);
+        check(
+            "running a command with its manifest's app ID",
+            wait(l, command as i32).await == Some((command, 0, 0)),
+        )?;
+        check(
+            "refusing to name a command's app ID",
+            as_app(COMMAND_APP, COMMAND).await.err() == Some(Status::AccessDenied),
         )?;
         let rename = spawn(l, &["rename"], |_| {})
             .await

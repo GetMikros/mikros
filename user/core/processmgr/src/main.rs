@@ -10,6 +10,7 @@
 extern crate alloc;
 
 mod broker;
+mod commands;
 mod devfs;
 mod init;
 mod launcher;

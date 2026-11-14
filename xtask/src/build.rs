@@ -402,10 +402,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", msh_check.display());
             let msh_options = crate::workspace_root().join("user/tests/msh-check/options.msh");
             let programs = crate::workspace_root().join("user/tests/launcher-probe/programs");
-            let (prog, closed, bad) = (
+            let (prog, closed, bad, command) = (
                 programs.join("system.prog.yaml"),
                 programs.join("system.closed.yaml"),
                 programs.join("system.bad.yaml"),
+                programs.join("system.probe-command.yaml"),
             );
             let dynamic_linker = crate::sysroot::dir().join("lib/ld-mikros.dlib");
             let greeting = crate::workspace_root().join("user/tests/hello-c/greeting.txt");
@@ -429,6 +430,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/lib/programs/system.prog.yaml", prog.as_path()),
                     ("usr/lib/programs/system.closed.yaml", closed.as_path()),
                     ("usr/lib/programs/system.bad.yaml", bad.as_path()),
+                    // A command, which the probe runs as another binary.
+                    ("usr/bin/probe-command", probe.as_path()),
+                    (
+                        "usr/lib/programs/system.probe-command.yaml",
+                        command.as_path(),
+                    ),
                     ("usr/bin/hello-std", hello_std.as_path()),
                     ("usr/bin/spawn-std", spawn_std.as_path()),
                     ("usr/bin/msh", msh.as_path()),

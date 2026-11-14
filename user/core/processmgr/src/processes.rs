@@ -78,6 +78,9 @@ pub struct Shared {
     waiters: RefCell<Vec<Waker>>,
     /// The login sessions sent `KILL`, whose processes may start no more.
     pub killed_sessions: RefCell<BTreeSet<u32>>,
+    /// The commands, and whether they were read from the root file
+    /// system's `/usr`.
+    pub commands: RefCell<Option<(bool, Rc<crate::commands::Commands>)>>,
 }
 
 /// A process to start.
@@ -94,6 +97,9 @@ pub struct NewProcess {
     pub process_group: u32,
     pub session: u32,
     pub app_id: String,
+    /// The app ID whose namespace it gets: its own, or for a command, its
+    /// spawner's.
+    pub namespace_of: String,
     pub user: u32,
     pub login_session: u32,
     pub arguments: OwnedHandle,
@@ -137,6 +143,7 @@ impl Shared {
             changes: Cell::new(0),
             waiters: RefCell::new(Vec::new()),
             killed_sessions: RefCell::new(BTreeSet::new()),
+            commands: RefCell::new(None),
         })
     }
 
@@ -184,7 +191,7 @@ impl Shared {
         let budget = self.budget_of(new.user, &new.app_id)?;
         let namespaces = self.namespaces.clone();
         let (namespace, programs) = namespaces
-            .of(self, &new.app_id, new.user, new.service_manager)
+            .of(self, &new.namespace_of, new.user, new.service_manager)
             .await?;
         let lookup = start::Lookup {
             first: new.programs_first.as_deref(),

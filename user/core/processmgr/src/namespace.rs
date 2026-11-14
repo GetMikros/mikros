@@ -44,7 +44,7 @@ use mikros_rt::files;
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemAsyncClient, Node, NodeAsyncClient, OpenFlags, Rights,
+    Error, Filesystem, FilesystemAsyncClient, Node, NodeAsyncClient, NodeType, OpenFlags, Rights,
     TemporaryFilesystem, TemporaryFilesystemAsyncClient,
 };
 use mikros_rt::interfaces::mikros::process::NamespaceEntry;
@@ -420,6 +420,26 @@ impl Namespaces {
             }
         }
         shared.fs.file(&format!("usr/{path}")).map(<[u8]>::to_vec)
+    }
+
+    /// The names of the files that end in `suffix` in the folder at
+    /// `path` below `/usr`: the root file system's once namespaces come
+    /// from it, or else the boot file system's. None when there is no
+    /// such folder.
+    pub async fn usr_names(&self, shared: &Shared, path: &str, suffix: &str) -> Vec<String> {
+        let ready = self.ready.borrow().clone();
+        let at = format!("usr/{path}");
+        if let Some(Roots::Root(root)) = ready.as_deref().map(|r| &r.roots) {
+            let listed = files::list(root, &shared.reactor, &at, NodeType::File, suffix).await;
+            return listed.unwrap_or_default();
+        }
+        let items = shared.fs.subtree(&at).unwrap_or_default();
+        items
+            .into_iter()
+            .filter(|i| matches!(i.kind, ItemKind::File(_)) && !i.path.contains('/'))
+            .filter(|i| i.path.ends_with(suffix))
+            .map(|i| i.path)
+            .collect()
     }
 
     /// Where the device manager's programs under `/usr` are looked for

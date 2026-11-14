@@ -119,7 +119,17 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                 });
                 Ok(())
             }
-            R::Fork(_, r) => r.reply(s, Err(no)),
+            R::Fork(_, r) => {
+                let (shared, server) = (shared.clone(), server.clone());
+                shared.clone().spawner.spawn(async move {
+                    let commands = crate::commands::of(&shared).await;
+                    let app_id = shared.records.borrow().get(pid).map(|r| r.app_id.clone());
+                    let command = app_id.is_some_and(|a| commands.has_app(&a));
+                    let refused = if command { Status::AccessDenied } else { no };
+                    let _ = r.reply(server.server(), Err(refused));
+                });
+                Ok(())
+            }
             R::KillLoginSession(request, r) => {
                 let (shared, server) = (shared.clone(), server.clone());
                 shared.clone().spawner.spawn(async move {
@@ -146,7 +156,9 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
 /// Only a spawn, by a caller that holds `process.set_user`, may name
 /// another user or ask for a new login session, which `spawn` gives the
 /// new process's ID. A process of a login session sent `KILL` starts
-/// none.
+/// none, and neither does a process with a command's app ID. A command's
+/// binary started without an app ID gets the command's app ID, with the
+/// namespace of the caller's.
 async fn new_process(
     shared: &Shared,
     caller: u32,
@@ -165,8 +177,13 @@ async fn new_process(
         None => None,
         Some(app_id) => Some(named_app(shared, caller, app_id, program).await?),
     };
+    let commands = crate::commands::of(shared).await;
     let records = shared.records.borrow();
     let from = records.get(caller).ok_or(Status::BadState)?;
+    // A command's app ID starts nothing else with its permissions.
+    if commands.has_app(&from.app_id) {
+        return Err(Status::AccessDenied);
+    }
     if spawning
         && shared
             .killed_sessions
@@ -175,7 +192,15 @@ async fn new_process(
     {
         return Err(Status::BadState);
     }
-    let app_id = named.unwrap_or_else(|| from.app_id.clone());
+    // A command's binary, started without an app ID, gets the command's,
+    // and keeps the namespace that its spawner's app ID gives.
+    let (app_id, namespace_of) = match named {
+        Some(app_id) => (app_id.clone(), app_id),
+        None => match commands.app_of(shared, program) {
+            Some(command) => (command, from.app_id.clone()),
+            None => (from.app_id.clone(), from.app_id.clone()),
+        },
+    };
     let user = match request.user {
         CALLER_USER => from.user,
         user => user,
@@ -195,6 +220,7 @@ async fn new_process(
         process_group: from.process_group,
         session: from.session,
         app_id,
+        namespace_of,
         user,
         login_session: from.login_session,
         arguments: duplicate(request.arguments.raw(), SAME_RIGHTS)?,
