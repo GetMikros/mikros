@@ -254,6 +254,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "devices"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "diagsvc"
 version = "0.0.0"
 dependencies = [

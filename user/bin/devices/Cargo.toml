@@ -1,0 +1,20 @@
+[package]
+name = "devices"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
+
+# It lists the devices through mikros.driver.Devices, which every process
+# may use, so it needs no program manifest.
+[package.metadata.mikros]
+kind = "program"
+image = "system"
+completions = "devices.msh"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }
