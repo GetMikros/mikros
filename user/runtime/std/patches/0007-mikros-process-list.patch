@@ -1,0 +1,99 @@
+diff --git a/std/src/os/mikros/process.rs b/std/src/os/mikros/process.rs
+index 400cdb2..97e9c57 100644
+--- a/std/src/os/mikros/process.rs
++++ b/std/src/os/mikros/process.rs
+@@ -6,13 +6,93 @@
+ #![unstable(feature = "mikros_handles", issue = "none")]
+ 
+ use super::io::{BorrowedHandle, OwnedHandle, RawHandle, owned};
+-use crate::ffi::c_int;
++use crate::ffi::{CStr, c_char, c_int};
+ use crate::io;
++use crate::path::PathBuf;
+ use crate::process::Child;
+ 
++/// `struct mikros_process_info` of the C library.
++#[repr(C)]
++struct CProcessInfo {
++    pid: i32,
++    parent: i32,
++    process_group: i32,
++    session: i32,
++    login_session: u32,
++    user: u32,
++    koid: u64,
++    app_id: [c_char; 129],
++    path: [c_char; 1025],
++}
++
+ unsafe extern "C" {
+     fn mikros_process_handle(pid: c_int) -> i64;
+     fn mikros_process_self() -> RawHandle;
++    fn mikros_process_list(pids: *mut i32, max: usize) -> isize;
++    fn mikros_process_info(pid: i32, info: *mut CProcessInfo) -> c_int;
++}
++
++/// A process as the process manager describes it.
++#[derive(Clone, Debug)]
++pub struct ProcessInfo {
++    pub pid: u32,
++    pub parent: u32,
++    pub process_group: u32,
++    pub session: u32,
++    pub login_session: u32,
++    pub user: u32,
++    /// The kernel object ID of the process.
++    pub koid: u64,
++    pub app_id: String,
++    /// The path of its executable.
++    pub path: PathBuf,
++}
++
++/// The IDs of the processes that the process manager lists to the
++/// caller.
++pub fn list() -> io::Result<Vec<u32>> {
++    let mut pids: Vec<i32> = Vec::new();
++    loop {
++        // SAFETY: `pids` has room for its capacity.
++        let count = unsafe { mikros_process_list(pids.as_mut_ptr(), pids.capacity()) };
++        if count < 0 {
++            return Err(io::Error::last_os_error());
++        }
++        let count = count as usize;
++        if count <= pids.capacity() {
++            // SAFETY: the call stored `count` IDs.
++            unsafe { pids.set_len(count) };
++            return Ok(pids.into_iter().map(|p| p as u32).collect());
++        }
++        pids.reserve_exact(count);
++    }
++}
++
++/// What the process manager knows of process `pid`.
++pub fn info(pid: u32) -> io::Result<ProcessInfo> {
++    let pid = i32::try_from(pid).map_err(|_| io::Error::from_raw_os_error(3))?;
++    let mut info = crate::mem::MaybeUninit::<CProcessInfo>::uninit();
++    // SAFETY: the pointer is valid for a `struct mikros_process_info`.
++    if unsafe { mikros_process_info(pid, info.as_mut_ptr()) } != 0 {
++        return Err(io::Error::last_os_error());
++    }
++    // SAFETY: the call filled it in.
++    let info = unsafe { info.assume_init() };
++    let text = |chars: &[c_char]| {
++        // SAFETY: the C library ends the field with a NUL byte.
++        unsafe { CStr::from_ptr(chars.as_ptr()) }.to_string_lossy().into_owned()
++    };
++    Ok(ProcessInfo {
++        pid: info.pid as u32,
++        parent: info.parent as u32,
++        process_group: info.process_group as u32,
++        session: info.session as u32,
++        login_session: info.login_session,
++        user: info.user,
++        koid: info.koid,
++        app_id: text(&info.app_id),
++        path: PathBuf::from(text(&info.path)),
++    })
+ }
+ 
+ /// The process's own handle, with the `MAP` right, which the C library
