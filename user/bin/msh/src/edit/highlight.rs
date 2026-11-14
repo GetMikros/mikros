@@ -4,8 +4,9 @@
 //! built-in command, a function or a program that is found, and crimson
 //! when it is not. Other words are arguments, mint green, and
 //! underlined when they name a file or folder that exists; one written
-//! as a path, from `/`, `~/`, `./` or `../`, that names nothing is
-//! crimson, as is the argument of `cd` that is no folder. Strings are
+//! as a path, from `/`, `~/`, `./` or `../`, that names nothing and that
+//! no entry of its folder starts as is crimson, as is the argument of
+//! `cd` that is no folder and that no folder starts as. Strings are
 //! orange, variables teal, operators mint green, `|`, `;`, `&` and
 //! redirections green, comments dark grey, and a closing bracket that
 //! closes nothing crimson. Those are the defaults of `$msh_colors`, a
@@ -355,11 +356,12 @@ impl Reader<'_> {
         } else if !plain || never_missing(&bare) {
             Style::Argument
         } else if let Some(is_folder) = self.file_kind(&bare) {
-            match folder && !is_folder {
-                true => Style::Error,
-                false => Style::Path,
+            match (folder && !is_folder, self.completes(&bare, true)) {
+                (false, _) => Style::Path,
+                (true, true) => Style::Argument,
+                (true, false) => Style::Error,
             }
-        } else if !target && (folder || written_as_path(&bare)) {
+        } else if !target && (folder || written_as_path(&bare)) && !self.completes(&bare, folder) {
             Style::Error
         } else {
             Style::Argument
@@ -415,17 +417,41 @@ impl Reader<'_> {
         }
     }
 
+    /// `path` with `~` and `~/` at its start as the home folder, or
+    /// `None` when the home folder is not known.
+    fn expanded(&self, path: &str) -> Option<String> {
+        match path.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                Some(format!("{}{rest}", self.home.as_deref()?))
+            }
+            _ => Some(path.to_owned()),
+        }
+    }
+
+    /// Whether an entry of the folder of `path`, a folder when `folders`,
+    /// starts with its last part, so that completion can still make it
+    /// a name.
+    fn completes(&self, path: &str, folders: bool) -> bool {
+        let Some(path) = self.expanded(path) else {
+            return false;
+        };
+        let (folder, prefix) = match path.rfind('/') {
+            Some(0) => ("/", &path[1..]),
+            Some(at) => (&path[..at], &path[at + 1..]),
+            None => (".", path.as_str()),
+        };
+        !prefix.is_empty()
+            && self.sources.entries(folder).is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|(name, is_folder)| name.starts_with(prefix) && (*is_folder || !folders))
+            })
+    }
+
     /// Whether `path` is a folder, if it names a file or folder that
     /// exists, with `~` and `~/` at its start as the home folder.
     fn file_kind(&self, path: &str) -> Option<bool> {
-        let expanded;
-        let path = match path.strip_prefix('~') {
-            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-                expanded = format!("{}{rest}", self.home.as_deref()?);
-                expanded.as_str()
-            }
-            _ => path,
-        };
+        let path = self.expanded(path)?;
         let trimmed = path.trim_end_matches('/');
         if trimmed.is_empty() {
             return path.starts_with('/').then_some(true);
@@ -601,6 +627,9 @@ mod tests {
         );
         // A redirection's target need not exist.
         assert_eq!(shown("ls > ./new.txt"), "cc.|.aaaaaaaaa");
+        // A path that an entry still completes is no error yet.
+        assert_eq!(shown("cat ./no ./sr /u ./zz"), "ccc.aaaa.aaaa.aa.EEEE");
+        assert_eq!(shown("cd sr; cd no"), "cc.aa|.cc.EE");
     }
 
     #[test]
