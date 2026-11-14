@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn takes_only_the_kinds_it_names() {
         let metadata = serde_json::json!({ "packages": [package("diagsvc",
-            serde_json::json!({"kind": "service", "image": "system", "manifest": "diag.yaml", "kinds": ["diag"]}))]});
+            serde_json::json!({"kind": "service", "image": "system", "manifest": "diagsvc.yaml", "kinds": ["diag"]}))]});
         let components = parse(&metadata).unwrap();
         assert!(components[0].in_kind(Kind::Diag));
         assert!(!components[0].in_kind(Kind::Production));

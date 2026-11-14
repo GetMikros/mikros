@@ -17,5 +17,5 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"
 kind = "service"
 image = "system"
 runtime = "rt"
-manifest = "diag.yaml"
+manifest = "diagsvc.yaml"
 kinds = ["diag"]

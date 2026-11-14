@@ -1,6 +1,6 @@
 # The service manifest of the diagnostic service, installed as
-# usr/lib/services/diag.yaml in the diagnostic build only.
-name: diag
+# usr/lib/services/diagsvc.yaml in the diagnostic build only.
+name: diagsvc
 binary: /usr/bin/diagsvc
 start: boot
 boot_handles: [root_resource]
