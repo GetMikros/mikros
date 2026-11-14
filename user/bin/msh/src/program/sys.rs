@@ -1,7 +1,7 @@
 //! The C library's process, signal, terminal and time functions that
 //! msh calls beyond what std gives.
 
-use std::ffi::{CString, c_char, c_int, c_long};
+use std::ffi::{CStr, CString, c_char, c_int, c_long};
 use std::io;
 
 pub const SIGKILL: i32 = 9;
@@ -25,7 +25,20 @@ struct Tm {
     zone: *const c_char,
 }
 
+/// musl's `struct passwd`.
+#[repr(C)]
+struct Passwd {
+    name: *const c_char,
+    password: *const c_char,
+    uid: u32,
+    gid: u32,
+    gecos: *const c_char,
+    dir: *const c_char,
+    shell: *const c_char,
+}
+
 unsafe extern "C" {
+    fn getpwnam(name: *const c_char) -> *const Passwd;
     fn getpgrp() -> c_int;
     fn setpgid(pid: c_int, pgid: c_int) -> c_int;
     fn tcsetpgrp(fd: c_int, pgrp: c_int) -> c_int;
@@ -144,6 +157,21 @@ pub fn host_name() -> String {
     }
     let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
     String::from_utf8_lossy(&name[..end]).into_owned()
+}
+
+/// The home folder of the user `name`, as the C library's `getpwnam`
+/// gives it, when there is such a user.
+pub fn home_of(name: &str) -> Option<String> {
+    let name = CString::new(name).ok()?;
+    // SAFETY: the name is a C string; the entry, when there is one, stays
+    // valid until the next call, and its folder is copied before then.
+    unsafe {
+        let entry = getpwnam(name.as_ptr());
+        if entry.is_null() || (*entry).dir.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr((*entry).dir).to_string_lossy().into_owned())
+    }
 }
 
 /// The local time, in seconds since 1970-01-01T00:00:00 local.

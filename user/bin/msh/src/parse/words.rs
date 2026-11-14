@@ -8,6 +8,18 @@ fn special(c: char) -> bool {
     c.is_whitespace() || "|;&><(){}[]".contains(c)
 }
 
+/// `word` with a `~` at its start as written, for the value of a
+/// `NAME=value` word, which does not start a word.
+pub(super) fn as_written(word: Word) -> Word {
+    let parts = word.parts.into_iter().map(|part| match part {
+        WordPart::Home(name) => WordPart::Bare(format!("~{}", name.unwrap_or_default())),
+        other => other,
+    });
+    Word {
+        parts: parts.collect(),
+    }
+}
+
 impl Parser<'_> {
     /// A pipeline, up to the end of its statement, or up to `{` when
     /// `before_block`, as a condition is.
@@ -62,7 +74,7 @@ impl Parser<'_> {
         while let Some((name, after)) = self.environment_word() {
             self.pos = after + 1;
             let value = match self.peek() {
-                Some(c) if !special(c) => self.word()?,
+                Some(c) if !special(c) => as_written(self.word()?),
                 _ => Word { parts: Vec::new() },
             };
             simple.environment.push((name, value));
@@ -174,7 +186,7 @@ impl Parser<'_> {
     /// a special character.
     pub(super) fn word(&mut self) -> Result<Word> {
         let start = self.pos;
-        let mut parts: Vec<WordPart> = Vec::new();
+        let mut parts: Vec<WordPart> = self.home().into_iter().collect();
         let mut bare = String::new();
         let flush = |bare: &mut String, parts: &mut Vec<WordPart>| {
             if !bare.is_empty() {
@@ -226,6 +238,28 @@ impl Parser<'_> {
             return Err(self.error_at(start, "a word is expected here"));
         }
         Ok(Word { parts })
+    }
+
+    /// `~` or `~name` at the start of a bare word, alone or before `/`,
+    /// if one is here.
+    fn home(&mut self) -> Option<WordPart> {
+        if self.peek() != Some('~') {
+            return None;
+        }
+        let mut end = self.pos + 1;
+        while self
+            .chars
+            .get(end)
+            .is_some_and(|&c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            end += 1;
+        }
+        if !self.chars.get(end).is_none_or(|&c| c == '/' || special(c)) {
+            return None;
+        }
+        let name: String = self.chars[self.pos + 1..end].iter().collect();
+        self.pos = end;
+        Some(WordPart::Home((!name.is_empty()).then_some(name)))
     }
 
     /// `[` and the text up to its matching `]`.

@@ -130,6 +130,9 @@ pub enum WordPart {
     Variable(Variable),
     /// A double-quoted string's `{expr}`, or `(expr)` in a word.
     Expr(Expr),
+    /// `~`, or `~name` with the user's name, at the start of a bare word,
+    /// alone or before `/`.
+    Home(Option<String>),
 }
 
 /// A variable with the fields and items read from it.

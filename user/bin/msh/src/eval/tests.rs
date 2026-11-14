@@ -45,6 +45,9 @@ impl System for Fake {
             .cloned()
             .ok_or_else(|| format!("{path}: not found"))
     }
+    fn home_of(&self, name: &str) -> Option<String> {
+        (name == "bob").then(|| "/Users/bob".into())
+    }
     fn executable(&self, path: &str) -> Option<bool> {
         match self.programs.contains_key(path) {
             true => Some(true),
@@ -350,6 +353,28 @@ fn sets_environment_words_for_one_command_and_assigns_without_one() {
     assert_eq!(assigned("x=2abc"), Value::String("2abc".into()));
     assert_eq!(assigned("x='a b'"), Value::String("a b".into()));
     assert!(matches!(assigned("x=[a 1]"), Value::List(l) if l.len() == 2));
+}
+
+#[test]
+fn expands_home_folders_at_the_start_of_bare_words() {
+    assert_eq!(
+        ok("echo ~ ~/a ~bob ~bob/x ~nobody/x '~' \"~/x\" a~ ~a~"),
+        "/home/ada /home/ada/a /Users/bob /Users/bob/x ~nobody/x ~ ~/x a~ ~a~\n"
+    );
+    assert_eq!(ok("print [~/a ~bob]"), "/home/ada/a\n/Users/bob\n");
+    assert_eq!(ok("cd /tmp\ncd ~\npwd"), "/home/ada\n");
+    // The value of a NAME=value word does not start a word.
+    let mut s = shell();
+    run(&mut s, "TOOL=~/bin echo hi\nlet x = 1\nx=~/a").unwrap();
+    let env: BTreeMap<_, _> = s.system.runs[0].programs[0]
+        .environment
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(env["TOOL"], "~/bin");
+    assert_eq!(s.lookup("x"), Some(&Value::String("~/a".into())));
+    let f = error("let s = 'x'\ndelete env.HOME\necho ~");
+    assert_eq!(f.message, "`$env.HOME` is not set");
 }
 
 #[test]

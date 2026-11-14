@@ -248,6 +248,20 @@ fn reads_quoted_field_names() {
 }
 
 #[test]
+fn reads_home_folders_at_the_start_of_bare_words() {
+    let s = simple("cat ~/a ~bob a~ ~$x > ~/out");
+    let first = |a: &Argument| match a {
+        Argument::Word(w) => w.parts[0].clone(),
+        Argument::Block(_) => panic!(),
+    };
+    assert_eq!(first(&s.words[1]), WordPart::Home(None));
+    assert_eq!(first(&s.words[2]), WordPart::Home(Some("bob".into())));
+    assert_eq!(first(&s.words[3]), WordPart::Bare("a~".into()));
+    assert_eq!(first(&s.words[4]), WordPart::Bare("~".into()));
+    assert_eq!(s.redirections[0].target.parts[0], WordPart::Home(None));
+}
+
+#[test]
 fn reads_delete() {
     let StatementKind::Delete(v) = one("delete $env.PATH.1") else {
         panic!()

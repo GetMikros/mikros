@@ -383,7 +383,8 @@ impl Parser<'_> {
                 _ => self.pos = start,
             }
         }
-        let mut parts: Vec<StringPart> = self.word()?.parts.into_iter().map(string_part).collect();
+        let word = words::as_written(self.word()?);
+        let mut parts: Vec<StringPart> = word.parts.into_iter().map(string_part).collect();
         // A lone variable or expression gives its value, as in a word.
         if let [StringPart::Expr(_)] = parts.as_slice()
             && let Some(StringPart::Expr(e)) = parts.pop()
@@ -420,6 +421,7 @@ fn string_part(part: WordPart) -> StringPart {
         WordPart::Bare(text) | WordPart::Quoted(text) => StringPart::Text(text),
         WordPart::Variable(v) => StringPart::Expr(Expr::Variable(v)),
         WordPart::Expr(e) => StringPart::Expr(e),
+        WordPart::Home(name) => StringPart::Text(format!("~{}", name.unwrap_or_default())),
     }
 }
 

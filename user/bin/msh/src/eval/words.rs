@@ -40,6 +40,7 @@ impl<S: System> Shell<S> {
                     Piece::Literal(scalar_text(&self.variable(v)?))
                 }
                 WordPart::Expr(expr) => Piece::Literal(scalar_text(&self.eval(expr)?)),
+                WordPart::Home(user) => Piece::Literal(self.home(user.as_deref())?),
             };
             match &piece {
                 Piece::Pattern(t) | Piece::Literal(t) => text.push_str(t),
@@ -52,6 +53,22 @@ impl<S: System> Shell<S> {
         match glob::expand(&pieces, &self.system) {
             Ok(paths) => Ok(paths.into_iter().map(Value::String).collect()),
             Err(message) => Err(self.fail(message)),
+        }
+    }
+
+    /// The folder that `~` stands for, `$env.HOME`, or `~name`, the home
+    /// folder of the user `name`, which stays as written when there is
+    /// no such user.
+    fn home(&self, user: Option<&str>) -> Result<String, Flow> {
+        match user {
+            None => match self.env("HOME") {
+                Some(home) => Ok(scalar_text(home)),
+                None => Err(self.fail("`$env.HOME` is not set".into())),
+            },
+            Some(name) => Ok(self
+                .system
+                .home_of(name)
+                .unwrap_or_else(|| format!("~{name}"))),
         }
     }
 

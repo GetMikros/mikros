@@ -314,6 +314,10 @@ impl System for Os {
         fs::metadata(path).ok()?.modified().ok()
     }
 
+    fn home_of(&self, name: &str) -> Option<String> {
+        sys::home_of(name)
+    }
+
     fn run(&mut self, run: Run) -> Result<Ran, String> {
         let mut input = None;
         let mut feeder = None;
