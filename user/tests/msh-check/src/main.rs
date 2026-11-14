@@ -66,6 +66,7 @@ fn main() -> ExitCode {
     let greeting = "spawn-std echo < /usr/share/hello/greeting.txt";
     let piped = format!("{greeting} | spawn-std echo");
     let captured = format!("let g = ({greeting} | lines)\nprint $g.0");
+    let unparenthesized = format!("let g = {greeting} | lines\nprint $g.0");
     let checks: Vec<(Vec<&str>, &str, Ran)> = vec![
         (vec!["-c", "print hello"], "", ran("hello\n", "", 0)),
         (
@@ -108,10 +109,20 @@ fn main() -> ExitCode {
         ),
         // A program's output as a value.
         (vec!["-c", &captured], "", ran(GREETING, "", 0)),
+        (vec!["-c", &unparenthesized], "", ran(GREETING, "", 0)),
         (
             vec!["-c", "env.FOO = 'bar'\nspawn-std env FOO"],
             "",
             ran("bar\n", "", 0),
+        ),
+        // `env.NAME=value` before a command sets it for that command only.
+        (
+            vec![
+                "-c",
+                "env.FOO=bar spawn-std env FOO\nprint ($env.FOO ?? 'unset')",
+            ],
+            "",
+            ran("bar\nunset\n", "", 0),
         ),
         (
             vec!["-c", "print /usr/share/hello/*.txt"],
