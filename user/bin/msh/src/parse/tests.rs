@@ -157,6 +157,15 @@ fn reads_double_quoted_strings() {
         StringPart::Expr(Expr::Binary(Binary::Add, ..))
     ));
     assert_eq!(parts[2], StringPart::Text(" {x} é".into()));
+    let Expr::String(parts) = expr(r#""a $b.c... \$d""#) else {
+        panic!()
+    };
+    let StringPart::Expr(Expr::Variable(v)) = &parts[1] else {
+        panic!()
+    };
+    assert_eq!((v.name.as_str(), v.spread), ("b", false));
+    assert_eq!(v.path, [Access::Field("c".into())]);
+    assert_eq!(parts[2], StringPart::Text("... $d".into()));
     assert_eq!(failure(r#"let x = "\q""#).message, "`\\q` is not an escape");
     assert_eq!(
         expr("'a\\n{b}'"),

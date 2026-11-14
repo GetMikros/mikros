@@ -188,11 +188,12 @@ impl Parser<'_> {
                 '"' => {
                     flush(&mut bare, &mut parts);
                     let string = self.double_quoted()?;
-                    for part in string {
-                        parts.push(match part {
-                            StringPart::Text(text) => WordPart::Quoted(text),
-                            StringPart::Expr(expr) => WordPart::Expr(expr),
-                        });
+                    // A string that interpolates gives its text as a
+                    // whole, whatever the kinds of the values in it.
+                    match string.as_slice() {
+                        [] => parts.push(WordPart::Quoted(String::new())),
+                        [StringPart::Text(text)] => parts.push(WordPart::Quoted(text.clone())),
+                        _ => parts.push(WordPart::Expr(Expr::String(string))),
                     }
                 }
                 '$' if self
@@ -243,6 +244,16 @@ impl Parser<'_> {
 
     /// `$name`, `$name.field.0`, `$env.NAME` or `$list...`.
     pub(super) fn variable(&mut self) -> Result<Variable> {
+        let mut variable = self.variable_path()?;
+        if self.looking_at("...") {
+            self.pos += 3;
+            variable.spread = true;
+        }
+        Ok(variable)
+    }
+
+    /// `$name`, `$name.field.0` or `$env.NAME`, without `...`.
+    fn variable_path(&mut self) -> Result<Variable> {
         self.expect('$', "`$`")?;
         let name = self.variable_name()?;
         let (environment, name) = match name.as_str() {
@@ -270,15 +281,11 @@ impl Parser<'_> {
                 _ => break,
             }
         }
-        let spread = self.looking_at("...");
-        if spread {
-            self.pos += 3;
-        }
         Ok(Variable {
             environment,
             name,
             path,
-            spread,
+            spread: false,
         })
     }
 
@@ -311,8 +318,9 @@ impl Parser<'_> {
         }
     }
 
-    /// A double-quoted string, with its escapes and `{expr}`
-    /// interpolations.
+    /// A double-quoted string, with its escapes, and its `{expr}` and
+    /// `$name` interpolations; a `$` that no name follows is text, and
+    /// `...` after a name is too.
     pub(super) fn double_quoted(&mut self) -> Result<Vec<StringPart>> {
         self.pos += 1;
         let mut parts = Vec::new();
@@ -355,6 +363,16 @@ impl Parser<'_> {
                     };
                     text.push(escaped);
                     self.pos += 1;
+                }
+                Some('$')
+                    if self
+                        .peek_at(1)
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_') =>
+                {
+                    if !text.is_empty() {
+                        parts.push(StringPart::Text(std::mem::take(&mut text)));
+                    }
+                    parts.push(StringPart::Expr(Expr::Variable(self.variable_path()?)));
                 }
                 Some('{') => {
                     if !text.is_empty() {

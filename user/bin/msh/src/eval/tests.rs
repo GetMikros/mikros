@@ -190,6 +190,29 @@ fn keeps_path_a_list_and_passes_the_environment() {
 }
 
 #[test]
+fn interpolates_names_in_double_quotes_but_not_in_single_quotes() {
+    let set = "let x = 'v'\nlet r = {name: 'n', items: [1 2]}\n";
+    let out = |source: &str| ok(&format!("{set}{source}"));
+    assert_eq!(out("echo \"a $x b\""), "a v b\n");
+    assert_eq!(out("echo \"$r.name/$r.items.1 {$x}\""), "n/2 v\n");
+    assert_eq!(out("echo \"$env.HOME\""), "/home/ada\n");
+    // A `$` that no name follows is text, as `\$` is, and so is `...`.
+    assert_eq!(
+        out("echo \"\\$x $ costs $5 $x...\""),
+        "$x $ costs $5 v...\n"
+    );
+    // The string is one argument, and gives its text.
+    let mut s = shell();
+    run(&mut s, "let l = [1 2]\necho \"$l\" $l...").unwrap();
+    assert_eq!(s.system.runs[0].programs[0].args[1..], ["[1,2]", "1", "2"]);
+    assert_eq!(ok("let n = 3\nprint (\"$n\" == '3')"), "true\n");
+    assert_eq!(error("echo \"$nope\"").message, "`$nope` is not set");
+    // Single quotes interpolate nothing.
+    assert_eq!(out("echo '$x {$x}' a'$x'b"), "$x {$x} a$xb\n");
+    assert_eq!(out("print '$x'"), "$x\n");
+}
+
+#[test]
 fn runs_programs_with_pipes_and_captures_output() {
     assert_eq!(ok("echo hello world | shout"), "HELLO WORLD\n");
     assert_eq!(ok("let x = (echo hi | shout)\nprint $x"), "HI\n");
