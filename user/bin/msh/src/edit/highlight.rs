@@ -1,12 +1,14 @@
 //! The colours of the line as it is typed. The line is read word by
 //! word, as it stands while it is typed, which may not parse yet: a word
-//! where a command goes is a command, blue when it is a keyword, a
-//! built-in command, a function or a program that is found, and bright
-//! red when it is not; other words are arguments, cyan, and underlined
-//! when they name a file or folder that exists. Strings are yellow,
-//! variables, operators, `|`, `;`, `&` and redirections bright cyan,
-//! comments dark grey, and a closing bracket that closes nothing bright
-//! red.
+//! where a command goes is a command, plain when it is a keyword, a
+//! built-in command, a function or a program that is found, and crimson
+//! when it is not. Other words are arguments, mint green, and
+//! underlined when they name a file or folder that exists; one written
+//! as a path, from `/`, `~/`, `./` or `../`, that names nothing is
+//! crimson, as is the argument of `cd` that is no folder. Strings are
+//! orange, variables teal, operators mint green, `|`, `;`, `&` and
+//! redirections green, comments dark grey, and a closing bracket that
+//! closes nothing crimson.
 
 use super::complete::Sources;
 use std::collections::HashSet;
@@ -17,14 +19,17 @@ pub enum Style {
     Plain,
     /// A keyword, or a command that is found.
     Command,
-    /// A command that is not found, or a syntax error.
+    /// A command or path that is not found, or a syntax error.
     Error,
     Argument,
     /// An argument that names a file or folder that exists.
     Path,
     String,
     Variable,
+    /// An operator of an expression or assignment.
     Operator,
+    /// `|`, `;`, `&` or a redirection.
+    Separator,
     Comment,
 }
 
@@ -32,13 +37,18 @@ impl Style {
     /// The escape sequence that starts drawing in the style.
     pub fn sgr(self) -> &'static str {
         match self {
-            Style::Plain => "\x1b[0m",
-            Style::Command => "\x1b[0;34m",
-            Style::Error => "\x1b[0;91m",
-            Style::Argument => "\x1b[0;36m",
-            Style::Path => "\x1b[0;36;4m",
-            Style::String => "\x1b[0;33m",
-            Style::Variable | Style::Operator => "\x1b[0;96m",
+            Style::Plain | Style::Command => "\x1b[0m",
+            // #c0392b
+            Style::Error => "\x1b[0;38;2;192;57;43m",
+            // #1ab597
+            Style::Argument | Style::Operator => "\x1b[0;38;2;26;181;151m",
+            Style::Path => "\x1b[0;4;38;2;26;181;151m",
+            // #f67400
+            Style::String => "\x1b[0;38;2;246;116;0m",
+            // #16a085
+            Style::Variable => "\x1b[0;38;2;22;160;133m",
+            // #11d116
+            Style::Separator => "\x1b[0;38;2;17;209;22m",
             Style::Comment => "\x1b[0;90m",
         }
     }
@@ -61,19 +71,39 @@ const ARITHMETIC: [&str; 6] = ["+", "-", "*", "/", "%", ".."];
 /// The characters that end a bare word.
 const SPECIAL: &str = "|;&><(){}[]";
 
+/// Whether `word` is written as a path, from `/`, `~/`, `./` or `../`.
+fn written_as_path(word: &str) -> bool {
+    word == "~" || ["/", "~/", "./", "../"].iter().any(|p| word.starts_with(p))
+}
+
+/// Whether `word` is never taken for a path that must exist: an option,
+/// a glob pattern, or another user's home folder as `~name`.
+fn never_missing(word: &str) -> bool {
+    word.starts_with('-')
+        || word.contains(['*', '?'])
+        || word.starts_with('~') && !(word == "~" || word.starts_with("~/"))
+}
+
 /// The style of each byte of `line`, with commands and files looked up
 /// in `sources`.
 pub fn styles(line: &str, sources: &dyn Sources) -> Vec<Style> {
     let mut known: HashSet<String> = sources.programs().into_iter().collect();
     known.extend(sources.functions().into_iter().map(|(name, _)| name));
     known.extend(crate::eval::builtins::names().into_iter().map(String::from));
+    let home = sources
+        .environment()
+        .into_iter()
+        .find_map(|(name, value)| (name == "HOME").then_some(value));
     let mut reader = Reader {
         line,
         at: 0,
         styles: vec![Style::Plain; line.len()],
         known,
         sources,
+        home,
         expression: false,
+        target: false,
+        folder: false,
     };
     reader.read();
     reader.styles
@@ -86,9 +116,17 @@ struct Reader<'a> {
     styles: Vec<Style>,
     known: HashSet<String>,
     sources: &'a dyn Sources,
+    /// The folder that `~` stands for.
+    home: Option<String>,
     /// Whether the statement read is an expression, as its first word
     /// tells.
     expression: bool,
+    /// Whether the next word is the target of `>`, `>>` or `2>`, which
+    /// need not exist.
+    target: bool,
+    /// Whether the next word is the argument of `cd`, which must be a
+    /// folder.
+    folder: bool,
 }
 
 impl Reader<'_> {
@@ -119,7 +157,7 @@ impl Reader<'_> {
             match c {
                 ' ' | '\t' | '\r' => self.at += 1,
                 '\n' | ';' => {
-                    self.take(1, Style::Operator);
+                    self.take(1, Style::Separator);
                     command = true;
                     self.expression = false;
                 }
@@ -130,7 +168,7 @@ impl Reader<'_> {
                     self.take(end - self.at, Style::Comment);
                 }
                 '|' | '&' => {
-                    self.take(1, Style::Operator);
+                    self.take(1, Style::Separator);
                     command = true;
                     self.expression = false;
                 }
@@ -163,17 +201,20 @@ impl Reader<'_> {
 
     /// `>`, `>>`, `<`, `2>`, `2>&1` or `>&2`.
     fn redirection(&mut self) {
-        let length = ["2>&1", ">&2", "2>", ">>", ">", "<"]
-            .iter()
+        let found = ["2>&1", ">&2", "2>", ">>", ">", "<"]
+            .into_iter()
             .find(|r| self.looking_at(r))
-            .map_or(1, |r| r.len());
-        self.take(length, Style::Operator);
+            .unwrap_or(">");
+        self.target = matches!(found, "2>" | ">>" | ">");
+        self.take(found.len(), Style::Separator);
     }
 
     /// A word, where a command goes when `command`, with its strings and
     /// variables; whether a command goes after it.
     fn word(&mut self, command: bool) -> bool {
         let start = self.at;
+        let target = std::mem::take(&mut self.target);
+        let folder = std::mem::take(&mut self.folder);
         if command && self.starts_expression() {
             self.expression = true;
         }
@@ -207,11 +248,19 @@ impl Reader<'_> {
             Style::Operator
         } else if command && plain {
             self.command_style(&bare)
-        } else if plain && self.names_a_file(&bare) {
-            Style::Path
+        } else if !plain || never_missing(&bare) {
+            Style::Argument
+        } else if let Some(is_folder) = self.file_kind(&bare) {
+            match folder && !is_folder {
+                true => Style::Error,
+                false => Style::Path,
+            }
+        } else if !target && (folder || written_as_path(&bare)) {
+            Style::Error
         } else {
             Style::Argument
         };
+        self.folder = command && bare == "cd";
         // The strings and variables in the word keep their colours.
         for s in &mut self.styles[start..end] {
             if *s == Style::Plain {
@@ -262,14 +311,17 @@ impl Reader<'_> {
         }
     }
 
-    /// Whether `word` names a file or folder that exists.
-    fn names_a_file(&self, word: &str) -> bool {
-        !word.starts_with('-') && self.file_kind(word).is_some()
-    }
-
     /// Whether `path` is a folder, if it names a file or folder that
-    /// exists.
+    /// exists, with `~` and `~/` at its start as the home folder.
     fn file_kind(&self, path: &str) -> Option<bool> {
+        let expanded;
+        let path = match path.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                expanded = format!("{}{rest}", self.home.as_deref()?);
+                expanded.as_str()
+            }
+            _ => path,
+        };
         let trimmed = path.trim_end_matches('/');
         if trimmed.is_empty() {
             return path.starts_with('/').then_some(true);
@@ -361,7 +413,7 @@ mod tests {
             Vec::new()
         }
         fn environment(&self) -> Vec<(String, String)> {
-            Vec::new()
+            vec![("HOME".into(), "/".into())]
         }
         fn params(&self, _: &str) -> Option<Vec<Param>> {
             None
@@ -381,6 +433,7 @@ mod tests {
                 Style::String => 's',
                 Style::Variable => 'v',
                 Style::Operator => 'o',
+                Style::Separator => '|',
                 Style::Comment => '#',
             })
             .collect()
@@ -390,28 +443,48 @@ mod tests {
     fn colours_commands_arguments_and_files() {
         assert_eq!(shown("ls -l notes.txt nope"), "cc.aa.ppppppppp.aaaa");
         assert_eq!(shown("nope src/ /usr"), "EEEE.pppp.pppp");
-        assert_eq!(shown("deploy | cat; print"), "cccccc.o.ccco.ccccc");
-        assert_eq!(shown("./run.sh &"), "cccccccc.o");
+        assert_eq!(shown("deploy | cat; print"), "cccccc.|.ccc|.ccccc");
+        assert_eq!(shown("./run.sh &"), "cccccccc.|");
         assert_eq!(shown("./gone.sh"), "EEEEEEEEE");
+    }
+
+    #[test]
+    fn colours_paths_that_name_nothing_as_errors() {
+        // Only words written as paths; globs and other words stay.
+        assert_eq!(
+            shown("cat ./gone /nope origin/main src/*.rs"),
+            "ccc.EEEEEE.EEEEE.aaaaaaaaaaa.aaaaaaaa"
+        );
+        assert_eq!(
+            shown("ls ~ ~/usr ~/nope ~bob -x"),
+            "cc.p.ppppp.EEEEEE.aaaa.aa"
+        );
+        // The argument of cd must be a folder.
+        assert_eq!(
+            shown("cd nope; cd notes.txt; cd src"),
+            "cc.EEEE|.cc.EEEEEEEEE|.cc.ppp"
+        );
+        // A redirection's target need not exist.
+        assert_eq!(shown("ls > ./new.txt"), "cc.|.aaaaaaaaa");
     }
 
     #[test]
     fn colours_strings_variables_operators_and_comments() {
         assert_eq!(shown("echo 'a b' \"x $y\" # c"), "EEEE.sssss.sssvvs.###");
-        assert_eq!(shown("cat $r.a.0... > f"), "ccc.vvvvvvvvv.o.a");
-        assert_eq!(shown("ls 2>&1 >> log"), "cc.oooo.oo.aaa");
+        assert_eq!(shown("cat $r.a.0... > f"), "ccc.vvvvvvvvv.|.a");
+        assert_eq!(shown("ls 2>&1 >> log"), "cc.||||.||.aaa");
     }
 
     #[test]
     fn colours_keywords_assignments_and_right_sides() {
         assert_eq!(shown("if $x == 1 { ls }"), "cc.vv.oo.a...cc..");
-        assert_eq!(shown("let n = ls | len"), "ccc.a.o.cc.o.ccc");
+        assert_eq!(shown("let n = ls | len"), "ccc.a.o.cc.|.ccc");
         assert_eq!(shown("n += 2"), "v.oo.a");
         assert_eq!(shown("A=1 ls"), "vvv.cc");
         // Arithmetic is an operator only in an expression.
         assert_eq!(shown("let n = 1 + -2"), "ccc.a.o.a.o.aa");
         assert_eq!(shown("cd / -"), "cc.p.a");
-        assert_eq!(shown("ls * | $x * 2"), "cc.a.o.vv.o.a");
+        assert_eq!(shown("ls * | $x * 2"), "cc.a.|.vv.o.a");
         assert_eq!(shown("} else { cat }"), "E.cccc...ccc..");
     }
 

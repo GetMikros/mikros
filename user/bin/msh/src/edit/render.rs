@@ -165,7 +165,8 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
             cursor = Some(at);
         }
         let next = view.styles.get(i).copied().unwrap_or(Style::Plain);
-        if next != style {
+        // Styles drawn alike, such as a plain command, change nothing.
+        if next.sgr() != style.sgr() {
             text.push_str(next.sgr());
             style = next;
         }
@@ -176,7 +177,7 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
         }
         at.advance(c, columns);
     }
-    if style != Style::Plain {
+    if style.sgr() != Style::Plain.sgr() {
         text.push_str(NORMAL);
     }
     let cursor = cursor.unwrap_or(at).settled(columns);
@@ -269,7 +270,7 @@ mod tests {
         };
         assert_eq!(
             draw(&v, 80, 0).text,
-            "\x1b[?25l\r\x1b[J% \x1b[0;34mls\x1b[0m \x1b[0;36m-l\x1b[0m\r\x1b[7C\x1b[?25h"
+            "\x1b[?25l\r\x1b[J% ls \x1b[0;38;2;26;181;151m-l\x1b[0m\r\x1b[7C\x1b[?25h"
         );
     }
 
