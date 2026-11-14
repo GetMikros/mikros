@@ -1,6 +1,7 @@
 //! msh, the Mikros shell, installed as /usr/bin/msh. Without arguments
-//! it runs interactively when its standard input is a terminal: it runs
-//! `~/.mshrc` when that exists, then reads lines at a prompt, keeping
+//! it runs interactively when its standard input is a terminal: it
+//! defines `$msh_colors`, the colours of the line, and runs `~/.mshrc`
+//! when that exists, then reads lines at a prompt, keeping
 //! them in `~/.msh_history`. Otherwise it runs a script: the file named
 //! by its first argument, the text after `-c`, or its standard input.
 //! The language is that of the rest of the crate; this module gives it
@@ -11,9 +12,10 @@ mod sys;
 mod term;
 
 use crate::edit::editor::{Editor, Outcome};
+use crate::edit::highlight::{self, Palette};
+use crate::edit::history;
 use crate::edit::keys::Decoder;
 use crate::edit::render::{View, draw, finish};
-use crate::edit::{highlight, history};
 use crate::eval::{Failure, Flow, Shell, Stream, System};
 use crate::parse::parse;
 use crate::prompt::{self, Context};
@@ -234,12 +236,14 @@ fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed 
         if !term::input_within(0) {
             let (columns, rows) = term::size();
             let suggestion = editor.suggestion(&shell.without_waiting());
-            let below = editor.below(columns, (rows / 2).max(1));
+            let palette = Palette::new(shell.value_of("msh_colors"));
+            let below = editor.below(columns, (rows / 2).max(1), palette.suggestion());
             let styles = highlight::styles(editor.line().text(), &shell.without_waiting());
             let view = View {
                 prompt,
                 line: editor.line().text(),
                 styles: &styles,
+                palette: &palette,
                 cursor: editor.line().cursor(),
                 suggestion: &suggestion,
                 below: &below,
@@ -292,7 +296,8 @@ fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed 
         _ => editor.line().text().to_owned(),
     };
     let styles = highlight::styles(&text, &shell.without_waiting());
-    show(&finish(prompt, &text, &styles, columns, row));
+    let palette = Palette::new(shell.value_of("msh_colors"));
+    show(&finish(prompt, &text, (&styles, &palette), columns, row));
     terminal.restore();
     ended
 }
@@ -373,6 +378,7 @@ fn interactive() -> i64 {
     if terminal.is_some() {
         Wake::start(&mut shell);
     }
+    shell.set_global("msh_colors", highlight::default_colors());
     let home = home(&shell);
     if let Some(rc) = home.as_ref().map(|h| format!("{h}/.mshrc"))
         && let Ok(text) = std::fs::read_to_string(&rc)

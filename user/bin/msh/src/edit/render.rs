@@ -7,7 +7,7 @@
 //! shows the frame before all of it came shows no cursor where the
 //! drawing has got to.
 
-use super::highlight::Style;
+use super::highlight::{Palette, Style};
 
 /// What to draw.
 pub struct View<'a> {
@@ -16,6 +16,8 @@ pub struct View<'a> {
     pub line: &'a str,
     /// The style of each byte of `line`; a missing one is plain.
     pub styles: &'a [Style],
+    /// The escape sequences of the styles and of the suggestion.
+    pub palette: &'a Palette,
     /// The cursor, a byte offset in `line`.
     pub cursor: usize,
     /// Text shown dimmed after the line.
@@ -36,7 +38,6 @@ pub struct Frame {
 /// Dark grey, for the suggestion and other text shown dimmed: a colour
 /// rather than faint text, which some terminals, Mikros's console among
 /// them, draw as normal text.
-const GREY: &str = "\x1b[90m";
 const NORMAL: &str = "\x1b[0m";
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
@@ -166,8 +167,8 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
         }
         let next = view.styles.get(i).copied().unwrap_or(Style::Plain);
         // Styles drawn alike, such as a plain command, change nothing.
-        if next.sgr() != style.sgr() {
-            text.push_str(next.sgr());
+        if view.palette.sgr(next) != view.palette.sgr(style) {
+            text.push_str(view.palette.sgr(next));
             style = next;
         }
         let c = shown(c);
@@ -177,12 +178,12 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
         }
         at.advance(c, columns);
     }
-    if style.sgr() != Style::Plain.sgr() {
+    if view.palette.sgr(style) != view.palette.sgr(Style::Plain) {
         text.push_str(NORMAL);
     }
     let cursor = cursor.unwrap_or(at).settled(columns);
     if !view.suggestion.is_empty() {
-        text.push_str(GREY);
+        text.push_str(view.palette.suggestion());
         for c in view.suggestion.chars().map(shown) {
             match c {
                 '\n' => text.push_str("\r\n"),
@@ -218,12 +219,13 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
     }
 }
 
-/// Draws the line as it is accepted, in its `styles`, without
-/// suggestion or rows below, and moves to the start of the row after it.
+/// Draws the line as it is accepted, in its `styles` drawn with
+/// `palette`, without suggestion or rows below, and moves to the start
+/// of the row after it.
 pub fn finish(
     prompt: &str,
     line: &str,
-    styles: &[Style],
+    (styles, palette): (&[Style], &Palette),
     columns: usize,
     previous_row: usize,
 ) -> String {
@@ -231,6 +233,7 @@ pub fn finish(
         prompt,
         line,
         styles,
+        palette,
         cursor: line.len(),
         suggestion: "",
         below: &[],
@@ -243,12 +246,16 @@ pub fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
+
+    static PALETTE: LazyLock<Palette> = LazyLock::new(Palette::default);
 
     fn view<'a>(prompt: &'a str, line: &'a str, cursor: usize) -> View<'a> {
         View {
             prompt,
             line,
             styles: &[],
+            palette: &PALETTE,
             cursor,
             suggestion: "",
             below: &[],
@@ -270,7 +277,7 @@ mod tests {
         };
         assert_eq!(
             draw(&v, 80, 0).text,
-            "\x1b[?25l\r\x1b[J% ls \x1b[0;38;2;26;181;151m-l\x1b[0m\r\x1b[7C\x1b[?25h"
+            "\x1b[?25l\r\x1b[J% ls \x1b[0;38;2;27;213;177m-l\x1b[0m\r\x1b[7C\x1b[?25h"
         );
     }
 
@@ -292,7 +299,7 @@ mod tests {
         let f = draw(&v, 80, 2);
         assert_eq!(
             f.text,
-            "\x1b[?25l\r\x1b[2A\x1b[J% ls\x1b[90m -l\x1b[0m\r\x1b[4C\x1b[?25h"
+            "\x1b[?25l\r\x1b[2A\x1b[J% ls\x1b[0;90m -l\x1b[0m\r\x1b[4C\x1b[?25h"
         );
     }
 
@@ -322,7 +329,7 @@ mod tests {
             "\x1b[?25l\r\x1b[J% x\r\none\x1b[0m\r\n\x1b[7mtwo t\x1b[0m\x1b[2A\r\x1b[3C\x1b[?25h"
         );
         assert_eq!(
-            finish("% ", "x", &[], 6, 0),
+            finish("% ", "x", (&[], &PALETTE), 6, 0),
             "\x1b[?25l\r\x1b[J% x\r\x1b[3C\x1b[?25h\r\n"
         );
     }

@@ -57,10 +57,6 @@ pub struct Editor {
     suggested: Option<(String, String)>,
 }
 
-/// Dark grey, for the suggestion and other text shown dimmed: a colour
-/// rather than faint text, which some terminals, Mikros's console among
-/// them, draw as normal text.
-const GREY: &str = "\x1b[90m";
 const NORMAL: &str = "\x1b[0m";
 
 impl Editor {
@@ -305,8 +301,9 @@ impl Editor {
     }
 
     /// The rows to show below the line, at most `height` of them on a
-    /// terminal `width` columns wide: the search, or the menu.
-    pub fn below(&mut self, width: usize, height: usize) -> Vec<String> {
+    /// terminal `width` columns wide: the search, or the menu, with
+    /// `dim`, the escape sequence of dimmed text.
+    pub fn below(&mut self, width: usize, height: usize, dim: &str) -> Vec<String> {
         if let Some(search) = &self.search {
             let failing = if search.found.is_none() && !search.query.is_empty() {
                 "failing "
@@ -314,12 +311,12 @@ impl Editor {
                 ""
             };
             return vec![format!(
-                "{GREY}{failing}bck-i-search:{NORMAL} {}_",
+                "{dim}{failing}bck-i-search:{NORMAL} {}_",
                 search.query
             )];
         }
         match &mut self.menu {
-            Some(menu) => menu.rows(width, height),
+            Some(menu) => menu.rows(width, height, dim),
             None => Vec::new(),
         }
     }
@@ -820,7 +817,7 @@ mod tests {
     fn shows_the_search_or_the_menu_below() {
         let mut e = editor(&["make"]);
         press(&mut e, &[Key::Ctrl('r'), Key::Char('q')]);
-        let below = e.below(80, 10);
+        let below = e.below(80, 10, "\x1b[90m");
         assert_eq!(
             super::super::render::visible(&below[0]),
             "failing bck-i-search: q_"
@@ -828,7 +825,7 @@ mod tests {
         press(&mut e, &[Key::Escape]);
         typed(&mut e, "pr");
         press(&mut e, &[Key::Tab]);
-        let below = e.below(80, 10);
+        let below = e.below(80, 10, "\x1b[90m");
         assert_eq!(
             super::super::render::visible(&below[0]),
             "print  (built-in)  printf  (program)"

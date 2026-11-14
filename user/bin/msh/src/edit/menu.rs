@@ -17,10 +17,6 @@ pub struct Menu {
     pub columns: usize,
 }
 
-/// Dark grey, for the suggestion and other text shown dimmed: a colour
-/// rather than faint text, which some terminals, Mikros's console among
-/// them, draw as normal text.
-const GREY: &str = "\x1b[90m";
 const REVERSE: &str = "\x1b[7m";
 const NORMAL: &str = "\x1b[0m";
 
@@ -74,8 +70,8 @@ impl Menu {
     }
 
     /// The rows of the menu for a terminal `width` columns wide, at most
-    /// `height` of them.
-    pub fn rows(&mut self, width: usize, height: usize) -> Vec<String> {
+    /// `height` of them, with the descriptions drawn with `dim`.
+    pub fn rows(&mut self, width: usize, height: usize, dim: &str) -> Vec<String> {
         if self.candidates.is_empty() {
             return Vec::new();
         }
@@ -117,7 +113,7 @@ impl Menu {
                 line.push_str(if on { REVERSE } else { "" });
                 line.push_str(display);
                 line.push_str(NORMAL);
-                line.push_str(GREY);
+                line.push_str(dim);
                 line.push_str(description);
                 line.push_str(NORMAL);
                 line.push_str(&pad);
@@ -126,7 +122,7 @@ impl Menu {
         }
         if shown < total {
             let more = total - shown;
-            rows.push(format!("{GREY}…and {more} more rows{NORMAL}"));
+            rows.push(format!("{dim}…and {more} more rows{NORMAL}"));
         }
         rows
     }
@@ -176,13 +172,13 @@ mod tests {
         let mut m = menu(&["one", "two", "three", "four", "five"]);
         m.candidates[0].description = Some("1".into());
         // Cells of 10 columns, 2 of them on 25 columns.
-        let rows = m.rows(25, 10);
+        let rows = m.rows(25, 10, "\x1b[90m");
         assert_eq!(m.columns, 2);
         assert_eq!(rows.len(), 3);
         assert_eq!(visible(&rows[0]), "one  (1)  two");
         assert_eq!(visible(&rows[2]), "five");
         m.selected = Some(4);
-        let rows = m.rows(25, 2);
+        let rows = m.rows(25, 2, "\x1b[90m");
         assert_eq!(rows.len(), 3);
         assert_eq!(visible(&rows[0]), "three     four");
         assert!(rows[1].starts_with("\x1b[7mfive"));

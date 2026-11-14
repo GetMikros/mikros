@@ -8,9 +8,13 @@
 //! crimson, as is the argument of `cd` that is no folder. Strings are
 //! orange, variables teal, operators mint green, `|`, `;`, `&` and
 //! redirections green, comments dark grey, and a closing bracket that
-//! closes nothing crimson.
+//! closes nothing crimson. Those are the defaults of `$msh_colors`, a
+//! record that interactive msh defines before it runs `~/.mshrc` and
+//! reads each time it draws the line, so that the colours can be
+//! changed there or at the prompt.
 
 use super::complete::Sources;
+use crate::value::Value;
 use std::collections::HashSet;
 
 /// How a part of the line is drawn.
@@ -33,24 +37,124 @@ pub enum Style {
     Comment,
 }
 
-impl Style {
-    /// The escape sequence that starts drawing in the style.
-    pub fn sgr(self) -> &'static str {
-        match self {
-            Style::Plain | Style::Command => "\x1b[0m",
-            // #c0392b
-            Style::Error => "\x1b[0;38;2;192;57;43m",
-            // #1ab597
-            Style::Argument | Style::Operator => "\x1b[0;38;2;26;181;151m",
-            Style::Path => "\x1b[0;4;38;2;26;181;151m",
-            // #f67400
-            Style::String => "\x1b[0;38;2;246;116;0m",
-            // #16a085
-            Style::Variable => "\x1b[0;38;2;22;160;133m",
-            // #11d116
-            Style::Separator => "\x1b[0;38;2;17;209;22m",
-            Style::Comment => "\x1b[0;90m",
+/// The fields of `$msh_colors`, with their defaults: a colour,
+/// `normal`, one of the 16 names, or `#rrggbb`, and then `bold`,
+/// `italic` or `underline`.
+const FIELDS: [(&str, &str); 10] = [
+    ("command", "normal"),
+    ("error", "#e74c3c"),
+    ("argument", "#1bd5b1"),
+    ("path", "#1bd5b1 underline"),
+    ("string", "#ff861a"),
+    ("variable", "#15c1a0"),
+    ("operator", "#1bd5b1"),
+    ("separator", "#11d116"),
+    ("comment", "brblack"),
+    ("suggestion", "brblack"),
+];
+/// The 16 colours by name, with `br` in front for the bright ones.
+const NAMES: [&str; 8] = [
+    "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+];
+
+/// `$msh_colors` with its defaults.
+pub fn default_colors() -> Value {
+    Value::Record(
+        FIELDS
+            .iter()
+            .map(|(name, value)| (name.to_string(), Value::String(value.to_string())))
+            .collect(),
+    )
+}
+
+/// The escape sequence of the colour `spec`, if it is a valid one.
+fn escape(spec: &str) -> Option<String> {
+    let mut words = spec.split_whitespace();
+    let colour = words.next()?;
+    let mut codes = vec!["0".to_string()];
+    for word in words {
+        let code = match word {
+            "bold" => "1",
+            "italic" => "3",
+            "underline" => "4",
+            _ => return None,
+        };
+        codes.push(code.into());
+    }
+    match colour {
+        "normal" => {}
+        hex if hex.starts_with('#') => {
+            let digits = &hex[1..];
+            if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            let n = u32::from_str_radix(digits, 16).ok()?;
+            codes.push(format!("38;2;{};{};{}", n >> 16, n >> 8 & 255, n & 255));
         }
+        name => {
+            let (base, bright) = match name.strip_prefix("br") {
+                Some(base) => (base, 90),
+                None => (name, 30),
+            };
+            let index = NAMES.iter().position(|n| *n == base)?;
+            codes.push((bright + index).to_string());
+        }
+    }
+    Some(format!("\x1b[{}m", codes.join(";")))
+}
+
+/// The escape sequences that the styles are drawn with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Palette {
+    /// One for each of `FIELDS`.
+    escapes: Vec<String>,
+}
+
+impl Default for Palette {
+    fn default() -> Palette {
+        Palette::new(None)
+    }
+}
+
+impl Palette {
+    /// The palette of `colors`, the value of `$msh_colors`: each field
+    /// that is missing or not a valid colour takes its default.
+    pub fn new(colors: Option<&Value>) -> Palette {
+        let escapes = FIELDS
+            .iter()
+            .map(|(name, default)| {
+                let set = match colors.map(|c| c.field(name)) {
+                    Some(Ok(Value::String(spec))) => escape(spec),
+                    _ => None,
+                };
+                set.or_else(|| escape(default))
+                    .expect("the defaults are valid")
+            })
+            .collect();
+        Palette { escapes }
+    }
+
+    /// The escape sequence that starts drawing in `style`.
+    pub fn sgr(&self, style: Style) -> &str {
+        let field = match style {
+            Style::Plain => return "\x1b[0m",
+            Style::Command => 0,
+            Style::Error => 1,
+            Style::Argument => 2,
+            Style::Path => 3,
+            Style::String => 4,
+            Style::Variable => 5,
+            Style::Operator => 6,
+            Style::Separator => 7,
+            Style::Comment => 8,
+        };
+        &self.escapes[field]
+    }
+
+    /// The escape sequence of the suggestion, menu descriptions and the
+    /// search prompt.
+    pub fn suggestion(&self) -> &str {
+        &self.escapes[9]
     }
 }
 
@@ -437,6 +541,37 @@ mod tests {
                 Style::Comment => '#',
             })
             .collect()
+    }
+
+    #[test]
+    fn takes_colours_from_msh_colors_with_defaults() {
+        let palette = Palette::default();
+        assert_eq!(palette.sgr(Style::Command), "\x1b[0m");
+        assert_eq!(palette.sgr(Style::Path), "\x1b[0;4;38;2;27;213;177m");
+        assert_eq!(palette.suggestion(), "\x1b[0;90m");
+        let set = |fields: &[(&str, &str)]| {
+            let record = Value::Record(
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+                    .collect(),
+            );
+            Palette::new(Some(&record))
+        };
+        let p = set(&[
+            ("string", "brred bold"),
+            ("command", "#0000ff italic underline"),
+            ("error", "pink"),
+            ("comment", "#12345"),
+        ]);
+        assert_eq!(p.sgr(Style::String), "\x1b[0;1;91m");
+        assert_eq!(p.sgr(Style::Command), "\x1b[0;3;4;38;2;0;0;255m");
+        // Invalid values and missing fields keep their defaults.
+        assert_eq!(p.sgr(Style::Error), palette.sgr(Style::Error));
+        assert_eq!(p.sgr(Style::Comment), "\x1b[0;90m");
+        assert_eq!(p.sgr(Style::Argument), palette.sgr(Style::Argument));
+        assert_eq!(Palette::new(Some(&Value::Int(1))), palette);
+        assert_eq!(Palette::new(Some(&default_colors())), palette);
     }
 
     #[test]

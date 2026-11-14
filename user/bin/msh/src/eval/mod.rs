@@ -155,6 +155,11 @@ impl<S: System> Shell<S> {
         }
     }
 
+    /// The value of the variable `name`, when it is set.
+    pub fn value_of(&self, name: &str) -> Option<&Value> {
+        self.lookup(name)
+    }
+
     fn lookup(&self, name: &str) -> Option<&Value> {
         self.visible()
             .find_map(|i| self.frames[i].variables.get(name))
