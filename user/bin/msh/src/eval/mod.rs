@@ -88,6 +88,9 @@ pub struct Shell<S: System> {
     pub history: Vec<crate::edit::history::Entry>,
     /// The folder listings kept for completion and suggestions.
     listings: listings::Listings,
+    /// What commands take, as `extern` declared it last, by the name of
+    /// the command and that of its subcommand.
+    declarations: BTreeMap<(String, Option<String>), Rc<Extern>>,
 }
 
 impl<S: System> Shell<S> {
@@ -123,6 +126,7 @@ impl<S: System> Shell<S> {
             inherited: Vec::new(),
             history: Vec::new(),
             listings: listings::Listings::default(),
+            declarations: BTreeMap::new(),
         };
         shell.set_global("status", Value::Int(0));
         shell.set_global("args", Value::List(Vec::new()));
@@ -158,6 +162,15 @@ impl<S: System> Shell<S> {
             Some(Value::Int(n)) => *n,
             _ => 0,
         }
+    }
+
+    /// What the command `name`, or its subcommand `sub`, takes, as
+    /// `extern` declared it last.
+    // Completion takes it in the next change.
+    #[cfg_attr(target_os = "mikros", allow(dead_code))]
+    pub fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
+        let key = (name.to_owned(), sub.map(str::to_owned));
+        self.declarations.get(&key).cloned()
     }
 
     /// The value of the variable `name`, when it is set.
@@ -512,6 +525,11 @@ impl<S: System> Shell<S> {
                 let block =
                     crate::parse::parse(&source).map_err(|e| self.fail(format!("{path}: {e}")))?;
                 self.collect_functions(&block);
+                Ok(Value::Null)
+            }
+            StatementKind::Extern(declared) => {
+                let key = (declared.command.clone(), declared.subcommand.clone());
+                self.declarations.insert(key, Rc::new(declared.clone()));
                 Ok(Value::Null)
             }
             StatementKind::Delete(target) => {

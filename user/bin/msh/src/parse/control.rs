@@ -1,5 +1,5 @@
 //! Keywords: `let`, `if`, `while`, `for`, `match` and its patterns,
-//! `fn`, `param`, `try`, `use`, `return` and `delete`.
+//! `fn`, `param`, `try`, `use`, `return`, `delete` and `extern`.
 
 use super::{Parser, Result};
 use crate::ast::*;
@@ -113,6 +113,7 @@ impl Parser<'_> {
                 None => return Err(self.incomplete("what to delete is missing")),
                 _ => return Err(self.error("`delete` takes `$name` or `env.NAME`")),
             },
+            "extern" => StatementKind::Extern(self.extern_()?),
             _ => unreachable!("not a keyword"),
         })
     }
@@ -325,6 +326,90 @@ impl Parser<'_> {
             flags,
             body: self.block()?,
         })
+    }
+
+    /// `name(…)` or `name sub(…)`, after `extern`: the items in the
+    /// parentheses, separated by commas, each with a description in
+    /// double quotes after it if it has one.
+    fn extern_(&mut self) -> Result<Extern> {
+        let mut declared = Extern {
+            command: self.name()?,
+            ..Extern::default()
+        };
+        self.skip_spaces();
+        if self.peek() != Some('(') {
+            declared.subcommand = Some(self.name()?);
+            self.skip_spaces();
+        }
+        self.expect('(', "`(`")?;
+        loop {
+            self.skip_blank();
+            match self.peek() {
+                None => return Err(self.incomplete("`)` is missing")),
+                Some(')') => {
+                    self.pos += 1;
+                    return Ok(declared);
+                }
+                Some(',') => self.pos += 1,
+                _ if self.looking_at("--") => {
+                    self.pos += 2;
+                    let name = self.name()?;
+                    let short = match self.peek() {
+                        Some('(') => {
+                            self.pos += 1;
+                            self.expect('-', "`-` and the short form")?;
+                            let short = self.name()?;
+                            self.expect(')', "`)` after the short form")?;
+                            Some(short)
+                        }
+                        _ => None,
+                    };
+                    let kind = self.item_type()?;
+                    declared.options.push(Declared {
+                        name,
+                        short,
+                        kind,
+                        description: self.description()?,
+                    });
+                }
+                _ => {
+                    let rest = self.looking_at("...");
+                    if rest {
+                        self.pos += 3;
+                    }
+                    let label = self.name()?;
+                    let optional = self.peek() == Some('?');
+                    if optional {
+                        self.pos += 1;
+                    }
+                    let kind = self.item_type()?;
+                    declared.positional.push(Positional {
+                        label,
+                        kind,
+                        optional,
+                        rest,
+                        description: self.description()?,
+                    });
+                }
+            }
+        }
+    }
+
+    /// `: type` after the label or name of a declared item.
+    fn item_type(&mut self) -> Result<ParamType> {
+        self.skip_spaces();
+        self.expect(':', "`:` and a type")?;
+        self.skip_spaces();
+        self.param_type()
+    }
+
+    /// The description in double quotes after a declared item, if any.
+    fn description(&mut self) -> Result<Option<String>> {
+        self.skip_spaces();
+        match self.peek() {
+            Some('"') => Ok(Some(self.quoted_text("a description")?)),
+            _ => Ok(None),
+        }
     }
 
     /// A type: a name such as `int` or `folder`, or the choices `[a b c]`.

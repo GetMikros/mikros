@@ -61,6 +61,40 @@ pub enum StatementKind {
     /// `delete $name`, `delete env.NAME`, or with a path, as in
     /// `delete $env.PATH.1`.
     Delete(Variable),
+    /// `extern name(…)` or `extern name sub(…)`.
+    Extern(Extern),
+}
+
+/// What a command, or a subcommand of it, takes, as `extern` declares
+/// it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Extern {
+    pub command: String,
+    pub subcommand: Option<String>,
+    pub positional: Vec<Positional>,
+    pub options: Vec<Declared>,
+}
+
+/// A positional argument that `extern` declares.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Positional {
+    pub label: String,
+    pub kind: ParamType,
+    /// Written with `?` after its label.
+    pub optional: bool,
+    /// `...label`, which takes all the remaining positional arguments.
+    pub rest: bool,
+    pub description: Option<String>,
+}
+
+/// An option that `extern` declares: `--name`, and `-x` when `short`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Declared {
+    pub name: String,
+    pub short: Option<String>,
+    /// `bool` for an option that takes no value.
+    pub kind: ParamType,
+    pub description: Option<String>,
 }
 
 /// How an assignment changes its target.

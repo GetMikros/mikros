@@ -217,6 +217,23 @@ fn removes_from_lists_and_assigns_to_items_and_fields() {
 }
 
 #[test]
+fn keeps_the_last_declaration_of_each_command() {
+    let mut s = shell();
+    run(
+        &mut s,
+        "extern ls(--long: bool)\nextern ls(--all: bool)\nextern git push(--force: bool)",
+    )
+    .unwrap();
+    let ls = s.declaration("ls", None).unwrap();
+    assert_eq!(ls.options[0].name, "all");
+    assert!(s.declaration("git", None).is_none());
+    assert_eq!(
+        s.declaration("git", Some("push")).unwrap().options[0].name,
+        "force"
+    );
+}
+
+#[test]
 fn deletes_variables_fields_and_items() {
     assert_eq!(ok("let x = 1\ndelete $x\nprint ($x ?? 'gone')"), "gone\n");
     assert_eq!(

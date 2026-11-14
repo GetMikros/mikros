@@ -160,9 +160,9 @@ impl Palette {
 }
 
 /// The keywords that start a statement, and those that go on one.
-const KEYWORDS: [&str; 17] = [
+const KEYWORDS: [&str; 18] = [
     "let", "if", "else", "for", "in", "while", "match", "fn", "param", "try", "catch", "use",
-    "return", "delete", "not", "and", "or",
+    "return", "delete", "not", "and", "or", "extern",
 ];
 /// The keywords after which a command goes.
 const BEFORE_COMMAND: [&str; 7] = ["if", "else", "while", "not", "run", "exec", "return"];
@@ -209,6 +209,7 @@ pub fn styles(line: &str, sources: &dyn Sources) -> Vec<Style> {
         expression: false,
         target: false,
         folder: false,
+        declaring: false,
     };
     reader.read();
     reader.styles
@@ -232,6 +233,9 @@ struct Reader<'a> {
     /// Whether the next word is the argument of `cd`, which must be a
     /// folder.
     folder: bool,
+    /// Whether the statement read is an `extern` declaration, whose words
+    /// are no commands.
+    declaring: bool,
 }
 
 impl Reader<'_> {
@@ -265,6 +269,7 @@ impl Reader<'_> {
                     self.take(1, Style::Separator);
                     command = true;
                     self.expression = false;
+                    self.declaring = false;
                 }
                 '#' => {
                     let end = self.line[self.at..]
@@ -282,7 +287,7 @@ impl Reader<'_> {
                 '(' | '{' | '[' => {
                     open.push(c);
                     self.at += 1;
-                    command = c != '[';
+                    command = c != '[' && !self.declaring;
                     self.expression &= c == '[';
                 }
                 ')' | '}' | ']' => {
@@ -299,7 +304,13 @@ impl Reader<'_> {
                     // `else` or `catch` may follow a block.
                     command = c == '}';
                 }
-                _ => command = self.word(command),
+                _ => {
+                    let keyword = command && self.looking_at("extern");
+                    command = self.word(command);
+                    if keyword && !command {
+                        self.declaring = true;
+                    }
+                }
             }
         }
     }
@@ -650,6 +661,11 @@ mod tests {
         assert_eq!(shown("cd / -"), "cc.p.a");
         assert_eq!(shown("ls * | $x * 2"), "cc.a.|.vv.o.a");
         assert_eq!(shown("} else { cat }"), "E.cccc...ccc..");
+        // The words of a declaration are no commands.
+        assert_eq!(
+            shown("extern git push(--force: bool)"),
+            "cccccc.aaa.aaaa.aaaaaaaa.aaaa."
+        );
     }
 
     #[test]

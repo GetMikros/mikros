@@ -262,6 +262,45 @@ fn reads_home_folders_at_the_start_of_bare_words() {
 }
 
 #[test]
+fn reads_extern_declarations() {
+    let StatementKind::Extern(e) = one(
+        "extern git push(remote?: string \"where to\", ...refs: string, \
+         --force(-f): bool \"overwrite\", --mode: [fast slow])",
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        (e.command.as_str(), e.subcommand.as_deref()),
+        ("git", Some("push"))
+    );
+    let remote = &e.positional[0];
+    assert!(remote.optional && !remote.rest);
+    assert_eq!(remote.description.as_deref(), Some("where to"));
+    assert!(e.positional[1].rest);
+    let force = &e.options[0];
+    assert_eq!(
+        (force.name.as_str(), force.short.as_deref()),
+        ("force", Some("f"))
+    );
+    assert_eq!(
+        (force.kind.clone(), force.description.as_deref()),
+        (ParamType::Bool, Some("overwrite"))
+    );
+    assert_eq!(e.options[1].kind.written(), "[fast slow]");
+    // Items may take several lines.
+    let StatementKind::Extern(e) = one("extern ls(\n  --long(-l): bool,\n  ...paths: path\n)")
+    else {
+        panic!()
+    };
+    assert_eq!((e.options.len(), e.positional.len()), (1, 1));
+    assert_eq!(
+        failure("extern ls(x)").message,
+        "`:` and a type is expected here"
+    );
+    assert!(failure("extern ls(--all: bool").incomplete);
+}
+
+#[test]
 fn reads_delete() {
     let StatementKind::Delete(v) = one("delete $env.PATH.1") else {
         panic!()

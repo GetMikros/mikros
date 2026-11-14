@@ -30,8 +30,8 @@ impl fmt::Display for Error {
 type Result<T> = std::result::Result<T, Error>;
 
 /// The keywords that start a statement.
-const KEYWORDS: [&str; 11] = [
-    "let", "if", "for", "while", "match", "fn", "param", "try", "use", "return", "delete",
+const KEYWORDS: [&str; 12] = [
+    "let", "if", "for", "while", "match", "fn", "param", "try", "use", "return", "delete", "extern",
 ];
 
 /// Parses `source` into the statements of a block.
