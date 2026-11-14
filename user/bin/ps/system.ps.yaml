@@ -1,0 +1,6 @@
+# The program manifest of ps, installed as
+# usr/lib/programs/system.ps.yaml: a command, which lists every process.
+app_id: system.ps
+binary: /usr/bin/ps
+command: true
+permissions: [process.list_all]

@@ -1,0 +1,5 @@
+# What `ps` takes, for msh's completion and colours.
+extern ps(
+    --json: bool "write the processes as JSON",
+    --help: bool "show how to use ps"
+)

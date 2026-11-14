@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 const DEVICES: &str = "/usr/bin/devices";
 const CLEAR: &str = "/usr/bin/clear";
 const LESS: &str = "/usr/bin/less";
+const PS: &str = "/usr/bin/ps";
 /// A file that every system holds with devices.
 const DECLARATIONS: &str = "/usr/share/msh/completions/devices.msh";
 
@@ -40,6 +41,9 @@ fn main() {
         ("clear_bad_arguments", clear_bad_arguments),
         ("less_copies", less_copies),
         ("less_bad_arguments", less_bad_arguments),
+        ("ps_lists", ps_lists),
+        ("ps_json", ps_json),
+        ("ps_bad_arguments", ps_bad_arguments),
     ];
     for (number, (name, check)) in checks.iter().enumerate() {
         if let Err(Failure { what, status }) = check() {
@@ -242,4 +246,67 @@ fn less_bad_arguments() -> Result<(), Failure> {
     let two = run(LESS, &[DECLARATIONS, DECLARATIONS])?;
     ensure(&two, "refusing a second file", two.status == 2)?;
     ensure(&two, "naming the command", two.err.starts_with("less: "))
+}
+
+/// `ps` writes a header and a line for each process, among them this
+/// test and init, which only a holder of `process.list_all` sees.
+fn ps_lists() -> Result<(), Failure> {
+    let run = run(PS, &[])?;
+    ensure(&run, "succeeding", run.status == 0 && run.err.is_empty())?;
+    let mut lines = run.out.lines();
+    let header = lines
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    ensure(
+        &run,
+        "the header",
+        header == ["PID", "PARENT", "USER", "APP", "ID", "PATH"],
+    )?;
+    let pid_of = |line: &str| {
+        line.split_whitespace()
+            .next()
+            .and_then(|p| p.parse::<u32>().ok())
+    };
+    let pids: Vec<u32> = lines.filter_map(pid_of).collect();
+    ensure(
+        &run,
+        "sorted process IDs",
+        pids.windows(2).all(|w| w[0] < w[1]),
+    )?;
+    ensure(&run, "listing init", pids.contains(&1))?;
+    ensure(
+        &run,
+        "listing this test",
+        pids.contains(&std::process::id()),
+    )
+}
+
+/// `ps --json` writes an object per process, and ps itself runs with
+/// the app ID of its command manifest.
+fn ps_json() -> Result<(), Failure> {
+    let run = run(PS, &["--json"])?;
+    ensure(&run, "succeeding with --json", run.status == 0)?;
+    let text = run.out.trim_end();
+    ensure(
+        &run,
+        "an array of objects",
+        text.starts_with("[{") && text.ends_with("}]"),
+    )?;
+    let own = format!("{{\"pid\":{},", std::process::id());
+    ensure(&run, "an object for this test", text.contains(&own))?;
+    let ps = "\"app_id\":\"system.ps\",\"path\":\"/usr/bin/ps\"";
+    ensure(&run, "ps running as system.ps", text.contains(ps))?;
+    ensure(&run, "no kernel object IDs", !text.contains("koid"))
+}
+
+/// An unknown option and an operand are refused with status 2.
+fn ps_bad_arguments() -> Result<(), Failure> {
+    for arguments in [&["--nope"][..], &["all"]] {
+        let run = run(PS, arguments)?;
+        ensure(&run, "refusing the arguments", run.status == 2)?;
+        ensure(&run, "naming the command", run.err.starts_with("ps: "))?;
+    }
+    Ok(())
 }
