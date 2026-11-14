@@ -376,10 +376,12 @@ mod tests {
 
     /// Folders by path, each with its modification time in seconds and
     /// its names, where a name ending in `*` may be run and one ending in
-    /// `/` is a folder.
+    /// `/` is a folder. While `gate` is held, the reader thread waits
+    /// before it checks a folder.
     #[derive(Default)]
     struct Fake {
         folders: Mutex<HashMap<String, (u64, Vec<&'static str>)>>,
+        gate: Mutex<()>,
     }
 
     impl Fake {
@@ -391,6 +393,7 @@ mod tests {
 
     impl Disk for Fake {
         fn modified(&self, path: &str) -> Option<SystemTime> {
+            drop(self.gate.lock().unwrap());
             let folders = self.folders.lock().unwrap();
             folders.get(path).map(|(time, _)| at(*time))
         }
@@ -423,8 +426,12 @@ mod tests {
         assert_eq!(listings.programs_now("/bin"), ["cat"]);
         assert_eq!(listings.entries_now("/bin").map(|n| n.len()), Some(3));
         // A changed folder shows what was kept until the thread read it.
+        // The thread may still hold asks of the lines above, so it is
+        // held while the folder changes.
+        let held = fake.gate.lock().unwrap();
         fake.set("/bin", 2, &["cat*", "ls*"]);
         assert_eq!(listings.programs_now("/bin"), ["cat"]);
+        drop(held);
         told.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(listings.programs_now("/bin"), ["cat", "ls"]);
         // An unchanged folder is not read again, and tells nothing.
