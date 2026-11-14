@@ -1166,3 +1166,10 @@ syscalls:
       - {name: buffer, type: "*mut u8", dir: out}
       - {name: size, type: u64, dir: in}
       - {name: actual, type: "*mut u64", dir: out}
+
+  - name: thread_yield
+    number: 113
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0008.R43]
+    args: []

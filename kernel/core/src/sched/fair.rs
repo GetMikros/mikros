@@ -669,4 +669,61 @@ mod tests {
         // The running thread itself is queued only when it stops.
         assert!(!fair.enqueue(running, Entity::new(31)));
     }
+
+    #[test]
+    fn picks_a_thread_alone_again_when_it_yields() {
+        let mut fair = Fair::new();
+        fair.enqueue(1, Entity::new(16));
+        for _ in 0..100 {
+            let (id, _) = fair.pick().unwrap();
+            assert_eq!(id, 1);
+            fair.charge(1_000);
+            fair.requeue(id);
+        }
+    }
+
+    #[test]
+    fn lets_a_queued_thread_run_when_the_running_one_yields() {
+        let mut fair = Fair::new();
+        fair.enqueue(1, Entity::new(16));
+        let (first, _) = fair.pick().unwrap();
+        fair.charge(1_000);
+        fair.enqueue(2, Entity::new(16));
+        // A yield after a short run, far from the end of the slice.
+        fair.charge(1_000);
+        fair.requeue(first);
+        assert_eq!(fair.pick().map(|(id, _)| id), Some(2));
+    }
+
+    /// Threads that each run briefly and yield, as when they wait for one
+    /// another, take turns within a few picks, whatever their run times,
+    /// and their lags stay bounded.
+    #[test]
+    fn hands_the_processor_round_when_threads_keep_yielding() {
+        for (n, priorities) in [&[16, 16][..], &[16, 16, 16], &[10, 16, 20]]
+            .into_iter()
+            .enumerate()
+        {
+            let mut fair = Fair::new();
+            for (id, &p) in priorities.iter().enumerate() {
+                fair.enqueue(id as u32, Entity::new(p));
+            }
+            let mut last = None;
+            let mut repeats = 0;
+            for step in 0..10_000i64 {
+                let (id, _) = fair.pick().unwrap();
+                if last == Some(id) {
+                    repeats += 1;
+                    assert!(repeats < 8, "mix {n}: thread {id} kept the processor");
+                } else {
+                    repeats = 0;
+                }
+                last = Some(id);
+                // Runs of 1 µs to 20 µs that vary from turn to turn.
+                fair.charge(1_000 + (step * 7_919) % 19_000);
+                fair.requeue(id);
+                check_lags(&fair, 0..priorities.len() as u32);
+            }
+        }
+    }
 }

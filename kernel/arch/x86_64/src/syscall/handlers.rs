@@ -1526,6 +1526,11 @@ pub fn thread_sleep(deadline: i64) -> Result<(), Error> {
     crate::signal::sleep(deadline)
 }
 
+pub fn thread_yield() -> Result<(), Error> {
+    crate::sched::yield_now();
+    Ok(())
+}
+
 pub fn resource_create(
     parent: Checked,
     kind: u32,

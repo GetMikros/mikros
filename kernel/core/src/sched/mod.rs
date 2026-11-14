@@ -1030,8 +1030,9 @@ pub fn wake_sleeper(thread: &Arc<Thread>) {
     }
 }
 
-/// Gives up the processor to the next queued thread, if any.
-#[allow(dead_code, reason = "nothing starts kernel threads yet")]
+/// Ends the running thread's slice: it stays runnable and is queued
+/// again, and the next thread is picked as when a slice ends, which is
+/// this one again when no other is queued.
 pub fn yield_now() {
     schedule(true);
 }
