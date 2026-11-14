@@ -46,6 +46,7 @@ const SYS_GETEUID: i64 = 107;
 const SYS_GETEGID: i64 = 108;
 const SYS_GETGROUPS: i64 = 115;
 const SYS_DUP2: i64 = 33;
+const SYS_SCHED_YIELD: i64 = 24;
 const SYS_NANOSLEEP: i64 = 35;
 const SYS_EXECVE: i64 = 59;
 const SYS_EXIT: i64 = 60;
@@ -371,6 +372,7 @@ extern "C" fn __mikros_syscall(
         ),
         SYS_EXIT_GROUP => exit(a1),
         SYS_EXIT => thread::exit(),
+        SYS_SCHED_YIELD => yield_now(),
         _ => -ENOSYS,
     }
 }
@@ -646,4 +648,19 @@ fn fcntl(fd: i64, cmd: i64, arg: i64) -> i64 {
         }
         _ => -EINVAL,
     }
+}
+
+/// `sched_yield`: ends the calling thread's time slice through the
+/// kernel's `thread_yield`, so that other threads that can run may run
+/// first. It always succeeds.
+fn yield_now() -> i64 {
+    // SAFETY: the call takes no arguments.
+    unsafe { sys::thread_yield() };
+    0
+}
+
+/// `pthread_yield`, which musl does not have, as `sched_yield`.
+#[unsafe(no_mangle)]
+extern "C" fn pthread_yield() -> i32 {
+    yield_now() as i32
 }

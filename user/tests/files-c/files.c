@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
+#include <sched.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <string.h>
@@ -159,6 +160,10 @@ int main(int argc, char **argv)
 	CHECK(getpriority(PRIO_PROCESS, 0) == 0 && errno == 0);
 	CHECK(fails_with(setpriority(PRIO_PROCESS, 0, 0), EPERM));
 	CHECK(nice(0) == 0 && fails_with(nice(1), EPERM));
+	/* Yielding the processor succeeds, also as pthread_yield, which the
+	 * C library exports without a header declaring it. */
+	extern int pthread_yield(void);
+	CHECK(sched_yield() == 0 && pthread_yield() == 0);
 	struct timespec mono, boot;
 	CHECK(clock_gettime(CLOCK_MONOTONIC, &mono) == 0 && clock_gettime(CLOCK_BOOTTIME, &boot) == 0);
 	CHECK(boot.tv_sec > mono.tv_sec || (boot.tv_sec == mono.tv_sec && boot.tv_nsec >= mono.tv_nsec));
