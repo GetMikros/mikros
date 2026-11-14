@@ -90,3 +90,21 @@ fn takes_blocks_whose_statements_are_expressions() {
     assert_eq!(ok("[1 2 3] | each { $it + 1 } | print"), "2\n3\n4\n");
     assert_eq!(ok("[1 2 3] | where { $it > 1 } | print"), "2\n3\n");
 }
+
+#[test]
+fn takes_a_single_record_as_a_list_that_holds_it() {
+    let r = "let r = {name: 'a', size: 2mb}\n";
+    let out = |source: &str| ok(&format!("{r}{source}"));
+    assert_eq!(out("$r | where { $it.size > 1mb } | len | print"), "1\n");
+    assert_eq!(out("$r | where { $it.size > 9mb } | len | print"), "0\n");
+    assert_eq!(out("$r | each { $it.name } | print"), "a\n");
+    assert_eq!(out("$r | first | get name | print"), "a\n");
+    assert_eq!(out("$r | first 5 | len | print"), "1\n");
+    assert_eq!(out("$r | skip | len | print"), "0\n");
+    assert_eq!(out("$r | uniq | len | print"), "1\n");
+    assert_eq!(out("$r | sort-by size | len | print"), "1\n");
+    assert_eq!(out("$r | group-by name | get a | len | print"), "1\n");
+    // `get` and `len` still take the record itself.
+    assert_eq!(out("$r | get name | print"), "a\n");
+    assert_eq!(out("$r | len | print"), "2\n");
+}

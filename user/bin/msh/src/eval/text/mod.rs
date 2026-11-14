@@ -84,6 +84,19 @@ fn input_items<S: System>(
     }
 }
 
+/// The items of `input` as `input_items` gives them, with a single
+/// record as a list that holds it.
+fn list_or_record<S: System>(
+    shell: &Shell<S>,
+    name: &str,
+    input: Option<Value>,
+) -> Result<Vec<Value>, Flow> {
+    match input {
+        Some(record @ Value::Record(_)) => Ok(vec![record]),
+        other => input_items(shell, name, other),
+    }
+}
+
 fn lines(text: &str) -> Vec<Value> {
     text.lines().map(|l| Value::String(l.into())).collect()
 }
@@ -217,7 +230,7 @@ pub fn run<S: System>(
         "where" => {
             let block = shell.need(a.block(0).cloned(), "`where` takes a block")?;
             let mut kept = Vec::new();
-            for item in input_items(shell, name, input)? {
+            for item in list_or_record(shell, name, input)? {
                 let keep = shell.with_it(&block, item.clone())?;
                 if keep.truth().map_err(|e| shell.fail(e))? {
                     kept.push(item);
@@ -228,13 +241,13 @@ pub fn run<S: System>(
         "each" => {
             let block = shell.need(a.block(0).cloned(), "`each` takes a block")?;
             let mut mapped = Vec::new();
-            for item in input_items(shell, name, input)? {
+            for item in list_or_record(shell, name, input)? {
                 mapped.push(shell.with_it(&block, item)?);
             }
             Ok(Value::List(mapped))
         }
         "sort-by" | "group-by" => {
-            let items = input_items(shell, name, input)?;
+            let items = list_or_record(shell, name, input)?;
             let mut keyed = Vec::new();
             for item in items {
                 let key = match (a.block(0).cloned(), a.text(0)) {
@@ -275,7 +288,7 @@ pub fn run<S: System>(
             Ok(Value::Record(groups))
         }
         "first" | "skip" => {
-            let items = input_items(shell, name, input)?;
+            let items = list_or_record(shell, name, input)?;
             let count = match a.text(0) {
                 None => None,
                 Some(n) => Some(
@@ -291,7 +304,7 @@ pub fn run<S: System>(
         }
         "uniq" => {
             let mut kept: Vec<Value> = Vec::new();
-            for item in input_items(shell, name, input)? {
+            for item in list_or_record(shell, name, input)? {
                 if !kept.iter().any(|k| value::equal(k, &item)) {
                     kept.push(item);
                 }
