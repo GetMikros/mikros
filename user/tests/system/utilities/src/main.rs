@@ -4,10 +4,14 @@
 //! passed, and otherwise with the number, from 1, of the first that
 //! failed, after writing its name and failure to standard error.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 const DEVICES: &str = "/usr/bin/devices";
 const CLEAR: &str = "/usr/bin/clear";
+const LESS: &str = "/usr/bin/less";
+/// A file that every system holds with devices.
+const DECLARATIONS: &str = "/usr/share/msh/completions/devices.msh";
 
 /// What failed, and the exit status of the utility, or -1 when it did not
 /// exit.
@@ -34,6 +38,8 @@ fn main() {
         ("devices_bad_arguments", devices_bad_arguments),
         ("clear_clears", clear_clears),
         ("clear_bad_arguments", clear_bad_arguments),
+        ("less_copies", less_copies),
+        ("less_bad_arguments", less_bad_arguments),
     ];
     for (number, (name, check)) in checks.iter().enumerate() {
         if let Err(Failure { what, status }) = check() {
@@ -45,13 +51,32 @@ fn main() {
 
 /// Runs `program` with `arguments` until it exits.
 fn run(program: &str, arguments: &[&str]) -> Result<Run, Failure> {
-    let output = Command::new(program)
+    run_with(program, arguments, None)
+}
+
+/// Runs `program` with `arguments` and, when there is one, `input` on
+/// its standard input, until it exits.
+fn run_with(program: &str, arguments: &[&str], input: Option<&[u8]>) -> Result<Run, Failure> {
+    let failed = |what| Failure { what, status: -1 };
+    let mut child = Command::new(program)
         .args(arguments)
-        .output()
-        .map_err(|_| Failure {
-            what: "starting the utility",
-            status: -1,
-        })?;
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| failed("starting the utility"))?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin
+            .write_all(input)
+            .map_err(|_| failed("writing the input"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|_| failed("waiting for the utility"))?;
     Ok(Run {
         status: output.status.code().unwrap_or(-1),
         out: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -184,4 +209,37 @@ fn clear_bad_arguments() -> Result<(), Failure> {
         ensure(&run, "naming the command", run.err.starts_with("clear: "))?;
     }
     Ok(())
+}
+
+/// Without a terminal for its output, `less` copies a file, and its
+/// standard input, as they are.
+fn less_copies() -> Result<(), Failure> {
+    let file = run(LESS, &[DECLARATIONS])?;
+    let expected = std::fs::read_to_string(DECLARATIONS).unwrap_or_default();
+    ensure(&file, "succeeding with a file", file.status == 0)?;
+    ensure(
+        &file,
+        "copying the file",
+        !expected.is_empty() && file.out == expected,
+    )?;
+    let input = "one\ntwo\t\x1b[1mbold\x1b[0m\nno line feed";
+    let piped = run_with(LESS, &[], Some(input.as_bytes()))?;
+    ensure(&piped, "succeeding with its input", piped.status == 0)?;
+    ensure(&piped, "copying its input", piped.out == input)
+}
+
+/// A file that does not exist fails with status 1 and an error that
+/// names it, and a second file is refused with status 2.
+fn less_bad_arguments() -> Result<(), Failure> {
+    let missing = run(LESS, &["/no/such/file"])?;
+    ensure(&missing, "failing on a missing file", missing.status == 1)?;
+    let named = missing.err.starts_with("less: cannot open /no/such/file");
+    ensure(
+        &missing,
+        "naming the missing file",
+        named && missing.out.is_empty(),
+    )?;
+    let two = run(LESS, &[DECLARATIONS, DECLARATIONS])?;
+    ensure(&two, "refusing a second file", two.status == 2)?;
+    ensure(&two, "naming the command", two.err.starts_with("less: "))
 }

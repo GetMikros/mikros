@@ -1,0 +1,5 @@
+# What `less` takes, for msh's completion and colours.
+extern less(
+    file?: file "the file to show, standard input when none is given",
+    --help: bool "show how to use less"
+)
