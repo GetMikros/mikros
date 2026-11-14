@@ -1,0 +1,22 @@
+[package]
+name = "sudo"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-cli = { path = "../../lib/cli" }
+mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
+
+# No program manifest: sudo replaces itself with the command through
+# Exec, which a command may not do, so it runs as system.cli and gains
+# no permission of its own.
+[package.metadata.mikros]
+kind = "program"
+image = "system"
+completions = "sudo.msh"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

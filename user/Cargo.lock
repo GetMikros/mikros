@@ -1002,6 +1002,14 @@ name = "spawn-std"
 version = "0.0.0"
 
 [[package]]
+name = "sudo"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-rt",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
