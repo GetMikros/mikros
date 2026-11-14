@@ -330,6 +330,7 @@ async fn named_app(
             pid: caller,
             user: from.user,
             app_id: from.app_id.clone(),
+            admin: from.admin,
         }
     };
     let bootstrap = shared.identity_setter.get() == Some(caller);
@@ -466,6 +467,7 @@ async fn holds(shared: &Shared, caller: u32, permission: &str) -> bool {
             pid: caller,
             user: from.user,
             app_id: from.app_id.clone(),
+            admin: from.admin,
         }
     };
     let bootstrap = shared.identity_setter.get() == Some(caller);
@@ -569,6 +571,7 @@ async fn kill(
             pid: caller,
             user: from.user,
             app_id: from.app_id.clone(),
+            admin: from.admin,
         }
     };
     let bootstrap = shared.identity_setter.get() == Some(caller);
@@ -716,5 +719,6 @@ fn clone(identity: &ClientIdentity) -> ClientIdentity {
         pid: identity.pid,
         user: identity.user,
         app_id: identity.app_id.clone(),
+        admin: identity.admin,
     }
 }

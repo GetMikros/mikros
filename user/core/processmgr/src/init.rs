@@ -133,6 +133,7 @@ impl Manager {
             user: 0,
             login_session: 0,
             admin: 0,
+            rebound: None,
             budget: duplicate(self.shared.budget.raw(), SAME_RIGHTS)?,
             path: "init".into(),
             // init's programs come from the boot file system.
@@ -302,6 +303,7 @@ fn own_identity() -> ClientIdentity {
         pid: 0,
         user: 0,
         app_id: PROCESS_MANAGER_APP.into(),
+        admin: 0,
     }
 }
 

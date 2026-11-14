@@ -193,7 +193,13 @@ impl Shared {
         let budget = self.budget_of(new.user, &new.app_id)?;
         let namespaces = self.namespaces.clone();
         let (namespace, programs) = namespaces
-            .of(self, &new.namespace_of, new.user, new.service_manager)
+            .of(
+                self,
+                &new.namespace_of,
+                new.user,
+                new.admin,
+                new.service_manager,
+            )
             .await?;
         let lookup = start::Lookup {
             first: new.programs_first.as_deref(),
@@ -228,6 +234,7 @@ impl Shared {
             pid,
             user,
             app_id: app_id.clone(),
+            admin,
         };
         let started_app = app_id.clone();
         let transferred = self
@@ -253,6 +260,7 @@ impl Shared {
                 user,
                 login_session,
                 admin,
+                rebound: None,
                 budget,
                 path,
                 programs: Rc::new(programs),

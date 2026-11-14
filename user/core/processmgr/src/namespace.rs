@@ -486,7 +486,7 @@ impl Namespaces {
         if let Some(pid) = shared.identity_setter.get() {
             let app_id = shared.records.borrow().get(pid).map(|r| r.app_id.clone());
             if let Some(app_id) = app_id {
-                match self.of(shared, &app_id, 0, true).await {
+                match self.of(shared, &app_id, 0, 0, true).await {
                     Ok((_, programs)) => {
                         if let Some(record) = shared.records.borrow_mut().get_mut(pid) {
                             record.programs = Rc::new(programs);
@@ -540,6 +540,7 @@ impl Namespaces {
         shared: &Shared,
         app_id: &str,
         user: u32,
+        admin: u32,
         service_manager: bool,
     ) -> Result<(Vec<NamespaceEntry>, Programs), Status> {
         let dev = NamespaceEntry {
@@ -679,7 +680,9 @@ impl Namespaces {
                 );
             }
         }
-        if app_id == CLI_APP || self.holds_volumes(shared, app_id, user).await {
+        // An elevated process holds the user's folder grants too, which
+        // the broker answers for.
+        if app_id == CLI_APP || self.holds_volumes(shared, app_id, user, admin).await {
             let volumes = NamespaceEntry {
                 path: VOLUMES.into(),
                 directory: shared.volumes.directory()?,
@@ -690,13 +693,14 @@ impl Namespaces {
         Ok((entries, Programs { entries: origins }))
     }
 
-    /// Whether the processes of `app_id` and `user` hold `files.volumes`,
-    /// as the broker says.
-    async fn holds_volumes(&self, shared: &Shared, app_id: &str, user: u32) -> bool {
+    /// Whether the processes of `app_id` and `user`, elevated by `admin`
+    /// unless it is 0, hold `files.volumes`, as the broker says.
+    async fn holds_volumes(&self, shared: &Shared, app_id: &str, user: u32, admin: u32) -> bool {
         let client = ClientIdentity {
             pid: 0,
             user,
             app_id: app_id.into(),
+            admin,
         };
         shared
             .permissions

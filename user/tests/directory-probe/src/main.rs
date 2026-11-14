@@ -101,6 +101,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         pid: header.pid,
         user: header.user,
         app_id: header.app_id,
+        admin: 0,
     };
     let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
     executor.block_on(async move {
@@ -341,6 +342,7 @@ fn identity(user: u32, app_id: &str) -> ClientIdentity {
         pid: 0,
         user,
         app_id: app_id.into(),
+        admin: 0,
     }
 }
 

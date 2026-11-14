@@ -98,6 +98,7 @@ impl Sources {
             pid: self.me.pid,
             user: self.me.user,
             app_id: self.me.app_id.clone(),
+            admin: self.me.admin,
         };
         if provider
             .connect(SOURCES.into(), None, server.into_handle(), me)

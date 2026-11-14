@@ -71,6 +71,8 @@ pub struct Dir {
     demand: RefCell<Option<Demand>>,
     shutdown: RefCell<Option<Shutdown>>,
     listing: RefCell<Option<Listing>>,
+    /// The identity each process was bound with last.
+    identities: RefCell<BTreeMap<u32, Rc<ClientIdentity>>>,
     /// The root file system's `/usr` and `/etc` once the process manager
     /// gave them, until the supervisor takes them, whether it has given
     /// them, and the task that waits for them.
@@ -156,6 +158,7 @@ impl Dir {
             demand: RefCell::new(None),
             shutdown: RefCell::new(None),
             listing: RefCell::new(None),
+            identities: RefCell::new(BTreeMap::new()),
             root: RefCell::new(None),
             root_given: Cell::new(false),
             root_waiting: RefCell::new(None),
@@ -163,9 +166,21 @@ impl Dir {
     }
 
     /// Serves `Directory` on `end` for `caller` until it closes.
+    /// The identity that `caller`'s process was bound with last: a later
+    /// `Bind` for the same process, after it was elevated, replaces the
+    /// identity of its earlier connections.
+    fn identity(&self, caller: &Rc<ClientIdentity>) -> Rc<ClientIdentity> {
+        let latest = self.identities.borrow().get(&caller.pid).cloned();
+        latest.unwrap_or_else(|| caller.clone())
+    }
+
     pub fn serve(self: &Rc<Self>, end: ServerEnd<Directory>, caller: ClientIdentity) {
         let dir = self.clone();
-        self.spawner.spawn(serve(dir, end, Rc::new(caller)));
+        let caller = Rc::new(caller);
+        self.identities
+            .borrow_mut()
+            .insert(caller.pid, caller.clone());
+        self.spawner.spawn(serve(dir, end, caller));
     }
 
     /// Records the protocols that `services` provide, as `initially`
@@ -738,6 +753,7 @@ fn clone(identity: &ClientIdentity) -> ClientIdentity {
         pid: identity.pid,
         user: identity.user,
         app_id: identity.app_id.clone(),
+        admin: identity.admin,
     }
 }
 
@@ -747,7 +763,7 @@ async fn serve(dir: Rc<Dir>, end: ServerEnd<Directory>, caller: Rc<ClientIdentit
     let server = Rc::new(DirectoryAsyncServer::new(end, dir.reactor.clone()));
     while let Ok(request) = server.next().await {
         // Each request may wait for the broker, so each runs on its own.
-        let (dir, server, caller) = (dir.clone(), server.clone(), caller.clone());
+        let (dir, server, caller) = (dir.clone(), server.clone(), dir.identity(&caller));
         dir.spawner.clone().spawn(async move {
             let s = server.server();
             let _ = match request {
@@ -779,5 +795,13 @@ async fn serve(dir: Rc<Dir>, end: ServerEnd<Directory>, caller: Rc<ClientIdentit
         });
     }
     // The bound connection closes when its process ends.
+    let mut identities = dir.identities.borrow_mut();
+    if identities
+        .get(&caller.pid)
+        .is_some_and(|i| Rc::ptr_eq(i, &caller))
+    {
+        identities.remove(&caller.pid);
+    }
+    drop(identities);
     dir.closed(caller.pid);
 }

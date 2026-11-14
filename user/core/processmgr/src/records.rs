@@ -23,6 +23,9 @@ pub struct Record {
     /// The administrator who elevated the process, or one it descends
     /// from, 0 for none.
     pub admin: u32,
+    /// The client end of the `Directory` connection bound again when the
+    /// process was elevated, kept so that the binding lasts with it.
+    pub rebound: Option<OwnedHandle>,
     #[expect(dead_code, reason = "kept so that the budget lives")]
     pub budget: OwnedHandle,
     /// The executable path the process was started with.

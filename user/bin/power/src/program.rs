@@ -98,6 +98,7 @@ fn authorized(directory: &DirectoryClient, arguments: &[String]) -> bool {
         // SAFETY: the call takes no pointers.
         user: unsafe { getuid() },
         app_id: APP_ID.into(),
+        admin: 0,
     };
     let answer = AuthorizationClient::new(client).authorize(me, ACTION.into(), reason, FOREVER);
     matches!(answer, Ok(Ok(a)) if a.allowed)

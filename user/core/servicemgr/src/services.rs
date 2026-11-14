@@ -75,6 +75,7 @@ pub async fn start(
         pid: me.pid,
         user: me.user,
         app_id: me.app_id.clone(),
+        admin: me.admin,
     };
     let sources = Sources::new(own, reactor.clone(), dir.spawner().clone());
     let supervisor = Rc::new(Supervisor {
