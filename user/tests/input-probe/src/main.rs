@@ -71,7 +71,10 @@ pub async fn first<A: Future, B: Future>(a: A, b: B) -> Option<A::Output> {
     .await
 }
 
-/// The instances of `service` once there are at least `count`.
+/// The service-ID instances of `service` once there are at least
+/// `count`. The device manager also registers each device under its
+/// name, which starts with a letter where an ID is a number; the names
+/// are left out, so that each device is listed once.
 pub async fn instances(
     directory: &DirectoryAsyncClient,
     reactor: &Reactor,
@@ -80,10 +83,15 @@ pub async fn instances(
 ) -> Option<Vec<String>> {
     let deadline = now() + PUBLISH_LIMIT;
     loop {
-        if let Ok(Ok(listed)) = directory.list(service.into()).await
-            && listed.instances.len() >= count
-        {
-            return Some(listed.instances);
+        if let Ok(Ok(listed)) = directory.list(service.into()).await {
+            let ids: Vec<String> = listed
+                .instances
+                .into_iter()
+                .filter(|i| !i.starts_with(|c: char| c.is_ascii_lowercase()))
+                .collect();
+            if ids.len() >= count {
+                return Some(ids);
+            }
         }
         if now() >= deadline {
             return None;
