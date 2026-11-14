@@ -4279,8 +4279,8 @@ mod manager {
             b"will not start",
             b"service log-probe exited",
             b"service log-probe ended",
-            b"service log exited",
-            b"service log ended",
+            b"service logsvc exited",
+            b"service logsvc ended",
         ];
         let (m, init, reader) = serving(s, b"tests/log.img")?;
         let deadline = super::within(super::PROBE_SECONDS);

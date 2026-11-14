@@ -89,7 +89,7 @@ const PANIC_LINE: &str = "KERNEL PANIC: ";
 /// line the service manager would log had it stopped the log service.
 const HOLDING: &str = "acpi: holding ";
 const PREPARE_FAILED: &str = "acpi: preparing S5 failed";
-const LOG_STOPPED: &str = "stopped service log";
+const LOG_STOPPED: &str = "stopped service logsvc";
 /// How long the runner waits for the service manager to see a press of
 /// the button before it presses it again, and how often it presses.
 const PRESS_WAIT: Duration = Duration::from_secs(5);

@@ -1,6 +1,6 @@
 # The service manifest of the log service, installed as
-# usr/lib/services/log.yaml.
-name: log
+# usr/lib/services/logsvc.yaml.
+name: logsvc
 binary: /usr/bin/logsvc
 start: boot
 boot_handles: [log_manage]

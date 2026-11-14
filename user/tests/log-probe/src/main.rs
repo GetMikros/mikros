@@ -180,9 +180,9 @@ fn check(directory: &DirectoryClient, me: &(u32, String)) -> Result<(), i64> {
     }
     // The kernel log's records, such as the service manager's, come with
     // the app ID `kernel` and no pid.
-    let kernel = records
-        .iter()
-        .any(|r| r.app_id == "kernel" && r.pid == 0 && r.message.contains("started service log"));
+    let kernel = records.iter().any(|r| {
+        r.app_id == "kernel" && r.pid == 0 && r.message.contains("started service logsvc")
+    });
     if !kernel {
         return Err(7);
     }

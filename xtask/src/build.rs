@@ -599,7 +599,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // the log, with their manifests.
             let log_service = user_build("logsvc", kind)?;
             println!("built    {}", log_service.display());
-            let log_manifest = crate::workspace_root().join("user/services/logsvc/log.yaml");
+            let log_manifest = crate::workspace_root().join("user/services/logsvc/logsvc.yaml");
             let log_probe = user_build("log-probe", kind)?;
             println!("built    {}", log_probe.display());
             let log_probe_manifest =
@@ -615,7 +615,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         broker_manifest.as_path(),
                     ),
                     ("usr/bin/logsvc", log_service.as_path()),
-                    ("usr/lib/services/log.yaml", log_manifest.as_path()),
+                    ("usr/lib/services/logsvc.yaml", log_manifest.as_path()),
                     ("usr/bin/log-probe", log_probe.as_path()),
                     (
                         "usr/lib/services/log-probe.yaml",
@@ -926,7 +926,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     // The log service, through which the drivers' messages
                     // reach the kernel log.
                     ("usr/bin/logsvc".to_owned(), log_service.clone()),
-                    ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                    (
+                        "usr/lib/services/logsvc.yaml".to_owned(),
+                        log_manifest.clone(),
+                    ),
                     ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
                     (
                         "usr/lib/drivers/rtc/driver.yaml".to_owned(),
@@ -962,7 +965,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
                     ),
                     ("usr/bin/logsvc".to_owned(), log_service.clone()),
-                    ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                    (
+                        "usr/lib/services/logsvc.yaml".to_owned(),
+                        log_manifest.clone(),
+                    ),
                     ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
                     (
                         "usr/lib/drivers/rtc/driver.yaml".to_owned(),
@@ -1010,7 +1016,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             }
             input_files.extend([
                 ("usr/bin/logsvc".to_owned(), log_service.clone()),
-                ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                (
+                    "usr/lib/services/logsvc.yaml".to_owned(),
+                    log_manifest.clone(),
+                ),
                 ("usr/bin/input-probe".to_owned(), input_probe.clone()),
                 (
                     "usr/lib/services/input-probe.yaml".to_owned(),
@@ -1149,7 +1158,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 // The log service, through which the server's messages
                 // reach the kernel log.
                 ("usr/bin/logsvc".to_owned(), log_service.clone()),
-                ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                (
+                    "usr/lib/services/logsvc.yaml".to_owned(),
+                    log_manifest.clone(),
+                ),
                 ("usr/bin/power-probe".to_owned(), power_probe.clone()),
                 (
                     "usr/lib/services/power-probe.yaml".to_owned(),
@@ -1228,7 +1240,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 // The log service, which keeps the log in files on the
                 // root file system and the EFI system partition.
                 ("usr/bin/logsvc".to_owned(), log_service.clone()),
-                ("usr/lib/services/log.yaml".to_owned(), log_manifest.clone()),
+                (
+                    "usr/lib/services/logsvc.yaml".to_owned(),
+                    log_manifest.clone(),
+                ),
                 // The time service, which takes the time zone from the
                 // root file system.
                 ("usr/bin/timesvc".to_owned(), time_service.clone()),
@@ -1285,7 +1300,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
                         || at.starts_with("usr/share/zoneinfo/")
                         || at.contains("logsvc")
-                        || at.ends_with("services/log.yaml")
+                        || at.ends_with("services/logsvc.yaml")
                 })
                 .cloned()
                 .collect();
@@ -1324,7 +1339,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
                         || at.starts_with("usr/share/zoneinfo/")
                         || at.contains("logsvc")
-                        || at.ends_with("services/log.yaml")
+                        || at.ends_with("services/logsvc.yaml")
                 })
                 .cloned()
                 .collect();
@@ -1404,7 +1419,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         .iter()
                         .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
                         || at.contains("logsvc")
-                        || at.ends_with("services/log.yaml")
+                        || at.ends_with("services/logsvc.yaml")
                 })
                 .cloned()
                 .collect();

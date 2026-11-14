@@ -292,7 +292,7 @@ mod tests {
     fn installs_each_role_where_it_belongs() {
         let metadata = serde_json::json!({ "packages": [
             package("nvme", serde_json::json!({"kind": "driver", "image": "boot", "runtime": "rt"})),
-            package("logsvc", serde_json::json!({"kind": "service", "image": "boot", "runtime": "rt", "manifest": "log.yaml"})),
+            package("logsvc", serde_json::json!({"kind": "service", "image": "boot", "runtime": "rt", "manifest": "logsvc.yaml"})),
             package("init", serde_json::json!({"kind": "core", "image": "boot", "runtime": "rt", "path": "init"})),
             package("msh", serde_json::json!({"kind": "program", "image": "system"})),
             { "name": "mikros-yaml", "manifest_path": "/r/user/lib/yaml/Cargo.toml", "metadata": null },
@@ -315,7 +315,10 @@ mod tests {
                 "usr/lib/drivers/nvme/driver.yaml"
             ]
         );
-        assert_eq!(members(1), ["usr/bin/logsvc", "usr/lib/services/log.yaml"]);
+        assert_eq!(
+            members(1),
+            ["usr/bin/logsvc", "usr/lib/services/logsvc.yaml"]
+        );
         assert_eq!(members(2), ["init"]);
         assert_eq!(members(3), ["usr/bin/msh"]);
         assert_eq!(
