@@ -211,6 +211,24 @@ fn reads_paths_and_removal_in_assignments() {
 }
 
 #[test]
+fn reads_right_sides_as_statements() {
+    let value = |source: &str| match one(source) {
+        StatementKind::Let { value, .. } => value,
+        StatementKind::Assign { value, .. } => value,
+        StatementKind::Return(Some(value)) => value,
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(value("let files = ls -l"), Expr::Pipeline(p) if p.commands.len() == 1));
+    assert!(matches!(value("x = $l | len"), Expr::Pipeline(p) if p.commands.len() == 2));
+    assert!(matches!(value("return echo a"), Expr::Pipeline(_)));
+    assert!(matches!(value("let x = -2"), Expr::Unary(Unary::Negate, _)));
+    assert!(matches!(
+        value("let x = 1 + 2"),
+        Expr::Binary(Binary::Add, ..)
+    ));
+}
+
+#[test]
 fn reads_delete() {
     let StatementKind::Delete(v) = one("delete $env.PATH.1") else {
         panic!()

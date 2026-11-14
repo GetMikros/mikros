@@ -238,6 +238,28 @@ fn deletes_variables_fields_and_items() {
 }
 
 #[test]
+fn reads_right_sides_as_statements() {
+    let same = |plain: &str, parenthesized: &str| assert_eq!(ok(plain), ok(parenthesized));
+    same(
+        "let x = echo hi | shout\nprint $x",
+        "let x = (echo hi | shout)\nprint $x",
+    );
+    same(
+        "fn f() { return echo hi | shout }\nprint (f)",
+        "fn f() { return (echo hi | shout) }\nprint (f)",
+    );
+    assert_eq!(ok("let n = [1 2 3] | len\nprint $n"), "3\n");
+    assert_eq!(ok("let n = 0\nn = 'abc' | len\nprint $n"), "3\n");
+    let mut s = shell();
+    run(&mut s, "env.PATH = $env.PATH | where { $it != '/bin' }").unwrap();
+    assert_eq!(run(&mut s, "print $env.PATH").unwrap(), "/usr/bin\n");
+    // Expressions, negations among them, are still values.
+    assert_eq!(ok("let x = 2 + 3 * 2\nprint $x"), "8\n");
+    assert_eq!(ok("let a = 3\nlet x = -$a - 2\nprint $x"), "-5\n");
+    assert_eq!(ok("let x = -2.5\nprint $x"), "-2.5\n");
+}
+
+#[test]
 fn keeps_path_a_list_and_passes_the_environment() {
     let mut s = shell();
     run(

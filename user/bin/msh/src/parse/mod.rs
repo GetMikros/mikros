@@ -333,10 +333,36 @@ impl Parser<'_> {
             true => self.tight_value()?,
             false => {
                 self.skip_spaces();
-                self.expression()?
+                self.right_side()?
             }
         };
         Ok(Some(StatementKind::Assign { target, op, value }))
+    }
+
+    /// The right side of `let`, of an assignment or of `return`, read as
+    /// a statement is: an expression, which `|` and commands may follow,
+    /// or else a command or pipeline. A pipeline gives its value, as it
+    /// does in parentheses. `-` before a number, `$` or `(` starts an
+    /// expression too.
+    fn right_side(&mut self) -> Result<Expr> {
+        // Here, unlike at the start of a statement, `-` is the negation
+        // of the operand after it.
+        let negation = self.peek() == Some('-')
+            && matches!(self.peek_at(1), Some('0'..='9' | '.' | '$' | '('));
+        if !negation && !self.at_expression() {
+            return Ok(Expr::Pipeline(Box::new(self.pipeline(false)?)));
+        }
+        let expr = self.expression()?;
+        self.skip_spaces();
+        if self.peek() != Some('|') {
+            return Ok(expr);
+        }
+        let mut pipeline = Pipeline {
+            commands: vec![Command::Expr(expr)],
+            background: false,
+        };
+        self.rest_of_pipeline(&mut pipeline, false)?;
+        Ok(Expr::Pipeline(Box::new(pipeline)))
     }
 
     /// The value of a `NAME=value` word with no command after it, read

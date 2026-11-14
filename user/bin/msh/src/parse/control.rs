@@ -14,7 +14,7 @@ impl Parser<'_> {
                 self.skip_spaces();
                 StatementKind::Let {
                     name,
-                    value: self.expression()?,
+                    value: self.right_side()?,
                 }
             }
             "if" => {
@@ -96,7 +96,7 @@ impl Parser<'_> {
                 self.skip_spaces();
                 match self.peek() {
                     None | Some('\n' | '\r' | ';' | '}' | '#') => StatementKind::Return(None),
-                    _ => StatementKind::Return(Some(self.expression()?)),
+                    _ => StatementKind::Return(Some(self.right_side()?)),
                 }
             }
             "delete" => match self.peek() {
