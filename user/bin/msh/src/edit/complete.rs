@@ -6,7 +6,9 @@
 //! one that starts with `-` an option that the command declares: a
 //! function's flags, a script's `param` options, or a built-in
 //! command's own. The value of a script's `path` option, and any other
-//! word, is a file.
+//! word, is a file. A file or command name that would not stay one word
+//! is put on the line quoted, and a word that starts with a quote is
+//! completed inside it, which is closed once the name is complete.
 
 use crate::ast::{Param, ParamType};
 
@@ -107,26 +109,69 @@ fn candidate(text: String, display: String, description: Option<&str>, done: boo
     }
 }
 
+/// The characters that a name must be quoted for, besides blanks.
+const QUOTED: &str = "|;&><(){}[]'\"$#";
+
+/// `name` as completion puts it on the line: quoted when it has a blank
+/// or one of `QUOTED`, or when `open` is the quote that the word starts
+/// with; in single quotes, or in double quotes with `"`, `$`, `{` and
+/// `\\` escaped when it holds a `'` or the word started with `"`. The
+/// quote is closed once the name is `done`.
+fn quoted(name: &str, open: Option<char>, done: bool) -> String {
+    let needs = name
+        .chars()
+        .any(|c| c.is_whitespace() || QUOTED.contains(c));
+    if open.is_none() && !needs {
+        return name.to_owned();
+    }
+    let quote = match open {
+        _ if name.contains('\'') => '"',
+        Some(q) => q,
+        None => '\'',
+    };
+    let mut text = String::from(quote);
+    for c in name.chars() {
+        if quote == '"' && matches!(c, '"' | '$' | '{' | '\\') {
+            text.push('\\');
+        }
+        text.push(c);
+    }
+    if done {
+        text.push(quote);
+    }
+    text
+}
+
 /// The candidates for `line` with the cursor at byte `cursor`.
 pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion {
     let words = words(&line[..cursor]);
     let (start, word) = words.last().cloned().unwrap_or_default();
+    let open = line[start..cursor]
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '\'' | '"'));
     let index = words.len() - 1;
     let mut first = 0;
     while first < index && COMMAND_KEYWORDS.contains(&words[first].1.as_str()) {
         first += 1;
     }
+    let names = |mut found: Vec<Candidate>| {
+        for c in &mut found {
+            c.text = quoted(&c.text, open, c.done);
+        }
+        found
+    };
     let mut candidates = if word.starts_with('$') {
         variables(&word, sources)
     } else if index == first && !word.contains('/') {
-        commands(&word, sources)
+        names(commands(&word, sources))
     } else if index == first {
-        files(&word, sources)
+        names(files(&word, sources))
     } else if word.starts_with('-') {
         options(&word, &words[first..index], sources)
     } else {
         match option_type(&words[first..index], sources) {
-            Some(ParamType::Path | ParamType::Bool) | None => files(&word, sources),
+            Some(ParamType::Path | ParamType::Bool) | None => names(files(&word, sources)),
             Some(_) => Vec::new(),
         }
     };
@@ -294,6 +339,13 @@ mod tests {
                 "." => &[("notes.txt", false), ("src", true), (".hidden", false)],
                 "src" => &[("main.rs", false), ("mod", true)],
                 "/" => &[("usr", true), ("Users", true)],
+                "odd" => &[
+                    ("My Docs", true),
+                    ("a b.txt", false),
+                    ("it's.txt", false),
+                    ("$x{y}", false),
+                    ("plain", false),
+                ],
                 _ => return None,
             };
             Some(entries.iter().map(|(n, f)| (n.to_string(), *f)).collect())
@@ -366,7 +418,23 @@ mod tests {
         let c = complete("cat src/", 8, &Fake);
         assert_eq!(c.candidates[1].display, "mod/");
         assert!(!c.candidates[1].done);
-        assert_eq!(texts("cat 'src/ma"), ["src/main.rs"]);
+        assert_eq!(texts("cat 'src/ma"), ["'src/main.rs'"]);
+    }
+
+    #[test]
+    fn quotes_names_that_would_not_stay_one_word() {
+        assert_eq!(texts("cat odd/a"), ["'odd/a b.txt'"]);
+        assert_eq!(texts("cat odd/pl"), ["odd/plain"]);
+        // A folder's quote stays open for the rest of the path.
+        assert_eq!(texts("cd odd/M"), ["'odd/My Docs/"]);
+        assert_eq!(texts("cat odd/i"), ["\"odd/it's.txt\""]);
+        assert_eq!(texts("cat odd/$"), ["'odd/$x{y}'"]);
+        // A word that starts with a quote is completed inside it.
+        assert_eq!(texts("cat 'odd/p"), ["'odd/plain'"]);
+        assert_eq!(texts("cat \"odd/$"), ["\"odd/\\$x\\{y}\""]);
+        assert_eq!(texts("cat 'odd/My Docs/"), Vec::<String>::new());
+        // Variables and options are not names.
+        assert_eq!(texts("print $env.P"), ["$env.PATH", "$env.PWD"]);
     }
 
     #[test]
