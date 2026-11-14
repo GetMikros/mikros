@@ -63,7 +63,9 @@ const JOB_START: Duration = Duration::from_secs(5);
 /// does not scroll the whole screen line by line, which is slow in a
 /// debug build; then `ls /usr/bin | more`, which must page its input
 /// with keys read from the terminal, `q`, which quits it, and
-/// `if $status != 0 { exit 8 }`; then `spaw`, which Tab completes to
+/// `if $status != 0 { exit 8 }`; then `ls /usr/bin | less`, Space, which
+/// shows its next screen, `/less` and Enter, which searches, `q` and
+/// `if $status != 0 { exit 10 }`; then `spaw`, which Tab completes to
 /// `spawn-std `, and
 /// `sleep`, a job that runs until it is killed, Ctrl-Z, which stops it,
 /// `let n = (jobs | lines | len)`, `bg`, `kill %1`,
@@ -83,7 +85,7 @@ const JOB_START: Duration = Duration::from_secs(5);
 /// its first entry, files-c's and coreutils-check's checks
 /// passed, and `/`, which no namespace entry covers, is a folder that
 /// lists `Users`.
-const MSH_KEYS: [(&str, Duration); 19] = [
+const MSH_KEYS: [(&str, Duration); 24] = [
     ("y e s ret", JOB_START),
     ("ctrl-c", QUESTION),
     ("ctrl-l", QUESTION),
@@ -95,6 +97,18 @@ const MSH_KEYS: [(&str, Duration); 19] = [
     (
         "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
          shift-bracket_left spc e x i t spc 8 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "l s spc slash u s r slash b i n spc shift-backslash spc l e s s ret",
+        JOB_START,
+    ),
+    ("spc", QUESTION),
+    ("slash l e s s ret", QUESTION),
+    ("q", QUESTION),
+    (
+        "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
+         shift-bracket_left spc e x i t spc 1 0 spc shift-bracket_right ret",
         QUESTION,
     ),
     ("s p a w tab s l e e p ret", JOB_START),
