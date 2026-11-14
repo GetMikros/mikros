@@ -16,11 +16,14 @@ enum Carry {
     Bytes(Vec<u8>),
 }
 
+/// Redirections, with their targets expanded.
+type Redirections = Vec<(RedirectionKind, String)>;
+
 /// A command found and its arguments expanded.
 enum Found {
     Expr(Value),
-    Function(Rc<Function>, Vec<Value>),
-    Builtin(&'static str, Vec<builtins::Arg>),
+    Function(Rc<Function>, Vec<Value>, Redirections),
+    Builtin(&'static str, Vec<builtins::Arg>, Redirections),
     Program(Program),
 }
 
@@ -243,7 +246,7 @@ impl<S: System> Shell<S> {
         }
         let rest = args.split_off(1);
         if let Some(f) = self.functions.get(&name).cloned() {
-            self.only_programs(&environment, &redirections)?;
+            self.only_programs(&environment)?;
             let values = rest
                 .into_iter()
                 .map(|a| match a {
@@ -251,11 +254,11 @@ impl<S: System> Shell<S> {
                     builtins::Arg::Block(_) => Err(self.fail("a function takes no blocks".into())),
                 })
                 .collect::<Result<_, _>>()?;
-            return Ok(Found::Function(f, values));
+            return Ok(Found::Function(f, values, redirections));
         }
         if let Some(builtin) = builtins::find(&name) {
-            self.only_programs(&environment, &redirections)?;
-            return Ok(Found::Builtin(builtin, rest));
+            self.only_programs(&environment)?;
+            return Ok(Found::Builtin(builtin, rest, redirections));
         }
         let path = self.locate(&name)?;
         let mut program_args = vec![name];
@@ -271,19 +274,14 @@ impl<S: System> Shell<S> {
             path,
             args: program_args,
             environment: self.program_environment(&environment),
-            redirections,
+            redirections: self.inherited.iter().cloned().chain(redirections).collect(),
         }))
     }
 
-    /// Fails for `NAME=value` words and redirections, which only programs
-    /// take.
-    fn only_programs(
-        &self,
-        environment: &[(String, Value)],
-        redirections: &[(RedirectionKind, String)],
-    ) -> Result<(), Flow> {
-        if !environment.is_empty() || !redirections.is_empty() {
-            return Err(self.fail("only programs take NAME=value words and redirections".into()));
+    /// Fails for `NAME=value` words, which only programs take.
+    fn only_programs(&self, environment: &[(String, Value)]) -> Result<(), Flow> {
+        if !environment.is_empty() {
+            return Err(self.fail("only programs take NAME=value words".into()));
         }
         Ok(())
     }
@@ -334,12 +332,84 @@ impl<S: System> Shell<S> {
                 None => Ok(value),
                 Some(_) => Err(self.fail("an expression takes no input from a pipe".into())),
             },
-            Found::Builtin(name, args) => {
-                self.gathering(gather, |s| builtins::run(s, name, args, input))
+            Found::Builtin(name, args, redirections) => {
+                self.redirected(&redirections, input, gather, |s, input| {
+                    builtins::run(s, name, args, input)
+                })
             }
-            Found::Function(f, args) => self.gathering(gather, |s| s.function(&f, args)),
+            Found::Function(f, args, redirections) => {
+                self.redirected(&redirections, input, gather, |s, _| s.function(&f, args))
+            }
             Found::Program(_) => unreachable!("programs are started, not called"),
         }
+    }
+
+    /// Runs `f`, a built-in command or function, with `input` and its
+    /// `redirections`: its input from a file for `<`; what it writes, or
+    /// else the value it gives, to a file for `>` and `>>` or to the
+    /// error stream for `>&2`; and for `2>` and `2>&1`, the error streams
+    /// of the programs it starts, which are the only ones it has. A file
+    /// of `2>` is emptied once, and those programs append to it.
+    fn redirected(
+        &mut self,
+        redirections: &[(RedirectionKind, String)],
+        input: Option<Value>,
+        gather: bool,
+        f: impl FnOnce(&mut Self, Option<Value>) -> Result<Value, Flow>,
+    ) -> Result<Value, Flow> {
+        let mut input = input;
+        let mut output = None;
+        let mut errors = Vec::new();
+        for (kind, target) in redirections {
+            match kind {
+                RedirectionKind::Input => {
+                    let text = self.system.read_file(target).map_err(|e| self.fail(e))?;
+                    input = Some(Value::String(text));
+                }
+                RedirectionKind::Output
+                | RedirectionKind::Append
+                | RedirectionKind::OutputToError => {
+                    output = Some((*kind, target.clone()));
+                }
+                RedirectionKind::Error => {
+                    let emptied = self.system.write_file(target, b"", false);
+                    emptied.map_err(|e| self.fail(e))?;
+                    errors.push((RedirectionKind::ErrorAppend, target.clone()));
+                }
+                RedirectionKind::ErrorToOutput | RedirectionKind::ErrorAppend => {
+                    errors.push((*kind, target.clone()));
+                }
+            }
+        }
+        let depth = self.inherited.len();
+        self.inherited.extend(errors);
+        let result = match output {
+            None => self.gathering(gather, |s| f(s, input)),
+            Some((kind, target)) => {
+                self.captures.push(Vec::new());
+                let result = f(self, input);
+                let mut written = self.captures.pop().unwrap_or_default();
+                if let Ok(value) = &result
+                    && written.is_empty()
+                    && *value != Value::Null
+                {
+                    written = program_text(value).into_bytes();
+                }
+                let sent = match kind {
+                    RedirectionKind::OutputToError => {
+                        self.write(Stream::Error, &written);
+                        Ok(())
+                    }
+                    kind => {
+                        let append = kind == RedirectionKind::Append;
+                        self.system.write_file(&target, &written, append)
+                    }
+                };
+                result.and_then(|_| sent.map(|()| Value::Null).map_err(|e| self.fail(e)))
+            }
+        };
+        self.inherited.truncate(depth);
+        result
     }
 
     /// Runs `f`, and, when `gather`, gives what it wrote as its value if

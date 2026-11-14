@@ -39,6 +39,14 @@ impl System for Fake {
             false => Err(format!("{path}: no such folder")),
         }
     }
+    fn write_file(&mut self, path: &str, bytes: &[u8], append: bool) -> Result<(), String> {
+        let file = self.files.entry(path.into()).or_default();
+        if !append {
+            file.clear();
+        }
+        file.push_str(&String::from_utf8_lossy(bytes));
+        Ok(())
+    }
     fn read_file(&self, path: &str) -> Result<String, String> {
         self.files
             .get(path)
@@ -375,6 +383,58 @@ fn expands_home_folders_at_the_start_of_bare_words() {
     assert_eq!(s.lookup("x"), Some(&Value::String("~/a".into())));
     let f = error("let s = 'x'\ndelete env.HOME\necho ~");
     assert_eq!(f.message, "`$env.HOME` is not set");
+}
+
+#[test]
+fn redirects_built_in_commands_and_functions() {
+    let mut s = shell();
+    let out = run(
+        &mut s,
+        "print hi > /tmp/a\nprint more >> /tmp/a\nprint x >&2",
+    )
+    .unwrap();
+    assert_eq!(out, "");
+    assert_eq!(s.system.files["/tmp/a"], "hi\nmore\n");
+    assert_eq!(String::from_utf8_lossy(&s.system.errors), "x\n");
+    // A function's output takes in that of the programs it starts, and
+    // a value that is given rather than written is written as text.
+    run(
+        &mut s,
+        "fn f() { print a; echo b }\nf > /tmp/f\n[c d] | first 2 > /tmp/v",
+    )
+    .unwrap();
+    assert_eq!(s.system.files["/tmp/f"], "a\nb\n");
+    assert_eq!(s.system.files["/tmp/v"], "c\nd\n");
+    s.system.files.insert("/tmp/in".into(), "x\ny\n".into());
+    assert_eq!(run(&mut s, "lines < /tmp/in | len | print").unwrap(), "2\n");
+    // 2> empties the file once, and the programs started append to it.
+    s.system.files.insert("/tmp/err".into(), "old".into());
+    s.system.runs.clear();
+    run(
+        &mut s,
+        "fn g() { echo a; echo b 2> /tmp/own }\ng 2> /tmp/err",
+    )
+    .unwrap();
+    assert_eq!(s.system.files["/tmp/err"], "");
+    let taken = |n: usize| s.system.runs[n].programs[0].redirections.clone();
+    assert_eq!(
+        taken(0),
+        [(RedirectionKind::ErrorAppend, "/tmp/err".into())]
+    );
+    assert_eq!(
+        taken(1),
+        [
+            (RedirectionKind::ErrorAppend, "/tmp/err".into()),
+            (RedirectionKind::Error, "/tmp/own".into())
+        ]
+    );
+    s.system.runs.clear();
+    run(&mut s, "echo after").unwrap();
+    assert!(s.system.runs[0].programs[0].redirections.is_empty());
+    assert_eq!(
+        error("A=1 print x").message,
+        "only programs take NAME=value words"
+    );
 }
 
 #[test]

@@ -173,6 +173,9 @@ pub enum RedirectionKind {
     ErrorToOutput,
     /// `>&2`, whose target is empty.
     OutputToError,
+    /// `2>` that appends, which the syntax lacks: what the programs that
+    /// a built-in command or function redirected with `2>` starts take.
+    ErrorAppend,
 }
 
 /// An expression.

@@ -106,6 +106,10 @@ impl Os {
                     ends[1] = opened(file)?;
                 }
                 RedirectionKind::Error => ends[2] = opened(File::create(target))?,
+                RedirectionKind::ErrorAppend => {
+                    let file = OpenOptions::new().append(true).create(true).open(target);
+                    ends[2] = opened(file)?;
+                }
                 RedirectionKind::ErrorToOutput => ends[2] = Some(copy(&ends[1], 1)?),
                 RedirectionKind::OutputToError => ends[1] = Some(copy(&ends[2], 2)?),
             }
@@ -303,6 +307,19 @@ impl System for Os {
 
     fn read_file(&self, path: &str) -> Result<String, String> {
         fs::read_to_string(path).map_err(|e| file_error(path, e))
+    }
+
+    fn write_file(&mut self, path: &str, bytes: &[u8], append: bool) -> Result<(), String> {
+        let mut options = OpenOptions::new();
+        options.create(true);
+        match append {
+            true => options.append(true),
+            false => options.write(true).truncate(true),
+        };
+        options
+            .open(path)
+            .and_then(|mut file| file.write_all(bytes))
+            .map_err(|e| file_error(path, e))
     }
 
     fn executable(&self, path: &str) -> Option<bool> {

@@ -80,6 +80,10 @@ pub struct Shell<S: System> {
     /// The output of the functions running in a pipeline, innermost
     /// last.
     captures: Vec<Vec<u8>>,
+    /// The redirections of the error stream of the built-in commands and
+    /// functions running, which the programs they start take before
+    /// their own.
+    inherited: Vec<(RedirectionKind, String)>,
     /// The entries made at the prompt, oldest first, for `history`.
     pub history: Vec<crate::edit::history::Entry>,
     /// The folder listings kept for completion and suggestions.
@@ -116,6 +120,7 @@ impl<S: System> Shell<S> {
             line: 0,
             command: String::new(),
             captures: Vec::new(),
+            inherited: Vec::new(),
             history: Vec::new(),
             listings: listings::Listings::default(),
         };

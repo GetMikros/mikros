@@ -59,6 +59,9 @@ pub trait System: glob::Folders {
     fn current_dir(&self) -> String;
     fn set_current_dir(&mut self, path: &str) -> Result<(), String>;
     fn read_file(&self, path: &str) -> Result<String, String>;
+    /// Writes `bytes` to the file at `path`, after what it holds when
+    /// `append`, and otherwise in place of it.
+    fn write_file(&mut self, path: &str, bytes: &[u8], append: bool) -> Result<(), String>;
     /// Whether a file is at `path`, and if so whether it may be run.
     fn executable(&self, path: &str) -> Option<bool>;
     /// The home folder of the user `name`, when there is such a user.
