@@ -543,9 +543,10 @@ async fn kill(
 /// Sends `signo` for process `caller` to every running process of
 /// `group` that it may signal: as `may_signal` says, or all of them when
 /// the broker says that it holds `process.signal_any`, which is asked
-/// only when `may_signal` leaves some out. Fails with `NOT_FOUND` when
-/// the group has no running process, and with `ACCESS_DENIED` when it
-/// may signal none.
+/// only when `may_signal` leaves some out. A group whose members have
+/// all ended, while the status of one is kept, gets no signal and no
+/// error. Fails with `NOT_FOUND` when the group has no member, and with
+/// `ACCESS_DENIED` when it may signal none of its running processes.
 async fn kill_group(
     shared: &Shared,
     caller: u32,
@@ -561,7 +562,11 @@ async fn kill_group(
             .map(|(pid, _)| pid)
             .collect();
         if members.is_empty() {
-            return Err(Status::NotFound);
+            let kept = records.iter().any(|(_, r)| r.process_group == group);
+            return match kept {
+                true => Ok(LauncherKillGroupResponse {}),
+                false => Err(Status::NotFound),
+            };
         }
         members
             .iter()
@@ -630,8 +635,9 @@ fn create_session(shared: &Shared, caller: u32) -> Result<LauncherCreateSessionR
 }
 
 /// Moves process `target`, the caller or one of its children, to process
-/// group `group` of its session: one that a running process of that
-/// session is in, or a new one when `group` is `target`. Fails with
+/// group `group` of its session: one that a process of that session is
+/// in, running or ended with its status still kept, or a new one when
+/// `group` is `target`. Fails with
 /// `ACCESS_DENIED` for any other process, a child in another session, or
 /// another group.
 fn set_process_group(
@@ -649,7 +655,7 @@ fn set_process_group(
         .ok_or(Status::AccessDenied)?;
     let exists = records
         .iter()
-        .any(|(_, r)| r.process_group == group && r.session == moved.session && r.exit.is_none());
+        .any(|(_, r)| r.process_group == group && r.session == moved.session);
     if group != target && !exists {
         return Err(Status::AccessDenied);
     }

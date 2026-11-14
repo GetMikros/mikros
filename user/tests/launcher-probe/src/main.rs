@@ -453,6 +453,14 @@ fn now() -> i64 {
     now
 }
 
+/// Takes `CHLD` when it is pending or arrives before `deadline`, and
+/// returns whether it did.
+fn chld_within(deadline: i64) -> bool {
+    let mut info = [0u8; 64];
+    // SAFETY: the pointer refers to room for the signal's information.
+    unsafe { sys::signal_wait(CHLD_BIT, deadline, info.as_mut_ptr()) == mikros_rt::OK }
+}
+
 /// Takes the pending `CHLD`, if any, and returns whether there was one.
 fn take_chld() -> bool {
     let mut info = [0u8; 64];
@@ -726,6 +734,42 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
             kill_group(l, a, 0).await == Err(Status::NotFound),
         )?;
         check("getting CHLD", take_chld())?;
+        // A member that ended keeps its group while its status is kept:
+        // another child may join it, and the group exists until no member
+        // runs and no status is kept.
+        let d = spawn(l, &["sleep"], |_| {}).await.map_or(0, |(pid, _)| pid);
+        let e = spawn(l, &["sleep"], |_| {}).await.map_or(0, |(pid, _)| pid);
+        check(
+            "giving a child a group",
+            set_process_group(l, d, d).await.is_ok(),
+        )?;
+        check("ending that child", kill(l, d, KILL).await.is_ok())?;
+        check(
+            "getting CHLD for its end",
+            chld_within(now() + 5_000_000_000),
+        )?;
+        check(
+            "joining the group of a child that ended",
+            set_process_group(l, e, d).await.is_ok(),
+        )?;
+        check(
+            "signalling a group whose running members are gone",
+            kill_group(l, d, 0).await.is_ok(),
+        )?;
+        check(
+            "collecting the ended child",
+            wait(l, d as i32).await == Some((d, -3, KILL)),
+        )?;
+        check("ending the joined child", kill(l, e, KILL).await.is_ok())?;
+        check(
+            "collecting it",
+            wait(l, e as i32).await == Some((e, -3, KILL)),
+        )?;
+        check(
+            "finding the group gone once both are collected",
+            kill_group(l, d, 0).await == Err(Status::NotFound),
+        )?;
+        while take_chld() {}
         // A stop and a continuation are reported once each, when asked
         // for, and with CHLD.
         let c = spawn(l, &["sleep"], |_| {}).await.map_or(0, |(pid, _)| pid);
