@@ -10,7 +10,8 @@
 //! is put on the line quoted, and a word that starts with a quote is
 //! completed inside it, which is closed once the name is complete.
 
-use crate::ast::{Param, ParamType};
+use crate::ast::{Extern, Param, ParamType};
+use std::rc::Rc;
 
 /// A way to complete the word.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,13 +52,21 @@ pub trait Sources {
     fn current_folder(&self) -> Option<String> {
         None
     }
+    /// What the command `name`, or its subcommand `sub`, takes, as it
+    /// was declared.
+    fn declaration(&self, _name: &str, _sub: Option<&str>) -> Option<Rc<Extern>> {
+        None
+    }
+    /// The subcommands declared for the command `name`.
+    fn subcommands(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
-/// The options of built-in commands, with what they do.
-const BUILTIN_OPTIONS: [(&str, &str, &str); 13] = [
+/// The options of built-in commands that their declarations cannot
+/// give, with what they do.
+const BUILTIN_OPTIONS: [(&str, &str, &str); 11] = [
     ("cd", "-", "the previous folder"),
-    ("print", "-n", "no line feed at the end"),
-    ("kill", "-s", "the signal by name"),
     ("kill", "-HUP", "signal 1"),
     ("kill", "-INT", "signal 2"),
     ("kill", "-QUIT", "signal 3"),
@@ -168,17 +177,130 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
     } else if index == first {
         names(files(&word, sources))
     } else if word.starts_with('-') {
-        options(&word, &words[first..index], sources)
-    } else {
-        match option_type(&words[first..index], sources) {
-            Some(ParamType::Path | ParamType::File | ParamType::Folder | ParamType::Bool)
-            | None => names(files(&word, sources)),
-            Some(_) => Vec::new(),
+        let command = &words[first..index];
+        let mut found = options(&word, command, sources);
+        if let Some((declared, _)) = declared(command, sources) {
+            found.extend(declared_options(&word, &declared));
         }
+        found
+    } else {
+        let command = &words[first..index];
+        let subcommands = match index == first + 1 {
+            true => sources.subcommands(&command[0].1),
+            false => Vec::new(),
+        };
+        let kind = match declared(command, sources) {
+            Some((declared, skip)) => value_type(&declared, &command[skip..]),
+            None => option_type(command, sources),
+        };
+        let mut found: Vec<Candidate> = subcommands
+            .into_iter()
+            .filter(|s| s.starts_with(&word))
+            .map(|s| candidate(s.clone(), s, Some("subcommand"), true))
+            .collect();
+        match (kind, found.is_empty()) {
+            (Some(kind), _) => found.extend(names(by_type(&kind, &word, sources))),
+            // Subcommands are offered without files.
+            (None, true) => found = names(files(&word, sources)),
+            (None, false) => {}
+        }
+        found
     };
     candidates.sort_by(|a, b| a.text.cmp(&b.text));
     candidates.dedup_by(|a, b| a.text == b.text);
     Completion { start, candidates }
+}
+
+/// The declaration of the command whose words are `command`, its
+/// subcommand's when the second word is one, with how many words name
+/// it.
+fn declared(command: &[(usize, String)], sources: &dyn Sources) -> Option<(Rc<Extern>, usize)> {
+    let name = &command.first()?.1;
+    if let Some((_, sub)) = command.get(1)
+        && let Some(declared) = sources.declaration(name, Some(sub))
+    {
+        return Some((declared, 2));
+    }
+    sources.declaration(name, None).map(|d| (d, 1))
+}
+
+/// The declared option that `word`, `--name` or `-x`, names.
+fn declared_option<'a>(declared: &'a Extern, word: &str) -> Option<&'a crate::ast::Declared> {
+    let word = word.split('=').next().unwrap_or(word);
+    declared
+        .options
+        .iter()
+        .find(|o| match word.strip_prefix("--") {
+            Some(name) => o.name == name,
+            None => o.short.as_deref() == word.strip_prefix('-'),
+        })
+}
+
+/// The options of `declared` that start as `word` does, long and short,
+/// with their descriptions.
+fn declared_options(word: &str, declared: &Extern) -> Vec<Candidate> {
+    let mut found = Vec::new();
+    for option in &declared.options {
+        let forms = std::iter::once(format!("--{}", option.name))
+            .chain(option.short.iter().map(|s| format!("-{s}")));
+        for text in forms.filter(|t| t.starts_with(word)) {
+            found.push(candidate(
+                text.clone(),
+                text,
+                option.description.as_deref(),
+                true,
+            ));
+        }
+    }
+    found
+}
+
+/// The type of the value that follows the arguments `args` of a declared
+/// command: that of the option before it when that takes a value, and
+/// otherwise that of its position, or of the rest; `None` past them.
+fn value_type(declared: &Extern, args: &[(usize, String)]) -> Option<ParamType> {
+    let mut position = 0;
+    let mut option_value = None;
+    for (_, arg) in args {
+        if option_value.take().is_some() {
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            option_value = declared_option(declared, arg)
+                .filter(|o| o.kind != ParamType::Bool && !arg.contains('='))
+                .map(|o| o.kind.clone());
+            continue;
+        }
+        position += 1;
+    }
+    if option_value.is_some() {
+        return option_value;
+    }
+    let item = declared
+        .positional
+        .get(position)
+        .or_else(|| declared.positional.iter().find(|p| p.rest))?;
+    Some(item.kind.clone())
+}
+
+/// The candidates for a value of type `kind`: only folders for a
+/// folder, files and folders for a file or path, commands for a command,
+/// the choices of a list, and none for the other types.
+fn by_type(kind: &ParamType, word: &str, sources: &dyn Sources) -> Vec<Candidate> {
+    match kind {
+        ParamType::Folder => files(word, sources)
+            .into_iter()
+            .filter(|c| !c.done)
+            .collect(),
+        ParamType::File | ParamType::Path | ParamType::Bool => files(word, sources),
+        ParamType::Command => commands(word, sources),
+        ParamType::Choices(choices) => choices
+            .iter()
+            .filter(|c| c.starts_with(word))
+            .map(|c| candidate(c.clone(), c.clone(), None, true))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn variables(word: &str, sources: &dyn Sources) -> Vec<Candidate> {
@@ -334,7 +456,40 @@ mod tests {
 
     struct Fake;
 
+    /// The declarations that `Fake` gives.
+    const DECLARED: &str = r#"
+extern git push(remote?: [origin upstream], ...refs: string, --force(-f): bool "overwrite", --repo: folder)
+extern cd(folder?: folder)
+extern print(--n(-n): bool, ...values: any)
+extern pick(choice: [red green], target: file, run: command)
+"#;
+
+    fn declared() -> Vec<Extern> {
+        parse(DECLARED)
+            .unwrap()
+            .statements
+            .into_iter()
+            .filter_map(|s| match s.kind {
+                crate::ast::StatementKind::Extern(e) => Some(e),
+                _ => None,
+            })
+            .collect()
+    }
+
     impl Sources for Fake {
+        fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
+            declared()
+                .into_iter()
+                .find(|e| e.command == name && e.subcommand.as_deref() == sub)
+                .map(Rc::new)
+        }
+        fn subcommands(&self, name: &str) -> Vec<String> {
+            declared()
+                .into_iter()
+                .filter(|e| e.command == name)
+                .filter_map(|e| e.subcommand)
+                .collect()
+        }
         fn entries(&self, folder: &str) -> Option<Vec<(String, bool)>> {
             let entries: &[(&str, bool)] = match folder {
                 "." => &[("notes.txt", false), ("src", true), (".hidden", false)],
@@ -423,6 +578,27 @@ mod tests {
     }
 
     #[test]
+    fn completes_from_declarations() {
+        assert_eq!(texts("git p"), ["push"]);
+        assert_eq!(texts("git push -"), ["--force", "--repo", "-f"]);
+        let c = complete("git push --f", 12, &Fake);
+        assert_eq!(c.candidates[0].description.as_deref(), Some("overwrite"));
+        // Values by the type of their position, past options.
+        assert_eq!(texts("git push o"), ["origin"]);
+        assert_eq!(texts("git push --force o"), ["origin"]);
+        assert!(texts("git push origin ").is_empty());
+        // An option's value by the option's type.
+        assert_eq!(texts("git push --repo "), ["src/"]);
+        assert_eq!(texts("cd "), ["src/"]);
+        assert_eq!(texts("cd -"), ["-"]);
+        assert_eq!(texts("pick g"), ["green"]);
+        assert_eq!(texts("pick red n"), ["notes.txt"]);
+        assert_eq!(texts("pick red notes.txt ca"), ["cat"]);
+        // Past what is declared, files.
+        assert_eq!(texts("pick red notes.txt cat n"), ["notes.txt"]);
+    }
+
+    #[test]
     fn quotes_names_that_would_not_stay_one_word() {
         assert_eq!(texts("cat odd/a"), ["'odd/a b.txt'"]);
         assert_eq!(texts("cat odd/pl"), ["odd/plain"]);
@@ -461,7 +637,7 @@ mod tests {
                 Some("path".to_string())
             ]
         );
-        assert_eq!(texts("print -"), ["-n"]);
+        assert_eq!(texts("print -"), ["--n", "-n"]);
         assert_eq!(texts("kill -T"), ["-TERM", "-TSTP"]);
         // A path option's value is a file; an int's has no candidates.
         assert_eq!(texts("./go.msh --out n"), ["notes.txt"]);

@@ -212,11 +212,18 @@ impl<S: System> Shell<S> {
 
     /// What the command `name`, or its subcommand `sub`, takes, as
     /// `extern` declared it last.
-    // Completion takes it in the next change.
-    #[cfg_attr(target_os = "mikros", allow(dead_code))]
     pub fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
         let key = (name.to_owned(), sub.map(str::to_owned));
         self.declarations.get(&key).cloned()
+    }
+
+    /// The subcommands declared for the command `name`.
+    pub fn subcommands(&self, name: &str) -> Vec<String> {
+        self.declarations
+            .keys()
+            .filter(|(command, _)| command == name)
+            .filter_map(|(_, sub)| sub.clone())
+            .collect()
     }
 
     /// The value of the variable `name`, when it is set.
