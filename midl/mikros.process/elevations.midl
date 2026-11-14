@@ -1,0 +1,9 @@
+// MIKSPEC-0092.R3
+
+library mikros.process;
+using mikros.base;
+
+protocol Elevations {
+    @1 SetAdmin(pid u32, admin u32) -> () error base.Status;
+    @2 GetAdmin(pid u32) -> (admin u32) error base.Status;
+};

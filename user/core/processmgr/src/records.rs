@@ -20,6 +20,9 @@ pub struct Record {
     pub app_id: String,
     pub user: u32,
     pub login_session: u32,
+    /// The administrator who elevated the process, or one it descends
+    /// from, 0 for none.
+    pub admin: u32,
     #[expect(dead_code, reason = "kept so that the budget lives")]
     pub budget: OwnedHandle,
     /// The executable path the process was started with.

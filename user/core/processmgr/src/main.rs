@@ -12,6 +12,7 @@ extern crate alloc;
 mod broker;
 mod commands;
 mod devfs;
+mod elevations;
 mod init;
 mod launcher;
 mod namespace;

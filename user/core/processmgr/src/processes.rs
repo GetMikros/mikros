@@ -102,6 +102,8 @@ pub struct NewProcess {
     pub namespace_of: String,
     pub user: u32,
     pub login_session: u32,
+    /// The administrator who elevated its spawner, 0 for none.
+    pub admin: u32,
     pub arguments: OwnedHandle,
     pub handles: Vec<StartupHandle>,
     /// Whether it is the service manager that init asked for.
@@ -215,6 +217,7 @@ impl Shared {
             app_id,
             user,
             login_session,
+            admin,
             arguments,
             handles,
             working_directory,
@@ -249,6 +252,7 @@ impl Shared {
                 app_id,
                 user,
                 login_session,
+                admin,
                 budget,
                 path,
                 programs: Rc::new(programs),

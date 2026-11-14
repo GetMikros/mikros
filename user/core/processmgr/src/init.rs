@@ -132,6 +132,7 @@ impl Manager {
             app_id: "system.init".into(),
             user: 0,
             login_session: 0,
+            admin: 0,
             budget: duplicate(self.shared.budget.raw(), SAME_RIGHTS)?,
             path: "init".into(),
             // init's programs come from the boot file system.
@@ -190,6 +191,7 @@ impl Manager {
             namespace_of: SERVICE_MANAGER_APP.into(),
             user: 0,
             login_session: 0,
+            admin: 0,
             arguments: match &self.selftest {
                 Some(word) => start::arguments(&[SERVICE_MANAGER_PATH, word])?,
                 None => start::arguments(&[SERVICE_MANAGER_PATH])?,

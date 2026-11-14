@@ -38,8 +38,8 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeAsyncClient, OpenFlags, Rights};
 use mikros_rt::interfaces::mikros::process::{
-    ExitStatus, HandleRole, LauncherAsyncClient, ProcessInfo, SpawnRequest, StartupHandle,
-    StatusKind, WaitOptions,
+    Elevations, ExitStatus, HandleRole, LauncherAsyncClient, ProcessInfo, SpawnRequest,
+    StartupHandle, StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::{
     Directory, DirectoryAsyncServer, DirectoryConnectResponse, DirectoryRequest, ProcessDirectory,
@@ -631,6 +631,17 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
         check(
             "naming an app ID whose manifest is invalid",
             wait(l, unmanifested as i32).await == Some((unmanifested, 0, 0)),
+        )?;
+        // Only the session manager may mark processes as elevated.
+        let ends = endpoints::<Elevations>();
+        check("making a channel for Elevations", ends.is_ok())?;
+        let Ok((_, server)) = ends else {
+            unreachable!()
+        };
+        let opened = l.open_elevations(server).await;
+        check(
+            "refusing Elevations to another app",
+            matches!(opened, Ok(Err(Status::AccessDenied))),
         )?;
         // A command's binary runs with the command's app ID, which no
         // caller may name, and starts nothing.

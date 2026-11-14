@@ -19,9 +19,9 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{
     ExitStatus, Launcher, LauncherAsyncServer, LauncherCreateSessionResponse, LauncherExecResponse,
     LauncherGetInfoResponse, LauncherKillGroupResponse, LauncherKillLoginSessionResponse,
-    LauncherKillResponse, LauncherListResponse, LauncherRequest, LauncherSetProcessGroupResponse,
-    LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo, SpawnRequest, StatusKind,
-    WaitOptions,
+    LauncherKillResponse, LauncherListResponse, LauncherOpenElevationsResponse, LauncherRequest,
+    LauncherSetProcessGroupResponse, LauncherSpawnResponse, LauncherWaitResponse, ProcessInfo,
+    SpawnRequest, StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::sys;
@@ -35,6 +35,8 @@ const MANAGE: u32 = 1 << 8;
 const INSPECT: u32 = 1 << 9;
 /// The device manager's app ID.
 const DEVICE_MANAGER: &str = "system.devicemgr";
+/// The session manager's app ID, the one that may open `Elevations`.
+const SESSION_MANAGER: &str = "system.sessionmgr";
 /// A `user` that means the caller's user ID.
 const CALLER_USER: u32 = u32::MAX;
 /// The signal that ends a process at once.
@@ -130,6 +132,20 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
                 });
                 Ok(())
             }
+            R::OpenElevations(request, r) => {
+                // Only the session manager marks processes as elevated.
+                let app_id = shared.records.borrow().get(pid).map(|r| r.app_id.clone());
+                let result = match app_id.as_deref() == Some(SESSION_MANAGER) {
+                    true => {
+                        let end = request.server;
+                        let serving = crate::elevations::serve(shared.clone(), end);
+                        shared.spawner.spawn(serving);
+                        Ok(LauncherOpenElevationsResponse {})
+                    }
+                    false => Err(Status::AccessDenied),
+                };
+                r.reply(s, result)
+            }
             R::KillLoginSession(request, r) => {
                 let (shared, server) = (shared.clone(), server.clone());
                 shared.clone().spawner.spawn(async move {
@@ -223,6 +239,9 @@ async fn new_process(
         namespace_of,
         user,
         login_session: from.login_session,
+        // A spawned process keeps its spawner's elevation, and Exec the
+        // caller's own.
+        admin: from.admin,
         arguments: duplicate(request.arguments.raw(), SAME_RIGHTS)?,
         handles: request.handles,
         service_manager: false,
