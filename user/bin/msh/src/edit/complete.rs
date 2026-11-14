@@ -83,9 +83,10 @@ const BUILTIN_OPTIONS: [(&str, &str, &str); 11] = [
 const COMMAND_KEYWORDS: [&str; 6] = ["if", "while", "not", "run", "exec", "else"];
 
 /// The words of the command that the cursor is in, and where each
-/// starts, up to the cursor; the last is the word being completed,
-/// empty after a blank.
-fn words(before: &str) -> Vec<(usize, String)> {
+/// starts, up to the cursor, without their quotes; the last is the word
+/// being completed, empty after a blank. With them, the quote that is
+/// open at the cursor, if one is.
+fn words(before: &str) -> (Vec<(usize, String)>, Option<char>) {
     let mut words: Vec<(usize, String)> = Vec::new();
     let mut current: Option<(usize, String)> = None;
     let mut quote = None;
@@ -106,7 +107,7 @@ fn words(before: &str) -> Vec<(usize, String)> {
         }
     }
     words.push(current.unwrap_or((before.len(), String::new())));
-    words
+    (words, quote)
 }
 
 fn candidate(text: String, display: String, description: Option<&str>, done: bool) -> Candidate {
@@ -122,16 +123,25 @@ fn candidate(text: String, display: String, description: Option<&str>, done: boo
 const QUOTED: &str = "|;&><(){}[]'\"$#";
 
 /// `name` as completion puts it on the line: quoted when it has a blank
-/// or one of `QUOTED`, or when `open` is the quote that the word starts
-/// with; in single quotes, or in double quotes with `"`, `$`, `{` and
-/// `\\` escaped when it holds a `'` or the word started with `"`. The
-/// quote is closed once the name is `done`.
+/// or one of `QUOTED`, or when `open` is the quote open at the cursor;
+/// in single quotes, or in double quotes with `"`, `$`, `{` and `\\`
+/// escaped when it holds a `'` or the open quote is `"`. The quote is
+/// closed once the name is `done`, and a folder's before its `/`, so
+/// that the line is whole and the rest of the path can follow, as in
+/// `'hello world'/`.
 fn quoted(name: &str, open: Option<char>, done: bool) -> String {
-    let needs = name
-        .chars()
-        .any(|c| c.is_whitespace() || QUOTED.contains(c));
-    if open.is_none() && !needs {
+    let needs = |text: &str| {
+        text.chars()
+            .any(|c| c.is_whitespace() || QUOTED.contains(c))
+    };
+    if open.is_none() && !needs(name) {
         return name.to_owned();
+    }
+    if let Some(folder) = name.strip_suffix('/')
+        && !done
+        && !folder.is_empty()
+    {
+        return format!("{}/", quoted(folder, open, true));
     }
     let quote = match open {
         _ if name.contains('\'') => '"',
@@ -236,12 +246,8 @@ fn quote_names(mut found: Vec<Candidate>, open: Option<char>) -> Vec<Candidate> 
 
 /// The candidates for `line` with the cursor at byte `cursor`.
 pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion {
-    let words = words(&line[..cursor]);
+    let (words, open) = words(&line[..cursor]);
     let (start, word) = words.last().cloned().unwrap_or_default();
-    let open = line[start..cursor]
-        .chars()
-        .next()
-        .filter(|c| matches!(c, '\'' | '"'));
     let index = words.len() - 1;
     let mut first = 0;
     while first < index && COMMAND_KEYWORDS.contains(&words[first].1.as_str()) {
@@ -593,6 +599,7 @@ extern pick(choice: [red green], target: file, run: command)
                 "." => &[("notes.txt", false), ("src", true), (".hidden", false)],
                 "src" => &[("main.rs", false), ("mod", true)],
                 "/" => &[("usr", true), ("Users", true)],
+                "odd/My Docs" => &[("inner", true)],
                 "odd" => &[
                     ("My Docs", true),
                     ("a b.txt", false),
@@ -694,7 +701,7 @@ extern pick(choice: [red green], target: file, run: command)
         assert_eq!(texts("cd ~"), ["~/"]);
         assert_eq!(texts("cd $env.HOME"), ["$env.HOME/"]);
         // Only the completed name is quoted.
-        assert_eq!(texts("cd $o/M"), ["$o/'My Docs/"]);
+        assert_eq!(texts("cd $o/M"), ["$o/'My Docs'/"]);
         assert!(texts("cat $nope/x").is_empty());
         assert!(texts("cat $here.x/y").is_empty());
     }
@@ -725,13 +732,16 @@ extern pick(choice: [red green], target: file, run: command)
         assert_eq!(texts("cat odd/a"), ["'odd/a b.txt'"]);
         assert_eq!(texts("cat odd/pl"), ["odd/plain"]);
         // A folder's quote stays open for the rest of the path.
-        assert_eq!(texts("cd odd/M"), ["'odd/My Docs/"]);
+        assert_eq!(texts("cd odd/M"), ["'odd/My Docs'/"]);
         assert_eq!(texts("cat odd/i"), ["\"odd/it's.txt\""]);
         assert_eq!(texts("cat odd/$"), ["'odd/$x{y}'"]);
         // A word that starts with a quote is completed inside it.
         assert_eq!(texts("cat 'odd/p"), ["'odd/plain'"]);
         assert_eq!(texts("cat \"odd/$"), ["\"odd/\\$x\\{y}\""]);
-        assert_eq!(texts("cat 'odd/My Docs/"), Vec::<String>::new());
+        // A folder's quote is closed before its `/`, and a word whose
+        // quote was closed goes on quoted anew.
+        assert_eq!(texts("cd 'odd/M"), ["'odd/My Docs'/"]);
+        assert_eq!(texts("cd 'odd/My Docs'/"), ["'odd/My Docs/inner'/"]);
         // Variables and options are not names.
         assert_eq!(texts("print $env.P"), ["$env.PATH", "$env.PWD"]);
     }
