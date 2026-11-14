@@ -1,0 +1,5 @@
+# What `power` takes, for msh's completion and colours.
+extern power(
+    action: [off restart] "power the machine off, or restart it",
+    --help: bool "show how to use power"
+)

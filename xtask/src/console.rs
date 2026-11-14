@@ -56,6 +56,9 @@ const QUESTION: Duration = Duration::from_secs(1);
 /// Starting the job and handing it the terminal takes about 70 ms; the
 /// rest leaves room for a loaded machine.
 const JOB_START: Duration = Duration::from_secs(5);
+/// How long the accounts service has to check a password on the
+/// authorization screen, which then says for 2 seconds that it failed.
+const ANSWER: Duration = Duration::from_secs(12);
 /// What the runner types in ada's msh, each with the time it then waits:
 /// first, while msh keeps up with what is typed, `yes`, which writes
 /// without end, Ctrl-C, which must reach it while the console draws its
@@ -65,7 +68,10 @@ const JOB_START: Duration = Duration::from_secs(5);
 /// with keys read from the terminal, `q`, which quits it, and
 /// `if $status != 0 { exit 8 }`; then `ls /usr/bin | less`, Space, which
 /// shows its next screen, `/less` and Enter, which searches, `q` and
-/// `if $status != 0 { exit 10 }`; then `spaw`, which Tab completes to
+/// `if $status != 0 { exit 10 }`; then `power restart`, a wrong password
+/// on the authorization screen and `if $status != 1 { exit 11 }`, and
+/// `power off`, Escape and `if $status != 1 { exit 12 }`, which refuse
+/// to power the machine off; then `spaw`, which Tab completes to
 /// `spawn-std `, and
 /// `sleep`, a job that runs until it is killed, Ctrl-Z, which stops it,
 /// `let n = (jobs | lines | len)`, `bg`, `kill %1`,
@@ -85,7 +91,7 @@ const JOB_START: Duration = Duration::from_secs(5);
 /// its first entry, files-c's and coreutils-check's checks
 /// passed, and `/`, which no namespace entry covers, is a folder that
 /// lists `Users`.
-const MSH_KEYS: [(&str, Duration); 24] = [
+const MSH_KEYS: [(&str, Duration); 30] = [
     ("y e s ret", JOB_START),
     ("ctrl-c", QUESTION),
     ("ctrl-l", QUESTION),
@@ -109,6 +115,20 @@ const MSH_KEYS: [(&str, Duration); 24] = [
     (
         "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
          shift-bracket_left spc e x i t spc 1 0 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    ("p o w e r spc r e s t a r t ret", JOB_START),
+    ("w r o n g ret", ANSWER),
+    (
+        "i f spc shift-4 s t a t u s spc shift-1 equal spc 1 spc \
+         shift-bracket_left spc e x i t spc 1 1 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    ("p o w e r spc o f f ret", JOB_START),
+    ("esc", QUESTION),
+    (
+        "i f spc shift-4 s t a t u s spc shift-1 equal spc 1 spc \
+         shift-bracket_left spc e x i t spc 1 2 spc shift-bracket_right ret",
         QUESTION,
     ),
     ("s p a w tab s l e e p ret", JOB_START),

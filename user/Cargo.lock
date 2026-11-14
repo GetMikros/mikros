@@ -749,6 +749,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "power"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-rt",
+]
+
+[[package]]
 name = "power-probe"
 version = "0.0.0"
 dependencies = [

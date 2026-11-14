@@ -11,6 +11,7 @@ const DEVICES: &str = "/usr/bin/devices";
 const CLEAR: &str = "/usr/bin/clear";
 const LESS: &str = "/usr/bin/less";
 const PS: &str = "/usr/bin/ps";
+const POWER: &str = "/usr/bin/power";
 /// A file that every system holds with devices.
 const DECLARATIONS: &str = "/usr/share/msh/completions/devices.msh";
 
@@ -44,6 +45,8 @@ fn main() {
         ("ps_lists", ps_lists),
         ("ps_json", ps_json),
         ("ps_bad_arguments", ps_bad_arguments),
+        ("power_not_authorized", power_not_authorized),
+        ("power_bad_arguments", power_bad_arguments),
     ];
     for (number, (name, check)) in checks.iter().enumerate() {
         if let Err(Failure { what, status }) = check() {
@@ -307,6 +310,25 @@ fn ps_bad_arguments() -> Result<(), Failure> {
         let run = run(PS, arguments)?;
         ensure(&run, "refusing the arguments", run.status == 2)?;
         ensure(&run, "naming the command", run.err.starts_with("ps: "))?;
+    }
+    Ok(())
+}
+
+/// Without a text console to ask an administrator on, `power off` is not
+/// authorized, and the machine stays up.
+fn power_not_authorized() -> Result<(), Failure> {
+    let run = run(POWER, &["off"])?;
+    ensure(&run, "failing", run.status == 1 && run.out.is_empty())?;
+    ensure(&run, "saying why", run.err == "power: not authorized\n")
+}
+
+/// No action, another action and a second operand are refused with
+/// status 2.
+fn power_bad_arguments() -> Result<(), Failure> {
+    for arguments in [&[][..], &["sideways"], &["off", "now"]] {
+        let run = run(POWER, arguments)?;
+        ensure(&run, "refusing the arguments", run.status == 2)?;
+        ensure(&run, "naming the command", run.err.starts_with("power: "))?;
     }
     Ok(())
 }
