@@ -12,7 +12,7 @@ mikros-rt = { path = "../../runtime/mikros-rt" }
 kind = "service"
 image = "system"
 runtime = "rt"
-manifest = "terminal.yaml"
+manifest = "termsvc.yaml"
 
 # The parts that only run on Mikros are left out of the host's tests.
 [lints.rust]

@@ -680,9 +680,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ),
                     ("usr/bin/termsvc", term_service.as_path()),
                     (
-                        "usr/lib/services/terminal.yaml",
+                        "usr/lib/services/termsvc.yaml",
                         crate::workspace_root()
-                            .join("user/services/termsvc/terminal.yaml")
+                            .join("user/services/termsvc/termsvc.yaml")
                             .as_path(),
                     ),
                     ("usr/bin/term-probe", term_probe.as_path()),
@@ -1051,8 +1051,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             console_files.extend([
                 ("usr/bin/termsvc".to_owned(), term_service.clone()),
                 (
-                    "usr/lib/services/terminal.yaml".to_owned(),
-                    crate::workspace_root().join("user/services/termsvc/terminal.yaml"),
+                    "usr/lib/services/termsvc.yaml".to_owned(),
+                    crate::workspace_root().join("user/services/termsvc/termsvc.yaml"),
                 ),
                 ("usr/bin/console".to_owned(), console.clone()),
                 ("usr/lib/ld-mikros.dlib".to_owned(), dynamic_linker.clone()),

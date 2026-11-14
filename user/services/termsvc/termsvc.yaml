@@ -1,6 +1,6 @@
 # The service manifest of the terminal service, installed as
-# usr/lib/services/terminal.yaml.
-name: terminal
+# usr/lib/services/termsvc.yaml.
+name: termsvc
 binary: /usr/bin/termsvc
 start: on-demand
 # To signal process groups and look at processes of every user, and to

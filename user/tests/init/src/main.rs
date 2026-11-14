@@ -4349,8 +4349,8 @@ mod manager {
             b"will not start",
             b"service term-probe exited",
             b"service term-probe ended",
-            b"service terminal exited",
-            b"service terminal ended",
+            b"service termsvc exited",
+            b"service termsvc ended",
         ];
         let (m, init, reader) = serving(s, b"tests/term.img")?;
         let deadline = super::within(super::PROBE_SECONDS);
