@@ -58,12 +58,8 @@ impl Parser<'_> {
             words: Vec::new(),
             redirections: Vec::new(),
         };
-        // NAME=value words before the command.
-        while let Some(name) = self.peek_name() {
-            let after = self.pos + name.chars().count();
-            if self.chars.get(after) != Some(&'=') || name.contains('-') {
-                break;
-            }
+        // NAME=value and env.NAME=value words before the command.
+        while let Some((name, after)) = self.environment_word() {
             self.pos = after + 1;
             let value = match self.peek() {
                 Some(c) if !special(c) => self.word()?,
@@ -116,6 +112,22 @@ impl Parser<'_> {
             return Err(self.error("a command is missing after these words"));
         }
         Ok(Command::Simple(simple))
+    }
+
+    /// The name of the `NAME=value` or `env.NAME=value` word that starts
+    /// here, if one does, and where its `=` is.
+    fn environment_word(&self) -> Option<(String, usize)> {
+        let mut name = self.peek_name()?;
+        let mut after = self.pos + name.chars().count();
+        if name == "env" && self.chars.get(after) == Some(&'.') {
+            let rest = Parser {
+                pos: after + 1,
+                ..*self
+            };
+            name = rest.peek_name()?;
+            after = rest.pos + name.chars().count();
+        }
+        (self.chars.get(after) == Some(&'=') && !name.contains('-')).then_some((name, after))
     }
 
     /// A redirection, if one starts here.

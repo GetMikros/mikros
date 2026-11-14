@@ -213,6 +213,38 @@ fn interpolates_names_in_double_quotes_but_not_in_single_quotes() {
 }
 
 #[test]
+fn sets_environment_words_for_one_command_and_assigns_without_one() {
+    let mut s = shell();
+    run(&mut s, "HELLO_WORLD=foobar env.EDITOR=vi LANG=C echo hi").unwrap();
+    let program = &s.system.runs[0].programs[0];
+    assert_eq!(program.args, ["echo", "hi"]);
+    let env: BTreeMap<_, _> = program.environment.iter().cloned().collect();
+    assert_eq!(
+        [&env["HELLO_WORLD"], &env["EDITOR"], &env["LANG"]],
+        ["foobar", "vi", "C"]
+    );
+    // The words change neither the shell's variables nor its environment.
+    assert!(s.env("HELLO_WORLD").is_none() && s.env("EDITOR").is_none());
+    assert!(run(&mut s, "print $HELLO_WORLD").is_err());
+    // Without a command, they assign: a value that starts like an
+    // expression keeps its kind, and any other is text.
+    run(&mut s, "env.EDITOR=vi").unwrap();
+    assert_eq!(s.env("EDITOR"), Some(&Value::String("vi".into())));
+    let assigned = |source: &str| {
+        let mut s = shell();
+        run(&mut s, &format!("let y = 'v'\nlet x = 0\n{source}")).unwrap();
+        s.lookup("x").cloned().unwrap()
+    };
+    assert_eq!(assigned("x=2"), Value::Int(2));
+    assert_eq!(assigned("x=(1 + 2)"), Value::Int(3));
+    assert_eq!(assigned("x=$y"), Value::String("v".into()));
+    assert_eq!(assigned("x=$y/*.txt"), Value::String("v/*.txt".into()));
+    assert_eq!(assigned("x=2abc"), Value::String("2abc".into()));
+    assert_eq!(assigned("x='a b'"), Value::String("a b".into()));
+    assert!(matches!(assigned("x=[a 1]"), Value::List(l) if l.len() == 2));
+}
+
+#[test]
 fn runs_programs_with_pipes_and_captures_output() {
     assert_eq!(ok("echo hello world | shout"), "HELLO WORLD\n");
     assert_eq!(ok("let x = (echo hi | shout)\nprint $x"), "HI\n");

@@ -313,13 +313,46 @@ impl Parser<'_> {
             return Ok(None);
         }
         self.pos += if append { 2 } else { 1 };
-        self.skip_spaces();
-        let value = self.expression()?;
+        let value = match tight {
+            true => self.tight_value()?,
+            false => {
+                self.skip_spaces();
+                self.expression()?
+            }
+        };
         Ok(Some(StatementKind::Assign {
             target,
             append,
             value,
         }))
+    }
+
+    /// The value of a `NAME=value` word with no command after it, read
+    /// as a list's item is: one that starts like an expression and ends
+    /// with the word is that expression, and any other the word's text,
+    /// with no glob patterns.
+    fn tight_value(&mut self) -> Result<Expr> {
+        let start = self.pos;
+        if self.at_expression() {
+            let ends = |p: &Parser| {
+                matches!(
+                    p.peek(),
+                    None | Some(' ' | '\t' | '\n' | '\r' | ';' | '}' | '#')
+                )
+            };
+            match self.operand() {
+                Ok(expr) if ends(self) => return Ok(expr),
+                _ => self.pos = start,
+            }
+        }
+        let mut parts: Vec<StringPart> = self.word()?.parts.into_iter().map(string_part).collect();
+        // A lone variable or expression gives its value, as in a word.
+        if let [StringPart::Expr(_)] = parts.as_slice()
+            && let Some(StringPart::Expr(e)) = parts.pop()
+        {
+            return Ok(e);
+        }
+        Ok(Expr::String(parts))
     }
 
     /// Whether, after the `=value` word here, the statement goes on with
@@ -348,6 +381,15 @@ impl Parser<'_> {
             },
             _ => self.name(),
         }
+    }
+}
+
+/// A part of a word as a part of a string.
+fn string_part(part: WordPart) -> StringPart {
+    match part {
+        WordPart::Bare(text) | WordPart::Quoted(text) => StringPart::Text(text),
+        WordPart::Variable(v) => StringPart::Expr(Expr::Variable(v)),
+        WordPart::Expr(e) => StringPart::Expr(e),
     }
 }
 
