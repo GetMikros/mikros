@@ -21,7 +21,9 @@ const COMMAND: Command = Command {
             to it. Space, f and Page Down show the next screen, b and Page Up\n\
             the previous one, Enter, j and Down the next line, k and Up the\n\
             previous one, g and Home the first line, G and End the last screen,\n\
-            and q quits.",
+            / followed by text and Enter the next line that contains the text,\n\
+            n and N the next and the previous line that contains it again, and\n\
+            q quits.",
     options: &[],
 };
 
