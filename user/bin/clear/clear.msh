@@ -1,0 +1,4 @@
+# What `clear` takes, for msh's completion and colours.
+extern clear(
+    --help: bool "show how to use clear"
+)

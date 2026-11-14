@@ -1,0 +1,16 @@
+[package]
+name = "clear"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-cli = { path = "../../lib/cli" }
+
+# It only writes to its standard output, so it needs no program
+# manifest.
+[package.metadata.mikros]
+kind = "program"
+image = "system"
+completions = "clear.msh"

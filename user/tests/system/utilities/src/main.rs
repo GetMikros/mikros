@@ -7,6 +7,7 @@
 use std::process::Command;
 
 const DEVICES: &str = "/usr/bin/devices";
+const CLEAR: &str = "/usr/bin/clear";
 
 /// What failed, and the exit status of the utility, or -1 when it did not
 /// exit.
@@ -31,6 +32,8 @@ fn main() {
         ("devices_json", devices_json),
         ("devices_help", devices_help),
         ("devices_bad_arguments", devices_bad_arguments),
+        ("clear_clears", clear_clears),
+        ("clear_bad_arguments", clear_bad_arguments),
     ];
     for (number, (name, check)) in checks.iter().enumerate() {
         if let Err(Failure { what, status }) = check() {
@@ -155,6 +158,30 @@ fn devices_bad_arguments() -> Result<(), Failure> {
         ensure(&run, "refusing the arguments", run.status == 2)?;
         ensure(&run, "writing nothing", run.out.is_empty())?;
         ensure(&run, "naming the command", run.err.starts_with("devices: "))?;
+    }
+    Ok(())
+}
+
+/// `clear` moves the cursor to the top left and erases the screen and the
+/// scrollback, and writes nothing else.
+fn clear_clears() -> Result<(), Failure> {
+    let run = run(CLEAR, &[])?;
+    ensure(&run, "succeeding", run.status == 0 && run.err.is_empty())?;
+    ensure(
+        &run,
+        "writing the sequences",
+        run.out == "\x1b[H\x1b[2J\x1b[3J",
+    )
+}
+
+/// An unknown option and an operand are refused with status 2 and an
+/// error after the command's name.
+fn clear_bad_arguments() -> Result<(), Failure> {
+    for arguments in [&["--nope"][..], &["screen"]] {
+        let run = run(CLEAR, arguments)?;
+        ensure(&run, "refusing the arguments", run.status == 2)?;
+        ensure(&run, "writing nothing", run.out.is_empty())?;
+        ensure(&run, "naming the command", run.err.starts_with("clear: "))?;
     }
     Ok(())
 }
