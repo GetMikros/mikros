@@ -53,9 +53,10 @@ impl Console {
         self.vts.get(usize::from(console).checked_sub(1)?)
     }
 
-    /// Shows the next waiting request over the screen of the terminal of
-    /// its console, which a request of a console without a session
-    /// cannot have.
+    /// Shows the next waiting request over the normal screen of the
+    /// terminal of its console, which a request of a console without a
+    /// session cannot have: the screen shown, or, while a program shows
+    /// the alternate screen, the one it left, which keeps the lines.
     fn show_next(&self) {
         let Some(request) = self.auth.pending.borrow_mut().pop_front() else {
             return;
@@ -65,8 +66,8 @@ impl Console {
         };
         let prompt = vt.with_screen(|s| {
             let (cols, rows) = (s.cols(), s.rows());
-            let cursor = s.cursor_position();
-            let cell = |r: usize, c: usize| *s.cell(r, c);
+            let cursor = s.normal_cursor();
+            let cell = |r: usize, c: usize| *s.normal_cell(r, c);
             Prompt::new(request, cols, rows, cursor, cell)
         });
         *self.auth.shown.borrow_mut() = Some(prompt);
@@ -82,7 +83,7 @@ impl Console {
         };
         let console = prompt.request.console;
         if let (Some(kept), Some(vt)) = (prompt.take_transcript(), self.vt_of(console)) {
-            vt.with_screen(|s| s.write(kept.as_bytes()));
+            vt.with_screen(|s| s.write_normal(kept.as_bytes()));
         }
     }
 

@@ -133,7 +133,44 @@ impl Screen {
         }
     }
 
-    /// The cursor's row and column, whether it shows or not.
+    /// The cell at `row` and `col` of the normal screen, also while the
+    /// alternate one shows.
+    pub fn normal_cell(&self, row: usize, col: usize) -> &Cell {
+        &self.primary[row * self.cols + col]
+    }
+
+    /// The row and column of the normal screen's cursor: the one saved
+    /// when the alternate screen was switched to, while it shows.
+    pub fn normal_cursor(&self) -> (usize, usize) {
+        let cursor = match self.on_alternate {
+            true => self.saved[0],
+            false => self.cursor,
+        };
+        (cursor.row.min(self.rows - 1), cursor.col.min(self.cols - 1))
+    }
+
+    /// Takes in `bytes` for the normal screen, as `write` does, also while
+    /// the alternate screen shows, which then keeps its contents, cursor
+    /// and scroll region; the normal screen's saved cursor moves.
+    pub fn write_normal(&mut self, bytes: &[u8]) {
+        if !self.on_alternate {
+            return self.write(bytes);
+        }
+        let (cursor, region) = (self.cursor, (self.top, self.bottom));
+        self.on_alternate = false;
+        self.cursor = self.saved[0];
+        (self.top, self.bottom) = (0, self.rows - 1);
+        self.write(bytes);
+        self.saved[0] = self.cursor;
+        (self.top, self.bottom) = region;
+        self.cursor = cursor;
+        self.on_alternate = true;
+        self.touch();
+    }
+
+    /// The cursor's row and column, whether it shows or not, which the
+    /// tests check.
+    #[cfg(test)]
     pub fn cursor_position(&self) -> (usize, usize) {
         (self.cursor.row, self.cursor.col.min(self.cols - 1))
     }

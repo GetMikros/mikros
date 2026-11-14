@@ -212,3 +212,23 @@ fn resizing_keeps_what_fits() {
     assert_eq!(line(&s, 0), "abcde");
     assert_eq!(s.cursor(), Some((1, 4)));
 }
+
+#[test]
+fn writes_to_the_normal_screen_behind_the_alternate_one() {
+    let mut s = screen(b"$ less\r\n\x1b[?1049h\x1b[2;3rpager\x1b[4;3H");
+    assert!(s.on_alternate());
+    assert_eq!(s.normal_cursor(), (1, 0));
+    assert_eq!(s.normal_cell(0, 2).ch, 'l');
+    s.write_normal(b"kept\r\n");
+    // The alternate screen and its cursor are untouched.
+    assert_eq!(line(&s, 0), "pager");
+    assert_eq!(line(&s, 1), "");
+    assert_eq!(s.cursor_position(), (3, 2));
+    // Leaving it shows what was kept, with the cursor after it.
+    s.write(b"\x1b[?1049l");
+    assert_eq!(line(&s, 1), "kept");
+    assert_eq!(s.cursor_position(), (2, 0));
+    // On the normal screen, it writes as `write` does.
+    s.write_normal(b"more");
+    assert_eq!(line(&s, 2), "more");
+}
