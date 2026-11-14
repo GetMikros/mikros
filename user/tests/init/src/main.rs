@@ -5786,8 +5786,8 @@ mod manager {
         // The processes of earlier tests may still log, so the lines
         // name what they are about.
         const ENDED: &[&[u8]] = &[
-            b"service permissions did not start",
-            b"service permissions will not start",
+            b"service permbroker did not start",
+            b"service permbroker will not start",
             b"service devicemgr did not start",
             b"service devicemgr will not start",
             b"service devicemgr exited",

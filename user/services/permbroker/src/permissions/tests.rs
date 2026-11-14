@@ -4,7 +4,7 @@ use crate::permissions::*;
 use alloc::string::ToString;
 use alloc::vec;
 
-const BROKER: &str = "system.permissions";
+const BROKER: &str = "system.permbroker";
 const APP: &str = "org.example.app";
 
 fn strings(list: &[&str]) -> Vec<String> {

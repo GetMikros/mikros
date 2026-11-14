@@ -42,7 +42,7 @@ const SHUTDOWN: [&str; 6] = [
     "stopped service power-probe",
     "device-manager: the ACPI server prepared for shutdown",
     "stopped service devicemgr",
-    "stopped service permissions",
+    "stopped service permbroker",
 ];
 /// An SSDT, assembled from the following, whose `\_PTS` writes an I/O
 /// port and reads a byte of the ECAM range at `0xE0000000` through a

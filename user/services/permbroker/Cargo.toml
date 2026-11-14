@@ -14,7 +14,7 @@ mikros-yaml = { path = "../../lib/yaml" }
 kind = "service"
 image = "boot"
 runtime = "rt"
-manifest = "permissions.yaml"
+manifest = "permbroker.yaml"
 
 # The parts that only run on Mikros are left out of the host's tests.
 [lints.rust]

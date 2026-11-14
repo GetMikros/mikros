@@ -17,7 +17,7 @@ use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::sys;
 
 /// The broker's service name.
-pub const NAME: &str = "permissions";
+pub const NAME: &str = "permbroker";
 const PROTOCOL: &str = "mikros.permissions.Broker";
 /// The app ID of the process manager, and the permissions the service
 /// manager registers for it.

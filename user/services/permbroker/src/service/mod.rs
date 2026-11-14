@@ -21,9 +21,9 @@ mikros_rt::raw_main!(main);
 
 /// The file name that the manifest stands for, which names the service
 /// `permissions`.
-const FILE_NAME: &str = "permissions.yaml";
+const FILE_NAME: &str = "permbroker.yaml";
 /// The app ID the service manager starts the broker with.
-const APP_ID: &str = "system.permissions";
+const APP_ID: &str = "system.permbroker";
 /// The protocol the broker provides.
 const PROTOCOL: &str = "mikros.permissions.Broker";
 /// The `id` of the manifest among the `USER` startup handles.

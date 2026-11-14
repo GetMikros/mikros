@@ -46,7 +46,7 @@ const READ_ONLY: u32 = 1 | 1 << 1 | 1 << 2 | 1 << 5 | 1 << 9;
 const SAME_RIGHTS: u32 = 1 << 31;
 
 const MANIFEST: &str = "\
-name: permissions
+name: permbroker
 binary: /usr/bin/permbroker
 start: boot
 provides:
@@ -152,7 +152,7 @@ async fn spawn_broker(
             handle(HandleRole::User, manifest),
             handle(HandleRole::Provider, server.into_handle()),
         ],
-        app_id: Some("system.permissions".into()),
+        app_id: Some("system.permbroker".into()),
         user: CALLER_USER,
         login_session: false,
         new_session: false,
@@ -287,7 +287,7 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
     )?;
     c(
         "granting the broker its manifest's permissions",
-        check(&manager, 0, "system.permissions", "logs.read").await == Ok(Decision::Allowed),
+        check(&manager, 0, "system.permbroker", "logs.read").await == Ok(Decision::Allowed),
     )?;
     c(
         "refusing a caller without permissions.check",

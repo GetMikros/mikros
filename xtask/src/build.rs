@@ -518,7 +518,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // system's services and their manifests, and a probe that
             // starts as a boot service.
             let broker_manifest =
-                crate::workspace_root().join("user/services/permbroker/permissions.yaml");
+                crate::workspace_root().join("user/services/permbroker/permbroker.yaml");
             let services_image = test_image(
                 kind,
                 "services.img",
@@ -526,7 +526,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permbroker", broker.as_path()),
                     (
-                        "usr/lib/services/permissions.yaml",
+                        "usr/lib/services/permbroker.yaml",
                         broker_manifest.as_path(),
                     ),
                     ("usr/bin/directory-probe", directory_probe.as_path()),
@@ -574,7 +574,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permbroker", broker.as_path()),
                     (
-                        "usr/lib/services/permissions.yaml",
+                        "usr/lib/services/permbroker.yaml",
                         broker_manifest.as_path(),
                     ),
                     ("usr/bin/tmpfs", tmpfs.as_path()),
@@ -611,7 +611,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permbroker", broker.as_path()),
                     (
-                        "usr/lib/services/permissions.yaml",
+                        "usr/lib/services/permbroker.yaml",
                         broker_manifest.as_path(),
                     ),
                     ("usr/bin/logsvc", log_service.as_path()),
@@ -640,7 +640,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permbroker", broker.as_path()),
                     (
-                        "usr/lib/services/permissions.yaml",
+                        "usr/lib/services/permbroker.yaml",
                         broker_manifest.as_path(),
                     ),
                     ("usr/bin/timesvc", time_service.as_path()),
@@ -675,7 +675,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permbroker", broker.as_path()),
                     (
-                        "usr/lib/services/permissions.yaml",
+                        "usr/lib/services/permbroker.yaml",
                         broker_manifest.as_path(),
                     ),
                     ("usr/bin/termsvc", term_service.as_path()),
@@ -715,7 +715,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permbroker", broker.as_path()),
                     (
-                        "usr/lib/services/permissions.yaml",
+                        "usr/lib/services/permbroker.yaml",
                         broker_manifest.as_path(),
                     ),
                     ("usr/bin/tmpfs", tmpfs.as_path()),
@@ -778,7 +778,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/servicemgr", services.as_path()),
                     ("usr/bin/permbroker", broker.as_path()),
                     (
-                        "usr/lib/services/permissions.yaml",
+                        "usr/lib/services/permbroker.yaml",
                         broker_manifest.as_path(),
                     ),
                     ("usr/bin/tmpfs", tmpfs.as_path()),
@@ -860,7 +860,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/servicemgr".into(), services.clone()),
                     ("usr/bin/permbroker".into(), broker.clone()),
                     (
-                        "usr/lib/services/permissions.yaml".into(),
+                        "usr/lib/services/permbroker.yaml".into(),
                         broker_manifest.clone(),
                     ),
                     ("usr/bin/devicemgr".into(), devices.clone()),
