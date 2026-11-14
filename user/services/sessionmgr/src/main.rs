@@ -12,6 +12,7 @@
 extern crate alloc;
 
 mod authorize;
+mod elevate;
 mod login;
 mod seat;
 mod spawn;
@@ -21,7 +22,7 @@ use alloc::vec;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::process::{
-    HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle,
+    Elevations, ElevationsAsyncClient, HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle,
 };
 use mikros_rt::interfaces::mikros::service::{
     DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
@@ -36,8 +37,9 @@ mikros_rt::raw_main!(main);
 const CONSOLE: &str = "/usr/bin/console";
 const CONSOLE_APP: &str = "system.console";
 const ACCOUNTS: &str = "mikros.session.Accounts";
-/// The protocol that the session manager provides.
+/// The protocols that the session manager provides.
 const AUTHORIZATION: &str = "mikros.session.Authorization";
+const ELEVATION: &str = "mikros.session.Elevation";
 /// The `USER` startup handle IDs of the console's channels.
 const TEXT_LOGIN_ID: u32 = 3;
 const SEAT_ID: u32 = 7;
@@ -109,6 +111,16 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             launcher.clone(),
             reactor.clone(),
         ));
+        // The process manager's record of elevated processes.
+        if let Ok((elevations, server)) = endpoints::<Elevations>() {
+            match launcher.open_elevations(server).await {
+                Ok(Ok(_)) => {
+                    let elevations = ElevationsAsyncClient::new(elevations, reactor.clone());
+                    *requests.elevations.borrow_mut() = Some(Rc::new(elevations));
+                }
+                other => mikros_rt::log!(Error, "sessionmgr: no Elevations: {other:?}"),
+            }
+        }
         if let Some(provider) = provider {
             let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
             let (requests, spawner) = (requests.clone(), spawner.clone());
@@ -116,9 +128,18 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
                     // Other protocols and named instances are not ours;
                     // dropping the server end closes the connection.
-                    if c.protocol == AUTHORIZATION && c.instance.is_none() {
+                    if c.instance.is_some() {
+                        continue;
+                    }
+                    if c.protocol == AUTHORIZATION {
                         let end = ServerEnd::new(c.server);
                         let serving = authorize::serve(requests.clone(), end, spawner.clone());
+                        spawner.spawn(serving);
+                    } else if c.protocol == ELEVATION {
+                        let end = ServerEnd::new(c.server);
+                        let client = c.client;
+                        let serving =
+                            elevate::serve(requests.clone(), end, client, spawner.clone());
                         spawner.spawn(serving);
                     }
                 }

@@ -22,3 +22,5 @@ permissions:
 provides:
   - protocol: mikros.session.Authorization
     permission: session.authorize
+  # For every process of a login session; sudo calls it.
+  - protocol: mikros.session.Elevation

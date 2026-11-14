@@ -13,7 +13,7 @@ use core::cell::{Cell, RefCell};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
+use mikros_rt::interfaces::mikros::process::{ElevationsAsyncClient, LauncherAsyncClient};
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::interfaces::mikros::session::{
     AccountsAsyncClient, Authorization, AuthorizationAsyncServer, AuthorizationAuthorizeResponse,
@@ -42,6 +42,8 @@ pub struct Requests {
     pub reactor: Reactor,
     /// The `TextLogin` server, once the console connected.
     pub text_login: RefCell<Option<Rc<TextLoginAsyncServer>>>,
+    /// The process manager's `Elevations`, once it is open.
+    pub elevations: RefCell<Option<Rc<ElevationsAsyncClient>>>,
     /// The login session of the session on each console.
     pub sessions: RefCell<BTreeMap<u8, u32>>,
     /// The open requests by number, with their console and outcome.
@@ -60,6 +62,7 @@ impl Requests {
             launcher,
             reactor,
             text_login: RefCell::new(None),
+            elevations: RefCell::new(None),
             sessions: RefCell::new(BTreeMap::new()),
             open: RefCell::new(BTreeMap::new()),
             next: Cell::new(1),
@@ -103,10 +106,50 @@ impl Requests {
         let _ = self.reactor.sleep_until(now() + nanos).await;
     }
 
-    /// `Authorize` of `client` for `action`: whether an administrator
-    /// allowed it on the client's console, and who, or `None` when the
-    /// client terminated before the request ended.
-    async fn authorize(
+    /// The administrator who elevated process `pid`, 0 for none.
+    pub async fn admin_of(&self, pid: u32) -> u32 {
+        let elevations = self.elevations.borrow().clone();
+        match elevations {
+            Some(e) => e
+                .get_admin(pid)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map_or(0, |r| r.admin),
+            None => 0,
+        }
+    }
+
+    /// `Authorize` of `client` for `action`: allowed without asking for
+    /// a process that an administrator elevated while that user is still
+    /// one, and otherwise whether an administrator allowed it on the
+    /// client's console, and who, or `None` when the client terminated
+    /// before the request ended.
+    pub async fn authorize(
+        &self,
+        client: &ClientIdentity,
+        action: String,
+        reason: String,
+    ) -> Option<(bool, u32)> {
+        let admin = self.admin_of(client.pid).await;
+        let still = admin != 0
+            && user(&self.accounts, admin)
+                .await
+                .is_some_and(|u| u.kind == UserKind::Admin);
+        if still {
+            let pid = client.pid;
+            mikros_rt::log!(
+                Info,
+                "sessionmgr: Authorize of process {pid} for {action}: allowed by the elevation of user {admin}"
+            );
+            return Some((true, admin));
+        }
+        self.ask(client, action, reason).await
+    }
+
+    /// Asks on the client's console for `action`, as `authorize` does for
+    /// a process that is not elevated.
+    async fn ask(
         &self,
         client: &ClientIdentity,
         action: String,

@@ -1,0 +1,8 @@
+// MIKSPEC-0092.R2
+
+library mikros.session;
+using mikros.base;
+
+protocol Elevation {
+    @1 Elevate(reason string<256>) -> (admin u32) error base.Status;
+};
