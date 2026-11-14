@@ -7,11 +7,15 @@
 //! shows the frame before all of it came shows no cursor where the
 //! drawing has got to.
 
+use super::highlight::Style;
+
 /// What to draw.
 pub struct View<'a> {
     /// The expanded prompt, which may hold escape sequences.
     pub prompt: &'a str,
     pub line: &'a str,
+    /// The style of each byte of `line`; a missing one is plain.
+    pub styles: &'a [Style],
     /// The cursor, a byte offset in `line`.
     pub cursor: usize,
     /// Text shown dimmed after the line.
@@ -155,9 +159,15 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
     for c in visible(view.prompt).chars() {
         at.advance(c, columns);
     }
+    let mut style = Style::Plain;
     for (i, c) in view.line.char_indices() {
         if i == view.cursor {
             cursor = Some(at);
+        }
+        let next = view.styles.get(i).copied().unwrap_or(Style::Plain);
+        if next != style {
+            text.push_str(next.sgr());
+            style = next;
         }
         let c = shown(c);
         match c {
@@ -165,6 +175,9 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
             c => text.push(c),
         }
         at.advance(c, columns);
+    }
+    if style != Style::Plain {
+        text.push_str(NORMAL);
     }
     let cursor = cursor.unwrap_or(at).settled(columns);
     if !view.suggestion.is_empty() {
@@ -204,12 +217,19 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
     }
 }
 
-/// Draws the line as it is accepted, without suggestion or rows below,
-/// and moves to the start of the row after it.
-pub fn finish(prompt: &str, line: &str, columns: usize, previous_row: usize) -> String {
+/// Draws the line as it is accepted, in its `styles`, without
+/// suggestion or rows below, and moves to the start of the row after it.
+pub fn finish(
+    prompt: &str,
+    line: &str,
+    styles: &[Style],
+    columns: usize,
+    previous_row: usize,
+) -> String {
     let view = View {
         prompt,
         line,
+        styles,
         cursor: line.len(),
         suggestion: "",
         below: &[],
@@ -227,10 +247,30 @@ mod tests {
         View {
             prompt,
             line,
+            styles: &[],
             cursor,
             suggestion: "",
             below: &[],
         }
+    }
+
+    #[test]
+    fn draws_the_styles_of_the_line() {
+        let styles = [
+            Style::Command,
+            Style::Command,
+            Style::Plain,
+            Style::Argument,
+            Style::Argument,
+        ];
+        let v = View {
+            styles: &styles,
+            ..view("% ", "ls -l", 5)
+        };
+        assert_eq!(
+            draw(&v, 80, 0).text,
+            "\x1b[?25l\r\x1b[J% \x1b[0;34mls\x1b[0m \x1b[0;36m-l\x1b[0m\r\x1b[7C\x1b[?25h"
+        );
     }
 
     #[test]
@@ -281,7 +321,7 @@ mod tests {
             "\x1b[?25l\r\x1b[J% x\r\none\x1b[0m\r\n\x1b[7mtwo t\x1b[0m\x1b[2A\r\x1b[3C\x1b[?25h"
         );
         assert_eq!(
-            finish("% ", "x", 6, 0),
+            finish("% ", "x", &[], 6, 0),
             "\x1b[?25l\r\x1b[J% x\r\x1b[3C\x1b[?25h\r\n"
         );
     }

@@ -11,9 +11,9 @@ mod sys;
 mod term;
 
 use crate::edit::editor::{Editor, Outcome};
-use crate::edit::history;
 use crate::edit::keys::Decoder;
 use crate::edit::render::{View, draw, finish};
+use crate::edit::{highlight, history};
 use crate::eval::{Failure, Flow, Shell, Stream, System};
 use crate::parse::parse;
 use crate::prompt::{self, Context};
@@ -235,9 +235,11 @@ fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed 
             let (columns, rows) = term::size();
             let suggestion = editor.suggestion(&shell.without_waiting());
             let below = editor.below(columns, (rows / 2).max(1));
+            let styles = highlight::styles(editor.line().text(), &shell.without_waiting());
             let view = View {
                 prompt,
                 line: editor.line().text(),
+                styles: &styles,
                 cursor: editor.line().cursor(),
                 suggestion: &suggestion,
                 below: &below,
@@ -289,7 +291,8 @@ fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed 
         Typed::Line(text) => text.clone(),
         _ => editor.line().text().to_owned(),
     };
-    show(&finish(prompt, &text, columns, row));
+    let styles = highlight::styles(&text, &shell.without_waiting());
+    show(&finish(prompt, &text, &styles, columns, row));
     terminal.restore();
     ended
 }
