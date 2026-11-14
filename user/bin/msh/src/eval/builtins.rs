@@ -41,6 +41,16 @@ fn signal(name: &str) -> Option<i32> {
 }
 
 /// The names of the built-in commands, `run` among them.
+/// What the built-in commands take, declared as `extern` declares it.
+pub const DECLARATIONS: &str = r#"
+extern cd(folder?: folder "the folder to go to, or - for the one before")
+extern print(--n(-n): bool "no line feed at the end", ...values: any)
+extern kill(
+    --signal(-s): [HUP INT QUIT KILL TERM STOP CONT] "the signal to send",
+    ...targets: string "job or process IDs"
+)
+"#;
+
 pub fn names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = BUILTINS
         .iter()
@@ -138,7 +148,7 @@ pub fn run<S: System>(
         }
         "print" => {
             let (newline, values) = match values.first() {
-                Some(Value::String(flag)) if flag == "-n" => (false, &values[1..]),
+                Some(Value::String(flag)) if flag == "-n" || flag == "--n" => (false, &values[1..]),
                 _ => (true, &values[..]),
             };
             let texts: Vec<String> = input.iter().chain(values).map(text).collect();
@@ -201,7 +211,7 @@ pub fn run<S: System>(
         "kill" => {
             let texts: Vec<String> = values.iter().map(scalar_text).collect();
             let (number, targets) = match texts.as_slice() {
-                [flag, sig, rest @ ..] if flag == "-s" => (signal(sig), rest),
+                [flag, sig, rest @ ..] if flag == "-s" || flag == "--signal" => (signal(sig), rest),
                 [flag, rest @ ..] if flag.starts_with('-') && flag.len() > 1 => {
                     (signal(&flag[1..]), rest)
                 }

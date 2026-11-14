@@ -91,6 +91,8 @@ pub struct Shell<S: System> {
     /// What commands take, as `extern` declared it last, by the name of
     /// the command and that of its subcommand.
     declarations: BTreeMap<(String, Option<String>), Rc<Extern>>,
+    /// The commands whose declarations files were looked for.
+    looked_up: std::collections::HashSet<String>,
 }
 
 impl<S: System> Shell<S> {
@@ -127,9 +129,17 @@ impl<S: System> Shell<S> {
             history: Vec::new(),
             listings: listings::Listings::default(),
             declarations: BTreeMap::new(),
+            looked_up: Default::default(),
         };
         shell.set_global("status", Value::Int(0));
         shell.set_global("args", Value::List(Vec::new()));
+        let declared =
+            crate::parse::parse(builtins::DECLARATIONS).expect("the built-ins' declarations");
+        for statement in declared.statements {
+            if let StatementKind::Extern(e) = statement.kind {
+                shell.declare(e);
+            }
+        }
         shell
     }
 
@@ -162,6 +172,42 @@ impl<S: System> Shell<S> {
             Some(Value::Int(n)) => *n,
             _ => 0,
         }
+    }
+
+    /// Keeps `declared`, in place of what was declared before for its
+    /// command or subcommand.
+    fn declare(&mut self, declared: Extern) {
+        let key = (declared.command.clone(), declared.subcommand.clone());
+        self.declarations.insert(key, Rc::new(declared));
+    }
+
+    /// Runs the declarations file of the command `name`, the first time
+    /// it is asked for: `~/.msh/completions/<name>.msh`, or else
+    /// `/usr/share/msh/completions/<name>.msh`. As it runs while a line
+    /// is edited, what it writes and its errors are dropped, and the
+    /// status and the line and command of errors are kept.
+    pub fn load_declarations(&mut self, name: &str) {
+        if name.is_empty() || name.contains('/') || !self.looked_up.insert(name.to_owned()) {
+            return;
+        }
+        let home = self.env("HOME").map(scalar_text);
+        let mut files: Vec<String> = home
+            .map(|h| format!("{h}/.msh/completions/{name}.msh"))
+            .into_iter()
+            .collect();
+        files.push(format!("/usr/share/msh/completions/{name}.msh"));
+        let Some(text) = files.iter().find_map(|f| self.system.read_file(f).ok()) else {
+            return;
+        };
+        let Ok(block) = crate::parse::parse(&text) else {
+            return;
+        };
+        let (status, line, command) = (self.status(), self.line, self.command.clone());
+        self.captures.push(Vec::new());
+        let _ = self.top(&block);
+        self.captures.pop();
+        self.set_global("status", Value::Int(status));
+        (self.line, self.command) = (line, command);
     }
 
     /// What the command `name`, or its subcommand `sub`, takes, as
@@ -528,8 +574,7 @@ impl<S: System> Shell<S> {
                 Ok(Value::Null)
             }
             StatementKind::Extern(declared) => {
-                let key = (declared.command.clone(), declared.subcommand.clone());
-                self.declarations.insert(key, Rc::new(declared.clone()));
+                self.declare(declared.clone());
                 Ok(Value::Null)
             }
             StatementKind::Delete(target) => {

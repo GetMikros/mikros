@@ -234,6 +234,48 @@ fn keeps_the_last_declaration_of_each_command() {
 }
 
 #[test]
+fn declares_built_ins_and_runs_declarations_files_once() {
+    let mut s = shell();
+    let cd = s.declaration("cd", None).unwrap();
+    assert_eq!(cd.positional[0].kind, ParamType::Folder);
+    assert!(s.declaration("kill", None).is_some() && s.declaration("print", None).is_some());
+    s.system.files.insert(
+        "/home/ada/.msh/completions/git.msh".into(),
+        "extern git push(--force: bool)\nprint noise".into(),
+    );
+    s.system.files.insert(
+        "/usr/share/msh/completions/git.msh".into(),
+        "extern git pull(--rebase: bool)".into(),
+    );
+    s.system.files.insert(
+        "/usr/share/msh/completions/tool.msh".into(),
+        "extern tool(--x: bool)".into(),
+    );
+    s.load_declarations("git");
+    s.load_declarations("tool");
+    // The user's file is taken instead of the system's, and what it
+    // writes is dropped.
+    assert!(s.declaration("git", Some("push")).is_some());
+    assert!(s.declaration("git", Some("pull")).is_none());
+    assert!(s.declaration("tool", None).is_some());
+    assert!(s.system.output.is_empty());
+    // A file is run once.
+    s.system.files.insert(
+        "/home/ada/.msh/completions/git.msh".into(),
+        "extern git push(--all: bool)".into(),
+    );
+    s.load_declarations("git");
+    assert_eq!(
+        s.declaration("git", Some("push")).unwrap().options[0].name,
+        "force"
+    );
+    // The built-ins take the long options they declare.
+    assert_eq!(run(&mut s, "print --n a; print -n b").unwrap(), "ab");
+    run(&mut s, "kill --signal INT 7").unwrap();
+    assert_eq!(s.system.killed, [("7".to_string(), 2)]);
+}
+
+#[test]
 fn deletes_variables_fields_and_items() {
     assert_eq!(ok("let x = 1\ndelete $x\nprint ($x ?? 'gone')"), "gone\n");
     assert_eq!(

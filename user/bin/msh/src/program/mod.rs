@@ -235,6 +235,11 @@ fn edit_line(shell: &mut Shell<Os>, terminal: &Terminal, prompt: &str) -> Typed 
         // would make it come in slower than it was typed.
         if !term::input_within(0) {
             let (columns, rows) = term::size();
+            // The commands on the line are declared before the line is
+            // completed or coloured.
+            for name in highlight::command_words(editor.line().text(), &shell.without_waiting()) {
+                shell.load_declarations(&name);
+            }
             let suggestion = editor.suggestion(&shell.without_waiting());
             let palette = Palette::new(shell.value_of("msh_colors"));
             let below = editor.below(columns, (rows / 2).max(1), palette.suggestion());

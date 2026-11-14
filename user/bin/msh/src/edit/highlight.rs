@@ -189,9 +189,19 @@ fn never_missing(word: &str) -> bool {
         || word.starts_with('~') && !(word == "~" || word.starts_with("~/"))
 }
 
+/// The words of `line` where commands go, apart from keywords, in order.
+pub fn command_words(line: &str, sources: &dyn Sources) -> Vec<String> {
+    reader(line, sources).commands
+}
+
 /// The style of each byte of `line`, with commands and files looked up
 /// in `sources`.
 pub fn styles(line: &str, sources: &dyn Sources) -> Vec<Style> {
+    reader(line, sources).styles
+}
+
+/// `line`, read.
+fn reader<'a>(line: &'a str, sources: &'a dyn Sources) -> Reader<'a> {
     let mut known: HashSet<String> = sources.programs().into_iter().collect();
     known.extend(sources.functions().into_iter().map(|(name, _)| name));
     known.extend(crate::eval::builtins::names().into_iter().map(String::from));
@@ -210,9 +220,10 @@ pub fn styles(line: &str, sources: &dyn Sources) -> Vec<Style> {
         target: false,
         folder: false,
         declaring: false,
+        commands: Vec::new(),
     };
     reader.read();
-    reader.styles
+    reader
 }
 
 struct Reader<'a> {
@@ -236,6 +247,8 @@ struct Reader<'a> {
     /// Whether the statement read is an `extern` declaration, whose words
     /// are no commands.
     declaring: bool,
+    /// The words where commands go, apart from keywords.
+    commands: Vec<String>,
 }
 
 impl Reader<'_> {
@@ -363,7 +376,12 @@ impl Reader<'_> {
         let style = if plain && operator {
             Style::Operator
         } else if command && plain {
-            self.command_style(&bare)
+            let style = self.command_style(&bare);
+            if matches!(style, Style::Command | Style::Error) && !KEYWORDS.contains(&bare.as_str())
+            {
+                self.commands.push(bare.clone());
+            }
+            style
         } else if !plain || never_missing(&bare) {
             Style::Argument
         } else if let Some(is_folder) = self.file_kind(&bare) {
@@ -665,6 +683,14 @@ mod tests {
         assert_eq!(
             shown("extern git push(--force: bool)"),
             "cccccc.aaa.aaaa.aaaaaaaa.aaaa."
+        );
+    }
+
+    #[test]
+    fn finds_the_words_where_commands_go() {
+        assert_eq!(
+            command_words("ls -l | git push; A=1 cat x; if true { make }", &Fake),
+            ["ls", "git", "cat", "make"]
         );
     }
 
