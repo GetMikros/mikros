@@ -14,4 +14,4 @@ mikros-yaml = { path = "../../lib/yaml" }
 kind = "service"
 image = "boot"
 runtime = "rt"
-manifest = "time.yaml"
+manifest = "timesvc.yaml"

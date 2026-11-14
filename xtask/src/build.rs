@@ -629,7 +629,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // manifests.
             let time_service = user_build("timesvc", kind)?;
             println!("built    {}", time_service.display());
-            let time_manifest = crate::workspace_root().join("user/services/timesvc/time.yaml");
+            let time_manifest = crate::workspace_root().join("user/services/timesvc/timesvc.yaml");
             let time_probe = user_build("time-probe", kind)?;
             println!("built    {}", time_probe.display());
             let probe_dir = crate::workspace_root().join("user/tests/time-probe");
@@ -644,7 +644,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                         broker_manifest.as_path(),
                     ),
                     ("usr/bin/timesvc", time_service.as_path()),
-                    ("usr/lib/services/time.yaml", time_manifest.as_path()),
+                    ("usr/lib/services/timesvc.yaml", time_manifest.as_path()),
                     ("usr/bin/time-probe", time_probe.as_path()),
                     (
                         "usr/lib/services/time-probe.yaml",
@@ -937,7 +937,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ),
                     ("usr/bin/timesvc".to_owned(), time_service.clone()),
                     (
-                        "usr/lib/services/time.yaml".to_owned(),
+                        "usr/lib/services/timesvc.yaml".to_owned(),
                         time_manifest.clone(),
                     ),
                     // The PS/2 driver for the i8042 device that the
@@ -976,7 +976,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ),
                     ("usr/bin/timesvc".to_owned(), time_service.clone()),
                     (
-                        "usr/lib/services/time.yaml".to_owned(),
+                        "usr/lib/services/timesvc.yaml".to_owned(),
                         time_manifest.clone(),
                     ),
                     ("usr/bin/restart-probe".to_owned(), restart_probe.clone()),
@@ -1248,7 +1248,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 // root file system.
                 ("usr/bin/timesvc".to_owned(), time_service.clone()),
                 (
-                    "usr/lib/services/time.yaml".to_owned(),
+                    "usr/lib/services/timesvc.yaml".to_owned(),
                     time_manifest.clone(),
                 ),
                 // The USB HID driver, for the keyboard behind the hub.
@@ -1366,7 +1366,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             setup_files.extend([
                 ("usr/bin/timesvc".to_owned(), time_service.clone()),
                 (
-                    "usr/lib/services/time.yaml".to_owned(),
+                    "usr/lib/services/timesvc.yaml".to_owned(),
                     time_manifest.clone(),
                 ),
                 ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),

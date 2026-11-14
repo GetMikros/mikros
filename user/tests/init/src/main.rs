@@ -4422,8 +4422,8 @@ mod manager {
             b"will not start",
             b"service time-probe exited",
             b"service time-probe ended",
-            b"service time exited",
-            b"service time ended",
+            b"service timesvc exited",
+            b"service timesvc ended",
         ];
         let (m, init, reader) = serving(s, b"tests/time.img")?;
         let deadline = super::within(super::PROBE_SECONDS);
