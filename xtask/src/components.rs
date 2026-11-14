@@ -19,6 +19,9 @@
 //!   standard library, whose programs are the default.
 //! - `kinds`: the build kinds that install it, when not all of them.
 //! - `path`: the member name of the program instead, for `init`.
+//! - `completions`: the file name, in its package, of the declarations of
+//!   a program's arguments for msh, installed as
+//!   `usr/share/msh/completions/<name>.msh`.
 
 use crate::build::Kind;
 use anyhow::{Context, Result, bail};
@@ -68,6 +71,7 @@ pub struct Component {
     manifest: Option<String>,
     kinds: Option<Vec<String>>,
     path: Option<String>,
+    completions: Option<String>,
 }
 
 impl Component {
@@ -108,6 +112,12 @@ impl Component {
             (Role::Core | Role::Test, Some(_)) => bail!("{name} cannot have a manifest"),
         };
         members.extend(manifest);
+        if let Some(file) = &self.completions {
+            members.push((
+                format!("usr/share/msh/completions/{name}.msh"),
+                self.dir.join(file),
+            ));
+        }
         Ok(members)
     }
 
@@ -201,7 +211,16 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             }
         };
         for key in table.keys() {
-            if !["kind", "image", "manifest", "runtime", "kinds", "path"].contains(&key.as_str()) {
+            let keys = [
+                "kind",
+                "image",
+                "manifest",
+                "runtime",
+                "kinds",
+                "path",
+                "completions",
+            ];
+            if !keys.contains(&key.as_str()) {
                 bail!("{name}: unknown key `{key}` in [package.metadata.mikros]");
             }
         }
@@ -251,6 +270,7 @@ fn parse(metadata: &Value) -> Result<Vec<Component>> {
             manifest: text("manifest")?,
             kinds,
             path: text("path")?,
+            completions: text("completions")?,
         });
     }
     Ok(components)
@@ -276,9 +296,10 @@ mod tests {
             package("init", serde_json::json!({"kind": "core", "image": "boot", "runtime": "rt", "path": "init"})),
             package("msh", serde_json::json!({"kind": "program", "image": "system"})),
             { "name": "mikros-yaml", "manifest_path": "/r/user/lib/yaml/Cargo.toml", "metadata": null },
+            package("devices", serde_json::json!({"kind": "program", "image": "system", "completions": "devices.msh"})),
         ]});
         let components = parse(&metadata).unwrap();
-        assert_eq!(components.len(), 4);
+        assert_eq!(components.len(), 5);
         let members = |i: usize| -> Vec<String> {
             components[i]
                 .members(Kind::Debug, Path::new("/bin"))
@@ -297,6 +318,10 @@ mod tests {
         assert_eq!(members(1), ["usr/bin/logsvc", "usr/lib/services/log.yaml"]);
         assert_eq!(members(2), ["init"]);
         assert_eq!(members(3), ["usr/bin/msh"]);
+        assert_eq!(
+            members(4),
+            ["usr/bin/devices", "usr/share/msh/completions/devices.msh"]
+        );
         assert_eq!(components[3].runtime, Runtime::Std);
         assert_eq!(components[0].runtime, Runtime::Rt);
     }
