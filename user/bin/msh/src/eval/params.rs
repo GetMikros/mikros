@@ -28,11 +28,19 @@ fn literal(text: &str) -> Option<Literal> {
 }
 
 /// `text` as a value of type `kind`, or `None` when it does not parse as
-/// one.
-fn typed(kind: ParamType, text: &str) -> Option<Value> {
+/// one; paths, folders, files and commands are taken as text.
+pub fn typed(kind: &ParamType, text: &str) -> Option<Value> {
     let parsed = || literal(text).map(|l| Value::from(&l));
     match kind {
-        ParamType::String | ParamType::Path => Some(Value::String(text.into())),
+        ParamType::String
+        | ParamType::Path
+        | ParamType::Folder
+        | ParamType::File
+        | ParamType::Command => Some(Value::String(text.into())),
+        ParamType::Choices(words) => words
+            .iter()
+            .any(|w| w == text)
+            .then(|| Value::String(text.into())),
         ParamType::Bool => match text {
             "true" => Some(Value::Bool(true)),
             "false" => Some(Value::Bool(false)),
@@ -85,7 +93,7 @@ impl<S: System> Shell<S> {
                 .iter()
                 .find(|p| p.name == name)
                 .ok_or_else(|| self.fail(format!("the script has no option `--{name}`")))?;
-            let text = match (inline, param.kind) {
+            let text = match (inline, &param.kind) {
                 (Some(v), _) => v,
                 (None, ParamType::Bool) => "true".into(),
                 (None, _) => args
@@ -93,14 +101,11 @@ impl<S: System> Shell<S> {
                     .cloned()
                     .ok_or_else(|| self.fail(format!("the option `--{name}` needs a value")))?,
             };
-            let value = typed(param.kind, &text).ok_or_else(|| {
-                self.fail(
-                    format!(
-                        "the option `--{name}` takes a {:?}, not `{text}`",
-                        param.kind
-                    )
-                    .to_lowercase(),
-                )
+            let value = typed(&param.kind, &text).ok_or_else(|| {
+                let kind = param.kind.written();
+                self.fail(format!(
+                    "the option `--{name}` takes a {kind}, not `{text}`"
+                ))
             })?;
             given.push((name.to_owned(), value));
         }
@@ -177,5 +182,19 @@ mod tests {
                 .contains("--big")
         );
         assert_eq!(Value::Null, Value::Null);
+    }
+
+    #[test]
+    fn takes_folders_files_commands_and_choices() {
+        let script =
+            "param --count: [one two]\nparam --big: folder = '/'\nparam --fast: command = 'ls'";
+        assert_eq!(
+            options(script, &["--count", "two", "--big", "src", "--fast", "cat"]).unwrap(),
+            ["two", "src", "cat", "[]"]
+        );
+        assert_eq!(
+            options(script, &["--count", "three"]).unwrap_err(),
+            "the option `--count` takes a [one two], not `three`"
+        );
     }
 }

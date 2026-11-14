@@ -439,7 +439,16 @@ fn reads_loops_functions_params_try_and_use() {
     let StatementKind::Param(p) = one("param --count: int = 3") else {
         panic!()
     };
-    assert_eq!((p.name.as_str(), p.kind), ("count", ParamType::Int));
+    assert_eq!((p.name.as_str(), p.kind.clone()), ("count", ParamType::Int));
+    let StatementKind::Param(p) = one("param --mode: [fast slow]") else {
+        panic!()
+    };
+    assert_eq!(
+        p.kind,
+        ParamType::Choices(vec!["fast".into(), "slow".into()])
+    );
+    assert_eq!(p.kind.written(), "[fast slow]");
+    assert_eq!(failure("param --x: thing").message, "`thing` is not a type");
     assert!(failure("param --x: thing").message.contains("thing"));
     assert!(matches!(
         one("try { rm x } catch e { echo $e.message }"),

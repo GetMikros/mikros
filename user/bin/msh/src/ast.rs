@@ -297,7 +297,9 @@ pub struct Param {
     pub default: Option<Expr>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The type of a script's option, of a declared argument or option, or
+/// of a function's.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParamType {
     String,
     Int,
@@ -306,7 +308,37 @@ pub enum ParamType {
     Size,
     Duration,
     Date,
+    /// A file or a folder.
     Path,
+    Folder,
+    File,
+    /// A command's name.
+    Command,
     List,
     Any,
+    /// One of the words.
+    Choices(Vec<String>),
+}
+
+impl ParamType {
+    /// The type as it is written.
+    pub fn written(&self) -> String {
+        let name = match self {
+            ParamType::String => "string",
+            ParamType::Int => "int",
+            ParamType::Float => "float",
+            ParamType::Bool => "bool",
+            ParamType::Size => "size",
+            ParamType::Duration => "duration",
+            ParamType::Date => "date",
+            ParamType::Path => "path",
+            ParamType::Folder => "folder",
+            ParamType::File => "file",
+            ParamType::Command => "command",
+            ParamType::List => "list",
+            ParamType::Any => "any",
+            ParamType::Choices(words) => return format!("[{}]", words.join(" ")),
+        };
+        name.into()
+    }
 }

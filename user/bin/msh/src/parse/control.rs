@@ -327,6 +327,54 @@ impl Parser<'_> {
         })
     }
 
+    /// A type: a name such as `int` or `folder`, or the choices `[a b c]`.
+    pub(super) fn param_type(&mut self) -> Result<ParamType> {
+        if self.peek() == Some('[') {
+            self.pos += 1;
+            let mut choices = Vec::new();
+            loop {
+                self.skip_spaces();
+                match self.peek() {
+                    Some(']') => {
+                        self.pos += 1;
+                        break;
+                    }
+                    None | Some('\n') => return Err(self.incomplete("`]` is missing")),
+                    _ => {
+                        let word = self.take_while(|c| {
+                            !c.is_whitespace() && !matches!(c, ']' | ',' | ')' | '"')
+                        });
+                        if word.is_empty() {
+                            return Err(self.error("a choice is expected here"));
+                        }
+                        choices.push(word);
+                    }
+                }
+            }
+            if choices.is_empty() {
+                return Err(self.error("a list of choices needs one at least"));
+            }
+            return Ok(ParamType::Choices(choices));
+        }
+        let at = self.pos;
+        Ok(match self.name()?.as_str() {
+            "string" => ParamType::String,
+            "int" => ParamType::Int,
+            "float" => ParamType::Float,
+            "bool" => ParamType::Bool,
+            "size" => ParamType::Size,
+            "duration" => ParamType::Duration,
+            "date" => ParamType::Date,
+            "path" => ParamType::Path,
+            "folder" => ParamType::Folder,
+            "file" => ParamType::File,
+            "command" => ParamType::Command,
+            "list" => ParamType::List,
+            "any" => ParamType::Any,
+            other => return Err(self.error_at(at, &format!("`{other}` is not a type"))),
+        })
+    }
+
     /// `param --name: type = default`, after `param`.
     fn param(&mut self) -> Result<Param> {
         if !self.looking_at("--") {
@@ -337,20 +385,7 @@ impl Parser<'_> {
         self.skip_spaces();
         self.expect(':', "`:` and a type")?;
         self.skip_spaces();
-        let at = self.pos;
-        let kind = match self.name()?.as_str() {
-            "string" => ParamType::String,
-            "int" => ParamType::Int,
-            "float" => ParamType::Float,
-            "bool" => ParamType::Bool,
-            "size" => ParamType::Size,
-            "duration" => ParamType::Duration,
-            "date" => ParamType::Date,
-            "path" => ParamType::Path,
-            "list" => ParamType::List,
-            "any" => ParamType::Any,
-            other => return Err(self.error_at(at, &format!("`{other}` is not a type"))),
-        };
+        let kind = self.param_type()?;
         self.skip_spaces();
         let default = if self.peek() == Some('=') {
             self.pos += 1;

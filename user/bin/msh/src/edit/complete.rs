@@ -171,7 +171,8 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
         options(&word, &words[first..index], sources)
     } else {
         match option_type(&words[first..index], sources) {
-            Some(ParamType::Path | ParamType::Bool) | None => names(files(&word, sources)),
+            Some(ParamType::Path | ParamType::File | ParamType::Folder | ParamType::Bool)
+            | None => names(files(&word, sources)),
             Some(_) => Vec::new(),
         }
     };
@@ -275,7 +276,7 @@ fn script(command: &[(usize, String)]) -> Option<&str> {
 
 /// What a script's option shows: its type, and its default if any.
 fn describe(param: &Param) -> String {
-    let kind = format!("{:?}", param.kind).to_lowercase();
+    let kind = param.kind.written();
     match &param.default {
         Some(crate::ast::Expr::Literal(l)) => {
             let default = crate::value::scalar_text(&crate::value::Value::from(l));
@@ -323,7 +324,7 @@ fn option_type(command: &[(usize, String)], sources: &dyn Sources) -> Option<Par
     params
         .into_iter()
         .find(|p| p.name == previous)
-        .map(|p| p.kind)
+        .map(|p| p.kind.clone())
 }
 
 #[cfg(test)]
