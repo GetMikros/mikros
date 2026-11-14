@@ -6,10 +6,7 @@
 
 #![cfg_attr(not(target_os = "mikros"), allow(dead_code))]
 
-// Until the next commit pages with them on Mikros.
-#[cfg_attr(target_os = "mikros", allow(dead_code))]
 mod keys;
-#[cfg_attr(target_os = "mikros", allow(dead_code))]
 mod pager;
 #[cfg(target_os = "mikros")]
 mod program;
