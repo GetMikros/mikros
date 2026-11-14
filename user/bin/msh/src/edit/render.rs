@@ -288,5 +288,12 @@ mod tests {
         let f = draw(&view("% ", "if x {\n  y", 10), 80, 0);
         assert_eq!(f.text, "\x1b[?25l\r\x1b[J% if x {\r\n  y\r\x1b[3C\x1b[?25h");
         assert_eq!(f.cursor_row, 1);
+        // With the cursor on an earlier line, it goes back up to it.
+        let f = draw(&view("% ", "if x {\n  y", 3), 80, 0);
+        assert_eq!(
+            f.text,
+            "\x1b[?25l\r\x1b[J% if x {\r\n  y\x1b[1A\r\x1b[5C\x1b[?25h"
+        );
+        assert_eq!(f.cursor_row, 0);
     }
 }

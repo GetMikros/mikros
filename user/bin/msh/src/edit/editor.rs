@@ -166,8 +166,18 @@ impl Editor {
                 let kill = self.kill.clone();
                 self.line.insert(&kill);
             }
-            Key::Up | Key::Ctrl('p') => self.older(),
-            Key::Down | Key::Ctrl('n') => self.newer(),
+            // In an entry of several lines, they move between its lines,
+            // and from its first or last on through the history.
+            Key::Up | Key::Ctrl('p') => {
+                if !l.up() {
+                    self.older();
+                }
+            }
+            Key::Down | Key::Ctrl('n') => {
+                if !l.down() {
+                    self.newer();
+                }
+            }
             Key::Ctrl('r') => {
                 self.search = Some(Search {
                     query: String::new(),
@@ -353,7 +363,9 @@ impl Editor {
         };
         match self.browse_from(at as isize + 1, 1, &typed) {
             Some(next) => {
+                // Further presses go down through its lines.
                 self.line.set(&self.history[next].clone());
+                self.line.first_line_end();
                 self.browse = Some((next, typed));
             }
             None => {
@@ -524,6 +536,36 @@ mod tests {
         e.key(Key::Ctrl('y'), &Nothing);
         e.key(Key::Ctrl('y'), &Nothing);
         assert_eq!(e.line().text(), "one twoecho twoecho ");
+    }
+
+    #[test]
+    fn moves_through_the_lines_of_an_entry_and_on_through_the_history() {
+        let entry = "if x {\n  long line\n}";
+        let mut e = editor(&["pwd", entry, "ls"]);
+        e.key(Key::Up, &Nothing);
+        e.key(Key::Up, &Nothing);
+        assert_eq!((e.line().text(), e.line().cursor()), (entry, entry.len()));
+        // Up goes to the same column of the line above, or its end.
+        e.key(Key::Up, &Nothing);
+        assert_eq!(e.line().cursor(), "if x {\n ".len());
+        e.key(Key::Up, &Nothing);
+        assert_eq!(e.line().cursor(), 1);
+        e.key(Key::Ctrl('p'), &Nothing);
+        assert_eq!(e.line().text(), "pwd");
+        // Down enters the entry on its first line and goes through it.
+        e.key(Key::Down, &Nothing);
+        assert_eq!(
+            (e.line().text(), e.line().cursor()),
+            (entry, "if x {".len())
+        );
+        e.key(Key::Down, &Nothing);
+        e.key(Key::Ctrl('n'), &Nothing);
+        assert_eq!(e.line().cursor(), entry.len());
+        e.key(Key::Down, &Nothing);
+        assert_eq!(e.line().text(), "ls");
+        // Enter takes the whole entry.
+        e.key(Key::Up, &Nothing);
+        assert_eq!(e.key(Key::Enter, &Nothing), Outcome::Accept(entry.into()));
     }
 
     #[test]

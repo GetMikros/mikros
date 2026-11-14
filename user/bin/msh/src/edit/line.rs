@@ -68,12 +68,69 @@ impl Line {
         }
     }
 
-    pub fn home(&mut self) {
-        self.cursor = 0;
+    /// Moves the cursor to the line above in a text of several lines, to
+    /// the same column or the end of that line; `false` on the first.
+    pub fn up(&mut self) -> bool {
+        let start = self.line_start();
+        if start == 0 {
+            return false;
+        }
+        let column = self.text[start..self.cursor].chars().count();
+        let above = self.text[..start - 1].rfind('\n').map_or(0, |i| i + 1);
+        self.cursor = self.column_in(above, start - 1, column);
+        true
     }
 
+    /// Moves the cursor to the line below as `up` does; `false` on the
+    /// last line.
+    pub fn down(&mut self) -> bool {
+        let end = self.line_end();
+        if end == self.text.len() {
+            return false;
+        }
+        let column = self.text[self.line_start()..self.cursor].chars().count();
+        let below = end + 1;
+        let below_end = self.text[below..]
+            .find('\n')
+            .map_or(self.text.len(), |i| below + i);
+        self.cursor = self.column_in(below, below_end, column);
+        true
+    }
+
+    /// Moves the cursor to the end of the first line.
+    pub fn first_line_end(&mut self) {
+        self.cursor = self.text.find('\n').unwrap_or(self.text.len());
+    }
+
+    /// Where the line that holds the cursor starts.
+    fn line_start(&self) -> usize {
+        self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1)
+    }
+
+    /// Where the line that holds the cursor ends, before its line feed.
+    fn line_end(&self) -> usize {
+        self.text[self.cursor..]
+            .find('\n')
+            .map_or(self.text.len(), |i| self.cursor + i)
+    }
+
+    /// The offset `column` characters into the line from `start` to `end`,
+    /// or `end` when the line is shorter.
+    fn column_in(&self, start: usize, end: usize, column: usize) -> usize {
+        self.text[start..end]
+            .char_indices()
+            .nth(column)
+            .map_or(end, |(i, _)| start + i)
+    }
+
+    /// Moves the cursor to the start of its line.
+    pub fn home(&mut self) {
+        self.cursor = self.line_start();
+    }
+
+    /// Moves the cursor to the end of its line.
     pub fn end(&mut self) {
-        self.cursor = self.text.len();
+        self.cursor = self.line_end();
     }
 
     pub fn at_end(&self) -> bool {
@@ -144,12 +201,17 @@ impl Line {
 
     /// Ctrl-K: the rest of the line.
     pub fn kill_to_end(&mut self) -> String {
-        self.cut(self.cursor, self.text.len())
+        // At the end of a line, the line feed, which joins the next.
+        let end = match self.line_end() {
+            end if end == self.cursor && end < self.text.len() => end + 1,
+            end => end,
+        };
+        self.cut(self.cursor, end)
     }
 
     /// Ctrl-U: the line before the cursor.
     pub fn kill_to_start(&mut self) -> String {
-        self.cut(0, self.cursor)
+        self.cut(self.line_start(), self.cursor)
     }
 
     /// Ctrl-W: back to the blank before the cursor's word.
@@ -220,6 +282,26 @@ mod tests {
         l.home();
         l.right();
         assert_eq!(l.cursor(), 2);
+    }
+
+    #[test]
+    fn moves_and_kills_within_the_line_of_several() {
+        let mut l = at("ab\ncdef\ng", 5);
+        l.home();
+        assert_eq!(l.cursor(), 3);
+        l.end();
+        assert_eq!(l.cursor(), 7);
+        assert!(l.up());
+        assert_eq!(l.cursor(), 2);
+        assert!(!l.up());
+        assert!(l.down() && l.down());
+        assert_eq!(l.cursor(), 9);
+        assert!(!l.down());
+        let mut l = at("ab\ncdef\ng", 5);
+        assert_eq!(l.kill_to_end(), "ef");
+        assert_eq!(l.kill_to_end(), "\n");
+        assert_eq!(l.kill_to_start(), "cd");
+        assert_eq!((l.text(), l.cursor()), ("ab\ng", 3));
     }
 
     #[test]
