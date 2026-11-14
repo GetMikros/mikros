@@ -150,14 +150,15 @@ impl Prompt {
         if bytes.first() == Some(&0x1b) {
             return Step::Nothing;
         }
-        for &b in bytes {
+        // Each key's bytes are whole UTF-8 sequences.
+        for c in String::from_utf8_lossy(bytes).chars() {
             let (text, max) = match self.field {
                 Field::Name => (&mut self.typed, NAME_MAX),
                 Field::Password => (&mut self.password, PASSWORD_MAX),
             };
-            match b {
-                b'\r' | b'\n' if self.field == Field::Name => self.field = Field::Password,
-                b'\r' | b'\n' => {
+            match c {
+                '\r' | '\n' if self.field == Field::Name => self.field = Field::Password,
+                '\r' | '\n' => {
                     self.waiting = true;
                     let name = match self.request.name.is_empty() {
                         true => self.typed.clone(),
@@ -165,18 +166,12 @@ impl Prompt {
                     };
                     return Step::Answer(name, self.password.clone());
                 }
-                0x7f | 0x08 => {
+                '\x7f' | '\x08' => {
                     text.pop();
                 }
-                0x15 => wipe(text),
-                b if b < 0x20 => {}
-                _ if text.len() < max => {
-                    // Typed text arrives as whole UTF-8 sequences.
-                    let mut bytes = core::mem::take(text).into_bytes();
-                    bytes.push(b);
-                    *text = String::from_utf8(bytes)
-                        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-                }
+                '\x15' => wipe(text),
+                c if c < ' ' => {}
+                c if text.len() + c.len_utf8() <= max => text.push(c),
                 _ => {}
             }
         }
@@ -210,8 +205,12 @@ impl Prompt {
         let cut: String = name_line.chars().take(width).collect();
         let name_at = (lines.len(), cut.chars().count());
         lines.push(cut);
-        let password_at = (lines.len(), "Password: ".len().min(width));
-        lines.push("Password:".chars().take(width).collect());
+        // One `*` for each character typed, never the characters.
+        let stars = "*".repeat(self.password.chars().count());
+        let password_line = format!("Password: {stars}");
+        let cut: String = password_line.chars().take(width).collect();
+        let password_at = (lines.len(), cut.chars().count());
+        lines.push(cut);
         if self.failed {
             lines.push(String::new());
             lines.extend(wrap(FAILED, width));
@@ -319,7 +318,8 @@ mod tests {
     fn takes_only_the_password_for_a_named_administrator() {
         let mut p = prompt("ada");
         assert_eq!(p.key("pä\x15pw".as_bytes()), Step::Nothing);
-        assert_eq!(p.key(b"\n"), Step::Answer("ada".into(), "pw".into()));
+        assert_eq!(p.key("ä".as_bytes()), Step::Nothing);
+        assert_eq!(p.key(b"\n"), Step::Answer("ada".into(), "pwä".into()));
     }
 
     #[test]
@@ -350,6 +350,12 @@ mod tests {
         assert_eq!(popup[3].trim_end_matches('│').trim(), "│ power off");
         assert_eq!(popup[5].trim_end_matches('│').trim(), "│ Name: ad");
         assert_eq!(popup[6].trim_end_matches('│').trim(), "│ Password:");
+        p.key("\rqä".as_bytes());
+        let typed = p.screen();
+        let rows: Vec<String> = (0..12).map(|r| row(&typed, r)).collect();
+        let password = rows.iter().find(|r| r.contains("Password")).unwrap();
+        assert!(password.contains("Password: ** "));
+        assert!(!password.contains(['q', 'ä']));
         assert!(popup[7].starts_with('└'));
         assert!(
             screen

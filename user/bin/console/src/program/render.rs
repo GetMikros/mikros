@@ -2,7 +2,7 @@
 //! preferred mode, cells drawn with the monospaced font, and commits of
 //! the rows that changed.
 
-use crate::emulator::cell::{BOLD, Cell, INVISIBLE, REVERSE, UNDERLINE, Width};
+use crate::emulator::cell::{BOLD, Cell, DIM, INVISIBLE, REVERSE, UNDERLINE, Width};
 use crate::emulator::screen::Screen;
 use crate::program::font::{Font, Glyph};
 use crate::program::palette::{BACKGROUND, FOREGROUND, blend, pixel};
@@ -160,6 +160,10 @@ impl Renderer {
         let mut bg = pixel(cell.bg, BACKGROUND);
         if (cell.attrs & REVERSE != 0) != invert {
             std::mem::swap(&mut fg, &mut bg);
+        }
+        if cell.attrs & DIM != 0 {
+            // Dim text is drawn halfway to the background.
+            fg = blend(fg, bg, 128);
         }
         let width = if cell.width == Width::Wide {
             2 * cw
