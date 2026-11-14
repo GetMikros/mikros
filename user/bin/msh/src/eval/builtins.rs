@@ -168,8 +168,9 @@ pub fn run<S: System>(
             let block =
                 crate::parse::parse(&source).map_err(|e| shell.fail(format!("{path}: {e}")))?;
             let (line, command) = (shell.line, shell.command.clone());
-            shell.collect_functions(&block);
-            let ran = shell.block(&block);
+            let ran = shell
+                .collect_functions(&block)
+                .and_then(|()| shell.block(&block));
             shell.line = line;
             shell.command = command;
             ran.map(|_| Value::Null)

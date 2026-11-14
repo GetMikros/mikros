@@ -448,7 +448,7 @@ impl<S: System> Shell<S> {
     /// Runs the statements of a script or a line at the prompt, showing
     /// each statement's value at the prompt unless it is `null`.
     pub fn top(&mut self, block: &Block) -> Result<(), Flow> {
-        self.collect_functions(block);
+        self.collect_functions(block)?;
         for statement in &block.statements {
             let value = self.statement(statement)?;
             if self.interactive && value != Value::Null {
@@ -460,12 +460,28 @@ impl<S: System> Shell<S> {
     }
 
     /// Defines the functions of `block`, so that they may be called
-    /// before their definition.
-    fn collect_functions(&mut self, block: &Block) {
+    /// before their definition. A function named `sudo` is an error, and
+    /// none of them is defined then.
+    pub fn collect_functions(&mut self, block: &Block) -> Result<(), Flow> {
+        for statement in &block.statements {
+            if let StatementKind::Fn(f) = &statement.kind {
+                self.definable(&f.name)?;
+            }
+        }
         for statement in &block.statements {
             if let StatementKind::Fn(f) = &statement.kind {
                 self.functions.insert(f.name.clone(), Rc::new(f.clone()));
             }
+        }
+        Ok(())
+    }
+
+    /// Fails for the name `sudo`, which always runs /usr/bin/sudo, so
+    /// that nothing can be put in its place.
+    fn definable(&self, name: &str) -> Result<(), Flow> {
+        match name == crate::eval::command::SUDO {
+            true => Err(self.fail("sudo cannot be redefined".into())),
+            false => Ok(()),
         }
     }
 
@@ -554,6 +570,7 @@ impl<S: System> Shell<S> {
                 Err(self.fail(format!("no arm of `match` matches {}", scalar_text(&value))))
             }
             StatementKind::Fn(f) => {
+                self.definable(&f.name)?;
                 self.functions.insert(f.name.clone(), Rc::new(f.clone()));
                 Ok(Value::Null)
             }
@@ -582,7 +599,7 @@ impl<S: System> Shell<S> {
                 let source = self.system.read_file(&path).map_err(|e| self.fail(e))?;
                 let block =
                     crate::parse::parse(&source).map_err(|e| self.fail(format!("{path}: {e}")))?;
-                self.collect_functions(&block);
+                self.collect_functions(&block)?;
                 Ok(Value::Null)
             }
             StatementKind::Extern(declared) => {

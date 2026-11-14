@@ -726,3 +726,33 @@ fn gives_completion_its_functions_variables_programs_and_options() {
     assert_eq!(c.candidates[0].description.as_deref(), Some("size = 1kb"));
     assert_eq!(texts(&s, "cat b"), ["b.txt"]);
 }
+
+#[test]
+fn sudo_always_runs_usr_bin_sudo_and_cannot_be_redefined() {
+    let mut s = shell();
+    let real: Behaviour = |args, _| (0, format!("real {}", args[1..].join(" ")).into_bytes());
+    let fake: Behaviour = |_, _| (0, b"fake".to_vec());
+    s.system.programs.insert("/usr/bin/sudo".into(), real);
+    // A sudo earlier in $env.PATH, or a path, is not taken for `sudo`.
+    s.system.programs.insert("/bin/sudo".into(), fake);
+    s.system.programs.insert("./sudo".into(), fake);
+    assert_eq!(run(&mut s, "sudo ls -l").unwrap(), "real ls -l");
+    assert_eq!(run(&mut s, "let c = 'sudo'; run $c ls").unwrap(), "real ls");
+    assert_eq!(run(&mut s, "./sudo ls").unwrap(), "fake");
+    // No function may take its place, however it is defined.
+    s.system
+        .files
+        .insert("/m.msh".into(), "fn sudo() { print fake }".into());
+    for source in [
+        "fn sudo() { print fake }",
+        "if true { fn sudo() { print fake } }",
+        "use /m.msh",
+        "source /m.msh",
+    ] {
+        match run(&mut s, source) {
+            Err(Flow::Error(f)) => assert_eq!(f.message, "sudo cannot be redefined", "{source}"),
+            other => panic!("{source}: {other:?}"),
+        }
+    }
+    assert_eq!(run(&mut s, "sudo ls").unwrap(), "real ls");
+}

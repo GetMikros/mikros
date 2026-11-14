@@ -20,6 +20,11 @@ enum Carry {
 type Redirections = Vec<(RedirectionKind, String)>;
 
 /// A command found and its arguments expanded.
+/// The command that always runs `SUDO_PATH`, whatever `$env.PATH` holds,
+/// and that no function may replace.
+pub const SUDO: &str = "sudo";
+const SUDO_PATH: &str = "/usr/bin/sudo";
+
 enum Found {
     Expr(Value),
     Function(Rc<Function>, Vec<Value>, Redirections),
@@ -245,7 +250,12 @@ impl<S: System> Shell<S> {
             redirections.push((r.kind, target));
         }
         let rest = args.split_off(1);
-        if let Some(f) = self.functions.get(&name).cloned() {
+        // `sudo` is never a function or a built-in.
+        let function = match name == SUDO {
+            true => None,
+            false => self.functions.get(&name).cloned(),
+        };
+        if let Some(f) = function {
             self.only_programs(&environment)?;
             let values = rest
                 .into_iter()
@@ -256,7 +266,7 @@ impl<S: System> Shell<S> {
                 .collect::<Result<_, _>>()?;
             return Ok(Found::Function(f, values, redirections));
         }
-        if let Some(builtin) = builtins::find(&name) {
+        if let Some(builtin) = builtins::find(&name).filter(|_| name != SUDO) {
             self.only_programs(&environment)?;
             return Ok(Found::Builtin(builtin, rest, redirections));
         }
@@ -297,6 +307,9 @@ impl<S: System> Shell<S> {
             failure.status = status;
             Flow::Error(failure)
         };
+        if name == SUDO {
+            return Ok(SUDO_PATH.into());
+        }
         if name.contains('/') {
             return match self.system.executable(name) {
                 Some(true) => Ok(name.into()),
