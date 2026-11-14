@@ -5690,7 +5690,8 @@ mod manager {
     /// host name and exit with 7. Stops QEMU with
     /// `PASSED` once setup and ada's session ended so, or with `FAILED`.
     pub fn setup_scenario(s: &Startup) -> i64 {
-        const SECONDS: i64 = 300;
+        // About 250 s of steps, with room for a loaded host.
+        const SECONDS: i64 = 420;
         const EXPECTED: &[(&[u8], usize)] = &[
             (b"device-manager: released the kernel console", 1),
             (

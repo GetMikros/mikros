@@ -27,10 +27,11 @@ use std::time::{Duration, Instant};
 const SEAT: &str = "sessionmgr: gave the console the display";
 const SETUP_DONE: &str = "sessionmgr: setup exited";
 /// How many times the run's timeout the setup run may take. Its msh
-/// session also runs files-c and coreutils-check: in a debug build under
-/// KVM the run takes about 210 s from boot to power-off, and a fuzz
-/// build is about 3.3 times slower.
-const SETUP_TIMES: u32 = 2;
+/// session also pages with more and less, asks for authorization twice,
+/// and runs files-c and coreutils-check: in a debug build under KVM the
+/// run takes about 250 s from boot to power-off, and a fuzz build is
+/// about 3.3 times slower.
+const SETUP_TIMES: u32 = 3;
 const SETUP_TIMES_FUZZ: u32 = 6;
 
 /// How many times longer than the pauses of the steps the runner waits in
