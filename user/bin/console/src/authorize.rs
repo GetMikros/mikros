@@ -13,6 +13,10 @@ use crate::emulator::screen::Screen;
 const NAME_MAX: usize = 32;
 const PASSWORD_MAX: usize = 1024;
 const PREFIX: &str = "[authorize] ";
+/// The action of sudo's requests, whose lines say `[sudo]` and leave the
+/// request's line out, as the command shows above them.
+const ADMIN_RUN: &str = "admin.run";
+const SUDO_PREFIX: &str = "[sudo] ";
 const FAILED: &str = "authorization failed";
 
 /// What `OnAuthorize` asks.
@@ -197,25 +201,30 @@ impl Prompt {
     /// with the field that the cursor ends, if any.
     fn lines(&self) -> (Vec<String>, Option<usize>) {
         let r = &self.request;
-        let mut lines = vec![format!(
-            "{PREFIX}{} wants {}: {}",
-            r.app_id, r.action, r.reason
-        )];
+        let sudo = r.action == ADMIN_RUN;
+        let prefix = if sudo { SUDO_PREFIX } else { PREFIX };
+        let mut lines = Vec::new();
+        if !sudo {
+            lines.push(format!(
+                "{prefix}{} wants {}: {}",
+                r.app_id, r.action, r.reason
+            ));
+        }
         let name = match r.name.is_empty() {
             true => {
-                lines.push(format!("{PREFIX}name: {}", self.typed));
+                lines.push(format!("{prefix}name: {}", self.typed));
                 &self.typed
             }
             false => &r.name,
         };
-        let mut cursor = Some(lines.len() - 1);
+        let mut cursor = lines.len().checked_sub(1);
         if self.field == Field::Password {
             let stars = "*".repeat(self.password.chars().count());
-            lines.push(format!("{PREFIX}password for {name}: {stars}"));
+            lines.push(format!("{prefix}password for {name}: {stars}"));
             cursor = Some(lines.len() - 1);
         }
         if self.failed {
-            lines.push(format!("{PREFIX}{FAILED}"));
+            lines.push(format!("{prefix}{FAILED}"));
         }
         if self.waiting || self.failed {
             cursor = None;
@@ -418,6 +427,30 @@ mod tests {
                 .take_transcript()
                 .unwrap()
                 .starts_with("\r\n[authorize] ")
+        );
+    }
+
+    #[test]
+    fn asks_for_sudo_with_the_password_line_only() {
+        let sudo = |name: &str| {
+            let mut request = request(name);
+            request.action = "admin.run".into();
+            let cell = |_, _| Cell::default();
+            Prompt::new(request, 60, 6, (1, 0), cell)
+        };
+        let mut p = sudo("sip");
+        p.key(b"pw");
+        let shown = rows(&p.screen());
+        assert_eq!(shown[1], "[sudo] password for sip: **");
+        assert_eq!(shown[2], "");
+        let mut p = sudo("");
+        p.key(b"ada");
+        assert_eq!(rows(&p.screen())[1], "[sudo] name: ada");
+        p.key(b"\rx\r");
+        p.failed();
+        assert_eq!(
+            p.take_transcript().unwrap(),
+            "\r[sudo] name: ada\r\n[sudo] password for ada: *\r\n[sudo] authorization failed\r\n"
         );
     }
 
