@@ -1,0 +1,31 @@
+// MIKSPEC-0036.R35
+
+library mikros.service;
+using mikros.base;
+
+type ServiceState = flexible enum : u32 {
+    NOT_STARTED = 1;
+    RUNNING = 2;
+    RESTARTING = 3;
+    EXITED = 4;
+    FAILED = 5;
+};
+
+type ServiceEntry = struct {
+    name string<64>;
+    state ServiceState;
+    on_demand bool;
+    pid u32;
+    restarts u32;
+    exit_status i32;
+};
+
+protocol Services {
+    @1 List(after string<64>?) -> (entries vector<ServiceEntry, 64>, more bool);
+};
+
+protocol ServiceControl {
+    @1 Start(name string<64>) -> () error base.Status;
+    @2 Stop(name string<64>) -> () error base.Status;
+    @3 Restart(name string<64>) -> () error base.Status;
+};

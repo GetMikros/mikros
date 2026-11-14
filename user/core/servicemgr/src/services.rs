@@ -93,6 +93,7 @@ pub async fn start(
         demand_waker: RefCell::new(None),
         running: RefCell::new(Vec::new()),
         stopping: Cell::new(false),
+        status: RefCell::new(BTreeMap::new()),
         root: RefCell::new(None),
         selftest,
     });
@@ -102,6 +103,13 @@ pub async fn start(
             supervisor.demand(name);
         }
     }));
+    let weak = Rc::downgrade(&supervisor);
+    supervisor
+        .dir
+        .set_listing(Rc::new(move |after| match weak.upgrade() {
+            Some(supervisor) => supervisor.entries(after),
+            None => (Vec::new(), false),
+        }));
     let weak = Rc::downgrade(&supervisor);
     supervisor.dir.set_shutdown(Rc::new(move |kind| {
         let supervisor = weak.upgrade();

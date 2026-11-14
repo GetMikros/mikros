@@ -23,6 +23,7 @@ mod root;
 mod selftest;
 mod services;
 mod sources;
+mod status;
 mod supervisor;
 
 use crate::boot::BootHandles;

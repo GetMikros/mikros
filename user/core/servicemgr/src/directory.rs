@@ -33,7 +33,7 @@ use mikros_rt::interfaces::mikros::permissions::{BrokerAsyncClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, DirectoryAsyncServer, DirectoryConnectResponse,
     DirectoryListResponse, DirectoryRequest, DirectoryWatchResponse, Provider as ProviderProtocol,
-    ProviderClient, ShutdownKind,
+    ProviderClient, ServiceEntry, ShutdownKind,
 };
 
 /// The protocol of the registrar, which the service manager provides,
@@ -43,6 +43,8 @@ const REGISTER_PERMISSION: &str = "services.register";
 /// The protocol through which the machine is shut down, which the
 /// service manager provides, and the permission it needs.
 pub const CONTROL: &str = "mikros.service.Control";
+/// The service manager's list of services, for every process.
+const SERVICES: &str = "mikros.service.Services";
 const CONTROL_PERMISSION: &str = "power.control";
 const PEER_CLOSED: u32 = 1 << 2;
 
@@ -68,6 +70,7 @@ pub struct Dir {
     registered: Cell<u64>,
     demand: RefCell<Option<Demand>>,
     shutdown: RefCell<Option<Shutdown>>,
+    listing: RefCell<Option<Listing>>,
     /// The root file system's `/usr` and `/etc` once the process manager
     /// gave them, until the supervisor takes them, whether it has given
     /// them, and the task that waits for them.
@@ -97,6 +100,8 @@ enum Provider {
     Registrar,
     /// The service manager's own `Control`.
     Control,
+    /// The service manager's own `Services`.
+    Services,
 }
 
 /// What the protocols of a service start as.
@@ -115,6 +120,9 @@ type Demand = Rc<dyn Fn(&str)>;
 
 /// What shuts the machine down for `Shutdown`.
 pub type Shutdown = Rc<dyn Fn(ShutdownKind) -> Pin<Box<dyn Future<Output = Result<(), Status>>>>>;
+/// What answers `List` on `Services`: the services after a name, and
+/// whether more follow.
+pub type Listing = Rc<dyn Fn(Option<&str>) -> (Vec<ServiceEntry>, bool)>;
 
 /// A named instance of a protocol.
 struct Instance {
@@ -147,6 +155,7 @@ impl Dir {
             registered: Cell::new(0),
             demand: RefCell::new(None),
             shutdown: RefCell::new(None),
+            listing: RefCell::new(None),
             root: RefCell::new(None),
             root_given: Cell::new(false),
             root_waiting: RefCell::new(None),
@@ -199,7 +208,7 @@ impl Dir {
                 },
             );
         }
-        for own in [REGISTRAR, CONTROL] {
+        for own in [REGISTRAR, CONTROL, SERVICES] {
             if provided.contains_key(own) {
                 mikros_rt::log!(
                     Error,
@@ -219,6 +228,12 @@ impl Dir {
             provider: Provider::Control,
         };
         provided.insert(CONTROL.into(), control);
+        let services = Provided {
+            service: String::new(),
+            permission: None,
+            provider: Provider::Services,
+        };
+        provided.insert(SERVICES.into(), services);
         drop(provided);
         self.ready.set(true);
         for waker in self.waiting.take() {
@@ -326,6 +341,16 @@ impl Dir {
                 }
             }
         }
+    }
+
+    /// Calls `listing` for `List` on `Services`.
+    pub fn set_listing(&self, listing: Listing) {
+        *self.listing.borrow_mut() = Some(listing);
+    }
+
+    /// What answers `List` on `Services`, once it is set.
+    pub fn listing(&self) -> Option<Listing> {
+        self.listing.borrow().clone()
     }
 
     /// Calls `shutdown` for `Shutdown` on `Control`.
@@ -447,6 +472,11 @@ impl Dir {
                 Provider::Control => {
                     drop(provided);
                     crate::control::serve(self.clone(), ServerEnd::new(server));
+                    return Ok(());
+                }
+                Provider::Services => {
+                    drop(provided);
+                    crate::status::serve(self.clone(), ServerEnd::new(server));
                     return Ok(());
                 }
             };

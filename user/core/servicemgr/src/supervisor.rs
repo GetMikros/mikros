@@ -7,6 +7,7 @@ use crate::broker;
 use crate::directory::Dir;
 use crate::launch::{self, Started};
 use crate::sources::{SOURCES, Sources};
+use crate::status::State;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
@@ -75,6 +76,8 @@ pub struct Supervisor {
     /// The running services and their process IDs, in the order they
     /// started.
     pub running: RefCell<Vec<(usize, u32)>>,
+    /// What `Services` tells of each service that has started or failed.
+    pub status: RefCell<BTreeMap<usize, crate::status::Status>>,
     /// Set once `Shutdown` began: from then on, no service is started or
     /// restarted.
     pub stopping: Cell<bool>,
@@ -127,6 +130,7 @@ impl Supervisor {
             match this.launch(i).await {
                 Ok(mut started) => {
                     mikros_rt::log!(Info, "started service {name} as pid {}", started.pid);
+                    this.set_state(i, State::Running);
                     this.active.borrow_mut().insert(i);
                     this.running.borrow_mut().push((i, started.pid));
                     let (pid, streams) = (started.pid, started.streams.take());
@@ -139,6 +143,7 @@ impl Supervisor {
                 }
                 Err(why) => {
                     mikros_rt::log!(Error, "service {name} did not start: {why}");
+                    this.set_state(i, State::Failed);
                     this.active.borrow_mut().remove(&i);
                     this.dir.never(&name);
                     false
@@ -218,22 +223,33 @@ impl Supervisor {
             }
             drop(process);
             this.running.borrow_mut().retain(|&(j, _)| j != i);
+            let code = ended.map_or(0, |(code, _)| code);
             if this.stopping.get() {
+                this.ended(i, code, false);
+                this.set_state(i, State::Exited);
                 this.active.borrow_mut().remove(&i);
                 this.dir.never(&name);
                 return;
             }
             let after = ended.map_or(After::Stop, |ended| this.after(i, ended));
+            this.ended(i, code, matches!(after, After::Restart));
             match after {
                 After::Restart => {
                     this.dir.stopped(&name);
                     this.start(i).await;
                 }
                 After::Stop if this.service(i).start == Start::OnDemand => {
+                    this.set_state(i, State::Exited);
                     this.active.borrow_mut().remove(&i);
                     this.dir.idle(&name);
                 }
-                After::Stop | After::GiveUp => {
+                After::Stop => {
+                    this.set_state(i, State::Exited);
+                    this.active.borrow_mut().remove(&i);
+                    this.dir.never(&name);
+                }
+                After::GiveUp => {
+                    this.set_state(i, State::Failed);
                     this.active.borrow_mut().remove(&i);
                     this.dir.never(&name);
                 }
