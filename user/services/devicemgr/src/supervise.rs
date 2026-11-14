@@ -55,6 +55,8 @@ pub struct Manager {
     pub starter: Starter,
     pub registrar: Option<RegistrarAsyncClient>,
     pub service_ids: ServiceIds,
+    /// The device names given and registered.
+    pub names: crate::names::Names,
     pub directory: DirectoryAsyncClient,
     pub profiles: Profiles,
     pub reactor: Reactor,

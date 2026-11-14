@@ -1,0 +1,14 @@
+// MIKSPEC-0096.R3
+
+library mikros.driver;
+
+type DeviceEntry = struct {
+    class string<32>;
+    name string<32>;
+    description string<128>;
+};
+
+protocol Devices {
+    @1 List(class string<32>?, after string<64>?)
+        -> (entries vector<DeviceEntry, 64>, more bool);
+};

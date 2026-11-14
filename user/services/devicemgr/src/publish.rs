@@ -1,6 +1,7 @@
 //! Publishing drivers' services in the service directory, as instances
 //! of `device.<class>` that the device manager registers with the
-//! service manager's `Registrar`.
+//! service manager's `Registrar`, under their service IDs and their
+//! device names.
 
 use crate::start::duplicate;
 use crate::supervise::Manager;
@@ -82,7 +83,8 @@ pub struct Published {
 /// Registers `provider` as the next service of `class` of the driver of
 /// device `caller`, which `published` keeps, and returns its ID. The
 /// instance is named after the ID, but a `subvolumes` service's after the
-/// ID of the last `filesystem` service of the same start of the driver.
+/// ID of the last `filesystem` service of the same start of the driver,
+/// and is registered under its device name, such as `storage0`, too.
 /// A `filesystem` service of a partition is also registered, through
 /// duplicates of `provider`, as `partuuid-<guid>`, the GUID in lowercase,
 /// as `root` when the partition is the root partition, as `esp` when it
@@ -128,11 +130,13 @@ pub async fn publish(
             .collect(),
         _ => Vec::new(),
     };
+    let name = m.names.get(caller, &class, nth);
     let provider = provider.into_handle();
     let mut copies = Vec::new();
-    for _ in &aliases {
+    for _ in 0..=aliases.len() {
         copies.push(duplicate(&provider).map_err(|_| Status::NoResources)?);
     }
+    let for_name = copies.pop().expect("a copy for the device name");
     let registered = registrar
         .register(
             protocol.clone(),
@@ -146,7 +150,34 @@ pub async fn publish(
         Ok(Err(status)) => return Err(status),
         Err(_) => return Err(Status::PeerClosed),
     }
-    keep(m, published, caller, protocol.clone(), instance).await;
+    keep(
+        m,
+        published,
+        caller,
+        protocol.clone(),
+        instance,
+        "published",
+    )
+    .await;
+    let registered = registrar
+        .register(
+            protocol.clone(),
+            name.clone(),
+            permission.clone(),
+            ClientEnd::new(for_name),
+        )
+        .await;
+    match registered {
+        Ok(Ok(_)) => {
+            m.names.add(&class, &name, caller);
+            keep(m, published, caller, protocol.clone(), name, "named").await;
+        }
+        failed => mikros_rt::log!(
+            Error,
+            "device-manager: naming {protocol} {name} for device {caller} failed: {:?}",
+            failed.map(|r| r.err())
+        ),
+    }
     for (alias, copy) in aliases.into_iter().zip(copies) {
         let registered = registrar
             .register(
@@ -157,7 +188,7 @@ pub async fn publish(
             )
             .await;
         match registered {
-            Ok(Ok(_)) => keep(m, published, caller, protocol.clone(), alias).await,
+            Ok(Ok(_)) => keep(m, published, caller, protocol.clone(), alias, "published").await,
             failed => mikros_rt::log!(
                 Error,
                 "device-manager: publishing {protocol} {alias} for device {caller} failed: {:?}",
@@ -202,13 +233,21 @@ fn aliases(m: &Manager, caller: u64) -> Vec<String> {
     aliases
 }
 
-/// Logs that instance `instance` of `protocol` is published for device
-/// `caller`, and keeps it in `published` to unregister when the driver
-/// ends, or unregisters it at once when it already did.
-async fn keep(m: &Manager, published: &Published, caller: u64, protocol: String, instance: String) {
+/// Logs that instance `instance` of `protocol` is `published`, or
+/// `named` for a device name, for device `caller`, and keeps it in
+/// `published` to unregister when the driver ends, or unregisters it at
+/// once when it already did.
+async fn keep(
+    m: &Manager,
+    published: &Published,
+    caller: u64,
+    protocol: String,
+    instance: String,
+    how: &str,
+) {
     mikros_rt::log!(
         Info,
-        "device-manager: published {protocol} {instance} for device {caller}"
+        "device-manager: {how} {protocol} {instance} for device {caller}"
     );
     if published.ended.get() {
         unregister(m, &protocol, &instance).await;
@@ -231,6 +270,9 @@ pub async fn unregister_all(m: &Manager, published: &Published) {
 /// service manager already removed, as its provider closed, counts as
 /// unregistered.
 async fn unregister(m: &Manager, protocol: &str, instance: &str) {
+    if let Some(class) = protocol.strip_prefix("device.") {
+        m.names.remove(class, instance);
+    }
     let Some(registrar) = &m.registrar else {
         return;
     };

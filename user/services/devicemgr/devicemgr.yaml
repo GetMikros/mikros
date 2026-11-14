@@ -14,6 +14,8 @@ provides:
     permission: power.control
   # For the service manager alone, which the device manager checks.
   - protocol: mikros.driver.RootDrivers
+  # The named devices, for every process.
+  - protocol: mikros.driver.Devices
 namespace:
   - path: /usr/lib/drivers
     rights: rx

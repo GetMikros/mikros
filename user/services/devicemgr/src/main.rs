@@ -25,6 +25,7 @@ mod boot_display;
 mod cache;
 mod devices;
 mod drivers;
+mod names;
 mod publish;
 mod removal;
 mod root;
@@ -244,6 +245,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         starter,
         registrar,
         service_ids: publish::ServiceIds::new(),
+        names: names::Names::default(),
         directory,
         profiles: cache::Profiles::new(&command_line),
         reactor,
