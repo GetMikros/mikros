@@ -133,6 +133,11 @@ impl Screen {
         }
     }
 
+    /// The cursor's row and column, whether it shows or not.
+    pub fn cursor_position(&self) -> (usize, usize) {
+        (self.cursor.row, self.cursor.col.min(self.cols - 1))
+    }
+
     /// The cursor's row and column, when it shows.
     pub fn cursor(&self) -> Option<(usize, usize)> {
         let col = self.cursor.col.min(self.cols - 1);

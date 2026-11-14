@@ -1,9 +1,9 @@
 //! The authorization screen on the display: the requests of
-//! `OnAuthorize`, one shown at a time over the screen shown when it
-//! came, the keys typed into it, and `Answer` and `Cancel`.
+//! `OnAuthorize`, one shown at a time over the terminal of the console
+//! it names, the keys typed into it, `Answer` and `Cancel`, and the
+//! lines that the terminal keeps of it.
 
 use crate::authorize::{Prompt, Request, Step};
-use crate::emulator::cell::Cell;
 use crate::program::{Console, now};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::session::TextLoginAsyncClient;
@@ -48,36 +48,53 @@ impl Console {
         }
     }
 
-    /// Shows the next waiting request over the screen shown now.
+    /// The text console with number `console`, 1 to 6.
+    fn vt_of(&self, console: u8) -> Option<&Rc<crate::program::vt::Vt>> {
+        self.vts.get(usize::from(console).checked_sub(1)?)
+    }
+
+    /// Shows the next waiting request over the screen of the terminal of
+    /// its console, which a request of a console without a session
+    /// cannot have.
     fn show_next(&self) {
         let Some(request) = self.auth.pending.borrow_mut().pop_front() else {
             return;
         };
-        let (cols, rows) = self.grid.get();
-        let layout = self.layout();
-        let top = self.top_screen(cols, layout.log, true);
-        let view: Vec<Vec<Cell>> = self.with_screen(|s| {
-            (0..layout.view.min(s.rows()))
-                .map(|r| (0..cols.min(s.cols())).map(|c| *s.cell(r, c)).collect())
-                .collect()
-        });
-        let cell = |r: usize, c: usize| match (r < layout.log, &top) {
-            (true, Some(top)) if r < top.rows() && c < top.cols() => *top.cell(r, c),
-            (true, _) => Cell::default(),
-            (false, _) => view
-                .get(r - layout.log)
-                .and_then(|row| row.get(c))
-                .copied()
-                .unwrap_or_default(),
+        let Some(vt) = self.vt_of(request.console).cloned() else {
+            return self.show_next();
         };
-        *self.auth.shown.borrow_mut() = Some(Prompt::new(request, cols, rows, cell));
+        let prompt = vt.with_screen(|s| {
+            let (cols, rows) = (s.cols(), s.rows());
+            let cursor = s.cursor_position();
+            let cell = |r: usize, c: usize| *s.cell(r, c);
+            Prompt::new(request, cols, rows, cursor, cell)
+        });
+        *self.auth.shown.borrow_mut() = Some(prompt);
         self.changed.notify();
     }
 
-    /// Drops the prompt shown, which erases what was typed into it, and
-    /// shows the screen shown before, or the next request.
+    /// Writes the lines of the prompt shown to its terminal's screen,
+    /// once, before what the terminal's programs write next.
+    fn keep_lines(&self) {
+        let mut shown = self.auth.shown.borrow_mut();
+        let Some(prompt) = shown.as_mut() else {
+            return;
+        };
+        let console = prompt.request.console;
+        if let (Some(kept), Some(vt)) = (prompt.take_transcript(), self.vt_of(console)) {
+            vt.with_screen(|s| s.write(kept.as_bytes()));
+        }
+    }
+
+    /// Drops the prompt shown, which erases what was typed into it, after
+    /// writing the lines it showed to its terminal's screen, and shows the
+    /// screen shown before, or the next request.
     fn end_prompt(&self) {
-        drop(self.auth.shown.borrow_mut().take());
+        self.keep_lines();
+        let Some(prompt) = self.auth.shown.borrow_mut().take() else {
+            return;
+        };
+        drop(prompt);
         self.with_screen(|s| s.touch());
         self.changed.notify();
         self.show_next();
@@ -109,6 +126,9 @@ impl Console {
                         if let Some(prompt) = console.auth.shown.borrow_mut().as_mut() {
                             prompt.failed();
                         }
+                        // The client learns the answer now, and may write
+                        // at once: the lines go first.
+                        console.keep_lines();
                         console.changed.notify();
                         let _ = console.reactor.sleep_until(now() + FAILED_FOR).await;
                     }

@@ -121,6 +121,7 @@ pub async fn events(console: Rc<Console>, text_login: Rc<TextLoginAsyncClient>) 
             }
             TextLoginEvent::OnAuthorize(e) => console.authorize(Request {
                 request: e.request,
+                console: e.console,
                 app_id: e.app_id,
                 action: e.action,
                 reason: e.reason,

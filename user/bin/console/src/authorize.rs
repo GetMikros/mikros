@@ -1,7 +1,9 @@
 //! The authorization screen: a request of the session manager's
-//! `OnAuthorize`, shown in a bordered popup over a dimmed copy of the
-//! screen shown before, the fields that an administrator types the name
-//! and password into, and what each key does. The name and the password
+//! `OnAuthorize`, shown as `[authorize]` lines below the cursor of its
+//! console's terminal, over that terminal's screen dimmed; the fields
+//! that an administrator types the name and the password into, the
+//! password shown as one `*` per character; what each key does; and the
+//! lines that the terminal keeps afterwards. The name and the password
 //! are overwritten with zeros when the prompt is dropped.
 
 use crate::emulator::cell::{Cell, DIM};
@@ -10,13 +12,14 @@ use crate::emulator::screen::Screen;
 /// The longest name and password that `Answer` takes.
 const NAME_MAX: usize = 32;
 const PASSWORD_MAX: usize = 1024;
-/// The widest the popup gets, with its border.
-const POPUP_MAX: usize = 64;
-const FAILED: &str = "Authorization failed";
+const PREFIX: &str = "[authorize] ";
+const FAILED: &str = "authorization failed";
 
 /// What `OnAuthorize` asks.
 pub struct Request {
     pub request: u32,
+    /// The text console of the client's session.
+    pub console: u8,
     pub app_id: String,
     pub action: String,
     pub reason: String,
@@ -42,10 +45,14 @@ enum Field {
 
 pub struct Prompt {
     pub request: Request,
-    /// The screen shown before, by row and column.
+    /// The terminal's screen, by row and column.
     background: Vec<Cell>,
     cols: usize,
     rows: usize,
+    /// The row that the lines start on, and whether that is the
+    /// cursor's own row.
+    prompt_row: usize,
+    on_cursor_row: bool,
     typed: String,
     password: String,
     field: Field,
@@ -54,6 +61,8 @@ pub struct Prompt {
     waiting: bool,
     failed: bool,
     stale: bool,
+    /// Whether the terminal has been given the lines already.
+    kept: bool,
 }
 
 /// Overwrites `text` with zeros before it is emptied.
@@ -74,50 +83,40 @@ impl Drop for Prompt {
     }
 }
 
-/// `text` cut into lines of at most `width` characters, at spaces where
-/// it can be.
+/// `text` cut into rows of `width` characters, as a terminal wraps a
+/// long line; at least one row.
 fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split(' ') {
-        let mut word = word.to_string();
-        loop {
-            let used = line.chars().count();
-            let gap = usize::from(used > 0);
-            let len = word.chars().count();
-            if used + gap + len <= width {
-                if gap == 1 {
-                    line.push(' ');
-                }
-                line.push_str(&word);
-                break;
-            }
-            if used > 0 {
-                lines.push(core::mem::take(&mut line));
-                continue;
-            }
-            let head: String = word.chars().take(width).collect();
-            word = word.chars().skip(width).collect();
-            lines.push(head);
-        }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
     }
-    lines.push(line);
-    lines
+    chars
+        .chunks(width.max(1))
+        .map(|c| c.iter().collect())
+        .collect()
 }
 
 impl Prompt {
-    /// The prompt of `request` over the screen shown before, `cols` by
-    /// `rows`, whose cells `cell` gives.
+    /// The prompt of `request` on a terminal whose screen, `cols` by
+    /// `rows`, has the cells that `cell` gives and the cursor at `cursor`.
+    /// The lines start on the cursor's row when the cursor is in the
+    /// first column of an empty row, and otherwise on the row below.
     pub fn new(
         request: Request,
         cols: usize,
         rows: usize,
+        cursor: (usize, usize),
         cell: impl Fn(usize, usize) -> Cell,
     ) -> Prompt {
-        let background = (0..rows)
+        let background: Vec<Cell> = (0..rows)
             .flat_map(|r| (0..cols).map(move |c| (r, c)))
             .map(|(r, c)| cell(r, c))
             .collect();
+        let (row, col) = (cursor.0.min(rows.saturating_sub(1)), cursor.1);
+        let empty = background[row * cols..(row + 1) * cols]
+            .iter()
+            .all(|c| c.ch == ' ');
+        let on_cursor_row = col == 0 && empty;
         let field = match request.name.is_empty() {
             true => Field::Name,
             false => Field::Password,
@@ -127,12 +126,15 @@ impl Prompt {
             background,
             cols,
             rows,
+            prompt_row: if on_cursor_row { row } else { row + 1 },
+            on_cursor_row,
             typed: String::new(),
             password: String::new(),
             field,
             waiting: false,
             failed: false,
             stale: true,
+            kept: false,
         }
     }
 
@@ -178,8 +180,8 @@ impl Prompt {
         Step::Nothing
     }
 
-    /// Notes that `Answer` failed: the popup says so until the prompt
-    /// ends.
+    /// Notes that `Answer` failed: a line says so, which the terminal
+    /// keeps.
     pub fn failed(&mut self) {
         self.failed = true;
         self.stale = true;
@@ -190,89 +192,104 @@ impl Prompt {
         core::mem::replace(&mut self.stale, false)
     }
 
-    /// The lines of the popup, and the line and column of the cursor in
-    /// them, wrapped to `width`.
-    fn lines(&self, width: usize) -> (Vec<String>, Option<(usize, usize)>) {
+    /// The lines, as they show now: the request, the name when it is
+    /// asked for, the password once the name is given, and the failure,
+    /// with the field that the cursor ends, if any.
+    fn lines(&self) -> (Vec<String>, Option<usize>) {
         let r = &self.request;
-        let mut lines = wrap(&format!("Authorize {} for {}", r.action, r.app_id), width);
-        lines.extend(wrap(&r.reason, width));
-        lines.push(String::new());
+        let mut lines = vec![format!(
+            "{PREFIX}{} wants {}: {}",
+            r.app_id, r.action, r.reason
+        )];
         let name = match r.name.is_empty() {
-            true => &self.typed,
+            true => {
+                lines.push(format!("{PREFIX}name: {}", self.typed));
+                &self.typed
+            }
             false => &r.name,
         };
-        let name_line = format!("Name: {name}");
-        let cut: String = name_line.chars().take(width).collect();
-        let name_at = (lines.len(), cut.chars().count());
-        lines.push(cut);
-        // One `*` for each character typed, never the characters.
-        let stars = "*".repeat(self.password.chars().count());
-        let password_line = format!("Password: {stars}");
-        let cut: String = password_line.chars().take(width).collect();
-        let password_at = (lines.len(), cut.chars().count());
-        lines.push(cut);
-        if self.failed {
-            lines.push(String::new());
-            lines.extend(wrap(FAILED, width));
+        let mut cursor = Some(lines.len() - 1);
+        if self.field == Field::Password {
+            let stars = "*".repeat(self.password.chars().count());
+            lines.push(format!("{PREFIX}password for {name}: {stars}"));
+            cursor = Some(lines.len() - 1);
         }
-        let cursor = match (self.waiting || self.failed, self.field) {
-            (true, _) => None,
-            (false, Field::Name) => Some(name_at),
-            (false, Field::Password) => Some(password_at),
-        };
+        if self.failed {
+            lines.push(format!("{PREFIX}{FAILED}"));
+        }
+        if self.waiting || self.failed {
+            cursor = None;
+        }
         (lines, cursor)
     }
 
-    /// The authorization screen: the screen shown before, dimmed, and the
-    /// popup in the middle.
+    /// The authorization screen: the terminal's screen dimmed, scrolled
+    /// up when the lines do not fit below the prompt row, and the lines.
     pub fn screen(&self) -> Screen {
         let (cols, rows) = (self.cols, self.rows);
-        let mut screen = Screen::new(cols, rows);
-        for (i, cell) in self.background.iter().enumerate() {
-            let mut cell = *cell;
-            cell.attrs |= DIM;
-            screen.set_cell(i / cols, i % cols, cell);
+        let (lines, cursor_line) = self.lines();
+        let mut wrapped: Vec<String> = Vec::new();
+        let mut cursor = None;
+        for (i, line) in lines.iter().enumerate() {
+            let rows_of = wrap(line, cols);
+            if Some(i) == cursor_line {
+                let last = rows_of.last().map_or(0, |r| r.chars().count());
+                cursor = Some((wrapped.len() + rows_of.len() - 1, last));
+            }
+            wrapped.extend(rows_of);
         }
-        let outer = POPUP_MAX.min(cols);
-        let inner = outer.saturating_sub(4).max(1);
-        let (lines, cursor) = self.lines(inner);
-        let height = (lines.len() + 2).min(rows);
-        let (top, left) = ((rows - height) / 2, (cols - outer) / 2);
-        let put = |screen: &mut Screen, row: usize, col: usize, ch: char| {
-            let cell = Cell {
-                ch,
-                ..Cell::default()
-            };
-            screen.set_cell(top + row, left + col, cell);
-        };
-        for row in 0..height {
-            for col in 0..outer {
-                let last = (row + 1 == height, col + 1 == outer);
-                let ch = match (row, col, last) {
-                    (0, 0, _) => '┌',
-                    (0, _, (_, true)) => '┐',
-                    (_, 0, (true, _)) => '└',
-                    (_, _, (true, true)) => '┘',
-                    (0, _, _) | (_, _, (true, false)) => '─',
-                    (_, 0, _) | (_, _, (false, true)) => '│',
-                    _ => ' ',
-                };
-                put(&mut screen, row, col, ch);
+        // The lines that fit, the last ones, and how far the screen
+        // scrolls up for them.
+        let skip = wrapped.len().saturating_sub(rows);
+        let shown = &wrapped[skip..];
+        let scroll = (self.prompt_row + shown.len()).saturating_sub(rows);
+        let top = self.prompt_row - scroll.min(self.prompt_row);
+        let mut screen = Screen::new(cols, rows);
+        for r in 0..rows {
+            let from = r + scroll;
+            if from >= rows {
+                break;
+            }
+            for c in 0..cols {
+                let mut cell = self.background[from * cols + c];
+                cell.attrs |= DIM;
+                screen.set_cell(r, c, cell);
             }
         }
-        for (i, line) in lines.iter().enumerate().take(height.saturating_sub(2)) {
-            for (j, ch) in line.chars().enumerate() {
-                put(&mut screen, i + 1, j + 2, ch);
+        for (i, line) in shown.iter().enumerate() {
+            let row = top + i;
+            let chars: Vec<char> = line.chars().collect();
+            for c in 0..cols {
+                let ch = chars.get(c).copied().unwrap_or(' ');
+                let cell = Cell {
+                    ch,
+                    ..Cell::default()
+                };
+                screen.set_cell(row, c, cell);
             }
         }
         match cursor {
-            Some((line, col)) if line + 1 < height => {
-                let at = format!("\x1b[{};{}H", top + line + 2, left + col + 3);
+            Some((line, col)) if line >= skip => {
+                let row = top + line - skip;
+                let at = format!("\x1b[{};{}H", row + 1, col.min(cols - 1) + 1);
                 screen.write(at.as_bytes());
             }
             _ => screen.modes.cursor_visible = false,
         }
         screen
+    }
+
+    /// What the terminal keeps of the prompt, to write to its screen once
+    /// the answer is known, before what its programs write next: the
+    /// lines shown, from the prompt row, and the cursor at the start of
+    /// the row after them. None once it was given.
+    pub fn take_transcript(&mut self) -> Option<String> {
+        if std::mem::replace(&mut self.kept, true) {
+            return None;
+        }
+        let (lines, _) = self.lines();
+        let start = if self.on_cursor_row { "\r" } else { "\r\n" };
+        Some(format!("{start}{}\r\n", lines.join("\r\n")))
     }
 }
 
@@ -283,6 +300,7 @@ mod tests {
     fn request(name: &str) -> Request {
         Request {
             request: 7,
+            console: 1,
             app_id: "system.power".into(),
             action: "power.control".into(),
             reason: "power off".into(),
@@ -290,21 +308,30 @@ mod tests {
         }
     }
 
-    fn prompt(name: &str) -> Prompt {
-        let background = |_, _| Cell {
-            ch: 'x',
+    /// A prompt on a 60 by 6 screen whose first `used` rows hold text,
+    /// with the cursor at `cursor`.
+    fn prompt(name: &str, used: usize, cursor: (usize, usize)) -> Prompt {
+        let cell = move |r: usize, _| Cell {
+            ch: if r < used { 'x' } else { ' ' },
             ..Cell::default()
         };
-        Prompt::new(request(name), 40, 12, background)
+        Prompt::new(request(name), 60, 6, cursor, cell)
     }
 
-    fn row(screen: &Screen, row: usize) -> String {
-        (0..screen.cols()).map(|c| screen.cell(row, c).ch).collect()
+    fn rows(screen: &Screen) -> Vec<String> {
+        (0..screen.rows())
+            .map(|r| {
+                (0..screen.cols())
+                    .map(|c| screen.cell(r, c).ch)
+                    .collect::<String>()
+            })
+            .map(|r| r.trim_end().to_string())
+            .collect()
     }
 
     #[test]
     fn asks_for_the_name_then_the_password() {
-        let mut p = prompt("");
+        let mut p = prompt("", 1, (1, 0));
         assert_eq!(p.key(b"ad"), Step::Nothing);
         assert_eq!(p.key(b"x\x7fa"), Step::Nothing);
         assert_eq!(p.key(b"\r"), Step::Nothing);
@@ -316,7 +343,7 @@ mod tests {
 
     #[test]
     fn takes_only_the_password_for_a_named_administrator() {
-        let mut p = prompt("ada");
+        let mut p = prompt("ada", 1, (1, 0));
         assert_eq!(p.key("pä\x15pw".as_bytes()), Step::Nothing);
         assert_eq!(p.key("ä".as_bytes()), Step::Nothing);
         assert_eq!(p.key(b"\n"), Step::Answer("ada".into(), "pwä".into()));
@@ -324,59 +351,78 @@ mod tests {
 
     #[test]
     fn cancels_on_escape_but_not_on_arrows() {
-        let mut p = prompt("");
+        let mut p = prompt("", 1, (1, 0));
         assert_eq!(p.key(b"\x1b[A"), Step::Nothing);
         assert_eq!(p.key(b"\x1b"), Step::Cancel);
     }
 
     #[test]
-    fn draws_the_popup_over_the_dimmed_screen() {
-        let mut p = prompt("");
+    fn writes_the_lines_on_the_empty_cursor_row() {
+        let mut p = prompt("", 1, (1, 0));
         p.key(b"ad");
         let screen = p.screen();
-        assert!(screen.cell(0, 0).attrs & DIM != 0 && screen.cell(0, 0).ch == 'x');
-        let rows: Vec<String> = (0..12).map(|r| row(&screen, r)).collect();
-        let popup: Vec<&str> = rows
-            .iter()
-            .map(|r| r.trim_matches('x'))
-            .filter(|r| r.starts_with(['┌', '│', '└']))
-            .collect();
-        assert_eq!(popup[0], format!("┌{}┐", "─".repeat(38)));
+        let shown = rows(&screen);
+        assert_eq!(shown[0], "x".repeat(60));
+        assert!(screen.cell(0, 0).attrs & DIM != 0);
         assert_eq!(
-            popup[1].trim_end_matches('│').trim(),
-            "│ Authorize power.control for"
+            shown[1],
+            "[authorize] system.power wants power.control: power off"
         );
-        assert_eq!(popup[2].trim_end_matches('│').trim(), "│ system.power");
-        assert_eq!(popup[3].trim_end_matches('│').trim(), "│ power off");
-        assert_eq!(popup[5].trim_end_matches('│').trim(), "│ Name: ad");
-        assert_eq!(popup[6].trim_end_matches('│').trim(), "│ Password:");
-        p.key("\rqä".as_bytes());
-        let typed = p.screen();
-        let rows: Vec<String> = (0..12).map(|r| row(&typed, r)).collect();
-        let password = rows.iter().find(|r| r.contains("Password")).unwrap();
-        assert!(password.contains("Password: ** "));
-        assert!(!password.contains(['q', 'ä']));
-        assert!(popup[7].starts_with('└'));
-        assert!(
-            screen
-                .cell(rows.iter().position(|r| r.contains("Name")).unwrap(), 2)
-                .attrs
-                & DIM
-                == 0
-        );
-        let (line, col) = screen.cursor().unwrap();
-        assert!(
-            rows[line].contains("Name: ad") && rows[line][..].chars().nth(col - 1) == Some('d')
-        );
-        p.failed();
-        let failed = p.screen();
-        assert!((0..12).any(|r| row(&failed, r).contains(FAILED)));
-        assert_eq!(failed.cursor(), None);
+        assert_eq!(shown[2], "[authorize] name: ad");
+        assert_eq!(shown[3], "");
+        assert_eq!(screen.cell(2, 0).attrs & DIM, 0);
+        assert_eq!(screen.cursor(), Some((2, 20)));
+        p.key("\rpä".as_bytes());
+        let shown = rows(&p.screen());
+        assert_eq!(shown[3], "[authorize] password for ad: **");
+        assert!(!shown[3].contains('ä'));
     }
 
     #[test]
-    fn wraps_long_words_and_lines() {
-        assert_eq!(wrap("a bb ccc", 4), ["a bb", "ccc"]);
+    fn writes_the_lines_below_a_row_with_text_and_scrolls() {
+        // The cursor after text on the last row but one: the lines start
+        // below it, and the screen scrolls up for the ones that do not
+        // fit.
+        let mut p = prompt("ada", 5, (4, 3));
+        p.key(b"pw");
+        let shown = rows(&p.screen());
+        assert_eq!(
+            &shown[..3],
+            ["x".repeat(60), "x".repeat(60), "x".repeat(60)]
+        );
+        assert_eq!(shown[3], "x".repeat(60));
+        assert_eq!(
+            shown[4],
+            "[authorize] system.power wants power.control: power off"
+        );
+        assert_eq!(shown[5], "[authorize] password for ada: **");
+    }
+
+    #[test]
+    fn keeps_the_lines_with_stars_and_the_failure() {
+        let mut p = prompt("ada", 1, (1, 0));
+        p.key(b"pw\r");
+        p.failed();
+        let screen = p.screen();
+        assert_eq!(rows(&screen)[3], "[authorize] authorization failed");
+        assert_eq!(screen.cursor(), None);
+        assert_eq!(
+            p.take_transcript().unwrap(),
+            "\r[authorize] system.power wants power.control: power off\r\n\
+             [authorize] password for ada: **\r\n[authorize] authorization failed\r\n"
+        );
+        assert_eq!(p.take_transcript(), None);
+        let mut below = prompt("ada", 1, (0, 4));
+        assert!(
+            below
+                .take_transcript()
+                .unwrap()
+                .starts_with("\r\n[authorize] ")
+        );
+    }
+
+    #[test]
+    fn wraps_long_lines_as_a_terminal_does() {
         assert_eq!(wrap("abcdefghij", 4), ["abcd", "efgh", "ij"]);
         assert_eq!(wrap("", 4), [""]);
     }
