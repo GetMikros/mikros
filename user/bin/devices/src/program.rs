@@ -2,8 +2,8 @@
 //! `mikros.driver.Devices` of the device manager, and writes what it
 //! got.
 
-use crate::cli::{Arguments, Command, FAILURE, INVALID, SUCCESS};
 use crate::listing::{self, Device};
+use mikros_cli::{Arguments, Command, FAILURE, INVALID, SUCCESS};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::driver::{Devices, DevicesClient};
 use mikros_rt::interfaces::mikros::service::DirectoryClient;

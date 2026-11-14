@@ -257,6 +257,7 @@ dependencies = [
 name = "devices"
 version = "0.0.0"
 dependencies = [
+ "mikros-cli",
  "mikros-rt",
 ]
 
@@ -503,6 +504,10 @@ dependencies = [
 
 [[package]]
 name = "mikros-casefold"
+version = "0.0.0"
+
+[[package]]
+name = "mikros-cli"
 version = "0.0.0"
 
 [[package]]

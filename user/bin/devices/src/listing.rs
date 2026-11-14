@@ -2,7 +2,7 @@
 //! description two spaces apart, or a JSON array with an object per
 //! device.
 
-use crate::cli::json_string;
+use mikros_cli::json_string;
 
 /// A named device.
 #[derive(Debug, PartialEq)]

@@ -1,8 +1,16 @@
 //! What the command-line utilities share: reading their arguments, the
 //! text of `--help`, their exit statuses and error messages, and JSON
-//! strings.
+//! strings. It needs only `alloc`, so that programs on either runtime
+//! can use it.
 
-use std::fmt::Write;
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt::Write;
 
 /// The exit status when the utility did what it was asked.
 pub const SUCCESS: u8 = 0;

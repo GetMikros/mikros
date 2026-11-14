@@ -5,6 +5,9 @@ edition.workspace = true
 license = "MPL-2.0"
 publish = false
 
+[dependencies]
+mikros-cli = { path = "../../lib/cli" }
+
 [target.'cfg(target_os = "mikros")'.dependencies]
 mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 
