@@ -884,6 +884,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "services-devices"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-test",
+]
+
+[[package]]
 name = "services-terminal"
 version = "0.0.0"
 dependencies = [
