@@ -258,6 +258,13 @@ pub async fn serve(
                     let _ = server.server().send_on_session_ended(console);
                 });
             }
+            // No authorization request is open until Authorize asks.
+            TextLoginRequest::Answer(_, r) => {
+                let _ = r.reply(s, Err(Status::NotFound));
+            }
+            TextLoginRequest::Cancel(_, r) => {
+                let _ = r.reply(s, Err(Status::NotFound));
+            }
         }
     }
 }

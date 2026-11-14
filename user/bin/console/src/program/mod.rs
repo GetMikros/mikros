@@ -14,6 +14,7 @@
 //! the system overview fills the screen while Ctrl, Alt and F11 are
 //! held.
 
+mod authorizing;
 mod font;
 mod keyboard;
 mod login;
@@ -90,6 +91,8 @@ pub struct Console {
     /// Woken when the screen changed, and when the held key changed.
     changed: Rc<Notify>,
     keys: Notify,
+    /// The authorization screen and the requests waiting for it.
+    auth: authorizing::Authorizing,
 }
 
 pub(crate) fn now() -> i64 {
@@ -126,8 +129,12 @@ impl Console {
         &self.vts[self.shown.get()]
     }
 
-    /// Shows text console `number`, 1 to 6, as it was left.
+    /// Shows text console `number`, 1 to 6, as it was left, unless the
+    /// authorization screen shows.
     fn switch_to(&self, number: u8) {
+        if self.authorizing() {
+            return;
+        }
         let Some(index) = usize::from(number)
             .checked_sub(1)
             .filter(|&i| i < self.vts.len())
@@ -150,7 +157,8 @@ impl Console {
     /// bottom `PROMPT_ROWS`.
     fn layout(&self) -> Layout {
         let rows = self.grid.get().1;
-        if self.log_held.get() || self.overview_shown() || self.vt().log_only.get() {
+        let whole = self.log_held.get() || self.overview_shown() || self.vt().log_only.get();
+        if self.authorizing() || whole {
             return Layout { log: rows, view: 0 };
         }
         match self.vt().session.get() {
@@ -177,6 +185,9 @@ impl Console {
     /// The screen of the log's rows, `cols` by `rows`, when it changed
     /// or `whole` is set: the system overview's while it shows.
     fn top_screen(&self, cols: usize, rows: usize, whole: bool) -> Option<Screen> {
+        if let Some(prompt) = self.auth.shown.borrow_mut().as_mut() {
+            return (prompt.take_stale() || whole).then(|| prompt.screen());
+        }
         #[cfg(mikros_diag)]
         if self.overview.shown() {
             return (self.overview.take_stale() || whole).then(|| self.overview.screen(cols, rows));
@@ -202,6 +213,10 @@ impl Console {
     /// Takes in `bytes` typed: the terminal of the console shown gets
     /// them, or its login prompt.
     fn input(self: &Rc<Self>, bytes: Vec<u8>) {
+        if self.authorizing() {
+            self.authorize_key(&bytes);
+            return;
+        }
         let vt = self.vt().clone();
         match vt.term() {
             Some(term) => {
@@ -475,11 +490,13 @@ pub fn main() {
         grid: Cell::new((render::MIN_COLS, render::MIN_ROWS)),
         changed: Rc::new(Notify::default()),
         keys: Notify::default(),
+        auth: authorizing::Authorizing::default(),
     });
     let text_login = Rc::new(TextLoginAsyncClient::new(
         ClientEnd::new(text_login),
         reactor.clone(),
     ));
+    *console.auth.text_login.borrow_mut() = Some(text_login.clone());
     spawner.spawn(console.clone().serve_seat(seat));
     spawner.spawn(console.clone().redraw());
     spawner.spawn(logpane::follow(console.clone()));

@@ -123,6 +123,16 @@ impl Screen {
         &self.grid()[row * self.cols + col]
     }
 
+    /// Puts `cell` at `row` and `col` of the screen shown, for a screen
+    /// that the console draws itself.
+    pub fn set_cell(&mut self, row: usize, col: usize, cell: Cell) {
+        if row < self.rows && col < self.cols {
+            let cols = self.cols;
+            self.grid_mut()[row * cols + col] = cell;
+            self.dirty[row] = true;
+        }
+    }
+
     /// The cursor's row and column, when it shows.
     pub fn cursor(&self) -> Option<(usize, usize)> {
         let col = self.cursor.col.min(self.cols - 1);

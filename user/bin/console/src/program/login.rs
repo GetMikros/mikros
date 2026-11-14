@@ -7,6 +7,7 @@
 //! prompt shows again. The prompt and setup's terminal take the rows
 //! below the log, and a session's terminal the whole screen.
 
+use crate::authorize::Request;
 use crate::emulator::screen::Screen;
 use crate::program::Console;
 use crate::program::term::Term;
@@ -106,14 +107,26 @@ async fn show_terminal(console: &Rc<Console>, vt: &Vt) -> Option<Rc<Term>> {
     Some(term)
 }
 
-/// Reads the session manager's events, and wakes the console that
-/// `OnSessionEnded` names, until it closes `TextLogin`; then wakes every
-/// console.
+/// Reads the session manager's events: wakes the console that
+/// `OnSessionEnded` names, and shows and ends authorization requests,
+/// until it closes `TextLogin`; then wakes every console.
 pub async fn events(console: Rc<Console>, text_login: Rc<TextLoginAsyncClient>) {
-    while let Ok(TextLoginEvent::OnSessionEnded(e)) = text_login.next_event().await {
-        let index = usize::from(e.console).wrapping_sub(1);
-        if let Some(vt) = console.vts.get(index) {
-            vt.ended.notify();
+    while let Ok(event) = text_login.next_event().await {
+        match event {
+            TextLoginEvent::OnSessionEnded(e) => {
+                let index = usize::from(e.console).wrapping_sub(1);
+                if let Some(vt) = console.vts.get(index) {
+                    vt.ended.notify();
+                }
+            }
+            TextLoginEvent::OnAuthorize(e) => console.authorize(Request {
+                request: e.request,
+                app_id: e.app_id,
+                action: e.action,
+                reason: e.reason,
+                name: e.name,
+            }),
+            TextLoginEvent::OnAuthorizeEnded(e) => console.authorize_ended(e.request),
         }
     }
     console.closed.set(true);

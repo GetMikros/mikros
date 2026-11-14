@@ -10,6 +10,7 @@
 // `emulator` uses only what the alloc library has of std.
 extern crate alloc;
 
+mod authorize;
 mod emulator;
 #[cfg(target_os = "mikros")]
 mod program;
