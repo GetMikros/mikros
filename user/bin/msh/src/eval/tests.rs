@@ -172,6 +172,40 @@ fn sets_reads_and_changes_variables() {
 }
 
 #[test]
+fn removes_from_lists_and_assigns_to_items_and_fields() {
+    assert_eq!(ok("let l = [1 2 1 3]\nl -= 1\nprint $l"), "2\n3\n");
+    assert_eq!(ok("let l = [a b]\nl.1 = 'x'\nprint $l"), "a\nx\n");
+    let cfg = "let cfg = {servers: [{port: 1, tags: [a b]}]}\n";
+    let out = |source: &str| ok(&format!("{cfg}{source}"));
+    assert_eq!(
+        out("cfg.servers.0.port = 80\nprint $cfg.servers.0.port"),
+        "80\n"
+    );
+    assert_eq!(
+        out("cfg.servers.0.tags += 'c'\ncfg.servers.0.tags -= 'a'\nprint $cfg.servers.0.tags"),
+        "b\nc\n"
+    );
+    // `=` adds a field that a record lacks.
+    assert_eq!(out("cfg.name = 'x'\nprint $cfg.name"), "x\n");
+    let mut s = shell();
+    run(&mut s, "env.PATH.0 = '/opt/bin'\nenv.PATH -= '/usr/bin'").unwrap();
+    assert_eq!(run(&mut s, "print $env.PATH").unwrap(), "/opt/bin\n");
+    let failure = |source: &str| error(&format!("{cfg}{source}")).message;
+    assert_eq!(failure("cfg.servers.5 = 1"), "the list has no item 5");
+    assert_eq!(failure("cfg.servers.0.port.x = 1"), "a int has no fields");
+    assert_eq!(failure("cfg.a.b = 1"), "the record has no field `a`");
+    assert_eq!(failure("cfg.a += 1"), "the record has no field `a`");
+    assert_eq!(
+        failure("let s = 'ab'\ns -= 'b'"),
+        "`-=` removes from a list, not a string"
+    );
+    assert_eq!(
+        failure("nope.a = 1"),
+        "`$nope` is not set; `let` creates it"
+    );
+}
+
+#[test]
 fn keeps_path_a_list_and_passes_the_environment() {
     let mut s = shell();
     run(

@@ -20,10 +20,11 @@ pub enum StatementKind {
         name: String,
         value: Expr,
     },
-    /// `name = value`, `name += value`, `env.NAME = value`.
+    /// `name = value`, `name += value` or `name -= value`, where the
+    /// target may be `env.NAME` and have a path, as `cfg.port` does.
     Assign {
-        target: Target,
-        append: bool,
+        target: Variable,
+        op: AssignOp,
         value: Expr,
     },
     /// A pipeline of commands, perhaps run in the background.
@@ -59,11 +60,15 @@ pub enum StatementKind {
     Return(Option<Expr>),
 }
 
-/// What an assignment changes.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Target {
-    Variable(String),
-    Environment(String),
+/// How an assignment changes its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssignOp {
+    /// `=`
+    Set,
+    /// `+=`
+    Append,
+    /// `-=`
+    Remove,
 }
 
 /// The condition of `if` and `while`.

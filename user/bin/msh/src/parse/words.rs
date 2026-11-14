@@ -275,6 +275,16 @@ impl Parser<'_> {
             }
             _ => (false, name),
         };
+        Ok(Variable {
+            environment,
+            name,
+            path: self.path()?,
+            spread: false,
+        })
+    }
+
+    /// The `.name` and `.0` accesses that follow a variable's name.
+    pub(super) fn path(&mut self) -> Result<Vec<Access>> {
         let mut path = Vec::new();
         while self.peek() == Some('.') && !self.looking_at("...") {
             match self.peek_at(1) {
@@ -293,12 +303,7 @@ impl Parser<'_> {
                 _ => break,
             }
         }
-        Ok(Variable {
-            environment,
-            name,
-            path,
-            spread: false,
-        })
+        Ok(path)
     }
 
     /// A variable's name: letters, digits and `_`.

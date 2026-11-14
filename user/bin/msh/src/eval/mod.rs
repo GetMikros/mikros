@@ -405,13 +405,9 @@ impl<S: System> Shell<S> {
                 self.define(name, value);
                 Ok(Value::Null)
             }
-            StatementKind::Assign {
-                target,
-                append,
-                value,
-            } => {
+            StatementKind::Assign { target, op, value } => {
                 let value = self.eval(value)?;
-                self.assign(target, *append, value)?;
+                self.assign(target, *op, value)?;
                 Ok(Value::Null)
             }
             StatementKind::Pipeline(p) => self.pipeline(p, false),
@@ -518,45 +514,32 @@ impl<S: System> Shell<S> {
         }
     }
 
-    fn assign(&mut self, target: &Target, append: bool, value: Value) -> Result<(), Flow> {
-        let current = match target {
-            Target::Variable(name) => self.lookup(name).cloned(),
-            Target::Environment(name) => self.env(name).cloned(),
+    /// Changes `target`, or the item or field its path names, with `op`
+    /// and `value`. Only `=` creates: an environment variable, or the
+    /// last field of the path in a record.
+    fn assign(&mut self, target: &Variable, op: AssignOp, value: Value) -> Result<(), Flow> {
+        let current = match target.environment {
+            true => self.env(&target.name).cloned(),
+            false => self.lookup(&target.name).cloned(),
         };
-        let new = match (append, current) {
-            (false, Some(_)) => value,
-            (false, None) if matches!(target, Target::Environment(_)) => value,
-            (_, None) => {
-                let name = match target {
-                    Target::Variable(n) => format!("${n}"),
-                    Target::Environment(n) => format!("$env.{n}"),
+        let mut whole = match current {
+            Some(whole) => whole,
+            None if target.environment && target.path.is_empty() && op == AssignOp::Set => {
+                self.set_env(&target.name, value);
+                return Ok(());
+            }
+            None => {
+                let name = match target.environment {
+                    true => format!("$env.{}", target.name),
+                    false => format!("${}", target.name),
                 };
                 return Err(self.fail(format!("`{name}` is not set; `let` creates it")));
             }
-            (true, Some(Value::List(mut items))) => {
-                items.push(value);
-                Value::List(items)
-            }
-            (true, Some(Value::String(text))) => match value {
-                Value::String(more) => Value::String(text + &more),
-                other => {
-                    return Err(
-                        self.fail(format!("`+=` cannot add a {} to a string", other.kind()))
-                    );
-                }
-            },
-            (true, Some(other)) => {
-                return Err(self.fail(format!(
-                    "`+=` appends to a list or a string, not a {}",
-                    other.kind()
-                )));
-            }
         };
-        match target {
-            Target::Variable(name) => {
-                *self.lookup_mut(name).expect("looked up") = new;
-            }
-            Target::Environment(name) => self.set_env(name, new),
+        change(&mut whole, &target.path, op, value).map_err(|e| self.fail(e))?;
+        match target.environment {
+            true => self.set_env(&target.name, whole),
+            false => *self.lookup_mut(&target.name).expect("looked up") = whole,
         }
         Ok(())
     }
@@ -577,6 +560,62 @@ impl<S: System> Shell<S> {
             },
         }
     }
+}
+
+/// Changes the item or field of `value` that `path` names with `op` and
+/// `new`, adding the last field of the path to a record for `=`.
+fn change(value: &mut Value, path: &[Access], op: AssignOp, new: Value) -> Result<(), String> {
+    let Some((access, rest)) = path.split_first() else {
+        *value = combine(op, std::mem::replace(value, Value::Null), new)?;
+        return Ok(());
+    };
+    match (access, value) {
+        (Access::Field(name), Value::Record(fields)) => {
+            match fields.iter_mut().find(|(k, _)| k == name) {
+                Some((_, v)) => change(v, rest, op, new),
+                None if rest.is_empty() && op == AssignOp::Set => {
+                    fields.push((name.clone(), new));
+                    Ok(())
+                }
+                None => Err(format!("the record has no field `{name}`")),
+            }
+        }
+        (Access::Item(index), Value::List(items)) => match items.get_mut(*index) {
+            Some(v) => change(v, rest, op, new),
+            None => Err(format!("the list has no item {index}")),
+        },
+        (Access::Field(_), other) => Err(format!("a {} has no fields", other.kind())),
+        (Access::Item(_), other) => Err(format!("a {} has no items", other.kind())),
+    }
+}
+
+/// `current` changed by `op` with `new`: replaced, appended to, or with
+/// every item equal to `new` removed.
+fn combine(op: AssignOp, current: Value, new: Value) -> Result<Value, String> {
+    Ok(match (op, current) {
+        (AssignOp::Set, _) => new,
+        (AssignOp::Append, Value::List(mut items)) => {
+            items.push(new);
+            Value::List(items)
+        }
+        (AssignOp::Append, Value::String(text)) => match new {
+            Value::String(more) => Value::String(text + &more),
+            other => return Err(format!("`+=` cannot add a {} to a string", other.kind())),
+        },
+        (AssignOp::Append, other) => {
+            return Err(format!(
+                "`+=` appends to a list or a string, not a {}",
+                other.kind()
+            ));
+        }
+        (AssignOp::Remove, Value::List(mut items)) => {
+            items.retain(|item| !value::equal(item, &new));
+            Value::List(items)
+        }
+        (AssignOp::Remove, other) => {
+            return Err(format!("`-=` removes from a list, not a {}", other.kind()));
+        }
+    })
 }
 
 #[cfg(test)]

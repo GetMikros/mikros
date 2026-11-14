@@ -276,7 +276,8 @@ impl Parser<'_> {
         Ok(StatementKind::Pipeline(self.pipeline(false)?))
     }
 
-    /// `name = value`, `name += value` or `env.NAME = value`, if one
+    /// `name = value`, `name += value`, `name -= value` or the same with
+    /// `env.NAME`, either with a path such as `.port` or `.0`, if one
     /// starts here.
     fn assignment(&mut self) -> Result<Option<StatementKind>> {
         let Some(name) = self.peek_name() else {
@@ -284,12 +285,12 @@ impl Parser<'_> {
         };
         let start = self.pos;
         self.pos += name.chars().count();
-        let target = if name == "env" && self.peek() == Some('.') {
+        let (environment, name) = if name == "env" && self.peek() == Some('.') {
             self.pos += 1;
             match self.peek_name() {
                 Some(var) => {
                     self.pos += var.chars().count();
-                    Target::Environment(var)
+                    (true, var)
                 }
                 None => {
                     self.pos = start;
@@ -297,7 +298,18 @@ impl Parser<'_> {
                 }
             }
         } else {
-            Target::Variable(name)
+            (false, name)
+        };
+        // A word such as `file.99999999999999999999` is no target.
+        let Ok(path) = self.path() else {
+            self.pos = start;
+            return Ok(None);
+        };
+        let target = Variable {
+            environment,
+            name,
+            path,
+            spread: false,
         };
         let tight = self.peek() == Some('=') && self.peek_at(1).is_some_and(|c| !c.is_whitespace());
         if tight && self.command_follows() {
@@ -306,13 +318,17 @@ impl Parser<'_> {
             return Ok(None);
         }
         self.skip_spaces();
-        let append = self.looking_at("+=");
-        let assigns = append || (self.peek() == Some('=') && self.peek_at(1) != Some('='));
-        if !assigns {
+        let op = if self.looking_at("+=") {
+            AssignOp::Append
+        } else if self.looking_at("-=") {
+            AssignOp::Remove
+        } else if self.peek() == Some('=') && self.peek_at(1) != Some('=') {
+            AssignOp::Set
+        } else {
             self.pos = start;
             return Ok(None);
-        }
-        self.pos += if append { 2 } else { 1 };
+        };
+        self.pos += if op == AssignOp::Set { 1 } else { 2 };
         let value = match tight {
             true => self.tight_value()?,
             false => {
@@ -320,11 +336,7 @@ impl Parser<'_> {
                 self.expression()?
             }
         };
-        Ok(Some(StatementKind::Assign {
-            target,
-            append,
-            value,
-        }))
+        Ok(Some(StatementKind::Assign { target, op, value }))
     }
 
     /// The value of a `NAME=value` word with no command after it, read

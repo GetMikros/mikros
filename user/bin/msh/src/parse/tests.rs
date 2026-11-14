@@ -178,17 +178,36 @@ fn reads_let_assignments_and_environment() {
     assert!(matches!(one("let n = 3"), StatementKind::Let { name, .. } if name == "n"));
     assert!(matches!(
         one("n += 1"),
-        StatementKind::Assign { target: Target::Variable(n), append: true, .. } if n == "n"
+        StatementKind::Assign { target: Variable { name, environment: false, .. }, op: AssignOp::Append, .. } if name == "n"
     ));
     assert!(matches!(
         one("env.PATH = null"),
-        StatementKind::Assign { target: Target::Environment(n), append: false, .. } if n == "PATH"
+        StatementKind::Assign { target: Variable { name, environment: true, .. }, op: AssignOp::Set, .. } if name == "PATH"
     ));
     let s = simple("LANG=C TZ=UTC date");
     assert_eq!(s.environment.len(), 2);
     assert_eq!(s.words, [bare("date")]);
     // `==` is a comparison, not an assignment.
     assert!(matches!(one("a == b"), StatementKind::Pipeline(_)));
+}
+
+#[test]
+fn reads_paths_and_removal_in_assignments() {
+    let StatementKind::Assign { target, op, .. } = one("cfg.servers.0.port -= 80") else {
+        panic!()
+    };
+    assert_eq!(op, AssignOp::Remove);
+    assert_eq!(target.name, "cfg");
+    assert_eq!(
+        target.path,
+        [
+            Access::Field("servers".into()),
+            Access::Item(0),
+            Access::Field("port".into())
+        ]
+    );
+    // A word with dots that no assignment operator follows is a command.
+    assert!(matches!(one("run.sh a.b"), StatementKind::Pipeline(_)));
 }
 
 #[test]
