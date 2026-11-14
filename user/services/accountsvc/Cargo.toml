@@ -1,5 +1,5 @@
 [package]
-name = "accounts"
+name = "accountsvc"
 version.workspace = true
 edition.workspace = true
 license = "MPL-2.0"
@@ -13,4 +13,4 @@ mikros-userdb = { path = "../../lib/userdb" }
 kind = "service"
 image = "system"
 runtime = "rt"
-manifest = "accounts.yaml"
+manifest = "accountsvc.yaml"

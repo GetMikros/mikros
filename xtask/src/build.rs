@@ -758,12 +758,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // the accounts service, with their manifests, the probe's
             // binary with the manifests of its five services, and a
             // users file in /var/lib/accounts.
-            let accounts = user_build("accounts", kind)?;
+            let accounts = user_build("accountsvc", kind)?;
             println!("built    {}", accounts.display());
             let accounts_probe = user_build("accounts-probe", kind)?;
             println!("built    {}", accounts_probe.display());
             let accounts_manifest =
-                crate::workspace_root().join("user/services/accounts/accounts.yaml");
+                crate::workspace_root().join("user/services/accountsvc/accountsvc.yaml");
             let probe_dir = crate::workspace_root().join("user/tests/accounts-probe");
             let accounts_probe_manifest = probe_dir.join("accounts-probe.yaml");
             let accounts_guest_manifest = probe_dir.join("accounts-guest.yaml");
@@ -783,9 +783,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ),
                     ("usr/bin/tmpfs", tmpfs.as_path()),
                     ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
-                    ("usr/bin/accounts", accounts.as_path()),
+                    ("usr/bin/accountsvc", accounts.as_path()),
                     (
-                        "usr/lib/services/accounts.yaml",
+                        "usr/lib/services/accountsvc.yaml",
                         accounts_manifest.as_path(),
                     ),
                     ("usr/bin/accounts-probe", accounts_probe.as_path()),
@@ -1073,9 +1073,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "usr/lib/services/tmpfs.yaml".to_owned(),
                     tmpfs_manifest.clone(),
                 ),
-                ("usr/bin/accounts".to_owned(), accounts.clone()),
+                ("usr/bin/accountsvc".to_owned(), accounts.clone()),
                 (
-                    "usr/lib/services/accounts.yaml".to_owned(),
+                    "usr/lib/services/accountsvc.yaml".to_owned(),
                     accounts_manifest.clone(),
                 ),
                 ("var/lib/accounts/users".to_owned(), accounts_users(kind)?),

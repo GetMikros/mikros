@@ -1,7 +1,7 @@
 # The service manifest of the accounts service, installed as
-# usr/lib/services/accounts.yaml.
-name: accounts
-binary: /usr/bin/accounts
+# usr/lib/services/accountsvc.yaml.
+name: accountsvc
+binary: /usr/bin/accountsvc
 start: boot
 after: [tmpfs]
 provides:

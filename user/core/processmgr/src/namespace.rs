@@ -55,7 +55,7 @@ use mikros_rt::interfaces::mikros::service::{
 /// The accounts service's data directory, which no other process's
 /// manifest entry may be, lie in, or hold.
 const ACCOUNTS_DATA: &str = "/var/lib/accounts";
-const ACCOUNTS_APP: &str = "system.accounts";
+const ACCOUNTS_APP: &str = "system.accountsvc";
 /// The app ID of the temporary file system service.
 const TMPFS_APP: &str = "system.tmpfs";
 /// The app ID of command-line tools.

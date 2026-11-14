@@ -3,18 +3,18 @@
 version = 4
 
 [[package]]
-name = "accounts"
-version = "0.0.0"
-dependencies = [
- "mikros-rt",
- "mikros-userdb",
-]
-
-[[package]]
 name = "accounts-probe"
 version = "0.0.0"
 dependencies = [
  "mikros-rt",
+]
+
+[[package]]
+name = "accountsvc"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+ "mikros-userdb",
 ]
 
 [[package]]

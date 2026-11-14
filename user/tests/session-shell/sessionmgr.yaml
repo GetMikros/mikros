@@ -5,7 +5,7 @@
 name: sessionmgr
 binary: /usr/bin/sessionmgr
 start: boot
-after: [devicemgr, accounts]
+after: [devicemgr, accountsvc]
 boot_handles: [log_manage]
 # To start the text console, the setup program and users' shells,
 # and the dynamic linker they load.
