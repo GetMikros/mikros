@@ -4,6 +4,7 @@
 //! Each console has at most one session, and the sessions of different
 //! consoles run at the same time.
 
+use crate::authorize::Requests;
 use crate::spawn::{block, standard};
 use crate::{SECOND, now};
 use alloc::collections::BTreeSet;
@@ -20,8 +21,9 @@ use mikros_rt::interfaces::mikros::process::{
     LauncherAsyncClient, SpawnRequest, StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::session::{
-    AccountsAsyncClient, TextLogin, TextLoginAsyncServer, TextLoginLoginResponse,
-    TextLoginNeedsSetupResponse, TextLoginRequest, TextLoginRunSetupResponse,
+    AccountsAsyncClient, TextLogin, TextLoginAnswerResponse, TextLoginAsyncServer,
+    TextLoginCancelResponse, TextLoginLoginResponse, TextLoginNeedsSetupResponse, TextLoginRequest,
+    TextLoginRunSetupResponse,
 };
 
 const SETUP: &str = "/usr/bin/setup";
@@ -170,10 +172,12 @@ pub async fn serve(
     end: ServerEnd<TextLogin>,
     accounts: AccountsAsyncClient,
     launcher: Rc<LauncherAsyncClient>,
+    requests: Rc<Requests>,
     reactor: Reactor,
     spawner: Spawner,
 ) {
     let server = Rc::new(TextLoginAsyncServer::new(end, reactor.clone()));
+    *requests.text_login.borrow_mut() = Some(server.clone());
     let accounts = Rc::new(accounts);
     // The consoles on which a session runs.
     let running: Rc<RefCell<BTreeSet<u8>>> = Rc::new(RefCell::new(BTreeSet::new()));
@@ -248,22 +252,27 @@ pub async fn serve(
                     q.name
                 );
                 running.borrow_mut().insert(console);
+                // The session's login session has the shell's process ID.
+                requests.sessions.borrow_mut().insert(console, pid);
                 let _ = r.reply(s, Ok(TextLoginLoginResponse {}));
                 let (launcher, reactor) = (launcher.clone(), reactor.clone());
                 let (server, running) = (server.clone(), running.clone());
+                let requests = requests.clone();
                 spawner.spawn(async move {
                     end_session(&launcher, &reactor, pid).await;
                     mikros_rt::log!(Info, "sessionmgr: ended session {pid}");
+                    requests.sessions.borrow_mut().remove(&console);
                     running.borrow_mut().remove(&console);
                     let _ = server.server().send_on_session_ended(console);
                 });
             }
-            // No authorization request is open until Authorize asks.
-            TextLoginRequest::Answer(_, r) => {
-                let _ = r.reply(s, Err(Status::NotFound));
+            TextLoginRequest::Answer(q, r) => {
+                let answered = requests.answer(q.request, q.name, q.password).await;
+                let _ = r.reply(s, answered.map(|()| TextLoginAnswerResponse {}));
             }
-            TextLoginRequest::Cancel(_, r) => {
-                let _ = r.reply(s, Err(Status::NotFound));
+            TextLoginRequest::Cancel(q, r) => {
+                let cancelled = requests.cancel(q.request);
+                let _ = r.reply(s, cancelled.map(|()| TextLoginCancelResponse {}));
             }
         }
     }

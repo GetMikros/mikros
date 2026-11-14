@@ -19,3 +19,9 @@ permissions:
   - gpu.display
   - input.seat
   - power.control
+  # To find the console of an Authorize client's login session, and
+  # whether the client still runs.
+  - process.list_all
+provides:
+  - protocol: mikros.session.Authorization
+    permission: session.authorize

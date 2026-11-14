@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+mod authorize;
 mod login;
 mod seat;
 mod spawn;
@@ -22,7 +23,9 @@ use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::process::{
     HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle,
 };
-use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
+use mikros_rt::interfaces::mikros::service::{
+    DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
+};
 use mikros_rt::interfaces::mikros::session::{
     Accounts, AccountsAsyncClient, Seat, SeatAsyncClient, TextLogin,
 };
@@ -33,6 +36,8 @@ mikros_rt::raw_main!(main);
 const CONSOLE: &str = "/usr/bin/console";
 const CONSOLE_APP: &str = "system.console";
 const ACCOUNTS: &str = "mikros.session.Accounts";
+/// The protocol that the session manager provides.
+const AUTHORIZATION: &str = "mikros.session.Authorization";
 /// The `USER` startup handle IDs of the console's channels.
 const TEXT_LOGIN_ID: u32 = 3;
 const SEAT_ID: u32 = 7;
@@ -55,9 +60,14 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let reactor = executor.reactor().clone();
     let spawner = executor.spawner().clone();
     let received = executor.block_on(managed::receive_async(bootstrap, reactor.clone(), |_| {}));
-    let Ok(managed) = received else {
+    let Ok(mut managed) = received else {
         return 1;
     };
+    let provider = managed
+        .handles
+        .iter()
+        .position(|h| h.role == HandleRole::Provider)
+        .map(|at| managed.handles.remove(at).handle);
     // A kernel log handle, which a test image gives, is used; otherwise
     // messages go to the log service.
     match managed
@@ -85,6 +95,35 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             return;
         }
         let accounts = AccountsAsyncClient::new(accounts, reactor.clone());
+        let Ok((authorizing, server)) = endpoints::<Accounts>() else {
+            return;
+        };
+        let connected = directory
+            .connect(ACCOUNTS.into(), None, server.into_handle())
+            .await;
+        if !matches!(connected, Ok(Ok(_))) {
+            return;
+        }
+        let requests = Rc::new(authorize::Requests::new(
+            Rc::new(AccountsAsyncClient::new(authorizing, reactor.clone())),
+            launcher.clone(),
+            reactor.clone(),
+        ));
+        if let Some(provider) = provider {
+            let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
+            let (requests, spawner) = (requests.clone(), spawner.clone());
+            spawner.clone().spawn(async move {
+                while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
+                    // Other protocols and named instances are not ours;
+                    // dropping the server end closes the connection.
+                    if c.protocol == AUTHORIZATION && c.instance.is_none() {
+                        let end = ServerEnd::new(c.server);
+                        let serving = authorize::serve(requests.clone(), end, spawner.clone());
+                        spawner.spawn(serving);
+                    }
+                }
+            });
+        }
         let (Ok((seat, seat_server)), Ok((login_client, login_server))) =
             (endpoints::<Seat>(), endpoints::<TextLogin>())
         else {
@@ -132,7 +171,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         let (d, r) = (directory.clone(), reactor.clone());
         spawner.spawn(async move { seat::serve(&d, &r, seat).await });
         let login = ServerEnd::new(login_server.into_handle());
-        login::serve(login, accounts, launcher, reactor, spawner).await;
+        login::serve(login, accounts, launcher, requests, reactor, spawner).await;
         mikros_rt::log!(Error, "sessionmgr: the console closed TextLogin");
     });
     0
