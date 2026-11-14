@@ -17,7 +17,10 @@ pub struct Menu {
     pub columns: usize,
 }
 
-const DIM: &str = "\x1b[2m";
+/// Dark grey, for the suggestion and other text shown dimmed: a colour
+/// rather than faint text, which some terminals, Mikros's console among
+/// them, draw as normal text.
+const GREY: &str = "\x1b[90m";
 const REVERSE: &str = "\x1b[7m";
 const NORMAL: &str = "\x1b[0m";
 
@@ -114,7 +117,7 @@ impl Menu {
                 line.push_str(if on { REVERSE } else { "" });
                 line.push_str(display);
                 line.push_str(NORMAL);
-                line.push_str(DIM);
+                line.push_str(GREY);
                 line.push_str(description);
                 line.push_str(NORMAL);
                 line.push_str(&pad);
@@ -123,7 +126,7 @@ impl Menu {
         }
         if shown < total {
             let more = total - shown;
-            rows.push(format!("{DIM}…and {more} more rows{NORMAL}"));
+            rows.push(format!("{GREY}…and {more} more rows{NORMAL}"));
         }
         rows
     }

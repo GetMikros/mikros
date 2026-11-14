@@ -29,7 +29,10 @@ pub struct Frame {
     pub cursor_row: usize,
 }
 
-const DIM: &str = "\x1b[2m";
+/// Dark grey, for the suggestion and other text shown dimmed: a colour
+/// rather than faint text, which some terminals, Mikros's console among
+/// them, draw as normal text.
+const GREY: &str = "\x1b[90m";
 const NORMAL: &str = "\x1b[0m";
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
@@ -165,7 +168,7 @@ pub fn draw(view: &View, columns: usize, previous_row: usize) -> Frame {
     }
     let cursor = cursor.unwrap_or(at).settled(columns);
     if !view.suggestion.is_empty() {
-        text.push_str(DIM);
+        text.push_str(GREY);
         for c in view.suggestion.chars().map(shown) {
             match c {
                 '\n' => text.push_str("\r\n"),
@@ -248,7 +251,7 @@ mod tests {
         let f = draw(&v, 80, 2);
         assert_eq!(
             f.text,
-            "\x1b[?25l\r\x1b[2A\x1b[J% ls\x1b[2m -l\x1b[0m\r\x1b[4C\x1b[?25h"
+            "\x1b[?25l\r\x1b[2A\x1b[J% ls\x1b[90m -l\x1b[0m\r\x1b[4C\x1b[?25h"
         );
     }
 

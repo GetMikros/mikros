@@ -57,7 +57,10 @@ pub struct Editor {
     suggested: Option<(String, String)>,
 }
 
-const DIM: &str = "\x1b[2m";
+/// Dark grey, for the suggestion and other text shown dimmed: a colour
+/// rather than faint text, which some terminals, Mikros's console among
+/// them, draw as normal text.
+const GREY: &str = "\x1b[90m";
 const NORMAL: &str = "\x1b[0m";
 
 impl Editor {
@@ -311,7 +314,7 @@ impl Editor {
                 ""
             };
             return vec![format!(
-                "{DIM}{failing}bck-i-search:{NORMAL} {}_",
+                "{GREY}{failing}bck-i-search:{NORMAL} {}_",
                 search.query
             )];
         }
