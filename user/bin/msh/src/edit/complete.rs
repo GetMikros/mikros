@@ -248,6 +248,7 @@ fn quote_names(mut found: Vec<Candidate>, open: Option<char>) -> Vec<Candidate> 
 pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion {
     let (words, open) = words(&line[..cursor]);
     let (start, word) = words.last().cloned().unwrap_or_default();
+    let raw = &line[start..cursor];
     let index = words.len() - 1;
     let mut first = 0;
     while first < index && COMMAND_KEYWORDS.contains(&words[first].1.as_str()) {
@@ -256,7 +257,7 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
     let mut candidates = if word.starts_with('$') && !word.contains('/') {
         // A whole variable that names a folder goes on with its `/`.
         let found = variables(&word, sources);
-        let folder = files(&word, sources, open);
+        let folder = files(&word, raw, sources, open);
         match !folder.is_empty() && found.iter().all(|c| c.text == word) {
             true => folder,
             false => found,
@@ -264,7 +265,7 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
     } else if index == first && !word.contains('/') {
         quote_names(commands(&word, sources), open)
     } else if index == first {
-        files(&word, sources, open)
+        files(&word, raw, sources, open)
     } else if word.starts_with('-') {
         let command = &words[first..index];
         let mut found = options(&word, command, sources);
@@ -288,9 +289,9 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
             .map(|s| candidate(s.clone(), s, Some("subcommand"), true))
             .collect();
         match (kind, found.is_empty()) {
-            (Some(kind), _) => found.extend(by_type(&kind, &word, sources, open)),
+            (Some(kind), _) => found.extend(by_type(&kind, &word, raw, sources, open)),
             // Subcommands are offered without files.
-            (None, true) => found = files(&word, sources, open),
+            (None, true) => found = files(&word, raw, sources, open),
             (None, false) => {}
         }
         found
@@ -360,15 +361,16 @@ fn value_type(declared: &Extern, args: &[(usize, String)]) -> Option<ParamType> 
 fn by_type(
     kind: &ParamType,
     word: &str,
+    raw: &str,
     sources: &dyn Sources,
     open: Option<char>,
 ) -> Vec<Candidate> {
     match kind {
-        ParamType::Folder => files(word, sources, open)
+        ParamType::Folder => files(word, raw, sources, open)
             .into_iter()
             .filter(|c| !c.done)
             .collect(),
-        ParamType::File | ParamType::Path | ParamType::Bool => files(word, sources, open),
+        ParamType::File | ParamType::Path | ParamType::Bool => files(word, raw, sources, open),
         ParamType::Command => quote_names(commands(word, sources), open),
         ParamType::Choices(choices) => choices
             .iter()
@@ -427,13 +429,46 @@ fn commands(word: &str, sources: &dyn Sources) -> Vec<Candidate> {
         .collect()
 }
 
-/// The entries of the folder that `word` names up to its last `/`
-/// whose names start as the rest does, hidden ones only for a rest that
-/// starts with `.`, put on the line quoted as needed. The folder is
-/// looked up as `expanded` gives it, and the word keeps its `~` and
-/// variables; one that ends in them goes on with the `/` after them
-/// when they name a folder.
-fn files(word: &str, sources: &dyn Sources, open: Option<char>) -> Vec<Candidate> {
+/// Where the last part of the word `raw`, as typed, starts: after its
+/// last `/` outside quotes.
+fn last_part(raw: &str) -> usize {
+    let mut quote = None;
+    let mut at = 0;
+    for (i, c) in raw.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '/') => at = i + 1,
+            _ => {}
+        }
+    }
+    at
+}
+
+/// `raw` without the quotes around its parts.
+fn unquoted(raw: &str) -> String {
+    let mut quote = None;
+    let mut out = String::new();
+    for c in raw.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '\'' | '"') => quote = Some(c),
+            (_, c) => out.push(c),
+        }
+    }
+    out
+}
+
+/// The entries of the folder that `word`, without its quotes, names up
+/// to its last `/` whose names start as the rest does, hidden ones only
+/// for a rest that starts with `.`. The folder is looked up as
+/// `expanded` gives it. On the line, the word as typed, `raw`, keeps
+/// what comes before its last part, with its quotes, `~` and variables,
+/// and only the name completed is quoted as needed, unless the last part
+/// is inside a quote that is still open. A word that ends in `~` or a
+/// variable goes on with the `/` after it when that names a folder.
+fn files(word: &str, raw: &str, sources: &dyn Sources, open: Option<char>) -> Vec<Candidate> {
     let full = match open {
         Some('\'') => Some(collapsed(word)),
         _ => expanded(word, sources),
@@ -446,7 +481,7 @@ fn files(word: &str, sources: &dyn Sources, open: Option<char>) -> Vec<Candidate
     if full != word && (last.contains('$') || word == "~") {
         return match sources.entries(&full) {
             Some(_) => vec![candidate(
-                format!("{word}/"),
+                format!("{raw}/"),
                 format!("{last}/"),
                 None,
                 false,
@@ -454,10 +489,11 @@ fn files(word: &str, sources: &dyn Sources, open: Option<char>) -> Vec<Candidate
             None => Vec::new(),
         };
     }
-    let (folder, prefix) = match at {
-        Some(at) => (collapsed(&word[..=at]), &word[at + 1..]),
-        None => (String::new(), word),
-    };
+    let prefix = &word[at.map_or(0, |at| at + 1)..];
+    let cut = last_part(raw);
+    let kept = collapsed(&raw[..cut]);
+    let inner = unquoted(&raw[cut..]);
+    let inner_folder = &inner[..inner.rfind('/').map_or(0, |at| at + 1)];
     let full_folder = match full.rfind('/') {
         Some(at) => &full[..=at],
         None => "",
@@ -477,12 +513,8 @@ fn files(word: &str, sources: &dyn Sources, open: Option<char>) -> Vec<Candidate
         .map(|(name, folder_entry)| {
             let slash = if folder_entry { "/" } else { "" };
             let named = format!("{name}{slash}");
-            // What the typed folder expands stays as typed.
-            let text = match folder == full_folder {
-                true => quoted(&format!("{folder}{named}"), open, !folder_entry),
-                false => format!("{folder}{}", quoted(&named, None, !folder_entry)),
-            };
-            candidate(text, named, None, !folder_entry)
+            let last = quoted(&format!("{inner_folder}{named}"), open, !folder_entry);
+            candidate(format!("{kept}{last}"), named, None, !folder_entry)
         })
         .collect()
 }
@@ -729,19 +761,23 @@ extern pick(choice: [red green], target: file, run: command)
 
     #[test]
     fn quotes_names_that_would_not_stay_one_word() {
-        assert_eq!(texts("cat odd/a"), ["'odd/a b.txt'"]);
+        assert_eq!(texts("cat odd/a"), ["odd/'a b.txt'"]);
         assert_eq!(texts("cat odd/pl"), ["odd/plain"]);
         // A folder's quote stays open for the rest of the path.
-        assert_eq!(texts("cd odd/M"), ["'odd/My Docs'/"]);
-        assert_eq!(texts("cat odd/i"), ["\"odd/it's.txt\""]);
-        assert_eq!(texts("cat odd/$"), ["'odd/$x{y}'"]);
+        assert_eq!(texts("cd odd/M"), ["odd/'My Docs'/"]);
+        assert_eq!(texts("cat odd/i"), ["odd/\"it's.txt\""]);
+        assert_eq!(texts("cat odd/$"), ["odd/'$x{y}'"]);
         // A word that starts with a quote is completed inside it.
         assert_eq!(texts("cat 'odd/p"), ["'odd/plain'"]);
         assert_eq!(texts("cat \"odd/$"), ["\"odd/\\$x\\{y}\""]);
         // A folder's quote is closed before its `/`, and a word whose
         // quote was closed goes on quoted anew.
         assert_eq!(texts("cd 'odd/M"), ["'odd/My Docs'/"]);
-        assert_eq!(texts("cd 'odd/My Docs'/"), ["'odd/My Docs/inner'/"]);
+        // A part whose quote is closed stays as typed, and only the
+        // name completed after it is quoted, as it needs.
+        assert_eq!(texts("cd 'odd/My Docs'/"), ["'odd/My Docs'/inner/"]);
+        assert_eq!(texts("cd odd/'My Docs'/i"), ["odd/'My Docs'/inner/"]);
+        assert_eq!(texts("cd odd/'M"), ["odd/'My Docs'/"]);
         // Variables and options are not names.
         assert_eq!(texts("print $env.P"), ["$env.PATH", "$env.PWD"]);
     }
