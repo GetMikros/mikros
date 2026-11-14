@@ -207,17 +207,12 @@ fn reader<'a>(line: &'a str, sources: &'a dyn Sources) -> Reader<'a> {
     let mut known: HashSet<String> = sources.programs().into_iter().collect();
     known.extend(sources.functions().into_iter().map(|(name, _)| name));
     known.extend(crate::eval::builtins::names().into_iter().map(String::from));
-    let home = sources
-        .environment()
-        .into_iter()
-        .find_map(|(name, value)| (name == "HOME").then_some(value));
     let mut reader = Reader {
         line,
         at: 0,
         styles: vec![Style::Plain; line.len()],
         known,
         sources,
-        home,
         expression: false,
         target: false,
         arguments: None,
@@ -246,8 +241,6 @@ struct Reader<'a> {
     styles: Vec<Style>,
     known: HashSet<String>,
     sources: &'a dyn Sources,
-    /// The folder that `~` stands for.
-    home: Option<String>,
     /// Whether the statement read is an expression, as its first word
     /// tells.
     expression: bool,
@@ -362,6 +355,7 @@ impl Reader<'_> {
         }
         let mut bare = String::new();
         let mut plain = true;
+        let mut quoted = false;
         while let Some(c) = self.peek() {
             if c.is_whitespace() || SPECIAL.contains(c) {
                 break;
@@ -370,6 +364,7 @@ impl Reader<'_> {
                 '\'' | '"' => {
                     self.string(c);
                     plain = false;
+                    quoted = true;
                 }
                 '$' => {
                     self.variable();
@@ -384,9 +379,14 @@ impl Reader<'_> {
             }
         }
         let end = self.at;
-        let kind = match command || target || !plain {
+        // A word of bare text and variables names a path once expanded;
+        // one with strings in it, or whose variables are not known, is
+        // not looked up.
+        let typed = self.line[start..end].to_owned();
+        let looked_up = !quoted && super::complete::expanded(&typed, self.sources).is_some();
+        let kind = match command || target || !looked_up {
             true => None,
-            false => self.argument_type(&bare),
+            false => self.argument_type(&typed),
         };
         let operator = OPERATORS.contains(&bare.as_str())
             || self.expression && ARITHMETIC.contains(&bare.as_str());
@@ -407,7 +407,7 @@ impl Reader<'_> {
                 });
             }
             style
-        } else if !plain || never_missing(&bare) {
+        } else if !looked_up || never_missing(&typed) {
             Style::Argument
         } else if let Some(kind @ (ParamType::Folder | ParamType::File | ParamType::Path)) = &kind {
             // A declared position takes only what is of its kind.
@@ -416,14 +416,14 @@ impl Reader<'_> {
                 ParamType::File => !is_folder,
                 _ => true,
             };
-            match self.file_kind(&bare) {
+            match self.file_kind(&typed) {
                 Some(is_folder) if fits(is_folder) => Style::Path,
-                _ if self.completes(&bare, &fits) => Style::Argument,
+                _ if self.completes(&typed, &fits) => Style::Argument,
                 _ => Style::Error,
             }
-        } else if self.file_kind(&bare).is_some() {
+        } else if self.file_kind(&typed).is_some() {
             Style::Path
-        } else if !target && written_as_path(&bare) && !self.completes(&bare, &|_| true) {
+        } else if !target && written_as_path(&typed) && !self.completes(&typed, &|_| true) {
             Style::Error
         } else {
             Style::Argument
@@ -478,15 +478,9 @@ impl Reader<'_> {
         }
     }
 
-    /// `path` with `~` and `~/` at its start as the home folder, or
-    /// `None` when the home folder is not known.
+    /// `path` as completion expands it, with `~` and its variables.
     fn expanded(&self, path: &str) -> Option<String> {
-        match path.strip_prefix('~') {
-            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-                Some(format!("{}{rest}", self.home.as_deref()?))
-            }
-            _ => Some(path.to_owned()),
-        }
+        super::complete::expanded(path, self.sources)
     }
 
     /// The declared type of the argument `word` of the command read, as
@@ -624,7 +618,7 @@ mod tests {
             vec![("deploy".into(), Vec::new())]
         }
         fn variables(&self) -> Vec<(String, String)> {
-            Vec::new()
+            vec![("here".into(), ".".into())]
         }
         fn environment(&self) -> Vec<(String, String)> {
             vec![("HOME".into(), "/".into())]
@@ -737,6 +731,11 @@ mod tests {
         );
         // A redirection's target need not exist.
         assert_eq!(shown("ls > ./new.txt"), "cc.|.aaaaaaaaa");
+        // Paths are looked up through their variables, which keep their
+        // colour; a variable that is not set leaves the word unchecked.
+        assert_eq!(shown("cat $here/notes.txt"), "ccc.vvvvvpppppppppp");
+        assert_eq!(shown("cd $here/nope"), "cc.vvvvvEEEEE");
+        assert_eq!(shown("cd $nope/x"), "cc.vvvvvaa");
         // A path that an entry still completes is no error yet.
         assert_eq!(shown("cat ./no ./sr /u ./zz"), "ccc.aaaa.aaaa.aa.EEEE");
         assert_eq!(shown("cd sr; cd no"), "cc.aa|.cc.EE");

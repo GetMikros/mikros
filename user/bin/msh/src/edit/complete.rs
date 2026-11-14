@@ -151,6 +151,78 @@ fn quoted(name: &str, open: Option<char>, done: bool) -> String {
     text
 }
 
+/// `word` as the shell expands it before it looks up a path: `~` or
+/// `~/` at its start as `$env.HOME`, and each `$name` and `$env.NAME` as
+/// its value; `None` when one is not set or reads a field, which only
+/// running could tell, so that completion and colours never run
+/// anything.
+pub fn expanded(word: &str, sources: &dyn Sources) -> Option<String> {
+    if !word.contains('$') && !word.starts_with('~') {
+        return Some(word.to_owned());
+    }
+    let environment = sources.environment();
+    let value_of = |name: &str| match name.strip_prefix("env.") {
+        Some(var) => environment
+            .iter()
+            .find(|(n, _)| n == var)
+            .map(|(_, v)| v.clone()),
+        None => sources
+            .variables()
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v),
+    };
+    let name_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    // A value that ends in `/` before a `/`, such as a home folder `/`,
+    // gives one.
+    let joined = |value: String, next: &str| match next.starts_with('/') {
+        true => value.trim_end_matches('/').to_owned(),
+        false => value,
+    };
+    let mut out = String::new();
+    let mut rest = word;
+    if let Some(after) = word.strip_prefix('~')
+        && (after.is_empty() || after.starts_with('/'))
+    {
+        out.push_str(&joined(value_of("env.HOME")?, after));
+        rest = after;
+    }
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let length = after.find(|c| !name_char(c)).unwrap_or(after.len());
+        let mut name = after[..length].to_owned();
+        let mut used = length;
+        if name == "env" && after[used..].starts_with('.') {
+            let var = &after[used + 1..];
+            let length = var.find(|c| !name_char(c)).unwrap_or(var.len());
+            name = format!("env.{}", &var[..length]);
+            used += 1 + length;
+        }
+        if name.is_empty() {
+            out.push('$');
+            rest = after;
+            continue;
+        }
+        if after[used..].starts_with('.') && after[used + 1..].starts_with(name_char) {
+            return None;
+        }
+        out.push_str(&joined(value_of(&name)?, &after[used..]));
+        rest = &after[used..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// `found` with the text of each quoted as completion puts it on the
+/// line, `open` being the quote that the word starts with.
+fn quote_names(mut found: Vec<Candidate>, open: Option<char>) -> Vec<Candidate> {
+    for c in &mut found {
+        c.text = quoted(&c.text, open, c.done);
+    }
+    found
+}
+
 /// The candidates for `line` with the cursor at byte `cursor`.
 pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion {
     let words = words(&line[..cursor]);
@@ -164,18 +236,18 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
     while first < index && COMMAND_KEYWORDS.contains(&words[first].1.as_str()) {
         first += 1;
     }
-    let names = |mut found: Vec<Candidate>| {
-        for c in &mut found {
-            c.text = quoted(&c.text, open, c.done);
+    let mut candidates = if word.starts_with('$') && !word.contains('/') {
+        // A whole variable that names a folder goes on with its `/`.
+        let found = variables(&word, sources);
+        let folder = files(&word, sources, open);
+        match !folder.is_empty() && found.iter().all(|c| c.text == word) {
+            true => folder,
+            false => found,
         }
-        found
-    };
-    let mut candidates = if word.starts_with('$') {
-        variables(&word, sources)
     } else if index == first && !word.contains('/') {
-        names(commands(&word, sources))
+        quote_names(commands(&word, sources), open)
     } else if index == first {
-        names(files(&word, sources))
+        files(&word, sources, open)
     } else if word.starts_with('-') {
         let command = &words[first..index];
         let mut found = options(&word, command, sources);
@@ -199,9 +271,9 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
             .map(|s| candidate(s.clone(), s, Some("subcommand"), true))
             .collect();
         match (kind, found.is_empty()) {
-            (Some(kind), _) => found.extend(names(by_type(&kind, &word, sources))),
+            (Some(kind), _) => found.extend(by_type(&kind, &word, sources, open)),
             // Subcommands are offered without files.
-            (None, true) => found = names(files(&word, sources)),
+            (None, true) => found = files(&word, sources, open),
             (None, false) => {}
         }
         found
@@ -268,14 +340,19 @@ fn value_type(declared: &Extern, args: &[(usize, String)]) -> Option<ParamType> 
 /// The candidates for a value of type `kind`: only folders for a
 /// folder, files and folders for a file or path, commands for a command,
 /// the choices of a list, and none for the other types.
-fn by_type(kind: &ParamType, word: &str, sources: &dyn Sources) -> Vec<Candidate> {
+fn by_type(
+    kind: &ParamType,
+    word: &str,
+    sources: &dyn Sources,
+    open: Option<char>,
+) -> Vec<Candidate> {
     match kind {
-        ParamType::Folder => files(word, sources)
+        ParamType::Folder => files(word, sources, open)
             .into_iter()
             .filter(|c| !c.done)
             .collect(),
-        ParamType::File | ParamType::Path | ParamType::Bool => files(word, sources),
-        ParamType::Command => commands(word, sources),
+        ParamType::File | ParamType::Path | ParamType::Bool => files(word, sources, open),
+        ParamType::Command => quote_names(commands(word, sources), open),
         ParamType::Choices(choices) => choices
             .iter()
             .filter(|c| c.starts_with(word))
@@ -334,14 +411,41 @@ fn commands(word: &str, sources: &dyn Sources) -> Vec<Candidate> {
 }
 
 /// The entries of the folder that `word` names up to its last `/`
-/// whose names start as the rest does; hidden ones only for a rest
-/// that starts with `.`.
-fn files(word: &str, sources: &dyn Sources) -> Vec<Candidate> {
-    let (folder, prefix) = match word.rfind('/') {
+/// whose names start as the rest does, hidden ones only for a rest that
+/// starts with `.`, put on the line quoted as needed. The folder is
+/// looked up as `expanded` gives it, and the word keeps its `~` and
+/// variables; one that ends in them goes on with the `/` after them
+/// when they name a folder.
+fn files(word: &str, sources: &dyn Sources, open: Option<char>) -> Vec<Candidate> {
+    let full = match open {
+        Some('\'') => Some(word.to_owned()),
+        _ => expanded(word, sources),
+    };
+    let Some(full) = full else {
+        return Vec::new();
+    };
+    let at = word.rfind('/');
+    let last = &word[at.map_or(0, |at| at + 1)..];
+    if full != word && (last.contains('$') || word == "~") {
+        return match sources.entries(&full) {
+            Some(_) => vec![candidate(
+                format!("{word}/"),
+                format!("{last}/"),
+                None,
+                false,
+            )],
+            None => Vec::new(),
+        };
+    }
+    let (folder, prefix) = match at {
         Some(at) => (&word[..=at], &word[at + 1..]),
         None => ("", word),
     };
-    let listed = match folder {
+    let full_folder = match full.rfind('/') {
+        Some(at) => &full[..=at],
+        None => "",
+    };
+    let listed = match full_folder {
         "" => ".",
         "/" => "/",
         f => f.trim_end_matches('/'),
@@ -355,12 +459,13 @@ fn files(word: &str, sources: &dyn Sources) -> Vec<Candidate> {
         .filter(|(name, _)| prefix.starts_with('.') || !name.starts_with('.'))
         .map(|(name, folder_entry)| {
             let slash = if folder_entry { "/" } else { "" };
-            candidate(
-                format!("{folder}{name}{slash}"),
-                format!("{name}{slash}"),
-                None,
-                !folder_entry,
-            )
+            let named = format!("{name}{slash}");
+            // What the typed folder expands stays as typed.
+            let text = match folder == full_folder {
+                true => quoted(&format!("{folder}{named}"), open, !folder_entry),
+                false => format!("{folder}{}", quoted(&named, None, !folder_entry)),
+            };
+            candidate(text, named, None, !folder_entry)
         })
         .collect()
 }
@@ -498,12 +603,15 @@ extern pick(choice: [red green], target: file, run: command)
             vec![
                 ("status".into(), "0".into()),
                 ("stuff".into(), "a\nb".into()),
+                ("here".into(), "src".into()),
+                ("o".into(), "odd".into()),
             ]
         }
         fn environment(&self) -> Vec<(String, String)> {
             vec![
                 ("PATH".into(), "/usr/bin".into()),
                 ("PWD".into(), "/".into()),
+                ("HOME".into(), "/".into()),
             ]
         }
         fn params(&self, path: &str) -> Option<Vec<Param>> {
@@ -557,6 +665,19 @@ extern pick(choice: [red green], target: file, run: command)
         assert_eq!(c.candidates[1].display, "mod/");
         assert!(!c.candidates[1].done);
         assert_eq!(texts("cat 'src/ma"), ["'src/main.rs'"]);
+    }
+
+    #[test]
+    fn completes_paths_after_expanding_them() {
+        assert_eq!(texts("cd ~/U"), ["~/Users/"]);
+        assert_eq!(texts("cat $here/m"), ["$here/main.rs", "$here/mod/"]);
+        // A word that ends in what expands goes on with its `/`.
+        assert_eq!(texts("cd ~"), ["~/"]);
+        assert_eq!(texts("cd $env.HOME"), ["$env.HOME/"]);
+        // Only the completed name is quoted.
+        assert_eq!(texts("cd $o/M"), ["$o/'My Docs/"]);
+        assert!(texts("cat $nope/x").is_empty());
+        assert!(texts("cat $here.x/y").is_empty());
     }
 
     #[test]
