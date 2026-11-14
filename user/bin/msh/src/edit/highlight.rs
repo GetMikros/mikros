@@ -731,6 +731,8 @@ mod tests {
         );
         // A redirection's target need not exist.
         assert_eq!(shown("ls > ./new.txt"), "cc.|.aaaaaaaaa");
+        // Runs of `/` name what one does.
+        assert_eq!(shown("ls //usr src//"), "cc.ppppp.ppppp");
         // Paths are looked up through their variables, which keep their
         // colour; a variable that is not set leaves the word unchecked.
         assert_eq!(shown("cat $here/notes.txt"), "ccc.vvvvvpppppppppp");

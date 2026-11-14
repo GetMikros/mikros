@@ -6,7 +6,7 @@
 use super::listings::Disk;
 use super::{Shell, System};
 use crate::ast::{Extern, Param, StatementKind};
-use crate::edit::complete::Sources;
+use crate::edit::complete::{Sources, collapsed};
 use crate::value::{Value, scalar_text};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -58,12 +58,12 @@ impl<S: System> Shell<S> {
     /// `folder` from the root, as the listings are kept.
     fn absolute(&self, folder: &str) -> String {
         if folder.starts_with('/') {
-            return folder.to_owned();
+            return collapsed(folder);
         }
         let current = self.system.current_dir();
         match folder {
             "" | "." => current,
-            f => format!("{}/{f}", current.trim_end_matches('/')),
+            f => collapsed(&format!("{}/{f}", current.trim_end_matches('/'))),
         }
     }
 }

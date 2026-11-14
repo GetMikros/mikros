@@ -151,14 +151,25 @@ fn quoted(name: &str, open: Option<char>, done: bool) -> String {
     text
 }
 
+/// `path` with each run of `/` as one, which names the same file.
+pub fn collapsed(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if !(c == '/' && out.ends_with('/')) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// `word` as the shell expands it before it looks up a path: `~` or
 /// `~/` at its start as `$env.HOME`, and each `$name` and `$env.NAME` as
 /// its value; `None` when one is not set or reads a field, which only
 /// running could tell, so that completion and colours never run
-/// anything.
+/// anything. Runs of `/` are collapsed.
 pub fn expanded(word: &str, sources: &dyn Sources) -> Option<String> {
     if !word.contains('$') && !word.starts_with('~') {
-        return Some(word.to_owned());
+        return Some(collapsed(word));
     }
     let environment = sources.environment();
     let value_of = |name: &str| match name.strip_prefix("env.") {
@@ -211,7 +222,7 @@ pub fn expanded(word: &str, sources: &dyn Sources) -> Option<String> {
         rest = &after[used..];
     }
     out.push_str(rest);
-    Some(out)
+    Some(collapsed(&out))
 }
 
 /// `found` with the text of each quoted as completion puts it on the
@@ -418,7 +429,7 @@ fn commands(word: &str, sources: &dyn Sources) -> Vec<Candidate> {
 /// when they name a folder.
 fn files(word: &str, sources: &dyn Sources, open: Option<char>) -> Vec<Candidate> {
     let full = match open {
-        Some('\'') => Some(word.to_owned()),
+        Some('\'') => Some(collapsed(word)),
         _ => expanded(word, sources),
     };
     let Some(full) = full else {
@@ -438,8 +449,8 @@ fn files(word: &str, sources: &dyn Sources, open: Option<char>) -> Vec<Candidate
         };
     }
     let (folder, prefix) = match at {
-        Some(at) => (&word[..=at], &word[at + 1..]),
-        None => ("", word),
+        Some(at) => (collapsed(&word[..=at]), &word[at + 1..]),
+        None => (String::new(), word),
     };
     let full_folder = match full.rfind('/') {
         Some(at) => &full[..=at],
@@ -665,6 +676,14 @@ extern pick(choice: [red green], target: file, run: command)
         assert_eq!(c.candidates[1].display, "mod/");
         assert!(!c.candidates[1].done);
         assert_eq!(texts("cat 'src/ma"), ["'src/main.rs'"]);
+    }
+
+    #[test]
+    fn completes_paths_with_runs_of_slashes_as_one() {
+        assert_eq!(texts("cat src//m"), ["src/main.rs", "src/mod/"]);
+        assert_eq!(texts("cd //U"), ["/Users/"]);
+        assert_eq!(texts("cd ~//U"), ["~/Users/"]);
+        assert_eq!(collapsed("a//b///c/"), "a/b/c/");
     }
 
     #[test]
