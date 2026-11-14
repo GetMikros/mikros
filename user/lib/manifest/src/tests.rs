@@ -274,7 +274,38 @@ fn reads_a_program_manifest() {
         }]
     );
     assert_eq!(p.spawned_by, ["system.servicemgr"]);
+    assert!(!p.command);
     assert!(read.unknown.is_empty());
+}
+
+#[test]
+fn reads_and_checks_command_manifests() {
+    let kind = |text: &str| {
+        parse_program("system.ps.yaml", text.as_bytes())
+            .map(|m| m.program.command)
+            .map_err(|e| e.kind)
+    };
+    let command = "app_id: system.ps\nbinary: /usr/bin/ps\ncommand: true\n";
+    assert_eq!(kind(command), Ok(true));
+    assert_eq!(
+        kind("app_id: system.ps\nbinary: /usr/bin/ps\ncommand: false\n"),
+        Ok(false)
+    );
+    assert_eq!(
+        kind("app_id: system.ps\nbinary: /usr/lib/ps\ncommand: true\n"),
+        Err(ErrorKind::BadBinary)
+    );
+    for (key, line) in [
+        ("namespace", "namespace: []"),
+        ("spawned_by", "spawned_by: [x]"),
+    ] {
+        let text = alloc::format!("{command}{line}\n");
+        assert_eq!(kind(&text), Err(ErrorKind::CommandKey(key)));
+    }
+    assert!(matches!(
+        kind("app_id: system.ps\nbinary: /usr/bin/ps\ncommand: yes please\n"),
+        Err(ErrorKind::Yaml(_))
+    ));
 }
 
 #[test]

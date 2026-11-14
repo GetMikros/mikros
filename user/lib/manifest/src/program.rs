@@ -6,7 +6,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// The keys of a program manifest.
-const KEYS: &[&str] = &["app_id", "binary", "permissions", "namespace", "spawned_by"];
+const KEYS: &[&str] = &[
+    "app_id",
+    "binary",
+    "permissions",
+    "namespace",
+    "spawned_by",
+    "command",
+];
+/// Where the binaries of commands lie.
+const COMMANDS: &str = "/usr/bin/";
 /// The keys of an item of `namespace`.
 const NAMESPACE_KEYS: &[&str] = &["path", "rights"];
 /// The prefix of the app IDs of system programs, and the app IDs that no
@@ -24,6 +33,9 @@ pub struct Program {
     /// The app IDs of the processes that may start the program with its
     /// app ID.
     pub spawned_by: Vec<String>,
+    /// Whether it is a command, which every process may run with its app
+    /// ID.
+    pub command: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +72,20 @@ pub fn parse_program(file_name: &str, bytes: &[u8]) -> Result<ProgramManifest, E
     if !is_under_usr(binary) {
         return Err(error(binary_node, ErrorKind::BadBinary));
     }
+    let command = match map.get("command") {
+        Some(node) => node.boolean()?,
+        None => false,
+    };
+    if command {
+        if !binary.starts_with(COMMANDS) {
+            return Err(error(binary_node, ErrorKind::BadBinary));
+        }
+        for key in ["namespace", "spawned_by"] {
+            if let Some(node) = map.get(key) {
+                return Err(error(node, ErrorKind::CommandKey(key)));
+            }
+        }
+    }
     let namespace = namespace(map, &mut unknown)?;
     let program = Program {
         app_id: app_id.into(),
@@ -67,6 +93,7 @@ pub fn parse_program(file_name: &str, bytes: &[u8]) -> Result<ProgramManifest, E
         permissions: crate::permissions(map)?,
         namespace,
         spawned_by: strings(map, "spawned_by")?,
+        command,
     };
     Ok(ProgramManifest { program, unknown })
 }

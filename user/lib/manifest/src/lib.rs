@@ -158,6 +158,9 @@ pub enum ErrorKind {
     /// `permissions` lists a permission that no manifest of its kind may
     /// list.
     ReservedPermission,
+    /// The manifest of a command has this key, which only other programs'
+    /// manifests may have.
+    CommandKey(&'static str),
 }
 
 impl From<mikros_yaml::Error> for Error {
