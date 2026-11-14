@@ -720,7 +720,7 @@ fn gives_completion_its_functions_variables_programs_and_options() {
     assert_eq!(texts(&s, "sh"), ["shine", "shout"]);
     assert_eq!(texts(&s, "shine a --"), ["--bright"]);
     assert_eq!(texts(&s, "print $sh"), ["$shade"]);
-    assert_eq!(texts(&s, "print $env.HO"), ["$env.HOME"]);
+    assert_eq!(texts(&s, "print $env.HO"), ["$env.HOME/"]);
     let c = complete("job.msh --", 10, &s);
     assert_eq!(c.candidates[0].text, "--size");
     assert_eq!(c.candidates[0].description.as_deref(), Some("size = 1kb"));

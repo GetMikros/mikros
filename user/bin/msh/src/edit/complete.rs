@@ -255,13 +255,18 @@ pub fn complete(line: &str, cursor: usize, sources: &dyn Sources) -> Completion 
         first += 1;
     }
     let mut candidates = if word.starts_with('$') && !word.contains('/') {
-        // A whole variable that names a folder goes on with its `/`.
-        let found = variables(&word, sources);
-        let folder = files(&word, raw, sources, open);
-        match !folder.is_empty() && found.iter().all(|c| c.text == word) {
-            true => folder,
-            false => found,
+        // A variable whose value names a folder goes on with its `/`,
+        // as the folder's path would, rather than a blank.
+        let mut found = variables(&word, sources);
+        for c in &mut found {
+            let names_folder = expanded(&c.text, sources)
+                .is_some_and(|path| !c.text.ends_with('.') && sources.entries(&path).is_some());
+            if names_folder {
+                c.text.push('/');
+                c.done = false;
+            }
         }
+        found
     } else if index == first && !word.contains('/') {
         quote_names(commands(&word, sources), open)
     } else if index == first {
@@ -732,6 +737,10 @@ extern pick(choice: [red green], target: file, run: command)
         // A word that ends in what expands goes on with its `/`.
         assert_eq!(texts("cd ~"), ["~/"]);
         assert_eq!(texts("cd $env.HOME"), ["$env.HOME/"]);
+        assert_eq!(texts("cd $env.HO"), ["$env.HOME/"]);
+        assert_eq!(texts("cd $he"), ["$here/"]);
+        // A variable that names no folder is done, and a blank follows.
+        assert!(complete("print $sta", 10, &Fake).candidates[0].done);
         // Only the completed name is quoted.
         assert_eq!(texts("cd $o/M"), ["$o/'My Docs'/"]);
         assert!(texts("cat $nope/x").is_empty());
@@ -779,14 +788,14 @@ extern pick(choice: [red green], target: file, run: command)
         assert_eq!(texts("cd odd/'My Docs'/i"), ["odd/'My Docs'/inner/"]);
         assert_eq!(texts("cd odd/'M"), ["odd/'My Docs'/"]);
         // Variables and options are not names.
-        assert_eq!(texts("print $env.P"), ["$env.PATH", "$env.PWD"]);
+        assert_eq!(texts("print $env.P"), ["$env.PATH", "$env.PWD/"]);
     }
 
     #[test]
     fn completes_variables() {
         assert_eq!(texts("print $st"), ["$status", "$stuff"]);
         assert_eq!(texts("print $e"), ["$env."]);
-        assert_eq!(texts("print $env.P"), ["$env.PATH", "$env.PWD"]);
+        assert_eq!(texts("print $env.P"), ["$env.PATH", "$env.PWD/"]);
         let c = complete("$stu", 4, &Fake);
         assert_eq!(c.candidates[0].description.as_deref(), Some("a…"));
     }
