@@ -276,6 +276,28 @@ fn declares_built_ins_and_runs_declarations_files_once() {
 }
 
 #[test]
+fn checks_and_declares_the_types_of_function_arguments() {
+    let f =
+        "fn inc(n: int, --mode: [up down] = 'up', --loud: bool) { print ($n + 1) $mode $loud }\n";
+    let out = |source: &str| ok(&format!("{f}{source}"));
+    assert_eq!(out("inc 2"), "3 up null\n");
+    assert_eq!(out("inc 2 --mode down --loud"), "3 down true\n");
+    let failure = |source: &str| error(&format!("{f}{source}")).message;
+    assert_eq!(failure("inc x"), "`inc` takes a int for `n`, not `x`");
+    assert_eq!(
+        failure("inc 1 --mode left"),
+        "`inc` takes a [up down] for `--mode`, not `left`"
+    );
+    let mut s = shell();
+    run(&mut s, &format!("{f}fn plain(a) {{ print $a }}")).unwrap();
+    let declared = s.declaration("inc", None).unwrap();
+    assert_eq!(declared.positional[0].kind, ParamType::Int);
+    assert_eq!(declared.options[1].kind, ParamType::Bool);
+    // A function without types declares nothing.
+    assert!(s.declaration("plain", None).is_none());
+}
+
+#[test]
 fn deletes_variables_fields_and_items() {
     assert_eq!(ok("let x = 1\ndelete $x\nprint ($x ?? 'gone')"), "gone\n");
     assert_eq!(

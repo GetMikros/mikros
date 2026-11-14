@@ -214,7 +214,12 @@ impl<S: System> Shell<S> {
     /// `extern` declared it last.
     pub fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
         let key = (name.to_owned(), sub.map(str::to_owned));
-        self.declarations.get(&key).cloned()
+        if let Some(declared) = self.declarations.get(&key) {
+            return Some(declared.clone());
+        }
+        // A function with types is declared by them.
+        let f = self.functions.get(name).filter(|_| sub.is_none())?;
+        f.declaration().map(Rc::new)
     }
 
     /// The subcommands declared for the command `name`.

@@ -349,7 +349,62 @@ pub struct Function {
     pub name: String,
     pub arguments: Vec<String>,
     pub flags: Vec<(String, Option<Expr>)>,
+    /// The types written after arguments, by their names, and after
+    /// flags, by `--name`.
+    pub types: Vec<(String, ParamType)>,
     pub body: Block,
+}
+
+impl Function {
+    /// The type written after the argument `key`, or the flag `--key`.
+    pub fn type_of(&self, key: &str) -> Option<&ParamType> {
+        self.types.iter().find(|(k, _)| k == key).map(|(_, t)| t)
+    }
+
+    /// Whether the flag `name` takes no value: its type is `bool`, or its
+    /// default a boolean.
+    pub fn bool_flag(&self, name: &str) -> bool {
+        let default = self.flags.iter().find(|(n, _)| n == name).map(|(_, d)| d);
+        matches!(self.type_of(&format!("--{name}")), Some(ParamType::Bool))
+            || matches!(default, Some(Some(Expr::Literal(Literal::Bool(_)))))
+    }
+
+    /// What the function takes, as `extern` would declare it, when it
+    /// gives any of its arguments or flags a type; the others are `any`.
+    pub fn declaration(&self) -> Option<Extern> {
+        if self.types.is_empty() {
+            return None;
+        }
+        let kind = |key: &str| self.type_of(key).cloned().unwrap_or(ParamType::Any);
+        Some(Extern {
+            command: self.name.clone(),
+            subcommand: None,
+            positional: self
+                .arguments
+                .iter()
+                .map(|a| Positional {
+                    label: a.clone(),
+                    kind: kind(a),
+                    optional: false,
+                    rest: false,
+                    description: None,
+                })
+                .collect(),
+            options: self
+                .flags
+                .iter()
+                .map(|(n, _)| Declared {
+                    name: n.clone(),
+                    short: None,
+                    kind: match self.bool_flag(n) {
+                        true => ParamType::Bool,
+                        false => kind(&format!("--{n}")),
+                    },
+                    description: None,
+                })
+                .collect(),
+        })
+    }
 }
 
 /// `param --name: type = default`.

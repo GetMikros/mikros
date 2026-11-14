@@ -295,6 +295,7 @@ impl Parser<'_> {
         self.expect('(', "`(`")?;
         let mut arguments = Vec::new();
         let mut flags = Vec::new();
+        let mut types = Vec::new();
         loop {
             self.skip_blank();
             match self.peek() {
@@ -307,6 +308,9 @@ impl Parser<'_> {
                 _ if self.looking_at("--") => {
                     self.pos += 2;
                     let flag = self.name()?;
+                    if let Some(kind) = self.written_type()? {
+                        types.push((format!("--{flag}"), kind));
+                    }
                     self.skip_spaces();
                     let default = if self.peek() == Some('=') {
                         self.pos += 1;
@@ -317,15 +321,33 @@ impl Parser<'_> {
                     };
                     flags.push((flag, default));
                 }
-                _ => arguments.push(self.name()?),
+                _ => {
+                    let argument = self.name()?;
+                    if let Some(kind) = self.written_type()? {
+                        types.push((argument.clone(), kind));
+                    }
+                    arguments.push(argument);
+                }
             }
         }
         Ok(Function {
             name,
             arguments,
             flags,
+            types,
             body: self.block()?,
         })
+    }
+
+    /// `: type` after a function's argument or flag, if it has one.
+    fn written_type(&mut self) -> Result<Option<ParamType>> {
+        self.skip_spaces();
+        if self.peek() != Some(':') {
+            return Ok(None);
+        }
+        self.pos += 1;
+        self.skip_spaces();
+        self.param_type().map(Some)
     }
 
     /// `name(…)` or `name sub(…)`, after `extern`: the items in the

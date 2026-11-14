@@ -451,10 +451,7 @@ impl<S: System> Shell<S> {
             let (name, value) = match flag.split_once('=') {
                 Some((name, value)) => (name.to_owned(), Value::String(value.into())),
                 None => {
-                    let takes_value = !matches!(
-                        f.flags.iter().find(|(n, _)| *n == flag),
-                        Some((_, Some(Expr::Literal(Literal::Bool(_)))))
-                    );
+                    let takes_value = !f.bool_flag(&flag);
                     match (takes_value, args.peek()) {
                         (true, Some(_)) => (flag, args.next().expect("peeked")),
                         _ => (flag, Value::Bool(true)),
@@ -474,6 +471,16 @@ impl<S: System> Shell<S> {
                 positional.len()
             )));
         }
+        let positional = f
+            .arguments
+            .iter()
+            .zip(positional)
+            .map(|(name, value)| self.conform(f, name, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let flags = flags
+            .into_iter()
+            .map(|(name, value)| Ok((name.clone(), self.conform(f, &format!("--{name}"), value)?)))
+            .collect::<Result<Vec<_>, Flow>>()?;
         let mut defaults = Vec::new();
         for (name, default) in &f.flags {
             if flags.iter().any(|(n, _)| n == name) {
@@ -504,6 +511,39 @@ impl<S: System> Shell<S> {
             Err(Flow::Return(value)) => Ok(value),
             other => other,
         }
+    }
+}
+
+impl<S: System> Shell<S> {
+    /// `value` given for the argument or flag `key` of `f`, as the type
+    /// written for it takes it: a value of that kind as it is, and a
+    /// string read as a script's option is; an error when it is not one.
+    fn conform(&self, f: &Function, key: &str, value: Value) -> Result<Value, Flow> {
+        let Some(kind) = f.type_of(key) else {
+            return Ok(value);
+        };
+        let same = matches!(
+            (kind, &value),
+            (ParamType::Any, _)
+                | (ParamType::List, Value::List(_))
+                | (ParamType::Int, Value::Int(_))
+                | (ParamType::Float, Value::Float(_))
+                | (ParamType::Bool, Value::Bool(_))
+                | (ParamType::Size, Value::Size(_))
+                | (ParamType::Duration, Value::Duration(_))
+                | (ParamType::Date, Value::Date(_))
+        );
+        if same {
+            return Ok(value);
+        }
+        let text = scalar_text(&value);
+        super::params::typed(kind, &text).ok_or_else(|| {
+            let kind = kind.written();
+            self.fail(format!(
+                "`{}` takes a {kind} for `{key}`, not `{text}`",
+                f.name
+            ))
+        })
     }
 }
 

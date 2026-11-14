@@ -471,6 +471,18 @@ fn reads_loops_functions_params_try_and_use() {
     };
     assert_eq!(f.arguments, ["name"]);
     assert_eq!(f.flags[0].0, "loud");
+    let StatementKind::Fn(typed) = one("fn f(dir: folder, n, --out: path = '.', --fast: bool) {}")
+    else {
+        panic!()
+    };
+    assert_eq!(
+        typed.types,
+        [
+            ("dir".to_string(), ParamType::Folder),
+            ("--out".to_string(), ParamType::Path),
+            ("--fast".to_string(), ParamType::Bool)
+        ]
+    );
     assert!(matches!(
         f.body.statements[0].kind,
         StatementKind::Return(Some(_))
