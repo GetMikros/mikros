@@ -75,6 +75,35 @@ pub struct Extern {
     pub options: Vec<Declared>,
 }
 
+impl Extern {
+    /// The declared option that `word`, `--name` or `-x`, with or
+    /// without `=value`, names.
+    pub fn option(&self, word: &str) -> Option<&Declared> {
+        let word = word.split('=').next().unwrap_or(word);
+        self.options.iter().find(|o| match word.strip_prefix("--") {
+            Some(name) => o.name == name,
+            None => o.short.as_deref() == word.strip_prefix('-'),
+        })
+    }
+
+    /// The type of the positional argument at `position`, or of the rest
+    /// past the others; `None` past all of them.
+    pub fn positional_type(&self, position: usize) -> Option<&ParamType> {
+        let item = self
+            .positional
+            .get(position)
+            .or_else(|| self.positional.iter().find(|p| p.rest))?;
+        Some(&item.kind)
+    }
+
+    /// The type of the value of the option `word`, when it names one that
+    /// takes its value from the next word.
+    pub fn option_value(&self, word: &str) -> Option<&ParamType> {
+        let option = self.option(word)?;
+        (option.kind != ParamType::Bool && !word.contains('=')).then_some(&option.kind)
+    }
+}
+
 /// A positional argument that `extern` declares.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Positional {

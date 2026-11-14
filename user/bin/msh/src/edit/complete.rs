@@ -224,18 +224,6 @@ fn declared(command: &[(usize, String)], sources: &dyn Sources) -> Option<(Rc<Ex
     sources.declaration(name, None).map(|d| (d, 1))
 }
 
-/// The declared option that `word`, `--name` or `-x`, names.
-fn declared_option<'a>(declared: &'a Extern, word: &str) -> Option<&'a crate::ast::Declared> {
-    let word = word.split('=').next().unwrap_or(word);
-    declared
-        .options
-        .iter()
-        .find(|o| match word.strip_prefix("--") {
-            Some(name) => o.name == name,
-            None => o.short.as_deref() == word.strip_prefix('-'),
-        })
-}
-
 /// The options of `declared` that start as `word` does, long and short,
 /// with their descriptions.
 fn declared_options(word: &str, declared: &Extern) -> Vec<Candidate> {
@@ -266,9 +254,7 @@ fn value_type(declared: &Extern, args: &[(usize, String)]) -> Option<ParamType> 
             continue;
         }
         if arg.starts_with('-') && arg != "-" {
-            option_value = declared_option(declared, arg)
-                .filter(|o| o.kind != ParamType::Bool && !arg.contains('='))
-                .map(|o| o.kind.clone());
+            option_value = declared.option_value(arg).cloned();
             continue;
         }
         position += 1;
@@ -276,11 +262,7 @@ fn value_type(declared: &Extern, args: &[(usize, String)]) -> Option<ParamType> 
     if option_value.is_some() {
         return option_value;
     }
-    let item = declared
-        .positional
-        .get(position)
-        .or_else(|| declared.positional.iter().find(|p| p.rest))?;
-    Some(item.kind.clone())
+    declared.positional_type(position).cloned()
 }
 
 /// The candidates for a value of type `kind`: only folders for a

@@ -15,8 +15,10 @@
 //! changed there or at the prompt.
 
 use super::complete::Sources;
+use crate::ast::{Extern, ParamType};
 use crate::value::Value;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 /// How a part of the line is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,12 +220,23 @@ fn reader<'a>(line: &'a str, sources: &'a dyn Sources) -> Reader<'a> {
         home,
         expression: false,
         target: false,
-        folder: false,
+        arguments: None,
         declaring: false,
         commands: Vec::new(),
     };
     reader.read();
     reader
+}
+
+/// Where the arguments of a declared command are.
+struct Arguments {
+    name: String,
+    declared: Option<Rc<Extern>>,
+    /// Whether the next word may name a subcommand.
+    first: bool,
+    position: usize,
+    /// The type of the value that the option before takes.
+    option_value: Option<ParamType>,
 }
 
 struct Reader<'a> {
@@ -241,9 +254,8 @@ struct Reader<'a> {
     /// Whether the next word is the target of `>`, `>>` or `2>`, which
     /// need not exist.
     target: bool,
-    /// Whether the next word is the argument of `cd`, which must be a
-    /// folder.
-    folder: bool,
+    /// The arguments of the command read, when it is declared.
+    arguments: Option<Arguments>,
     /// Whether the statement read is an `extern` declaration, whose words
     /// are no commands.
     declaring: bool,
@@ -282,6 +294,7 @@ impl Reader<'_> {
                     self.take(1, Style::Separator);
                     command = true;
                     self.expression = false;
+                    self.arguments = None;
                     self.declaring = false;
                 }
                 '#' => {
@@ -294,6 +307,7 @@ impl Reader<'_> {
                     self.take(1, Style::Separator);
                     command = true;
                     self.expression = false;
+                    self.arguments = None;
                 }
                 '>' | '<' => self.redirection(),
                 '2' if self.looking_at("2>") => self.redirection(),
@@ -343,7 +357,6 @@ impl Reader<'_> {
     fn word(&mut self, command: bool) -> bool {
         let start = self.at;
         let target = std::mem::take(&mut self.target);
-        let folder = std::mem::take(&mut self.folder);
         if command && self.starts_expression() {
             self.expression = true;
         }
@@ -371,31 +384,50 @@ impl Reader<'_> {
             }
         }
         let end = self.at;
+        let kind = match command || target || !plain {
+            true => None,
+            false => self.argument_type(&bare),
+        };
         let operator = OPERATORS.contains(&bare.as_str())
             || self.expression && ARITHMETIC.contains(&bare.as_str());
         let style = if plain && operator {
             Style::Operator
         } else if command && plain {
             let style = self.command_style(&bare);
-            if matches!(style, Style::Command | Style::Error) && !KEYWORDS.contains(&bare.as_str())
-            {
+            if KEYWORDS.contains(&bare.as_str()) {
+                self.arguments = None;
+            } else if matches!(style, Style::Command | Style::Error) {
                 self.commands.push(bare.clone());
+                self.arguments = Some(Arguments {
+                    declared: self.sources.declaration(&bare, None),
+                    name: bare.clone(),
+                    first: true,
+                    position: 0,
+                    option_value: None,
+                });
             }
             style
         } else if !plain || never_missing(&bare) {
             Style::Argument
-        } else if let Some(is_folder) = self.file_kind(&bare) {
-            match (folder && !is_folder, self.completes(&bare, true)) {
-                (false, _) => Style::Path,
-                (true, true) => Style::Argument,
-                (true, false) => Style::Error,
+        } else if let Some(kind @ (ParamType::Folder | ParamType::File | ParamType::Path)) = &kind {
+            // A declared position takes only what is of its kind.
+            let fits = |is_folder: bool| match kind {
+                ParamType::Folder => is_folder,
+                ParamType::File => !is_folder,
+                _ => true,
+            };
+            match self.file_kind(&bare) {
+                Some(is_folder) if fits(is_folder) => Style::Path,
+                _ if self.completes(&bare, &fits) => Style::Argument,
+                _ => Style::Error,
             }
-        } else if !target && (folder || written_as_path(&bare)) && !self.completes(&bare, folder) {
+        } else if self.file_kind(&bare).is_some() {
+            Style::Path
+        } else if !target && written_as_path(&bare) && !self.completes(&bare, &|_| true) {
             Style::Error
         } else {
             Style::Argument
         };
-        self.folder = command && bare == "cd";
         // The strings and variables in the word keep their colours.
         for s in &mut self.styles[start..end] {
             if *s == Style::Plain {
@@ -457,10 +489,33 @@ impl Reader<'_> {
         }
     }
 
-    /// Whether an entry of the folder of `path`, a folder when `folders`,
-    /// starts with its last part, so that completion can still make it
-    /// a name.
-    fn completes(&self, path: &str, folders: bool) -> bool {
+    /// The declared type of the argument `word` of the command read, as
+    /// its position or the option before it gives it; a word that names a
+    /// declared subcommand turns to that subcommand's declaration.
+    fn argument_type(&mut self, word: &str) -> Option<ParamType> {
+        let arguments = self.arguments.as_mut()?;
+        if std::mem::take(&mut arguments.first)
+            && let Some(declared) = self.sources.declaration(&arguments.name, Some(word))
+        {
+            arguments.declared = Some(declared);
+            return None;
+        }
+        let declared = arguments.declared.as_ref()?;
+        if let Some(kind) = arguments.option_value.take() {
+            return Some(kind);
+        }
+        if word.starts_with('-') && word != "-" {
+            arguments.option_value = declared.option_value(word).cloned();
+            return None;
+        }
+        arguments.position += 1;
+        declared.positional_type(arguments.position - 1).cloned()
+    }
+
+    /// Whether an entry of the folder of `path`, one that `fits` by
+    /// whether it is a folder, starts with its last part, so that
+    /// completion can still make it a name.
+    fn completes(&self, path: &str, fits: &dyn Fn(bool) -> bool) -> bool {
         let Some(path) = self.expanded(path) else {
             return false;
         };
@@ -473,7 +528,7 @@ impl Reader<'_> {
             && self.sources.entries(folder).is_some_and(|entries| {
                 entries
                     .iter()
-                    .any(|(name, is_folder)| name.starts_with(prefix) && (*is_folder || !folders))
+                    .any(|(name, is_folder)| name.starts_with(prefix) && fits(*is_folder))
             })
     }
 
@@ -577,6 +632,24 @@ mod tests {
         fn params(&self, _: &str) -> Option<Vec<Param>> {
             None
         }
+        fn declaration(&self, name: &str, sub: Option<&str>) -> Option<Rc<Extern>> {
+            let declared = format!(
+                "{}\nextern pick(target: file, ...rest: path)\nextern git push(--repo: folder)",
+                crate::eval::builtins::DECLARATIONS
+            );
+            crate::parse::parse(&declared)
+                .unwrap()
+                .statements
+                .into_iter()
+                .find_map(|s| match s.kind {
+                    crate::ast::StatementKind::Extern(e)
+                        if e.command == name && e.subcommand.as_deref() == sub =>
+                    {
+                        Some(Rc::new(e))
+                    }
+                    _ => None,
+                })
+        }
     }
 
     /// One letter for each byte's style.
@@ -653,6 +726,14 @@ mod tests {
         assert_eq!(
             shown("cd nope; cd notes.txt; cd src"),
             "cc.EEEE|.cc.EEEEEEEEE|.cc.ppp"
+        );
+        // Declared positions take only what is of their kind, past options
+        // and in subcommands.
+        assert_eq!(shown("pick src notes.txt nope"), "EEEE.EEE.ppppppppp.EEEE");
+        assert_eq!(shown("pick no"), "EEEE.aa");
+        assert_eq!(
+            shown("git push --repo src --repo nope"),
+            "EEE.aaaa.aaaaaa.ppp.aaaaaa.EEEE"
         );
         // A redirection's target need not exist.
         assert_eq!(shown("ls > ./new.txt"), "cc.|.aaaaaaaaa");
