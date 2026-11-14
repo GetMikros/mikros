@@ -16,7 +16,11 @@ fn store() -> Store {
 }
 
 fn id(app_id: &str) -> Identity<'_> {
-    Identity { user: 1, app_id }
+    Identity {
+        user: 1,
+        app_id,
+        admin: 0,
+    }
 }
 
 fn grant(user: u32, permission: &str, decision: Decision) -> Grant {
@@ -45,7 +49,10 @@ fn table_is_sorted_and_unique() {
 fn bootstrap_trusts_the_service_manager_and_the_broker_manifest() {
     let s = store();
     for p in SERVICE_MANAGER_PERMISSIONS {
-        assert_eq!(s.check(id(SERVICE_MANAGER), p), Ok(Decision::Allowed));
+        assert_eq!(
+            s.check(id(SERVICE_MANAGER), p).map(|d| d.0),
+            Ok(Decision::Allowed)
+        );
     }
     assert_eq!(s.authorize(SERVICE_MANAGER, Call::Check), Ok(()));
     assert_eq!(s.authorize(SERVICE_MANAGER, Call::GrantSystem), Ok(()));
@@ -53,7 +60,10 @@ fn bootstrap_trusts_the_service_manager_and_the_broker_manifest() {
         s.authorize(SERVICE_MANAGER, Call::SetGrant),
         Err(Failure::AccessDenied)
     );
-    assert_eq!(s.check(id(BROKER), "logs.read"), Ok(Decision::Allowed));
+    assert_eq!(
+        s.check(id(BROKER), "logs.read").map(|d| d.0),
+        Ok(Decision::Allowed)
+    );
 }
 
 #[test]
@@ -91,13 +101,20 @@ fn each_call_needs_its_permission() {
 fn system_permissions_apply_for_every_user() {
     let mut s = store();
     assert_eq!(
-        s.check(id(APP), "device.registry"),
+        s.check(id(APP), "device.registry").map(|d| d.0),
         Ok(Decision::Undetermined)
     );
     s.grant_system(APP, &strings(&["device.registry"])).unwrap();
     for user in [0, 1, 1000] {
-        let who = Identity { user, app_id: APP };
-        assert_eq!(s.check(who, "device.registry"), Ok(Decision::Allowed));
+        let who = Identity {
+            user,
+            app_id: APP,
+            admin: 0,
+        };
+        assert_eq!(
+            s.check(who, "device.registry").map(|d| d.0),
+            Ok(Decision::Allowed)
+        );
     }
 }
 
@@ -106,14 +123,20 @@ fn grant_system_adds_and_checks_every_name_first() {
     let mut s = store();
     s.grant_system(APP, &strings(&["logs.read"])).unwrap();
     s.grant_system(APP, &strings(&["time.set"])).unwrap();
-    assert_eq!(s.check(id(APP), "logs.read"), Ok(Decision::Allowed));
-    assert_eq!(s.check(id(APP), "time.set"), Ok(Decision::Allowed));
+    assert_eq!(
+        s.check(id(APP), "logs.read").map(|d| d.0),
+        Ok(Decision::Allowed)
+    );
+    assert_eq!(
+        s.check(id(APP), "time.set").map(|d| d.0),
+        Ok(Decision::Allowed)
+    );
     let bad = strings(&["power.control", "camera"]);
     assert_eq!(s.grant_system(APP, &bad), Err(Failure::InvalidArgs));
     let unknown = strings(&["power.control", "nope"]);
     assert_eq!(s.grant_system(APP, &unknown), Err(Failure::NotFound));
     assert_eq!(
-        s.check(id(APP), "power.control"),
+        s.check(id(APP), "power.control").map(|d| d.0),
         Ok(Decision::Undetermined)
     );
 }
@@ -121,45 +144,76 @@ fn grant_system_adds_and_checks_every_name_first() {
 #[test]
 fn checks_by_kind() {
     let mut s = store();
-    assert_eq!(s.check(id(APP), "camera"), Ok(Decision::Undetermined));
-    assert_eq!(s.check(id(APP), "network"), Ok(Decision::Allowed));
-    assert_eq!(s.check(id(APP), "nope"), Err(Failure::NotFound));
+    assert_eq!(
+        s.check(id(APP), "camera").map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
+    assert_eq!(
+        s.check(id(APP), "network").map(|d| d.0),
+        Ok(Decision::Allowed)
+    );
+    assert_eq!(
+        s.check(id(APP), "nope").map(|d| d.0),
+        Err(Failure::NotFound)
+    );
     s.set_grant(&grant(1, "camera", Decision::Allowed)).unwrap();
     s.set_grant(&grant(1, "network", Decision::Denied)).unwrap();
-    assert_eq!(s.check(id(APP), "camera"), Ok(Decision::Allowed));
-    assert_eq!(s.check(id(APP), "network"), Ok(Decision::Denied));
+    assert_eq!(
+        s.check(id(APP), "camera").map(|d| d.0),
+        Ok(Decision::Allowed)
+    );
+    assert_eq!(
+        s.check(id(APP), "network").map(|d| d.0),
+        Ok(Decision::Denied)
+    );
     // Another user's grants are their own.
     let other = Identity {
         user: 2,
         app_id: APP,
+        admin: 0,
     };
-    assert_eq!(s.check(other, "camera"), Ok(Decision::Undetermined));
-    assert_eq!(s.check(other, "network"), Ok(Decision::Allowed));
+    assert_eq!(
+        s.check(other, "camera").map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
+    assert_eq!(
+        s.check(other, "network").map(|d| d.0),
+        Ok(Decision::Allowed)
+    );
     s.set_grant(&grant(1, "camera", Decision::Denied)).unwrap();
-    assert_eq!(s.check(id(APP), "camera"), Ok(Decision::Denied));
+    assert_eq!(
+        s.check(id(APP), "camera").map(|d| d.0),
+        Ok(Decision::Denied)
+    );
 }
 
 #[test]
 fn requests_ask_only_for_undetermined_user_permissions() {
     let mut s = store();
-    assert_eq!(s.request(id(APP), "camera"), Ok(Requested::Ask));
     assert_eq!(
-        s.request(id(APP), "network"),
+        s.request(id(APP), "camera").map(|d| d.0),
+        Ok(Requested::Ask)
+    );
+    assert_eq!(
+        s.request(id(APP), "network").map(|d| d.0),
         Ok(Requested::Decided(Decision::Allowed))
     );
     assert_eq!(
-        s.request(id(APP), "device.registry"),
+        s.request(id(APP), "device.registry").map(|d| d.0),
         Ok(Requested::Decided(Decision::Undetermined))
     );
-    assert_eq!(s.request(id(APP), "nope"), Err(Failure::NotFound));
+    assert_eq!(
+        s.request(id(APP), "nope").map(|d| d.0),
+        Err(Failure::NotFound)
+    );
     assert_eq!(s.record(id(APP), "camera", false), Decision::Denied);
     assert_eq!(
-        s.request(id(APP), "camera"),
+        s.request(id(APP), "camera").map(|d| d.0),
         Ok(Requested::Decided(Decision::Denied))
     );
     assert_eq!(s.record(id(APP), "microphone", true), Decision::Allowed);
     assert_eq!(
-        s.request(id(APP), "microphone"),
+        s.request(id(APP), "microphone").map(|d| d.0),
         Ok(Requested::Decided(Decision::Allowed))
     );
 }
@@ -231,7 +285,10 @@ fn undetermined_removes_a_grant() {
     s.set_grant(&grant(1, "camera", Decision::Undetermined))
         .unwrap();
     assert!(s.list(1).is_empty());
-    assert_eq!(s.check(id(APP), "camera"), Ok(Decision::Undetermined));
+    assert_eq!(
+        s.check(id(APP), "camera").map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
 }
 
 #[test]
@@ -261,4 +318,56 @@ fn list_stops_at_its_limit() {
         s.set_grant(&g).unwrap();
     }
     assert_eq!(s.list(1).len(), LIST_MAX);
+}
+
+#[test]
+fn elevated_clients_hold_user_and_administrator_permissions() {
+    let mut s = store();
+    let elevated = Identity {
+        user: 1,
+        app_id: APP,
+        admin: 1000,
+    };
+    // User permissions but full disk access, and the administrator
+    // permissions, without asking or recording a grant.
+    assert_eq!(s.check(elevated, "camera"), Ok((Decision::Allowed, true)));
+    assert_eq!(
+        s.check(elevated, "files.volumes"),
+        Ok((Decision::Allowed, true))
+    );
+    assert_eq!(
+        s.check(elevated, "power.control"),
+        Ok((Decision::Allowed, true))
+    );
+    assert_eq!(
+        s.check(elevated, "logs.read"),
+        Ok((Decision::Allowed, true))
+    );
+    assert_eq!(
+        s.request(elevated, "camera"),
+        Ok((Requested::Decided(Decision::Allowed), true))
+    );
+    assert_eq!(
+        s.check(id(APP), "camera").map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
+    // Never the other system permissions or full disk access.
+    assert_eq!(
+        s.check(elevated, "files.full_disk").map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
+    assert_eq!(
+        s.check(elevated, "device.registry").map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
+    assert_eq!(
+        s.check(elevated, "process.set_identity").map(|d| d.0),
+        Ok(Decision::Undetermined)
+    );
+    // A default permission a user denied stays denied.
+    s.set_grant(&grant(1, "network", Decision::Denied)).unwrap();
+    assert_eq!(s.check(elevated, "network"), Ok((Decision::Denied, false)));
+    // What is allowed anyway is not counted as elevation.
+    s.set_grant(&grant(1, "camera", Decision::Allowed)).unwrap();
+    assert_eq!(s.check(elevated, "camera"), Ok((Decision::Allowed, false)));
 }

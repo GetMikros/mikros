@@ -58,7 +58,18 @@ fn identity(client: &ClientIdentity) -> Identity<'_> {
     Identity {
         user: client.user,
         app_id: &client.app_id,
+        admin: client.admin,
     }
+}
+
+/// Logs that `permission` was allowed to `client` only because an
+/// administrator elevated it.
+fn log_elevated(client: &ClientIdentity, permission: &str) {
+    let (pid, app_id, admin) = (client.pid, &client.app_id, client.admin);
+    mikros_rt::log!(
+        Info,
+        "permbroker: allowed {permission} to process {pid} ({app_id}) by the elevation of user {admin}"
+    );
 }
 
 fn to_midl(decision: Decision) -> midl::Decision {
@@ -114,8 +125,13 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
             R::Check(q, r) => {
                 let result = inner.authorize(&caller, Call::Check).and_then(|()| {
                     let store = inner.store.borrow();
-                    let decision = store.check(identity(&q.client), &q.permission);
-                    decision.map_err(status)
+                    let (decision, elevated) = store
+                        .check(identity(&q.client), &q.permission)
+                        .map_err(status)?;
+                    if elevated {
+                        log_elevated(&q.client, &q.permission);
+                    }
+                    Ok(decision)
                 });
                 r.reply(
                     s,
@@ -208,7 +224,11 @@ async fn decide_request(
     inner.authorize(caller, Call::Request)?;
     let client = identity(&q.client);
     let requested = inner.store.borrow().request(client, &q.permission);
-    let decision = match requested.map_err(status)? {
+    let (requested, elevated) = requested.map_err(status)?;
+    if elevated {
+        log_elevated(&q.client, &q.permission);
+    }
+    let decision = match requested {
         Requested::Decided(decision) => decision,
         Requested::Ask => {
             let prompter = inner.prompter.borrow().clone();

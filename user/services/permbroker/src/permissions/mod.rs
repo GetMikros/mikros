@@ -56,7 +56,19 @@ pub enum Failure {
 pub struct Identity<'a> {
     pub user: u32,
     pub app_id: &'a str,
+    /// The administrator who elevated the client's process, 0 for none.
+    pub admin: u32,
 }
+
+/// The `system` permissions that an elevated process holds, and the one
+/// `user` permission it does not.
+const ADMINISTRATOR: [&str; 4] = [
+    "power.control",
+    "services.control",
+    "accounts.manage",
+    "logs.read",
+];
+const FULL_DISK: &str = "files.full_disk";
 
 /// A user's decision on a `user` or `default` permission for an app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,25 +169,48 @@ impl Store {
             .unwrap_or(Decision::Undetermined)
     }
 
-    /// The decision on `permission` for `client`, without prompting.
-    pub fn check(&self, client: Identity<'_>, permission: &str) -> Result<Decision, Failure> {
+    /// The decision on `permission` for `client`, without prompting, and
+    /// whether it allows `permission` only because an administrator
+    /// elevated the client: an elevated client holds the administrator
+    /// permissions and every `user` permission but `files.full_disk`.
+    pub fn check(
+        &self,
+        client: Identity<'_>,
+        permission: &str,
+    ) -> Result<(Decision, bool), Failure> {
         let kind = kind(permission).ok_or(Failure::NotFound)?;
         let grant = self.grant(client.user, client.app_id, permission);
-        Ok(match kind {
+        let decision = match kind {
             Kind::System if self.has_system(client.app_id, permission) => Decision::Allowed,
             Kind::System => Decision::Undetermined,
             Kind::User => grant,
             Kind::Default if grant == Decision::Denied => Decision::Denied,
             Kind::Default => Decision::Allowed,
+        };
+        let elevated = client.admin != 0
+            && match kind {
+                Kind::System => ADMINISTRATOR.contains(&permission),
+                Kind::User => permission != FULL_DISK,
+                Kind::Default => false,
+            };
+        Ok(match decision {
+            Decision::Allowed => (decision, false),
+            _ if elevated => (Decision::Allowed, true),
+            _ => (decision, false),
         })
     }
 
-    /// What a request for `permission` by `client` comes to.
-    pub fn request(&self, client: Identity<'_>, permission: &str) -> Result<Requested, Failure> {
-        let decision = self.check(client, permission)?;
+    /// What a request for `permission` by `client` comes to, and whether
+    /// it is allowed only because the client is elevated.
+    pub fn request(
+        &self,
+        client: Identity<'_>,
+        permission: &str,
+    ) -> Result<(Requested, bool), Failure> {
+        let (decision, elevated) = self.check(client, permission)?;
         Ok(match kind(permission) {
-            Some(Kind::User) if decision == Decision::Undetermined => Requested::Ask,
-            _ => Requested::Decided(decision),
+            Some(Kind::User) if decision == Decision::Undetermined => (Requested::Ask, false),
+            _ => (Requested::Decided(decision), elevated),
         })
     }
 
