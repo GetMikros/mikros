@@ -1,76 +1,81 @@
-//! The permissions that the broker knows, and their kinds.
+//! The permissions that the broker knows, and their scopes.
 
 /// Who grants a permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
+pub enum Scope {
     /// Only manifests; never a user.
     System,
+    /// Manifests, elevation, and an administrator for one process; never
+    /// stored.
+    Admin,
     /// The user.
     User,
     /// Every app, unless the user denies it.
     Default,
 }
 
-/// Every known permission and its kind, sorted by name.
-pub const PERMISSIONS: &[(&str, Kind)] = &[
-    ("admin.accounts.manage", Kind::System),
-    ("admin.logs.read", Kind::System),
-    ("admin.power.control", Kind::System),
-    ("admin.services.control", Kind::System),
-    ("admin.time.set", Kind::System),
-    ("default.game_controllers.use", Kind::Default),
-    ("default.gpu.use", Kind::Default),
-    ("default.network.use", Kind::Default),
-    ("default.realtime.use", Kind::Default),
-    ("session.authorize", Kind::System),
-    ("system.boot_state.set", Kind::System),
-    ("system.devices.manage", Kind::System),
-    ("system.diagnostics.read", Kind::System),
-    ("system.display.control", Kind::System),
-    ("system.filesystems.mount", Kind::System),
-    ("system.gpu_priority.use", Kind::System),
-    ("system.grants.manage", Kind::System),
-    ("system.identity.set", Kind::System),
-    ("system.input.control", Kind::System),
-    ("system.log_sources.create", Kind::System),
-    ("system.permissions.read", Kind::System),
-    ("system.permissions.set", Kind::System),
-    ("system.processes.control", Kind::System),
-    ("system.processes.debug", Kind::System),
-    ("system.processes.read", Kind::System),
-    ("system.prompts.use", Kind::System),
-    ("system.raw_storage.use", Kind::System),
-    ("system.services.create", Kind::System),
-    ("system.subvolumes.manage", Kind::System),
-    ("system.unions.create", Kind::System),
-    ("system.user_id.set", Kind::System),
-    ("system.users.authenticate", Kind::System),
-    ("user.accessibility.use", Kind::User),
-    ("user.autostart.use", Kind::User),
-    ("user.background.use", Kind::User),
-    ("user.background_controllers.use", Kind::User),
-    ("user.bluetooth.use", Kind::User),
-    ("user.camera.use", Kind::User),
-    ("user.desktop.access", Kind::User),
-    ("user.documents.access", Kind::User),
-    ("user.downloads.access", Kind::User),
-    ("user.full_disk.access", Kind::User),
-    ("user.global_shortcuts.use", Kind::User),
-    ("user.input.read", Kind::User),
-    ("user.local_network.use", Kind::User),
-    ("user.location.read", Kind::User),
-    ("user.microphone.use", Kind::User),
-    ("user.music.access", Kind::User),
-    ("user.network_volumes.access", Kind::User),
-    ("user.pictures.access", Kind::User),
-    ("user.raw_hid.use", Kind::User),
-    ("user.screen.read", Kind::User),
-    ("user.videos.access", Kind::User),
-    ("user.volumes.access", Kind::User),
+/// Every known permission and its scope, sorted by name.
+pub const PERMISSIONS: &[(&str, Scope)] = &[
+    ("admin.accounts.manage", Scope::Admin),
+    ("admin.grants.manage", Scope::Admin),
+    ("admin.logs.read", Scope::Admin),
+    ("admin.power.control", Scope::Admin),
+    ("admin.services.control", Scope::Admin),
+    ("admin.time.set", Scope::Admin),
+    ("default.game_controllers.use", Scope::Default),
+    ("default.gpu.use", Scope::Default),
+    ("default.network.use", Scope::Default),
+    ("default.realtime.use", Scope::Default),
+    ("session.authorize", Scope::System),
+    ("system.boot_state.set", Scope::System),
+    ("system.devices.manage", Scope::System),
+    ("system.diagnostics.read", Scope::System),
+    ("system.display.control", Scope::System),
+    ("system.filesystems.mount", Scope::System),
+    ("system.gpu_priority.use", Scope::System),
+    ("system.grants.manage", Scope::System),
+    ("system.identity.set", Scope::System),
+    ("system.input.control", Scope::System),
+    ("system.log_sources.create", Scope::System),
+    ("system.permissions.read", Scope::System),
+    ("system.permissions.set", Scope::System),
+    ("system.processes.control", Scope::System),
+    ("system.processes.debug", Scope::System),
+    ("system.processes.read", Scope::System),
+    ("system.prompts.use", Scope::System),
+    ("system.raw_storage.use", Scope::System),
+    ("system.services.create", Scope::System),
+    ("system.subvolumes.manage", Scope::System),
+    ("system.unions.create", Scope::System),
+    ("system.user_id.set", Scope::System),
+    ("system.users.authenticate", Scope::System),
+    ("user.accessibility.use", Scope::User),
+    ("user.autostart.use", Scope::User),
+    ("user.background.use", Scope::User),
+    ("user.background_controllers.use", Scope::User),
+    ("user.bluetooth.use", Scope::User),
+    ("user.camera.use", Scope::User),
+    ("user.desktop.access", Scope::User),
+    ("user.developer.access", Scope::User),
+    ("user.documents.access", Scope::User),
+    ("user.downloads.access", Scope::User),
+    ("user.full_disk.access", Scope::User),
+    ("user.global_shortcuts.use", Scope::User),
+    ("user.input.read", Scope::User),
+    ("user.local_network.use", Scope::User),
+    ("user.location.read", Scope::User),
+    ("user.microphone.use", Scope::User),
+    ("user.music.access", Scope::User),
+    ("user.network_volumes.access", Scope::User),
+    ("user.pictures.access", Scope::User),
+    ("user.raw_hid.use", Scope::User),
+    ("user.screen.read", Scope::User),
+    ("user.videos.access", Scope::User),
+    ("user.volumes.access", Scope::User),
 ];
 
-/// The kind of `permission`, or `None` when the broker does not know it.
-pub fn kind(permission: &str) -> Option<Kind> {
+/// The scope of `permission`, or `None` when the broker does not know it.
+pub fn scope(permission: &str) -> Option<Scope> {
     PERMISSIONS
         .binary_search_by(|(name, _)| (*name).cmp(permission))
         .ok()

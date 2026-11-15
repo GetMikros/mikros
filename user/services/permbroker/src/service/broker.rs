@@ -151,7 +151,7 @@ async fn serve(inner: Rc<Inner>, end: ServerEnd<midl::Broker>, caller: Rc<Client
             }
             R::Watch(q, r) => {
                 let result = inner.authorize(&caller, Call::Watch).and_then(|()| {
-                    crate::permissions::kind(&q.permission).ok_or(Status::NotFound)?;
+                    crate::permissions::scope(&q.permission).ok_or(Status::NotFound)?;
                     let watcher = (q.permission, Rc::downgrade(&server));
                     inner.watchers.borrow_mut().push(watcher);
                     Ok(BrokerWatchResponse {})

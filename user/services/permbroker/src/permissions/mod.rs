@@ -1,8 +1,8 @@
 //! The permission broker's records and decisions, apart from the
 //! protocol that carries them.
 //!
-//! A `Store` holds the system permissions of each app ID and the grants
-//! that users made. It answers checks, says when a request needs the
+//! A `Store` holds the `system` and `admin` permissions that manifests
+//! give each app ID and the grants that users made. It answers checks, says when a request needs the
 //! prompter, records grants, and reports each change that takes a
 //! permission away, for the connections that watch it. Grants are kept
 //! in memory only.
@@ -13,7 +13,7 @@ mod tests;
 
 #[cfg(test)]
 pub use table::PERMISSIONS;
-pub use table::{Kind, kind};
+pub use table::{Scope, scope};
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 /// The app ID of the service manager, which the broker trusts from its
 /// start.
 pub const SERVICE_MANAGER: &str = "system.servicemgr";
-/// The system permissions the service manager holds from the start.
+/// The permissions the service manager holds from the start.
 pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
     "system.identity.set",
     "system.permissions.read",
@@ -47,7 +47,7 @@ pub enum Failure {
     AccessDenied,
     /// The broker does not know the permission.
     NotFound,
-    /// The permission has the wrong kind for the call.
+    /// The permission has the wrong scope for the call.
     InvalidArgs,
 }
 
@@ -59,16 +59,6 @@ pub struct Identity<'a> {
     /// The administrator who elevated the client's process, 0 for none.
     pub admin: u32,
 }
-
-/// The `system` permissions that an elevated process holds, and the one
-/// `user` permission it does not.
-const ADMINISTRATOR: [&str; 4] = [
-    "admin.power.control",
-    "admin.services.control",
-    "admin.accounts.manage",
-    "admin.logs.read",
-];
-const FULL_DISK: &str = "user.full_disk.access";
 
 /// A user's decision on a `user` or `default` permission for an app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,7 +91,7 @@ pub enum Call {
 }
 
 impl Call {
-    /// The system permission a caller needs to make this call.
+    /// The `system` permission a caller needs to make this call.
     pub fn needs(self) -> &'static str {
         match self {
             Call::Check | Call::Request | Call::Watch => "system.permissions.read",
@@ -125,7 +115,8 @@ pub enum Requested {
 
 #[derive(Default)]
 pub struct Store {
-    /// The system permissions of each app ID, for every user.
+    /// The `system` and `admin` permissions of each app ID, for every
+    /// user.
     system: BTreeMap<String, BTreeSet<String>>,
     /// The grants, by user, app ID and permission. None is
     /// `Undetermined`.
@@ -136,7 +127,7 @@ impl Store {
     /// A store with the trusted initial grants: the service manager's,
     /// and `permissions` for the broker's own app ID `own_app_id`, from
     /// its manifest. Fails when `permissions` names a permission that is
-    /// unknown or not a `system` one.
+    /// unknown or neither a `system` nor an `admin` one.
     pub fn bootstrap(own_app_id: &str, permissions: &[String]) -> Result<Store, Failure> {
         let mut store = Store::default();
         let manager = SERVICE_MANAGER_PERMISSIONS.iter().map(|p| String::from(*p));
@@ -171,28 +162,25 @@ impl Store {
 
     /// The decision on `permission` for `client`, without prompting, and
     /// whether it allows `permission` only because an administrator
-    /// elevated the client: an elevated client holds the administrator
-    /// permissions and every `user` permission but `user.full_disk.access`.
+    /// elevated the client: an elevated client holds every `admin` and
+    /// `user` permission.
     pub fn check(
         &self,
         client: Identity<'_>,
         permission: &str,
     ) -> Result<(Decision, bool), Failure> {
-        let kind = kind(permission).ok_or(Failure::NotFound)?;
+        let scope = scope(permission).ok_or(Failure::NotFound)?;
         let grant = self.grant(client.user, client.app_id, permission);
-        let decision = match kind {
-            Kind::System if self.has_system(client.app_id, permission) => Decision::Allowed,
-            Kind::System => Decision::Undetermined,
-            Kind::User => grant,
-            Kind::Default if grant == Decision::Denied => Decision::Denied,
-            Kind::Default => Decision::Allowed,
+        let decision = match scope {
+            Scope::System | Scope::Admin if self.has_system(client.app_id, permission) => {
+                Decision::Allowed
+            }
+            Scope::System | Scope::Admin => Decision::Undetermined,
+            Scope::User => grant,
+            Scope::Default if grant == Decision::Denied => Decision::Denied,
+            Scope::Default => Decision::Allowed,
         };
-        let elevated = client.admin != 0
-            && match kind {
-                Kind::System => ADMINISTRATOR.contains(&permission),
-                Kind::User => permission != FULL_DISK,
-                Kind::Default => false,
-            };
+        let elevated = client.admin != 0 && matches!(scope, Scope::Admin | Scope::User);
         Ok(match decision {
             Decision::Allowed => (decision, false),
             _ if elevated => (Decision::Allowed, true),
@@ -208,8 +196,8 @@ impl Store {
         permission: &str,
     ) -> Result<(Requested, bool), Failure> {
         let (decision, elevated) = self.check(client, permission)?;
-        Ok(match kind(permission) {
-            Some(Kind::User) if decision == Decision::Undetermined => (Requested::Ask, false),
+        Ok(match scope(permission) {
+            Some(Scope::User) if decision == Decision::Undetermined => (Requested::Ask, false),
             _ => (Requested::Decided(decision), elevated),
         })
     }
@@ -229,17 +217,18 @@ impl Store {
     }
 
     /// Sets the grant `grant`, which must be `ALLOWED` or `DENIED` for a
-    /// known permission that is not a `system` one. Returns what it takes
-    /// away, if anything.
+    /// known `user` or `default` permission. Returns what it takes away,
+    /// if anything.
     pub fn set_grant(&mut self, grant: &Grant) -> Result<Option<Revoked>, Failure> {
-        let kind = kind(&grant.permission).ok_or(Failure::NotFound)?;
-        if kind == Kind::System || grant.decision == Decision::Undetermined {
+        let scope = scope(&grant.permission).ok_or(Failure::NotFound)?;
+        if matches!(scope, Scope::System | Scope::Admin) || grant.decision == Decision::Undetermined
+        {
             return Err(Failure::InvalidArgs);
         }
         let before = self.put(grant.user, &grant.app_id, &grant.permission, grant.decision);
         let after = grant.decision;
         let taken = (before == Decision::Allowed && after != Decision::Allowed)
-            || (kind == Kind::Default && after == Decision::Denied && before != Decision::Denied);
+            || (scope == Scope::Default && after == Decision::Denied && before != Decision::Denied);
         Ok(taken.then(|| Revoked {
             user: grant.user,
             app_id: grant.app_id.clone(),
@@ -271,17 +260,18 @@ impl Store {
             .collect()
     }
 
-    /// Adds `permissions` to the system permissions of `app_id`. Fails,
-    /// adding none, when one is unknown or not a `system` permission.
+    /// Adds `permissions` to the `system` and `admin` permissions of
+    /// `app_id`. Fails, adding none, when one is unknown or of another
+    /// scope.
     pub fn grant_system(&mut self, app_id: &str, permissions: &[String]) -> Result<(), Failure> {
         self.add_system(app_id, permissions)
     }
 
     fn add_system(&mut self, app_id: &str, permissions: &[String]) -> Result<(), Failure> {
         for p in permissions {
-            match kind(p) {
+            match scope(p) {
                 None => return Err(Failure::NotFound),
-                Some(Kind::System) => {}
+                Some(Scope::System | Scope::Admin) => {}
                 Some(_) => return Err(Failure::InvalidArgs),
             }
         }

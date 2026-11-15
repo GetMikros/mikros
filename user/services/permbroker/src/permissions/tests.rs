@@ -35,16 +35,38 @@ fn grant(user: u32, permission: &str, decision: Decision) -> Grant {
 #[test]
 fn table_is_sorted_and_unique() {
     assert!(PERMISSIONS.windows(2).all(|w| w[0].0 < w[1].0));
-    assert_eq!(PERMISSIONS.len(), 54);
-    assert_eq!(kind("user.camera.use"), Some(Kind::User));
-    assert_eq!(kind("system.diagnostics.read"), Some(Kind::System));
-    assert_eq!(kind("default.network.use"), Some(Kind::Default));
-    assert_eq!(kind("system.permissions.read"), Some(Kind::System));
-    assert_eq!(kind("system.gpu_priority.use"), Some(Kind::System));
-    assert_eq!(kind("system.boot_state.set"), Some(Kind::System));
-    assert_eq!(kind("system.log_sources.create"), Some(Kind::System));
-    assert_eq!(kind("admin.services.control"), Some(Kind::System));
-    assert_eq!(kind("nope"), None);
+    assert_eq!(PERMISSIONS.len(), 56);
+    assert_eq!(scope("user.camera.use"), Some(Scope::User));
+    assert_eq!(scope("user.developer.access"), Some(Scope::User));
+    assert_eq!(scope("system.diagnostics.read"), Some(Scope::System));
+    assert_eq!(scope("default.network.use"), Some(Scope::Default));
+    assert_eq!(scope("system.permissions.read"), Some(Scope::System));
+    assert_eq!(scope("system.gpu_priority.use"), Some(Scope::System));
+    assert_eq!(scope("system.boot_state.set"), Some(Scope::System));
+    assert_eq!(scope("system.log_sources.create"), Some(Scope::System));
+    assert_eq!(scope("admin.services.control"), Some(Scope::Admin));
+    assert_eq!(scope("admin.grants.manage"), Some(Scope::Admin));
+    assert_eq!(scope("nope"), None);
+}
+
+#[test]
+fn admin_permissions_are_these() {
+    let admin: Vec<&str> = PERMISSIONS
+        .iter()
+        .filter(|(_, scope)| *scope == Scope::Admin)
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(
+        admin,
+        [
+            "admin.accounts.manage",
+            "admin.grants.manage",
+            "admin.logs.read",
+            "admin.power.control",
+            "admin.services.control",
+            "admin.time.set",
+        ]
+    );
 }
 
 #[test]
@@ -134,6 +156,8 @@ fn grant_system_adds_and_checks_every_name_first() {
         s.check(id(APP), "admin.time.set").map(|d| d.0),
         Ok(Decision::Allowed)
     );
+    s.grant_system(APP, &strings(&["system.devices.manage"]))
+        .unwrap();
     let bad = strings(&["admin.power.control", "user.camera.use"]);
     assert_eq!(s.grant_system(APP, &bad), Err(Failure::InvalidArgs));
     let unknown = strings(&["admin.power.control", "nope"]);
@@ -145,7 +169,7 @@ fn grant_system_adds_and_checks_every_name_first() {
 }
 
 #[test]
-fn checks_by_kind() {
+fn checks_by_scope() {
     let mut s = store();
     assert_eq!(
         s.check(id(APP), "user.camera.use").map(|d| d.0),
@@ -231,12 +255,17 @@ fn requests_ask_only_for_undetermined_user_permissions() {
 }
 
 #[test]
-fn set_grant_refuses_system_and_unknown_permissions() {
+fn set_grant_refuses_system_admin_and_unknown_permissions() {
     let mut s = store();
-    assert_eq!(
-        s.set_grant(&grant(1, "admin.time.set", Decision::Allowed)),
-        Err(Failure::InvalidArgs)
-    );
+    for permission in ["system.devices.manage", "admin.time.set"] {
+        for decision in [Decision::Allowed, Decision::Denied] {
+            assert_eq!(
+                s.set_grant(&grant(1, permission, decision)),
+                Err(Failure::InvalidArgs)
+            );
+        }
+    }
+    assert!(s.list(1).is_empty());
     assert_eq!(
         s.set_grant(&grant(1, "nope", Decision::Allowed)),
         Err(Failure::NotFound)
@@ -333,15 +362,15 @@ fn list_stops_at_its_limit() {
 }
 
 #[test]
-fn elevated_clients_hold_user_and_administrator_permissions() {
+fn elevated_clients_hold_user_and_admin_permissions() {
     let mut s = store();
     let elevated = Identity {
         user: 1,
         app_id: APP,
         admin: 1000,
     };
-    // User permissions but full disk access, and the administrator
-    // permissions, without asking or recording a grant.
+    // Every user and admin permission, without asking or recording a
+    // grant.
     assert_eq!(
         s.check(elevated, "user.camera.use"),
         Ok((Decision::Allowed, true))
@@ -358,6 +387,16 @@ fn elevated_clients_hold_user_and_administrator_permissions() {
         s.check(elevated, "admin.logs.read"),
         Ok((Decision::Allowed, true))
     );
+    for (permission, _) in PERMISSIONS
+        .iter()
+        .filter(|(_, scope)| matches!(scope, Scope::User | Scope::Admin))
+    {
+        assert_eq!(s.check(elevated, permission), Ok((Decision::Allowed, true)));
+        assert_eq!(
+            s.request(elevated, permission),
+            Ok((Requested::Decided(Decision::Allowed), true))
+        );
+    }
     assert_eq!(
         s.request(elevated, "user.camera.use"),
         Ok((Requested::Decided(Decision::Allowed), true))
@@ -366,10 +405,11 @@ fn elevated_clients_hold_user_and_administrator_permissions() {
         s.check(id(APP), "user.camera.use").map(|d| d.0),
         Ok(Decision::Undetermined)
     );
-    // Never the other system permissions or full disk access.
+    assert!(s.list(1).is_empty());
+    // Full disk access too, but never a system permission.
     assert_eq!(
-        s.check(elevated, "user.full_disk.access").map(|d| d.0),
-        Ok(Decision::Undetermined)
+        s.check(elevated, "user.full_disk.access"),
+        Ok((Decision::Allowed, true))
     );
     assert_eq!(
         s.check(elevated, "system.devices.manage").map(|d| d.0),

@@ -321,7 +321,11 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
     let watcher = connect(&provider, ADMIN, reactor);
     c(
         "refusing to set a system permission",
-        set(&admin, "admin.time.set", Decision::Allowed).await == Err(Status::InvalidArgs),
+        set(&admin, "system.devices.manage", Decision::Allowed).await == Err(Status::InvalidArgs),
+    )?;
+    c(
+        "refusing to set an admin permission",
+        set(&admin, "admin.time.set", Decision::Denied).await == Err(Status::InvalidArgs),
     )?;
     c(
         "setting a grant",
