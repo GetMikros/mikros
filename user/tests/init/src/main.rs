@@ -1954,6 +1954,7 @@ fn dma_isolation_reported(s: &Startup) -> Result {
 
 const KIND_FIRMWARE: u32 = 10;
 const BUFFER_TOO_SMALL: i64 = -15;
+const IO: i64 = -28;
 
 fn variable_get(resource: Handle, name: &[u8], buffer: &mut [u8]) -> (i64, u64, u32) {
     let (mut actual, mut attributes) = (0, 0);
@@ -1994,12 +1995,25 @@ fn firmware_variables(s: &Startup) -> Result {
     let ranged = unsafe { sys::resource_create(s.root_resource, KIND_FIRMWARE, 0, 1, 0, &mut bad) };
     ensure("refusing a FIRMWARE range", ranged == INVALID_ARGS)?;
     let firmware = grant(s, KIND_FIRMWARE, 0, 0)?;
-    let irq = grant(s, KIND_IRQ, u64::from(RTC_GSI), 1)?;
+    let irq = match grant(s, KIND_IRQ, u64::from(RTC_GSI), 1) {
+        Ok(irq) => irq,
+        Err(f) => {
+            close(firmware)?;
+            return Err(f);
+        }
+    };
+    // The resources go whatever the outcome, for the tests after.
+    let checked = variable_checks(s, firmware, irq);
+    [firmware, irq].into_iter().try_for_each(close)?;
+    checked
+}
+
+fn variable_checks(s: &Startup, firmware: Handle, irq: Handle) -> Result {
     let mut buffer = [0u8; 1100];
     let wrong = [
         variable_get(s.root_resource, b"MikrosTest", &mut buffer).0,
         variable_get(irq, b"MikrosTest", &mut buffer).0,
-        variable_set(s.root_resource, b"MikrosTest", 6, b"x"),
+        variable_set(s.root_resource, b"MikrosTest", 7, b"x"),
     ];
     ensure("refusing other resources", wrong == [WRONG_TYPE; 3])?;
     let long = [b'a'; 65];
@@ -2015,15 +2029,14 @@ fn firmware_variables(s: &Startup) -> Result {
         "refusing names, attributes and sizes",
         invalid == [INVALID_ARGS; 6],
     )?;
-    let status = variable_set(firmware, b"MikrosTest", 6, b"hello");
+    let status = variable_set(firmware, b"MikrosTest", 7, b"hello");
     if !boot_logged(b"runtime ranges mapped") {
-        ensure(
+        return ensure(
             "refusing calls without runtime services",
             status == NOT_SUPPORTED,
-        )?;
-        return [firmware, irq].into_iter().try_for_each(close);
+        );
     }
-    check("setting a volatile variable", status)?;
+    check("setting a variable", status)?;
     let small = variable_get(firmware, b"MikrosTest", &mut buffer[..2]);
     ensure(
         "asking for a larger buffer",
@@ -2033,29 +2046,40 @@ fn firmware_variables(s: &Startup) -> Result {
     check("reading it", status)?;
     ensure(
         "reading what was set",
-        len == 5 && attributes == 6 && &buffer[..5] == b"hello",
+        len == 5 && attributes == 7 && &buffer[..5] == b"hello",
     )?;
     let data: alloc::vec::Vec<u8> = (0..1024).map(|i| i as u8).collect();
     check(
-        "setting a non-volatile variable",
+        "setting 1024 bytes",
         variable_set(firmware, b"MikrosTest2", 7, &data),
     )?;
     let (status, len, attributes) = variable_get(firmware, b"MikrosTest2", &mut buffer);
-    check("reading it", status)?;
+    check("reading them", status)?;
     ensure(
-        "reading all of it",
+        "reading all of them",
         len == 1024 && attributes == 7 && buffer[..1024] == data[..],
     )?;
     for name in [&b"MikrosTest"[..], b"MikrosTest2"] {
-        let attributes = if name == b"MikrosTest" { 6 } else { 7 };
-        check(
-            "deleting a variable",
-            variable_set(firmware, name, attributes, &[]),
-        )?;
+        check("deleting a variable", variable_set(firmware, name, 7, &[]))?;
         let gone = variable_get(firmware, name, &mut buffer).0;
         ensure("finding no deleted variable", gone == NOT_FOUND)?;
     }
-    [firmware, irq].into_iter().try_for_each(close)
+    // Firmware may refuse to make a volatile variable once boot services
+    // have ended, as EDK2 does, which the call gives as IO.
+    let volatile = variable_set(firmware, b"MikrosVolatile", 6, b"v");
+    ensure(
+        "setting a volatile variable, or failing with IO",
+        volatile == 0 || volatile == IO,
+    )?;
+    if volatile == 0 {
+        let (status, _, attributes) = variable_get(firmware, b"MikrosVolatile", &mut buffer);
+        ensure("reading it", status == 0 && attributes == 6)?;
+        check(
+            "deleting it",
+            variable_set(firmware, b"MikrosVolatile", 6, &[]),
+        )?;
+    }
+    Ok(())
 }
 
 const KIND_BTI: u32 = 8;
@@ -4615,15 +4639,14 @@ mod manager {
     /// app of user 0 does not start. The probe exits with 0 once every
     /// check passed, as the service manager logs. The process manager
     /// tells the service manager that the root file system is available,
-    /// which registers the one valid program manifest of the image's
-    /// `/usr/lib/programs/`, and ignores the one with the app ID of the
-    /// on-demand service `idle` and the one whose app ID is not its file
-    /// name. The program manifest with tmpfs's app ID is not valid either:
-    /// the process manager ignores it, and tmpfs starts.
+    /// which registers the one valid program manifest of the root's
+    /// `/usr/lib/programs/`, and ignores the ones with the app IDs of the
+    /// on-demand service `idle` and of tmpfs, and the one whose app ID is
+    /// not its file name.
     pub fn process_manager_builds_namespaces_from_the_root(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service namespace-probe exited with code 0";
         const ALSO: [&[u8]; 5] = [
-            b"/usr/lib/programs/system.tmpfs.yaml: system.tmpfs is a service's app ID; the program manifest is ignored",
+            b"/usr/lib/programs/system.tmpfs.yaml: system.tmpfs is a service's app ID; ignored",
             b"the root file system is available",
             b"/usr/lib/programs/system.idle.yaml: system.idle is a service's app ID; ignored",
             b"/usr/lib/programs/system.misnamed.yaml:",
@@ -6172,14 +6195,14 @@ mod bootfs {
                     Error::Exists,
                 ),
                 (
-                    "init",
+                    "usr/init",
                     OpenFlags::DIRECTORY,
                     Rights::READ,
                     Error::NotDirectory,
                 ),
-                ("init/x", none, Rights::READ, Error::NotDirectory),
-                ("/init", none, Rights::READ, Error::Invalid),
-                ("usr/../init", none, Rights::READ, Error::AccessDenied),
+                ("usr/init/x", none, Rights::READ, Error::NotDirectory),
+                ("/usr/init", none, Rights::READ, Error::Invalid),
+                ("usr/../usr/init", none, Rights::READ, Error::AccessDenied),
             ];
             for (path, flags, rights, error) in refused {
                 let opened = open(&root, &reactor, path, flags, rights).await?;
@@ -6189,7 +6212,8 @@ mod bootfs {
             ensure("opening an existing name to create", existing.is_ok())?;
 
             // A directory lists in name order, in parts.
-            let Ok((_, tests)) = open(&root, &reactor, "tests", none, Rights::READ).await? else {
+            let Ok((_, tests)) = open(&root, &reactor, "usr/tests", none, Rights::READ).await?
+            else {
                 return Err(failed("opening a directory"));
             };
             let mut names: Vec<String> = Vec::new();
@@ -6211,14 +6235,12 @@ mod bootfs {
                 "listing a directory",
                 names
                     == [
-                        "accounts.img",
                         "acpi-restart.img",
                         "acpi.img",
                         "broker.img",
                         "bus.img",
                         "call-server",
                         "channel-echo",
-                        "console.img",
                         "debuggee",
                         "devices.img",
                         "durable.img",
@@ -6227,7 +6249,6 @@ mod bootfs {
                         "launcher.img",
                         "log.img",
                         "managed",
-                        "namespaces.img",
                         "pci.img",
                         "pie",
                         "ports.img",
@@ -6239,7 +6260,6 @@ mod bootfs {
                         "term.img",
                         "time.img",
                         "tmpfs.img",
-                        "volumes.img",
                     ],
             )?;
 
