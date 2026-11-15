@@ -23,9 +23,11 @@
 //! `device.filesystem`, once it is published, and from then on gives it
 //! as `/boot/efi` to the processes whose manifests list it
 //! (MIKSPEC-0064.R9, MIKSPEC-0064.R15). Processes whose profiles apply and
-//! that hold `user.volumes.access` get `/Volumes`, read and write, and so do the
-//! command-line tools of `system.cli`, whose home folder may also hold
-//! programs.
+//! that hold `user.volumes.access` get `/Volumes`, read and write, and so
+//! do the command-line tools of `system.cli`, whose home folder may also
+//! hold programs. An elevated process also gets its user's home folder,
+//! read and write, and `/Apps`, read only, unless it has them already
+//! (MIKSPEC-0092.R9).
 
 use crate::processes::Shared;
 use alloc::format;
@@ -67,6 +69,8 @@ const ROOT_INSTANCE: &str = "root";
 const SYSTEM: &str = "/@system";
 /// Where the EFI system partition is served, and its instance.
 const BOOT_EFI: &str = "/boot/efi";
+/// The apps installed for every user.
+const APPS: &str = "/Apps";
 /// The directory of the other volumes, and the permission it needs.
 const VOLUMES: &str = "/Volumes";
 const VOLUMES_PERMISSION: &str = "user.volumes.access";
@@ -555,7 +559,7 @@ impl Namespaces {
             add(
                 &mut entries,
                 &mut origins,
-                self.entry(shared, &ready, "/Apps", Rights::READ).await?,
+                self.entry(shared, &ready, APPS, Rights::READ).await?,
             );
             let libraries = self
                 .entry(shared, &ready, "/Libraries", Rights::READ)
@@ -640,8 +644,25 @@ impl Namespaces {
                 );
             }
         }
-        // An elevated process holds the user's folder grants too, which
-        // the broker answers for.
+        // An elevated process gets the folders of every user permission:
+        // the user's home folder, read and write, `/Apps`, read only, and
+        // `/Volumes`, whose permission the broker allows it.
+        if admin != 0 {
+            let home = match user {
+                0 => None,
+                _ => Some(format!(
+                    "/Users/{}",
+                    crate::users::name(shared, user).await?
+                )),
+            };
+            let folders = home.map(|h| (h, RW)).into_iter();
+            for (path, rights) in folders.chain([(String::from(APPS), Rights::READ)]) {
+                if !entries.iter().any(|e| e.path == path) {
+                    let entry = self.entry(shared, &ready, &path, rights).await?;
+                    add(&mut entries, &mut origins, entry);
+                }
+            }
+        }
         if app_id == CLI_APP || self.holds_volumes(shared, app_id, user, admin).await {
             let volumes = NamespaceEntry {
                 path: VOLUMES.into(),
