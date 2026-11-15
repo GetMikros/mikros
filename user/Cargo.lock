@@ -123,6 +123,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootsvc"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "broker-probe"
 version = "0.0.0"
 dependencies = [

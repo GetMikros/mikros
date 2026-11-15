@@ -1,0 +1,16 @@
+// MIKSPEC-0099.R4
+
+library mikros.boot;
+using mikros.base;
+
+type BootState = struct {
+    version string<64>;
+    good bool;
+    tries_left u32;
+    fell_back bool;
+};
+
+protocol Attempts {
+    @1 GetState() -> (state BootState) error base.Status;
+    @2 MarkGood() -> () error base.Status;
+};

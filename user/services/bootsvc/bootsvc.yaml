@@ -1,0 +1,9 @@
+# The service manifest of the boot attempts service, installed as
+# usr/lib/services/bootsvc.yaml.
+name: bootsvc
+binary: /usr/bin/bootsvc
+start: boot
+boot_handles: [root_resource, platform_info]
+provides:
+  - protocol: mikros.boot.Attempts
+    permission: boot.confirm
