@@ -330,7 +330,7 @@ fn create_parts(
         .collect();
     let total = files.iter().map(|(_, d)| d.len() as u64).sum();
     let esp = esp::build(esp::size_for(total), &files)?;
-    let root = root::create(kind, system)?;
+    let root = root::create(kind, system, &built.boot_image, &built.kernel)?;
     let mut parts = vec![
         Part {
             type_guid: ESP_TYPE,

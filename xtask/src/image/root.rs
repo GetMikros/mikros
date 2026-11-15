@@ -92,9 +92,10 @@ fn symlink(_target: &str, _link: &Path) -> Result<()> {
 }
 
 /// The mkfs.btrfs arguments that create the file system in `image` from
-/// `tree`.
+/// `tree`, with crc32c checksums, which the bootloader checks.
 fn mkfs_args(tree: &Path, image: &Path, version: &str) -> Vec<OsString> {
-    let mut args: Vec<OsString> = vec!["-q".into(), "-f".into(), "--rootdir".into(), tree.into()];
+    let mut args: Vec<OsString> = vec!["-q".into(), "-f".into(), "--csum".into(), "crc32c".into()];
+    args.extend(["--rootdir".into(), tree.into()]);
     for subvolume in subvolumes(version) {
         args.push("--subvol".into());
         args.push(subvolume.into());
@@ -103,11 +104,24 @@ fn mkfs_args(tree: &Path, image: &Path, version: &str) -> Vec<OsString> {
     args
 }
 
+/// Where a member of an archive at `path` goes on the root file system:
+/// into the system version, at its path without `usr/` when it is in
+/// `usr`, and otherwise, outside the shared top-level directories, at the
+/// same path; `None` for those in a shared directory.
+fn version_path(path: &Path) -> Option<PathBuf> {
+    if let Ok(rest) = path.strip_prefix("usr") {
+        return Some(rest.to_owned());
+    }
+    match path.components().next() {
+        Some(top) if SHARED_DIRS.iter().any(|d| top.as_os_str() == *d) => None,
+        _ => Some(path.to_owned()),
+    }
+}
+
 /// Copies the members of the archive `boot_image` into the tree `dir`
-/// at their paths on the root file system: those under `usr` into the
-/// system version `version`, and those under the shared top-level
-/// directories at the same paths. Members elsewhere, such as `init`,
-/// are left out.
+/// at their paths on the root file system: into the system version
+/// `version` as `version_path` gives, and those under the shared
+/// top-level directories at the same paths.
 fn copy_boot_image(dir: &Path, version: &str, boot_image: &Path) -> Result<()> {
     let file =
         File::open(boot_image).with_context(|| format!("opening {}", boot_image.display()))?;
@@ -116,12 +130,9 @@ fn copy_boot_image(dir: &Path, version: &str, boot_image: &Path) -> Result<()> {
     for entry in archive.entries().context("reading the boot image")? {
         let mut entry = entry.context("reading the boot image")?;
         let path = entry.path()?.into_owned();
-        let target = match path.strip_prefix("usr") {
-            Ok(rest) => system.join(rest),
-            Err(_) => match path.components().next() {
-                Some(top) if SHARED_DIRS.iter().any(|d| top.as_os_str() == *d) => dir.join(&path),
-                _ => continue,
-            },
+        let target = match version_path(&path) {
+            Some(path) => system.join(path),
+            None => dir.join(&path),
         };
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
@@ -153,9 +164,34 @@ fn symlink_to(_target: &Path, _link: &Path) -> Result<()> {
     bail!("creating the root file system needs a Linux host")
 }
 
-/// Creates the root file system for `kind`, holding the system of
-/// `boot_image`, and returns the path of its image.
-pub fn create(kind: Kind, boot_image: &Path) -> Result<PathBuf> {
+/// The boot list naming the files and links of the archive `boot_image`
+/// at their paths in the system version, in the order of the archive.
+fn boot_list(boot_image: &Path) -> Result<String> {
+    let file =
+        File::open(boot_image).with_context(|| format!("opening {}", boot_image.display()))?;
+    let mut archive = tar::Archive::new(file);
+    let mut list = String::new();
+    for entry in archive.entries().context("reading the boot image")? {
+        let entry = entry.context("reading the boot image")?;
+        let kind = entry.header().entry_type();
+        if kind != tar::EntryType::Regular && kind != tar::EntryType::Symlink {
+            continue;
+        }
+        let path = entry.path()?.into_owned();
+        if let Some(path) = version_path(&path) {
+            let path = path.to_str().context("a member path is not UTF-8")?;
+            list.push_str(path);
+            list.push('\n');
+        }
+    }
+    Ok(list)
+}
+
+/// Creates the root file system for `kind`, holding the system of the
+/// archive `system`, with `kernel` and the boot list of the files of the
+/// archive `boot_image` in the system version, and returns the path of
+/// its image.
+pub fn create(kind: Kind, system: &Path, boot_image: &Path, kernel: &Path) -> Result<PathBuf> {
     let dir = crate::workspace_root().join("target/image");
     let tree = dir.join(format!("root-{}", kind.name()));
     if tree.exists() {
@@ -163,7 +199,12 @@ pub fn create(kind: Kind, boot_image: &Path) -> Result<PathBuf> {
     }
     let version = version(kind);
     write_tree(&tree, &version)?;
-    copy_boot_image(&tree, &version, boot_image)?;
+    copy_boot_image(&tree, &version, system)?;
+    let root = tree.join("@system").join(&version);
+    fs::copy(kernel, root.join("mikros"))
+        .with_context(|| format!("copying {}", kernel.display()))?;
+    fs::create_dir_all(root.join("boot"))?;
+    fs::write(root.join("boot/modules"), boot_list(boot_image)?)?;
 
     let image = dir.join(format!("root-{}.btrfs", kind.name()));
     File::create(&image)?.set_len(SIZE)?;
@@ -220,6 +261,8 @@ mod tests {
             [
                 "-q",
                 "-f",
+                "--csum",
+                "crc32c",
                 "--rootdir",
                 "tree",
                 "--subvol",
@@ -257,16 +300,31 @@ mod tests {
         add("usr/lib/services/s.yaml", b"name: s");
         add("etc/config", b"config");
         add("tests/data", b"data");
+        let mut link = tar::Header::new_ustar();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        archive
+            .append_link(&mut link, "usr/bin/alias", "tool")
+            .unwrap();
         archive.finish().unwrap();
         drop(archive);
         write_tree(&tree, "v1").unwrap();
         copy_boot_image(&tree, "v1", &image).unwrap();
+        assert_eq!(
+            boot_list(&image).unwrap(),
+            "init\nbin/tool\nlib/services/s.yaml\ntests/data\nbin/alias\n"
+        );
         assert_eq!(fs::read(tree.join("@system/v1/bin/tool")).unwrap(), b"tool");
         assert_eq!(
             fs::read(tree.join("@system/v1/lib/services/s.yaml")).unwrap(),
             b"name: s"
         );
         assert_eq!(fs::read(tree.join("etc/config")).unwrap(), b"config");
+        assert_eq!(fs::read(tree.join("@system/v1/init")).unwrap(), b"init");
+        assert_eq!(
+            fs::read(tree.join("@system/v1/tests/data")).unwrap(),
+            b"data"
+        );
         assert!(!tree.join("init").exists() && !tree.join("tests").exists());
         assert!(!tree.join("usr").exists());
         fs::remove_dir_all(&dir).unwrap();
