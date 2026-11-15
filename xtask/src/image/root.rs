@@ -175,10 +175,10 @@ fn boot_list(boot_image: &Path) -> Result<String> {
     Ok(list)
 }
 
-/// Creates the root file system for `kind`, holding the system of the
-/// archive `system`, with `kernel` and the boot list of the files of the
-/// archive `boot_image` in the system version, and returns the path of
-/// its image.
+/// Creates the root file system for `kind`, holding the files of the
+/// archive `boot_image` and then the system of the archive `system`,
+/// with `kernel` and the boot list of the files of `boot_image` in the
+/// system version, and returns the path of its image.
 pub fn create(kind: Kind, system: &Path, boot_image: &Path, kernel: &Path) -> Result<PathBuf> {
     let dir = crate::workspace_root().join("target/image");
     let tree = dir.join(format!("root-{}", kind.name()));
@@ -187,6 +187,10 @@ pub fn create(kind: Kind, system: &Path, boot_image: &Path, kernel: &Path) -> Re
     }
     let version = version(kind);
     write_tree(&tree, &version)?;
+    // The files that the boot list names are there whatever the system.
+    if boot_image != system {
+        copy_boot_image(&tree, &version, boot_image)?;
+    }
     copy_boot_image(&tree, &version, system)?;
     let root = tree.join("@system").join(&version);
     fs::copy(kernel, root.join("mikros"))

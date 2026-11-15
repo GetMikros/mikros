@@ -703,11 +703,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ],
             )?;
             println!("built    {}", term_image.display());
-            // The namespace test serves this image, with root=bootfs: the
-            // service manager, the broker, the temporary file system and a
-            // probe of its namespace, with their manifests, files in /etc,
-            // /usr and /Libraries that the probe reads, and a native app's
-            // bundle with the dynamic linker it needs.
+            // The namespaces run's root partition holds these files: the
+            // temporary file system and a probe of its namespace,
+            // with their manifests, files in /etc, /usr and /Libraries
+            // that the probe reads, and a native app's bundle with the
+            // dynamic linker it needs.
             let namespace_probe = user_build("namespace-probe", kind)?;
             println!("built    {}", namespace_probe.display());
             let probe_dir = crate::workspace_root().join("user/tests/namespace-probe");
@@ -715,56 +715,59 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let probe_conf = probe_dir.join("probe.conf");
             let probe_data = probe_dir.join("data.txt");
             let programs = probe_dir.join("programs");
-            let namespaces_image = test_image(
-                kind,
-                "namespaces.img",
-                &[
-                    ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permbroker", broker.as_path()),
-                    (
-                        "usr/lib/services/permbroker.yaml",
-                        broker_manifest.as_path(),
-                    ),
-                    ("usr/bin/tmpfs", tmpfs.as_path()),
-                    ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
-                    ("usr/bin/namespace-probe", namespace_probe.as_path()),
-                    (
-                        "usr/lib/services/namespace-probe.yaml",
-                        namespace_probe_manifest.as_path(),
-                    ),
-                    ("usr/share/probe/data.txt", probe_data.as_path()),
-                    ("etc/probe.conf", probe_conf.as_path()),
-                    ("Libraries/probe.txt", probe_data.as_path()),
-                    ("Apps/test.native/bin/hello", hello_dynamic.as_path()),
-                    ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
-                    (
-                        "usr/lib/programs/system.probe-tool.yaml",
-                        programs.join("system.probe-tool.yaml").as_path(),
-                    ),
-                    (
-                        "usr/lib/programs/system.tmpfs.yaml",
-                        programs.join("system.tmpfs.yaml").as_path(),
-                    ),
-                    (
-                        "usr/lib/programs/system.idle.yaml",
-                        programs.join("system.idle.yaml").as_path(),
-                    ),
-                    (
-                        "usr/lib/services/idle.yaml",
-                        probe_dir.join("idle.yaml").as_path(),
-                    ),
-                    (
-                        "usr/lib/programs/system.misnamed.yaml",
-                        programs.join("system.misnamed.yaml").as_path(),
-                    ),
-                ],
-            )?;
-            println!("built    {}", namespaces_image.display());
-            // The accounts test serves this image, with root=bootfs: the
-            // service manager, the broker, the temporary file system and
-            // the accounts service, with their manifests, the probe's
-            // binary with the manifests of its five services, and a
-            // users file in /var/lib/accounts.
+            let namespaces_files: Vec<(String, PathBuf)> = vec![
+                ("usr/bin/tmpfs".to_owned(), tmpfs.to_path_buf()),
+                (
+                    "usr/lib/services/tmpfs.yaml".to_owned(),
+                    tmpfs_manifest.to_path_buf(),
+                ),
+                (
+                    "usr/bin/namespace-probe".to_owned(),
+                    namespace_probe.to_path_buf(),
+                ),
+                (
+                    "usr/lib/services/namespace-probe.yaml".to_owned(),
+                    namespace_probe_manifest.to_path_buf(),
+                ),
+                (
+                    "usr/share/probe/data.txt".to_owned(),
+                    probe_data.to_path_buf(),
+                ),
+                ("etc/probe.conf".to_owned(), probe_conf.to_path_buf()),
+                ("Libraries/probe.txt".to_owned(), probe_data.to_path_buf()),
+                (
+                    "Apps/test.native/bin/hello".to_owned(),
+                    hello_dynamic.to_path_buf(),
+                ),
+                (
+                    "usr/lib/ld-mikros.dlib".to_owned(),
+                    dynamic_linker.to_path_buf(),
+                ),
+                (
+                    "usr/lib/programs/system.probe-tool.yaml".to_owned(),
+                    programs.join("system.probe-tool.yaml").to_path_buf(),
+                ),
+                (
+                    "usr/lib/programs/system.tmpfs.yaml".to_owned(),
+                    programs.join("system.tmpfs.yaml").to_path_buf(),
+                ),
+                (
+                    "usr/lib/programs/system.idle.yaml".to_owned(),
+                    programs.join("system.idle.yaml").to_path_buf(),
+                ),
+                (
+                    "usr/lib/services/idle.yaml".to_owned(),
+                    probe_dir.join("idle.yaml").to_path_buf(),
+                ),
+                (
+                    "usr/lib/programs/system.misnamed.yaml".to_owned(),
+                    programs.join("system.misnamed.yaml").to_path_buf(),
+                ),
+            ];
+            // The accounts run's root partition holds these files: the
+            // temporary file system and the accounts service, with their
+            // manifests, the probe's binary with the manifests of its
+            // five services, and a users file in /var/lib/accounts.
             let accounts = user_build("accountsvc", kind)?;
             println!("built    {}", accounts.display());
             let accounts_probe = user_build("accounts-probe", kind)?;
@@ -778,48 +781,43 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let thief_manifest = probe_dir.join("accounts-thief.yaml");
             let sneak_manifest = probe_dir.join("accounts-sneak.yaml");
             let users = accounts_users(kind)?;
-            let accounts_image = test_image(
-                kind,
-                "accounts.img",
-                &[
-                    ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permbroker", broker.as_path()),
-                    (
-                        "usr/lib/services/permbroker.yaml",
-                        broker_manifest.as_path(),
-                    ),
-                    ("usr/bin/tmpfs", tmpfs.as_path()),
-                    ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
-                    ("usr/bin/accountsvc", accounts.as_path()),
-                    (
-                        "usr/lib/services/accountsvc.yaml",
-                        accounts_manifest.as_path(),
-                    ),
-                    ("usr/bin/accounts-probe", accounts_probe.as_path()),
-                    (
-                        "usr/lib/services/accounts-probe.yaml",
-                        accounts_probe_manifest.as_path(),
-                    ),
-                    (
-                        "usr/lib/services/accounts-guest.yaml",
-                        accounts_guest_manifest.as_path(),
-                    ),
-                    (
-                        "usr/lib/services/authorization-stub.yaml",
-                        stub_manifest.as_path(),
-                    ),
-                    (
-                        "usr/lib/services/accounts-thief.yaml",
-                        thief_manifest.as_path(),
-                    ),
-                    (
-                        "usr/lib/services/accounts-sneak.yaml",
-                        sneak_manifest.as_path(),
-                    ),
-                    ("var/lib/accounts/users", users.as_path()),
-                ],
-            )?;
-            println!("built    {}", accounts_image.display());
+            let accounts_files: Vec<(String, PathBuf)> = vec![
+                ("usr/bin/tmpfs".to_owned(), tmpfs.to_path_buf()),
+                (
+                    "usr/lib/services/tmpfs.yaml".to_owned(),
+                    tmpfs_manifest.to_path_buf(),
+                ),
+                ("usr/bin/accountsvc".to_owned(), accounts.to_path_buf()),
+                (
+                    "usr/lib/services/accountsvc.yaml".to_owned(),
+                    accounts_manifest.to_path_buf(),
+                ),
+                (
+                    "usr/bin/accounts-probe".to_owned(),
+                    accounts_probe.to_path_buf(),
+                ),
+                (
+                    "usr/lib/services/accounts-probe.yaml".to_owned(),
+                    accounts_probe_manifest.to_path_buf(),
+                ),
+                (
+                    "usr/lib/services/accounts-guest.yaml".to_owned(),
+                    accounts_guest_manifest.to_path_buf(),
+                ),
+                (
+                    "usr/lib/services/authorization-stub.yaml".to_owned(),
+                    stub_manifest.to_path_buf(),
+                ),
+                (
+                    "usr/lib/services/accounts-thief.yaml".to_owned(),
+                    thief_manifest.to_path_buf(),
+                ),
+                (
+                    "usr/lib/services/accounts-sneak.yaml".to_owned(),
+                    sneak_manifest.to_path_buf(),
+                ),
+                ("var/lib/accounts/users".to_owned(), users.to_path_buf()),
+            ];
             // The device manager tests serve these images. Each holds the
             // service manager, the broker and the device manager with
             // their manifests, and test drivers: their manifests from
@@ -1035,8 +1033,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             ]);
             let input_image = device_image("input.img", &[], &input_files)?;
             println!("built    {}", input_image.display());
-            // The console run serves this image: the drivers and the log
-            // service of the input run, the terminal service, the
+            // The console run's root partition holds these files: the
+            // drivers and the log service of the input run, the terminal
+            // service, the
             // temporary file system and the accounts service with the
             // test users and bob's home folder, the union service, the
             // session manager, the text console with its program manifest
@@ -1131,8 +1130,6 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     .context("not UTF-8")?;
                 console_files.push((format!("usr/share/X11/xkb/{relative}"), path.clone()));
             }
-            let console_image = device_image("console.img", &[], &console_files)?;
-            println!("built    {}", console_image.display());
             // The power-off run serves this image, with the ACPI server, the
             // log service and the power probe, a boot service that the
             // service manager stops when the power button shuts the
@@ -1286,7 +1283,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &pci_bus_files,
             )?;
             println!("built    {}", pci_image.display());
-            // The USB volumes run serves this image, with root=bootfs: the
+            // The USB volumes run's root partition holds these files: the
             // PCI bus, xHCI, USB mass storage, partition, FAT, exFAT and
             // btrfs drivers, the time zones and the log service, through
             // which the drivers' messages reach the serial output, from the
@@ -1327,8 +1324,6 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     crate::workspace_root().join("user/tests/volumes-probe/volumes-probe.yaml"),
                 ),
             ]);
-            let volumes_image = device_image("volumes.img", &[], &volumes_files)?;
-            println!("built    {}", volumes_image.display());
             // The root disk runs serve this image: the PCI bus driver, the
             // drivers of the disk controllers, the partition, FAT and btrfs
             // drivers, the time zones and the log service, from the PCI
@@ -1356,6 +1351,25 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .collect();
             let root_image = device_image("root.img", &[], &root_files)?;
             println!("built    {}", root_image.display());
+            // The root partitions of the namespaces, accounts, console and
+            // USB volumes runs hold the files of these archives, whose
+            // services start once the root file system is available; the
+            // test init serves setup.img for them.
+            let archive = |file: &str, files: &[(String, PathBuf)]| {
+                let members: Vec<(&str, &Path)> = files
+                    .iter()
+                    .map(|(name, path)| (name.as_str(), path.as_path()))
+                    .collect();
+                test_image(kind, file, &members)
+            };
+            for (file, files) in [
+                ("namespaces.img", &namespaces_files),
+                ("accounts.img", &accounts_files),
+                ("console.img", &console_files),
+                ("volumes.img", &volumes_files),
+            ] {
+                println!("built    {}", archive(file, files)?.display());
+            }
             // The setup run serves this image: the drivers and the log
             // service of the input run, the root disk's drivers of the
             // root disk runs, tmpfs and the union server, the services
@@ -1438,27 +1452,23 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 device_image("durable.img", &[("test-durable", true)], &durable_files)?;
             println!("built    {}", durable_image.display());
             let members = [
-                ("tests/accounts.img", accounts_image.as_path()),
                 ("tests/broker.img", broker_image.as_path()),
                 ("tests/services.img", services_image.as_path()),
                 ("tests/tmpfs.img", tmpfs_image.as_path()),
                 ("tests/log.img", log_image.as_path()),
                 ("tests/term.img", term_image.as_path()),
                 ("tests/time.img", time_image.as_path()),
-                ("tests/namespaces.img", namespaces_image.as_path()),
                 ("tests/devices.img", devices_image.as_path()),
                 ("tests/failing.img", failing_image.as_path()),
                 ("tests/restart.img", restart_image.as_path()),
                 ("tests/acpi.img", acpi_image.as_path()),
                 ("tests/power.img", power_image.as_path()),
                 ("tests/pci.img", pci_image.as_path()),
-                ("tests/volumes.img", volumes_image.as_path()),
                 ("tests/root.img", root_image.as_path()),
                 ("tests/bus.img", bus_image.as_path()),
                 ("tests/durable.img", durable_image.as_path()),
                 ("tests/acpi-restart.img", acpi_restart_image.as_path()),
                 ("tests/input.img", input_image.as_path()),
-                ("tests/console.img", console_image.as_path()),
                 ("tests/setup.img", setup_image.as_path()),
                 ("init", init.as_path()),
                 ("tests/launcher.img", launcher.as_path()),
@@ -1652,6 +1662,15 @@ fn login_members(
 
 /// Writes the boot archive `file` with each of `members`, given by name
 /// and the path of its contents, as a regular file.
+/// Where the archive `file` of the build kind `kind` is written, the test
+/// images that the test boot image holds among them.
+pub fn test_image_path(kind: Kind, file: &str) -> PathBuf {
+    crate::workspace_root()
+        .join("target/boot")
+        .join(kind.name())
+        .join(file)
+}
+
 fn boot_image(kind: Kind, file: &str, members: &[(&str, &Path)]) -> Result<PathBuf> {
     archive(kind, file, members, &[], &[])
 }
@@ -1721,11 +1740,8 @@ fn archive(
     dirs: &[&str],
     links: &[(&str, &str)],
 ) -> Result<PathBuf> {
-    let dir = crate::workspace_root()
-        .join("target/boot")
-        .join(kind.name());
-    fs::create_dir_all(&dir)?;
-    let path = dir.join(file);
+    let path = test_image_path(kind, file);
+    fs::create_dir_all(path.parent().context("an archive in a directory")?)?;
     let mut listing = Listing::default();
     let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
     let mut archive = tar::Builder::new(file);

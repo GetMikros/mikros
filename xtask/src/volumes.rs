@@ -357,7 +357,16 @@ pub fn run(
     timeout: Duration,
 ) -> Result<()> {
     fs::create_dir_all(dir)?;
-    image::create_with(kind, built, &dir.join("disk.img"), "test=usb-volumes", &[])?;
+    // The root partition holds the files of the image the test init
+    // serves.
+    let system = build::test_image_path(kind, "volumes.img");
+    image::create_with_system(
+        kind,
+        built,
+        &system,
+        &dir.join("disk.img"),
+        "test=usb-volumes",
+    )?;
     let log = dir.join("serial.log");
     let socket = scenario::monitor_socket(dir);
     let extra = more_sticks(dir);

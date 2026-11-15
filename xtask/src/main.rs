@@ -28,6 +28,7 @@ mod loader_check;
 mod machine_state;
 mod meson;
 mod musl;
+mod own_root;
 mod port;
 mod port_tests;
 mod ports;

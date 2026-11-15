@@ -607,6 +607,26 @@ pub fn run(args: &Args) -> Result<()> {
         timeout,
     )?;
     println!("USB volumes run passed");
+    crate::own_root::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("namespaces"),
+        timeout,
+        "namespaces",
+    )?;
+    println!("namespaces run passed");
+    // Each Argon2id hash of the accounts probe takes seconds when
+    // emulated, and it makes about a dozen.
+    crate::own_root::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("accounts"),
+        timeout * 2,
+        "accounts",
+    )?;
+    println!("accounts run passed");
     crate::root_disk::run(
         &args.machine,
         args.kind,

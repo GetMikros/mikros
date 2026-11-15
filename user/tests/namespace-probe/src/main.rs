@@ -1,10 +1,9 @@
-//! A program that the service manager starts as a boot service, from a
-//! boot image that the process manager serves with `root=bootfs`, to
-//! check the namespace that its manifest gives it. Started after tmpfs,
-//! it has its profile from the start: exactly its manifest's entries and
-//! `/dev`, which the boot image and the copies of its `etc` on tmpfs
-//! serve with the rights given, and the writable entry that did not
-//! exist was made. It then starts a copy of itself as a command-line
+//! A program that the service manager starts as a boot service, from
+//! the root partition, to check the namespace that its manifest gives it.
+//! Started once the root file system is available, it has its profile
+//! from the start: exactly its manifest's entries and `/dev`, which the
+//! root file system serves with the rights given, and the writable entry
+//! that did not exist was made. It then starts a copy of itself as a command-line
 //! tool of user 0, which checks the entries of that profile, and a
 //! native app of user 0, which cannot start. It exits with 0 when every
 //! check passed, or with the number of the first that failed.
@@ -85,9 +84,9 @@ fn spawn(launcher: &LauncherClient, path: &str, app_id: &str) -> Result<u32, Opt
 
 /// A command-line tool of user 0 starts with its profile and passes its
 /// checks; a native app of user 0 does not start. Paths are resolved in
-/// the probe's namespace: a program of the boot image outside it is not
-/// found, a file below an entry without `x` may not be started, and a
-/// copy of the probe in its state directory, on tmpfs, may not be started
+/// the probe's namespace: a program outside it is not found, a file
+/// below an entry without `x` may not be started, and a copy of the probe
+/// in its state directory, on the root file system, may not be started
 /// while its mode has no execute bit, and once it has one is an
 /// application there, which a program without the dynamic linker may not
 /// be.
@@ -229,12 +228,12 @@ fn check(entries: &[(String, NodeClient)]) -> Result<(), i64> {
         10,
     )?;
     let entry = |path: &str| entries.iter().find(|(p, _)| p == path).map(|(_, n)| n);
-    // The boot image serves /usr, read only.
+    // The root file system serves /usr, read only.
     let share = entry("/usr/share/probe").ok_or(11)?;
     expect(read(share, "data.txt").as_deref() == Some(&b"data"[..]), 11)?;
     let write = open(share, "data.txt", OpenFlags(0), RW);
     expect(matches!(write, Err(Some(Error::AccessDenied))), 12)?;
-    // /etc is tmpfs's copy of the boot image's, here read only.
+    // /etc is the root file system's, here read only.
     let etc = entry("/etc").ok_or(13)?;
     expect(
         read(etc, "probe.conf").as_deref() == Some(&b"probe"[..]),
@@ -245,7 +244,7 @@ fn check(entries: &[(String, NodeClient)]) -> Result<(), i64> {
         .ok()
         .and_then(|r| r.ok())
         .ok_or(14)?;
-    expect(info.info.r#type == "tmpfs", 14)?;
+    expect(info.info.r#type == "btrfs", 14)?;
     let write = open(etc, "probe.conf", OpenFlags(0), RW);
     expect(matches!(write, Err(Some(Error::AccessDenied))), 15)?;
     // The writable entry was made, and takes files.

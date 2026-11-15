@@ -4604,13 +4604,12 @@ mod manager {
         ensure("passing every check of the probe", outcome == Some(true))
     }
 
-    /// With `root=bootfs` on the command line, from a boot image with the
-    /// service manager, the permission broker, the temporary file system,
-    /// a probe of namespaces with their manifests, files in `/etc`, `/usr`
-    /// and `/Libraries`, and a native app's bundle, the process manager
-    /// makes tmpfs's `boot/` directories, fills them from the image, and
-    /// gives each process started after tmpfs the namespace of its
-    /// profile. The probe gets exactly the entries of its manifest and
+    /// From the setup run's boot image, with the root partition holding a
+    /// probe of namespaces with its manifest, files in `/etc`, `/usr` and
+    /// `/Libraries`, and a native app's bundle, the process manager builds
+    /// namespaces from the root file system once it is published, and the
+    /// service manager starts the probe from there with the namespace of
+    /// its profile. The probe gets exactly the entries of its manifest and
     /// `/dev`, with the rights given; a command-line tool of user 0 that
     /// it starts gets its profile without a folder in `/Users`; a native
     /// app of user 0 does not start. The probe exits with 0 once every
@@ -4621,7 +4620,7 @@ mod manager {
     /// on-demand service `idle` and the one whose app ID is not its file
     /// name. The program manifest with tmpfs's app ID is not valid either:
     /// the process manager ignores it, and tmpfs starts.
-    pub fn process_manager_builds_namespaces_from_the_boot_image(s: &Startup) -> Result {
+    pub fn process_manager_builds_namespaces_from_the_root(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service namespace-probe exited with code 0";
         const ALSO: [&[u8]; 5] = [
             b"/usr/lib/programs/system.tmpfs.yaml: system.tmpfs is a service's app ID; the program manifest is ignored",
@@ -4638,26 +4637,7 @@ mod manager {
             b"service tmpfs exited",
             b"service tmpfs ended",
         ];
-        let (m, init, reader) = serving_with(s, b"tests/namespaces.img", "root=bootfs")?;
-        let deadline = super::within(super::PROBE_SECONDS);
-        let log = StartupHandle {
-            role: HandleRole::User,
-            id: 2,
-            handle: copy(s.log, SAME_RIGHTS)?,
-        };
-        let root = StartupHandle {
-            role: HandleRole::User,
-            id: 1,
-            handle: copy(s.root_resource, SAME_RIGHTS)?,
-        };
-        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
-        let Ok(Ok(started)) = reply else {
-            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
-            return Err(Failure {
-                what: "starting the service manager",
-                status: 0,
-            });
-        };
+        let (m, _init, reader, process) = services_from_with(s, b"tests/setup.img", false, "")?;
         let deadline = super::within(super::PROBE_SECONDS);
         let mut seen = [false; 5];
         let mut passed = false;
@@ -4688,16 +4668,16 @@ mod manager {
             }
         };
         // SAFETY: the call takes no pointers.
-        unsafe { sys::task_kill(started.process.raw()) };
+        unsafe { sys::task_kill(process.raw()) };
         drop(m);
         ensure("logging an outcome in time", outcome.is_some())?;
         ensure("passing every check of the probe", outcome == Some(true))
     }
 
-    /// With `root=bootfs` on the command line, from a boot image with the
-    /// service manager, the permission broker, the temporary file system,
+    /// From the setup run's boot image, with the root partition holding
     /// the accounts service and a users file in `/var/lib/accounts`, the
-    /// accounts service lists, authenticates and changes those users. A
+    /// accounts service lists, authenticates and changes those users, and
+    /// makes and deletes a home folder. A
     /// probe that holds its permissions and that an authorization stub
     /// allows to manage accounts, and a guest without
     /// `accounts.authenticate` that the stub turns down, each exit with 0
@@ -4725,26 +4705,7 @@ mod manager {
             b"service tmpfs exited",
             b"service tmpfs ended",
         ];
-        let (m, init, reader) = serving_with(s, b"tests/accounts.img", "root=bootfs")?;
-        let deadline = super::within(super::PROBE_SECONDS);
-        let log = StartupHandle {
-            role: HandleRole::User,
-            id: 2,
-            handle: copy(s.log, SAME_RIGHTS)?,
-        };
-        let root = StartupHandle {
-            role: HandleRole::User,
-            id: 1,
-            handle: copy(s.root_resource, SAME_RIGHTS)?,
-        };
-        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
-        let Ok(Ok(started)) = reply else {
-            mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
-            return Err(Failure {
-                what: "starting the service manager",
-                status: 0,
-            });
-        };
+        let (m, _init, reader, process) = services_from_with(s, b"tests/setup.img", false, "")?;
         let deadline = super::within(ACCOUNTS_SECONDS);
         let mut passed = [false; 4];
         let outcome = loop {
@@ -4771,7 +4732,7 @@ mod manager {
             }
         };
         // SAFETY: the call takes no pointers.
-        unsafe { sys::task_kill(started.process.raw()) };
+        unsafe { sys::task_kill(process.raw()) };
         drop(m);
         ensure("logging an outcome in time", outcome.is_some())?;
         ensure("passing every check of the probes", outcome == Some(true))
@@ -5420,13 +5381,53 @@ mod manager {
         Ok((m, init, reader, started.process))
     }
 
-    /// The `usb-volumes` scenario: serves `tests/volumes.img` with
-    /// `root=bootfs`, whose volumes probe uses the FAT volume on the USB
+    /// Runs `test` as the scenario `name`, and ends the machine with its
+    /// outcome.
+    fn checked_scenario(s: &Startup, name: &str, test: fn(&Startup) -> Result) -> i64 {
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(Error, "SCENARIO {name}: {} failed ({})", f.what, f.status);
+            return 1;
+        }
+        match test(s) {
+            Ok(()) => {
+                mikros_rt::log!(Info, "SCENARIO {name} PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Err(f) => {
+                mikros_rt::log!(
+                    Error,
+                    "SCENARIO {name} FAILED: {} failed ({})",
+                    f.what,
+                    f.status
+                );
+                mikros_test::exit_qemu(mikros_test::FAILED)
+            }
+        }
+    }
+
+    /// The `namespaces` scenario, whose root partition holds the files of
+    /// the namespaces archive.
+    pub fn namespaces_scenario(s: &Startup) -> i64 {
+        checked_scenario(
+            s,
+            "namespaces",
+            process_manager_builds_namespaces_from_the_root,
+        )
+    }
+
+    /// The `accounts` scenario, whose root partition holds the files of
+    /// the accounts archive.
+    pub fn accounts_scenario(s: &Startup) -> i64 {
+        checked_scenario(s, "accounts", accounts_service_serves_users)
+    }
+
+    /// The `usb-volumes` scenario: serves `tests/setup.img`, with the root
+    /// partition holding the volumes archive, whose volumes probe uses the FAT volume on the USB
     /// disk through `/Volumes` and sees it go once the runner unplugs the
     /// disk, and runs until the runner stops the machine; it returns 1
     /// only when the service manager did not start.
     pub fn usb_volumes_scenario(s: &Startup) -> i64 {
-        match services_from_with(s, b"tests/volumes.img", false, "root=bootfs") {
+        match services_from_with(s, b"tests/setup.img", false, "") {
             // Everything stays as it is until the runner stops the machine.
             Ok(_running) => loop {
                 super::sleep_ms(1000);
@@ -5689,8 +5690,9 @@ mod manager {
         mikros_test::exit_qemu(mikros_test::FAILED)
     }
 
-    /// The `console` scenario: serves `tests/console.img`, whose session
-    /// manager starts the text console, while the runner types bob's
+    /// The `console` scenario: serves `tests/setup.img`, with the root
+    /// partition holding the console archive, whose session manager starts
+    /// the text console, while the runner types bob's
     /// login on console 1, cy's on console 2, and then a line for bob's
     /// session shell, which checks its session and exits with 0; stops
     /// QEMU with `PASSED` once that session ended so, or with `FAILED`.
@@ -5716,16 +5718,9 @@ mod manager {
             mikros_rt::log!(Error, "SCENARIO console: {} failed ({})", f.what, f.status);
             return 1;
         }
-        // The accounts service keeps its users under the root's /var.
-        let logged = device_manager_logs_with(
-            s,
-            b"tests/console.img",
-            true,
-            "root=bootfs",
-            SECONDS,
-            EXPECTED,
-            FAILED,
-        );
+        // The accounts service keeps its users under the root's /var,
+        // on the root partition that holds the image's files.
+        let logged = device_manager_logs(s, b"tests/setup.img", true, SECONDS, EXPECTED, FAILED);
         match logged {
             Ok(true) => {
                 mikros_rt::log!(Info, "SCENARIO console PASSED");
@@ -6270,7 +6265,7 @@ fn clock_page_rights(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 81] = [
+const TESTS: [(&str, Test); 79] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6326,14 +6321,6 @@ const TESTS: [(&str, Test); 81] = [
         manager::terminal_service_serves_terminals,
     ),
     ("time_service_keeps_utc", manager::time_service_keeps_utc),
-    (
-        "process_manager_builds_namespaces_from_the_boot_image",
-        manager::process_manager_builds_namespaces_from_the_boot_image,
-    ),
-    (
-        "accounts_service_serves_users",
-        manager::accounts_service_serves_users,
-    ),
     (
         "device_manager_adds_platform_devices",
         manager::device_manager_adds_platform_devices,
@@ -6515,6 +6502,8 @@ fn scenario(s: &Startup) -> Option<i64> {
         "acpi-restart" => manager::acpi_restart_scenario(s),
         "input" => manager::input_scenario(s),
         "console" => manager::console_scenario(s),
+        "namespaces" => manager::namespaces_scenario(s),
+        "accounts" => manager::accounts_scenario(s),
         "setup" => manager::setup_scenario(s),
         "takeover" => manager::takeover_scenario(s),
         // The runner logs the writes and flushes of the scratch disks.

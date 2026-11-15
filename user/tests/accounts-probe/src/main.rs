@@ -196,7 +196,7 @@ fn probe(a: &AccountsClient) -> Result<(), i64> {
         fails(authenticate(a, "nobody", "x"), Status::AccessDenied),
         15,
     )?;
-    // Creating: checked, but no home folder can be made on tmpfs.
+    // Creating: checked, with a home folder on the root file system.
     let create = |name: &str, full: &str, password: &str| {
         a.create_user(name.into(), full.into(), Standard, password.into(), FOREVER)
     };
@@ -204,7 +204,7 @@ fn probe(a: &AccountsClient) -> Result<(), i64> {
     expect(fails(create("dan", "", "pw"), Status::InvalidArgs), 17)?;
     expect(fails(create("dan", "Dan", ""), Status::InvalidArgs), 18)?;
     expect(fails(create("ann", "Ann", "pw"), Status::AlreadyExists), 19)?;
-    expect(fails(create("dan", "Dan", "pw"), Status::NotSupported), 20)?;
+    expect(ok(create("dan", "Dan", "pw")), 20)?;
     // Full names.
     expect(ok(a.set_full_name(1001, "Bob Example".into(), FOREVER)), 21)?;
     expect(
@@ -229,7 +229,12 @@ fn probe(a: &AccountsClient) -> Result<(), i64> {
     )?;
     expect(ok(a.set_kind(1001, Admin, FOREVER)), 26)?;
     expect(ok(a.set_kind(1000, Standard, FOREVER)), 27)?;
-    let changed = alloc::vec![(1000, Standard), (1001, Admin), (1002, Standard)];
+    let changed = alloc::vec![
+        (1000, Standard),
+        (1001, Admin),
+        (1002, Standard),
+        (1003, Standard),
+    ];
     expect(kinds(a) == Some(changed), 28)?;
     expect(
         fails(a.set_kind(5000, Admin, FOREVER), Status::NotFound),
@@ -252,11 +257,9 @@ fn probe(a: &AccountsClient) -> Result<(), i64> {
         ),
         33,
     )?;
-    // Deleting, which keeps the last administrator.
-    expect(
-        fails(a.delete_user(1002, true, FOREVER), Status::NotSupported),
-        34,
-    )?;
+    // Deleting, with the home folder or without it, which keeps the
+    // last administrator.
+    expect(ok(a.delete_user(1003, true, FOREVER)), 34)?;
     expect(ok(a.delete_user(1002, false, FOREVER)), 35)?;
     expect(
         kinds(a) == Some(alloc::vec![(1000, Standard), (1001, Admin)]),

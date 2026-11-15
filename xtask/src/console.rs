@@ -421,8 +421,20 @@ pub fn run(
         Step::Log("console1.ppm", Shown::Session),
         Step::Keys("l s ret"),
     ];
+    // The root partition holds the files of the image the test init
+    // serves, the test users among them.
+    let system = build::test_image_path(kind, "console.img");
     session(
-        machine, kind, built, dir, timeout, "console", &steps, "bob", &after, None,
+        machine,
+        kind,
+        built,
+        dir,
+        timeout,
+        "console",
+        &steps,
+        "bob",
+        &after,
+        Some(&system),
     )
 }
 
