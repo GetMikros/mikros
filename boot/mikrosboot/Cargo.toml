@@ -10,3 +10,4 @@ uefi-raw = "0.17.0"
 
 [dependencies]
 boot-protocol = { path = "../protocol" }
+ruzstd = { version = "0.9.1", default-features = false }

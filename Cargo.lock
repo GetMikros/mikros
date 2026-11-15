@@ -871,6 +871,7 @@ name = "mikrosboot"
 version = "0.0.0"
 dependencies = [
  "boot-protocol",
+ "ruzstd",
  "uefi",
  "uefi-raw",
 ]

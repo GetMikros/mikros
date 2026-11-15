@@ -1,5 +1,6 @@
 //! Reading the contents of files and symbolic links.
 
+use super::zstd::decompress;
 use super::{Error, Inode, Key, Kind, Node, Volume, u16_at, u32_at, u64_at};
 use crate::crc::crc32c;
 use crate::disk::Disk;
@@ -10,6 +11,8 @@ pub(super) const EXTENT_DATA: u8 = 108;
 const EXTENT_CSUM: u8 = 128;
 const EXTENT_CSUM_OBJECTID: u64 = -10i64 as u64;
 const COMPRESS_NONE: u8 = 0;
+/// The most bytes that a compressed extent holds once decompressed.
+pub(super) const COMPRESSED_MAX: u64 = 128 * 1024;
 /// The most bytes read from an uncompressed extent at a time.
 const READ_STEP: u64 = 1 << 20;
 /// The longest symbolic link target.
@@ -51,6 +54,7 @@ impl<D: Disk> Volume<D> {
         if item.len() < 21 {
             return Err(Error::Corrupt("a file extent item is too short"));
         }
+        let ram_bytes = u64_at(item, 8);
         let compression = item[16];
         if item[17] != 0 || u16_at(item, 18) != 0 {
             return Err(Error::Corrupt("a file extent is encrypted or encoded"));
@@ -60,7 +64,7 @@ impl<D: Disk> Volume<D> {
             let data = &item[21..];
             let data = match compression {
                 COMPRESS_NONE => data.to_vec(),
-                _ => return Err(Error::Compression(compression)),
+                _ => decompress(compression, data, ram_bytes)?,
             };
             let len = data.len().min(dest.len());
             dest[..len].copy_from_slice(&data[..len]);
@@ -83,7 +87,17 @@ impl<D: Disk> Volume<D> {
         let len = bytes.min(dest.len() as u64) as usize;
         let checked = !inode.nodatasum;
         if compression != COMPRESS_NONE {
-            return Err(Error::Compression(compression));
+            if disk_bytes > COMPRESSED_MAX {
+                return Err(Error::Corrupt("a compressed extent is too large"));
+            }
+            let mut raw = vec![0; disk_bytes as usize];
+            self.read_data(disk_bytenr, &mut raw, checked)?;
+            let data = decompress(compression, &raw, ram_bytes)?;
+            let source = data
+                .get(offset as usize..offset as usize + len)
+                .ok_or(Error::Corrupt("a compressed extent is too short"))?;
+            dest[..len].copy_from_slice(source);
+            return Ok(());
         }
         if offset.checked_add(bytes).is_none_or(|end| end > disk_bytes) {
             return Err(Error::Corrupt("a file extent lies outside its disk extent"));

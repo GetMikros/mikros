@@ -1,4 +1,5 @@
 use super::file::EXTENT_DATA;
+use super::zstd::{COMPRESS_ZSTD, decompress};
 use super::*;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -260,4 +261,41 @@ fn checks_data_checksums() {
         v.read(big, &mut out),
         Err(Error::DataChecksum(disk_bytenr + 4096))
     );
+}
+
+/// Bytes that compress well.
+fn text(len: usize) -> Vec<u8> {
+    let line = b"the quick brown fox jumps over the lazy dog 0123456789\n";
+    line.iter().copied().cycle().take(len).collect()
+}
+
+#[test]
+fn decompresses_zstd_extents() {
+    let image = mkfs("zstd", &["--compress", "zstd"], |t| {
+        write(t, "inline", &text(1500));
+        write(t, "big", &text(700 * 1024 + 3));
+        write(t, "noise", &noise(200 * 1024));
+    });
+    let mut v = Volume::open(image).unwrap();
+    for (path, expected) in [
+        ("inline", text(1500)),
+        ("big", text(700 * 1024 + 3)),
+        ("noise", noise(200 * 1024)),
+    ] {
+        let node = walk(&mut v, path);
+        assert_eq!(contents(&mut v, node), expected, "{path}");
+    }
+    // The large file is stored compressed.
+    let big = walk(&mut v, "big");
+    let extents = v.items(big, EXTENT_DATA).unwrap();
+    assert!(extents.iter().any(|(_, item)| item[16] == COMPRESS_ZSTD));
+}
+
+#[test]
+fn refuses_other_compression() {
+    let image = mkfs("lzo", &["--compress", "lzo"], |t| {
+        write(t, "big", &text(400 * 1024))
+    });
+    assert_eq!(Volume::open(image).err(), Some(Error::Incompat(1 << 3)));
+    assert_eq!(decompress(1, b"x", 1), Err(Error::Compression(1)));
 }

@@ -13,6 +13,7 @@ mod dir;
 mod file;
 #[cfg(test)]
 mod tests;
+mod zstd;
 
 pub use dir::{Inode, Kind, Node};
 
