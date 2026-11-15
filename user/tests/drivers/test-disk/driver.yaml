@@ -5,4 +5,4 @@
 name: test-disk
 binary: /usr/lib/drivers/test-disk/test-disk
 match: [storage:partition]
-permissions: [permissions.manage]
+permissions: [system.grants.manage]

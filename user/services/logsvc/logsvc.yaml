@@ -4,10 +4,10 @@ name: logsvc
 binary: /usr/bin/logsvc
 start: boot
 boot_handles: [log_manage]
-permissions: [filesystem.mount]
+permissions: [system.filesystems.mount]
 provides:
   - protocol: mikros.log.Writer
   - protocol: mikros.log.Reader
     permission: logs.read
   - protocol: mikros.log.Sources
-    permission: logs.add_source
+    permission: system.log_sources.create

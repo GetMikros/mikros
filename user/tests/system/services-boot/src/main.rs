@@ -27,7 +27,7 @@ fn main(m: &Managed) -> i64 {
     )
 }
 
-/// `mikros.boot.Attempts` is refused without `boot.confirm`.
+/// `mikros.boot.Attempts` is refused without `system.boot_state.set`.
 fn attempts_need_their_permission(s: &Own) -> Result {
     let (_client, server) = endpoints::<Attempts>().map_err(|_| Failure {
         what: "making a channel",

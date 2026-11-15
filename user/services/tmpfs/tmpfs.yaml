@@ -5,6 +5,6 @@ binary: /usr/bin/tmpfs
 start: boot
 provides:
   - protocol: mikros.fs.Filesystem
-    permission: filesystem.mount
+    permission: system.filesystems.mount
   - protocol: mikros.fs.TemporaryFilesystem
-    permission: filesystem.mount
+    permission: system.filesystems.mount

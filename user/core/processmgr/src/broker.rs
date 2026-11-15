@@ -3,10 +3,10 @@
 //! The process manager connects to the broker through its own directory
 //! once the service manager has bound it. Until the broker has answered
 //! on that connection, only the service manager that init asked for
-//! holds a permission, `process.set_identity`, so that it can start the
+//! holds a permission, `system.identity.set`, so that it can start the
 //! broker. From then on the broker decides for every process, the
 //! service manager included. When the connection fails, the broker is
-//! gone and that service manager holds `process.set_identity` again.
+//! gone and that service manager holds `system.identity.set` again.
 
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
@@ -17,14 +17,14 @@ use mikros_rt::interfaces::mikros::service::{ClientIdentity, Directory, Director
 
 /// The broker's protocol.
 const PROTOCOL: &str = "mikros.permissions.Broker";
-pub const SET_IDENTITY: &str = "process.set_identity";
+pub const SET_IDENTITY: &str = "system.identity.set";
 pub const FULL_DISK: &str = "files.full_disk";
-pub const SIGNAL_ANY: &str = "process.signal_any";
-pub const LIST_ALL: &str = "process.list_all";
-pub const SET_USER: &str = "process.set_user";
+pub const SIGNAL_ANY: &str = "system.processes.control";
+pub const LIST_ALL: &str = "system.processes.read";
+pub const SET_USER: &str = "system.user_id.set";
 /// The permission asked about, for the process manager itself, to learn
 /// that the broker serves requests. Any answer will do.
-const PROBE: &str = "permissions.check";
+const PROBE: &str = "system.permissions.read";
 
 /// The process manager's directory and connection to the broker, once
 /// it made them, and whether the broker has answered on it.

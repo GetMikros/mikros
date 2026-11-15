@@ -18,13 +18,13 @@ use mikros_rt::interfaces::mikros::service::Provider;
 /// that connecting to each one's instances needs.
 const CLASSES: [(&str, &str); 8] = [
     ("gpu", "gpu.render"),
-    ("input", "input.seat"),
-    ("acpi", "device.registry"),
-    ("storage", "storage.raw"),
-    ("filesystem", "filesystem.mount"),
+    ("input", "system.input.control"),
+    ("acpi", "system.devices.manage"),
+    ("storage", "system.raw_storage.use"),
+    ("filesystem", "system.filesystems.mount"),
     ("rtc", "time.set"),
     ("hid", "input.hid_raw"),
-    ("subvolumes", "filesystem.manage"),
+    ("subvolumes", "system.subvolumes.manage"),
 ];
 /// The class of file systems, and that of the management of a file
 /// system's subvolumes, whose instance is named after the file system's.

@@ -6,4 +6,4 @@ start: boot
 boot_handles: [root_resource, platform_info]
 provides:
   - protocol: mikros.boot.Attempts
-    permission: boot.confirm
+    permission: system.boot_state.set

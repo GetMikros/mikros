@@ -6,4 +6,4 @@
 app_id: system.permissions
 binary: /usr/bin/permissions
 command: true
-permissions: [permissions.manage, session.authorize]
+permissions: [system.grants.manage, session.authorize]

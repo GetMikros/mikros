@@ -10,17 +10,17 @@ namespace:
   - path: /usr
     rights: rx
 permissions:
-  - process.set_user
-  - process.set_identity
-  - accounts.authenticate
-  - gpu.display
-  - input.seat
+  - system.user_id.set
+  - system.identity.set
+  - system.users.authenticate
+  - system.display.control
+  - system.input.control
   - power.control
   # To find the console of an Authorize client's login session, and
   # whether the client still runs.
-  - process.list_all
+  - system.processes.read
   # To mark the boot good once the console has started.
-  - boot.confirm
+  - system.boot_state.set
 provides:
   - protocol: mikros.session.Authorization
     permission: session.authorize

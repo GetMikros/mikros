@@ -40,7 +40,7 @@ use mikros_rt::interfaces::mikros::service::{
 /// The protocol of the registrar, which the service manager provides,
 /// and the permission it needs.
 pub const REGISTRAR: &str = "mikros.service.Registrar";
-const REGISTER_PERMISSION: &str = "services.register";
+const REGISTER_PERMISSION: &str = "system.services.create";
 /// The protocol through which the machine is shut down, which the
 /// service manager provides, and the permission it needs.
 pub const CONTROL: &str = "mikros.service.Control";

@@ -274,8 +274,8 @@ fn list<'a>(map: Map<'a>, key: &str) -> Result<&'a [Node], mikros_yaml::Error> {
 }
 
 /// The permissions that no service or program manifest may list: the
-/// service manager uses `logs.add_source` without a manifest.
-const RESERVED_PERMISSIONS: [&str; 1] = ["logs.add_source"];
+/// service manager uses `system.log_sources.create` without a manifest.
+const RESERVED_PERMISSIONS: [&str; 1] = ["system.log_sources.create"];
 
 /// The permissions at `permissions`, or none when it is absent; a
 /// service or program manifest that lists one of `RESERVED_PERMISSIONS`

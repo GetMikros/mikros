@@ -57,7 +57,7 @@ provides:
   - protocol: mikros.net.Admin
 boot_handles: [root_resource, log_manage, root_budget, framebuffer, platform_info]
 permissions:
-  - device.registry
+  - system.devices.manage
 namespace:
   - path: /dev
     rights: r
@@ -91,7 +91,7 @@ stop_timeout: 600
             BootHandle::PlatformInfo,
         ]
     );
-    assert_eq!(s.permissions, ["device.registry"]);
+    assert_eq!(s.permissions, ["system.devices.manage"]);
     assert_eq!(
         s.namespace,
         [NamespaceEntry {
@@ -337,7 +337,7 @@ fn refuses_program_manifests_that_break_the_rules() {
 fn reads_a_driver_manifest() {
     let text = "name: pcibus\nbinary: /usr/lib/drivers/pcibus/pcibus\n\
                 match: [platform:pci-host-ecam]\nkind: normal\nneeds: [bus, dma]\n\
-                permissions: [device.registry]\npriority: 20\nfoo: 1\n";
+                permissions: [system.devices.manage]\npriority: 20\nfoo: 1\n";
     let dir = "pcibus";
     let m = parse_driver(dir, text.as_bytes()).unwrap();
     let d = &m.driver;
@@ -352,7 +352,7 @@ fn reads_a_driver_manifest() {
     );
     assert_eq!(
         (d.permissions.as_slice(), d.priority),
-        (&["device.registry".into()][..], 20)
+        (&["system.devices.manage".into()][..], 20)
     );
     assert_eq!(m.unknown.len(), 1);
     let fallback = parse_driver("a", b"name: a\nbinary: /usr/a\nkind: fallback\n").unwrap();
@@ -394,12 +394,14 @@ fn refuses_driver_manifests_that_break_the_rules() {
         ErrorKind::BadHardwareId
     );
     assert_eq!(
-        kind_of(&format!("{base}permissions: [dma.map, logs.add_source]\n")),
+        kind_of(&format!(
+            "{base}permissions: [dma.map, system.log_sources.create]\n"
+        )),
         ErrorKind::ReservedPermission
     );
     let e = parse_driver(
         dir,
-        format!("{base}permissions: [logs.add_source]\n").as_bytes(),
+        format!("{base}permissions: [system.log_sources.create]\n").as_bytes(),
     )
     .unwrap_err();
     assert_eq!((e.line, e.column), (4, 15));
@@ -486,7 +488,7 @@ fn chooses_drivers_by_hardware_id_kind_and_name() {
 
 #[test]
 fn refuses_services_and_programs_that_list_logs_add_source() {
-    let listed = "permissions: [logs.read, logs.add_source]\n";
+    let listed = "permissions: [logs.read, system.log_sources.create]\n";
     let service = parse("log.yaml", format!("{MINIMAL}{listed}").as_bytes()).unwrap_err();
     assert_eq!(
         (service.kind, service.line),

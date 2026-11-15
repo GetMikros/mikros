@@ -6,7 +6,7 @@
 //! It takes the framebuffer's memory object from its startup handle with
 //! the role `USER` and ID 1, and its description from the device's
 //! properties, and publishes its GPU device with the gpudev library,
-//! which lets one client at a time, holding `gpu.display`, own the
+//! which lets one client at a time, holding `system.display.control`, own the
 //! display, and shows the system log on the framebuffer while none does.
 //! It serves the `Display` part of `mikros.gpu` with one connector, CRTC
 //! and primary plane in the framebuffer's mode, dumb buffers in

@@ -5,7 +5,7 @@ binary: /usr/bin/termsvc
 start: on-demand
 # To signal process groups and look at processes of every user, and to
 # ask the broker about permissions.
-permissions: [process.signal_any, process.list_all, permissions.check]
+permissions: [system.processes.control, system.processes.read, system.permissions.read]
 provides:
   - protocol: mikros.terminal.Factory
   - protocol: mikros.terminal.Terminal

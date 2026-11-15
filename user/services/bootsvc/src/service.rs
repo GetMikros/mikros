@@ -3,7 +3,7 @@
 //! version from the command line of its `platform_info` boot handle, and
 //! serves `mikros.boot.Attempts`, reading and writing `MikrosBoot` with
 //! the firmware variable calls. The service manager lets only processes
-//! with `boot.confirm` connect.
+//! with `system.boot_state.set` connect.
 
 use crate::attempts::{self, ATTRIBUTES, NAME, Record};
 use mikros_rt::exec::{Executor, Reactor};

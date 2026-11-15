@@ -4,7 +4,7 @@ name: diagsvc
 binary: /usr/bin/diagsvc
 start: boot
 boot_handles: [root_resource]
-# permissions.check to check its clients' diag.read.
-permissions: [process.list_all, permissions.check]
+# system.permissions.read to check its clients' system.diagnostics.read.
+permissions: [system.processes.read, system.permissions.read]
 provides:
   - protocol: mikros.diag.Overview

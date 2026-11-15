@@ -4795,7 +4795,7 @@ mod manager {
     /// makes and deletes a home folder. A
     /// probe that holds its permissions and that an authorization stub
     /// allows to manage accounts, and a guest without
-    /// `accounts.authenticate` that the stub turns down, each exit with 0
+    /// `system.users.authenticate` that the stub turns down, each exit with 0
     /// once every check of theirs passed, as the service manager logs. Two services whose
     /// manifests ask for the accounts service's data never start.
     pub fn accounts_service_serves_users(s: &Startup) -> Result {

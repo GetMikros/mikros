@@ -24,10 +24,10 @@ use alloc::vec::Vec;
 pub const SERVICE_MANAGER: &str = "system.servicemgr";
 /// The system permissions the service manager holds from the start.
 pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
-    "process.set_identity",
-    "permissions.check",
-    "permissions.grant_system",
-    "device.registry",
+    "system.identity.set",
+    "system.permissions.read",
+    "system.permissions.set",
+    "system.devices.manage",
     "power.control",
 ];
 /// The most grants one `ListGrants` reply holds.
@@ -104,10 +104,10 @@ impl Call {
     /// The system permission a caller needs to make this call.
     pub fn needs(self) -> &'static str {
         match self {
-            Call::Check | Call::Request | Call::Watch => "permissions.check",
-            Call::SetGrant | Call::ListGrants => "permissions.manage",
-            Call::GrantSystem => "permissions.grant_system",
-            Call::RegisterPrompter => "permissions.prompt",
+            Call::Check | Call::Request | Call::Watch => "system.permissions.read",
+            Call::SetGrant | Call::ListGrants => "system.grants.manage",
+            Call::GrantSystem => "system.permissions.set",
+            Call::RegisterPrompter => "system.prompts.use",
         }
     }
 }

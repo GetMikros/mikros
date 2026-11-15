@@ -5,6 +5,6 @@ provides:
   - protocol: test.directory.Open
   - protocol: test.directory.Protected
     permission: camera
-permissions: [permissions.check, services.register]
+permissions: [system.permissions.read, system.services.create]
 boot_handles: [log_manage, platform_info, framebuffer]
 priority: 20

@@ -1,6 +1,6 @@
 //! Serving GPU devices for drivers: publishing one service of class
 //! `gpu`, which serves `mikros.gpu.Device`, letting one client at a time
-//! that holds `gpu.display` own the display through a `Display`
+//! that holds `system.display.control` own the display through a `Display`
 //! connection, closing it when its revocation event is signaled, and
 //! showing the system log on the driver's screen while no client owns
 //! the display.
@@ -38,7 +38,7 @@ const CLASS: &str = "gpu";
 const PROTOCOL: &str = "device.gpu";
 const BROKER: &str = "mikros.permissions.Broker";
 /// The permission that owning the display takes.
-const GPU_DISPLAY: &str = "gpu.display";
+const GPU_DISPLAY: &str = "system.display.control";
 /// The signal of the revocation event.
 const SIGNALED: u32 = 1 << 3;
 
@@ -163,7 +163,7 @@ impl<B: Backend + 'static> GpuDevice<B> {
         }
     }
 
-    /// Whether `client` holds `gpu.display`, as the broker says.
+    /// Whether `client` holds `system.display.control`, as the broker says.
     async fn may_own(&self, client: &ClientIdentity) -> bool {
         let Some(broker) = &self.broker else {
             return false;

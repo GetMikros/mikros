@@ -9,7 +9,7 @@
 //! as the directory gave it, and its message is also copied into the
 //! kernel log, whose records from this process are not taken again.
 //! The service manager adds the standard output and error of services
-//! through `mikros.log.Sources`, which `logs.add_source` lets it use.
+//! through `mikros.log.Sources`, which `system.log_sources.create` lets it use.
 //!
 //! Once the root file system and the EFI system partition are
 //! published, the records also go to files on them (see `files`). On

@@ -37,12 +37,12 @@ fn table_is_sorted_and_unique() {
     assert!(PERMISSIONS.windows(2).all(|w| w[0].0 < w[1].0));
     assert_eq!(PERMISSIONS.len(), 54);
     assert_eq!(kind("camera"), Some(Kind::User));
-    assert_eq!(kind("diag.read"), Some(Kind::System));
+    assert_eq!(kind("system.diagnostics.read"), Some(Kind::System));
     assert_eq!(kind("network"), Some(Kind::Default));
-    assert_eq!(kind("permissions.check"), Some(Kind::System));
-    assert_eq!(kind("gpu.high_priority"), Some(Kind::System));
-    assert_eq!(kind("boot.confirm"), Some(Kind::System));
-    assert_eq!(kind("logs.add_source"), Some(Kind::System));
+    assert_eq!(kind("system.permissions.read"), Some(Kind::System));
+    assert_eq!(kind("system.gpu_priority.use"), Some(Kind::System));
+    assert_eq!(kind("system.boot_state.set"), Some(Kind::System));
+    assert_eq!(kind("system.log_sources.create"), Some(Kind::System));
     assert_eq!(kind("services.control"), Some(Kind::System));
     assert_eq!(kind("nope"), None);
 }
@@ -83,13 +83,13 @@ fn bootstrap_refuses_a_bad_manifest() {
 #[test]
 fn each_call_needs_its_permission() {
     let calls = [
-        (Call::Check, "permissions.check"),
-        (Call::Request, "permissions.check"),
-        (Call::Watch, "permissions.check"),
-        (Call::SetGrant, "permissions.manage"),
-        (Call::ListGrants, "permissions.manage"),
-        (Call::GrantSystem, "permissions.grant_system"),
-        (Call::RegisterPrompter, "permissions.prompt"),
+        (Call::Check, "system.permissions.read"),
+        (Call::Request, "system.permissions.read"),
+        (Call::Watch, "system.permissions.read"),
+        (Call::SetGrant, "system.grants.manage"),
+        (Call::ListGrants, "system.grants.manage"),
+        (Call::GrantSystem, "system.permissions.set"),
+        (Call::RegisterPrompter, "system.prompts.use"),
     ];
     for (call, needs) in calls {
         let mut s = store();
@@ -103,10 +103,11 @@ fn each_call_needs_its_permission() {
 fn system_permissions_apply_for_every_user() {
     let mut s = store();
     assert_eq!(
-        s.check(id(APP), "device.registry").map(|d| d.0),
+        s.check(id(APP), "system.devices.manage").map(|d| d.0),
         Ok(Decision::Undetermined)
     );
-    s.grant_system(APP, &strings(&["device.registry"])).unwrap();
+    s.grant_system(APP, &strings(&["system.devices.manage"]))
+        .unwrap();
     for user in [0, 1, 1000] {
         let who = Identity {
             user,
@@ -114,7 +115,7 @@ fn system_permissions_apply_for_every_user() {
             admin: 0,
         };
         assert_eq!(
-            s.check(who, "device.registry").map(|d| d.0),
+            s.check(who, "system.devices.manage").map(|d| d.0),
             Ok(Decision::Allowed)
         );
     }
@@ -201,7 +202,7 @@ fn requests_ask_only_for_undetermined_user_permissions() {
         Ok(Requested::Decided(Decision::Allowed))
     );
     assert_eq!(
-        s.request(id(APP), "device.registry").map(|d| d.0),
+        s.request(id(APP), "system.devices.manage").map(|d| d.0),
         Ok(Requested::Decided(Decision::Undetermined))
     );
     assert_eq!(
@@ -352,11 +353,11 @@ fn elevated_clients_hold_user_and_administrator_permissions() {
         Ok(Decision::Undetermined)
     );
     assert_eq!(
-        s.check(elevated, "device.registry").map(|d| d.0),
+        s.check(elevated, "system.devices.manage").map(|d| d.0),
         Ok(Decision::Undetermined)
     );
     assert_eq!(
-        s.check(elevated, "process.set_identity").map(|d| d.0),
+        s.check(elevated, "system.identity.set").map(|d| d.0),
         Ok(Decision::Undetermined)
     );
     // A default permission a user denied stays denied.

@@ -8,4 +8,4 @@ match: [platform:boot-framebuffer, display:boot-framebuffer]
 kind: fallback
 # To ask the permission broker whether a client may own the display, and
 # to read the log that it shows while none does.
-permissions: [permissions.check, logs.read]
+permissions: [system.permissions.read, logs.read]

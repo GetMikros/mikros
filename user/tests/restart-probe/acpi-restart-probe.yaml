@@ -8,4 +8,4 @@ start: boot
 after: [devicemgr]
 boot_handles: [log_manage]
 # To kill the ACPI server, and to reach the real-time clock's service.
-permissions: [process.signal_any, time.set]
+permissions: [system.processes.control, time.set]

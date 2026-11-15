@@ -4,7 +4,7 @@
 //! - `accounts-probe` checks what the accounts service lists,
 //!   authenticates and changes, as a client that holds both of its
 //!   permissions and that the stub authorizes.
-//! - `accounts-guest` checks that a client without `accounts.authenticate`,
+//! - `accounts-guest` checks that a client without `system.users.authenticate`,
 //!   and that the stub turns down, can list the users and nothing more.
 //! - `authorization-stub` serves `mikros.session.Authorization`, allowing
 //!   `accounts.manage` for the probe only, with user 1000 as the
@@ -337,7 +337,7 @@ fn guest(a: &AccountsClient) -> Result<(), i64> {
         users.first().map(|u| (u.0, u.1.as_str())) == Some((1000, "ann")),
         11,
     )?;
-    // Without accounts.authenticate.
+    // Without system.users.authenticate.
     expect(
         fails(authenticate(a, "ann", "ann-password"), Status::AccessDenied),
         12,

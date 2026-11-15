@@ -292,7 +292,7 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
         check(&manager, 0, "system.permbroker", "logs.read").await == Ok(Decision::Allowed),
     )?;
     c(
-        "refusing a caller without permissions.check",
+        "refusing a caller without system.permissions.read",
         check(&stranger, 1, APP, "network").await == Err(Status::AccessDenied),
     )?;
     c(
@@ -308,9 +308,9 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
         grant_system(&manager, ADMIN, &["camera"]).await == Err(Status::InvalidArgs),
     )?;
     let admin_permissions = [
-        "permissions.check",
-        "permissions.manage",
-        "permissions.prompt",
+        "system.permissions.read",
+        "system.grants.manage",
+        "system.prompts.use",
     ];
     c(
         "granting system permissions",

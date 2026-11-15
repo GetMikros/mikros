@@ -20,7 +20,7 @@ use mikros_userdb::{Attempts, Kind, LAST_ID, Refusal, Users, hash, valid_name};
 
 /// The permissions that `Authenticate` and changes to other users'
 /// accounts need, and the action an administrator authorizes for them.
-const AUTHENTICATE: &str = "accounts.authenticate";
+const AUTHENTICATE: &str = "system.users.authenticate";
 const MANAGE: &str = "accounts.manage";
 /// The app ID that may create the first administrator.
 const SETUP: &str = "system.setup";

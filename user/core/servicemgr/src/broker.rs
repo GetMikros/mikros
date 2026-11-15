@@ -23,10 +23,10 @@ const PROTOCOL: &str = "mikros.permissions.Broker";
 /// manager registers for it.
 const PROCESS_MANAGER: &str = "system.processmgr";
 const PROCESS_MANAGER_PERMISSIONS: &[&str] = &[
-    "device.registry",
-    "filesystem.mount",
-    "filesystem.compose",
-    "permissions.check",
+    "system.devices.manage",
+    "system.filesystems.mount",
+    "system.unions.create",
+    "system.permissions.read",
 ];
 /// The `id` of the manifest among the broker's `USER` startup handles.
 const MANIFEST_ID: u32 = 0;

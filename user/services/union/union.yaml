@@ -6,4 +6,4 @@ start: boot
 after: [tmpfs]
 provides:
   - protocol: mikros.fs.Union
-    permission: filesystem.compose
+    permission: system.unions.create

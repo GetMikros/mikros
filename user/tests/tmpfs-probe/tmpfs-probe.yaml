@@ -4,6 +4,6 @@ name: tmpfs-probe
 binary: /usr/bin/tmpfs-probe
 start: boot
 after: [tmpfs]
-permissions: [filesystem.mount]
+permissions: [system.filesystems.mount]
 # To make budgets for files below a directory.
 boot_handles: [root_budget]

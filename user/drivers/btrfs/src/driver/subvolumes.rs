@@ -3,7 +3,7 @@
 //! MIKSPEC-0053.R10): `mikros.fs.btrfs.Subvolumes`, which the server
 //! publishes as a service of class `subvolumes` after its `filesystem`
 //! one, so that the directory lets in only callers with the permission
-//! `filesystem.manage`. Paths name subvolumes from the root of the
+//! `system.subvolumes.manage`. Paths name subvolumes from the root of the
 //! top-level subvolume, one component at a time, the server's own `usr`
 //! left aside.
 

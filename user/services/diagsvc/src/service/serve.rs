@@ -19,7 +19,7 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 const OVERVIEW: &str = "mikros.diag.Overview";
 const BROKER: &str = "mikros.permissions.Broker";
-const DIAG_READ: &str = "diag.read";
+const DIAG_READ: &str = "system.diagnostics.read";
 /// The `id` of the `root_resource` boot handle among the `USER` startup
 /// handles.
 const ROOT_RESOURCE_ID: u32 = 1;
@@ -129,7 +129,7 @@ async fn serve(
 }
 
 impl Service {
-    /// Whether `client` holds `diag.read`, as the broker says.
+    /// Whether `client` holds `system.diagnostics.read`, as the broker says.
     async fn may_read(&self, client: &ClientIdentity) -> bool {
         let Some(broker) = &self.broker else {
             return false;

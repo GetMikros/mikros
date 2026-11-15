@@ -169,7 +169,7 @@ pub async fn serve(end: ServerEnd<Launcher>, pid: u32, shared: Rc<Shared>) {
 
 /// The process that `request` of process `caller` starts with the
 /// parent `parent`, and whether it keeps the caller's user and app ID.
-/// Only a spawn, by a caller that holds `process.set_user`, may name
+/// Only a spawn, by a caller that holds `system.user_id.set`, may name
 /// another user or ask for a new login session, which `spawn` gives the
 /// new process's ID. A process of a login session sent `KILL` starts
 /// none, and neither does a process with a command's app ID. A command's
@@ -311,7 +311,7 @@ async fn exec(
 /// path relative to the boot file system's root, `app_id`, and returns
 /// it. A caller with `files.full_disk` may name `system.cli` for a
 /// program under `/usr/bin`. Any other app ID needs
-/// `process.set_identity`, and one outside `system.` needs the program
+/// `system.identity.set`, and one outside `system.` needs the program
 /// to lie in the app's bundle under `/Apps`. A `system.` app ID with a
 /// program manifest needs a manifest that is valid, the program to be
 /// its `binary`, and the caller's app ID in its `spawned_by`; one whose
@@ -481,7 +481,7 @@ async fn holds(shared: &Shared, caller: u32, permission: &str) -> bool {
 
 /// What process `caller` may learn of process `target`: all of it when
 /// `target` has the caller's user ID, or when the caller holds
-/// `process.list_all`; otherwise the process is reported missing.
+/// `system.processes.read`; otherwise the process is reported missing.
 async fn get_info(
     shared: &Shared,
     caller: u32,
@@ -519,7 +519,7 @@ const LIST_MAX: usize = 4096;
 
 /// The process IDs, in order, that process `caller` may see: those of
 /// its user ID, ended ones that their parent has not collected included,
-/// or all of them when it holds `process.list_all`. At most `LIST_MAX`
+/// or all of them when it holds `system.processes.read`. At most `LIST_MAX`
 /// are given.
 async fn list(shared: &Shared, caller: u32) -> LauncherListResponse {
     let all = holds(shared, caller, LIST_ALL).await;
@@ -555,7 +555,7 @@ fn signal(record: &Record, signo: u32) -> Result<(), Status> {
 
 /// Sends `signo` to process `target` for process `caller`, which may
 /// signal it as `may_signal` says, or else when the broker says that it
-/// holds `process.signal_any`.
+/// holds `system.processes.control`.
 async fn kill(
     shared: &Shared,
     caller: u32,
@@ -593,7 +593,7 @@ async fn kill(
 
 /// Sends `signo` for process `caller` to every running process of
 /// `group` that it may signal: as `may_signal` says, or all of them when
-/// the broker says that it holds `process.signal_any`, which is asked
+/// the broker says that it holds `system.processes.control`, which is asked
 /// only when `may_signal` leaves some out. A group whose members have
 /// all ended, while the status of one is kept, gets no signal and no
 /// error. Fails with `NOT_FOUND` when the group has no member, and with
@@ -643,7 +643,7 @@ async fn kill_group(
 }
 
 /// Sends `signo` for process `caller`, which must hold
-/// `process.set_user`, to every running process of login session
+/// `system.user_id.set`, to every running process of login session
 /// `session`; after `KILL` the session's processes may start no more.
 /// Fails with `INVALID_ARGS` for login session 0.
 async fn kill_login_session(

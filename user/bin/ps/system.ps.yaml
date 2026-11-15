@@ -3,4 +3,4 @@
 app_id: system.ps
 binary: /usr/bin/ps
 command: true
-permissions: [process.list_all]
+permissions: [system.processes.read]

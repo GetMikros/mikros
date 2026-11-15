@@ -8,4 +8,4 @@ after: [devicemgr]
 boot_handles: [log_manage]
 # To own the display and read the input devices; gpu.render, which
 # connecting to the gpu service also needs, is held by default.
-permissions: [gpu.display, input.seat]
+permissions: [system.display.control, system.input.control]

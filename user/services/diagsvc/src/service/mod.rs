@@ -1,7 +1,7 @@
 //! The diagnostic service of the diagnostic build. At start it makes a
 //! `DIAG` resource from the root resource of its `root_resource` boot
 //! handle and closes that handle. It serves `mikros.diag.Overview` to
-//! processes that hold `diag.read`: `Snapshot` takes the kernel's account
+//! processes that hold `system.diagnostics.read`: `Snapshot` takes the kernel's account
 //! of its state with `diag_snapshot` and gives it as text tables, with
 //! the identity of each process that the process manager reports.
 //!

@@ -23,7 +23,7 @@ const KEYS: &[&str] = &[
 /// The keys of service manifests that a driver manifest must not have.
 const SERVICE_KEYS: [&str; 5] = ["provides", "after", "start", "restart", "boot_handles"];
 /// The permissions that no driver manifest may list.
-const DRIVER_RESERVED_PERMISSIONS: [&str; 1] = ["logs.add_source"];
+const DRIVER_RESERVED_PERMISSIONS: [&str; 1] = ["system.log_sources.create"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Driver {

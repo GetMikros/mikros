@@ -275,7 +275,7 @@ fn less_bad_arguments() -> Result<(), Failure> {
 }
 
 /// `ps` writes a header and a line for each process, among them this
-/// test and init, which only a holder of `process.list_all` sees.
+/// test and init, which only a holder of `system.processes.read` sees.
 fn ps_lists() -> Result<(), Failure> {
     let run = run(PS, &[])?;
     ensure(&run, "succeeding", run.status == 0 && run.err.is_empty())?;
