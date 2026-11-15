@@ -84,7 +84,11 @@ fn window_phys(virt: u64) -> Option<u64> {
 /// services table, read from the system table, when the tables and the
 /// function lie in ranges the window maps.
 fn service(info: &BootInfo, offset: u64) -> Option<u64> {
-    let data = [Kind::FirmwareRuntime, Kind::FirmwareRuntimeCode];
+    let data = [
+        Kind::FirmwareRuntime,
+        Kind::FirmwareRuntimeCode,
+        Kind::FirmwareRuntimeMixed,
+    ];
     let table = in_window(
         info,
         &data,
@@ -98,7 +102,7 @@ fn service(info: &BootInfo, offset: u64) -> Option<u64> {
     let function = unsafe { ((services + offset) as *const u64).read_unaligned() };
     in_window(
         info,
-        &[Kind::FirmwareRuntimeCode],
+        &[Kind::FirmwareRuntimeCode, Kind::FirmwareRuntimeMixed],
         window_phys(function)?,
         1,
     )?;

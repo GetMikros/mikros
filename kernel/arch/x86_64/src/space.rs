@@ -327,7 +327,7 @@ fn symbol(s: *const u8) -> u64 {
 }
 
 /// The kinds of memory the kernel's direct map covers.
-pub const DIRECT_KINDS: [Kind; 10] = [
+pub const DIRECT_KINDS: [Kind; 11] = [
     Kind::Usable,
     Kind::BootloaderReclaimable,
     Kind::KernelStack,
@@ -337,6 +337,7 @@ pub const DIRECT_KINDS: [Kind; 10] = [
     Kind::AcpiNvs,
     Kind::FirmwareRuntime,
     Kind::FirmwareRuntimeCode,
+    Kind::FirmwareRuntimeMixed,
     Kind::ApTrampoline,
 ];
 
@@ -441,6 +442,11 @@ fn runtime_flags(kind: Kind, data: Flags) -> Option<Flags> {
     match kind {
         Kind::FirmwareRuntimeCode => Some(Flags {
             writable: false,
+            executable: true,
+            ..data
+        }),
+        // The firmware may write to data in the pages of its code.
+        Kind::FirmwareRuntimeMixed => Some(Flags {
             executable: true,
             ..data
         }),
