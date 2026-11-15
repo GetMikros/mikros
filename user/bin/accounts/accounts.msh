@@ -1,0 +1,10 @@
+# What `accounts` takes, for msh's completion and colours.
+extern accounts(
+    call?: [add delete password kind full-name] "how to change a user",
+    ...rest: string "the user's name, and what to set",
+    --admin: bool "with add: make an administrator",
+    --full-name: string "with add: the full name",
+    --delete-home: bool "with delete: delete the home folder too",
+    --json: bool "write the users as JSON",
+    --help: bool "show how to use accounts"
+)
