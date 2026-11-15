@@ -14,6 +14,9 @@ const PS: &str = "/usr/bin/ps";
 const POWER: &str = "/usr/bin/power";
 const LOGS: &str = "/usr/bin/logs";
 const SERVICES: &str = "/usr/bin/services";
+const PERMISSIONS: &str = "/usr/bin/permissions";
+/// An app ID that no program has, whose grants the checks set.
+const NO_APP: &str = "system.no-such-app";
 /// A file that every system holds with devices.
 const DECLARATIONS: &str = "/usr/share/msh/completions/devices.msh";
 
@@ -55,6 +58,13 @@ fn main() {
         ("services_json", services_json),
         ("services_not_authorized", services_not_authorized),
         ("services_bad_arguments", services_bad_arguments),
+        ("permissions_deny_and_list", permissions_deny_and_list),
+        (
+            "permissions_refuses_bad_grants",
+            permissions_refuses_bad_grants,
+        ),
+        ("permissions_not_authorized", permissions_not_authorized),
+        ("permissions_bad_arguments", permissions_bad_arguments),
     ];
     for (number, (name, check)) in checks.iter().enumerate() {
         if let Err(Failure { what, status }) = check() {
@@ -435,6 +445,91 @@ fn services_bad_arguments() -> Result<(), Failure> {
             &run,
             "naming the command",
             run.err.starts_with("services: "),
+        )?;
+    }
+    Ok(())
+}
+
+/// Denying for the caller's own user needs no administrator: the grant
+/// then shows in the list and its JSON.
+fn permissions_deny_and_list() -> Result<(), Failure> {
+    let deny = run(PERMISSIONS, &["deny", NO_APP, "camera"])?;
+    ensure(&deny, "denying", deny.status == 0 && deny.err.is_empty())?;
+    let list = run(PERMISSIONS, &[])?;
+    ensure(&list, "listing", list.status == 0)?;
+    let mut lines = list.out.lines();
+    let header = lines.next().unwrap_or("");
+    ensure(
+        &list,
+        "a header line",
+        header
+            .split_whitespace()
+            .eq(["APP", "ID", "PERMISSION", "DECISION"]),
+    )?;
+    let row = [NO_APP, "camera", "denied"];
+    ensure(
+        &list,
+        "the denied grant",
+        lines.any(|l| l.split_whitespace().eq(row)),
+    )?;
+    let json = run(PERMISSIONS, &["--json"])?;
+    let object =
+        format!("\"app_id\":\"{NO_APP}\",\"permission\":\"camera\",\"decision\":\"denied\"}}");
+    ensure(&json, "the grant in JSON", json.out.contains(&object))
+}
+
+/// The broker refuses unknown and system permissions.
+fn permissions_refuses_bad_grants() -> Result<(), Failure> {
+    let unknown = run(PERMISSIONS, &["deny", NO_APP, "no.such"])?;
+    ensure(
+        &unknown,
+        "failing on an unknown permission",
+        unknown.status == 1,
+    )?;
+    ensure(
+        &unknown,
+        "naming it",
+        unknown.err == "permissions: no.such: no such permission\n",
+    )?;
+    let system = run(PERMISSIONS, &["deny", NO_APP, "time.set"])?;
+    ensure(
+        &system,
+        "failing on a system permission",
+        system.status == 1,
+    )?;
+    ensure(
+        &system,
+        "saying so",
+        system.err == "permissions: time.set: a system permission\n",
+    )
+}
+
+/// Allowing always needs an administrator, who does not answer here.
+fn permissions_not_authorized() -> Result<(), Failure> {
+    let run = run(PERMISSIONS, &["allow", NO_APP, "camera"])?;
+    ensure(&run, "failing", run.status == 1 && run.out.is_empty())?;
+    ensure(
+        &run,
+        "saying why",
+        run.err == "permissions: not authorized\n",
+    )
+}
+
+/// An unknown subcommand and a missing or extra operand are refused with
+/// status 2.
+fn permissions_bad_arguments() -> Result<(), Failure> {
+    let refused: [&[&str]; 3] = [
+        &["grant", "a", "b"],
+        &["allow", NO_APP],
+        &["deny", NO_APP, "camera", "ada", "bob"],
+    ];
+    for arguments in refused {
+        let run = run(PERMISSIONS, arguments)?;
+        ensure(&run, "refusing the arguments", run.status == 2)?;
+        ensure(
+            &run,
+            "naming the command",
+            run.err.starts_with("permissions: "),
         )?;
     }
     Ok(())

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 const SEAT: &str = "sessionmgr: gave the console the display";
 const SETUP_DONE: &str = "sessionmgr: setup exited";
 /// How many times the run's timeout the setup run may take. Its msh
-/// session also pages with more and less, asks for authorization eight
+/// session also pages with more and less, asks for authorization nine
 /// times, and runs files-c and coreutils-check: in a debug build under
 /// KVM the run takes over 400 s from boot to power-off, which the test
 /// init allows 600 s, and a fuzz build is about 3.3 times slower.
@@ -81,6 +81,8 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// `services restart idle-service`, each with ada's password and
 /// `if $status != 0 { exit 16 }`, 17 and 18: the start succeeds only when
 /// the stopped service, which always restarts, stayed stopped; then
+/// `permissions allow system.example camera` with ada's password and
+/// `if $status != 0 { exit 19 }`; then
 /// `spaw`, which Tab completes to `spawn-std `, and
 /// `sleep`, a job that runs until it is killed, Ctrl-Z, which stops it,
 /// `let n = (jobs | lines | len)`, `bg`, `kill %1`,
@@ -100,7 +102,7 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// its first entry, files-c's and coreutils-check's checks
 /// passed, and `/`, which no namespace entry covers, is a folder that
 /// lists `Users`.
-const MSH_KEYS: [(&str, Duration); 47] = [
+const MSH_KEYS: [(&str, Duration); 50] = [
     ("y e s ret", JOB_START),
     ("ctrl-c", QUESTION),
     ("ctrl-l", QUESTION),
@@ -189,6 +191,17 @@ const MSH_KEYS: [(&str, Duration); 47] = [
     (
         "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
          shift-bracket_left spc e x i t spc 1 8 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "p e r m i s s i o n s spc a l l o w spc s y s t e m dot e x a m p l e spc \
+         c a m e r a ret",
+        JOB_START,
+    ),
+    ("a d a minus p w ret", ANSWER),
+    (
+        "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
+         shift-bracket_left spc e x i t spc 1 9 spc shift-bracket_right ret",
         QUESTION,
     ),
     ("s p a w tab s l e e p ret", JOB_START),
