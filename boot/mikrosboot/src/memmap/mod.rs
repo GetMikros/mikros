@@ -4,7 +4,7 @@ use boot_protocol::{Kind, MemoryMapEntry, PAGE_SIZE};
 use core::fmt;
 
 /// UEFI memory types.
-mod uefi_type {
+pub(crate) mod uefi_type {
     pub const LOADER_CODE: u32 = 1;
     pub const LOADER_DATA: u32 = 2;
     pub const BOOT_SERVICES_CODE: u32 = 3;
@@ -24,14 +24,16 @@ pub const EFI_MEMORY_RUNTIME: u64 = 1 << 63;
 
 /// The kind of a range of the given UEFI memory type and attributes. A
 /// range with `EFI_MEMORY_RUNTIME` always gets a firmware runtime kind:
-/// `FirmwareRuntime` when its type would give another kind.
+/// `FirmwareRuntime` when its type would give another kind. Runtime
+/// services code is mixed unless the Memory Attributes Table says
+/// otherwise for its pages, which `attributes::regions` gives.
 pub fn firmware_kind(uefi_type: u32, attribute: u64) -> Kind {
     use uefi_type::*;
     let runtime = attribute & EFI_MEMORY_RUNTIME != 0;
     let kind = match uefi_type {
         CONVENTIONAL | BOOT_SERVICES_CODE | BOOT_SERVICES_DATA => Kind::Usable,
         LOADER_CODE | LOADER_DATA => Kind::BootloaderReclaimable,
-        RUNTIME_SERVICES_CODE => Kind::FirmwareRuntimeCode,
+        RUNTIME_SERVICES_CODE => Kind::FirmwareRuntimeMixed,
         RUNTIME_SERVICES_DATA => Kind::FirmwareRuntime,
         ACPI_RECLAIM => Kind::AcpiReclaimable,
         ACPI_NVS => Kind::AcpiNvs,

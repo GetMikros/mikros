@@ -1,6 +1,7 @@
 //! What the kernel is given: the memory map and `BootInfo`, from where the
 //! bootloader placed things.
 
+use crate::attributes;
 use crate::display::PciLocation;
 use crate::elf::Kernel;
 use crate::load::{self, Layout};
@@ -42,6 +43,10 @@ pub struct Prepared {
     /// The buffer for the final firmware memory map.
     pub firmware_map_phys: u64,
     pub firmware_map_size: usize,
+    /// A copy of the firmware's Memory Attributes Table, as start and
+    /// size, when it has one whose header `attributes::size` accepts;
+    /// size zero otherwise.
+    pub attributes: (u64, usize),
     pub tables_phys: u64,
     /// The number of pages for page tables.
     pub tables: u64,
@@ -95,17 +100,26 @@ impl Prepared {
     }
 
     /// Builds the kernel memory map in `map` from the firmware's ranges, as
-    /// start, page count, UEFI type and attributes, and `overlays`, and
+    /// start, page count, UEFI type and attributes, the Memory Attributes
+    /// Table `table` when its entries fit those ranges, and `overlays`, and
     /// checks that the direct map can cover it.
     pub fn memory_map(
         &self,
         map: &mut Map,
-        firmware: impl IntoIterator<Item = (u64, u64, u32, u64)>,
+        firmware: impl Iterator<Item = (u64, u64, u32, u64)> + Clone,
+        table: &[u8],
     ) -> Result<(), memmap::Error> {
-        for (start, pages, uefi_type, attribute) in firmware {
+        for (start, pages, uefi_type, attribute) in firmware.clone() {
             map.push_firmware(start, pages, uefi_type, attribute)?;
         }
         map.sort()?;
+        let ranges = firmware.map(|(start, pages, uefi_type, _)| (start, pages, uefi_type));
+        let entries = attributes::entries(table);
+        if attributes::usable(entries.clone(), ranges.clone()) {
+            for region in attributes::regions(entries, ranges) {
+                map.overlay(region)?;
+            }
+        }
         for region in self.overlays().into_iter().flatten() {
             map.overlay(region)?;
         }

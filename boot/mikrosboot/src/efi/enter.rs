@@ -14,10 +14,10 @@ use mikrosboot::handoff::{CMDLINE_OFFSET, INFO_PAGES, Prepared, module_array};
 use mikrosboot::load::{self, Layout, PHYS_ALIGN};
 use mikrosboot::memmap::{Map, Region};
 use mikrosboot::paging::{self, BOOT_STACK_SIZE, Frames, Placement};
-use mikrosboot::{placement, runtime};
+use mikrosboot::{attributes, placement, runtime};
 use uefi::boot::{self, AllocateType, AllocateType::AnyPages, MemoryType};
 use uefi::mem::memory_map::MemoryMap;
-use uefi::{Status, table};
+use uefi::{Guid, Status, system, table};
 use uefi_raw::table::boot::{BootServices, MemoryDescriptor};
 use uefi_raw::table::system::SystemTable;
 
@@ -30,6 +30,38 @@ const TABLE_SLACK: u64 = 16;
 /// Kernel memory map entries beyond the firmware's: each of the ranges
 /// overlaid on the firmware map can split one range in three.
 const ENTRY_SLACK: usize = 32;
+
+/// Copies the firmware's Memory Attributes Table into pages of ours, and
+/// returns their start and the table's size; size zero when the firmware
+/// has no table whose header `attributes::size` accepts, or the copy
+/// cannot be allocated, so that the table is not used.
+fn memory_attributes() -> (u64, usize) {
+    let guid = Guid::from_bytes(attributes::GUID);
+    let address = system::with_config_table(|entries| {
+        entries
+            .iter()
+            .find(|e| e.guid == guid)
+            .map(|e| e.address as u64)
+    });
+    let Some(address) = address.filter(|&a| a != 0) else {
+        return (0, 0);
+    };
+    // SAFETY: the configuration table gives the table's address, in memory
+    // that the firmware's identity map covers, and the table starts with
+    // its header.
+    let header = unsafe { (address as *const [u8; attributes::HEADER]).read_unaligned() };
+    let Some(size) = attributes::size(&header) else {
+        return (0, 0);
+    };
+    let step = "copying the memory attributes table";
+    let Ok(phys) = allocate(AllocateType::AnyPages, load::pages(size as u64), step) else {
+        return (0, 0);
+    };
+    // SAFETY: the table is `size` bytes long, which its header gives, and
+    // the allocation of ours holds as many.
+    unsafe { core::ptr::copy_nonoverlapping(address as *const u8, phys as *mut u8, size) };
+    (phys, size)
+}
 
 // Switches to the kernel's page tables and stack and jumps to the kernel.
 // Arguments: RDI = CR3, RSI = RSP, RDX = BootInfo address, RCX = entry.
@@ -258,7 +290,17 @@ fn prepare(mut g: Gathered) -> Result<(Prepared, Words), Failure> {
         load::pages(firmware_map_size as u64),
         step,
     )?;
-    let entries_capacity = descriptors + DESCRIPTOR_SLACK + ENTRY_SLACK;
+    // Each entry of the table can split one range in three.
+    let attributes = memory_attributes();
+    let attribute_entries = match attributes.1 {
+        0 => 0,
+        _ => {
+            // SAFETY: the copy is at least as long as the table's header.
+            let header = unsafe { (attributes.0 as *const [u8; attributes::HEADER]).read() };
+            attributes::count(&header)
+        }
+    };
+    let entries_capacity = descriptors + DESCRIPTOR_SLACK + ENTRY_SLACK + 2 * attribute_entries;
     let entries_size = (entries_capacity * size_of::<MemoryMapEntry>()) as u64;
     let entries_phys = allocate(AllocateType::AnyPages, load::pages(entries_size), step)?;
 
@@ -277,6 +319,7 @@ fn prepare(mut g: Gathered) -> Result<(Prepared, Words), Failure> {
         entries_capacity,
         firmware_map_phys,
         firmware_map_size,
+        attributes,
         tables_phys,
         tables,
         framebuffer: g.framebuffer,
@@ -445,7 +488,13 @@ fn enter(
         let d = unsafe { (at as *const MemoryDescriptor).read_unaligned() };
         (d.phys_start, d.page_count, d.ty.0, d.att.bits())
     });
-    p.memory_map(&mut map, firmware).ok()?;
+    let table: &[u8] = match p.attributes {
+        (_, 0) => &[],
+        // SAFETY: `memory_attributes` copied the table's `size` bytes here,
+        // into pages that stay ours.
+        (phys, size) => unsafe { core::slice::from_raw_parts(phys as *const u8, size) },
+    };
+    p.memory_map(&mut map, firmware, table).ok()?;
     p.runtime_services_mapped = move_runtime_services(p, fw, window_table);
     // With random words, the direct map goes where it still covers the
     // final map.

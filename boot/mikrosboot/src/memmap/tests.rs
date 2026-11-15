@@ -23,7 +23,7 @@ fn translates_firmware_types() {
         (2, Kind::BootloaderReclaimable),
         (3, Kind::Usable),
         (4, Kind::Usable),
-        (5, Kind::FirmwareRuntimeCode),
+        (5, Kind::FirmwareRuntimeMixed),
         (6, Kind::FirmwareRuntime),
         (7, Kind::Usable),
         (8, Kind::Bad),
@@ -42,7 +42,7 @@ fn translates_firmware_types() {
 #[test]
 fn gives_every_runtime_range_a_runtime_kind() {
     let expected = [
-        (5, Kind::FirmwareRuntimeCode),
+        (5, Kind::FirmwareRuntimeMixed),
         (6, Kind::FirmwareRuntime),
         (11, Kind::FirmwareRuntimeMmio),
         (12, Kind::FirmwareRuntimeMmio),

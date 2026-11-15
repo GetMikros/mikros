@@ -6,6 +6,7 @@
 extern crate alloc;
 
 pub mod attempts;
+pub mod attributes;
 pub mod bootlist;
 pub mod btrfs;
 pub mod cmdline;

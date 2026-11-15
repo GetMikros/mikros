@@ -36,6 +36,7 @@ fn prepared() -> Prepared {
         entries_capacity: 64,
         firmware_map_phys: 0x32_3000,
         firmware_map_size: 2 * P as usize,
+        attributes: (0, 0),
         tables_phys: 0x33_0000,
         tables: 8,
         framebuffer: Some(Framebuffer {
@@ -81,7 +82,7 @@ fn gives_allocations_the_kind_of_their_contents() {
     let p = prepared();
     let mut buf = vec![MemoryMapEntry::default(); p.entries_capacity];
     let mut map = Map::new(&mut buf);
-    p.memory_map(&mut map, firmware()).unwrap();
+    p.memory_map(&mut map, firmware().into_iter(), &[]).unwrap();
     let entries = map.entries();
     let expected = [
         (0x8000, Kind::ApTrampoline),
@@ -103,7 +104,7 @@ fn keeps_handoff_data_reclaimable_and_direct_mapped() {
     let p = prepared();
     let mut buf = vec![MemoryMapEntry::default(); p.entries_capacity];
     let mut map = Map::new(&mut buf);
-    p.memory_map(&mut map, firmware()).unwrap();
+    p.memory_map(&mut map, firmware().into_iter(), &[]).unwrap();
     let entries = map.entries();
     let cmdline = INFO + CMDLINE_OFFSET;
     let handoff = [
@@ -144,11 +145,11 @@ fn reports_runtime_ranges_with_runtime_kinds() {
     firmware.push((0x7e0_4000, 4, 6, runtime));
     firmware.push((0x7e0_8000, 1, 10, runtime));
     firmware.push((0xffc0_0000, 0x400, 11, EFI_MEMORY_RUNTIME | 1));
-    p.memory_map(&mut map, firmware).unwrap();
+    p.memory_map(&mut map, firmware.into_iter(), &[]).unwrap();
     let entries = map.entries();
     assert_eq!(
         kind_at(entries, 0x7e0_0000),
-        Some(Kind::FirmwareRuntimeCode)
+        Some(Kind::FirmwareRuntimeMixed)
     );
     assert_eq!(kind_at(entries, 0x7e0_4000), Some(Kind::FirmwareRuntime));
     assert_eq!(kind_at(entries, 0x7e0_8000), Some(Kind::FirmwareRuntime));
@@ -160,6 +161,58 @@ fn reports_runtime_ranges_with_runtime_kinds() {
     assert!(!direct_mapped(entries, 0xffc0_0000, 0xffc0_1000));
 }
 
+/// The kinds of the four pages of runtime code at 0x7e0_0000, with the
+/// Memory Attributes Table `table`.
+fn runtime_code_kinds(table: &[u8]) -> Vec<Option<Kind>> {
+    use crate::memmap::EFI_MEMORY_RUNTIME;
+    let p = prepared();
+    let mut buf = vec![MemoryMapEntry::default(); p.entries_capacity];
+    let mut map = Map::new(&mut buf);
+    let mut firmware = firmware().to_vec();
+    let runtime = EFI_MEMORY_RUNTIME | 0xF;
+    firmware.push((0x7e0_0000, 4, 5, runtime));
+    firmware.push((0x7e0_4000, 4, 6, runtime));
+    p.memory_map(&mut map, firmware.into_iter(), table).unwrap();
+    let entries = map.entries();
+    let mut kinds: Vec<Option<Kind>> = (0..4)
+        .map(|i| kind_at(entries, 0x7e0_0000 + i * P))
+        .collect();
+    kinds.push(kind_at(entries, 0x7e0_4000));
+    kinds
+}
+
+#[test]
+fn splits_runtime_code_by_the_memory_attributes_table() {
+    use crate::attributes::{EFI_MEMORY_RO, EFI_MEMORY_XP, table};
+    use Kind::{FirmwareRuntime, FirmwareRuntimeCode, FirmwareRuntimeMixed};
+    let entries = [
+        (5, 0x7e0_0000, 1, EFI_MEMORY_RO),
+        (5, 0x7e0_1000, 1, EFI_MEMORY_XP),
+        (5, 0x7e0_2000, 1, 0),
+        (6, 0x7e0_4000, 4, EFI_MEMORY_XP),
+    ];
+    let kinds = [
+        FirmwareRuntimeCode,
+        FirmwareRuntime,
+        FirmwareRuntimeMixed,
+        FirmwareRuntimeMixed,
+        FirmwareRuntime,
+    ];
+    assert_eq!(runtime_code_kinds(&table(2, 48, &entries)), kinds.map(Some));
+    let mixed = [
+        FirmwareRuntimeMixed,
+        FirmwareRuntimeMixed,
+        FirmwareRuntimeMixed,
+        FirmwareRuntimeMixed,
+        FirmwareRuntime,
+    ];
+    assert_eq!(runtime_code_kinds(&[]), mixed.map(Some));
+    // A table with an entry outside the runtime ranges is not used at all.
+    let mut outside = entries.to_vec();
+    outside.push((5, 0x10_0000, 1, EFI_MEMORY_XP));
+    assert_eq!(runtime_code_kinds(&table(1, 48, &outside)), mixed.map(Some));
+}
+
 #[test]
 fn refuses_a_map_the_direct_map_cannot_cover() {
     let p = prepared();
@@ -168,7 +221,7 @@ fn refuses_a_map_the_direct_map_cannot_cover() {
     let mut firmware = firmware().to_vec();
     firmware.push((DIRECT_MAP_LIMIT - P, 2, LOADER_DATA, 0xF));
     assert_eq!(
-        p.memory_map(&mut map, firmware),
+        p.memory_map(&mut map, firmware.into_iter(), &[]),
         Err(memmap::Error::AboveDirectMapLimit(DIRECT_MAP_LIMIT + P))
     );
 }
@@ -188,7 +241,7 @@ fn fills_boot_info_with_physical_addresses() {
     assert_eq!(info.arch_data0, 0x8000);
     assert_eq!(info.framebuffer.phys_base, 0xfd00_0000);
     assert_eq!(info.flags, flags::FRAMEBUFFER_PRESENT);
-    assert_eq!((info.version_major, info.version_minor), (1, 4));
+    assert_eq!((info.version_major, info.version_minor), (1, 5));
     assert_eq!(
         (
             info.framebuffer_pci_segment,
@@ -238,7 +291,7 @@ fn leaves_out_the_module_pages_without_contents() {
     };
     let mut buf = vec![MemoryMapEntry::default(); p.entries_capacity];
     let mut map = Map::new(&mut buf);
-    p.memory_map(&mut map, firmware()).unwrap();
+    p.memory_map(&mut map, firmware().into_iter(), &[]).unwrap();
     assert!(
         map.entries()
             .iter()
@@ -264,7 +317,7 @@ fn gives_zero_addresses_for_what_is_absent() {
     assert_eq!(info.arch_data1, 0);
     let mut buf = vec![MemoryMapEntry::default(); p.entries_capacity];
     let mut map = Map::new(&mut buf);
-    p.memory_map(&mut map, firmware()).unwrap();
+    p.memory_map(&mut map, firmware().into_iter(), &[]).unwrap();
     assert_eq!(
         kind_at(map.entries(), 0x8000),
         Some(Kind::BootloaderReclaimable)
