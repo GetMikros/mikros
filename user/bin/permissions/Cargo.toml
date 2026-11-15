@@ -1,0 +1,25 @@
+[package]
+name = "permissions"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-cli = { path = "../../lib/cli" }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-command = { path = "../../lib/command" }
+mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
+
+# A command: it runs with the app ID system.permissions, which may read
+# and change the users' decisions on permissions.
+[package.metadata.mikros]
+kind = "program"
+image = "system"
+manifest = "system.permissions.yaml"
+completions = "permissions.msh"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

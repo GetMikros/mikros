@@ -1,0 +1,7 @@
+# What `permissions` takes, for msh's completion and colours.
+extern permissions(
+    call?: string "allow or deny, or the user whose decisions to list",
+    ...rest: string "the app ID, the permission and the user",
+    --json: bool "write the grants as JSON",
+    --help: bool "show how to use permissions"
+)
