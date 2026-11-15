@@ -1,5 +1,4 @@
-//! Starting the initial process from the boot image or the boot
-//! modules.
+//! Starting the initial process from the boot modules.
 
 use crate::arch::CachePolicy as Policy;
 use crate::elf::{self, PF_W, PF_X, Segment};
@@ -16,11 +15,10 @@ use crate::process::Process;
 use crate::regions::{MapOptions, PERM_EXECUTE, PERM_READ, PERM_WRITE, SPECIFIC};
 use crate::sched::Thread;
 use crate::startup;
-use crate::ustar;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use boot_protocol::{BootInfo, flags};
+use boot_protocol::{BOOT_INFO_SIZE, BootInfo, flags};
 
 /// The size of the stack of the initial thread.
 const STACK_SIZE: u64 = 256 * 1024;
@@ -46,39 +44,6 @@ struct BootImage {
     object: Arc<MemoryObject>,
     size: u64,
     init: &'static [u8],
-}
-
-/// The boot image of a `BootInfo` older than 1.4 as a memory object that
-/// owns its frames, with the bytes after the image zeroed.
-fn archive(info: &BootInfo) -> BootImage {
-    let size = info.boot_image_size;
-    let pages = size.div_ceil(PAGE_SIZE);
-    let tail = pages * PAGE_SIZE - size;
-    // SAFETY: the bootloader allocated whole pages for the image, which
-    // lie in the direct map and which nothing else uses.
-    let after = unsafe {
-        core::slice::from_raw_parts_mut(
-            crate::arch::frame_address(info.boot_image_phys + size) as *mut u8,
-            tail as usize,
-        )
-    };
-    after.fill(0);
-    let object = MemoryObject::from_frames(info.boot_image_phys, pages)
-        .unwrap_or_else(|e| panic!("no memory for the boot image object: {e:?}"));
-    // SAFETY: the boot image object owns these frames and nothing writes
-    // to them while the kernel reads the image.
-    let image = unsafe {
-        core::slice::from_raw_parts(
-            crate::arch::frame_address(info.boot_image_phys) as *const u8,
-            info.boot_image_size as usize,
-        )
-    };
-    let init = ustar::find(image, b"init").unwrap_or_else(|e| panic!("{e}"));
-    BootImage {
-        object,
-        size: info.boot_image_size,
-        init,
-    }
 }
 
 /// `len` bytes at the physical address `phys`, through the direct map.
@@ -213,15 +178,17 @@ fn load_segment(process: &Process, file: &[u8], segment: &Segment) {
 }
 
 /// Creates the initial process, belonging to `budget`, and its thread
-/// from the `init` module, or the `init` member of the boot image of a
-/// `BootInfo` older than 1.4, with its segments and stack mapped.
-/// Nothing made here is charged to a budget.
+/// from the `init` module, with its segments and stack mapped. Nothing
+/// made here is charged to a budget. Panics for a `BootInfo` older than
+/// 1.4, which passes no modules.
 fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
-    let boot_image = if info.version_minor >= 4 {
-        modules(info)
-    } else {
-        archive(info)
-    };
+    if info.version_minor < 4 || info.size < BOOT_INFO_SIZE {
+        panic!(
+            "boot protocol {}.{} passes no boot modules",
+            info.version_major, info.version_minor
+        );
+    }
+    let boot_image = modules(info);
     let file = boot_image.init;
     let elf = elf::parse(file, crate::arch::elf_machine(), {
         let (start, end) = crate::aspace::user_range();

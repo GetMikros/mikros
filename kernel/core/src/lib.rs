@@ -62,5 +62,4 @@ pub mod status;
 pub mod sync;
 pub mod timeline;
 pub mod user;
-pub mod ustar;
 pub mod wait;
