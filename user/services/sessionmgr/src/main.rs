@@ -4,7 +4,9 @@
 //! first-boot setup and logs users in, checked with the accounts
 //! service. A login starts the user's shell in a new login session on the
 //! console's terminal; once the shell exits, the session's processes are
-//! ended and the console shows its login prompt again.
+//! ended and the console shows its login prompt again. Once the console
+//! has started, the session manager marks the boot good through the boot
+//! attempts service, without the login waiting for it.
 
 #![no_std]
 #![no_main]
@@ -12,6 +14,7 @@
 extern crate alloc;
 
 mod authorize;
+mod boot;
 mod elevate;
 mod login;
 mod seat;
@@ -182,7 +185,11 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     Info,
                     "sessionmgr: started the console as pid {}",
                     spawned.pid
-                )
+                );
+                // The boot counts as good once the console can show the
+                // login prompt or run setup; the login does not wait.
+                let (d, r) = (directory.clone(), reactor.clone());
+                spawner.spawn(async move { boot::mark_good(&d, &r).await });
             }
             other => {
                 mikros_rt::log!(Error, "sessionmgr: starting the console failed: {other:?}");

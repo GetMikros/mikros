@@ -19,6 +19,8 @@ permissions:
   # To find the console of an Authorize client's login session, and
   # whether the client still runs.
   - process.list_all
+  # To mark the boot good once the console has started.
+  - boot.confirm
 provides:
   - protocol: mikros.session.Authorization
     permission: session.authorize
