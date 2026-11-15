@@ -116,6 +116,19 @@ fn chooses_the_partition_the_command_line_names() {
 }
 
 #[test]
+fn lists_the_candidates_for_a_bad_guid() {
+    let found = partitions(&mut disk(&two_roots()), BLOCK as u32, BLOCKS - 1).unwrap();
+    let bad = Error::BadGuid {
+        candidates: roots(&found),
+    };
+    assert_eq!(
+        bad.to_string(),
+        "the root=PARTUUID= option holds no valid GUID; Mikros root partitions: \
+         02020202-0202-0202-0202-020202020202 03030303-0303-0303-0303-030303030303"
+    );
+}
+
+#[test]
 fn needs_exactly_one_root_partition_without_the_option() {
     let found = partitions(&mut disk(&two_roots()), BLOCK as u32, BLOCKS - 1).unwrap();
     let many = system_partition(&found, None).unwrap_err();

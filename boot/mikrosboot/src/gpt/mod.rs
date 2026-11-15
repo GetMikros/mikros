@@ -54,6 +54,11 @@ pub enum Error {
         wanted: Option<[u8; 16]>,
         candidates: Vec<[u8; 16]>,
     },
+    /// The command line gives no valid partition GUID; with the partition
+    /// GUIDs of the Mikros root partitions.
+    BadGuid {
+        candidates: Vec<[u8; 16]>,
+    },
 }
 
 impl From<IoError> for Error {
@@ -64,28 +69,52 @@ impl From<IoError> for Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Io(e) => write!(f, "{e}"),
-            Error::NoTable => write!(f, "the boot disk has no valid GUID partition table"),
-            Error::NotOne { wanted, candidates } => {
-                match wanted {
-                    Some(guid) => write!(f, "no partition {} on the boot disk", guid_text(guid))?,
-                    None if candidates.is_empty() => {
-                        write!(f, "the boot disk has no Mikros root partition")?
-                    }
-                    None => write!(f, "the boot disk has more than one Mikros root partition")?,
-                }
-                write!(f, "; Mikros root partitions:")?;
-                if candidates.is_empty() {
-                    write!(f, " none")?;
-                }
-                for guid in candidates {
-                    write!(f, " {}", guid_text(guid))?;
-                }
-                Ok(())
+        let candidates = match self {
+            Error::Io(e) => return write!(f, "{e}"),
+            Error::NoTable => {
+                return write!(f, "the boot disk has no valid GUID partition table");
             }
+            Error::NotOne {
+                wanted: Some(guid),
+                candidates,
+            } => {
+                write!(f, "no partition {} on the boot disk", guid_text(guid))?;
+                candidates
+            }
+            Error::NotOne {
+                wanted: None,
+                candidates,
+            } if candidates.is_empty() => {
+                write!(f, "the boot disk has no Mikros root partition")?;
+                candidates
+            }
+            Error::NotOne { candidates, .. } => {
+                write!(f, "the boot disk has more than one Mikros root partition")?;
+                candidates
+            }
+            Error::BadGuid { candidates } => {
+                write!(f, "the root=PARTUUID= option holds no valid GUID")?;
+                candidates
+            }
+        };
+        write!(f, "; Mikros root partitions:")?;
+        if candidates.is_empty() {
+            write!(f, " none")?;
         }
+        for guid in candidates {
+            write!(f, " {}", guid_text(guid))?;
+        }
+        Ok(())
     }
+}
+
+/// The partition GUIDs of the Mikros root partitions among `partitions`.
+pub fn roots(partitions: &[Partition]) -> Vec<[u8; 16]> {
+    partitions
+        .iter()
+        .filter(|p| p.type_guid == ROOT_TYPE)
+        .map(|p| p.guid)
+        .collect()
 }
 
 fn u32_at(b: &[u8], at: usize) -> u32 {
@@ -168,16 +197,18 @@ pub fn system_partition(
     partitions: &[Partition],
     wanted: Option<[u8; 16]>,
 ) -> Result<Partition, Error> {
-    let roots = partitions.iter().filter(|p| p.type_guid == ROOT_TYPE);
     let found: Vec<&Partition> = match wanted {
         Some(guid) => partitions.iter().filter(|p| p.guid == guid).collect(),
-        None => roots.clone().collect(),
+        None => partitions
+            .iter()
+            .filter(|p| p.type_guid == ROOT_TYPE)
+            .collect(),
     };
     match found[..] {
         [one] => Ok(*one),
         _ => Err(Error::NotOne {
             wanted,
-            candidates: roots.map(|p| p.guid).collect(),
+            candidates: roots(partitions),
         }),
     }
 }
