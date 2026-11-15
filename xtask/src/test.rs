@@ -614,6 +614,7 @@ pub fn run(args: &Args) -> Result<()> {
         &dir.join("namespaces"),
         timeout,
         "namespaces",
+        "",
     )?;
     println!("namespaces run passed");
     // Each Argon2id hash of the accounts probe takes seconds when
@@ -625,8 +626,17 @@ pub fn run(args: &Args) -> Result<()> {
         &dir.join("accounts"),
         timeout * 2,
         "accounts",
+        "",
     )?;
     println!("accounts run passed");
+    crate::own_root::run_live(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("live"),
+        timeout,
+    )?;
+    println!("live run passed");
     crate::boot_attempts::run(
         &args.machine,
         args.kind,

@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 syscall-table = { path = "../kernel/syscalls" }
+mikrosboot = { path = "../boot/mikrosboot" }
 mikros-userdb = { path = "../user/lib/userdb" }
 mikros-exfat = { path = "../user/lib/exfat" }
 anyhow = "1"

@@ -1720,6 +1720,7 @@ dependencies = [
  "lzma-rs",
  "mikros-exfat",
  "mikros-userdb",
+ "mikrosboot",
  "object",
  "pem-rfc7468",
  "rsa",

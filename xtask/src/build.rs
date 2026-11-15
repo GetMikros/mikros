@@ -1362,7 +1362,27 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     .collect();
                 test_image(kind, file, &members)
             };
+            // The live run's root partition holds the probe of a live
+            // system's namespace, with its manifest, and the file of /etc
+            // that it reads and writes over.
+            let live_probe = user_build("live-probe", kind)?;
+            println!("built    {}", live_probe.display());
+            let live_dir = crate::workspace_root().join("user/tests/live-probe");
+            let live_conf = live_dir.join("live-probe.conf");
+            let live_files: Vec<(String, PathBuf)> = vec![
+                ("usr/bin/live-probe".to_owned(), live_probe),
+                (
+                    "usr/lib/services/live-probe.yaml".to_owned(),
+                    live_dir.join("live-probe.yaml"),
+                ),
+                (
+                    "usr/share/live-probe/live-probe.conf".to_owned(),
+                    live_conf.clone(),
+                ),
+                ("etc/live-probe.conf".to_owned(), live_conf),
+            ];
             for (file, files) in [
+                ("live.img", &live_files),
                 ("namespaces.img", &namespaces_files),
                 ("accounts.img", &accounts_files),
                 ("console.img", &console_files),

@@ -5536,6 +5536,56 @@ mod manager {
         checked_scenario(s, "accounts", accounts_service_serves_users)
     }
 
+    /// The `live` scenario: serves `tests/setup.img` with `live` on the
+    /// process manager's command line, as on the kernel's, with the root
+    /// partition holding the live archive, whose probe checks the live
+    /// system's `/etc` and `/usr`; stops QEMU with `PASSED` once the probe
+    /// exited with 0, or with `FAILED`.
+    pub fn live_scenario(s: &Startup) -> i64 {
+        const SECONDS: i64 = 240;
+        const EXPECTED: &[(&[u8], usize)] = &[
+            (
+                b"process-manager: namespaces come from the root file system",
+                1,
+            ),
+            (b"service live-probe exited with code 0", 1),
+        ];
+        const FAILED: &[&[u8]] = &[
+            b"did not start",
+            b"will not start",
+            b"service live-probe ended",
+            b"making the live system's views failed",
+            b"left without a driver",
+        ];
+        if let Err(f) = mikros_test::open_exit_port(s.root_resource, s.process) {
+            mikros_rt::log!(Error, "SCENARIO live: {} failed ({})", f.what, f.status);
+            return 1;
+        }
+        let logged = device_manager_logs_with(
+            s,
+            b"tests/setup.img",
+            false,
+            "live",
+            SECONDS,
+            EXPECTED,
+            FAILED,
+        );
+        match logged {
+            Ok(true) => {
+                mikros_rt::log!(Info, "SCENARIO live PASSED");
+                mikros_test::exit_qemu(mikros_test::PASSED)
+            }
+            Ok(false) => mikros_rt::log!(Error, "SCENARIO live FAILED"),
+            Err(f) => mikros_rt::log!(
+                Error,
+                "SCENARIO live FAILED: {} failed ({})",
+                f.what,
+                f.status
+            ),
+        }
+        mikros_test::exit_qemu(mikros_test::FAILED)
+    }
+
     /// The `usb-volumes` scenario: serves `tests/setup.img`, with the root
     /// partition holding the volumes archive, whose volumes probe uses the FAT volume on the USB
     /// disk through `/Volumes` and sees it go once the runner unplugs the
@@ -6616,6 +6666,7 @@ fn scenario(s: &Startup) -> Option<i64> {
         "console" => manager::console_scenario(s),
         "namespaces" => manager::namespaces_scenario(s),
         "accounts" => manager::accounts_scenario(s),
+        "live" => manager::live_scenario(s),
         "setup" => manager::setup_scenario(s),
         "takeover" => manager::takeover_scenario(s),
         // The runner logs the writes and flushes of the scratch disks.
