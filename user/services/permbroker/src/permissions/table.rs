@@ -60,6 +60,7 @@ pub const PERMISSIONS: &[(&str, Kind)] = &[
     ("process.signal_any", Kind::System),
     ("scheduling.realtime", Kind::Default),
     ("screen.capture", Kind::User),
+    ("services.control", Kind::System),
     ("services.register", Kind::System),
     ("session.authorize", Kind::System),
     ("shortcuts.global", Kind::User),
