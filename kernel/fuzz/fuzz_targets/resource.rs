@@ -7,8 +7,8 @@
 
 use kernel_core::object::budget::{Budget, UNLIMITED};
 use kernel_core::object::resource::{
-    KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_MMIO, KIND_MSI, KIND_POLICY, KIND_PRIORITY, KIND_ROOT,
-    Request, Resource, SHARED,
+    KIND_DIAG, KIND_DMA, KIND_FIRMWARE, KIND_IOPORT, KIND_MMIO, KIND_MSI, KIND_POLICY,
+    KIND_PRIORITY, KIND_ROOT, Request, Resource, SHARED,
 };
 use kernel_core::status::Error;
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
@@ -75,7 +75,10 @@ struct Model {
 }
 
 fn rangeless(kind: u32) -> bool {
-    matches!(kind, KIND_DMA | KIND_MSI | KIND_POLICY)
+    matches!(
+        kind,
+        KIND_DMA | KIND_MSI | KIND_POLICY | KIND_DIAG | KIND_FIRMWARE
+    )
 }
 
 impl Model {
@@ -115,7 +118,7 @@ impl Model {
         } else {
             r.size != 0
         };
-        if !(KIND_MMIO..=KIND_BTI).contains(&r.kind)
+        if !(KIND_MMIO..=KIND_FIRMWARE).contains(&r.kind)
             || parent.kind != KIND_ROOT && parent.kind != r.kind
             || !size_ok
             || r.options & !SHARED != 0
@@ -131,6 +134,10 @@ impl Model {
         }
         if r.kind == KIND_IOPORT && end > 0x1_0000 {
             return Err(Error::OutOfRange);
+        }
+        // kernel-core is built here without its diagnostic build.
+        if r.kind == KIND_DIAG {
+            return Err(Error::NotSupported);
         }
         if parent.kind != KIND_ROOT && (r.base < parent.base || end > parent.base + parent.size) {
             return Err(Error::OutOfRange);
@@ -165,7 +172,10 @@ impl Model {
             let r = n.weak.upgrade();
             assert_eq!(r.is_some(), alive[i], "resource {i} alive");
             if let Some(r) = r {
-                assert_eq!((r.kind(), r.range(), r.options()), (n.kind, (n.base, n.size), n.options));
+                assert_eq!(
+                    (r.kind(), r.range(), r.options()),
+                    (n.kind, (n.base, n.size), n.options)
+                );
             }
         }
     }
@@ -201,12 +211,14 @@ fuzz_target!(|input: Input| {
                 full: no_room,
             } => {
                 let p = usize::from(parent) % m.nodes.len();
-                let Some(parent) = m.nodes[p].handle.clone() else { continue };
+                let Some(parent) = m.nodes[p].handle.clone() else {
+                    continue;
+                };
                 if m.nodes.len() == MAX {
                     continue;
                 }
                 let request = Request {
-                    kind: u32::from(kind) % 10,
+                    kind: u32::from(kind) % 12,
                     base: base.get(),
                     size: size.get(),
                     options: options & 3,
@@ -233,7 +245,11 @@ fuzz_target!(|input: Input| {
                     m.nodes[i].handle = None;
                 }
             }
-            Op::Covers { resource, base, size } => {
+            Op::Covers {
+                resource,
+                base,
+                size,
+            } => {
                 let n = &m.nodes[usize::from(resource) % m.nodes.len()];
                 let Some(r) = n.weak.upgrade() else { continue };
                 let (base, size) = (base.get(), size.get());

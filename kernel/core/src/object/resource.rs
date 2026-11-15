@@ -19,6 +19,8 @@ pub const KIND_POLICY: u32 = 7;
 pub const KIND_BTI: u32 = 8;
 /// Grants `diag_snapshot`; only the diagnostic build makes these.
 pub const KIND_DIAG: u32 = 9;
+/// Grants the firmware variable calls.
+pub const KIND_FIRMWARE: u32 = 10;
 
 /// The option that lets the range overlap other `SHARED` resources.
 pub const SHARED: u32 = 1 << 0;
@@ -59,7 +61,10 @@ pub struct Resource {
 
 /// Whether the kinds have no range.
 fn rangeless(kind: u32) -> bool {
-    matches!(kind, KIND_DMA | KIND_MSI | KIND_POLICY | KIND_DIAG)
+    matches!(
+        kind,
+        KIND_DMA | KIND_MSI | KIND_POLICY | KIND_DIAG | KIND_FIRMWARE
+    )
 }
 
 impl Resource {
@@ -95,7 +100,7 @@ impl Resource {
             size,
             options,
         } = request;
-        let known = (KIND_MMIO..=KIND_DIAG).contains(&kind);
+        let known = (KIND_MMIO..=KIND_FIRMWARE).contains(&kind);
         let fits_kind = parent.kind == KIND_ROOT || parent.kind == kind;
         let size_ok = if rangeless(kind) {
             base == 0 && size == 0
@@ -254,7 +259,25 @@ mod tests {
         let root = Resource::root();
         let e = |r: Result<Arc<Resource>, Error>| r.err();
         assert_eq!(e(make(&root, KIND_ROOT, 0, 1, 0)), Some(Error::InvalidArgs));
-        assert_eq!(e(make(&root, 10, 0, 1, 0)), Some(Error::InvalidArgs));
+        assert_eq!(e(make(&root, 11, 0, 1, 0)), Some(Error::InvalidArgs));
+        assert_eq!(
+            e(make(&root, KIND_FIRMWARE, 0, 1, 0)),
+            Some(Error::InvalidArgs)
+        );
+        assert_eq!(
+            e(make(&root, KIND_FIRMWARE, 1, 0, 0)),
+            Some(Error::InvalidArgs)
+        );
+        let firmware = make(&root, KIND_FIRMWARE, 0, 0, 0).unwrap();
+        assert_eq!(firmware.kind(), KIND_FIRMWARE);
+        assert!(firmware.grants(KIND_FIRMWARE, 0, 0));
+        // Rangeless resources do not conflict with each other.
+        assert!(make(&root, KIND_FIRMWARE, 0, 0, 0).is_ok());
+        assert!(make(&firmware, KIND_FIRMWARE, 0, 0, 0).is_ok());
+        assert_eq!(
+            e(make(&firmware, KIND_DMA, 0, 0, 0)),
+            Some(Error::InvalidArgs)
+        );
         assert_eq!(e(make(&root, KIND_DIAG, 0, 1, 0)), Some(Error::InvalidArgs));
         let diag = make(&root, KIND_DIAG, 0, 0, 0);
         if cfg!(feature = "diag") {
