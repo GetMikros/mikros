@@ -5,8 +5,9 @@
 //! It binds to partitions of the Mikros root file system type, and on
 //! `Start` gives the shim the partition behind the `bus` channel, which
 //! it reads and writes through `mikros.storage.Block`, mounts the btrfs
-//! on it, for writing unless the partition is read-only, with the options
-//! of `OPTIONS` (MIKSPEC-0053.R3), and publishes it
+//! on it, for writing unless the partition is read-only or its `live`
+//! property is `true` (MIKSPEC-0053.R14), with the options of `OPTIONS`,
+//! which compress with zstd only (MIKSPEC-0053.R15), and publishes it
 //! as a service of class `filesystem` that serves `mikros.fs.Filesystem`
 //! (MIKSPEC-0049.R13). `Start` fails with `NOT_SUPPORTED` for a partition
 //! that holds no btrfs. Changes are durable when their calls return if
@@ -62,11 +63,18 @@ const SUBVOLUMES_CLASS: &str = "subvolumes";
 /// what is freed in the background.
 const OPTIONS: &CStr = c"space_cache=v2,compress=zstd";
 const OPTIONS_DISCARD: &CStr = c"space_cache=v2,compress=zstd,discard=async";
+/// The options of a live system's mount, which writes nothing: not even
+/// what the log tree holds is replayed.
+const OPTIONS_LIVE: &CStr = c"space_cache=v2,compress=zstd,rescue=nologreplay";
 /// The property of the partition that says how its changes may be
 /// cached (MIKSPEC-0025.R33), and the value that has them durable at
 /// once; any other value, or none, lets them be written back.
 const CACHE: &str = "cache";
 const QUICK_DISCONNECT: &str = "quick-disconnect";
+/// The properties of the root partition (MIKSPEC-0025.R62): the version
+/// to show as `usr`, and whether the system is live.
+const SYSTEM: &str = "system";
+const LIVE: &str = "live";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -155,8 +163,9 @@ fn memory() -> u64 {
 /// `request`, and returns the file system to serve and the device
 /// manager. Fails with `INVALID_ARGS` without a bus channel, with
 /// `NO_RESOURCES` when the disk gives no buffer, with `NOT_SUPPORTED`
-/// when the partition holds no btrfs, and with `INTERNAL` when the shim
-/// cannot start or mount it.
+/// when the partition holds no btrfs, with `NOT_FOUND` when its `system`
+/// property names no version in `@system`, and with `INTERNAL` when the
+/// shim cannot start or mount it.
 fn start(
     request: DriverStartRequest,
     process: sys::Handle,
@@ -164,11 +173,13 @@ fn start(
     reactor: &Reactor,
     spawner: &Spawner,
 ) -> Result<(Rc<Fs>, DeviceManagerAsyncClient), Status> {
-    let quick_disconnect = request
-        .device
-        .properties
-        .iter()
-        .any(|p| p.key == CACHE && p.value == QUICK_DISCONNECT);
+    let property = |key: &str| {
+        let found = request.device.properties.iter().find(|p| p.key == key);
+        found.map(|p| p.value.clone())
+    };
+    let quick_disconnect = property(CACHE).as_deref() == Some(QUICK_DISCONNECT);
+    let live = property(LIVE).as_deref() == Some("true");
+    let system = property(SYSTEM);
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let block = BlockClient::new(ClientEnd::new(bus));
     let disk = Disk::new(block, process).ok_or(Status::NoResources)?;
@@ -180,7 +191,7 @@ fn start(
     crate::linux::start().map_err(|_| Status::Internal)?;
     // The shim keeps the disk for the rest of the program.
     let disk: &'static Disk = Box::leak(Box::new(disk));
-    let read_only = disk.read_only();
+    let read_only = disk.read_only() || live;
     let handle = disk as *const Disk as *mut c_void;
     // SAFETY: the handle points to a disk that is never freed, which the
     // host layer's disk calls take.
@@ -195,9 +206,10 @@ fn start(
         )
     }
     .map_err(|_| Status::Internal)?;
-    let options = match disk.discards() {
-        true => OPTIONS_DISCARD,
-        false => OPTIONS,
+    let options = match (live, disk.discards()) {
+        (true, _) => OPTIONS_LIVE,
+        (false, true) => OPTIONS_DISCARD,
+        (false, false) => OPTIONS,
     };
     let mount = Mount::new(c"/dev/partition", read_only, Some(options)).map_err(|e| match e {
         EINVAL => Status::NotSupported,
@@ -210,10 +222,21 @@ fn start(
         read_only,
         disk,
         quick_disconnect,
+        system.as_deref(),
         reactor.clone(),
         spawner.clone(),
     )
-    .map_err(|_| Status::Internal)?;
+    .map_err(|e| match e {
+        mikros_rt::interfaces::mikros::fs::Error::NotFound => {
+            mikros_rt::log!(
+                Error,
+                "btrfs: @system has no version {:?}, which the partition's system property names; the file system is not published",
+                system.as_deref().unwrap_or_default()
+            );
+            Status::NotFound
+        }
+        _ => Status::Internal,
+    })?;
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     Ok((Rc::new(fs), manager))
 }

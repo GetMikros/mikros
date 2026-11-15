@@ -3,11 +3,13 @@
 //! connections to the same node share, the tokens of directories, the
 //! byte-range locks and watches of connections, and the `Filesystem`
 //! service (MIKSPEC-0049.R13). Its root is the top-level subvolume. When
-//! that holds `@system` with a `current` link, the root has an entry
-//! `usr` of its own as well, the root of the system version that
-//! `current` names when the file system is mounted (MIKSPEC-0053.R4,
-//! MIKSPEC-0053.R9); any other file system's root is the top-level
-//! subvolume as it is.
+//! that holds `@system`, the root has an entry `usr` of its own as well,
+//! the root of the system version that the partition's `system` property
+//! names, or without one, that `@system/current` names when the file
+//! system is mounted (MIKSPEC-0053.R4, MIKSPEC-0053.R13); any other file
+//! system's root is the top-level subvolume as it is. On a file system
+//! with `@system`, `Sync` commits a transaction, so that the bootloader,
+//! which does not read the log tree, sees the change (MIKSPEC-0053.R15).
 
 use crate::driver::change::koids;
 use crate::driver::disk::Disk;
@@ -76,9 +78,11 @@ impl Open {
 pub struct Fs {
     pub mount: &'static Mount,
     pub root: Rc<Open>,
-    /// The root of the current system version, which the root's `usr`
-    /// names; none when there is no `@system/current`.
+    /// The root of the booted system version, which the root's `usr`
+    /// names; none when there is none.
     pub usr: Option<Rc<Open>>,
+    /// Whether the top-level subvolume holds `@system`.
+    pub system_layout: bool,
     opens: RefCell<BTreeMap<Key, Weak<Open>>>,
     /// The directories that tokens name, by the token's object ID.
     pub(crate) tokens: RefCell<BTreeMap<u64, Rc<Open>>>,
@@ -167,11 +171,15 @@ pub fn attributes(a: &BtrfsAttributes) -> Attributes {
 }
 
 impl Fs {
+    /// The file system of `mount`, whose root's `usr` is the version that
+    /// `system` names, or else the one that `@system/current` names.
+    /// Fails with `NOT_FOUND` when `system` names no version in `@system`.
     pub fn new(
         mount: &'static Mount,
         read_only: bool,
         disk: &'static Disk,
         quick_disconnect: bool,
+        system: Option<&str>,
         reactor: Reactor,
         spawner: Spawner,
     ) -> Result<Fs, Error> {
@@ -179,7 +187,12 @@ impl Fs {
         let key = key(&node)?;
         let root = Rc::new(Open::new(Arc::new(node), key));
         let mut opens = BTreeMap::from([(key, Rc::downgrade(&root))]);
-        let usr = current_version(&root.node).map(|node| {
+        let system_layout = root.node.lookup(SYSTEM).is_ok();
+        let version = match system {
+            Some(name) => Some(named_version(&root.node, name).ok_or(Error::NotFound)?),
+            None => current_version(&root.node),
+        };
+        let usr = version.map(|node| {
             let usr = Rc::new(Open::new(Arc::new(node.0), node.1));
             usr.names.borrow_mut().push((key, String::from(USR)));
             opens.insert(usr.key, Rc::downgrade(&usr));
@@ -189,6 +202,7 @@ impl Fs {
             mount,
             root,
             usr,
+            system_layout,
             opens: RefCell::new(opens),
             tokens: RefCell::new(BTreeMap::new()),
             connections: RefCell::new(BTreeMap::new()),
@@ -397,6 +411,24 @@ fn current_version(root: &BtrfsNode<'static>) -> Option<(BtrfsNode<'static>, Key
     let version = system.lookup(name).ok()?;
     let key = key(&version).ok()?;
     Some((version, key))
+}
+
+/// The inode number of the root directory of every subvolume.
+const SUBVOLUME_ROOT: u64 = 256;
+
+/// The root of the version subvolume `name` in `@system` of `root`, and
+/// its key: a subvolume of its own directly in `@system`.
+fn named_version(root: &BtrfsNode<'static>, name: &str) -> Option<(BtrfsNode<'static>, Key)> {
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    let system = root.lookup(SYSTEM).ok()?;
+    let version = system.lookup(name.as_bytes()).ok()?;
+    let a = version.attributes().ok()?;
+    let own = a.mode & MODE_TYPE == MODE_DIRECTORY
+        && a.inode == SUBVOLUME_ROOT
+        && a.device != key(&system).ok()?.0;
+    own.then_some((version, (a.device, a.inode)))
 }
 
 pub(crate) fn key(node: &BtrfsNode<'_>) -> Result<Key, Error> {

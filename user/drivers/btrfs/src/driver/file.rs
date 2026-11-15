@@ -204,10 +204,16 @@ impl Connection {
 
     /// Syncs the node, after marking the pages that clients wrote through
     /// mappings of a memory object of it dirty, on a thread of its own,
-    /// as syncing waits for the disk.
+    /// as syncing waits for the disk. On a file system with `@system`,
+    /// the whole file system is committed instead, so that the change does
+    /// not wait in the log tree.
     pub(crate) async fn sync(&self) -> Result<(), Error> {
         if let Some(file) = self.fs.shares.get(self.open.key) {
             file.harvest();
+        }
+        if self.fs.system_layout {
+            let mount = self.fs.mount;
+            return blocking(&self.fs.reactor, move || mount.sync().map_err(error)).await;
         }
         let node = self.open.node.clone();
         blocking(&self.fs.reactor, move || node.sync().map_err(error)).await

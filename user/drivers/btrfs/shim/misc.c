@@ -3,7 +3,7 @@
  * What the code built on the shim asks for but the program does not use:
  * CPU hotplug, SRCU notifier chains, uevents, the btrfs control device,
  * managed device resources, firmware nodes and RAID6 recovery, which
- * MIKSPEC-0053.R3 leaves out. Each does as little as its callers allow.
+ * MIKSPEC-0053.R15 leaves out. Each does as little as its callers allow.
  */
 #include <linux/cpuhotplug.h>
 #include <linux/cpumask.h>
