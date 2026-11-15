@@ -117,20 +117,16 @@ pub fn with_esp(cmdline: String, partition: Option<[u8; 16]>) -> String {
     {
         return cmdline;
     }
-    let option = alloc::format!("esp=PARTUUID={}", guid_text(&guid));
-    if cmdline.is_empty() {
-        option
-    } else {
-        alloc::format!("{cmdline} {option}")
-    }
+    append(
+        cmdline,
+        &alloc::format!("esp=PARTUUID={}", guid_text(&guid)),
+    )
 }
 
-/// The size asked for with the first `video=<width>x<height>` option, if it
+/// The size asked for with the last `video=<width>x<height>` option, if it
 /// is well formed.
 pub fn video_mode(cmdline: &str) -> Option<(usize, usize)> {
-    let value = cmdline
-        .split_ascii_whitespace()
-        .find_map(|option| option.strip_prefix("video="))?;
+    let value = option(cmdline, "video")?;
     let (width, height) = value.split_once('x')?;
     let number = |s: &str| {
         (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
@@ -138,6 +134,119 @@ pub fn video_mode(cmdline: &str) -> Option<(usize, usize)> {
             .flatten()
     };
     Some((number(width)?, number(height)?))
+}
+
+/// The value of the last option `<name>=<value>` of `cmdline`.
+pub fn option<'a>(cmdline: &'a str, name: &str) -> Option<&'a str> {
+    cmdline
+        .split_ascii_whitespace()
+        .filter_map(|option| option.strip_prefix(name)?.strip_prefix('='))
+        .next_back()
+}
+
+/// The command line made of the contents of `boot.conf` and the load
+/// options, either of which may be absent.
+pub fn compose(boot_conf: Option<String>, load_options: Option<String>) -> String {
+    match (boot_conf, load_options) {
+        (Some(conf), Some(options)) if !conf.is_empty() => alloc::format!("{conf} {options}"),
+        (_, Some(options)) => options,
+        (Some(conf), None) => conf,
+        (None, None) => String::new(),
+    }
+}
+
+/// `guid` in its 36-character textual form, as GPT stores it, with digits
+/// in either case.
+pub fn parse_guid(text: &str) -> Option<[u8; 16]> {
+    let bytes = text.as_bytes();
+    let dashes = [8, 13, 18, 23];
+    if bytes.len() != 36 || dashes.iter().any(|&i| bytes[i] != b'-') {
+        return None;
+    }
+    let digits: alloc::vec::Vec<u8> = text.bytes().filter(|&b| b != b'-').collect();
+    let mut value = [0u8; 16];
+    for (i, pair) in digits.as_chunks::<2>().0.iter().enumerate() {
+        let hex = core::str::from_utf8(pair).ok()?;
+        value[i] = u8::from_str_radix(hex, 16).ok()?;
+    }
+    if digits.len() != 32 || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    // The first three fields are stored little-endian.
+    value[..4].reverse();
+    value[4..6].reverse();
+    value[6..8].reverse();
+    Some(value)
+}
+
+/// The partition GUID that the last `root=` option gives as
+/// `root=PARTUUID=<guid>`, if it gives one.
+pub fn root_partition(cmdline: &str) -> Option<Result<[u8; 16], InvalidGuid>> {
+    let guid = option(cmdline, "root")?.strip_prefix("PARTUUID=")?;
+    Some(parse_guid(guid).ok_or(InvalidGuid))
+}
+
+/// A `root=PARTUUID=` option whose GUID is not valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidGuid;
+
+impl fmt::Display for InvalidGuid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the root=PARTUUID= option holds no valid GUID")
+    }
+}
+
+fn append(cmdline: String, option: &str) -> String {
+    if cmdline.is_empty() {
+        String::from(option)
+    } else {
+        alloc::format!("{cmdline} {option}")
+    }
+}
+
+/// `cmdline` with `root=PARTUUID=<guid>` appended, unless it has an option
+/// that starts with `root=`.
+pub fn with_root(cmdline: String, guid: &[u8; 16]) -> String {
+    if cmdline
+        .split_ascii_whitespace()
+        .any(|option| option.starts_with("root="))
+    {
+        return cmdline;
+    }
+    append(
+        cmdline,
+        &alloc::format!("root=PARTUUID={}", guid_text(guid)),
+    )
+}
+
+/// `cmdline` without its `system=` options, each removed with the
+/// whitespace before it, and with `system=<version>` appended.
+pub fn with_system(cmdline: &str, version: &str) -> String {
+    let mut kept = String::new();
+    let mut rest = cmdline;
+    loop {
+        let start = rest
+            .find(|c: char| !c.is_ascii_whitespace())
+            .unwrap_or(rest.len());
+        let space = &rest[..start];
+        rest = &rest[start..];
+        if rest.is_empty() {
+            break;
+        }
+        let end = rest
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(rest.len());
+        let option = &rest[..end];
+        rest = &rest[end..];
+        if option.starts_with("system=") {
+            continue;
+        }
+        if !kept.is_empty() {
+            kept.push_str(space);
+        }
+        kept.push_str(option);
+    }
+    append(kept, &alloc::format!("system={version}"))
 }
 
 #[cfg(test)]
@@ -204,7 +313,10 @@ mod tests {
             video_mode("quiet video=1920x1080 root=x"),
             Some((1920, 1080))
         );
-        assert_eq!(video_mode("video=800x600 video=1024x768"), Some((800, 600)));
+        assert_eq!(
+            video_mode("video=800x600 video=1024x768"),
+            Some((1024, 768))
+        );
         assert_eq!(video_mode("video=1920x"), None);
         assert_eq!(video_mode("video=+1x2"), None);
         assert_eq!(video_mode("myvideo=1x2"), None);
@@ -258,5 +370,76 @@ mod tests {
             "an esp= option is kept"
         );
         assert_eq!(with_esp(String::from("quiet"), None), "quiet");
+    }
+
+    #[test]
+    fn takes_the_last_option() {
+        assert_eq!(option("a=1 b=2 a=3", "a"), Some("3"));
+        assert_eq!(option("ab=1 a", "a"), None);
+        assert_eq!(option("a= b", "a"), Some(""));
+    }
+
+    #[test]
+    fn puts_load_options_after_boot_conf() {
+        let s = |t: &str| Some(String::from(t));
+        assert_eq!(compose(s("a b"), s("c")), "a b c");
+        assert_eq!(compose(s(""), s("c")), "c");
+        assert_eq!(compose(s("a"), None), "a");
+        assert_eq!(compose(None, s("c")), "c");
+        assert_eq!(compose(None, None), "");
+    }
+
+    #[test]
+    fn parses_guids_as_gpt_stores_them() {
+        let text = "01234567-89ab-cdef-0123-456789ABCDEF";
+        let guid = parse_guid(text).unwrap();
+        assert_eq!(guid_text(&guid), text.to_ascii_lowercase());
+        assert_eq!(guid[..4], [0x67, 0x45, 0x23, 0x01]);
+        assert_eq!(parse_guid("01234567-89ab-cdef-0123-456789abcde"), None);
+        assert_eq!(parse_guid("01234567x89ab-cdef-0123-456789abcdef"), None);
+        assert_eq!(parse_guid("0123456g-89ab-cdef-0123-456789abcdef"), None);
+        assert_eq!(parse_guid("+1234567-89ab-cdef-0123-456789abcdef"), None);
+    }
+
+    #[test]
+    fn finds_the_root_partition_option() {
+        let guid = "01234567-89ab-cdef-0123-456789abcdef";
+        let line = alloc::format!(
+            "root=PARTUUID=00000000-0000-0000-0000-000000000000 root=PARTUUID={guid}"
+        );
+        assert_eq!(root_partition(&line), Some(Ok(parse_guid(guid).unwrap())));
+        assert_eq!(root_partition("root=PARTUUID=x"), Some(Err(InvalidGuid)));
+        assert_eq!(
+            root_partition(&alloc::format!("root=PARTUUID={guid} root=other")),
+            None
+        );
+        assert_eq!(root_partition("quiet"), None);
+    }
+
+    #[test]
+    fn appends_the_root_partition() {
+        let guid = parse_guid("01234567-89ab-cdef-0123-456789abcdef").unwrap();
+        let root = "root=PARTUUID=01234567-89ab-cdef-0123-456789abcdef";
+        assert_eq!(with_root(String::new(), &guid), root);
+        assert_eq!(
+            with_root(String::from("quiet"), &guid),
+            alloc::format!("quiet {root}")
+        );
+        assert_eq!(with_root(String::from("root=x"), &guid), "root=x");
+        assert_eq!(
+            with_root(String::from("myroot=x"), &guid),
+            alloc::format!("myroot=x {root}")
+        );
+    }
+
+    #[test]
+    fn replaces_system_options() {
+        assert_eq!(with_system("", "1.0"), "system=1.0");
+        assert_eq!(with_system("system=current", "1.0"), "system=1.0");
+        assert_eq!(
+            with_system("a  system=x b\tsystem=y c ", "1.0"),
+            "a b c system=1.0"
+        );
+        assert_eq!(with_system("subsystem=x", "1.0"), "subsystem=x system=1.0");
     }
 }
