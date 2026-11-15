@@ -2,7 +2,7 @@
 //! log service, to drive it as a client. It writes records through
 //! `mikros.log.Writer` and lines to its standard output and error, and
 //! reads them back through `mikros.log.Reader`, which its permission
-//! `logs.read` lets it use, with `Read` and with `Follow`. It exits with
+//! `admin.logs.read` lets it use, with `Read` and with `Follow`. It exits with
 //! 0 when every check passed, or with the number of the first that
 //! failed.
 

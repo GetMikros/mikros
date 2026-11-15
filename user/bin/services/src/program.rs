@@ -15,7 +15,7 @@ use std::process::ExitCode;
 const SERVICES: &str = "mikros.service.Services";
 const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
 const APP_ID: &str = "system.services";
-const ACTION: &str = "services.manage";
+const ACTION: &str = "admin.services.control";
 const FOREVER: i64 = i64::MAX;
 
 unsafe extern "C" {
@@ -114,7 +114,7 @@ fn fail(status: u8, message: &str) -> ExitCode {
     ExitCode::from(status)
 }
 
-/// Whether an administrator allows `services.manage` for this process,
+/// Whether an administrator allows `admin.services.control` for this process,
 /// asked with the command line as the reason.
 fn authorized(directory: &Directory, arguments: &[String]) -> bool {
     let me = ClientIdentity {

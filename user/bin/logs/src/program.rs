@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 const READER: &str = "mikros.log.Reader";
 const APP_ID: &str = "system.logs";
-const ACTION: &str = "logs.read";
+const ACTION: &str = "admin.logs.read";
 /// The most records one `Read` gives.
 const BATCH: u32 = 32;
 const FOREVER: i64 = i64::MAX;
@@ -144,7 +144,7 @@ fn fail(status: u8, message: &str) -> ExitCode {
     ExitCode::from(status)
 }
 
-/// Whether an administrator allows `logs.read` for this process, asked
+/// Whether an administrator allows `admin.logs.read` for this process, asked
 /// with the command line as the reason.
 fn authorized(directory: &Directory, arguments: &[String]) -> bool {
     let me = ClientIdentity {

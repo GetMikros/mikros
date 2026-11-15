@@ -5,7 +5,7 @@ binary: /usr/bin/volumes-probe
 start: boot
 after: [devicemgr, tmpfs]
 boot_handles: [log_manage]
-# To grant itself files.volumes, which its copy then holds, and for the
+# To grant itself user.volumes.access, which its copy then holds, and for the
 # copy to kill the xHCI driver.
 permissions: [system.grants.manage, system.processes.control]
 # Its program, to start the copy.

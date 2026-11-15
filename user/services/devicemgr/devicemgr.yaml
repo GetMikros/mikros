@@ -9,9 +9,9 @@ permissions: [system.identity.set, system.permissions.read, system.permissions.s
 stop_timeout: 600
 provides:
   - protocol: mikros.driver.Removal
-    permission: files.volumes
+    permission: user.volumes.access
   - protocol: mikros.driver.Shutdown
-    permission: power.control
+    permission: admin.power.control
   # For the service manager alone, which the device manager checks.
   - protocol: mikros.driver.RootDrivers
   # The named devices, for every process.

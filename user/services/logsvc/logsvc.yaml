@@ -8,6 +8,6 @@ permissions: [system.filesystems.mount]
 provides:
   - protocol: mikros.log.Writer
   - protocol: mikros.log.Reader
-    permission: logs.read
+    permission: admin.logs.read
   - protocol: mikros.log.Sources
     permission: system.log_sources.create

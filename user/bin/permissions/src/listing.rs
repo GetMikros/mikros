@@ -210,20 +210,20 @@ mod tests {
             }
         );
         assert_eq!(
-            read_args(&["allow", "app.a", "camera"]),
+            read_args(&["allow", "app.a", "user.camera.use"]),
             Request::Set {
                 decision: Decision::Allow,
                 app_id: "app.a".into(),
-                permission: "camera".into(),
+                permission: "user.camera.use".into(),
                 user: None,
             }
         );
         assert_eq!(
-            read_args(&["deny", "app.a", "camera", "bob"]),
+            read_args(&["deny", "app.a", "user.camera.use", "bob"]),
             Request::Set {
                 decision: Decision::Deny,
                 app_id: "app.a".into(),
-                permission: "camera".into(),
+                permission: "user.camera.use".into(),
                 user: Some("bob".into()),
             }
         );
@@ -252,31 +252,31 @@ mod tests {
         let list = read_args(&["bob"]);
         assert!(needs_authorization(&list, false));
         assert!(!needs_authorization(&list, true));
-        let deny = read_args(&["deny", "a", "camera"]);
+        let deny = read_args(&["deny", "a", "user.camera.use"]);
         assert!(!needs_authorization(&deny, true));
         assert!(needs_authorization(&deny, false));
-        let allow = read_args(&["allow", "a", "camera"]);
+        let allow = read_args(&["allow", "a", "user.camera.use"]);
         assert!(needs_authorization(&allow, true));
     }
 
     #[test]
     fn writes_sorted_columns_and_json() {
         let grants = [
-            grant("app.zed", "camera", "denied"),
-            grant("app.a", "microphone", "allowed"),
-            grant("app.a", "camera", "allowed"),
+            grant("app.zed", "user.camera.use", "denied"),
+            grant("app.a", "user.microphone.use", "allowed"),
+            grant("app.a", "user.camera.use", "allowed"),
         ];
         assert_eq!(
             text(&grants),
-            "APP ID   PERMISSION  DECISION\n\
-             app.a    camera      allowed\n\
-             app.a    microphone  allowed\n\
-             app.zed  camera      denied\n"
+            "APP ID   PERMISSION           DECISION\n\
+             app.a    user.camera.use      allowed\n\
+             app.a    user.microphone.use  allowed\n\
+             app.zed  user.camera.use      denied\n"
         );
         assert_eq!(text(&[]), "APP ID  PERMISSION  DECISION\n");
         assert_eq!(
             json(&grants[..1]),
-            "[{\"user\":1000,\"app_id\":\"app.zed\",\"permission\":\"camera\",\
+            "[{\"user\":1000,\"app_id\":\"app.zed\",\"permission\":\"user.camera.use\",\
              \"decision\":\"denied\"}]\n"
         );
         assert_eq!(json(&[]), "[]\n");
@@ -286,12 +286,12 @@ mod tests {
     fn names_failures() {
         assert_eq!(lowercase("InvalidArgs"), "invalid_args");
         assert_eq!(
-            failure(Some("camera"), "not_found"),
-            "camera: no such permission"
+            failure(Some("user.camera.use"), "not_found"),
+            "user.camera.use: no such permission"
         );
         assert_eq!(
-            failure(Some("time.set"), "invalid_args"),
-            "time.set: a system permission"
+            failure(Some("admin.time.set"), "invalid_args"),
+            "admin.time.set: a system permission"
         );
         assert_eq!(failure(None, "access_denied"), "access_denied");
     }

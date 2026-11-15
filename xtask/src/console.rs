@@ -81,9 +81,9 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// `services restart idle-service`, each with ada's password and
 /// `if $status != 0 { exit 16 }`, 17 and 18: the start succeeds only when
 /// the stopped service, which always restarts, stayed stopped; then
-/// `permissions allow system.example camera` with ada's password and
-/// `if $status != 0 { exit 19 }`; then `accounts add bob`, bob's
-/// password twice and ada's on the authorization screen, and
+/// `permissions allow system.example user.camera.use` with ada's
+/// password and `if $status != 0 { exit 19 }`; then `accounts add bob`,
+/// bob's password twice and ada's on the authorization screen, and
 /// `if $status != 0 { exit 20 }`; then
 /// `spaw`, which Tab completes to `spawn-std `, and
 /// `sleep`, a job that runs until it is killed, Ctrl-Z, which stops it,
@@ -197,7 +197,7 @@ const MSH_KEYS: [(&str, Duration); 55] = [
     ),
     (
         "p e r m i s s i o n s spc a l l o w spc s y s t e m dot e x a m p l e spc \
-         c a m e r a ret",
+         u s e r dot c a m e r a dot u s e ret",
         JOB_START,
     ),
     ("a d a minus p w ret", ANSWER),

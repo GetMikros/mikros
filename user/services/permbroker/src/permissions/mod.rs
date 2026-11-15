@@ -28,7 +28,7 @@ pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
     "system.permissions.read",
     "system.permissions.set",
     "system.devices.manage",
-    "power.control",
+    "admin.power.control",
 ];
 /// The most grants one `ListGrants` reply holds.
 pub const LIST_MAX: usize = 256;
@@ -63,12 +63,12 @@ pub struct Identity<'a> {
 /// The `system` permissions that an elevated process holds, and the one
 /// `user` permission it does not.
 const ADMINISTRATOR: [&str; 4] = [
-    "power.control",
-    "services.control",
-    "accounts.manage",
-    "logs.read",
+    "admin.power.control",
+    "admin.services.control",
+    "admin.accounts.manage",
+    "admin.logs.read",
 ];
-const FULL_DISK: &str = "files.full_disk";
+const FULL_DISK: &str = "user.full_disk.access";
 
 /// A user's decision on a `user` or `default` permission for an app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,7 +172,7 @@ impl Store {
     /// The decision on `permission` for `client`, without prompting, and
     /// whether it allows `permission` only because an administrator
     /// elevated the client: an elevated client holds the administrator
-    /// permissions and every `user` permission but `files.full_disk`.
+    /// permissions and every `user` permission but `user.full_disk.access`.
     pub fn check(
         &self,
         client: Identity<'_>,

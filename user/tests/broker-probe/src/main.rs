@@ -51,7 +51,7 @@ binary: /usr/bin/permbroker
 start: boot
 provides:
   - protocol: mikros.permissions.Broker
-permissions: [logs.read]
+permissions: [admin.logs.read]
 ";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
@@ -277,11 +277,11 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
 
     c(
         "checking a default permission",
-        check(&manager, 1, APP, "network").await == Ok(Decision::Allowed),
+        check(&manager, 1, APP, "default.network.use").await == Ok(Decision::Allowed),
     )?;
     c(
         "checking an undecided user permission",
-        check(&manager, 1, APP, "camera").await == Ok(Decision::Undetermined),
+        check(&manager, 1, APP, "user.camera.use").await == Ok(Decision::Undetermined),
     )?;
     c(
         "checking an unknown permission",
@@ -289,23 +289,23 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
     )?;
     c(
         "granting the broker its manifest's permissions",
-        check(&manager, 0, "system.permbroker", "logs.read").await == Ok(Decision::Allowed),
+        check(&manager, 0, "system.permbroker", "admin.logs.read").await == Ok(Decision::Allowed),
     )?;
     c(
         "refusing a caller without system.permissions.read",
-        check(&stranger, 1, APP, "network").await == Err(Status::AccessDenied),
+        check(&stranger, 1, APP, "default.network.use").await == Err(Status::AccessDenied),
     )?;
     c(
         "denying a request without a prompter",
-        request(&manager, APP, "camera").await == Ok(Decision::Denied),
+        request(&manager, APP, "user.camera.use").await == Ok(Decision::Denied),
     )?;
     c(
         "recording nothing without a prompter",
-        check(&manager, 1, APP, "camera").await == Ok(Decision::Undetermined),
+        check(&manager, 1, APP, "user.camera.use").await == Ok(Decision::Undetermined),
     )?;
     c(
         "refusing to grant a user permission as a system one",
-        grant_system(&manager, ADMIN, &["camera"]).await == Err(Status::InvalidArgs),
+        grant_system(&manager, ADMIN, &["user.camera.use"]).await == Err(Status::InvalidArgs),
     )?;
     let admin_permissions = [
         "system.permissions.read",
@@ -321,32 +321,32 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
     let watcher = connect(&provider, ADMIN, reactor);
     c(
         "refusing to set a system permission",
-        set(&admin, "time.set", Decision::Allowed).await == Err(Status::InvalidArgs),
+        set(&admin, "admin.time.set", Decision::Allowed).await == Err(Status::InvalidArgs),
     )?;
     c(
         "setting a grant",
-        set(&admin, "camera", Decision::Allowed).await == Ok(()),
+        set(&admin, "user.camera.use", Decision::Allowed).await == Ok(()),
     )?;
     c(
         "checking the grant",
-        check(&admin, 1, APP, "camera").await == Ok(Decision::Allowed),
+        check(&admin, 1, APP, "user.camera.use").await == Ok(Decision::Allowed),
     )?;
     let listed = admin.list_grants(1).await;
     c(
         "listing the grant",
         listed.is_ok_and(|r| r.is_ok_and(|r| r.grants.len() == 1)),
     )?;
-    let watched = watcher.watch("camera".into()).await;
+    let watched = watcher.watch("user.camera.use".into()).await;
     c("watching", watched.is_ok_and(|r| r.is_ok()))?;
     c(
         "revoking the grant",
-        set(&admin, "camera", Decision::Denied).await == Ok(()),
+        set(&admin, "user.camera.use", Decision::Denied).await == Ok(()),
     )?;
     let event = watcher.next_event().await;
     c(
         "telling the watcher",
         matches!(event, Ok(BrokerEvent::OnRevoked(e))
-            if e.user == 1 && e.app_id == APP && e.permission == "camera"),
+            if e.user == 1 && e.app_id == APP && e.permission == "user.camera.use"),
     )?;
 
     let (client, server) = endpoints::<Prompter>().map_err(|_| 100)?;
@@ -358,14 +358,14 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
     )?;
     c(
         "asking the prompter",
-        request(&admin, APP, "microphone").await == Ok(Decision::Allowed),
+        request(&admin, APP, "user.microphone.use").await == Ok(Decision::Allowed),
     )?;
     c(
         "recording its answer",
-        check(&admin, 1, APP, "microphone").await == Ok(Decision::Allowed),
+        check(&admin, 1, APP, "user.microphone.use").await == Ok(Decision::Allowed),
     )?;
     c(
         "not asking for a decided permission",
-        request(&admin, APP, "camera").await == Ok(Decision::Denied),
+        request(&admin, APP, "user.camera.use").await == Ok(Decision::Denied),
     )
 }

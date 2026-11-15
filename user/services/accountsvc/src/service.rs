@@ -21,7 +21,7 @@ use mikros_userdb::{Attempts, Kind, LAST_ID, Refusal, Users, hash, valid_name};
 /// The permissions that `Authenticate` and changes to other users'
 /// accounts need, and the action an administrator authorizes for them.
 const AUTHENTICATE: &str = "system.users.authenticate";
-const MANAGE: &str = "accounts.manage";
+const MANAGE: &str = "admin.accounts.manage";
 /// The app ID that may create the first administrator.
 const SETUP: &str = "system.setup";
 const SECOND: i64 = 1_000_000_000;
@@ -134,7 +134,7 @@ impl Service {
         user.filter(|_| matched).map(|(id, _)| id)
     }
 
-    /// Whether `client` holds `accounts.manage` and an administrator
+    /// Whether `client` holds `admin.accounts.manage` and an administrator
     /// authorized it, asked for with `reason`.
     async fn may_manage(&self, client: &ClientIdentity, reason: String) -> bool {
         self.checks.holds(client, MANAGE).await

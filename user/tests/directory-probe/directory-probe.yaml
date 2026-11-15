@@ -4,7 +4,7 @@ start: boot
 provides:
   - protocol: test.directory.Open
   - protocol: test.directory.Protected
-    permission: camera
+    permission: user.camera.use
 permissions: [system.permissions.read, system.services.create]
 boot_handles: [log_manage, platform_info, framebuffer]
 priority: 20

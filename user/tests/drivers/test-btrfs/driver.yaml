@@ -5,4 +5,4 @@
 name: test-btrfs
 binary: /usr/lib/drivers/test-btrfs/test-btrfs
 match: [gpt:38a2aae9-c051-4fe5-a24a-441d4a220d2a]
-permissions: [system.filesystems.mount, system.subvolumes.manage, system.processes.control, time.set]
+permissions: [system.filesystems.mount, system.subvolumes.manage, system.processes.control, admin.time.set]

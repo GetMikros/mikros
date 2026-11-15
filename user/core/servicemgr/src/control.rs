@@ -1,5 +1,5 @@
 //! `mikros.service.Control`, which the service manager serves to
-//! processes with `power.control`, whom the directory has already checked
+//! processes with `admin.power.control`, whom the directory has already checked
 //! for it: `Shutdown` stops every service and powers the machine off or
 //! restarts it, and replies only when that failed.
 

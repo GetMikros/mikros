@@ -5,4 +5,4 @@ name: accounts-guest
 binary: /usr/bin/accounts-probe
 start: boot
 after: [tmpfs]
-permissions: [accounts.manage]
+permissions: [admin.accounts.manage]

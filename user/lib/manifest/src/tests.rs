@@ -488,7 +488,7 @@ fn chooses_drivers_by_hardware_id_kind_and_name() {
 
 #[test]
 fn refuses_services_and_programs_that_list_logs_add_source() {
-    let listed = "permissions: [logs.read, system.log_sources.create]\n";
+    let listed = "permissions: [admin.logs.read, system.log_sources.create]\n";
     let service = parse("log.yaml", format!("{MINIMAL}{listed}").as_bytes()).unwrap_err();
     assert_eq!(
         (service.kind, service.line),
@@ -501,6 +501,9 @@ fn refuses_services_and_programs_that_list_logs_add_source() {
     );
     assert_eq!(program.unwrap_err().kind, ErrorKind::ReservedPermission);
     // Other permissions stay as listed.
-    let read = manifest("log.yaml", &format!("{MINIMAL}permissions: [logs.read]\n"));
-    assert_eq!(read.service.permissions, ["logs.read"]);
+    let read = manifest(
+        "log.yaml",
+        &format!("{MINIMAL}permissions: [admin.logs.read]\n"),
+    );
+    assert_eq!(read.service.permissions, ["admin.logs.read"]);
 }

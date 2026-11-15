@@ -371,7 +371,7 @@ async fn probe(
         Ok(client) => {
             let broker = BrokerAsyncClient::new(client, reactor.clone());
             match broker
-                .check(identity(1, "test.app"), "network".into())
+                .check(identity(1, "test.app"), "default.network.use".into())
                 .await
             {
                 Ok(Ok(r)) => Some(r.decision),
@@ -456,7 +456,7 @@ async fn probe(
         "telling of an added instance",
         two.is_ok() && told(d, "two", true).await,
     )?;
-    let secret = register(&r, NAMED, "secret", Some("camera")).await;
+    let secret = register(&r, NAMED, "secret", Some("user.camera.use")).await;
     check("registering a protected instance", secret.is_ok())?;
     let listed = list(d, NAMED).await;
     check(

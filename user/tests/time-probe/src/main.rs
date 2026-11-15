@@ -1,12 +1,12 @@
 //! A program that the service manager starts as a boot service after
-//! the time service, to drive it as a client. It holds `time.set` and
+//! the time service, to drive it as a client. It holds `admin.time.set` and
 //! gets the platform information, and checks that UTC is the boot time
 //! plus the monotonic clock, as the time page also says, that the page
 //! cannot be written, that setting the time changes it and is sent to
 //! watchers, and that without a root file system the zone is UTC and
 //! cannot be set, and that the time page of its startup, when the process
 //! manager had one to give, says the same as the service. The system
-//! test services-time checks what a program without `time.set` can do.
+//! test services-time checks what a program without `admin.time.set` can do.
 //! It exits with 0 when every check passed, or with the number of the
 //! first that failed.
 

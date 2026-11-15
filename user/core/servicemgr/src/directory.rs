@@ -46,11 +46,11 @@ const REGISTER_PERMISSION: &str = "system.services.create";
 pub const CONTROL: &str = "mikros.service.Control";
 /// The service manager's list of services, for every process.
 const SERVICES: &str = "mikros.service.Services";
-const CONTROL_PERMISSION: &str = "power.control";
+const CONTROL_PERMISSION: &str = "admin.power.control";
 /// The protocol that starts and stops services, and the permission it
 /// needs.
 const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
-const SERVICE_CONTROL_PERMISSION: &str = "services.control";
+const SERVICE_CONTROL_PERMISSION: &str = "admin.services.control";
 const PEER_CLOSED: u32 = 1 << 2;
 
 /// The directory's state, shared by every connection.

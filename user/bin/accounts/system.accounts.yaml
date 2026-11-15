@@ -5,4 +5,4 @@
 app_id: system.accounts
 binary: /usr/bin/accounts
 command: true
-permissions: [accounts.manage]
+permissions: [admin.accounts.manage]

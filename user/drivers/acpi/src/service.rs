@@ -1,5 +1,5 @@
 //! The `acpi` service: the routes of PCI interrupt pins, powering the
-//! machine off and restarting it for clients that hold `power.control`,
+//! machine off and restarting it for clients that hold `admin.power.control`,
 //! as the broker says once for each connection, and `OnPowerButton` to
 //! every client each time the power button is pressed.
 
@@ -22,7 +22,7 @@ use mikros_rt::sys;
 
 /// The protocol of the `acpi` service class in the service directory.
 const PROTOCOL: &str = "device.acpi";
-const POWER_CONTROL: &str = "power.control";
+const POWER_CONTROL: &str = "admin.power.control";
 const SIGNALED: u32 = 1 << 3;
 
 /// What every connection shares.
@@ -39,7 +39,7 @@ impl Acpi {
         }
     }
 
-    /// Whether `client` holds `power.control`, as the broker says.
+    /// Whether `client` holds `admin.power.control`, as the broker says.
     async fn may_control(&self, client: &ClientIdentity) -> bool {
         let Some(broker) = &self.broker else {
             return false;

@@ -6,4 +6,4 @@ app_id: system.selftest
 binary: /usr/bin/selftest
 spawned_by:
   - system.servicemgr
-permissions: [power.control]
+permissions: [admin.power.control]

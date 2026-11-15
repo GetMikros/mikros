@@ -3,4 +3,4 @@
 # connects to idle, so nothing starts it.
 app_id: system.idle
 binary: /usr/bin/namespace-probe
-permissions: [logs.read]
+permissions: [admin.logs.read]

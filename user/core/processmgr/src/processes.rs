@@ -44,7 +44,7 @@ pub struct Shared {
     pub fs: Rc<Fs>,
     /// The `/dev` of every process.
     pub dev: Dev,
-    /// `/Volumes`, for the processes that hold `files.volumes`.
+    /// `/Volumes`, for the processes that hold `user.volumes.access`.
     pub volumes: Rc<crate::volumes::Volumes>,
     /// How the namespaces of new processes are built.
     pub namespaces: Rc<Namespaces>,

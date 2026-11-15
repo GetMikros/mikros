@@ -7,7 +7,7 @@
 //! - `accounts-guest` checks that a client without `system.users.authenticate`,
 //!   and that the stub turns down, can list the users and nothing more.
 //! - `authorization-stub` serves `mikros.session.Authorization`, allowing
-//!   `accounts.manage` for the probe only, with user 1000 as the
+//!   `admin.accounts.manage` for the probe only, with user 1000 as the
 //!   administrator.
 //! - `accounts-thief` and `accounts-sneak` ask for the accounts service's
 //!   data in their manifests, so they never start. The probe connects to
@@ -108,12 +108,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     }
 }
 
-/// Serves `Authorize` on `end`: `accounts.manage` for the probe, by user
+/// Serves `Authorize` on `end`: `admin.accounts.manage` for the probe, by user
 /// 1000, and nothing else.
 async fn authorize(end: ServerEnd<Authorization>, reactor: Reactor) {
     let server = AuthorizationAsyncServer::new(end, reactor);
     while let Ok(AuthorizationRequest::Authorize(q, r)) = server.next().await {
-        let allowed = q.client.app_id == PROBE && q.action == "accounts.manage";
+        let allowed = q.client.app_id == PROBE && q.action == "admin.accounts.manage";
         let admin = if allowed { 1000 } else { 0 };
         let _ = r.reply(
             server.server(),

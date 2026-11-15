@@ -5,4 +5,4 @@
 app_id: system.power
 binary: /usr/bin/power
 command: true
-permissions: [power.control, session.authorize]
+permissions: [admin.power.control, session.authorize]

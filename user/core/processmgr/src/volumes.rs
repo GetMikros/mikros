@@ -1,5 +1,5 @@
 //! `/Volumes`, which the process manager serves over `Node` to the
-//! processes that hold `files.volumes`: one entry for each instance of
+//! processes that hold `user.volumes.access`: one entry for each instance of
 //! `device.filesystem` named `volume-<guid>`, which the device manager
 //! registers for every volume but the root file system and the boot EFI
 //! system partition, added and removed as the instances come and go.

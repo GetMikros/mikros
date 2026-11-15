@@ -17,7 +17,7 @@ use std::process::ExitCode;
 const BROKER: &str = "mikros.permissions.Broker";
 const ACCOUNTS: &str = "mikros.session.Accounts";
 const APP_ID: &str = "system.permissions";
-const ACTION: &str = "permissions.manage";
+const ACTION: &str = "admin.grants.manage";
 const FOREVER: i64 = i64::MAX;
 
 unsafe extern "C" {
@@ -150,7 +150,7 @@ fn fail(status: u8, message: &str) -> ExitCode {
     ExitCode::from(status)
 }
 
-/// Whether an administrator allows `permissions.manage` for this
+/// Whether an administrator allows `admin.grants.manage` for this
 /// process of user `caller`, asked with the command line as the reason.
 fn authorized(directory: &Directory, caller: u32, arguments: &[String]) -> bool {
     let me = ClientIdentity {

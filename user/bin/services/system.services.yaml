@@ -5,4 +5,4 @@
 app_id: system.services
 binary: /usr/bin/services
 command: true
-permissions: [services.control, session.authorize]
+permissions: [admin.services.control, session.authorize]

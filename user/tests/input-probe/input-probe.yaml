@@ -6,6 +6,6 @@ binary: /usr/bin/input-probe
 start: boot
 after: [devicemgr]
 boot_handles: [log_manage]
-# To own the display and read the input devices; gpu.render, which
+# To own the display and read the input devices; default.gpu.use, which
 # connecting to the gpu service also needs, is held by default.
 permissions: [system.display.control, system.input.control]

@@ -37,7 +37,7 @@ fn clock(s: &Own) -> Result<ClockClient> {
     Ok(ClockClient::new(client))
 }
 
-/// Without `time.set`, the time service refuses to set UTC or the zone.
+/// Without `admin.time.set`, the time service refuses to set UTC or the zone.
 fn setting_refused(s: &Own) -> Result {
     let clock = clock(s)?;
     ensure(

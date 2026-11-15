@@ -4486,7 +4486,7 @@ mod manager {
     /// From a boot image with the service manager, the permission broker,
     /// the log service and a probe, with their manifests, the service
     /// manager starts the log service with the log, and the probe, which
-    /// holds `logs.read`. The probe writes records and reads them back
+    /// holds `admin.logs.read`. The probe writes records and reads them back
     /// with the pid and app ID of its identity, numbered from 1, among the
     /// kernel log's records, and gets a later one as an event after
     /// `Follow`. It exits with 0 once every check passed, as the service
@@ -4632,7 +4632,7 @@ mod manager {
     /// From a boot image with the service manager, the permission broker,
     /// the time service and the time probe, with their manifests, the
     /// service manager starts the time service with init's platform
-    /// information, and the probe, which holds `time.set` and gets the
+    /// information, and the probe, which holds `admin.time.set` and gets the
     /// platform information. It finds UTC to be its boot time plus the
     /// monotonic clock, as the time page says, which it cannot write;
     /// sets the time and hears of it as a watcher; and, without a root
@@ -5246,7 +5246,7 @@ mod manager {
     /// partitions that is the test driver, whose `Start` succeeds only
     /// when reads, writes, flushes, the writable lock and refusals work
     /// as they should, and when the device manager's removal service,
-    /// once the driver has granted itself `files.volumes`, lists at
+    /// once the driver has granted itself `user.volumes.access`, lists at
     /// most the USB disk as removable and refuses to eject its
     /// partition. For the EFI system partition it is the FAT server,
     /// which publishes the volume's `filesystem` service, and the test

@@ -1,6 +1,6 @@
 //! `mikros.time.Clock`: UTC as the monotonic clock plus the offset of the
 //! time page, the page itself, and setting the time, which needs
-//! `time.set`, for every client; and `OnTimeChanged` for those that
+//! `admin.time.set`, for every client; and `OnTimeChanged` for those that
 //! watch. UTC comes from the real-time clock once it is published, and
 //! setting the time writes it there.
 
@@ -23,7 +23,7 @@ use mikros_rt::interfaces::mikros::time::{
 use mikros_rt::sys;
 
 /// The permission that setting the time and the time zone needs.
-const TIME_SET: &str = "time.set";
+const TIME_SET: &str = "admin.time.set";
 /// The time zone while no other is known.
 pub const UTC: &str = "UTC";
 pub const NANOS_PER_SECOND: i64 = 1_000_000_000;
@@ -190,7 +190,7 @@ impl Time {
         });
     }
 
-    /// Whether `client` holds `time.set`, as the broker says.
+    /// Whether `client` holds `admin.time.set`, as the broker says.
     async fn may_set(&self, client: &ClientIdentity) -> bool {
         let Some(broker) = &self.broker else {
             return false;

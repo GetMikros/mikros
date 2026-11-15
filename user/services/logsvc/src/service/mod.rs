@@ -1,6 +1,6 @@
 //! The log service: a system service that collects the records of the
 //! kernel log and those that clients write through `mikros.log.Writer`
-//! into one log, kept in memory, and lets clients that hold `logs.read`
+//! into one log, kept in memory, and lets clients that hold `admin.logs.read`
 //! read it through `mikros.log.Reader`.
 //!
 //! It reads the kernel log with a `LogReader` on the `log_manage` boot

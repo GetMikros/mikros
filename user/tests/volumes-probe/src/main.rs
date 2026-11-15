@@ -4,7 +4,7 @@
 //! there, and go away when the disks are unplugged.
 //!
 //! Started without `/Volumes`, it grants its own app ID and user
-//! `files.volumes` through the broker and starts a copy of itself, which
+//! `user.volumes.access` through the broker and starts a copy of itself, which
 //! has `/Volumes` in its namespace. For each of the volumes in `LABELS`,
 //! the copy waits for it, reads `HELLO.TXT`, which the runner put there,
 //! writes `WRITTEN.TXT` and reads it back. It then kills the xHCI driver
@@ -42,7 +42,7 @@ mikros_rt::raw_main!(main);
 
 const BINARY: &str = "/usr/bin/volumes-probe";
 const BROKER: &str = "mikros.permissions.Broker";
-const VOLUMES_PERMISSION: &str = "files.volumes";
+const VOLUMES_PERMISSION: &str = "user.volumes.access";
 const VOLUMES: &str = "/Volumes";
 /// The volumes' labels, and the files on them.
 /// The volumes of the GPT disk, those of the MBR disk, its btrfs on a
@@ -137,7 +137,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     }
 }
 
-/// Grants `app_id` and `user` `files.volumes`, and starts a copy of the
+/// Grants `app_id` and `user` `user.volumes.access`, and starts a copy of the
 /// probe, which gets `/Volumes` and the log handle `log`.
 async fn start_copy(
     directory: &DirectoryAsyncClient,
@@ -161,7 +161,7 @@ async fn start_copy(
         decision: Decision::Allowed,
     };
     if !matches!(broker.set_grant(grant).await, Ok(Ok(_))) {
-        return Err("granting files.volumes");
+        return Err("granting user.volumes.access");
     }
     let mut handles = Vec::new();
     if let Some(log) = log {

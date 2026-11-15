@@ -15,7 +15,7 @@ permissions:
   - system.users.authenticate
   - system.display.control
   - system.input.control
-  - power.control
+  - admin.power.control
   # To find the console of an Authorize client's login session, and
   # whether the client still runs.
   - system.processes.read

@@ -18,7 +18,7 @@ use mikros_rt::interfaces::mikros::service::{ClientIdentity, Directory, Director
 /// The broker's protocol.
 const PROTOCOL: &str = "mikros.permissions.Broker";
 pub const SET_IDENTITY: &str = "system.identity.set";
-pub const FULL_DISK: &str = "files.full_disk";
+pub const FULL_DISK: &str = "user.full_disk.access";
 pub const SIGNAL_ANY: &str = "system.processes.control";
 pub const LIST_ALL: &str = "system.processes.read";
 pub const SET_USER: &str = "system.user_id.set";

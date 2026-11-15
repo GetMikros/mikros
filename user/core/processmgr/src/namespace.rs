@@ -23,7 +23,7 @@
 //! `device.filesystem`, once it is published, and from then on gives it
 //! as `/boot/efi` to the processes whose manifests list it
 //! (MIKSPEC-0064.R9, MIKSPEC-0064.R15). Processes whose profiles apply and
-//! that hold `files.volumes` get `/Volumes`, read and write, and so do the
+//! that hold `user.volumes.access` get `/Volumes`, read and write, and so do the
 //! command-line tools of `system.cli`, whose home folder may also hold
 //! programs.
 
@@ -69,7 +69,7 @@ const SYSTEM: &str = "/@system";
 const BOOT_EFI: &str = "/boot/efi";
 /// The directory of the other volumes, and the permission it needs.
 const VOLUMES: &str = "/Volumes";
-const VOLUMES_PERMISSION: &str = "files.volumes";
+const VOLUMES_PERMISSION: &str = "user.volumes.access";
 const ESP_INSTANCE: &str = "esp";
 /// How long to wait before asking again for tmpfs.
 const RETRY: i64 = 20_000_000;
@@ -654,7 +654,7 @@ impl Namespaces {
     }
 
     /// Whether the processes of `app_id` and `user`, elevated by `admin`
-    /// unless it is 0, hold `files.volumes`, as the broker says.
+    /// unless it is 0, hold `user.volumes.access`, as the broker says.
     async fn holds_volumes(&self, shared: &Shared, app_id: &str, user: u32, admin: u32) -> bool {
         let client = ClientIdentity {
             pid: 0,

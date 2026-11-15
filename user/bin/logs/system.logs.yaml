@@ -4,4 +4,4 @@
 app_id: system.logs
 binary: /usr/bin/logs
 command: true
-permissions: [logs.read, session.authorize]
+permissions: [admin.logs.read, session.authorize]

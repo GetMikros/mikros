@@ -5,4 +5,4 @@ binary: /usr/bin/console
 spawned_by:
   - system.sessionmgr
 # To show the log while no session runs, and the system overview.
-permissions: [logs.read, system.diagnostics.read]
+permissions: [admin.logs.read, system.diagnostics.read]

@@ -1,6 +1,6 @@
 //! As the ACPI test driver: whether the ACPI server routes the PCI
 //! interrupt pins of the q35 machine's bus 0, and refuses to power the
-//! machine off or restart it for a client without `power.control`; and
+//! machine off or restart it for a client without `admin.power.control`; and
 //! whether the RTC driver reads and sets the clock that the server adds.
 
 use alloc::string::String;

@@ -4,7 +4,7 @@ name: timesvc
 binary: /usr/bin/timesvc
 start: boot
 boot_handles: [platform_info]
-# time.set also to reach the real-time clock's device.rtc.
-permissions: [system.permissions.read, system.filesystems.mount, time.set]
+# admin.time.set also to reach the real-time clock's device.rtc.
+permissions: [system.permissions.read, system.filesystems.mount, admin.time.set]
 provides:
   - protocol: mikros.time.Clock

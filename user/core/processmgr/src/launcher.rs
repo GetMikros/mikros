@@ -43,7 +43,7 @@ const CALLER_USER: u32 = u32::MAX;
 const SIGKILL: u32 = 9;
 /// App IDs that need no bundle.
 const SYSTEM_PREFIX: &str = "system.";
-/// The app ID that `files.full_disk` lets a caller name, for programs
+/// The app ID that `user.full_disk.access` lets a caller name, for programs
 /// in `CLI_PROGRAMS`.
 const CLI: &str = "system.cli";
 const CLI_PROGRAMS: &str = "usr/bin";
@@ -309,7 +309,7 @@ async fn exec(
 
 /// Checks that process `caller` may give the new process of `program`, a
 /// path relative to the boot file system's root, `app_id`, and returns
-/// it. A caller with `files.full_disk` may name `system.cli` for a
+/// it. A caller with `user.full_disk.access` may name `system.cli` for a
 /// program under `/usr/bin`. Any other app ID needs
 /// `system.identity.set`, and one outside `system.` needs the program
 /// to lie in the app's bundle under `/Apps`. A `system.` app ID with a

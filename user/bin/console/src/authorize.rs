@@ -317,20 +317,20 @@ mod tests {
             request: 7,
             console: 1,
             app_id: "system.power".into(),
-            action: "power.control".into(),
+            action: "admin.power.control".into(),
             reason: "power off".into(),
             name: name.into(),
         }
     }
 
-    /// A prompt on a 60 by 6 screen whose first `used` rows hold text,
+    /// A prompt on an 80 by 6 screen whose first `used` rows hold text,
     /// with the cursor at `cursor`.
     fn prompt(name: &str, used: usize, cursor: (usize, usize)) -> Prompt {
         let cell = move |r: usize, _| Cell {
             ch: if r < used { 'x' } else { ' ' },
             ..Cell::default()
         };
-        Prompt::new(request(name), 60, 6, cursor, cell)
+        Prompt::new(request(name), 80, 6, cursor, cell)
     }
 
     fn rows(screen: &Screen) -> Vec<String> {
@@ -383,11 +383,11 @@ mod tests {
         p.type_bytes(b"ad");
         let screen = p.screen();
         let shown = rows(&screen);
-        assert_eq!(shown[0], "x".repeat(60));
+        assert_eq!(shown[0], "x".repeat(80));
         assert!(screen.cell(0, 0).attrs & DIM != 0);
         assert_eq!(
             shown[1],
-            "[authorize] system.power wants power.control: power off"
+            "[authorize] system.power wants admin.power.control: power off"
         );
         assert_eq!(shown[2], "[authorize] name: ad");
         assert_eq!(shown[3], "");
@@ -409,12 +409,12 @@ mod tests {
         let shown = rows(&p.screen());
         assert_eq!(
             &shown[..3],
-            ["x".repeat(60), "x".repeat(60), "x".repeat(60)]
+            ["x".repeat(80), "x".repeat(80), "x".repeat(80)]
         );
-        assert_eq!(shown[3], "x".repeat(60));
+        assert_eq!(shown[3], "x".repeat(80));
         assert_eq!(
             shown[4],
-            "[authorize] system.power wants power.control: power off"
+            "[authorize] system.power wants admin.power.control: power off"
         );
         assert_eq!(shown[5], "[authorize] password for ada: **");
     }
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(screen.cursor(), None);
         assert_eq!(
             p.take_transcript().unwrap(),
-            "\r[authorize] system.power wants power.control: power off\r\n\
+            "\r[authorize] system.power wants admin.power.control: power off\r\n\
              [authorize] password for ada: **\r\n[authorize] authorization failed\r\n"
         );
         assert_eq!(p.take_transcript(), None);

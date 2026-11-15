@@ -98,7 +98,7 @@ fn lists_after_a_name(s: &Own) -> Result {
     ensure("none after the last name", none.is_empty() && !more)
 }
 
-/// `ServiceControl` is refused without `services.control`.
+/// `ServiceControl` is refused without `admin.services.control`.
 fn control_needs_its_permission(s: &Own) -> Result {
     let (_client, server) = endpoints::<ServiceControl>().map_err(|_| Failure {
         what: "making a channel",

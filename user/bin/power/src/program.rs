@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 const CONTROL: &str = "mikros.service.Control";
 const APP_ID: &str = "system.power";
-const ACTION: &str = "power.control";
+const ACTION: &str = "admin.power.control";
 const FOREVER: i64 = i64::MAX;
 
 unsafe extern "C" {
@@ -53,7 +53,7 @@ fn fail(status: u8, message: &str) -> ExitCode {
     ExitCode::from(status)
 }
 
-/// Whether an administrator allows `power.control` for this process,
+/// Whether an administrator allows `admin.power.control` for this process,
 /// asked with the command line as the reason.
 fn authorized(directory: &Directory, arguments: &[String]) -> bool {
     let me = ClientIdentity {

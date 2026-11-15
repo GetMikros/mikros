@@ -17,13 +17,13 @@ use mikros_rt::interfaces::mikros::service::Provider;
 /// The classes of services that drivers may publish, and the permission
 /// that connecting to each one's instances needs.
 const CLASSES: [(&str, &str); 8] = [
-    ("gpu", "gpu.render"),
+    ("gpu", "default.gpu.use"),
     ("input", "system.input.control"),
     ("acpi", "system.devices.manage"),
     ("storage", "system.raw_storage.use"),
     ("filesystem", "system.filesystems.mount"),
-    ("rtc", "time.set"),
-    ("hid", "input.hid_raw"),
+    ("rtc", "admin.time.set"),
+    ("hid", "user.raw_hid.use"),
     ("subvolumes", "system.subvolumes.manage"),
 ];
 /// The class of file systems, and that of the management of a file

@@ -458,7 +458,7 @@ fn services_bad_arguments() -> Result<(), Failure> {
 /// Denying for the caller's own user needs no administrator: the grant
 /// then shows in the list and its JSON.
 fn permissions_deny_and_list() -> Result<(), Failure> {
-    let deny = run(PERMISSIONS, &["deny", NO_APP, "camera"])?;
+    let deny = run(PERMISSIONS, &["deny", NO_APP, "user.camera.use"])?;
     ensure(&deny, "denying", deny.status == 0 && deny.err.is_empty())?;
     let list = run(PERMISSIONS, &[])?;
     ensure(&list, "listing", list.status == 0)?;
@@ -471,15 +471,16 @@ fn permissions_deny_and_list() -> Result<(), Failure> {
             .split_whitespace()
             .eq(["APP", "ID", "PERMISSION", "DECISION"]),
     )?;
-    let row = [NO_APP, "camera", "denied"];
+    let row = [NO_APP, "user.camera.use", "denied"];
     ensure(
         &list,
         "the denied grant",
         lines.any(|l| l.split_whitespace().eq(row)),
     )?;
     let json = run(PERMISSIONS, &["--json"])?;
-    let object =
-        format!("\"app_id\":\"{NO_APP}\",\"permission\":\"camera\",\"decision\":\"denied\"}}");
+    let object = format!(
+        "\"app_id\":\"{NO_APP}\",\"permission\":\"user.camera.use\",\"decision\":\"denied\"}}"
+    );
     ensure(&json, "the grant in JSON", json.out.contains(&object))
 }
 
@@ -496,7 +497,7 @@ fn permissions_refuses_bad_grants() -> Result<(), Failure> {
         "naming it",
         unknown.err == "permissions: no.such: no such permission\n",
     )?;
-    let system = run(PERMISSIONS, &["deny", NO_APP, "time.set"])?;
+    let system = run(PERMISSIONS, &["deny", NO_APP, "admin.time.set"])?;
     ensure(
         &system,
         "failing on a system permission",
@@ -505,13 +506,13 @@ fn permissions_refuses_bad_grants() -> Result<(), Failure> {
     ensure(
         &system,
         "saying so",
-        system.err == "permissions: time.set: a system permission\n",
+        system.err == "permissions: admin.time.set: a system permission\n",
     )
 }
 
 /// Allowing always needs an administrator, who does not answer here.
 fn permissions_not_authorized() -> Result<(), Failure> {
-    let run = run(PERMISSIONS, &["allow", NO_APP, "camera"])?;
+    let run = run(PERMISSIONS, &["allow", NO_APP, "user.camera.use"])?;
     ensure(&run, "failing", run.status == 1 && run.out.is_empty())?;
     ensure(
         &run,
@@ -526,7 +527,7 @@ fn permissions_bad_arguments() -> Result<(), Failure> {
     let refused: [&[&str]; 3] = [
         &["grant", "a", "b"],
         &["allow", NO_APP],
-        &["deny", NO_APP, "camera", "ada", "bob"],
+        &["deny", NO_APP, "user.camera.use", "ada", "bob"],
     ];
     for arguments in refused {
         let run = run(PERMISSIONS, arguments)?;

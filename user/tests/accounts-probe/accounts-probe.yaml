@@ -4,4 +4,4 @@ name: accounts-probe
 binary: /usr/bin/accounts-probe
 start: boot
 after: [tmpfs]
-permissions: [system.users.authenticate, accounts.manage]
+permissions: [system.users.authenticate, admin.accounts.manage]
