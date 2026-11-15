@@ -1,3 +1,4 @@
+use super::file::EXTENT_DATA;
 use super::*;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -207,4 +208,56 @@ fn maps_only_single_and_dup_chunks() {
     assert_eq!(v.map(0x30000, 16), Err(Error::Profile(0x30000)));
     assert_eq!(v.map(0x40000, 16), Err(Error::Unmapped(0x40000)));
     assert!(matches!(v.map(0x10ff8, 16), Err(Error::Corrupt(_))));
+}
+
+fn contents(v: &mut Volume<Vec<u8>>, node: Node) -> Vec<u8> {
+    let mut out = vec![0; v.inode(node).unwrap().size as usize];
+    v.read(node, &mut out).unwrap();
+    out
+}
+
+#[test]
+fn reads_files_and_links() {
+    let mut v = Volume::open(plain()).unwrap();
+    for (path, expected) in [
+        ("small", b"hello\n".to_vec()),
+        ("big", noise(300 * 1024 + 17)),
+        ("empty", Vec::new()),
+        ("dir/sub/file", b"deep\n".to_vec()),
+    ] {
+        let node = walk(&mut v, path);
+        assert_eq!(contents(&mut v, node), expected, "{path}");
+    }
+    let link = walk(&mut v, "link");
+    assert_eq!(v.read_link(link).unwrap(), b"dir/sub/file");
+    let file = walk(&mut v, "small");
+    assert!(matches!(v.read_link(file), Err(Error::Corrupt(_))));
+    let mut wrong = vec![0; 5];
+    assert!(matches!(v.read(file, &mut wrong), Err(Error::Corrupt(_))));
+}
+
+#[test]
+fn reads_files_in_subvolumes() {
+    let mut v = Volume::open(nested()).unwrap();
+    let file = walk(&mut v, "outer/inner/file");
+    assert_eq!(contents(&mut v, file), b"inside\n");
+}
+
+#[test]
+fn checks_data_checksums() {
+    let image = plain();
+    let mut v = Volume::open(image.clone()).unwrap();
+    let big = walk(&mut v, "big");
+    let (_, item) = v.items(big, EXTENT_DATA).unwrap().remove(0);
+    let disk_bytenr = u64_at(&item, 21);
+    let physical = v.map(disk_bytenr, 1).unwrap() as usize;
+    let mut bad = image;
+    bad[physical + 4096 + 5] ^= 1;
+    let mut v = Volume::open(bad).unwrap();
+    let big = walk(&mut v, "big");
+    let mut out = vec![0; v.inode(big).unwrap().size as usize];
+    assert_eq!(
+        v.read(big, &mut out),
+        Err(Error::DataChecksum(disk_bytenr + 4096))
+    );
 }

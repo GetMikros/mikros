@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 mod dir;
+mod file;
 #[cfg(test)]
 mod tests;
 
@@ -47,6 +48,8 @@ const DUP: u64 = 1 << 5;
 
 const ROOT_ITEM: u8 = 132;
 const CHUNK_ITEM: u8 = 228;
+
+const CSUM_TREE: u64 = 7;
 
 const FIRST_CHUNK_TREE: u64 = 256;
 
@@ -188,8 +191,10 @@ struct Chunk {
 pub struct Volume<D> {
     disk: D,
     nodesize: u32,
+    sectorsize: u32,
     chunks: Vec<Chunk>,
     root_tree: Root,
+    csum_tree: Option<Root>,
     subvolumes: Vec<Subvolume>,
     cache: Vec<(u64, Rc<[u8]>)>,
     next_slot: usize,
@@ -267,11 +272,13 @@ impl<D: Disk> Volume<D> {
         let mut volume = Volume {
             disk,
             nodesize,
+            sectorsize,
             chunks,
             root_tree: Root {
                 bytenr: u64_at(&sb, 0x50),
                 level: sb[0xc6],
             },
+            csum_tree: None,
             subvolumes: Vec::new(),
             cache: Vec::new(),
             next_slot: 0,
@@ -289,6 +296,7 @@ impl<D: Disk> Volume<D> {
                 volume.chunks.push(c);
             }
         }
+        volume.csum_tree = volume.root_item(CSUM_TREE)?.map(|(root, _)| root);
         Ok(volume)
     }
 
