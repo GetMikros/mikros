@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+pub mod attempts;
 pub mod btrfs;
 pub mod cmdline;
 pub mod cpu;
