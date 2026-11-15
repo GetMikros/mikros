@@ -208,7 +208,9 @@ impl Manager {
         *self.shared.control.borrow_mut() = Some(control.clone());
         self.shared.identity_setter.set(Some(pid));
         let started = match self.shared.start(pid, new, &control).await {
-            Ok(process) => bind_own_directory(&control).await.map(|own| (process, own)),
+            Ok(process) => bind_own_directory(&self.shared, &control)
+                .await
+                .map(|own| (process, own)),
             Err(status) => Err(status),
         };
         let (process, own) = match started {
@@ -226,7 +228,7 @@ impl Manager {
         // Namespaces come from profiles once the root file system is
         // published, through a directory of the process manager's own.
         let shared = self.shared.clone();
-        if let Ok(directory) = bind_own_directory(&control).await {
+        if let Ok(directory) = bind_own_directory(&self.shared, &control).await {
             self.shared.spawner.spawn(async move {
                 let reactor = shared.reactor.clone();
                 let directory = DirectoryAsyncClient::new(directory, reactor.clone());
@@ -237,7 +239,7 @@ impl Manager {
         // The EFI system partition the system booted from comes as
         // `/boot/efi` once its file system is published, through another
         // directory of the process manager's own, which waits for it.
-        if let Ok(directory) = bind_own_directory(&control).await {
+        if let Ok(directory) = bind_own_directory(&self.shared, &control).await {
             let shared = self.shared.clone();
             self.shared.spawner.spawn(async move {
                 let reactor = shared.reactor.clone();
@@ -247,7 +249,7 @@ impl Manager {
         }
         // `/Volumes` follows the instances of volumes through another
         // directory of the process manager's own.
-        if let Ok(directory) = bind_own_directory(&control).await {
+        if let Ok(directory) = bind_own_directory(&self.shared, &control).await {
             let shared = self.shared.clone();
             self.shared.spawner.spawn(async move {
                 let directory = DirectoryAsyncClient::new(directory, shared.reactor.clone());
@@ -257,7 +259,7 @@ impl Manager {
         // Processes get the time page once the time service gives it,
         // through another directory of the process manager's own; none
         // waits for it.
-        if let Ok(directory) = bind_own_directory(&control).await {
+        if let Ok(directory) = bind_own_directory(&self.shared, &control).await {
             let shared = self.shared.clone();
             self.shared.spawner.spawn(async move {
                 let reactor = shared.reactor.clone();
@@ -268,12 +270,10 @@ impl Manager {
             });
         }
         let shared = self.shared.clone();
+        let me = own_identity(&self.shared)?;
         self.shared.spawner.spawn(async move {
             let reactor = shared.reactor.clone();
-            shared
-                .permissions
-                .connect(own, &reactor, own_identity())
-                .await;
+            shared.permissions.connect(own, &reactor, me).await;
         });
         Ok(InitBootstrapStartServiceManagerResponse { pid, process })
     }
@@ -282,21 +282,24 @@ impl Manager {
 /// The process manager's own `Directory` connection, bound over the
 /// service manager's control endpoint.
 async fn bind_own_directory(
+    shared: &Shared,
     control: &ProcessDirectoryAsyncClient,
 ) -> Result<ClientEnd<Directory>, Status> {
     let (own, own_end) = endpoints::<Directory>().map_err(|_| Status::NoResources)?;
-    bind(control, own_identity(), own_end).await?;
+    bind(control, own_identity(shared)?, own_end).await?;
     Ok(own)
 }
 
-/// The identity of the process manager's own directory.
-fn own_identity() -> ClientIdentity {
-    ClientIdentity {
+/// The identity of the process manager's own directory, with the
+/// kernel object ID of its own process.
+fn own_identity(shared: &Shared) -> Result<ClientIdentity, Status> {
+    Ok(ClientIdentity {
         pid: 0,
         user: 0,
         app_id: PROCESS_MANAGER_APP.into(),
         admin: 0,
-    }
+        koid: koid(&shared.process)?,
+    })
 }
 
 /// The time page of the time service's `mikros.time.Clock` through

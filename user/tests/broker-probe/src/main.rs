@@ -179,6 +179,7 @@ fn identity(user: u32, app_id: &str) -> ClientIdentity {
         user,
         app_id: app_id.into(),
         admin: 0,
+        koid: 0,
     }
 }
 

@@ -102,6 +102,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         user: header.user,
         app_id: header.app_id,
         admin: 0,
+        koid: mikros_rt::midl::koid(header.process.raw()).unwrap_or(0),
     };
     let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
     executor.block_on(async move {
@@ -343,6 +344,7 @@ fn identity(user: u32, app_id: &str) -> ClientIdentity {
         user,
         app_id: app_id.into(),
         admin: 0,
+        koid: 0,
     }
 }
 

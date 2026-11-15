@@ -99,5 +99,6 @@ pub fn copy(client: &ClientIdentity) -> ClientIdentity {
         user: client.user,
         app_id: client.app_id.clone(),
         admin: client.admin,
+        koid: client.koid,
     }
 }

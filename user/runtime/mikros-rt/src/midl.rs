@@ -41,9 +41,8 @@ pub fn handle_close(handle: u32) {
     unsafe { sys::handle_close(handle) };
 }
 
-/// The object type and rights of `handle`, or `None` when it cannot be
-/// inspected.
-pub fn handle_info(handle: u32) -> Option<(u32, u32)> {
+/// The basic record of `handle`, or `None` when it cannot be inspected.
+fn basic_info(handle: u32) -> Option<[u8; INFO_BASIC_SIZE]> {
     let mut record = [0u8; INFO_BASIC_SIZE];
     let mut len = 0;
     // SAFETY: the pointers describe `record` and `len`.
@@ -56,11 +55,22 @@ pub fn handle_info(handle: u32) -> Option<(u32, u32)> {
             &mut len,
         )
     };
-    if s != crate::OK || len < INFO_BASIC_SIZE as u64 {
-        return None;
-    }
+    (s == crate::OK && len >= INFO_BASIC_SIZE as u64).then_some(record)
+}
+
+/// The object type and rights of `handle`, or `None` when it cannot be
+/// inspected.
+pub fn handle_info(handle: u32) -> Option<(u32, u32)> {
+    let record = basic_info(handle)?;
     let at = |i: usize| u32::from_le_bytes(record[i..i + 4].try_into().expect("4 bytes"));
     Some((at(16), at(20)))
+}
+
+/// The kernel object ID of the object of `handle`, or `None` when it
+/// cannot be inspected.
+pub fn koid(handle: u32) -> Option<u64> {
+    let record = basic_info(handle)?;
+    Some(u64::from_le_bytes(record[..8].try_into().expect("8 bytes")))
 }
 
 pub fn handle_replace(handle: u32, rights: u32) -> Result<u32, i32> {

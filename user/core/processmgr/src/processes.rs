@@ -230,11 +230,13 @@ impl Shared {
             umask,
             ..
         } = new;
+        let process_koid = koid(&started.process).inspect_err(|_| started.kill())?;
         let identity = ClientIdentity {
             pid,
             user,
             app_id: app_id.clone(),
             admin,
+            koid: process_koid,
         };
         let transferred = self
             .transfer(
@@ -251,7 +253,7 @@ impl Shared {
             .await;
         let recorded = transferred.and_then(|()| {
             let record = Record {
-                koid: koid(&started.process)?,
+                koid: process_koid,
                 parent,
                 process_group,
                 session,

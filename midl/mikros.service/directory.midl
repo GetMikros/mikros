@@ -1,4 +1,4 @@
-// MIKSPEC-0036.R36
+// MIKSPEC-0036.R38
 
 library mikros.service;
 using mikros.base;
@@ -8,6 +8,7 @@ type ClientIdentity = struct {
     user u32;
     app_id string<128>;
     admin u32;
+    koid u64;
 };
 
 protocol Directory {

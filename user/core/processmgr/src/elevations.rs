@@ -54,6 +54,7 @@ async fn set_admin(shared: &Shared, pid: u32, admin: u32) -> Result<(), Status> 
             user: record.user,
             app_id: record.app_id.clone(),
             admin,
+            koid: record.koid,
         }
     };
     let control = shared.control.borrow().clone().ok_or(Status::BadState)?;

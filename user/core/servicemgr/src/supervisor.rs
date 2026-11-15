@@ -177,6 +177,7 @@ impl Supervisor {
                 user: self.me.user,
                 app_id: self.me.app_id.clone(),
                 admin: self.me.admin,
+                koid: self.me.koid,
             };
             let (launcher, boot, reactor) = (&self.launcher, &self.boot, &self.reactor);
             let manifest = &self.manifests.borrow()[i].clone();

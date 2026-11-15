@@ -661,6 +661,7 @@ impl Namespaces {
             user,
             app_id: app_id.into(),
             admin,
+            koid: 0,
         };
         shared
             .permissions

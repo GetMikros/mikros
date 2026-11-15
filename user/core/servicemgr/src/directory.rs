@@ -795,6 +795,7 @@ fn clone(identity: &ClientIdentity) -> ClientIdentity {
         user: identity.user,
         app_id: identity.app_id.clone(),
         admin: identity.admin,
+        koid: identity.koid,
     }
 }
 

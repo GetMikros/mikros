@@ -158,6 +158,7 @@ fn authorized(directory: &Directory, caller: u32, arguments: &[String]) -> bool 
         user: caller,
         app_id: APP_ID.into(),
         admin: 0,
+        koid: 0,
     };
     let reason = format!("permissions {}", arguments.join(" "));
     directory.authorized(me, ACTION, reason.trim_end().into())

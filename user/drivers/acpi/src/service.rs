@@ -49,6 +49,7 @@ impl Acpi {
             user: client.user,
             app_id: client.app_id.clone(),
             admin: client.admin,
+            koid: client.koid,
         };
         let checked = broker.check(client, POWER_CONTROL.into()).await;
         matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)

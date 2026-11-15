@@ -123,6 +123,7 @@ fn authorized(directory: &Directory, arguments: &[String]) -> bool {
         user: unsafe { getuid() },
         app_id: APP_ID.into(),
         admin: 0,
+        koid: 0,
     };
     let reason = format!("services {}", arguments.join(" "));
     directory.authorized(me, ACTION, reason)
