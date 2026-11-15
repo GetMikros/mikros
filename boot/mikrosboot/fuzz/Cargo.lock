@@ -96,6 +96,7 @@ name = "mikrosboot"
 version = "0.0.0"
 dependencies = [
  "boot-protocol",
+ "ruzstd",
  "uefi",
  "uefi-raw",
 ]
@@ -152,6 +153,12 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
 
 [[package]]
 name = "shlex"
