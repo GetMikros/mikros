@@ -71,9 +71,17 @@ fn defaults_without_keys() {
 fn missing_file_configuration() {
     let config = Config::for_missing_file();
     assert_eq!(config.timeout, Some(0));
-    assert_eq!(config.entries.len(), 1);
+    assert_eq!(config.entries.len(), 2);
     assert_eq!(config.entries[0].id, "mikros");
     assert_eq!(config.entries[0].path, "\\EFI\\Mikros\\mikrosboot.efi");
+    assert_eq!(config.entries[0].args, None);
+    let previous = &config.entries[1];
+    assert_eq!(previous.id, "mikros-previous");
+    assert_eq!(previous.name, "Mikros");
+    assert_eq!(previous.detail.as_deref(), Some("Previous version"));
+    assert_eq!(previous.path, "\\EFI\\Mikros\\mikrosboot.efi");
+    assert_eq!(previous.args.as_deref(), Some("system=previous"));
+    assert_eq!(config.default_index(), 0);
 }
 
 #[test]

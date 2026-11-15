@@ -107,21 +107,30 @@ impl fmt::Display for Error {
 }
 
 impl Config {
-    /// The configuration used when there is no entries file. The caller sets
-    /// `timeout` to 5 when it adds detected systems.
+    /// The configuration used when there is no entries file: Mikros, and
+    /// Mikros's previous version. The caller sets `timeout` to 5 when it
+    /// adds detected systems.
     pub fn for_missing_file() -> Config {
+        let mikros = |id: &str, detail: Option<&str>, args: Option<&str>| Entry {
+            id: id.to_string(),
+            name: "Mikros".to_string(),
+            detail: detail.map(str::to_string),
+            color: Color::DEFAULT_TILE,
+            icon: None,
+            path: "\\EFI\\Mikros\\mikrosboot.efi".to_string(),
+            args: args.map(str::to_string),
+        };
         Config {
             default: None,
             timeout: Some(0),
-            entries: alloc::vec![Entry {
-                id: "mikros".to_string(),
-                name: "Mikros".to_string(),
-                detail: None,
-                color: Color::DEFAULT_TILE,
-                icon: None,
-                path: "\\EFI\\Mikros\\mikrosboot.efi".to_string(),
-                args: None,
-            }],
+            entries: alloc::vec![
+                mikros("mikros", None, None),
+                mikros(
+                    "mikros-previous",
+                    Some("Previous version"),
+                    Some("system=previous")
+                ),
+            ],
             detect: true,
         }
     }
