@@ -13,12 +13,12 @@ use mikros_rt::{Startup, log};
 use mikros_test::{
     ACCESS_DENIED, BAD_HANDLE, BAD_STATE, FAILED, INVALID_ARGS, NOT_FOUND, OUT_OF_RANGE,
     PAGE_FAULT, PAGE_SIZE, PASSED, PERM_READ, PERM_WRITE, READABLE, REPORT_SIZE, Result, SIGNALED,
-    STARTED, SUSPENDED, TERMINATED, TIMED_OUT, USER0, call, check, close, contains, create_memory,
-    elf, ensure, exit_qemu, futex_wake, general_registers, in_time, info, koid, map, map_read_only,
-    mem_read_at, mem_write_at, now, open_exit_port, paged_object, protect, read_memory,
-    read_message, read_sizes, record_report, report_bytes, report_id, right, set_size, signal,
-    signal_restorer, sleep_ms, soon, spawn, take_packet, thread_list, thread_state, u32_at, u64_at,
-    ustar, wait, wait_for_state, wait_forever, wait_until_blocked, within, write_memory,
+    STARTED, SUSPENDED, TERMINATED, TIMED_OUT, USER0, boot, call, check, close, contains,
+    create_memory, elf, ensure, exit_qemu, futex_wake, general_registers, in_time, info, koid, map,
+    map_read_only, mem_read_at, mem_write_at, now, open_exit_port, paged_object, protect,
+    read_memory, read_message, read_sizes, record_report, report_bytes, report_id, right, set_size,
+    signal, signal_restorer, sleep_ms, soon, spawn, take_packet, thread_list, thread_state, u32_at,
+    u64_at, wait, wait_for_state, wait_forever, wait_until_blocked, within, write_memory,
 };
 
 mikros_rt::main!(main);
@@ -125,7 +125,7 @@ fn start_program_in(
     let mut path = [0u8; 64];
     path[..6].copy_from_slice(b"tests/");
     path[6..6 + name.len()].copy_from_slice(name.as_bytes());
-    let program = ustar::find(image, &path[..6 + name.len()]);
+    let program = boot::find(image, &path[..6 + name.len()]);
     ensure("finding the program", program.is_some())?;
 
     let (mut process, mut thread) = (0, 0);
@@ -238,7 +238,7 @@ fn init_segments_as_loaded(s: &Startup) -> Result {
     })?;
     // SAFETY: the boot image is mapped readable at `at`.
     let image = unsafe { core::slice::from_raw_parts(at as *const u8, s.boot_image_size as usize) };
-    let file = ustar::find(image, b"init").unwrap_or_default();
+    let file = boot::find(image, b"init").unwrap_or_default();
     ensure("finding init", file.len() >= 64)?;
     let mut action = [0u8; 32];
     action[0x00..0x08].copy_from_slice(&(skip_fault as *const () as u64).to_le_bytes());
@@ -3330,7 +3330,7 @@ fn boot_file(s: &Startup, name: &[u8]) -> Result<alloc::vec::Vec<u8>> {
     })?;
     // SAFETY: the boot image is mapped readable at `at`.
     let image = unsafe { core::slice::from_raw_parts(at as *const u8, s.boot_image_size as usize) };
-    let file = ustar::find(image, name).map(<[u8]>::to_vec);
+    let file = boot::find(image, name).map(<[u8]>::to_vec);
     // SAFETY: the call takes no pointers.
     check("unmapping the boot image", unsafe {
         sys::vm_unmap(s.process, at, image_size)

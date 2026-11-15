@@ -6,6 +6,7 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
+mikros-bootimage = { path = "../../lib/bootimage" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-ustar = { path = "../../lib/ustar" }
 

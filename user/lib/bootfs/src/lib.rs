@@ -1,4 +1,5 @@
-//! The node tree of the boot image, and path resolution in it, and on
+//! The node tree of the boot image, an index followed by boot modules or
+//! an archive, and path resolution in it, and on
 //! Mikros the file system server that serves it, `server`, which the
 //! process manager and the test init run.
 //!
@@ -102,8 +103,19 @@ fn path_of(entry: &Entry) -> Vec<u8> {
     entry.components().collect::<Vec<_>>().join(&b'/')
 }
 
+/// The mode of the files and directories of boot modules.
+pub const MODULE_MODE: u32 = 0o555;
+
 impl Tree {
-    /// The tree of the archive `image`. Directories that only appear in
+    /// The tree of the boot image `image`: of its boot modules when it
+    /// starts with an index, and otherwise of the archive it holds.
+    ///
+    /// Each boot module is at `usr/` followed by its path, as a file of mode
+    /// `MODULE_MODE`, owner 0 and time 0, in directories of the same
+    /// attributes. A module whose path is in the way of an earlier one's is
+    /// left out, and an index that is not valid gives an empty root.
+    ///
+    /// In an archive, directories that only appear in
     /// the paths of members are created with mode 0o755, owner 0 and
     /// time 0. A later member with the same path replaces an earlier
     /// one, except that a directory member only sets the attributes of
@@ -113,10 +125,44 @@ impl Tree {
             nodes: alloc::vec![Node::directory()],
             skipped: Vec::new(),
         };
+        if image.starts_with(&mikros_bootimage::MAGIC) {
+            tree.add_modules(image);
+            return tree;
+        }
         for entry in mikros_ustar::entries(image) {
             tree.add(&entry);
         }
         tree
+    }
+
+    fn add_modules(&mut self, image: &[u8]) {
+        let modules = mikros_bootimage::modules(image).unwrap_or_default();
+        for module in modules {
+            let mut components: Vec<&[u8]> = alloc::vec![b"usr"];
+            components.extend(module.path.split(|&b| b == b'/'));
+            let (name, parents) = components.split_last().expect("usr/ comes first");
+            let parent = self.directories(parents);
+            let Some(parent) = parent.filter(|&p| self.child(p, name).is_none()) else {
+                self.skipped.push((module.path.to_vec(), b'0'));
+                continue;
+            };
+            let node = self.push(Node {
+                kind: NodeKind::File {
+                    offset: module.offset,
+                    size: module.data.len(),
+                },
+                mode: MODULE_MODE,
+                owner: 0,
+                mtime: 0,
+                links: 1,
+            });
+            self.entries_mut(parent).insert(name.to_vec(), node);
+        }
+        for node in &mut self.nodes {
+            if matches!(node.kind, NodeKind::Directory(_)) {
+                node.mode = MODULE_MODE;
+            }
+        }
     }
 
     fn add(&mut self, entry: &Entry) {

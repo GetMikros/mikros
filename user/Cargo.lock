@@ -436,6 +436,7 @@ dependencies = [
 name = "init"
 version = "0.0.0"
 dependencies = [
+ "mikros-bootimage",
  "mikros-loader",
  "mikros-rt",
  "mikros-ustar",
@@ -539,9 +540,14 @@ dependencies = [
 name = "mikros-bootfs"
 version = "0.0.0"
 dependencies = [
+ "mikros-bootimage",
  "mikros-rt",
  "mikros-ustar",
 ]
+
+[[package]]
+name = "mikros-bootimage"
+version = "0.0.0"
 
 [[package]]
 name = "mikros-casefold"
@@ -653,6 +659,7 @@ dependencies = [
 name = "mikros-test"
 version = "0.0.0"
 dependencies = [
+ "mikros-bootimage",
  "mikros-rt",
  "mikros-ustar",
 ]

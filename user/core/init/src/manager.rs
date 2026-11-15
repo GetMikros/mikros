@@ -1,4 +1,4 @@
-//! Starting the process manager from the boot image, registering with
+//! Starting the process manager from its boot module, registering with
 //! it as process ID 1, and asking it to start the service manager.
 
 use alloc::vec::Vec;
@@ -17,8 +17,10 @@ const PERM_READ: u32 = 1 << 0;
 /// Duplicates keep the rights of the original, including `TRANSFER`.
 /// The receivers' bindings reduce them to the rights they declare.
 const SAME_RIGHTS: u32 = 1 << 31;
-/// The boot image member of the process manager.
-const PROCESS_MANAGER: &[u8] = b"usr/bin/processmgr";
+/// The boot module of the process manager, and its member in a boot
+/// image that is an archive.
+const PROCESS_MANAGER: &[u8] = b"bin/processmgr";
+const PROCESS_MANAGER_MEMBER: &[u8] = b"usr/bin/processmgr";
 
 /// A step that failed, and why.
 pub struct Failure {
@@ -182,7 +184,8 @@ fn boot_handles(s: &Startup) -> Result<Vec<StartupHandle>> {
         .collect())
 }
 
-/// A copy of the boot image member `name`.
+/// A copy of the boot module `name`, or of the process manager's member
+/// of a boot image that is an archive.
 fn member(s: &Startup, name: &[u8]) -> Result<Vec<u8>> {
     let size = s.boot_image_size.next_multiple_of(PAGE_SIZE);
     let mut at = 0;
@@ -192,11 +195,15 @@ fn member(s: &Startup, name: &[u8]) -> Result<Vec<u8>> {
     })?;
     // SAFETY: the boot image is mapped readable at `at`.
     let image = unsafe { core::slice::from_raw_parts(at as *const u8, s.boot_image_size as usize) };
-    let file = mikros_ustar::find(image, name).map(<[u8]>::to_vec);
+    let file = match image.starts_with(&mikros_bootimage::MAGIC) {
+        true => mikros_bootimage::find(image, name),
+        false => mikros_ustar::find(image, PROCESS_MANAGER_MEMBER),
+    };
+    let file = file.map(<[u8]>::to_vec);
     // SAFETY: nothing refers to the mapping any more.
     unsafe { sys::vm_unmap(s.process, at, size) };
     file.ok_or(Failure {
-        what: "finding usr/bin/processmgr",
+        what: "finding bin/processmgr",
         why: Why::Missing,
     })
 }

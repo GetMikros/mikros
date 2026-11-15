@@ -21,7 +21,6 @@ mod threads;
 pub use context::{Context, Own};
 pub use harness::{Check, run};
 pub use helpers::*;
-pub use mikros_ustar as ustar;
 pub use pagers::*;
 pub use reports::*;
 pub use signals::*;
@@ -152,4 +151,19 @@ pub fn read_message(channel: Handle, ms: i64) -> Result<Message> {
         what: "waiting for a message",
         status: SHOULD_WAIT,
     })
+}
+
+/// Reading the files of the boot image, which is either an archive or an
+/// index followed by boot modules.
+pub mod boot {
+    /// The file of `image` at `path`, the path of an archive member. The
+    /// paths of boot modules are relative to the system version, so a path
+    /// in `usr/` is looked for without that directory there.
+    pub fn find<'a>(image: &'a [u8], path: &[u8]) -> Option<&'a [u8]> {
+        if image.starts_with(&mikros_bootimage::MAGIC) {
+            let path = path.strip_prefix(b"usr/").unwrap_or(path);
+            return mikros_bootimage::find(image, path);
+        }
+        mikros_ustar::find(image, path)
+    }
 }
