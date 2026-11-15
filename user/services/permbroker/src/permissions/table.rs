@@ -18,6 +18,7 @@ pub const PERMISSIONS: &[(&str, Kind)] = &[
     ("accounts.manage", Kind::System),
     ("autostart", Kind::User),
     ("background.run", Kind::User),
+    ("boot.confirm", Kind::System),
     ("camera", Kind::User),
     ("device.registry", Kind::System),
     ("diag.read", Kind::System),
