@@ -178,6 +178,10 @@ pub enum Kind {
     FirmwareRuntimeCode = 15,
     /// Added in version 1.2, before which such I/O memory is `Mmio`.
     FirmwareRuntimeMmio = 16,
+    /// Added in version 1.5: runtime services code whose pages may also
+    /// hold data that the firmware writes, which version 1.4 gives as
+    /// `FirmwareRuntimeCode`.
+    FirmwareRuntimeMixed = 17,
 }
 
 impl Kind {
@@ -199,13 +203,14 @@ impl Kind {
             14 => Kind::Bad,
             15 => Kind::FirmwareRuntimeCode,
             16 => Kind::FirmwareRuntimeMmio,
+            17 => Kind::FirmwareRuntimeMixed,
             _ => return None,
         })
     }
 
     /// Whether ranges of this kind are covered by the direct map.
     pub const fn in_direct_map(self) -> bool {
-        matches!(self as u32, 1..=9 | 12 | 15)
+        matches!(self as u32, 1..=9 | 12 | 15 | 17)
     }
 
     /// Whether ranges of this kind hold the firmware's runtime services,
@@ -213,7 +218,10 @@ impl Kind {
     pub const fn is_firmware_runtime(self) -> bool {
         matches!(
             self,
-            Kind::FirmwareRuntime | Kind::FirmwareRuntimeCode | Kind::FirmwareRuntimeMmio
+            Kind::FirmwareRuntime
+                | Kind::FirmwareRuntimeCode
+                | Kind::FirmwareRuntimeMmio
+                | Kind::FirmwareRuntimeMixed
         )
     }
 }
@@ -326,11 +334,12 @@ mod tests {
 
     #[test]
     fn kinds_round_trip_and_know_the_direct_map() {
-        for value in 1..=16 {
+        for value in 1..=17 {
             assert_eq!(Kind::from_u32(value).map(|k| k as u32), Some(value));
         }
         assert_eq!(Kind::from_u32(0), None);
-        assert_eq!(Kind::from_u32(17), None);
+        assert_eq!(Kind::from_u32(18), None);
+        assert!(Kind::FirmwareRuntimeMixed.in_direct_map());
         assert!(Kind::Usable.in_direct_map() && Kind::FirmwareRuntime.in_direct_map());
         assert!(Kind::ApTrampoline.in_direct_map() && Kind::FirmwareRuntimeCode.in_direct_map());
         for kind in [
@@ -342,12 +351,13 @@ mod tests {
         ] {
             assert!(!kind.in_direct_map(), "{kind:?}");
         }
-        let runtime: [Kind; 3] = [
+        let runtime: [Kind; 4] = [
             Kind::FirmwareRuntime,
             Kind::FirmwareRuntimeCode,
             Kind::FirmwareRuntimeMmio,
+            Kind::FirmwareRuntimeMixed,
         ];
-        for value in 1..=16 {
+        for value in 1..=17 {
             let kind = Kind::from_u32(value).unwrap();
             assert_eq!(
                 kind.is_firmware_runtime(),
