@@ -25,6 +25,7 @@ pub mod paging;
 pub mod placement;
 pub mod report;
 pub mod runtime;
+pub mod version;
 
 #[cfg(test)]
 mod absent;
