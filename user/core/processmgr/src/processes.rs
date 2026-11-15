@@ -236,7 +236,6 @@ impl Shared {
             app_id: app_id.clone(),
             admin,
         };
-        let started_app = app_id.clone();
         let transferred = self
             .transfer(
                 &started,
@@ -283,7 +282,6 @@ impl Shared {
         match recorded {
             Ok(watched) => {
                 self.spawner.spawn(self.clone().watch(pid, watched));
-                self.namespaces.started(&started_app);
                 Ok(started.process)
             }
             Err(status) => {

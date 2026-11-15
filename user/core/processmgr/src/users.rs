@@ -56,10 +56,6 @@ pub async fn merged(
     layers: Vec<ClientEnd<Node>>,
     rights: Rights,
 ) -> Result<ClientEnd<Node>, Status> {
-    let client = connect::<Union>(shared, UNION)
-        .await
-        .ok_or(Status::NotFound)?;
-    let union = UnionAsyncClient::new(client, shared.reactor.clone());
     let layers = layers
         .into_iter()
         .map(|directory| Layer {
@@ -67,6 +63,20 @@ pub async fn merged(
             writable: false,
         })
         .collect();
+    view(shared, layers, rights).await
+}
+
+/// A view with `rights` of `layers`, the first of which a name resolves
+/// to first, and which alone may be writable.
+pub async fn view(
+    shared: &Shared,
+    layers: Vec<Layer>,
+    rights: Rights,
+) -> Result<ClientEnd<Node>, Status> {
+    let client = connect::<Union>(shared, UNION)
+        .await
+        .ok_or(Status::NotFound)?;
+    let union = UnionAsyncClient::new(client, shared.reactor.clone());
     let (view, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
     match union.create(layers, rights, server).await {
         Ok(Ok(_)) => Ok(view),

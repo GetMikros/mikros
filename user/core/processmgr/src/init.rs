@@ -223,23 +223,15 @@ impl Manager {
                 return Err(status);
             }
         };
-        // Namespaces come from profiles once tmpfs serves when running
-        // from the boot image, and once the root file system is published
-        // too otherwise, through a directory of the process manager's own.
+        // Namespaces come from profiles once the root file system is
+        // published, through a directory of the process manager's own.
         let shared = self.shared.clone();
         if let Ok(directory) = bind_own_directory(&control).await {
             self.shared.spawner.spawn(async move {
                 let reactor = shared.reactor.clone();
                 let directory = DirectoryAsyncClient::new(directory, reactor.clone());
                 let namespaces = shared.namespaces.clone();
-                match namespaces.runs_from_boot_image() {
-                    true => {
-                        namespaces
-                            .prepare(&shared, directory, shared.fs.clone(), reactor)
-                            .await
-                    }
-                    false => namespaces.prepare_root(&shared, directory, reactor).await,
-                }
+                namespaces.prepare_root(&shared, directory, reactor).await
             });
         }
         // The EFI system partition the system booted from comes as

@@ -1,21 +1,19 @@
 //! The namespaces of new processes.
 //!
 //! Until profiles apply, every process gets `/`, the boot file system,
-//! and `/dev`. With `root=bootfs` on the command line, profiles apply
-//! once the process manager has made tmpfs's `boot/etc`, `boot/var` and
-//! `boot/Users` and filled them with the boot image's `etc`, `var` and
-//! `Users`. Once tmpfs has started, the namespace of every other new
-//! process waits for that, so that only the processes started before
-//! tmpfs, and tmpfs itself, go without their profiles. A profile's
-//! entries come from the root table: `/usr`, read only and executable,
-//! and `/Apps` and `/Libraries`, read only, from the boot image, and
-//! `/etc`, `/var` and `/Users` from those directories.
+//! and `/dev` (MIKSPEC-0050.R36). Profiles apply once the process manager
+//! has connected to the root file system, the instance `root` of
+//! `device.filesystem` (MIKSPEC-0050.R8, MIKSPEC-0050.R29): the root
+//! table's entries then come from the root file system, and `/tmp` from
+//! tmpfs, for which an entry waits until tmpfs serves.
 //!
-//! Otherwise profiles apply once the process manager has connected to
-//! the root file system, the instance `root` of `device.filesystem`
-//! (MIKSPEC-0050.R8, MIKSPEC-0050.R29): the root table's entries then
-//! come from the root file system, and `/tmp` from tmpfs, for which an
-//! entry waits until tmpfs serves.
+//! When `live` is a word of the command line, the root file system is
+//! read-only, and profiles apply only once the process manager has made
+//! tmpfs's `live/etc`, `live/var` and `live/Users` and, through the union
+//! service, a view of each over the root's directory of that name, read
+//! only, to which changes go; the root table's `/etc`, `/var` and
+//! `/Users` are those views (MIKSPEC-0050.R34, MIKSPEC-0050.R35,
+//! MIKSPEC-0050.R37).
 //! Processes started before go without their profiles. An entry that is
 //! the root file system's root or lies in `@system` fails the start with
 //! `ACCESS_DENIED` (MIKSPEC-0050.R28).
@@ -34,18 +32,18 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use core::future::poll_fn;
 use core::task::{Poll, Waker};
-use mikros_bootfs::server::{Fs, ItemKind};
+use mikros_bootfs::server::ItemKind;
 use mikros_manifest::path;
 use mikros_rt::exec::Reactor;
 use mikros_rt::files;
-use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemAsyncClient, Node, NodeAsyncClient, NodeType, OpenFlags, Rights,
-    TemporaryFilesystem, TemporaryFilesystemAsyncClient,
+    Error, Filesystem, FilesystemAsyncClient, Layer, Node, NodeAsyncClient, NodeType, OpenFlags,
+    Rights, TemporaryFilesystem, TemporaryFilesystemAsyncClient,
 };
 use mikros_rt::interfaces::mikros::process::NamespaceEntry;
 use mikros_rt::interfaces::mikros::service::{
@@ -56,8 +54,6 @@ use mikros_rt::interfaces::mikros::service::{
 /// manifest entry may be, lie in, or hold.
 const ACCOUNTS_DATA: &str = "/var/lib/accounts";
 const ACCOUNTS_APP: &str = "system.accountsvc";
-/// The app ID of the temporary file system service.
-const TMPFS_APP: &str = "system.tmpfs";
 /// The app ID of command-line tools.
 const CLI_APP: &str = "system.cli";
 /// The protocols of the temporary file system.
@@ -77,8 +73,6 @@ const VOLUMES_PERMISSION: &str = "files.volumes";
 const ESP_INSTANCE: &str = "esp";
 /// How long to wait before asking again for tmpfs.
 const RETRY: i64 = 20_000_000;
-/// The most bytes one write moves.
-const CHUNK: usize = 32768;
 /// The largest manifest read from the root file system.
 const USR_FILE_MAX: usize = 1 << 16;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
@@ -98,36 +92,41 @@ struct Tmpfs {
 }
 
 enum Roots {
-    /// Running from the boot image: tmpfs's directories for `/etc`,
-    /// `/var` and `/Users`, and the boot image for the rest.
-    Boot {
+    /// The root directory of the root file system.
+    Root(Rc<NodeAsyncClient>),
+    /// A live system's: the root directory of its root file system, read
+    /// and execute only, and the views of `/etc`, `/var` and `/Users`.
+    Live {
+        root: Rc<NodeAsyncClient>,
         etc: Rc<NodeAsyncClient>,
         var: Rc<NodeAsyncClient>,
         users: Rc<NodeAsyncClient>,
     },
+}
+
+impl Roots {
     /// The root directory of the root file system.
-    Root(Rc<NodeAsyncClient>),
+    fn root(&self) -> &Rc<NodeAsyncClient> {
+        match self {
+            Roots::Root(root) | Roots::Live { root, .. } => root,
+        }
+    }
 }
 
 pub struct Namespaces {
-    bootfs: bool,
+    live: bool,
     /// The root of the EFI system partition's file system, once
     /// connected.
     esp: RefCell<Option<Rc<NodeAsyncClient>>>,
     ready: RefCell<Option<Rc<Ready>>>,
-    /// Whether tmpfs has started, and the tasks whose namespaces wait for
-    /// profiles to apply since.
-    tmpfs_started: Cell<bool>,
-    waiting: RefCell<Vec<Waker>>,
     /// tmpfs, once it serves, and the tasks that wait for it.
     tmpfs: RefCell<Option<Rc<Tmpfs>>>,
     tmpfs_waiting: RefCell<Vec<Waker>>,
 }
 
-/// Where an entry of the root table comes from: a directory of the boot
-/// image, or a directory and the path below it.
+/// Where an entry of the root table comes from: a directory and the path
+/// below it.
 enum Source {
-    Boot(&'static str),
     Dir(Rc<NodeAsyncClient>, &'static str),
 }
 
@@ -291,65 +290,13 @@ fn rights(text: &str) -> Option<Rights> {
 impl Namespaces {
     /// The namespaces of a system started with `command_line`.
     pub fn new(command_line: &str) -> Namespaces {
-        let bootfs = command_line
-            .split_whitespace()
-            .any(|word| word == "root=bootfs");
+        let live = command_line.split_whitespace().any(|word| word == "live");
         Namespaces {
-            bootfs,
+            live,
             esp: RefCell::new(None),
             ready: RefCell::new(None),
-            tmpfs_started: Cell::new(false),
-            waiting: RefCell::new(Vec::new()),
             tmpfs: RefCell::new(None),
             tmpfs_waiting: RefCell::new(Vec::new()),
-        }
-    }
-
-    /// Records that a process of `app_id` has started: once it is tmpfs,
-    /// new namespaces wait for profiles to apply.
-    pub fn started(&self, app_id: &str) {
-        if app_id == TMPFS_APP {
-            self.tmpfs_started.set(true);
-        }
-    }
-
-    /// Completes once profiles apply.
-    async fn profiles(&self) {
-        poll_fn(|cx| match self.ready.borrow().is_some() {
-            true => Poll::Ready(()),
-            false => {
-                self.waiting.borrow_mut().push(cx.waker().clone());
-                Poll::Pending
-            }
-        })
-        .await
-    }
-
-    /// Whether profiles apply to processes started under `root=bootfs`.
-    pub fn runs_from_boot_image(&self) -> bool {
-        self.bootfs
-    }
-
-    /// Connects to tmpfs through `directory`, the process manager's own,
-    /// asking again until it serves, makes its `boot/` directories, fills
-    /// them from the boot image, from then on builds namespaces from
-    /// profiles, and tells the service manager.
-    pub async fn prepare(
-        &self,
-        shared: &Shared,
-        directory: DirectoryAsyncClient,
-        fs: Rc<Fs>,
-        reactor: Reactor,
-    ) {
-        let tmpfs = self.serve_tmpfs(&directory, &reactor).await;
-        match fill(&tmpfs.root, &fs, &reactor).await {
-            Ok((etc, var, users)) => {
-                self.apply(Ready {
-                    roots: Roots::Boot { etc, var, users },
-                });
-                self.announce_root(shared).await;
-            }
-            Err(e) => mikros_rt::log!(Error, "process-manager: filling tmpfs failed: {e:?}"),
         }
     }
 
@@ -380,15 +327,18 @@ impl Namespaces {
     /// Connects through `directory`, the process manager's own, to the
     /// root file system once it is published, from then on builds
     /// namespaces from profiles, tells the service manager, and connects
-    /// to tmpfs once it serves.
+    /// to tmpfs once it serves. A live system connects to tmpfs first, and
+    /// builds namespaces from profiles only once it has made the views of
+    /// `/etc`, `/var` and `/Users`.
     pub async fn prepare_root(
         &self,
         shared: &Shared,
         directory: DirectoryAsyncClient,
         reactor: Reactor,
     ) {
-        let root = match root_filesystem(&directory, &reactor).await {
-            Ok(root) => root,
+        let rights = if self.live { RX } else { RWX };
+        let root = match filesystem(&directory, &reactor, ROOT_INSTANCE, rights).await {
+            Ok(root) => Rc::new(root),
             // The system ends before the root file system came.
             Err(Status::PeerClosed) => return,
             Err(e) => {
@@ -396,15 +346,36 @@ impl Namespaces {
                 return;
             }
         };
-        self.apply(Ready {
-            roots: Roots::Root(Rc::new(root)),
-        });
+        let roots = match self.live {
+            true => {
+                let tmpfs = self.serve_tmpfs(&directory, &reactor).await;
+                match live_views(shared, &root, &tmpfs.root, &reactor).await {
+                    Ok((etc, var, users)) => Roots::Live {
+                        root,
+                        etc,
+                        var,
+                        users,
+                    },
+                    Err(e) => {
+                        mikros_rt::log!(
+                            Error,
+                            "process-manager: making the live system's views failed: {e:?}"
+                        );
+                        return;
+                    }
+                }
+            }
+            false => Roots::Root(root),
+        };
+        self.apply(Ready { roots });
         mikros_rt::log!(
             Info,
             "process-manager: namespaces come from the root file system"
         );
         self.announce_root(shared).await;
-        self.serve_tmpfs(&directory, &reactor).await;
+        if !self.live {
+            self.serve_tmpfs(&directory, &reactor).await;
+        }
     }
 
     /// The file at `path` below `/usr`: the root file system's once
@@ -413,7 +384,7 @@ impl Namespaces {
     /// paths.
     pub async fn usr_file(&self, shared: &Shared, path: &str) -> Option<Vec<u8>> {
         let ready = self.ready.borrow().clone();
-        if let Some(Roots::Root(root)) = ready.as_deref().map(|r| &r.roots) {
+        if let Some(root) = ready.as_deref().map(|r| r.roots.root()) {
             let at = format!("usr/{path}");
             if let Ok(bytes) = files::read(root, &shared.reactor, &at, USR_FILE_MAX).await {
                 return Some(bytes);
@@ -429,7 +400,7 @@ impl Namespaces {
     pub async fn usr_names(&self, shared: &Shared, path: &str, suffix: &str) -> Vec<String> {
         let ready = self.ready.borrow().clone();
         let at = format!("usr/{path}");
-        if let Some(Roots::Root(root)) = ready.as_deref().map(|r| &r.roots) {
+        if let Some(root) = ready.as_deref().map(|r| r.roots.root()) {
             let listed = files::list(root, &shared.reactor, &at, NodeType::File, suffix).await;
             return listed.unwrap_or_default();
         }
@@ -445,18 +416,14 @@ impl Namespaces {
     /// Where the device manager's programs under `/usr` are looked for
     /// first: the root file system, once namespaces come from it.
     pub fn root_programs(&self) -> Option<Programs> {
-        match self.ready.borrow().as_deref().map(|r| &r.roots) {
-            Some(Roots::Root(root)) => Some(Programs::root(root.clone())),
-            _ => None,
-        }
+        let ready = self.ready.borrow();
+        let root = ready.as_deref().map(|r| r.roots.root().clone());
+        root.map(Programs::root)
     }
 
     /// Whether namespaces come from the root file system.
     pub fn on_root(&self) -> bool {
-        matches!(
-            self.ready.borrow().as_deref().map(|r| &r.roots),
-            Some(Roots::Root(_))
-        )
+        self.ready.borrow().is_some()
     }
 
     /// Gives the service manager read-only connections to the `/usr` and
@@ -526,15 +493,11 @@ impl Namespaces {
     /// Makes profiles apply, from `ready`.
     fn apply(&self, ready: Ready) {
         *self.ready.borrow_mut() = Some(Rc::new(ready));
-        for waker in self.waiting.take() {
-            waker.wake();
-        }
     }
 
     /// The namespace of a new process of `app_id` and `user`, the service
     /// manager that init asked for when `service_manager`, and where the
-    /// programs it names come from. Once tmpfs has started, that of any
-    /// other process waits for profiles to apply.
+    /// programs it names come from.
     pub async fn of(
         &self,
         shared: &Shared,
@@ -547,9 +510,6 @@ impl Namespaces {
             path: "/dev".into(),
             directory: shared.dev.directory()?,
         };
-        if self.bootfs && self.tmpfs_started.get() && app_id != TMPFS_APP {
-            self.profiles().await;
-        }
         let ready = self.ready.borrow().clone();
         let Some(ready) = ready else {
             let root = crate::start::root(&shared.fs)?;
@@ -750,33 +710,37 @@ impl Namespaces {
         rights: Rights,
     ) -> Result<(NamespaceEntry, Origin), Status> {
         let normal = path.trim_end_matches('/');
-        let mut table: Vec<(&str, Source, Rights)> = match &ready.roots {
-            Roots::Boot { etc, var, users } => alloc::vec![
-                ("/usr", Source::Boot("usr"), RX),
-                ("/Apps", Source::Boot("Apps"), Rights::READ),
-                ("/Libraries", Source::Boot("Libraries"), Rights::READ),
-                ("/etc", Source::Dir(etc.clone(), ""), RWX),
-                ("/var", Source::Dir(var.clone(), ""), RWX),
-                ("/Users", Source::Dir(users.clone(), ""), RWX),
+        let root = ready.roots.root();
+        if normal.is_empty() || path::overlaps(normal, SYSTEM) {
+            return Err(Status::AccessDenied);
+        }
+        let changing = match &ready.roots {
+            Roots::Root(root) => [
+                Source::Dir(root.clone(), "etc"),
+                Source::Dir(root.clone(), "var"),
+                Source::Dir(root.clone(), "Users"),
             ],
-            Roots::Root(root) => {
-                if normal.is_empty() || path::overlaps(normal, SYSTEM) {
-                    return Err(Status::AccessDenied);
-                }
-                alloc::vec![
-                    ("/usr", Source::Dir(root.clone(), "usr"), RX),
-                    ("/Apps", Source::Dir(root.clone(), "Apps"), Rights::READ),
-                    (
-                        "/Libraries",
-                        Source::Dir(root.clone(), "Libraries"),
-                        Rights::READ,
-                    ),
-                    ("/etc", Source::Dir(root.clone(), "etc"), RWX),
-                    ("/var", Source::Dir(root.clone(), "var"), RWX),
-                    ("/Users", Source::Dir(root.clone(), "Users"), RWX),
-                ]
-            }
+            Roots::Live {
+                etc, var, users, ..
+            } => [
+                Source::Dir(etc.clone(), ""),
+                Source::Dir(var.clone(), ""),
+                Source::Dir(users.clone(), ""),
+            ],
         };
+        let [etc, var, users] = changing;
+        let mut table: Vec<(&str, Source, Rights)> = alloc::vec![
+            ("/usr", Source::Dir(root.clone(), "usr"), RX),
+            ("/Apps", Source::Dir(root.clone(), "Apps"), Rights::READ),
+            (
+                "/Libraries",
+                Source::Dir(root.clone(), "Libraries"),
+                Rights::READ,
+            ),
+            ("/etc", etc, RWX),
+            ("/var", var, RWX),
+            ("/Users", users, RWX),
+        ];
         if let Some(esp) = self.esp.borrow().as_ref() {
             table.push((BOOT_EFI, Source::Dir(esp.clone(), ""), RW));
         }
@@ -805,24 +769,6 @@ impl Namespaces {
         }
         let (client, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
         match source {
-            Source::Boot(top) => {
-                let boot_path = match rest.is_empty() {
-                    true => String::from(top),
-                    false => format!("{top}/{rest}"),
-                };
-                if !shared.fs.serve_directory(server, &boot_path, rights) {
-                    return Err(Status::NotFound);
-                }
-                let origin = match executable {
-                    true => Origin::Boot(boot_path),
-                    false => Origin::None,
-                };
-                let entry = NamespaceEntry {
-                    path: String::from(normal),
-                    directory: client,
-                };
-                Ok((entry, origin))
-            }
             Source::Dir(dir, top) => {
                 let rest = match (top.is_empty(), rest.is_empty()) {
                     (true, _) => rest,
@@ -928,16 +874,6 @@ async fn tmpfs_once_served(
     }
 }
 
-/// The root directory of the root file system, with read, write and
-/// execute rights, once its `filesystem` service is published as the
-/// instance `root`.
-async fn root_filesystem(
-    directory: &DirectoryAsyncClient,
-    reactor: &Reactor,
-) -> Result<NodeAsyncClient, Status> {
-    filesystem(directory, reactor, ROOT_INSTANCE, RWX).await
-}
-
 /// The root directory, with `rights`, of the file system published as
 /// `instance` of `device.filesystem`, once it is, which a watch of the
 /// protocol waits for.
@@ -1027,52 +963,47 @@ type Dirs = (
     Rc<NodeAsyncClient>,
 );
 
-/// Makes `boot/etc`, `boot/var` and `boot/Users` on the tmpfs of `root`
-/// and copies into each what the boot image holds at that path.
-async fn fill(root: &NodeAsyncClient, fs: &Fs, reactor: &Reactor) -> Result<Dirs, Error> {
+/// The views of a live system's `/etc`, `/var` and `/Users`: for each,
+/// tmpfs's `live/etc`, `live/var` or `live/Users` of `tmpfs`, made where
+/// missing, over the directory of the same name of `root`, read only.
+async fn live_views(
+    shared: &Shared,
+    root: &NodeAsyncClient,
+    tmpfs: &NodeAsyncClient,
+    reactor: &Reactor,
+) -> Result<Dirs, Status> {
     let mut made = Vec::new();
     for top in ["etc", "var", "Users"] {
-        let dir = directories(root, &format!("boot/{top}"), reactor).await?;
-        for item in fs.subtree(top).unwrap_or_default() {
-            match item.kind {
-                ItemKind::Directory => {
-                    let flags = OpenFlags(
-                        OpenFlags::CREATE.0 | OpenFlags::DIRECTORY.0 | OpenFlags::EXCLUSIVE.0,
-                    );
-                    open(&dir, &item.path, flags, item.mode, RW, reactor).await?;
-                }
-                ItemKind::File(bytes) => {
-                    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
-                    let file = open(&dir, &item.path, flags, item.mode, RW, reactor).await?;
-                    for (i, chunk) in bytes.chunks(CHUNK).enumerate() {
-                        flat(file.write((i * CHUNK) as u64, chunk.to_vec()).await)?;
-                    }
-                }
-                ItemKind::Symlink(target) => {
-                    let (parent, name) = match item.path.rsplit_once('/') {
-                        Some((parent, name)) => (Some(parent), name),
-                        None => (None, item.path.as_str()),
-                    };
-                    let target = String::from_utf8_lossy(&target).into_owned();
-                    match parent {
-                        Some(parent) => {
-                            let parent =
-                                open(&dir, parent, OpenFlags::DIRECTORY, 0, RW, reactor).await?;
-                            flat(parent.create_symlink(name.into(), target).await)?;
-                        }
-                        None => {
-                            flat(dir.create_symlink(name.into(), target).await)?;
-                        }
-                    }
-                }
-            }
-        }
-        made.push(Rc::new(dir));
+        let upper = directories(tmpfs, &format!("live/{top}"), reactor)
+            .await
+            .map_err(status)?;
+        let lower = open(root, top, OpenFlags::DIRECTORY, 0, Rights::READ, reactor)
+            .await
+            .map_err(status)?;
+        let layers = alloc::vec![
+            Layer {
+                directory: connection(&upper, RWX).await?,
+                writable: true,
+            },
+            Layer {
+                directory: connection(&lower, Rights::READ).await?,
+                writable: false,
+            },
+        ];
+        let view = crate::users::view(shared, layers, RWX).await?;
+        made.push(Rc::new(NodeAsyncClient::new(view, reactor.clone())));
     }
-    let users = made.pop().ok_or(Error::Io)?;
-    let var = made.pop().ok_or(Error::Io)?;
-    let etc = made.pop().ok_or(Error::Io)?;
+    let users = made.pop().ok_or(Status::Io)?;
+    let var = made.pop().ok_or(Status::Io)?;
+    let etc = made.pop().ok_or(Status::Io)?;
     Ok((etc, var, users))
+}
+
+/// A new connection to the directory `dir` with `rights`.
+async fn connection(dir: &NodeAsyncClient, rights: Rights) -> Result<ClientEnd<Node>, Status> {
+    let (client, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
+    flat(dir.clone(server, rights).await).map_err(status)?;
+    Ok(client)
 }
 
 /// Whether `app_id` has a program manifest, and the namespace entries of
