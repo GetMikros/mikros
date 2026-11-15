@@ -74,8 +74,10 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// `power off`, Escape and `if $status != 1 { exit 12 }`, which refuse
 /// to power the machine off; then `sudo hostname` with ada's password and
 /// `if $status != 0 { exit 13 }`, and `sudo hostname` with a wrong one and
-/// `if $status != 1 { exit 14 }`; then `spaw`, which Tab completes to
-/// `spawn-std `, and
+/// `if $status != 1 { exit 14 }`; then
+/// `if ((logs -n 3 | lines | len) != 3) { exit 15 }` with ada's password,
+/// which prints the last three records of the log; then `spaw`, which Tab
+/// completes to `spawn-std `, and
 /// `sleep`, a job that runs until it is killed, Ctrl-Z, which stops it,
 /// `let n = (jobs | lines | len)`, `bg`, `kill %1`,
 /// `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
@@ -94,7 +96,7 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// its first entry, files-c's and coreutils-check's checks
 /// passed, and `/`, which no namespace entry covers, is a folder that
 /// lists `Users`.
-const MSH_KEYS: [(&str, Duration); 36] = [
+const MSH_KEYS: [(&str, Duration); 38] = [
     ("y e s ret", JOB_START),
     ("ctrl-c", QUESTION),
     ("ctrl-l", QUESTION),
@@ -148,6 +150,13 @@ const MSH_KEYS: [(&str, Duration); 36] = [
          shift-bracket_left spc e x i t spc 1 4 spc shift-bracket_right ret",
         QUESTION,
     ),
+    (
+        "i f spc shift-9 shift-9 l o g s spc minus n spc 3 spc shift-backslash spc \
+         l i n e s spc shift-backslash spc l e n shift-0 spc shift-1 equal spc 3 shift-0 spc \
+         shift-bracket_left spc e x i t spc 1 5 spc shift-bracket_right ret",
+        JOB_START,
+    ),
+    ("a d a minus p w ret", ANSWER),
     ("s p a w tab s l e e p ret", JOB_START),
     ("ctrl-z", QUESTION),
     (

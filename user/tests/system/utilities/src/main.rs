@@ -12,6 +12,7 @@ const CLEAR: &str = "/usr/bin/clear";
 const LESS: &str = "/usr/bin/less";
 const PS: &str = "/usr/bin/ps";
 const POWER: &str = "/usr/bin/power";
+const LOGS: &str = "/usr/bin/logs";
 /// A file that every system holds with devices.
 const DECLARATIONS: &str = "/usr/share/msh/completions/devices.msh";
 
@@ -47,6 +48,8 @@ fn main() {
         ("ps_bad_arguments", ps_bad_arguments),
         ("power_not_authorized", power_not_authorized),
         ("power_bad_arguments", power_bad_arguments),
+        ("logs_not_authorized", logs_not_authorized),
+        ("logs_bad_arguments", logs_bad_arguments),
     ];
     for (number, (name, check)) in checks.iter().enumerate() {
         if let Err(Failure { what, status }) = check() {
@@ -329,6 +332,34 @@ fn power_bad_arguments() -> Result<(), Failure> {
         let run = run(POWER, arguments)?;
         ensure(&run, "refusing the arguments", run.status == 2)?;
         ensure(&run, "naming the command", run.err.starts_with("power: "))?;
+    }
+    Ok(())
+}
+
+/// No administrator answers here, so logs prints no record.
+fn logs_not_authorized() -> Result<(), Failure> {
+    let run = run(LOGS, &["-n", "3"])?;
+    ensure(&run, "failing", run.status == 1 && run.out.is_empty())?;
+    ensure(&run, "saying why", run.err == "logs: not authorized\n")
+}
+
+/// Following with JSON, values that are not numbers or severities, a
+/// missing value and an operand are refused with status 2, before any
+/// authorization is asked.
+fn logs_bad_arguments() -> Result<(), Failure> {
+    let refused: [&[&str]; 6] = [
+        &["-f", "--json"],
+        &["-n", "few"],
+        &["--pid", "-1"],
+        &["--severity", "fatal"],
+        &["--app"],
+        &["system.logs"],
+    ];
+    for arguments in refused {
+        let run = run(LOGS, arguments)?;
+        ensure(&run, "refusing the arguments", run.status == 2)?;
+        ensure(&run, "writing nothing", run.out.is_empty())?;
+        ensure(&run, "naming the command", run.err.starts_with("logs: "))?;
     }
     Ok(())
 }
