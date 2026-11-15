@@ -7,7 +7,7 @@ use std::string::String;
 
 /// A file system made by mkfs.btrfs from the tree that `fill` writes,
 /// with `args` added to its command line.
-fn mkfs(name: &str, args: &[&str], fill: impl FnOnce(&Path)) -> Vec<u8> {
+pub(crate) fn mkfs(name: &str, args: &[&str], fill: impl FnOnce(&Path)) -> Vec<u8> {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let pid = std::process::id();
@@ -47,7 +47,7 @@ fn noise(len: usize) -> Vec<u8> {
         .collect()
 }
 
-fn write(tree: &Path, path: &str, bytes: &[u8]) {
+pub(crate) fn write(tree: &Path, path: &str, bytes: &[u8]) {
     let path = tree.join(path);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, bytes).unwrap();

@@ -12,7 +12,7 @@ use core::fmt;
 mod dir;
 mod file;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod zstd;
 
 pub use dir::{Inode, Kind, Node};
