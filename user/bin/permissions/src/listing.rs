@@ -1,6 +1,6 @@
-//! What permissions is asked, whether that needs an administrator's
-//! authorization, and what it writes: a header line and one line per
-//! grant in aligned columns, a JSON array, or why a call failed.
+//! What permissions is asked, and what it writes: a header line and one
+//! line per grant in aligned columns, a JSON array, or why a call
+//! failed.
 
 use mikros_cli::{Arguments, Command, json_string};
 
@@ -71,24 +71,6 @@ pub fn read(arguments: Vec<String>) -> Request {
     }
 }
 
-/// Whether the request needs an administrator's authorization, when
-/// `own` tells whether its user is the caller's: listing and denying for
-/// another user, and every allowing.
-pub fn needs_authorization(request: &Request, own: bool) -> bool {
-    match request {
-        Request::List { .. } => !own,
-        Request::Set {
-            decision: Decision::Deny,
-            ..
-        } => !own,
-        Request::Set {
-            decision: Decision::Allow,
-            ..
-        } => true,
-        Request::Help | Request::Invalid(_) => false,
-    }
-}
-
 /// A grant, as permissions shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Grant {
@@ -154,11 +136,13 @@ pub fn json(grants: &[Grant]) -> String {
 }
 
 /// Why a call on the broker about `permission` failed with the status
-/// named `status`, in lowercase with underscores.
+/// named `status`, in lowercase with underscores. The broker refuses
+/// with `ACCESS_DENIED` when no administrator allowed the call.
 pub fn failure(permission: Option<&str>, status: &str) -> String {
     match (permission, status) {
         (Some(p), "not_found") => format!("{p}: no such permission"),
-        (Some(p), "invalid_args") => format!("{p}: a system permission"),
+        (Some(p), "invalid_args") => format!("{p}: a system or admin permission"),
+        (_, "access_denied") => "not authorized".into(),
         (_, status) => status.into(),
     }
 }
@@ -248,18 +232,6 @@ mod tests {
     }
 
     #[test]
-    fn asks_an_administrator_for_others_and_for_allowing() {
-        let list = read_args(&["bob"]);
-        assert!(needs_authorization(&list, false));
-        assert!(!needs_authorization(&list, true));
-        let deny = read_args(&["deny", "a", "user.camera.use"]);
-        assert!(!needs_authorization(&deny, true));
-        assert!(needs_authorization(&deny, false));
-        let allow = read_args(&["allow", "a", "user.camera.use"]);
-        assert!(needs_authorization(&allow, true));
-    }
-
-    #[test]
     fn writes_sorted_columns_and_json() {
         let grants = [
             grant("app.zed", "user.camera.use", "denied"),
@@ -291,8 +263,13 @@ mod tests {
         );
         assert_eq!(
             failure(Some("admin.time.set"), "invalid_args"),
-            "admin.time.set: a system permission"
+            "admin.time.set: a system or admin permission"
         );
-        assert_eq!(failure(None, "access_denied"), "access_denied");
+        assert_eq!(failure(None, "access_denied"), "not authorized");
+        assert_eq!(
+            failure(Some("user.camera.use"), "access_denied"),
+            "not authorized"
+        );
+        assert_eq!(failure(None, "peer_closed"), "peer_closed");
     }
 }

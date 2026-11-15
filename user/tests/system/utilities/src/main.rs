@@ -484,7 +484,7 @@ fn permissions_deny_and_list() -> Result<(), Failure> {
     ensure(&json, "the grant in JSON", json.out.contains(&object))
 }
 
-/// The broker refuses unknown and system permissions.
+/// The broker refuses unknown, system and admin permissions.
 fn permissions_refuses_bad_grants() -> Result<(), Failure> {
     let unknown = run(PERMISSIONS, &["deny", NO_APP, "no.such"])?;
     ensure(
@@ -497,20 +497,21 @@ fn permissions_refuses_bad_grants() -> Result<(), Failure> {
         "naming it",
         unknown.err == "permissions: no.such: no such permission\n",
     )?;
-    let system = run(PERMISSIONS, &["deny", NO_APP, "admin.time.set"])?;
-    ensure(
-        &system,
-        "failing on a system permission",
-        system.status == 1,
-    )?;
-    ensure(
-        &system,
-        "saying so",
-        system.err == "permissions: admin.time.set: a system permission\n",
-    )
+    for permission in ["system.devices.manage", "admin.time.set"] {
+        let refused = run(PERMISSIONS, &["deny", NO_APP, permission])?;
+        ensure(
+            &refused,
+            "failing on a system or admin permission",
+            refused.status == 1,
+        )?;
+        let said = format!("permissions: {permission}: a system or admin permission\n");
+        ensure(&refused, "saying so", refused.err == said)?;
+    }
+    Ok(())
 }
 
-/// Allowing always needs an administrator, who does not answer here.
+/// Allowing always needs an administrator, for whom the broker asks and
+/// who does not answer here.
 fn permissions_not_authorized() -> Result<(), Failure> {
     let run = run(PERMISSIONS, &["allow", NO_APP, "user.camera.use"])?;
     ensure(&run, "failing", run.status == 1 && run.out.is_empty())?;

@@ -5,7 +5,8 @@
 //! trusted grants of `crate::permissions::Store::bootstrap`. Without a
 //! valid manifest it ends. It then serves `mikros.permissions.Broker` on
 //! each connection that the service manager forwards on its `PROVIDER`
-//! startup handle, to the caller that the connection names.
+//! startup handle, to the caller that the connection names. It asks the
+//! session manager for `admin` permissions through its own directory.
 
 mod broker;
 use crate::permissions::Store;
@@ -14,7 +15,9 @@ use alloc::vec::Vec;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
-use mikros_rt::interfaces::mikros::service::{ProviderAsyncServer, ProviderRequest};
+use mikros_rt::interfaces::mikros::service::{
+    DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
+};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
@@ -52,7 +55,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Some(provider) = take(&mut managed.handles, HandleRole::Provider, 0) else {
         return PANIC_EXIT_CODE;
     };
-    let broker = crate::service::broker::Broker::new(store, reactor.clone(), spawner.clone());
+    let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
+    let broker =
+        crate::service::broker::Broker::new(store, directory, reactor.clone(), spawner.clone());
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor);
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {

@@ -15,11 +15,15 @@ fn store() -> Store {
     Store::bootstrap(BROKER, &strings(&["admin.logs.read"])).unwrap()
 }
 
+/// The kernel object ID of the process of `id`'s identities.
+const KOID: u64 = 7;
+
 fn id(app_id: &str) -> Identity<'_> {
     Identity {
         user: 1,
         app_id,
         admin: 0,
+        koid: KOID,
     }
 }
 
@@ -135,6 +139,7 @@ fn system_permissions_apply_for_every_user() {
             user,
             app_id: APP,
             admin: 0,
+            koid: KOID,
         };
         assert_eq!(
             s.check(who, "system.devices.manage").map(|d| d.0),
@@ -200,6 +205,7 @@ fn checks_by_scope() {
         user: 2,
         app_id: APP,
         admin: 0,
+        koid: KOID,
     };
     assert_eq!(
         s.check(other, "user.camera.use").map(|d| d.0),
@@ -368,6 +374,7 @@ fn elevated_clients_hold_user_and_admin_permissions() {
         user: 1,
         app_id: APP,
         admin: 1000,
+        koid: KOID,
     };
     // Every user and admin permission, without asking or recording a
     // grant.
@@ -432,5 +439,105 @@ fn elevated_clients_hold_user_and_admin_permissions() {
     assert_eq!(
         s.check(elevated, "user.camera.use"),
         Ok((Decision::Allowed, false))
+    );
+}
+
+#[test]
+fn admin_requests_ask_an_administrator_and_hold_for_one_process() {
+    let mut s = store();
+    assert_eq!(
+        s.request(id(APP), "admin.time.set"),
+        Ok((Requested::Authorize, false))
+    );
+    // Checks never ask.
+    assert_eq!(
+        s.check(id(APP), "admin.time.set"),
+        Ok((Decision::Undetermined, false))
+    );
+    s.hold(id(APP), "admin.time.set");
+    assert_eq!(
+        s.check(id(APP), "admin.time.set"),
+        Ok((Decision::Allowed, false))
+    );
+    assert_eq!(
+        s.request(id(APP), "admin.time.set"),
+        Ok((Requested::Decided(Decision::Allowed), false))
+    );
+    // Only that permission, only that process, and nothing stored.
+    assert_eq!(
+        s.request(id(APP), "admin.logs.read"),
+        Ok((Requested::Authorize, false))
+    );
+    let later = Identity {
+        koid: KOID + 1,
+        ..id(APP)
+    };
+    assert_eq!(
+        s.check(later, "admin.time.set"),
+        Ok((Decision::Undetermined, false))
+    );
+    assert!(s.list(1).is_empty());
+    // A manifest's admin permission needs no administrator.
+    assert_eq!(
+        s.request(id(BROKER), "admin.logs.read"),
+        Ok((Requested::Decided(Decision::Allowed), false))
+    );
+}
+
+#[test]
+fn admin_requests_without_a_process_are_denied() {
+    let mut s = store();
+    let none = Identity { koid: 0, ..id(APP) };
+    assert_eq!(
+        s.request(none, "admin.time.set"),
+        Ok((Requested::Decided(Decision::Denied), false))
+    );
+    s.hold(none, "admin.time.set");
+    assert_eq!(
+        s.check(none, "admin.time.set"),
+        Ok((Decision::Undetermined, false))
+    );
+    // Holds are for admin permissions only.
+    s.hold(id(APP), "user.camera.use");
+    s.hold(id(APP), "system.devices.manage");
+    assert_eq!(
+        s.check(id(APP), "user.camera.use"),
+        Ok((Decision::Undetermined, false))
+    );
+    assert_eq!(
+        s.check(id(APP), "system.devices.manage"),
+        Ok((Decision::Undetermined, false))
+    );
+}
+
+#[test]
+fn other_users_and_allowing_need_manage_grants() {
+    let me = id(APP);
+    assert!(!listing_needs_manage(me, 1));
+    assert!(listing_needs_manage(me, 2));
+    assert!(!setting_needs_manage(
+        me,
+        &grant(1, "user.camera.use", Decision::Denied)
+    ));
+    assert!(setting_needs_manage(
+        me,
+        &grant(1, "user.camera.use", Decision::Allowed)
+    ));
+    assert!(setting_needs_manage(
+        me,
+        &grant(2, "user.camera.use", Decision::Denied)
+    ));
+    assert_eq!(scope(MANAGE_GRANTS), Some(Scope::Admin));
+    assert_eq!(
+        Store::check_grant(&grant(1, "user.camera.use", Decision::Allowed)),
+        Ok(())
+    );
+    assert_eq!(
+        Store::check_grant(&grant(1, "admin.grants.manage", Decision::Allowed)),
+        Err(Failure::InvalidArgs)
+    );
+    assert_eq!(
+        Store::check_grant(&grant(1, "nope", Decision::Denied)),
+        Err(Failure::NotFound)
     );
 }

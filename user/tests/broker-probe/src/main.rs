@@ -6,16 +6,21 @@
 //! failed.
 //!
 //! It accepts the `Bind` requests on the control endpoint that arrives
-//! as the `USER` startup handle with ID 0, for itself and its children.
+//! as the `USER` startup handle with ID 0, for itself and its children,
+//! and serves on each bound directory a stub of the session manager's
+//! `Authorization`, which allows only `test.admin` and counts how often
+//! it was asked.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use mikros_rt::exec::{Executor, Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -27,8 +32,12 @@ use mikros_rt::interfaces::mikros::process::{
     HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::{
-    ClientIdentity, ProcessDirectory, ProcessDirectoryAsyncServer, ProcessDirectoryBindResponse,
+    ClientIdentity, Directory, DirectoryAsyncServer, DirectoryConnectResponse, DirectoryRequest,
+    ProcessDirectory, ProcessDirectoryAsyncServer, ProcessDirectoryBindResponse,
     ProcessDirectoryRequest, Provider, ProviderClient,
+};
+use mikros_rt::interfaces::mikros::session::{
+    Authorization, AuthorizationAsyncServer, AuthorizationAuthorizeResponse, AuthorizationRequest,
 };
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
@@ -44,6 +53,10 @@ const SEAL_WRITE: u32 = 1 << 3;
 /// Rights of the manifest the broker is given: no `WRITE`.
 const READ_ONLY: u32 = 1 | 1 << 1 | 1 << 2 | 1 << 5 | 1 << 9;
 const SAME_RIGHTS: u32 = 1 << 31;
+const AUTHORIZATION: &str = "mikros.session.Authorization";
+/// The kernel object ID that the probe's connections to the broker
+/// name as their process's.
+const KOID: u64 = 77;
 
 const MANIFEST: &str = "\
 name: permbroker
@@ -62,6 +75,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let spawner = executor.spawner().clone();
     let control_reactor = reactor.clone();
     let control_spawner = spawner.clone();
+    let asked = Rc::new(Cell::new(0));
+    let stub_asked = asked.clone();
     let received = executor.block_on(managed::receive_async(
         bootstrap,
         reactor.clone(),
@@ -71,7 +86,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 .position(|h| h.role == HandleRole::User && h.id == CONTROL_ID);
             if let Some(at) = at {
                 let end = handles.remove(at).handle;
-                control_spawner.spawn(serve_control(end, control_reactor.clone()));
+                let (reactor, spawner) = (control_reactor.clone(), control_spawner.clone());
+                control_spawner.spawn(serve_control(end, reactor, spawner, stub_asked.clone()));
             }
         },
     ));
@@ -80,7 +96,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let launcher = LauncherAsyncClient::new(managed.header.launcher, reactor.clone());
     executor.block_on(async move {
-        match probe(&launcher, &reactor, &spawner).await {
+        match probe(&launcher, &reactor, &spawner, &asked).await {
             Ok(()) => 0,
             Err(step) => step,
         }
@@ -88,13 +104,51 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 }
 
 /// Accepts every `Bind` request on the control endpoint `end`, and
-/// keeps the bound connections open.
-async fn serve_control(end: OwnedHandle, reactor: Reactor) {
-    let server = ProcessDirectoryAsyncServer::new(ServerEnd::<ProcessDirectory>::new(end), reactor);
-    let mut bound = Vec::new();
+/// serves each bound directory, counting the asks of its stubs in
+/// `asked`.
+async fn serve_control(end: OwnedHandle, reactor: Reactor, spawner: Spawner, asked: Rc<Cell<u32>>) {
+    let control = ServerEnd::<ProcessDirectory>::new(end);
+    let server = ProcessDirectoryAsyncServer::new(control, reactor.clone());
     while let Ok(ProcessDirectoryRequest::Bind(request, responder)) = server.next().await {
-        bound.push(request.directory);
+        let directory = ServerEnd::new(request.directory.into_handle());
+        let serving = serve_directory(directory, reactor.clone(), spawner.clone(), asked.clone());
+        spawner.spawn(serving);
         let _ = responder.reply(server.server(), Ok(ProcessDirectoryBindResponse {}));
+    }
+}
+
+/// Serves `Directory` on `end`: `Authorization` as the stub, and no
+/// other protocol.
+async fn serve_directory(
+    end: ServerEnd<Directory>,
+    reactor: Reactor,
+    spawner: Spawner,
+    asked: Rc<Cell<u32>>,
+) {
+    let server = DirectoryAsyncServer::new(end, reactor.clone());
+    while let Ok(request) = server.next().await {
+        let DirectoryRequest::Connect(q, r) = request else {
+            continue;
+        };
+        if q.protocol != AUTHORIZATION {
+            let _ = r.reply(server.server(), Err(Status::NotFound));
+            continue;
+        }
+        let stub = ServerEnd::<Authorization>::new(q.server);
+        spawner.spawn(authorization(stub, reactor.clone(), asked.clone()));
+        let _ = r.reply(server.server(), Ok(DirectoryConnectResponse {}));
+    }
+}
+
+/// The stub of `Authorization`: allows `test.admin` only, as user 1000.
+async fn authorization(end: ServerEnd<Authorization>, reactor: Reactor, asked: Rc<Cell<u32>>) {
+    let server = AuthorizationAsyncServer::new(end, reactor);
+    while let Ok(AuthorizationRequest::Authorize(q, r)) = server.next().await {
+        asked.set(asked.get() + 1);
+        let allowed = q.client.app_id == ADMIN;
+        let admin = if allowed { 1000 } else { 0 };
+        let reply = AuthorizationAuthorizeResponse { allowed, admin };
+        let _ = r.reply(server.server(), Ok(reply));
     }
 }
 
@@ -174,23 +228,39 @@ async fn exit_code(launcher: &LauncherAsyncClient, pid: u32) -> Option<i64> {
 }
 
 fn identity(user: u32, app_id: &str) -> ClientIdentity {
+    process(user, app_id, 0)
+}
+
+/// The identity of a process of `user` and `app_id` with `koid`.
+fn process(user: u32, app_id: &str, koid: u64) -> ClientIdentity {
     ClientIdentity {
         pid: 0,
         user,
         app_id: app_id.into(),
         admin: 0,
-        koid: 0,
+        koid,
     }
 }
 
 /// A connection to the broker on `provider`, for `caller`.
 fn connect(provider: &ProviderClient, caller: &str, reactor: &Reactor) -> BrokerAsyncClient {
+    connect_as(provider, caller, KOID, reactor)
+}
+
+/// A connection to the broker on `provider`, for `caller` in the process
+/// with `koid`.
+fn connect_as(
+    provider: &ProviderClient,
+    caller: &str,
+    koid: u64,
+    reactor: &Reactor,
+) -> BrokerAsyncClient {
     let (client, server) = endpoints::<Broker>().expect("a channel");
     let _ = provider.connect(
         PROTOCOL.into(),
         None,
         server.into_handle(),
-        identity(0, caller),
+        process(0, caller, koid),
     );
     BrokerAsyncClient::new(client, reactor.clone())
 }
@@ -202,11 +272,27 @@ async fn check(b: &BrokerAsyncClient, user: u32, app: &str, p: &str) -> Result<D
     }
 }
 
+async fn check_for(
+    b: &BrokerAsyncClient,
+    client: ClientIdentity,
+    p: &str,
+) -> Result<Decision, Status> {
+    match b.check(client, p.into()).await {
+        Ok(r) => r.map(|r| r.decision),
+        Err(_) => Err(Status::PeerClosed),
+    }
+}
+
 async fn request(b: &BrokerAsyncClient, app: &str, p: &str) -> Result<Decision, Status> {
-    match b
-        .request(identity(1, app), p.into(), "testing".into())
-        .await
-    {
+    request_for(b, identity(1, app), p).await
+}
+
+async fn request_for(
+    b: &BrokerAsyncClient,
+    client: ClientIdentity,
+    p: &str,
+) -> Result<Decision, Status> {
+    match b.request(client, p.into(), "testing".into()).await {
         Ok(r) => r.map(|r| r.decision),
         Err(_) => Err(Status::PeerClosed),
     }
@@ -244,10 +330,17 @@ async fn prompter(end: ServerEnd<Prompter>, reactor: Reactor, allowed: bool) {
 const MANAGER: &str = "system.servicemgr";
 const ADMIN: &str = "test.admin";
 const APP: &str = "test.app";
+/// An app that may manage grants but no administrator allows.
+const MANAGER_APP: &str = "test.manager";
 
 /// Runs every check in turn, and returns the number of the first that
 /// failed.
-async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) -> Result<(), i64> {
+async fn probe(
+    l: &LauncherAsyncClient,
+    reactor: &Reactor,
+    spawner: &Spawner,
+    asked: &Cell<u32>,
+) -> Result<(), i64> {
     let mut step = 0;
     let mut check_ = |what: &str, passed: bool| {
         step += 1;
@@ -327,10 +420,22 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
         "refusing to set an admin permission",
         set(&admin, "admin.time.set", Decision::Denied).await == Err(Status::InvalidArgs),
     )?;
+    c("refusing them before asking", asked.get() == 0)?;
     c(
-        "setting a grant",
+        "granting a manager of grants",
+        grant_system(&manager, MANAGER_APP, &["system.grants.manage"]).await == Ok(()),
+    )?;
+    let other = connect_as(&provider, MANAGER_APP, KOID + 1, reactor);
+    c(
+        "refusing another user's grant that no administrator allows",
+        set(&other, "user.camera.use", Decision::Denied).await == Err(Status::AccessDenied),
+    )?;
+    c("asking the administrator", asked.get() == 1)?;
+    c(
+        "setting a grant that an administrator allows",
         set(&admin, "user.camera.use", Decision::Allowed).await == Ok(()),
     )?;
+    c("asking the administrator again", asked.get() == 2)?;
     c(
         "checking the grant",
         check(&admin, 1, APP, "user.camera.use").await == Ok(Decision::Allowed),
@@ -340,6 +445,31 @@ async fn probe(l: &LauncherAsyncClient, reactor: &Reactor, spawner: &Spawner) ->
         "listing the grant",
         listed.is_ok_and(|r| r.is_ok_and(|r| r.grants.len() == 1)),
     )?;
+    c("holding the administrator's answer", asked.get() == 2)?;
+    c(
+        "denying an admin permission to no process",
+        request(&manager, ADMIN, "admin.time.set").await == Ok(Decision::Denied),
+    )?;
+    c("not asking for no process", asked.get() == 2)?;
+    c(
+        "allowing an admin permission that an administrator allows",
+        request_for(&manager, process(1, ADMIN, 5), "admin.time.set").await
+            == Ok(Decision::Allowed),
+    )?;
+    c(
+        "holding it for that process",
+        check_for(&manager, process(1, ADMIN, 5), "admin.time.set").await == Ok(Decision::Allowed),
+    )?;
+    c(
+        "holding it for no other process",
+        check_for(&manager, process(1, ADMIN, 6), "admin.time.set").await
+            == Ok(Decision::Undetermined),
+    )?;
+    c(
+        "denying an admin permission that no administrator allows",
+        request_for(&manager, process(1, APP, 8), "admin.time.set").await == Ok(Decision::Denied),
+    )?;
+    c("asking twice more", asked.get() == 4)?;
     let watched = watcher.watch("user.camera.use".into()).await;
     c("watching", watched.is_ok_and(|r| r.is_ok()))?;
     c(

@@ -2,10 +2,12 @@
 //! protocol that carries them.
 //!
 //! A `Store` holds the `system` and `admin` permissions that manifests
-//! give each app ID and the grants that users made. It answers checks, says when a request needs the
-//! prompter, records grants, and reports each change that takes a
-//! permission away, for the connections that watch it. Grants are kept
-//! in memory only.
+//! give each app ID, the grants that users made, and the `admin`
+//! permissions that an administrator allowed one process, by its kernel
+//! object ID. It answers checks, says when a request needs the prompter
+//! or an administrator, records grants, and reports each change that
+//! takes a permission away, for the connections that watch it. Grants
+//! are kept in memory only.
 
 mod table;
 #[cfg(test)]
@@ -32,6 +34,9 @@ pub const SERVICE_MANAGER_PERMISSIONS: &[&str] = &[
 ];
 /// The most grants one `ListGrants` reply holds.
 pub const LIST_MAX: usize = 256;
+/// The permission that `ListGrants` for another user, and `SetGrant` for
+/// another user or with `ALLOWED`, need besides the one of their call.
+pub const MANAGE_GRANTS: &str = "admin.grants.manage";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -58,6 +63,8 @@ pub struct Identity<'a> {
     pub app_id: &'a str,
     /// The administrator who elevated the client's process, 0 for none.
     pub admin: u32,
+    /// The kernel object ID of the client's process, 0 for none.
+    pub koid: u64,
 }
 
 /// A user's decision on a `user` or `default` permission for an app.
@@ -90,6 +97,16 @@ pub enum Call {
     RegisterPrompter,
 }
 
+/// Whether `caller` needs `MANAGE_GRANTS` to list the grants of `user`.
+pub fn listing_needs_manage(caller: Identity<'_>, user: u32) -> bool {
+    user != caller.user
+}
+
+/// Whether `caller` needs `MANAGE_GRANTS` to set `grant`.
+pub fn setting_needs_manage(caller: Identity<'_>, grant: &Grant) -> bool {
+    grant.user != caller.user || grant.decision == Decision::Allowed
+}
+
 impl Call {
     /// The `system` permission a caller needs to make this call.
     pub fn needs(self) -> &'static str {
@@ -111,6 +128,10 @@ pub enum Requested {
     /// the prompter must be asked, and its answer recorded with
     /// `Store::record`.
     Ask,
+    /// The permission is an `admin` one that the client does not hold:
+    /// the session manager must ask an administrator, and an allowed
+    /// answer be recorded with `Store::hold`.
+    Authorize,
 }
 
 #[derive(Default)]
@@ -121,6 +142,9 @@ pub struct Store {
     /// The grants, by user, app ID and permission. None is
     /// `Undetermined`.
     grants: BTreeMap<(u32, String, String), Decision>,
+    /// The `admin` permissions that an administrator allowed, by the
+    /// kernel object ID of the process they were allowed to.
+    held: BTreeSet<(u64, String)>,
 }
 
 impl Store {
@@ -175,6 +199,7 @@ impl Store {
             Scope::System | Scope::Admin if self.has_system(client.app_id, permission) => {
                 Decision::Allowed
             }
+            Scope::Admin if self.holds(client, permission) => Decision::Allowed,
             Scope::System | Scope::Admin => Decision::Undetermined,
             Scope::User => grant,
             Scope::Default if grant == Decision::Denied => Decision::Denied,
@@ -189,17 +214,48 @@ impl Store {
     }
 
     /// What a request for `permission` by `client` comes to, and whether
-    /// it is allowed only because the client is elevated.
+    /// it is allowed only because the client is elevated. An `admin`
+    /// permission that a client without a process may not have is
+    /// `DENIED`.
     pub fn request(
         &self,
         client: Identity<'_>,
         permission: &str,
     ) -> Result<(Requested, bool), Failure> {
         let (decision, elevated) = self.check(client, permission)?;
+        let undetermined = decision == Decision::Undetermined;
         Ok(match scope(permission) {
-            Some(Scope::User) if decision == Decision::Undetermined => (Requested::Ask, false),
+            Some(Scope::User) if undetermined => (Requested::Ask, false),
+            Some(Scope::Admin) if undetermined && client.koid != 0 => (Requested::Authorize, false),
+            Some(Scope::Admin) if undetermined => (Requested::Decided(Decision::Denied), false),
             _ => (Requested::Decided(decision), elevated),
         })
+    }
+
+    /// Whether an administrator allowed `permission` to the process of
+    /// `client`.
+    fn holds(&self, client: Identity<'_>, permission: &str) -> bool {
+        client.koid != 0 && self.held.contains(&(client.koid, permission.into()))
+    }
+
+    /// Records that an administrator allowed the `admin` permission
+    /// `permission` to the process of `client`, which alone holds it
+    /// from then on. Nothing is recorded for a client without a process.
+    pub fn hold(&mut self, client: Identity<'_>, permission: &str) {
+        if client.koid != 0 && scope(permission) == Some(Scope::Admin) {
+            self.held.insert((client.koid, permission.into()));
+        }
+    }
+
+    /// Fails with `NOT_FOUND` or `INVALID_ARGS` when `set_grant` would
+    /// refuse `grant`, without changing anything.
+    pub fn check_grant(grant: &Grant) -> Result<(), Failure> {
+        let scope = scope(&grant.permission).ok_or(Failure::NotFound)?;
+        if matches!(scope, Scope::System | Scope::Admin) || grant.decision == Decision::Undetermined
+        {
+            return Err(Failure::InvalidArgs);
+        }
+        Ok(())
     }
 
     /// Records the prompter's answer to a request, and returns the
@@ -220,11 +276,8 @@ impl Store {
     /// known `user` or `default` permission. Returns what it takes away,
     /// if anything.
     pub fn set_grant(&mut self, grant: &Grant) -> Result<Option<Revoked>, Failure> {
+        Store::check_grant(grant)?;
         let scope = scope(&grant.permission).ok_or(Failure::NotFound)?;
-        if matches!(scope, Scope::System | Scope::Admin) || grant.decision == Decision::Undetermined
-        {
-            return Err(Failure::InvalidArgs);
-        }
         let before = self.put(grant.user, &grant.app_id, &grant.permission, grant.decision);
         let after = grant.decision;
         let taken = (before == Decision::Allowed && after != Decision::Allowed)
