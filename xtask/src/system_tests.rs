@@ -26,6 +26,9 @@ const MARK: &str = "selftest: ";
 const POWER_OFF_WAIT: Duration = Duration::from_secs(20);
 /// How long selftest gives a test with the speed factor 1.
 const TEST_TIME: Duration = Duration::from_secs(60);
+/// What the session manager logs once it marked the boot good through
+/// the boot attempts service, which writes the firmware variable.
+const MARKED: &str = "sessionmgr: marked the boot good";
 
 /// Builds a test image of the build kind `kind`, boots it in `dir` with
 /// `selftest` on the machine `machine` with the processor `processor`,
@@ -77,7 +80,14 @@ pub fn run(
     let _ = qemu.kill();
     let _ = qemu.wait();
     let serial = String::from_utf8_lossy(&fs::read(&log).unwrap_or_default()).into_owned();
-    let result = ended.and_then(|()| verdict(&serial).map_err(|why| anyhow::anyhow!(why)));
+    let result = ended
+        .and_then(|()| verdict(&serial).map_err(|why| anyhow::anyhow!(why)))
+        .and_then(|passed| match serial.contains(MARKED) {
+            true => Ok(passed),
+            false => Err(anyhow::anyhow!(
+                "the session manager did not mark the boot good"
+            )),
+        });
     result.with_context(|| {
         format!(
             "the system tests failed; serial output in {}",
