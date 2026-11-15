@@ -228,11 +228,12 @@ impl Store {
         decision
     }
 
-    /// Sets the grant `grant`, where `Undetermined` removes it. Returns
-    /// what it takes away, if anything.
+    /// Sets the grant `grant`, which must be `ALLOWED` or `DENIED` for a
+    /// known permission that is not a `system` one. Returns what it takes
+    /// away, if anything.
     pub fn set_grant(&mut self, grant: &Grant) -> Result<Option<Revoked>, Failure> {
         let kind = kind(&grant.permission).ok_or(Failure::NotFound)?;
-        if kind == Kind::System {
+        if kind == Kind::System || grant.decision == Decision::Undetermined {
             return Err(Failure::InvalidArgs);
         }
         let before = self.put(grant.user, &grant.app_id, &grant.permission, grant.decision);
@@ -246,14 +247,11 @@ impl Store {
         }))
     }
 
-    /// Stores `decision` and returns the one it replaces.
+    /// Stores `decision`, `ALLOWED` or `DENIED`, and returns the one it
+    /// replaces.
     fn put(&mut self, user: u32, app_id: &str, permission: &str, decision: Decision) -> Decision {
         let key = (user, app_id.into(), permission.into());
-        let before = if decision == Decision::Undetermined {
-            self.grants.remove(&key)
-        } else {
-            self.grants.insert(key, decision)
-        };
+        let before = self.grants.insert(key, decision);
         before.unwrap_or(Decision::Undetermined)
     }
 

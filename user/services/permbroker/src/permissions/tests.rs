@@ -249,14 +249,6 @@ fn revocations() {
         Ok(None)
     );
     assert_eq!(
-        s.set_grant(&grant(1, "camera", Decision::Undetermined)),
-        Ok(revoked("camera"))
-    );
-    assert_eq!(
-        s.set_grant(&grant(1, "camera", Decision::Allowed)),
-        Ok(None)
-    );
-    assert_eq!(
         s.set_grant(&grant(1, "camera", Decision::Denied)),
         Ok(revoked("camera"))
     );
@@ -280,15 +272,16 @@ fn revocations() {
 }
 
 #[test]
-fn undetermined_removes_a_grant() {
+fn set_grant_refuses_undetermined() {
     let mut s = store();
     s.set_grant(&grant(1, "camera", Decision::Denied)).unwrap();
-    s.set_grant(&grant(1, "camera", Decision::Undetermined))
-        .unwrap();
-    assert!(s.list(1).is_empty());
+    assert_eq!(
+        s.set_grant(&grant(1, "camera", Decision::Undetermined)),
+        Err(Failure::InvalidArgs)
+    );
     assert_eq!(
         s.check(id(APP), "camera").map(|d| d.0),
-        Ok(Decision::Undetermined)
+        Ok(Decision::Denied)
     );
 }
 
