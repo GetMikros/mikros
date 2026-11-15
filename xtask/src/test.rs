@@ -629,13 +629,7 @@ pub fn run(args: &Args) -> Result<()> {
         "",
     )?;
     println!("accounts run passed");
-    crate::own_root::run_live(
-        &args.machine,
-        args.kind,
-        &built,
-        &dir.join("live"),
-        timeout,
-    )?;
+    crate::own_root::run_live(&args.machine, args.kind, &built, &dir.join("live"), timeout)?;
     println!("live run passed");
     crate::boot_attempts::run(
         &args.machine,

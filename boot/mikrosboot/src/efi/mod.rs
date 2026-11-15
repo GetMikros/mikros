@@ -2,8 +2,8 @@
 
 mod enter;
 mod gather;
-mod pci;
 mod partition;
+mod pci;
 
 use core::fmt::{Arguments, Write};
 use core::time::Duration;
