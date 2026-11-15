@@ -66,7 +66,7 @@ async fn elevate(
     let elevated = match answer {
         None => return None,
         Some((false, _)) => Err(Status::AccessDenied),
-        Some((true, admin)) => mark(requests, pid, admin).await,
+        Some((true, admin)) => mark(requests, client.koid, admin).await,
     };
     match &elevated {
         Ok(admin) => mikros_rt::log!(
@@ -81,14 +81,16 @@ async fn elevate(
     Some(elevated)
 }
 
-/// Marks process `pid` as elevated by `admin`, which a process elevated
-/// before keeps: then the administrator who did.
-async fn mark(requests: &Requests, pid: u32, admin: u32) -> Result<u32, Status> {
+/// Marks the process with the kernel object ID `koid`, the caller's, as
+/// elevated by `admin`, which a process elevated before keeps: then the
+/// administrator who did. A process with the caller's process ID that
+/// started after the caller ended is never marked.
+async fn mark(requests: &Requests, koid: u64, admin: u32) -> Result<u32, Status> {
     let elevations = requests.elevations.borrow().clone();
     let elevations = elevations.ok_or(Status::BadState)?;
-    match elevations.set_admin(pid, admin).await {
+    match elevations.set_admin(koid, admin).await {
         Ok(Ok(_)) => Ok(admin),
-        Ok(Err(Status::BadState)) => match requests.admin_of(pid).await {
+        Ok(Err(Status::BadState)) => match requests.admin_of(koid).await {
             0 => Err(Status::BadState),
             earlier => Ok(earlier),
         },

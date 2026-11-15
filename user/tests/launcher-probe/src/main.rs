@@ -38,8 +38,8 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeAsyncClient, OpenFlags, Rights};
 use mikros_rt::interfaces::mikros::process::{
-    Elevations, ExitStatus, HandleRole, LauncherAsyncClient, ProcessInfo, SpawnRequest,
-    StartupHandle, StatusKind, WaitOptions,
+    Elevations, ElevationsAsyncClient, ExitStatus, HandleRole, LauncherAsyncClient, ProcessInfo,
+    SpawnRequest, StartupHandle, StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::{
     Directory, DirectoryAsyncServer, DirectoryConnectResponse, DirectoryRequest, ProcessDirectory,
@@ -61,6 +61,9 @@ const PROBE: &str = "/system/bin/probe";
 /// The probe as the binary of a command, and the command's app ID.
 const COMMAND: &str = "/system/bin/probe-command";
 const COMMAND_APP: &str = "system.probe-command";
+/// The session manager's app ID, which a program manifest lets the
+/// probe take, to drive `Elevations`.
+const SESSION_MANAGER_APP: &str = "system.sessionmgr";
 /// The probe's own path, as init starts it in place of the service
 /// manager; the image holds the probe there too.
 const SELF_PATH: &str = "/system/servicemgr";
@@ -164,6 +167,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             [_] => probe(&launcher, &root, &reactor, me).await,
             [_, "exit", code] => code.parse().unwrap_or(PANIC_EXIT_CODE),
             [_, "sleep"] => core::future::pending().await,
+            [_, "elevations"] => elevations(&launcher, &reactor).await,
             // Run as a command: with its app ID, and starting nothing.
             [_, "command"] => {
                 let own = get_info(&launcher, me).await;
@@ -498,6 +502,51 @@ fn take_chld() -> bool {
     unsafe { sys::signal_wait(CHLD_BIT, 0, info.as_mut_ptr()) == mikros_rt::OK }
 }
 
+/// As the session manager, through `Elevations`: an ended process's
+/// kernel object ID names no process, and a running child's names it, to
+/// be marked as elevated once. Gives 0 when every check passed, or the
+/// number of the first that failed.
+async fn elevations(l: &LauncherAsyncClient, reactor: &Reactor) -> i64 {
+    let Ok((client, server)) = endpoints::<Elevations>() else {
+        return 1;
+    };
+    if !matches!(l.open_elevations(server).await, Ok(Ok(_))) {
+        return 2;
+    }
+    let e = ElevationsAsyncClient::new(client, reactor.clone());
+    let Ok((ended, _)) = spawn(l, &["exit", "0"], |_| {}).await else {
+        return 3;
+    };
+    let Ok(stale) = get_info(l, ended).await.map(|i| i.koid) else {
+        return 4;
+    };
+    if wait(l, ended as i32).await != Some((ended, 0, 0)) {
+        return 5;
+    }
+    if !matches!(e.set_admin(stale, 1000).await, Ok(Err(Status::NotFound))) {
+        return 6;
+    }
+    if !matches!(e.get_admin(stale).await, Ok(Err(Status::NotFound))) {
+        return 7;
+    }
+    let Ok((sleeper, _)) = spawn(l, &["sleep"], |_| {}).await else {
+        return 8;
+    };
+    let Ok(koid) = get_info(l, sleeper).await.map(|i| i.koid) else {
+        return 9;
+    };
+    let checks = [
+        matches!(e.get_admin(koid).await, Ok(Ok(r)) if r.admin == 0),
+        matches!(e.set_admin(koid, 1000).await, Ok(Ok(_))),
+        matches!(e.get_admin(koid).await, Ok(Ok(r)) if r.admin == 1000),
+        matches!(e.set_admin(koid, 1001).await, Ok(Err(Status::BadState))),
+    ];
+    let failed = checks.iter().position(|passed| !passed);
+    let _ = kill(l, sleeper, KILL).await;
+    let _ = wait(l, sleeper as i32).await;
+    failed.map_or(0, |at| 10 + at as i64)
+}
+
 async fn kill(launcher: &LauncherAsyncClient, pid: u32, signo: u32) -> Result<(), Status> {
     match launcher.kill(pid, signo).await {
         Ok(result) => result.map(drop),
@@ -642,6 +691,15 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
         check(
             "refusing Elevations to another app",
             matches!(opened, Ok(Err(Status::AccessDenied))),
+        )?;
+        let elevator = spawn(l, &["elevations"], |r| {
+            r.app_id = Some(SESSION_MANAGER_APP.into())
+        })
+        .await
+        .map_or(0, |(pid, _)| pid);
+        check(
+            "elevating processes by kernel object ID",
+            wait(l, elevator as i32).await == Some((elevator, 0, 0)),
         )?;
         // A command's binary runs with the command's app ID, which no
         // caller may name, and starts nothing.

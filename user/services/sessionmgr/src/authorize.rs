@@ -124,12 +124,13 @@ impl Requests {
         self.open.borrow().values().any(|o| o.console == console)
     }
 
-    /// The administrator who elevated process `pid`, 0 for none.
-    pub async fn admin_of(&self, pid: u32) -> u32 {
+    /// The administrator who elevated the process with the kernel object
+    /// ID `koid`, 0 for none.
+    pub async fn admin_of(&self, koid: u64) -> u32 {
         let elevations = self.elevations.borrow().clone();
         match elevations {
             Some(e) => e
-                .get_admin(pid)
+                .get_admin(koid)
                 .await
                 .ok()
                 .and_then(Result::ok)
@@ -149,7 +150,7 @@ impl Requests {
         action: String,
         reason: String,
     ) -> Option<(bool, u32)> {
-        let admin = self.admin_of(client.pid).await;
+        let admin = self.admin_of(client.koid).await;
         let still = admin != 0
             && user(&self.accounts, admin)
                 .await
