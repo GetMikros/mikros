@@ -265,6 +265,7 @@ name = "devices"
 version = "0.0.0"
 dependencies = [
  "mikros-cli",
+ "mikros-command",
  "mikros-rt",
 ]
 
@@ -525,6 +526,13 @@ name = "mikros-cli"
 version = "0.0.0"
 
 [[package]]
+name = "mikros-command"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "mikros-display"
 version = "0.0.0"
 
@@ -753,6 +761,7 @@ name = "power"
 version = "0.0.0"
 dependencies = [
  "mikros-cli",
+ "mikros-command",
  "mikros-rt",
 ]
 
@@ -1006,6 +1015,7 @@ name = "sudo"
 version = "0.0.0"
 dependencies = [
  "mikros-cli",
+ "mikros-command",
  "mikros-rt",
 ]
 

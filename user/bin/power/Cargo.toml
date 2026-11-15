@@ -9,6 +9,7 @@ publish = false
 mikros-cli = { path = "../../lib/cli" }
 
 [target.'cfg(target_os = "mikros")'.dependencies]
+mikros-command = { path = "../../lib/command" }
 mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 
 # A command: it runs with the app ID system.power, which may shut the

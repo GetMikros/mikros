@@ -9,6 +9,7 @@ publish = false
 mikros-cli = { path = "../../lib/cli" }
 
 [target.'cfg(target_os = "mikros")'.dependencies]
+mikros-command = { path = "../../lib/command" }
 mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
 
 # It lists the devices through mikros.driver.Devices, which every process
