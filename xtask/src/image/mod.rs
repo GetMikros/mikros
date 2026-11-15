@@ -33,8 +33,9 @@ pub struct Args {
     /// The build kind to put in the image.
     #[arg(long, value_enum, default_value_t = Kind::Debug)]
     pub kind: Kind,
-    /// Create an image with only the EFI system partition, which runs the
-    /// whole system from the boot image.
+    /// Create a live image, whose command line holds the word `live`, so
+    /// that the system uses its root partition read-only and keeps no
+    /// changes.
     #[arg(long)]
     pub live: bool,
     /// Sign the EFI executables for Secure Boot and add the files for
@@ -138,8 +139,6 @@ fn write_image(path: &Path, parts: &[Part]) -> Result<()> {
     Ok(())
 }
 
-pub use root::live_dirs;
-
 pub fn run(args: &Args) -> Result<()> {
     let key = match (args.signed, &args.key) {
         (false, _) => None,
@@ -152,31 +151,29 @@ pub fn run(args: &Args) -> Result<()> {
         true => build::build_tests(args.kind)?,
         false => build::build(args.kind)?,
     };
-    if args.live {
-        let boot_image = build::live_boot_image(args.kind, &built.system_image)?;
-        let out = path(args.kind, true, args.tests);
-        return create_live(&built, &boot_image, &out, key.as_ref());
-    }
-    let out = path(args.kind, false, args.tests);
+    let out = path(args.kind, args.live, args.tests);
     create_parts(
         args.kind,
         &built,
         &built.system_image,
         &out,
-        "",
+        if args.live { LIVE } else { "" },
         &[],
         false,
         key.as_ref(),
     )
 }
 
+/// The command line word that makes the system use the root partition
+/// read-only, as a live system.
+pub const LIVE: &str = "live";
+
 /// The files of the EFI system partition: the boot manager, also at the
-/// fallback path, the bootloader, the kernel, `boot_image` and
-/// `command_line`. With `key`, the EFI executables are signed with it
-/// and the files for enrolling it are added.
+/// fallback path, the bootloader and `command_line`. With `key`, the EFI
+/// executables are signed with it and the files for enrolling it are
+/// added.
 fn esp_files(
     built: &build::Built,
-    boot_image: &Path,
     command_line: String,
     key: Option<&Key>,
 ) -> Result<Vec<(String, Vec<u8>)>> {
@@ -186,8 +183,6 @@ fn esp_files(
         ("EFI/Mikros/bootmenu.efi", bootmenu.clone()),
         ("EFI/BOOT/BOOTX64.EFI", bootmenu),
         ("EFI/Mikros/mikrosboot.efi", read(&built.bootloader)?),
-        ("EFI/Mikros/kernel", read(&built.kernel)?),
-        ("EFI/Mikros/boot.img", read(boot_image)?),
         ("EFI/Mikros/boot.conf", command_line.into_bytes()),
     ]
     .into_iter()
@@ -197,34 +192,6 @@ fn esp_files(
         secure_boot::sign_esp(&mut files, key)?;
     }
     Ok(files)
-}
-
-/// Writes a live image to `out`: only the EFI system partition, with the
-/// live system's `boot_image` and `root=bootfs` on the command line.
-fn create_live(
-    built: &build::Built,
-    boot_image: &Path,
-    out: &Path,
-    key: Option<&Key>,
-) -> Result<()> {
-    let contents = esp_files(built, boot_image, "root=bootfs".to_owned(), key)?;
-    let files: Vec<(&str, &[u8])> = contents
-        .iter()
-        .map(|(p, d)| (p.as_str(), d.as_slice()))
-        .collect();
-    let total = files.iter().map(|(_, d)| d.len() as u64).sum();
-    let esp = esp::build(esp::size_for(total), &files)?;
-    write_image(
-        out,
-        &[Part {
-            type_guid: ESP_TYPE,
-            guid: Uuid::new_v4(),
-            name: "EFI system partition",
-            data: Data::Bytes(&esp),
-        }],
-    )?;
-    println!("created  {}", out.display());
-    Ok(())
 }
 
 /// Writes the disk image of the components `built` for the build kind
@@ -322,7 +289,7 @@ fn create_parts(
     if kind == Kind::Fuzz && !extra.split(' ').any(|w| w == KASLR_OFF) {
         command_line = format!("{command_line} {KASLR_OFF}");
     }
-    let contents = esp_files(built, &built.boot_image, command_line, key)?;
+    let contents = esp_files(built, command_line, key)?;
     let files: Vec<(&str, &[u8])> = contents
         .iter()
         .map(|(p, d)| (p.as_str(), d.as_slice()))

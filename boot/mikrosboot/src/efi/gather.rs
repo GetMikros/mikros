@@ -1,9 +1,11 @@
 //! Collecting what the kernel is given while boot services run.
 
 use super::Failure;
+use super::partition::{self, System};
 use alloc::string::String;
 use alloc::vec::Vec;
 use boot_protocol::Framebuffer;
+use mikrosboot::bootlist::Module;
 use mikrosboot::display::{self, ModeInfo, Output, PciLocation, Pixels};
 use mikrosboot::elf::{self, Kernel};
 use mikrosboot::firmware::{self, RSDP_SIZE};
@@ -17,8 +19,6 @@ use uefi::proto::rng::Rng;
 use uefi::table::cfg::ConfigTableEntry;
 use uefi::{CString16, Handle, runtime, system, table};
 
-const KERNEL_PATH: &str = "\\EFI\\Mikros\\kernel";
-const BOOT_IMAGE_PATH: &str = "\\EFI\\Mikros\\boot.img";
 const BOOT_CONF_PATH: &str = "\\EFI\\Mikros\\boot.conf";
 
 /// The largest RSDP length that is read.
@@ -29,7 +29,9 @@ pub struct Gathered {
     pub kernel_file: Vec<u8>,
     pub kernel: Kernel,
     pub layout: load::Layout,
-    pub boot_image: Vec<u8>,
+    /// The system partition, from which `modules` are read.
+    pub system: System,
+    pub modules: Vec<Module>,
     pub cmdline: String,
     pub framebuffer: Option<Framebuffer>,
     /// The PCI function that provides the framebuffer, when one was found.
@@ -55,24 +57,29 @@ fn exists(fs: &mut FileSystem, path: &str) -> Result<bool, Failure> {
         .map_err(|e| Failure::new(step, alloc::format!("{e}")))
 }
 
-fn command_line(fs: &mut FileSystem) -> Result<String, Failure> {
+/// The command line of `boot.conf` and the load options, with the boot
+/// partition, and the bootloader's device.
+fn command_line(fs: &mut FileSystem) -> Result<(String, Handle), Failure> {
     let step = "finding the command line";
     let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())
         .map_err(|e| Failure::new(step, alloc::format!("{e}")))?;
-    let line = match image
-        .load_options_as_bytes()
-        .and_then(cmdline::from_load_options)
-    {
-        Some(line) => line,
-        None if exists(fs, BOOT_CONF_PATH)? => {
+    let conf = match exists(fs, BOOT_CONF_PATH)? {
+        true => {
             let contents = read(fs, BOOT_CONF_PATH, "reading \\EFI\\Mikros\\boot.conf")?;
-            cmdline::from_boot_conf(&contents).map_err(|e| Failure::new(step, e))?
+            Some(cmdline::from_boot_conf(&contents).map_err(|e| Failure::new(step, e))?)
         }
-        None => String::new(),
+        false => None,
     };
+    let options = image
+        .load_options_as_bytes()
+        .and_then(cmdline::from_load_options);
+    let line = cmdline::compose(conf, options);
     cmdline::check_len(&line).map_err(|e| Failure::new(step, e))?;
+    let device = image
+        .device()
+        .ok_or_else(|| Failure::new(step, "the bootloader has no device"))?;
     // The limit applies before the boot partition is named.
-    Ok(cmdline::with_esp(line, boot_partition(&image)))
+    Ok((cmdline::with_esp(line, boot_partition(&image)), device))
 }
 
 /// The partition GUID of the GPT partition the bootloader was loaded
@@ -302,14 +309,15 @@ pub fn gather() -> Result<Gathered, Failure> {
     let volume = boot::get_image_file_system(boot::image_handle())
         .map_err(|e| Failure::new("opening the boot volume", alloc::format!("{e}")))?;
     let mut fs = FileSystem::new(volume);
-    let kernel_file = read(&mut fs, KERNEL_PATH, "reading \\EFI\\Mikros\\kernel")?;
+    let (cmdline, device) = command_line(&mut fs)?;
+    drop(fs);
+    let found = partition::find(device, cmdline)?;
+    let kernel_file = found.kernel;
     let range_start = boot_protocol::x86_64::KERNEL_RANGE_START;
     let kernel = elf::check(&kernel_file, range_start)
         .map_err(|e| Failure::new("checking the kernel", e))?;
     let layout = load::layout(&kernel);
-    let boot_image = read(&mut fs, BOOT_IMAGE_PATH, "reading \\EFI\\Mikros\\boot.img")?;
-    let cmdline = command_line(&mut fs)?;
-    drop(fs);
+    let cmdline = found.cmdline;
     let (framebuffer, framebuffer_pci) = framebuffer(&cmdline)?;
     let random = match kernel.relocatable && !placement::kaslr_off(cmdline.as_bytes()) {
         true => random_words(),
@@ -319,7 +327,8 @@ pub fn gather() -> Result<Gathered, Failure> {
         kernel_file,
         kernel,
         layout,
-        boot_image,
+        system: found.volume,
+        modules: found.modules,
         cmdline,
         framebuffer,
         framebuffer_pci,

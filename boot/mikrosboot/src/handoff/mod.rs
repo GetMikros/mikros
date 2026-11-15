@@ -6,10 +6,12 @@ use crate::elf::Kernel;
 use crate::load::{self, Layout};
 use crate::memmap::{self, Map, Region};
 use crate::paging::BOOT_STACK_SIZE;
+use alloc::vec;
+use alloc::vec::Vec;
 use boot_protocol::x86_64::DIRECT_MAP_LIMIT;
 use boot_protocol::{
-    BOOT_INFO_SIZE_1_3, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, PAGE_SIZE,
-    VERSION_MAJOR, arch, flags,
+    BOOT_INFO_SIZE, BootInfo, BootModule, Framebuffer, Kind, MAGIC, MemoryMapEntry, PAGE_SIZE,
+    VERSION_MAJOR, VERSION_MINOR, arch, flags,
 };
 
 /// The pages allocated for `BootInfo` and the command line.
@@ -23,8 +25,12 @@ pub struct Prepared {
     pub kernel: Kernel,
     pub layout: Layout,
     pub kernel_phys: u64,
-    pub boot_image_phys: u64,
-    pub boot_image_size: u64,
+    /// The pages that hold the contents of the boot modules, as start and
+    /// count; no pages when every module is empty.
+    pub modules_area: (u64, u64),
+    /// The boot module array, and its number of entries.
+    pub modules_phys: u64,
+    pub modules_count: u64,
     pub stack_phys: u64,
     pub trampoline: Option<u64>,
     /// The `INFO_PAGES` pages for `BootInfo` and the command line.
@@ -63,9 +69,9 @@ impl Prepared {
                 pages: load::pages(self.layout.size),
                 kind: Kind::KernelImage,
             }),
-            Some(Region {
-                start: self.boot_image_phys,
-                pages: load::pages(self.boot_image_size).max(1),
+            (self.modules_area.1 > 0).then_some(Region {
+                start: self.modules_area.0,
+                pages: self.modules_area.1,
                 kind: Kind::BootImage,
             }),
             Some(Region {
@@ -121,9 +127,8 @@ impl Prepared {
         BootInfo {
             magic: MAGIC,
             version_major: VERSION_MAJOR,
-            // Boot modules are not passed yet.
-            version_minor: 3,
-            size: BOOT_INFO_SIZE_1_3,
+            version_minor: VERSION_MINOR,
+            size: BOOT_INFO_SIZE,
             arch: arch::X86_64,
             flags: optional.flags | runtime,
             memory_map_phys: entries.as_ptr() as u64,
@@ -133,8 +138,8 @@ impl Prepared {
             kernel_virt_base: self.layout.virt_base,
             kernel_size: self.layout.size,
             direct_map_base: self.direct_map_base,
-            boot_image_phys: self.boot_image_phys,
-            boot_image_size: self.boot_image_size,
+            boot_image_phys: 0,
+            boot_image_size: 0,
             cmdline_phys: if self.cmdline_len == 0 {
                 0
             } else {
@@ -154,10 +159,28 @@ impl Prepared {
             framebuffer_pci_devfn: pci.map_or(0, |p| p.devfn),
             framebuffer_pci_valid: u8::from(pci.is_some()),
             reserved: [0; 3],
-            modules_phys: 0,
-            modules_count: 0,
+            modules_phys: self.modules_phys,
+            modules_count: self.modules_count,
         }
     }
+}
+
+/// The boot module array for modules whose contents are at `phys` and
+/// `size` bytes long, and whose paths are `paths`, placed at `array_phys`:
+/// the entries, followed by the paths.
+pub fn module_array(modules: &[(u64, u64)], paths: &[&str], array_phys: u64) -> Vec<u8> {
+    let entry = size_of::<BootModule>();
+    let mut bytes = vec![0u8; entry * modules.len()];
+    for (i, (&(phys, size), path)) in modules.iter().zip(paths).enumerate() {
+        let path_phys = array_phys + bytes.len() as u64;
+        bytes.extend_from_slice(path.as_bytes());
+        let at = i * entry;
+        bytes[at..at + 8].copy_from_slice(&phys.to_le_bytes());
+        bytes[at + 8..at + 16].copy_from_slice(&size.to_le_bytes());
+        bytes[at + 16..at + 24].copy_from_slice(&path_phys.to_le_bytes());
+        bytes[at + 24..at + 28].copy_from_slice(&(path.len() as u32).to_le_bytes());
+    }
+    bytes
 }
 
 #[cfg(test)]

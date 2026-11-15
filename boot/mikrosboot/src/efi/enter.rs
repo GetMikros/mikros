@@ -5,17 +5,17 @@ use super::Failure;
 use super::gather::Gathered;
 use alloc::vec;
 use boot_protocol::x86_64::{AP_TRAMPOLINE_END, DIRECT_MAP_BASE, fits_ap_trampoline};
-use boot_protocol::{BootInfo, Kind, MemoryMapEntry, PAGE_SIZE};
+use boot_protocol::{BootInfo, BootModule, Kind, MemoryMapEntry, PAGE_SIZE};
 use core::arch::{asm, global_asm};
 use core::ptr::NonNull;
 use mikrosboot::cpu;
 use mikrosboot::exit::{self, FinalMap};
-use mikrosboot::handoff::{CMDLINE_OFFSET, INFO_PAGES, Prepared};
+use mikrosboot::handoff::{CMDLINE_OFFSET, INFO_PAGES, Prepared, module_array};
 use mikrosboot::load::{self, Layout, PHYS_ALIGN};
 use mikrosboot::memmap::{Map, Region};
 use mikrosboot::paging::{self, BOOT_STACK_SIZE, Frames, Placement};
 use mikrosboot::{placement, runtime};
-use uefi::boot::{self, AllocateType, MemoryType};
+use uefi::boot::{self, AllocateType, AllocateType::AnyPages, MemoryType};
 use uefi::mem::memory_map::MemoryMap;
 use uefi::{Status, table};
 use uefi_raw::table::boot::{BootServices, MemoryDescriptor};
@@ -148,9 +148,53 @@ struct Words {
     len: usize,
 }
 
+/// Reads the boot modules of `g` into one allocation, each from a page of
+/// its own, and writes the module array with their paths. Returns the
+/// pages of the modules' contents, as start and count, the array's
+/// address and its number of entries.
+fn load_modules(g: &mut Gathered) -> Result<((u64, u64), u64, u64), Failure> {
+    let step = "loading the boot modules";
+    let pages: u64 = g.modules.iter().map(|m| load::pages(m.size)).sum();
+    let area = match pages {
+        0 => 0,
+        _ => allocate(AnyPages, pages, step)?,
+    };
+    let mut at = area;
+    let mut placed = vec![];
+    for m in &g.modules {
+        if m.size == 0 {
+            placed.push((0, 0));
+            continue;
+        }
+        // SAFETY: the allocation holds the module's pages from `at`, and
+        // nothing else refers to them.
+        let contents = unsafe { core::slice::from_raw_parts_mut(at as *mut u8, m.size as usize) };
+        g.system
+            .read(m.node, contents)
+            .map_err(|e| Failure::new(step, alloc::format!("{}: {e}", m.path)))?;
+        placed.push((at, m.size));
+        at += load::pages(m.size) * PAGE_SIZE;
+    }
+    let paths: alloc::vec::Vec<&str> = g.modules.iter().map(|m| m.path.as_str()).collect();
+    let size = (size_of::<BootModule>() * paths.len()
+        + paths.iter().map(|p| p.len()).sum::<usize>()) as u64;
+    let array = allocate(
+        AnyPages,
+        load::pages(size).max(1),
+        "allocating the boot module array",
+    )?;
+    let bytes = module_array(&placed, &paths, array);
+    // SAFETY: the allocation holds at least `size` bytes, which `bytes` has.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), array as *mut u8, bytes.len()) };
+    Ok(((area, pages), array, g.modules.len() as u64))
+}
+
 /// Allocates and fills what the kernel is given, and returns it with the
 /// random words left for placing the direct map.
-fn prepare(g: Gathered) -> Result<(Prepared, Words), Failure> {
+fn prepare(mut g: Gathered) -> Result<(Prepared, Words), Failure> {
+    // The modules are read while the system partition is open, and it
+    // closes when `g` is dropped, before boot services end.
+    let (modules_area, modules_phys, modules_count) = load_modules(&mut g)?;
     let step = "allocating memory for the kernel";
     let kernel_pages = load::pages(g.layout.size);
     let kernel_phys = allocate_aligned(kernel_pages, step)?;
@@ -167,22 +211,6 @@ fn prepare(g: Gathered) -> Result<(Prepared, Words), Failure> {
     let layout = Layout {
         virt_base: base,
         size: g.layout.size,
-    };
-
-    let step = "allocating memory for the boot image";
-    let boot_image_size = g.boot_image.len() as u64;
-    let boot_image_phys = allocate(
-        AllocateType::AnyPages,
-        load::pages(boot_image_size).max(1),
-        step,
-    )?;
-    // SAFETY: the allocation holds at least `boot_image_size` bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            g.boot_image.as_ptr(),
-            boot_image_phys as *mut u8,
-            g.boot_image.len(),
-        )
     };
 
     let step = "allocating memory for the boot stack";
@@ -238,8 +266,9 @@ fn prepare(g: Gathered) -> Result<(Prepared, Words), Failure> {
         kernel,
         layout,
         kernel_phys,
-        boot_image_phys,
-        boot_image_size,
+        modules_area,
+        modules_phys,
+        modules_count,
         stack_phys,
         trampoline,
         info_phys,

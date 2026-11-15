@@ -25,8 +25,9 @@ fn prepared() -> Prepared {
             size: 16 * P,
         },
         kernel_phys: 0x20_0000,
-        boot_image_phys: 0x30_0000,
-        boot_image_size: 3 * P - 5,
+        modules_area: (0x30_0000, 3),
+        modules_phys: 0x30_8000,
+        modules_count: 4,
         stack_phys: 0x31_0000,
         trampoline: Some(0x8000),
         info_phys: INFO,
@@ -177,7 +178,7 @@ fn fills_boot_info_with_physical_addresses() {
     let p = prepared();
     let entries = [MemoryMapEntry::default(); 3];
     let info = p.boot_info(&entries);
-    assert_eq!((info.magic, info.size), (MAGIC, BOOT_INFO_SIZE_1_3));
+    assert_eq!((info.magic, info.size), (MAGIC, BOOT_INFO_SIZE));
     assert_eq!(info.memory_map_phys, entries.as_ptr() as u64);
     assert_eq!(info.memory_map_count, 3);
     assert_eq!(info.cmdline_phys, INFO + CMDLINE_OFFSET);
@@ -187,7 +188,7 @@ fn fills_boot_info_with_physical_addresses() {
     assert_eq!(info.arch_data0, 0x8000);
     assert_eq!(info.framebuffer.phys_base, 0xfd00_0000);
     assert_eq!(info.flags, flags::FRAMEBUFFER_PRESENT);
-    assert_eq!((info.version_major, info.version_minor), (1, 3));
+    assert_eq!((info.version_major, info.version_minor), (1, 4));
     assert_eq!(
         (
             info.framebuffer_pci_segment,
@@ -209,13 +210,39 @@ fn fills_boot_info_with_physical_addresses() {
         (info.kernel_phys_base, info.kernel_size),
         (0x20_0000, 16 * P)
     );
-    assert_eq!(
-        (info.boot_image_phys, info.boot_image_size),
-        (0x30_0000, 3 * P - 5)
-    );
+    assert_eq!((info.boot_image_phys, info.boot_image_size), (0, 0));
+    assert_eq!((info.modules_phys, info.modules_count), (0x30_8000, 4));
     assert_eq!(
         (info.kernel_virt_base, info.direct_map_base),
         (0xffff_ffff_8000_0000, DIRECT_MAP_BASE)
+    );
+}
+
+#[test]
+fn lays_out_the_module_array() {
+    let bytes = module_array(&[(0x30_0000, 10), (0, 0)], &["init", "lib/x"], 0x40_0000);
+    assert_eq!(bytes.len(), 64 + 9);
+    let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    assert_eq!((word(0), word(8), word(16)), (0x30_0000, 10, 0x40_0040));
+    assert_eq!(bytes[24..32], [4, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!((word(32), word(40), word(48)), (0, 0, 0x40_0044));
+    assert_eq!(bytes[56..60], [5, 0, 0, 0]);
+    assert_eq!(&bytes[64..], b"initlib/x");
+}
+
+#[test]
+fn leaves_out_the_module_pages_without_contents() {
+    let p = Prepared {
+        modules_area: (0, 0),
+        ..prepared()
+    };
+    let mut buf = vec![MemoryMapEntry::default(); p.entries_capacity];
+    let mut map = Map::new(&mut buf);
+    p.memory_map(&mut map, firmware()).unwrap();
+    assert!(
+        map.entries()
+            .iter()
+            .all(|e| e.kind != Kind::BootImage as u32)
     );
 }
 

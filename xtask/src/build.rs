@@ -76,12 +76,12 @@ pub struct Built {
     pub bootmenu: PathBuf,
     pub bootloader: PathBuf,
     pub kernel: PathBuf,
-    /// The boot image, which the EFI system partition holds: the files
-    /// that the system needs until the root file system is available.
+    /// An archive of the files that the system needs until the root file
+    /// system is available, which the boot list of the system version
+    /// names.
     pub boot_image: PathBuf,
     /// The whole system, early services included, which the root
-    /// partition and a live system's boot image hold. For the test build
-    /// it is the boot image.
+    /// partition holds. For the test build it is the boot image.
     pub system_image: PathBuf,
     /// For the test build, the whole system of the setup run's root
     /// partition: the test boot image with the services that need the
@@ -1568,42 +1568,6 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
         takeover_image,
         xkbcommon,
     })
-}
-
-/// Builds the boot image of a live system for `kind` from the system's
-/// boot image `boot_image`: each of its members, `init` and the whole
-/// system at their paths in the namespaces, and then the directories of
-/// the root file system at their paths there.
-pub fn live_boot_image(kind: Kind, boot_image: &Path) -> Result<PathBuf> {
-    let dir = crate::workspace_root()
-        .join("target/boot")
-        .join(kind.name());
-    fs::create_dir_all(&dir)?;
-    let path = dir.join("live-boot.img");
-    let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-    let mut live = tar::Builder::new(file);
-    let source =
-        File::open(boot_image).with_context(|| format!("opening {}", boot_image.display()))?;
-    let mut source = tar::Archive::new(source);
-    let entries = source
-        .entries()
-        .with_context(|| format!("reading {}", boot_image.display()))?;
-    for entry in entries {
-        let mut entry = entry.with_context(|| format!("reading {}", boot_image.display()))?;
-        let header = entry.header().clone();
-        live.append(&header, &mut entry)
-            .context("adding a member to the live boot archive")?;
-    }
-    for dir in crate::image::live_dirs() {
-        let mut header = tar::Header::new_ustar();
-        header.set_size(0);
-        header.set_mode(0o755);
-        header.set_entry_type(tar::EntryType::Directory);
-        live.append_data(&mut header, dir_name(&dir), std::io::empty())
-            .with_context(|| format!("adding {dir} to the live boot archive"))?;
-    }
-    live.finish().context("finishing the live boot archive")?;
-    Ok(path)
 }
 
 /// Writes the users file of the accounts test for `kind` and returns its
