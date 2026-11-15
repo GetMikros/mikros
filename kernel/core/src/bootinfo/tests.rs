@@ -45,7 +45,16 @@ fn sample() -> BootInfo {
         framebuffer_pci_devfn: 2 * 8,
         framebuffer_pci_valid: 1,
         reserved: [0; 3],
+        modules_phys: 0x3000,
+        modules_count: 4,
     }
+}
+
+/// `info` without boot modules.
+fn without_modules(mut info: BootInfo) -> BootInfo {
+    info.modules_phys = 0;
+    info.modules_count = 0;
+    info
 }
 
 /// `info` without a framebuffer PCI function.
@@ -73,7 +82,7 @@ fn encode(info: &BootInfo) -> Vec<u8> {
 fn decodes_every_field() {
     let info = sample();
     let data = encode(&info);
-    assert_eq!(size(&data[..HEADER_SIZE]), Ok(0xF8));
+    assert_eq!(size(&data[..HEADER_SIZE]), Ok(0x108));
     assert_eq!(decode(&data), Ok(info));
 }
 
@@ -84,15 +93,35 @@ fn reads_the_framebuffer_pci_function_only_from_version_1_3() {
     (info.version_minor, info.size) = (2, 0xF0);
     let mut data = encode(&info);
     data.truncate(0xF0);
-    assert_eq!(decode(&data), Ok(without_pci(info)));
-    // Version 1.3 with the function marked not valid.
+    assert_eq!(decode(&data), Ok(without_modules(without_pci(info))));
+    // Version 1.4 with the function marked not valid.
     let mut info = sample();
     info.framebuffer_pci_valid = 0;
     assert_eq!(decode(&encode(&info)), Ok(without_pci(info)));
     // A version 1.2 structure of the new size still counts as without.
     let mut info = sample();
     info.version_minor = 2;
-    assert_eq!(decode(&encode(&info)), Ok(without_pci(info)));
+    assert_eq!(
+        decode(&encode(&info)),
+        Ok(without_modules(without_pci(info)))
+    );
+}
+
+#[test]
+fn reads_boot_modules_only_from_version_1_4() {
+    let mut info = sample();
+    (info.version_minor, info.size) = (3, 0xF8);
+    let mut data = encode(&info);
+    data.truncate(0xF8);
+    assert_eq!(decode(&data), Ok(without_modules(info)));
+    let mut info = sample();
+    info.version_minor = 3;
+    assert_eq!(decode(&encode(&info)), Ok(without_modules(info)));
+    let mut info = sample();
+    info.size = 0x100;
+    let mut data = encode(&info);
+    data.truncate(0x100);
+    assert_eq!(decode(&data), Ok(without_modules(info)));
 }
 
 /// `sample` as version 1.0, in its 0xE8 bytes, with the flags `flags`.
@@ -101,7 +130,7 @@ fn version_1_0(flags: u32) -> (BootInfo, Vec<u8>) {
     (info.version_minor, info.size, info.flags) = (0, 0xE8, flags);
     let mut data = encode(&info);
     data.truncate(0xE8);
-    (without_pci(info), data)
+    (without_modules(without_pci(info)), data)
 }
 
 #[test]
@@ -127,7 +156,7 @@ fn reads_boot_time_ns_only_with_version_and_size() {
     info.boot_time_ns = 7;
     let data = encode(&info);
     info.boot_time_ns = given;
-    assert_eq!(decode(&data), Ok(without_pci(info)));
+    assert_eq!(decode(&data), Ok(without_modules(without_pci(info))));
 }
 
 #[test]
@@ -157,10 +186,9 @@ fn takes_mapped_runtime_services_only_from_version_1_2() {
 #[test]
 fn ignores_bytes_after_known_fields() {
     let mut info = sample();
-    info.version_minor = 3;
-    info.size = 0x100;
+    info.size = 0x110;
     let mut data = encode(&info);
-    data.resize(0x100, 0xaa);
+    data.resize(0x110, 0xaa);
     assert_eq!(decode(&data), Ok(info));
 }
 
@@ -182,7 +210,7 @@ fn refuses_bad_headers() {
     assert_eq!(decode(&encode(&info)), Err(Error::BadSize(0xE0)));
 
     info = sample();
-    info.size = 0x100;
+    info.size = 0x110;
     assert_eq!(decode(&encode(&info)), Err(Error::Truncated));
     assert_eq!(size(&[0; 4]), Err(Error::Truncated));
 }

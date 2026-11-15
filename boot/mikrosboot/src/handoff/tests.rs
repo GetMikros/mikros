@@ -3,7 +3,7 @@ use crate::paging::direct_runs;
 use alloc::vec;
 use alloc::vec::Vec;
 use boot_protocol::x86_64::DIRECT_MAP_BASE;
-use boot_protocol::{CMDLINE_MAX, flags};
+use boot_protocol::{BOOT_INFO_SIZE, CMDLINE_MAX, VERSION_MINOR, flags};
 
 const P: u64 = PAGE_SIZE;
 const CONVENTIONAL: u32 = 7;
@@ -177,7 +177,7 @@ fn fills_boot_info_with_physical_addresses() {
     let p = prepared();
     let entries = [MemoryMapEntry::default(); 3];
     let info = p.boot_info(&entries);
-    assert_eq!((info.magic, info.size), (MAGIC, BOOT_INFO_SIZE));
+    assert_eq!((info.magic, info.size), (MAGIC, BOOT_INFO_SIZE_1_3));
     assert_eq!(info.memory_map_phys, entries.as_ptr() as u64);
     assert_eq!(info.memory_map_count, 3);
     assert_eq!(info.cmdline_phys, INFO + CMDLINE_OFFSET);

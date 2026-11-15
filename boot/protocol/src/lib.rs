@@ -9,7 +9,7 @@
 pub const MAGIC: [u8; 8] = *b"MIKROSBI";
 /// The protocol version this crate describes.
 pub const VERSION_MAJOR: u16 = 1;
-pub const VERSION_MINOR: u16 = 3;
+pub const VERSION_MINOR: u16 = 4;
 
 /// The name and type of the ELF note that gives the protocol version a
 /// kernel was built for. Its descriptor is a `u16` major version followed
@@ -87,6 +87,10 @@ pub struct BootInfo {
     pub framebuffer_pci_devfn: u8,
     pub framebuffer_pci_valid: u8,
     pub reserved: [u8; 3],
+    /// Added in version 1.4: the array of `modules_count` boot modules,
+    /// which replace the boot image.
+    pub modules_phys: u64,
+    pub modules_count: u64,
 }
 
 impl BootInfo {
@@ -98,7 +102,10 @@ impl BootInfo {
 }
 
 /// The value of `BootInfo::size` for this version.
-pub const BOOT_INFO_SIZE: u32 = 0xF8;
+pub const BOOT_INFO_SIZE: u32 = 0x108;
+/// The size of a version 1.3 `BootInfo`, which ends before
+/// `modules_phys`.
+pub const BOOT_INFO_SIZE_1_3: u32 = 0xF8;
 /// The size of a version 1.1 or 1.2 `BootInfo`, which ends before
 /// `framebuffer_pci_segment`.
 pub const BOOT_INFO_SIZE_1_1: u32 = 0xF0;
@@ -123,6 +130,20 @@ pub struct Framebuffer {
     pub green_mask: u32,
     pub blue_mask: u32,
     pub reserved_mask: u32,
+}
+
+/// An entry of the boot module array.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BootModule {
+    /// The page-aligned address of the module's contents, zero when it
+    /// has none.
+    pub phys: u64,
+    pub size: u64,
+    /// The address and length of the module's UTF-8 path.
+    pub path_phys: u64,
+    pub path_len: u32,
+    pub reserved: u32,
 }
 
 #[repr(C)]
@@ -247,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_info_has_the_version_1_3_layout() {
+    fn boot_info_has_the_version_1_4_layout() {
         assert_eq!(size_of::<BootInfo>(), BOOT_INFO_SIZE as usize);
         assert_eq!(align_of::<BootInfo>(), 8);
         let offsets = [
@@ -281,6 +302,8 @@ mod tests {
             (offset_of!(BootInfo, framebuffer_pci_devfn), 0xF3),
             (offset_of!(BootInfo, framebuffer_pci_valid), 0xF4),
             (offset_of!(BootInfo, reserved), 0xF5),
+            (offset_of!(BootInfo, modules_phys), 0xF8),
+            (offset_of!(BootInfo, modules_count), 0x100),
         ];
         for (i, (actual, expected)) in offsets.into_iter().enumerate() {
             assert_eq!(actual, expected, "field {i}");
@@ -296,6 +319,9 @@ mod tests {
         assert_eq!(size_of::<MemoryMapEntry>(), 24);
         assert_eq!(align_of::<MemoryMapEntry>(), 8);
         assert_eq!(offset_of!(MemoryMapEntry, kind), 0x10);
+        assert_eq!(size_of::<BootModule>(), 32);
+        assert_eq!(offset_of!(BootModule, path_phys), 0x10);
+        assert_eq!(offset_of!(BootModule, path_len), 0x18);
     }
 
     #[test]

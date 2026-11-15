@@ -8,14 +8,14 @@ use crate::memmap::{self, Map, Region};
 use crate::paging::BOOT_STACK_SIZE;
 use boot_protocol::x86_64::DIRECT_MAP_LIMIT;
 use boot_protocol::{
-    BOOT_INFO_SIZE, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, PAGE_SIZE, VERSION_MAJOR,
-    VERSION_MINOR, arch, flags,
+    BOOT_INFO_SIZE_1_3, BootInfo, Framebuffer, Kind, MAGIC, MemoryMapEntry, PAGE_SIZE,
+    VERSION_MAJOR, arch, flags,
 };
 
 /// The pages allocated for `BootInfo` and the command line.
 pub const INFO_PAGES: u64 = 2;
 /// Where the command line is placed in the `BootInfo` allocation.
-pub const CMDLINE_OFFSET: u64 = 0x100;
+pub const CMDLINE_OFFSET: u64 = 0x200;
 
 /// Memory allocated for the kernel, and what is passed to it. All
 /// addresses are physical.
@@ -121,8 +121,9 @@ impl Prepared {
         BootInfo {
             magic: MAGIC,
             version_major: VERSION_MAJOR,
-            version_minor: VERSION_MINOR,
-            size: BOOT_INFO_SIZE,
+            // Boot modules are not passed yet.
+            version_minor: 3,
+            size: BOOT_INFO_SIZE_1_3,
             arch: arch::X86_64,
             flags: optional.flags | runtime,
             memory_map_phys: entries.as_ptr() as u64,
@@ -153,6 +154,8 @@ impl Prepared {
             framebuffer_pci_devfn: pci.map_or(0, |p| p.devfn),
             framebuffer_pci_valid: u8::from(pci.is_some()),
             reserved: [0; 3],
+            modules_phys: 0,
+            modules_count: 0,
         }
     }
 }
