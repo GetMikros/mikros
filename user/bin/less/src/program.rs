@@ -25,6 +25,7 @@ const COMMAND: Command = Command {
             n and N the next and the previous line that contains it again, and\n\
             q quits.",
     options: &[],
+    values: &[],
 };
 
 /// The descriptor of standard output, the terminal that less reads its

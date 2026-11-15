@@ -24,13 +24,14 @@ const COMMAND: Command = Command {
     about: "Lists the named devices, of every class or of class, each as\n\
             <class>/<name> followed by its description.",
     options: &[("--json", "write the devices as a JSON array of objects")],
+    values: &[],
 };
 
 pub fn main() -> ExitCode {
     let (json, class) = match COMMAND.parse(std::env::args().skip(1)) {
-        Arguments::Run { options, operands } => {
-            (options.contains(&"--json"), operands.into_iter().next())
-        }
+        Arguments::Run {
+            options, operands, ..
+        } => (options.contains(&"--json"), operands.into_iter().next()),
         Arguments::Help => return write(&COMMAND.help()),
         Arguments::Invalid(reason) => return fail(INVALID, &reason),
     };

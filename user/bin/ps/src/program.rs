@@ -21,6 +21,7 @@ const COMMAND: Command = Command {
     about: "Lists the processes, sorted by process ID, with their parent, user,\n\
             app ID and executable.",
     options: &[("--json", "write the processes as a JSON array of objects")],
+    values: &[],
 };
 
 /// musl's `struct passwd`.

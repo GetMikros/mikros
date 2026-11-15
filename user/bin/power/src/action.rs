@@ -9,6 +9,7 @@ pub const COMMAND: Command = Command {
     about: "Powers the machine off, or restarts it, once an administrator\n\
             allowed it.",
     options: &[],
+    values: &[],
 };
 
 /// What power does.

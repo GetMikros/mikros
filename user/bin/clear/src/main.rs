@@ -16,6 +16,7 @@ const COMMAND: Command = Command {
     most: 0,
     about: "Clears the terminal's screen and its scrollback.",
     options: &[],
+    values: &[],
 };
 
 fn main() -> ExitCode {
