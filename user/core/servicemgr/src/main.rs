@@ -18,6 +18,7 @@ mod broker;
 mod control;
 mod directory;
 mod launch;
+mod manage;
 mod registrar;
 mod root;
 mod selftest;

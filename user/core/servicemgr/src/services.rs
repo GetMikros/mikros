@@ -85,10 +85,13 @@ pub async fn start(
         me,
         sources,
         dir,
+        boot_services: services.len(),
         services: RefCell::new(services),
         manifests: RefCell::new(manifests),
         broker: RefCell::new(None),
         active: RefCell::new(BTreeSet::new()),
+        held: RefCell::new(BTreeSet::new()),
+        starting: RefCell::new(BTreeSet::new()),
         restarts: RefCell::new(BTreeMap::new()),
         demanded: RefCell::new(VecDeque::new()),
         demand_waker: RefCell::new(None),
@@ -111,6 +114,16 @@ pub async fn start(
             Some(supervisor) => supervisor.entries(after),
             None => (Vec::new(), false),
         }));
+    let weak = Rc::downgrade(&supervisor);
+    supervisor.dir.set_manage(Rc::new(move |call, name| {
+        let supervisor = weak.upgrade();
+        Box::pin(async move {
+            match supervisor {
+                Some(supervisor) => supervisor.manage(call, &name).await,
+                None => Err(Status::BadState),
+            }
+        })
+    }));
     let weak = Rc::downgrade(&supervisor);
     supervisor.dir.set_shutdown(Rc::new(move |kind| {
         let supervisor = weak.upgrade();

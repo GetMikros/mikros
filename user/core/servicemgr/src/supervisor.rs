@@ -68,6 +68,14 @@ pub struct Supervisor {
     pub broker: RefCell<Option<Rc<BrokerAsyncClient>>>,
     /// The services that started and have not stopped for good.
     pub active: RefCell<BTreeSet<usize>>,
+    /// How many of the services, the first ones, have their manifests
+    /// in the boot image.
+    pub boot_services: usize,
+    /// The services that `ServiceControl` stopped, which are not
+    /// restarted until it starts them.
+    pub held: RefCell<BTreeSet<usize>>,
+    /// The services that are being started.
+    pub starting: RefCell<BTreeSet<usize>>,
     /// When each service was restarted, within the last `WINDOW`.
     pub restarts: RefCell<BTreeMap<usize, VecDeque<i64>>>,
     /// The on-demand services that connections asked for, in order.
@@ -127,7 +135,12 @@ impl Supervisor {
         let this = self.clone();
         Box::pin(async move {
             let name = this.service(i).name;
-            match this.launch(i).await {
+            let first = this.starting.borrow_mut().insert(i);
+            let launched = this.launch(i).await;
+            if first {
+                this.starting.borrow_mut().remove(&i);
+            }
+            match launched {
                 Ok(mut started) => {
                     mikros_rt::log!(Info, "started service {name} as pid {}", started.pid);
                     this.set_state(i, State::Running);
@@ -232,7 +245,11 @@ impl Supervisor {
                 this.dir.never(&name);
                 return;
             }
-            let after = ended.map_or(After::Stop, |ended| this.after(i, ended));
+            let after = match ended {
+                _ if this.held.borrow().contains(&i) => After::Stop,
+                Some(ended) => this.after(i, ended),
+                None => After::Stop,
+            };
             this.ended(i, code, matches!(after, After::Restart));
             match after {
                 After::Restart => {
@@ -297,6 +314,10 @@ impl Supervisor {
         let Some(i) = self.position(name) else {
             return;
         };
+        // From now on, it is being started.
+        if !self.starting.borrow_mut().insert(i) {
+            return;
+        }
         self.demanded.borrow_mut().push_back(i);
         if let Some(waker) = self.demand_waker.borrow_mut().take() {
             waker.wake();
@@ -318,6 +339,7 @@ impl Supervisor {
             if !self.stopping.get() && !self.active.borrow().contains(&i) {
                 self.start_with_after(i, Vec::new()).await;
             }
+            self.starting.borrow_mut().remove(&i);
         }
     }
 
@@ -340,7 +362,7 @@ impl Supervisor {
     /// Stops service `i`, which runs as `pid`: sends it `TERM`, and
     /// `KILL` once its stop timeout has passed, and returns once it has
     /// terminated.
-    async fn stop(&self, i: usize, pid: u32) {
+    pub async fn stop(&self, i: usize, pid: u32) {
         let service = self.service(i);
         let timeout = i64::try_from(service.stop_timeout)
             .unwrap_or(i64::MAX)
@@ -521,6 +543,7 @@ impl Supervisor {
                 };
                 if let Some(why) = failed {
                     mikros_rt::log!(Error, "service {name} did not start: {why}");
+                    this.set_state(i, State::Failed);
                     this.dir.never(&name);
                     return false;
                 }

@@ -9,8 +9,9 @@
 //! unregistered, when their provider closes, or when the bound
 //! connection of the process that registered them closes. The service
 //! manager provides the registrar itself, as `mikros.service.Registrar`,
-//! and `mikros.service.Control`, whose `Shutdown` it hands to the
-//! supervisor.
+//! `mikros.service.Control`, whose `Shutdown` it hands to the
+//! supervisor, and `mikros.service.ServiceControl`, whose calls it hands
+//! to the supervisor too.
 //! When a protocol or instance has a permission, the caller must hold
 //! it, as the broker decides; without an answer from the broker, it
 //! does not.
@@ -46,6 +47,10 @@ pub const CONTROL: &str = "mikros.service.Control";
 /// The service manager's list of services, for every process.
 const SERVICES: &str = "mikros.service.Services";
 const CONTROL_PERMISSION: &str = "power.control";
+/// The protocol that starts and stops services, and the permission it
+/// needs.
+const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
+const SERVICE_CONTROL_PERMISSION: &str = "services.control";
 const PEER_CLOSED: u32 = 1 << 2;
 
 /// The directory's state, shared by every connection.
@@ -71,6 +76,7 @@ pub struct Dir {
     demand: RefCell<Option<Demand>>,
     shutdown: RefCell<Option<Shutdown>>,
     listing: RefCell<Option<Listing>>,
+    manage: RefCell<Option<Manage>>,
     /// The identity each process was bound with last.
     identities: RefCell<BTreeMap<u32, Rc<ClientIdentity>>>,
     /// The root file system's `/usr` and `/etc` once the process manager
@@ -104,6 +110,8 @@ enum Provider {
     Control,
     /// The service manager's own `Services`.
     Services,
+    /// The service manager's own `ServiceControl`.
+    ServiceControl,
 }
 
 /// What the protocols of a service start as.
@@ -125,6 +133,17 @@ pub type Shutdown = Rc<dyn Fn(ShutdownKind) -> Pin<Box<dyn Future<Output = Resul
 /// What answers `List` on `Services`: the services after a name, and
 /// whether more follow.
 pub type Listing = Rc<dyn Fn(Option<&str>) -> (Vec<ServiceEntry>, bool)>;
+/// What answers a call on `ServiceControl`: the call, for the service
+/// of a name.
+pub type Manage = Rc<dyn Fn(Call, String) -> Pin<Box<dyn Future<Output = Result<(), Status>>>>>;
+
+/// A call on `ServiceControl`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Call {
+    Start,
+    Stop,
+    Restart,
+}
 
 /// A named instance of a protocol.
 struct Instance {
@@ -158,6 +177,7 @@ impl Dir {
             demand: RefCell::new(None),
             shutdown: RefCell::new(None),
             listing: RefCell::new(None),
+            manage: RefCell::new(None),
             identities: RefCell::new(BTreeMap::new()),
             root: RefCell::new(None),
             root_given: Cell::new(false),
@@ -223,7 +243,7 @@ impl Dir {
                 },
             );
         }
-        for own in [REGISTRAR, CONTROL, SERVICES] {
+        for own in [REGISTRAR, CONTROL, SERVICES, SERVICE_CONTROL] {
             if provided.contains_key(own) {
                 mikros_rt::log!(
                     Error,
@@ -249,6 +269,12 @@ impl Dir {
             provider: Provider::Services,
         };
         provided.insert(SERVICES.into(), services);
+        let service_control = Provided {
+            service: String::new(),
+            permission: Some(SERVICE_CONTROL_PERMISSION.into()),
+            provider: Provider::ServiceControl,
+        };
+        provided.insert(SERVICE_CONTROL.into(), service_control);
         drop(provided);
         self.ready.set(true);
         for waker in self.waiting.take() {
@@ -366,6 +392,16 @@ impl Dir {
     /// What answers `List` on `Services`, once it is set.
     pub fn listing(&self) -> Option<Listing> {
         self.listing.borrow().clone()
+    }
+
+    /// Calls `manage` for the calls on `ServiceControl`.
+    pub fn set_manage(&self, manage: Manage) {
+        *self.manage.borrow_mut() = Some(manage);
+    }
+
+    /// What answers the calls on `ServiceControl`, once it is set.
+    pub fn manage(&self) -> Option<Manage> {
+        self.manage.borrow().clone()
     }
 
     /// Calls `shutdown` for `Shutdown` on `Control`.
@@ -492,6 +528,11 @@ impl Dir {
                 Provider::Services => {
                     drop(provided);
                     crate::status::serve(self.clone(), ServerEnd::new(server));
+                    return Ok(());
+                }
+                Provider::ServiceControl => {
+                    drop(provided);
+                    crate::manage::serve(self.clone(), ServerEnd::new(server));
                     return Ok(());
                 }
             };
