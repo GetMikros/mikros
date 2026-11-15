@@ -15,10 +15,12 @@ pub const BOOT_TIME_VALID: u32 = 1 << 1;
 /// Header flag: `framebuffer_pci` is valid.
 pub const FRAMEBUFFER_PCI_VALID: u32 = 1 << 2;
 
-/// The startup message for `info`, with the command line `cmdline` and
-/// the entries of `memory_map`.
+/// The startup message for `info`, with the size of the boot image object
+/// `boot_image_size`, the command line `cmdline` and the entries of
+/// `memory_map`.
 pub fn message(
     info: &BootInfo,
+    boot_image_size: u64,
     cmdline: &[u8],
     memory_map: impl Iterator<Item = MemoryMapEntry>,
 ) -> Vec<u8> {
@@ -60,7 +62,7 @@ pub fn message(
     for (i, word) in words.iter().enumerate() {
         put(&mut m, 0x20 + 4 * i, &word.to_le_bytes());
     }
-    put(&mut m, 0x40, &info.boot_image_size.to_le_bytes());
+    put(&mut m, 0x40, &boot_image_size.to_le_bytes());
     put(&mut m, 0x58, &info.arch.to_le_bytes());
     put(&mut m, 0x5C, &framebuffer_pci.to_le_bytes());
     put(&mut m, 0x60, &info.boot_time.to_le_bytes());
@@ -137,7 +139,7 @@ mod tests {
                 reserved: 9,
             },
         ];
-        let m = message(&info, b"root=x", map.into_iter());
+        let m = message(&info, info.boot_image_size, b"root=x", map.into_iter());
         assert_eq!(u32_at(&m, 0x00), 1);
         assert_eq!(
             u32_at(&m, 0x04),
@@ -165,7 +167,7 @@ mod tests {
 
     #[test]
     fn leaves_absent_fields_clear() {
-        let m = message(&BootInfo::default(), b"", core::iter::empty());
+        let m = message(&BootInfo::default(), 0, b"", core::iter::empty());
         assert_eq!(u32_at(&m, 0x04), 0);
         assert_eq!((u32_at(&m, 0x48), u32_at(&m, 0x4C)), (0x68, 0));
         assert_eq!((u32_at(&m, 0x50), u32_at(&m, 0x54)), (0x68, 0));
@@ -176,7 +178,7 @@ mod tests {
             framebuffer_pci_valid: 1,
             ..BootInfo::default()
         };
-        let m = message(&info, b"", core::iter::empty());
+        let m = message(&info, 0, b"", core::iter::empty());
         assert_eq!((u32_at(&m, 0x04), u32_at(&m, 0x5C)), (0, 0));
     }
 }

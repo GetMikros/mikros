@@ -143,27 +143,32 @@ pub fn valid_path(path: &[u8]) -> bool {
             .all(|c| !c.is_empty() && c != b"." && c != b"..")
 }
 
-/// Checks the module array at `array_phys` with `count` entries
-/// `modules`, against the memory map `map`. `path` reads the path of an
-/// entry, which must lie in `BootloaderReclaimable` memory first.
-pub fn check<'a>(
+/// Checks that the module array of `count` entries at `array_phys` may be
+/// read: it has 1 to `MODULES_MAX` entries in `BootloaderReclaimable`
+/// memory of `map`.
+pub fn check_array(
     array_phys: u64,
+    count: u64,
+    map: impl Iterator<Item = MemoryMapEntry> + Clone,
+) -> Result<(), Error> {
+    if count == 0 || count > MODULES_MAX {
+        return Err(Error::Count(count));
+    }
+    let kind = Kind::BootloaderReclaimable;
+    if !covered(map, kind, array_phys, count * ENTRY_SIZE as u64) {
+        return Err(Error::Array);
+    }
+    Ok(())
+}
+
+/// Checks `modules`, the entries of the module array, against the memory
+/// map `map`. `path` reads the path of an entry, which must lie in
+/// `BootloaderReclaimable` memory first.
+pub fn check<'a>(
     modules: &[Module],
     map: impl Iterator<Item = MemoryMapEntry> + Clone,
     path: impl Fn(&Module) -> &'a [u8],
 ) -> Result<(), Error> {
-    let count = modules.len() as u64;
-    if count == 0 || count > MODULES_MAX {
-        return Err(Error::Count(count));
-    }
-    if !covered(
-        map.clone(),
-        Kind::BootloaderReclaimable,
-        array_phys,
-        count * ENTRY_SIZE as u64,
-    ) {
-        return Err(Error::Array);
-    }
     let mut ranges = Vec::new();
     for (i, m) in modules.iter().enumerate() {
         if m.size == 0 {

@@ -1157,20 +1157,39 @@ impl MemoryObject {
     /// this at boot. The frames return to the frame allocator when the
     /// object is destroyed.
     pub fn from_frames(phys: u64, count: u64) -> Result<Arc<MemoryObject>, Error> {
+        MemoryObject::from_frame_runs(count * PAGE_SIZE, &[(0, phys, count)])
+    }
+
+    /// An anonymous object of `size` bytes, a multiple of the page size,
+    /// that takes over the frames of `runs`, each given as the page index
+    /// it starts at and the `count` frames from `phys`, charging them to no
+    /// budget, as the kernel does this at boot. Its other pages are zero
+    /// until written. The frames return to the frame allocator when the
+    /// object is destroyed.
+    pub fn from_frame_runs(
+        size: u64,
+        runs: &[(u64, u64, u64)],
+    ) -> Result<Arc<MemoryObject>, Error> {
+        let frames: Vec<(u64, u64)> = runs
+            .iter()
+            .flat_map(|&(index, phys, count)| {
+                (0..count).map(move |i| (index + i, phys + i * PAGE_SIZE))
+            })
+            .collect();
         // The frames come back to the allocator with the object.
-        if let Some(frames) = FRAMES.lock().as_mut() {
-            frames.adopt(count);
+        if let Some(allocator) = FRAMES.lock().as_mut() {
+            allocator.adopt(frames.len() as u64);
         }
-        let object = MemoryObject::new(None, count * PAGE_SIZE, 0)?;
+        let object = MemoryObject::new(None, size, 0)?;
         let mut pages = object.pages.lock();
-        for index in 0..count {
+        for (at, &(index, phys)) in frames.iter().enumerate() {
             match nodes::claim_insert() {
-                Ok(claim) => pages.insert(index, phys + index * PAGE_SIZE, claim),
+                Ok(claim) => pages.insert(index, phys, claim),
                 Err(e) => {
                     // The object frees the frames it took, and the rest
                     // go back here.
                     drop(pages);
-                    object.free((index..count).map(|i| phys + i * PAGE_SIZE));
+                    object.free(frames[at..].iter().map(|&(_, phys)| phys));
                     return Err(e);
                 }
             }

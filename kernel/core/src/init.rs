@@ -1,8 +1,10 @@
-//! Starting the initial process from the boot image.
+//! Starting the initial process from the boot image or the boot
+//! modules.
 
 use crate::arch::CachePolicy as Policy;
 use crate::elf::{self, PF_W, PF_X, Segment};
 use crate::memory_object::MemoryObject;
+use crate::modules::{self, Module};
 use crate::object::budget::Budget;
 use crate::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
 use crate::object::handles::{Entry, HandleTable};
@@ -35,12 +37,20 @@ struct Loaded {
     thread: Arc<Thread>,
     entry: u64,
     stack: u64,
-    boot_image: Arc<MemoryObject>,
+    boot_image: BootImage,
 }
 
-/// The boot image as a memory object that owns its frames, with the bytes
-/// after the image zeroed.
-fn boot_image(info: &BootInfo) -> Arc<MemoryObject> {
+/// The boot image object, the size that the startup message gives for it,
+/// and the `init` program in it.
+struct BootImage {
+    object: Arc<MemoryObject>,
+    size: u64,
+    init: &'static [u8],
+}
+
+/// The boot image of a `BootInfo` older than 1.4 as a memory object that
+/// owns its frames, with the bytes after the image zeroed.
+fn archive(info: &BootInfo) -> BootImage {
     let size = info.boot_image_size;
     let pages = size.div_ceil(PAGE_SIZE);
     let tail = pages * PAGE_SIZE - size;
@@ -53,8 +63,98 @@ fn boot_image(info: &BootInfo) -> Arc<MemoryObject> {
         )
     };
     after.fill(0);
-    MemoryObject::from_frames(info.boot_image_phys, pages)
-        .unwrap_or_else(|e| panic!("no memory for the boot image object: {e:?}"))
+    let object = MemoryObject::from_frames(info.boot_image_phys, pages)
+        .unwrap_or_else(|e| panic!("no memory for the boot image object: {e:?}"));
+    // SAFETY: the boot image object owns these frames and nothing writes
+    // to them while the kernel reads the image.
+    let image = unsafe {
+        core::slice::from_raw_parts(
+            crate::arch::frame_address(info.boot_image_phys) as *const u8,
+            info.boot_image_size as usize,
+        )
+    };
+    let init = ustar::find(image, b"init").unwrap_or_else(|e| panic!("{e}"));
+    BootImage {
+        object,
+        size: info.boot_image_size,
+        init,
+    }
+}
+
+/// `len` bytes at the physical address `phys`, through the direct map.
+///
+/// # Safety
+///
+/// The bytes must lie in memory that the direct map covers, and nothing
+/// may write them while the slice is used.
+unsafe fn physical(phys: u64, len: u64) -> &'static [u8] {
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        core::slice::from_raw_parts(crate::arch::frame_address(phys) as *const u8, len as usize)
+    }
+}
+
+/// The boot modules as the boot image object: its index, followed by
+/// each module's contents in the module's own frames, with the bytes
+/// after each module zeroed.
+fn modules(info: &BootInfo) -> BootImage {
+    let map = || crate::boot::memory_map(info);
+    let count = info.modules_count;
+    modules::check_array(info.modules_phys, count, map()).unwrap_or_else(|e| panic!("{e}"));
+    // SAFETY: the array lies in BootloaderReclaimable memory, which the
+    // direct map covers and which nothing frees until the kernel reclaims
+    // boot memory, after init has started.
+    let entries =
+        modules::decode(unsafe { physical(info.modules_phys, count * modules::ENTRY_SIZE as u64) });
+    // SAFETY: `check` reads a path only once it lies in
+    // BootloaderReclaimable memory, as the array does, and the others are
+    // read after it.
+    let path = |m: &Module| unsafe { physical(m.path_phys, u64::from(m.path_len)) };
+    modules::check(&entries, map(), path).unwrap_or_else(|e| panic!("{e}"));
+    let sizes: Vec<u64> = entries.iter().map(|m| m.size).collect();
+    let paths: Vec<&[u8]> = entries.iter().map(path).collect();
+    let layout = modules::layout(&sizes, &paths);
+    let init = entries
+        .iter()
+        .find(|m| path(m) == b"init")
+        .unwrap_or_else(|| panic!("there is no boot module init"));
+    let mut runs = Vec::new();
+    for (m, &offset) in entries.iter().zip(&layout.offsets) {
+        if m.size == 0 {
+            continue;
+        }
+        let end = m.size.next_multiple_of(PAGE_SIZE);
+        // SAFETY: the module's pages lie in BootImage memory, which the
+        // direct map covers and which holds no other module.
+        let tail = unsafe {
+            core::slice::from_raw_parts_mut(
+                crate::arch::frame_address(m.phys + m.size) as *mut u8,
+                (end - m.size) as usize,
+            )
+        };
+        tail.fill(0);
+        runs.push((offset / PAGE_SIZE, m.phys, end / PAGE_SIZE));
+    }
+    let object = MemoryObject::from_frame_runs(layout.size, &runs)
+        .unwrap_or_else(|e| panic!("no memory for the boot image object: {e:?}"));
+    let mut rest = &layout.index[..];
+    // This runs during boot, where no other thread could run.
+    let mut work = crate::publish::Work::new(|| {});
+    object
+        .write(0, layout.index.len() as u64, &mut work, |chunk| {
+            let (now, later) = rest.split_at(chunk.len());
+            chunk.copy_from_slice(now);
+            rest = later;
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("no memory for the boot image index: {e:?}"));
+    BootImage {
+        object,
+        size: layout.size,
+        // SAFETY: the boot image object owns these frames and nothing
+        // writes to them while the kernel reads init.
+        init: unsafe { physical(init.phys, init.size) },
+    }
 }
 
 /// Maps a new memory object of `len` bytes, a multiple of the page size,
@@ -113,19 +213,16 @@ fn load_segment(process: &Process, file: &[u8], segment: &Segment) {
 }
 
 /// Creates the initial process, belonging to `budget`, and its thread
-/// from the `init` member of the boot image, with its segments and stack
-/// mapped. Nothing made here is charged to a budget.
+/// from the `init` module, or the `init` member of the boot image of a
+/// `BootInfo` older than 1.4, with its segments and stack mapped.
+/// Nothing made here is charged to a budget.
 fn load(info: &BootInfo, budget: &Arc<Budget>) -> Loaded {
-    let boot_image = boot_image(info);
-    // SAFETY: the boot image object owns these frames and nothing writes
-    // to them while the kernel reads the image.
-    let image = unsafe {
-        core::slice::from_raw_parts(
-            crate::arch::frame_address(info.boot_image_phys) as *const u8,
-            info.boot_image_size as usize,
-        )
+    let boot_image = if info.version_minor >= 4 {
+        modules(info)
+    } else {
+        archive(info)
     };
-    let file = ustar::find(image, b"init").unwrap_or_else(|e| panic!("{e}"));
+    let file = boot_image.init;
     let elf = elf::parse(file, crate::arch::elf_machine(), {
         let (start, end) = crate::aspace::user_range();
         start..end
@@ -207,7 +304,12 @@ pub fn start(info: &BootInfo) {
             info.cmdline_len as usize,
         )
     };
-    let bytes = startup::message(info, cmdline, crate::boot::memory_map(info));
+    let bytes = startup::message(
+        info,
+        loaded.boot_image.size,
+        cmdline,
+        crate::boot::memory_map(info),
+    );
     let clock_page = clock_page().unwrap_or_else(|e| panic!("no memory for the clock page: {e:?}"));
     let entry = |object: Arc<dyn Object>, kind| Entry {
         object,
@@ -218,7 +320,7 @@ pub fn start(info: &BootInfo) {
         entry(loaded.thread.clone(), ObjectType::Thread),
         entry(Resource::root(), ObjectType::Resource),
         Entry {
-            object: loaded.boot_image,
+            object: loaded.boot_image.object,
             rights: READ_ONLY,
         },
         entry(crate::log::object(), ObjectType::Log),

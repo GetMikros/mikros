@@ -48,7 +48,8 @@ fn path(m: &Module) -> &'static [u8] {
 }
 
 fn checked(modules: &[Module]) -> Result<(), Error> {
-    check(ARRAY, modules, map().into_iter(), path)
+    check_array(ARRAY, modules.len() as u64, map().into_iter())?;
+    check(modules, map().into_iter(), path)
 }
 
 #[test]
@@ -97,7 +98,7 @@ fn checks_the_count_and_the_array() {
     let many = vec![module(3, 0, 0); MODULES_MAX as usize + 1];
     assert_eq!(checked(&many), Err(Error::Count(MODULES_MAX + 1)));
     assert_eq!(
-        check(8 * P - 64, &modules(), map().into_iter(), path),
+        check_array(8 * P - 64, 4, map().into_iter()),
         Err(Error::Array)
     );
 }
