@@ -7,10 +7,13 @@ extern crate alloc;
 
 pub mod cmdline;
 pub mod cpu;
+pub mod crc;
+pub mod disk;
 pub mod display;
 pub mod elf;
 pub mod exit;
 pub mod firmware;
+pub mod gpt;
 pub mod handoff;
 pub mod info;
 pub mod load;
