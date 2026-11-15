@@ -1,0 +1,26 @@
+[package]
+name = "logs"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+mikros-cli = { path = "../../lib/cli" }
+mikros-tz = { path = "../../lib/tz" }
+
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-command = { path = "../../lib/command" }
+mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
+
+# A command: it runs with the app ID system.logs, which may read the
+# system log once an administrator allowed it.
+[package.metadata.mikros]
+kind = "program"
+image = "system"
+manifest = "system.logs.yaml"
+completions = "logs.msh"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

@@ -483,6 +483,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "logs"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+ "mikros-rt",
+ "mikros-tz",
+]
+
+[[package]]
 name = "logsvc"
 version = "0.0.0"
 dependencies = [

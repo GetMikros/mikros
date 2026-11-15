@@ -1,0 +1,7 @@
+# The program manifest of logs, installed as
+# usr/lib/programs/system.logs.yaml: a command, which asks for an
+# administrator's authorization and then reads the system log.
+app_id: system.logs
+binary: /usr/bin/logs
+command: true
+permissions: [logs.read, session.authorize]
