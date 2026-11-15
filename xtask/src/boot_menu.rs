@@ -3,7 +3,7 @@
 //! from the serial output what the boot menu started.
 
 use crate::build::{self, Kind};
-use crate::image;
+use crate::image::{self, root};
 use crate::qemu::MachineArgs;
 use crate::scenario::{
     WAITING, monitor, monitor_socket, ppm_pixels, screen_dump, start, wait_for_line,
@@ -38,6 +38,9 @@ enum Outcome {
     PowersOff,
     /// The firmware starts the boot menu again.
     Restarts,
+    /// The previous system version boots, on a disk that has one, without
+    /// the boot being counted.
+    BootsPrevious,
 }
 
 /// A run of the boot menu.
@@ -84,7 +87,7 @@ entries:
     path: /EFI/Mikros/mikrosboot.efi
 ";
 
-const RUNS: [Run; 7] = [
+const RUNS: [Run; 8] = [
     // The countdown starts the default entry with its arguments as the
     // kernel command line.
     Run {
@@ -134,13 +137,23 @@ const RUNS: [Run; 7] = [
         keys: &["right", "ret"],
         outcome: Outcome::Boots(KERNEL_STARTS),
     },
-    // After the one card come Restart and Shut down.
+    // Without an entries file, the second card starts the previous
+    // version.
+    Run {
+        name: "previous",
+        entries: None,
+        other: None,
+        hold: true,
+        keys: &["right", "ret"],
+        outcome: Outcome::BootsPrevious,
+    },
+    // After the two cards come Restart and Shut down.
     Run {
         name: "shutdown",
         entries: None,
         other: None,
         hold: true,
-        keys: &["right", "right", "ret"],
+        keys: &["right", "right", "right", "ret"],
         outcome: Outcome::PowersOff,
     },
     Run {
@@ -148,7 +161,7 @@ const RUNS: [Run; 7] = [
         entries: None,
         other: None,
         hold: true,
-        keys: &["right", "ret"],
+        keys: &["right", "right", "ret"],
         outcome: Outcome::Restarts,
     },
 ];
@@ -202,8 +215,15 @@ fn wait_for_menu(socket: &Path, dir: &Path, deadline: Instant) -> Result<()> {
     }
 }
 
-/// Boots the image in `dir` and checks that `run` ends as it must.
-fn boot(machine: &MachineArgs, dir: &Path, run: &Run, timeout: Duration) -> Result<()> {
+/// Boots the image in `dir` and checks that `run` ends as it must, with
+/// `previous` as the name of the previous system version.
+fn boot(
+    machine: &MachineArgs,
+    dir: &Path,
+    run: &Run,
+    previous: &str,
+    timeout: Duration,
+) -> Result<()> {
     let log = dir.join("serial.log");
     let socket = monitor_socket(dir);
     let reboot = matches!(run.outcome, Outcome::Restarts);
@@ -252,6 +272,14 @@ fn boot(machine: &MachineArgs, dir: &Path, run: &Run, timeout: Duration) -> Resu
                 }
                 std::thread::sleep(Duration::from_millis(100));
             },
+            // The test init's boot-attempts scenario logs the version
+            // that the bootloader names on the command line, and what
+            // MikrosBoot holds, which a boot of the previous version
+            // leaves as it is, missing on a new machine.
+            Outcome::BootsPrevious => {
+                let booted = format!("booted {previous}, MikrosBoot missing");
+                wait_for_line(&log, &booted, &mut qemu, deadline)?;
+            }
             Outcome::Restarts => loop {
                 if serial(&log).matches(FIRMWARE_STARTS).count() >= 2 {
                     break;
@@ -287,8 +315,15 @@ pub fn run(
             .into_iter()
             .chain(run.other.map(|path| (path, &b"not an image"[..])))
             .collect();
-        image::create_with(kind, built, &dir.join("disk.img"), "", &files)?;
-        boot(machine, &dir, run, timeout).with_context(|| {
+        let disk = dir.join("disk.img");
+        match run.outcome {
+            Outcome::BootsPrevious => {
+                image::create_with_previous(kind, built, &disk, "test=boot-attempts")?
+            }
+            _ => image::create_with(kind, built, &disk, "", &files)?,
+        }
+        let previous = root::previous_version(kind);
+        boot(machine, &dir, run, &previous, timeout).with_context(|| {
             format!(
                 "boot menu run {} failed; serial output in {}",
                 run.name,
