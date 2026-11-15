@@ -96,3 +96,115 @@ fn finds_entries_and_inodes() {
     assert!(v.is_subvolume_root(top).unwrap());
     assert!(!v.is_subvolume_root(dir).unwrap());
 }
+
+fn nested() -> Vec<u8> {
+    let subvolumes = ["--subvol", "outer", "--subvol", "ro:outer/inner"];
+    mkfs("subvol", &subvolumes, |t| {
+        write(t, "outer/inner/file", b"inside\n");
+        write(t, "outer/other", b"beside\n");
+    })
+}
+
+#[test]
+fn follows_entries_into_subvolumes() {
+    let mut v = Volume::open(nested()).unwrap();
+    let top = v.top().unwrap();
+    let outer = walk(&mut v, "outer");
+    let inner = walk(&mut v, "outer/inner");
+    assert_ne!(outer.subvolume, top.subvolume);
+    assert_ne!(inner.subvolume, outer.subvolume);
+    assert!(v.is_subvolume_root(inner).unwrap());
+    let file = walk(&mut v, "outer/inner/file");
+    assert_eq!(file.subvolume, inner.subvolume);
+    assert_eq!(v.inode(file).unwrap().size, 7);
+    let listed = v.entries(outer).unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|(name, node)| name == b"inner" && *node == inner)
+    );
+}
+
+#[test]
+fn checks_tree_block_checksums() {
+    let image = plain();
+    let mut v = Volume::open(image.clone()).unwrap();
+    let (root, _) = v.root_item(5).unwrap().unwrap();
+    let all = |kind| Key {
+        objectid: if kind == 0 { 0 } else { u64::MAX },
+        kind,
+        offset: if kind == 0 { 0 } else { u64::MAX },
+    };
+    let mut items = Vec::new();
+    v.search(root, all(0), all(u8::MAX), &mut items).unwrap();
+    assert!(items.len() > 10);
+    let physical = v.map(root.bytenr, 1).unwrap() as usize;
+    let mut bad = image;
+    bad[physical + HEADER + 3] ^= 1;
+    let mut v = Volume::open(bad).unwrap();
+    assert_eq!(
+        v.search(root, all(0), all(u8::MAX), &mut Vec::new()).err(),
+        Some(Error::TreeChecksum(root.bytenr))
+    );
+}
+
+fn patch_superblock(image: &mut [u8], change: impl FnOnce(&mut [u8])) {
+    let sb = &mut image[SUPERBLOCK_AT as usize..SUPERBLOCK_AT as usize + SUPERBLOCK_SIZE];
+    change(sb);
+    let sum = crc32c(&sb[CSUM_SIZE..]);
+    sb[..4].copy_from_slice(&sum.to_le_bytes());
+}
+
+#[test]
+fn checks_the_superblock() {
+    let image = plain();
+    let mut bad = image.clone();
+    bad[SUPERBLOCK_AT as usize + 0x40] = b'x';
+    assert_eq!(Volume::open(bad).err(), Some(Error::Magic));
+    let mut bad = image.clone();
+    bad[SUPERBLOCK_AT as usize + 0x12b] ^= 1;
+    assert_eq!(Volume::open(bad).err(), Some(Error::SuperblockChecksum));
+    let mut bad = image.clone();
+    patch_superblock(&mut bad, |sb| sb[0x88] = 2);
+    assert_eq!(Volume::open(bad).err(), Some(Error::Devices(2)));
+    let mut bad = image.clone();
+    patch_superblock(&mut bad, |sb| sb[0xbc] |= 0x80);
+    assert_eq!(Volume::open(bad).err(), Some(Error::Incompat(0x80)));
+    let mut bad = image.clone();
+    patch_superblock(&mut bad, |sb| sb[0xc4] = 1);
+    assert_eq!(Volume::open(bad).err(), Some(Error::ChecksumType(1)));
+    // Flags that are not incompatible do not matter.
+    let mut fine = image;
+    patch_superblock(&mut fine, |sb| sb[0xb4..0xbc].fill(0xff));
+    assert!(Volume::open(fine).is_ok());
+}
+
+#[test]
+fn maps_only_single_and_dup_chunks() {
+    let mut v = Volume::open(plain()).unwrap();
+    v.chunks = vec![
+        Chunk {
+            logical: 0x10000,
+            length: 0x1000,
+            kind: 1,
+            physical: 0x50000,
+        },
+        Chunk {
+            logical: 0x20000,
+            length: 0x1000,
+            kind: 4 | DUP,
+            physical: 0x60000,
+        },
+        Chunk {
+            logical: 0x30000,
+            length: 0x1000,
+            kind: 1 | (1 << 4),
+            physical: 0x70000,
+        },
+    ];
+    assert_eq!(v.map(0x10010, 16), Ok(0x50010));
+    assert_eq!(v.map(0x20ff0, 16), Ok(0x60ff0));
+    assert_eq!(v.map(0x30000, 16), Err(Error::Profile(0x30000)));
+    assert_eq!(v.map(0x40000, 16), Err(Error::Unmapped(0x40000)));
+    assert!(matches!(v.map(0x10ff8, 16), Err(Error::Corrupt(_))));
+}
