@@ -1173,3 +1173,30 @@ syscalls:
     fuzz_only: false
     spec: [MIKSPEC-0008.R43]
     args: []
+
+  - name: firmware_variable_get
+    number: 114
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0099.R2]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: name, type: "*const u8", dir: in}
+      - {name: name_len, type: u64, dir: in}
+      - {name: buffer, type: "*mut u8", dir: out}
+      - {name: size, type: u64, dir: in}
+      - {name: actual, type: "*mut u64", dir: out}
+      - {name: attributes, type: "*mut u32", dir: out}
+
+  - name: firmware_variable_set
+    number: 115
+    arch: [x86_64]
+    fuzz_only: false
+    spec: [MIKSPEC-0099.R2]
+    args:
+      - {name: resource, type: Handle, dir: in, object: Resource, rights: [MANAGE]}
+      - {name: name, type: "*const u8", dir: in}
+      - {name: name_len, type: u64, dir: in}
+      - {name: attributes, type: u32, dir: in}
+      - {name: data, type: "*const u8", dir: in}
+      - {name: size, type: u64, dir: in}

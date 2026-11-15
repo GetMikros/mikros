@@ -29,6 +29,7 @@ pub mod diag;
 pub mod elf;
 pub mod exception;
 pub mod fallible;
+pub mod firmware;
 pub mod frames;
 #[cfg(feature = "fuzz")]
 pub mod fuzz;

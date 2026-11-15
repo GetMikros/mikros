@@ -1881,11 +1881,12 @@ fn kernel_logged(s: &Startup, needle: &[u8]) -> Result<bool> {
 
 /// What the tests ask about what the kernel logged at boot, which they
 /// cannot find in the log later, as the tests' records push it out.
-const BOOT_LINES: [&[u8]; 4] = [
+const BOOT_LINES: [&[u8]; 5] = [
     b"DMA isolated",
     b"DMA is not isolated",
     b"VT-d units",
     b"AMD-Vi units",
+    b"runtime ranges mapped",
 ];
 /// A bit for each of `BOOT_LINES` that the kernel logged before the first
 /// test, set by `keep_boot_log`.
@@ -1949,6 +1950,112 @@ fn dma_isolation_reported(s: &Startup) -> Result {
             )
         } == ACCESS_DENIED,
     )
+}
+
+const KIND_FIRMWARE: u32 = 10;
+const BUFFER_TOO_SMALL: i64 = -15;
+
+fn variable_get(resource: Handle, name: &[u8], buffer: &mut [u8]) -> (i64, u64, u32) {
+    let (mut actual, mut attributes) = (0, 0);
+    // SAFETY: the pointers describe `name`, `buffer` and the locals.
+    let status = unsafe {
+        sys::firmware_variable_get(
+            resource,
+            name.as_ptr(),
+            name.len() as u64,
+            buffer.as_mut_ptr(),
+            buffer.len() as u64,
+            &mut actual,
+            &mut attributes,
+        )
+    };
+    (status, actual, attributes)
+}
+
+fn variable_set(resource: Handle, name: &[u8], attributes: u32, data: &[u8]) -> i64 {
+    // SAFETY: the pointers describe `name` and `data`.
+    unsafe {
+        sys::firmware_variable_set(
+            resource,
+            name.as_ptr(),
+            name.len() as u64,
+            attributes,
+            data.as_ptr(),
+            data.len() as u64,
+        )
+    }
+}
+
+/// The firmware variable calls take a `FIRMWARE` resource and check their
+/// arguments, and through it set, read and delete Mikros's variables.
+fn firmware_variables(s: &Startup) -> Result {
+    let mut bad = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let ranged = unsafe { sys::resource_create(s.root_resource, KIND_FIRMWARE, 0, 1, 0, &mut bad) };
+    ensure("refusing a FIRMWARE range", ranged == INVALID_ARGS)?;
+    let firmware = grant(s, KIND_FIRMWARE, 0, 0)?;
+    let irq = grant(s, KIND_IRQ, u64::from(RTC_GSI), 1)?;
+    let mut buffer = [0u8; 1100];
+    let wrong = [
+        variable_get(s.root_resource, b"MikrosTest", &mut buffer).0,
+        variable_get(irq, b"MikrosTest", &mut buffer).0,
+        variable_set(s.root_resource, b"MikrosTest", 6, b"x"),
+    ];
+    ensure("refusing other resources", wrong == [WRONG_TYPE; 3])?;
+    let long = [b'a'; 65];
+    let invalid = [
+        variable_get(firmware, b"", &mut buffer).0,
+        variable_get(firmware, b"Mikros-Test", &mut buffer).0,
+        variable_get(firmware, &long, &mut buffer).0,
+        variable_set(firmware, b"MikrosTest", 5, b"x"),
+        variable_set(firmware, b"MikrosTest", 0, b"x"),
+        variable_set(firmware, b"MikrosTest", 7, &buffer[..1025]),
+    ];
+    ensure(
+        "refusing names, attributes and sizes",
+        invalid == [INVALID_ARGS; 6],
+    )?;
+    let status = variable_set(firmware, b"MikrosTest", 6, b"hello");
+    if !boot_logged(b"runtime ranges mapped") {
+        ensure(
+            "refusing calls without runtime services",
+            status == NOT_SUPPORTED,
+        )?;
+        return [firmware, irq].into_iter().try_for_each(close);
+    }
+    check("setting a volatile variable", status)?;
+    let small = variable_get(firmware, b"MikrosTest", &mut buffer[..2]);
+    ensure(
+        "asking for a larger buffer",
+        small.0 == BUFFER_TOO_SMALL && small.1 == 5,
+    )?;
+    let (status, len, attributes) = variable_get(firmware, b"MikrosTest", &mut buffer);
+    check("reading it", status)?;
+    ensure(
+        "reading what was set",
+        len == 5 && attributes == 6 && &buffer[..5] == b"hello",
+    )?;
+    let data: alloc::vec::Vec<u8> = (0..1024).map(|i| i as u8).collect();
+    check(
+        "setting a non-volatile variable",
+        variable_set(firmware, b"MikrosTest2", 7, &data),
+    )?;
+    let (status, len, attributes) = variable_get(firmware, b"MikrosTest2", &mut buffer);
+    check("reading it", status)?;
+    ensure(
+        "reading all of it",
+        len == 1024 && attributes == 7 && buffer[..1024] == data[..],
+    )?;
+    for name in [&b"MikrosTest"[..], b"MikrosTest2"] {
+        let attributes = if name == b"MikrosTest" { 6 } else { 7 };
+        check(
+            "deleting a variable",
+            variable_set(firmware, name, attributes, &[]),
+        )?;
+        let gone = variable_get(firmware, name, &mut buffer).0;
+        ensure("finding no deleted variable", gone == NOT_FOUND)?;
+    }
+    [firmware, irq].into_iter().try_for_each(close)
 }
 
 const KIND_BTI: u32 = 8;
@@ -6163,7 +6270,7 @@ fn clock_page_rights(s: &Startup) -> Result {
     )
 }
 
-const TESTS: [(&str, Test); 80] = [
+const TESTS: [(&str, Test); 81] = [
     ("boot_memory_uncharged", boot_memory_uncharged),
     ("log_writes_and_reads", log_writes_and_reads),
     ("thread_by_koid", thread_by_koid),
@@ -6255,6 +6362,7 @@ const TESTS: [(&str, Test); 80] = [
         "resources_report_their_ranges",
         resources_report_their_ranges,
     ),
+    ("firmware_variables", firmware_variables),
     ("kill_blocked_thread", kill_blocked_thread),
     (
         "exception_reports_and_actions",

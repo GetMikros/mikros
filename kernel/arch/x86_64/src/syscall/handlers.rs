@@ -14,6 +14,7 @@ use crate::thread_state::{self, DEBUG_SIZE, GENERAL_SIZE, General};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use kernel_core::exception::{self, DEBUG_EVENTS};
+use kernel_core::firmware;
 use kernel_core::log::{MESSAGE_MAX, RECORD_SIZE, Severity};
 use kernel_core::object::budget::{Budget, INFO_BUDGET, Scratch};
 use kernel_core::object::channel::{BYTES_MAX, Endpoint, HANDLES_MAX, Message};
@@ -21,8 +22,8 @@ use kernel_core::object::handles::Handle;
 use kernel_core::object::handles::{Entry, HANDLE_INVALID, HandleTable};
 use kernel_core::object::memory::{INFO_MEMORY, PAGE_SIZE};
 use kernel_core::object::resource::{
-    INFO_RESOURCE, KIND_BTI, KIND_DMA, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_MSI, KIND_POLICY,
-    KIND_PRIORITY, KIND_ROOT, Request, Resource,
+    INFO_RESOURCE, KIND_BTI, KIND_DMA, KIND_FIRMWARE, KIND_IOPORT, KIND_IRQ, KIND_MMIO, KIND_MSI,
+    KIND_POLICY, KIND_PRIORITY, KIND_ROOT, Request, Resource,
 };
 use kernel_core::object::stream::{QUEUE_BYTES as STREAM_QUEUE_BYTES, StreamEnd};
 use kernel_core::object::{
@@ -1529,6 +1530,89 @@ pub fn thread_sleep(deadline: i64) -> Result<(), Error> {
 pub fn thread_yield() -> Result<(), Error> {
     crate::sched::yield_now();
     Ok(())
+}
+
+/// Checks that `resource` is a `FIRMWARE` resource, and reads the name of
+/// a Mikros variable of `len` bytes from `name` in its UCS-2 form.
+fn variable_name(
+    resource: Checked,
+    name: UserIn<u8>,
+    len: u64,
+) -> Result<[u16; firmware::NAME_MAX + 1], Error> {
+    if object::<Resource>(resource).kind() != KIND_FIRMWARE {
+        return Err(Error::WrongType);
+    }
+    let len = usize::try_from(len)
+        .ok()
+        .filter(|&l| l <= firmware::NAME_MAX)
+        .ok_or(Error::InvalidArgs)?;
+    let mut bytes = [0u8; firmware::NAME_MAX];
+    name.read_bytes(&mut bytes[..len])?;
+    firmware::name(&bytes[..len])
+}
+
+pub fn firmware_variable_get(
+    resource: Checked,
+    name: UserIn<u8>,
+    name_len: u64,
+    buffer: UserOut<u8>,
+    size: u64,
+    actual: UserOut<u64>,
+    attributes: UserOut<u32>,
+) -> Result<(), Error> {
+    let name = variable_name(resource, name, name_len)?;
+    if !actual.fits(1) || !attributes.fits(1) || !buffer.fits(size) {
+        return Err(Error::InvalidArgs);
+    }
+    let room = usize::try_from(size).map_or(firmware::GET_MAX, |s| s.min(firmware::GET_MAX));
+    let mut data = Vec::new();
+    data.try_reserve_exact(room).map_err(|_| Error::NoMemory)?;
+    data.resize(room, 0);
+    let (status, len, attrs) = crate::uefi::get_variable(&name, &mut data)?;
+    let process = current_process()?;
+    if status == firmware::EFI_BUFFER_TOO_SMALL {
+        let needed = len as u64;
+        // A variable that fits `size` but not what the kernel reads at
+        // once cannot be read.
+        if needed <= size {
+            return Err(Error::NoResources);
+        }
+        let outputs = prepare(&process, &[actual.range(1)])?;
+        publish(outputs, &[bytes_of(&[needed])]);
+        return Err(Error::BufferTooSmall);
+    }
+    firmware::result(status)?;
+    let len = len.min(data.len());
+    let outputs = prepare(
+        &process,
+        &[
+            buffer.range(len as u64),
+            actual.range(1),
+            attributes.range(1),
+        ],
+    )?;
+    publish(
+        outputs,
+        &[&data[..len], bytes_of(&[len as u64]), bytes_of(&[attrs])],
+    );
+    Ok(())
+}
+
+pub fn firmware_variable_set(
+    resource: Checked,
+    name: UserIn<u8>,
+    name_len: u64,
+    attributes: u32,
+    data: UserIn<u8>,
+    size: u64,
+) -> Result<(), Error> {
+    let name = variable_name(resource, name, name_len)?;
+    firmware::check_set(attributes, size)?;
+    let mut bytes = [0u8; firmware::SET_MAX as usize];
+    let bytes = &mut bytes[..size as usize];
+    data.read_bytes(bytes)?;
+    let status = crate::uefi::set_variable(&name, attributes, bytes)?;
+    firmware::result(status)
 }
 
 pub fn resource_create(
