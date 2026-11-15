@@ -12,6 +12,9 @@ extern crate alloc;
 
 mod authorize;
 mod emulator;
+// Until the next commit routes the keys through it on Mikros.
+#[cfg_attr(target_os = "mikros", allow(dead_code))]
+mod input;
 #[cfg(target_os = "mikros")]
 mod program;
 
