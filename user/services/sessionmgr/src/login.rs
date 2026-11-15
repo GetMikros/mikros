@@ -266,9 +266,15 @@ pub async fn serve(
                     let _ = server.server().send_on_session_ended(console);
                 });
             }
+            // The password is checked in a task of its own, so that the
+            // console's other requests, Cancel among them, go on.
             TextLoginRequest::Answer(q, r) => {
-                let answered = requests.answer(q.request, q.name, q.password).await;
-                let _ = r.reply(s, answered.map(|()| TextLoginAnswerResponse {}));
+                let (requests, server) = (requests.clone(), server.clone());
+                spawner.spawn(async move {
+                    let answered = requests.answer(q.request, q.name, q.password).await;
+                    let reply = answered.map(|()| TextLoginAnswerResponse {});
+                    let _ = r.reply(server.server(), reply);
+                });
             }
             TextLoginRequest::Cancel(q, r) => {
                 let cancelled = requests.cancel(q.request);

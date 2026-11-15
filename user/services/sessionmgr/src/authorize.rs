@@ -5,6 +5,7 @@
 //! console at a time, and ends the request on `Answer` or `Cancel`, after
 //! 60 seconds, or when the client terminates.
 
+use crate::wait::{Either, Slot, Waiters, select};
 use crate::{SECOND, now};
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
@@ -21,18 +22,23 @@ use mikros_rt::interfaces::mikros::session::{
 };
 
 /// How long a request waits for an answer, and how often its task looks
-/// whether it ended or the client still runs.
+/// whether the client still runs, which it has no handle to wait on.
 const TIMEOUT: i64 = 60 * SECOND;
-const POLL: i64 = SECOND / 10;
 const CLIENT_POLL: i64 = SECOND;
 
 /// How an open request ended, for its `Authorize`.
-#[derive(Clone, Copy)]
 enum Outcome {
     /// `Answer` checked the credentials: the administrator's user ID, or
     /// none when they were wrong or not an administrator's.
     Answered(Option<u32>),
     Cancelled,
+}
+
+/// An open request: its console, and the slot of its outcome, which its
+/// task waits on.
+struct Open {
+    console: u8,
+    outcome: Rc<Slot<Outcome>>,
 }
 
 /// The requests and what they need.
@@ -46,8 +52,10 @@ pub struct Requests {
     pub elevations: RefCell<Option<Rc<ElevationsAsyncClient>>>,
     /// The login session of the session on each console.
     pub sessions: RefCell<BTreeMap<u8, u32>>,
-    /// The open requests by number, with their console and outcome.
-    open: RefCell<BTreeMap<u32, (u8, Option<Outcome>)>>,
+    /// The open requests by number.
+    open: RefCell<BTreeMap<u32, Open>>,
+    /// The tasks that wait for a console's open request to end.
+    freed: Waiters,
     next: Cell<u32>,
 }
 
@@ -65,6 +73,7 @@ impl Requests {
             elevations: RefCell::new(None),
             sessions: RefCell::new(BTreeMap::new()),
             open: RefCell::new(BTreeMap::new()),
+            freed: Waiters::default(),
             next: Cell::new(1),
         }
     }
@@ -83,27 +92,35 @@ impl Requests {
                 .map(|u| u.id),
             _ => None,
         };
-        let mut open = self.open.borrow_mut();
-        let (_, outcome) = open.get_mut(&request).ok_or(Status::NotFound)?;
-        *outcome = Some(Outcome::Answered(admin));
+        // The request may have ended while the password was checked.
+        self.give(request, Outcome::Answered(admin))?;
         admin.map(drop).ok_or(Status::AccessDenied)
     }
 
     /// Ends open request `request` without an answer.
     pub fn cancel(&self, request: u32) -> Result<(), Status> {
-        let mut open = self.open.borrow_mut();
-        let (_, outcome) = open.get_mut(&request).ok_or(Status::NotFound)?;
-        *outcome = Some(Outcome::Cancelled);
-        Ok(())
+        self.give(request, Outcome::Cancelled)
+    }
+
+    /// Gives open request `request` its outcome, once.
+    fn give(&self, request: u32, outcome: Outcome) -> Result<(), Status> {
+        let slot = self.open.borrow().get(&request).map(|o| o.outcome.clone());
+        match slot {
+            Some(slot) if slot.give(outcome) => Ok(()),
+            _ => Err(Status::NotFound),
+        }
+    }
+
+    /// Closes request `request`, and wakes the requests that wait for its
+    /// console.
+    fn close(&self, request: u32) {
+        self.open.borrow_mut().remove(&request);
+        self.freed.wake_all();
     }
 
     /// Whether `console` has an open request.
     fn busy(&self, console: u8) -> bool {
-        self.open.borrow().values().any(|&(c, _)| c == console)
-    }
-
-    async fn sleep(&self, nanos: i64) {
-        let _ = self.reactor.sleep_until(now() + nanos).await;
+        self.open.borrow().values().any(|o| o.console == console)
     }
 
     /// The administrator who elevated process `pid`, 0 for none.
@@ -183,39 +200,40 @@ impl Requests {
             Some(u) if u.kind == UserKind::Admin => u.name,
             _ => String::new(),
         };
-        while self.busy(console) {
-            self.sleep(POLL).await;
-        }
+        // One request per console: the next starts once it is free.
+        self.freed.until(|| !self.busy(console)).await;
         let request = self.next.get();
         self.next.set(request.wrapping_add(1).max(1));
-        self.open.borrow_mut().insert(request, (console, None));
+        let slot = Rc::new(Slot::default());
+        let open = Open {
+            console,
+            outcome: slot.clone(),
+        };
+        self.open.borrow_mut().insert(request, open);
         let app_id = client.app_id.clone();
         let sent = server
             .server()
             .send_on_authorize(request, console, app_id, action, reason, name);
         let deadline = now() + TIMEOUT;
-        let mut checked = now();
         let outcome = loop {
             if sent.is_err() {
                 break None;
             }
-            if let Some((_, Some(outcome))) = self.open.borrow().get(&request) {
-                break Some(*outcome);
-            }
-            if now() >= deadline {
-                break None;
-            }
-            if now() - checked >= CLIENT_POLL {
-                checked = now();
-                if !matches!(self.launcher.get_info(client.pid).await, Ok(Ok(_))) {
-                    self.open.borrow_mut().remove(&request);
-                    let _ = server.server().send_on_authorize_ended(request);
-                    return None;
+            // The outcome, or the next look at the client, or the end.
+            let next = now().saturating_add(CLIENT_POLL).min(deadline);
+            match select(slot.take(), self.reactor.sleep_until(next)).await {
+                Either::Left(outcome) => break Some(outcome),
+                Either::Right(_) if now() >= deadline => break None,
+                Either::Right(_) => {
+                    if !matches!(self.launcher.get_info(client.pid).await, Ok(Ok(_))) {
+                        self.close(request);
+                        let _ = server.server().send_on_authorize_ended(request);
+                        return None;
+                    }
                 }
             }
-            self.sleep(POLL).await;
         };
-        self.open.borrow_mut().remove(&request);
+        self.close(request);
         match outcome {
             Some(Outcome::Answered(Some(admin))) => Some((true, admin)),
             Some(_) => denied,

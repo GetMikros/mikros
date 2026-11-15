@@ -16,6 +16,7 @@ mod elevate;
 mod login;
 mod seat;
 mod spawn;
+mod wait;
 
 use alloc::rc::Rc;
 use alloc::vec;
