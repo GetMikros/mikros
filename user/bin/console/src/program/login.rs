@@ -10,6 +10,7 @@
 use crate::authorize::Request;
 use crate::emulator::screen::Screen;
 use crate::program::Console;
+use crate::program::authorizing::Event;
 use crate::program::term::Term;
 use crate::program::vt::{View, Vt};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -119,15 +120,15 @@ pub async fn events(console: Rc<Console>, text_login: Rc<TextLoginAsyncClient>) 
                     vt.ended.notify();
                 }
             }
-            TextLoginEvent::OnAuthorize(e) => console.authorize(Request {
+            TextLoginEvent::OnAuthorize(e) => console.apply(Event::Asked(Request {
                 request: e.request,
                 console: e.console,
                 app_id: e.app_id,
                 action: e.action,
                 reason: e.reason,
                 name: e.name,
-            }),
-            TextLoginEvent::OnAuthorizeEnded(e) => console.authorize_ended(e.request),
+            })),
+            TextLoginEvent::OnAuthorizeEnded(e) => console.apply(Event::Ended(e.request)),
         }
     }
     console.closed.set(true);

@@ -8,6 +8,7 @@
 
 use crate::emulator::cell::{Cell, DIM};
 use crate::emulator::screen::Screen;
+use crate::input::SecureKey;
 
 /// The longest name and password that `Answer` takes.
 const NAME_MAX: usize = 32;
@@ -142,8 +143,13 @@ impl Prompt {
         }
     }
 
+    /// Takes in a key that the input router gave the request.
+    pub fn key(&mut self, key: &SecureKey) -> Step {
+        self.type_bytes(key.bytes())
+    }
+
     /// Takes in the bytes of keys typed.
-    pub fn key(&mut self, bytes: &[u8]) -> Step {
+    fn type_bytes(&mut self, bytes: &[u8]) -> Step {
         if self.waiting {
             return Step::Nothing;
         }
@@ -341,34 +347,40 @@ mod tests {
     #[test]
     fn asks_for_the_name_then_the_password() {
         let mut p = prompt("", 1, (1, 0));
-        assert_eq!(p.key(b"ad"), Step::Nothing);
-        assert_eq!(p.key(b"x\x7fa"), Step::Nothing);
-        assert_eq!(p.key(b"\r"), Step::Nothing);
-        assert_eq!(p.key(b"s3cret"), Step::Nothing);
-        assert_eq!(p.key(b"\r"), Step::Answer("ada".into(), "s3cret".into()));
+        assert_eq!(p.type_bytes(b"ad"), Step::Nothing);
+        assert_eq!(p.type_bytes(b"x\x7fa"), Step::Nothing);
+        assert_eq!(p.type_bytes(b"\r"), Step::Nothing);
+        assert_eq!(p.type_bytes(b"s3cret"), Step::Nothing);
+        assert_eq!(
+            p.type_bytes(b"\r"),
+            Step::Answer("ada".into(), "s3cret".into())
+        );
         // While the answer is checked, keys do nothing.
-        assert_eq!(p.key(b"\x1b"), Step::Nothing);
+        assert_eq!(p.type_bytes(b"\x1b"), Step::Nothing);
     }
 
     #[test]
     fn takes_only_the_password_for_a_named_administrator() {
         let mut p = prompt("ada", 1, (1, 0));
-        assert_eq!(p.key("pä\x15pw".as_bytes()), Step::Nothing);
-        assert_eq!(p.key("ä".as_bytes()), Step::Nothing);
-        assert_eq!(p.key(b"\n"), Step::Answer("ada".into(), "pwä".into()));
+        assert_eq!(p.type_bytes("pä\x15pw".as_bytes()), Step::Nothing);
+        assert_eq!(p.type_bytes("ä".as_bytes()), Step::Nothing);
+        assert_eq!(
+            p.type_bytes(b"\n"),
+            Step::Answer("ada".into(), "pwä".into())
+        );
     }
 
     #[test]
     fn cancels_on_escape_but_not_on_arrows() {
         let mut p = prompt("", 1, (1, 0));
-        assert_eq!(p.key(b"\x1b[A"), Step::Nothing);
-        assert_eq!(p.key(b"\x1b"), Step::Cancel);
+        assert_eq!(p.type_bytes(b"\x1b[A"), Step::Nothing);
+        assert_eq!(p.type_bytes(b"\x1b"), Step::Cancel);
     }
 
     #[test]
     fn writes_the_lines_on_the_empty_cursor_row() {
         let mut p = prompt("", 1, (1, 0));
-        p.key(b"ad");
+        p.type_bytes(b"ad");
         let screen = p.screen();
         let shown = rows(&screen);
         assert_eq!(shown[0], "x".repeat(60));
@@ -381,7 +393,7 @@ mod tests {
         assert_eq!(shown[3], "");
         assert_eq!(screen.cell(2, 0).attrs & DIM, 0);
         assert_eq!(screen.cursor(), Some((2, 20)));
-        p.key("\rpä".as_bytes());
+        p.type_bytes("\rpä".as_bytes());
         let shown = rows(&p.screen());
         assert_eq!(shown[3], "[authorize] password for ad: **");
         assert!(!shown[3].contains('ä'));
@@ -393,7 +405,7 @@ mod tests {
         // below it, and the screen scrolls up for the ones that do not
         // fit.
         let mut p = prompt("ada", 5, (4, 3));
-        p.key(b"pw");
+        p.type_bytes(b"pw");
         let shown = rows(&p.screen());
         assert_eq!(
             &shown[..3],
@@ -410,7 +422,7 @@ mod tests {
     #[test]
     fn keeps_the_lines_with_stars_and_the_failure() {
         let mut p = prompt("ada", 1, (1, 0));
-        p.key(b"pw\r");
+        p.type_bytes(b"pw\r");
         p.failed();
         let screen = p.screen();
         assert_eq!(rows(&screen)[3], "[authorize] authorization failed");
@@ -439,14 +451,14 @@ mod tests {
             Prompt::new(request, 60, 6, (1, 0), cell)
         };
         let mut p = sudo("sip");
-        p.key(b"pw");
+        p.type_bytes(b"pw");
         let shown = rows(&p.screen());
         assert_eq!(shown[1], "[sudo] password for sip: **");
         assert_eq!(shown[2], "");
         let mut p = sudo("");
-        p.key(b"ada");
+        p.type_bytes(b"ada");
         assert_eq!(rows(&p.screen())[1], "[sudo] name: ada");
-        p.key(b"\rx\r");
+        p.type_bytes(b"\rx\r");
         p.failed();
         assert_eq!(
             p.take_transcript().unwrap(),

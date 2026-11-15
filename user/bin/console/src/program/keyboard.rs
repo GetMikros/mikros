@@ -6,11 +6,6 @@ use crate::emulator::keys::{Key, Modifiers, encode};
 use crate::emulator::screen::Modes;
 use crate::program::xkb::Keymap;
 
-/// How long a key is held before it repeats, and how often it then does,
-/// in nanoseconds of the monotonic clock.
-pub const REPEAT_DELAY: i64 = 500_000_000;
-pub const REPEAT_INTERVAL: i64 = 33_000_000;
-
 /// The xkb keysyms of the keys that send sequences rather than text.
 fn special(keysym: u32) -> Option<Key> {
     Some(match keysym {
@@ -77,8 +72,6 @@ pub enum Pressed {
 
 pub struct Keyboard {
     keymap: Keymap,
-    /// The key that repeats while held, and when it next does.
-    repeat: Option<(u16, i64)>,
     /// The F12 key held since it was pressed with Ctrl and Alt.
     log_key: Option<u16>,
     /// In the diagnostic build, the F11 key held since it was pressed
@@ -91,7 +84,6 @@ impl Keyboard {
     pub fn new(keymap: Keymap) -> Keyboard {
         Keyboard {
             keymap,
-            repeat: None,
             log_key: None,
             #[cfg(mikros_diag)]
             overview_key: None,
@@ -144,9 +136,10 @@ impl Keyboard {
         }
     }
 
-    /// Takes in a press (`value` 1) or release (0) of evdev key `code` at
-    /// `now`, and returns what it means.
-    pub fn key(&mut self, code: u16, value: i32, now: i64, modes: &Modes) -> Pressed {
+    /// Takes in a press (`value` 1) or release (0) of evdev key `code`,
+    /// and returns what it means. Which key repeats is the input
+    /// router's to track.
+    pub fn key(&mut self, code: u16, value: i32, modes: &Modes) -> Pressed {
         let pressed = value != 0;
         let meaning = if pressed {
             self.meaning(code, modes)
@@ -155,19 +148,28 @@ impl Keyboard {
         };
         self.keymap.update(code, pressed);
         match (pressed, &meaning) {
-            (true, Pressed::Bytes(_)) if self.keymap.repeats(code) => {
-                self.repeat = Some((code, now + REPEAT_DELAY));
-            }
             (true, Pressed::LogView) => self.log_key = Some(code),
             #[cfg(mikros_diag)]
             (true, Pressed::Overview) => self.overview_key = Some(code),
             #[cfg(mikros_diag)]
             (false, _) if self.overview_key == Some(code) => self.overview_key = None,
-            (false, _) if self.repeat.is_some_and(|(c, _)| c == code) => self.repeat = None,
             (false, _) if self.log_key == Some(code) => self.log_key = None,
             _ => {}
         }
         meaning
+    }
+
+    /// Whether key `code` repeats while it is held.
+    pub fn repeats(&self, code: u16) -> bool {
+        self.keymap.repeats(code)
+    }
+
+    /// The bytes that key `code` sends now, for its repeat.
+    pub fn bytes_of(&self, code: u16, modes: &Modes) -> Option<Vec<u8>> {
+        match self.meaning(code, modes) {
+            Pressed::Bytes(bytes) => Some(bytes),
+            _ => None,
+        }
     }
 
     /// Whether Ctrl, Alt and F12 are held, which shows the log.
@@ -182,23 +184,5 @@ impl Keyboard {
     pub fn overview(&self) -> bool {
         let mods = self.modifiers();
         self.overview_key.is_some() && mods.ctrl && mods.alt
-    }
-
-    /// When the held key next repeats.
-    pub fn next_repeat(&self) -> Option<i64> {
-        self.repeat.map(|(_, at)| at)
-    }
-
-    /// The bytes of the held key's repeat once it is due at `now`.
-    pub fn repeat(&mut self, now: i64, modes: &Modes) -> Option<Vec<u8>> {
-        let (code, at) = self.repeat?;
-        if now < at {
-            return None;
-        }
-        self.repeat = Some((code, now + REPEAT_INTERVAL));
-        match self.meaning(code, modes) {
-            Pressed::Bytes(bytes) => Some(bytes),
-            _ => None,
-        }
     }
 }

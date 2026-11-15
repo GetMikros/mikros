@@ -30,6 +30,7 @@ mod vt;
 mod xkb;
 
 use crate::emulator::screen::{Modes, Screen};
+use crate::input::{Owner, Route, Router, TerminalInput};
 use keyboard::{Keyboard, Pressed};
 use logpane::LogPane;
 use mikros_evdev::codes::{EV_KEY, KEY_A};
@@ -93,6 +94,8 @@ pub struct Console {
     keys: Notify,
     /// The authorization screen and the requests waiting for it.
     auth: authorizing::Authorizing,
+    /// Who gets the keys, and the key that repeats.
+    router: RefCell<Router>,
 }
 
 pub(crate) fn now() -> i64 {
@@ -132,7 +135,8 @@ impl Console {
     /// Shows text console `number`, 1 to 6, as it was left, unless the
     /// authorization screen shows.
     fn switch_to(&self, number: u8) {
-        if self.authorizing() {
+        // Not while an authorization request has the keyboard.
+        if self.router.borrow().owner() != Owner::Terminal {
             return;
         }
         let Some(index) = usize::from(number)
@@ -210,13 +214,19 @@ impl Console {
         self.changed.notify();
     }
 
-    /// Takes in `bytes` typed: the terminal of the console shown gets
-    /// them, or its login prompt.
-    fn input(self: &Rc<Self>, bytes: Vec<u8>) {
-        if self.authorizing() {
-            self.authorize_key(&bytes);
-            return;
+    /// Hands the bytes of a key to where the router sent them.
+    fn deliver(self: &Rc<Self>, route: Route) {
+        match route {
+            Route::Terminal(input) => self.input(input),
+            Route::Secure(request, key) => self.authorize_key(request, key),
+            Route::Dropped => {}
         }
+    }
+
+    /// Takes in a key's bytes for the console shown: its terminal gets
+    /// them, or its login prompt.
+    fn input(self: &Rc<Self>, input: TerminalInput) {
+        let bytes = input.into_bytes();
         let vt = self.vt().clone();
         match vt.term() {
             Some(term) => {
@@ -285,11 +295,7 @@ impl Console {
     /// Repeats the held key, for as long as the console runs.
     async fn repeat(self: Rc<Self>) {
         loop {
-            let next = self
-                .keyboard
-                .borrow()
-                .as_ref()
-                .and_then(Keyboard::next_repeat);
+            let next = self.router.borrow().next_repeat();
             match next {
                 Some(at) => {
                     let sleep = self.reactor.sleep_until(at);
@@ -298,14 +304,12 @@ impl Console {
                 None => self.keys.changed().await,
             }
             let modes = self.modes();
-            let bytes = self
-                .keyboard
-                .borrow_mut()
-                .as_mut()
-                .and_then(|k| k.repeat(now(), &modes));
-            if let Some(bytes) = bytes {
-                self.input(bytes);
-            }
+            let keyboard = self.keyboard.borrow();
+            let route = self.router.borrow_mut().repeat(now(), |code| {
+                keyboard.as_ref().and_then(|k| k.bytes_of(code, &modes))
+            });
+            drop(keyboard);
+            self.deliver(route);
         }
     }
 
@@ -390,7 +394,15 @@ impl Console {
                     .keyboard
                     .borrow_mut()
                     .as_mut()
-                    .map(|k| k.key(event.code, event.value, now(), &modes));
+                    .map(|k| k.key(event.code, event.value, &modes));
+                let repeats = self
+                    .keyboard
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|k| k.repeats(event.code));
+                if event.value == 0 {
+                    self.router.borrow_mut().release(event.code);
+                }
                 self.keys.notify();
                 let held = self
                     .keyboard
@@ -412,7 +424,18 @@ impl Console {
                     }
                 }
                 match pressed {
-                    Some(Pressed::Bytes(bytes)) => self.input(bytes),
+                    Some(Pressed::Bytes(bytes)) => {
+                        // The key goes to the owner of the keyboard when
+                        // it was pressed, which the device's time says.
+                        let route = self.router.borrow_mut().press(
+                            event.code,
+                            event.timestamp,
+                            Some(bytes),
+                            repeats,
+                            now(),
+                        );
+                        self.deliver(route);
+                    }
                     Some(Pressed::Switch(number)) => self.switch_to(number),
                     Some(Pressed::LogView) | Some(Pressed::Nothing) | None => {}
                     #[cfg(mikros_diag)]
@@ -491,6 +514,7 @@ pub fn main() {
         changed: Rc::new(Notify::default()),
         keys: Notify::default(),
         auth: authorizing::Authorizing::default(),
+        router: RefCell::new(Router::default()),
     });
     let text_login = Rc::new(TextLoginAsyncClient::new(
         ClientEnd::new(text_login),
