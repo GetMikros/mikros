@@ -446,7 +446,6 @@ dependencies = [
  "mikros-bootimage",
  "mikros-loader",
  "mikros-rt",
- "mikros-ustar",
 ]
 
 [[package]]
@@ -549,7 +548,6 @@ version = "0.0.0"
 dependencies = [
  "mikros-bootimage",
  "mikros-rt",
- "mikros-ustar",
 ]
 
 [[package]]
@@ -668,7 +666,6 @@ version = "0.0.0"
 dependencies = [
  "mikros-bootimage",
  "mikros-rt",
- "mikros-ustar",
 ]
 
 [[package]]
@@ -681,10 +678,6 @@ version = "0.0.0"
 dependencies = [
  "argon2",
 ]
-
-[[package]]
-name = "mikros-ustar"
-version = "0.0.0"
 
 [[package]]
 name = "mikros-virtio"

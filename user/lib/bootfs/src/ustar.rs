@@ -1,6 +1,4 @@
-//! Reading the members of the boot image, a ustar archive.
-
-#![no_std]
+//! Reading the members of a ustar archive, which test images still are.
 
 const BLOCK: usize = 512;
 
@@ -130,14 +128,6 @@ pub fn entries(image: &[u8]) -> Entries<'_> {
     Entries { image, at: 0 }
 }
 
-/// The data of the first regular member of `image` with no prefix named
-/// `name`.
-pub fn find<'a>(image: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    entries(image)
-        .find(|e| e.kind() == Kind::File && e.prefix().is_empty() && e.name() == name)
-        .map(|e| e.data)
-}
-
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -193,17 +183,6 @@ mod tests {
             (all[1].mode(), all[1].uid(), all[1].mtime()),
             (0o644, 10, 100)
         );
-    }
-
-    #[test]
-    fn finds_regular_members_without_a_prefix() {
-        let image = archive(&[
-            member("a", "init", b'0', b"prefixed", ""),
-            member("", "init", b'5', b"", ""),
-            member("", "init", b'0', b"found", ""),
-        ]);
-        assert_eq!(find(&image, b"init"), Some(&b"found"[..]));
-        assert_eq!(find(&image, b"other"), None);
     }
 
     #[test]

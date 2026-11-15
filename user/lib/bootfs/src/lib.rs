@@ -12,10 +12,11 @@ extern crate alloc;
 
 #[cfg(target_os = "mikros")]
 pub mod server;
+mod ustar;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use mikros_ustar::{Entry, Kind};
+use ustar::{Entry, Kind};
 
 /// The longest path component, in bytes.
 pub const NAME_MAX: usize = 255;
@@ -129,7 +130,7 @@ impl Tree {
             tree.add_modules(image);
             return tree;
         }
-        for entry in mikros_ustar::entries(image) {
+        for entry in ustar::entries(image) {
             tree.add(&entry);
         }
         tree
