@@ -526,7 +526,7 @@ impl fmt::Display for Exception<'_> {
 /// leaves work to the interrupted thread, for `after_interrupt`: an
 /// exception from user mode or a page fault in the user copy routine,
 /// whose handling may wait, and whatever a thread does on its way back to
-/// user mode.
+/// user mode. A fault that ends a firmware call leaves none.
 #[cfg(target_os = "none")]
 extern "sysv64" fn interrupt(frame: &mut Frame) -> bool {
     use crate::apic::{PIC_BASE, SPURIOUS_VECTOR, TIMER_VECTOR};
@@ -535,7 +535,9 @@ extern "sysv64" fn interrupt(frame: &mut Frame) -> bool {
     handling.fetch_add(1, Ordering::Relaxed);
     let vector = frame.vector as u8;
     let user = frame.cs & 3 == 3;
+    let ended = matches!(vector, PAGE_FAULT | GENERAL_PROTECTION) && crate::uefi::recover(frame);
     match vector {
+        _ if ended => {}
         PAGE_FAULT if user || crate::usercopy::in_copy(frame) => {
             let address = crate::cpu::read_cr2();
             crate::percpu::this()
@@ -567,7 +569,7 @@ extern "sysv64" fn interrupt(frame: &mut Frame) -> bool {
         _ => crate::apic::eoi(),
     }
     handling.fetch_sub(1, Ordering::Relaxed);
-    user || vector == PAGE_FAULT
+    !ended && (user || vector == PAGE_FAULT)
 }
 
 const FAULT_WRITE: u64 = 1 << 1;

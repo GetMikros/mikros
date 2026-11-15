@@ -148,6 +148,27 @@ fn unmap(virt: u64, size: u64, mut unmapped: impl FnMut(u64, u64)) {
     flush(virt + size, &batch[..count]);
 }
 
+// The runtime window is the span of one top-level entry, so that
+// `unmap_runtime_window` can remove it at once.
+const _: () =
+    assert!(RUNTIME_WINDOW_SIZE == 512 << 30 && RUNTIME_WINDOW_BASE.is_multiple_of(512 << 30));
+
+/// Removes every mapping of the runtime window from the kernel's tables,
+/// whose kernel half every address space shares, and drops their
+/// translations on every processor.
+pub fn unmap_runtime_window() {
+    let mut tables = FrameTables;
+    Mapper::existing(&mut tables, root(), gib_pages()).clear_kernel_slot(RUNTIME_WINDOW_BASE);
+    crate::cpu::flush_all();
+    crate::tlb::shootdown(
+        crate::tlb::KERNEL,
+        RUNTIME_WINDOW_BASE,
+        RUNTIME_WINDOW_SIZE,
+        false,
+        &crate::tlb::RUNNING,
+    );
+}
+
 /// Maps `size` bytes of device memory at `phys` uncached into the dynamic
 /// region and returns the address of `phys` there.
 pub fn map_device(phys: u64, size: u64) -> u64 {

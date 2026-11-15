@@ -267,6 +267,18 @@ impl<'t, T: Tables> Mapper<'t, T> {
         Ok(())
     }
 
+    /// Removes every mapping of the 512 GiB that the top-level entry for
+    /// `virt`, in the kernel half, covers, by clearing the table that the
+    /// entry leads to, so that every hierarchy that shares the kernel half
+    /// loses them too. The tables below that one are kept, and become
+    /// unreachable. The caller invalidates the translations.
+    pub fn clear_kernel_slot(&mut self, virt: u64) {
+        let entry = self.tables.table(self.root)[index(virt, 3)];
+        if entry & PRESENT != 0 {
+            self.tables.table(entry & ADDR_MASK).fill(0);
+        }
+    }
+
     /// Removes the mappings of the 4 KiB pages in the `size` bytes from
     /// `virt` that are mapped, skipping the others, and calls `unmapped`
     /// with the virtual and physical address of each page removed. The
@@ -740,6 +752,31 @@ mod tests {
         let u = *pool.table(user);
         assert_eq!(k[256..], u[256..]);
         assert!(u[..256].iter().all(|&e| e == 0));
+    }
+
+    #[test]
+    fn clears_a_kernel_slot_in_every_space() {
+        let mut pool = Pool(Vec::new());
+        let kernel = Mapper::new(&mut pool, true).unwrap().root();
+        let user = Mapper::user(&mut pool, kernel).unwrap().root();
+        let slot = 0xffff_fe00_0000_0000;
+        let next = slot + (512 << 30);
+        let mut m = Mapper::existing(&mut pool, kernel, true);
+        m.map(slot + 0x7e0_0000, 0x7e0_0000, 4 * PAGE_SIZE, KERNEL_DATA)
+            .unwrap();
+        m.map(slot + 0x4000_0000, 0x4000_0000, 2 << 20, KERNEL_DATA)
+            .unwrap();
+        m.map(next, 0x9000, PAGE_SIZE, KERNEL_DATA).unwrap();
+        m.clear_kernel_slot(slot + 0x1234);
+        for root in [kernel, user] {
+            let mut m = Mapper::existing(&mut pool, root, true);
+            assert_eq!(m.translate(slot + 0x7e0_0000), None);
+            assert_eq!(m.translate(slot + 0x4000_0000), None);
+            assert_eq!(m.translate(next), Some(0x9000));
+        }
+        let mut m = Mapper::existing(&mut pool, kernel, true);
+        m.map(slot, 0x5000, PAGE_SIZE, KERNEL_DATA).unwrap();
+        assert_eq!(m.translate(slot), Some(0x5000));
     }
 
     #[test]
