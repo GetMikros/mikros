@@ -1,5 +1,6 @@
 //! The service manager's list of services, as a system test, from a
-//! program that holds no permission of its own, as selftest's tests do.
+//! program that holds no permission of its own, as selftest's tests do,
+//! and so may not start or stop services.
 
 #![no_std]
 #![no_main]
@@ -10,8 +11,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::Managed;
 use mikros_rt::interfaces::__midl::endpoints;
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{
-    ServiceEntry, ServiceState, Services, ServicesClient,
+    ServiceControl, ServiceEntry, ServiceState, Services, ServicesClient,
 };
 use mikros_test::*;
 
@@ -25,6 +27,7 @@ fn main(m: &Managed) -> i64 {
         &[
             ("lists_services", lists_services),
             ("lists_after_a_name", lists_after_a_name),
+            ("control_needs_its_permission", control_needs_its_permission),
         ],
     )
 }
@@ -93,4 +96,22 @@ fn lists_after_a_name(s: &Own) -> Result {
     ensure("the services after the first", got == expected)?;
     let (none, more) = list(&services, Some("~"))?;
     ensure("none after the last name", none.is_empty() && !more)
+}
+
+/// `ServiceControl` is refused without `services.control`.
+fn control_needs_its_permission(s: &Own) -> Result {
+    let (_client, server) = endpoints::<ServiceControl>().map_err(|_| Failure {
+        what: "making a channel",
+        status: 0,
+    })?;
+    let connected = s.services().connect(
+        "mikros.service.ServiceControl".into(),
+        None,
+        server.into_handle(),
+        FOREVER,
+    );
+    ensure(
+        "refusing the connection",
+        matches!(connected, Ok(Err(Status::AccessDenied))),
+    )
 }

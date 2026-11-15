@@ -417,6 +417,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "idle-service"
+version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
+
+[[package]]
 name = "init"
 version = "0.0.0"
 dependencies = [

@@ -13,6 +13,7 @@ const LESS: &str = "/usr/bin/less";
 const PS: &str = "/usr/bin/ps";
 const POWER: &str = "/usr/bin/power";
 const LOGS: &str = "/usr/bin/logs";
+const SERVICES: &str = "/usr/bin/services";
 /// A file that every system holds with devices.
 const DECLARATIONS: &str = "/usr/share/msh/completions/devices.msh";
 
@@ -50,6 +51,10 @@ fn main() {
         ("power_bad_arguments", power_bad_arguments),
         ("logs_not_authorized", logs_not_authorized),
         ("logs_bad_arguments", logs_bad_arguments),
+        ("services_lists", services_lists),
+        ("services_json", services_json),
+        ("services_not_authorized", services_not_authorized),
+        ("services_bad_arguments", services_bad_arguments),
     ];
     for (number, (name, check)) in checks.iter().enumerate() {
         if let Err(Failure { what, status }) = check() {
@@ -360,6 +365,77 @@ fn logs_bad_arguments() -> Result<(), Failure> {
         ensure(&run, "refusing the arguments", run.status == 2)?;
         ensure(&run, "writing nothing", run.out.is_empty())?;
         ensure(&run, "naming the command", run.err.starts_with("logs: "))?;
+    }
+    Ok(())
+}
+
+/// The header, then a line per service: the log service runs with a
+/// process ID, and a service that does not run shows `-`.
+fn services_lists() -> Result<(), Failure> {
+    let run = run(SERVICES, &[])?;
+    ensure(&run, "succeeding", run.status == 0 && run.err.is_empty())?;
+    let mut lines = run.out.lines();
+    let header = lines.next().unwrap_or("").split_whitespace();
+    ensure(
+        &run,
+        "a header line",
+        header.eq(["NAME", "STATE", "PID", "RESTARTS"]),
+    )?;
+    let rows: Vec<Vec<&str>> = lines.map(|l| l.split_whitespace().collect()).collect();
+    ensure(&run, "four columns", rows.iter().all(|r| r.len() == 4))?;
+    let log = rows.iter().find(|r| r[0] == "logsvc");
+    ensure(
+        &run,
+        "the log service running",
+        log.is_some_and(|r| r[1] == "running" && r[2].parse::<u32>().is_ok_and(|p| p > 0)),
+    )?;
+    let consistent = rows.iter().all(|r| (r[1] == "running") == (r[2] != "-"));
+    ensure(&run, "process IDs of the running services only", consistent)
+}
+
+fn services_json() -> Result<(), Failure> {
+    let run = run(SERVICES, &["--json"])?;
+    ensure(&run, "succeeding with --json", run.status == 0)?;
+    let text = run.out.trim_end();
+    ensure(
+        &run,
+        "one array",
+        text.starts_with("[{") && text.ends_with("}]"),
+    )?;
+    ensure(
+        &run,
+        "the log service's object",
+        text.contains("{\"name\":\"logsvc\",\"state\":\"running\",\"on_demand\":false,"),
+    )?;
+    ensure(
+        &run,
+        "every member",
+        ["\"pid\":", "\"restarts\":", "\"exit_status\":"]
+            .iter()
+            .all(|k| text.contains(k)),
+    )
+}
+
+/// No administrator answers here, so nothing is stopped.
+fn services_not_authorized() -> Result<(), Failure> {
+    let run = run(SERVICES, &["stop", "logsvc"])?;
+    ensure(&run, "failing", run.status == 1 && run.out.is_empty())?;
+    ensure(&run, "saying why", run.err == "services: not authorized\n")
+}
+
+/// An unknown subcommand and a missing or extra operand are refused with
+/// status 2, before any authorization is asked.
+fn services_bad_arguments() -> Result<(), Failure> {
+    let refused: [&[&str]; 3] = [&["list"], &["stop"], &["stop", "logsvc", "termsvc"]];
+    for arguments in refused {
+        let run = run(SERVICES, arguments)?;
+        ensure(&run, "refusing the arguments", run.status == 2)?;
+        ensure(&run, "writing nothing", run.out.is_empty())?;
+        ensure(
+            &run,
+            "naming the command",
+            run.err.starts_with("services: "),
+        )?;
     }
     Ok(())
 }

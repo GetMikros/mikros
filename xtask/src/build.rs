@@ -1048,6 +1048,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", sessions.display());
             let session_shell = user_build("session-shell", kind)?;
             println!("built    {}", session_shell.display());
+            let idle_service = user_build("idle-service", kind)?;
+            println!("built    {}", idle_service.display());
+            let idle_manifest =
+                crate::workspace_root().join("user/tests/idle-service/idle-service.yaml");
             let test_sessions_manifest =
                 crate::workspace_root().join("user/tests/session-shell/sessionmgr.yaml");
             let mut console_files: Vec<(String, PathBuf)> = input_files
@@ -1488,8 +1492,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // system and what they load, msh among them, the session
             // manager's manifest with the kernel log handle,
             // spawn-std, which runs as the job that the runner stops in
-            // msh, and files-c, which ada's msh runs in her home. The
-            // dynamic linker is in both lists, and goes in once.
+            // msh, files-c, which ada's msh runs in her home, and the idle
+            // service, which ada's msh stops and starts. The dynamic
+            // linker is in both lists, and goes in once.
             let sessions_manifest = "usr/lib/services/sessionmgr.yaml";
             let console_fonts =
                 ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"].map(|f| fonts.ttf.join(f));
@@ -1509,6 +1514,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("usr/bin/spawn-std", spawn_std.as_path()),
                     ("usr/bin/files-c", files_c.as_path()),
                     ("usr/bin/coreutils-check", coreutils_check.as_path()),
+                    ("usr/bin/idle-service", idle_service.as_path()),
+                    (
+                        "usr/lib/services/idle-service.yaml",
+                        idle_manifest.as_path(),
+                    ),
                     (
                         "usr/share/fonts/dejavu/DejaVuSansMono.ttf",
                         console_fonts[0].as_path(),

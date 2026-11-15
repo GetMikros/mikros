@@ -76,8 +76,12 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// `if $status != 0 { exit 13 }`, and `sudo hostname` with a wrong one and
 /// `if $status != 1 { exit 14 }`; then
 /// `if ((logs -n 3 | lines | len) != 3) { exit 15 }` with ada's password,
-/// which prints the last three records of the log; then `spaw`, which Tab
-/// completes to `spawn-std `, and
+/// which prints the last three records of the log; then
+/// `services stop idle-service`, `services start idle-service` and
+/// `services restart idle-service`, each with ada's password and
+/// `if $status != 0 { exit 16 }`, 17 and 18: the start succeeds only when
+/// the stopped service, which always restarts, stayed stopped; then
+/// `spaw`, which Tab completes to `spawn-std `, and
 /// `sleep`, a job that runs until it is killed, Ctrl-Z, which stops it,
 /// `let n = (jobs | lines | len)`, `bg`, `kill %1`,
 /// `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
@@ -96,7 +100,7 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// its first entry, files-c's and coreutils-check's checks
 /// passed, and `/`, which no namespace entry covers, is a folder that
 /// lists `Users`.
-const MSH_KEYS: [(&str, Duration); 38] = [
+const MSH_KEYS: [(&str, Duration); 47] = [
     ("y e s ret", JOB_START),
     ("ctrl-c", QUESTION),
     ("ctrl-l", QUESTION),
@@ -157,6 +161,36 @@ const MSH_KEYS: [(&str, Duration); 38] = [
         JOB_START,
     ),
     ("a d a minus p w ret", ANSWER),
+    (
+        "s e r v i c e s spc s t o p spc i d l e minus s e r v i c e ret",
+        JOB_START,
+    ),
+    ("a d a minus p w ret", ANSWER),
+    (
+        "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
+         shift-bracket_left spc e x i t spc 1 6 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "s e r v i c e s spc s t a r t spc i d l e minus s e r v i c e ret",
+        JOB_START,
+    ),
+    ("a d a minus p w ret", ANSWER),
+    (
+        "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
+         shift-bracket_left spc e x i t spc 1 7 spc shift-bracket_right ret",
+        QUESTION,
+    ),
+    (
+        "s e r v i c e s spc r e s t a r t spc i d l e minus s e r v i c e ret",
+        JOB_START,
+    ),
+    ("a d a minus p w ret", ANSWER),
+    (
+        "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
+         shift-bracket_left spc e x i t spc 1 8 spc shift-bracket_right ret",
+        QUESTION,
+    ),
     ("s p a w tab s l e e p ret", JOB_START),
     ("ctrl-z", QUESTION),
     (
