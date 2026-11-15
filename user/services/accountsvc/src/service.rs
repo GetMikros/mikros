@@ -19,7 +19,7 @@ use mikros_rt::sys;
 use mikros_userdb::{Attempts, Kind, LAST_ID, Refusal, Users, hash, valid_name};
 
 /// The permissions that `Authenticate` and changes to other users'
-/// accounts need, and the action an administrator authorizes for them.
+/// accounts need; an administrator may allow the second.
 const AUTHENTICATE: &str = "system.users.authenticate";
 const MANAGE: &str = "admin.accounts.manage";
 /// The app ID that may create the first administrator.
@@ -134,11 +134,10 @@ impl Service {
         user.filter(|_| matched).map(|(id, _)| id)
     }
 
-    /// Whether `client` holds `admin.accounts.manage` and an administrator
-    /// authorized it, asked for with `reason`.
+    /// Whether the broker allows `client` `admin.accounts.manage` when
+    /// asked for it with `reason`.
     async fn may_manage(&self, client: &ClientIdentity, reason: String) -> bool {
-        self.checks.holds(client, MANAGE).await
-            && self.checks.authorized(client, MANAGE, reason).await
+        self.checks.requested(client, MANAGE, reason).await
     }
 
     pub async fn create_user(

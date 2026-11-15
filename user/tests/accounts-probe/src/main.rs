@@ -2,11 +2,14 @@
 //! it tells apart by their app IDs:
 //!
 //! - `accounts-probe` checks what the accounts service lists,
-//!   authenticates and changes, as a client that holds both of its
-//!   permissions and that the stub authorizes.
-//! - `accounts-guest` checks that a client without `system.users.authenticate`,
-//!   and that the stub turns down, can list the users and nothing more.
-//! - `authorization-stub` serves `mikros.session.Authorization`, allowing
+//!   authenticates and changes, as a client that holds
+//!   `system.users.authenticate`, and for which the stub allows
+//!   `admin.accounts.manage` when the broker asks.
+//! - `accounts-guest` checks that a client without permissions, for
+//!   which the stub turns `admin.accounts.manage` down, can list the
+//!   users and nothing more.
+//! - `authorization-stub` serves `mikros.session.Authorization` to the
+//!   permission broker alone, as the session manager does, allowing
 //!   `admin.accounts.manage` for the probe only, with user 1000 as the
 //!   administrator.
 //! - `accounts-thief` and `accounts-sneak` ask for the accounts service's
@@ -49,6 +52,7 @@ const AUTHORIZATION: &str = "mikros.session.Authorization";
 const PROBE: &str = "system.accounts-probe";
 const GUEST: &str = "system.accounts-guest";
 const STUB: &str = "system.authorization-stub";
+const BROKER: &str = "system.permbroker";
 /// The protocols of the services that never start.
 const THIEVES: [&str; 2] = ["test.accounts.Thief", "test.accounts.Sneak"];
 const SECOND: i64 = 1_000_000_000;
@@ -78,7 +82,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
         executor.block_on(async {
             while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
-                if c.protocol == AUTHORIZATION && c.instance.is_none() {
+                if c.protocol == AUTHORIZATION && c.instance.is_none() && c.client.app_id == BROKER
+                {
                     spawner.spawn(authorize(ServerEnd::new(c.server), reactor.clone()));
                 }
             }

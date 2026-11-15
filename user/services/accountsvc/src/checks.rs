@@ -1,6 +1,6 @@
 //! Whether a client holds a permission, which the permission broker
-//! decides, and whether an administrator authorized an action of a
-//! client, through the session manager's `Authorization`.
+//! decides, and whether the broker allows a client an `admin` permission
+//! when asked, which an administrator may allow.
 
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -9,10 +9,8 @@ use mikros_rt::exec::Reactor;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerAsyncClient, Decision};
 use mikros_rt::interfaces::mikros::service::{ClientIdentity, DirectoryAsyncClient};
-use mikros_rt::interfaces::mikros::session::{Authorization, AuthorizationAsyncClient};
 
 const BROKER: &str = "mikros.permissions.Broker";
-const AUTHORIZATION: &str = "mikros.session.Authorization";
 
 pub struct Checks {
     directory: DirectoryAsyncClient,
@@ -69,26 +67,28 @@ impl Checks {
         Some(broker)
     }
 
-    /// Whether an administrator authorized `action` of `client`, asked
-    /// for with `reason`. Each request makes a connection of its own, so
-    /// that a restarted session manager answers the next one. Without an
-    /// answer, nothing is authorized.
-    pub async fn authorized(&self, client: &ClientIdentity, action: &str, reason: String) -> bool {
-        let Ok((authorization, server)) = endpoints::<Authorization>() else {
+    /// Whether the broker allows `client` `permission` when asked with
+    /// `Request` for `reason`. Without an answer, it does not.
+    pub async fn requested(
+        &self,
+        client: &ClientIdentity,
+        permission: &str,
+        reason: String,
+    ) -> bool {
+        let Some(broker) = self.broker().await else {
             return false;
         };
-        let connected = self
-            .directory
-            .connect(AUTHORIZATION.into(), None, server.into_handle())
-            .await;
-        if !matches!(connected, Ok(Ok(_))) {
-            return false;
+        match broker
+            .request(copy(client), permission.into(), reason)
+            .await
+        {
+            Ok(Ok(requested)) => requested.decision == Decision::Allowed,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                *self.broker.borrow_mut() = None;
+                false
+            }
         }
-        let authorization = AuthorizationAsyncClient::new(authorization, self.reactor.clone());
-        let answer = authorization
-            .authorize(copy(client), action.into(), reason)
-            .await;
-        matches!(answer, Ok(Ok(a)) if a.allowed)
     }
 }
 

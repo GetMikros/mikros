@@ -1,12 +1,15 @@
 //! `mikros.time.Clock`: UTC as the monotonic clock plus the offset of the
 //! time page, the page itself, and setting the time, which needs
-//! `admin.time.set`, for every client; and `OnTimeChanged` for those that
-//! watch. UTC comes from the real-time clock once it is published, and
+//! `admin.time.set`, asked for with the broker's `Request` so that an
+//! administrator may allow it, for every client; and `OnTimeChanged` for
+//! those that watch. UTC comes from the real-time clock once it is published, and
 //! setting the time writes it there.
 
 use crate::page::Page;
 use crate::root::{self, Zone};
+use alloc::format;
 use alloc::rc::{Rc, Weak};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use mikros_rt::exec::Reactor;
@@ -190,8 +193,9 @@ impl Time {
         });
     }
 
-    /// Whether `client` holds `admin.time.set`, as the broker says.
-    async fn may_set(&self, client: &ClientIdentity) -> bool {
+    /// Whether the broker allows `client` `admin.time.set` when asked
+    /// for it with `reason`.
+    async fn may_set(&self, client: &ClientIdentity, reason: String) -> bool {
         let Some(broker) = &self.broker else {
             return false;
         };
@@ -202,8 +206,8 @@ impl Time {
             admin: client.admin,
             koid: client.koid,
         };
-        let checked = broker.check(client, TIME_SET.into()).await;
-        matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
+        let requested = broker.request(client, TIME_SET.into(), reason).await;
+        matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed)
     }
 }
 
@@ -229,7 +233,8 @@ pub async fn serve(
                 None => return,
             },
             ClockRequest::SetUtc(set, responder) => {
-                let result = match time.may_set(&client).await {
+                let reason = String::from("set the time");
+                let result = match time.may_set(&client, reason).await {
                     true => {
                         time.set_since_boot.set(true);
                         time.set_utc(set.utc);
@@ -245,7 +250,8 @@ pub async fn serve(
                 responder.reply(s, ClockGetTimezoneResponse { name })
             }
             ClockRequest::SetTimezone(set, responder) => {
-                let result = match time.may_set(&client).await {
+                let reason = format!("set the time zone to {}", set.name);
+                let result = match time.may_set(&client, reason).await {
                     true => time.set_timezone(&set.name, &reactor).await,
                     false => Err(Status::AccessDenied),
                 };

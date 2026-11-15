@@ -39,7 +39,7 @@ fn grant(user: u32, permission: &str, decision: Decision) -> Grant {
 #[test]
 fn table_is_sorted_and_unique() {
     assert!(PERMISSIONS.windows(2).all(|w| w[0].0 < w[1].0));
-    assert_eq!(PERMISSIONS.len(), 56);
+    assert_eq!(PERMISSIONS.len(), 55);
     assert_eq!(scope("user.camera.use"), Some(Scope::User));
     assert_eq!(scope("user.developer.access"), Some(Scope::User));
     assert_eq!(scope("system.diagnostics.read"), Some(Scope::System));
@@ -51,6 +51,45 @@ fn table_is_sorted_and_unique() {
     assert_eq!(scope("admin.services.control"), Some(Scope::Admin));
     assert_eq!(scope("admin.grants.manage"), Some(Scope::Admin));
     assert_eq!(scope("nope"), None);
+}
+
+/// The verbs that a permission's name may end with.
+const VERBS: [&str; 12] = [
+    "access",
+    "read",
+    "write",
+    "use",
+    "create",
+    "install",
+    "manage",
+    "control",
+    "set",
+    "debug",
+    "mount",
+    "authenticate",
+];
+
+#[test]
+fn names_are_scope_thing_and_verb() {
+    let part = |p: &str| {
+        p.starts_with(|c: char| c.is_ascii_lowercase())
+            && p.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    };
+    for (name, scope) in PERMISSIONS {
+        let parts: Vec<&str> = name.split('.').collect();
+        assert!(name.len() <= 64, "{name}");
+        assert!(parts.len() == 3 && parts.iter().all(|p| part(p)), "{name}");
+        let named = match parts[0] {
+            "system" => Scope::System,
+            "admin" => Scope::Admin,
+            "user" => Scope::User,
+            "default" => Scope::Default,
+            other => panic!("{name}: no scope {other}"),
+        };
+        assert_eq!(named, *scope, "{name}");
+        assert!(VERBS.contains(&parts[2]), "{name}");
+    }
 }
 
 #[test]

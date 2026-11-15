@@ -1,5 +1,6 @@
 //! Administrator authorization: `mikros.session.Authorization`, which the
-//! session manager serves to processes with `session.authorize`. It asks
+//! session manager serves to the permission broker alone, for the
+//! clients that ask the broker for `admin` permissions. It asks
 //! through the authorization screen of the text console that the
 //! client's login session runs on, with `OnAuthorize`, one request per
 //! console at a time, and ends the request on `Answer` or `Cancel`, after

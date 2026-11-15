@@ -14,7 +14,9 @@
 //! to the supervisor too.
 //! When a protocol or instance has a permission, the caller must hold
 //! it, as the broker decides; without an answer from the broker, it
-//! does not.
+//! does not. To connect, an `admin` permission is asked for with
+//! `Request`, so that an administrator may allow it; every other
+//! permission, and every list and event, is checked with `Check`.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -52,6 +54,8 @@ const CONTROL_PERMISSION: &str = "admin.power.control";
 const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
 const SERVICE_CONTROL_PERMISSION: &str = "admin.services.control";
 const PEER_CLOSED: u32 = 1 << 2;
+/// The start of the names of `admin` permissions.
+const ADMIN_SCOPE: &str = "admin.";
 
 /// The directory's state, shared by every connection.
 pub struct Dir {
@@ -468,6 +472,28 @@ impl Dir {
         allowed(broker, caller, permission).await
     }
 
+    /// Whether `caller` may connect to `protocol`, which needs
+    /// `permission` if there is one: an `admin` one is requested, with
+    /// the connection as the reason.
+    async fn may_connect(
+        &self,
+        caller: &ClientIdentity,
+        protocol: &str,
+        permission: Option<&str>,
+    ) -> bool {
+        let Some(permission) = permission.filter(|p| p.starts_with(ADMIN_SCOPE)) else {
+            return self.allowed(caller, permission).await;
+        };
+        let Some(broker) = self.broker.borrow().clone() else {
+            return false;
+        };
+        let reason = alloc::format!("connect to {protocol}");
+        let requested = broker
+            .request(clone(caller), permission.into(), reason)
+            .await;
+        matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed)
+    }
+
     pub async fn connect(
         self: &Rc<Self>,
         caller: &ClientIdentity,
@@ -493,7 +519,10 @@ impl Dir {
                 named.get(name).ok_or(Status::NotFound)?.permission.clone()
             }
         };
-        if !self.allowed(caller, permission.as_deref()).await {
+        if !self
+            .may_connect(caller, &protocol, permission.as_deref())
+            .await
+        {
             return Err(Status::AccessDenied);
         }
         // The provider may have changed while the broker answered.

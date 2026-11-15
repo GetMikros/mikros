@@ -1,7 +1,7 @@
 //! `mikros.service.Control`, which the service manager serves to
-//! processes with `admin.power.control`, whom the directory has already checked
-//! for it: `Shutdown` stops every service and powers the machine off or
-//! restarts it, and replies only when that failed.
+//! processes with `admin.power.control`, for which the directory has
+//! already asked: `Shutdown` stops every service and powers the machine
+//! off or restarts it, and replies only when that failed.
 
 use crate::directory::Dir;
 use alloc::rc::Rc;

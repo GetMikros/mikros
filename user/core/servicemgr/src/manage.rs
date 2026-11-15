@@ -1,6 +1,6 @@
 //! `mikros.service.ServiceControl`, which the service manager serves to
-//! processes with `admin.services.control`, whom the directory has already
-//! checked for it: `Start`, `Stop` and `Restart` of a service by name.
+//! processes with `admin.services.control`, for which the directory has
+//! already asked: `Start`, `Stop` and `Restart` of a service by name.
 
 use crate::directory::{Call, Dir};
 use crate::supervisor::Supervisor;

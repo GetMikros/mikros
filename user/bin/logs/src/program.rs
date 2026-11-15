@@ -1,30 +1,23 @@
-//! logs on Mikros: it asks the session manager's `Authorization` with
-//! its own identity, and once an administrator allowed it, reads the log
-//! service's `Reader` from the first record and, when asked, follows it.
+//! logs on Mikros: it reads the log service's `Reader`, whose connection
+//! needs `admin.logs.read`, for which the directory asks an
+//! administrator, from the first record and, when asked, follows it.
 
 use crate::listing::{self, COMMAND, Entry, Filter, Request};
 use mikros_cli::{FAILURE, INVALID, SUCCESS};
 use mikros_command::Directory;
 use mikros_rt::interfaces::mikros::log::{Reader, ReaderClient, ReaderEvent, Record, Severity};
-use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::process::ExitCode;
 
 const READER: &str = "mikros.log.Reader";
-const APP_ID: &str = "system.logs";
-const ACTION: &str = "admin.logs.read";
 /// The most records one `Read` gives.
 const BATCH: u32 = 32;
 const FOREVER: i64 = i64::MAX;
 
-unsafe extern "C" {
-    fn getuid() -> u32;
-}
-
 pub fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let (filter, last, follow, json) = match listing::read(arguments.clone()) {
+    let (filter, last, follow, json) = match listing::read(arguments) {
         Request::Print {
             filter,
             last,
@@ -40,11 +33,9 @@ pub fn main() -> ExitCode {
     let Some(directory) = Directory::new(std::os::mikros::directory().as_raw_handle()) else {
         return fail(FAILURE, "cannot reach the service directory");
     };
-    if !authorized(&directory, &arguments) {
-        return fail(FAILURE, "not authorized");
-    }
-    let reader = match directory.connect::<Reader>(READER) {
-        Ok(client) => ReaderClient::new(client),
+    let reader = match directory.connect_unless_denied::<Reader>(READER) {
+        Ok(Some(client)) => ReaderClient::new(client),
+        Ok(None) => return fail(FAILURE, "not authorized"),
         Err(why) => return fail(FAILURE, &why),
     };
     // Following before reading leaves out no record that comes while
@@ -142,19 +133,4 @@ fn entry(record: Record) -> Entry {
 fn fail(status: u8, message: &str) -> ExitCode {
     eprintln!("{}", COMMAND.error(message));
     ExitCode::from(status)
-}
-
-/// Whether an administrator allows `admin.logs.read` for this process, asked
-/// with the command line as the reason.
-fn authorized(directory: &Directory, arguments: &[String]) -> bool {
-    let me = ClientIdentity {
-        pid: std::process::id(),
-        // SAFETY: the call takes no pointers.
-        user: unsafe { getuid() },
-        app_id: APP_ID.into(),
-        admin: 0,
-        koid: 0,
-    };
-    let reason = format!("logs {}", arguments.join(" "));
-    directory.authorized(me, ACTION, reason.trim_end().into())
 }

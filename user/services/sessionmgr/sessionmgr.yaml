@@ -22,7 +22,7 @@ permissions:
   # To mark the boot good once the console has started.
   - system.boot_state.set
 provides:
+  # For the permission broker alone, which the session manager checks.
   - protocol: mikros.session.Authorization
-    permission: session.authorize
   # For every process of a login session; sudo calls it.
   - protocol: mikros.session.Elevation

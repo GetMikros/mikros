@@ -1,8 +1,7 @@
 # The manifest of the guest of the accounts test image: the probe's
-# binary, which may manage accounts but which the authorization stub
-# turns down.
+# binary, which holds no permissions, and for which the authorization
+# stub turns down admin.accounts.manage when the broker asks.
 name: accounts-guest
 binary: /usr/bin/accounts-probe
 start: boot
 after: [tmpfs]
-permissions: [admin.accounts.manage]

@@ -1,10 +1,14 @@
 //! The `acpi` service: the routes of PCI interrupt pins, powering the
-//! machine off and restarting it for clients that hold `admin.power.control`,
-//! as the broker says once for each connection, and `OnPowerButton` to
-//! every client each time the power button is pressed.
+//! machine off and restarting it for clients that hold
+//! `admin.power.control`, as the broker says once for each connection,
+//! and `OnPowerButton` to every client each time the power button is
+//! pressed. A client that does not hold it is asked for it with the
+//! broker's `Request` the first time it powers off or restarts, so that
+//! an administrator may allow it.
 
 use crate::acpica::Status as AcpiStatus;
 use alloc::rc::{Rc, Weak};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -39,8 +43,9 @@ impl Acpi {
         }
     }
 
-    /// Whether `client` holds `admin.power.control`, as the broker says.
-    async fn may_control(&self, client: &ClientIdentity) -> bool {
+    /// Whether `client` holds `admin.power.control`, as the broker says
+    /// when checked, or, with `reason`, when asked with `Request`.
+    async fn may_control(&self, client: &ClientIdentity, reason: Option<String>) -> bool {
         let Some(broker) = &self.broker else {
             return false;
         };
@@ -51,8 +56,17 @@ impl Acpi {
             admin: client.admin,
             koid: client.koid,
         };
-        let checked = broker.check(client, POWER_CONTROL.into()).await;
-        matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
+        let decision = match reason {
+            None => broker
+                .check(client, POWER_CONTROL.into())
+                .await
+                .map(|r| r.map(|r| r.decision)),
+            Some(reason) => broker
+                .request(client, POWER_CONTROL.into(), reason)
+                .await
+                .map(|r| r.map(|r| r.decision)),
+        };
+        matches!(decision, Ok(Ok(Decision::Allowed)))
     }
 
     /// Sends `OnPowerButton` to every connection, and forgets the closed
@@ -104,10 +118,11 @@ async fn serve(
     // needs no permission.
     let server = Rc::new(AcpiAsyncServer::new(end, reactor));
     acpi.connections.borrow_mut().push(Rc::downgrade(&server));
-    // Asked once, when the connection is made, and kept for it: the
+    // Checked once, when the connection is made, and kept for it: the
     // service manager's connection keeps it after the broker stops at
-    // shutdown.
-    let may_control = acpi.may_control(&client).await;
+    // shutdown. Without it, the first power-off or restart asks once.
+    let mut may_control = acpi.may_control(&client, None).await;
+    let mut asked = false;
     while let Ok(request) = server.next().await {
         let s = server.server();
         let _ = match request {
@@ -123,6 +138,11 @@ async fn serve(
                 responder.reply(s, routed)
             }
             AcpiRequest::PowerOff(_, responder) => {
+                if !may_control && !asked {
+                    asked = true;
+                    let reason = Some(String::from("power off"));
+                    may_control = acpi.may_control(&client, reason).await;
+                }
                 if !may_control {
                     responder.reply(s, Err(Status::AccessDenied))
                 } else {
@@ -132,6 +152,11 @@ async fn serve(
                 }
             }
             AcpiRequest::Restart(_, responder) => {
+                if !may_control && !asked {
+                    asked = true;
+                    let reason = Some(String::from("restart"));
+                    may_control = acpi.may_control(&client, reason).await;
+                }
                 if !may_control {
                     responder.reply(s, Err(Status::AccessDenied))
                 } else {

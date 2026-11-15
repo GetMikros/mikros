@@ -4792,12 +4792,12 @@ mod manager {
     /// From the setup run's boot image, with the root partition holding
     /// the accounts service and a users file in `/var/lib/accounts`, the
     /// accounts service lists, authenticates and changes those users, and
-    /// makes and deletes a home folder. A
-    /// probe that holds its permissions and that an authorization stub
-    /// allows to manage accounts, and a guest without
-    /// `system.users.authenticate` that the stub turns down, each exit with 0
-    /// once every check of theirs passed, as the service manager logs. Two services whose
-    /// manifests ask for the accounts service's data never start.
+    /// makes and deletes a home folder. A probe that may authenticate,
+    /// and for which an authorization stub allows the broker
+    /// `admin.accounts.manage`, and a guest without permissions that the
+    /// stub turns down, each exit with 0 once every check of theirs
+    /// passed, as the service manager logs. Two services whose manifests
+    /// ask for the accounts service's data never start.
     pub fn accounts_service_serves_users(s: &Startup) -> Result {
         // Under emulation, each Argon2id hash of 64 MiB takes seconds, and
         // the probe makes about a dozen.

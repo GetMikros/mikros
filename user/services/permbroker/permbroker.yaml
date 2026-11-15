@@ -5,5 +5,3 @@ binary: /usr/bin/permbroker
 start: boot
 provides:
   - protocol: mikros.permissions.Broker
-# To ask the session manager for admin permissions.
-permissions: [session.authorize]

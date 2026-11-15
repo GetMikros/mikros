@@ -41,8 +41,10 @@ mikros_rt::raw_main!(main);
 const CONSOLE: &str = "/usr/bin/console";
 const CONSOLE_APP: &str = "system.console";
 const ACCOUNTS: &str = "mikros.session.Accounts";
-/// The protocols that the session manager provides.
+/// The protocols that the session manager provides, and the app ID of
+/// the permission broker, the one client of `AUTHORIZATION`.
 const AUTHORIZATION: &str = "mikros.session.Authorization";
+const BROKER_APP: &str = "system.permbroker";
 const ELEVATION: &str = "mikros.session.Elevation";
 /// The `USER` startup handle IDs of the console's channels.
 const TEXT_LOGIN_ID: u32 = 3;
@@ -135,7 +137,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     if c.instance.is_some() {
                         continue;
                     }
-                    if c.protocol == AUTHORIZATION {
+                    if c.protocol == AUTHORIZATION && c.client.app_id == BROKER_APP {
                         let end = ServerEnd::new(c.server);
                         let serving = authorize::serve(requests.clone(), end, spawner.clone());
                         spawner.spawn(serving);

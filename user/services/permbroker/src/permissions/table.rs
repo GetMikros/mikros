@@ -26,7 +26,6 @@ pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("default.gpu.use", Scope::Default),
     ("default.network.use", Scope::Default),
     ("default.realtime.use", Scope::Default),
-    ("session.authorize", Scope::System),
     ("system.boot_state.set", Scope::System),
     ("system.devices.manage", Scope::System),
     ("system.diagnostics.read", Scope::System),

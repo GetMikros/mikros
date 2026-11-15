@@ -1,8 +1,8 @@
 # The program manifest of power, installed as
-# usr/lib/programs/system.power.yaml: a command, which asks for an
-# administrator's authorization and then powers the machine off or
-# restarts it.
+# usr/lib/programs/system.power.yaml: a command, which powers the
+# machine off or restarts it once an administrator allowed it. It holds
+# no permissions, so that its prompt names it.
 app_id: system.power
 binary: /usr/bin/power
 command: true
-permissions: [admin.power.control, session.authorize]
+permissions: []

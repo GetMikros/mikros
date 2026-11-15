@@ -23,7 +23,7 @@ permissions:
   # whether the client still runs.
   - system.processes.read
 provides:
+  # For the permission broker alone, which the session manager checks.
   - protocol: mikros.session.Authorization
-    permission: session.authorize
   # For every process of a login session; sudo calls it.
   - protocol: mikros.session.Elevation

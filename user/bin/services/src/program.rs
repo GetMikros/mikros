@@ -1,30 +1,22 @@
 //! services on Mikros: it pages through the service manager's
-//! `Services`, and for a call on a service asks the session manager's
-//! `Authorization` with its own identity, and once an administrator
-//! allowed it, calls `ServiceControl`.
+//! `Services`, and for a call on a service calls `ServiceControl`, whose
+//! connection needs `admin.services.control`, for which the directory
+//! asks an administrator.
 
 use crate::listing::{self, COMMAND, Call, Request, Service};
 use mikros_cli::{FAILURE, INVALID, SUCCESS};
 use mikros_command::Directory;
-use mikros_rt::interfaces::mikros::service::{
-    ClientIdentity, ServiceControlClient, ServicesClient,
-};
+use mikros_rt::interfaces::mikros::service::{ServiceControlClient, ServicesClient};
 use std::io::Write;
 use std::process::ExitCode;
 
 const SERVICES: &str = "mikros.service.Services";
 const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
-const APP_ID: &str = "system.services";
-const ACTION: &str = "admin.services.control";
 const FOREVER: i64 = i64::MAX;
-
-unsafe extern "C" {
-    fn getuid() -> u32;
-}
 
 pub fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let request = match listing::read(arguments.clone()) {
+    let request = match listing::read(arguments) {
         Request::Help => return write(&COMMAND.help()),
         Request::Invalid(reason) => return fail(INVALID, &reason),
         request => request,
@@ -44,10 +36,12 @@ pub fn main() -> ExitCode {
             }
         }
         Request::Call(call, name) => {
-            if !authorized(&directory, &arguments) {
-                return fail(FAILURE, "not authorized");
-            }
-            match control(&directory, call, &name) {
+            let control = match directory.connect_unless_denied(SERVICE_CONTROL) {
+                Ok(Some(client)) => ServiceControlClient::new(client),
+                Ok(None) => return fail(FAILURE, "not authorized"),
+                Err(why) => return fail(FAILURE, &why),
+            };
+            match call_on(&directory, &control, call, &name) {
                 Ok(()) => ExitCode::from(SUCCESS),
                 Err(why) => fail(FAILURE, &why),
             }
@@ -79,9 +73,14 @@ fn list(directory: &Directory) -> Result<Vec<Service>, String> {
     }
 }
 
-/// Calls `call` on the service `name`, and says why it failed.
-fn control(directory: &Directory, call: Call, name: &str) -> Result<(), String> {
-    let control = ServiceControlClient::new(directory.connect(SERVICE_CONTROL)?);
+/// Calls `call` on the service `name` through `control`, and says why
+/// it failed.
+fn call_on(
+    directory: &Directory,
+    control: &ServiceControlClient,
+    call: Call,
+    name: &str,
+) -> Result<(), String> {
     let done = match call {
         Call::Start => control.start(name.into(), FOREVER).map(|r| r.map(drop)),
         Call::Stop => control.stop(name.into(), FOREVER).map(|r| r.map(drop)),
@@ -112,19 +111,4 @@ fn write(text: &str) -> ExitCode {
 fn fail(status: u8, message: &str) -> ExitCode {
     eprintln!("{}", COMMAND.error(message));
     ExitCode::from(status)
-}
-
-/// Whether an administrator allows `admin.services.control` for this process,
-/// asked with the command line as the reason.
-fn authorized(directory: &Directory, arguments: &[String]) -> bool {
-    let me = ClientIdentity {
-        pid: std::process::id(),
-        // SAFETY: the call takes no pointers.
-        user: unsafe { getuid() },
-        app_id: APP_ID.into(),
-        admin: 0,
-        koid: 0,
-    };
-    let reason = format!("services {}", arguments.join(" "));
-    directory.authorized(me, ACTION, reason)
 }
