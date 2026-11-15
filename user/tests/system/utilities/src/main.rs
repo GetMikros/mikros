@@ -15,6 +15,7 @@ const POWER: &str = "/usr/bin/power";
 const LOGS: &str = "/usr/bin/logs";
 const SERVICES: &str = "/usr/bin/services";
 const PERMISSIONS: &str = "/usr/bin/permissions";
+const ACCOUNTS: &str = "/usr/bin/accounts";
 /// An app ID that no program has, whose grants the checks set.
 const NO_APP: &str = "system.no-such-app";
 /// A file that every system holds with devices.
@@ -65,6 +66,10 @@ fn main() {
         ),
         ("permissions_not_authorized", permissions_not_authorized),
         ("permissions_bad_arguments", permissions_bad_arguments),
+        ("accounts_lists", accounts_lists),
+        ("accounts_needs_a_terminal", accounts_needs_a_terminal),
+        ("accounts_unknown_user", accounts_unknown_user),
+        ("accounts_bad_arguments", accounts_bad_arguments),
     ];
     for (number, (name, check)) in checks.iter().enumerate() {
         if let Err(Failure { what, status }) = check() {
@@ -530,6 +535,86 @@ fn permissions_bad_arguments() -> Result<(), Failure> {
             &run,
             "naming the command",
             run.err.starts_with("permissions: "),
+        )?;
+    }
+    Ok(())
+}
+
+/// The header, then a line per user with an ID, a name and a kind, and
+/// the same users in JSON.
+fn accounts_lists() -> Result<(), Failure> {
+    let run = run(ACCOUNTS, &[])?;
+    ensure(&run, "succeeding", run.status == 0 && run.err.is_empty())?;
+    let mut lines = run.out.lines();
+    let header = lines.next().unwrap_or("").split_whitespace();
+    ensure(
+        &run,
+        "a header line",
+        header.eq(["ID", "NAME", "KIND", "FULL", "NAME"]),
+    )?;
+    let users: Vec<Vec<&str>> = lines.map(|l| l.split_whitespace().collect()).collect();
+    let well_formed = users.iter().all(|u| {
+        u.len() >= 4 && u[0].parse::<u32>().is_ok() && matches!(u[2], "standard" | "admin")
+    });
+    ensure(&run, "a user per line", well_formed)?;
+    let json = run_with(ACCOUNTS, &["--json"], None)?;
+    ensure(&json, "succeeding with --json", json.status == 0)?;
+    let objects = json.out.matches("{\"id\":").count();
+    ensure(&json, "an object per user", objects == users.len())
+}
+
+/// Passwords come only from a terminal, so nothing is changed or added
+/// without one.
+fn accounts_needs_a_terminal() -> Result<(), Failure> {
+    for arguments in [&["password"][..], &["add", "nobody-here"]] {
+        let run = run(ACCOUNTS, arguments)?;
+        ensure(&run, "failing", run.status == 1 && run.out.is_empty())?;
+        ensure(
+            &run,
+            "saying why",
+            run.err == "accounts: standard input is not a terminal\n",
+        )?;
+    }
+    Ok(())
+}
+
+fn accounts_unknown_user() -> Result<(), Failure> {
+    for arguments in [
+        &["delete", "nobody-here"][..],
+        &["kind", "nobody-here", "admin"],
+    ] {
+        let run = run(ACCOUNTS, arguments)?;
+        ensure(&run, "failing", run.status == 1)?;
+        ensure(
+            &run,
+            "naming the user",
+            run.err == "accounts: nobody-here: no such user\n",
+        )?;
+    }
+    Ok(())
+}
+
+/// An unknown subcommand, a missing or extra operand, an unknown kind, an
+/// option of another subcommand, an invalid name and an empty full name
+/// are refused with status 2.
+fn accounts_bad_arguments() -> Result<(), Failure> {
+    let refused: [&[&str]; 7] = [
+        &["rename", "a"],
+        &["add"],
+        &["delete", "a", "b"],
+        &["kind", "a", "root"],
+        &["delete", "a", "--admin"],
+        &["add", "Not-Valid"],
+        &["full-name", "a", ""],
+    ];
+    for arguments in refused {
+        let run = run(ACCOUNTS, arguments)?;
+        ensure(&run, "refusing the arguments", run.status == 2)?;
+        ensure(&run, "writing nothing", run.out.is_empty())?;
+        ensure(
+            &run,
+            "naming the command",
+            run.err.starts_with("accounts: "),
         )?;
     }
     Ok(())
