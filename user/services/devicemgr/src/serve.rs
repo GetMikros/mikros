@@ -113,7 +113,8 @@ enum Added {
 
 /// Adds the device of `request` as a child of device `caller`, with the
 /// `cache` property when it is a disk or partition, from the storage
-/// profiles read again for it, and binds a driver to it. A device that
+/// profiles read again for it, and the root partition's properties when
+/// it is the root partition, and binds a driver to it. A device that
 /// was kept for `caller`'s restarted driver, with the same name and
 /// hardware IDs, is given back instead. The PCI function that has the
 /// boot framebuffer also gets `display:boot-framebuffer` after its own
@@ -170,6 +171,7 @@ async fn add_device(
         Some(caller),
         request.resources,
     );
+    m.profiles.give_root_properties(id, &mut devices);
     let added = match devices.bind_device(id, &m.drivers.borrow()) {
         true => Added::Bound,
         false => Added::Unbound,

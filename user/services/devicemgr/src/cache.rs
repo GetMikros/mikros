@@ -1,6 +1,8 @@
 //! The `cache` property of disks and partitions, which their file system
 //! servers follow: from the storage profiles in the root file system
-//! when there is a matching one, and from defaults otherwise.
+//! when there is a matching one, and from defaults otherwise. And the
+//! root partition, which gets the properties `system` and `live` from
+//! the command line.
 
 use crate::devices::{Device, Devices};
 use alloc::rc::Rc;
@@ -25,6 +27,10 @@ pub const CACHE: &str = "cache";
 const REMOVABLE: &str = "removable";
 const SERIAL: &str = "serial";
 const PARTITION_GUID: &str = "partition_guid";
+/// The root partition's properties: the booted system version and
+/// whether the system is live.
+const SYSTEM: &str = "system";
+const LIVE: &str = "live";
 /// The protocol of file systems' published services.
 const FILESYSTEM: &str = "device.filesystem";
 /// The profiles' path in the root file system, and their largest size.
@@ -34,8 +40,6 @@ const PROFILES_MAX: usize = 64 << 10;
 /// Which partition is the root, from the command line.
 #[derive(Debug, PartialEq, Eq)]
 enum Root {
-    /// `root=bootfs`: there is no root partition.
-    BootFs,
     /// `root=PARTUUID=<guid>`.
     Guid(String),
     /// Neither: the partition of the Mikros root type on the boot disk.
@@ -43,14 +47,17 @@ enum Root {
 }
 
 /// The root partition's device, once the first one that matches `root`
-/// publishes a file system, and its file system once connected, from
-/// which the profiles are read, and the GUID of the EFI system partition
-/// that `esp=PARTUUID=` gives.
+/// is added or publishes a file system, and its file system once
+/// connected, from which the profiles are read; the GUID of the EFI
+/// system partition that `esp=PARTUUID=` gives; and the version that
+/// `system=` names and whether `live` is a word of the command line.
 pub struct Profiles {
     root: Root,
     root_device: Cell<Option<u64>>,
     fs: RefCell<Option<Rc<NodeAsyncClient>>>,
     esp: Option<String>,
+    system: Option<String>,
+    live: bool,
 }
 
 fn property<'a>(properties: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -63,20 +70,25 @@ impl Profiles {
     pub fn new(command_line: &str) -> Profiles {
         let mut root = Root::OfRootType;
         let mut esp = None;
+        let mut system = None;
+        let mut live = false;
         for word in command_line.split_ascii_whitespace() {
-            if word == "root=bootfs" {
-                root = Root::BootFs;
-            } else if let Some(guid) = word.strip_prefix("root=PARTUUID=") {
+            if let Some(guid) = word.strip_prefix("root=PARTUUID=") {
                 root = Root::Guid(guid.into());
             } else if let Some(guid) = word.strip_prefix("esp=PARTUUID=") {
                 esp = Some(guid.into());
+            } else if let Some(version) = word.strip_prefix("system=") {
+                system = Some(version.into());
             }
+            live |= word == LIVE;
         }
         Profiles {
             root,
             root_device: Cell::new(None),
             fs: RefCell::new(None),
             esp,
+            system,
+            live,
         }
     }
 
@@ -85,7 +97,6 @@ impl Profiles {
     /// the boot disk.
     fn matches_root(&self, device: &Device, devices: &Devices) -> bool {
         match &self.root {
-            Root::BootFs => false,
             Root::Guid(guid) => property(&device.properties, PARTITION_GUID)
                 .is_some_and(|ours| ours.eq_ignore_ascii_case(guid)),
             Root::OfRootType => {
@@ -114,9 +125,9 @@ impl Profiles {
     }
 
     /// Whether `device`, among `devices`, whose driver published a
-    /// `filesystem` service, is the root partition: the first device that
-    /// publishes one and matches the command line becomes it, and stays
-    /// it.
+    /// `filesystem` service, is the root partition: the one that
+    /// `give_root_properties` chose, or else the first device that
+    /// publishes one and matches the command line, which stays it.
     pub fn claim_root(&self, device: &Device, devices: &Devices) -> bool {
         if let Some(root) = self.root_device.get() {
             return root == device.id;
@@ -128,17 +139,43 @@ impl Profiles {
         matches
     }
 
+    /// Makes device `id`, just added to `devices`, the root partition when
+    /// none is yet and it matches the command line, and then gives it the
+    /// property `system` with the version that `system=` names, when the
+    /// command line has that option, and `live`, `true` or `false`, in
+    /// place of any it had.
+    pub fn give_root_properties(&self, id: u64, devices: &mut Devices) {
+        if self.root_device.get().is_some() {
+            return;
+        }
+        match devices.get(id) {
+            Some(device) if self.matches_root(device, devices) => {}
+            _ => return,
+        }
+        self.root_device.set(Some(id));
+        let Some(device) = devices.get_mut(id) else {
+            return;
+        };
+        let properties = &mut device.properties;
+        properties.retain(|(k, _)| k != SYSTEM && k != LIVE);
+        if let Some(version) = &self.system {
+            properties.push((SYSTEM.into(), version.clone()));
+        }
+        let live = if self.live { "true" } else { "false" };
+        properties.push((LIVE.into(), live.into()));
+    }
+
     /// Whether `device`, among `devices`, is the EFI system partition of
-    /// the boot: the one whose GUID `esp=PARTUUID=` gives, or else, unless
-    /// there is no root partition, the first EFI system partition on the
-    /// disk that holds the root partition, the one already chosen or else
-    /// one that matches the command line.
+    /// the boot: the one whose GUID `esp=PARTUUID=` gives, or else the
+    /// first EFI system partition on the disk that holds the root
+    /// partition, the one already chosen or else one that matches the
+    /// command line.
     pub fn is_esp(&self, device: &Device, devices: &Devices) -> bool {
         if let Some(guid) = &self.esp {
             return property(&device.properties, PARTITION_GUID)
                 .is_some_and(|ours| ours.eq_ignore_ascii_case(guid));
         }
-        if self.root == Root::BootFs || !device.hardware_ids.iter().any(|id| id == ESP_TYPE) {
+        if !device.hardware_ids.iter().any(|id| id == ESP_TYPE) {
             return false;
         }
         let Some(disk) = device.parent else {
