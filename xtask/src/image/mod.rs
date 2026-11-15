@@ -2,7 +2,7 @@
 
 pub(crate) mod esp;
 pub(crate) mod gpt;
-mod root;
+pub mod root;
 
 use crate::build::{self, Kind};
 use crate::secure_boot::{self, Key};
@@ -159,7 +159,7 @@ pub fn run(args: &Args) -> Result<()> {
         &out,
         if args.live { LIVE } else { "" },
         &[],
-        false,
+        Extras::default(),
         key.as_ref(),
     )
 }
@@ -223,7 +223,7 @@ pub fn create_with(
         out,
         extra,
         more,
-        false,
+        Extras::default(),
         None,
     )
 }
@@ -238,7 +238,7 @@ pub fn create_signed(kind: Kind, built: &build::Built, out: &Path, key: &Key) ->
         out,
         "",
         &[],
-        false,
+        Extras::default(),
         Some(key),
     )
 }
@@ -253,7 +253,10 @@ pub fn create_for_tests(kind: Kind, built: &build::Built, out: &Path, extra: &st
         out,
         extra,
         &[],
-        true,
+        Extras {
+            test_partitions: true,
+            previous: false,
+        },
         None,
     )
 }
@@ -267,7 +270,48 @@ pub fn create_with_system(
     out: &Path,
     extra: &str,
 ) -> Result<()> {
-    create_parts(kind, built, system, out, extra, &[], false, None)
+    create_parts(
+        kind,
+        built,
+        system,
+        out,
+        extra,
+        &[],
+        Extras::default(),
+        None,
+    )
+}
+
+/// Like `create_with`, with a copy of the system version as the one that
+/// `@system/previous` names.
+pub fn create_with_previous(
+    kind: Kind,
+    built: &build::Built,
+    out: &Path,
+    extra: &str,
+) -> Result<()> {
+    let extras = Extras {
+        test_partitions: false,
+        previous: true,
+    };
+    create_parts(
+        kind,
+        built,
+        &built.system_image,
+        out,
+        extra,
+        &[],
+        extras,
+        None,
+    )
+}
+
+/// What a disk holds besides the system: the partitions of `TEST_TYPES`,
+/// and a previous system version.
+#[derive(Clone, Copy, Default)]
+struct Extras {
+    test_partitions: bool,
+    previous: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -278,7 +322,7 @@ fn create_parts(
     out: &Path,
     extra: &str,
     more: &[(&str, &[u8])],
-    test_partition: bool,
+    extras: Extras,
     key: Option<&Key>,
 ) -> Result<()> {
     let root_guid = Uuid::new_v4();
@@ -297,7 +341,13 @@ fn create_parts(
         .collect();
     let total = files.iter().map(|(_, d)| d.len() as u64).sum();
     let esp = esp::build(esp::size_for(total), &files)?;
-    let root = root::create(kind, system, &built.boot_image, &built.kernel)?;
+    let root = root::create(
+        kind,
+        system,
+        &built.boot_image,
+        &built.kernel,
+        extras.previous,
+    )?;
     let mut parts = vec![
         Part {
             type_guid: ESP_TYPE,
@@ -313,7 +363,7 @@ fn create_parts(
         },
     ];
     let test = [0; 4096];
-    if test_partition {
+    if extras.test_partitions {
         for (type_guid, name) in TEST_TYPES {
             parts.push(Part {
                 type_guid,

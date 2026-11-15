@@ -45,15 +45,19 @@ const TOP_DIRS: [&str; 9] = [
     "@system",
 ];
 
-/// The `--subvol` values for the tree written by `write_tree`.
-fn subvolumes(version: &str) -> Vec<String> {
-    vec![
-        "@system".to_owned(),
-        format!("ro:@system/{version}"),
-        "etc".to_owned(),
-        "var".to_owned(),
-        "Libraries".to_owned(),
-    ]
+/// The name of the version that `@system/previous` names in a root file
+/// system that `create` makes with one: a copy of the current version.
+pub fn previous_version(kind: Kind) -> String {
+    format!("{}-previous", version(kind))
+}
+
+/// The `--subvol` values for the tree written by `write_tree` with the
+/// system versions `versions`.
+fn subvolumes(versions: &[&str]) -> Vec<String> {
+    let mut all = vec!["@system".to_owned()];
+    all.extend(versions.iter().map(|v| format!("ro:@system/{v}")));
+    all.extend(["etc", "var", "Libraries"].map(str::to_owned));
+    all
 }
 
 /// Writes the directory tree of the root file system into `dir`, which must
@@ -81,10 +85,10 @@ fn symlink(_target: &str, _link: &Path) -> Result<()> {
 
 /// The mkfs.btrfs arguments that create the file system in `image` from
 /// `tree`, with crc32c checksums, which the bootloader checks.
-fn mkfs_args(tree: &Path, image: &Path, version: &str) -> Vec<OsString> {
+fn mkfs_args(tree: &Path, image: &Path, versions: &[&str]) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["-q".into(), "-f".into(), "--csum".into(), "crc32c".into()];
     args.extend(["--rootdir".into(), tree.into()]);
-    for subvolume in subvolumes(version) {
+    for subvolume in subvolumes(versions) {
         args.push("--subvol".into());
         args.push(subvolume.into());
     }
@@ -175,11 +179,37 @@ fn boot_list(boot_image: &Path) -> Result<String> {
     Ok(list)
 }
 
+/// Copies the directory tree `from` to `to`, which must not exist, with
+/// its symbolic links as they are.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let (source, target) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&source, &target)?;
+        } else if kind.is_symlink() {
+            symlink_to(&fs::read_link(&source)?, &target)?;
+        } else {
+            fs::copy(&source, &target)?;
+        }
+    }
+    Ok(())
+}
+
 /// Creates the root file system for `kind`, holding the files of the
 /// archive `boot_image` and then the system of the archive `system`,
 /// with `kernel` and the boot list of the files of `boot_image` in the
-/// system version, and returns the path of its image.
-pub fn create(kind: Kind, system: &Path, boot_image: &Path, kernel: &Path) -> Result<PathBuf> {
+/// system version, and returns the path of its image. With `previous`,
+/// `@system/previous` names a copy of that version, `previous_version`.
+pub fn create(
+    kind: Kind,
+    system: &Path,
+    boot_image: &Path,
+    kernel: &Path,
+    previous: bool,
+) -> Result<PathBuf> {
     let dir = crate::workspace_root().join("target/image");
     let tree = dir.join(format!("root-{}", kind.name()));
     if tree.exists() {
@@ -197,11 +227,19 @@ pub fn create(kind: Kind, system: &Path, boot_image: &Path, kernel: &Path) -> Re
         .with_context(|| format!("copying {}", kernel.display()))?;
     fs::create_dir_all(root.join("boot"))?;
     fs::write(root.join("boot/modules"), boot_list(boot_image)?)?;
+    let mut versions = vec![version.clone()];
+    if previous {
+        let name = previous_version(kind);
+        copy_tree(&root, &tree.join("@system").join(&name))?;
+        symlink(&name, &tree.join("@system/previous"))?;
+        versions.push(name);
+    }
 
     let image = dir.join(format!("root-{}.btrfs", kind.name()));
     File::create(&image)?.set_len(SIZE)?;
+    let versions: Vec<&str> = versions.iter().map(String::as_str).collect();
     let status = Command::new("mkfs.btrfs")
-        .args(mkfs_args(&tree, &image, &version))
+        .args(mkfs_args(&tree, &image, &versions))
         .status()
         .context("failed to run mkfs.btrfs")?;
     if !status.success() {
@@ -223,7 +261,8 @@ mod tests {
 
     #[test]
     fn makes_the_system_version_a_read_only_subvolume() {
-        let args = mkfs_args(Path::new("tree"), Path::new("root.btrfs"), "1.0-debug");
+        let versions = ["1.0-debug", "0.9-debug"];
+        let args = mkfs_args(Path::new("tree"), Path::new("root.btrfs"), &versions);
         let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,
@@ -238,6 +277,8 @@ mod tests {
                 "@system",
                 "--subvol",
                 "ro:@system/1.0-debug",
+                "--subvol",
+                "ro:@system/0.9-debug",
                 "--subvol",
                 "etc",
                 "--subvol",

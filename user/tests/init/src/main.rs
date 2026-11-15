@@ -2082,6 +2082,98 @@ fn variable_checks(s: &Startup, firmware: Handle, irq: Handle) -> Result {
     Ok(())
 }
 
+/// The reset control register, and the value that resets the machine.
+const RESET_CONTROL: u16 = 0xCF9;
+const RESET: u8 = 0x06;
+
+/// The `boot-attempts` scenario: logs the version that the command line's
+/// `system=` names and what `MikrosBoot` holds, and then, unless the
+/// variable names another version that has no tries left, which the
+/// bootloader fell back from, resets the machine for the runner to see
+/// the next boot.
+fn boot_attempts_scenario(s: &Startup) -> i64 {
+    match boot_attempt(s) {
+        Ok(true) => {
+            log!(Info, "SCENARIO boot-attempts PASSED");
+            exit_qemu(PASSED)
+        }
+        Ok(false) => {
+            if let Err(f) = reset(s) {
+                log!(
+                    Error,
+                    "SCENARIO boot-attempts: {} failed ({})",
+                    f.what,
+                    f.status
+                );
+            }
+            1
+        }
+        Err(f) => {
+            log!(
+                Error,
+                "SCENARIO boot-attempts FAILED: {} failed ({})",
+                f.what,
+                f.status
+            );
+            exit_qemu(FAILED)
+        }
+    }
+}
+
+/// Logs the booted version and the variable, and gives whether the boot
+/// fell back.
+fn boot_attempt(s: &Startup) -> Result<bool> {
+    open_exit_port(s.root_resource, s.process)?;
+    let cmdline = core::str::from_utf8(s.cmdline).unwrap_or("");
+    let booted = cmdline
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("system="))
+        .next_back()
+        .unwrap_or("");
+    let firmware = grant(s, KIND_FIRMWARE, 0, 0)?;
+    let mut data = [0u8; 1024];
+    let (status, len, attributes) = variable_get(firmware, b"MikrosBoot", &mut data);
+    close(firmware)?;
+    if status == NOT_FOUND {
+        log!(
+            Info,
+            "SCENARIO boot-attempts: booted {booted}, MikrosBoot missing"
+        );
+        return Ok(false);
+    }
+    check("reading MikrosBoot", status)?;
+    ensure(
+        "finding 80 bytes with 7 as attributes",
+        len == 80 && attributes == 7,
+    )?;
+    let name_len = (u32_at(&data, 12) as usize).min(64);
+    let named = core::str::from_utf8(&data[16..16 + name_len]).unwrap_or("?");
+    let (state, tries) = (u32_at(&data, 4), u32_at(&data, 8));
+    log!(
+        Info,
+        "SCENARIO boot-attempts: booted {booted}, MikrosBoot names {named}, state {state}, {tries} tries left"
+    );
+    Ok(named != booted && state == 0 && tries == 0)
+}
+
+/// Resets the machine through the reset control register.
+fn reset(s: &Startup) -> Result {
+    let port = u64::from(RESET_CONTROL);
+    let ports = grant(s, mikros_test::KIND_IOPORT, port, 1)?;
+    // SAFETY: the call takes no pointers.
+    check("enabling the reset port", unsafe {
+        sys::process_ioports_enable(s.process, ports, port, 1)
+    })?;
+    // SAFETY: the process may access the port, and writing it resets the
+    // machine.
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") RESET_CONTROL, in("al") RESET, options(nomem, nostack));
+    }
+    loop {
+        sleep_ms(1000);
+    }
+}
+
 const KIND_BTI: u32 = 8;
 const WRONG_TYPE: i64 = -12;
 const DEVICE_READ: u32 = 1 << 0;
@@ -6528,6 +6620,8 @@ fn scenario(s: &Startup) -> Option<i64> {
         "takeover" => manager::takeover_scenario(s),
         // The runner logs the writes and flushes of the scratch disks.
         "durability" => manager::durability_scenario(s),
+        // The runner lets the machine restart, and checks each boot's line.
+        "boot-attempts" => boot_attempts_scenario(s),
         // The runner raises an NMI or a machine check once this is logged.
         "wait" => {
             log!(Info, "SCENARIO waiting");

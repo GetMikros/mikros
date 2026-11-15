@@ -1,6 +1,7 @@
 //! Development tasks for the Mikros repository, run with `cargo xtask`.
 
 mod acpica;
+mod boot_attempts;
 mod boot_menu;
 mod btrfs;
 mod build;

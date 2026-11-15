@@ -627,6 +627,14 @@ pub fn run(args: &Args) -> Result<()> {
         "accounts",
     )?;
     println!("accounts run passed");
+    crate::boot_attempts::run(
+        &args.machine,
+        args.kind,
+        &built,
+        &dir.join("boot-attempts"),
+        timeout,
+    )?;
+    println!("boot attempts run passed");
     crate::root_disk::run(
         &args.machine,
         args.kind,
