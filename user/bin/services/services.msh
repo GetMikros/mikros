@@ -1,0 +1,7 @@
+# What `services` takes, for msh's completion and colours.
+extern services(
+    call?: [start stop restart] "start, stop or restart a service",
+    name?: string "the name of the service",
+    --json: bool "write the services as JSON",
+    --help: bool "show how to use services"
+)

@@ -1,0 +1,8 @@
+# The program manifest of services, installed as
+# usr/lib/programs/system.services.yaml: a command, which lists the
+# services, and asks for an administrator's authorization before it
+# starts, stops or restarts one.
+app_id: system.services
+binary: /usr/bin/services
+command: true
+permissions: [services.control, session.authorize]
