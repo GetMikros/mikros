@@ -40,6 +40,7 @@ pub mod lend;
 pub mod lock_order;
 pub mod log;
 pub mod memory_object;
+pub mod modules;
 pub mod nodes;
 pub mod object;
 pub mod output;
