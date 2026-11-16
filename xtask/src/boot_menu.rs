@@ -147,13 +147,13 @@ const RUNS: [Run; 8] = [
         keys: &["right", "ret"],
         outcome: Outcome::BootsPrevious,
     },
-    // After the two cards come Restart and Shut down.
+    // After the three cards come Restart and Shut down.
     Run {
         name: "shutdown",
         entries: None,
         other: None,
         hold: true,
-        keys: &["right", "right", "right", "ret"],
+        keys: &["right", "right", "right", "right", "ret"],
         outcome: Outcome::PowersOff,
     },
     Run {
@@ -161,7 +161,7 @@ const RUNS: [Run; 8] = [
         entries: None,
         other: None,
         hold: true,
-        keys: &["right", "right", "ret"],
+        keys: &["right", "right", "right", "ret"],
         outcome: Outcome::Restarts,
     },
 ];

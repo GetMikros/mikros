@@ -107,8 +107,9 @@ impl fmt::Display for Error {
 }
 
 impl Config {
-    /// The configuration used when there is no entries file: Mikros, and
-    /// Mikros's previous version. The caller sets `timeout` to 5 when it
+    /// The configuration used when there is no entries file: Mikros,
+    /// Mikros's previous version, and Mikros without the drivers that
+    /// packages added. The caller sets `timeout` to 5 when it
     /// adds detected systems.
     pub fn for_missing_file() -> Config {
         let mikros = |id: &str, detail: Option<&str>, args: Option<&str>| Entry {
@@ -129,6 +130,11 @@ impl Config {
                     "mikros-previous",
                     Some("Previous version"),
                     Some("system=previous")
+                ),
+                mikros(
+                    "mikros-nodrivers",
+                    Some("Without added drivers"),
+                    Some("nodrivers")
                 ),
             ],
             detect: true,

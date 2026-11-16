@@ -71,7 +71,7 @@ fn defaults_without_keys() {
 fn missing_file_configuration() {
     let config = Config::for_missing_file();
     assert_eq!(config.timeout, Some(0));
-    assert_eq!(config.entries.len(), 2);
+    assert_eq!(config.entries.len(), 3);
     assert_eq!(config.entries[0].id, "mikros");
     assert_eq!(config.entries[0].path, "\\EFI\\Mikros\\mikrosboot.efi");
     assert_eq!(config.entries[0].args, None);
@@ -81,6 +81,12 @@ fn missing_file_configuration() {
     assert_eq!(previous.detail.as_deref(), Some("Previous version"));
     assert_eq!(previous.path, "\\EFI\\Mikros\\mikrosboot.efi");
     assert_eq!(previous.args.as_deref(), Some("system=previous"));
+    let without = &config.entries[2];
+    assert_eq!(without.id, "mikros-nodrivers");
+    assert_eq!(without.name, "Mikros");
+    assert_eq!(without.detail.as_deref(), Some("Without added drivers"));
+    assert_eq!(without.path, "\\EFI\\Mikros\\mikrosboot.efi");
+    assert_eq!(without.args.as_deref(), Some("nodrivers"));
     assert_eq!(config.default_index(), 0);
 }
 
