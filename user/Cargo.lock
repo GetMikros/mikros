@@ -666,6 +666,7 @@ dependencies = [
 name = "mikros-mika"
 version = "0.0.0"
 dependencies = [
+ "mikros-yaml",
  "ruzstd",
  "sha2",
 ]
