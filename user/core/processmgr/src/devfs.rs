@@ -140,10 +140,23 @@ impl Connection {
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unwatch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
-            // `/dev` stores no owners.
+            // `/dev` stores no owners and no lists.
             R::SetOwner(_, r) => {
                 r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
             }
+            R::GetAcl(q, r) => {
+                let a = attributes(self.kind);
+                let entries = mikros_acl::midl::of_mode(
+                    a.mode,
+                    a.r#type == NodeType::Directory,
+                    q.default,
+                );
+                r.reply(s, entries.map(|entries| NodeGetAclResponse { entries }))
+            }
+            R::SetAcl(_, r) => {
+                r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
+            }
+            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
             // Everything that would change the directory or a node's
             // attributes.
             R::SetAttributes(_, r) => r.reply(s, Err(self.write_denied())),

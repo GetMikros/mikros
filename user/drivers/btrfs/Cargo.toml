@@ -6,6 +6,7 @@ license = "GPL-2.0-only"
 publish = false
 
 [target.'cfg(target_os = "mikros")'.dependencies]
+mikros-acl = { path = "../../lib/acl", features = ["midl"] }
 mikros-casefold = { path = "../../lib/casefold" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 

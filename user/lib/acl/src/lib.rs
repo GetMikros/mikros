@@ -9,6 +9,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "midl")]
+pub mod midl;
 #[cfg(test)]
 mod tests;
 

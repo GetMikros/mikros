@@ -140,6 +140,7 @@ dependencies = [
 name = "btrfs"
 version = "0.0.0"
 dependencies = [
+ "mikros-acl",
  "mikros-casefold",
  "mikros-rt",
 ]
@@ -552,11 +553,15 @@ dependencies = [
 [[package]]
 name = "mikros-acl"
 version = "0.0.0"
+dependencies = [
+ "mikros-rt",
+]
 
 [[package]]
 name = "mikros-bootfs"
 version = "0.0.0"
 dependencies = [
+ "mikros-acl",
  "mikros-bootimage",
  "mikros-rt",
 ]
@@ -608,6 +613,7 @@ dependencies = [
 name = "mikros-fatserver"
 version = "0.0.0"
 dependencies = [
+ "mikros-acl",
  "mikros-fat",
  "mikros-rt",
  "mikros-tz",
@@ -838,6 +844,7 @@ dependencies = [
 name = "processmgr"
 version = "0.0.0"
 dependencies = [
+ "mikros-acl",
  "mikros-bootfs",
  "mikros-loader",
  "mikros-manifest",
@@ -1225,6 +1232,7 @@ dependencies = [
 name = "tmpfs"
 version = "0.0.0"
 dependencies = [
+ "mikros-acl",
  "mikros-casefold",
  "mikros-rt",
 ]

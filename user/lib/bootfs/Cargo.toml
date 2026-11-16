@@ -9,6 +9,7 @@ publish = false
 mikros-bootimage = { path = "../bootimage" }
 
 [target.'cfg(target_os = "mikros")'.dependencies]
+mikros-acl = { path = "../acl", features = ["midl"] }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 
 # The server only runs on Mikros, and is left out of the host's tests.

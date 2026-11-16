@@ -71,6 +71,9 @@ impl Connection {
             R::GetMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::SetOwner(q, r) => r.reply(s, self.set_owner(q.owner).await),
+            R::GetAcl(q, r) => r.reply(s, self.get_acl(q.default).await),
+            R::SetAcl(_, r) => r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported))),
+            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Lock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::Unlock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::CloneRange(_, r) => r.reply(s, Err(Error::IsDirectory)),
@@ -202,6 +205,11 @@ impl Connection {
     async fn attributes(&self) -> Result<NodeGetAttributesResponse, Error> {
         let (_, first) = self.dir.first().ok_or(Error::NotFound)?;
         flat(first.get_attributes().await)
+    }
+
+    async fn get_acl(&self, default: bool) -> Result<NodeGetAclResponse, Error> {
+        let (_, first) = self.dir.first().ok_or(Error::NotFound)?;
+        flat(first.get_acl(default).await)
     }
 
     async fn filesystem(&self) -> Result<NodeQueryFilesystemResponse, Error> {

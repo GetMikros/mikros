@@ -89,6 +89,7 @@ pub fn from_fs(error: Error) -> i64 {
         Error::TooBig => EFBIG,
         Error::WouldBlock => EAGAIN,
         Error::Refused => ECONNREFUSED,
+        Error::BadState => EINVAL,
         Error::Unknown(_) => EIO,
     }
 }

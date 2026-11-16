@@ -163,6 +163,18 @@ impl Connection {
             // Not there yet.
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::SetOwner(q, r) => r.reply(s, self.set_owner(q.owner)),
+            R::GetAcl(q, r) => {
+                let entries = self.attributes(self.node).and_then(|a| {
+                    mikros_acl::midl::of_mode(
+                        a.mode,
+                        a.r#type == NodeType::Directory,
+                        q.default,
+                    )
+                });
+                r.reply(s, entries.map(|entries| NodeGetAclResponse { entries }))
+            }
+            R::SetAcl(_, r) => r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported))),
+            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
                 s,

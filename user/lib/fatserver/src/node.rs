@@ -149,10 +149,24 @@ impl<F: Format> Connection<F> {
             // What this server does not provide.
             R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
-            // FAT and exFAT store no owners.
+            // FAT and exFAT store no owners and no lists.
             R::SetOwner(_, r) => {
                 r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
             }
+            R::GetAcl(q, r) => {
+                let entries = self.fs.attributes(self.target).and_then(|a| {
+                    mikros_acl::midl::of_mode(
+                        a.mode,
+                        a.r#type == NodeType::Directory,
+                        q.default,
+                    )
+                });
+                r.reply(s, entries.map(|entries| NodeGetAclResponse { entries }))
+            }
+            R::SetAcl(_, r) => {
+                r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
+            }
+            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
                 s,

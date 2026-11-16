@@ -215,6 +215,9 @@ impl Connection {
             R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags).await),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::SetOwner(q, r) => r.reply(s, flat(b.set_owner(q.owner).await)),
+            R::GetAcl(q, r) => r.reply(s, flat(b.get_acl(q.default).await)),
+            R::SetAcl(q, r) => r.reply(s, flat(b.set_acl(q.default, q.entries).await)),
+            R::Restrict(q, r) => r.reply(s, self.restrict(q).await),
             R::CloneRange(q, r) => r.reply(
                 s,
                 flat(
@@ -247,6 +250,24 @@ impl Connection {
                 flat(b.connect_socket(q.name, q.r#type, q.connection).await),
             ),
         };
+    }
+
+    /// Restricts the backing connection, and serves the restricted one as
+    /// a connection of the domain with the same rights.
+    async fn restrict(&self, q: NodeRestrictRequest) -> Result<NodeRestrictResponse, Error> {
+        let (backing, server) = endpoints::<Node>().map_err(|_| Error::Io)?;
+        flat(
+            self.backing
+                .restrict(q.user, q.app, q.pid, q.koid, q.admin, server)
+                .await,
+        )?;
+        self.open_domain()?;
+        self.spawn(
+            NodeAsyncClient::new(backing, self.reactor.clone()),
+            q.node,
+            self.rights,
+        );
+        Ok(NodeRestrictResponse {})
     }
 
     async fn clone(&self, q: NodeCloneRequest) -> Result<NodeCloneResponse, Error> {

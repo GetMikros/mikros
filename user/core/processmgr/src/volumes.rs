@@ -282,6 +282,14 @@ fn write_denied(rights: Rights) -> Error {
     }
 }
 
+/// The error of setting what the directory does not store.
+fn not_stored(rights: Rights) -> Error {
+    match rights.contains(Rights::WRITE) {
+        true => Error::NotSupported,
+        false => Error::AccessDenied,
+    }
+}
+
 fn directory_attributes(inode: u64) -> Attributes {
     Attributes {
         r#type: NodeType::Directory,
@@ -353,14 +361,15 @@ async fn serve(volumes: Rc<Volumes>, end: ServerEnd<Node>, rights: Rights) {
             R::ReadLink(_, r) => r.reply(s, Err(Error::Invalid)),
             R::GetMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
-            // The directory stores no owner.
-            R::SetOwner(_, r) => r.reply(
+            // The directory stores no owner and no lists.
+            R::SetOwner(_, r) => r.reply(s, Err(not_stored(rights))),
+            R::GetAcl(q, r) => r.reply(
                 s,
-                match rights.contains(Rights::WRITE) {
-                    true => Err(Error::NotSupported),
-                    false => Err(Error::AccessDenied),
-                },
+                mikros_acl::midl::of_mode(directory_attributes(1).mode, true, q.default)
+                    .map(|entries| NodeGetAclResponse { entries }),
             ),
+            R::SetAcl(_, r) => r.reply(s, Err(not_stored(rights))),
+            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),

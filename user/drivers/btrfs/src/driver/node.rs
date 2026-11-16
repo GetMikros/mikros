@@ -210,6 +210,19 @@ impl Connection {
                 let set = self.set_owner(q.owner);
                 r.reply(s, self.fs.durable(set).await)
             }
+            R::GetAcl(q, r) => {
+                let entries = self.open.attributes().and_then(|a| {
+                    let a = fs::attributes(&a);
+                    mikros_acl::midl::of_mode(
+                        a.mode,
+                        a.r#type == NodeType::Directory,
+                        q.default,
+                    )
+                });
+                r.reply(s, entries.map(|entries| NodeGetAclResponse { entries }))
+            }
+            R::SetAcl(_, r) => r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported))),
+            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::ConnectSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
         };

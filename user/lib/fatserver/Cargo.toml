@@ -6,6 +6,7 @@ license = "MPL-2.0"
 publish = false
 
 [dependencies]
+mikros-acl = { path = "../acl", features = ["midl"] }
 mikros-fat = { path = "../fat" }
 mikros-rt = { path = "../../runtime/mikros-rt" }
 mikros-tz = { path = "../tz" }
