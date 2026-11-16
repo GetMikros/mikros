@@ -302,13 +302,12 @@ fn negotiate(structures: &Structures, wanted: u64) -> Result<u64, Error> {
     Ok(accepted)
 }
 
-/// Takes the device's interrupts: on each one, processes the used rings
-/// of the queues it belongs to and counts a configuration change, and
-/// then acknowledges it, an INTx event on the bus channel of the moment.
-/// Returns the handles to keep. An MSI that arrives while its object is
-/// still signaled adds no signal, so after the acknowledgement the used
-/// rings are processed once more, for requests that the device returned
-/// in between.
+/// Takes the device's interrupts. A message-signaled interrupt is
+/// acknowledged first, so that a message that arrives while the rings are
+/// read signals again, and then the used rings of the queues it belongs
+/// to are processed and a configuration change counted. The INTx event
+/// is acknowledged after the work that the ISR status names, on the bus
+/// channel of the moment. Returns the handles to keep.
 fn watch(
     device: &Bus,
     structures: &Rc<Structures>,
@@ -332,16 +331,13 @@ fn watch(
                 let reactor = reactor.clone();
                 spawner.spawn(async move {
                     while reactor.signals(raw, SIGNALED).await.is_ok() {
+                        // SAFETY: the call takes no pointers.
+                        unsafe { sys::interrupt_ack(raw) };
                         for queue in &mine {
                             queue.process_used();
                         }
                         if let Some(changes) = &config {
                             changes.set(changes.get() + 1);
-                        }
-                        // SAFETY: the call takes no pointers.
-                        unsafe { sys::interrupt_ack(raw) };
-                        for queue in &mine {
-                            queue.process_used();
                         }
                     }
                 });
