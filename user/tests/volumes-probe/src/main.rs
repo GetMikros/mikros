@@ -7,7 +7,9 @@
 //! `user.volumes.access` through the broker and starts a copy of itself, which
 //! has `/volumes` in its namespace. For each of the volumes in `LABELS`,
 //! the copy waits for it, reads `HELLO.TXT`, which the runner put there,
-//! writes `WRITTEN.TXT` and reads it back. It then kills the xHCI driver
+//! also through the volume's ID, which its file system gives, checks that
+//! `/volumes` lists it once by its name, writes `WRITTEN.TXT` and reads it
+//! back. It then kills the xHCI driver
 //! and writes `AGAIN.TXT` on the first volume, which the USB mass storage
 //! driver sends again once the restarted xHCI driver gives it a new
 //! channel; every other driver must still run as the process it was, and
@@ -244,6 +246,7 @@ async fn use_volume(
     if !matches!(&read, Ok(Ok(r)) if r.data == HELLO_TEXT) {
         return Err("reading HELLO.TXT");
     }
+    by_id(volumes, reactor, label).await?;
     let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
     let written = open(volumes, reactor, &written_path, flags, RW).await?;
     let wrote = written.write(0, WRITTEN_TEXT.to_vec()).await;
@@ -340,6 +343,56 @@ async fn restart(
         }
     }
     Ok(())
+}
+
+/// Checks that the volume `label` names its ID: that the ID opens to the
+/// same volume, that `/volumes` lists the volume once by its name and not
+/// by its ID, and that a FAT on a whole disk has the CRC-32 of the disk's
+/// serial after its own identifier.
+async fn by_id(
+    volumes: &NodeAsyncClient,
+    reactor: &Reactor,
+    label: &str,
+) -> Result<(), &'static str> {
+    let root = open(volumes, reactor, label, OpenFlags(0), Rights::READ).await?;
+    let id = match root.query_filesystem().await {
+        Ok(Ok(queried)) => queried.info.id,
+        _ => return Err("querying a volume's file system"),
+    };
+    if id.is_empty() || id.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err("finding a volume's ID");
+    }
+    if label == "WHOLEFAT" && id.split('-').count() != 3 {
+        return Err("finding the disk's serial in a whole disk's ID");
+    }
+    let hello = format!("{id}/{HELLO}");
+    let file = open(volumes, reactor, &hello, OpenFlags(0), Rights::READ).await?;
+    if !matches!(file.read(0, 4096).await, Ok(Ok(r)) if r.data == HELLO_TEXT) {
+        return Err("reading HELLO.TXT through the volume's ID");
+    }
+    let names = names(volumes).await?;
+    let once = names.iter().filter(|n| n.as_str() == label).count() == 1;
+    if !once || names.contains(&id) {
+        return Err("listing a volume once, by its name");
+    }
+    Ok(())
+}
+
+/// The names that `/volumes` lists.
+async fn names(volumes: &NodeAsyncClient) -> Result<Vec<String>, &'static str> {
+    let mut names = Vec::new();
+    let mut cookie = 0;
+    loop {
+        let listed = match volumes.read_directory(cookie, false).await {
+            Ok(Ok(listed)) => listed,
+            _ => return Err("listing /volumes"),
+        };
+        if listed.entries.is_empty() {
+            return Ok(names);
+        }
+        names.extend(listed.entries.into_iter().map(|e| e.name));
+        cookie = listed.next;
+    }
 }
 
 /// Whether `/volumes` still lists either volume.
