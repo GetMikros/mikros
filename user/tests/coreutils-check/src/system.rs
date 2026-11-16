@@ -31,6 +31,8 @@ pub fn check(c: &mut Checks) {
     c.ok(&["whoami"], "", "ada\n");
     // The home folder is its user's.
     c.ok(&["stat", "-c", "%U", "/users/ada"], "", "ada\n");
+    // Its group is its owner's own.
+    c.ok(&["stat", "-c", "%G", "/users/ada"], "", "ada\n");
     c.err(&["whoami", "x"], 1);
     c.ok(&["logname"], "", "ada\n");
     c.err(&["logname", "x"], 1);

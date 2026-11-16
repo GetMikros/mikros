@@ -2,7 +2,8 @@
 //!
 //! The file type comes from the node's type and the permission bits from
 //! its stored mode. Each namespace entry is a device of its own, the
-//! owner is the user ID, and the group ID is 0. A stream is a pipe.
+//! owner is the user ID, and the group ID that of the owner's own group,
+//! which is the owner's ID. A stream is a pipe.
 
 use crate::errno::{self, EBADF, EINVAL, EIO};
 use crate::fd::{self, Description};
@@ -70,6 +71,8 @@ fn from_attributes(a: &Attributes, device: u64) -> Kstat {
         nlink: a.links,
         mode: file_type(a.r#type) | a.mode & PERMISSIONS,
         uid: a.owner,
+        // The owner's own group, whose ID is the owner's.
+        gid: a.owner,
         size: a.size as i64,
         blksize: BLOCK_SIZE,
         blocks: a.allocated.div_ceil(512) as i64,
