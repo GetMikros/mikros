@@ -13,7 +13,9 @@ use alloc::rc::Rc;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::process::HandleRole;
-use mikros_rt::interfaces::mikros::service::{ProviderAsyncServer, ProviderRequest};
+use mikros_rt::interfaces::mikros::service::{
+    DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
+};
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
@@ -40,7 +42,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         return PANIC_EXIT_CODE;
     };
     let provider = managed.handles.remove(at).handle;
-    let fs = Rc::new(Fs::new(reactor.clone(), spawner.clone()));
+    let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
+    let fs = Rc::new(Fs::new(directory, reactor.clone(), spawner.clone()));
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor);
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {
@@ -51,11 +54,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             }
             if c.protocol == PROTOCOL {
                 let end = ServerEnd::new(c.server);
-                spawner.spawn(crate::service::fs::serve_filesystem(
-                    fs.clone(),
-                    end,
-                    c.client.user,
-                ));
+                spawner.spawn(crate::service::fs::serve_filesystem(fs.clone(), end));
             } else if c.protocol == TEMPORARY {
                 spawner.spawn(crate::service::budget::serve(
                     fs.clone(),

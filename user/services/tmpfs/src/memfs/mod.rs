@@ -6,6 +6,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use mikros_acl::Entry;
 
 /// A node's number, which is also its inode number.
 pub type Id = u64;
@@ -107,6 +108,10 @@ pub struct Node<C, S> {
     pub kind: Kind<C, S>,
     pub mode: u32,
     pub owner: u32,
+    /// The node's access list when it is extended, and a directory's
+    /// default list, if it has one (MIKSPEC-0049.R26).
+    pub acl: Option<Vec<Entry>>,
+    pub default_acl: Option<Vec<Entry>>,
     pub times: Times,
     /// The directories that hold the node, with the names they give it.
     pub names: Vec<(Id, String)>,
@@ -167,6 +172,8 @@ impl<C, S> Tree<C, S> {
             kind: Kind::Directory(Directory::default()),
             mode,
             owner,
+            acl: None,
+            default_acl: None,
             times: Times::at(now),
             names: Vec::new(),
         };
@@ -354,12 +361,19 @@ impl<C, S> Tree<C, S> {
         let id = self.next;
         self.next += 1;
         let names = alloc::vec![(dir, String::from(name))];
+        // A directory's default list becomes the new node's access list,
+        // and a new directory's default list.
+        let default = self.nodes.get(&dir).and_then(|d| d.default_acl.as_deref());
+        let directory = matches!(kind, Kind::Directory(_));
+        let inherited = mikros_acl::inherit(default, mode, directory);
         self.nodes.insert(
             id,
             Node {
                 kind,
-                mode,
+                mode: inherited.mode,
                 owner,
+                acl: inherited.access,
+                default_acl: inherited.default,
                 times: Times::at(now),
                 names,
             },

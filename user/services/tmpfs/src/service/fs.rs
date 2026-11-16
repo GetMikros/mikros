@@ -10,14 +10,24 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
+use mikros_acl::Subject;
 use mikros_rt::exec::{Reactor, Spawner};
-use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
     Error, Filesystem, FilesystemAsyncServer, FilesystemGetRootResponse, FilesystemInfo,
     FilesystemQueryFilesystemResponse, FilesystemRequest, Node, Rights, SocketListenerClient,
     WatchKind,
 };
+use mikros_rt::interfaces::mikros::permissions::{
+    AppNumbers, AppNumbersAsyncClient, Broker, BrokerAsyncClient,
+};
+use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::sys;
+
+/// The broker's protocols, through which a subject's `admin.acls.manage`
+/// is asked for.
+const BROKER: &str = "mikros.permissions.Broker";
+const APP_NUMBERS: &str = "mikros.permissions.AppNumbers";
 
 const INFO_BASIC: u32 = 1;
 /// The rights of a token: DUPLICATE, TRANSFER and INSPECT.
@@ -62,6 +72,8 @@ pub struct Fs {
     /// them to.
     pub budgets: RefCell<BTreeMap<Id, Rc<OwnedHandle>>>,
     pub watches: Watches,
+    /// The service's own directory, through which it reaches the broker.
+    directory: DirectoryAsyncClient,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -92,7 +104,7 @@ pub fn now() -> i64 {
 }
 
 impl Fs {
-    pub fn new(reactor: Reactor, spawner: Spawner) -> Fs {
+    pub fn new(directory: DirectoryAsyncClient, reactor: Reactor, spawner: Spawner) -> Fs {
         Fs {
             tree: RefCell::new(Tree::new(0o755, 0, now())),
             refs: RefCell::new(BTreeMap::new()),
@@ -101,25 +113,48 @@ impl Fs {
             next_owner: Cell::new(1),
             budgets: RefCell::new(BTreeMap::new()),
             watches: Watches::default(),
+            directory,
             reactor,
             spawner,
         }
     }
 
-    /// Serves `end` as a connection to `node` with `rights` for the user
-    /// `user`, writing at the end when `append`, and looking names up
-    /// case-insensitively when `folded` (MIKSPEC-0071.R17).
+    /// Whether the broker allows `subject` `admin.acls.manage`, through
+    /// connections of their own; not when they cannot be made.
+    pub async fn may_manage(&self, subject: &Subject) -> bool {
+        let (Ok((broker, broker_server)), Ok((numbers, numbers_server))) =
+            (endpoints::<Broker>(), endpoints::<AppNumbers>())
+        else {
+            return false;
+        };
+        for (protocol, server) in [
+            (BROKER, broker_server.into_handle()),
+            (APP_NUMBERS, numbers_server.into_handle()),
+        ] {
+            let connected = self.directory.connect(protocol.into(), None, server).await;
+            if !matches!(connected, Ok(Ok(_))) {
+                return false;
+            }
+        }
+        let broker = BrokerAsyncClient::new(broker, self.reactor.clone());
+        let numbers = AppNumbersAsyncClient::new(numbers, self.reactor.clone());
+        mikros_acl::midl::may_manage(&broker, &numbers, subject).await
+    }
+
+    /// Serves `end` as a connection to `node` with `rights` for
+    /// `subject`, if any, writing at the end when `append`, and looking
+    /// names up case-insensitively when `folded` (MIKSPEC-0071.R17).
     pub fn serve(
         self: &Rc<Self>,
         end: ServerEnd<Node>,
         node: Id,
         rights: Rights,
-        user: u32,
+        subject: Option<Subject>,
         append: bool,
         folded: bool,
     ) {
         *self.refs.borrow_mut().entry(node).or_default() += 1;
-        let task = node::serve(self.clone(), end, node, rights, user, append, folded);
+        let task = node::serve(self.clone(), end, node, rights, subject, append, folded);
         self.spawner.spawn(task);
     }
 
@@ -307,15 +342,15 @@ fn koid(handle: &OwnedHandle) -> Option<u64> {
     (status == mikros_rt::OK).then_some(id)
 }
 
-/// Serves `Filesystem` on `end` for the user `user`: `GetRoot` serves a
-/// connection to the root directory.
-pub async fn serve_filesystem(fs: Rc<Fs>, end: ServerEnd<Filesystem>, user: u32) {
+/// Serves `Filesystem` on `end`: `GetRoot` serves a connection to the
+/// root directory, without a subject.
+pub async fn serve_filesystem(fs: Rc<Fs>, end: ServerEnd<Filesystem>) {
     let server = FilesystemAsyncServer::new(end, fs.reactor.clone());
     while let Ok(request) = server.next().await {
         let s = server.server();
         let _ = match request {
             FilesystemRequest::GetRoot(q, r) => {
-                fs.serve(q.node, ROOT, q.rights, user, false, false);
+                fs.serve(q.node, ROOT, q.rights, None, false, false);
                 r.reply(s, Ok(FilesystemGetRootResponse {}))
             }
             FilesystemRequest::QueryFilesystem(_, r) => {

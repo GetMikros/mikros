@@ -2,9 +2,10 @@
 //! temporary file system, to drive it as a client. It connects to
 //! `mikros.fs.Filesystem` and `mikros.fs.TemporaryFilesystem` through its
 //! directory and checks that a budget set on a directory is charged for
-//! the files below it, for which it gets the root budget. The system test
-//! services-tmpfs checks the rest of the file system as a client of the
-//! running one. It exits with 0 when the check passed, or with the number
+//! the files below it, for which it gets the root budget, and that access
+//! control lists are kept, inherited and checked for the subjects that
+//! `Restrict` gives connections. The system test services-tmpfs checks
+//! the rest of the file system as a client of the running one. It exits with 0 when the check passed, or with the number
 //! of the step that failed.
 
 #![no_std]
@@ -16,8 +17,8 @@ use alloc::string::String;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemClient, Node, NodeClient, NodeType, OpenFlags, Rights,
-    TemporaryFilesystem, TemporaryFilesystemClient,
+    AclEntry, AclTag, Error, Filesystem, FilesystemClient, Node, NodeClient, NodeType, OpenFlags,
+    Rights, TemporaryFilesystem, TemporaryFilesystemClient,
 };
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
@@ -59,10 +60,142 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Some(root) = root(&directory).and_then(|fs| own_directory(&fs)) else {
         return 1;
     };
-    match budgets(&root, &directory, budget) {
+    match budgets(&root, &directory, budget).and_then(|()| acls(&root)) {
         Ok(()) => 0,
         Err(failed) => failed,
     }
+}
+
+const R: Rights = Rights::READ;
+const W: Rights = Rights::WRITE;
+const NONE: Rights = Rights(0);
+
+fn entry(tag: AclTag, id: u32, rights: Rights) -> AclEntry {
+    AclEntry { tag, id, rights }
+}
+
+/// A connection to the node of `node` for the subject `user` and `app`.
+fn restrict(node: &NodeClient, user: u32, app: u32) -> Result<NodeClient, Option<Error>> {
+    let (client, server) = endpoints::<Node>().map_err(|_| None)?;
+    match node.restrict(user, app, 1, 1, 0, server, FOREVER) {
+        Ok(Ok(_)) => Ok(NodeClient::new(client)),
+        Ok(Err(e)) => Err(Some(e)),
+        Err(_) => Err(None),
+    }
+}
+
+fn get_acl(node: &NodeClient, default: bool) -> Result<alloc::vec::Vec<AclEntry>, Option<Error>> {
+    match node.get_acl(default, FOREVER) {
+        Ok(Ok(r)) => Ok(r.entries),
+        Ok(Err(e)) => Err(Some(e)),
+        Err(_) => Err(None),
+    }
+}
+
+fn set_acl(node: &NodeClient, default: bool, entries: &[AclEntry]) -> Result<(), Option<Error>> {
+    let entries = entries
+        .iter()
+        .map(|e| entry(e.tag, e.id, e.rights))
+        .collect();
+    match node.set_acl(default, entries, FOREVER) {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(Some(e)),
+        Err(_) => Err(None),
+    }
+}
+
+/// Whether reading and writing the file `name` in `dir` succeed.
+fn access(dir: &NodeClient, name: &str) -> Result<(bool, bool), i64> {
+    // Opening needs no entry of the list, only reading and writing do.
+    let (file, _, _) = open(dir, name, OpenFlags(0), RW).map_err(|_| 0)?;
+    let read = ok(file.read(0, 1, FOREVER)).is_some();
+    let wrote = ok(file.write(0, b"x".to_vec(), FOREVER)).is_some();
+    Ok((read, wrote))
+}
+
+/// Lists: the entries of the mode without an extended one; a list that
+/// `SetAcl` sets, with the mode from its mask, and that decides the
+/// access of subjects other than user 0; default lists that new nodes
+/// take; owners of the nodes that a subject makes; and `Restrict` only
+/// once.
+fn acls(root: &NodeClient) -> Result<(), i64> {
+    use AclTag as T;
+    use OpenFlags as F;
+    let mkdir = flags(&[F::CREATE, F::DIRECTORY]);
+    let (dir, _, _) = open(root, "acls", mkdir, RW).map_err(|_| 70)?;
+    let (file, _, _) = open(&dir, "f", F::CREATE, RW).map_err(|_| 70)?;
+    let of_mode = || {
+        alloc::vec![
+            entry(T::Owner, 0, Rights(R.0 | W.0)),
+            entry(T::Group, 0, R),
+            entry(T::Other, 0, NONE),
+        ]
+    };
+    expect(get_acl(&file, false) == Ok(of_mode()), 71)?;
+    expect(get_acl(&file, true) == Err(Some(Error::NotDirectory)), 72)?;
+    expect(get_acl(&dir, true) == Ok(alloc::vec![]), 72)?;
+
+    // A list of the owner, user 1001, app 7 and a mask of reading.
+    let list = || {
+        alloc::vec![
+            entry(T::Owner, 0, Rights(R.0 | W.0)),
+            entry(T::User, 1001, Rights(R.0 | W.0)),
+            entry(T::Group, 0, R),
+            entry(T::App, 7, Rights(R.0 | W.0)),
+            entry(T::Mask, 0, R),
+            entry(T::Other, 0, NONE),
+        ]
+    };
+    let mut reversed = list();
+    reversed.reverse();
+    expect(set_acl(&file, false, &reversed) == Ok(()), 73)?;
+    expect(get_acl(&file, false) == Ok(list()), 73)?;
+    let mode = ok(file.get_attributes(FOREVER)).ok_or(74)?.attributes.mode;
+    expect(mode & 0o777 == 0o640, 74)?;
+    let mut no_mask = list();
+    no_mask.retain(|e| e.tag != T::Mask);
+    expect(
+        set_acl(&file, false, &no_mask) == Err(Some(Error::Invalid)),
+        75,
+    )?;
+
+    // Subjects meet the list; user 0 and connections without one do not.
+    let user = |user, app| restrict(&dir, user, app).map_err(|_| 76);
+    expect(access(&user(1001, 0)?, "f") == Ok((true, false)), 77)?;
+    expect(access(&user(1002, 7)?, "f") == Ok((true, false)), 78)?;
+    expect(access(&user(1002, 8)?, "f") == Ok((false, false)), 79)?;
+    expect(access(&user(0, 8)?, "f") == Ok((true, true)), 80)?;
+    expect(access(&dir, "f") == Ok((true, true)), 80)?;
+
+    // Only once, and owners only without a subject or as user 0.
+    let ada = user(1000, 0)?;
+    expect(
+        restrict(&ada, 1001, 0).err() == Some(Some(Error::BadState)),
+        81,
+    )?;
+    let (mine, _, _) = open(&ada, "mine", F::CREATE, RW).map_err(|_| 82)?;
+    let owner = ok(mine.get_attributes(FOREVER)).ok_or(82)?.attributes.owner;
+    expect(owner == 1000, 82)?;
+    expect(ok(mine.set_owner(1001, FOREVER)).is_none(), 83)?;
+    // The owner sets the list of its own file; another user may not.
+    expect(set_acl(&mine, false, &list()) == Ok(()), 84)?;
+    let (theirs, _, _) = open(&user(1001, 0)?, "mine", OpenFlags(0), RW).map_err(|_| 85)?;
+    expect(
+        set_acl(&theirs, false, &of_mode()) == Err(Some(Error::AccessDenied)),
+        85,
+    )?;
+
+    // New nodes take the default list, and new directories keep it.
+    let (inherits, _, _) = open(&dir, "d", mkdir, RW).map_err(|_| 86)?;
+    expect(set_acl(&inherits, true, &list()) == Ok(()), 86)?;
+    expect(get_acl(&inherits, true) == Ok(list()), 86)?;
+    let (new, _, _) = open(&inherits, "g", F::CREATE, RW).map_err(|_| 87)?;
+    expect(get_acl(&new, false) == Ok(list()), 87)?;
+    let (sub, _, _) = open(&inherits, "e", mkdir, RW).map_err(|_| 88)?;
+    expect(get_acl(&sub, true) == Ok(list()), 88)?;
+    expect(set_acl(&inherits, true, &[]) == Ok(()), 89)?;
+    expect(get_acl(&inherits, true) == Ok(alloc::vec![]), 89)?;
+    Ok(())
 }
 
 /// A connection, read and write, to the root of the file system.

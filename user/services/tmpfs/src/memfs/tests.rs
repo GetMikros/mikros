@@ -230,3 +230,32 @@ fn finds_names_case_insensitively() {
     assert_eq!(t.find(a, "DUP", true), Ok(Some(("DUP".to_string(), third))));
     assert_eq!(t.find(a, "Dup", false), Ok(None));
 }
+
+#[test]
+fn new_nodes_take_their_directorys_default_list() {
+    use mikros_acl::{READ, Tag, WRITE};
+    let mut t = T::new(0o755, 0, 0);
+    let a = mkdir(&mut t, ROOT, "a");
+    let list = vec![
+        Entry::new(Tag::Owner, 0, READ | WRITE),
+        Entry::new(Tag::User, 1001, READ),
+        Entry::new(Tag::Group, 0, READ),
+        Entry::new(Tag::Mask, 0, READ),
+        Entry::new(Tag::Other, 0, 0),
+    ];
+    t.get_mut(a).unwrap().default_acl = Some(list.clone());
+    let f = file(&mut t, a, "f");
+    let b = mkdir(&mut t, a, "b");
+    let f_node = t.get(f).unwrap();
+    assert_eq!(f_node.acl.as_ref(), Some(&list));
+    assert_eq!((f_node.mode, f_node.default_acl.is_none()), (0o640, true));
+    let b_node = t.get(b).unwrap();
+    assert_eq!(b_node.acl.as_ref(), Some(&list));
+    assert_eq!(b_node.default_acl.as_ref(), Some(&list));
+    // Without a default list, nothing is inherited.
+    let g = file(&mut t, ROOT, "g");
+    assert_eq!(
+        (t.get(g).unwrap().acl.is_none(), t.get(g).unwrap().mode),
+        (true, 0o644)
+    );
+}

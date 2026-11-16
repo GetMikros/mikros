@@ -10,6 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::poll_fn;
 use core::task::Poll;
+use mikros_acl::Subject;
 use mikros_rt::interfaces::__midl::{Error as MidlError, ServerEnd};
 use mikros_rt::interfaces::mikros::fs::*;
 
@@ -24,8 +25,9 @@ struct Connection {
     fs: Rc<Fs>,
     node: Id,
     rights: Rights,
-    /// The user that nodes made through the connection belong to.
-    user: u32,
+    /// Whom the connection is for, which the access lists of nodes
+    /// apply to, and whom the nodes it makes belong to.
+    subject: Option<Subject>,
     cursor: u64,
     append: bool,
     /// Whether the connection looks names up case-insensitively, as it was
@@ -42,7 +44,7 @@ pub async fn serve(
     end: ServerEnd<Node>,
     node: Id,
     rights: Rights,
-    user: u32,
+    subject: Option<Subject>,
     append: bool,
     folded: bool,
 ) {
@@ -52,7 +54,7 @@ pub async fn serve(
         fs,
         node,
         rights,
-        user,
+        subject,
         cursor: 0,
         append,
         folded,
@@ -65,6 +67,11 @@ pub async fn serve(
             NodeRequest::Lock(q, r) => {
                 let locked = connection.lock(q).await;
                 let _ = r.reply(server.server(), locked.map(|()| NodeLockResponse {}));
+            }
+            // So does asking the broker whether a list may be set.
+            NodeRequest::SetAcl(q, r) => {
+                let set = connection.set_acl(q).await;
+                let _ = r.reply(server.server(), set.map(|()| NodeSetAclResponse {}));
             }
             request => connection.handle(request, server.server()),
         }
@@ -163,18 +170,9 @@ impl Connection {
             // Not there yet.
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::SetOwner(q, r) => r.reply(s, self.set_owner(q.owner)),
-            R::GetAcl(q, r) => {
-                let entries = self.attributes(self.node).and_then(|a| {
-                    mikros_acl::midl::of_mode(
-                        a.mode,
-                        a.r#type == NodeType::Directory,
-                        q.default,
-                    )
-                });
-                r.reply(s, entries.map(|entries| NodeGetAclResponse { entries }))
-            }
-            R::SetAcl(_, r) => r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported))),
-            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::GetAcl(q, r) => r.reply(s, self.get_acl(q.default)),
+            R::SetAcl(_, r) => r.reply(s, Err(Error::Invalid)),
+            R::Restrict(q, r) => r.reply(s, self.restrict(q)),
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
                 s,
@@ -198,6 +196,101 @@ impl Connection {
             true => Ok(()),
             false => Err(Error::AccessDenied),
         }
+    }
+
+    /// Fails with `ACCESS_DENIED` unless the connection has `rights` and
+    /// the access list of `id` allows them to its subject
+    /// (MIKSPEC-0049.R25).
+    fn allowed(&self, id: Id, rights: Rights) -> Result<(), Error> {
+        self.require(rights)?;
+        let tree = self.fs.tree.borrow();
+        let node = tree.get(id).ok_or(Error::NotFound)?;
+        let subject = self.subject.as_ref();
+        match mikros_acl::permits(subject, node.acl.as_deref(), node.owner, rights.0) {
+            true => Ok(()),
+            false => Err(Error::AccessDenied),
+        }
+    }
+
+    /// The owner of the nodes the connection makes.
+    fn new_owner(&self) -> u32 {
+        mikros_acl::new_owner(self.subject.as_ref())
+    }
+
+    /// The node's access list, or with `default` a directory's default
+    /// list (MIKSPEC-0049.R26, MIKSPEC-0049.R31).
+    fn get_acl(&self, default: bool) -> Result<NodeGetAclResponse, Error> {
+        let tree = self.fs.tree.borrow();
+        let node = tree.get(self.node).ok_or(Error::NotFound)?;
+        let entries = match (default, &node.acl, &node.default_acl) {
+            (false, Some(list), _) | (true, _, Some(list)) => mikros_acl::midl::to_midl(list),
+            _ => mikros_acl::midl::of_mode(node.mode, node.is_directory(), default)?,
+        };
+        Ok(NodeGetAclResponse { entries })
+    }
+
+    /// Replaces the node's access list, setting its mode from it, or a
+    /// directory's default list, which an empty list removes. A subject
+    /// other than user 0 and the node's owner needs `admin.acls.manage`.
+    async fn set_acl(&self, q: NodeSetAclRequest) -> Result<(), Error> {
+        self.require(Rights::WRITE)?;
+        let (owner, directory) = {
+            let tree = self.fs.tree.borrow();
+            let node = tree.get(self.node).ok_or(Error::NotFound)?;
+            (node.owner, node.is_directory())
+        };
+        if q.default && !directory {
+            return Err(Error::NotDirectory);
+        }
+        let list = match q.default && q.entries.is_empty() {
+            true => None,
+            false => Some(mikros_acl::midl::from_midl(&q.entries)?),
+        };
+        if let Some(subject) = &self.subject
+            && mikros_acl::needs_manage(Some(subject), owner)
+            && !self.fs.may_manage(subject).await
+        {
+            return Err(Error::AccessDenied);
+        }
+        let mut tree = self.fs.tree.borrow_mut();
+        let node = tree.get_mut(self.node).ok_or(Error::NotFound)?;
+        match (q.default, list) {
+            (true, list) => node.default_acl = list,
+            (false, Some(list)) => {
+                node.mode = mikros_acl::mode_of(&list, node.mode);
+                node.acl = mikros_acl::is_extended(&list).then_some(list);
+            }
+            (false, None) => {}
+        }
+        node.times.changed = fs::now();
+        drop(tree);
+        self.fs.changed(self.node, WatchKind::Attributes);
+        Ok(())
+    }
+
+    /// Serves `q.node` as a connection to the same node with the same
+    /// rights for the subject of `q`: `BAD_STATE` when this connection
+    /// has a subject already (MIKSPEC-0049.R30).
+    fn restrict(&self, q: NodeRestrictRequest) -> Result<NodeRestrictResponse, Error> {
+        if self.subject.is_some() {
+            return Err(Error::BadState);
+        }
+        let subject = Subject {
+            user: q.user,
+            app: q.app,
+            pid: q.pid,
+            koid: q.koid,
+            admin: q.admin,
+        };
+        self.fs.serve(
+            q.node,
+            self.node,
+            self.rights,
+            Some(subject),
+            self.append,
+            self.folded,
+        );
+        Ok(NodeRestrictResponse {})
     }
 
     fn attributes(&self, id: Id) -> Result<Attributes, Error> {
@@ -227,6 +320,9 @@ impl Connection {
     /// Makes `owner` the node's owner (MIKSPEC-0049.R27).
     fn set_owner(&self, owner: u32) -> Result<NodeSetOwnerResponse, Error> {
         self.require(Rights::WRITE)?;
+        if self.subject.is_some_and(|s| s.user != 0) {
+            return Err(Error::AccessDenied);
+        }
         let mut tree = self.fs.tree.borrow_mut();
         let node = tree.get_mut(self.node).ok_or(Error::NotFound)?;
         node.owner = owner;
@@ -240,7 +336,7 @@ impl Connection {
         &self,
         q: NodeSetAttributesRequest,
     ) -> Result<NodeSetAttributesResponse, Error> {
-        self.require(Rights::WRITE)?;
+        self.allowed(self.node, Rights::WRITE)?;
         let mut tree = self.fs.tree.borrow_mut();
         let node = tree.get_mut(self.node).ok_or(Error::NotFound)?;
         if q.mask.contains(AttributeMask::MODE) {
@@ -264,7 +360,7 @@ impl Connection {
             q.node,
             self.node,
             q.rights,
-            self.user,
+            self.subject,
             self.append,
             self.folded,
         );
@@ -302,7 +398,7 @@ impl Connection {
     }
 
     fn read(&self, offset: u64, count: u32) -> Result<Vec<u8>, Error> {
-        self.require(Rights::READ)?;
+        self.allowed(self.node, Rights::READ)?;
         let count = count.min(READ_MAX) as usize;
         self.with_file(|file| file.read(offset, count).map_err(failed))
     }
@@ -312,15 +408,15 @@ impl Connection {
     /// object, writable when asked for. `WRITE` without `PRIVATE` needs
     /// the right, as `EXECUTE` does.
     fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
-        self.require(Rights::READ)?;
+        self.allowed(self.node, Rights::READ)?;
         let execute = flags.contains(MemoryFlags::EXECUTE);
         if execute {
-            self.require(Rights::EXECUTE)?;
+            self.allowed(self.node, Rights::EXECUTE)?;
         }
         let write = flags.contains(MemoryFlags::WRITE);
         let private = flags.contains(MemoryFlags::PRIVATE);
         if write && !private {
-            self.require(Rights::WRITE)?;
+            self.allowed(self.node, Rights::WRITE)?;
         }
         let rights = memory_rights(write, execute);
         let memory = self.with_file(|file| {
@@ -374,7 +470,7 @@ impl Connection {
     /// Adds a socket node `q.name` with the mode `q.mode` to this
     /// directory, referring to `q.listener`.
     fn bind_socket(&self, q: NodeBindSocketRequest) -> Result<(), Error> {
-        self.require(Rights::WRITE)?;
+        self.allowed(self.node, Rights::WRITE)?;
         self.free_folded(self.node, &q.name)?;
         let socket = Socket {
             listener: SocketListenerClient::new(q.listener),
@@ -386,7 +482,7 @@ impl Connection {
             &q.name,
             Kind::Socket(socket),
             mode,
-            self.user,
+            self.new_owner(),
             fs::now(),
         );
         drop(tree);
@@ -443,7 +539,7 @@ impl Connection {
     /// Writes `data` at `offset`, or at the end without one, and returns
     /// where it went.
     fn write(&self, offset: Option<u64>, data: &[u8]) -> Result<u64, Error> {
-        self.require(Rights::WRITE)?;
+        self.allowed(self.node, Rights::WRITE)?;
         let at = self.with_file(|file| {
             let at = offset.unwrap_or(file.size);
             if at
@@ -469,7 +565,7 @@ impl Connection {
     }
 
     fn truncate(&self, size: u64) -> Result<(), Error> {
-        self.require(Rights::WRITE)?;
+        self.allowed(self.node, Rights::WRITE)?;
         if size > i64::MAX as u64 {
             return Err(Error::TooBig);
         }
@@ -527,7 +623,7 @@ impl Connection {
                 });
             }
             Resolved::Missing { parent, name } if q.flags.contains(OpenFlags::CREATE) => {
-                self.require(Rights::WRITE)?;
+                self.allowed(parent, Rights::WRITE)?;
                 let kind = match q.flags.contains(OpenFlags::DIRECTORY) {
                     true => Kind::Directory(Directory::default()),
                     false => Kind::File(File::default()),
@@ -535,7 +631,7 @@ impl Connection {
                 let mode = q.mode & MODE_BITS;
                 let mut tree = self.fs.tree.borrow_mut();
                 let id = tree
-                    .create(parent, &name, kind, mode, self.user, fs::now())
+                    .create(parent, &name, kind, mode, self.new_owner(), fs::now())
                     .map_err(fs::error)?;
                 drop(tree);
                 let created = event(WatchKind::Created, 0, &name);
@@ -556,7 +652,7 @@ impl Connection {
             return Err(Error::Invalid);
         }
         if q.flags.contains(OpenFlags::TRUNCATE) && r#type == NodeType::File {
-            self.require(Rights::WRITE)?;
+            self.allowed(id, Rights::WRITE)?;
             let mut tree = self.fs.tree.borrow_mut();
             if let Some(Kind::File(file)) = tree.get_mut(id).map(|n| &mut n.kind) {
                 file.truncate(0).map_err(failed)?;
@@ -566,7 +662,7 @@ impl Connection {
         }
         let append = q.flags.contains(OpenFlags::APPEND);
         self.fs
-            .serve(q.node, id, q.rights, self.user, append, folded);
+            .serve(q.node, id, q.rights, self.subject, append, folded);
         Ok(NodeOpenResponse {
             r#type,
             redirect: None,
@@ -578,7 +674,7 @@ impl Connection {
         cookie: u64,
         attributes: bool,
     ) -> Result<NodeReadDirectoryResponse, Error> {
-        self.require(Rights::READ)?;
+        self.allowed(self.node, Rights::READ)?;
         let (found, next) = self
             .fs
             .tree
@@ -599,7 +695,7 @@ impl Connection {
     }
 
     fn unlink(&self, name: &str, directory: bool) -> Result<(), Error> {
-        self.require(Rights::WRITE)?;
+        self.allowed(self.node, Rights::WRITE)?;
         let name = match self.find(self.node, name)? {
             Some((own, _)) => own,
             None => String::from(name),
@@ -634,8 +730,9 @@ impl Connection {
     }
 
     fn rename(&self, q: NodeRenameRequest) -> Result<(), Error> {
-        self.require(Rights::WRITE)?;
+        self.allowed(self.node, Rights::WRITE)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        self.allowed(to, Rights::WRITE)?;
         let (name, moved) = self.find(self.node, &q.name)?.ok_or(Error::NotFound)?;
         // An entry equal to the new name under case folding is replaced as
         // one of exactly that name: the moved entry takes that entry's own
@@ -681,8 +778,9 @@ impl Connection {
     }
 
     fn link(&self, q: NodeLinkRequest) -> Result<(), Error> {
-        self.require(Rights::WRITE)?;
+        self.allowed(self.node, Rights::WRITE)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        self.allowed(to, Rights::WRITE)?;
         let (name, _) = self.find(self.node, &q.name)?.ok_or(Error::NotFound)?;
         self.free_folded(to, &q.new_name)?;
         let q = NodeLinkRequest { name, ..q };
@@ -700,7 +798,7 @@ impl Connection {
     }
 
     fn create_symlink(&self, name: &str, target: String) -> Result<(), Error> {
-        self.require(Rights::WRITE)?;
+        self.allowed(self.node, Rights::WRITE)?;
         if target.is_empty() {
             return Err(Error::Invalid);
         }
@@ -711,7 +809,7 @@ impl Connection {
             name,
             Kind::Symlink(target),
             0o777,
-            self.user,
+            self.new_owner(),
             fs::now(),
         );
         drop(tree);
@@ -742,7 +840,7 @@ impl Connection {
     }
 
     fn read_link(&self) -> Result<NodeReadLinkResponse, Error> {
-        self.require(Rights::READ)?;
+        self.allowed(self.node, Rights::READ)?;
         match &self
             .fs
             .tree
