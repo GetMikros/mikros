@@ -1180,6 +1180,41 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // The program that the session shell packs into an app.
             let app_probe = crate::rust_std::build("app-probe", kind)?;
             println!("built    {}", app_probe.display());
+            // The program and libraries that it packs into a library
+            // package and an app that needs them: one named by its
+            // package's ID, one in the app's libraries/, and one that the
+            // program finds through its DT_RUNPATH.
+            let package_c = |name: &str| format!("user/tests/package-c/{name}");
+            let runpath_library = c_build(
+                "librunpath",
+                &[&package_c("runpath.c")],
+                Linking::Shared("librunpath.dlib"),
+                &[],
+            )?;
+            let own_library = c_build(
+                "libown",
+                &[&package_c("own.c")],
+                Linking::Shared("libown.dlib"),
+                &[],
+            )?;
+            let greet_library = c_build(
+                "greet",
+                &[&package_c("greet.c")],
+                Linking::Shared("org.example.greet:greet"),
+                &[],
+            )?;
+            let package_user = c_build(
+                "package-user",
+                &[&package_c("main.c")],
+                Linking::Dynamic,
+                &[
+                    runpath_library.display().to_string(),
+                    own_library.display().to_string(),
+                    greet_library.display().to_string(),
+                    "-Wl,--enable-new-dtags,-rpath,$ORIGIN/../lib".to_owned(),
+                ],
+            )?;
+            println!("built    {}", package_user.display());
             let idle_service = user_build("idle-service", kind)?;
             println!("built    {}", idle_service.display());
             let idle_manifest =
@@ -1244,6 +1279,22 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ),
                 ("system/bin/msh".to_owned(), session_shell.clone()),
                 ("system/bin/app-probe".to_owned(), app_probe.clone()),
+                (
+                    "system/share/package-c/package-user".to_owned(),
+                    package_user.clone(),
+                ),
+                (
+                    "system/share/package-c/librunpath.dlib".to_owned(),
+                    runpath_library.clone(),
+                ),
+                (
+                    "system/share/package-c/libown.dlib".to_owned(),
+                    own_library.clone(),
+                ),
+                (
+                    "system/share/package-c/greet.dlib".to_owned(),
+                    greet_library.clone(),
+                ),
                 (
                     "system/services/system.union/union".to_owned(),
                     union.clone(),

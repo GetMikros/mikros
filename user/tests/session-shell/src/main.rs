@@ -219,6 +219,7 @@ async fn packages(shell: &Shell<'_>, reactor: &mikros_rt::exec::Reactor) -> Resu
         )?;
     }
     run_app(shell, ID, reactor).await?;
+    run_libraries(shell, &installer, reactor).await?;
     let removed = installer.remove(ID.into(), false, false).await;
     check(matches!(removed, Ok(Ok(_))), 28)?;
     let (_, server) = endpoints::<Node>().map_err(|_| 28)?;
@@ -338,6 +339,128 @@ async fn run_app(
         .await;
     check(matches!(made, Ok(Err(_))), 39)?;
     Ok(())
+}
+
+/// Where the console image keeps the program and the libraries that
+/// `run_libraries` packs, below `/system`.
+const PACKAGE_C: &str = "share/package-c";
+
+/// Installs for the user the library package `org.example.greet` with
+/// `greet.dlib`, named `org.example.greet:greet`, and the app
+/// `org.example.libs` whose program needs it, `lib/librunpath.dlib`
+/// through its `DT_RUNPATH` of `$ORIGIN/../lib`, and
+/// `libraries/libown.dlib`, and checks that the program finds all three
+/// (MIKSPEC-0101.R16, MIKSPEC-0035.R21, MIKSPEC-0034.R46,
+/// MIKSPEC-0050.R50). Removes both again.
+async fn run_libraries(
+    shell: &Shell<'_>,
+    installer: &mikros_rt::interfaces::mikros::packages::InstallerAsyncClient,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    use mikros_rt::interfaces::mikros::process::{SpawnRequest, StatusKind, WaitOptions};
+    const LIBRARY: &str = "org.example.greet";
+    const APP: &str = "org.example.libs";
+    let file = |name: &str| format!("{PACKAGE_C}/{name}");
+    let program = read_all(shell.system, &file("package-user"), reactor).await?;
+    let runpath = read_all(shell.system, &file("librunpath.dlib"), reactor).await?;
+    let own = read_all(shell.system, &file("libown.dlib"), reactor).await?;
+    let greet = read_all(shell.system, &file("greet.dlib"), reactor).await?;
+    let library = format!(
+        "id: {LIBRARY}\nkind: library\nversion: 1.0.0\nname: Greet\n\
+         description: Greets.\ninstall: local\n"
+    );
+    install(
+        shell,
+        installer,
+        "greet.mika",
+        &library,
+        &[("greet.dlib", greet)],
+        66,
+        reactor,
+    )
+    .await?;
+    let app = format!(
+        "id: {APP}\nkind: app\nversion: 1.0.0\nname: Libraries\n\
+         description: Uses libraries.\nexecutable: bin/package-user\ninstall: local\n"
+    );
+    let files = [
+        ("bin/package-user", program),
+        ("lib/librunpath.dlib", runpath),
+        ("libraries/libown.dlib", own),
+    ];
+    install(shell, installer, "libs.mika", &app, &files, 67, reactor).await?;
+    let path = format!("/users/{}/apps/{APP}/package/bin/package-user", shell.name);
+    let request = SpawnRequest {
+        path: path.clone(),
+        arguments: arguments(&[&path]).ok_or(68)?,
+        handles: Vec::new(),
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+        new_session: false,
+        working_directory: None,
+        umask: u32::MAX,
+    };
+    let spawned = shell.launcher.spawn(request).await;
+    let pid = spawned.ok().and_then(|r| r.ok()).ok_or(68)?.pid;
+    let waited = shell
+        .launcher
+        .wait(pid as i32, WaitOptions(0), now() + 60 * SECOND)
+        .await;
+    let status = waited.ok().and_then(|r| r.ok()).ok_or(68)?.status;
+    check(status.kind == StatusKind::Exited, 68)?;
+    // The program's own number for the check that failed.
+    if status.exit_code != 0 {
+        return Err(status.exit_code);
+    }
+    for id in [APP, LIBRARY] {
+        let removed = installer.remove(id.into(), false, false).await;
+        check(matches!(removed, Ok(Ok(_))), 69)?;
+    }
+    Ok(())
+}
+
+/// Packs `files`, each executable, with the manifest `manifest` and its
+/// checksum into the file `name` of the user's home, installs it, and
+/// removes the file again; fails with `code`.
+async fn install(
+    shell: &Shell<'_>,
+    installer: &mikros_rt::interfaces::mikros::packages::InstallerAsyncClient,
+    name: &str,
+    manifest: &str,
+    files: &[(&str, Vec<u8>)],
+    code: i64,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    use mikros_mika::format::{Builder, MANIFEST, checksum_text};
+    let mut builder = Builder::default();
+    for (path, bytes) in files {
+        if let Some((folder, _)) = path.rsplit_once('/') {
+            builder.folder(folder);
+        }
+        builder.file(path, bytes.clone(), true);
+    }
+    let checksum = checksum_text(&builder.checksum(None));
+    let manifest = format!("{manifest}checksum: {checksum}\n");
+    builder.file(MANIFEST, manifest.into_bytes(), false);
+    let bytes = builder.finish();
+    let (file, server) = endpoints::<Node>().map_err(|_| code)?;
+    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+    let opened = shell.home.open(name.into(), flags, 0o644, rw, server).await;
+    check(matches!(opened, Ok(Ok(_))), code)?;
+    let file = NodeAsyncClient::new(file, reactor.clone());
+    for (at, chunk) in bytes.chunks(32768).enumerate() {
+        let written = file.write((at * 32768) as u64, chunk.to_vec()).await;
+        check(matches!(written, Ok(Ok(_))), code)?;
+    }
+    let (client, server) = endpoints::<Node>().map_err(|_| code)?;
+    let cloned = file.clone(server, Rights::READ).await;
+    check(matches!(cloned, Ok(Ok(_))), code)?;
+    let installed = installer.install(client, false, vec![], false, false).await;
+    check(matches!(installed, Ok(Ok(_))), code)?;
+    let unlinked = shell.home.unlink(name.into(), false).await;
+    check(matches!(unlinked, Ok(Ok(_))), code)
 }
 
 /// A memory object of `args` with no environment, as `Spawn` takes them.
