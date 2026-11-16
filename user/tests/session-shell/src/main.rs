@@ -158,6 +158,110 @@ async fn acls(
     Ok(())
 }
 
+/// A local install through the install service: a package made here,
+/// written to the home folder, installs into the user's
+/// `apps/<id>/package`, which `List` then shows as local, and goes again
+/// with `Remove` (MIKSPEC-0101.R25, MIKSPEC-0101.R27). Fails with the
+/// number of the step.
+async fn packages(
+    home: &NodeAsyncClient,
+    directory: &DirectoryAsyncClient,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    use mikros_rt::interfaces::mikros::packages::{Installer, InstallerAsyncClient};
+    const ID: &str = "org.example.hello";
+    const FILE: &str = "hello.mika";
+    let (installer, server) = endpoints::<Installer>().map_err(|_| 23)?;
+    let connected = directory
+        .connect(
+            "mikros.packages.Installer".into(),
+            None,
+            server.into_handle(),
+        )
+        .await;
+    check(matches!(connected, Ok(Ok(_))), 23)?;
+    let installer = InstallerAsyncClient::new(installer, reactor.clone());
+    // Version 1.0.0, then 1.1.0 over it, which swaps the new subvolume
+    // with the old one.
+    for (version, step) in [("1.0.0", 24), ("1.1.0", 29)] {
+        let file = write_package(home, FILE, ID, version, reactor).await?;
+        let (client, server) = endpoints::<Node>().map_err(|_| step)?;
+        check(
+            matches!(file.clone(server, Rights::READ).await, Ok(Ok(_))),
+            step,
+        )?;
+        let inspected = installer.inspect(client).await;
+        let named =
+            matches!(&inspected, Ok(Ok(r)) if r.manifest.starts_with(b"id: org.example.hello"));
+        check(named, step)?;
+        let (client, server) = endpoints::<Node>().map_err(|_| step + 1)?;
+        check(
+            matches!(file.clone(server, Rights::READ).await, Ok(Ok(_))),
+            step + 1,
+        )?;
+        let installed = installer.install(client, false, vec![], false, false).await;
+        check(matches!(installed, Ok(Ok(_))), step + 1)?;
+        let listed = installer.list(String::new()).await;
+        let shown = matches!(&listed, Ok(Ok(r)) if r.packages.iter().any(|p| p.id == ID && !p.global && p.version == version));
+        check(shown, step + 2)?;
+        let (program, server) = endpoints::<Node>().map_err(|_| step + 3)?;
+        let path = format!("apps/{ID}/package/bin/hello");
+        let found = home.open(path, OpenFlags(0), 0, Rights::READ, server).await;
+        check(matches!(found, Ok(Ok(_))), step + 3)?;
+        let program = NodeAsyncClient::new(program, reactor.clone());
+        let read = program.read(0, 64).await;
+        let says = format!("hello {version}");
+        check(
+            matches!(&read, Ok(Ok(r)) if r.data == says.as_bytes()),
+            step + 3,
+        )?;
+    }
+    let removed = installer.remove(ID.into(), false, false).await;
+    check(matches!(removed, Ok(Ok(_))), 28)?;
+    let (_, server) = endpoints::<Node>().map_err(|_| 28)?;
+    let path = format!("apps/{ID}/package/bin/hello");
+    let gone = home.open(path, OpenFlags(0), 0, Rights::READ, server).await;
+    check(matches!(gone, Ok(Err(Error::NotFound))), 28)?;
+    check(
+        matches!(home.unlink(FILE.into(), false).await, Ok(Ok(_))),
+        28,
+    )?;
+    Ok(())
+}
+
+/// Writes a package of the app `id` in `version`, whose program says
+/// hello with its version, to the file `name` of `home`.
+async fn write_package(
+    home: &NodeAsyncClient,
+    name: &str,
+    id: &str,
+    version: &str,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<NodeAsyncClient, i64> {
+    use mikros_mika::format::{Builder, MANIFEST, checksum_text};
+    let mut builder = Builder::default();
+    builder.folder("bin");
+    builder.file("bin/hello", format!("hello {version}").into_bytes(), true);
+    let checksum = checksum_text(&builder.checksum(None));
+    let manifest = format!(
+        "id: {id}\nkind: app\nversion: {version}\nname: Hello\ndescription: Says hello.\n\
+         executable: bin/hello\ninstall: local\nchecksum: {checksum}\n"
+    );
+    builder.file(MANIFEST, manifest.into_bytes(), false);
+    let bytes = builder.finish();
+    let (file, server) = endpoints::<Node>().map_err(|_| 22)?;
+    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+    let opened = home.open(name.into(), flags, 0o644, rw, server).await;
+    check(matches!(opened, Ok(Ok(_))), 22)?;
+    let file = NodeAsyncClient::new(file, reactor.clone());
+    for (at, chunk) in bytes.chunks(32768).enumerate() {
+        let written = file.write((at * 32768) as u64, chunk.to_vec()).await;
+        check(matches!(written, Ok(Ok(_))), 22)?;
+    }
+    Ok(file)
+}
+
 /// Fails with `code` unless `ok`.
 fn check(ok: bool, code: i64) -> Result<(), i64> {
     if ok { Ok(()) } else { Err(code) }
@@ -223,6 +327,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         let libraries = NodeAsyncClient::new(libraries.ok_or(13)?, reactor.clone());
         let home = NodeAsyncClient::new(home_dir.ok_or(16)?, reactor.clone());
         acls(&home, user, &reactor).await?;
+        packages(&home, &directory, &reactor).await?;
         if name == "bob" {
             let (_readme, server) = endpoints::<Node>().map_err(|_| 13)?;
             let opened = libraries

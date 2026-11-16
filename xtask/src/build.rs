@@ -1248,6 +1248,16 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     "system/services/system.union/service.yaml".to_owned(),
                     union_manifest.clone(),
                 ),
+                // The install service, which the session shell installs a
+                // package for its user through.
+                (
+                    "system/services/system.pkgsvc/pkgsvc".to_owned(),
+                    crate::rust_std::build("pkgsvc", kind)?,
+                ),
+                (
+                    "system/services/system.pkgsvc/service.yaml".to_owned(),
+                    crate::workspace_root().join("user/services/pkgsvc/pkgsvc.yaml"),
+                ),
                 (
                     "apps/README".to_owned(),
                     crate::workspace_root().join("user/tests/session-shell/system/Apps/README"),
