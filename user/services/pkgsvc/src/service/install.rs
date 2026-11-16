@@ -6,6 +6,7 @@
 use super::files::{Root, user_name};
 use super::{Given, Shared, open};
 use crate::place::{self, Scope};
+use crate::records::{Owner, Record};
 use mikros_mika::format::{self, Kind as EntryKind, Package};
 use mikros_mika::manifest::{Kind, Manifest};
 use mikros_mika::version::Version;
@@ -28,14 +29,19 @@ pub fn permission(kind: Kind) -> &'static str {
     }
 }
 
-/// The scope that `global` names for `caller`.
-pub fn scope(shared: &Shared, caller: &ClientIdentity, global: bool) -> Result<Scope, Status> {
+/// The scope, and its owner in the records, that `global` names for
+/// `caller`.
+pub fn scope(
+    shared: &Shared,
+    caller: &ClientIdentity,
+    global: bool,
+) -> Result<(Scope, Owner), Status> {
     if global {
-        return Ok(Scope::Global);
+        return Ok((Scope::Global, Owner::Global));
     }
     let directory = shared.directory.lock().map_err(|_| Status::Internal)?;
     let name = user_name(&directory, caller.user)?;
-    Ok(Scope::Local(name))
+    Ok((Scope::Local(name), Owner::User(caller.user)))
 }
 
 /// The version of the package `id` of `kind` installed in `scope`, if
@@ -69,7 +75,7 @@ pub fn install(
         return Err(Status::InvalidArgs);
     }
     let root = shared.root()?;
-    let scope = scope(shared, caller, q.global)?;
+    let (scope, owner) = scope(shared, caller, q.global)?;
     // Not for every user and for this user at once.
     let other = match &scope {
         Scope::Global => scope_of_caller(shared, caller).ok(),
@@ -111,12 +117,21 @@ pub fn install(
         place::read_only(kind),
         q.dev,
     )?;
-    Ok(())
+    let mut records = root.records()?;
+    records.set(
+        owner,
+        &manifest.id,
+        Record {
+            owner: None,
+            dependency: q.dependency,
+        },
+    );
+    root.write_records(&records)
 }
 
 /// The scope of the caller's own user.
 fn scope_of_caller(shared: &Shared, caller: &ClientIdentity) -> Result<Scope, Status> {
-    scope(shared, caller, false)
+    scope(shared, caller, false).map(|(scope, _)| scope)
 }
 
 /// Writes the files of `package`, without `include/` unless `dev`, into a

@@ -25,6 +25,23 @@ pub fn subvolume(kind: Kind, id: &str, scope: &Scope) -> Option<String> {
     }
 }
 
+/// The folders whose entries are the installed packages of `scope`, each
+/// with the kind of the packages it holds, and, for a user's apps, the
+/// folder below an app's that holds its package.
+pub fn folders(scope: &Scope) -> Vec<(String, Kind, Option<&'static str>)> {
+    match scope {
+        Scope::Global => vec![
+            ("apps".into(), Kind::App, None),
+            ("libraries".into(), Kind::Library, None),
+            ("drivers".into(), Kind::Driver, None),
+        ],
+        Scope::Local(user) => vec![
+            (format!("users/{user}/apps"), Kind::App, Some("package")),
+            (format!("users/{user}/libraries"), Kind::Library, None),
+        ],
+    }
+}
+
 /// Whether a library's or a driver's subvolume is made read-only once it
 /// is written; an app's stays writable.
 pub fn read_only(kind: Kind) -> bool {
@@ -57,5 +74,6 @@ mod tests {
         );
         assert_eq!(subvolume(Kind::Driver, id, &ada), None);
         assert!(read_only(Kind::Library) && read_only(Kind::Driver) && !read_only(Kind::App));
+        assert_eq!(folders(&ada)[0].2, Some("package"));
     }
 }

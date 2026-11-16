@@ -1,13 +1,14 @@
 //! The root file system, which pkgsvc connects to itself, its folders and
-//! files by path from the root, its subvolume management, and the names
-//! of users, which the folders of local packages are named by.
+//! files by path from the root, and the names of users, which the
+//! folders of local packages are named by.
 
 use super::FOREVER;
+use crate::records::Records;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::btrfs::SubvolumesClient;
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemClient, Node, NodeClient, OpenFlags, Rights,
+    Error, Filesystem, FilesystemClient, Node, NodeClient, NodeType, OpenFlags, Rights,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::interfaces::mikros::session::{Accounts, AccountsClient};
@@ -17,8 +18,13 @@ const FILESYSTEM: &str = "device.filesystem";
 const ROOT: &str = "root";
 const ACCOUNTS: &str = "mikros.session.Accounts";
 const SUBVOLUMES: &str = "device.subvolumes";
+/// The folder of the records, from the root, and their file in it.
+const RECORDS_FOLDER: &str = "state/pkgsvc";
+const RECORDS_NAME: &str = "records";
 /// The most bytes one write moves.
 const WRITE_MAX: usize = 32768;
+/// Where the records are, from the root.
+const RECORDS: &str = "state/pkgsvc/records";
 /// The longest records file and manifest that are read.
 const FILE_MAX: usize = 1 << 20;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
@@ -98,6 +104,32 @@ impl Root {
         }
     }
 
+    /// The names of the folders in the folder at `path`; none when it is
+    /// missing.
+    pub fn folders(&self, path: &str) -> Result<Vec<String>, Status> {
+        let dir = match self.open(path, OpenFlags::DIRECTORY, 0, Rights::READ) {
+            Ok(dir) => dir,
+            Err(Status::NotFound) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut names = Vec::new();
+        let mut cookie = 0;
+        loop {
+            let listed = flat(dir.read_directory(cookie, false, FOREVER))?;
+            if listed.entries.is_empty() {
+                return Ok(names);
+            }
+            names.extend(
+                listed
+                    .entries
+                    .into_iter()
+                    .filter(|e| e.r#type == NodeType::Directory && e.name != "." && e.name != "..")
+                    .map(|e| e.name),
+            );
+            cookie = listed.next;
+        }
+    }
+
     /// Makes the folder `path` and the folders above it where they are
     /// missing.
     pub fn make_folders(&self, path: &str) -> Result<(), Status> {
@@ -164,6 +196,84 @@ impl Root {
         }
         flat(dir.exchange(from.into(), token, to.into(), FOREVER))?;
         subvolumes.delete(&format!("{parent}/{from}"))
+    }
+
+    /// Removes `path` and everything below it.
+    pub fn remove_all(&self, path: &str) -> Result<(), Status> {
+        let (parent, name) = path.rsplit_once('/').ok_or(Status::InvalidArgs)?;
+        let dir = self.open(parent, OpenFlags::DIRECTORY, 0, RW)?;
+        if flat(dir.unlink(name.into(), false, FOREVER)).is_ok() {
+            return Ok(());
+        }
+        let below = self.open(path, OpenFlags::DIRECTORY, 0, RW)?;
+        let mut names = Vec::new();
+        let mut cookie = 0;
+        loop {
+            let listed = flat(below.read_directory(cookie, false, FOREVER))?;
+            if listed.entries.is_empty() {
+                break;
+            }
+            names.extend(
+                listed
+                    .entries
+                    .into_iter()
+                    .map(|e| e.name)
+                    .filter(|n| n != "." && n != ".."),
+            );
+            cookie = listed.next;
+        }
+        for name in names {
+            self.remove_all(&format!("{path}/{name}"))?;
+        }
+        flat(dir.unlink(name.into(), true, FOREVER)).map(|_| ())
+    }
+
+    /// Writes `records`, through a new file that replaces the old one.
+    pub fn write_records(&self, records: &Records) -> Result<(), Status> {
+        self.make_folders(RECORDS_FOLDER)?;
+        let new = format!("{RECORDS_FOLDER}/{RECORDS_NAME}.new");
+        self.write_file(&new, records.encode().as_bytes(), 0o600)?;
+        let dir = self.open(RECORDS_FOLDER, OpenFlags::DIRECTORY, 0, RW)?;
+        let token = flat(dir.get_token(FOREVER))?.token;
+        flat(dir.rename(
+            format!("{RECORDS_NAME}.new"),
+            token,
+            RECORDS_NAME.into(),
+            FOREVER,
+        ))?;
+        flat(dir.sync(FOREVER)).map(|_| ())
+    }
+
+    /// The records, none when there are none yet.
+    pub fn records(&self) -> Result<Records, Status> {
+        match self.read(RECORDS) {
+            Ok(bytes) => Ok(Records::parse(&String::from_utf8_lossy(&bytes))),
+            Err(Status::NotFound) => Ok(Records::default()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Every user's ID and name, from the accounts service.
+pub fn users(directory: &DirectoryClient) -> Result<Vec<(u32, String)>, Status> {
+    let (client, server) = endpoints::<Accounts>().map_err(|_| Status::NoResources)?;
+    match directory.connect(ACCOUNTS.into(), None, server.into_handle(), FOREVER) {
+        Ok(Ok(_)) => {}
+        Ok(Err(status)) => return Err(status),
+        Err(_) => return Err(Status::Io),
+    }
+    let accounts = AccountsClient::new(client);
+    let mut found = Vec::new();
+    let mut after = 0;
+    loop {
+        let listed = accounts
+            .list_users(after, FOREVER)
+            .map_err(|_| Status::Io)?;
+        let Some(last) = listed.users.last().map(|u| u.id) else {
+            return Ok(found);
+        };
+        found.extend(listed.users.into_iter().map(|u| (u.id, u.name)));
+        after = last;
     }
 }
 

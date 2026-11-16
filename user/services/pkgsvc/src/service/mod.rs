@@ -5,6 +5,8 @@
 
 mod files;
 mod install;
+mod list;
+mod remove;
 
 use files::{Root, Subvolumes};
 use mikros_mika::format::{self, Package};
@@ -13,8 +15,8 @@ use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeClient};
 use mikros_rt::interfaces::mikros::packages::{
-    Installer, InstallerInspectResponse, InstallerInstallResponse, InstallerRequest,
-    InstallerServer,
+    Installer, InstallerInspectResponse, InstallerInstallResponse, InstallerListResponse,
+    InstallerRemoveResponse, InstallerRequest, InstallerServer,
 };
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
@@ -164,12 +166,20 @@ fn serve(shared: Arc<Shared>, end: ServerEnd<Installer>, caller: ClientIdentity)
         let s = &server;
         let _ = match request {
             R::Inspect(q, r) => r.reply(s, inspect(q.package)),
-            R::List(_, r) => r.reply(s, Err(Status::NotSupported)),
+            R::List(q, r) => r.reply(
+                s,
+                list::list(&shared, &caller, &q.after)
+                    .map(|packages| InstallerListResponse { packages }),
+            ),
             R::Install(q, r) => r.reply(
                 s,
                 install::install(&shared, &caller, q).map(|()| InstallerInstallResponse {}),
             ),
-            R::Remove(_, r) => r.reply(s, Err(Status::NotSupported)),
+            R::Remove(q, r) => r.reply(
+                s,
+                remove::remove(&shared, &caller, &q.id, q.global, q.keep_data)
+                    .map(|()| InstallerRemoveResponse {}),
+            ),
             R::CreatePublic(_, r) => r.reply(s, Err(Status::NotSupported)),
             R::CommandOwner(_, r) => r.reply(s, Err(Status::NotSupported)),
         };
