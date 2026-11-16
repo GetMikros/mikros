@@ -349,6 +349,54 @@ pub fn fstatfs(fd: i64, out: *mut Statfs) -> i64 {
     result(node_of(fd, Rights(0)).and_then(|node| statfs_of(&node, out)))
 }
 
+/// The folder of the volumes, whose entries open by name and by ID.
+const VOLUMES: &str = "/volumes/";
+
+/// For musl's `realpath`: the resolved path in the `len` bytes at `path`,
+/// a buffer of `cap` bytes, with the volume of a path below
+/// `/volumes/<name>` named by the ID that `QueryFilesystem` gives for
+/// `/volumes/<name>`, written there with a NUL. Returns the length of the
+/// path, which is unchanged for any other path or when the volume gives
+/// no ID, or `usize::MAX` when the path with the ID does not fit.
+///
+/// # Safety
+///
+/// `path` must point to `cap` writable bytes, of which the first `len`
+/// are the path.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __mikros_volume_path(path: *mut u8, len: usize, cap: usize) -> usize {
+    // SAFETY: the caller passes `len` bytes of path at `path`.
+    let bytes = unsafe { core::slice::from_raw_parts(path, len) };
+    let Some(rest) = core::str::from_utf8(bytes)
+        .ok()
+        .and_then(|p| p.strip_prefix(VOLUMES))
+    else {
+        return len;
+    };
+    let (name, tail) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    if name.is_empty() {
+        return len;
+    }
+    let entry = alloc::format!("{VOLUMES}{name}");
+    let id = fs::connect(&entry, 0, 0, Some(Rights(0)))
+        .and_then(|c| done(c.node.query_filesystem(FOREVER)))
+        .map(|r| r.info.id);
+    let id = match id {
+        Ok(id) if !id.is_empty() && id != name => id,
+        _ => return len,
+    };
+    let named = alloc::format!("{VOLUMES}{id}{tail}");
+    if named.len() >= cap {
+        return usize::MAX;
+    }
+    // SAFETY: the buffer holds `cap` bytes, more than the path and NUL.
+    unsafe {
+        core::ptr::copy_nonoverlapping(named.as_ptr(), path, named.len());
+        path.add(named.len()).write(0);
+    }
+    named.len()
+}
+
 /// Whether owner `uid` and group `gid` change nothing for a node owned by
 /// `owner`, in group 0; -1 keeps either.
 fn unchanged(owner: u32, uid: u32, gid: u32) -> bool {

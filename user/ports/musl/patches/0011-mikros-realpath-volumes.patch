@@ -1,0 +1,24 @@
+--- a/src/misc/realpath.c
++++ b/src/misc/realpath.c
+@@ -4,6 +4,11 @@
+ #include <unistd.h>
+ #include <string.h>
+ 
++/* Mikros: names a volume below /volumes/ by its ID instead of its name,
++ * in the q bytes of a path in a buffer of the given size, and returns the
++ * path's new length, or (size_t)-1 when it does not fit. */
++hidden size_t __mikros_volume_path(char *, size_t, size_t);
++
+ static size_t slash_len(const char *s)
+ {
+ 	const char *s0 = s;
+@@ -147,6 +152,9 @@
+ 		q = l + q-p;
+ 	}
+ 
++	q = __mikros_volume_path(output, q, sizeof output);
++	if (q == (size_t)-1) goto toolong;
++
+ 	if (resolved) return memcpy(resolved, output, q+1);
+ 	else return strdup(output);
+ 
