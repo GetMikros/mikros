@@ -160,18 +160,18 @@ pub struct Built {
     pub source: PathBuf,
     /// Its build directory, which holds its tests.
     pub build: PathBuf,
-    /// The directory its prefix, `/usr`, was installed in.
+    /// The directory its prefix, `/system`, was installed in.
     pub install: PathBuf,
 }
 
 /// Where the tests of `port` find its source on Mikros.
 pub fn test_source(port: &Port) -> String {
-    format!("/usr/share/{}-tests", port.name)
+    format!("/system/share/{}-tests", port.name)
 }
 
 /// Where the programs of `port`'s build directory are on Mikros.
 pub fn test_programs(port: &Port) -> String {
-    format!("/usr/libexec/{}-tests", port.name)
+    format!("/system/libexec/{}-tests", port.name)
 }
 
 /// Fetches, patches and builds `port`, a Meson project.

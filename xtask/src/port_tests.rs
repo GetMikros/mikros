@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Where the runner reads its plan, in the boot image.
-pub const PLAN: &str = "usr/share/port-tests/plan";
+pub const PLAN: &str = "system/share/port-tests/plan";
 
 /// How many times the timeout Meson gives a test it has on Mikros, where
 /// it may run emulated.
@@ -175,8 +175,8 @@ fn tests(
         let env = field("env")?.as_object().context("a test's environment")?;
         let env = env
             .iter()
-            // The libraries are in `/usr/lib`, where the dynamic linker
-            // finds them.
+            // The libraries are in `/system/libraries`, where the dynamic
+            // linker finds them.
             .filter(|(var, _)| *var != "LD_LIBRARY_PATH")
             .map(|(var, value)| Some(format!("{var}={}", paths.on_mikros(value.as_str()?))))
             .collect::<Option<_>>()
@@ -272,7 +272,7 @@ pub fn members(port: &Port, built: &Built, plan_file: &Path) -> Result<Vec<(Stri
     for entry in fs::read_dir(&built.build)? {
         let name = entry?.file_name().into_string().ok().unwrap_or_default();
         if major_version_name(&name) {
-            members.push((format!("usr/lib/{name}"), built.build.join(&name)));
+            members.push((format!("system/libraries/{name}"), built.build.join(&name)));
         }
     }
     for dir in &port.test_data {
@@ -347,8 +347,8 @@ mod tests {
         Paths {
             build: "/h/build".into(),
             source: "/h/src".into(),
-            programs: "/usr/libexec/p-tests".into(),
-            test_source: "/usr/share/p-tests".into(),
+            programs: "/system/libexec/p-tests".into(),
+            test_source: "/system/share/p-tests".into(),
         }
     }
 
@@ -382,16 +382,16 @@ mod tests {
             [
                 Test {
                     name: "xkbcommon/a".into(),
-                    path: "/usr/libexec/p-tests/test-a".into(),
-                    args: vec!["/usr/libexec/p-tests/test-a".into(), "x".into()],
-                    env: vec!["top_srcdir=/usr/share/p-tests".into()],
+                    path: "/system/libexec/p-tests/test-a".into(),
+                    args: vec!["/system/libexec/p-tests/test-a".into(), "x".into()],
+                    env: vec!["top_srcdir=/system/share/p-tests".into()],
                     timeout: 300,
                     expect_fail: false,
                 },
                 Test {
                     name: "xkbcommon/c".into(),
-                    path: "/usr/libexec/p-tests/test-c".into(),
-                    args: vec!["/usr/libexec/p-tests/test-c".into()],
+                    path: "/system/libexec/p-tests/test-c".into(),
+                    args: vec!["/system/libexec/p-tests/test-c".into()],
                     env: vec![],
                     timeout: 50,
                     expect_fail: true,
@@ -400,9 +400,9 @@ mod tests {
         );
         assert_eq!(
             plan(&tests[..1]),
-            "test xkbcommon/a\npath /usr/libexec/p-tests/test-a\n\
-             arg /usr/libexec/p-tests/test-a\narg x\n\
-             env top_srcdir=/usr/share/p-tests\ntimeout 300\nend\n"
+            "test xkbcommon/a\npath /system/libexec/p-tests/test-a\n\
+             arg /system/libexec/p-tests/test-a\narg x\n\
+             env top_srcdir=/system/share/p-tests\ntimeout 300\nend\n"
         );
         assert!(plan(&tests[1..]).ends_with("expect fail\ntimeout 50\nend\n"));
         let missing = expectations("a pass\n").unwrap();

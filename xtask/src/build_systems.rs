@@ -1,8 +1,9 @@
 //! Building C and C++ projects for Mikros with Meson and CMake, through
 //! the sysroot's cross file and toolchain file, in
 //! `target/ported/<name>/`. Projects are configured with the prefix
-//! `/usr`, so the paths they build in are those of Mikros, and installed
-//! below a directory of their own.
+//! `/system`, their libraries in `libraries/`, configuration in
+//! `config/` and state in `state/`, so the paths they build in are those
+//! of Mikros, and installed below a directory of their own.
 //!
 //! A project is configured again, in an emptied directory, only when
 //! its configuration changes: the command that configures it, the
@@ -18,8 +19,12 @@ fn dir(name: &str) -> PathBuf {
     crate::workspace_root().join("target/ported").join(name)
 }
 
-/// The prefix projects are configured with.
-const PREFIX: &str = "/usr";
+/// The prefix projects are configured with, and their directories below
+/// it.
+const PREFIX: &str = "/system";
+const LIBDIR: &str = "libraries";
+const SYSCONFDIR: &str = "config";
+const LOCALSTATEDIR: &str = "state";
 
 /// Builds the CMake project in `source` as `name`, with the further
 /// options `options`, and returns the directory its prefix was installed
@@ -38,6 +43,9 @@ pub fn cmake(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
         .arg(format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()))
         .arg("-DCMAKE_BUILD_TYPE=Release")
         .arg(format!("-DCMAKE_INSTALL_PREFIX={PREFIX}"))
+        .arg(format!("-DCMAKE_INSTALL_LIBDIR={LIBDIR}"))
+        .arg(format!("-DCMAKE_INSTALL_SYSCONFDIR={SYSCONFDIR}"))
+        .arg(format!("-DCMAKE_INSTALL_LOCALSTATEDIR={LOCALSTATEDIR}"))
         .args(options);
     configured(name, &mut configure, &toolchain, source)?;
     crate::port::run(Command::new(&cmake).arg("--build").arg(&build))
@@ -64,8 +72,11 @@ pub fn meson(name: &str, source: &Path, options: &[String]) -> Result<PathBuf> {
     setup
         .arg("setup")
         .arg(format!("--cross-file={}", cross.display()))
-        .args(["--buildtype=release", "--libdir=lib"])
+        .arg("--buildtype=release")
         .arg(format!("--prefix={PREFIX}"))
+        .arg(format!("--libdir={LIBDIR}"))
+        .arg(format!("--sysconfdir={SYSCONFDIR}"))
+        .arg(format!("--localstatedir={LOCALSTATEDIR}"))
         .args(options)
         .arg(&build)
         .arg(source);

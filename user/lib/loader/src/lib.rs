@@ -33,7 +33,7 @@ const ABI_NOTE_NAME: &[u8] = b"Mikros\0";
 const NT_MIKROS_ABI: u32 = 1;
 
 /// The only dynamic linker an image may name.
-pub const INTERPRETER: &[u8] = b"/usr/lib/ld-mikros.dlib";
+pub const INTERPRETER: &[u8] = b"/system/libraries/ld-mikros.dlib";
 /// The size of the main thread's stack.
 pub const STACK_SIZE: u64 = 8 << 20;
 

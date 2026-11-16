@@ -23,7 +23,7 @@
  
 +/* Mikros: users come from the accounts service through the C library,
 + * not from /etc/passwd: the name, ID and full name, the user's own group,
-+ * the home folder /Users/<name>, or / for user 0, and the shell msh. */
++ * the home folder /users/<name>, or / for user 0, and the shell msh. */
  int __getpw_a(const char *name, uid_t uid, struct passwd *pw, char **buf, size_t *size, struct passwd **res)
  {
 -	FILE *f;
@@ -44,7 +44,7 @@
 -	if (!f) {
 -		rv = errno;
 -		goto done;
-+	need = 2*strlen(user) + strlen(full) + sizeof "x" + sizeof "/Users/" + sizeof "/usr/bin/msh" + 3;
++	need = 2*strlen(user) + strlen(full) + sizeof "x" + sizeof "/users/" + sizeof "/system/bin/msh" + 3;
 +	if (*size < need) {
 +		p = realloc(*buf, need);
 +		if (!p) return errno;
@@ -166,9 +166,9 @@
 +	pw->pw_gecos = p;
 +	p = stpcpy(p, full) + 1;
 +	pw->pw_dir = p;
-+	p = stpcpy(id ? stpcpy(p, "/Users/") : p, id ? user : "/") + 1;
++	p = stpcpy(id ? stpcpy(p, "/users/") : p, id ? user : "/") + 1;
 +	pw->pw_shell = p;
-+	stpcpy(p, "/usr/bin/msh");
++	stpcpy(p, "/system/bin/msh");
 +	pw->pw_uid = id;
 +	pw->pw_gid = id;
 +	*res = pw;

@@ -1117,22 +1117,31 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("basicdisplay", &basic_display),
             ] {
                 input_files.extend([
-                    (format!("usr/lib/drivers/{name}/{name}"), binary.clone()),
                     (
-                        format!("usr/lib/drivers/{name}/driver.yaml"),
+                        format!("system/drivers/system.driver.{name}/{name}"),
+                        binary.clone(),
+                    ),
+                    (
+                        format!("system/drivers/system.driver.{name}/driver.yaml"),
                         crate::workspace_root().join(format!("user/drivers/{name}/driver.yaml")),
                     ),
                 ]);
             }
             input_files.extend([
-                ("usr/bin/logsvc".to_owned(), log_service.clone()),
                 (
-                    "usr/lib/services/logsvc.yaml".to_owned(),
+                    "system/services/system.logsvc/logsvc".to_owned(),
+                    log_service.clone(),
+                ),
+                (
+                    "system/services/system.logsvc/service.yaml".to_owned(),
                     log_manifest.clone(),
                 ),
-                ("usr/bin/input-probe".to_owned(), input_probe.clone()),
                 (
-                    "usr/lib/services/input-probe.yaml".to_owned(),
+                    "system/services/system.input-probe/input-probe".to_owned(),
+                    input_probe.clone(),
+                ),
+                (
+                    "system/services/system.input-probe/service.yaml".to_owned(),
                     crate::workspace_root().join("user/tests/input-probe/input-probe.yaml"),
                 ),
             ]);
@@ -1164,64 +1173,82 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .cloned()
                 .collect();
             console_files.extend([
-                ("usr/bin/termsvc".to_owned(), term_service.clone()),
                 (
-                    "usr/lib/services/termsvc.yaml".to_owned(),
+                    "system/services/system.termsvc/termsvc".to_owned(),
+                    term_service.clone(),
+                ),
+                (
+                    "system/services/system.termsvc/service.yaml".to_owned(),
                     crate::workspace_root().join("user/services/termsvc/termsvc.yaml"),
                 ),
-                ("usr/bin/console".to_owned(), console.clone()),
-                ("usr/lib/ld-mikros.dlib".to_owned(), dynamic_linker.clone()),
+                ("system/bin/console".to_owned(), console.clone()),
                 (
-                    "usr/lib/libfreetype.6.dlib".to_owned(),
-                    freetype.install.join("lib/libfreetype.6.20.7.dlib"),
+                    "system/libraries/ld-mikros.dlib".to_owned(),
+                    dynamic_linker.clone(),
                 ),
                 (
-                    "usr/lib/libxkbcommon.0.dlib".to_owned(),
-                    xkbcommon.install.join("lib/libxkbcommon.0.13.2.dlib"),
+                    "system/libraries/libfreetype.6.dlib".to_owned(),
+                    freetype.install.join("libraries/libfreetype.6.20.7.dlib"),
                 ),
                 (
-                    "usr/lib/programs/system.console.yaml".to_owned(),
+                    "system/libraries/libxkbcommon.0.dlib".to_owned(),
+                    xkbcommon.install.join("libraries/libxkbcommon.0.13.2.dlib"),
+                ),
+                (
+                    "system/programs/system.console.yaml".to_owned(),
                     crate::workspace_root().join("user/bin/console/system.console.yaml"),
                 ),
-                ("usr/bin/tmpfs".to_owned(), tmpfs.clone()),
                 (
-                    "usr/lib/services/tmpfs.yaml".to_owned(),
+                    "system/services/system.tmpfs/tmpfs".to_owned(),
+                    tmpfs.clone(),
+                ),
+                (
+                    "system/services/system.tmpfs/service.yaml".to_owned(),
                     tmpfs_manifest.clone(),
                 ),
-                ("usr/bin/accountsvc".to_owned(), accounts.clone()),
                 (
-                    "usr/lib/services/accountsvc.yaml".to_owned(),
+                    "system/services/system.accountsvc/accountsvc".to_owned(),
+                    accounts.clone(),
+                ),
+                (
+                    "system/services/system.accountsvc/service.yaml".to_owned(),
                     accounts_manifest.clone(),
                 ),
-                ("var/lib/accounts/users".to_owned(), accounts_users(kind)?),
-                ("usr/bin/sessionmgr".to_owned(), sessions.clone()),
+                ("state/accounts/users".to_owned(), accounts_users(kind)?),
                 (
-                    "usr/lib/services/sessionmgr.yaml".to_owned(),
+                    "system/services/system.sessionmgr/sessionmgr".to_owned(),
+                    sessions.clone(),
+                ),
+                (
+                    "system/services/system.sessionmgr/service.yaml".to_owned(),
                     test_sessions_manifest.clone(),
                 ),
-                ("usr/bin/msh".to_owned(), session_shell.clone()),
-                ("usr/bin/union".to_owned(), union.clone()),
+                ("system/bin/msh".to_owned(), session_shell.clone()),
                 (
-                    "usr/lib/services/union.yaml".to_owned(),
+                    "system/services/system.union/union".to_owned(),
+                    union.clone(),
+                ),
+                (
+                    "system/services/system.union/service.yaml".to_owned(),
                     union_manifest.clone(),
                 ),
                 (
-                    "Apps/README".to_owned(),
+                    "apps/README".to_owned(),
                     crate::workspace_root().join("user/tests/session-shell/system/Apps/README"),
                 ),
                 (
-                    "Libraries/README".to_owned(),
+                    "libraries/README".to_owned(),
                     crate::workspace_root()
                         .join("user/tests/session-shell/system/Libraries/README"),
                 ),
                 (
-                    "Users/bob/Libraries/README".to_owned(),
+                    "users/bob/libraries/README".to_owned(),
                     crate::workspace_root().join("user/tests/session-shell/home/Libraries/README"),
                 ),
             ]);
             for font in ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"] {
                 console_files.push((
-                    format!("usr/share/fonts/dejavu/{font}"),
+                    format!("system/share/fonts/dejavu/{font}"),
                     fonts.ttf.join(font),
                 ));
             }
@@ -1233,7 +1260,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     .strip_prefix(&keymap_data)?
                     .to_str()
                     .context("not UTF-8")?;
-                console_files.push((format!("usr/share/X11/xkb/{relative}"), path.clone()));
+                console_files.push((format!("system/share/X11/xkb/{relative}"), path.clone()));
             }
             // The power-off run serves this image, with the ACPI server, the
             // log service and the power probe, a boot service that the
@@ -1243,9 +1270,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // and of partitions, whose devices the device manager removes
             // when it stops.
             let mut power_files: Vec<(String, PathBuf)> = vec![
-                ("usr/lib/drivers/acpi/acpi".to_owned(), acpi.clone()),
                 (
-                    "usr/lib/drivers/acpi/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.acpi/acpi".to_owned(),
+                    acpi.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.acpi/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
                 ),
             ];
@@ -1260,9 +1290,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             ] {
                 let manifest = format!("user/drivers/{name}/driver.yaml");
                 power_files.extend([
-                    (format!("usr/lib/drivers/{name}/{name}"), binary.clone()),
                     (
-                        format!("usr/lib/drivers/{name}/driver.yaml"),
+                        format!("system/drivers/system.driver.{name}/{name}"),
+                        binary.clone(),
+                    ),
+                    (
+                        format!("system/drivers/system.driver.{name}/driver.yaml"),
                         crate::workspace_root().join(manifest),
                     ),
                 ]);
@@ -1270,14 +1303,20 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             power_files.extend([
                 // The log service, through which the server's messages
                 // reach the kernel log.
-                ("usr/bin/logsvc".to_owned(), log_service.clone()),
                 (
-                    "usr/lib/services/logsvc.yaml".to_owned(),
+                    "system/services/system.logsvc/logsvc".to_owned(),
+                    log_service.clone(),
+                ),
+                (
+                    "system/services/system.logsvc/service.yaml".to_owned(),
                     log_manifest.clone(),
                 ),
-                ("usr/bin/power-probe".to_owned(), power_probe.clone()),
                 (
-                    "usr/lib/services/power-probe.yaml".to_owned(),
+                    "system/services/system.power-probe/power-probe".to_owned(),
+                    power_probe.clone(),
+                ),
+                (
+                    "system/services/system.power-probe/service.yaml".to_owned(),
                     crate::workspace_root().join("user/tests/power-probe/power-probe.yaml"),
                 ),
             ]);
@@ -1289,85 +1328,127 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // storage drivers, the xHCI driver and the USB mass storage
             // driver, with the partition driver, the FAT server for
             // the EFI system partition, a test driver for the root partition
-            // that checks it, and one for each scratch partition.
+            // that checks it, and one for each scratch partition, and
+            // tmpfs.
             let pci_bus_files = [
-                ("usr/lib/drivers/pcibus/pcibus".to_owned(), pci_bus.clone()),
                 (
-                    "usr/lib/drivers/pcibus/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.pcibus/pcibus".to_owned(),
+                    pci_bus.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.pcibus/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/pcibus/driver.yaml"),
                 ),
                 (
-                    "usr/lib/drivers/virtioblk/virtioblk".to_owned(),
+                    "system/drivers/system.driver.virtioblk/virtioblk".to_owned(),
                     virtio_blk.clone(),
                 ),
                 (
-                    "usr/lib/drivers/virtioblk/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.virtioblk/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/virtioblk/driver.yaml"),
                 ),
-                ("usr/lib/drivers/nvme/nvme".to_owned(), nvme.clone()),
                 (
-                    "usr/lib/drivers/nvme/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.nvme/nvme".to_owned(),
+                    nvme.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.nvme/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/nvme/driver.yaml"),
                 ),
-                ("usr/lib/drivers/ahci/ahci".to_owned(), ahci.clone()),
                 (
-                    "usr/lib/drivers/ahci/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.ahci/ahci".to_owned(),
+                    ahci.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.ahci/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/ahci/driver.yaml"),
                 ),
-                ("usr/lib/drivers/xhci/xhci".to_owned(), xhci.clone()),
                 (
-                    "usr/lib/drivers/xhci/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.xhci/xhci".to_owned(),
+                    xhci.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.xhci/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/xhci/driver.yaml"),
                 ),
                 (
-                    "usr/lib/drivers/usbstorage/usbstorage".to_owned(),
+                    "system/drivers/system.driver.usbstorage/usbstorage".to_owned(),
                     usb_storage.clone(),
                 ),
                 (
-                    "usr/lib/drivers/usbstorage/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.usbstorage/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/usbstorage/driver.yaml"),
                 ),
                 (
-                    "usr/lib/drivers/partition/partition".to_owned(),
+                    "system/drivers/system.driver.partition/partition".to_owned(),
                     partition.clone(),
                 ),
                 (
-                    "usr/lib/drivers/partition/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.partition/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/partition/driver.yaml"),
                 ),
-                ("usr/lib/drivers/fat/fat".to_owned(), fat.clone()),
                 (
-                    "usr/lib/drivers/fat/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.fat/fat".to_owned(),
+                    fat.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.fat/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/fat/driver.yaml"),
                 ),
-                ("usr/lib/drivers/exfat/exfat".to_owned(), exfat.clone()),
                 (
-                    "usr/lib/drivers/exfat/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.exfat/exfat".to_owned(),
+                    exfat.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.exfat/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/exfat/driver.yaml"),
                 ),
-                ("usr/lib/drivers/btrfs/btrfs".to_owned(), btrfs.clone()),
                 (
-                    "usr/lib/drivers/btrfs/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.btrfs/btrfs".to_owned(),
+                    btrfs.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.btrfs/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/btrfs/driver.yaml"),
                 ),
                 // The log service, which keeps the log in files on the
                 // root file system and the EFI system partition.
-                ("usr/bin/logsvc".to_owned(), log_service.clone()),
                 (
-                    "usr/lib/services/logsvc.yaml".to_owned(),
+                    "system/services/system.logsvc/logsvc".to_owned(),
+                    log_service.clone(),
+                ),
+                (
+                    "system/services/system.logsvc/service.yaml".to_owned(),
                     log_manifest.clone(),
                 ),
                 // The time service, which takes the time zone from the
                 // root file system.
-                ("usr/bin/timesvc".to_owned(), time_service.clone()),
                 (
-                    "usr/lib/services/timesvc.yaml".to_owned(),
+                    "system/services/system.timesvc/timesvc".to_owned(),
+                    time_service.clone(),
+                ),
+                (
+                    "system/services/system.timesvc/service.yaml".to_owned(),
                     time_manifest.clone(),
                 ),
-                // The USB HID driver, for the keyboard behind the hub.
-                ("usr/lib/drivers/usbhid/usbhid".to_owned(), usb_hid.clone()),
+                // The temporary file system, in which the drivers that
+                // start once the root file system is available get their
+                // folders.
                 (
-                    "usr/lib/drivers/usbhid/driver.yaml".to_owned(),
+                    "system/services/system.tmpfs/tmpfs".to_owned(),
+                    tmpfs.to_path_buf(),
+                ),
+                (
+                    "system/services/system.tmpfs/service.yaml".to_owned(),
+                    tmpfs_manifest.to_path_buf(),
+                ),
+                // The USB HID driver, for the keyboard behind the hub.
+                (
+                    "system/drivers/system.driver.usbhid/usbhid".to_owned(),
+                    usb_hid.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.usbhid/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/usbhid/driver.yaml"),
                 ),
             ];
@@ -1410,29 +1491,34 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .filter(|(at, _)| {
                     volume_drivers
                         .iter()
-                        .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
-                        || at.starts_with("usr/share/zoneinfo/")
+                        .any(|d| at.starts_with(&format!("system/drivers/system.driver.{d}/")))
+                        || at.starts_with("system/share/zoneinfo/")
                         || at.contains("logsvc")
-                        || at.ends_with("services/logsvc.yaml")
                 })
                 .cloned()
                 .collect();
             volumes_files.extend([
-                ("usr/bin/tmpfs".to_owned(), tmpfs.clone()),
                 (
-                    "usr/lib/services/tmpfs.yaml".to_owned(),
+                    "system/services/system.tmpfs/tmpfs".to_owned(),
+                    tmpfs.clone(),
+                ),
+                (
+                    "system/services/system.tmpfs/service.yaml".to_owned(),
                     tmpfs_manifest.clone(),
                 ),
-                ("usr/bin/volumes-probe".to_owned(), volumes_probe.clone()),
                 (
-                    "usr/lib/services/volumes-probe.yaml".to_owned(),
+                    "system/services/system.volumes-probe/volumes-probe".to_owned(),
+                    volumes_probe.clone(),
+                ),
+                (
+                    "system/services/system.volumes-probe/service.yaml".to_owned(),
                     crate::workspace_root().join("user/tests/volumes-probe/volumes-probe.yaml"),
                 ),
             ]);
             // The root disk runs serve this image: the PCI bus driver, the
             // drivers of the disk controllers, the partition, FAT and btrfs
-            // drivers, the time zones and the log service, from the PCI
-            // test's files, without test drivers.
+            // drivers, the time zones, the log service and tmpfs, from the
+            // PCI test's files, without test drivers.
             let root_drivers = [
                 "pcibus",
                 "virtioblk",
@@ -1447,10 +1533,10 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .filter(|(at, _)| {
                     root_drivers
                         .iter()
-                        .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
-                        || at.starts_with("usr/share/zoneinfo/")
+                        .any(|d| at.starts_with(&format!("system/drivers/system.driver.{d}/")))
+                        || at.starts_with("system/share/zoneinfo/")
                         || at.contains("logsvc")
-                        || at.ends_with("services/logsvc.yaml")
+                        || at.contains("system.tmpfs/")
                 })
                 .cloned()
                 .collect();
@@ -1468,23 +1554,26 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 test_image(kind, file, &members)
             };
             // The live run's root partition holds the probe of a live
-            // system's namespace, with its manifest, and the file of /etc
-            // that it reads and writes over.
+            // system's namespace, with its manifest, and the file of
+            // /system/config that it reads and writes over.
             let live_probe = user_build("live-probe", kind)?;
             println!("built    {}", live_probe.display());
             let live_dir = crate::workspace_root().join("user/tests/live-probe");
             let live_conf = live_dir.join("live-probe.conf");
             let live_files: Vec<(String, PathBuf)> = vec![
-                ("usr/bin/live-probe".to_owned(), live_probe),
                 (
-                    "usr/lib/services/live-probe.yaml".to_owned(),
+                    "system/services/system.live-probe/live-probe".to_owned(),
+                    live_probe,
+                ),
+                (
+                    "system/services/system.live-probe/service.yaml".to_owned(),
                     live_dir.join("live-probe.yaml"),
                 ),
                 (
-                    "usr/share/live-probe/live-probe.conf".to_owned(),
+                    "system/share/live-probe/live-probe.conf".to_owned(),
                     live_conf.clone(),
                 ),
-                ("etc/live-probe.conf".to_owned(), live_conf),
+                ("config/live-probe.conf".to_owned(), live_conf),
             ];
             for (file, files) in [
                 ("live.img", &live_files),
@@ -1496,8 +1585,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 println!("built    {}", archive(file, files)?.display());
             }
             // The setup run serves this image: the drivers and the log
-            // service of the input run, the root disk's drivers of the
-            // root disk runs, tmpfs and the union server, the services
+            // service of the input run, the root disk's drivers and tmpfs
+            // of the root disk runs, and the union server, the services
             // that run until the root file system is available.
             // The rest of the system comes from the root partition, which
             // the run makes from the first-boot archive below.
@@ -1514,24 +1603,28 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     .collect::<Vec<_>>(),
             );
             setup_files.extend([
-                ("usr/bin/timesvc".to_owned(), time_service.clone()),
                 (
-                    "usr/lib/services/timesvc.yaml".to_owned(),
+                    "system/services/system.timesvc/timesvc".to_owned(),
+                    time_service.clone(),
+                ),
+                (
+                    "system/services/system.timesvc/service.yaml".to_owned(),
                     time_manifest.clone(),
                 ),
-                ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
                 (
-                    "usr/lib/drivers/rtc/driver.yaml".to_owned(),
+                    "system/drivers/system.driver.rtc/rtc".to_owned(),
+                    rtc.clone(),
+                ),
+                (
+                    "system/drivers/system.driver.rtc/driver.yaml".to_owned(),
                     crate::workspace_root().join("user/drivers/rtc/driver.yaml"),
                 ),
-                ("usr/bin/tmpfs".to_owned(), tmpfs.clone()),
                 (
-                    "usr/lib/services/tmpfs.yaml".to_owned(),
-                    tmpfs_manifest.clone(),
+                    "system/services/system.union/union".to_owned(),
+                    union.clone(),
                 ),
-                ("usr/bin/union".to_owned(), union.clone()),
                 (
-                    "usr/lib/services/union.yaml".to_owned(),
+                    "system/services/system.union/service.yaml".to_owned(),
                     union_manifest.clone(),
                 ),
             ]);
@@ -1541,9 +1634,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // with the restart probe.
             let mut bus_files = root_files.clone();
             bus_files.extend([
-                ("usr/bin/restart-probe".to_owned(), restart_probe.clone()),
                 (
-                    "usr/lib/services/restart-probe.yaml".to_owned(),
+                    "system/services/system.restart-probe/restart-probe".to_owned(),
+                    restart_probe.clone(),
+                ),
+                (
+                    "system/services/system.restart-probe/service.yaml".to_owned(),
                     crate::workspace_root().join("user/tests/restart-probe/restart-probe.yaml"),
                 ),
             ]);
@@ -1551,8 +1647,8 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", bus_image.display());
             // The durability run serves this image: the PCI bus driver, the
             // drivers of the disk controllers, of USB mass storage and of
-            // partitions, and the log service, from the PCI test's files,
-            // with the durability test driver.
+            // partitions, the log service and tmpfs, from the PCI test's
+            // files, with the durability test driver.
             let durable_drivers = [
                 "pcibus",
                 "virtioblk",
@@ -1567,9 +1663,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .filter(|(at, _)| {
                     durable_drivers
                         .iter()
-                        .any(|d| at.starts_with(&format!("usr/lib/drivers/{d}/")))
+                        .any(|d| at.starts_with(&format!("system/drivers/system.driver.{d}/")))
                         || at.contains("logsvc")
-                        || at.ends_with("services/logsvc.yaml")
+                        || at.contains("system.tmpfs/")
                 })
                 .cloned()
                 .collect();
@@ -1603,19 +1699,19 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 ("tests/debuggee", debuggee.as_path()),
                 ("tests/pie", pie.as_path()),
                 ("tests/managed", managed.as_path()),
-                ("usr/bin/processmgr", manager.as_path()),
-                ("usr/bin/servicemgr", services.as_path()),
+                ("system/processmgr", manager.as_path()),
+                ("system/servicemgr", services.as_path()),
                 // A dynamically linked program with its libraries and the
                 // dynamic linker, which the test machine's root partition
-                // gets with the rest of usr, and the nested systems' boot
+                // gets with the rest of the system version, and the nested systems' boot
                 // images lack: the bus restart runs start it from the root.
-                ("usr/bin/library-user", library_user.as_path()),
-                ("usr/lib/libgreet.1.dlib", greet.as_path()),
-                ("usr/lib/libnonote.1.dlib", no_note.as_path()),
-                ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
+                ("system/bin/library-user", library_user.as_path()),
+                ("system/libraries/libgreet.1.dlib", greet.as_path()),
+                ("system/libraries/libnonote.1.dlib", no_note.as_path()),
+                ("system/libraries/ld-mikros.dlib", dynamic_linker.as_path()),
             ];
             // The time zones, which the test machine's root partition
-            // gets with the rest of usr.
+            // gets with the rest of the system version.
             let zones = crate::tzdata::members(&crate::tzdata::zoneinfo()?)?;
             let members: Vec<(&str, &Path)> = members
                 .into_iter()
@@ -1630,7 +1726,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // msh, files-c, which ada's msh runs in her home, and the idle
             // service, which ada's msh stops and starts. The dynamic
             // linker is in both lists, and goes in once.
-            let sessions_manifest = "usr/lib/services/sessionmgr.yaml";
+            let sessions_manifest = "system/services/system.sessionmgr/service.yaml";
             let console_fonts =
                 ["DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"].map(|f| fonts.ttf.join(f));
             let login = login_members(kind, &xkbcommon, &freetype, &keymaps)?;
@@ -1646,20 +1742,23 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 )
                 .chain([
                     (sessions_manifest, test_sessions_manifest.as_path()),
-                    ("usr/bin/spawn-std", spawn_std.as_path()),
-                    ("usr/bin/files-c", files_c.as_path()),
-                    ("usr/bin/coreutils-check", coreutils_check.as_path()),
-                    ("usr/bin/idle-service", idle_service.as_path()),
+                    ("system/bin/spawn-std", spawn_std.as_path()),
+                    ("system/bin/files-c", files_c.as_path()),
+                    ("system/bin/coreutils-check", coreutils_check.as_path()),
                     (
-                        "usr/lib/services/idle-service.yaml",
+                        "system/services/system.idle-service/idle-service",
+                        idle_service.as_path(),
+                    ),
+                    (
+                        "system/services/system.idle-service/service.yaml",
                         idle_manifest.as_path(),
                     ),
                     (
-                        "usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+                        "system/share/fonts/dejavu/DejaVuSansMono.ttf",
                         console_fonts[0].as_path(),
                     ),
                     (
-                        "usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf",
+                        "system/share/fonts/dejavu/DejaVuSansMono-Bold.ttf",
                         console_fonts[1].as_path(),
                     ),
                 ])
@@ -1677,11 +1776,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 .copied()
                 .chain([
                     (
-                        "usr/lib/drivers/test-takeover/driver.yaml",
+                        "system/drivers/system.driver.test-takeover/driver.yaml",
                         takeover_manifest.as_path(),
                     ),
                     (
-                        "usr/lib/drivers/test-takeover/test-takeover",
+                        "system/drivers/system.driver.test-takeover/test-takeover",
                         test_driver.as_path(),
                     ),
                 ])
@@ -1756,20 +1855,20 @@ fn login_members(
     }
     // The command-line utilities, each its own program.
     for (name, program) in crate::coreutils::build()? {
-        members.push((format!("usr/bin/{name}"), program));
+        members.push((format!("system/bin/{name}"), program));
     }
     members.extend([
         (
-            "usr/lib/ld-mikros.dlib".into(),
+            "system/libraries/ld-mikros.dlib".into(),
             crate::sysroot::dir().join("lib/ld-mikros.dlib"),
         ),
         (
-            "usr/lib/libfreetype.6.dlib".into(),
-            freetype.install.join("lib/libfreetype.6.20.7.dlib"),
+            "system/libraries/libfreetype.6.dlib".into(),
+            freetype.install.join("libraries/libfreetype.6.20.7.dlib"),
         ),
         (
-            "usr/lib/libxkbcommon.0.dlib".into(),
-            xkbcommon.install.join("lib/libxkbcommon.0.13.2.dlib"),
+            "system/libraries/libxkbcommon.0.dlib".into(),
+            xkbcommon.install.join("libraries/libxkbcommon.0.13.2.dlib"),
         ),
     ]);
     let keymap_data = keymaps.install.join("share/xkeyboard-config-2");
@@ -1780,7 +1879,7 @@ fn login_members(
             .strip_prefix(&keymap_data)?
             .to_str()
             .context("not UTF-8")?;
-        members.push((format!("usr/share/X11/xkb/{relative}"), path.clone()));
+        members.push((format!("system/share/X11/xkb/{relative}"), path.clone()));
     }
     Ok(members)
 }

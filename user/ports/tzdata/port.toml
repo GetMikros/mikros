@@ -1,5 +1,5 @@
 # The time zone database, which the host's zic compiles into the zone
-# files of /usr/share/zoneinfo. The archive has no directory of its own;
+# files of /system/share/zoneinfo. The archive has no directory of its own;
 # `dir` names the one that xtask unpacks and compiles it in.
 
 [source]

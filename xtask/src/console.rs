@@ -65,9 +65,9 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// without end, Ctrl-C, which must reach it while the console draws its
 /// output, and Ctrl-L, which clears the screen, so that what follows
 /// does not scroll the whole screen line by line, which is slow in a
-/// debug build; then `ls /usr/bin | more`, which must page its input
+/// debug build; then `ls /system/bin | more`, which must page its input
 /// with keys read from the terminal, `q`, which quits it, and
-/// `if $status != 0 { exit 8 }`; then `ls /usr/bin | less`, Space, which
+/// `if $status != 0 { exit 8 }`; then `ls /system/bin | less`, Space, which
 /// shows its next screen, `/less` and Enter, which searches, `q` and
 /// `if $status != 0 { exit 10 }`; then `power restart`, a wrong password
 /// on the authorization screen and `if $status != 1 { exit 11 }`, and
@@ -89,27 +89,27 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// `sleep`, a job that runs until it is killed, Ctrl-Z, which stops it,
 /// `let n = (jobs | lines | len)`, `bg`, `kill %1`,
 /// `if (spawn-std hostname | lines).0 != 'box' { exit 1 }`,
-/// `if (pwd | lines).0 != '/Users/ada' { exit 2 }`,
-/// `if ((history --folders | lines).0 !~ '/Users/ada') { exit 3 }`,
-/// `cd /; cd ~ada; if ((pwd | lines).0 != '/Users/ada') { exit 9 }`,
+/// `if (pwd | lines).0 != '/users/ada' { exit 2 }`,
+/// `if ((history --folders | lines).0 !~ '/users/ada') { exit 3 }`,
+/// `cd /; cd ~ada; if ((pwd | lines).0 != '/users/ada') { exit 9 }`,
 /// which finds ada's home folder through the C library,
 /// `try { files-c . } catch e { exit 5 }`, which makes, changes and
 /// removes files in ada's home,
 /// `try { coreutils-check . } catch e { exit 6 }`, which runs the
 /// command-line utilities there,
-/// `cd /; if ((print /*) !~ 'Users') { exit 4 }` and
+/// `cd /; if ((print /*) !~ 'users') { exit 4 }` and
 /// `exit ($n + 6 + $status)`, which exits with 7 when msh listed the one
 /// job, the kill worked, the host name is the one setup wrote, msh
 /// started in ada's home, the history gives that home as the folder of
 /// its first entry, files-c's and coreutils-check's checks
 /// passed, and `/`, which no namespace entry covers, is a folder that
-/// lists `Users`.
+/// lists `users`.
 const MSH_KEYS: [(&str, Duration); 55] = [
     ("y e s ret", JOB_START),
     ("ctrl-c", QUESTION),
     ("ctrl-l", QUESTION),
     (
-        "l s spc slash u s r slash b i n spc shift-backslash spc m o r e ret",
+        "l s spc slash s y s t e m slash b i n spc shift-backslash spc m o r e ret",
         JOB_START,
     ),
     ("q", QUESTION),
@@ -119,7 +119,7 @@ const MSH_KEYS: [(&str, Duration); 55] = [
         QUESTION,
     ),
     (
-        "l s spc slash u s r slash b i n spc shift-backslash spc l e s s ret",
+        "l s spc slash s y s t e m slash b i n spc shift-backslash spc l e s s ret",
         JOB_START,
     ),
     ("spc", QUESTION),
@@ -232,21 +232,21 @@ const MSH_KEYS: [(&str, Duration); 55] = [
     ),
     (
         "i f spc shift-9 p w d spc shift-backslash spc l i n e s shift-0 dot 0 spc shift-1 equal spc \
-         apostrophe slash shift-u s e r s slash a d a apostrophe spc \
+         apostrophe slash u s e r s slash a d a apostrophe spc \
          shift-bracket_left spc e x i t spc 2 spc shift-bracket_right ret",
         QUESTION,
     ),
     (
         "i f spc shift-9 shift-9 h i s t o r y spc minus minus f o l d e r s spc \
          shift-backslash spc l i n e s shift-0 dot 0 spc shift-1 shift-grave_accent spc \
-         apostrophe slash shift-u s e r s slash a d a apostrophe shift-0 spc \
+         apostrophe slash u s e r s slash a d a apostrophe shift-0 spc \
          shift-bracket_left spc e x i t spc 3 spc shift-bracket_right ret",
         QUESTION,
     ),
     (
         "c d spc slash semicolon spc c d spc shift-grave_accent a d a semicolon spc \
          i f spc shift-9 p w d spc shift-backslash spc l i n e s shift-0 dot 0 spc shift-1 equal spc \
-         apostrophe slash shift-u s e r s slash a d a apostrophe spc \
+         apostrophe slash u s e r s slash a d a apostrophe spc \
          shift-bracket_left spc e x i t spc 9 spc shift-bracket_right ret",
         QUESTION,
     ),
@@ -263,7 +263,7 @@ const MSH_KEYS: [(&str, Duration); 55] = [
     ),
     (
         "c d spc slash semicolon spc i f spc shift-9 shift-9 p r i n t spc slash shift-8 shift-0 spc \
-         shift-1 shift-grave_accent spc apostrophe shift-u s e r s apostrophe shift-0 spc \
+         shift-1 shift-grave_accent spc apostrophe u s e r s apostrophe shift-0 spc \
          shift-bracket_left spc e x i t spc 4 spc shift-bracket_right ret",
         QUESTION,
     ),

@@ -254,7 +254,7 @@
 +	if (strchr(file, '/'))
 +		return posix_spawn(res, file, fa, attr, argv, envp);
 +
-+	if (!path) path = "/usr/local/bin:/bin:/usr/bin";
++	if (!path) path = "/system/bin";
 +	k = strnlen(file, NAME_MAX+1);
 +	if (k > NAME_MAX) return ENAMETOOLONG;
 +	l = strnlen(path, PATH_MAX-1)+1;

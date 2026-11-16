@@ -2,7 +2,7 @@
 # of which Mikros has, and without its documentation and shell
 # completions. It is given the directories of keymap extensions, which it
 # derives itself only from an installed xkeyboard-config, next to its
-# default keymap directory, /usr/share/X11/xkb, and the directory its
+# default keymap directory, /system/share/X11/xkb, and the directory its
 # tests read their data from on Mikros, below the port's test source.
 
 [source]
@@ -17,9 +17,9 @@ options = [
     "-Denable-xkbregistry=false",
     "-Denable-docs=false",
     "-Denable-bash-completion=false",
-    "-Dxkb-config-versioned-extensions-path=/usr/share/X11/xkb.d",
-    "-Dxkb-config-unversioned-extensions-path=/usr/share/xkeyboard-config.d",
-    "-Dtest-data-dir=/usr/share/xkbcommon-tests/test/data",
+    "-Dxkb-config-versioned-extensions-path=/system/share/X11/xkb.d",
+    "-Dxkb-config-unversioned-extensions-path=/system/share/xkeyboard-config.d",
+    "-Dtest-data-dir=/system/share/xkbcommon-tests/test/data",
 ]
 
 [tests]

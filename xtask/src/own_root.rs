@@ -80,10 +80,10 @@ impl Disk for Image {
     }
 }
 
-/// The contents of `/etc/<name>` on the root partition of the disk image
-/// `disk`, or `None` without such a file, read with the bootloader's
-/// readers.
-fn root_etc_file(disk: &Path, name: &str) -> Result<Option<Vec<u8>>> {
+/// The contents of `<name>` in the subvolume `config`, which is
+/// `/system/config`, on the root partition of the disk image `disk`, or
+/// `None` without such a file, read with the bootloader's readers.
+fn root_config_file(disk: &Path, name: &str) -> Result<Option<Vec<u8>>> {
     const SECTOR: u32 = 512;
     let file = File::open(disk).with_context(|| format!("opening {}", disk.display()))?;
     let last = file.metadata()?.len() / u64::from(SECTOR) - 1;
@@ -102,11 +102,11 @@ fn root_etc_file(disk: &Path, name: &str) -> Result<Option<Vec<u8>>> {
     let mut volume = Volume::open(disk).map_err(|e| anyhow::anyhow!("{e}"))?;
     let fail = |e: mikrosboot::btrfs::Error| anyhow::anyhow!("{e}");
     let top = volume.top().map_err(fail)?;
-    let etc = volume
-        .lookup(top, b"etc")
+    let config = volume
+        .lookup(top, b"config")
         .map_err(fail)?
-        .context("no /etc")?;
-    let Some(node) = volume.lookup(etc, name.as_bytes()).map_err(fail)? else {
+        .context("no config subvolume")?;
+    let Some(node) = volume.lookup(config, name.as_bytes()).map_err(fail)? else {
         return Ok(None);
     };
     let mut contents = vec![0; volume.inode(node).map_err(fail)?.size as usize];
@@ -115,8 +115,8 @@ fn root_etc_file(disk: &Path, name: &str) -> Result<Option<Vec<u8>>> {
 }
 
 /// Boots the live run of the components `built` of the build kind `kind`
-/// in `dir`, whose probe changes `/etc`, and checks that the root
-/// partition's `/etc` is as it was.
+/// in `dir`, whose probe changes `/system/config`, and checks that the
+/// root partition's `config` subvolume is as it was.
 pub fn run_live(
     machine: &MachineArgs,
     kind: Kind,
@@ -126,11 +126,11 @@ pub fn run_live(
 ) -> Result<()> {
     run(machine, kind, built, dir, timeout, "live", "live")?;
     let disk = dir.join("disk.img");
-    let kept = root_etc_file(&disk, "live-probe.conf")?;
-    let made = root_etc_file(&disk, "live-probe.new")?;
+    let kept = root_config_file(&disk, "live-probe.conf")?;
+    let made = root_config_file(&disk, "live-probe.new")?;
     if kept.as_deref() != Some(&b"lower\n"[..]) || made.is_some() {
         bail!(
-            "the live run changed /etc on its root partition, in {}",
+            "the live run changed /system/config on its root partition, in {}",
             disk.display()
         );
     }

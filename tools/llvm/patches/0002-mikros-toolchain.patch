@@ -95,7 +95,7 @@ diff -ruN a/clang/lib/Driver/ToolChains/Mikros.h b/clang/lib/Driver/ToolChains/M
 +  const char *getDefaultLinker() const override { return "ld.lld"; }
 +
 +  std::string getDynamicLinker(const llvm::opt::ArgList &) const override {
-+    return "/usr/lib/ld-mikros.dlib";
++    return "/system/libraries/ld-mikros.dlib";
 +  }
 +
 +  bool HasNativeLLVMSupport() const override { return true; }

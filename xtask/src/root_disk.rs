@@ -3,7 +3,7 @@
 //! - the root disk runs, behind an NVMe controller and behind the AHCI
 //!   controller: the test init serves `tests/root.img` with
 //!   `test=root-disk`, until the process manager has switched to the root
-//!   and serves `/boot/efi`;
+//!   and serves `/system/boot/efi`;
 //! - the bus restart runs, behind a virtio-blk, an NVMe and the AHCI
 //!   controller: the test init serves `tests/bus.img` with
 //!   `test=bus-restart`, whose restart probe kills the PCI bus driver

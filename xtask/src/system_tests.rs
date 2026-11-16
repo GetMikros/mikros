@@ -1,7 +1,7 @@
 //! The system tests, which a test image runs: the image boots with
 //! `selftest` on the kernel command line, the service manager starts
 //! selftest once the services that start at boot run, and selftest runs
-//! every program of `/usr/bin/tests/` and then powers the machine off,
+//! every program of `/system/bin/tests/` and then powers the machine off,
 //! after which QEMU exits by itself. The result comes from selftest's
 //! lines in the serial output: the speed factor it measured, a `PASS` or
 //! `FAIL` line for each test, and the counts. The run is stopped only

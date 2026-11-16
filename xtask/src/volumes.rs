@@ -1,5 +1,5 @@
 //! The run of the test image in which the volumes of USB disks come and
-//! go in `/Volumes`, each with `HELLO.TXT` on it:
+//! go in `/volumes`, each with `HELLO.TXT` on it:
 //! - The first disk holds a GPT with a basic data partition with a FAT
 //!   file system labelled `USBSTICK`, a Mikros root type partition with a
 //!   btrfs labelled `USBBTRFS`, and another basic data partition with an
@@ -11,7 +11,7 @@
 //!   a partition table.
 //!
 //! The test init serves `tests/volumes.img` with `test=usb-volumes`,
-//! whose volumes probe reads and writes every volume through `/Volumes`.
+//! whose volumes probe reads and writes every volume through `/volumes`.
 //! The runner then unplugs the disks through QEMU's monitor and waits for
 //! the probe to see the volumes leave. Afterwards each FAT and exFAT
 //! volume must hold what the probe wrote, the first FAT volume also what

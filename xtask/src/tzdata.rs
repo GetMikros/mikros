@@ -1,5 +1,5 @@
 //! The IANA time zone database, compiled with the host's `zic` into the
-//! TZif files that the system keeps in `/usr/share/zoneinfo`.
+//! TZif files that the system keeps in `/system/share/zoneinfo`.
 
 use anyhow::{Context, Result, bail};
 use std::fs::{self, File};
@@ -67,7 +67,7 @@ pub fn zoneinfo() -> Result<PathBuf> {
 }
 
 /// The compiled zones as members of an image: each file of `zoneinfo`
-/// under `usr/share/zoneinfo`.
+/// under `system/share/zoneinfo`.
 pub fn members(zoneinfo: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut members = Vec::new();
     let mut pending = vec![zoneinfo.to_path_buf()];
@@ -79,7 +79,7 @@ pub fn members(zoneinfo: &Path) -> Result<Vec<(String, PathBuf)>> {
                 continue;
             }
             let inside = path.strip_prefix(zoneinfo)?.to_string_lossy().into_owned();
-            members.push((format!("usr/share/zoneinfo/{inside}"), path));
+            members.push((format!("system/share/zoneinfo/{inside}"), path));
         }
     }
     members.sort();

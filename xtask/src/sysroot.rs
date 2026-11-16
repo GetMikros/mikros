@@ -431,7 +431,7 @@ fn check_driver() -> Result<()> {
         "\"-stack-protector\" \"2\"",
         "ld.lld\"",
         "\"-pie\"",
-        "\"-dynamic-linker\" \"/usr/lib/ld-mikros.dlib\"",
+        "\"-dynamic-linker\" \"/system/libraries/ld-mikros.dlib\"",
         "crt1.o\"",
     ] {
         if !text.contains(wanted) {

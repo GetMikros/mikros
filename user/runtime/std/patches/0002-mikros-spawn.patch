@@ -182,7 +182,7 @@ index d1262ba..fde9815 100644
 +    envp: *const *mut libc::c_char,
 +) -> c_int {
 +    use crate::os::unix::ffi::OsStrExt;
-+    let path = path.map_or(&b"/usr/local/bin:/bin:/usr/bin"[..], |p| p.as_bytes());
++    let path = path.map_or(&b"/system/bin"[..], |p| p.as_bytes());
 +    let mut error = libc::ENOENT;
 +    for dir in path.split(|&b| b == b':') {
 +        let dir = if dir.is_empty() { &b"."[..] } else { dir };
