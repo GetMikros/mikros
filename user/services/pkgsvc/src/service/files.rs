@@ -1,0 +1,226 @@
+//! The root file system, which pkgsvc connects to itself, its folders and
+//! files by path from the root, its subvolume management, and the names
+//! of users, which the folders of local packages are named by.
+
+use super::FOREVER;
+use mikros_rt::interfaces::__midl::endpoints;
+use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::fs::btrfs::SubvolumesClient;
+use mikros_rt::interfaces::mikros::fs::{
+    Error, Filesystem, FilesystemClient, Node, NodeClient, OpenFlags, Rights,
+};
+use mikros_rt::interfaces::mikros::service::DirectoryClient;
+use mikros_rt::interfaces::mikros::session::{Accounts, AccountsClient};
+use std::sync::Mutex;
+
+const FILESYSTEM: &str = "device.filesystem";
+const ROOT: &str = "root";
+const ACCOUNTS: &str = "mikros.session.Accounts";
+const SUBVOLUMES: &str = "device.subvolumes";
+/// The most bytes one write moves.
+const WRITE_MAX: usize = 32768;
+/// The longest records file and manifest that are read.
+const FILE_MAX: usize = 1 << 20;
+const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
+
+/// The status of a file system error.
+pub fn status(e: Error) -> Status {
+    match e {
+        Error::NotFound => Status::NotFound,
+        Error::Exists => Status::AlreadyExists,
+        Error::AccessDenied | Error::ReadOnly => Status::AccessDenied,
+        Error::NoSpace => Status::NoResources,
+        Error::Invalid | Error::NameTooLong => Status::InvalidArgs,
+        _ => Status::Io,
+    }
+}
+
+fn flat<T>(
+    reply: Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>,
+) -> Result<T, Status> {
+    match reply {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(status(e)),
+        Err(_) => Err(Status::Io),
+    }
+}
+
+/// The root directory of the root file system, read and write. Its
+/// calls go one at a time, as a connection's replies come in order.
+pub struct Root(Mutex<NodeClient>);
+
+impl Root {
+    pub fn connect(directory: &DirectoryClient) -> Result<Root, Status> {
+        let (client, server) = endpoints::<Filesystem>().map_err(|_| Status::NoResources)?;
+        match directory.connect(
+            FILESYSTEM.into(),
+            Some(ROOT.into()),
+            server.into_handle(),
+            FOREVER,
+        ) {
+            Ok(Ok(_)) => {}
+            Ok(Err(status)) => return Err(status),
+            Err(_) => return Err(Status::Io),
+        }
+        let fs = FilesystemClient::new(client);
+        let (root, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
+        flat(fs.get_root(server, RW, FOREVER))?;
+        Ok(Root(Mutex::new(NodeClient::new(root))))
+    }
+
+    /// Opens `path` from the root with `flags` and `rights`.
+    pub fn open(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        mode: u32,
+        rights: Rights,
+    ) -> Result<NodeClient, Status> {
+        let (node, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
+        let root = self.0.lock().map_err(|_| Status::Internal)?;
+        flat(root.open(path.into(), flags, mode, rights, server, FOREVER))?;
+        Ok(NodeClient::new(node))
+    }
+
+    /// The contents of the file at `path`, at most `FILE_MAX` bytes.
+    pub fn read(&self, path: &str) -> Result<Vec<u8>, Status> {
+        let file = self.open(path, OpenFlags(0), 0, Rights::READ)?;
+        let mut bytes = Vec::new();
+        loop {
+            let data = flat(file.read(bytes.len() as u64, 32768, FOREVER))?.data;
+            if data.is_empty() {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&data);
+            if bytes.len() > FILE_MAX {
+                return Err(Status::OutOfRange);
+            }
+        }
+    }
+
+    /// Makes the folder `path` and the folders above it where they are
+    /// missing.
+    pub fn make_folders(&self, path: &str) -> Result<(), Status> {
+        let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::DIRECTORY.0);
+        let mut at = String::new();
+        for name in path.split('/') {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(name);
+            self.open(&at, flags, 0o755, RW)?;
+        }
+        Ok(())
+    }
+
+    /// Writes `contents` to a new file at `path` with `mode`, and syncs it.
+    pub fn write_file(&self, path: &str, contents: &[u8], mode: u32) -> Result<(), Status> {
+        let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
+        let file = self.open(path, flags, mode, RW)?;
+        let mut at = 0;
+        while at < contents.len() {
+            let end = contents.len().min(at + WRITE_MAX);
+            let written = flat(file.write(at as u64, contents[at..end].to_vec(), FOREVER))?.written;
+            if written == 0 {
+                return Err(Status::Io);
+            }
+            at += written as usize;
+        }
+        flat(file.sync(FOREVER)).map(|_| ())
+    }
+
+    /// Makes a symbolic link at `path` to `target`.
+    pub fn symlink(&self, path: &str, target: &str) -> Result<(), Status> {
+        let (dir, name) = match path.rsplit_once('/') {
+            Some((dir, name)) => (self.open(dir, OpenFlags::DIRECTORY, 0, RW)?, name),
+            None => return Err(Status::InvalidArgs),
+        };
+        flat(dir.create_symlink(name.into(), target.into(), FOREVER)).map(|_| ())
+    }
+
+    /// Puts `from` of the folder `parent` in the place of `to`: renamed
+    /// to it when there is no `to`, and otherwise swapped with it in one
+    /// step, after which the old `to`, now at `from`, a subvolume, is
+    /// deleted (MIKSPEC-0101.R36).
+    pub fn replace(
+        &self,
+        parent: &str,
+        from: &str,
+        to: &str,
+        subvolumes: &Subvolumes,
+    ) -> Result<(), Status> {
+        let dir = self.open(parent, OpenFlags::DIRECTORY, 0, RW)?;
+        let token = flat(dir.get_token(FOREVER))?.token;
+        let exists = self
+            .open(
+                &format!("{parent}/{to}"),
+                OpenFlags::DIRECTORY,
+                0,
+                Rights::READ,
+            )
+            .is_ok();
+        if !exists {
+            return flat(dir.rename(from.into(), token, to.into(), FOREVER)).map(|_| ());
+        }
+        flat(dir.exchange(from.into(), token, to.into(), FOREVER))?;
+        subvolumes.delete(&format!("{parent}/{from}"))
+    }
+}
+
+/// The name of the user `user`, from the accounts service.
+pub fn user_name(directory: &DirectoryClient, user: u32) -> Result<String, Status> {
+    let (client, server) = endpoints::<Accounts>().map_err(|_| Status::NoResources)?;
+    match directory.connect(ACCOUNTS.into(), None, server.into_handle(), FOREVER) {
+        Ok(Ok(_)) => {}
+        Ok(Err(status)) => return Err(status),
+        Err(_) => return Err(Status::Io),
+    }
+    let accounts = AccountsClient::new(client);
+    // The users are listed by ID from the one after `after`.
+    let after = user.checked_sub(1).ok_or(Status::NotFound)?;
+    let listed = accounts
+        .list_users(after, FOREVER)
+        .map_err(|_| Status::Io)?;
+    listed
+        .users
+        .into_iter()
+        .find(|u| u.id == user)
+        .map(|u| u.name)
+        .ok_or(Status::NotFound)
+}
+
+/// The subvolume management of the root file system. Its calls go one at
+/// a time.
+pub struct Subvolumes(Mutex<SubvolumesClient>);
+
+impl Subvolumes {
+    pub fn connect(directory: &DirectoryClient) -> Result<Subvolumes, Status> {
+        let (client, server) = endpoints::<mikros_rt::interfaces::mikros::fs::btrfs::Subvolumes>()
+            .map_err(|_| Status::NoResources)?;
+        match directory.connect(
+            SUBVOLUMES.into(),
+            Some(ROOT.into()),
+            server.into_handle(),
+            FOREVER,
+        ) {
+            Ok(Ok(_)) => Ok(Subvolumes(Mutex::new(SubvolumesClient::new(client)))),
+            Ok(Err(_)) => Err(Status::NotSupported),
+            Err(_) => Err(Status::Io),
+        }
+    }
+
+    pub fn create(&self, path: &str) -> Result<(), Status> {
+        let client = self.0.lock().map_err(|_| Status::Internal)?;
+        flat(client.create(path.into(), FOREVER)).map(|_| ())
+    }
+
+    pub fn delete(&self, path: &str) -> Result<(), Status> {
+        let client = self.0.lock().map_err(|_| Status::Internal)?;
+        flat(client.delete(path.into(), FOREVER)).map(|_| ())
+    }
+
+    pub fn set_read_only(&self, path: &str, read_only: bool) -> Result<(), Status> {
+        let client = self.0.lock().map_err(|_| Status::Internal)?;
+        flat(client.set_read_only(path.into(), read_only, FOREVER)).map(|_| ())
+    }
+}

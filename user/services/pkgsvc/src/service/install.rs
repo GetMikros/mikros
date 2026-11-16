@@ -1,0 +1,175 @@
+//! `Install`: a package is written into a new subvolume next to where it
+//! is installed, which then takes the place of the old version, if one is
+//! installed (MIKSPEC-0101.R25). A global install asks the broker for the
+//! permission of the package's kind first (MIKSPEC-0101.R27).
+
+use super::files::{Root, user_name};
+use super::{Given, Shared, open};
+use crate::place::{self, Scope};
+use mikros_mika::format::{self, Kind as EntryKind, Package};
+use mikros_mika::manifest::{Kind, Manifest};
+use mikros_mika::version::Version;
+use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::fs::NodeClient;
+use mikros_rt::interfaces::mikros::packages::InstallerInstallRequest;
+use mikros_rt::interfaces::mikros::service::ClientIdentity;
+
+/// The folder of a library's headers, which an install leaves out unless
+/// it is for development (MIKSPEC-0101.R21).
+const INCLUDE: &str = "include";
+
+/// The permission that installing a package of `kind` for every user
+/// needs.
+pub fn permission(kind: Kind) -> &'static str {
+    match kind {
+        Kind::App => "admin.apps.install",
+        Kind::Library => "admin.libraries.install",
+        Kind::Driver => "admin.drivers.install",
+    }
+}
+
+/// The scope that `global` names for `caller`.
+pub fn scope(shared: &Shared, caller: &ClientIdentity, global: bool) -> Result<Scope, Status> {
+    if global {
+        return Ok(Scope::Global);
+    }
+    let directory = shared.directory.lock().map_err(|_| Status::Internal)?;
+    let name = user_name(&directory, caller.user)?;
+    Ok(Scope::Local(name))
+}
+
+/// The version of the package `id` of `kind` installed in `scope`, if
+/// one is.
+pub fn installed(root: &Root, kind: Kind, id: &str, scope: &Scope) -> Option<Version> {
+    let at = place::subvolume(kind, id, scope)?;
+    let bytes = root.read(&format!("{at}/{}", format::MANIFEST)).ok()?;
+    Manifest::parse(&bytes).ok()?.version
+}
+
+/// Which installed package of any kind has `id` in `scope`, and its
+/// version.
+fn installed_any(root: &Root, id: &str, scope: &Scope) -> Option<Version> {
+    [Kind::App, Kind::Library, Kind::Driver]
+        .into_iter()
+        .find_map(|kind| installed(root, kind, id, scope))
+}
+
+pub fn install(
+    shared: &Shared,
+    caller: &ClientIdentity,
+    q: InstallerInstallRequest,
+) -> Result<(), Status> {
+    let given = Given(NodeClient::new(q.package));
+    let (package, manifest, _) = open(&given)?;
+    let kind = manifest.kind.ok_or(Status::InvalidArgs)?;
+    if !manifest.installable {
+        return Err(Status::InvalidArgs);
+    }
+    if kind == Kind::Driver && !q.global {
+        return Err(Status::InvalidArgs);
+    }
+    let root = shared.root()?;
+    let scope = scope(shared, caller, q.global)?;
+    // Not for every user and for this user at once.
+    let other = match &scope {
+        Scope::Global => scope_of_caller(shared, caller).ok(),
+        Scope::Local(_) => Some(Scope::Global),
+    };
+    if let Some(other) = other
+        && installed_any(&root, &manifest.id, &other).is_some()
+    {
+        return Err(Status::AlreadyExists);
+    }
+    // Every package it needs, in a version of its range.
+    for (needed, range) in &manifest.needs {
+        let local = scope_of_caller(shared, caller).ok();
+        let found = [Some(Scope::Global), local]
+            .into_iter()
+            .flatten()
+            .filter_map(|s| installed_any(&root, needed, &s))
+            .any(|version| range.contains(&version));
+        if !found {
+            eprintln!(
+                "pkgsvc: {} needs {needed}, which is not installed",
+                manifest.id
+            );
+            return Err(Status::NotFound);
+        }
+    }
+    if scope == Scope::Global
+        && !super::allowed(shared, caller, permission(kind), &manifest, "install")?
+    {
+        return Err(Status::AccessDenied);
+    }
+    let at = place::subvolume(kind, &manifest.id, &scope).ok_or(Status::InvalidArgs)?;
+    write(
+        &root,
+        shared,
+        &given,
+        &package,
+        &at,
+        place::read_only(kind),
+        q.dev,
+    )?;
+    Ok(())
+}
+
+/// The scope of the caller's own user.
+fn scope_of_caller(shared: &Shared, caller: &ClientIdentity) -> Result<Scope, Status> {
+    scope(shared, caller, false)
+}
+
+/// Writes the files of `package`, without `include/` unless `dev`, into a
+/// new subvolume next to `at`, which then takes the place of `at`.
+fn write(
+    root: &Root,
+    shared: &Shared,
+    given: &Given,
+    package: &Package,
+    at: &str,
+    read_only: bool,
+    dev: bool,
+) -> Result<(), Status> {
+    let (parent, name) = at.rsplit_once('/').ok_or(Status::InvalidArgs)?;
+    root.make_folders(parent)?;
+    let new = format!("{parent}/.new-{name}");
+    let subvolumes = shared.subvolumes()?;
+    // What an install that failed half-way left.
+    let _ = subvolumes.delete(&new);
+    subvolumes.create(&new)?;
+    let written = (|| {
+        for entry in &package.entries {
+            // Headers only for those who build against the package.
+            let header = entry.path == INCLUDE || entry.path.starts_with("include/");
+            if header && !dev {
+                continue;
+            }
+            let path = format!("{new}/{}", entry.path);
+            match entry.kind {
+                EntryKind::Folder => root.make_folders(&path)?,
+                EntryKind::File => {
+                    let contents = package
+                        .read(given, entry)
+                        .map_err(|_| Status::InvalidArgs)?;
+                    let mode = if entry.executable() { 0o755 } else { 0o644 };
+                    root.write_file(&path, &contents, mode)?;
+                }
+                EntryKind::Symlink => {
+                    let target = package
+                        .read(given, entry)
+                        .map_err(|_| Status::InvalidArgs)?;
+                    let target = String::from_utf8(target).map_err(|_| Status::InvalidArgs)?;
+                    root.symlink(&path, &target)?;
+                }
+            }
+        }
+        if read_only {
+            subvolumes.set_read_only(&new, true)?;
+        }
+        root.replace(parent, &format!(".new-{name}"), name, &subvolumes)
+    })();
+    if written.is_err() {
+        let _ = subvolumes.delete(&new);
+    }
+    written
+}

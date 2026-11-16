@@ -1,24 +1,104 @@
 //! pkgsvc on Mikros: it serves `mikros.packages.Installer` on each
-//! connection that the service manager forwards, on a thread of its own.
+//! connection that the service manager forwards, on a thread of its own,
+//! and works on the root file system, which it connects to itself
+//! (MIKSPEC-0101.R37).
 
+mod files;
+mod install;
+
+use files::{Root, Subvolumes};
 use mikros_mika::format::{self, Package};
 use mikros_mika::manifest::Manifest;
-use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeClient};
 use mikros_rt::interfaces::mikros::packages::{
-    Installer, InstallerInspectResponse, InstallerRequest, InstallerServer,
+    Installer, InstallerInspectResponse, InstallerInstallResponse, InstallerRequest,
+    InstallerServer,
 };
-use mikros_rt::interfaces::mikros::service::{Provider, ProviderRequest, ProviderServer};
+use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerClient, Decision};
+use mikros_rt::interfaces::mikros::service::{
+    ClientIdentity, DirectoryClient, Provider, ProviderRequest, ProviderServer,
+};
+use mikros_rt::sys;
 use std::os::mikros::startup;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 /// The role of the provider among the startup handles.
 const PROVIDER: u32 = 4;
 const INSTALLER: &str = "mikros.packages.Installer";
+const BROKER: &str = "mikros.permissions.Broker";
 pub const FOREVER: i64 = i64::MAX;
+const SAME_RIGHTS: u32 = 1 << 31;
 /// The longest manifest that `Inspect` returns.
 const MANIFEST_MAX: usize = 32768;
+
+/// What every connection shares: the service directory, and the root
+/// file system once it is reached.
+pub struct Shared {
+    pub directory: Mutex<DirectoryClient>,
+    pub root: Mutex<Option<Arc<Root>>>,
+    pub subvolumes: Mutex<Option<Arc<Subvolumes>>>,
+}
+
+impl Shared {
+    /// The root file system, connected to when first needed.
+    pub fn root(&self) -> Result<Arc<Root>, Status> {
+        let mut root = self.root.lock().map_err(|_| Status::Internal)?;
+        if let Some(root) = root.as_ref() {
+            return Ok(root.clone());
+        }
+        let directory = self.directory.lock().map_err(|_| Status::Internal)?;
+        let connected = Arc::new(Root::connect(&directory)?);
+        *root = Some(connected.clone());
+        Ok(connected)
+    }
+
+    /// The root file system's subvolume management, connected to when
+    /// first needed.
+    pub fn subvolumes(&self) -> Result<Arc<Subvolumes>, Status> {
+        let mut subvolumes = self.subvolumes.lock().map_err(|_| Status::Internal)?;
+        if let Some(subvolumes) = subvolumes.as_ref() {
+            return Ok(subvolumes.clone());
+        }
+        let directory = self.directory.lock().map_err(|_| Status::Internal)?;
+        let connected = Arc::new(Subvolumes::connect(&directory)?);
+        *subvolumes = Some(connected.clone());
+        Ok(connected)
+    }
+}
+
+/// Whether the broker allows `caller` `permission` for the package of
+/// `manifest`, asked for with `Request`; not without an answer.
+pub fn allowed(
+    shared: &Shared,
+    caller: &ClientIdentity,
+    permission: &str,
+    manifest: &Manifest,
+    action: &str,
+) -> Result<bool, Status> {
+    let (client, server) = endpoints::<Broker>().map_err(|_| Status::NoResources)?;
+    {
+        let directory = shared.directory.lock().map_err(|_| Status::Internal)?;
+        match directory.connect(BROKER.into(), None, server.into_handle(), FOREVER) {
+            Ok(Ok(_)) => {}
+            _ => return Ok(false),
+        }
+    }
+    let broker = BrokerClient::new(client);
+    let name = manifest.name.as_deref().unwrap_or(&manifest.id);
+    let reason = format!("{action} {name} ({}) for every user", manifest.id);
+    let identity = ClientIdentity {
+        pid: caller.pid,
+        user: caller.user,
+        app_id: caller.app_id.clone(),
+        admin: caller.admin,
+        koid: caller.koid,
+    };
+    let requested = broker.request(identity, permission.into(), reason, FOREVER);
+    Ok(matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed))
+}
 
 /// A package that a client gave, read through its connection.
 pub struct Given(pub NodeClient);
@@ -76,8 +156,8 @@ fn inspect(package: ClientEnd<Node>) -> Result<InstallerInspectResponse, Status>
     Ok(InstallerInspectResponse { manifest })
 }
 
-/// Serves `Installer` on `end` until it closes.
-fn serve(end: ServerEnd<Installer>) {
+/// Serves `Installer` on `end` for `caller` until it closes.
+fn serve(shared: Arc<Shared>, end: ServerEnd<Installer>, caller: ClientIdentity) {
     let server = InstallerServer::new(end);
     while let Ok(request) = server.next(FOREVER) {
         use InstallerRequest as R;
@@ -85,12 +165,23 @@ fn serve(end: ServerEnd<Installer>) {
         let _ = match request {
             R::Inspect(q, r) => r.reply(s, inspect(q.package)),
             R::List(_, r) => r.reply(s, Err(Status::NotSupported)),
-            R::Install(_, r) => r.reply(s, Err(Status::NotSupported)),
+            R::Install(q, r) => r.reply(
+                s,
+                install::install(&shared, &caller, q).map(|()| InstallerInstallResponse {}),
+            ),
             R::Remove(_, r) => r.reply(s, Err(Status::NotSupported)),
             R::CreatePublic(_, r) => r.reply(s, Err(Status::NotSupported)),
             R::CommandOwner(_, r) => r.reply(s, Err(Status::NotSupported)),
         };
     }
+}
+
+fn duplicate(handle: sys::Handle) -> Option<OwnedHandle> {
+    let mut raw = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let status = unsafe { sys::handle_duplicate(handle, SAME_RIGHTS, &mut raw) };
+    // SAFETY: the kernel just made the handle for us.
+    (status == mikros_rt::OK).then(|| unsafe { OwnedHandle::from_raw(raw) })
 }
 
 pub fn main() -> ExitCode {
@@ -100,13 +191,23 @@ pub fn main() -> ExitCode {
     };
     // SAFETY: the handle is ours, and is handed over once.
     let provider = unsafe { OwnedHandle::from_raw(provider.into_raw_handle()) };
+    let Some(directory) = duplicate(std::os::mikros::directory().as_raw_handle()) else {
+        eprintln!("pkgsvc: the service directory is missing");
+        return ExitCode::FAILURE;
+    };
+    let shared = Arc::new(Shared {
+        directory: Mutex::new(DirectoryClient::new(ClientEnd::new(directory))),
+        root: Mutex::new(None),
+        subvolumes: Mutex::new(None),
+    });
     let provider = ProviderServer::new(ServerEnd::<Provider>::new(provider));
     while let Ok(ProviderRequest::Connect(c)) = provider.next(FOREVER) {
         // Other protocols and named instances are not ours; dropping the
         // server end closes the connection.
         if c.instance.is_none() && c.protocol == INSTALLER {
+            let shared = shared.clone();
             let end = ServerEnd::new(c.server);
-            std::thread::spawn(move || serve(end));
+            std::thread::spawn(move || serve(shared, end, c.client));
         }
     }
     ExitCode::SUCCESS
