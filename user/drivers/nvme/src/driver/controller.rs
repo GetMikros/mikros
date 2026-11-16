@@ -342,9 +342,9 @@ async fn identify_controller(
 
 /// Takes the controller's interrupts: one per completion queue through
 /// `EnableMsi`, the I/O queue sharing the admin queue's when there is
-/// only one, or else the INTx event. Each interrupt processes its
-/// completion queues and is then acknowledged, an INTx event on the bus
-/// channel of the moment. Returns the handles to keep and the I/O
+/// only one, or else the INTx event. A message-signaled interrupt is
+/// acknowledged before its completion queues are processed; the INTx
+/// event is acknowledged afterwards, on the bus channel of the moment. Returns the handles to keep and the I/O
 /// queue's vector.
 async fn interrupts(
     pci: &Rc<PciBus>,
@@ -369,11 +369,13 @@ async fn interrupts(
             let reactor = reactor.clone();
             spawner.spawn(async move {
                 while reactor.signals(raw, SIGNALED).await.is_ok() {
+                    // Acknowledged first, so that a completion posted
+                    // while the queues are read signals again.
+                    // SAFETY: the call takes no pointers.
+                    unsafe { sys::interrupt_ack(raw) };
                     for queue in &mine {
                         queue.process();
                     }
-                    // SAFETY: the call takes no pointers.
-                    unsafe { sys::interrupt_ack(raw) };
                 }
             });
         }
