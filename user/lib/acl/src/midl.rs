@@ -1,8 +1,46 @@
-//! Lists as `mikros.fs` has them (MIKSPEC-0049.R28).
+//! Lists as `mikros.fs` has them (MIKSPEC-0049.R29), and asking the
+//! broker whether a subject may set the lists of others' nodes
+//! (MIKSPEC-0049.R26, MIKSPEC-0049.R30).
 
-use crate::{Entry, Tag};
+use crate::{Entry, Subject, Tag};
 use alloc::vec::Vec;
 use mikros_rt::interfaces::mikros::fs::{AclEntry, AclTag, Error, Rights};
+use mikros_rt::interfaces::mikros::permissions::{
+    AppNumbersAsyncClient, BrokerAsyncClient, Decision,
+};
+use mikros_rt::interfaces::mikros::service::ClientIdentity;
+
+/// The permission that setting the lists of another user's node needs.
+pub const MANAGE: &str = "admin.acls.manage";
+/// What the administrator is told the permission is asked for.
+const REASON: &str = "change who may use a file or folder of another user";
+
+/// Whether `subject` holds `MANAGE`, asked for with `Request` of `broker`,
+/// with the app ID that `numbers` gives for its app number; not when
+/// either fails.
+pub async fn may_manage(
+    broker: &BrokerAsyncClient,
+    numbers: &AppNumbersAsyncClient,
+    subject: &Subject,
+) -> bool {
+    // App number 0 is no app.
+    let app_id = match subject.app {
+        0 => alloc::string::String::new(),
+        n => match numbers.app_id(n).await {
+            Ok(Ok(r)) => r.app_id,
+            _ => return false,
+        },
+    };
+    let client = ClientIdentity {
+        pid: subject.pid,
+        user: subject.user,
+        app_id,
+        admin: subject.admin,
+        koid: subject.koid,
+    };
+    let requested = broker.request(client, MANAGE.into(), REASON.into()).await;
+    matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed)
+}
 
 /// `entries` as `mikros.fs` entries.
 pub fn to_midl(entries: &[Entry]) -> Vec<AclEntry> {

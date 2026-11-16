@@ -88,3 +88,59 @@ fn round_trips_through_the_linux_format() {
     assert_eq!(decode(&[1, 0, 0, 0]), None);
     assert_eq!(decode(&bytes[..10]), None);
 }
+
+fn subject(user: u32, app: u32) -> Subject {
+    Subject {
+        user,
+        app,
+        pid: 1,
+        koid: 2,
+        admin: 0,
+    }
+}
+
+#[test]
+fn only_subjects_other_than_user_0_meet_extended_lists() {
+    let list = owner_user_app();
+    let plain = from_mode(0);
+    // Without a subject, as user 0 and without an extended list, rights
+    // alone decide.
+    assert!(permits(None, Some(&list), 1000, WRITE));
+    assert!(permits(Some(&subject(0, 0)), Some(&list), 1000, WRITE));
+    assert!(permits(Some(&subject(1002, 0)), Some(&plain), 1000, WRITE));
+    assert!(permits(Some(&subject(1002, 0)), None, 1000, WRITE));
+    assert!(!permits(Some(&subject(1001, 0)), Some(&list), 1000, WRITE));
+    assert!(permits(Some(&subject(1001, 0)), Some(&list), 1000, READ));
+    assert_eq!(new_owner(None), 0);
+    assert_eq!(new_owner(Some(&subject(1001, 3))), 1001);
+}
+
+#[test]
+fn others_than_the_owner_and_user_0_need_the_permission() {
+    assert!(!needs_manage(None, 1000));
+    assert!(!needs_manage(Some(&subject(0, 0)), 1000));
+    assert!(!needs_manage(Some(&subject(1000, 0)), 1000));
+    assert!(needs_manage(Some(&subject(1001, 0)), 1000));
+}
+
+#[test]
+fn new_nodes_take_the_default_list() {
+    let list = owner_user_app();
+    assert_eq!(
+        inherit(None, 0o644, true),
+        Inherited {
+            access: None,
+            mode: 0o644,
+            default: None
+        }
+    );
+    let file = inherit(Some(&list), 0o100666, false);
+    assert_eq!(file.access.as_deref(), Some(&list[..]));
+    assert_eq!(file.mode, 0o100640);
+    assert_eq!(file.default, None);
+    let dir = inherit(Some(&list), 0o40777, true);
+    assert_eq!(dir.default.as_deref(), Some(&list[..]));
+    // A default list of three entries sets only the mode.
+    let plain = inherit(Some(&from_mode(0o750)), 0o777, false);
+    assert_eq!((plain.access, plain.mode), (None, 0o750));
+}

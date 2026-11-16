@@ -142,6 +142,73 @@ pub fn allows(entries: &[Entry], owner: u32, user: u32, app: u32, wanted: u32) -
     granted & wanted == wanted
 }
 
+/// Whom a node connection is for: the user ID, app number, process ID,
+/// kernel object ID and `admin` of a process (MIKSPEC-0049.R30).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Subject {
+    pub user: u32,
+    pub app: u32,
+    pub pid: u32,
+    pub koid: u64,
+    pub admin: u32,
+}
+
+/// The owner of a node that a connection with `subject` makes: the
+/// subject's user, or 0 without one.
+pub fn new_owner(subject: Option<&Subject>) -> u32 {
+    subject.map_or(0, |s| s.user)
+}
+
+/// Whether a connection with `subject` may do what needs `wanted` to a
+/// node owned by `owner` whose access list is `entries`, if it has an
+/// extended one: always without a subject, for user 0 and without an
+/// extended list, and otherwise as `allows` says.
+pub fn permits(
+    subject: Option<&Subject>,
+    entries: Option<&[Entry]>,
+    owner: u32,
+    wanted: u32,
+) -> bool {
+    match (subject, entries) {
+        (Some(s), Some(entries)) if s.user != 0 && is_extended(entries) => {
+            allows(entries, owner, s.user, s.app, wanted)
+        }
+        _ => true,
+    }
+}
+
+/// Whether a connection with `subject` needs `admin.acls.manage` to set
+/// the lists of a node owned by `owner`: unless it has no subject, or
+/// one of user 0 or the owner.
+pub fn needs_manage(subject: Option<&Subject>, owner: u32) -> bool {
+    subject.is_some_and(|s| s.user != 0 && s.user != owner)
+}
+
+/// What a new node gets in a directory whose default list is `default`:
+/// its access list, if extended, and its mode from `mode`, and, for a
+/// directory, its default list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inherited {
+    pub access: Option<Vec<Entry>>,
+    pub mode: u32,
+    pub default: Option<Vec<Entry>>,
+}
+
+pub fn inherit(default: Option<&[Entry]>, mode: u32, directory: bool) -> Inherited {
+    match default {
+        None => Inherited {
+            access: None,
+            mode,
+            default: None,
+        },
+        Some(list) => Inherited {
+            access: is_extended(list).then(|| list.to_vec()),
+            mode: mode_of(list, mode),
+            default: directory.then(|| list.to_vec()),
+        },
+    }
+}
+
 /// The version of the format of the extended attributes.
 const VERSION: u32 = 2;
 /// Linux's tags, and the ID of an entry without one.
