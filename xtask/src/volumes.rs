@@ -240,6 +240,7 @@ fn btrfs_volume(dir: &Path, label: &str) -> Result<Vec<u8>> {
     if !status.success() {
         bail!("mkfs.btrfs failed with {status}");
     }
+    crate::image::owners::make_owned_by_0(&image)?;
     let bytes = fs::read(&image)?;
     fs::remove_dir_all(&tree)?;
     fs::remove_file(&image)?;

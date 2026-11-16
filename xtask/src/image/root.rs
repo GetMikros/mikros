@@ -270,6 +270,8 @@ pub fn create(
     if !status.success() {
         bail!("mkfs.btrfs failed with {status}");
     }
+    // mkfs.btrfs keeps the owners of the build's files.
+    super::owners::make_owned_by_0(&image)?;
     Ok(image)
 }
 

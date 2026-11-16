@@ -2,6 +2,7 @@
 
 pub(crate) mod esp;
 pub(crate) mod gpt;
+pub(crate) mod owners;
 pub mod root;
 
 use crate::build::{self, Kind};
