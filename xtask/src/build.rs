@@ -152,13 +152,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     crate::build_systems::check_installed(
         &xkbcommon.install,
         &[
-            "lib/libxkbcommon.0.13.2.dlib",
+            "libraries/libxkbcommon.0.13.2.dlib",
             "include/xkbcommon/xkbcommon.h",
             "bin/xkbcli",
         ],
         &[
-            ("lib/libxkbcommon.0.dlib", "libxkbcommon.0.13.2.dlib"),
-            ("lib/libxkbcommon.dlib", "libxkbcommon.0.dlib"),
+            ("libraries/libxkbcommon.0.dlib", "libxkbcommon.0.13.2.dlib"),
+            ("libraries/libxkbcommon.dlib", "libxkbcommon.0.dlib"),
         ],
     )?;
     println!("built    {}", xkbcommon.install.display());
@@ -177,13 +177,13 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
     crate::build_systems::check_installed(
         &freetype.install,
         &[
-            "lib/libfreetype.6.20.7.dlib",
+            "libraries/libfreetype.6.20.7.dlib",
             "include/freetype2/ft2build.h",
             "include/freetype2/freetype/freetype.h",
         ],
         &[
-            ("lib/libfreetype.6.dlib", "libfreetype.6.20.7.dlib"),
-            ("lib/libfreetype.dlib", "libfreetype.6.dlib"),
+            ("libraries/libfreetype.6.dlib", "libfreetype.6.20.7.dlib"),
+            ("libraries/libfreetype.dlib", "libfreetype.6.dlib"),
         ],
     )?;
     println!("built    {}", freetype.install.display());
@@ -225,22 +225,22 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // them as the defaults.
             for file in crate::fonts::FILES {
                 early.push((
-                    format!("usr/share/fonts/dejavu/{file}"),
+                    format!("system/share/fonts/dejavu/{file}"),
                     fonts.ttf.join(file),
                 ));
             }
             early.extend([
                 (
-                    "usr/share/fonts/dejavu/LICENSE".to_owned(),
+                    "system/share/fonts/dejavu/LICENSE".to_owned(),
                     fonts.license.clone(),
                 ),
                 (
-                    "etc/fonts/fonts.conf".to_owned(),
+                    "system/share/fonts/fonts.conf".to_owned(),
                     crate::workspace_root().join("user/data/fonts.conf"),
                 ),
             ]);
             // The time zones, which the root partition gets with the rest
-            // of usr.
+            // of the system version.
             early.extend(crate::tzdata::members(&crate::tzdata::zoneinfo()?)?);
             // The services that need the root file system, and what they
             // load, are only in the whole system, so that the service
@@ -362,7 +362,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[
                     format!("-L{}", c_dir("libgreet").display()),
                     "-lgreet".to_owned(),
-                    "-Wl,--disable-new-dtags,-rpath,/usr/share/decoy".to_owned(),
+                    "-Wl,--disable-new-dtags,-rpath,/system/share/decoy".to_owned(),
                 ],
             )?;
             println!("built    {}", library_user.display());
@@ -380,14 +380,14 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     tree,
                     &[
                         &format!("bin/tally-{system}-user"),
-                        &format!("lib/{real}"),
-                        &format!("lib/{base}"),
-                        &format!("lib/libcount-{system}.slib"),
+                        &format!("libraries/{real}"),
+                        &format!("libraries/{base}"),
+                        &format!("libraries/libcount-{system}.slib"),
                     ],
                     &[
-                        (&format!("lib/{major}"), &real),
-                        (&format!("lib/libtally-{system}.dlib"), &major),
-                        (&format!("lib/libbase-{system}.dlib"), &base),
+                        (&format!("libraries/{major}"), &real),
+                        (&format!("libraries/libtally-{system}.dlib"), &major),
+                        (&format!("libraries/libbase-{system}.dlib"), &base),
                     ],
                 )?;
                 println!("built    {}", tree.display());
@@ -416,68 +416,68 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "launcher.img",
                 &[
-                    ("usr/bin/servicemgr", probe.as_path()),
-                    ("usr/bin/probe", probe.as_path()),
-                    ("usr/bin/hello", hello.as_path()),
-                    ("usr/bin/hello-dynamic", hello_dynamic.as_path()),
-                    ("usr/bin/raw-syscall", raw_syscall.as_path()),
+                    ("system/servicemgr", probe.as_path()),
+                    ("system/bin/probe", probe.as_path()),
+                    ("system/bin/hello", hello.as_path()),
+                    ("system/bin/hello-dynamic", hello_dynamic.as_path()),
+                    ("system/bin/raw-syscall", raw_syscall.as_path()),
                     // Applications that the boot image provides.
-                    ("Apps/test/bin/hello", hello.as_path()),
-                    ("Apps/test/bin/hello-dynamic", hello_dynamic.as_path()),
-                    ("Apps/test/bin/raw-syscall", raw_syscall.as_path()),
+                    ("apps/test/bin/hello", hello.as_path()),
+                    ("apps/test/bin/hello-dynamic", hello_dynamic.as_path()),
+                    ("apps/test/bin/raw-syscall", raw_syscall.as_path()),
                     // An app's bundle, and program manifests.
-                    ("Apps/test.app/bin/hello", hello_dynamic.as_path()),
-                    ("usr/lib/programs/system.prog.yaml", prog.as_path()),
-                    ("usr/lib/programs/system.closed.yaml", closed.as_path()),
-                    ("usr/lib/programs/system.bad.yaml", bad.as_path()),
+                    ("apps/test.app/bin/hello", hello_dynamic.as_path()),
+                    ("system/programs/system.prog.yaml", prog.as_path()),
+                    ("system/programs/system.closed.yaml", closed.as_path()),
+                    ("system/programs/system.bad.yaml", bad.as_path()),
                     // A command, which the probe runs as another binary.
-                    ("usr/bin/probe-command", probe.as_path()),
+                    ("system/bin/probe-command", probe.as_path()),
                     (
-                        "usr/lib/programs/system.probe-command.yaml",
+                        "system/programs/system.probe-command.yaml",
                         command.as_path(),
                     ),
-                    ("usr/bin/hello-std", hello_std.as_path()),
-                    ("usr/bin/spawn-std", spawn_std.as_path()),
-                    ("usr/bin/msh", msh.as_path()),
-                    ("usr/bin/msh-check", msh_check.as_path()),
-                    ("usr/share/msh/options.msh", msh_options.as_path()),
-                    ("usr/bin/spawn-child", spawn_child.as_path()),
-                    ("usr/lib/ld-mikros.dlib", dynamic_linker.as_path()),
-                    ("usr/bin/library-user", library_user.as_path()),
-                    ("usr/lib/libgreet.1.dlib", greet.as_path()),
-                    ("usr/share/decoy/libgreet.1.dlib", decoy.as_path()),
-                    ("usr/lib/libnonote.1.dlib", no_note.as_path()),
+                    ("system/bin/hello-std", hello_std.as_path()),
+                    ("system/bin/spawn-std", spawn_std.as_path()),
+                    ("system/bin/msh", msh.as_path()),
+                    ("system/bin/msh-check", msh_check.as_path()),
+                    ("system/share/msh/options.msh", msh_options.as_path()),
+                    ("system/bin/spawn-child", spawn_child.as_path()),
+                    ("system/libraries/ld-mikros.dlib", dynamic_linker.as_path()),
+                    ("system/bin/library-user", library_user.as_path()),
+                    ("system/libraries/libgreet.1.dlib", greet.as_path()),
+                    ("system/share/decoy/libgreet.1.dlib", decoy.as_path()),
+                    ("system/libraries/libnonote.1.dlib", no_note.as_path()),
                     (
-                        "usr/bin/tally-cmake-user",
+                        "system/bin/tally-cmake-user",
                         &cmake_tree.join("bin/tally-cmake-user"),
                     ),
                     (
-                        "usr/lib/libtally-cmake.1.dlib",
-                        &cmake_tree.join("lib/libtally-cmake.1.dlib"),
+                        "system/libraries/libtally-cmake.1.dlib",
+                        &cmake_tree.join("libraries/libtally-cmake.1.dlib"),
                     ),
                     (
-                        "usr/lib/libbase-cmake.0.dlib",
-                        &cmake_tree.join("lib/libbase-cmake.0.dlib"),
+                        "system/libraries/libbase-cmake.0.dlib",
+                        &cmake_tree.join("libraries/libbase-cmake.0.dlib"),
                     ),
                     (
-                        "usr/bin/tally-meson-user",
+                        "system/bin/tally-meson-user",
                         &meson_tree.join("bin/tally-meson-user"),
                     ),
                     (
-                        "usr/lib/libtally-meson.1.dlib",
-                        &meson_tree.join("lib/libtally-meson.1.dlib"),
+                        "system/libraries/libtally-meson.1.dlib",
+                        &meson_tree.join("libraries/libtally-meson.1.dlib"),
                     ),
                     (
-                        "usr/lib/libbase-meson.0.dlib",
-                        &meson_tree.join("lib/libbase-meson.0.dlib"),
+                        "system/libraries/libbase-meson.0.dlib",
+                        &meson_tree.join("libraries/libbase-meson.0.dlib"),
                     ),
-                    ("usr/share/hello/greeting.txt", greeting.as_path()),
+                    ("system/share/hello/greeting.txt", greeting.as_path()),
                 ],
                 &[],
                 &[
-                    ("usr/share/hello/near", "greeting.txt"),
-                    ("usr/share/hello/far", "/usr/share/hello/greeting.txt"),
-                    ("usr/bin/app-hello", "../../Apps/test/bin/hello"),
+                    ("system/share/hello/near", "greeting.txt"),
+                    ("system/share/hello/far", "/system/share/hello/greeting.txt"),
+                    ("system/bin/app-hello", "../../apps/test/bin/hello"),
                 ],
             )?;
             println!("built    {}", launcher.display());
@@ -488,8 +488,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // manager's place.
             let plan = crate::workspace_root().join("target/ported/port-tests.plan");
             let mut members = crate::port_tests::members(&xkbcommon_port, &xkbcommon, &plan)?;
-            members.push(("usr/bin/servicemgr".into(), runner));
-            members.push(("usr/lib/ld-mikros.dlib".into(), dynamic_linker.clone()));
+            members.push(("system/servicemgr".into(), runner));
+            members.push((
+                "system/libraries/ld-mikros.dlib".into(),
+                dynamic_linker.clone(),
+            ));
             let members: Vec<(&str, &Path)> = members
                 .iter()
                 .map(|(n, p)| (n.as_str(), p.as_path()))
@@ -506,8 +509,11 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "broker.img",
                 &[
-                    ("usr/bin/servicemgr", broker_probe.as_path()),
-                    ("usr/bin/permbroker", broker.as_path()),
+                    ("system/servicemgr", broker_probe.as_path()),
+                    (
+                        "system/services/system.permbroker/permbroker",
+                        broker.as_path(),
+                    ),
                 ],
             )?;
             println!("built    {}", broker_image.display());
@@ -530,27 +536,33 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "services.img",
                 &[
-                    ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permbroker", broker.as_path()),
+                    ("system/servicemgr", services.as_path()),
                     (
-                        "usr/lib/services/permbroker.yaml",
+                        "system/services/system.permbroker/permbroker",
+                        broker.as_path(),
+                    ),
+                    (
+                        "system/services/system.permbroker/service.yaml",
                         broker_manifest.as_path(),
                     ),
-                    ("usr/bin/directory-probe", directory_probe.as_path()),
                     (
-                        "usr/lib/services/directory-probe.yaml",
+                        "system/services/system.directory-probe/directory-probe",
+                        directory_probe.as_path(),
+                    ),
+                    (
+                        "system/services/system.directory-probe/service.yaml",
                         directory_probe_manifest.as_path(),
                     ),
                     (
-                        "usr/lib/services/restart-probe.yaml",
+                        "system/services/system.restart-probe/service.yaml",
                         restart_probe_manifest.as_path(),
                     ),
                     (
-                        "usr/lib/services/demand-probe.yaml",
+                        "system/services/system.demand-probe/service.yaml",
                         demand_probe_manifest.as_path(),
                     ),
                     (
-                        "usr/lib/services/demand-dep.yaml",
+                        "system/services/system.demand-dep/service.yaml",
                         demand_dep_manifest.as_path(),
                     ),
                 ],
@@ -578,24 +590,39 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "tmpfs.img",
                 &[
-                    ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permbroker", broker.as_path()),
+                    ("system/servicemgr", services.as_path()),
                     (
-                        "usr/lib/services/permbroker.yaml",
+                        "system/services/system.permbroker/permbroker",
+                        broker.as_path(),
+                    ),
+                    (
+                        "system/services/system.permbroker/service.yaml",
                         broker_manifest.as_path(),
                     ),
-                    ("usr/bin/tmpfs", tmpfs.as_path()),
-                    ("usr/lib/services/tmpfs.yaml", tmpfs_manifest.as_path()),
-                    ("usr/bin/tmpfs-probe", tmpfs_probe.as_path()),
+                    ("system/services/system.tmpfs/tmpfs", tmpfs.as_path()),
                     (
-                        "usr/lib/services/tmpfs-probe.yaml",
+                        "system/services/system.tmpfs/service.yaml",
+                        tmpfs_manifest.as_path(),
+                    ),
+                    (
+                        "system/services/system.tmpfs-probe/tmpfs-probe",
+                        tmpfs_probe.as_path(),
+                    ),
+                    (
+                        "system/services/system.tmpfs-probe/service.yaml",
                         tmpfs_probe_manifest.as_path(),
                     ),
-                    ("usr/bin/union", union.as_path()),
-                    ("usr/lib/services/union.yaml", union_manifest.as_path()),
-                    ("usr/bin/union-probe", union_probe.as_path()),
+                    ("system/services/system.union/union", union.as_path()),
                     (
-                        "usr/lib/services/union-probe.yaml",
+                        "system/services/system.union/service.yaml",
+                        union_manifest.as_path(),
+                    ),
+                    (
+                        "system/services/system.union-probe/union-probe",
+                        union_probe.as_path(),
+                    ),
+                    (
+                        "system/services/system.union-probe/service.yaml",
                         union_probe_manifest.as_path(),
                     ),
                 ],
@@ -615,17 +642,29 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "log.img",
                 &[
-                    ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permbroker", broker.as_path()),
+                    ("system/servicemgr", services.as_path()),
                     (
-                        "usr/lib/services/permbroker.yaml",
+                        "system/services/system.permbroker/permbroker",
+                        broker.as_path(),
+                    ),
+                    (
+                        "system/services/system.permbroker/service.yaml",
                         broker_manifest.as_path(),
                     ),
-                    ("usr/bin/logsvc", log_service.as_path()),
-                    ("usr/lib/services/logsvc.yaml", log_manifest.as_path()),
-                    ("usr/bin/log-probe", log_probe.as_path()),
                     (
-                        "usr/lib/services/log-probe.yaml",
+                        "system/services/system.logsvc/logsvc",
+                        log_service.as_path(),
+                    ),
+                    (
+                        "system/services/system.logsvc/service.yaml",
+                        log_manifest.as_path(),
+                    ),
+                    (
+                        "system/services/system.log-probe/log-probe",
+                        log_probe.as_path(),
+                    ),
+                    (
+                        "system/services/system.log-probe/service.yaml",
                         log_probe_manifest.as_path(),
                     ),
                 ],
@@ -644,17 +683,29 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "time.img",
                 &[
-                    ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permbroker", broker.as_path()),
+                    ("system/servicemgr", services.as_path()),
                     (
-                        "usr/lib/services/permbroker.yaml",
+                        "system/services/system.permbroker/permbroker",
+                        broker.as_path(),
+                    ),
+                    (
+                        "system/services/system.permbroker/service.yaml",
                         broker_manifest.as_path(),
                     ),
-                    ("usr/bin/timesvc", time_service.as_path()),
-                    ("usr/lib/services/timesvc.yaml", time_manifest.as_path()),
-                    ("usr/bin/time-probe", time_probe.as_path()),
                     (
-                        "usr/lib/services/time-probe.yaml",
+                        "system/services/system.timesvc/timesvc",
+                        time_service.as_path(),
+                    ),
+                    (
+                        "system/services/system.timesvc/service.yaml",
+                        time_manifest.as_path(),
+                    ),
+                    (
+                        "system/services/system.time-probe/time-probe",
+                        time_probe.as_path(),
+                    ),
+                    (
+                        "system/services/system.time-probe/service.yaml",
                         probe_dir.join("time-probe.yaml").as_path(),
                     ),
                 ],
@@ -679,23 +730,32 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 kind,
                 "term.img",
                 &[
-                    ("usr/bin/servicemgr", services.as_path()),
-                    ("usr/bin/permbroker", broker.as_path()),
+                    ("system/servicemgr", services.as_path()),
                     (
-                        "usr/lib/services/permbroker.yaml",
+                        "system/services/system.permbroker/permbroker",
+                        broker.as_path(),
+                    ),
+                    (
+                        "system/services/system.permbroker/service.yaml",
                         broker_manifest.as_path(),
                     ),
-                    ("usr/bin/termsvc", term_service.as_path()),
                     (
-                        "usr/lib/services/termsvc.yaml",
+                        "system/services/system.termsvc/termsvc",
+                        term_service.as_path(),
+                    ),
+                    (
+                        "system/services/system.termsvc/service.yaml",
                         crate::workspace_root()
                             .join("user/services/termsvc/termsvc.yaml")
                             .as_path(),
                     ),
-                    ("usr/bin/term-probe", term_probe.as_path()),
-                    ("usr/bin/term-c", term_c.as_path()),
                     (
-                        "usr/lib/services/term-probe.yaml",
+                        "system/services/system.term-probe/term-probe",
+                        term_probe.as_path(),
+                    ),
+                    ("system/bin/term-c", term_c.as_path()),
+                    (
+                        "system/services/system.term-probe/service.yaml",
                         crate::workspace_root()
                             .join("user/tests/term-probe/term-probe.yaml")
                             .as_path(),
@@ -705,7 +765,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", term_image.display());
             // The namespaces run's root partition holds these files: the
             // temporary file system and a probe of its namespace,
-            // with their manifests, files in /etc, /usr and /Libraries
+            // with their manifests, files in /system/config, /system and /libraries
             // that the probe reads, and a native app's bundle with the
             // dynamic linker it needs.
             let namespace_probe = user_build("namespace-probe", kind)?;
@@ -716,58 +776,61 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let probe_data = probe_dir.join("data.txt");
             let programs = probe_dir.join("programs");
             let namespaces_files: Vec<(String, PathBuf)> = vec![
-                ("usr/bin/tmpfs".to_owned(), tmpfs.to_path_buf()),
                 (
-                    "usr/lib/services/tmpfs.yaml".to_owned(),
+                    "system/services/system.tmpfs/tmpfs".to_owned(),
+                    tmpfs.to_path_buf(),
+                ),
+                (
+                    "system/services/system.tmpfs/service.yaml".to_owned(),
                     tmpfs_manifest.to_path_buf(),
                 ),
                 (
-                    "usr/bin/namespace-probe".to_owned(),
+                    "system/services/system.namespace-probe/namespace-probe".to_owned(),
                     namespace_probe.to_path_buf(),
                 ),
                 (
-                    "usr/lib/services/namespace-probe.yaml".to_owned(),
+                    "system/services/system.namespace-probe/service.yaml".to_owned(),
                     namespace_probe_manifest.to_path_buf(),
                 ),
                 (
-                    "usr/share/probe/data.txt".to_owned(),
+                    "system/share/probe/data.txt".to_owned(),
                     probe_data.to_path_buf(),
                 ),
-                ("etc/probe.conf".to_owned(), probe_conf.to_path_buf()),
-                ("Libraries/probe.txt".to_owned(), probe_data.to_path_buf()),
+                ("config/probe.conf".to_owned(), probe_conf.to_path_buf()),
+                ("libraries/probe.txt".to_owned(), probe_data.to_path_buf()),
                 (
-                    "Apps/test.native/bin/hello".to_owned(),
+                    "apps/test.native/bin/hello".to_owned(),
                     hello_dynamic.to_path_buf(),
                 ),
                 (
-                    "usr/lib/ld-mikros.dlib".to_owned(),
+                    "system/libraries/ld-mikros.dlib".to_owned(),
                     dynamic_linker.to_path_buf(),
                 ),
                 (
-                    "usr/lib/programs/system.probe-tool.yaml".to_owned(),
+                    "system/programs/system.probe-tool.yaml".to_owned(),
                     programs.join("system.probe-tool.yaml").to_path_buf(),
                 ),
                 (
-                    "usr/lib/programs/system.tmpfs.yaml".to_owned(),
+                    "system/programs/system.tmpfs.yaml".to_owned(),
                     programs.join("system.tmpfs.yaml").to_path_buf(),
                 ),
                 (
-                    "usr/lib/programs/system.idle.yaml".to_owned(),
+                    "system/programs/system.idle.yaml".to_owned(),
                     programs.join("system.idle.yaml").to_path_buf(),
                 ),
                 (
-                    "usr/lib/services/idle.yaml".to_owned(),
+                    "system/services/system.idle/service.yaml".to_owned(),
                     probe_dir.join("idle.yaml").to_path_buf(),
                 ),
                 (
-                    "usr/lib/programs/system.misnamed.yaml".to_owned(),
+                    "system/programs/system.misnamed.yaml".to_owned(),
                     programs.join("system.misnamed.yaml").to_path_buf(),
                 ),
             ];
             // The accounts run's root partition holds these files: the
             // temporary file system and the accounts service, with their
             // manifests, the probe's binary with the manifests of its
-            // five services, and a users file in /var/lib/accounts.
+            // five services, and a users file in /system/state/accounts.
             let accounts = user_build("accountsvc", kind)?;
             println!("built    {}", accounts.display());
             let accounts_probe = user_build("accounts-probe", kind)?;
@@ -782,41 +845,47 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             let sneak_manifest = probe_dir.join("accounts-sneak.yaml");
             let users = accounts_users(kind)?;
             let accounts_files: Vec<(String, PathBuf)> = vec![
-                ("usr/bin/tmpfs".to_owned(), tmpfs.to_path_buf()),
                 (
-                    "usr/lib/services/tmpfs.yaml".to_owned(),
+                    "system/services/system.tmpfs/tmpfs".to_owned(),
+                    tmpfs.to_path_buf(),
+                ),
+                (
+                    "system/services/system.tmpfs/service.yaml".to_owned(),
                     tmpfs_manifest.to_path_buf(),
                 ),
-                ("usr/bin/accountsvc".to_owned(), accounts.to_path_buf()),
                 (
-                    "usr/lib/services/accountsvc.yaml".to_owned(),
+                    "system/services/system.accountsvc/accountsvc".to_owned(),
+                    accounts.to_path_buf(),
+                ),
+                (
+                    "system/services/system.accountsvc/service.yaml".to_owned(),
                     accounts_manifest.to_path_buf(),
                 ),
                 (
-                    "usr/bin/accounts-probe".to_owned(),
+                    "system/services/system.accounts-probe/accounts-probe".to_owned(),
                     accounts_probe.to_path_buf(),
                 ),
                 (
-                    "usr/lib/services/accounts-probe.yaml".to_owned(),
+                    "system/services/system.accounts-probe/service.yaml".to_owned(),
                     accounts_probe_manifest.to_path_buf(),
                 ),
                 (
-                    "usr/lib/services/accounts-guest.yaml".to_owned(),
+                    "system/services/system.accounts-guest/service.yaml".to_owned(),
                     accounts_guest_manifest.to_path_buf(),
                 ),
                 (
-                    "usr/lib/services/authorization-stub.yaml".to_owned(),
+                    "system/services/system.authorization-stub/service.yaml".to_owned(),
                     stub_manifest.to_path_buf(),
                 ),
                 (
-                    "usr/lib/services/accounts-thief.yaml".to_owned(),
+                    "system/services/system.accounts-thief/service.yaml".to_owned(),
                     thief_manifest.to_path_buf(),
                 ),
                 (
-                    "usr/lib/services/accounts-sneak.yaml".to_owned(),
+                    "system/services/system.accounts-sneak/service.yaml".to_owned(),
                     sneak_manifest.to_path_buf(),
                 ),
-                ("var/lib/accounts/users".to_owned(), users.to_path_buf()),
+                ("state/accounts/users".to_owned(), users.to_path_buf()),
             ];
             // The device manager tests serve these images. Each holds the
             // service manager, the broker and the device manager with
@@ -862,26 +931,32 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                                 more: &[(String, PathBuf)]|
              -> Result<PathBuf> {
                 let mut members: Vec<(String, PathBuf)> = vec![
-                    ("usr/bin/servicemgr".into(), services.clone()),
-                    ("usr/bin/permbroker".into(), broker.clone()),
+                    ("system/servicemgr".into(), services.clone()),
                     (
-                        "usr/lib/services/permbroker.yaml".into(),
+                        "system/services/system.permbroker/permbroker".into(),
+                        broker.clone(),
+                    ),
+                    (
+                        "system/services/system.permbroker/service.yaml".into(),
                         broker_manifest.clone(),
                     ),
-                    ("usr/bin/devicemgr".into(), devices.clone()),
                     (
-                        "usr/lib/services/devicemgr.yaml".into(),
+                        "system/services/system.devicemgr/devicemgr".into(),
+                        devices.clone(),
+                    ),
+                    (
+                        "system/services/system.devicemgr/service.yaml".into(),
                         devices_manifest.clone(),
                     ),
                 ];
                 for &(name, starts) in drivers {
                     let manifest = format!("user/tests/drivers/{name}/driver.yaml");
                     members.push((
-                        format!("usr/lib/drivers/{name}/driver.yaml"),
+                        format!("system/drivers/system.driver.{name}/driver.yaml"),
                         crate::workspace_root().join(manifest),
                     ));
                     if starts {
-                        let binary = format!("usr/lib/drivers/{name}/{name}");
+                        let binary = format!("system/drivers/system.driver.{name}/{name}");
                         members.push((binary, test_driver.clone()));
                     }
                 }
@@ -923,33 +998,48 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 "acpi.img",
                 &[("test-acpi", true)],
                 &[
-                    ("usr/lib/drivers/acpi/acpi".to_owned(), acpi.clone()),
                     (
-                        "usr/lib/drivers/acpi/driver.yaml".to_owned(),
+                        "system/drivers/system.driver.acpi/acpi".to_owned(),
+                        acpi.clone(),
+                    ),
+                    (
+                        "system/drivers/system.driver.acpi/driver.yaml".to_owned(),
                         crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
                     ),
                     // The log service, through which the drivers' messages
                     // reach the kernel log.
-                    ("usr/bin/logsvc".to_owned(), log_service.clone()),
                     (
-                        "usr/lib/services/logsvc.yaml".to_owned(),
+                        "system/services/system.logsvc/logsvc".to_owned(),
+                        log_service.clone(),
+                    ),
+                    (
+                        "system/services/system.logsvc/service.yaml".to_owned(),
                         log_manifest.clone(),
                     ),
-                    ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
                     (
-                        "usr/lib/drivers/rtc/driver.yaml".to_owned(),
+                        "system/drivers/system.driver.rtc/rtc".to_owned(),
+                        rtc.clone(),
+                    ),
+                    (
+                        "system/drivers/system.driver.rtc/driver.yaml".to_owned(),
                         crate::workspace_root().join("user/drivers/rtc/driver.yaml"),
                     ),
-                    ("usr/bin/timesvc".to_owned(), time_service.clone()),
                     (
-                        "usr/lib/services/timesvc.yaml".to_owned(),
+                        "system/services/system.timesvc/timesvc".to_owned(),
+                        time_service.clone(),
+                    ),
+                    (
+                        "system/services/system.timesvc/service.yaml".to_owned(),
                         time_manifest.clone(),
                     ),
                     // The PS/2 driver for the i8042 device that the
                     // server adds.
-                    ("usr/lib/drivers/ps2/ps2".to_owned(), ps2.clone()),
                     (
-                        "usr/lib/drivers/ps2/driver.yaml".to_owned(),
+                        "system/drivers/system.driver.ps2/ps2".to_owned(),
+                        ps2.clone(),
+                    ),
+                    (
+                        "system/drivers/system.driver.ps2/driver.yaml".to_owned(),
                         crate::workspace_root().join("user/drivers/ps2/driver.yaml"),
                     ),
                 ],
@@ -964,29 +1054,44 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 "acpi-restart.img",
                 &[],
                 &[
-                    ("usr/lib/drivers/acpi/acpi".to_owned(), acpi.clone()),
                     (
-                        "usr/lib/drivers/acpi/driver.yaml".to_owned(),
+                        "system/drivers/system.driver.acpi/acpi".to_owned(),
+                        acpi.clone(),
+                    ),
+                    (
+                        "system/drivers/system.driver.acpi/driver.yaml".to_owned(),
                         crate::workspace_root().join("user/drivers/acpi/driver.yaml"),
                     ),
-                    ("usr/bin/logsvc".to_owned(), log_service.clone()),
                     (
-                        "usr/lib/services/logsvc.yaml".to_owned(),
+                        "system/services/system.logsvc/logsvc".to_owned(),
+                        log_service.clone(),
+                    ),
+                    (
+                        "system/services/system.logsvc/service.yaml".to_owned(),
                         log_manifest.clone(),
                     ),
-                    ("usr/lib/drivers/rtc/rtc".to_owned(), rtc.clone()),
                     (
-                        "usr/lib/drivers/rtc/driver.yaml".to_owned(),
+                        "system/drivers/system.driver.rtc/rtc".to_owned(),
+                        rtc.clone(),
+                    ),
+                    (
+                        "system/drivers/system.driver.rtc/driver.yaml".to_owned(),
                         crate::workspace_root().join("user/drivers/rtc/driver.yaml"),
                     ),
-                    ("usr/bin/timesvc".to_owned(), time_service.clone()),
                     (
-                        "usr/lib/services/timesvc.yaml".to_owned(),
+                        "system/services/system.timesvc/timesvc".to_owned(),
+                        time_service.clone(),
+                    ),
+                    (
+                        "system/services/system.timesvc/service.yaml".to_owned(),
                         time_manifest.clone(),
                     ),
-                    ("usr/bin/restart-probe".to_owned(), restart_probe.clone()),
                     (
-                        "usr/lib/services/acpi-restart-probe.yaml".to_owned(),
+                        "system/services/system.restart-probe/restart-probe".to_owned(),
+                        restart_probe.clone(),
+                    ),
+                    (
+                        "system/services/system.acpi-restart-probe/service.yaml".to_owned(),
                         crate::workspace_root()
                             .join("user/tests/restart-probe/acpi-restart-probe.yaml"),
                     ),
