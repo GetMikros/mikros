@@ -398,9 +398,10 @@ unsafe extern "C" fn __mikros_volume_path(path: *mut u8, len: usize, cap: usize)
 }
 
 /// Whether owner `uid` and group `gid` change nothing for a node owned by
-/// `owner`, in group 0; -1 keeps either.
+/// `owner`, whose group is the owner's own, as `stat` reports it; -1
+/// keeps either.
 fn unchanged(owner: u32, uid: u32, gid: u32) -> bool {
-    (uid == u32::MAX || uid == owner) && (gid == u32::MAX || gid == 0)
+    (uid == u32::MAX || uid == owner) && (gid == u32::MAX || gid == owner)
 }
 
 fn chown_node(node: &NodeClient, uid: u32, gid: u32) -> Result<(), i64> {
