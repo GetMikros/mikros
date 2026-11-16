@@ -183,6 +183,7 @@ impl Connection {
             R::CreateSymlink(_, r) => r.reply(s, Err(self.write_denied())),
             R::BindSocket(_, r) => r.reply(s, Err(self.write_denied())),
             R::ConnectSocket(_, r) => r.reply(s, Err(self.write_denied())),
+            R::Exchange(_, r) => r.reply(s, Err(self.write_denied())),
         };
     }
 

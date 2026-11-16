@@ -77,6 +77,8 @@ impl Connection {
             R::GetAcl(q, r) => r.reply(s, self.get_acl(q.default).await),
             R::SetAcl(q, r) => r.reply(s, self.set_acl(q).await),
             R::Restrict(q, r) => r.reply(s, self.restrict(q).await),
+            // A view cannot swap names of several layers in one step.
+            R::Exchange(_, r) => r.reply(s, self.may_change().and(Err(Error::NotSupported))),
             R::Lock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::Unlock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::CloneRange(_, r) => r.reply(s, Err(Error::IsDirectory)),

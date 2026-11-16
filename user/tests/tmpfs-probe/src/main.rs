@@ -60,7 +60,10 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Some(root) = root(&directory).and_then(|fs| own_directory(&fs)) else {
         return 1;
     };
-    match budgets(&root, &directory, budget).and_then(|()| acls(&root)) {
+    match budgets(&root, &directory, budget)
+        .and_then(|()| acls(&root))
+        .and_then(|()| exchanges(&root))
+    {
         Ok(()) => 0,
         Err(failed) => failed,
     }
@@ -332,4 +335,32 @@ fn budgets(
         unsafe { sys::thread_sleep(now + 10_000_000) };
     }
     Err(62)
+}
+
+/// `Exchange` swaps two names in one step, also across directories, and
+/// fails with `NOT_FOUND` for a name that is not there.
+fn exchanges(root: &NodeClient) -> Result<(), i64> {
+    use OpenFlags as F;
+    let mkdir = flags(&[F::CREATE, F::DIRECTORY]);
+    let (a, _, _) = open(root, "swap-a", mkdir, RW).map_err(|_| 90)?;
+    let (b, _, _) = open(root, "swap-b", mkdir, RW).map_err(|_| 90)?;
+    let (one, _, _) = open(&a, "one", F::CREATE, RW).map_err(|_| 90)?;
+    let (two, _, _) = open(&b, "two", F::CREATE, RW).map_err(|_| 90)?;
+    expect(ok(one.write(0, b"1".to_vec(), FOREVER)).is_some(), 90)?;
+    expect(ok(two.write(0, b"2".to_vec(), FOREVER)).is_some(), 90)?;
+    let token = ok(b.get_token(FOREVER)).ok_or(91)?.token;
+    expect(
+        ok(a.exchange("one".into(), token, "two".into(), FOREVER)).is_some(),
+        91,
+    )?;
+    let read = |dir: &NodeClient, name: &str| {
+        let (file, _, _) = open(dir, name, OpenFlags(0), Rights::READ).ok()?;
+        ok(file.read(0, 8, FOREVER)).map(|r| r.data)
+    };
+    expect(read(&a, "one").as_deref() == Some(&b"2"[..]), 91)?;
+    expect(read(&b, "two").as_deref() == Some(&b"1"[..]), 91)?;
+    let token = ok(b.get_token(FOREVER)).ok_or(92)?.token;
+    let missing = a.exchange("one".into(), token, "gone".into(), FOREVER);
+    expect(matches!(missing, Ok(Err(Error::NotFound))), 92)?;
+    Ok(())
 }

@@ -99,6 +99,7 @@ impl Connection {
                 r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
             }
             R::Restrict(q, r) => r.reply(s, self.restrict(q)),
+            R::Exchange(_, r) => r.reply(s, Err(self.write_denied())),
             // Everything that would change the file system.
             R::SetAttributes(_, r) => r.reply(s, Err(self.write_denied())),
             R::Write(_, r) => r.reply(s, Err(self.write_denied())),

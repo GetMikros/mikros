@@ -221,6 +221,16 @@ impl Connection {
                 )
             }
             R::Restrict(q, r) => r.reply(s, self.restrict(q)),
+            R::Exchange(q, r) => {
+                let exchanged = self.exchange(q).await;
+                r.reply(
+                    s,
+                    self.fs
+                        .durable(exchanged)
+                        .await
+                        .map(|()| NodeExchangeResponse {}),
+                )
+            }
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::ConnectSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
         };

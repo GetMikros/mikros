@@ -173,6 +173,7 @@ impl Connection {
             R::GetAcl(q, r) => r.reply(s, self.get_acl(q.default)),
             R::SetAcl(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Restrict(q, r) => r.reply(s, self.restrict(q)),
+            R::Exchange(q, r) => r.reply(s, self.exchange(q).map(|()| NodeExchangeResponse {})),
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
                 s,
@@ -773,6 +774,38 @@ impl Connection {
                 .watches
                 .notify(replaced.id, &[event(WatchKind::SelfRemoved, 0, "")]);
             self.fs.unnamed(replaced.id);
+        }
+        Ok(())
+    }
+
+    /// Swaps the entry `q.name` of this directory with the entry
+    /// `q.other_name` of the directory of `q.target` (MIKSPEC-0049.R33).
+    fn exchange(&self, q: NodeExchangeRequest) -> Result<(), Error> {
+        self.allowed(self.node, Rights::WRITE)?;
+        let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        self.allowed(to, Rights::WRITE)?;
+        let (name, a) = self.find(self.node, &q.name)?.ok_or(Error::NotFound)?;
+        let (other, b) = self.find(to, &q.other_name)?.ok_or(Error::NotFound)?;
+        self.fs
+            .tree
+            .borrow_mut()
+            .exchange(self.node, &name, to, &other, fs::now())
+            .map_err(fs::error)?;
+        // Each node moved from its name to the other's.
+        for (node, (from, old), (into, new)) in [
+            (a, (self.node, &name), (to, &other)),
+            (b, (to, &other), (self.node, &name)),
+        ] {
+            let cookie = self.fs.watches.move_cookie();
+            self.fs
+                .watches
+                .notify(from, &[event(WatchKind::MovedFrom, cookie, old)]);
+            self.fs
+                .watches
+                .notify(into, &[event(WatchKind::MovedTo, cookie, new)]);
+            self.fs
+                .watches
+                .notify(node, &[event(WatchKind::SelfMoved, 0, "")]);
         }
         Ok(())
     }

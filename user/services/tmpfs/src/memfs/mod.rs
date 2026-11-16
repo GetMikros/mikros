@@ -507,6 +507,53 @@ impl<C, S> Tree<C, S> {
         Ok(replaced)
     }
 
+    /// Swaps the entry `name` of `from` with the entry `other` of `to`, so
+    /// that each name leads to the node the other led to. A directory
+    /// cannot go into itself or below it.
+    pub fn exchange(
+        &mut self,
+        from: Id,
+        name: &str,
+        to: Id,
+        other: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        let a = self.lookup(from, name)?;
+        let b = self.lookup(to, other)?;
+        if a == b {
+            return Ok(());
+        }
+        let into_itself = |tree: &Self, id: Id, dir: Id| {
+            tree.get(id).is_some_and(Node::is_directory) && tree.is_within(dir, id)
+        };
+        if into_itself(self, a, to) || into_itself(self, b, from) {
+            return Err(Error::Invalid);
+        }
+        self.dir_mut(from)?.remove(name);
+        self.dir_mut(to)?.remove(other);
+        self.dir_mut(from)?.insert(name, b);
+        self.dir_mut(to)?.insert(other, a);
+        let renamed = |node: &mut Node<C, S>, (d0, n0): (Id, &str), (d1, n1): (Id, &str)| {
+            if let Some(at) = node.names.iter().position(|(d, n)| *d == d0 && n == n0) {
+                node.names[at] = (d1, String::from(n1));
+            }
+            node.times.changed = now;
+        };
+        renamed(
+            self.nodes.get_mut(&a).ok_or(Error::NotFound)?,
+            (from, name),
+            (to, other),
+        );
+        renamed(
+            self.nodes.get_mut(&b).ok_or(Error::NotFound)?,
+            (to, other),
+            (from, name),
+        );
+        self.touch(from, now);
+        self.touch(to, now);
+        Ok(())
+    }
+
     /// Gives the file `name` of `from` the further name `new_name` in
     /// `to`. Directories cannot be linked.
     pub fn link(

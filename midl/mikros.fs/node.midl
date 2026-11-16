@@ -1,4 +1,4 @@
-// MIKSPEC-0049.R29, MIKSPEC-0049.R17, MIKSPEC-0049.R27
+// MIKSPEC-0049.R32, MIKSPEC-0049.R17, MIKSPEC-0049.R27
 
 library mikros.fs;
 using mikros.base;
@@ -144,4 +144,6 @@ protocol Node {
     @38 SetAcl(default bool, entries vector<AclEntry, 64>) -> () error Error;
     @39 Restrict(user u32, app u32, pid u32, koid u64, admin u32,
                  node server_end<Node>) -> () error Error;
+    @40 Exchange(name string<255>, target base.Token,
+                 other_name string<255>) -> () error Error;
 };

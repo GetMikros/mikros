@@ -168,6 +168,7 @@ impl<F: Format> Connection<F> {
                 r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
             }
             R::Restrict(q, r) => r.reply(s, self.restrict(q)),
+            R::Exchange(_, r) => r.reply(s, self.require_write().and(Err(Error::NotSupported))),
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
                 s,

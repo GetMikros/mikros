@@ -218,6 +218,7 @@ impl Connection {
             R::GetAcl(q, r) => r.reply(s, flat(b.get_acl(q.default).await)),
             R::SetAcl(q, r) => r.reply(s, flat(b.set_acl(q.default, q.entries).await)),
             R::Restrict(q, r) => r.reply(s, self.restrict(q).await),
+            R::Exchange(q, r) => r.reply(s, flat(b.exchange(q.name, q.target, q.other_name).await)),
             R::CloneRange(q, r) => r.reply(
                 s,
                 flat(

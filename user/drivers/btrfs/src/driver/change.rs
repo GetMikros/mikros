@@ -9,7 +9,7 @@
 use crate::driver::fs::{Fs, Open, error};
 use crate::driver::node::{Connection, NAME_MAX, TARGET_MAX};
 use crate::driver::watch::event;
-use crate::linux::node::Kind;
+use crate::linux::node::{Kind, RENAME_EXCHANGE};
 use alloc::rc::Rc;
 use alloc::string::String;
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -132,6 +132,58 @@ impl Connection {
             .watches
             .notify(moved.key, &[event(WatchKind::SelfMoved, 0, "")]);
         renamed
+    }
+
+    /// Swaps the entry `q.name` of this directory with the entry
+    /// `q.other_name` of the directory of `q.target` in one step, as
+    /// Linux's `RENAME_EXCHANGE` does, also for subvolumes
+    /// (MIKSPEC-0049.R33).
+    pub(crate) async fn exchange(&self, q: NodeExchangeRequest) -> Result<(), Error> {
+        self.require_write()?;
+        self.directory()?;
+        check_component(&q.name)?;
+        check_component(&q.other_name)?;
+        let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        self.allowed(&self.open, Rights::WRITE)?;
+        self.allowed(&to, Rights::WRITE)?;
+        let (a, name) = self
+            .find(&self.open, &q.name)
+            .await?
+            .ok_or(Error::NotFound)?;
+        let (b, other) = self
+            .find(&to, &q.other_name)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if self.fs.is_booted(&self.open, &name) || self.fs.is_booted(&to, &other) {
+            return Err(Error::AccessDenied);
+        }
+        self.open
+            .node
+            .rename(name.as_bytes(), &to.node, other.as_bytes(), RENAME_EXCHANGE)
+            .map_err(error)?;
+        // The open nodes' names swap, through a name no entry can have.
+        const SWAPPING: &str = "\0";
+        self.fs
+            .renamed(self.open.key, &name, Some((to.key, SWAPPING)));
+        self.fs
+            .renamed(to.key, &other, Some((self.open.key, &name)));
+        self.fs.renamed(to.key, SWAPPING, Some((to.key, &other)));
+        for (node, (from, old), (into, new)) in [
+            (a.key, (self.open.key, &name), (to.key, &other)),
+            (b.key, (to.key, &other), (self.open.key, &name)),
+        ] {
+            let cookie = self.fs.watches.move_cookie();
+            self.fs
+                .watches
+                .notify(from, &[event(WatchKind::MovedFrom, cookie, old)]);
+            self.fs
+                .watches
+                .notify(into, &[event(WatchKind::MovedTo, cookie, new)]);
+            self.fs
+                .watches
+                .notify(node, &[event(WatchKind::SelfMoved, 0, "")]);
+        }
+        Ok(())
     }
 
     pub(crate) async fn link(&self, q: NodeLinkRequest) -> Result<(), Error> {

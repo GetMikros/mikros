@@ -435,6 +435,7 @@ async fn serve(
             R::CreateSymlink(_, r) => r.reply(s, Err(write_denied(rights))),
             R::BindSocket(_, r) => r.reply(s, Err(write_denied(rights))),
             R::ConnectSocket(_, r) => r.reply(s, Err(write_denied(rights))),
+            R::Exchange(_, r) => r.reply(s, Err(write_denied(rights))),
         };
     }
 }

@@ -259,3 +259,25 @@ fn new_nodes_take_their_directorys_default_list() {
         (true, 0o644)
     );
 }
+
+#[test]
+fn exchanges_entries() {
+    let mut t = T::new(0o755, 0, 0);
+    let a = mkdir(&mut t, ROOT, "a");
+    let b = mkdir(&mut t, ROOT, "b");
+    let f = file(&mut t, a, "f");
+    let g = file(&mut t, b, "g");
+    t.exchange(a, "f", b, "g", 2).unwrap();
+    assert_eq!(t.lookup(a, "f").unwrap(), g);
+    assert_eq!(t.lookup(b, "g").unwrap(), f);
+    assert_eq!(t.get(f).unwrap().names, vec![(b, "g".to_string())]);
+    // Directories, in one folder.
+    t.exchange(ROOT, "a", ROOT, "b", 3).unwrap();
+    assert_eq!(t.lookup(ROOT, "a").unwrap(), b);
+    assert_eq!(t.lookup(ROOT, "b").unwrap(), a);
+    // A directory cannot go below itself, and both entries must exist.
+    let c = mkdir(&mut t, b, "c");
+    assert_eq!(t.exchange(ROOT, "a", c, "x", 4), Err(Error::NotFound));
+    file(&mut t, c, "x");
+    assert_eq!(t.exchange(ROOT, "a", c, "x", 4), Err(Error::Invalid));
+}
