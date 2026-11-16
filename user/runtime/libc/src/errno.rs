@@ -35,6 +35,7 @@ pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
 pub const ELOOP: i64 = 40;
 pub const ENOTSUP: i64 = 95;
+pub const ENOEXEC: i64 = 8;
 pub const ETIMEDOUT: i64 = 110;
 pub const ECONNREFUSED: i64 = 111;
 
@@ -55,6 +56,15 @@ pub fn from_status(status: Status) -> i64 {
         -26 => EEXIST,    // ALREADY_EXISTS
         -2 => ENOTSUP,    // NOT_SUPPORTED
         _ => EIO,
+    }
+}
+
+/// The error number of the failed status `status` of `Spawn` or `Exec`:
+/// a file that is not an executable is `ENOEXEC` (MIKSPEC-0033.R39).
+pub fn from_start_status(status: Status) -> i64 {
+    match status {
+        -2 => ENOEXEC, // NOT_SUPPORTED
+        status => from_status(status),
     }
 }
 

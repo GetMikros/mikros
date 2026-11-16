@@ -308,7 +308,7 @@ pub unsafe fn execve(
             unsafe { sys::process_exit(0) };
             unreachable!("process_exit returned")
         }
-        Ok(Err(status)) => -errno::from_status(i64::from(status.into_raw())),
+        Ok(Err(status)) => -errno::from_start_status(i64::from(status.into_raw())),
         Err(_) => -EIO,
     }
 }
@@ -344,7 +344,7 @@ unsafe fn spawn(
             CHILDREN.lock().insert(spawned.pid, spawned.process);
             Ok(spawned.pid)
         }
-        Ok(Err(status)) => Err(errno::from_status(i64::from(status.into_raw()))),
+        Ok(Err(status)) => Err(errno::from_start_status(i64::from(status.into_raw()))),
         Err(_) => Err(EIO),
     }
 }
