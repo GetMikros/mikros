@@ -79,6 +79,20 @@ pub async fn open_in(
     Ok((NodeAsyncClient::new(client, reactor.clone()), opened.r#type))
 }
 
+/// Opens the directory `name` in the directory `dir` of a layer without
+/// following a link, with read and execute rights.
+async fn open_searchable(
+    dir: &NodeAsyncClient,
+    name: &str,
+    reactor: &Reactor,
+) -> Result<NodeAsyncClient, Error> {
+    let (client, server) = endpoints::<Node>().map_err(|_| Error::Io)?;
+    let flags = OpenFlags(OpenFlags::NO_FOLLOW.0 | OpenFlags::DIRECTORY.0);
+    let rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
+    flat(dir.open(name.into(), flags, 0, rights, server).await)?;
+    Ok(NodeAsyncClient::new(client, reactor.clone()))
+}
+
 /// Whether the directory `dir` of a layer holds `name`.
 pub async fn has(dir: &NodeAsyncClient, name: &str, reactor: &Reactor) -> Result<bool, Error> {
     match open_in(dir, name, reactor).await {
@@ -126,6 +140,18 @@ impl Dir {
             };
             match open_in(dir, name, reactor).await {
                 Ok((node, NodeType::Directory)) => {
+                    // A view that runs programs searches its layers'
+                    // directories with execute rights too, where the
+                    // layer allows it, so that their files can be opened
+                    // to run.
+                    let node = match self.view.rights.contains(Rights::EXECUTE) {
+                        true => match open_searchable(dir, name, reactor).await {
+                            Ok(searchable) => searchable,
+                            Err(Error::AccessDenied) => node,
+                            Err(e) => return Err(e),
+                        },
+                        false => node,
+                    };
                     let opaque = has(&node, OPAQUE, reactor).await?;
                     merged[i] = Some(Rc::new(node));
                     found_dir = true;
