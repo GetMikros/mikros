@@ -243,7 +243,7 @@ async fn resolve(
             };
             fs.executable(&at).map(Program::Boot).map_err(status)
         }
-        Origin::Dir { dir, system } => {
+        Origin::Dir { dir, system, .. } => {
             let name = if rest.is_empty() { "." } else { rest };
             let rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
             let file = namespace::open(dir, name, OpenFlags(0), 0, rights, reactor)

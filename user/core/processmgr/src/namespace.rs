@@ -161,11 +161,13 @@ pub enum Origin {
     /// A directory of the boot file system, by its path from the root.
     Boot(String),
     /// A directory on a file system server, through a connection of the
-    /// process manager's own with the entry's rights, and whether it is
-    /// the root's `/system`, whose files are system components.
+    /// process manager's own with the entry's rights, whether it is the
+    /// root's `/system`, whose files are system components, and its path
+    /// on the root file system, when it is a folder there and not a view.
     Dir {
         dir: Rc<NodeAsyncClient>,
         system: bool,
+        real: Option<String>,
     },
 }
 
@@ -185,7 +187,8 @@ impl Programs {
                 String::from("/"),
                 Origin::Dir {
                     dir: root,
-                    system: true
+                    system: true,
+                    real: Some(String::from("/")),
                 }
             )],
         }
@@ -220,6 +223,28 @@ impl Programs {
             })
             .max_by_key(|&(len, ..)| len)
             .map(|(_, origin, rest)| (origin, rest))
+    }
+
+    /// The ID of the installed app whose package holds the file that the
+    /// absolute `path` names, judged by the folder of the root file
+    /// system that the entry it lies in comes from, as the system call
+    /// gate judges `/system` (MIKSPEC-0101.R39).
+    pub fn package_of(&self, path: &str) -> Option<String> {
+        let normal = path::normalize(path)?;
+        let (
+            Origin::Dir {
+                real: Some(real), ..
+            },
+            rest,
+        ) = self.find(&normal)?
+        else {
+            return None;
+        };
+        let file = match (real.trim_end_matches('/'), rest) {
+            (real, "") => String::from(real),
+            (real, rest) => format!("{real}/{rest}"),
+        };
+        package_of(&file).map(String::from)
     }
 }
 
@@ -871,6 +896,7 @@ impl Namespaces {
                 Origin::Dir {
                     dir: Rc::new(view),
                     system: false,
+                    real: None,
                 },
             ),
         );
@@ -1112,6 +1138,7 @@ impl Namespaces {
                             true => Origin::Dir {
                                 dir: Rc::new(made),
                                 system,
+                                real: Some(String::from(normal)),
                             },
                             false => Origin::None,
                         };
@@ -1140,6 +1167,7 @@ impl Namespaces {
                             .map_err(status)?,
                         ),
                         system,
+                        real: Some(String::from(normal)),
                     },
                     false => Origin::None,
                 };

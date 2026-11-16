@@ -209,12 +209,17 @@ async fn new_process(
         return Err(Status::BadState);
     }
     // A command's binary, started without an app ID, gets the command's,
-    // and keeps the namespace that its spawner's app ID gives.
+    // and keeps the namespace that its spawner's app ID gives. A program
+    // of an installed package starts as its app, whoever starts it
+    // (MIKSPEC-0034.R45, MIKSPEC-0101.R39).
     let (app_id, namespace_of) = match named {
         Some(app_id) => (app_id.clone(), app_id),
         None => match commands.app_of(shared, program) {
             Some(command) => (command, from.app_id.clone()),
-            None => (from.app_id.clone(), from.app_id.clone()),
+            None => match from.programs.package_of(&request.path) {
+                Some(app_id) => (app_id.clone(), app_id),
+                None => (from.app_id.clone(), from.app_id.clone()),
+            },
         },
     };
     let user = match request.user {
@@ -222,6 +227,7 @@ async fn new_process(
         user => user,
     };
     let same = app_id == from.app_id && user == from.user;
+    let inherits_app = app_id == from.app_id;
     // The device manager starts drivers that only the root file system
     // holds, and those of the boot image.
     let programs_first = match from.app_id == DEVICE_MANAGER {
@@ -237,6 +243,7 @@ async fn new_process(
         session: from.session,
         app_id,
         namespace_of,
+        inherits_app,
         user,
         login_session: from.login_session,
         // A spawned process keeps its spawner's elevation, and Exec the

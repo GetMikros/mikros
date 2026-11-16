@@ -101,6 +101,9 @@ pub struct NewProcess {
     /// The app ID whose namespace it gets: its own, or for a command, its
     /// spawner's.
     pub namespace_of: String,
+    /// Whether it keeps its spawner's app ID, which for an installed app
+    /// leaves its folder and home as its spawner gives them.
+    pub inherits_app: bool,
     pub user: u32,
     pub login_session: u32,
     /// The administrator who elevated its spawner, 0 for none.
@@ -287,6 +290,7 @@ impl Shared {
             handles,
             mut working_directory,
             umask,
+            inherits_app,
             ..
         } = new;
         let process_koid = koid(&started.process).inspect_err(|_| started.kill())?;
@@ -304,17 +308,21 @@ impl Shared {
             false => arguments,
         };
         // An installed app starts in its folder, which is its home, and
-        // learns how it is installed (MIKSPEC-0101.R7, MIKSPEC-0101.R9).
+        // learns how it is installed (MIKSPEC-0101.R7, MIKSPEC-0101.R9). A
+        // process that keeps its spawner's app ID learns only the latter
+        // (MIKSPEC-0101.R41).
         let arguments = match &app {
             Some(app) => {
                 let cache = alloc::format!("{}/cache", app.folder);
-                let variables = [
-                    ("HOME", app.folder.as_str()),
-                    ("XDG_CACHE_HOME", cache.as_str()),
+                let mut variables = alloc::vec![
                     ("MIKA_MODE", app.mode),
                     ("MIKA_EXECUTABLE", app.executable.as_str()),
                 ];
-                working_directory = app.folder.clone();
+                if !inherits_app {
+                    variables.push(("HOME", app.folder.as_str()));
+                    variables.push(("XDG_CACHE_HOME", cache.as_str()));
+                    working_directory = app.folder.clone();
+                }
                 start::with_variables(arguments, &variables).inspect_err(|_| started.kill())?
             }
             None => arguments,

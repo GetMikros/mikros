@@ -190,6 +190,7 @@ impl Manager {
             session: INIT_GROUP,
             app_id: SERVICE_MANAGER_APP.into(),
             namespace_of: SERVICE_MANAGER_APP.into(),
+            inherits_app: false,
             user: 0,
             login_session: 0,
             admin: 0,
