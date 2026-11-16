@@ -16,8 +16,9 @@ use core::future::poll_fn;
 use core::task::{Poll, Waker};
 use mikros_bootfs::server::Fs;
 use mikros_rt::exec::{Reactor, Spawner};
-use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd, endpoints};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::fs::{Node, NodeAsyncClient};
 use mikros_rt::interfaces::mikros::process::{Launcher, NamespaceEntry, StartupHandle};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, ProcessDirectoryAsyncClient,
@@ -179,6 +180,64 @@ impl Shared {
         self.start_as(pid, new, control, true).await.map(drop)
     }
 
+    /// The entries of `namespace` bound with `Restrict` to the process of
+    /// `identity` and the number of its app ID (MIKSPEC-0050.R44), once
+    /// namespaces come from the root file system: before, they come from
+    /// the process manager alone, and the broker gives numbers only once
+    /// it has read the stored ones there. An entry whose server refuses
+    /// keeps its connection.
+    async fn restricted(
+        &self,
+        namespace: Vec<NamespaceEntry>,
+        identity: &ClientIdentity,
+    ) -> Vec<NamespaceEntry> {
+        if !self.namespaces.on_root() {
+            return namespace;
+        }
+        let app = self.permissions.app_number(&identity.app_id).await;
+        let mut restricted = Vec::with_capacity(namespace.len());
+        for entry in namespace {
+            let NamespaceEntry { path, directory } = entry;
+            let directory = NodeAsyncClient::new(directory, self.reactor.clone());
+            let bound = match endpoints::<Node>() {
+                Ok((client, server)) => {
+                    let ClientIdentity {
+                        pid,
+                        user,
+                        admin,
+                        koid,
+                        ..
+                    } = *identity;
+                    let made = directory
+                        .restrict(user, app, pid, koid, admin, server)
+                        .await;
+                    match made {
+                        Ok(Ok(_)) => Some(client),
+                        _ => None,
+                    }
+                }
+                Err(_) => None,
+            };
+            let kept = match bound {
+                Some(client) => Some(client),
+                None => {
+                    mikros_rt::log!(
+                        Warning,
+                        "process-manager: {path} of pid {} keeps no subject",
+                        identity.pid
+                    );
+                    let raw = directory.channel().ok();
+                    raw.and_then(|raw| duplicate(raw, SAME_RIGHTS).ok())
+                        .map(ClientEnd::new)
+                }
+            };
+            if let Some(directory) = kept {
+                restricted.push(NamespaceEntry { path, directory });
+            }
+        }
+        restricted
+    }
+
     /// Starts `new` as process `pid`, whose record it adds, or replaces
     /// when `replacing`. Its namespace is built first, so that a process
     /// that may not start fails as such whatever its program.
@@ -243,6 +302,7 @@ impl Shared {
             admin,
             koid: process_koid,
         };
+        let namespace = self.restricted(namespace, &identity).await;
         let transferred = self
             .transfer(
                 &started,
