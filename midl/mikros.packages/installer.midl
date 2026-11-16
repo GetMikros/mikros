@@ -1,0 +1,29 @@
+// MIKSPEC-0101.R27
+
+library mikros.packages;
+using mikros.base;
+using mikros.fs;
+
+type PackageInfo = struct {
+    id string<128>;
+    kind string<16>;
+    version string<64>;
+    name string<128>;
+    global bool;
+    owner string<128>;
+};
+
+protocol Installer {
+    @1 Inspect(package client_end<mikros.fs.Node>)
+        -> (manifest vector<u8, 32768>) error base.Status;
+    @2 Install(package client_end<mikros.fs.Node>, global bool,
+               components vector<string<255>, 32>, dependency bool)
+        -> () error base.Status;
+    @3 Remove(id string<128>, global bool, keep_data bool)
+        -> () error base.Status;
+    @4 List(after string<128>) -> (packages vector<PackageInfo, 64>)
+        error base.Status;
+    @5 CreatePublic() -> () error base.Status;
+    @6 CommandOwner(name string<255>, user u32) -> (id string<128>)
+        error base.Status;
+};
