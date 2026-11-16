@@ -62,6 +62,8 @@ async fn check(
     let root = named(directory, reactor, "root").await?;
     let info = ok(root.query_filesystem().await)?.info;
     expect(!info.read_only && info.free_bytes > 0 && info.block_size == 4096)?;
+    // Its ID is its partition's GUID.
+    expect(crate::is_guid(&info.id))?;
     let attributes = ok(root.get_attributes().await)?.attributes;
     expect(attributes.r#type == NodeType::Directory)?;
     let top = names(&root).await?;

@@ -36,6 +36,8 @@ const SERVICE_CLASS: &str = "filesystem";
 /// once; any other value, or none, lets them wait for `Sync` or `Stop`.
 const CACHE: &str = "cache";
 const QUICK_DISCONNECT: &str = "quick-disconnect";
+/// The partition's property that is the file system's ID.
+const PARTITION_GUID: &str = "partition_guid";
 const FOREVER: i64 = i64::MAX;
 
 /// Runs the server of the format `F` in the driver process whose
@@ -144,6 +146,13 @@ fn start<F: Format>(
         .properties
         .iter()
         .any(|p| p.key == CACHE && p.value == QUICK_DISCONNECT);
+    let id = request
+        .device
+        .properties
+        .iter()
+        .find(|p| p.key == PARTITION_GUID)
+        .map(|p| p.value.clone())
+        .unwrap_or_default();
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let block = BlockClient::new(ClientEnd::new(bus));
     let device = BlockDevice::new(block, process, &driver::GATE).ok_or(Status::NoResources)?;
@@ -159,6 +168,7 @@ fn start<F: Format>(
         clock,
         pager,
         quick_disconnect,
+        id,
         reactor.clone(),
         spawner.clone(),
     ));

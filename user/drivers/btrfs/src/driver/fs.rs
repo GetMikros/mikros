@@ -104,6 +104,9 @@ pub struct Fs {
     /// The label of the primary superblock, which `QueryFilesystem`
     /// reports.
     label: String,
+    /// The `partition_guid` of the partition, which `QueryFilesystem`
+    /// reports as the file system's ID.
+    pub id: String,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -213,6 +216,7 @@ impl Fs {
             disk,
             quick_disconnect,
             label: superblock_label(disk),
+            id: String::new(),
             reactor,
             spawner,
         })
@@ -381,6 +385,7 @@ impl Fs {
             free_bytes: statfs.blocks_available * statfs.block_size,
             read_only: self.read_only,
             label: self.label.clone(),
+            id: self.id.clone(),
         })
     }
 }

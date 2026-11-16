@@ -1,16 +1,17 @@
 //! `/volumes`, which the process manager serves over `Node` to the
 //! processes that hold `user.volumes.access`: one entry for each instance of
-//! `device.filesystem` named `volume-<guid>`, which the device manager
+//! `device.filesystem` named `volume-<id>`, which the device manager
 //! registers for every volume but the root file system and the boot EFI
 //! system partition, added and removed as the instances come and go.
 //!
-//! An entry is named after its file system's label, or its partition GUID
+//! An entry is listed by its name: its file system's label, or its ID
 //! when the label is empty or could not be a name, being `.` or `..` or
-//! holding a `/` or a NUL; when an earlier entry has that name, the
-//! smallest number from 2 that makes it unique is appended after a space.
-//! Opening a path
-//! below an entry opens it on that volume's file system, which then serves
-//! the node itself. The directory cannot be changed.
+//! holding a `/` or a NUL; when an earlier entry has that name, or it is
+//! another volume's ID, the smallest number from 2 that makes it unique
+//! is appended after a space. An entry opens both by its name and by its
+//! ID, to the root of its file system. Opening a path below an entry
+//! opens it on that volume's file system, which then serves the node
+//! itself. The directory cannot be changed.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -32,9 +33,11 @@ const ENTRIES_MAX: usize = 64;
 const BLOCK: u32 = 512;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 
-/// A volume: its instance, its entry's name and its file system's root.
+/// A volume: its instance, its ID, its entry's name and its file system's
+/// root.
 struct Volume {
     instance: String,
+    id: String,
     name: String,
     root: Rc<NodeAsyncClient>,
 }
@@ -99,7 +102,7 @@ impl Volumes {
 
     /// Adds the entry of `instance` when it names a volume that has none.
     async fn add(&self, directory: &DirectoryAsyncClient, instance: String) {
-        let Some(guid) = instance.strip_prefix(PREFIX) else {
+        let Some(id) = instance.strip_prefix(PREFIX).map(String::from) else {
             return;
         };
         if self.entries.borrow().iter().any(|v| v.instance == instance) {
@@ -114,14 +117,18 @@ impl Volumes {
             _ => String::new(),
         };
         let mut entries = self.entries.borrow_mut();
-        let taken: Vec<&str> = entries.iter().map(|v| v.name.as_str()).collect();
-        let name = entry_name(&label, guid, &taken);
+        let taken: Vec<&str> = entries
+            .iter()
+            .flat_map(|v| [v.name.as_str(), v.id.as_str()])
+            .collect();
+        let name = entry_name(&label, &id, &taken);
         mikros_rt::log!(
             Info,
             "process-manager: serving {instance} as /volumes/{name}"
         );
         entries.push(Volume {
             instance,
+            id,
             name,
             root: Rc::new(root),
         });
@@ -154,7 +161,7 @@ impl Volumes {
             .entries
             .borrow()
             .iter()
-            .find(|v| v.name == first)
+            .find(|v| v.name == first || v.id == first)
             .map(|v| v.root.clone());
         let Some(root) = root else {
             return Err(match q.flags.contains(OpenFlags::CREATE) {
@@ -212,11 +219,12 @@ impl Volumes {
 /// The most bytes in an entry's name.
 const NAME_MAX: usize = 255;
 
-/// The name of a new entry for a volume with `label` and partition GUID
-/// `guid`, given the names that earlier entries have. The GUID takes the
-/// place of a label that cannot be a name, and of one whose name, with
-/// the suffix that makes it unique, would be longer than `NAME_MAX`.
-fn entry_name(label: &str, guid: &str, taken: &[&str]) -> String {
+/// The name of a new entry for a volume with `label` and ID `id`, given
+/// the names that earlier entries have and the IDs of the other volumes.
+/// The ID takes the place of a label that cannot be a name, and of one
+/// whose name, with the suffix that makes it unique, would be longer than
+/// `NAME_MAX`.
+fn entry_name(label: &str, id: &str, taken: &[&str]) -> String {
     let usable = !label.is_empty() && label != "." && label != ".." && !label.contains(['/', '\0']);
     if usable {
         let name = unique(label, taken);
@@ -224,11 +232,11 @@ fn entry_name(label: &str, guid: &str, taken: &[&str]) -> String {
             return name;
         }
     }
-    unique(guid, taken)
+    unique(id, taken)
 }
 
-/// `base`, or, when an earlier entry has that name, `base` with a space
-/// and the smallest number from 2 that no earlier entry has.
+/// `base`, or, when `taken` holds it, `base` with a space and the
+/// smallest number from 2 that `taken` does not hold.
 fn unique(base: &str, taken: &[&str]) -> String {
     if !taken.contains(&base) {
         return String::from(base);
@@ -324,6 +332,7 @@ async fn serve(volumes: Rc<Volumes>, end: ServerEnd<Node>, rights: Rights) {
                         free_bytes: 0,
                         read_only: true,
                         label: String::new(),
+                        id: String::new(),
                     },
                 }),
             ),

@@ -105,6 +105,7 @@ impl Connection {
                         free_bytes: 0,
                         read_only: true,
                         label: String::new(),
+                        id: String::new(),
                     },
                 }),
             ),

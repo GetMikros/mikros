@@ -6,6 +6,7 @@ use crate::node;
 use crate::time::Clock;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
@@ -55,6 +56,9 @@ struct Lock {
 }
 
 pub struct Fs<F: Format> {
+    /// The `partition_guid` of the partition, which `QueryFilesystem`
+    /// reports as the file system's ID.
+    id: String,
     pub volume: RefCell<F>,
     nodes: RefCell<BTreeMap<u64, Open<F::Node>>>,
     next: Cell<u64>,
@@ -96,10 +100,12 @@ impl<F: Format> Fs<F> {
         clock: Clock,
         pager: OwnedHandle,
         quick_disconnect: bool,
+        id: String,
         reactor: Reactor,
         spawner: Spawner,
     ) -> Fs<F> {
         Fs {
+            id,
             volume: RefCell::new(volume),
             nodes: RefCell::new(BTreeMap::new()),
             next: Cell::new(1),
@@ -350,6 +356,7 @@ impl<F: Format> Fs<F> {
             free_bytes: free * cluster,
             read_only: volume.read_only(),
             label: volume.label().map_err(error)?.unwrap_or_default(),
+            id: self.id.clone(),
         })
     }
 

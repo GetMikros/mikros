@@ -75,6 +75,8 @@ const QUICK_DISCONNECT: &str = "quick-disconnect";
 /// to show as `system`, and whether the system is live.
 const SYSTEM: &str = "system";
 const LIVE: &str = "live";
+/// The partition's property that is the file system's ID.
+const PARTITION_GUID: &str = "partition_guid";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {
@@ -217,7 +219,7 @@ fn start(
     })?;
     // The mount stays for the rest of the program, as its nodes do.
     let mount: &'static Mount = Box::leak(Box::new(mount));
-    let fs = Fs::new(
+    let mut fs = Fs::new(
         mount,
         read_only,
         disk,
@@ -237,6 +239,7 @@ fn start(
         }
         _ => Status::Internal,
     })?;
+    fs.id = property(PARTITION_GUID).unwrap_or_default();
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     Ok((Rc::new(fs), manager))
 }

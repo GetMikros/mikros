@@ -265,6 +265,7 @@ impl Fs {
             free_bytes: 0,
             read_only: false,
             label: alloc::string::String::new(),
+            id: alloc::string::String::new(),
         }
     }
 }
