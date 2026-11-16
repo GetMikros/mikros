@@ -182,10 +182,12 @@ impl Controller {
             self.spawner.spawn(async move {
                 let reactor = controller.reactor.clone();
                 while reactor.signals(raw, SIGNALED).await.is_ok() {
-                    controller.regs.clear_pending();
-                    controller.process_events();
+                    // Acknowledged first, so that an event posted while
+                    // the ring is read signals again.
                     // SAFETY: the call takes no pointers.
                     unsafe { sys::interrupt_ack(raw) };
+                    controller.regs.clear_pending();
+                    controller.process_events();
                 }
             });
             return Ok(());
