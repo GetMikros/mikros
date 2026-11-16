@@ -343,7 +343,7 @@ async fn start(
                 first_lba: 0,
                 last_lba: info.block_count - 1,
                 name: String::new(),
-                partition_guid: found.identifier,
+                partition_guid: crate::gpt::whole_disk_guid(&found.identifier, &info.serial),
                 no_automount: false,
                 fs: Some(found.id),
             }]

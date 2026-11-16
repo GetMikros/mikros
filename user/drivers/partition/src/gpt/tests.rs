@@ -48,6 +48,16 @@ fn header_block(lba: u64, entries: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn names_a_whole_disk_by_its_file_system_and_serial() {
+    assert_eq!(whole_disk_guid("1234-abcd", ""), "1234-abcd");
+    // zlib's crc32 of "123456789" is 0xcbf43926.
+    assert_eq!(
+        whole_disk_guid("1234-abcd", "123456789"),
+        "1234-abcd-cbf43926"
+    );
+}
+
+#[test]
 fn computes_the_crc32_of_gpt() {
     assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
     assert_eq!(crc32(b""), 0);

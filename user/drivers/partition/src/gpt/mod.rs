@@ -62,6 +62,18 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().expect("8 bytes"))
 }
 
+/// The `partition_guid` of a whole disk that holds a file system with
+/// `identifier`, on a disk with `serial`: the identifier, and when the
+/// serial is not empty, a hyphen and the CRC32 of its bytes in eight
+/// lowercase hexadecimal digits.
+pub fn whole_disk_guid(identifier: &str, serial: &str) -> String {
+    let mut guid = String::from(identifier);
+    if !serial.is_empty() {
+        let _ = write!(guid, "-{:08x}", crc32(serial.as_bytes()));
+    }
+    guid
+}
+
 /// The CRC32 of `bytes`, as GPT computes it: reflected, with polynomial
 /// 0x04C11DB7, starting at all ones and inverted at the end.
 pub fn crc32(bytes: &[u8]) -> u32 {
