@@ -118,11 +118,15 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let folder = header.working_directory;
     let environment = strings(&header.arguments).map(|(_, e)| e);
     let mut home = None;
+    let mut home_dir = None;
     let mut libraries = None;
     for entry in managed.namespace {
         match entry.path.as_str() {
             "/libraries" => libraries = Some(entry.directory),
-            path if path.starts_with("/users/") => home = Some(entry.path),
+            path if path.starts_with("/users/") => {
+                home = Some(entry.path);
+                home_dir = Some(entry.directory);
+            }
             _ => {}
         }
     }
@@ -163,6 +167,23 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 .open("README".into(), OpenFlags(0), 0, Rights::READ, server)
                 .await;
             check(matches!(opened, Ok(Ok(_))), 13)?;
+            // The image made the README user 0's; the accounts service
+            // made everything in bob's home that user 0 owned bob's.
+            let home = NodeAsyncClient::new(home_dir.ok_or(16)?, reactor.clone());
+            let (readme, server) = endpoints::<Node>().map_err(|_| 16)?;
+            let opened = home
+                .open(
+                    "libraries/README".into(),
+                    OpenFlags(0),
+                    0,
+                    Rights::READ,
+                    server,
+                )
+                .await;
+            check(matches!(opened, Ok(Ok(_))), 16)?;
+            let readme = NodeAsyncClient::new(readme, reactor.clone());
+            let owner = readme.get_attributes().await.ok().and_then(|r| r.ok());
+            check(owner.is_some_and(|a| a.attributes.owner == user), 16)?;
         }
         let token = token.ok_or(6)?;
         let (client, server) = endpoints::<Terminal>().map_err(|_| 6)?;

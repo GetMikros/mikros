@@ -27,8 +27,10 @@ const FOLDERS: [&str; 9] = [
     "libraries",
     "apps",
 ];
-/// The folder of a user's apps.
+/// The folder of a user's apps, and the folder of an app's package in
+/// it.
 const APPS: &str = "apps";
+const PACKAGE: &str = "package";
 /// The mode of new folders: read, write and search for their owner.
 const FOLDER_MODE: u32 = 0o700;
 
@@ -135,6 +137,62 @@ pub async fn own(
         for inner in folder_names(&app).await? {
             let inner = open(&app, &inner, OpenFlags::DIRECTORY, reactor).await?;
             claim(&inner, owner).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Makes every file, folder and link below the home folder `name` in
+/// `homes` that user 0 owns `owner`'s, except inside the `package`
+/// folders of the user's apps.
+pub async fn own_all(
+    homes: &NodeAsyncClient,
+    name: &str,
+    owner: u32,
+    reactor: &Reactor,
+) -> Result<(), Status> {
+    let home = open(homes, name, OpenFlags::DIRECTORY, reactor).await?;
+    // Each folder to walk, with its path below the home folder.
+    let mut folders = alloc::vec![(home, alloc::vec::Vec::<alloc::string::String>::new())];
+    while let Some((dir, path)) = folders.pop() {
+        let mut cookie = 0;
+        loop {
+            let listed = match dir.read_directory(cookie, true).await {
+                Ok(Ok(listed)) => listed,
+                Ok(Err(e)) => return Err(status(e)),
+                Err(_) => return Err(Status::Io),
+            };
+            if listed.entries.is_empty() {
+                break;
+            }
+            cookie = listed.next;
+            for entry in listed.entries {
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+                let folder = entry.r#type == NodeType::Directory;
+                // `apps/<id>/package` is the install service's.
+                if folder && path.len() == 2 && path[0] == APPS && entry.name == PACKAGE {
+                    continue;
+                }
+                let owned_by_0 = entry.attributes.as_ref().is_some_and(|a| a.owner == 0);
+                if !owned_by_0 && !folder {
+                    continue;
+                }
+                let flags = match folder {
+                    true => OpenFlags::DIRECTORY,
+                    false => OpenFlags::NO_FOLLOW,
+                };
+                let node = open(&dir, &entry.name, flags, reactor).await?;
+                if owned_by_0 {
+                    set_owner(&node, owner).await?;
+                }
+                if folder {
+                    let mut inner = path.clone();
+                    inner.push(entry.name);
+                    folders.push((node, inner));
+                }
+            }
         }
     }
     Ok(())

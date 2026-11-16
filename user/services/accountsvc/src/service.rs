@@ -188,8 +188,9 @@ impl Service {
     }
 
     /// Makes the home folders of the existing users, and the folders in
-    /// them, the users' own where they have another owner. A failure for
-    /// one user is logged, and the others are still done.
+    /// them, the users' own where they have another owner, and, once for
+    /// each user, everything in them that user 0 owns. A failure for one
+    /// user is logged, and the others are still done.
     pub async fn own_homes(&self) {
         let Some(homes) = self.homes.as_ref() else {
             return;
@@ -214,6 +215,26 @@ impl Service {
                 mikros_rt::log!(
                     Error,
                     "accounts: making /users/{name} the user's own failed: {e:?}"
+                );
+                continue;
+            }
+            // Once for each user, everything in it that user 0 owns.
+            if self.store.owned(id) {
+                continue;
+            }
+            let walked = crate::homes::own_all(homes, &name, id, &self.reactor).await;
+            let recorded = match walked {
+                Ok(()) => self
+                    .store
+                    .mark_owned(id, &self.reactor)
+                    .await
+                    .map_err(|_| Status::Io),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = recorded {
+                mikros_rt::log!(
+                    Error,
+                    "accounts: making the files in /users/{name} the user's own failed: {e:?}"
                 );
             }
         }
