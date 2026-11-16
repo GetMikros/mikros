@@ -131,6 +131,7 @@ fn create(
         rights: q.rights,
         roots,
         tokens: RefCell::new(BTreeMap::new()),
+        bound: false,
         reactor: reactor.clone(),
         spawner: spawner.clone(),
     });

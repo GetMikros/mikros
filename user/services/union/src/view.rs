@@ -28,6 +28,9 @@ pub struct View {
     /// The directories that the view's tokens name, by the token's
     /// object ID.
     pub tokens: RefCell<BTreeMap<u64, Dir>>,
+    /// Whether the layers' connections have a subject, that of the
+    /// connections to the view (MIKSPEC-0051.R15).
+    pub bound: bool,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }

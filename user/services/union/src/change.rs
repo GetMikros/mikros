@@ -43,9 +43,39 @@ async fn open_with(
     Ok(NodeAsyncClient::new(client, dir_of.view.reactor.clone()))
 }
 
-/// The mode of the directory at `path` from the root of a layer after
-/// the first, the first that has one there, or 0o755.
-async fn lower_mode(dir: &Dir, path: &[alloc::string::String]) -> u32 {
+/// Gives `copy` the access list of `source`, when it is extended, and,
+/// for directories, its default list, when it has one (MIKSPEC-0051.R15).
+/// A layer that stores no lists keeps none.
+pub async fn copy_lists(
+    source: &NodeAsyncClient,
+    copy: &NodeAsyncClient,
+    directory: bool,
+) -> Result<(), Error> {
+    let access = flat(source.get_acl(false).await)?.entries;
+    let mut sets = alloc::vec![(false, access)];
+    if directory {
+        sets.push((true, flat(source.get_acl(true).await)?.entries));
+    }
+    for (default, entries) in sets {
+        // The three entries of the mode, or no default list.
+        let plain = match default {
+            true => entries.is_empty(),
+            false => entries.len() == 3,
+        };
+        if plain {
+            continue;
+        }
+        match flat(copy.set_acl(default, entries).await) {
+            Ok(_) | Err(Error::NotSupported) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// The directory at `path` from the root of a layer after the first,
+/// the first that has one there.
+async fn lower_dir(dir: &Dir, path: &[alloc::string::String]) -> Option<Rc<NodeAsyncClient>> {
     for root in dir.view.roots.iter().skip(1) {
         let mut current = root.clone();
         let mut found = true;
@@ -58,17 +88,17 @@ async fn lower_mode(dir: &Dir, path: &[alloc::string::String]) -> u32 {
                 }
             }
         }
-        if found && let Ok(attrs) = flat(current.get_attributes().await) {
-            return attrs.attributes.mode;
+        if found {
+            return Some(current);
         }
     }
-    0o755
+    None
 }
 
 impl Dir {
     /// This directory in the writable layer, read and write, made there
     /// with the directories above it when it is not, each with the mode
-    /// of the first lower layer that has it.
+    /// and lists of the first lower layer that has it.
     pub async fn upper(&self) -> Result<Rc<NodeAsyncClient>, Error> {
         if !self.view.writable {
             return Err(Error::ReadOnly);
@@ -79,11 +109,21 @@ impl Dir {
             current = match opened {
                 Ok(node) => Rc::new(node),
                 Err(Error::NotFound) => {
-                    let mode = lower_mode(self, &self.path[..=at]).await;
+                    let lower = lower_dir(self, &self.path[..=at]).await;
+                    let mode = match &lower {
+                        Some(lower) => {
+                            flat(lower.get_attributes().await).map_or(0o755, |a| a.attributes.mode)
+                        }
+                        None => 0o755,
+                    };
                     let flags = OpenFlags(
                         OpenFlags::CREATE.0 | OpenFlags::DIRECTORY.0 | OpenFlags::EXCLUSIVE.0,
                     );
-                    Rc::new(open_with(&current, name, flags, mode, RW, self).await?)
+                    let made = open_with(&current, name, flags, mode, RW, self).await?;
+                    if let Some(lower) = &lower {
+                        copy_lists(lower, &made, true).await?;
+                    }
+                    Rc::new(made)
                 }
                 Err(e) => return Err(e),
             };
@@ -114,8 +154,8 @@ impl Dir {
     }
 
     /// Copies the file, link or socket `name` of layer `layer` up into
-    /// the writable layer, with its mode and times, and returns that
-    /// layer's directory.
+    /// the writable layer, with its mode, times and lists, and returns
+    /// that layer's directory.
     pub async fn copy_up(
         &self,
         name: &str,
@@ -158,6 +198,7 @@ impl Dir {
             }
             Err(e) => return Err(e),
         }
+        copy_lists(&source, &copy, false).await?;
         let mask = AttributeMask(AttributeMask::ACCESSED.0 | AttributeMask::MODIFIED.0);
         flat(
             copy.set_attributes(mask, 0, attrs.accessed, attrs.modified)

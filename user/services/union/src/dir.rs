@@ -1,10 +1,13 @@
 //! One connection to a directory of a view.
 
 use crate::change::check_name;
-use crate::view::{Dir, Found, flat, open_in};
+use crate::view::{Dir, Found, View, flat, open_in};
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use mikros_rt::interfaces::__midl::ServerEnd;
+use core::cell::RefCell;
+use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::fs::*;
 
 /// The most entries one directory read returns, the limit of its reply.
@@ -72,8 +75,8 @@ impl Connection {
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::SetOwner(q, r) => r.reply(s, self.set_owner(q.owner).await),
             R::GetAcl(q, r) => r.reply(s, self.get_acl(q.default).await),
-            R::SetAcl(_, r) => r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported))),
-            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::SetAcl(q, r) => r.reply(s, self.set_acl(q).await),
+            R::Restrict(q, r) => r.reply(s, self.restrict(q).await),
             R::Lock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::Unlock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::CloneRange(_, r) => r.reply(s, Err(Error::IsDirectory)),
@@ -205,6 +208,52 @@ impl Connection {
     async fn attributes(&self) -> Result<NodeGetAttributesResponse, Error> {
         let (_, first) = self.dir.first().ok_or(Error::NotFound)?;
         flat(first.get_attributes().await)
+    }
+
+    /// Sets a list of this directory in the writable layer, which it is
+    /// copied up to first.
+    async fn set_acl(&self, q: NodeSetAclRequest) -> Result<NodeSetAclResponse, Error> {
+        self.may_change()?;
+        let upper = self.dir.upper().await?;
+        flat(upper.set_acl(q.default, q.entries).await)
+    }
+
+    /// Serves `q.node` as a connection to this directory with the same
+    /// rights in a view of its own, whose layers' connections are bound
+    /// to the subject of `q` (MIKSPEC-0049.R30, MIKSPEC-0051.R15):
+    /// `BAD_STATE` when this one's are already.
+    async fn restrict(&self, q: NodeRestrictRequest) -> Result<NodeRestrictResponse, Error> {
+        let view = &self.dir.view;
+        if view.bound {
+            return Err(Error::BadState);
+        }
+        let mut roots = Vec::with_capacity(view.roots.len());
+        for root in &view.roots {
+            let (client, server) = endpoints::<Node>().map_err(|_| Error::Io)?;
+            flat(
+                root.restrict(q.user, q.app, q.pid, q.koid, q.admin, server)
+                    .await,
+            )?;
+            roots.push(Rc::new(NodeAsyncClient::new(client, view.reactor.clone())));
+        }
+        let bound = Rc::new(View {
+            writable: view.writable,
+            rights: view.rights,
+            roots,
+            tokens: RefCell::new(BTreeMap::new()),
+            bound: true,
+            reactor: view.reactor.clone(),
+            spawner: view.spawner.clone(),
+        });
+        let mut dir = Dir::root(bound);
+        for name in &self.dir.path {
+            dir = match dir.lookup(name).await? {
+                Found::Dir(found) => found,
+                _ => return Err(Error::NotFound),
+            };
+        }
+        self.dir.view.spawner.spawn(serve(dir, q.node, self.rights));
+        Ok(NodeRestrictResponse {})
     }
 
     async fn get_acl(&self, default: bool) -> Result<NodeGetAclResponse, Error> {
