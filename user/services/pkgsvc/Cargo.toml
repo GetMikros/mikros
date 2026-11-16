@@ -1,0 +1,20 @@
+[package]
+name = "pkgsvc"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-mika = { path = "../../lib/mika" }
+mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
+
+# The install service, which installs, updates and removes packages.
+[package.metadata.mikros]
+kind = "service"
+image = "system"
+manifest = "pkgsvc.yaml"
+
+# The parts that only run on Mikros are left out of the host's tests.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mikros"))'] }

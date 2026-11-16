@@ -1,0 +1,7 @@
+# The service manifest of the install service, installed as
+# system/services/system.pkgsvc/service.yaml.
+name: pkgsvc
+binary: /system/services/system.pkgsvc/pkgsvc
+start: on-demand
+provides:
+  - protocol: mikros.packages.Installer

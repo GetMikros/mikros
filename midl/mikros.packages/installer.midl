@@ -1,4 +1,4 @@
-// MIKSPEC-0101.R27
+// MIKSPEC-0101.R35
 
 library mikros.packages;
 using mikros.base;
@@ -17,7 +17,8 @@ protocol Installer {
     @1 Inspect(package client_end<mikros.fs.Node>)
         -> (manifest vector<u8, 32768>) error base.Status;
     @2 Install(package client_end<mikros.fs.Node>, global bool,
-               components vector<string<255>, 32>, dependency bool)
+               components vector<string<255>, 32>, dependency bool,
+               dev bool)
         -> () error base.Status;
     @3 Remove(id string<128>, global bool, keep_data bool)
         -> () error base.Status;
