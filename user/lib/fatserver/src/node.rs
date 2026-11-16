@@ -25,6 +25,9 @@ struct Connection<F: Format> {
     rights: Rights,
     cursor: u64,
     append: bool,
+    /// Whether the connection has a subject (MIKSPEC-0049.R30), which
+    /// nothing here decides by, as FAT and exFAT store no lists.
+    bound: bool,
     /// The owner of the connection's locks.
     owner: u64,
 }
@@ -38,6 +41,7 @@ pub async fn serve<F: Format>(
     target: Target,
     rights: Rights,
     append: bool,
+    bound: bool,
 ) {
     let server = NodeAsyncServer::new(end, fs.reactor.clone());
     let owner = fs.owner();
@@ -47,6 +51,7 @@ pub async fn serve<F: Format>(
         rights,
         cursor: 0,
         append,
+        bound,
         owner,
     };
     while let Ok(request) = server.next().await {
@@ -155,18 +160,14 @@ impl<F: Format> Connection<F> {
             }
             R::GetAcl(q, r) => {
                 let entries = self.fs.attributes(self.target).and_then(|a| {
-                    mikros_acl::midl::of_mode(
-                        a.mode,
-                        a.r#type == NodeType::Directory,
-                        q.default,
-                    )
+                    mikros_acl::midl::of_mode(a.mode, a.r#type == NodeType::Directory, q.default)
                 });
                 r.reply(s, entries.map(|entries| NodeGetAclResponse { entries }))
             }
             R::SetAcl(_, r) => {
                 r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
             }
-            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::Restrict(q, r) => r.reply(s, self.restrict(q)),
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
                 s,
@@ -178,6 +179,17 @@ impl<F: Format> Connection<F> {
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::ConnectSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
         };
+    }
+
+    /// Serves `q.node` as a connection to the same node with the same
+    /// rights and a subject: `BAD_STATE` when this one has one.
+    fn restrict(&self, q: NodeRestrictRequest) -> Result<NodeRestrictResponse, Error> {
+        if self.bound {
+            return Err(Error::BadState);
+        }
+        self.fs
+            .serve(q.node, self.target, self.rights, self.append, true);
+        Ok(NodeRestrictResponse {})
     }
 
     fn require(&self, rights: Rights) -> Result<(), Error> {
@@ -236,7 +248,8 @@ impl<F: Format> Connection<F> {
 
     fn clone(&self, q: NodeCloneRequest) -> Result<NodeCloneResponse, Error> {
         self.require(q.rights)?;
-        self.fs.serve(q.node, self.target, q.rights, self.append);
+        self.fs
+            .serve(q.node, self.target, q.rights, self.append, self.bound);
         Ok(NodeCloneResponse {})
     }
 
@@ -378,7 +391,8 @@ impl<F: Format> Connection<F> {
         let (parts, trailing) = components(&q.path)?;
         let Some((&last, within)) = parts.split_last() else {
             // The path names this directory itself.
-            self.fs.serve(q.node, self.target, q.rights, false);
+            self.fs
+                .serve(q.node, self.target, q.rights, false, self.bound);
             return Ok(NodeOpenResponse {
                 r#type: NodeType::Directory,
                 redirect: None,
@@ -428,7 +442,7 @@ impl<F: Format> Connection<F> {
             truncated?;
         }
         let append = q.flags.contains(OpenFlags::APPEND);
-        self.fs.serve(q.node, target, q.rights, append);
+        self.fs.serve(q.node, target, q.rights, append, self.bound);
         Ok(NodeOpenResponse {
             r#type,
             redirect: None,

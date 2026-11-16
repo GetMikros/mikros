@@ -145,21 +145,22 @@ impl<F: Format> Fs<F> {
     }
 
     /// Serves `end` as a connection to `target` with `rights`, writing at
-    /// the end when `append`. The connection holds `target` until it
-    /// closes.
+    /// the end when `append`, with a subject when `bound`. The connection
+    /// holds `target` until it closes.
     pub fn serve(
         self: &Rc<Self>,
         end: ServerEnd<Node>,
         target: Target,
         rights: Rights,
         append: bool,
+        bound: bool,
     ) {
         if let Target::Node(id) = target
             && let Some(open) = self.nodes.borrow_mut().get_mut(&id)
         {
             open.refs += 1;
         }
-        let task = node::serve(self.clone(), end, target, rights, append);
+        let task = node::serve(self.clone(), end, target, rights, append, bound);
         self.spawner.spawn(task);
     }
 
@@ -487,7 +488,7 @@ async fn serve_filesystem<F: Format>(fs: Rc<Fs<F>>, end: ServerEnd<Filesystem>) 
                 if q.rights.contains(Rights::WRITE) && fs.read_only() {
                     r.reply(s, Err(Error::ReadOnly))
                 } else {
-                    fs.serve(q.node, Target::Root, q.rights, false);
+                    fs.serve(q.node, Target::Root, q.rights, false, false);
                     r.reply(s, Ok(FilesystemGetRootResponse {}))
                 }
             }

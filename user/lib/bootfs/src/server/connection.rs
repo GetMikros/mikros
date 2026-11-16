@@ -21,17 +21,27 @@ struct Connection {
     fs: Rc<Fs>,
     node: usize,
     rights: Rights,
+    /// Whether the connection has a subject (MIKSPEC-0049.R30), which
+    /// nothing here decides by, as the boot file system has no lists.
+    bound: bool,
     cursor: u64,
 }
 
-/// Serves the connection on `end` to `node` with `rights` until the
-/// client closes it or sends an invalid message.
-pub(super) async fn serve(fs: Rc<Fs>, end: ServerEnd<Node>, node: usize, rights: Rights) {
+/// Serves the connection on `end` to `node` with `rights`, with a subject
+/// when `bound`, until the client closes it or sends an invalid message.
+pub(super) async fn serve(
+    fs: Rc<Fs>,
+    end: ServerEnd<Node>,
+    node: usize,
+    rights: Rights,
+    bound: bool,
+) {
     let server = NodeAsyncServer::new(end, fs.reactor.clone());
     let mut connection = Connection {
         fs,
         node,
         rights,
+        bound,
         cursor: 0,
     };
     while let Ok(request) = server.next().await {
@@ -81,17 +91,14 @@ impl Connection {
             }
             R::GetAcl(q, r) => {
                 let a = self.attributes(self.node);
-                let entries = mikros_acl::midl::of_mode(
-                    a.mode,
-                    a.r#type == NodeType::Directory,
-                    q.default,
-                );
+                let entries =
+                    mikros_acl::midl::of_mode(a.mode, a.r#type == NodeType::Directory, q.default);
                 r.reply(s, entries.map(|entries| NodeGetAclResponse { entries }))
             }
             R::SetAcl(_, r) => {
                 r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
             }
-            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::Restrict(q, r) => r.reply(s, self.restrict(q)),
             // Everything that would change the file system.
             R::SetAttributes(_, r) => r.reply(s, Err(self.write_denied())),
             R::Write(_, r) => r.reply(s, Err(self.write_denied())),
@@ -124,6 +131,16 @@ impl Connection {
             true => Ok(()),
             false => Err(Error::AccessDenied),
         }
+    }
+
+    /// Serves `q.node` as a connection to the same node with the same
+    /// rights and a subject: `BAD_STATE` when this one has one.
+    fn restrict(&self, q: NodeRestrictRequest) -> Result<NodeRestrictResponse, Error> {
+        if self.bound {
+            return Err(Error::BadState);
+        }
+        self.fs.serve(q.node, self.node, self.rights, true);
+        Ok(NodeRestrictResponse {})
     }
 
     fn kind(&self, node: usize) -> &NodeKind {
@@ -169,7 +186,7 @@ impl Connection {
 
     fn clone(&self, q: NodeCloneRequest) -> Result<NodeCloneResponse, Error> {
         self.require(q.rights)?;
-        self.fs.serve(q.node, self.node, q.rights);
+        self.fs.serve(q.node, self.node, q.rights, self.bound);
         Ok(NodeCloneResponse {})
     }
 
@@ -243,7 +260,7 @@ impl Connection {
             return Err(self.write_denied());
         }
         let r#type = self.attributes(node).r#type;
-        self.fs.serve(q.node, node, q.rights);
+        self.fs.serve(q.node, node, q.rights, self.bound);
         Ok(NodeOpenResponse {
             r#type,
             redirect: None,

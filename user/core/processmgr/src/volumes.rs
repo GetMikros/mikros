@@ -11,7 +11,8 @@
 //! is appended after a space. An entry opens both by its name and by its
 //! ID, to the root of its file system. Opening a path below an entry
 //! opens it on that volume's file system, which then serves the node
-//! itself. The directory cannot be changed.
+//! itself, for the subject of the connection that opened it, if it has
+//! one (MIKSPEC-0050.R44). The directory cannot be changed.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -19,6 +20,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use mikros_acl::Subject;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -61,14 +63,14 @@ impl Volumes {
     /// nodes opened through it may have.
     pub fn directory(self: &Rc<Self>) -> Result<ClientEnd<Node>, Status> {
         let (client, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
-        self.serve(server, RW);
+        self.serve(server, RW, None);
         Ok(client)
     }
 
-    fn serve(self: &Rc<Self>, end: ServerEnd<Node>, rights: Rights) {
+    fn serve(self: &Rc<Self>, end: ServerEnd<Node>, rights: Rights, subject: Option<Subject>) {
         let volumes = self.clone();
         self.spawner
-            .spawn(async move { serve(volumes, end, rights).await });
+            .spawn(async move { serve(volumes, end, rights, subject).await });
     }
 
     /// Adds and removes entries as the instances of volumes come and go
@@ -134,11 +136,13 @@ impl Volumes {
         });
     }
 
-    /// Opens `q.path` below the directory, for a connection with `rights`.
+    /// Opens `q.path` below the directory, for a connection with `rights`
+    /// and `subject`, which a node of a volume gets.
     async fn open(
         self: &Rc<Self>,
         q: NodeOpenRequest,
         rights: Rights,
+        subject: Option<Subject>,
     ) -> Result<NodeOpenResponse, Error> {
         if !rights.contains(q.rights) {
             return Err(Error::AccessDenied);
@@ -151,7 +155,7 @@ impl Volumes {
             if q.flags.contains(OpenFlags::TRUNCATE) {
                 return Err(Error::IsDirectory);
             }
-            self.serve(q.node, q.rights);
+            self.serve(q.node, q.rights, subject);
             return Ok(NodeOpenResponse {
                 r#type: NodeType::Directory,
                 redirect: None,
@@ -174,14 +178,33 @@ impl Volumes {
             true => String::from("."),
             false => rest.join("/"),
         };
-        match root.open(rest, q.flags, q.mode, q.rights, q.node).await {
-            Ok(Ok(opened)) => Ok(NodeOpenResponse {
-                r#type: opened.r#type,
-                redirect: opened.redirect,
-            }),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(Error::Io),
+        let Some(subject) = subject else {
+            return flat(root.open(rest, q.flags, q.mode, q.rights, q.node).await).map(|o| {
+                NodeOpenResponse {
+                    r#type: o.r#type,
+                    redirect: o.redirect,
+                }
+            });
+        };
+        // The node opens for the process manager, and is then bound to the
+        // subject.
+        let (node, server) = endpoints::<Node>().map_err(|_| Error::Io)?;
+        let opened = flat(root.open(rest, q.flags, q.mode, q.rights, server).await)?;
+        if opened.redirect.is_none() {
+            let node = NodeAsyncClient::new(node, self.reactor.clone());
+            let Subject {
+                user,
+                app,
+                pid,
+                koid,
+                admin,
+            } = subject;
+            flat(node.restrict(user, app, pid, koid, admin, q.node).await)?;
         }
+        Ok(NodeOpenResponse {
+            r#type: opened.r#type,
+            redirect: opened.redirect,
+        })
     }
 
     /// The entries from `cookie`, at most `ENTRIES_MAX`.
@@ -306,9 +329,20 @@ fn directory_attributes(inode: u64) -> Attributes {
     }
 }
 
-/// Serves the connection on `end` to the directory with `rights` until
-/// the client closes it or sends an invalid message.
-async fn serve(volumes: Rc<Volumes>, end: ServerEnd<Node>, rights: Rights) {
+fn flat<T>(
+    reply: Result<Result<T, Error>, mikros_rt::interfaces::__midl::Error>,
+) -> Result<T, Error> {
+    reply.unwrap_or(Err(Error::Io))
+}
+
+/// Serves the connection on `end` to the directory with `rights` and
+/// `subject` until the client closes it or sends an invalid message.
+async fn serve(
+    volumes: Rc<Volumes>,
+    end: ServerEnd<Node>,
+    rights: Rights,
+    subject: Option<Subject>,
+) {
     use NodeRequest as R;
     let server = NodeAsyncServer::new(end, volumes.reactor.clone());
     while let Ok(request) = server.next().await {
@@ -324,7 +358,7 @@ async fn serve(volumes: Rc<Volumes>, end: ServerEnd<Node>, rights: Rights) {
             ),
             R::Clone(q, r) => match rights.contains(q.rights) {
                 true => {
-                    volumes.serve(q.node, q.rights);
+                    volumes.serve(q.node, q.rights, subject);
                     r.reply(s, Ok(NodeCloneResponse {}))
                 }
                 false => r.reply(s, Err(Error::AccessDenied)),
@@ -345,7 +379,7 @@ async fn serve(volumes: Rc<Volumes>, end: ServerEnd<Node>, rights: Rights) {
                 }),
             ),
             R::Open(q, r) => {
-                let opened = volumes.open(q, rights).await;
+                let opened = volumes.open(q, rights, subject).await;
                 r.reply(s, opened)
             }
             R::ReadDirectory(q, r) => {
@@ -369,7 +403,23 @@ async fn serve(volumes: Rc<Volumes>, end: ServerEnd<Node>, rights: Rights) {
                     .map(|entries| NodeGetAclResponse { entries }),
             ),
             R::SetAcl(_, r) => r.reply(s, Err(not_stored(rights))),
-            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::Restrict(q, r) => r.reply(
+                s,
+                match subject {
+                    Some(_) => Err(Error::BadState),
+                    None => {
+                        let subject = Subject {
+                            user: q.user,
+                            app: q.app,
+                            pid: q.pid,
+                            koid: q.koid,
+                            admin: q.admin,
+                        };
+                        volumes.serve(q.node, rights, Some(subject));
+                        Ok(NodeRestrictResponse {})
+                    }
+                },
+            ),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),

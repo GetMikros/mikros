@@ -4,7 +4,9 @@
 //! to any of them succeed and discard every byte; reads return no bytes
 //! from `null`, zero bytes from `zero`, and bytes of the kernel's random
 //! number generator from `random` and `urandom`, as many as asked for.
-//! The directory itself cannot be changed.
+//! The directory itself cannot be changed. A connection may be given a
+//! subject once, which nothing here decides by, as nothing here leads to
+//! another file system.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -54,14 +56,14 @@ impl Dev {
     /// files opened through it may have.
     pub fn directory(&self) -> Result<ClientEnd<Node>, Status> {
         let (client, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
-        self.serve(server, Kind::Directory, Rights::READ | Rights::WRITE);
+        self.serve(server, Kind::Directory, Rights::READ | Rights::WRITE, false);
         Ok(client)
     }
 
-    fn serve(&self, end: ServerEnd<Node>, kind: Kind, rights: Rights) {
+    fn serve(&self, end: ServerEnd<Node>, kind: Kind, rights: Rights, bound: bool) {
         let dev = self.clone();
         self.spawner
-            .spawn(async move { serve(dev, end, kind, rights).await });
+            .spawn(async move { serve(dev, end, kind, rights, bound).await });
     }
 }
 
@@ -69,13 +71,20 @@ struct Connection {
     dev: Dev,
     kind: Kind,
     rights: Rights,
+    /// Whether the connection has a subject (MIKSPEC-0049.R30).
+    bound: bool,
 }
 
-/// Serves the connection on `end` to `kind` with `rights` until the
-/// client closes it or sends an invalid message.
-async fn serve(dev: Dev, end: ServerEnd<Node>, kind: Kind, rights: Rights) {
+/// Serves the connection on `end` to `kind` with `rights`, with a subject
+/// when `bound`, until the client closes it or sends an invalid message.
+async fn serve(dev: Dev, end: ServerEnd<Node>, kind: Kind, rights: Rights, bound: bool) {
     let server = NodeAsyncServer::new(end, dev.reactor.clone());
-    let connection = Connection { dev, kind, rights };
+    let connection = Connection {
+        dev,
+        kind,
+        rights,
+        bound,
+    };
     while let Ok(request) = server.next().await {
         connection.handle(request, server.server());
     }
@@ -146,17 +155,23 @@ impl Connection {
             }
             R::GetAcl(q, r) => {
                 let a = attributes(self.kind);
-                let entries = mikros_acl::midl::of_mode(
-                    a.mode,
-                    a.r#type == NodeType::Directory,
-                    q.default,
-                );
+                let entries =
+                    mikros_acl::midl::of_mode(a.mode, a.r#type == NodeType::Directory, q.default);
                 r.reply(s, entries.map(|entries| NodeGetAclResponse { entries }))
             }
             R::SetAcl(_, r) => {
                 r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
             }
-            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::Restrict(q, r) => r.reply(
+                s,
+                match self.bound {
+                    true => Err(Error::BadState),
+                    false => {
+                        self.dev.serve(q.node, self.kind, self.rights, true);
+                        Ok(NodeRestrictResponse {})
+                    }
+                },
+            ),
             // Everything that would change the directory or a node's
             // attributes.
             R::SetAttributes(_, r) => r.reply(s, Err(self.write_denied())),
@@ -189,7 +204,7 @@ impl Connection {
 
     fn clone(&self, q: NodeCloneRequest) -> Result<NodeCloneResponse, Error> {
         self.require(q.rights)?;
-        self.dev.serve(q.node, self.kind, q.rights);
+        self.dev.serve(q.node, self.kind, q.rights, self.bound);
         Ok(NodeCloneResponse {})
     }
 
@@ -261,7 +276,7 @@ impl Connection {
         if target == Kind::Directory && q.flags.contains(OpenFlags::TRUNCATE) {
             return Err(Error::IsDirectory);
         }
-        self.dev.serve(q.node, target, q.rights);
+        self.dev.serve(q.node, target, q.rights, self.bound);
         Ok(NodeOpenResponse {
             r#type: attributes(target).r#type,
             redirect: None,

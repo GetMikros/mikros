@@ -73,13 +73,15 @@ impl Fs {
 
     /// Serves a connection to the root directory with `rights` on `end`.
     pub fn serve_root(self: &Rc<Self>, end: ServerEnd<Node>, rights: Rights) {
-        self.serve(end, 0, rights);
+        self.serve(end, 0, rights, false);
     }
 
-    fn serve(self: &Rc<Self>, end: ServerEnd<Node>, node: usize, rights: Rights) {
+    /// Serves a connection to `node` with `rights` on `end`, which has a
+    /// subject when `bound`.
+    fn serve(self: &Rc<Self>, end: ServerEnd<Node>, node: usize, rights: Rights, bound: bool) {
         let fs = self.clone();
         self.spawner
-            .spawn(async move { connection::serve(fs, end, node, rights).await });
+            .spawn(async move { connection::serve(fs, end, node, rights, bound).await });
     }
 }
 
@@ -114,7 +116,7 @@ impl Fs {
         };
         match node {
             Some(node) if matches!(self.tree.nodes[node].kind, crate::NodeKind::Directory(_)) => {
-                self.serve(end, node, rights);
+                self.serve(end, node, rights, false);
                 true
             }
             _ => false,
