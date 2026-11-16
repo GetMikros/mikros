@@ -293,10 +293,11 @@ async fn stop(ports: &[Rc<Port>], disks: &[Rc<Disk>], reactor: &Reactor) {
 }
 
 /// Takes the HBA's interrupt through `EnableMsi`, or else the INTx
-/// event. On each one, each port that reports something has its `PxIS`
-/// and then its bit of `IS` cleared, a port that reported an error is
-/// recovered, and the interrupt is then acknowledged, an INTx event on
-/// the bus channel of the moment. The task keeps the interrupt and the
+/// event. A message-signaled interrupt is acknowledged before `IS` is
+/// read. On each interrupt, each port that `IS` names that reports
+/// something has its `PxIS` and then its bit of `IS` cleared, and a port
+/// that reported an error is recovered; the INTx event is then
+/// acknowledged, on the bus channel of the moment. The task keeps the interrupt and the
 /// bus channel for as long as the driver runs.
 async fn interrupts(
     pci: &Rc<PciBus>,
@@ -320,7 +321,14 @@ async fn interrupts(
     spawner.spawn(async move {
         let _handle = handle;
         while reactor.signals(raw, SIGNALED).await.is_ok() {
-            for port in &ports {
+            if msi {
+                // Acknowledged before `IS` is read, so that a port that
+                // raises it meanwhile signals again.
+                // SAFETY: the call takes no pointers.
+                unsafe { sys::interrupt_ack(raw) };
+            }
+            let pending = mmio.read32(crate::driver::hba::IS);
+            for port in ports.iter().filter(|p| pending & 1 << p.number != 0) {
                 let event = port.interrupt();
                 if matches!(event, Event::None) {
                     continue;
@@ -331,10 +339,7 @@ async fn interrupts(
                     tasks.spawn(async move { port.recover(&reactor, spin_up).await });
                 }
             }
-            if msi {
-                // SAFETY: the call takes no pointers.
-                unsafe { sys::interrupt_ack(raw) };
-            } else {
+            if !msi {
                 // A failure leaves the event signaled; a `Reconnect`
                 // brings a channel that acknowledges it.
                 let _ = pci.get().ack_interrupt().await;
