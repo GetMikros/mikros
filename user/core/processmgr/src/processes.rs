@@ -44,7 +44,7 @@ pub struct Shared {
     pub fs: Rc<Fs>,
     /// The `/dev` of every process.
     pub dev: Dev,
-    /// `/Volumes`, for the processes that hold `user.volumes.access`.
+    /// `/volumes`, for the processes that hold `user.volumes.access`.
     pub volumes: Rc<crate::volumes::Volumes>,
     /// How the namespaces of new processes are built.
     pub namespaces: Rc<Namespaces>,
@@ -79,7 +79,7 @@ pub struct Shared {
     /// The login sessions sent `KILL`, whose processes may start no more.
     pub killed_sessions: RefCell<BTreeSet<u32>>,
     /// The commands, and whether they were read from the root file
-    /// system's `/usr`.
+    /// system's `/system`.
     pub commands: RefCell<Option<(bool, Rc<crate::commands::Commands>)>>,
 }
 
@@ -89,7 +89,7 @@ pub struct NewProcess {
     pub path: String,
     /// The namespace that `path` is resolved in: the spawner's.
     pub programs: Rc<Programs>,
-    /// Where `path`, when it is under `/usr`, is looked for before
+    /// Where `path`, when it is under `/system`, is looked for before
     /// `programs`: the root file system for the device manager's programs
     /// once namespaces come from it.
     pub programs_first: Option<Rc<Programs>>,
@@ -231,6 +231,11 @@ impl Shared {
             ..
         } = new;
         let process_koid = koid(&started.process).inspect_err(|_| started.kill())?;
+        // A process with `/tmp` uses its own entry (MIKSPEC-0050.R43).
+        let arguments = match namespace.iter().any(|e| e.path == "/tmp") {
+            true => start::with_tmpdir(arguments).inspect_err(|_| started.kill())?,
+            false => arguments,
+        };
         let identity = ClientIdentity {
             pid,
             user,

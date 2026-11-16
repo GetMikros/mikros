@@ -20,6 +20,13 @@ use mikros_rt::interfaces::mikros::service::Directory;
 use mikros_rt::sys::{self, Handle};
 
 const PAGE_SIZE: u64 = 4096;
+/// The `object_get_info` topic of memory objects, whose record starts
+/// with the size.
+const INFO_MEMORY: u32 = 4;
+/// The most bytes of an `arguments` object that are read.
+const ARGUMENTS_MAX: u64 = 1 << 20;
+/// The environment variable of the temporary folder.
+const TMPDIR: [u8; 11] = *b"TMPDIR=/tmp";
 const PERM_READ: u32 = 1 << 0;
 /// The only version of the transfer.
 const VERSION: u32 = 3;
@@ -153,7 +160,7 @@ impl Drop for Mapped {
 
 /// An executable as a path names it in a namespace (MIKSPEC-0034.R27): a
 /// file of the boot file system, or one on a file system server, which
-/// is a system component when it comes from the root's `/usr`.
+/// is a system component when it comes from the root's `/system`.
 enum Program {
     Boot(Executable),
     File { file: Mapped, system: bool },
@@ -284,7 +291,7 @@ fn load_image(fs: &Rc<Fs>, process: Handle, program: &Program) -> Result<Image, 
 }
 
 /// Where a program is looked for: in `first`, when given, for a path
-/// under `/usr`, and then in `then`, the spawner's programs.
+/// under `/system`, and then in `then`, the spawner's programs.
 #[derive(Clone, Copy)]
 pub struct Lookup<'a> {
     pub first: Option<&'a Programs>,
@@ -292,7 +299,7 @@ pub struct Lookup<'a> {
 }
 
 /// The program that the absolute `path` names: in `lookup.first`, when
-/// given and `path` is under `/usr`, and when it does not exist there, in
+/// given and `path` is under `/system`, and when it does not exist there, in
 /// `lookup.then`, as `resolve` finds it.
 async fn resolve_first(
     fs: &Rc<Fs>,
@@ -301,8 +308,8 @@ async fn resolve_first(
     path: &str,
     reactor: &Reactor,
 ) -> Result<Program, Status> {
-    let under_usr = path::normalize(path).is_some_and(|p| p.starts_with("/usr/"));
-    if let Some(first) = lookup.first.filter(|_| under_usr) {
+    let under_system = path::normalize(path).is_some_and(|p| p.starts_with("/system/"));
+    if let Some(first) = lookup.first.filter(|_| under_system) {
         match resolve(fs, first, own, path, reactor).await {
             Err(Status::NotFound) => {}
             found => return found,
@@ -392,6 +399,11 @@ pub fn arguments(args: &[&str]) -> Result<OwnedHandle, Status> {
         bytes.extend_from_slice(arg.as_bytes());
         bytes.push(0);
     }
+    memory(&bytes)
+}
+
+/// A new memory object holding `bytes`.
+fn memory(bytes: &[u8]) -> Result<OwnedHandle, Status> {
     let mut mem = 0;
     let size = (bytes.len() as u64).next_multiple_of(PAGE_SIZE);
     // SAFETY: the out pointer is valid for the call.
@@ -401,6 +413,69 @@ pub fn arguments(args: &[&str]) -> Result<OwnedHandle, Status> {
     // SAFETY: the pointer describes `bytes`.
     check(unsafe { sys::mem_write(mem.raw(), 0, bytes.as_ptr(), bytes.len() as u64) })?;
     Ok(mem)
+}
+
+/// The `arguments` memory object `arguments` with `TMPDIR` set to `/tmp`
+/// in its environment (MIKSPEC-0050.R43): a new object, in which the
+/// variable replaces any `TMPDIR` the environment had. An object that
+/// does not hold as many strings as it counts is given as it is.
+pub fn with_tmpdir(arguments: OwnedHandle) -> Result<OwnedHandle, Status> {
+    let mut record = [0u8; 0x18];
+    let mut len = 0;
+    // SAFETY: the pointers describe `record` and `len`.
+    check(unsafe {
+        sys::object_get_info(
+            arguments.raw(),
+            INFO_MEMORY,
+            record.as_mut_ptr(),
+            record.len() as u64,
+            &mut len,
+        )
+    })?;
+    let mut size = [0; 8];
+    size.copy_from_slice(&record[..8]);
+    let size = u64::from_le_bytes(size).min(ARGUMENTS_MAX);
+    let mut bytes = alloc::vec![0u8; size as usize];
+    // SAFETY: the pointer describes `bytes`.
+    check(unsafe { sys::mem_read(arguments.raw(), 0, bytes.as_mut_ptr(), size) })?;
+    match set_tmpdir(&bytes) {
+        Some(encoded) => memory(&encoded),
+        None => Ok(arguments),
+    }
+}
+
+/// The encoded arguments `bytes` with `TMPDIR=/tmp` as the last string of
+/// the environment and no other `TMPDIR`, or `None` when they hold fewer
+/// strings than they count.
+fn set_tmpdir(bytes: &[u8]) -> Option<Vec<u8>> {
+    let count = |at: usize| -> Option<usize> {
+        let mut word = [0; 4];
+        word.copy_from_slice(bytes.get(at..at + 4)?);
+        Some(u32::from_le_bytes(word) as usize)
+    };
+    let (argc, envc) = (count(0)?, count(4)?);
+    let mut rest = bytes.get(8..)?;
+    let mut strings: Vec<&[u8]> = Vec::new();
+    for _ in 0..argc + envc {
+        let end = rest.iter().position(|&b| b == 0)?;
+        strings.push(&rest[..end]);
+        rest = &rest[end + 1..];
+    }
+    let (args, env) = strings.split_at(argc);
+    let env: Vec<&[u8]> = env
+        .iter()
+        .copied()
+        .filter(|var| !var.starts_with(b"TMPDIR="))
+        .chain([&TMPDIR[..]])
+        .collect();
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(&(argc as u32).to_le_bytes());
+    encoded.extend_from_slice(&(env.len() as u32).to_le_bytes());
+    for string in args.iter().chain(&env) {
+        encoded.extend_from_slice(string);
+        encoded.push(0);
+    }
+    Some(encoded)
 }
 
 /// What the startup transfer of a process carries besides its loaded
