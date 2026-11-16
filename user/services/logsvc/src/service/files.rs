@@ -1,10 +1,12 @@
 //! The log's files: once the `device.filesystem` instance `root` is
-//! published, every record goes to a new `var/log/system/boot-<n>.log`
-//! there, and the oldest of those files go while they take more than
-//! 256 MiB together; once the instance `esp` is published, the records
-//! of the boot go to `EFI/Mikros/boot.log` there, which replaces the
-//! previous boot's, within 10 seconds of coming. Missing directories are
-//! made. When the service stops, both files get the last records and are
+//! published, every record goes to a new `logs/boot-<n>.log` there, and
+//! the oldest of those files go while they take more than 256 MiB
+//! together; once the instance `esp` is published, the records of the
+//! boot go to `EFI/Mikros/boot.log` there, which replaces the previous
+//! boot's, within 10 seconds of coming. A live system changes neither
+//! partition: its records go to `live/logs/` of the temporary file system
+//! instead, and none to the EFI system partition. Missing directories are
+//! made. When the service stops, the files get the last records and are
 //! synced.
 
 use crate::service::log::{Log, now};
@@ -24,8 +26,12 @@ use mikros_rt::interfaces::mikros::service::{DirectoryAsyncClient, DirectoryEven
 const FILESYSTEM: &str = "device.filesystem";
 const ROOT: &str = "root";
 const ESP: &str = "esp";
-/// Where the files go on each.
-const SYSTEM_DIRECTORY: [&str; 3] = ["var", "log", "system"];
+/// The protocol of the temporary file system.
+const TMPFS: &str = "mikros.fs.Filesystem";
+/// Where the files go on each, and on the temporary file system of a
+/// live system.
+const SYSTEM_DIRECTORY: [&str; 1] = ["logs"];
+const LIVE_DIRECTORY: [&str; 2] = ["live", "logs"];
 const ESP_DIRECTORY: [&str; 2] = ["EFI", "Mikros"];
 const BOOT_LOG: &str = "boot.log";
 /// The most bytes the files of the root take together.
@@ -46,13 +52,22 @@ fn ok<T>(reply: Reply<T>) -> Option<T> {
 }
 
 /// Waits for `root` and `esp` to be published through `directory`, and
-/// starts writing to each once it is.
+/// starts writing to each once it is; on a `live` system, writes to the
+/// temporary file system instead, and to neither.
 pub async fn watch(
     log: Rc<Log>,
     directory: DirectoryAsyncClient,
     reactor: Reactor,
     spawner: Spawner,
+    live: bool,
 ) {
+    if live {
+        match tmpfs(&directory, &reactor).await {
+            Some(fs) => to_root(log, fs, &LIVE_DIRECTORY, reactor).await,
+            None => mikros_rt::log!(Error, "log: connecting to {TMPFS} failed"),
+        }
+        return;
+    }
     if !matches!(directory.watch(FILESYSTEM.into()).await, Ok(Ok(_))) {
         mikros_rt::log!(Error, "log: watching {FILESYSTEM} failed");
         return;
@@ -75,7 +90,7 @@ pub async fn watch(
                 continue;
             };
             match instance {
-                ROOT => spawner.spawn(to_root(log.clone(), fs, reactor.clone())),
+                ROOT => spawner.spawn(to_root(log.clone(), fs, &SYSTEM_DIRECTORY, reactor.clone())),
                 _ => spawner.spawn(to_esp(log.clone(), fs, reactor.clone())),
             }
         }
@@ -110,6 +125,26 @@ async fn connect(
     if !matches!(connected, Ok(Ok(_))) {
         return None;
     }
+    root_of(client, reactor).await
+}
+
+/// The root directory of the temporary file system, read and write.
+async fn tmpfs(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<NodeAsyncClient> {
+    let (client, server) = endpoints::<Filesystem>().ok()?;
+    let connected = directory
+        .connect(TMPFS.into(), None, server.into_handle())
+        .await;
+    if !matches!(connected, Ok(Ok(_))) {
+        return None;
+    }
+    root_of(client, reactor).await
+}
+
+/// The root directory, read and write, of the file system `client`.
+async fn root_of(
+    client: mikros_rt::interfaces::__midl::ClientEnd<Filesystem>,
+    reactor: &Reactor,
+) -> Option<NodeAsyncClient> {
     let fs = FilesystemAsyncClient::new(client, reactor.clone());
     let (root, server) = endpoints::<Node>().ok()?;
     ok(fs.get_root(server, RW).await)?;
@@ -204,26 +239,23 @@ fn file_name(n: u64) -> String {
 }
 
 /// Appends every record, from the oldest kept, to a new file of
-/// `var/log/system` on the root file system `root`, and then each that
+/// the directory `path` of the file system `root`, and then each that
 /// comes, removing the oldest other files while they all take more than
 /// `KEPT`.
-async fn to_root(log: Rc<Log>, root: NodeAsyncClient, reactor: Reactor) {
-    let Some(dir) = directory(root, &SYSTEM_DIRECTORY, &reactor).await else {
-        mikros_rt::log!(Error, "log: making var/log/system failed");
+async fn to_root(log: Rc<Log>, root: NodeAsyncClient, path: &[&str], reactor: Reactor) {
+    let shown = path.join("/");
+    let Some(dir) = directory(root, path, &reactor).await else {
+        mikros_rt::log!(Error, "log: making {shown} failed");
         return;
     };
     let Some(mut older) = boot_files(&dir).await else {
-        mikros_rt::log!(Error, "log: listing var/log/system failed");
+        mikros_rt::log!(Error, "log: listing {shown} failed");
         return;
     };
     let n = older.last().map_or(1, |&(n, _)| n + 1);
     let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
     let Some(file) = open(&dir, &file_name(n), flags, &reactor).await else {
-        mikros_rt::log!(
-            Error,
-            "log: creating var/log/system/{} failed",
-            file_name(n)
-        );
+        mikros_rt::log!(Error, "log: creating {shown}/{} failed", file_name(n));
         return;
     };
     log.open_files.set(log.open_files.get() + 1);
@@ -231,7 +263,7 @@ async fn to_root(log: Rc<Log>, root: NodeAsyncClient, reactor: Reactor) {
     let mut size = 0;
     loop {
         let Some(appended) = output.append_new(&log).await else {
-            mikros_rt::log!(Error, "log: writing var/log/system/{} failed", file_name(n));
+            mikros_rt::log!(Error, "log: writing {shown}/{} failed", file_name(n));
             log.open_files.set(log.open_files.get() - 1);
             return;
         };

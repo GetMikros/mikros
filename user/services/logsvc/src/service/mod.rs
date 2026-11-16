@@ -12,7 +12,9 @@
 //! through `mikros.log.Sources`, which `system.log_sources.create` lets it use.
 //!
 //! Once the root file system and the EFI system partition are
-//! published, the records also go to files on them (see `files`). On
+//! published, the records also go to files on them (see `files`), or on
+//! a live system, which the command line of the `platform_info` boot
+//! handle says, to the temporary file system. On
 //! `TERM`, which the service manager sends to stop it, the service writes
 //! the last records to them and exits.
 
@@ -42,6 +44,14 @@ const SOURCES: &str = "mikros.log.Sources";
 /// The `id` of the `log_manage` boot handle among the `USER` startup
 /// handles.
 const LOG_MANAGE_ID: u32 = 2;
+/// The `id` of the `platform_info` boot handle, and where its header
+/// gives the command line.
+const PLATFORM_INFO_ID: u32 = 5;
+const CMDLINE_OFFSET: u64 = 0x48;
+const CMDLINE_LEN: u64 = 0x4C;
+const CMDLINE_MAX: usize = 4096;
+/// The command-line word of live systems.
+const LIVE: &str = "live";
 /// The mask bit of `TERM`, signal 15.
 const TERM: u64 = 1 << (15 - 1);
 /// How often the service looks for a pending `TERM`, and for its files
@@ -66,6 +76,12 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let kernel_log = take(&mut managed.handles, |h| {
         h.role == HandleRole::User && h.id == LOG_MANAGE_ID
     });
+    let platform_info = take(&mut managed.handles, |h| {
+        h.role == HandleRole::User && h.id == PLATFORM_INFO_ID
+    });
+    let live = platform_info
+        .as_ref()
+        .is_some_and(|info| command_line(info).split_whitespace().any(|w| w == LIVE));
     let log = Rc::new(Log::new(kernel_log.as_ref().map(|h| h.raw())));
     match &kernel_log {
         Some(handle) => {
@@ -90,6 +106,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         directory,
         reactor.clone(),
         spawner.clone(),
+        live,
     ));
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
     executor.block_on(async {
@@ -175,4 +192,26 @@ async fn stop(log: Rc<Log>, reactor: mikros_rt::exec::Reactor) {
     }
     // SAFETY: the call takes no pointers.
     unsafe { sys::process_exit(0) };
+}
+
+/// The command line that the platform information `mem` holds, or an
+/// empty one when it cannot be read or is not UTF-8.
+fn command_line(mem: &OwnedHandle) -> alloc::string::String {
+    let word = |at: u64| -> Option<u32> {
+        let mut bytes = [0u8; 4];
+        // SAFETY: the pointer describes `bytes`.
+        let status = unsafe { sys::mem_read(mem.raw(), at, bytes.as_mut_ptr(), 4) };
+        (status == mikros_rt::OK).then(|| u32::from_le_bytes(bytes))
+    };
+    let (Some(offset), Some(len)) = (word(CMDLINE_OFFSET), word(CMDLINE_LEN)) else {
+        return alloc::string::String::new();
+    };
+    let len = (len as usize).min(CMDLINE_MAX);
+    let mut bytes = alloc::vec![0u8; len];
+    // SAFETY: the pointer describes `bytes`.
+    let status = unsafe { sys::mem_read(mem.raw(), offset.into(), bytes.as_mut_ptr(), len as u64) };
+    match status == mikros_rt::OK {
+        true => alloc::string::String::from_utf8(bytes).unwrap_or_default(),
+        false => alloc::string::String::new(),
+    }
 }
