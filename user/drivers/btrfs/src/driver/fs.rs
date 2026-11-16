@@ -241,6 +241,14 @@ impl Fs {
 
     /// The open node for `node`, found as `name` in `dir`: the one that
     /// connections to the same node share, if there is one.
+    /// Forgets the nodes and shared files of the deleted subvolume with
+    /// the device `device`: connections keep the nodes they have open,
+    /// but a node with the same key is a node of its own from now on.
+    pub fn forget_device(&self, device: u32) {
+        self.opens.borrow_mut().retain(|key, _| key.0 != device);
+        self.shares.forget(device);
+    }
+
     pub fn open(&self, node: BtrfsNode<'static>, dir: Key, name: &str) -> Result<Rc<Open>, Error> {
         let key = key(&node)?;
         Ok(self.open_shared(Arc::new(node), key, dir, name))

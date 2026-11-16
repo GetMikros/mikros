@@ -141,8 +141,16 @@ impl Fs {
 
     fn delete_subvolume(&self, path: &str) -> Result<(), Error> {
         self.writable()?;
+        let device = self
+            .walk(&components(path)?)?
+            .attributes()
+            .map_err(error)?
+            .device;
         let (dir, name) = self.parent(path)?;
         dir.delete_subvolume(name.as_bytes()).map_err(error)?;
+        // A subvolume made later may get the same device, and its nodes
+        // the same inodes, so nothing of this one may be found by key.
+        self.forget_device(device);
         self.entry_changed(&dir, name, WatchKind::Removed);
         Ok(())
     }

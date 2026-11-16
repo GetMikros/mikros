@@ -169,6 +169,12 @@ impl Shares {
             .any(|f| f.pinned.get() && f.open.key.0 == device)
     }
 
+    /// Forgets the shared files of the subvolume with the device `device`,
+    /// whose objects stay with the clients that hold them.
+    pub fn forget(&self, device: u32) {
+        self.files.borrow_mut().retain(|key, _| key.0 != device);
+    }
+
     /// Marks the pages that clients wrote dirty in the page cache, for
     /// every shared file.
     pub fn harvest(&self) {
