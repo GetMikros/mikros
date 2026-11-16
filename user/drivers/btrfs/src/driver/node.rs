@@ -6,6 +6,7 @@
 
 use crate::driver::fs::{self, Fs, Open};
 use alloc::rc::Rc;
+use mikros_acl::Subject;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::fs::*;
 
@@ -20,8 +21,9 @@ pub(crate) struct Connection {
     pub(crate) fs: Rc<Fs>,
     pub(crate) open: Rc<Open>,
     pub(crate) rights: Rights,
-    /// The user of the connection, whom new nodes belong to.
-    pub(crate) user: u32,
+    /// Whom the connection is for, which the access lists of nodes apply
+    /// to, and whom the nodes it makes belong to (MIKSPEC-0049.R30).
+    pub(crate) subject: Option<Subject>,
     pub(crate) cursor: u64,
     pub(crate) append: bool,
     /// Whether the connection looks names up case-insensitively, as it was
@@ -38,7 +40,7 @@ pub async fn serve(
     end: ServerEnd<Node>,
     open: Rc<Open>,
     rights: Rights,
-    user: u32,
+    subject: Option<Subject>,
     append: bool,
     folded: bool,
 ) {
@@ -48,7 +50,7 @@ pub async fn serve(
         fs,
         open,
         rights,
-        user,
+        subject,
         cursor: 0,
         append,
         folded,
@@ -210,19 +212,15 @@ impl Connection {
                 let set = self.set_owner(q.owner);
                 r.reply(s, self.fs.durable(set).await)
             }
-            R::GetAcl(q, r) => {
-                let entries = self.open.attributes().and_then(|a| {
-                    let a = fs::attributes(&a);
-                    mikros_acl::midl::of_mode(
-                        a.mode,
-                        a.r#type == NodeType::Directory,
-                        q.default,
-                    )
-                });
-                r.reply(s, entries.map(|entries| NodeGetAclResponse { entries }))
+            R::GetAcl(q, r) => r.reply(s, self.get_acl(q.default)),
+            R::SetAcl(q, r) => {
+                let set = self.set_acl(q).await;
+                r.reply(
+                    s,
+                    self.fs.durable(set).await.map(|()| NodeSetAclResponse {}),
+                )
             }
-            R::SetAcl(_, r) => r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported))),
-            R::Restrict(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::Restrict(q, r) => r.reply(s, self.restrict(q)),
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::ConnectSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
         };

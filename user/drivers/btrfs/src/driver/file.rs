@@ -26,6 +26,7 @@ impl Connection {
         q: NodeSetAttributesRequest,
     ) -> Result<NodeSetAttributesResponse, Error> {
         self.require_write()?;
+        self.allowed(&self.open, Rights::WRITE)?;
         let changes = Changes {
             mode: q
                 .mask
@@ -51,6 +52,9 @@ impl Connection {
     /// (MIKSPEC-0049.R27).
     pub(crate) fn set_owner(&self, owner: u32) -> Result<NodeSetOwnerResponse, Error> {
         self.require_write()?;
+        if self.subject.is_some_and(|s| s.user != 0) {
+            return Err(Error::AccessDenied);
+        }
         let changes = Changes {
             mode: None,
             accessed: None,
@@ -69,7 +73,7 @@ impl Connection {
             q.node,
             self.open.clone(),
             q.rights,
-            self.user,
+            self.subject,
             self.append,
             self.folded,
         );
@@ -80,7 +84,7 @@ impl Connection {
     /// the page cache holds at once, and the rest on a thread of its own,
     /// as reading it waits for the disk.
     pub(crate) async fn read(&self, offset: u64, count: u32) -> Result<Vec<u8>, Error> {
-        self.require(Rights::READ)?;
+        self.allowed(&self.open, Rights::READ)?;
         self.file()?;
         let mut data = vec![0u8; count.min(READ_MAX) as usize];
         let done = match self.open.node.read_nowait(offset, &mut data) {
@@ -118,6 +122,7 @@ impl Connection {
         data: Vec<u8>,
     ) -> Result<(u32, u64), Error> {
         self.require_write()?;
+        self.allowed(&self.open, Rights::WRITE)?;
         self.file()?;
         let node = self.open.node.clone();
         let written = blocking(&self.fs.reactor, move || {
@@ -157,6 +162,7 @@ impl Connection {
 
     pub(crate) fn truncate(&self, size: u64) -> Result<(), Error> {
         self.require_write()?;
+        self.allowed(&self.open, Rights::WRITE)?;
         self.file()?;
         // A memory object of the file loses the pages cut off first.
         self.fs.resized(&self.open, Some(size));
@@ -172,6 +178,7 @@ impl Connection {
     /// that is no connection of this server is on another file system.
     pub(crate) fn clone_range(&self, q: NodeCloneRangeRequest) -> Result<(), Error> {
         self.require_write()?;
+        self.allowed(&self.open, Rights::WRITE)?;
         self.file()?;
         let (_, server_end) = koids(q.source.handle()).ok_or(Error::Invalid)?;
         let connection = self.fs.connections.borrow().get(&server_end).cloned();
@@ -179,6 +186,8 @@ impl Connection {
         if !rights.contains(Rights::READ) {
             return Err(Error::AccessDenied);
         }
+        // The source's list is met by this connection's subject.
+        self.allowed(&source, Rights::READ)?;
         self.open
             .node
             .clone_range(q.offset, &source.node, q.source_offset, q.length)
@@ -197,16 +206,17 @@ impl Connection {
     /// `EXECUTE`, and `WRITE` without `PRIVATE` a connection that may
     /// change the file system.
     pub(crate) fn memory(&self, flags: MemoryFlags) -> Result<NodeGetMemoryObjectResponse, Error> {
-        self.require(Rights::READ)?;
+        self.allowed(&self.open, Rights::READ)?;
         self.file()?;
         let private = flags.contains(MemoryFlags::PRIVATE);
         let write = flags.contains(MemoryFlags::WRITE);
         let execute = flags.contains(MemoryFlags::EXECUTE);
         if execute {
-            self.require(Rights::EXECUTE)?;
+            self.allowed(&self.open, Rights::EXECUTE)?;
         }
         if write && !private {
             self.require_write()?;
+            self.allowed(&self.open, Rights::WRITE)?;
         }
         let file = self.fs.shared(&self.open)?;
         let rights = crate::driver::share::rights(write, execute);
@@ -255,7 +265,7 @@ impl Connection {
     }
 
     pub(crate) async fn read_link(&self) -> Result<NodeReadLinkResponse, Error> {
-        self.require(Rights::READ)?;
+        self.allowed(&self.open, Rights::READ)?;
         Ok(NodeReadLinkResponse {
             target: link_target(&self.open, &self.fs.reactor).await?,
         })

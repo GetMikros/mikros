@@ -459,3 +459,36 @@ fn clones_ranges() {
     }
     image.check();
 }
+
+#[test]
+fn keeps_extended_attributes() {
+    const ACCESS: &CStr = c"system.posix_acl_access";
+    const DEFAULT: &CStr = c"system.posix_acl_default";
+    let value: Vec<u8> = (0..44).collect();
+    changes(
+        "keeps-extended-attributes",
+        256 << 20,
+        None,
+        |root| {
+            let a = root.create(b"a", Kind::File, 0o644).unwrap();
+            assert_eq!(a.xattr(ACCESS, 1024), Ok(None));
+            a.set_xattr(ACCESS, Some(&value)).unwrap();
+            assert_eq!(a.xattr(ACCESS, 1024), Ok(Some(value.clone())));
+            // A value larger than the buffer is not cut.
+            assert!(a.xattr(ACCESS, 8).is_err());
+            let d = root.create(b"d", Kind::Directory, 0o755).unwrap();
+            d.set_xattr(DEFAULT, Some(&value[..12])).unwrap();
+            d.set_xattr(ACCESS, Some(&value)).unwrap();
+            d.set_xattr(ACCESS, None).unwrap();
+            // Removing what is not there is no error.
+            d.set_xattr(ACCESS, None).unwrap();
+        },
+        |root| {
+            assert_eq!(walk(root, "a").xattr(ACCESS, 1024), Ok(Some(value.clone())));
+            let d = walk(root, "d");
+            assert_eq!(d.xattr(DEFAULT, 1024), Ok(Some(value[..12].to_vec())));
+            assert_eq!(d.xattr(ACCESS, 1024), Ok(None));
+        },
+        |_| {},
+    );
+}

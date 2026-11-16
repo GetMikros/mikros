@@ -11,6 +11,7 @@
 //! with `@system`, `Sync` commits a transaction, so that the bootloader,
 //! which does not read the log tree, sees the change (MIKSPEC-0053.R15).
 
+use crate::driver::acl::Lists;
 use crate::driver::change::koids;
 use crate::driver::disk::Disk;
 use crate::driver::lock::Lock;
@@ -29,6 +30,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::task::Waker;
+use mikros_acl::Subject;
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
@@ -37,6 +39,7 @@ use mikros_rt::interfaces::mikros::fs::{
     FilesystemInfo, FilesystemQueryFilesystemResponse, FilesystemRequest, Node, NodeType, Rights,
     WatchKind,
 };
+use mikros_rt::interfaces::mikros::permissions::{AppNumbersAsyncClient, BrokerAsyncClient};
 use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, ProviderRequest};
 use mikros_rt::sys;
 
@@ -63,6 +66,8 @@ pub struct Open {
     names: RefCell<Vec<(Key, String)>>,
     pub(crate) locks: RefCell<Vec<Lock>>,
     pub(crate) waiting: RefCell<Vec<Waker>>,
+    /// The node's access control lists, once read.
+    pub(crate) lists: RefCell<Option<Lists>>,
 }
 
 impl Open {
@@ -107,6 +112,9 @@ pub struct Fs {
     /// The `partition_guid` of the partition, which `QueryFilesystem`
     /// reports as the file system's ID.
     pub id: String,
+    /// The broker's `Broker` and `AppNumbers`, which subjects'
+    /// `admin.acls.manage` is asked for through.
+    pub broker: Option<(BrokerAsyncClient, AppNumbersAsyncClient)>,
     pub reactor: Reactor,
     pub spawner: Spawner,
 }
@@ -217,6 +225,7 @@ impl Fs {
             quick_disconnect,
             label: superblock_label(disk),
             id: String::new(),
+            broker: None,
             reactor,
             spawner,
         })
@@ -310,7 +319,7 @@ impl Fs {
         end: ServerEnd<Node>,
         open: Rc<Open>,
         rights: Rights,
-        user: u32,
+        subject: Option<Subject>,
         append: bool,
         folded: bool,
     ) {
@@ -322,7 +331,7 @@ impl Fs {
             self.connections.borrow_mut().insert(id, connection);
         }
         let fs = self.clone();
-        let task = node::serve(self.clone(), end, open, rights, user, append, folded);
+        let task = node::serve(self.clone(), end, open, rights, subject, append, folded);
         self.spawner.spawn(async move {
             task.await;
             if let Some(id) = id {
@@ -369,6 +378,15 @@ impl Fs {
     }
 
     /// A new owner of locks and watches, for a connection.
+    /// Whether the broker allows `subject` `admin.acls.manage`; not
+    /// without a connection to it.
+    pub async fn may_manage(&self, subject: &Subject) -> bool {
+        match &self.broker {
+            Some((broker, numbers)) => mikros_acl::midl::may_manage(broker, numbers, subject).await,
+            None => false,
+        }
+    }
+
     pub fn owner(&self) -> u64 {
         let owner = self.next_owner.get();
         self.next_owner.set(owner + 1);
@@ -398,6 +416,7 @@ impl Open {
             names: RefCell::new(Vec::new()),
             locks: RefCell::new(Vec::new()),
             waiting: RefCell::new(Vec::new()),
+            lists: RefCell::new(None),
         }
     }
 }
@@ -442,22 +461,21 @@ pub(crate) fn key(node: &BtrfsNode<'_>) -> Result<Key, Error> {
 }
 
 /// Serves the provider `end` of the published `filesystem` service until
-/// it closes: each connection to `device.filesystem` gets `Filesystem`,
-/// for the user that connected.
+/// it closes: each connection to `device.filesystem` gets `Filesystem`.
 pub async fn serve_provider(fs: Rc<Fs>, end: ServerEnd<Provider>) {
     let server = ProviderAsyncServer::new(end, fs.reactor.clone());
     while let Ok(ProviderRequest::Connect(request)) = server.next().await {
         if request.protocol == PROTOCOL {
             let end = ServerEnd::<Filesystem>::new(request.server);
-            let user = request.client.user;
-            fs.spawner.spawn(serve_filesystem(fs.clone(), end, user));
+            fs.spawner.spawn(serve_filesystem(fs.clone(), end));
         }
     }
 }
 
-/// Serves `Filesystem` on `end` for `user`. `GetRoot` asking for `WRITE`
-/// on a read-only file system fails with `READ_ONLY`.
-async fn serve_filesystem(fs: Rc<Fs>, end: ServerEnd<Filesystem>, user: u32) {
+/// Serves `Filesystem` on `end`: `GetRoot` gives connections without a
+/// subject, and asking for `WRITE` on a read-only file system fails with
+/// `READ_ONLY`.
+async fn serve_filesystem(fs: Rc<Fs>, end: ServerEnd<Filesystem>) {
     let server = FilesystemAsyncServer::new(end, fs.reactor.clone());
     while let Ok(request) = server.next().await {
         let s = server.server();
@@ -466,7 +484,7 @@ async fn serve_filesystem(fs: Rc<Fs>, end: ServerEnd<Filesystem>, user: u32) {
                 if q.rights.contains(Rights::WRITE) && fs.read_only {
                     r.reply(s, Err(Error::ReadOnly))
                 } else {
-                    fs.serve(q.node, fs.root.clone(), q.rights, user, false, false);
+                    fs.serve(q.node, fs.root.clone(), q.rights, None, false, false);
                     r.reply(s, Ok(FilesystemGetRootResponse {}))
                 }
             }

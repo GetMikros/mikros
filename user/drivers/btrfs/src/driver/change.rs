@@ -9,7 +9,7 @@
 use crate::driver::fs::{Fs, Open, error};
 use crate::driver::node::{Connection, NAME_MAX, TARGET_MAX};
 use crate::driver::watch::event;
-use crate::linux::node::{Changes, Kind};
+use crate::linux::node::Kind;
 use alloc::rc::Rc;
 use alloc::string::String;
 use mikros_rt::interfaces::__midl::OwnedHandle;
@@ -21,17 +21,9 @@ const INFO_BASIC: u32 = 1;
 const TOKEN_RIGHTS: u32 = 1 << 0 | 1 << 1 | 1 << 9;
 
 impl Connection {
-    /// Makes the connection's user the owner of a node it created.
-    pub(crate) fn own(&self, node: &crate::linux::node::Node<'_>) -> Result<(), Error> {
-        let changes = Changes {
-            owner: Some(self.user),
-            ..Changes::default()
-        };
-        node.set_attributes(&changes).map_err(error)
-    }
-
     pub(crate) async fn unlink(&self, name: &str, directory: bool) -> Result<(), Error> {
         self.require_write()?;
+        self.allowed(&self.open, Rights::WRITE)?;
         self.directory()?;
         check_component(name)?;
         let (removed, name) = match self.find(&self.open, name).await? {
@@ -76,6 +68,8 @@ impl Connection {
         check_component(&q.name)?;
         check_component(&q.new_name)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        self.allowed(&self.open, Rights::WRITE)?;
+        self.allowed(&to, Rights::WRITE)?;
         let (moved, name) = self
             .find(&self.open, &q.name)
             .await?
@@ -146,6 +140,8 @@ impl Connection {
         check_component(&q.name)?;
         check_component(&q.new_name)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
+        self.allowed(&self.open, Rights::WRITE)?;
+        self.allowed(&to, Rights::WRITE)?;
         if self.fs.is_booted(&to, &q.new_name) {
             return Err(Error::AccessDenied);
         }
@@ -166,6 +162,7 @@ impl Connection {
 
     pub(crate) async fn create_symlink(&self, name: &str, target: &str) -> Result<(), Error> {
         self.require_write()?;
+        self.allowed(&self.open, Rights::WRITE)?;
         self.directory()?;
         check_component(name)?;
         if self.fs.is_booted(&self.open, name) {
@@ -181,7 +178,7 @@ impl Connection {
             .node
             .create(name.as_bytes(), Kind::Symlink(target.as_c_str()), 0o777)
             .map_err(error)?;
-        self.own(&node)?;
+        self.own(&node, &self.open, 0o777)?;
         self.fs
             .watches
             .notify(self.open.key, &[event(WatchKind::Created, 0, name)]);

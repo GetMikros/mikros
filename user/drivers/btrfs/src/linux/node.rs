@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 //! The nodes of a mounted btrfs, which the program walks one name at a
-//! time: the calls of `shim/file.c`.
+//! time: the calls of `shim/file.c` and `shim/write.c`.
 
 use crate::linux::{Mount, result};
-use core::ffi::{c_char, c_int, c_long, c_void};
+use alloc::vec::Vec;
+use core::ffi::{CStr, c_char, c_int, c_long, c_void};
 use core::marker::PhantomData;
 
 unsafe extern "C" {
@@ -89,6 +90,18 @@ unsafe extern "C" {
         group: u32,
     ) -> i32;
     fn mikros_btrfs_sync(node: *mut c_void) -> i32;
+    fn mikros_btrfs_get_xattr(
+        node: *mut c_void,
+        name: *const c_char,
+        buf: *mut u8,
+        size: core::ffi::c_ulong,
+    ) -> i32;
+    fn mikros_btrfs_set_xattr(
+        node: *mut c_void,
+        name: *const c_char,
+        value: *const u8,
+        size: core::ffi::c_ulong,
+    ) -> i32;
     fn mikros_btrfs_clone_range(
         dst: *mut c_void,
         dst_offset: u64,
@@ -164,6 +177,9 @@ pub const MODE_DIRECTORY: u32 = 0o040000;
 #[allow(dead_code)]
 pub const MODE_FILE: u32 = 0o100000;
 pub const MODE_SYMLINK: u32 = 0o120000;
+
+/// The errno of an extended attribute that is not there.
+const ENODATA: i32 = -61;
 
 /// The types of directory entries, as Linux's `DT_` values, which the
 /// tests use. The driver has its own constants for the types it serves.
@@ -459,6 +475,35 @@ impl<'m> Node<'m> {
                 changes.group.unwrap_or(0),
             )
         })
+    }
+
+    /// The value of the extended attribute `name`, none when the node has
+    /// none, at most `max` bytes of it.
+    pub fn xattr(&self, name: &CStr, max: usize) -> Result<Option<Vec<u8>>, i32> {
+        let mut value = alloc::vec![0u8; max];
+        // SAFETY: as for `create()`; the shim writes at most `max` bytes
+        // to `value` and reads the name to its NUL.
+        let ret = unsafe {
+            mikros_btrfs_get_xattr(self.node, name.as_ptr(), value.as_mut_ptr(), max as _)
+        };
+        match ret {
+            ENODATA => Ok(None),
+            n if n < 0 => Err(n),
+            n => {
+                value.truncate(n as usize);
+                Ok(Some(value))
+            }
+        }
+    }
+
+    /// Sets the extended attribute `name` to `value`, or removes it, which
+    /// need not be there, without one; the change time becomes the
+    /// present.
+    pub fn set_xattr(&self, name: &CStr, value: Option<&[u8]>) -> Result<(), i32> {
+        let (at, len) = value.map_or((core::ptr::null(), 0), |v| (v.as_ptr(), v.len()));
+        // SAFETY: as for `create()`; the shim reads `len` bytes at `at`
+        // and the name to its NUL.
+        result(unsafe { mikros_btrfs_set_xattr(self.node, name.as_ptr(), at, len as _) })
     }
 
     /// Puts the node's data and attributes, and the entries that name

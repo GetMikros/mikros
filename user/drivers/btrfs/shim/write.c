@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Changing nodes: writing and appending to files, truncating them,
- * making ranges of them share data, setting attributes, and syncing a
- * node to stable storage. Each call
+ * making ranges of them share data, setting attributes and extended
+ * attributes, and syncing a node to stable storage. Each call
  * runs as a task of the shim while it lasts, unless its thread runs as
  * one already.
  */
@@ -12,6 +12,7 @@
 #include <linux/uio.h>
 #include <linux/fsnotify.h>
 #include <linux/err.h>
+#include "fs/btrfs/xattr.h"
 #include "file.h"
 #include "shim.h"
 
@@ -220,6 +221,44 @@ int mikros_btrfs_sync(struct mikros_node *node)
 		ret = sync_filesystem(sb);
 		up_read(&sb->s_umount);
 	}
+	if (adopted)
+		mikros_task_exit();
+	return ret;
+}
+
+/* The value of the extended attribute `name` of a node, as btrfs stores
+ * it, whether or not a handler of the VFS knows the name: how many bytes
+ * it holds, which go to `buf` when `size` takes them, -ENODATA without
+ * one, -ERANGE when `size` does not take it, or a negative errno. */
+int mikros_btrfs_get_xattr(struct mikros_node *node, const char *name, void *buf,
+			   unsigned long size)
+{
+	bool adopted = mikros_task_adopt("get_xattr");
+	int ret = btrfs_getxattr(d_inode(node->path.dentry), name, buf, size);
+
+	if (adopted)
+		mikros_task_exit();
+	return ret;
+}
+
+/* Sets the extended attribute `name` of a node to the `size` bytes of
+ * `value`, or removes it, which need not be there, when `value` is NULL,
+ * and makes the change time the present. 0, or a negative errno. */
+int mikros_btrfs_set_xattr(struct mikros_node *node, const char *name, const void *value,
+			   unsigned long size)
+{
+	bool adopted = mikros_task_adopt("set_xattr");
+	struct inode *inode = d_inode(node->path.dentry);
+	int ret;
+
+	ret = mnt_want_write(node->path.mnt);
+	if (ret)
+		goto out;
+	inode_lock(inode);
+	ret = btrfs_setxattr_trans(inode, name, value, size, 0);
+	inode_unlock(inode);
+	mnt_drop_write(node->path.mnt);
+out:
 	if (adopted)
 		mikros_task_exit();
 	return ret;

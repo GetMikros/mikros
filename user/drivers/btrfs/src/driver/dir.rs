@@ -202,6 +202,7 @@ impl Connection {
             }
             Resolved::Missing { parent, name } if q.flags.contains(OpenFlags::CREATE) => {
                 self.require_write()?;
+                self.allowed(&parent, Rights::WRITE)?;
                 if self.fs.is_booted(&parent, &name) {
                     return Err(Error::AccessDenied);
                 }
@@ -213,7 +214,7 @@ impl Connection {
                     .node
                     .create(name.as_bytes(), kind, q.mode & MODE_BITS)
                     .map_err(error)?;
-                self.own(&node)?;
+                self.own(&node, &parent, q.mode & MODE_BITS)?;
                 self.fs
                     .watches
                     .notify(parent.key, &[event(WatchKind::Created, 0, &name)]);
@@ -239,6 +240,7 @@ impl Connection {
         }
         if q.flags.contains(OpenFlags::TRUNCATE) && r#type == NodeType::File {
             self.require_write()?;
+            self.allowed(&open, Rights::WRITE)?;
             self.fs.resized(&open, Some(0));
             open.node.truncate(0).map_err(error)?;
             self.fs.changed(&open, WatchKind::Modified);
@@ -246,7 +248,7 @@ impl Connection {
         let append = q.flags.contains(OpenFlags::APPEND);
         let folded = q.flags.contains(OpenFlags::CASE_INSENSITIVE);
         self.fs
-            .serve(q.node, open, q.rights, self.user, append, folded);
+            .serve(q.node, open, q.rights, self.subject, append, folded);
         Ok(NodeOpenResponse {
             r#type,
             redirect: None,
@@ -260,7 +262,7 @@ impl Connection {
         cookie: u64,
         attributes: bool,
     ) -> Result<NodeReadDirectoryResponse, Error> {
-        self.require(Rights::READ)?;
+        self.allowed(&self.open, Rights::READ)?;
         self.directory()?;
         let mut found: Vec<(String, u64, u32)> = Vec::new();
         let root = self.open.key == self.fs.root.key;

@@ -19,6 +19,7 @@
 //! (MIKSPEC-0044.R19).
 //! `ResetChild` and `ConnectChild` fail with `NOT_SUPPORTED`.
 
+mod acl;
 mod change;
 mod dir;
 mod disk;
@@ -46,10 +47,17 @@ use mikros_rt::interfaces::mikros::driver::{
     DeviceManagerAsyncClient, DriverAsyncServer, DriverReconnectResponse, DriverRequest,
     DriverStartRequest, DriverStartResponse, DriverStopResponse,
 };
+use mikros_rt::interfaces::mikros::permissions::{
+    AppNumbers, AppNumbersAsyncClient, Broker, BrokerAsyncClient,
+};
 use mikros_rt::interfaces::mikros::process::HandleRole;
 use mikros_rt::interfaces::mikros::service::{DirectoryClient, Provider};
 use mikros_rt::interfaces::mikros::storage::BlockClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
+
+/// The broker's protocols.
+const BROKER: &str = "mikros.permissions.Broker";
+const APP_NUMBERS: &str = "mikros.permissions.AppNumbers";
 
 mikros_rt::raw_main!(main);
 
@@ -240,8 +248,33 @@ fn start(
         _ => Status::Internal,
     })?;
     fs.id = property(PARTITION_GUID).unwrap_or_default();
+    fs.broker = broker(directory, reactor);
     let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
     Ok((Rc::new(fs), manager))
+}
+
+/// Connections to the broker's `Broker` and `AppNumbers`, through which
+/// the server asks for the `admin.acls.manage` of subjects; none when
+/// they cannot be made.
+fn broker(
+    directory: &DirectoryClient,
+    reactor: &Reactor,
+) -> Option<(BrokerAsyncClient, AppNumbersAsyncClient)> {
+    const DEADLINE: i64 = i64::MAX;
+    let (broker, server) = endpoints::<Broker>().ok()?;
+    let connected = directory.connect(BROKER.into(), None, server.into_handle(), DEADLINE);
+    if !matches!(connected, Ok(Ok(_))) {
+        return None;
+    }
+    let (numbers, server) = endpoints::<AppNumbers>().ok()?;
+    let connected = directory.connect(APP_NUMBERS.into(), None, server.into_handle(), DEADLINE);
+    if !matches!(connected, Ok(Ok(_))) {
+        return None;
+    }
+    Some((
+        BrokerAsyncClient::new(broker, reactor.clone()),
+        AppNumbersAsyncClient::new(numbers, reactor.clone()),
+    ))
 }
 
 /// Publishes the file system as a `filesystem` service and then the
