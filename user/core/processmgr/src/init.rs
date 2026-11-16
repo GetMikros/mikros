@@ -26,7 +26,7 @@ const SAME_RIGHTS: u32 = 1 << 31;
 /// The time service's protocol.
 const CLOCK: &str = "mikros.time.Clock";
 /// The service manager's program, which init's namespace resolves.
-const SERVICE_MANAGER_PATH: &str = "/usr/bin/servicemgr";
+const SERVICE_MANAGER_PATH: &str = "/system/servicemgr";
 const SERVICE_MANAGER_APP: &str = "system.servicemgr";
 /// The identity of the process manager's own directory.
 const PROCESS_MANAGER_APP: &str = "system.processmgr";
@@ -237,7 +237,7 @@ impl Manager {
             });
         }
         // The EFI system partition the system booted from comes as
-        // `/boot/efi` once its file system is published, through another
+        // `/system/boot/efi` once its file system is published, through another
         // directory of the process manager's own, which waits for it.
         if let Ok(directory) = bind_own_directory(&self.shared, &control).await {
             let shared = self.shared.clone();
@@ -247,7 +247,7 @@ impl Manager {
                 shared.namespaces.prepare_esp(directory, reactor).await;
             });
         }
-        // `/Volumes` follows the instances of volumes through another
+        // `/volumes` follows the instances of volumes through another
         // directory of the process manager's own.
         if let Ok(directory) = bind_own_directory(&self.shared, &control).await {
             let shared = self.shared.clone();

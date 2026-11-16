@@ -1,4 +1,4 @@
-//! `/Volumes`, which the process manager serves over `Node` to the
+//! `/volumes`, which the process manager serves over `Node` to the
 //! processes that hold `user.volumes.access`: one entry for each instance of
 //! `device.filesystem` named `volume-<guid>`, which the device manager
 //! registers for every volume but the root file system and the boot EFI
@@ -118,7 +118,7 @@ impl Volumes {
         let name = entry_name(&label, guid, &taken);
         mikros_rt::log!(
             Info,
-            "process-manager: serving {instance} as /Volumes/{name}"
+            "process-manager: serving {instance} as /volumes/{name}"
         );
         entries.push(Volume {
             instance,

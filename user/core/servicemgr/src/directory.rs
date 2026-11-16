@@ -83,9 +83,9 @@ pub struct Dir {
     manage: RefCell<Option<Manage>>,
     /// The identity each process was bound with last.
     identities: RefCell<BTreeMap<u32, Rc<ClientIdentity>>>,
-    /// The root file system's `/usr` and `/etc` once the process manager
-    /// gave them, until the supervisor takes them, whether it has given
-    /// them, and the task that waits for them.
+    /// The root file system's `/system` and `/system/config` once the
+    /// process manager gave them, until the supervisor takes them, whether
+    /// it has given them, and the task that waits for them.
     root: RefCell<Option<(ClientEnd<Node>, ClientEnd<Node>)>>,
     root_given: Cell<bool>,
     root_waiting: RefCell<Option<Waker>>,
@@ -333,21 +333,25 @@ impl Dir {
         }
     }
 
-    /// Takes the root file system's `/usr` and `/etc` from the process
-    /// manager, once: a second time fails with `BAD_STATE`.
-    pub fn give_root(&self, usr: ClientEnd<Node>, etc: ClientEnd<Node>) -> Result<(), Status> {
+    /// Takes the root file system's `/system` and `/system/config` from the
+    /// process manager, once: a second time fails with `BAD_STATE`.
+    pub fn give_root(
+        &self,
+        system: ClientEnd<Node>,
+        config: ClientEnd<Node>,
+    ) -> Result<(), Status> {
         if self.root_given.replace(true) {
             return Err(Status::BadState);
         }
-        *self.root.borrow_mut() = Some((usr, etc));
+        *self.root.borrow_mut() = Some((system, config));
         if let Some(waker) = self.root_waiting.borrow_mut().take() {
             waker.wake();
         }
         Ok(())
     }
 
-    /// The root file system's `/usr` and `/etc`, once the process manager
-    /// gave them.
+    /// The root file system's `/system` and `/system/config`, once the
+    /// process manager gave them.
     pub async fn root(&self) -> (ClientEnd<Node>, ClientEnd<Node>) {
         poll_fn(|cx| match self.root.borrow_mut().take() {
             Some(root) => Poll::Ready(root),

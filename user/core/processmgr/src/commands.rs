@@ -1,4 +1,4 @@
-//! The commands: the programs whose manifest in `/usr/lib/programs/`
+//! The commands: the programs whose manifest in `/system/programs/`
 //! says `command: true`. A process that starts one of their binaries
 //! without naming an app ID runs it with the manifest's app ID, and a
 //! process with such an app ID starts no other.
@@ -9,12 +9,12 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 
-/// The program manifests' folder below `/usr`, and their suffix.
-const PROGRAMS: &str = "lib/programs";
+/// The program manifests' folder below `/system`, and their suffix.
+const PROGRAMS: &str = "programs";
 const SUFFIX: &str = ".yaml";
 const SYSTEM_PREFIX: &str = "system.";
 
-/// The commands of one `/usr`.
+/// The commands of one `/system`.
 #[derive(Default)]
 pub struct Commands {
     /// The app ID of each command, by the path of its binary relative to
@@ -46,7 +46,7 @@ impl Commands {
     }
 }
 
-/// The commands of the `/usr` that namespaces come from now, read once
+/// The commands of the `/system` that namespaces come from now, read once
 /// for it.
 pub async fn of(shared: &Shared) -> Rc<Commands> {
     let on_root = shared.namespaces.on_root();
@@ -67,9 +67,9 @@ pub async fn of(shared: &Shared) -> Rc<Commands> {
 async fn read(shared: &Shared) -> Commands {
     let namespaces = shared.namespaces.clone();
     let mut commands = Commands::default();
-    for name in namespaces.usr_names(shared, PROGRAMS, SUFFIX).await {
+    for name in namespaces.system_names(shared, PROGRAMS, SUFFIX).await {
         let path = format!("{PROGRAMS}/{name}");
-        let Some(bytes) = namespaces.usr_file(shared, &path).await else {
+        let Some(bytes) = namespaces.system_file(shared, &path).await else {
             continue;
         };
         let Ok(manifest) = mikros_manifest::parse_program(&name, &bytes) else {
@@ -80,8 +80,8 @@ async fn read(shared: &Shared) -> Commands {
             continue;
         }
         if let Some(service) = program.app_id.strip_prefix(SYSTEM_PREFIX) {
-            let service = format!("lib/services/{service}.yaml");
-            if namespaces.usr_file(shared, &service).await.is_some() {
+            let service = format!("services/system.{service}/service.yaml");
+            if namespaces.system_file(shared, &service).await.is_some() {
                 continue;
             }
         }

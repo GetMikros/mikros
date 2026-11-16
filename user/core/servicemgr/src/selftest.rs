@@ -2,7 +2,7 @@
 //! line asks for it with the word `selftest` or `selftest=<names>`, the
 //! process manager gives the service manager that word as its argument;
 //! once the services that start at boot run, the service manager starts
-//! `/usr/bin/selftest --poweroff`, with those names, as `system.selftest`,
+//! `/system/bin/selftest --poweroff`, with those names, as `system.selftest`,
 //! with its standard output and error going to the log service. Without
 //! the program, the system boots as usual.
 
@@ -14,7 +14,7 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::process::{HandleRole, SpawnRequest, StartupHandle};
 use mikros_rt::sys;
 
-const PROGRAM: &str = "/usr/bin/selftest";
+const PROGRAM: &str = "/system/bin/selftest";
 const APP_ID: &str = "system.selftest";
 /// The bytes of the arguments read: their counts, and enough for the
 /// service manager's own path and the word.

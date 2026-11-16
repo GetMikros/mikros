@@ -46,7 +46,7 @@ const SYSTEM_PREFIX: &str = "system.";
 /// The app ID that `user.full_disk.access` lets a caller name, for programs
 /// in `CLI_PROGRAMS`.
 const CLI: &str = "system.cli";
-const CLI_PROGRAMS: &str = "usr/bin";
+const CLI_PROGRAMS: &str = "system/bin";
 
 /// Serves the `Launcher` endpoint `end` of process `pid` until it
 /// closes. `Spawn`, `Exec` and `Wait` run as tasks of their own, so that one
@@ -310,9 +310,9 @@ async fn exec(
 /// Checks that process `caller` may give the new process of `program`, a
 /// path relative to the boot file system's root, `app_id`, and returns
 /// it. A caller with `user.full_disk.access` may name `system.cli` for a
-/// program under `/usr/bin`. Any other app ID needs
+/// program under `/system/bin`. Any other app ID needs
 /// `system.identity.set`, and one outside `system.` needs the program
-/// to lie in the app's bundle under `/Apps`. A `system.` app ID with a
+/// to lie in the app's bundle under `/apps`. A `system.` app ID with a
 /// program manifest needs a manifest that is valid, the program to be
 /// its `binary`, and the caller's app ID in its `spawned_by`; one whose
 /// manifest cannot be used is refused. A program manifest of a service's
@@ -348,25 +348,25 @@ async fn named_app(
     }
     let Some(name) = app_id.strip_prefix(SYSTEM_PREFIX) else {
         // User bundles are not in the boot file system.
-        let bundle = format!("Apps/{app_id}");
+        let bundle = format!("apps/{app_id}");
         return match !app_id.contains('/') && shared.fs.lies_in(program, &bundle) {
             true => Ok(app_id.into()),
             false => Err(Status::AccessDenied),
         };
     };
     let file_name = format!("{app_id}.yaml");
-    let path = format!("usr/lib/programs/{file_name}");
+    let path = format!("system/programs/{file_name}");
     let namespaces = shared.namespaces.clone();
     let Some(bytes) = namespaces
-        .usr_file(shared, &format!("lib/programs/{file_name}"))
+        .system_file(shared, &format!("programs/{file_name}"))
         .await
     else {
         return Ok(app_id.into());
     };
     // The app ID is a service's when its service manifest exists, and a
     // program manifest of it is then not valid, as none.
-    let service = format!("lib/services/{name}.yaml");
-    if namespaces.usr_file(shared, &service).await.is_some() {
+    let service = format!("services/system.{name}/service.yaml");
+    if namespaces.system_file(shared, &service).await.is_some() {
         mikros_rt::log!(
             Error,
             "/{path}: {app_id} is a service's app ID; the program manifest is ignored"

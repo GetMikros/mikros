@@ -1,4 +1,5 @@
-//! The services of the manifests in `/usr/lib/services/`.
+//! The services of the manifests in `/system/services/`, each
+//! `service.yaml` in a folder named by the service's app ID.
 
 use crate::boot::BootHandles;
 use crate::broker;
@@ -20,11 +21,10 @@ use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient, NodeType};
 use mikros_rt::interfaces::mikros::process::LauncherAsyncClient;
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 
-/// The directory of the service manifests.
-pub const SERVICES: &str = "/usr/lib/services";
+/// The directory of the services' folders.
+pub const SERVICES: &str = "/system/services";
 /// The service that starts right after the broker.
 pub const TMPFS: &str = "tmpfs";
-const SUFFIX: &str = ".yaml";
 
 /// Reads the service manifests in `SERVICES`, which is at the relative
 /// path `at` under `fs`, records the protocols they provide in `dir`,
@@ -168,16 +168,17 @@ pub async fn start(
     supervisor.serve_demands().await;
 }
 
-/// The services of the valid manifests in `SERVICES`, at `at` under
-/// `fs`, with the manifests' bytes. Files that cannot be read or are
-/// invalid are logged and left out, and so are the keys that a manifest
-/// does not have.
+/// The services of the valid manifests in the folders of `SERVICES`, at
+/// `at` under `fs`, with the manifests' bytes. Folders not named
+/// `system.<name>`, and manifests that cannot be read or are invalid, are
+/// logged and left out, and so are the keys that a manifest does not
+/// have.
 pub async fn read_all(
     fs: &NodeAsyncClient,
     at: &str,
     reactor: &Reactor,
 ) -> Vec<(Service, Vec<u8>)> {
-    let names = match files::list(fs, reactor, at, NodeType::File, SUFFIX).await {
+    let names = match files::list(fs, reactor, at, NodeType::Directory, "").await {
         Ok(names) => names,
         Err(Failure::Fs(Error::NotFound)) => Vec::new(),
         Err(failure) => {
@@ -187,8 +188,12 @@ pub async fn read_all(
     };
     let mut services = Vec::new();
     for name in names {
-        let path = format!("{SERVICES}/{name}");
-        let relative = files::join(at, &name);
+        let path = format!("{SERVICES}/{name}/{}", mikros_manifest::SERVICE_FILE);
+        if !name.starts_with(mikros_manifest::SERVICE_PREFIX) {
+            mikros_rt::log!(Error, "{SERVICES}/{name}: not named by a system app ID");
+            continue;
+        }
+        let relative = files::join(&files::join(at, &name), mikros_manifest::SERVICE_FILE);
         let bytes = match files::read(fs, reactor, &relative, mikros_yaml::SIZE_MAX).await {
             Ok(bytes) => bytes,
             Err(failure) => {

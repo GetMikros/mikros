@@ -1,9 +1,9 @@
 //! The root file system, once the process manager says it is available:
-//! the service manager's `/usr` and `/etc` are then the root's, it
-//! registers the permissions of the program manifests in
-//! `/usr/lib/programs/`, gives the device manager the root's `/usr` for
+//! the service manager's `/system` and `/system/config` are then the
+//! root's, it registers the permissions of the program manifests in
+//! `/system/programs/`, gives the device manager the root's `/system` for
 //! its drivers, and starts the services whose manifests in
-//! `/usr/lib/services/` it had not read before.
+//! `/system/services/` it had not read before.
 
 use crate::broker;
 use crate::directory::Initially;
@@ -18,23 +18,24 @@ use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::driver::{RootDrivers, RootDriversAsyncClient};
 use mikros_rt::interfaces::mikros::fs::{Error, Node, NodeAsyncClient, NodeType, Rights};
 
-/// The program manifests' directory, below the root's `/usr`.
-const PROGRAMS: &str = "lib/programs";
-const PROGRAMS_PATH: &str = "/usr/lib/programs";
-const SERVICES: &str = "lib/services";
+/// The program manifests' directory, below the root's `/system`, and the
+/// services' folders.
+const PROGRAMS: &str = "programs";
+const PROGRAMS_PATH: &str = "/system/programs";
+const SERVICES: &str = "services";
 const SUFFIX: &str = ".yaml";
 /// The device manager's protocol for the root's drivers.
 const ROOT_DRIVERS: &str = "mikros.driver.RootDrivers";
 
 /// Waits for the root file system, and then acts on its manifests.
 pub async fn follow(supervisor: Rc<Supervisor>) {
-    let (usr, etc) = supervisor.dir.root().await;
+    let (system, config) = supervisor.dir.root().await;
     let reactor = supervisor.reactor.clone();
-    let usr = NodeAsyncClient::new(usr, reactor.clone());
-    let etc = NodeAsyncClient::new(etc, reactor);
+    let system = NodeAsyncClient::new(system, reactor.clone());
+    let config = NodeAsyncClient::new(config, reactor);
     mikros_rt::log!(Info, "the root file system is available");
     // Read before any service whose manifest the root holds starts.
-    let new = new_services(&supervisor, &usr).await;
+    let new = new_services(&supervisor, &system).await;
     let names: Vec<_> = supervisor
         .services
         .borrow()
@@ -42,10 +43,10 @@ pub async fn follow(supervisor: Rc<Supervisor>) {
         .map(|s| s.name.clone())
         .chain(new.iter().map(|s| s.0.name.clone()))
         .collect();
-    register_programs(&supervisor, &usr, &names).await;
-    give_drivers(&supervisor, &usr).await;
+    register_programs(&supervisor, &system, &names).await;
+    give_drivers(&supervisor, &system).await;
     start_services(&supervisor, new).await;
-    *supervisor.root.borrow_mut() = Some((usr, etc));
+    *supervisor.root.borrow_mut() = Some((system, config));
     // Every service that starts at boot runs now.
     if let Some(names) = supervisor.selftest.clone() {
         crate::selftest::start(&supervisor, &names).await;
@@ -53,14 +54,14 @@ pub async fn follow(supervisor: Rc<Supervisor>) {
 }
 
 /// Gives the device manager a new read-only connection to the root's
-/// `usr`, for the drivers there, under the service manager's own
+/// `/system`, for the drivers there, under the service manager's own
 /// identity. A failure is logged.
-async fn give_drivers(supervisor: &Supervisor, usr: &NodeAsyncClient) {
+async fn give_drivers(supervisor: &Supervisor, system: &NodeAsyncClient) {
     let given = async {
         let (node, server) = endpoints::<Node>().map_err(|e| alloc::format!("{e:?}"))?;
-        match usr.clone(server, Rights::READ).await {
+        match system.clone(server, Rights::READ).await {
             Ok(Ok(_)) => {}
-            failed => return Err(alloc::format!("opening /usr: {failed:?}")),
+            failed => return Err(alloc::format!("opening /system: {failed:?}")),
         }
         let (client, server) = endpoints::<RootDrivers>().map_err(|e| alloc::format!("{e:?}"))?;
         let me = &supervisor.me;
@@ -86,9 +87,9 @@ async fn give_drivers(supervisor: &Supervisor, usr: &NodeAsyncClient) {
 /// The services of the root's manifests that were not read before.
 async fn new_services(
     supervisor: &Supervisor,
-    usr: &NodeAsyncClient,
+    system: &NodeAsyncClient,
 ) -> Vec<(mikros_manifest::Service, Vec<u8>)> {
-    let read = services::read_all(usr, SERVICES, &supervisor.reactor).await;
+    let read = services::read_all(system, SERVICES, &supervisor.reactor).await;
     read.into_iter()
         .filter(|(s, _)| supervisor.position(&s.name).is_none())
         .collect()
@@ -99,11 +100,11 @@ async fn new_services(
 /// service among `services`, is logged and ignored.
 async fn register_programs(
     supervisor: &Supervisor,
-    usr: &NodeAsyncClient,
+    system: &NodeAsyncClient,
     services: &[alloc::string::String],
 ) {
     let reactor = &supervisor.reactor;
-    let names = match files::list(usr, reactor, PROGRAMS, NodeType::File, SUFFIX).await {
+    let names = match files::list(system, reactor, PROGRAMS, NodeType::File, SUFFIX).await {
         Ok(names) => names,
         Err(Failure::Fs(Error::NotFound)) => Vec::new(),
         Err(failure) => {
@@ -122,7 +123,7 @@ async fn register_programs(
     for name in names {
         let path = format!("{PROGRAMS_PATH}/{name}");
         let relative = files::join(PROGRAMS, &name);
-        let bytes = match files::read(usr, reactor, &relative, mikros_yaml::SIZE_MAX).await {
+        let bytes = match files::read(system, reactor, &relative, mikros_yaml::SIZE_MAX).await {
             Ok(bytes) => bytes,
             Err(failure) => {
                 mikros_rt::log!(Error, "reading {path} failed: {failure:?}");

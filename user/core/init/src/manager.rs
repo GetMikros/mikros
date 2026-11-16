@@ -18,7 +18,7 @@ const PERM_READ: u32 = 1 << 0;
 /// The receivers' bindings reduce them to the rights they declare.
 const SAME_RIGHTS: u32 = 1 << 31;
 /// The boot module of the process manager.
-const PROCESS_MANAGER: &[u8] = b"bin/processmgr";
+const PROCESS_MANAGER: &[u8] = b"processmgr";
 
 /// A step that failed, and why.
 pub struct Failure {
@@ -196,7 +196,7 @@ fn member(s: &Startup, name: &[u8]) -> Result<Vec<u8>> {
     // SAFETY: nothing refers to the mapping any more.
     unsafe { sys::vm_unmap(s.process, at, size) };
     file.ok_or(Failure {
-        what: "finding bin/processmgr",
+        what: "finding processmgr",
         why: Why::Missing,
     })
 }

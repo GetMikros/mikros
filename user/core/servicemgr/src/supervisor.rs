@@ -89,7 +89,8 @@ pub struct Supervisor {
     /// Set once `Shutdown` began: from then on, no service is started or
     /// restarted.
     pub stopping: Cell<bool>,
-    /// The root file system's `/usr` and `/etc`, once it is available.
+    /// The root file system's `/system` and `/system/config`, once it is
+    /// available.
     pub root: RefCell<
         Option<(
             mikros_rt::interfaces::mikros::fs::NodeAsyncClient,

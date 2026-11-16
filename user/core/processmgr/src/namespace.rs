@@ -9,11 +9,11 @@
 //!
 //! When `live` is a word of the command line, the root file system is
 //! read-only, and profiles apply only once the process manager has made
-//! tmpfs's `live/etc`, `live/var` and `live/Users` and, through the union
-//! service, a view of each over the root's directory of that name, read
-//! only, to which changes go; the root table's `/etc`, `/var` and
-//! `/Users` are those views (MIKSPEC-0050.R34, MIKSPEC-0050.R35,
-//! MIKSPEC-0050.R37).
+//! tmpfs's `live/config`, `live/state`, `live/logs` and `live/users` and,
+//! through the union service, a view of each over the root's subvolume
+//! of that name, read only, to which changes go; the root table's
+//! `/system/config`, `/system/state`, `/system/logs` and `/users` are
+//! those views (MIKSPEC-0050.R41, MIKSPEC-0050.R42, MIKSPEC-0050.R46).
 //! Processes started before go without their profiles. An entry that is
 //! the root file system's root or lies in `@system` fails the start with
 //! `ACCESS_DENIED` (MIKSPEC-0050.R28).
@@ -21,13 +21,20 @@
 //! The process manager also connects to the file system of the EFI
 //! system partition that the system booted from, the instance `esp` of
 //! `device.filesystem`, once it is published, and from then on gives it
-//! as `/boot/efi` to the processes whose manifests list it
+//! as `/system/boot/efi` to the processes whose manifests list it
 //! (MIKSPEC-0064.R9, MIKSPEC-0064.R15). Processes whose profiles apply and
-//! that hold `user.volumes.access` get `/Volumes`, read and write, and so
+//! that hold `user.volumes.access` get `/volumes`, read and write, and so
 //! do the command-line tools of `system.cli`, whose home folder may also
 //! hold programs. An elevated process also gets its user's home folder,
-//! read and write, and `/Apps`, read only, unless it has them already
+//! read and write, and `/apps`, read only, unless it has them already
 //! (MIKSPEC-0092.R9).
+//!
+//! A service whose manifest lists `/system/tmp/<its name>` gets tmpfs's
+//! `system/<its name>` there, and a manifest that lists another path in
+//! `/system/tmp` makes the start fail with `INVALID_ARGS`. Every driver
+//! gets `/system/tmp/<app ID>`, tmpfs's `drivers/<app ID>`, and
+//! `/system/state/<app ID>`, both read and write, without listing them
+//! (MIKSPEC-0100.R14, MIKSPEC-0050.R46, MIKSPEC-0050.R47).
 
 use crate::processes::Shared;
 use alloc::format;
@@ -54,7 +61,7 @@ use mikros_rt::interfaces::mikros::service::{
 
 /// The accounts service's data directory, which no other process's
 /// manifest entry may be, lie in, or hold.
-const ACCOUNTS_DATA: &str = "/var/lib/accounts";
+const ACCOUNTS_DATA: &str = "/system/state/accounts";
 const ACCOUNTS_APP: &str = "system.accountsvc";
 /// The app ID of command-line tools.
 const CLI_APP: &str = "system.cli";
@@ -68,17 +75,25 @@ const ROOT_INSTANCE: &str = "root";
 /// The subvolume of system versions, which no namespace may reach.
 const SYSTEM: &str = "/@system";
 /// Where the EFI system partition is served, and its instance.
-const BOOT_EFI: &str = "/boot/efi";
+const BOOT_EFI: &str = "/system/boot/efi";
 /// The apps installed for every user.
-const APPS: &str = "/Apps";
+const APPS: &str = "/apps";
 /// The directory of the other volumes, and the permission it needs.
-const VOLUMES: &str = "/Volumes";
+const VOLUMES: &str = "/volumes";
+/// The system version, its configuration, and the folders of services'
+/// and drivers' temporary files and state.
+const SYSTEM_ENTRY: &str = "/system";
+const CONFIG: &str = "/system/config";
+const SYSTEM_TMP: &str = "/system/tmp";
+const STATE: &str = "/system/state";
+/// The prefix of the app IDs of drivers.
+const DRIVER_PREFIX: &str = "system.driver.";
 const VOLUMES_PERMISSION: &str = "user.volumes.access";
 const ESP_INSTANCE: &str = "esp";
 /// How long to wait before asking again for tmpfs.
 const RETRY: i64 = 20_000_000;
 /// The largest manifest read from the root file system.
-const USR_FILE_MAX: usize = 1 << 16;
+const SYSTEM_FILE_MAX: usize = 1 << 16;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 const RX: Rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
 const RWX: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0);
@@ -99,12 +114,11 @@ enum Roots {
     /// The root directory of the root file system.
     Root(Rc<NodeAsyncClient>),
     /// A live system's: the root directory of its root file system, read
-    /// and execute only, and the views of `/etc`, `/var` and `/Users`.
+    /// and execute only, and the views of `/system/config`,
+    /// `/system/state`, `/system/logs` and `/users`, in that order.
     Live {
         root: Rc<NodeAsyncClient>,
-        etc: Rc<NodeAsyncClient>,
-        var: Rc<NodeAsyncClient>,
-        users: Rc<NodeAsyncClient>,
+        views: [Rc<NodeAsyncClient>; 4],
     },
 }
 
@@ -143,7 +157,7 @@ pub enum Origin {
     Boot(String),
     /// A directory on a file system server, through a connection of the
     /// process manager's own with the entry's rights, and whether it is
-    /// the root's `/usr`, whose files are system components.
+    /// the root's `/system`, whose files are system components.
     Dir {
         dir: Rc<NodeAsyncClient>,
         system: bool,
@@ -158,8 +172,8 @@ pub struct Programs {
 
 impl Programs {
     /// The root file system `root` as `/`, which the device manager's
-    /// programs under `/usr` are looked for in first once namespaces come
-    /// from it.
+    /// programs under `/system` are looked for in first once namespaces
+    /// come from it.
     pub fn root(root: Rc<NodeAsyncClient>) -> Programs {
         Programs {
             entries: alloc::vec![(
@@ -333,7 +347,7 @@ impl Namespaces {
     /// namespaces from profiles, tells the service manager, and connects
     /// to tmpfs once it serves. A live system connects to tmpfs first, and
     /// builds namespaces from profiles only once it has made the views of
-    /// `/etc`, `/var` and `/Users`.
+    /// `/system/config`, `/system/state`, `/system/logs` and `/users`.
     pub async fn prepare_root(
         &self,
         shared: &Shared,
@@ -354,12 +368,7 @@ impl Namespaces {
             true => {
                 let tmpfs = self.serve_tmpfs(&directory, &reactor).await;
                 match live_views(shared, &root, &tmpfs.root, &reactor).await {
-                    Ok((etc, var, users)) => Roots::Live {
-                        root,
-                        etc,
-                        var,
-                        users,
-                    },
+                    Ok(views) => Roots::Live { root, views },
                     Err(e) => {
                         mikros_rt::log!(
                             Error,
@@ -382,28 +391,31 @@ impl Namespaces {
         }
     }
 
-    /// The file at `path` below `/usr`: the root file system's once
+    /// The file at `path` below `/system`: the root file system's once
     /// namespaces come from it, or else, as before, the boot file
     /// system's, which holds the files of early services at the same
     /// paths.
-    pub async fn usr_file(&self, shared: &Shared, path: &str) -> Option<Vec<u8>> {
+    pub async fn system_file(&self, shared: &Shared, path: &str) -> Option<Vec<u8>> {
         let ready = self.ready.borrow().clone();
         if let Some(root) = ready.as_deref().map(|r| r.roots.root()) {
-            let at = format!("usr/{path}");
-            if let Ok(bytes) = files::read(root, &shared.reactor, &at, USR_FILE_MAX).await {
+            let at = format!("system/{path}");
+            if let Ok(bytes) = files::read(root, &shared.reactor, &at, SYSTEM_FILE_MAX).await {
                 return Some(bytes);
             }
         }
-        shared.fs.file(&format!("usr/{path}")).map(<[u8]>::to_vec)
+        shared
+            .fs
+            .file(&format!("system/{path}"))
+            .map(<[u8]>::to_vec)
     }
 
     /// The names of the files that end in `suffix` in the folder at
-    /// `path` below `/usr`: the root file system's once namespaces come
-    /// from it, or else the boot file system's. None when there is no
-    /// such folder.
-    pub async fn usr_names(&self, shared: &Shared, path: &str, suffix: &str) -> Vec<String> {
+    /// `path` below `/system`: the root file system's once namespaces
+    /// come from it, or else the boot file system's. None when there is
+    /// no such folder.
+    pub async fn system_names(&self, shared: &Shared, path: &str, suffix: &str) -> Vec<String> {
         let ready = self.ready.borrow().clone();
-        let at = format!("usr/{path}");
+        let at = format!("system/{path}");
         if let Some(root) = ready.as_deref().map(|r| r.roots.root()) {
             let listed = files::list(root, &shared.reactor, &at, NodeType::File, suffix).await;
             return listed.unwrap_or_default();
@@ -417,7 +429,7 @@ impl Namespaces {
             .collect()
     }
 
-    /// Where the device manager's programs under `/usr` are looked for
+    /// Where the device manager's programs under `/system` are looked for
     /// first: the root file system, once namespaces come from it.
     pub fn root_programs(&self) -> Option<Programs> {
         let ready = self.ready.borrow();
@@ -430,9 +442,10 @@ impl Namespaces {
         self.ready.borrow().is_some()
     }
 
-    /// Gives the service manager read-only connections to the `/usr` and
-    /// `/etc` of the profiles that now apply, through the control
-    /// connection, so that it reads its manifests there from then on.
+    /// Gives the service manager read-only connections to the `/system`
+    /// and `/system/config` of the profiles that now apply, through the
+    /// control connection, so that it reads its manifests there from then
+    /// on.
     async fn announce_root(&self, shared: &Shared) {
         let Some(ready) = self.ready.borrow().clone() else {
             return;
@@ -440,19 +453,19 @@ impl Namespaces {
         let Some(control) = shared.control.borrow().clone() else {
             return;
         };
-        let usr = self.entry(shared, &ready, "/usr", Rights::READ).await;
-        let etc = self.entry(shared, &ready, "/etc", Rights::READ).await;
-        let (usr, etc) = match (usr, etc) {
-            (Ok((usr, _)), Ok((etc, _))) => (usr.directory, etc.directory),
+        let system = self.entry(shared, &ready, SYSTEM_ENTRY, Rights::READ).await;
+        let config = self.entry(shared, &ready, CONFIG, Rights::READ).await;
+        let (system, config) = match (system, config) {
+            (Ok((system, _)), Ok((config, _))) => (system.directory, config.directory),
             (Err(e), _) | (_, Err(e)) => {
                 mikros_rt::log!(
                     Error,
-                    "process-manager: opening /usr and /etc for the service manager failed: {e:?}"
+                    "process-manager: opening /system and /system/config for the service manager failed: {e:?}"
                 );
                 return;
             }
         };
-        // The service manager's programs come from the root's /usr from
+        // The service manager's programs come from the root's /system from
         // now on, so that it starts the services there.
         if let Some(pid) = shared.identity_setter.get() {
             let app_id = shared.records.borrow().get(pid).map(|r| r.app_id.clone());
@@ -470,7 +483,7 @@ impl Namespaces {
                 }
             }
         }
-        match control.root_available(usr, etc).await {
+        match control.root_available(system, config).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => mikros_rt::log!(Error, "process-manager: RootAvailable failed: {e:?}"),
             Err(e) => mikros_rt::log!(Error, "process-manager: RootAvailable failed: {e:?}"),
@@ -479,14 +492,14 @@ impl Namespaces {
 
     /// Connects through `directory`, the process manager's own, to the
     /// file system of the EFI system partition the system booted from,
-    /// once it is published, to serve it as `/boot/efi`.
+    /// once it is published, to serve it as `/system/boot/efi`.
     pub async fn prepare_esp(&self, directory: DirectoryAsyncClient, reactor: Reactor) {
         match filesystem(&directory, &reactor, ESP_INSTANCE, RW).await {
             Ok(root) => {
                 *self.esp.borrow_mut() = Some(Rc::new(root));
                 mikros_rt::log!(
                     Info,
-                    "process-manager: serving the EFI system partition as /boot/efi"
+                    "process-manager: serving the EFI system partition as /system/boot/efi"
                 );
             }
             Err(Status::PeerClosed) => {}
@@ -533,15 +546,15 @@ impl Namespaces {
             add(
                 &mut entries,
                 &mut origins,
-                self.entry(shared, &ready, "/usr", RX).await?,
+                self.entry(shared, &ready, SYSTEM_ENTRY, RX).await?,
             );
             add(
                 &mut entries,
                 &mut origins,
-                self.entry(shared, &ready, "/etc", Rights::READ).await?,
+                self.entry(shared, &ready, CONFIG, Rights::READ).await?,
             );
         } else if app_id == CLI_APP {
-            // User 0 has no folder in /Users, and so no name is needed.
+            // User 0 has no folder in /users, and so no name is needed.
             let name = match user {
                 0 => None,
                 _ => Some(crate::users::name(shared, user).await?),
@@ -549,12 +562,12 @@ impl Namespaces {
             add(
                 &mut entries,
                 &mut origins,
-                self.entry(shared, &ready, "/usr", RX).await?,
+                self.entry(shared, &ready, SYSTEM_ENTRY, RX).await?,
             );
             add(
                 &mut entries,
                 &mut origins,
-                self.entry(shared, &ready, "/etc", Rights::READ).await?,
+                self.entry(shared, &ready, CONFIG, Rights::READ).await?,
             );
             add(
                 &mut entries,
@@ -562,7 +575,7 @@ impl Namespaces {
                 self.entry(shared, &ready, APPS, Rights::READ).await?,
             );
             let libraries = self
-                .entry(shared, &ready, "/Libraries", Rights::READ)
+                .entry(shared, &ready, "/libraries", Rights::READ)
                 .await?;
             let libraries = match &name {
                 None => libraries,
@@ -570,7 +583,7 @@ impl Namespaces {
             };
             add(&mut entries, &mut origins, libraries);
             if let Some(name) = &name {
-                let home = format!("/Users/{name}");
+                let home = format!("/users/{name}");
                 add(
                     &mut entries,
                     &mut origins,
@@ -582,7 +595,7 @@ impl Namespaces {
             add(
                 &mut entries,
                 &mut origins,
-                none(tmp(&tmpfs, &format!("cli/{user}"), budget, reactor).await?),
+                none(tmp(&tmpfs, &format!("cli/{user}"), "/tmp", budget, reactor).await?),
             );
         } else if !app_id.starts_with("system.") {
             // A native app.
@@ -592,23 +605,23 @@ impl Namespaces {
             // Its profile names the user, whose name is not known yet.
             return Err(Status::NotSupported);
         } else {
-            let (program, listed) = manifest_entries(self, shared, app_id).await;
-            if program {
+            let (kind, listed) = manifest_entries(self, shared, app_id).await;
+            if kind == Manifest::Program {
                 add(
                     &mut entries,
                     &mut origins,
-                    self.entry(shared, &ready, "/usr", RX).await?,
+                    self.entry(shared, &ready, SYSTEM_ENTRY, RX).await?,
                 );
-                // A program whose manifest lists `/etc` gets it with the
-                // rights listed there instead.
-                let lists_etc = listed
+                // A program whose manifest lists `/system/config` gets it
+                // with the rights listed there instead.
+                let lists_config = listed
                     .iter()
-                    .any(|(path, _)| path::normalize(path).as_deref() == Some("/etc"));
-                if !lists_etc {
+                    .any(|(path, _)| path::normalize(path).as_deref() == Some(CONFIG));
+                if !lists_config {
                     add(
                         &mut entries,
                         &mut origins,
-                        self.entry(shared, &ready, "/etc", Rights::READ).await?,
+                        self.entry(shared, &ready, CONFIG, Rights::READ).await?,
                     );
                 }
                 let path = format!("apps/{user}/{app_id}");
@@ -617,12 +630,30 @@ impl Namespaces {
                 add(
                     &mut entries,
                     &mut origins,
-                    none(tmp(&tmpfs, &path, budget, reactor).await?),
+                    none(tmp(&tmpfs, &path, "/tmp", budget, reactor).await?),
                 );
                 if user != 0 {
                     // The folders of the user's app need the user's name.
                     return Err(Status::NotSupported);
                 }
+            }
+            if kind == Manifest::Driver {
+                // Its own folders for temporary files and state.
+                let budget = shared.budget_of(user, app_id)?;
+                let tmpfs = self.tmpfs().await;
+                let at = format!("{SYSTEM_TMP}/{app_id}");
+                let dir = format!("drivers/{app_id}");
+                add(
+                    &mut entries,
+                    &mut origins,
+                    none(tmp(&tmpfs, &dir, &at, budget, reactor).await?),
+                );
+                let state = format!("{STATE}/{app_id}");
+                add(
+                    &mut entries,
+                    &mut origins,
+                    self.entry(shared, &ready, &state, RW).await?,
+                );
             }
             for (path, text) in listed {
                 if path.contains("<user>") {
@@ -632,11 +663,30 @@ impl Namespaces {
                     }
                 }
                 let path = path::normalize(&path).ok_or(Status::NotFound)?;
-                // Only the accounts service reaches its data.
-                if app_id != ACCOUNTS_APP && path::overlaps(&path, ACCOUNTS_DATA) {
+                // Only the accounts service reaches its data, which only
+                // entries in `/system/state` can: `/system` itself comes
+                // from the system version.
+                let in_state = path == STATE || path.starts_with("/system/state/");
+                if app_id != ACCOUNTS_APP && in_state && path::overlaps(&path, ACCOUNTS_DATA) {
                     return Err(Status::AccessDenied);
                 }
                 let rights = rights(&text).ok_or(Status::InvalidArgs)?;
+                if path == SYSTEM_TMP || path.starts_with("/system/tmp/") {
+                    // Only a service's own folder there.
+                    let name = app_id.strip_prefix("system.").unwrap_or(app_id);
+                    if kind != Manifest::Service || path != format!("{SYSTEM_TMP}/{name}") {
+                        return Err(Status::InvalidArgs);
+                    }
+                    let budget = shared.budget_of(user, app_id)?;
+                    let tmpfs = self.tmpfs().await;
+                    let dir = format!("system/{name}");
+                    add(
+                        &mut entries,
+                        &mut origins,
+                        none(tmp(&tmpfs, &dir, &path, budget, reactor).await?),
+                    );
+                    continue;
+                }
                 add(
                     &mut entries,
                     &mut origins,
@@ -645,13 +695,13 @@ impl Namespaces {
             }
         }
         // An elevated process gets the folders of every user permission:
-        // the user's home folder, read and write, `/Apps`, read only, and
-        // `/Volumes`, whose permission the broker allows it.
+        // the user's home folder, read and write, `/apps`, read only, and
+        // `/volumes`, whose permission the broker allows it.
         if admin != 0 {
             let home = match user {
                 0 => None,
                 _ => Some(format!(
-                    "/Users/{}",
+                    "/users/{}",
                     crate::users::name(shared, user).await?
                 )),
             };
@@ -695,8 +745,8 @@ impl Namespaces {
     /// when the rights hold `WRITE` and it lies on tmpfs, and fails with
     /// `NOT_FOUND` otherwise; rights beyond those of its root fail with
     /// `ACCESS_DENIED`.
-    /// `/Libraries` for user `name`: a read-only view of `system`, the
-    /// system's, merged with the user's `Libraries` folder, or `system`
+    /// `/libraries` for user `name`: a read-only view of `system`, the
+    /// system's, merged with the user's `libraries` folder, or `system`
     /// alone when the user has none.
     async fn libraries(
         &self,
@@ -705,13 +755,13 @@ impl Namespaces {
         system: (NamespaceEntry, Origin),
         name: &str,
     ) -> Result<(NamespaceEntry, Origin), Status> {
-        let path = format!("/Users/{name}/Libraries");
+        let path = format!("/users/{name}/libraries");
         let own = match self.entry(shared, ready, &path, Rights::READ).await {
             Ok((own, _)) => own,
             Err(e) => {
                 mikros_rt::log!(
                     Warning,
-                    "process-manager: {path} cannot be opened ({e:?}); /Libraries is only the system's"
+                    "process-manager: {path} cannot be opened ({e:?}); /libraries is only the system's"
                 );
                 return Ok(system);
             }
@@ -719,7 +769,7 @@ impl Namespaces {
         let layers = alloc::vec![system.0.directory, own.directory];
         let view = crate::users::merged(shared, layers, Rights::READ).await?;
         Ok(none(NamespaceEntry {
-            path: "/Libraries".into(),
+            path: "/libraries".into(),
             directory: view,
         }))
     }
@@ -736,39 +786,34 @@ impl Namespaces {
         if normal.is_empty() || path::overlaps(normal, SYSTEM) {
             return Err(Status::AccessDenied);
         }
+        // The writable subvolumes, or a live system's views of them.
         let changing = match &ready.roots {
-            Roots::Root(root) => [
-                Source::Dir(root.clone(), "etc"),
-                Source::Dir(root.clone(), "var"),
-                Source::Dir(root.clone(), "Users"),
-            ],
-            Roots::Live {
-                etc, var, users, ..
-            } => [
-                Source::Dir(etc.clone(), ""),
-                Source::Dir(var.clone(), ""),
-                Source::Dir(users.clone(), ""),
-            ],
+            Roots::Root(root) => {
+                ["config", "state", "logs", "users"].map(|top| Source::Dir(root.clone(), top))
+            }
+            Roots::Live { views, .. } => views.clone().map(|view| Source::Dir(view, "")),
         };
-        let [etc, var, users] = changing;
+        let [config, state, logs, users] = changing;
         let mut table: Vec<(&str, Source, Rights)> = alloc::vec![
-            ("/usr", Source::Dir(root.clone(), "usr"), RX),
-            ("/Apps", Source::Dir(root.clone(), "Apps"), Rights::READ),
+            (SYSTEM_ENTRY, Source::Dir(root.clone(), "system"), RX),
+            (CONFIG, config, RWX),
+            (STATE, state, RWX),
+            ("/system/logs", logs, RWX),
+            (APPS, Source::Dir(root.clone(), "apps"), Rights::READ),
             (
-                "/Libraries",
-                Source::Dir(root.clone(), "Libraries"),
+                "/libraries",
+                Source::Dir(root.clone(), "libraries"),
                 Rights::READ,
             ),
-            ("/etc", etc, RWX),
-            ("/var", var, RWX),
-            ("/Users", users, RWX),
+            ("/users", users, RWX),
         ];
         if let Some(esp) = self.esp.borrow().as_ref() {
             table.push((BOOT_EFI, Source::Dir(esp.clone(), ""), RW));
         }
+        // The longest root that holds the path.
         let (top, source, most, rest) = table
             .into_iter()
-            .find_map(|(root, source, most)| {
+            .filter_map(|(root, source, most)| {
                 let rest = normal.strip_prefix(root)?;
                 (rest.is_empty() || rest.starts_with('/')).then(|| {
                     (
@@ -779,13 +824,15 @@ impl Namespaces {
                     )
                 })
             })
+            .max_by_key(|(root, ..)| root.len())
             .ok_or(Status::NotFound)?;
-        // Missing directories are made only where services keep state.
-        let creatable = matches!(top, "/etc" | "/var" | "/Users");
+        // Missing directories are made only where services and drivers
+        // keep configuration and state, and in users' folders.
+        let creatable = matches!(top, CONFIG | STATE | "/system/logs" | "/users");
         let executable = rights.contains(Rights::EXECUTE);
-        // The system's own programs are those of the root's /usr; the
+        // The system's own programs are those of the root's /system; the
         // boot file system tells its own apart itself.
-        let system = top == "/usr";
+        let system = top == SYSTEM_ENTRY;
         if rights.0 & !most.0 != 0 {
             return Err(Status::AccessDenied);
         }
@@ -859,11 +906,12 @@ impl Namespaces {
     }
 }
 
-/// A `/tmp` entry for the directory `path` of tmpfs, made if missing,
+/// An entry at `at` for the directory `path` of tmpfs, made if missing,
 /// with read and write rights, whose files are charged to `budget`.
 async fn tmp(
     tmpfs: &Tmpfs,
     path: &str,
+    at: &str,
     budget: OwnedHandle,
     reactor: &Reactor,
 ) -> Result<NamespaceEntry, Status> {
@@ -874,7 +922,7 @@ async fn tmp(
     let (directory, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
     flat(dir.clone(server, RW).await).map_err(status)?;
     Ok(NamespaceEntry {
-        path: "/tmp".into(),
+        path: at.into(),
         directory,
     })
 }
@@ -979,23 +1027,19 @@ async fn tmpfs(
     Some((NodeAsyncClient::new(root, reactor.clone()), temporary))
 }
 
-type Dirs = (
-    Rc<NodeAsyncClient>,
-    Rc<NodeAsyncClient>,
-    Rc<NodeAsyncClient>,
-);
-
-/// The views of a live system's `/etc`, `/var` and `/Users`: for each,
-/// tmpfs's `live/etc`, `live/var` or `live/Users` of `tmpfs`, made where
-/// missing, over the directory of the same name of `root`, read only.
+/// The views of a live system's `/system/config`, `/system/state`,
+/// `/system/logs` and `/users`, in that order: for each, tmpfs's
+/// `live/config`, `live/state`, `live/logs` or `live/users` of `tmpfs`,
+/// made where missing, over the subvolume of the same name of `root`, read
+/// only.
 async fn live_views(
     shared: &Shared,
     root: &NodeAsyncClient,
     tmpfs: &NodeAsyncClient,
     reactor: &Reactor,
-) -> Result<Dirs, Status> {
+) -> Result<[Rc<NodeAsyncClient>; 4], Status> {
     let mut made = Vec::new();
-    for top in ["etc", "var", "Users"] {
+    for top in ["config", "state", "logs", "users"] {
         let upper = directories(tmpfs, &format!("live/{top}"), reactor)
             .await
             .map_err(status)?;
@@ -1015,10 +1059,7 @@ async fn live_views(
         let view = crate::users::view(shared, layers, RWX).await?;
         made.push(Rc::new(NodeAsyncClient::new(view, reactor.clone())));
     }
-    let users = made.pop().ok_or(Status::Io)?;
-    let var = made.pop().ok_or(Status::Io)?;
-    let etc = made.pop().ok_or(Status::Io)?;
-    Ok((etc, var, users))
+    made.try_into().map_err(|_| Status::Io)
 }
 
 /// A new connection to the directory `dir` with `rights`.
@@ -1028,49 +1069,56 @@ async fn connection(dir: &NodeAsyncClient, rights: Rights) -> Result<ClientEnd<N
     Ok(client)
 }
 
-/// Whether `app_id` has a program manifest, and the namespace entries of
-/// its manifest, a driver's, a service's or a program's, with their paths
-/// and rights, read from `/usr` as `namespaces` serves it. Without a valid
-/// manifest it has none.
+/// The kind of manifest that an app ID has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Manifest {
+    /// None that is valid.
+    None,
+    Driver,
+    Service,
+    Program,
+}
+
+/// The kind of `app_id`'s manifest, and its namespace entries: a
+/// driver's, a service's or a program's, with their paths and rights,
+/// read from `/system` as `namespaces` serves it. Without a valid manifest
+/// it has none.
 async fn manifest_entries(
     namespaces: &Namespaces,
     shared: &Shared,
     app_id: &str,
-) -> (bool, Vec<(String, String)>) {
+) -> (Manifest, Vec<(String, String)>) {
     let pairs = |entries: Vec<mikros_manifest::NamespaceEntry>| {
         entries.into_iter().map(|e| (e.path, e.rights)).collect()
     };
-    if let Some(name) = app_id.strip_prefix("system.driver.") {
-        let path = format!("lib/drivers/{name}/driver.yaml");
+    if app_id.starts_with(DRIVER_PREFIX) {
+        let path = format!("drivers/{app_id}/driver.yaml");
         return match namespaces
-            .usr_file(shared, &path)
+            .system_file(shared, &path)
             .await
-            .map(|b| mikros_manifest::parse_driver(name, &b))
+            .map(|b| mikros_manifest::parse_driver(app_id, &b))
         {
-            Some(Ok(m)) => (false, pairs(m.driver.namespace)),
-            _ => (false, Vec::new()),
+            Some(Ok(m)) => (Manifest::Driver, pairs(m.driver.namespace)),
+            _ => (Manifest::None, Vec::new()),
         };
     }
-    let Some(name) = app_id.strip_prefix("system.") else {
-        return (false, Vec::new());
-    };
-    let service = format!("{name}.yaml");
-    if let Some(bytes) = namespaces
-        .usr_file(shared, &format!("lib/services/{service}"))
-        .await
-    {
-        return match mikros_manifest::parse(&service, &bytes) {
-            Ok(m) => (false, pairs(m.service.namespace)),
-            Err(_) => (false, Vec::new()),
+    if !app_id.starts_with("system.") {
+        return (Manifest::None, Vec::new());
+    }
+    let service = format!("services/{app_id}/{}", mikros_manifest::SERVICE_FILE);
+    if let Some(bytes) = namespaces.system_file(shared, &service).await {
+        return match mikros_manifest::parse(app_id, &bytes) {
+            Ok(m) => (Manifest::Service, pairs(m.service.namespace)),
+            Err(_) => (Manifest::None, Vec::new()),
         };
     }
     let program = format!("{app_id}.yaml");
     match namespaces
-        .usr_file(shared, &format!("lib/programs/{program}"))
+        .system_file(shared, &format!("programs/{program}"))
         .await
         .map(|b| mikros_manifest::parse_program(&program, &b))
     {
-        Some(Ok(m)) => (true, pairs(m.program.namespace)),
-        _ => (false, Vec::new()),
+        Some(Ok(m)) => (Manifest::Program, pairs(m.program.namespace)),
+        _ => (Manifest::None, Vec::new()),
     }
 }
