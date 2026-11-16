@@ -1177,6 +1177,9 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             println!("built    {}", sessions.display());
             let session_shell = user_build("session-shell", kind)?;
             println!("built    {}", session_shell.display());
+            // The program that the session shell packs into an app.
+            let app_probe = crate::rust_std::build("app-probe", kind)?;
+            println!("built    {}", app_probe.display());
             let idle_service = user_build("idle-service", kind)?;
             println!("built    {}", idle_service.display());
             let idle_manifest =
@@ -1240,6 +1243,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     test_sessions_manifest.clone(),
                 ),
                 ("system/bin/msh".to_owned(), session_shell.clone()),
+                ("system/bin/app-probe".to_owned(), app_probe.clone()),
                 (
                     "system/services/system.union/union".to_owned(),
                     union.clone(),

@@ -1,0 +1,10 @@
+[package]
+name = "app-probe"
+version.workspace = true
+edition.workspace = true
+license = "MPL-2.0"
+publish = false
+
+[[bin]]
+name = "app-probe"
+path = "src/main.rs"

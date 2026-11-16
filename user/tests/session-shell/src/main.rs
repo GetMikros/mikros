@@ -5,7 +5,9 @@
 //! a session and process group of its own, starts in the user's home,
 //! and has exactly the environment of that user's session, with the
 //! user's home and a `/libraries` in its namespace, which for bob holds the README of his
-//! own Libraries folder.
+//! own Libraries folder. It installs a package of an app for its user,
+//! updates it with one that also holds the app probe, starts the probe
+//! from there, and removes the package.
 //! On the terminal it was given it asks
 //! for the cursor position, which the console answers, and reads the
 //! line that the runner types. It exits with 0 once all of that held,
@@ -163,14 +165,12 @@ async fn acls(
 /// `apps/<id>/package`, which `List` then shows as local, and goes again
 /// with `Remove` (MIKSPEC-0101.R25, MIKSPEC-0101.R27). Fails with the
 /// number of the step.
-async fn packages(
-    home: &NodeAsyncClient,
-    directory: &DirectoryAsyncClient,
-    reactor: &mikros_rt::exec::Reactor,
-) -> Result<(), i64> {
+async fn packages(shell: &Shell<'_>, reactor: &mikros_rt::exec::Reactor) -> Result<(), i64> {
     use mikros_rt::interfaces::mikros::packages::{Installer, InstallerAsyncClient};
     const ID: &str = "org.example.hello";
     const FILE: &str = "hello.mika";
+    let (home, directory) = (shell.home, shell.directory);
+    let probe = read_all(shell.system, PROBE, reactor).await?;
     let (installer, server) = endpoints::<Installer>().map_err(|_| 23)?;
     let connected = directory
         .connect(
@@ -184,7 +184,9 @@ async fn packages(
     // Version 1.0.0, then 1.1.0 over it, which swaps the new subvolume
     // with the old one.
     for (version, step) in [("1.0.0", 24), ("1.1.0", 29)] {
-        let file = write_package(home, FILE, ID, version, reactor).await?;
+        // The second version also holds the app probe.
+        let program = (step == 29).then_some(probe.as_slice());
+        let file = write_package(home, FILE, ID, version, program, reactor).await?;
         let (client, server) = endpoints::<Node>().map_err(|_| step)?;
         check(
             matches!(file.clone(server, Rights::READ).await, Ok(Ok(_))),
@@ -216,6 +218,7 @@ async fn packages(
             step + 3,
         )?;
     }
+    run_app(shell, ID, reactor).await?;
     let removed = installer.remove(ID.into(), false, false).await;
     check(matches!(removed, Ok(Ok(_))), 28)?;
     let (_, server) = endpoints::<Node>().map_err(|_| 28)?;
@@ -229,19 +232,154 @@ async fn packages(
     Ok(())
 }
 
+/// What the checks of installed apps use of the shell's namespace and
+/// identity.
+struct Shell<'a> {
+    home: &'a NodeAsyncClient,
+    /// The entry `/users/<name>/apps`.
+    apps: &'a NodeAsyncClient,
+    system: &'a NodeAsyncClient,
+    directory: &'a DirectoryAsyncClient,
+    launcher: &'a LauncherAsyncClient,
+    name: &'a str,
+    user: u32,
+}
+
+/// The app probe, from `/system`, and the user given to `Spawn` for the
+/// caller's own.
+const PROBE: &str = "bin/app-probe";
+const CALLER_USER: u32 = u32::MAX;
+
+/// The file `path` of `dir`, whole.
+async fn read_all(
+    dir: &NodeAsyncClient,
+    path: &str,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<Vec<u8>, i64> {
+    let (file, server) = endpoints::<Node>().map_err(|_| 33)?;
+    let opened = dir
+        .open(path.into(), OpenFlags(0), 0, Rights::READ, server)
+        .await;
+    check(matches!(opened, Ok(Ok(_))), 33)?;
+    let file = NodeAsyncClient::new(file, reactor.clone());
+    let mut bytes = Vec::new();
+    loop {
+        let read = file.read(bytes.len() as u64, 32768).await;
+        let data = read.ok().and_then(|r| r.ok()).ok_or(33)?.data;
+        if data.is_empty() {
+            return Ok(bytes);
+        }
+        bytes.extend(data);
+    }
+}
+
+/// Starts the app probe from the local package of `id` without naming an
+/// app ID, which makes it that app (MIKSPEC-0101.R39, MIKSPEC-0034.R45),
+/// and checks that it and its child passed their checks
+/// (MIKSPEC-0101.R7, MIKSPEC-0101.R41), that the note it wrote is in the
+/// user's `data` folder of the app, which belongs to the user, and that
+/// the shell's `/users/<name>/apps` takes no new files (MIKSPEC-0101.R42).
+async fn run_app(
+    shell: &Shell<'_>,
+    id: &str,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    use mikros_rt::interfaces::mikros::process::{SpawnRequest, StatusKind, WaitOptions};
+    let path = format!("/users/{}/apps/{id}/package/bin/probe", shell.name);
+    let request = SpawnRequest {
+        path: path.clone(),
+        arguments: arguments(&[&path]).ok_or(34)?,
+        handles: Vec::new(),
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+        new_session: false,
+        working_directory: None,
+        umask: u32::MAX,
+    };
+    let spawned = shell.launcher.spawn(request).await;
+    let pid = spawned.ok().and_then(|r| r.ok()).ok_or(34)?.pid;
+    let info = shell.launcher.get_info(pid).await;
+    let info = info.ok().and_then(|r| r.ok()).ok_or(35)?.info;
+    check(info.app_id == id, 35)?;
+    let waited = shell
+        .launcher
+        .wait(pid as i32, WaitOptions(0), now() + 60 * SECOND)
+        .await;
+    let status = waited.ok().and_then(|r| r.ok()).ok_or(36)?.status;
+    check(status.kind == StatusKind::Exited, 36)?;
+    // The probe's own number for the check that failed.
+    if status.exit_code != 0 {
+        return Err(status.exit_code);
+    }
+    let note = read_all(shell.home, &format!("apps/{id}/data/note"), reactor).await;
+    check(note.as_deref() == Ok(b"from the app".as_slice()), 37)?;
+    let (data, server) = endpoints::<Node>().map_err(|_| 38)?;
+    let opened = shell
+        .home
+        .open(
+            format!("apps/{id}/data"),
+            OpenFlags::DIRECTORY,
+            0,
+            Rights::READ,
+            server,
+        )
+        .await;
+    check(matches!(opened, Ok(Ok(_))), 38)?;
+    let data = NodeAsyncClient::new(data, reactor.clone());
+    let owner = data.get_attributes().await.ok().and_then(|r| r.ok());
+    check(owner.is_some_and(|a| a.attributes.owner == shell.user), 38)?;
+    let (_, server) = endpoints::<Node>().map_err(|_| 39)?;
+    let flags = OpenFlags(OpenFlags::CREATE.0);
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+    let made = shell
+        .apps
+        .open("made".into(), flags, 0o644, rw, server)
+        .await;
+    check(matches!(made, Ok(Err(_))), 39)?;
+    Ok(())
+}
+
+/// A memory object of `args` with no environment, as `Spawn` takes them.
+fn arguments(args: &[&str]) -> Option<OwnedHandle> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(args.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    for arg in args {
+        bytes.extend_from_slice(arg.as_bytes());
+        bytes.push(0);
+    }
+    let mut mem = 0;
+    // SAFETY: the pointers describe `mem` and `bytes`.
+    let made = unsafe { sys::mem_create(bytes.len().next_multiple_of(4096) as u64, 0, &mut mem) };
+    if made != mikros_rt::OK {
+        return None;
+    }
+    // SAFETY: the kernel just created the handle for us.
+    let mem = unsafe { OwnedHandle::from_raw(mem) };
+    // SAFETY: the pointer describes `bytes`.
+    let written = unsafe { sys::mem_write(mem.raw(), 0, bytes.as_ptr(), bytes.len() as u64) };
+    (written == mikros_rt::OK).then_some(mem)
+}
+
 /// Writes a package of the app `id` in `version`, whose program says
-/// hello with its version, to the file `name` of `home`.
+/// hello with its version, to the file `name` of `home`, with `probe`
+/// as its `bin/probe` when given.
 async fn write_package(
     home: &NodeAsyncClient,
     name: &str,
     id: &str,
     version: &str,
+    probe: Option<&[u8]>,
     reactor: &mikros_rt::exec::Reactor,
 ) -> Result<NodeAsyncClient, i64> {
     use mikros_mika::format::{Builder, MANIFEST, checksum_text};
     let mut builder = Builder::default();
     builder.folder("bin");
     builder.file("bin/hello", format!("hello {version}").into_bytes(), true);
+    if let Some(probe) = probe {
+        builder.file("bin/probe", probe.to_vec(), true);
+    }
     let checksum = checksum_text(&builder.checksum(None));
     let manifest = format!(
         "id: {id}\nkind: app\nversion: {version}\nname: Hello\ndescription: Says hello.\n\
@@ -284,9 +422,15 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let mut home = None;
     let mut home_dir = None;
     let mut libraries = None;
+    let mut system = None;
+    let mut apps = None;
     for entry in managed.namespace {
         match entry.path.as_str() {
             "/libraries" => libraries = Some(entry.directory),
+            "/system" => system = Some(entry.directory),
+            path if path.starts_with("/users/") && path.ends_with("/apps") => {
+                apps = Some(entry.directory);
+            }
             path if path.starts_with("/users/") => {
                 home = Some(entry.path);
                 home_dir = Some(entry.directory);
@@ -327,7 +471,18 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         let libraries = NodeAsyncClient::new(libraries.ok_or(13)?, reactor.clone());
         let home = NodeAsyncClient::new(home_dir.ok_or(16)?, reactor.clone());
         acls(&home, user, &reactor).await?;
-        packages(&home, &directory, &reactor).await?;
+        let system = NodeAsyncClient::new(system.ok_or(33)?, reactor.clone());
+        let apps = NodeAsyncClient::new(apps.ok_or(33)?, reactor.clone());
+        let shell = Shell {
+            home: &home,
+            apps: &apps,
+            system: &system,
+            directory: &directory,
+            launcher: &launcher,
+            name: &name,
+            user,
+        };
+        packages(&shell, &reactor).await?;
         if name == "bob" {
             let (_readme, server) = endpoints::<Node>().map_err(|_| 13)?;
             let opened = libraries
