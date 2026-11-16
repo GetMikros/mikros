@@ -23,7 +23,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use mikros_rt::exec::Executor;
 use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
-use mikros_rt::interfaces::mikros::fs::{Node, NodeAsyncClient, OpenFlags, Rights};
+use mikros_rt::interfaces::mikros::fs::{
+    AclEntry, AclTag, Error, Node, NodeAsyncClient, OpenFlags, Rights,
+};
 use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient};
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::interfaces::mikros::terminal::{Attributes, Terminal, TerminalAsyncClient, When};
@@ -98,6 +100,64 @@ fn copy(a: &Attributes) -> Attributes {
     }
 }
 
+/// The home folder's entry, which the process manager bound to this
+/// process, takes no other subject; a file made through it is the user's;
+/// and an extended access list decides what the user may do with it, and
+/// the owner may set it (MIKSPEC-0050.R44, MIKSPEC-0049.R25,
+/// MIKSPEC-0049.R26). Fails with the number of the step.
+async fn acls(
+    home: &NodeAsyncClient,
+    user: u32,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    const NAME: &str = "acl-check";
+    let entry = |tag, id, rights| AclEntry { tag, id, rights };
+    let (_, server) = endpoints::<Node>().map_err(|_| 17)?;
+    let again = home.restrict(user, 0, 1, 1, 0, server).await;
+    check(matches!(again, Ok(Err(Error::BadState))), 17)?;
+    let (file, server) = endpoints::<Node>().map_err(|_| 18)?;
+    let flags = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::TRUNCATE.0);
+    let rw = Rights(Rights::READ.0 | Rights::WRITE.0);
+    let opened = home.open(NAME.into(), flags, 0o600, rw, server).await;
+    check(matches!(opened, Ok(Ok(_))), 18)?;
+    let file = NodeAsyncClient::new(file, reactor.clone());
+    let owner = file.get_attributes().await.ok().and_then(|r| r.ok());
+    check(owner.is_some_and(|a| a.attributes.owner == user), 18)?;
+    check(matches!(file.write(0, b"x".to_vec()).await, Ok(Ok(_))), 18)?;
+    // Only another user may read it, so its owner may not.
+    let none = Rights(0);
+    let denying = vec![
+        entry(AclTag::Owner, 0, none),
+        entry(AclTag::User, 4242, Rights::READ),
+        entry(AclTag::Group, 0, none),
+        entry(AclTag::Mask, 0, Rights::READ),
+        entry(AclTag::Other, 0, none),
+    ];
+    check(matches!(file.set_acl(false, denying).await, Ok(Ok(_))), 19)?;
+    let listed = file.get_acl(false).await.ok().and_then(|r| r.ok());
+    check(listed.is_some_and(|l| l.entries.len() == 5), 19)?;
+    check(
+        matches!(file.read(0, 1).await, Ok(Err(Error::AccessDenied))),
+        20,
+    )?;
+    // Its owner gives it back the entries of a mode.
+    let owner_only = vec![
+        entry(AclTag::Owner, 0, rw),
+        entry(AclTag::Group, 0, none),
+        entry(AclTag::Other, 0, none),
+    ];
+    check(
+        matches!(file.set_acl(false, owner_only).await, Ok(Ok(_))),
+        21,
+    )?;
+    check(matches!(file.read(0, 1).await, Ok(Ok(_))), 21)?;
+    check(
+        matches!(home.unlink(NAME.into(), false).await, Ok(Ok(_))),
+        21,
+    )?;
+    Ok(())
+}
+
 /// Fails with `code` unless `ok`.
 fn check(ok: bool, code: i64) -> Result<(), i64> {
     if ok { Ok(()) } else { Err(code) }
@@ -161,6 +221,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         // Only bob's home in tests/console.img holds a Libraries folder
         // with a README; an account that setup made has an empty one.
         let libraries = NodeAsyncClient::new(libraries.ok_or(13)?, reactor.clone());
+        let home = NodeAsyncClient::new(home_dir.ok_or(16)?, reactor.clone());
+        acls(&home, user, &reactor).await?;
         if name == "bob" {
             let (_readme, server) = endpoints::<Node>().map_err(|_| 13)?;
             let opened = libraries
@@ -169,7 +231,6 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             check(matches!(opened, Ok(Ok(_))), 13)?;
             // The image made the README user 0's; the accounts service
             // made everything in bob's home that user 0 owned bob's.
-            let home = NodeAsyncClient::new(home_dir.ok_or(16)?, reactor.clone());
             let (readme, server) = endpoints::<Node>().map_err(|_| 16)?;
             let opened = home
                 .open(
