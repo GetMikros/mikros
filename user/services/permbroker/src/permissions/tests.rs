@@ -39,7 +39,7 @@ fn grant(user: u32, permission: &str, decision: Decision) -> Grant {
 #[test]
 fn table_is_sorted_and_unique() {
     assert!(PERMISSIONS.windows(2).all(|w| w[0].0 < w[1].0));
-    assert_eq!(PERMISSIONS.len(), 55);
+    assert_eq!(PERMISSIONS.len(), 56);
     assert_eq!(scope("user.camera.use"), Some(Scope::User));
     assert_eq!(scope("user.developer.access"), Some(Scope::User));
     assert_eq!(scope("system.diagnostics.read"), Some(Scope::System));
@@ -108,6 +108,7 @@ fn admin_permissions_are_these() {
             "admin.power.control",
             "admin.services.control",
             "admin.time.set",
+            "admin.volumes.mount",
         ]
     );
 }

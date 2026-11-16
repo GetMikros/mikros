@@ -22,6 +22,7 @@ pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("admin.power.control", Scope::Admin),
     ("admin.services.control", Scope::Admin),
     ("admin.time.set", Scope::Admin),
+    ("admin.volumes.mount", Scope::Admin),
     ("default.game_controllers.use", Scope::Default),
     ("default.gpu.use", Scope::Default),
     ("default.network.use", Scope::Default),
