@@ -1,0 +1,9 @@
+// MIKSPEC-0037.R31
+
+library mikros.permissions;
+using mikros.base;
+
+protocol AppNumbers {
+    @1 Number(app_id string<128>) -> (number u32) error base.Status;
+    @2 AppId(number u32) -> (app_id string<128>) error base.Status;
+};

@@ -28,6 +28,8 @@ const FOLDER: &str = "system.permbroker";
 const APP_ID: &str = "system.permbroker";
 /// The protocol the broker provides.
 const PROTOCOL: &str = "mikros.permissions.Broker";
+/// The numbers of app IDs, for every process.
+const APP_NUMBERS: &str = "mikros.permissions.AppNumbers";
 /// The `id` of the manifest among the `USER` startup handles.
 const MANIFEST_ID: u32 = 0;
 
@@ -64,6 +66,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             // the server end closes the connection.
             if c.protocol == PROTOCOL && c.instance.is_none() {
                 broker.serve(ServerEnd::new(c.server), c.client);
+            } else if c.protocol == APP_NUMBERS && c.instance.is_none() {
+                broker.serve_numbers(ServerEnd::new(c.server), c.client);
             }
         }
     });

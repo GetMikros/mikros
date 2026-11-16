@@ -145,6 +145,10 @@ pub struct Store {
     /// The `admin` permissions that an administrator allowed, by the
     /// kernel object ID of the process they were allowed to.
     held: BTreeSet<(u64, String)>,
+    /// The number of each app ID that was asked for, and the app ID of
+    /// each number.
+    numbers: BTreeMap<String, u32>,
+    app_ids: BTreeMap<u32, String>,
 }
 
 impl Store {
@@ -160,6 +164,25 @@ impl Store {
             .insert(SERVICE_MANAGER.into(), manager.collect());
         store.add_system(own_app_id, permissions)?;
         Ok(store)
+    }
+
+    /// The number of `app_id`: the lowest from 1 that no app ID has, given
+    /// the first time it is asked for, and the same from then on.
+    pub fn number(&mut self, app_id: &str) -> u32 {
+        if let Some(&number) = self.numbers.get(app_id) {
+            return number;
+        }
+        let number = (1..)
+            .find(|n| !self.app_ids.contains_key(n))
+            .expect("fewer than u32::MAX app IDs");
+        self.numbers.insert(app_id.into(), number);
+        self.app_ids.insert(number, app_id.into());
+        number
+    }
+
+    /// The app ID that has `number`, if one has.
+    pub fn app_id(&self, number: u32) -> Option<&str> {
+        self.app_ids.get(&number).map(String::as_str)
     }
 
     /// Fails with `AccessDenied` unless `caller` may make `call`.

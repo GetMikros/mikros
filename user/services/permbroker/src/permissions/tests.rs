@@ -39,7 +39,7 @@ fn grant(user: u32, permission: &str, decision: Decision) -> Grant {
 #[test]
 fn table_is_sorted_and_unique() {
     assert!(PERMISSIONS.windows(2).all(|w| w[0].0 < w[1].0));
-    assert_eq!(PERMISSIONS.len(), 56);
+    assert_eq!(PERMISSIONS.len(), 57);
     assert_eq!(scope("user.camera.use"), Some(Scope::User));
     assert_eq!(scope("user.developer.access"), Some(Scope::User));
     assert_eq!(scope("system.diagnostics.read"), Some(Scope::System));
@@ -103,6 +103,7 @@ fn admin_permissions_are_these() {
         admin,
         [
             "admin.accounts.manage",
+            "admin.acls.manage",
             "admin.grants.manage",
             "admin.logs.read",
             "admin.power.control",
@@ -580,4 +581,15 @@ fn other_users_and_allowing_need_manage_grants() {
         Store::check_grant(&grant(1, "nope", Decision::Denied)),
         Err(Failure::NotFound)
     );
+}
+
+#[test]
+fn numbers_app_ids_from_1_and_keeps_their_numbers() {
+    let mut s = store();
+    assert_eq!(s.number("system.a"), 1);
+    assert_eq!(s.number("system.b"), 2);
+    assert_eq!(s.number("system.a"), 1);
+    assert_eq!(s.app_id(2), Some("system.b"));
+    assert_eq!(s.app_id(0), None);
+    assert_eq!(s.app_id(3), None);
 }

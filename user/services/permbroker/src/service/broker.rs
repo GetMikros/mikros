@@ -62,6 +62,38 @@ impl Broker {
         }))
     }
 
+    /// Serves `AppNumbers` on the connection `end` of `caller` until it
+    /// closes: `Number` for callers that hold `system.permissions.read`,
+    /// `AppId` for every caller.
+    pub fn serve_numbers(&self, end: ServerEnd<midl::AppNumbers>, caller: ClientIdentity) {
+        let inner = self.0.clone();
+        let spawner = inner.spawner.clone();
+        spawner.spawn(async move {
+            use midl::AppNumbersRequest as R;
+            let server = midl::AppNumbersAsyncServer::new(end, inner.reactor.clone());
+            while let Ok(request) = server.next().await {
+                let s = server.server();
+                let _ = match request {
+                    R::Number(q, r) => {
+                        // The same permission as Check: system.permissions.read.
+                        let result = inner.authorize(&caller, Call::Check).map(|()| {
+                            let number = inner.store.borrow_mut().number(&q.app_id);
+                            midl::AppNumbersNumberResponse { number }
+                        });
+                        r.reply(s, result)
+                    }
+                    R::AppId(q, r) => {
+                        let found = inner.store.borrow().app_id(q.number).map(String::from);
+                        let result = found
+                            .map(|app_id| midl::AppNumbersAppIdResponse { app_id })
+                            .ok_or(Status::NotFound);
+                        r.reply(s, result)
+                    }
+                };
+            }
+        });
+    }
+
     /// Serves the connection `end` of `caller` until it closes.
     pub fn serve(&self, end: ServerEnd<midl::Broker>, caller: ClientIdentity) {
         let inner = self.0.clone();

@@ -17,6 +17,7 @@ pub enum Scope {
 /// Every known permission and its scope, sorted by name.
 pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("admin.accounts.manage", Scope::Admin),
+    ("admin.acls.manage", Scope::Admin),
     ("admin.grants.manage", Scope::Admin),
     ("admin.logs.read", Scope::Admin),
     ("admin.power.control", Scope::Admin),

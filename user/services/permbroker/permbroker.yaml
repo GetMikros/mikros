@@ -5,3 +5,6 @@ binary: /system/services/system.permbroker/permbroker
 start: boot
 provides:
   - protocol: mikros.permissions.Broker
+  # The numbers of app IDs, for every process; Number needs
+  # system.permissions.read, which the broker checks.
+  - protocol: mikros.permissions.AppNumbers
