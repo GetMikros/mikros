@@ -74,6 +74,8 @@ pub struct Manager {
     pub root_drivers: Cell<bool>,
     /// The boot framebuffer's physical start and size, when there is one.
     pub framebuffer_range: Option<(u64, u64)>,
+    /// Which volumes are mounted and ejected.
+    pub volumes: crate::volumes::State,
 }
 
 /// Something that happens once, which tasks can wait for.
@@ -241,14 +243,21 @@ pub async fn supervise(m: Rc<Manager>, id: u64) {
         }
         let ended = exited(&m.reactor, &spawned.process).await;
         served.wait().await;
-        let removing = match m.devices.borrow_mut().get_mut(id) {
+        let (removing, stopped) = match m.devices.borrow_mut().get_mut(id) {
             Some(device) => {
                 device.pid = None;
                 device.client = None;
-                device.removing
+                (device.removing, device.stopped)
             }
-            None => true,
+            None => (true, false),
         };
+        if stopped && !removing {
+            mikros_rt::log!(
+                Info,
+                "device-manager: stopped driver {name} for device {id}, whose volume is ejected"
+            );
+            return;
+        }
         if removing {
             mikros_rt::log!(
                 Info,
@@ -411,6 +420,13 @@ pub fn remove_within(m: Rc<Manager>, id: u64, limit: i64) -> Pin<Box<dyn Future<
                 remove_within(m.clone(), child, limit).await;
             }
         }
+        let volume = m
+            .devices
+            .borrow()
+            .get(id)
+            .and_then(|d| d.properties.iter().find(|(k, _)| k == "partition_guid"))
+            .map(|(_, v)| v.to_ascii_lowercase());
+        m.volumes.removed(volume.as_deref());
         m.devices.borrow_mut().remove(id);
     })
 }
@@ -423,7 +439,7 @@ pub async fn stop(m: &Manager, client: Option<Rc<DriverAsyncClient>>, pid: Optio
 }
 
 /// Stops a driver as `stop` does, but after `limit` nanoseconds.
-async fn stop_within(
+pub async fn stop_within(
     m: &Manager,
     client: Option<Rc<DriverAsyncClient>>,
     pid: Option<u32>,

@@ -33,6 +33,7 @@ mod serve;
 mod shutdown;
 mod start;
 mod supervise;
+mod volumes;
 
 use alloc::format;
 use alloc::rc::Rc;
@@ -255,6 +256,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         boot_display,
         root_drivers: core::cell::Cell::new(false),
         framebuffer_range,
+        volumes: volumes::State::default(),
     });
     spawner.spawn(shutdown::watch(manager.clone()));
     match provider {

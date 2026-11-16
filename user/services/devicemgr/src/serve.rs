@@ -96,6 +96,7 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
         });
     }
     publish::unregister_all(&m, &published).await;
+    crate::volumes::driver_ended(&m, caller).await;
     done.set();
 }
 

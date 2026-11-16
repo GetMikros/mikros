@@ -25,7 +25,8 @@ const SERIAL: &str = "serial";
 
 /// Serves the provider `end` until it closes: each connection without an
 /// instance name gets `Removal` for this protocol,
-/// `mikros.driver.Shutdown` and `mikros.driver.Devices` for those, and
+/// `mikros.driver.Shutdown`, `mikros.driver.Devices` and `device.volumes`
+/// for those, and
 /// the service manager's alone `mikros.driver.RootDrivers`. Others are
 /// dropped, which closes them.
 pub async fn serve(m: Rc<Manager>, end: ServerEnd<Provider>) {
@@ -36,6 +37,9 @@ pub async fn serve(m: Rc<Manager>, end: ServerEnd<Provider>) {
         }
         if c.protocol == PROTOCOL {
             let connection = serve_removal(m.clone(), ServerEnd::new(c.server));
+            m.spawner.spawn(connection);
+        } else if c.protocol == crate::volumes::PROTOCOL {
+            let connection = crate::volumes::serve(m.clone(), c.client, ServerEnd::new(c.server));
             m.spawner.spawn(connection);
         } else if c.protocol == crate::names::PROTOCOL {
             let connection = crate::names::serve(m.clone(), ServerEnd::new(c.server));

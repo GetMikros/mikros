@@ -16,6 +16,9 @@ provides:
   - protocol: mikros.driver.RootDrivers
   # The named devices, for every process.
   - protocol: mikros.driver.Devices
+  # The volumes, for every process; ejecting and mounting one asks for
+  # the permissions they need.
+  - protocol: device.volumes
 namespace:
   - path: /system/drivers
     rights: rx

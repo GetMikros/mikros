@@ -89,7 +89,8 @@ pub struct Published {
 /// duplicates of `provider`, as `partuuid-<guid>`, the GUID in lowercase,
 /// as `root` when the partition is the root partition, as `esp` when it
 /// is the boot's EFI system partition, and otherwise as `volume-<guid>`
-/// unless its `no_automount` property is `true`. Fails with
+/// unless its `no_automount` property is `true`; a partition that a
+/// mount asked for gets `volume-<guid>` in either case. Fails with
 /// `INVALID_ARGS` for a class that drivers may not publish, and with
 /// `BAD_STATE` for a `subvolumes` service before any `filesystem`
 /// service.
@@ -137,6 +138,11 @@ pub async fn publish(
         copies.push(duplicate(&provider).map_err(|_| Status::NoResources)?);
     }
     let for_name = copies.pop().expect("a copy for the device name");
+    // A mount of a hidden volume registers it later through a copy.
+    if class == FILESYSTEM {
+        let kept = duplicate(&provider).map_err(|_| Status::NoResources)?;
+        m.volumes.keep_provider(caller, kept);
+    }
     let registered = registrar
         .register(
             protocol.clone(),
@@ -188,7 +194,10 @@ pub async fn publish(
             )
             .await;
         match registered {
-            Ok(Ok(_)) => keep(m, published, caller, protocol.clone(), alias, "published").await,
+            Ok(Ok(_)) => {
+                m.volumes.note(&protocol, &alias, true);
+                keep(m, published, caller, protocol.clone(), alias, "published").await
+            }
             failed => mikros_rt::log!(
                 Error,
                 "device-manager: publishing {protocol} {alias} for device {caller} failed: {:?}",
@@ -227,7 +236,8 @@ fn aliases(m: &Manager, caller: u64) -> Vec<String> {
         .properties
         .iter()
         .any(|(k, v)| k == NO_AUTOMOUNT && v == "true");
-    if !root && !esp && !no_automount {
+    // A mount has a hidden volume registered too.
+    if !root && (!esp && !no_automount || m.volumes.forced(&guid)) {
         aliases.push(format!("volume-{guid}"));
     }
     aliases
@@ -273,6 +283,7 @@ async fn unregister(m: &Manager, protocol: &str, instance: &str) {
     if let Some(class) = protocol.strip_prefix("device.") {
         m.names.remove(class, instance);
     }
+    m.volumes.note(protocol, instance, false);
     let Some(registrar) = &m.registrar else {
         return;
     };

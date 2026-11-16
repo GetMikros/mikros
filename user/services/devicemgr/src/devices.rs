@@ -34,6 +34,9 @@ pub struct Device {
     /// Set while its driver is stopped for a normal driver that takes
     /// the device over.
     pub taken_over: bool,
+    /// Set while an eject has stopped its driver, which then does not
+    /// start again until a mount asks for it.
+    pub stopped: bool,
 }
 
 /// The devices, with the ID the next one gets.
@@ -77,6 +80,7 @@ impl Devices {
             starts: 0,
             kept: None,
             taken_over: false,
+            stopped: false,
         };
         mikros_rt::log!(Info, "device-manager: added {}", describe(&device));
         mikros_rt::diag!(
