@@ -22,9 +22,8 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
 
-/// The file name that the manifest stands for, which names the service
-/// `permissions`.
-const FILE_NAME: &str = "permbroker.yaml";
+/// The folder of the manifest, which names the service `permbroker`.
+const FOLDER: &str = "system.permbroker";
 /// The app ID the service manager starts the broker with.
 const APP_ID: &str = "system.permbroker";
 /// The protocol the broker provides.
@@ -114,6 +113,6 @@ fn manifest_store(mem: &OwnedHandle) -> Option<Store> {
     // The object may be larger than the manifest, which then ends at
     // the zero bytes that fill the rest.
     let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    let manifest = mikros_manifest::parse(FILE_NAME, &bytes[..end]).ok()?;
+    let manifest = mikros_manifest::parse(FOLDER, &bytes[..end]).ok()?;
     Store::bootstrap(APP_ID, &manifest.service.permissions).ok()
 }

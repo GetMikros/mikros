@@ -1,5 +1,5 @@
 //! Users' home folders: a subvolume of the root file system at
-//! `/Users/<name>`, with the folders that every user has.
+//! `/users/<name>`, with the folders that every user has.
 
 use alloc::format;
 use mikros_rt::exec::Reactor;
@@ -14,15 +14,15 @@ const SUBVOLUMES: &str = "device.subvolumes";
 const ROOT: &str = "root";
 /// The folders of a home folder.
 const FOLDERS: [&str; 9] = [
-    "Desktop",
-    "Documents",
-    "Downloads",
-    "Pictures",
-    "Music",
-    "Videos",
-    "Developer",
-    "Libraries",
-    "Apps",
+    "desktop",
+    "documents",
+    "downloads",
+    "pictures",
+    "music",
+    "videos",
+    "developer",
+    "libraries",
+    "apps",
 ];
 /// The mode of new folders: read, write and search for their owner.
 const FOLDER_MODE: u32 = 0o700;
@@ -53,8 +53,8 @@ fn status(error: Error) -> Status {
     }
 }
 
-/// Makes `/Users/<name>` a new subvolume through `subvolumes`, and the
-/// folders in it through `homes`, the service's `/Users`. When the
+/// Makes `/users/<name>` a new subvolume through `subvolumes`, and the
+/// folders in it through `homes`, the service's `/users`. When the
 /// folders cannot be made, the subvolume is deleted again, so that no
 /// home folder is left that would keep the name from being used.
 pub async fn create(
@@ -63,7 +63,7 @@ pub async fn create(
     name: &str,
     reactor: &Reactor,
 ) -> Result<(), Status> {
-    let path = format!("Users/{name}");
+    let path = format!("users/{name}");
     match subvolumes.create(path.clone()).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => return Err(status(e)),
@@ -76,9 +76,9 @@ pub async fn create(
     made
 }
 
-/// Deletes the subvolume `/Users/<name>` through `subvolumes`.
+/// Deletes the subvolume `/users/<name>` through `subvolumes`.
 pub async fn delete(subvolumes: &SubvolumesAsyncClient, name: &str) -> Result<(), Status> {
-    match subvolumes.delete(format!("Users/{name}")).await {
+    match subvolumes.delete(format!("users/{name}")).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(status(e)),
         Err(_) => Err(Status::PeerClosed),

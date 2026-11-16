@@ -1,9 +1,9 @@
 //! The time service's files on the root file system: once the
 //! `device.filesystem` instance `root` is published, which `watch` sees,
-//! the service reads there, once, the `rtc` key of `etc/time.yaml`, which
+//! the service reads there, once, the `rtc` key of `config/time.yaml`, which
 //! says whether the real-time clock keeps UTC or local time, and the
-//! system time zone, which the link `etc/localtime` names in
-//! `usr/share/zoneinfo/`; and it makes that link anew when the time zone
+//! system time zone, which the link `config/localtime` names in
+//! `system/share/zoneinfo/`; and it makes that link anew when the time zone
 //! is set.
 
 use crate::clock::{NANOS_PER_SECOND, Time};
@@ -21,9 +21,9 @@ use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 
 pub const FILESYSTEM: &str = "device.filesystem";
 pub const ROOT: &str = "root";
-const TIME_YAML: &str = "etc/time.yaml";
+const TIME_YAML: &str = "config/time.yaml";
 const LOCALTIME: &str = "localtime";
-const ZONEINFO: &str = "/usr/share/zoneinfo/";
+const ZONEINFO: &str = "/system/share/zoneinfo/";
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 const CHUNK: u32 = 32768;
 
@@ -116,7 +116,7 @@ async fn read(dir: &NodeAsyncClient, path: &str, reactor: &Reactor) -> Option<Ve
     }
 }
 
-/// Whether `etc/time.yaml` says that the real-time clock keeps local
+/// Whether `config/time.yaml` says that the real-time clock keeps local
 /// time: its key `rtc` is `local`. A missing file or key, or another
 /// value, means UTC.
 async fn rtc_local(root: &NodeAsyncClient, reactor: &Reactor) -> bool {
@@ -134,11 +134,11 @@ async fn rtc_local(root: &NodeAsyncClient, reactor: &Reactor) -> bool {
     value == Some("local")
 }
 
-/// The system time zone, which `etc/localtime` names, with its rules
+/// The system time zone, which `config/localtime` names, with its rules
 /// from the zone's file; None when the link is missing or names no
 /// zone that can be read.
 async fn localtime(root: &NodeAsyncClient, reactor: &Reactor) -> Option<Zone> {
-    let link = open(root, "etc/localtime", OpenFlags::NO_FOLLOW, reactor).await?;
+    let link = open(root, "config/localtime", OpenFlags::NO_FOLLOW, reactor).await?;
     let target = ok(link.read_link().await)?.target;
     let at = target.rfind(&ZONEINFO[1..])?;
     let name = &target[at + ZONEINFO.len() - 1..];
@@ -147,14 +147,14 @@ async fn localtime(root: &NodeAsyncClient, reactor: &Reactor) -> Option<Zone> {
         Err(_) => {
             mikros_rt::log!(
                 Warning,
-                "time: etc/localtime names no zone that can be read: {target}"
+                "time: config/localtime names no zone that can be read: {target}"
             );
             None
         }
     }
 }
 
-/// Whether `name` can name a file of `usr/share/zoneinfo/`, as IANA names
+/// Whether `name` can name a file of `system/share/zoneinfo/`, as IANA names
 /// such as `America/Argentina/Buenos_Aires` and `Etc/GMT+5` do: parts of
 /// letters, digits and `_`, `-`, `+` and `.`, none of them `.` or `..`.
 fn is_zone_name(name: &str) -> bool {
@@ -169,7 +169,7 @@ fn is_zone_name(name: &str) -> bool {
         })
 }
 
-/// The zone `name` with its rules from `usr/share/zoneinfo/` below
+/// The zone `name` with its rules from `system/share/zoneinfo/` below
 /// `root`: `NOT_FOUND` for a name without a file there, and `IO` for a
 /// file that is no zone.
 async fn load(root: &NodeAsyncClient, name: &str, reactor: &Reactor) -> Result<Zone, Status> {
@@ -186,20 +186,20 @@ async fn load(root: &NodeAsyncClient, name: &str, reactor: &Reactor) -> Result<Z
 }
 
 /// Makes `name` the system time zone below `root`: reads its rules and
-/// makes `etc/localtime` a link to its file.
+/// makes `config/localtime` a link to its file.
 pub async fn set_zone(
     root: &NodeAsyncClient,
     name: &str,
     reactor: &Reactor,
 ) -> Result<Zone, Status> {
     let zone = load(root, name, reactor).await?;
-    let etc = open(root, "etc", OpenFlags::DIRECTORY, reactor)
+    let config = open(root, "config", OpenFlags::DIRECTORY, reactor)
         .await
         .ok_or(Status::Io)?;
     // A missing link is fine; another failure shows when it is made.
-    let _ = etc.unlink(LOCALTIME.into(), false).await;
+    let _ = config.unlink(LOCALTIME.into(), false).await;
     let target = format!("{ZONEINFO}{name}");
-    ok(etc.create_symlink(LOCALTIME.into(), target).await).ok_or(Status::Io)?;
+    ok(config.create_symlink(LOCALTIME.into(), target).await).ok_or(Status::Io)?;
     Ok(zone)
 }
 

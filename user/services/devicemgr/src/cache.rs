@@ -34,7 +34,7 @@ const LIVE: &str = "live";
 /// The protocol of file systems' published services.
 const FILESYSTEM: &str = "device.filesystem";
 /// The profiles' path in the root file system, and their largest size.
-const PROFILES: &str = "etc/storage/profiles.yaml";
+const PROFILES: &str = "config/storage/profiles.yaml";
 const PROFILES_MAX: usize = 64 << 10;
 
 /// Which partition is the root, from the command line.

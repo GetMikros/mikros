@@ -1,5 +1,5 @@
 //! The accounts service: a system service that keeps the users in the
-//! file `users` of `/var/lib/accounts/` and provides
+//! file `users` of `/system/state/accounts/` and provides
 //! `mikros.session.Accounts`. It asks the permission broker about its
 //! clients' permissions, and the session manager for administrators'
 //! authorizations, through its directory.
@@ -35,8 +35,8 @@ mikros_rt::raw_main!(main);
 const PROTOCOL: &str = "mikros.session.Accounts";
 /// The directory of the service's data, and that of users' home
 /// folders.
-const DATA: &str = "/var/lib/accounts";
-const HOMES: &str = "/Users";
+const DATA: &str = "/system/state/accounts";
+const HOMES: &str = "/users";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let Ok(mut executor) = Executor::new() else {

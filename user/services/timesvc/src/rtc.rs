@@ -1,7 +1,7 @@
 //! The real-time clock, through the first instance of `device.rtc` that
 //! is published: the time service sets UTC from it while `SetUtc` has not
 //! set the time since boot, and writes it when the time is set, as UTC
-//! or, when `etc/time.yaml` says so, as local time.
+//! or, when `config/time.yaml` says so, as local time.
 
 use crate::clock::Time;
 use alloc::rc::Rc;

@@ -1,5 +1,5 @@
 //! The drivers on the root file system: `mikros.driver.RootDrivers`,
-//! which the service manager calls once with the root's `/usr`.
+//! which the service manager calls once with the root's `/system`.
 
 use crate::drivers;
 use crate::supervise::{self, Manager};
@@ -17,8 +17,8 @@ use mikros_rt::interfaces::mikros::fs::NodeAsyncClient;
 pub const PROTOCOL: &str = "mikros.driver.RootDrivers";
 /// The only caller that may connect.
 pub const CALLER: &str = "system.servicemgr";
-/// The drivers' directory below `/usr`.
-const DRIVERS: &str = "lib/drivers";
+/// The drivers' directory below `/system`.
+const DRIVERS: &str = "drivers";
 
 /// Serves `RootDrivers` on `end` until it closes. After the first
 /// `RootAvailable`, on any connection, others fail with `BAD_STATE`.
@@ -28,8 +28,8 @@ pub async fn serve(m: Rc<Manager>, end: ServerEnd<RootDrivers>) {
         let reply = match m.root_drivers.replace(true) {
             true => Err(Status::BadState),
             false => {
-                let usr = NodeAsyncClient::new(request.usr, m.reactor.clone());
-                add_drivers(&m, &usr).await;
+                let system = NodeAsyncClient::new(request.usr, m.reactor.clone());
+                add_drivers(&m, &system).await;
                 Ok(RootDriversRootAvailableResponse {})
             }
         };
@@ -37,11 +37,11 @@ pub async fn serve(m: Rc<Manager>, end: ServerEnd<RootDrivers>) {
     }
 }
 
-/// Reads the driver manifests of the root's `usr`, keeps those whose
+/// Reads the driver manifests of the root's `/system`, keeps those whose
 /// names are not taken, binds them to the devices without a driver, and
 /// has them take over the devices that a fallback driver runs.
-async fn add_drivers(m: &Rc<Manager>, usr: &NodeAsyncClient) {
-    let read = drivers::read_all(usr, DRIVERS, &m.reactor).await;
+async fn add_drivers(m: &Rc<Manager>, system: &NodeAsyncClient) {
+    let read = drivers::read_all(system, DRIVERS, &m.reactor).await;
     let added = {
         let mut known = m.drivers.borrow_mut();
         let mut added = 0;

@@ -1,5 +1,5 @@
-//! The installed drivers: the manifests in `usr/lib/drivers/`, one in
-//! each driver's own directory.
+//! The installed drivers: the manifests in `/system/drivers/`, one in
+//! each driver's own folder, named by the driver's app ID.
 
 use alloc::format;
 use alloc::vec::Vec;
@@ -9,7 +9,7 @@ use mikros_rt::files::{self, Failure};
 use mikros_rt::interfaces::mikros::fs::{Error, NodeAsyncClient, NodeType};
 
 /// The directory of the drivers.
-pub const DRIVERS: &str = "/usr/lib/drivers";
+pub const DRIVERS: &str = "/system/drivers";
 /// The name of the manifest in each driver's directory.
 const MANIFEST: &str = "driver.yaml";
 

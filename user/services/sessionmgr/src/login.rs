@@ -26,9 +26,9 @@ use mikros_rt::interfaces::mikros::session::{
     TextLoginRunSetupResponse,
 };
 
-const SETUP: &str = "/usr/bin/setup";
+const SETUP: &str = "/system/bin/setup";
 const SETUP_APP: &str = "system.setup";
-const SHELL: &str = "/usr/bin/msh";
+const SHELL: &str = "/system/bin/msh";
 const SHELL_APP: &str = "system.cli";
 const CALLER_USER: u32 = u32::MAX;
 const FOREVER: i64 = i64::MAX;
@@ -37,7 +37,7 @@ const TERM: u32 = 15;
 const KILL: u32 = 9;
 /// How long a session's processes have after `TERM`.
 const GRACE: i64 = 5 * SECOND;
-const PATH: &str = "PATH=/usr/bin";
+const PATH: &str = "PATH=/system/bin";
 const TERM_VALUE: &str = "TERM=xterm-256color";
 /// The numbers of the consoles, and the one that setup runs on.
 const CONSOLES: core::ops::RangeInclusive<u8> = 1..=6;
@@ -140,7 +140,7 @@ async fn setup(
 /// The environment of `name`'s session leader on the text console.
 fn environment(name: &str) -> Vec<String> {
     vec![
-        format!("HOME=/Users/{name}"),
+        format!("HOME=/users/{name}"),
         format!("USER={name}"),
         format!("LOGNAME={name}"),
         format!("SHELL={SHELL}"),
@@ -232,7 +232,7 @@ pub async fn serve(
                     SHELL,
                     SHELL_APP,
                     user,
-                    Some(format!("/Users/{}", q.name)),
+                    Some(format!("/users/{}", q.name)),
                     &environment,
                     &q.terminal,
                 )

@@ -29,7 +29,7 @@ const SECOND: i64 = 1_000_000_000;
 pub struct Service {
     pub store: Store,
     pub checks: Checks,
-    /// `/Users`, where users' home folders are.
+    /// `/users`, where users' home folders are.
     pub homes: Option<NodeAsyncClient>,
     pub reactor: Reactor,
     attempts: RefCell<Attempts>,
@@ -185,7 +185,7 @@ impl Service {
         Ok(id)
     }
 
-    /// Whether `/Users/<name>` exists.
+    /// Whether `/users/<name>` exists.
     async fn home_exists(&self, name: &str) -> Result<bool, Status> {
         let homes = self.homes.as_ref().ok_or(Status::NotSupported)?;
         let (_, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;

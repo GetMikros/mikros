@@ -38,7 +38,7 @@ use mikros_rt::{managed, sys};
 
 mikros_rt::raw_main!(main);
 
-const CONSOLE: &str = "/usr/bin/console";
+const CONSOLE: &str = "/system/bin/console";
 const CONSOLE_APP: &str = "system.console";
 const ACCOUNTS: &str = "mikros.session.Accounts";
 /// The protocols that the session manager provides, and the app ID of

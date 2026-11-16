@@ -50,7 +50,7 @@ const READD_LIMIT: i64 = 10_000_000_000;
 pub struct Manager {
     pub devices: RefCell<Devices>,
     /// The drivers read at startup, and from the root file system once
-    /// the service manager gives its `/usr`.
+    /// the service manager gives its `/system`.
     pub drivers: RefCell<Vec<Driver>>,
     pub starter: Starter,
     pub registrar: Option<RegistrarAsyncClient>,
@@ -70,7 +70,7 @@ pub struct Manager {
     /// The boot framebuffer while its PCI function is expected, or once
     /// that function has it.
     pub boot_display: Option<crate::boot_display::BootDisplay>,
-    /// Whether the service manager gave the root's `/usr` for drivers.
+    /// Whether the service manager gave the root's `/system` for drivers.
     pub root_drivers: Cell<bool>,
     /// The boot framebuffer's physical start and size, when there is one.
     pub framebuffer_range: Option<(u64, u64)>,
