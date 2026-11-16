@@ -273,7 +273,8 @@ fn main() {
         &format!("du reports a.txt ({:?}, {:?})", du.out, du.err),
     );
     c.err(&["du", "missing"], 1);
-    // df lists the namespace's entries, and a path's entry for a path.
+    // df lists the namespace's entries that the listing of `/` shows,
+    // which leaves out `/tmp`, and a path's entry for a path.
     let df = run(&dir, &["df", "."], "");
     c.holds(
         &["df", "."],
@@ -291,10 +292,7 @@ fn main() {
         .collect();
     c.holds(
         &["df"],
-        df.code == Some(0)
-            && ["/system", "/tmp", "/users/ada"]
-                .iter()
-                .all(|m| mounts.contains(m)),
+        df.code == Some(0) && ["/system", "/users/ada"].iter().all(|m| mounts.contains(m)),
         &format!(
             "df lists the namespace's entries ({:?}, {:?})",
             df.out, df.err
