@@ -1,0 +1,17 @@
+// MIKSPEC-0025.R63
+
+library mikros.driver;
+using mikros.base;
+
+type Volume = struct {
+    id string<64>;
+    mounted bool;
+    hidden bool;
+    removable bool;
+};
+
+protocol Volumes {
+    @1 List(after string<64>) -> (volumes vector<Volume, 64>) error base.Status;
+    @2 Eject(id string<64>) -> () error base.Status;
+    @3 Mount(id string<64>) -> () error base.Status;
+};

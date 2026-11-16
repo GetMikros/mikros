@@ -1,0 +1,7 @@
+# What `volumes` takes, for msh's completion and colours.
+extern volumes(
+    call?: [eject mount] "eject or mount a volume",
+    volume?: string "the name or ID of the volume",
+    --json: bool "write the volumes as JSON",
+    --help: bool "show how to use volumes"
+)

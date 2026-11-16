@@ -1289,6 +1289,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "volumes"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-command",
+ "mikros-rt",
+]
+
+[[package]]
 name = "volumes-probe"
 version = "0.0.0"
 dependencies = [

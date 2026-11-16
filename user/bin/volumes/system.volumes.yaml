@@ -1,0 +1,8 @@
+# The program manifest of volumes, installed as
+# system/programs/system.volumes.yaml: a command, which lists the volumes
+# and ejects or mounts one. It holds no permissions; the device manager
+# asks for those that ejecting and mounting need.
+app_id: system.volumes
+binary: /system/bin/volumes
+command: true
+permissions: []
