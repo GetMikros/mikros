@@ -70,6 +70,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
     let checks = Checks::new(directory, reactor.clone());
     let service = Rc::new(Service::new(store, checks, homes, reactor.clone()));
+    // Home folders that existing users do not own yet become theirs.
+    let owning = service.clone();
+    spawner.spawn(async move { owning.own_homes().await });
     let provider = ProviderAsyncServer::new(ServerEnd::new(provider), reactor.clone());
     executor.block_on(async {
         while let Ok(ProviderRequest::Connect(c)) = provider.next().await {

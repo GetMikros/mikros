@@ -178,11 +178,45 @@ impl Service {
         let homes = self.homes.as_ref().ok_or(Status::NotSupported)?;
         let subvolumes = crate::homes::subvolumes(self.checks.directory(), &self.reactor).await?;
         let phc = hash::hash(password.0.as_bytes(), &salt()?).ok_or(Status::NoMemory)?;
-        crate::homes::create(&subvolumes, homes, name, &self.reactor).await?;
+        // The user gets the next ID, which owns the home folder.
+        let owner = self.store.users().next_id();
+        crate::homes::create(&subvolumes, homes, name, owner, &self.reactor).await?;
         let mut users = self.store.users().clone();
         let id = users.create(name, full_name, kind, phc).map_err(status)?;
         self.save(users).await?;
         Ok(id)
+    }
+
+    /// Makes the home folders of the existing users, and the folders in
+    /// them, the users' own where they have another owner. A failure for
+    /// one user is logged, and the others are still done.
+    pub async fn own_homes(&self) {
+        let Some(homes) = self.homes.as_ref() else {
+            return;
+        };
+        let users: alloc::vec::Vec<(u32, alloc::string::String)> = {
+            let all = self.store.users();
+            let mut found = alloc::vec::Vec::new();
+            let mut after = 0;
+            loop {
+                let page: alloc::vec::Vec<_> =
+                    all.list(after).map(|r| (r.id, r.name.clone())).collect();
+                let Some(&(last, _)) = page.last() else {
+                    break;
+                };
+                found.extend(page);
+                after = last;
+            }
+            found
+        };
+        for (id, name) in users {
+            if let Err(e) = crate::homes::own(homes, &name, id, &self.reactor).await {
+                mikros_rt::log!(
+                    Error,
+                    "accounts: making /users/{name} the user's own failed: {e:?}"
+                );
+            }
+        }
     }
 
     /// Whether `/users/<name>` exists.
