@@ -623,11 +623,9 @@ impl Namespaces {
             add(
                 &mut entries,
                 &mut origins,
-                self.entry(shared, &ready, APPS, Rights::READ).await?,
+                self.entry(shared, &ready, APPS, RX).await?,
             );
-            let libraries = self
-                .entry(shared, &ready, "/libraries", Rights::READ)
-                .await?;
+            let libraries = self.entry(shared, &ready, "/libraries", RX).await?;
             let libraries = match &name {
                 None => libraries,
                 Some(name) => self.libraries(shared, &ready, libraries, name).await?,
@@ -640,6 +638,8 @@ impl Namespaces {
                     &mut origins,
                     self.entry(shared, &ready, &home, RWX).await?,
                 );
+                let apps = self.apps_read_only(shared, &ready, name, user, RX).await?;
+                add(&mut entries, &mut origins, apps);
             }
             let budget = shared.user_budget(user)?;
             let tmpfs = self.tmpfs().await;
@@ -761,18 +761,21 @@ impl Namespaces {
         // the user's home folder, read and write, `/apps`, read only, and
         // `/volumes`, whose permission the broker allows it.
         if admin != 0 {
-            let home = match user {
+            let name = match user {
                 0 => None,
-                _ => Some(format!(
-                    "/users/{}",
-                    crate::users::name(shared, user).await?
-                )),
+                _ => Some(crate::users::name(shared, user).await?),
             };
-            let folders = home.map(|h| (h, RW)).into_iter();
+            let home = name.as_ref().map(|name| format!("/users/{name}"));
+            let folders = home.clone().map(|h| (h, RW)).into_iter();
             for (path, rights) in folders.chain([(String::from(APPS), Rights::READ)]) {
                 if !entries.iter().any(|e| e.path == path) {
                     let entry = self.entry(shared, &ready, &path, rights).await?;
                     add(&mut entries, &mut origins, entry);
+                    // Its apps' folders stay read-only (MIKSPEC-0101.R42).
+                    if let Some(name) = name.as_ref().filter(|_| Some(&path) == home.as_ref()) {
+                        let apps = self.apps_read_only(shared, &ready, name, user, RX).await?;
+                        add(&mut entries, &mut origins, apps);
+                    }
                 }
             }
         }
@@ -954,6 +957,22 @@ impl Namespaces {
         })
     }
 
+    /// The entry `/users/<name>/apps` of user `user` with `rights`, which
+    /// lack `WRITE`, over a writable entry of the user's home folder, so
+    /// that the user's installed apps, also those installed later, are
+    /// written only as MIKSPEC-0101.R26 allows (MIKSPEC-0101.R42).
+    async fn apps_read_only(
+        &self,
+        shared: &Shared,
+        ready: &Ready,
+        name: &str,
+        user: u32,
+        rights: Rights,
+    ) -> Result<(NamespaceEntry, Origin), Status> {
+        let path = self.apps_folder(shared, ready, name, user).await?;
+        self.entry(shared, ready, &path, rights).await
+    }
+
     /// The path of the folder of the apps of user `user`, named `name`,
     /// which is made, owned by the user, when it is missing.
     async fn apps_folder(
@@ -1016,7 +1035,7 @@ impl Namespaces {
             .await
     }
 
-    /// `/libraries` for user `name`: a read-only view of `system`, the
+    /// `/libraries` for user `name`: a view of `system`, the
     /// system's, merged with the user's `libraries` folder, or `system`
     /// alone when the user has none.
     async fn libraries(
@@ -1027,7 +1046,7 @@ impl Namespaces {
         name: &str,
     ) -> Result<(NamespaceEntry, Origin), Status> {
         let path = format!("/users/{name}/libraries");
-        let own = match self.entry(shared, ready, &path, Rights::READ).await {
+        let own = match self.entry(shared, ready, &path, RX).await {
             Ok((own, _)) => own,
             Err(e) => {
                 mikros_rt::log!(
@@ -1038,7 +1057,7 @@ impl Namespaces {
             }
         };
         let layers = alloc::vec![system.0.directory, own.directory];
-        let view = crate::users::merged(shared, layers, Rights::READ).await?;
+        let view = crate::users::merged(shared, layers, RX).await?;
         Ok(none(NamespaceEntry {
             path: "/libraries".into(),
             directory: view,
