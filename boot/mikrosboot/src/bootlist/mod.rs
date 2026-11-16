@@ -266,6 +266,33 @@ pub fn modules<D: Disk>(
     Ok(walk.modules)
 }
 
+/// The subvolume of the installed drivers, at the top level of the
+/// system partition, and its boot list, whose paths are relative to it.
+pub const DRIVERS: &str = "drivers";
+pub const DRIVERS_LIST: &str = "boot-modules";
+
+/// The modules that the boot list `boot-modules` of the subvolume
+/// `drivers` names, with paths that start with `drivers/`: none when the
+/// subvolume or the list is missing.
+pub fn drivers<D: Disk>(volume: &mut Volume<D>) -> Result<Vec<Module>, Error> {
+    let top = volume.top()?;
+    let Some(dir) = volume.lookup(top, DRIVERS.as_bytes())? else {
+        return Ok(Vec::new());
+    };
+    let list = match file(volume, dir, DRIVERS_LIST) {
+        Ok(list) => list,
+        Err(Error::Missing(_)) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut bytes = vec![0; list.size as usize];
+    volume.read(list.node, &mut bytes)?;
+    let mut found = modules(volume, dir, &bytes)?;
+    for module in &mut found {
+        module.path = alloc::format!("{DRIVERS}/{}", module.path);
+    }
+    Ok(found)
+}
+
 /// The file at `path` in the system version whose root directory is
 /// `root`, following symbolic links as the boot list does.
 pub fn file<D: Disk>(volume: &mut Volume<D>, root: Node, path: &str) -> Result<Module, Error> {

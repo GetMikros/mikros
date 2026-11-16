@@ -98,6 +98,10 @@ fn boot_disk(device: Handle) -> Result<(BootDisk, u32, u64), Failure> {
     Err(Failure::new(step, "no disk has the boot partition's path"))
 }
 
+/// The command-line word that leaves out the drivers that packages
+/// installed for boot.
+const NODRIVERS: &str = "nodrivers";
+
 /// The version to boot of `current` and `previous`, counted in the
 /// `MikrosBoot` variable.
 fn count(current: &str, previous: Option<&str>) -> String {
@@ -128,8 +132,8 @@ fn read(volume: &mut System, root: Node, path: &'static str) -> Result<Vec<u8>, 
 }
 
 /// Finds the system partition on the boot disk of `device`, as `cmdline`
-/// names it, chooses the version to boot, and reads its kernel and the
-/// files its boot list names.
+/// names it, chooses the version to boot, and reads its kernel, the
+/// files its boot list names, and the drivers marked for boot.
 pub fn find(device: Handle, cmdline: String) -> Result<Found, Failure> {
     let (mut disk, block_size, last_lba) = boot_disk(device)?;
     let step = "finding the system partition";
@@ -151,14 +155,29 @@ pub fn find(device: Handle, cmdline: String) -> Result<Found, Failure> {
     let cmdline = cmdline::with_root(cmdline, &partition.guid);
     let mut volume = Volume::open(Slice { disk, start, size })
         .map_err(|e| Failure::new("reading the system partition", e))?;
-    let version = version::choose(&mut volume, &cmdline, count)
+    let mut fell_back = false;
+    let counted = |current: &str, previous: Option<&str>| {
+        let name = count(current, previous);
+        fell_back = name != current;
+        name
+    };
+    let version = version::choose(&mut volume, &cmdline, counted)
         .map_err(|e| Failure::new("choosing the system version", e))?;
     let cmdline = cmdline::with_system(&cmdline, &version.name);
     cmdline::check_len(&cmdline).map_err(|e| Failure::new("finding the command line", e))?;
     let kernel = read(&mut volume, version.root, "mikros")?;
     let list = read(&mut volume, version.root, "boot/modules")?;
-    let modules = bootlist::modules(&mut volume, version.root, &list)
+    let mut modules = bootlist::modules(&mut volume, version.root, &list)
         .map_err(|e| Failure::new("following boot/modules", e))?;
+    // The drivers that packages installed for boot, except with
+    // `nodrivers` and when the previous version boots after the current
+    // one failed.
+    let nodrivers = cmdline.split_whitespace().any(|w| w == NODRIVERS);
+    if !nodrivers && !fell_back {
+        let drivers = bootlist::drivers(&mut volume)
+            .map_err(|e| Failure::new("following drivers/boot-modules", e))?;
+        modules.extend(drivers);
+    }
     Ok(Found {
         volume,
         kernel,

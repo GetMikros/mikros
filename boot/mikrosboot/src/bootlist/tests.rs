@@ -178,3 +178,47 @@ fn limits_the_number_of_modules() {
         Err(Error::TooMany)
     );
 }
+
+#[test]
+fn loads_the_drivers_marked_for_boot() {
+    let image = mkfs(
+        "drivers",
+        &["--subvol", "version", "--subvol", "drivers"],
+        |t| {
+            write(t, "version/mikros", b"kernel");
+            write(t, "drivers/org.example.drv/drv", b"driver");
+            write(
+                t,
+                "drivers/org.example.drv/driver.yaml",
+                b"name: org.example.drv",
+            );
+            write(t, "drivers/boot-modules", b"org.example.drv/\n");
+        },
+    );
+    let mut v = Volume::open(image).unwrap();
+    let found = drivers(&mut v).unwrap();
+    assert_eq!(
+        paths(&found),
+        [
+            "drivers/org.example.drv/driver.yaml",
+            "drivers/org.example.drv/drv"
+        ]
+    );
+    // Without the list, or without the subvolume, there are none.
+    let image = mkfs("no-list", &["--subvol", "drivers"], |t| {
+        write(t, "drivers/org.example.drv/drv", b"driver");
+    });
+    assert_eq!(drivers(&mut Volume::open(image).unwrap()).unwrap(), []);
+    let image = mkfs("no-drivers", &["--subvol", "version"], |t| {
+        write(t, "version/mikros", b"kernel");
+    });
+    assert_eq!(drivers(&mut Volume::open(image).unwrap()).unwrap(), []);
+    // A list that names a missing file is an error.
+    let image = mkfs("bad-list", &["--subvol", "drivers"], |t| {
+        write(t, "drivers/boot-modules", b"gone\n");
+    });
+    assert!(matches!(
+        drivers(&mut Volume::open(image).unwrap()),
+        Err(Error::Missing(_))
+    ));
+}
