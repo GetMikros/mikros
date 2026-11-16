@@ -119,6 +119,10 @@ async fn check(
     )?;
     expect(ok(file.read(0, 100).await)?.data == b"hello btrfs!")?;
     expect(ok(file.read(6, 5).await)?.data == b"btrfs")?;
+    // SetOwner changes the owner and leaves the mode.
+    ok(file.set_owner(1234).await)?;
+    let attributes = ok(file.get_attributes().await)?.attributes;
+    expect(attributes.owner == 1234 && attributes.mode == 0o644)?;
     ok(file.sync().await)?;
     memory(&file, process).await?;
 

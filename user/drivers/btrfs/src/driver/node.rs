@@ -206,6 +206,10 @@ impl Connection {
             // What this server does not provide yet.
             R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::SetOwner(q, r) => {
+                let set = self.set_owner(q.owner);
+                r.reply(s, self.fs.durable(set).await)
+            }
             R::BindSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::ConnectSocket(_, r) => r.reply(s, Err(Error::NotSupported)),
         };

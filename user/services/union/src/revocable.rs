@@ -214,6 +214,7 @@ impl Connection {
             R::Truncate(q, r) => r.reply(s, flat(b.truncate(q.size).await)),
             R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags).await),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::SetOwner(q, r) => r.reply(s, flat(b.set_owner(q.owner).await)),
             R::CloneRange(q, r) => r.reply(
                 s,
                 flat(

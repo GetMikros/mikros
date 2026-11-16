@@ -47,6 +47,22 @@ impl Connection {
         Ok(NodeSetAttributesResponse {})
     }
 
+    /// Makes `owner` the node's owner, leaving its mode as it is
+    /// (MIKSPEC-0049.R27).
+    pub(crate) fn set_owner(&self, owner: u32) -> Result<NodeSetOwnerResponse, Error> {
+        self.require_write()?;
+        let changes = Changes {
+            mode: None,
+            accessed: None,
+            modified: None,
+            owner: Some(owner),
+            group: None,
+        };
+        self.open.node.set_attributes(&changes).map_err(error)?;
+        self.fs.changed(&self.open, WatchKind::Attributes);
+        Ok(NodeSetOwnerResponse {})
+    }
+
     pub(crate) fn clone(&self, q: NodeCloneRequest) -> Result<NodeCloneResponse, Error> {
         self.require(q.rights)?;
         self.fs.serve(

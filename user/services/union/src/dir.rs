@@ -70,6 +70,7 @@ impl Connection {
             R::Truncate(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::GetMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
+            R::SetOwner(q, r) => r.reply(s, self.set_owner(q.owner).await),
             R::Lock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::Unlock(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::CloneRange(_, r) => r.reply(s, Err(Error::IsDirectory)),
@@ -114,6 +115,12 @@ impl Connection {
                 .set_attributes(q.mask, q.mode, q.accessed, q.modified)
                 .await,
         )
+    }
+
+    async fn set_owner(&self, owner: u32) -> Result<NodeSetOwnerResponse, Error> {
+        self.may_change()?;
+        let upper = self.dir.upper().await?;
+        flat(upper.set_owner(owner).await)
     }
 
     async fn unlink(&self, name: &str, directory: bool) -> Result<NodeUnlinkResponse, Error> {

@@ -140,6 +140,10 @@ impl Connection {
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unwatch(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
+            // `/dev` stores no owners.
+            R::SetOwner(_, r) => {
+                r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
+            }
             // Everything that would change the directory or a node's
             // attributes.
             R::SetAttributes(_, r) => r.reply(s, Err(self.write_denied())),

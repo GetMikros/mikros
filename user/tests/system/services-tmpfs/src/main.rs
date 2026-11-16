@@ -201,6 +201,10 @@ fn check(root: &NodeClient) -> Result<(), i64> {
         attributes.size == 10001 && attributes.mode == 0o640 && attributes.links == 1,
         6,
     )?;
+    // SetOwner changes the owner and leaves the mode.
+    expect(ok(file.set_owner(1234, FOREVER)).is_some(), 6)?;
+    let attributes = ok(file.get_attributes(FOREVER)).ok_or(6)?.attributes;
+    expect(attributes.owner == 1234 && attributes.mode == 0o640, 6)?;
     let gap = ok(file.read(4, 10, FOREVER)).ok_or(7)?.data;
     expect(
         gap.len() == 10 && gap[0] == b'o' && gap[1..].iter().all(|&b| b == 0),

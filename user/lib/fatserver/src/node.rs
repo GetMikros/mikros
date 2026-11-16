@@ -149,6 +149,10 @@ impl<F: Format> Connection<F> {
             // What this server does not provide.
             R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
+            // FAT and exFAT store no owners.
+            R::SetOwner(_, r) => {
+                r.reply(s, self.require(Rights::WRITE).and(Err(Error::NotSupported)))
+            }
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
                 s,

@@ -129,4 +129,5 @@ protocol Node {
                       connection handle<Channel>) -> () error Error;
     @33 GetRevocableMemoryObject(flags MemoryFlags) ->
         (memory handle<MemoryObject>, control client_end<MemoryRevocation>) error Error;
+    @36 SetOwner(owner u32) -> () error Error;
 };

@@ -353,6 +353,14 @@ async fn serve(volumes: Rc<Volumes>, end: ServerEnd<Node>, rights: Rights) {
             R::ReadLink(_, r) => r.reply(s, Err(Error::Invalid)),
             R::GetMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::IsDirectory)),
+            // The directory stores no owner.
+            R::SetOwner(_, r) => r.reply(
+                s,
+                match rights.contains(Rights::WRITE) {
+                    true => Err(Error::NotSupported),
+                    false => Err(Error::AccessDenied),
+                },
+            ),
             R::Lock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Unlock(_, r) => r.reply(s, Err(Error::NotSupported)),
             R::Watch(_, r) => r.reply(s, Err(Error::NotSupported)),

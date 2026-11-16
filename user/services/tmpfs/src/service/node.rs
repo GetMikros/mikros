@@ -162,6 +162,7 @@ impl Connection {
             R::GetMemoryObject(q, r) => r.reply(s, self.memory(q.flags)),
             // Not there yet.
             R::GetRevocableMemoryObject(_, r) => r.reply(s, Err(Error::NotSupported)),
+            R::SetOwner(q, r) => r.reply(s, self.set_owner(q.owner)),
             R::Lock(_, r) => r.reply(s, Err(Error::Invalid)),
             R::Unlock(q, r) => r.reply(
                 s,
@@ -209,6 +210,18 @@ impl Connection {
             accessed: node.times.accessed,
             changed: node.times.changed,
         })
+    }
+
+    /// Makes `owner` the node's owner (MIKSPEC-0049.R27).
+    fn set_owner(&self, owner: u32) -> Result<NodeSetOwnerResponse, Error> {
+        self.require(Rights::WRITE)?;
+        let mut tree = self.fs.tree.borrow_mut();
+        let node = tree.get_mut(self.node).ok_or(Error::NotFound)?;
+        node.owner = owner;
+        node.times.changed = fs::now();
+        drop(tree);
+        self.fs.changed(self.node, WatchKind::Attributes);
+        Ok(NodeSetOwnerResponse {})
     }
 
     fn set_attributes(
