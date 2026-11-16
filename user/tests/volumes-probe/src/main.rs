@@ -32,10 +32,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 use mikros_rt::exec::{Executor, Reactor};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, endpoints};
+use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::driver::{Volumes, VolumesAsyncClient};
 use mikros_rt::interfaces::mikros::fs::{Node, NodeAsyncClient, OpenFlags, Rights};
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerAsyncClient, Decision, Grant};
 use mikros_rt::interfaces::mikros::process::{
-    HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle,
+    HandleRole, LauncherAsyncClient, SpawnRequest, StartupHandle, StatusKind, WaitOptions,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryAsyncClient;
 use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
@@ -46,6 +48,13 @@ const BINARY: &str = "/system/services/system.volumes-probe/volumes-probe";
 const BROKER: &str = "mikros.permissions.Broker";
 const VOLUMES_PERMISSION: &str = "user.volumes.access";
 const VOLUMES: &str = "/volumes";
+/// The device manager's service of volumes, the volume that is ejected
+/// and mounted, the volumes utility, and the program that checks the
+/// paths that `realpath` gives.
+const DEVICE_VOLUMES: &str = "device.volumes";
+const EJECTED: &str = "WHOLEFAT";
+const UTILITY: &str = "/system/bin/volumes";
+const VOLUME_PATH: &str = "/system/bin/volume-path";
 /// The volumes' labels, and the files on them.
 /// The volumes of the GPT disk, those of the MBR disk, its btrfs on a
 /// logical partition of the Linux type, and the FAT on a disk without a
@@ -115,7 +124,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let checked = match volumes {
         Some(volumes) => {
             let launcher = LauncherAsyncClient::new(header.launcher, reactor.clone());
-            executor.block_on(use_volumes(&volumes, &launcher, &reactor))
+            let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
+            executor.block_on(use_volumes(&volumes, &directory, &launcher, &reactor))
         }
         None => {
             let directory = DirectoryAsyncClient::new(header.directory, reactor.clone());
@@ -176,7 +186,7 @@ async fn start_copy(
     }
     let request = SpawnRequest {
         path: BINARY.into(),
-        arguments: arguments(BINARY).ok_or("making the arguments")?,
+        arguments: arguments(&[BINARY]).ok_or("making the arguments")?,
         handles,
         app_id: None,
         user: CALLER_USER,
@@ -196,6 +206,7 @@ async fn start_copy(
 /// logs `READY`, and logs `GONE` once they have left.
 async fn use_volumes(
     volumes: &NodeAsyncClient,
+    directory: &DirectoryAsyncClient,
     launcher: &LauncherAsyncClient,
     reactor: &Reactor,
 ) -> Result<(), &'static str> {
@@ -211,6 +222,7 @@ async fn use_volumes(
             use_volume(volumes, reactor, label).await?;
         }
     }
+    eject_and_mount(volumes, directory, launcher, reactor).await?;
     mikros_rt::log!(Info, "{}", READY);
     let limit = now() + LIMIT;
     while listed(volumes).await? {
@@ -395,6 +407,125 @@ async fn names(volumes: &NodeAsyncClient) -> Result<Vec<String>, &'static str> {
     }
 }
 
+/// Ejects and mounts the whole-disk volume `EJECTED`: checks that
+/// `realpath` names it by its ID, lists it as a mounted removable volume,
+/// ejects it with the volumes utility by its name, and sees it leave
+/// `/volumes` and be listed as ejected; checks that ejecting it again,
+/// and ejecting and mounting an unknown ID, fail; mounts it with the
+/// utility by its ID, and sees it come back and be used again.
+async fn eject_and_mount(
+    volumes: &NodeAsyncClient,
+    directory: &DirectoryAsyncClient,
+    launcher: &LauncherAsyncClient,
+    reactor: &Reactor,
+) -> Result<(), &'static str> {
+    let device = connect_volumes(directory, reactor).await?;
+    let root = open(volumes, reactor, EJECTED, OpenFlags(0), Rights::READ).await?;
+    let id = match root.query_filesystem().await {
+        Ok(Ok(queried)) => queried.info.id,
+        _ => return Err("querying the ejected volume's file system"),
+    };
+    drop(root);
+    let by_name = format!("{VOLUMES}/{EJECTED}/{HELLO}");
+    let by_id = format!("{VOLUMES}/{id}/{HELLO}");
+    if run(launcher, &[VOLUME_PATH, &by_name, &by_id]).await != Some(0) {
+        return Err("naming the volume by its ID in realpath");
+    }
+    let listed = listed_volume(&device, &id).await?;
+    if !matches!(listed, Some((true, false, true))) {
+        return Err("listing the volume as mounted and removable");
+    }
+    if run(launcher, &[UTILITY, "eject", EJECTED]).await != Some(0) {
+        return Err("ejecting the volume with the utility");
+    }
+    let names = names(volumes).await?;
+    if names.iter().any(|n| n == EJECTED) {
+        return Err("removing the ejected volume from /volumes");
+    }
+    if listed_volume(&device, &id).await? != Some((false, false, true)) {
+        return Err("listing the volume as ejected");
+    }
+    if !matches!(device.eject(id.clone()).await, Ok(Err(Status::BadState))) {
+        return Err("refusing to eject the volume again");
+    }
+    let unknown = String::from("0000-unknown");
+    let ejected = device.eject(unknown.clone()).await;
+    let mounted = device.mount(unknown).await;
+    if !matches!(ejected, Ok(Err(Status::NotFound)))
+        || !matches!(mounted, Ok(Err(Status::NotFound)))
+    {
+        return Err("refusing an unknown volume");
+    }
+    if run(launcher, &[UTILITY, "mount", &id]).await != Some(0) {
+        return Err("mounting the volume with the utility");
+    }
+    use_volume(volumes, reactor, EJECTED).await?;
+    if !matches!(device.mount(id.clone()).await, Ok(Err(Status::BadState))) {
+        return Err("refusing to mount the volume again");
+    }
+    if run(launcher, &[UTILITY]).await != Some(0) {
+        return Err("listing the volumes with the utility");
+    }
+    mikros_rt::log!(Info, "volumes-probe: ejected and mounted {}", EJECTED);
+    Ok(())
+}
+
+/// The device manager's `device.volumes`.
+async fn connect_volumes(
+    directory: &DirectoryAsyncClient,
+    reactor: &Reactor,
+) -> Result<VolumesAsyncClient, &'static str> {
+    let (client, server) = endpoints::<Volumes>().map_err(|_| "making a channel")?;
+    let connected = directory
+        .connect(DEVICE_VOLUMES.into(), None, server.into_handle())
+        .await;
+    if !matches!(connected, Ok(Ok(_))) {
+        return Err("connecting to device.volumes");
+    }
+    Ok(VolumesAsyncClient::new(client, reactor.clone()))
+}
+
+/// Whether `List` gives the volume `id` as mounted, hidden and removable.
+async fn listed_volume(
+    device: &VolumesAsyncClient,
+    id: &str,
+) -> Result<Option<(bool, bool, bool)>, &'static str> {
+    let mut after = String::new();
+    loop {
+        let volumes = match device.list(after).await {
+            Ok(Ok(listed)) => listed.volumes,
+            _ => return Err("listing the volumes"),
+        };
+        let Some(last) = volumes.last().map(|v| v.id.clone()) else {
+            return Ok(None);
+        };
+        if let Some(v) = volumes.iter().find(|v| v.id == id) {
+            return Ok(Some((v.mounted, v.hidden, v.removable)));
+        }
+        after = last;
+    }
+}
+
+/// Runs the program `all[0]` with the arguments `all`, as this probe, and
+/// gives its exit code.
+async fn run(launcher: &LauncherAsyncClient, all: &[&str]) -> Option<i64> {
+    let request = SpawnRequest {
+        path: all[0].into(),
+        arguments: arguments(all)?,
+        handles: Vec::new(),
+        app_id: None,
+        user: CALLER_USER,
+        login_session: false,
+        new_session: false,
+        working_directory: None,
+        umask: u32::MAX,
+    };
+    let pid = launcher.spawn(request).await.ok()?.ok()?.pid;
+    let waited = launcher.wait(pid as i32, WaitOptions(0), i64::MAX).await;
+    let status = waited.ok()?.ok()?.status;
+    (status.kind == StatusKind::Exited).then_some(status.exit_code)
+}
+
 /// Whether `/volumes` still lists either volume.
 async fn listed(volumes: &NodeAsyncClient) -> Result<bool, &'static str> {
     let mut cookie = 0;
@@ -441,12 +572,14 @@ fn duplicate(handle: &OwnedHandle) -> Option<OwnedHandle> {
 }
 
 /// The arguments of a program at `path`: only its path.
-fn arguments(path: &str) -> Option<OwnedHandle> {
+fn arguments(all: &[&str]) -> Option<OwnedHandle> {
     let mut bytes = vec![];
-    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&(all.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(path.as_bytes());
-    bytes.push(0);
+    for argument in all {
+        bytes.extend_from_slice(argument.as_bytes());
+        bytes.push(0);
+    }
     let mut mem = 0;
     // SAFETY: the out pointer is valid for the call.
     if unsafe { sys::mem_create(4096, 0, &mut mem) } != mikros_rt::OK {

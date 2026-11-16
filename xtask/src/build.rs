@@ -1481,6 +1481,17 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
             // probe.
             let volumes_probe = user_build("volumes-probe", kind)?;
             println!("built    {}", volumes_probe.display());
+            // The volumes utility, and a C program that checks the paths
+            // that realpath gives below /volumes, which the probe runs.
+            let volumes_utility = crate::rust_std::build("volumes", kind)?;
+            println!("built    {}", volumes_utility.display());
+            let volume_path = c_build(
+                "volume-path",
+                &["user/tests/volume-path/main.c"],
+                Linking::Dynamic,
+                &[],
+            )?;
+            println!("built    {}", volume_path.display());
             let volume_drivers = [
                 "pcibus",
                 "xhci",
@@ -1513,6 +1524,12 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 (
                     "system/services/system.volumes-probe/volumes-probe".to_owned(),
                     volumes_probe.clone(),
+                ),
+                ("system/bin/volumes".to_owned(), volumes_utility),
+                ("system/bin/volume-path".to_owned(), volume_path),
+                (
+                    "system/libraries/ld-mikros.dlib".to_owned(),
+                    dynamic_linker.clone(),
                 ),
                 (
                     "system/services/system.volumes-probe/service.yaml".to_owned(),

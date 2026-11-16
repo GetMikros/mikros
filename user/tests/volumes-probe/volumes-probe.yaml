@@ -7,8 +7,14 @@ after: [devicemgr, tmpfs]
 boot_handles: [log_manage]
 # To grant itself user.volumes.access, which its copy then holds, without
 # an administrator, and for the copy to kill the xHCI driver.
-permissions: [system.grants.manage, admin.grants.manage, system.processes.control]
+permissions: [system.grants.manage, admin.grants.manage, system.processes.control, admin.volumes.mount]
 # Its folder, to start the copy from its program.
 namespace:
   - path: /system/services/system.volumes-probe
+    rights: rx
+  # The volumes utility and the program that checks realpath, which the
+  # copy runs, with the dynamic linker.
+  - path: /system/bin
+    rights: rx
+  - path: /system/libraries
     rights: rx
