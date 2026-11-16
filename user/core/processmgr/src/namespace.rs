@@ -628,7 +628,10 @@ impl Namespaces {
             let libraries = self.entry(shared, &ready, "/libraries", RX).await?;
             let libraries = match &name {
                 None => libraries,
-                Some(name) => self.libraries(shared, &ready, libraries, name).await?,
+                Some(name) => {
+                    self.libraries(shared, &ready, libraries, name, false)
+                        .await?
+                }
             };
             add(&mut entries, &mut origins, libraries);
             if let Some(name) = &name {
@@ -838,11 +841,14 @@ impl Namespaces {
             origins,
             self.entry(shared, ready, SYSTEM_ENTRY, RX).await?,
         );
-        add(
-            entries,
-            origins,
-            self.entry(shared, ready, "/libraries", RX).await?,
-        );
+        // A local install also gets its user's libraries, which are looked
+        // for first (MIKSPEC-0050.R50).
+        let libraries = self.entry(shared, ready, "/libraries", RX).await?;
+        let libraries = match mode {
+            "local" => self.libraries(shared, ready, libraries, name, true).await?,
+            _ => libraries,
+        };
+        add(entries, origins, libraries);
         // The app's own folders of the user, made where they are missing:
         // the app's folder as a subvolume of its own (MIKSPEC-0101.R38).
         let folder = format!("/users/{name}/apps/{app_id}");
@@ -1036,14 +1042,16 @@ impl Namespaces {
     }
 
     /// `/libraries` for user `name`: a view of `system`, the
-    /// system's, merged with the user's `libraries` folder, or `system`
-    /// alone when the user has none.
+    /// system's, merged with the user's `libraries` folder, which a name
+    /// resolves to first when `own_first`, or `system` alone when the user
+    /// has none.
     async fn libraries(
         &self,
         shared: &Shared,
         ready: &Ready,
         system: (NamespaceEntry, Origin),
         name: &str,
+        own_first: bool,
     ) -> Result<(NamespaceEntry, Origin), Status> {
         let path = format!("/users/{name}/libraries");
         let own = match self.entry(shared, ready, &path, RX).await {
@@ -1056,7 +1064,10 @@ impl Namespaces {
                 return Ok(system);
             }
         };
-        let layers = alloc::vec![system.0.directory, own.directory];
+        let layers = match own_first {
+            true => alloc::vec![own.directory, system.0.directory],
+            false => alloc::vec![system.0.directory, own.directory],
+        };
         let view = crate::users::merged(shared, layers, RX).await?;
         Ok(none(NamespaceEntry {
             path: "/libraries".into(),
