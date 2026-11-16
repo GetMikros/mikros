@@ -822,7 +822,9 @@ name = "pkg"
 version = "0.0.0"
 dependencies = [
  "mikros-cli",
+ "mikros-command",
  "mikros-mika",
+ "mikros-rt",
 ]
 
 [[package]]

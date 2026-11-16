@@ -9,6 +9,10 @@ publish = false
 mikros-cli = { path = "../../lib/cli" }
 mikros-mika = { path = "../../lib/mika" }
 
+[target.'cfg(target_os = "mikros")'.dependencies]
+mikros-command = { path = "../../lib/command" }
+mikros-rt = { path = "../../runtime/mikros-rt", default-features = false }
+
 # A command: it installs, removes, lists, shows and makes packages through
 # the install service, which asks for the permissions that installs need.
 [package.metadata.mikros]
