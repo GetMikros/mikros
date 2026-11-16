@@ -229,6 +229,22 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                 .open("README".into(), OpenFlags(0), 0, Rights::READ, server)
                 .await;
             check(matches!(opened, Ok(Ok(_))), 13)?;
+            // The image made the README user 0's; the accounts service
+            // made everything in bob's home that user 0 owned bob's.
+            let (readme, server) = endpoints::<Node>().map_err(|_| 16)?;
+            let opened = home
+                .open(
+                    "libraries/README".into(),
+                    OpenFlags(0),
+                    0,
+                    Rights::READ,
+                    server,
+                )
+                .await;
+            check(matches!(opened, Ok(Ok(_))), 16)?;
+            let readme = NodeAsyncClient::new(readme, reactor.clone());
+            let owner = readme.get_attributes().await.ok().and_then(|r| r.ok());
+            check(owner.is_some_and(|a| a.attributes.owner == user), 16)?;
         }
         let token = token.ok_or(6)?;
         let (client, server) = endpoints::<Terminal>().map_err(|_| 6)?;
