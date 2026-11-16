@@ -9,6 +9,7 @@
 //! session manager for `admin` permissions through its own directory.
 
 mod broker;
+mod files;
 use crate::permissions::Store;
 use alloc::vec;
 use alloc::vec::Vec;

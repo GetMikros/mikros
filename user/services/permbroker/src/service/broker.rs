@@ -8,6 +8,7 @@ use crate::permissions::{
     self as store, Call, Decision, Failure, Grant, Identity, MANAGE_GRANTS, Requested, Revoked,
     Store,
 };
+use crate::service::files::{self, Files};
 use alloc::format;
 use alloc::rc::{Rc, Weak};
 use alloc::string::String;
@@ -34,10 +35,13 @@ const REASON_MAX: usize = 256;
 pub struct Broker(Rc<Inner>);
 
 struct Inner {
-    store: RefCell<Store>,
+    store: Rc<RefCell<Store>>,
+    /// Whether the stored grants and numbers have been read, and whether
+    /// the store changed since they were written.
+    files: Rc<Files>,
     /// The broker's own directory, through which it reaches the session
-    /// manager.
-    directory: DirectoryAsyncClient,
+    /// manager and the file system of its files.
+    directory: Rc<DirectoryAsyncClient>,
     prompter: RefCell<Option<Rc<PrompterAsyncClient>>>,
     /// The connections that watch each permission.
     watchers: RefCell<Vec<(String, Weak<BrokerAsyncServer>)>>,
@@ -46,14 +50,27 @@ struct Inner {
 }
 
 impl Broker {
+    /// The broker of `store`, which keeps its files on the root file
+    /// system, or on the temporary file system when the root cannot be
+    /// written.
     pub fn new(
         store: Store,
         directory: DirectoryAsyncClient,
         reactor: Reactor,
         spawner: Spawner,
     ) -> Broker {
+        let store = Rc::new(RefCell::new(store));
+        let files = Rc::new(Files::default());
+        let directory = Rc::new(directory);
+        spawner.spawn(files::keep(
+            store.clone(),
+            files.clone(),
+            directory.clone(),
+            reactor.clone(),
+        ));
         Broker(Rc::new(Inner {
-            store: RefCell::new(store),
+            store,
+            files,
             directory,
             prompter: RefCell::new(None),
             watchers: RefCell::new(Vec::new()),
@@ -76,10 +93,17 @@ impl Broker {
                 let _ = match request {
                     R::Number(q, r) => {
                         // The same permission as Check: system.permissions.read.
-                        let result = inner.authorize(&caller, Call::Check).map(|()| {
-                            let number = inner.store.borrow_mut().number(&q.app_id);
-                            midl::AppNumbersNumberResponse { number }
-                        });
+                        let result = match inner.authorize(&caller, Call::Check) {
+                            Ok(()) => {
+                                inner.files.loaded().await;
+                                let (number, new) = inner.store.borrow_mut().number(&q.app_id);
+                                if new {
+                                    inner.files.changed();
+                                }
+                                Ok(midl::AppNumbersNumberResponse { number })
+                            }
+                            Err(e) => Err(e),
+                        };
                         r.reply(s, result)
                     }
                     R::AppId(q, r) => {
@@ -348,6 +372,7 @@ async fn set_grant(
         inner.manage_grants(caller, reason).await?;
     }
     let revoked = inner.store.borrow_mut().set_grant(&grant);
+    inner.files.changed();
     if let Some(revoked) = revoked.map_err(status)? {
         inner.revoked(&revoked);
     }
@@ -422,7 +447,9 @@ async fn decide_request(
                     match asked.await {
                         Ok(answer) => {
                             let mut store = inner.store.borrow_mut();
-                            store.record(client, &q.permission, answer.allowed)
+                            let decision = store.record(client, &q.permission, answer.allowed);
+                            inner.files.changed();
+                            decision
                         }
                         Err(_) => {
                             let mut current = inner.prompter.borrow_mut();

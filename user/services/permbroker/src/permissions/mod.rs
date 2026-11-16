@@ -6,8 +6,10 @@
 //! permissions that an administrator allowed one process, by its kernel
 //! object ID. It answers checks, says when a request needs the prompter
 //! or an administrator, records grants, and reports each change that
-//! takes a permission away, for the connections that watch it. Grants
-//! are kept in memory only.
+//! takes a permission away, for the connections that watch it. It
+//! writes the grants and the numbers of app IDs as text, one per line,
+//! and reads them back after a restart; the `system` and `admin`
+//! permissions are not written.
 
 mod table;
 #[cfg(test)]
@@ -167,17 +169,114 @@ impl Store {
     }
 
     /// The number of `app_id`: the lowest from 1 that no app ID has, given
-    /// the first time it is asked for, and the same from then on.
-    pub fn number(&mut self, app_id: &str) -> u32 {
+    /// the first time it is asked for, and the same from then on; and
+    /// whether it is new.
+    pub fn number(&mut self, app_id: &str) -> (u32, bool) {
         if let Some(&number) = self.numbers.get(app_id) {
-            return number;
+            return (number, false);
         }
         let number = (1..)
             .find(|n| !self.app_ids.contains_key(n))
             .expect("fewer than u32::MAX app IDs");
         self.numbers.insert(app_id.into(), number);
         self.app_ids.insert(number, app_id.into());
-        number
+        (number, true)
+    }
+
+    /// The numbers of the app IDs, a line `<number> <app ID>` each.
+    pub fn encode_numbers(&self) -> Vec<u8> {
+        let mut text = String::new();
+        for (number, app_id) in &self.app_ids {
+            if storable(app_id) {
+                text.push_str(&alloc::format!("{number} {app_id}\n"));
+            }
+        }
+        text.into_bytes()
+    }
+
+    /// Adds the numbers of `bytes`, as `encode_numbers` writes them,
+    /// except those of a number or app ID that has one already. Returns
+    /// how many lines it skipped.
+    pub fn load_numbers(&mut self, bytes: &[u8]) -> usize {
+        let mut skipped = 0;
+        for line in lines(bytes) {
+            let parsed = line.split_once(' ').and_then(|(number, app_id)| {
+                let number: u32 = number.parse().ok()?;
+                (number != 0 && storable(app_id)).then_some((number, app_id))
+            });
+            match parsed {
+                Some((number, app_id))
+                    if !self.app_ids.contains_key(&number)
+                        && !self.numbers.contains_key(app_id) =>
+                {
+                    self.numbers.insert(app_id.into(), number);
+                    self.app_ids.insert(number, app_id.into());
+                }
+                _ => skipped += 1,
+            }
+        }
+        skipped
+    }
+
+    /// The `user` and `default` grants, a line
+    /// `<user> <app ID> <permission> allowed|denied` each.
+    pub fn encode_grants(&self) -> Vec<u8> {
+        let mut text = String::new();
+        for ((user, app_id, permission), decision) in &self.grants {
+            let decision = match decision {
+                Decision::Allowed => "allowed",
+                Decision::Denied => "denied",
+                Decision::Undetermined => continue,
+            };
+            if storable(app_id) {
+                text.push_str(&alloc::format!("{user} {app_id} {permission} {decision}\n"));
+            }
+        }
+        text.into_bytes()
+    }
+
+    /// Adds the grants of `bytes`, as `encode_grants` writes them, except
+    /// those that `set_grant` would refuse and those of a user, app ID
+    /// and permission that have one already. Returns how many lines it
+    /// skipped.
+    pub fn load_grants(&mut self, bytes: &[u8]) -> usize {
+        let mut skipped = 0;
+        for line in lines(bytes) {
+            let mut words = line.split(' ');
+            let parsed = match (words.next(), words.next(), words.next(), words.next()) {
+                (Some(user), Some(app_id), Some(permission), Some(decision))
+                    if words.next().is_none() =>
+                {
+                    let decision = match decision {
+                        "allowed" => Some(Decision::Allowed),
+                        "denied" => Some(Decision::Denied),
+                        _ => None,
+                    };
+                    user.parse()
+                        .ok()
+                        .zip(decision)
+                        .map(|(user, decision)| Grant {
+                            user,
+                            app_id: app_id.into(),
+                            permission: permission.into(),
+                            decision,
+                        })
+                }
+                _ => None,
+            };
+            let key = parsed
+                .as_ref()
+                .map(|g| (g.user, g.app_id.clone(), g.permission.clone()));
+            match (parsed, key) {
+                (Some(grant), Some(key))
+                    if Store::check_grant(&grant).is_ok() && !self.grants.contains_key(&key) =>
+                {
+                    self.grants.insert(key, grant.decision);
+                }
+                _ => skipped += 1,
+            }
+        }
+        skipped
     }
 
     /// The app ID that has `number`, if one has.
@@ -357,4 +456,19 @@ impl Store {
             .extend(permissions.iter().cloned());
         Ok(())
     }
+}
+
+/// Whether `app_id` can be written as a word of a line: it is not empty
+/// and holds no space or control character.
+fn storable(app_id: &str) -> bool {
+    !app_id.is_empty() && !app_id.chars().any(|c| c == ' ' || c.is_control())
+}
+
+/// The lines of the text `bytes` that are not empty; none when `bytes`
+/// is not UTF-8.
+fn lines(bytes: &[u8]) -> impl Iterator<Item = &str> {
+    core::str::from_utf8(bytes)
+        .unwrap_or("")
+        .lines()
+        .filter(|l| !l.is_empty())
 }

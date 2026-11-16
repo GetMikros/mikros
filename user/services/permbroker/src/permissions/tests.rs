@@ -586,10 +586,87 @@ fn other_users_and_allowing_need_manage_grants() {
 #[test]
 fn numbers_app_ids_from_1_and_keeps_their_numbers() {
     let mut s = store();
-    assert_eq!(s.number("system.a"), 1);
-    assert_eq!(s.number("system.b"), 2);
-    assert_eq!(s.number("system.a"), 1);
+    assert_eq!(s.number("system.a"), (1, true));
+    assert_eq!(s.number("system.b"), (2, true));
+    assert_eq!(s.number("system.a"), (1, false));
     assert_eq!(s.app_id(2), Some("system.b"));
     assert_eq!(s.app_id(0), None);
     assert_eq!(s.app_id(3), None);
+}
+
+#[test]
+fn numbers_survive_a_restart() {
+    let mut s = store();
+    s.number("system.a");
+    s.number("org.example.b");
+    let bytes = s.encode_numbers();
+    assert_eq!(bytes, b"1 system.a\n2 org.example.b\n");
+    let mut restarted = store();
+    assert_eq!(restarted.load_numbers(&bytes), 0);
+    assert_eq!(restarted.app_id(2), Some("org.example.b"));
+    assert_eq!(restarted.number("org.example.b"), (2, false));
+    assert_eq!(restarted.number("system.c"), (3, true));
+    // Numbers and app IDs that are taken, 0 and malformed lines are left
+    // out.
+    assert_eq!(
+        restarted.load_numbers(b"3 other\n4 system.a\n0 x\nnone\n5 \n"),
+        5
+    );
+    assert_eq!(restarted.app_id(3), Some("system.c"));
+}
+
+#[test]
+fn grants_survive_a_restart() {
+    let mut s = store();
+    s.set_grant(&app_grant(
+        1000,
+        "org.example.b",
+        "user.pictures.access",
+        Decision::Allowed,
+    ))
+    .unwrap();
+    s.set_grant(&app_grant(
+        1001,
+        "org.example.c",
+        "user.pictures.access",
+        Decision::Denied,
+    ))
+    .unwrap();
+    let bytes = s.encode_grants();
+    assert_eq!(
+        bytes,
+        b"1000 org.example.b user.pictures.access allowed\n\
+          1001 org.example.c user.pictures.access denied\n"
+    );
+    let mut restarted = store();
+    assert_eq!(restarted.load_grants(&bytes), 0);
+    assert_eq!(restarted.list(1000), s.list(1000));
+    assert_eq!(restarted.list(1001), s.list(1001));
+    // A grant made before the stored ones were read stays, and grants of
+    // system and admin permissions, unknown permissions and malformed
+    // lines are left out.
+    let mut early = store();
+    early
+        .set_grant(&app_grant(
+            1000,
+            "org.example.b",
+            "user.pictures.access",
+            Decision::Denied,
+        ))
+        .unwrap();
+    let odd = b"1000 org.example.b user.pictures.access allowed\n\
+        1000 x system.permissions.read allowed\n\
+        1000 x admin.power.control allowed\n\
+        1000 x no.such.permission allowed\n\
+        1000 x user.pictures.access maybe\n\
+        x y z allowed\n";
+    assert_eq!(early.load_grants(odd), 6);
+    assert_eq!(early.list(1000)[0].decision, Decision::Denied);
+}
+
+fn app_grant(user: u32, app_id: &str, permission: &str, decision: Decision) -> Grant {
+    Grant {
+        app_id: app_id.to_string(),
+        ..grant(user, permission, decision)
+    }
 }
