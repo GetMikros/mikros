@@ -43,7 +43,7 @@ unsafe extern "C" {
     fn xkb_state_mod_name_is_active(state: *mut c_void, name: *const c_char, kind: c_int) -> c_int;
 }
 
-/// The layout to compile: the keys of `/etc/keyboard.yaml`.
+/// The layout to compile: the keys of `/system/config/keyboard.yaml`.
 #[derive(Clone, Debug, Default)]
 pub struct Names {
     pub model: String,

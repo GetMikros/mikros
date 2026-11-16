@@ -23,7 +23,7 @@ type Redirections = Vec<(RedirectionKind, String)>;
 /// The command that always runs `SUDO_PATH`, whatever `$env.PATH` holds,
 /// and that no function may replace.
 pub const SUDO: &str = "sudo";
-const SUDO_PATH: &str = "/usr/bin/sudo";
+const SUDO_PATH: &str = "/system/bin/sudo";
 
 enum Found {
     Expr(Value),

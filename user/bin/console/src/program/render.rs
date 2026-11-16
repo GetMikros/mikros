@@ -17,8 +17,8 @@ use std::collections::HashMap;
 const XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 const PERM_READ: u32 = 1 << 0;
 const PERM_WRITE: u32 = 1 << 1;
-const REGULAR: &str = "/usr/share/fonts/dejavu/DejaVuSansMono.ttf";
-const BOLD_FONT: &str = "/usr/share/fonts/dejavu/DejaVuSansMono-Bold.ttf";
+const REGULAR: &str = "/system/share/fonts/dejavu/DejaVuSansMono.ttf";
+const BOLD_FONT: &str = "/system/share/fonts/dejavu/DejaVuSansMono-Bold.ttf";
 /// The font sizes tried. Of those that give at least 80 columns and 24
 /// rows, the console takes the one whose rows are nearest the kernel
 /// log's, `ROW_TARGET` pixels high, and the larger of two as near.

@@ -183,7 +183,7 @@ impl<S: System> Shell<S> {
 
     /// Runs the declarations file of the command `name`, the first time
     /// it is asked for: `~/.msh/completions/<name>.msh`, or else
-    /// `/usr/share/msh/completions/<name>.msh`. As it runs while a line
+    /// `/system/share/msh/completions/<name>.msh`. As it runs while a line
     /// is edited, what it writes and its errors are dropped, and the
     /// status and the line and command of errors are kept.
     pub fn load_declarations(&mut self, name: &str) {
@@ -195,7 +195,7 @@ impl<S: System> Shell<S> {
             .map(|h| format!("{h}/.msh/completions/{name}.msh"))
             .into_iter()
             .collect();
-        files.push(format!("/usr/share/msh/completions/{name}.msh"));
+        files.push(format!("/system/share/msh/completions/{name}.msh"));
         let Some(text) = files.iter().find_map(|f| self.system.read_file(f).ok()) else {
             return;
         };
@@ -476,7 +476,7 @@ impl<S: System> Shell<S> {
         Ok(())
     }
 
-    /// Fails for the name `sudo`, which always runs /usr/bin/sudo, so
+    /// Fails for the name `sudo`, which always runs /system/bin/sudo, so
     /// that nothing can be put in its place.
     fn definable(&self, name: &str) -> Result<(), Flow> {
         match name == crate::eval::command::SUDO {

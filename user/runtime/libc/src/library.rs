@@ -1,8 +1,8 @@
 //! The directories that the dynamic linker searches for libraries.
 //!
 //! A library is looked for in the `DT_RUNPATH` entries of the objects
-//! that need it, then in the bundle's `lib/`, `/usr/lib` and
-//! `/Libraries/lib`. Only the `DT_RUNPATH` entries that start with
+//! that need it, then in the bundle's `lib/`, `/system/libraries` and
+//! `/libraries/lib`. Only the `DT_RUNPATH` entries that start with
 //! `$ORIGIN` and name a directory within the bundle are kept. The main
 //! program's path is not known, so its entries are not.
 
@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::ffi::{CStr, c_char};
 
 /// The system directories, after the bundle's.
-const SYSTEM: [&str; 2] = ["/usr/lib", "/Libraries/lib"];
+const SYSTEM: [&str; 2] = ["/system/libraries", "/libraries/lib"];
 
 /// The normalized path of the app's bundle, when the program is in one.
 static BUNDLE: Lock<Option<String>> = Lock::new(None);

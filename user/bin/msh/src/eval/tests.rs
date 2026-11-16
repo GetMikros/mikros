@@ -244,11 +244,11 @@ fn declares_built_ins_and_runs_declarations_files_once() {
         "extern git push(--force: bool)\nprint noise".into(),
     );
     s.system.files.insert(
-        "/usr/share/msh/completions/git.msh".into(),
+        "/system/share/msh/completions/git.msh".into(),
         "extern git pull(--rebase: bool)".into(),
     );
     s.system.files.insert(
-        "/usr/share/msh/completions/tool.msh".into(),
+        "/system/share/msh/completions/tool.msh".into(),
         "extern tool(--x: bool)".into(),
     );
     s.load_declarations("git");
@@ -732,7 +732,7 @@ fn sudo_always_runs_usr_bin_sudo_and_cannot_be_redefined() {
     let mut s = shell();
     let real: Behaviour = |args, _| (0, format!("real {}", args[1..].join(" ")).into_bytes());
     let fake: Behaviour = |_, _| (0, b"fake".to_vec());
-    s.system.programs.insert("/usr/bin/sudo".into(), real);
+    s.system.programs.insert("/system/bin/sudo".into(), real);
     // A sudo earlier in $env.PATH, or a path, is not taken for `sudo`.
     s.system.programs.insert("/bin/sudo".into(), fake);
     s.system.programs.insert("./sudo".into(), fake);

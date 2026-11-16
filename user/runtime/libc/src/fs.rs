@@ -131,7 +131,7 @@ fn covered(namespace: &[Entry], path: &str) -> bool {
 }
 
 /// The names in the folder that `path` is when no entry covers it but
-/// entries lie below it (MIKSPEC-0050.R31): the next component of each
+/// entries lie below it (MIKSPEC-0050.R48): the next component of each
 /// such entry's path, each once, in order.
 pub fn folder_names(path: &str) -> Option<Vec<String>> {
     let namespace = NAMESPACE.lock();
@@ -323,9 +323,14 @@ pub fn open_description(
     // SAFETY: musl passes a NUL-terminated path.
     let bytes = unsafe { c_path(path) }?;
     let path = absolute(dirfd, bytes)?;
-    if let Some(names) = folder_names(&path) {
+    if let Some(mut names) = folder_names(&path) {
         if writes(flags) {
             return Err(EROFS);
+        }
+        // The listing of `/` leaves `tmp` out, which is still opened as
+        // its entry (MIKSPEC-0050.R48).
+        if path == "/" {
+            names.retain(|name| name != "tmp");
         }
         return Ok(Arc::new(Description::Folder(Folder::new(path, names))));
     }

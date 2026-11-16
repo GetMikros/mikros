@@ -1,7 +1,7 @@
 //! The setup program, which the session manager runs on the text
 //! console's terminal on the first boot, while no user account exists.
 //! It asks for the computer's name, suggesting `mikros`, and writes it
-//! to /etc/hostname. Then it asks for the name, full name and password
+//! to /system/config/hostname. Then it asks for the name, full name and password
 //! of the first administrator and creates that account with the
 //! accounts service, which accepts this one call from the app ID
 //! `system.setup`. It exits with 0 once the account exists, and with 1
@@ -22,7 +22,7 @@ const FOREVER: i64 = i64::MAX;
 const SAME_RIGHTS: u32 = 1 << 31;
 /// The file of the computer's name, the name suggested for it, and the
 /// longest one.
-const HOSTNAME: &str = "/etc/hostname";
+const HOSTNAME: &str = "/system/config/hostname";
 const HOST_SUGGESTED: &str = "mikros";
 const HOST_MAX: usize = 63;
 /// The longest name and full name the accounts service takes.

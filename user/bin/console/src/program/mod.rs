@@ -55,7 +55,7 @@ const USER: u32 = 16;
 const TEXT_LOGIN_ID: u32 = 3;
 const SEAT_ID: u32 = 7;
 const SAME_RIGHTS: u32 = 1 << 31;
-/// The keyboard layout until `/etc/keyboard.yaml` names one.
+/// The keyboard layout until `/system/config/keyboard.yaml` names one.
 const LAYOUT: &str = "us";
 /// The rows of the login prompt and of setup's terminal, below the log.
 const PROMPT_ROWS: usize = 8;

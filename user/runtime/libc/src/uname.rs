@@ -1,6 +1,6 @@
 //! `uname`, from which musl's `gethostname` takes the host name, and
 //! `sethostname`, which no process may call. The host name is read from
-//! `/etc/hostname` at each call: one line of 1 to 63 ASCII letters,
+//! `/system/config/hostname` at each call: one line of 1 to 63 ASCII letters,
 //! digits and `-`, neither first nor last, with or without a line feed
 //! after it. A missing file, or one that holds anything else, gives the
 //! name `mikros`.
@@ -14,12 +14,12 @@ const SYSNAME: &[u8] = b"Mikros";
 /// The machine's name, the fifth field.
 const MACHINE: &[u8] = b"x86_64";
 const MACHINE_FIELD: usize = 4;
-const HOSTNAME: &[u8] = b"/etc/hostname\0";
+const HOSTNAME: &[u8] = b"/system/config/hostname\0";
 const DEFAULT_HOST: &[u8] = b"mikros";
 /// The longest host name.
 const NAME_MAX: usize = 63;
 
-/// The host name that `contents`, the bytes of `/etc/hostname`, give.
+/// The host name that `contents`, the bytes of `/system/config/hostname`, give.
 fn host_name(contents: &[u8]) -> &[u8] {
     let name = contents.strip_suffix(b"\n").unwrap_or(contents);
     let valid = (1..=NAME_MAX).contains(&name.len())
@@ -29,7 +29,7 @@ fn host_name(contents: &[u8]) -> &[u8] {
     if valid { name } else { DEFAULT_HOST }
 }
 
-/// Reads `/etc/hostname` into `buf`, which holds one byte more than the
+/// Reads `/system/config/hostname` into `buf`, which holds one byte more than the
 /// longest valid contents, and gives how many bytes it read: none when
 /// the file cannot be read.
 fn read_host_file(buf: &mut [u8; NAME_MAX + 2]) -> usize {
@@ -73,7 +73,7 @@ pub fn uname(buf: *mut u8) -> i64 {
     0
 }
 
-/// `sethostname`: the host name changes only with `/etc/hostname`.
+/// `sethostname`: the host name changes only with `/system/config/hostname`.
 pub fn sethostname() -> i64 {
     -EPERM
 }

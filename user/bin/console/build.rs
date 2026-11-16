@@ -14,7 +14,7 @@ fn main() {
         let lib = root
             .join("target/ported")
             .join(port)
-            .join("install/usr/lib");
+            .join("install/system/libraries");
         println!("cargo:rustc-link-search=native={}", lib.display());
     }
     println!("cargo:rustc-link-lib=dylib=freetype");

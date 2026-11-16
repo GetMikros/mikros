@@ -1,6 +1,6 @@
 //! Time: UTC from the time service's time page, and the system time
 //! zone, whose name the time service gives and whose rules lie in
-//! `/usr/share/zoneinfo/`.
+//! `/system/share/zoneinfo/`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -19,7 +19,7 @@ const FOREVER: i64 = i64::MAX;
 const PERM_READ: u32 = 1 << 0;
 const NS: i64 = 1_000_000_000;
 /// Where the rules of the time zones lie.
-const ZONEINFO: &str = "/usr/share/zoneinfo";
+const ZONEINFO: &str = "/system/share/zoneinfo";
 /// How long a call to the time service or a zone file may take.
 const CALL_NS: i64 = NS;
 /// The largest zone file read, and how much of it one read asks for.

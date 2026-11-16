@@ -1,5 +1,5 @@
 //! Measuring how fast the machine is, running the tests of
-//! `/usr/bin/tests/` one at a time, each with a timeout scaled to that
+//! `/system/bin/tests/` one at a time, each with a timeout scaled to that
 //! speed, writing a line for each and a summary, and, with `--poweroff`,
 //! then powering the machine off through the service manager's
 //! `mikros.service.Control`.
@@ -17,7 +17,7 @@ use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 /// The directory of the tests.
-const TESTS: &str = "/usr/bin/tests";
+const TESTS: &str = "/system/bin/tests";
 /// How long the calibration workload takes at best on the reference
 /// machine, a debug build under KVM, where it took 61 to 68 ms. It took
 /// 3 s on QEMU's emulated processor, and 0.21 s in a fuzz build.
@@ -143,7 +143,7 @@ fn say(line: &str) {
     let _ = out.flush();
 }
 
-/// The names of the programs in `/usr/bin/tests/`, none when there is no
+/// The names of the programs in `/system/bin/tests/`, none when there is no
 /// such directory.
 fn tests() -> std::io::Result<Vec<String>> {
     let mut names = Vec::new();

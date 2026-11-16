@@ -1,4 +1,4 @@
-//! msh, the Mikros shell, installed as /usr/bin/msh. Without arguments
+//! msh, the Mikros shell, installed as /system/bin/msh. Without arguments
 //! it runs interactively when its standard input is a terminal: it
 //! defines `$msh_colors`, the colours of the line, and runs `~/.mshrc`
 //! when that exists, then reads lines at a prompt, keeping
