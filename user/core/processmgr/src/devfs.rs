@@ -1,7 +1,10 @@
 //! The `/dev` directory of every process's namespace, served over the
-//! `Node` protocol, one executor task per connection. It holds only the
-//! file `null`, whose reads return no bytes and whose writes succeed and
-//! discard every byte. The directory itself cannot be changed.
+//! `Node` protocol, one executor task per connection (MIKSPEC-0050.R39).
+//! It holds only the files `null`, `zero`, `random` and `urandom`. Writes
+//! to any of them succeed and discard every byte; reads return no bytes
+//! from `null`, zero bytes from `zero`, and bytes of the kernel's random
+//! number generator from `random` and `urandom`, as many as asked for.
+//! The directory itself cannot be changed.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -11,16 +14,28 @@ use mikros_rt::interfaces::__midl::{ClientEnd, ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::*;
 
-/// The name of the only file.
-const NULL: &str = "null";
+/// The files, by name, in the order listed.
+const FILES: [(&str, Kind); 4] = [
+    ("null", Kind::Null),
+    ("zero", Kind::Zero),
+    ("random", Kind::Random),
+    ("urandom", Kind::Urandom),
+];
 /// The block size reported.
 const BLOCK: u32 = 512;
+/// The most bytes that one read returns, as many as a reply holds.
+const READ_MAX: u32 = 32768;
+/// The most bytes that one `system_get_random` call gives.
+const RANDOM_MAX: usize = 4096;
 
-/// The two nodes.
+/// The nodes.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Directory,
     Null,
+    Zero,
+    Random,
+    Urandom,
 }
 
 /// What connections run on.
@@ -93,8 +108,11 @@ impl Connection {
                     },
                 }),
             ),
-            R::Read(_, r) => r.reply(s, self.read().map(|data| NodeReadResponse { data })),
-            R::ReadNext(_, r) => r.reply(s, self.read().map(|data| NodeReadNextResponse { data })),
+            R::Read(q, r) => r.reply(s, self.read(q.count).map(|data| NodeReadResponse { data })),
+            R::ReadNext(q, r) => r.reply(
+                s,
+                self.read(q.count).map(|data| NodeReadNextResponse { data }),
+            ),
             R::Write(q, r) => r.reply(
                 s,
                 self.write(&q.data)
@@ -157,16 +175,32 @@ impl Connection {
         Ok(NodeCloneResponse {})
     }
 
-    /// No bytes, from `null`.
-    fn read(&self) -> Result<Vec<u8>, Error> {
+    /// Up to `count` bytes of the file: none from `null`, zero bytes from
+    /// `zero`, and random bytes from `random` and `urandom`.
+    fn read(&self, count: u32) -> Result<Vec<u8>, Error> {
         self.require(Rights::READ)?;
+        let len = count.min(READ_MAX) as usize;
         match self.kind {
             Kind::Null => Ok(Vec::new()),
+            Kind::Zero => Ok(alloc::vec![0; len]),
+            Kind::Random | Kind::Urandom => {
+                let mut data = alloc::vec![0; len];
+                for chunk in data.chunks_mut(RANDOM_MAX) {
+                    // SAFETY: the chunk is valid for its length.
+                    let status = unsafe {
+                        mikros_rt::sys::system_get_random(chunk.as_mut_ptr(), chunk.len() as u64)
+                    };
+                    if status != mikros_rt::OK {
+                        return Err(Error::Io);
+                    }
+                }
+                Ok(data)
+            }
             Kind::Directory => Err(Error::IsDirectory),
         }
     }
 
-    /// Takes every byte of `data` for `null` and drops it.
+    /// Takes every byte of `data` for a file and drops it.
     fn write(&self, data: &[u8]) -> Result<u32, Error> {
         if self.kind == Kind::Directory {
             return Err(Error::IsDirectory);
@@ -175,11 +209,11 @@ impl Connection {
         Ok(data.len() as u32)
     }
 
-    /// `null` has no size, so every position is its start.
+    /// The files have no size, so every position is their start.
     fn seek(&self) -> Result<NodeSeekResponse, Error> {
         match self.kind {
-            Kind::Null => Ok(NodeSeekResponse { position: 0 }),
             Kind::Directory => Err(Error::Invalid),
+            _ => Ok(NodeSeekResponse { position: 0 }),
         }
     }
 
@@ -190,22 +224,22 @@ impl Connection {
         }
         let mut target = Kind::Directory;
         for name in q.path.split('/').filter(|n| !n.is_empty() && *n != ".") {
-            target = match (target, name) {
-                (Kind::Directory, NULL) => Kind::Null,
-                (Kind::Null, _) => return Err(Error::NotDirectory),
-                (Kind::Directory, _) if q.flags.contains(OpenFlags::CREATE) => {
-                    return Err(self.write_denied());
-                }
-                (Kind::Directory, _) => return Err(Error::NotFound),
+            if target != Kind::Directory {
+                return Err(Error::NotDirectory);
+            }
+            target = match FILES.iter().find(|(file, _)| *file == name) {
+                Some(&(_, kind)) => kind,
+                None if q.flags.contains(OpenFlags::CREATE) => return Err(self.write_denied()),
+                None => return Err(Error::NotFound),
             };
         }
         if q.flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) {
             return Err(Error::Exists);
         }
-        if target == Kind::Null && q.flags.contains(OpenFlags::DIRECTORY) {
+        if target != Kind::Directory && q.flags.contains(OpenFlags::DIRECTORY) {
             return Err(Error::NotDirectory);
         }
-        // Truncating `null` changes nothing.
+        // Truncating a file changes nothing.
         if target == Kind::Directory && q.flags.contains(OpenFlags::TRUNCATE) {
             return Err(Error::IsDirectory);
         }
@@ -225,18 +259,19 @@ impl Connection {
         if self.kind != Kind::Directory {
             return Err(Error::NotDirectory);
         }
-        let entries = match cookie {
-            0 => {
-                let attrs = self::attributes(Kind::Null);
-                alloc::vec![DirEntry {
-                    name: String::from(NULL),
+        let entries: Vec<DirEntry> = FILES
+            .iter()
+            .skip(usize::try_from(cookie).unwrap_or(usize::MAX))
+            .map(|&(name, kind)| {
+                let attrs = self::attributes(kind);
+                DirEntry {
+                    name: String::from(name),
                     r#type: attrs.r#type,
                     inode: attrs.inode,
                     attributes: attributes.then(|| Box::new(attrs)),
-                }]
-            }
-            _ => Vec::new(),
-        };
+                }
+            })
+            .collect();
         let next = cookie + entries.len() as u64;
         Ok(NodeReadDirectoryResponse { entries, next })
     }
@@ -246,6 +281,9 @@ fn attributes(kind: Kind) -> Attributes {
     let (r#type, mode, links, inode) = match kind {
         Kind::Directory => (NodeType::Directory, 0o555, 2, 1),
         Kind::Null => (NodeType::File, 0o666, 1, 2),
+        Kind::Zero => (NodeType::File, 0o666, 1, 3),
+        Kind::Random => (NodeType::File, 0o666, 1, 4),
+        Kind::Urandom => (NodeType::File, 0o666, 1, 5),
     };
     Attributes {
         r#type,
