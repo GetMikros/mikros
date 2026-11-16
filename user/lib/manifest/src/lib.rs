@@ -22,7 +22,8 @@ mod program;
 mod tests;
 
 pub use driver::{
-    Choice, Driver, DriverKind, DriverManifest, Need, choose, is_hardware_id, parse_driver,
+    Choice, DRIVER_PREFIX, Driver, DriverKind, DriverManifest, Need, choose, is_hardware_id,
+    parse_driver,
 };
 pub use order::{Blocked, Order, order};
 pub use program::{NamespaceEntry, Program, ProgramManifest, parse_program};
@@ -52,6 +53,11 @@ pub const PRIORITY_DEFAULT: i64 = 16;
 /// `stop_timeout`, in seconds, when the manifest leaves it out.
 pub const STOP_TIMEOUT_DEFAULT: u64 = 10;
 const SUFFIX: &str = ".yaml";
+/// The prefix of the app IDs of system services, which name their
+/// folders in `/system/services/`.
+pub const SERVICE_PREFIX: &str = "system.";
+/// The file name of a service's manifest in its folder.
+pub const SERVICE_FILE: &str = "service.yaml";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Service {
@@ -133,10 +139,10 @@ pub enum ErrorKind {
     Missing(&'static str),
     /// `name` is not lowercase kebab-case.
     BadName,
-    /// The file, or a driver manifest's directory, is not named after
-    /// `name`.
+    /// A service's or driver's folder is not named by the app ID of
+    /// `name`, or a program's manifest file not after its `app_id`.
     FileName,
-    /// `binary` is not an absolute path under `/usr`.
+    /// `binary` is not an absolute path under `/system`.
     BadBinary,
     /// `start` is neither `boot` nor `on-demand`.
     BadStart,
@@ -181,8 +187,9 @@ fn error(node: &Node, kind: ErrorKind) -> Error {
     }
 }
 
-/// Reads the manifest in `bytes`, from the file `file_name`.
-pub fn parse(file_name: &str, bytes: &[u8]) -> Result<Manifest, Error> {
+/// Reads the manifest in `bytes`, from the file `service.yaml` in the
+/// folder `folder`, which must be `system.<name>`.
+pub fn parse(folder: &str, bytes: &[u8]) -> Result<Manifest, Error> {
     let root = mikros_yaml::parse(bytes)?;
     let map = root.map()?;
     let mut unknown = unknown_keys(map, KEYS);
@@ -193,12 +200,12 @@ pub fn parse(file_name: &str, bytes: &[u8]) -> Result<Manifest, Error> {
     if !is_kebab_case(name) {
         return Err(error(name_node, ErrorKind::BadName));
     }
-    if file_name.strip_suffix(SUFFIX) != Some(name) {
+    if folder.strip_prefix(SERVICE_PREFIX) != Some(name) {
         return Err(error(name_node, ErrorKind::FileName));
     }
     let binary_node = required("binary")?;
     let binary = binary_node.string()?;
-    if !is_under_usr(binary) {
+    if !is_under_system(binary) {
         return Err(error(binary_node, ErrorKind::BadBinary));
     }
     let start_node = required("start")?;
@@ -323,11 +330,11 @@ fn is_kebab_case(name: &str) -> bool {
     first.starts_with(|c: char| c.is_ascii_lowercase()) && alnum(first) && parts.all(alnum)
 }
 
-/// Whether `path` is absolute and names something below `/usr`. Empty,
-/// `.` and `..` components are refused, so that the path cannot leave
-/// `/usr`.
-fn is_under_usr(path: &str) -> bool {
-    let Some(rest) = path.strip_prefix("/usr/") else {
+/// Whether `path` is absolute and names something below `/system`.
+/// Empty, `.` and `..` components are refused, so that the path cannot
+/// leave `/system`.
+fn is_under_system(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/system/") else {
         return false;
     };
     rest.split('/').all(|c| !matches!(c, "" | "." | ".."))

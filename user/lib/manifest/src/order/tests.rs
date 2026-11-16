@@ -7,7 +7,7 @@ use alloc::vec;
 fn service(name: &str, start: Start, after: &[&str]) -> Service {
     Service {
         name: name.to_string(),
-        binary: std::format!("/usr/bin/{name}"),
+        binary: std::format!("/system/services/system.{name}/{name}"),
         provides: vec![],
         after: after.iter().map(|a| a.to_string()).collect(),
         start,

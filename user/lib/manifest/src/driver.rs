@@ -1,10 +1,10 @@
 //! Reading driver manifests: the `driver.yaml` in each driver's own
-//! directory under `/usr/lib/drivers/`.
+//! directory under `/system/drivers/`.
 
 use crate::program::namespace;
 use crate::{
     Error, ErrorKind, NamespaceEntry, PRIORITY_DEFAULT, Unknown, error, is_kebab_case,
-    is_under_usr, list, strings, unknown_keys,
+    is_under_system, list, strings, unknown_keys,
 };
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -104,7 +104,12 @@ pub fn choose<'a>(drivers: &'a [Driver], hardware_ids: &'a [String]) -> Option<C
         })
 }
 
-/// Reads the driver manifest in `bytes`, from the directory `directory`.
+/// The prefix of the app IDs of the system's drivers, which name their
+/// folders in `/system/drivers/`.
+pub const DRIVER_PREFIX: &str = "system.driver.";
+
+/// Reads the driver manifest in `bytes`, from the folder `directory`,
+/// which must be `system.driver.<name>`.
 pub fn parse_driver(directory: &str, bytes: &[u8]) -> Result<DriverManifest, Error> {
     let root = mikros_yaml::parse(bytes)?;
     let map = root.map()?;
@@ -119,12 +124,12 @@ pub fn parse_driver(directory: &str, bytes: &[u8]) -> Result<DriverManifest, Err
     if !is_kebab_case(name) {
         return Err(error(name_node, ErrorKind::BadName));
     }
-    if directory != name {
+    if directory.strip_prefix(DRIVER_PREFIX) != Some(name) {
         return Err(error(name_node, ErrorKind::FileName));
     }
     let binary_node = required("binary")?;
     let binary = binary_node.string()?;
-    if !is_under_usr(binary) {
+    if !is_under_system(binary) {
         return Err(error(binary_node, ErrorKind::BadBinary));
     }
     let mut matches = Vec::new();

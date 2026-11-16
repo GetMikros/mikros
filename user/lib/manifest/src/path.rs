@@ -66,23 +66,23 @@ mod tests {
 
     #[test]
     fn paths_overlap_at_component_boundaries() {
-        let data = "/var/lib/accounts";
+        let data = "/system/state/accounts";
         for yes in [
-            "/var/lib/accounts",
-            "/var/lib/accounts/users",
-            "/var/lib",
-            "/var",
+            "/system/state/accounts",
+            "/system/state/accounts/users",
+            "/system/state",
+            "/system",
             "/",
         ] {
             assert!(overlaps(yes, data), "{yes}");
             assert!(overlaps(data, yes), "{yes}");
         }
         for no in [
-            "/var/lib/accounts2",
-            "/var/lib/account",
-            "/var/library",
-            "/etc",
-            "/usr/var",
+            "/system/state/accounts2",
+            "/system/state/account",
+            "/system/statement",
+            "/system/config",
+            "/users/state",
         ] {
             assert!(!overlaps(no, data), "{no}");
             assert!(!overlaps(data, no), "{no}");

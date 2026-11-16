@@ -1,7 +1,10 @@
 //! Reading program manifests: those of system programs that are neither
-//! services nor drivers, in `/usr/lib/programs/<app-id>.yaml`.
+//! services nor drivers, in `/system/programs/<app-id>.yaml`.
 
-use crate::{Error, ErrorKind, SUFFIX, Unknown, error, is_under_usr, list, strings, unknown_keys};
+use crate::{
+    DRIVER_PREFIX, Error, ErrorKind, SUFFIX, Unknown, error, is_under_system, list, strings,
+    unknown_keys,
+};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -15,14 +18,13 @@ const KEYS: &[&str] = &[
     "command",
 ];
 /// Where the binaries of commands lie.
-const COMMANDS: &str = "/usr/bin/";
+const COMMANDS: &str = "/system/bin/";
 /// The keys of an item of `namespace`.
 const NAMESPACE_KEYS: &[&str] = &["path", "rights"];
 /// The prefix of the app IDs of system programs, and the app IDs that no
 /// program manifest may name.
 const SYSTEM_PREFIX: &str = "system.";
 const CLI: &str = "system.cli";
-const DRIVER_PREFIX: &str = "system.driver.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Program {
@@ -69,7 +71,7 @@ pub fn parse_program(file_name: &str, bytes: &[u8]) -> Result<ProgramManifest, E
     }
     let binary_node = required("binary")?;
     let binary = binary_node.string()?;
-    if !is_under_usr(binary) {
+    if !is_under_system(binary) {
         return Err(error(binary_node, ErrorKind::BadBinary));
     }
     let command = match map.get("command") {

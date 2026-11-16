@@ -19,16 +19,16 @@ fn kind(file: &str, text: &str) -> ErrorKind {
     }
 }
 
-const MINIMAL: &str = "name: log\nbinary: /usr/bin/log\nstart: boot\n";
+const MINIMAL: &str = "name: log\nbinary: /system/bin/log\nstart: boot\n";
 
 #[test]
 fn minimal_manifest_takes_defaults() {
-    let m = manifest("log.yaml", MINIMAL);
+    let m = manifest("system.log", MINIMAL);
     assert_eq!(
         m.service,
         Service {
             name: "log".to_string(),
-            binary: "/usr/bin/log".to_string(),
+            binary: "/system/bin/log".to_string(),
             provides: vec![],
             after: vec![],
             start: Start::Boot,
@@ -47,7 +47,7 @@ fn minimal_manifest_takes_defaults() {
 fn full_manifest() {
     let text = "\
 name: net-stack
-binary: /usr/bin/net
+binary: /system/bin/net
 start: on-demand
 restart: on-failure
 after: [log, devices]
@@ -64,7 +64,7 @@ namespace:
 priority: 20
 stop_timeout: 600
 ";
-    let s = manifest("net-stack.yaml", text).service;
+    let s = manifest("system.net-stack", text).service;
     assert_eq!(s.start, Start::OnDemand);
     assert_eq!(s.restart, Restart::OnFailure);
     assert_eq!(s.after, ["log", "devices"]);
@@ -105,8 +105,9 @@ stop_timeout: 600
 
 #[test]
 fn absent_values_take_defaults() {
-    let text = "name: log\nbinary: /usr/bin/log\nstart: boot\nrestart: ~\nafter: null\npriority:\n";
-    let s = manifest("log.yaml", text).service;
+    let text =
+        "name: log\nbinary: /system/bin/log\nstart: boot\nrestart: ~\nafter: null\npriority:\n";
+    let s = manifest("system.log", text).service;
     assert_eq!(s.restart, Restart::Never);
     assert!(s.after.is_empty());
     assert_eq!(s.priority, 16);
@@ -114,8 +115,8 @@ fn absent_values_take_defaults() {
 
 #[test]
 fn unknown_keys_are_reported_with_their_place() {
-    let text = "name: log\nbinary: /usr/bin/log\nstart: boot\ncolour: red\nprovides:\n  - protocol: p\n    extra: 1\n";
-    let unknown = manifest("log.yaml", text).unknown;
+    let text = "name: log\nbinary: /system/bin/log\nstart: boot\ncolour: red\nprovides:\n  - protocol: p\n    extra: 1\n";
+    let unknown = manifest("system.log", text).unknown;
     let keys: alloc::vec::Vec<_> = unknown.iter().map(|u| (u.key.as_str(), u.line)).collect();
     assert_eq!(keys, [("colour", 4), ("extra", 7)]);
 }
@@ -123,19 +124,22 @@ fn unknown_keys_are_reported_with_their_place() {
 #[test]
 fn required_keys() {
     assert_eq!(
-        kind("log.yaml", "binary: /usr/bin/log\nstart: boot\n"),
+        kind("system.log", "binary: /system/bin/log\nstart: boot\n"),
         ErrorKind::Missing("name")
     );
     assert_eq!(
-        kind("log.yaml", "name: log\nstart: boot\n"),
+        kind("system.log", "name: log\nstart: boot\n"),
         ErrorKind::Missing("binary")
     );
     assert_eq!(
-        kind("log.yaml", "name: log\nbinary: /usr/bin/log\n"),
+        kind("system.log", "name: log\nbinary: /system/bin/log\n"),
         ErrorKind::Missing("start")
     );
     assert_eq!(
-        kind("log.yaml", "name: log\nbinary: /usr/bin/log\nstart: ~\n"),
+        kind(
+            "system.log",
+            "name: log\nbinary: /system/bin/log\nstart: ~\n"
+        ),
         ErrorKind::Missing("start")
     );
 }
@@ -143,37 +147,39 @@ fn required_keys() {
 #[test]
 fn names() {
     for good in ["a", "log", "net-stack", "a1-b2-c3", "x-1"] {
-        let text = std::format!("name: {good}\nbinary: /usr/bin/x\nstart: boot\n");
-        manifest(&std::format!("{good}.yaml"), &text);
+        let text = std::format!("name: {good}\nbinary: /system/bin/x\nstart: boot\n");
+        manifest(&std::format!("system.{good}"), &text);
     }
     for bad in ["1a", "-a", "a-", "a--b", "Log", "a_b", "a.b", "'é'"] {
-        let text = std::format!("name: {bad}\nbinary: /usr/bin/x\nstart: boot\n");
-        assert_eq!(kind("x.yaml", &text), ErrorKind::BadName, "{bad}");
+        let text = std::format!("name: {bad}\nbinary: /system/bin/x\nstart: boot\n");
+        assert_eq!(kind("system.x", &text), ErrorKind::BadName, "{bad}");
     }
 }
 
 #[test]
-fn file_must_be_named_after_the_service() {
-    assert_eq!(kind("other.yaml", MINIMAL), ErrorKind::FileName);
+fn folder_must_be_named_by_the_app_id() {
+    assert_eq!(kind("system.other", MINIMAL), ErrorKind::FileName);
     assert_eq!(kind("log", MINIMAL), ErrorKind::FileName);
-    assert_eq!(kind("log.yml", MINIMAL), ErrorKind::FileName);
+    assert_eq!(kind("log.yaml", MINIMAL), ErrorKind::FileName);
+    assert_eq!(kind("system.log.yaml", MINIMAL), ErrorKind::FileName);
 }
 
 #[test]
-fn binary_must_be_under_usr() {
+fn binary_must_be_under_system() {
     for bad in [
-        "usr/bin/x",
+        "system/bin/x",
         "/bin/x",
-        "/usr",
-        "/usr/",
-        "/usrx/bin",
-        "/usr/../bin/x",
-        "/usr/./x",
-        "/usr//x",
-        "/usr/bin/",
+        "/usr/bin/x",
+        "/system",
+        "/system/",
+        "/systemx/bin",
+        "/system/../bin/x",
+        "/system/./x",
+        "/system//x",
+        "/system/bin/",
     ] {
         let text = std::format!("name: log\nbinary: '{bad}'\nstart: boot\n");
-        assert_eq!(kind("log.yaml", &text), ErrorKind::BadBinary, "{bad}");
+        assert_eq!(kind("system.log", &text), ErrorKind::BadBinary, "{bad}");
     }
 }
 
@@ -181,22 +187,22 @@ fn binary_must_be_under_usr() {
 fn bad_values() {
     let with = |extra: &str| std::format!("{MINIMAL}{extra}\n");
     assert_eq!(
-        kind("log.yaml", &with("boot_handles: [log]")),
+        kind("system.log", &with("boot_handles: [log]")),
         ErrorKind::BadBootHandle
     );
     assert_eq!(
-        kind("log.yaml", &with("restart: sometimes")),
+        kind("system.log", &with("restart: sometimes")),
         ErrorKind::BadRestart
     );
     assert_eq!(
         kind(
-            "log.yaml",
-            "name: log\nbinary: /usr/bin/log\nstart: later\n"
+            "system.log",
+            "name: log\nbinary: /system/bin/log\nstart: later\n"
         ),
         ErrorKind::BadStart
     );
     assert_eq!(
-        kind("log.yaml", &with("provides:\n  - permission: p")),
+        kind("system.log", &with("provides:\n  - permission: p")),
         ErrorKind::Missing("protocol")
     );
 }
@@ -205,15 +211,15 @@ fn bad_values() {
 fn wrong_types_make_the_file_invalid() {
     let wrong = ErrorKind::Yaml(mikros_yaml::ErrorKind::WrongType);
     let with = |extra: &str| std::format!("{MINIMAL}{extra}\n");
-    assert_eq!(kind("log.yaml", &with("after: log")), wrong);
-    assert_eq!(kind("log.yaml", &with("permissions: [[a]]")), wrong);
-    assert_eq!(kind("log.yaml", &with("provides: [p]")), wrong);
-    assert_eq!(kind("log.yaml", &with("priority: '17'")), wrong);
-    assert_eq!(kind("log.yaml", &with("priority: high")), wrong);
+    assert_eq!(kind("system.log", &with("after: log")), wrong);
+    assert_eq!(kind("system.log", &with("permissions: [[a]]")), wrong);
+    assert_eq!(kind("system.log", &with("provides: [p]")), wrong);
+    assert_eq!(kind("system.log", &with("priority: '17'")), wrong);
+    assert_eq!(kind("system.log", &with("priority: high")), wrong);
     assert_eq!(
         kind(
-            "log.yaml",
-            "name: [log]\nbinary: /usr/bin/log\nstart: boot\n"
+            "system.log",
+            "name: [log]\nbinary: /system/bin/log\nstart: boot\n"
         ),
         wrong
     );
@@ -221,11 +227,11 @@ fn wrong_types_make_the_file_invalid() {
 
 #[test]
 fn errors_say_where() {
-    let e = parse("log.yaml", b"name: log\nbinary: /bin/log\nstart: boot\n").unwrap_err();
+    let e = parse("system.log", b"name: log\nbinary: /bin/log\nstart: boot\n").unwrap_err();
     assert_eq!((e.line, e.column), (2, 9));
-    let e = parse("log.yaml", b"name: log\nstart: boot\n").unwrap_err();
+    let e = parse("system.log", b"name: log\nstart: boot\n").unwrap_err();
     assert_eq!((e.line, e.column), (1, 1));
-    let e = parse("log.yaml", b"name: [log\n").unwrap_err();
+    let e = parse("system.log", b"name: [log\n").unwrap_err();
     assert!(matches!(e.kind, ErrorKind::Yaml(_)));
 }
 
@@ -234,26 +240,26 @@ fn stop_timeout_must_be_a_positive_integer() {
     let with = |extra: &str| std::format!("{MINIMAL}{extra}\n");
     let out_of_range = ErrorKind::Yaml(mikros_yaml::ErrorKind::OutOfRange);
     let wrong = ErrorKind::Yaml(mikros_yaml::ErrorKind::WrongType);
-    assert_eq!(kind("log.yaml", &with("stop_timeout: 0")), out_of_range);
-    assert_eq!(kind("log.yaml", &with("stop_timeout: -5")), out_of_range);
-    assert_eq!(kind("log.yaml", &with("stop_timeout: '5'")), wrong);
-    assert_eq!(kind("log.yaml", &with("stop_timeout: 1.5")), wrong);
-    let s = manifest("log.yaml", &with("stop_timeout: 1")).service;
+    assert_eq!(kind("system.log", &with("stop_timeout: 0")), out_of_range);
+    assert_eq!(kind("system.log", &with("stop_timeout: -5")), out_of_range);
+    assert_eq!(kind("system.log", &with("stop_timeout: '5'")), wrong);
+    assert_eq!(kind("system.log", &with("stop_timeout: 1.5")), wrong);
+    let s = manifest("system.log", &with("stop_timeout: 1")).service;
     assert_eq!(s.stop_timeout, 1);
 }
 
 #[test]
 fn priority_is_read_without_a_range() {
-    let s = manifest("log.yaml", &std::format!("{MINIMAL}priority: 40\n")).service;
+    let s = manifest("system.log", &std::format!("{MINIMAL}priority: 40\n")).service;
     assert_eq!(s.priority, 40);
 }
 
 const PROGRAM: &str = "app_id: system.console
-binary: /usr/bin/console
+binary: /system/bin/console
 permissions:
   - devices.framebuffer
 namespace:
-  - path: /usr
+  - path: /system
     rights: rx
 spawned_by:
   - system.servicemgr
@@ -264,12 +270,12 @@ fn reads_a_program_manifest() {
     let read = parse_program("system.console.yaml", PROGRAM.as_bytes()).unwrap();
     let p = read.program;
     assert_eq!(p.app_id, "system.console");
-    assert_eq!(p.binary, "/usr/bin/console");
+    assert_eq!(p.binary, "/system/bin/console");
     assert_eq!(p.permissions, ["devices.framebuffer"]);
     assert_eq!(
         p.namespace,
         [NamespaceEntry {
-            path: "/usr".into(),
+            path: "/system".into(),
             rights: "rx".into()
         }]
     );
@@ -285,14 +291,14 @@ fn reads_and_checks_command_manifests() {
             .map(|m| m.program.command)
             .map_err(|e| e.kind)
     };
-    let command = "app_id: system.ps\nbinary: /usr/bin/ps\ncommand: true\n";
+    let command = "app_id: system.ps\nbinary: /system/bin/ps\ncommand: true\n";
     assert_eq!(kind(command), Ok(true));
     assert_eq!(
-        kind("app_id: system.ps\nbinary: /usr/bin/ps\ncommand: false\n"),
+        kind("app_id: system.ps\nbinary: /system/bin/ps\ncommand: false\n"),
         Ok(false)
     );
     assert_eq!(
-        kind("app_id: system.ps\nbinary: /usr/lib/ps\ncommand: true\n"),
+        kind("app_id: system.ps\nbinary: /system/libraries/ps\ncommand: true\n"),
         Err(ErrorKind::BadBinary)
     );
     for (key, line) in [
@@ -303,7 +309,7 @@ fn reads_and_checks_command_manifests() {
         assert_eq!(kind(&text), Err(ErrorKind::CommandKey(key)));
     }
     assert!(matches!(
-        kind("app_id: system.ps\nbinary: /usr/bin/ps\ncommand: yes please\n"),
+        kind("app_id: system.ps\nbinary: /system/bin/ps\ncommand: yes please\n"),
         Err(ErrorKind::Yaml(_))
     ));
 }
@@ -315,7 +321,7 @@ fn refuses_program_manifests_that_break_the_rules() {
             .map(drop)
             .map_err(|e| e.kind)
     };
-    let with = |id: &str| alloc::format!("app_id: {id}\nbinary: /usr/bin/x\n");
+    let with = |id: &str| alloc::format!("app_id: {id}\nbinary: /system/bin/x\n");
     assert_eq!(
         kind("other.yaml", &with("system.console")),
         Err(ErrorKind::FileName)
@@ -335,15 +341,15 @@ fn refuses_program_manifests_that_break_the_rules() {
 
 #[test]
 fn reads_a_driver_manifest() {
-    let text = "name: pcibus\nbinary: /usr/lib/drivers/pcibus/pcibus\n\
+    let text = "name: pcibus\nbinary: /system/drivers/system.driver.pcibus/pcibus\n\
                 match: [platform:pci-host-ecam]\nkind: normal\nneeds: [bus, dma]\n\
                 permissions: [system.devices.manage]\npriority: 20\nfoo: 1\n";
-    let dir = "pcibus";
+    let dir = "system.driver.pcibus";
     let m = parse_driver(dir, text.as_bytes()).unwrap();
     let d = &m.driver;
     assert_eq!(
         (d.name.as_str(), d.binary.as_str()),
-        ("pcibus", "/usr/lib/drivers/pcibus/pcibus")
+        ("pcibus", "/system/drivers/system.driver.pcibus/pcibus")
     );
     assert_eq!(d.matches, ["platform:pci-host-ecam"]);
     assert_eq!(
@@ -355,9 +361,13 @@ fn reads_a_driver_manifest() {
         (&["system.devices.manage".into()][..], 20)
     );
     assert_eq!(m.unknown.len(), 1);
-    let fallback = parse_driver("a", b"name: a\nbinary: /usr/a\nkind: fallback\n").unwrap();
+    let fallback = parse_driver(
+        "system.driver.a",
+        b"name: a\nbinary: /system/a\nkind: fallback\n",
+    )
+    .unwrap();
     assert_eq!(fallback.driver.kind, DriverKind::Fallback);
-    let minimal = parse_driver("a", b"name: a\nbinary: /usr/a\n")
+    let minimal = parse_driver("system.driver.a", b"name: a\nbinary: /system/a\n")
         .unwrap()
         .driver;
     assert_eq!(
@@ -370,9 +380,9 @@ fn reads_a_driver_manifest() {
 
 #[test]
 fn refuses_driver_manifests_that_break_the_rules() {
-    let dir = "a";
+    let dir = "system.driver.a";
     let kind_of = |text: &str| parse_driver(dir, text.as_bytes()).unwrap_err().kind;
-    let base = "name: a\nbinary: /usr/a\nkind: normal\n";
+    let base = "name: a\nbinary: /system/a\nkind: normal\n";
     assert_eq!(
         kind_of(&format!("{base}start: boot\n")),
         ErrorKind::ServiceKey("start")
@@ -382,7 +392,7 @@ fn refuses_driver_manifests_that_break_the_rules() {
         ErrorKind::ServiceKey("provides")
     );
     assert_eq!(
-        kind_of("name: a\nbinary: /usr/a\nkind: odd\n"),
+        kind_of("name: a\nbinary: /system/a\nkind: odd\n"),
         ErrorKind::BadKind
     );
     assert_eq!(
@@ -405,16 +415,18 @@ fn refuses_driver_manifests_that_break_the_rules() {
     )
     .unwrap_err();
     assert_eq!((e.line, e.column), (4, 15));
-    assert_eq!(kind_of("binary: /usr/a\n"), ErrorKind::Missing("name"));
+    assert_eq!(kind_of("binary: /system/a\n"), ErrorKind::Missing("name"));
     assert_eq!(kind_of("name: a\n"), ErrorKind::Missing("binary"));
     assert_eq!(
         kind_of("name: a\nbinary: /bin/a\nkind: normal\n"),
         ErrorKind::BadBinary
     );
     assert_eq!(
-        kind_of("name: b\nbinary: /usr/b\nkind: normal\n"),
+        kind_of("name: b\nbinary: /system/b\nkind: normal\n"),
         ErrorKind::FileName
     );
+    let unprefixed = parse_driver("a", b"name: a\nbinary: /system/a\n").unwrap_err();
+    assert_eq!(unprefixed.kind, ErrorKind::FileName);
 }
 
 #[test]
@@ -431,7 +443,7 @@ fn checks_hardware_ids() {
 fn driver(name: &str, kind: DriverKind, matches: &[&str]) -> Driver {
     Driver {
         name: name.into(),
-        binary: format!("/usr/lib/drivers/{name}/{name}"),
+        binary: format!("/system/drivers/system.driver.{name}/{name}"),
         permissions: vec![],
         namespace: vec![],
         priority: PRIORITY_DEFAULT,
@@ -489,12 +501,12 @@ fn chooses_drivers_by_hardware_id_kind_and_name() {
 #[test]
 fn refuses_services_and_programs_that_list_logs_add_source() {
     let listed = "permissions: [admin.logs.read, system.log_sources.create]\n";
-    let service = parse("log.yaml", format!("{MINIMAL}{listed}").as_bytes()).unwrap_err();
+    let service = parse("system.log", format!("{MINIMAL}{listed}").as_bytes()).unwrap_err();
     assert_eq!(
         (service.kind, service.line),
         (ErrorKind::ReservedPermission, 4)
     );
-    let program = "app_id: system.console\nbinary: /usr/bin/x\n";
+    let program = "app_id: system.console\nbinary: /system/bin/x\n";
     let program = parse_program(
         "system.console.yaml",
         format!("{program}{listed}").as_bytes(),
@@ -502,7 +514,7 @@ fn refuses_services_and_programs_that_list_logs_add_source() {
     assert_eq!(program.unwrap_err().kind, ErrorKind::ReservedPermission);
     // Other permissions stay as listed.
     let read = manifest(
-        "log.yaml",
+        "system.log",
         &format!("{MINIMAL}permissions: [admin.logs.read]\n"),
     );
     assert_eq!(read.service.permissions, ["admin.logs.read"]);
