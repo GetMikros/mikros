@@ -10,12 +10,12 @@
 //! - `rename`: exits with 0 when it may not name an app ID, 1 otherwise;
 //! - `exec`: replaces itself with `SELF_PATH` run with `sleep`.
 //!
-//! It also spawns `/usr/bin/hello`, a static C program, and
-//! `/usr/bin/hello-std`, a Rust program that uses the standard library,
+//! It also spawns `/system/bin/hello`, a static C program, and
+//! `/system/bin/hello-std`, a Rust program that uses the standard library,
 //! with a stream as their standard output, and checks what they print,
-//! runs `/usr/bin/msh-check`, which runs msh's scripts and checks what
+//! runs `/system/bin/msh-check`, which runs msh's scripts and checks what
 //! they do, and reads more than the process manager's small heap blocks hold of
-//! `/usr/bin/hello` with one `Read`.
+//! `/system/bin/hello` with one `Read`.
 //!
 //! It logs each check that failed to the `USER` startup handle with ID 2,
 //! when it has one.
@@ -57,43 +57,43 @@ const LOG_ID: u32 = 2;
 /// How long the probe waits for a process to be replaced, which takes
 /// seconds when emulated.
 const EXEC_WAIT_NS: i64 = 60_000_000_000;
-const PROBE: &str = "/usr/bin/probe";
+const PROBE: &str = "/system/bin/probe";
 /// The probe as the binary of a command, and the command's app ID.
-const COMMAND: &str = "/usr/bin/probe-command";
+const COMMAND: &str = "/system/bin/probe-command";
 const COMMAND_APP: &str = "system.probe-command";
 /// The probe's own path, as init starts it in place of the service
 /// manager; the image holds the probe there too.
-const SELF_PATH: &str = "/usr/bin/servicemgr";
+const SELF_PATH: &str = "/system/servicemgr";
 /// A static C program, which prints a greeting for its argument.
-const HELLO: &str = "/usr/bin/hello";
+const HELLO: &str = "/system/bin/hello";
 /// The same program linked with the shared C library.
-const HELLO_DYNAMIC: &str = "/usr/bin/hello-dynamic";
+const HELLO_DYNAMIC: &str = "/system/bin/hello-dynamic";
 /// A C program that needs a shared library.
-const LIBRARY_USER: &str = "/usr/bin/library-user";
+const LIBRARY_USER: &str = "/system/bin/library-user";
 /// C programs that need a shared library, built with CMake and with
 /// Meson through the sysroot's toolchain files.
-const TALLY_CMAKE: &str = "/usr/bin/tally-cmake-user";
-const TALLY_MESON: &str = "/usr/bin/tally-meson-user";
+const TALLY_CMAKE: &str = "/system/bin/tally-cmake-user";
+const TALLY_MESON: &str = "/system/bin/tally-meson-user";
 /// A Rust program that uses the standard library, which opens
 /// `/dev/null` for its closed standard input and error.
-const HELLO_STD: &str = "/usr/bin/hello-std";
+const HELLO_STD: &str = "/system/bin/hello-std";
 /// The `id` of the `USER` startup handle that hello-std takes.
 const HELLO_STD_HANDLE: u32 = 9;
 /// The same C programs as applications, which the boot image provides
-/// under /Apps, a link under /usr to the static one, and a dynamic C
+/// under /apps, a link under /system to the static one, and a dynamic C
 /// program that makes a system call with its own instruction, as a
 /// system component and as an application.
-const APP_HELLO: &str = "/Apps/test/bin/hello";
-const APP_HELLO_DYNAMIC: &str = "/Apps/test/bin/hello-dynamic";
-const APP_LINK: &str = "/usr/bin/app-hello";
-const RAW_SYSCALL: &str = "/usr/bin/raw-syscall";
-const APP_RAW_SYSCALL: &str = "/Apps/test/bin/raw-syscall";
+const APP_HELLO: &str = "/apps/test/bin/hello";
+const APP_HELLO_DYNAMIC: &str = "/apps/test/bin/hello-dynamic";
+const APP_LINK: &str = "/system/bin/app-hello";
+const RAW_SYSCALL: &str = "/system/bin/raw-syscall";
+const APP_RAW_SYSCALL: &str = "/apps/test/bin/raw-syscall";
 /// A Rust program that starts processes with `std::process::Command`.
-const SPAWN_STD: &str = "/usr/bin/spawn-std";
+const SPAWN_STD: &str = "/system/bin/spawn-std";
 /// A Rust program that runs msh, the shell, and checks its scripts.
-const MSH_CHECK: &str = "/usr/bin/msh-check";
+const MSH_CHECK: &str = "/system/bin/msh-check";
 /// A dynamic C program in the bundle of the app `test.app`.
-const BUNDLED: &str = "/Apps/test.app/bin/hello";
+const BUNDLED: &str = "/apps/test.app/bin/hello";
 /// The `id` of a stream as descriptor 1.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const KILL: u32 = 9;
@@ -553,15 +553,15 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
         let refused = async |path: &str| spawn(l, &[], |r| r.path = path.into()).await.err();
         check(
             "refusing a relative path",
-            refused("usr/bin/probe").await == Some(Status::InvalidArgs),
+            refused("system/bin/probe").await == Some(Status::InvalidArgs),
         )?;
         check(
             "refusing a missing program",
-            refused("/usr/bin/none").await == Some(Status::NotFound),
+            refused("/system/bin/none").await == Some(Status::NotFound),
         )?;
         check(
             "refusing a directory",
-            refused("/usr/bin").await == Some(Status::AccessDenied),
+            refused("/system/bin").await == Some(Status::AccessDenied),
         )?;
         let other = |change: fn(&mut SpawnRequest)| spawn(l, &["exit", "0"], change);
         check(
@@ -895,7 +895,7 @@ async fn probe(l: &LauncherAsyncClient, root: &NodeAsyncClient, reactor: &Reacto
             refused(APP_HELLO).await == Some(Status::NotSupported),
         )?;
         check(
-            "refusing it through a link under /usr",
+            "refusing it through a link under /system",
             refused(APP_LINK).await == Some(Status::NotSupported),
         )?;
         let (output, code) = run_c(l, APP_HELLO_DYNAMIC).await;

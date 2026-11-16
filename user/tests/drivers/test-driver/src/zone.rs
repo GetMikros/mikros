@@ -25,7 +25,7 @@ fn failed(what: &str) -> Option<()> {
 
 /// Sets the zone `Europe/Berlin` through the time service, asking again
 /// while it says that the root file system is not available yet, and
-/// checks that `GetTimezone` gives it, that `etc/localtime` on the root
+/// checks that `GetTimezone` gives it, that `config/localtime` on the root
 /// is a link to its file, that a zone without a file is refused, and
 /// what `in_effect` checks.
 pub async fn set_on_root(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Option<()> {
@@ -52,12 +52,15 @@ pub async fn set_on_root(directory: &DirectoryAsyncClient, reactor: &Reactor) ->
         _ => return failed("reading the time zone"),
     }
     let root = named(directory, reactor, "root").await?;
-    let Ok((link, kind)) = open(&root, "etc/localtime", OpenFlags::NO_FOLLOW, reactor).await else {
-        return failed("opening etc/localtime");
+    let Ok((link, kind)) = open(&root, "config/localtime", OpenFlags::NO_FOLLOW, reactor).await
+    else {
+        return failed("opening config/localtime");
     };
     let target = ok(link.read_link().await).map(|t| t.target);
-    if kind != NodeType::Symlink || target.as_deref() != Some("/usr/share/zoneinfo/Europe/Berlin") {
-        return failed("finding the link etc/localtime");
+    if kind != NodeType::Symlink
+        || target.as_deref() != Some("/system/share/zoneinfo/Europe/Berlin")
+    {
+        return failed("finding the link config/localtime");
     }
     match clock.set_timezone("Nowhere/Atlantis".into()).await {
         Ok(Err(Status::NotFound)) => {}

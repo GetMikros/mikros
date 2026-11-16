@@ -69,9 +69,9 @@ const FOREVER: i64 = i64::MAX;
 /// `LIBRARY_USER`, and that dynamically linked program, which the
 /// test machine's root partition holds with its libraries and the dynamic
 /// linker, and the probe's boot file system does not.
-const BINARY: &str = "/usr/bin/restart-probe";
+const BINARY: &str = "/system/services/system.restart-probe/restart-probe";
 const DYNAMIC: &str = "dynamic";
-const LIBRARY_USER: &str = "/usr/bin/library-user";
+const LIBRARY_USER: &str = "/system/bin/library-user";
 /// The user of the caller, for `Spawn`, and the rights of a handle copy.
 const CALLER_USER: u32 = u32::MAX;
 const SAME_RIGHTS: u32 = 1 << 31;

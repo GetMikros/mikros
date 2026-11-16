@@ -277,9 +277,9 @@ fn main() {
     let df = run(&dir, &["df", "."], "");
     c.holds(
         &["df", "."],
-        df.code == Some(0) && df.out.lines().count() == 2 && df.out.ends_with(" /Users/ada\n"),
+        df.code == Some(0) && df.out.lines().count() == 2 && df.out.ends_with(" /users/ada\n"),
         &format!(
-            "df reports the entry /Users/ada ({:?}, {:?})",
+            "df reports the entry /users/ada ({:?}, {:?})",
             df.out, df.err
         ),
     );
@@ -292,7 +292,7 @@ fn main() {
     c.holds(
         &["df"],
         df.code == Some(0)
-            && ["/usr", "/tmp", "/Users/ada"]
+            && ["/system", "/tmp", "/users/ada"]
                 .iter()
                 .all(|m| mounts.contains(m)),
         &format!(

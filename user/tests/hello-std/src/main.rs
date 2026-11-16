@@ -51,7 +51,7 @@ fn checks() -> Result<String, u8> {
     check(joined.ok() == Some(55))?;
     // The process manager gives the program's path.
     let exe = std::env::current_exe();
-    check(exe.is_ok_and(|p| p == std::path::Path::new("/usr/bin/hello-std")))?;
+    check(exe.is_ok_and(|p| p == std::path::Path::new("/system/bin/hello-std")))?;
     // Instant comes from the clock page, and goes on.
     let before = Instant::now();
     thread::sleep(Duration::from_millis(2));

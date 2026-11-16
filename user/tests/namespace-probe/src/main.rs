@@ -25,9 +25,11 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 mikros_rt::raw_main!(main);
 
 const FOREVER: i64 = i64::MAX;
-const BINARY: &str = "/usr/bin/namespace-probe";
+/// The probe's folder, and its program there.
+const FOLDER: &str = "/system/services/system.namespace-probe";
+const BINARY: &str = "/system/services/system.namespace-probe/namespace-probe";
 /// The program of a native app's bundle, and the app's ID.
-const NATIVE: &str = "/Apps/test.native/bin/hello";
+const NATIVE: &str = "/apps/test.native/bin/hello";
 const NATIVE_APP: &str = "test.native";
 const CLI: &str = "system.cli";
 /// The user of the caller, for `Spawn`.
@@ -102,17 +104,17 @@ fn spawns(launcher: &LauncherClient, entries: &[(String, NodeClient)]) -> Result
         23,
     )?;
     expect(
-        spawn_own(launcher, "/usr/share/probe/data.txt") == Err(Some(Status::AccessDenied)),
+        spawn_own(launcher, "/system/share/probe/data.txt") == Err(Some(Status::AccessDenied)),
         24,
     )?;
     let entry = |path: &str| entries.iter().find(|(p, _)| p == path).map(|(_, n)| n);
-    let bin = entry("/usr/bin").ok_or(25)?;
-    let state = entry("/var/lib/namespace-probe").ok_or(25)?;
+    let bin = entry(FOLDER).ok_or(25)?;
+    let state = entry("/system/state/namespace-probe").ok_or(25)?;
     copy(bin, "namespace-probe", state, "copy", 0o644).ok_or(25)?;
-    let copied = spawn_own(launcher, "/var/lib/namespace-probe/copy");
+    let copied = spawn_own(launcher, "/system/state/namespace-probe/copy");
     expect(copied == Err(Some(Status::AccessDenied)), 27)?;
     copy(bin, "namespace-probe", state, "copy-x", 0o755).ok_or(25)?;
-    let copied = spawn_own(launcher, "/var/lib/namespace-probe/copy-x");
+    let copied = spawn_own(launcher, "/system/state/namespace-probe/copy-x");
     expect(copied == Err(Some(Status::NotSupported)), 26)
 }
 
@@ -219,22 +221,22 @@ fn check(entries: &[(String, NodeClient)]) -> Result<(), i64> {
     expect(
         paths
             == [
-                "/usr/share/probe",
-                "/usr/bin",
-                "/var/lib/namespace-probe",
-                "/etc",
+                "/system/share/probe",
+                FOLDER,
+                "/system/state/namespace-probe",
+                "/system/config",
                 "/dev",
             ],
         10,
     )?;
     let entry = |path: &str| entries.iter().find(|(p, _)| p == path).map(|(_, n)| n);
-    // The root file system serves /usr, read only.
-    let share = entry("/usr/share/probe").ok_or(11)?;
+    // The root file system serves /system, read only.
+    let share = entry("/system/share/probe").ok_or(11)?;
     expect(read(share, "data.txt").as_deref() == Some(&b"data"[..]), 11)?;
     let write = open(share, "data.txt", OpenFlags(0), RW);
     expect(matches!(write, Err(Some(Error::AccessDenied))), 12)?;
-    // /etc is the root file system's, here read only.
-    let etc = entry("/etc").ok_or(13)?;
+    // /system/config is the root file system's, here read only.
+    let etc = entry("/system/config").ok_or(13)?;
     expect(
         read(etc, "probe.conf").as_deref() == Some(&b"probe"[..]),
         13,
@@ -248,7 +250,7 @@ fn check(entries: &[(String, NodeClient)]) -> Result<(), i64> {
     let write = open(etc, "probe.conf", OpenFlags(0), RW);
     expect(matches!(write, Err(Some(Error::AccessDenied))), 15)?;
     // The writable entry was made, and takes files.
-    let state = entry("/var/lib/namespace-probe").ok_or(16)?;
+    let state = entry("/system/state/namespace-probe").ok_or(16)?;
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
     let file = open(state, "state", create, RW).map_err(|_| 16)?;
     expect(
@@ -261,43 +263,44 @@ fn check(entries: &[(String, NodeClient)]) -> Result<(), i64> {
     Ok(())
 }
 
-/// The entries of a command-line tool of user 0: `/usr`, `/etc`, `/Apps`
-/// and `/Libraries` read only, its user's `/tmp` on tmpfs, `/Volumes` and
+/// The entries of a command-line tool of user 0: `/system`,
+/// `/system/config`, `/apps`
+/// and `/libraries` read only, its user's `/tmp` on tmpfs, `/volumes` and
 /// `/dev`.
 fn check_cli(entries: &[(String, NodeClient)]) -> Result<(), i64> {
     let paths: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
     expect(
         paths
             == [
-                "/usr",
-                "/etc",
-                "/Apps",
-                "/Libraries",
+                "/system",
+                "/system/config",
+                "/apps",
+                "/libraries",
                 "/tmp",
-                "/Volumes",
+                "/volumes",
                 "/dev",
             ],
         30,
     )?;
     let entry = |path: &str| entries.iter().find(|(p, _)| p == path).map(|(_, n)| n);
-    let usr = entry("/usr").ok_or(31)?;
+    let system = entry("/system").ok_or(31)?;
     expect(
-        read(usr, "share/probe/data.txt").as_deref() == Some(&b"data"[..]),
+        read(system, "share/probe/data.txt").as_deref() == Some(&b"data"[..]),
         31,
     )?;
-    let etc = entry("/etc").ok_or(32)?;
+    let etc = entry("/system/config").ok_or(32)?;
     expect(
         read(etc, "probe.conf").as_deref() == Some(&b"probe"[..]),
         32,
     )?;
     let write = open(etc, "probe.conf", OpenFlags(0), RW);
     expect(matches!(write, Err(Some(Error::AccessDenied))), 33)?;
-    let apps = entry("/Apps").ok_or(34)?;
+    let apps = entry("/apps").ok_or(34)?;
     expect(
         open(apps, "test.native", OpenFlags::DIRECTORY, Rights::READ).is_ok(),
         34,
     )?;
-    let libraries = entry("/Libraries").ok_or(35)?;
+    let libraries = entry("/libraries").ok_or(35)?;
     expect(
         read(libraries, "probe.txt").as_deref() == Some(&b"data"[..]),
         35,

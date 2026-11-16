@@ -66,15 +66,16 @@ async fn check(
     expect(attributes.r#type == NodeType::Directory)?;
     let top = names(&root).await?;
     for dir in [
-        "usr",
+        "system",
         "@system",
-        "etc",
-        "var",
-        "Users",
-        "Apps",
-        "Libraries",
-        "tmp",
-        "Volumes",
+        "config",
+        "state",
+        "logs",
+        "drivers",
+        "libraries",
+        "apps",
+        "public",
+        "users",
     ] {
         expect(
             top.iter()
@@ -88,17 +89,17 @@ async fn check(
     }
 
     system(&root, reactor).await?;
-    usr(&root, reactor).await?;
+    booted(&root, reactor).await?;
     // The log service keeps the boot's log on the root file system.
     let published = b" I 0 kernel device-manager: published device.filesystem root for device";
-    logged(&root, "var/log/system/boot-1.log", published, reactor).await?;
+    logged(&root, "logs/boot-1.log", published, reactor).await?;
 
-    let (etc, _) = open(&root, "etc", OpenFlags::DIRECTORY, reactor)
+    let (config, _) = open(&root, "config", OpenFlags::DIRECTORY, reactor)
         .await
         .ok()?;
-    let up = open(&etc, "../var", OpenFlags(0), reactor).await;
+    let up = open(&config, "../state", OpenFlags(0), reactor).await;
     expect(matches!(up, Err(Some(Error::AccessDenied))))?;
-    let missing = open(&etc, "missing", OpenFlags(0), reactor).await;
+    let missing = open(&config, "missing", OpenFlags(0), reactor).await;
     expect(matches!(missing, Err(Some(Error::NotFound))))?;
     let deeper = open(&root, "missing/x", OpenFlags(0), reactor).await;
     expect(matches!(deeper, Err(Some(Error::NotFound))))?;
@@ -156,6 +157,19 @@ async fn check(
     Some(())
 }
 
+/// The folders that a system version holds (MIKSPEC-0100.R2).
+const VERSION_DIRS: [&str; 9] = [
+    "bin",
+    "services",
+    "drivers",
+    "libraries",
+    "share",
+    "config",
+    "state",
+    "logs",
+    "tmp",
+];
+
 /// Whether `@system/current` in `root` is a link to a system version,
 /// which is followed to a directory of a system image.
 async fn system(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
@@ -170,52 +184,52 @@ async fn system(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
         .ok()?;
     expect(kind == NodeType::Directory)?;
     let listed = names(&system).await?;
-    for dir in ["bin", "lib", "include", "share"] {
+    for dir in VERSION_DIRS {
         expect(
             listed
                 .iter()
                 .any(|(n, t)| n == dir && *t == NodeType::Directory),
         )?;
     }
-    let (_, kind) = open(root, "@system/current/lib/drivers", OpenFlags(0), reactor)
+    let (_, kind) = open(root, "@system/current/drivers", OpenFlags(0), reactor)
         .await
         .ok()?;
     expect(kind == NodeType::Directory)?;
     Some(())
 }
 
-/// Whether the root's `usr` behaves: it is the current system version,
-/// with the directories of a system image, which cannot be written, and
-/// it cannot be created, removed or renamed.
-async fn usr(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
-    let (usr, kind) = open(root, "usr", OpenFlags(0), reactor).await.ok()?;
+/// Whether the root's `system` behaves: it is the current system
+/// version, with the directories of a system image, which cannot be
+/// written, and it cannot be created, removed or renamed.
+async fn booted(root: &NodeAsyncClient, reactor: &Reactor) -> Option<()> {
+    let (system, kind) = open(root, "system", OpenFlags(0), reactor).await.ok()?;
     expect(kind == NodeType::Directory)?;
-    let listed = names(&usr).await?;
-    for dir in ["bin", "lib", "include", "share"] {
+    let listed = names(&system).await?;
+    for dir in VERSION_DIRS {
         expect(
             listed
                 .iter()
                 .any(|(n, t)| n == dir && *t == NodeType::Directory),
         )?;
     }
-    let (_, kind) = open(root, "usr/lib/drivers", OpenFlags(0), reactor)
+    let (_, kind) = open(root, "system/drivers", OpenFlags(0), reactor)
         .await
         .ok()?;
     expect(kind == NodeType::Directory)?;
     // The system image holds the boot image's system.
-    let (manager, kind) = open(root, "usr/bin/processmgr", OpenFlags(0), reactor)
+    let (manager, kind) = open(root, "system/processmgr", OpenFlags(0), reactor)
         .await
         .ok()?;
     expect(kind == NodeType::File)?;
     expect(ok(manager.get_attributes().await)?.attributes.size > 0)?;
     let create = OpenFlags(OpenFlags::CREATE.0 | OpenFlags::EXCLUSIVE.0);
-    let written = open(root, "usr/new", create, reactor).await;
+    let written = open(root, "system/new", create, reactor).await;
     expect(matches!(written, Err(Some(Error::ReadOnly))))?;
-    let made = open(root, "usr", create, reactor).await;
+    let made = open(root, "system", create, reactor).await;
     expect(matches!(made, Err(Some(Error::AccessDenied))))?;
-    expect(failed(root.unlink("usr".into(), true).await) == Some(Error::AccessDenied))?;
+    expect(failed(root.unlink("system".into(), true).await) == Some(Error::AccessDenied))?;
     let token = ok(root.get_token().await)?.token;
-    let renamed = root.rename("usr".into(), token, "old".into()).await;
+    let renamed = root.rename("system".into(), token, "old".into()).await;
     expect(failed(renamed) == Some(Error::AccessDenied))?;
     Some(())
 }
@@ -415,7 +429,7 @@ async fn case_insensitive(
         .await
         .ok()?;
     expect(kind == NodeType::File)?;
-    let (_, kind) = open(root, "USR/LIB", folded, reactor).await.ok()?;
+    let (_, kind) = open(root, "SYSTEM/LIBRARIES", folded, reactor).await.ok()?;
     expect(kind == NodeType::Directory)?;
 
     for name in ["dup", "DUP"] {
@@ -537,7 +551,17 @@ async fn subvolumes(directory: &DirectoryAsyncClient, reactor: &Reactor) -> Opti
             .any(|s| s.path == path && s.read_only == read_only)
     };
     let listed = list_all(&subvolumes).await?;
-    for path in ["@system", "etc", "var", "Libraries"] {
+    for path in [
+        "@system",
+        "config",
+        "state",
+        "logs",
+        "drivers",
+        "libraries",
+        "apps",
+        "public",
+        "users",
+    ] {
         expect(has(&listed, path, false))?;
     }
     expect(

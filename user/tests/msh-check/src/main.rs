@@ -10,9 +10,9 @@ use std::io::Write;
 use std::process::{Command, ExitCode, Stdio};
 
 /// The shell, as the boot image holds it.
-const MSH: &str = "/usr/bin/msh";
+const MSH: &str = "/system/bin/msh";
 /// A script with an option `--n`, which prints `$n + 1` and `$args`.
-const OPTIONS: &str = "/usr/share/msh/options.msh";
+const OPTIONS: &str = "/system/share/msh/options.msh";
 const GREETING: &str = "a greeting from the boot file system\n";
 
 /// What msh wrote, and how it ended.
@@ -36,7 +36,7 @@ fn msh(args: &[&str], input: &str) -> Ran {
     let child = Command::new(MSH)
         .args(args)
         .env_clear()
-        .env("PATH", "/usr/bin")
+        .env("PATH", "/system/bin")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -63,7 +63,7 @@ fn main() -> ExitCode {
     if args != ["world"] {
         return ExitCode::from(200);
     }
-    let greeting = "spawn-std echo < /usr/share/hello/greeting.txt";
+    let greeting = "spawn-std echo < /system/share/hello/greeting.txt";
     let piped = format!("{greeting} | spawn-std echo");
     let captured = format!("let g = ({greeting} | lines)\nprint $g.0");
     let unparenthesized = format!("let g = {greeting} | lines\nprint $g.0");
@@ -125,20 +125,20 @@ fn main() -> ExitCode {
             ran("bar\nunset\n", "", 0),
         ),
         (
-            vec!["-c", "print /usr/share/hello/*.txt"],
+            vec!["-c", "print /system/share/hello/*.txt"],
             "",
-            ran("/usr/share/hello/greeting.txt\n", "", 0),
+            ran("/system/share/hello/greeting.txt\n", "", 0),
         ),
         (
-            vec!["-c", "cd /usr/share\npwd"],
+            vec!["-c", "cd /system/share\npwd"],
             "",
-            ran("/usr/share\n", "", 0),
+            ran("/system/share\n", "", 0),
         ),
         // A program starts in msh's current folder.
         (
-            vec!["-c", "cd /usr/share\nspawn-std cwd"],
+            vec!["-c", "cd /system/share\nspawn-std cwd"],
             "",
-            ran("/usr/share\n", "", 0),
+            ran("/system/share\n", "", 0),
         ),
         (
             vec!["-c", "run spawn-std exit 3"],

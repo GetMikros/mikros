@@ -44,7 +44,7 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 mikros_rt::raw_main!(main);
 
 const CONTROL_ID: u32 = 0;
-const BROKER: &str = "/usr/bin/permbroker";
+const BROKER: &str = "/system/services/system.permbroker/permbroker";
 const PROTOCOL: &str = "mikros.permissions.Broker";
 const CALLER_USER: u32 = u32::MAX;
 const FOREVER: i64 = i64::MAX;
@@ -60,7 +60,7 @@ const KOID: u64 = 77;
 
 const MANIFEST: &str = "\
 name: permbroker
-binary: /usr/bin/permbroker
+binary: /system/services/system.permbroker/permbroker
 start: boot
 provides:
   - protocol: mikros.permissions.Broker

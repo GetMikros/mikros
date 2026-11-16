@@ -1,10 +1,10 @@
 //! The user's shell of `tests/console.img`, installed there as
-//! /usr/bin/msh, which the session manager starts once a
+//! /system/bin/msh, which the session manager starts once a
 //! user logged in on the text console. It checks that it runs as a user
 //! other than 0 with the app ID `system.cli`, leads a login session and
 //! a session and process group of its own, starts in the user's home,
 //! and has exactly the environment of that user's session, with the
-//! user's home and a `/Libraries` in its namespace, which for bob holds the README of his
+//! user's home and a `/libraries` in its namespace, which for bob holds the README of his
 //! own Libraries folder.
 //! On the terminal it was given it asks
 //! for the cursor position, which the console answers, and reads the
@@ -39,14 +39,16 @@ const SECOND: i64 = 1_000_000_000;
 const ICANON: u32 = 0o2;
 const ECHO: u32 = 0o10;
 /// The environment that the session of user `name` must have, in order.
-fn expected(name: &str) -> [String; 6] {
+fn expected(name: &str) -> [String; 7] {
     [
-        format!("HOME=/Users/{name}"),
+        format!("HOME=/users/{name}"),
         format!("USER={name}"),
         format!("LOGNAME={name}"),
-        "SHELL=/usr/bin/msh".into(),
-        "PATH=/usr/bin".into(),
+        "SHELL=/system/bin/msh".into(),
+        "PATH=/system/bin".into(),
         "TERM=xterm-256color".into(),
+        // The process manager's, for the session's `/tmp`.
+        "TMPDIR=/tmp".into(),
     ]
 }
 
@@ -119,8 +121,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     let mut libraries = None;
     for entry in managed.namespace {
         match entry.path.as_str() {
-            "/Libraries" => libraries = Some(entry.directory),
-            path if path.starts_with("/Users/") => home = Some(entry.path),
+            "/libraries" => libraries = Some(entry.directory),
+            path if path.starts_with("/users/") => home = Some(entry.path),
             _ => {}
         }
     }
@@ -150,8 +152,8 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
             .map(String::from)
             .ok_or(5)?;
         check(environment == expected(&name), 5)?;
-        check(home.as_deref() == Some(&*format!("/Users/{name}")), 12)?;
-        check(folder == format!("/Users/{name}"), 15)?;
+        check(home.as_deref() == Some(&*format!("/users/{name}")), 12)?;
+        check(folder == format!("/users/{name}"), 15)?;
         // Only bob's home in tests/console.img holds a Libraries folder
         // with a README; an account that setup made has an empty one.
         let libraries = NodeAsyncClient::new(libraries.ok_or(13)?, reactor.clone());

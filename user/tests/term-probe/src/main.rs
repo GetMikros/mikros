@@ -29,7 +29,7 @@ const FACTORY: &str = "mikros.terminal.Factory";
 const TERMINAL: &str = "mikros.terminal.Terminal";
 /// The C program run on a terminal, and the descriptor kind of a slave
 /// terminal.
-const C_PROGRAM: &str = "/usr/bin/term-c";
+const C_PROGRAM: &str = "/system/bin/term-c";
 const TERMINAL_KIND: u32 = 8;
 const FOREVER: i64 = i64::MAX;
 const SECOND: i64 = 1_000_000_000;

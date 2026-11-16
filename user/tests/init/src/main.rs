@@ -3986,7 +3986,7 @@ mod manager {
     }
 
     fn start(s: &Startup) -> Result<Manager> {
-        let file = boot_file(s, b"bin/processmgr")?;
+        let file = boot_file(s, b"processmgr")?;
         let fail = |e| Failure {
             what: "loading the process manager",
             status: match e {
@@ -4483,6 +4483,29 @@ mod manager {
         ensure("passing every check of the probes", outcome == Some(true))
     }
 
+    /// The `platform_info` boot handle for the log service: a header of
+    /// version 1 with an empty command line.
+    fn platform_info() -> Result<StartupHandle> {
+        let mut header = [0u8; 0x68];
+        header[..4].copy_from_slice(&1u32.to_le_bytes());
+        let mut info = 0;
+        // SAFETY: the out pointer is valid for the call.
+        check("creating the platform information", unsafe {
+            sys::mem_create(super::PAGE_SIZE, 0, &mut info)
+        })?;
+        // SAFETY: the kernel just created the handle for us.
+        let info = unsafe { OwnedHandle::from_raw(info) };
+        // SAFETY: the pointer describes `header`.
+        check("writing the platform information", unsafe {
+            sys::mem_write(info.raw(), 0, header.as_ptr(), header.len() as u64)
+        })?;
+        Ok(StartupHandle {
+            role: HandleRole::User,
+            id: 5,
+            handle: info,
+        })
+    }
+
     /// From a boot image with the service manager, the permission broker,
     /// the log service and a probe, with their manifests, the service
     /// manager starts the log service with the log, and the probe, which
@@ -4517,7 +4540,8 @@ mod manager {
             id: 1,
             handle: copy(s.root_resource, SAME_RIGHTS)?,
         };
-        let reply = init.start_service_manager(alloc::vec![root, log], deadline);
+        let info = platform_info()?;
+        let reply = init.start_service_manager(alloc::vec![root, log, info], deadline);
         let Ok(Ok(started)) = reply else {
             mikros_rt::log!(Error, "StartServiceManager: {:?}", reply.map(|r| r.err()));
             return Err(Failure {
@@ -4593,6 +4617,7 @@ mod manager {
                 id: 3,
                 handle: copy(s.budget, SAME_RIGHTS)?,
             },
+            platform_info()?,
         ];
         let reply = init.start_service_manager(handles, deadline);
         let Ok(Ok(started)) = reply else {
@@ -4721,27 +4746,27 @@ mod manager {
     }
 
     /// From the setup run's boot image, with the root partition holding a
-    /// probe of namespaces with its manifest, files in `/etc`, `/usr` and
-    /// `/Libraries`, and a native app's bundle, the process manager builds
+    /// probe of namespaces with its manifest, files in `/system/config`, `/system` and
+    /// `/libraries`, and a native app's bundle, the process manager builds
     /// namespaces from the root file system once it is published, and the
     /// service manager starts the probe from there with the namespace of
     /// its profile. The probe gets exactly the entries of its manifest and
     /// `/dev`, with the rights given; a command-line tool of user 0 that
-    /// it starts gets its profile without a folder in `/Users`; a native
+    /// it starts gets its profile without a folder in `/users`; a native
     /// app of user 0 does not start. The probe exits with 0 once every
     /// check passed, as the service manager logs. The process manager
     /// tells the service manager that the root file system is available,
     /// which registers the one valid program manifest of the root's
-    /// `/usr/lib/programs/`, and ignores the ones with the app IDs of the
+    /// `/system/programs/`, and ignores the ones with the app IDs of the
     /// on-demand service `idle` and of tmpfs, and the one whose app ID is
     /// not its file name.
     pub fn process_manager_builds_namespaces_from_the_root(s: &Startup) -> Result {
         const PASSED: &[u8] = b"service namespace-probe exited with code 0";
         const ALSO: [&[u8]; 5] = [
-            b"/usr/lib/programs/system.tmpfs.yaml: system.tmpfs is a service's app ID; ignored",
+            b"/system/programs/system.tmpfs.yaml: system.tmpfs is a service's app ID; ignored",
             b"the root file system is available",
-            b"/usr/lib/programs/system.idle.yaml: system.idle is a service's app ID; ignored",
-            b"/usr/lib/programs/system.misnamed.yaml:",
+            b"/system/programs/system.idle.yaml: system.idle is a service's app ID; ignored",
+            b"/system/programs/system.misnamed.yaml:",
             b"registered 1 program manifests",
         ];
         const FAILED: &[&[u8]] = &[
@@ -4790,7 +4815,7 @@ mod manager {
     }
 
     /// From the setup run's boot image, with the root partition holding
-    /// the accounts service and a users file in `/var/lib/accounts`, the
+    /// the accounts service and a users file in `/system/state/accounts`, the
     /// accounts service lists, authenticates and changes those users, and
     /// makes and deletes a home folder. A probe that may authenticate,
     /// and for which an authorization stub allows the broker
@@ -5257,8 +5282,8 @@ mod manager {
     /// partition on the root partition's disk as `esp`, neither of them
     /// as a `volume-<guid>`. The btrfs test
     /// driver sets the time zone through the time service, which makes
-    /// `etc/localtime` on the root a link to the zone's file of the root's
-    /// `usr/share/zoneinfo`. It then kills the virtio-blk driver while it writes a file on
+    /// `config/localtime` on the root a link to the zone's file of the root's
+    /// `system/share/zoneinfo`. It then kills the virtio-blk driver while it writes a file on
     /// the root, and goes on writing and syncing: the device manager
     /// keeps the disk and its partitions, has the device reset and
     /// restarts the driver, which adds the disk again under its old ID,
@@ -5314,7 +5339,10 @@ mod manager {
             (b"device-manager: published device.filesystem root for device", 1),
             (b"device-manager: published device.filesystem esp for device", 1),
             (b"process-manager: namespaces come from the root file system", 1),
-            (b"process-manager: serving the EFI system partition as /boot/efi", 1),
+            (
+                b"process-manager: serving the EFI system partition as /system/boot/efi",
+                1,
+            ),
             // By its ID, its partition's name and root, as its file
             // system.
             (b"device-manager: published device.subvolumes ", 3),
@@ -5539,7 +5567,7 @@ mod manager {
     /// The `live` scenario: serves `tests/setup.img` with `live` on the
     /// process manager's command line, as on the kernel's, with the root
     /// partition holding the live archive, whose probe checks the live
-    /// system's `/etc` and `/usr`; stops QEMU with `PASSED` once the probe
+    /// system's `/system/config` and `/system`; stops QEMU with `PASSED` once the probe
     /// exited with 0, or with `FAILED`.
     pub fn live_scenario(s: &Startup) -> i64 {
         const SECONDS: i64 = 240;
@@ -5588,7 +5616,7 @@ mod manager {
 
     /// The `usb-volumes` scenario: serves `tests/setup.img`, with the root
     /// partition holding the volumes archive, whose volumes probe uses the FAT volume on the USB
-    /// disk through `/Volumes` and sees it go once the runner unplugs the
+    /// disk through `/volumes` and sees it go once the runner unplugs the
     /// disk, and runs until the runner stops the machine; it returns 1
     /// only when the service manager did not start.
     pub fn usb_volumes_scenario(s: &Startup) -> i64 {
@@ -5608,7 +5636,7 @@ mod manager {
     /// bring up the root file system and the EFI system partition from
     /// the boot disk, on whichever controller the runner put it, and
     /// stops QEMU with `PASSED` once the process manager has switched to
-    /// the root and serves `/boot/efi`, or with `FAILED`.
+    /// the root and serves `/system/boot/efi`, or with `FAILED`.
     pub fn root_disk_scenario(s: &Startup) -> i64 {
         // The root's disk, its partitions and file systems take about two
         // minutes when the processor is emulated.
@@ -5631,7 +5659,7 @@ mod manager {
                 1,
             ),
             (
-                b"process-manager: serving the EFI system partition as /boot/efi",
+                b"process-manager: serving the EFI system partition as /system/boot/efi",
                 1,
             ),
         ];
@@ -5883,7 +5911,7 @@ mod manager {
             mikros_rt::log!(Error, "SCENARIO console: {} failed ({})", f.what, f.status);
             return 1;
         }
-        // The accounts service keeps its users under the root's /var,
+        // The accounts service keeps its users under the root's state,
         // on the root partition that holds the image's files.
         let logged = device_manager_logs(s, b"tests/setup.img", true, SECONDS, EXPECTED, FAILED);
         match logged {
@@ -6144,7 +6172,7 @@ mod bootfs {
     use mikros_rt::sys;
     use mikros_test::{Failure, Result, check, ensure};
 
-    const MANAGER: &str = "usr/bin/processmgr";
+    const MANAGER: &str = "system/processmgr";
 
     fn failed(what: &'static str) -> Failure {
         Failure { what, status: 0 }
@@ -6337,24 +6365,29 @@ mod bootfs {
                     Error::Exists,
                 ),
                 (
-                    "usr/init",
+                    "system/init",
                     OpenFlags::DIRECTORY,
                     Rights::READ,
                     Error::NotDirectory,
                 ),
-                ("usr/init/x", none, Rights::READ, Error::NotDirectory),
-                ("/usr/init", none, Rights::READ, Error::Invalid),
-                ("usr/../usr/init", none, Rights::READ, Error::AccessDenied),
+                ("system/init/x", none, Rights::READ, Error::NotDirectory),
+                ("/system/init", none, Rights::READ, Error::Invalid),
+                (
+                    "system/../system/init",
+                    none,
+                    Rights::READ,
+                    Error::AccessDenied,
+                ),
             ];
             for (path, flags, rights, error) in refused {
                 let opened = open(&root, &reactor, path, flags, rights).await?;
                 ensure("refusing to open", opened.err() == Some(error))?;
             }
-            let existing = open(&root, &reactor, "usr", OpenFlags::CREATE, Rights::READ).await?;
+            let existing = open(&root, &reactor, "system", OpenFlags::CREATE, Rights::READ).await?;
             ensure("opening an existing name to create", existing.is_ok())?;
 
             // A directory lists in name order, in parts.
-            let Ok((_, tests)) = open(&root, &reactor, "usr/tests", none, Rights::READ).await?
+            let Ok((_, tests)) = open(&root, &reactor, "system/tests", none, Rights::READ).await?
             else {
                 return Err(failed("opening a directory"));
             };

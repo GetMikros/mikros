@@ -96,7 +96,7 @@ int main(int argc, char **argv)
 	int made = open(a, O_CREAT | O_WRONLY | O_EXCL, 0666);
 	CHECK(made >= 0 && fstat(made, &st) == 0 && (st.st_mode & 0777) == 0600);
 	CHECK(close(made) == 0 && unlink(a) == 0);
-	CHECK(posix_spawn(&pid, "/usr/bin/files-c", NULL, NULL, child, environ) == 0);
+	CHECK(posix_spawn(&pid, "/system/bin/files-c", NULL, NULL, child, environ) == 0);
 	CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 077);
 	CHECK(umask(022) == 077);
 
@@ -143,7 +143,7 @@ int main(int argc, char **argv)
 
 	/* A program in the home folder runs once its mode lets it. */
 	char *arguments[] = {prog, NULL};
-	CHECK(copy("/usr/bin/true", prog) == 0 && chmod(prog, 0644) == 0);
+	CHECK(copy("/system/bin/true", prog) == 0 && chmod(prog, 0644) == 0);
 	CHECK(posix_spawn(&pid, prog, NULL, NULL, arguments, environ) == EACCES);
 	CHECK(chmod(prog, 0755) == 0);
 	CHECK(posix_spawn(&pid, prog, NULL, NULL, arguments, environ) == 0);
@@ -151,7 +151,7 @@ int main(int argc, char **argv)
 	CHECK(unlink(prog) == 0);
 
 	/* Command-line tools have the other volumes. */
-	CHECK(stat("/Volumes", &st) == 0 && S_ISDIR(st.st_mode));
+	CHECK(stat("/volumes", &st) == 0 && S_ISDIR(st.st_mode));
 
 	/* The machine, priorities, which never change, and the time since
 	 * boot, which is the monotonic clock's. */
@@ -193,7 +193,7 @@ int main(int argc, char **argv)
 	/* Users and groups, from the accounts service. */
 	struct passwd *pw = getpwuid(uid), entry, *found;
 	CHECK(pw && strcmp(pw->pw_name, "ada") == 0 && strcmp(pw->pw_gecos, "Ada") == 0);
-	CHECK(strcmp(pw->pw_dir, "/Users/ada") == 0 && strcmp(pw->pw_shell, "/usr/bin/msh") == 0);
+	CHECK(strcmp(pw->pw_dir, "/users/ada") == 0 && strcmp(pw->pw_shell, "/system/bin/msh") == 0);
 	CHECK(pw->pw_gid == uid && (pw = getpwnam("ada")) && pw->pw_uid == uid);
 	CHECK((pw = getpwuid(0)) && strcmp(pw->pw_name, "system") == 0 && strcmp(pw->pw_dir, "/") == 0);
 	errno = 0;
@@ -212,8 +212,8 @@ int main(int argc, char **argv)
 
 	/* The folders above namespace entries cannot be changed. */
 	CHECK(fails_with(mkdir("/files-c", 0755), EROFS));
-	CHECK(fails_with(mkdir("/Users", 0755), EEXIST));
-	CHECK(fails_with(rmdir("/Users"), EROFS));
+	CHECK(fails_with(mkdir("/users", 0755), EEXIST));
+	CHECK(fails_with(rmdir("/users"), EROFS));
 
 	printf("files, world\n");
 	return 0;

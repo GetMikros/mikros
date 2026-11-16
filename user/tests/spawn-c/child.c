@@ -20,7 +20,7 @@ static int exec_again(void)
 {
 	char *args[] = { "spawn-child", "one", "two", 0, 0 };
 	char *env[] = { "SPAWN_TEST=yes", 0 };
-	if (execve("/usr/bin/missing", args, env) != -1 || errno != ENOENT)
+	if (execve("/system/bin/missing", args, env) != -1 || errno != ENOENT)
 		return 10;
 	int root = open("/", O_RDONLY | O_DIRECTORY);
 	if (root < 0 || dup3(root, 7, O_CLOEXEC) != 7 || close(root))
@@ -28,7 +28,7 @@ static int exec_again(void)
 	char pid[16];
 	snprintf(pid, sizeof pid, "%d", (int)getpid());
 	args[3] = pid;
-	execve("/usr/bin/spawn-child", args, env);
+	execve("/system/bin/spawn-child", args, env);
 	return 12;
 }
 

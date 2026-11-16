@@ -32,7 +32,7 @@
 #include <unistd.h>
 
 /* A file of the boot image, and what it holds. */
-#define GREETING "/usr/share/hello/greeting.txt"
+#define GREETING "/system/share/hello/greeting.txt"
 #define GREETING_TEXT "a greeting from the boot file system\n"
 
 static int64_t ns(struct timespec ts)
@@ -104,7 +104,7 @@ static int stdio_reads_a_file(void)
 static int descriptors_share_offsets(void)
 {
 	char part[6] = {0};
-	int fd = open("/usr/share/../share/./hello/greeting.txt", O_RDONLY);
+	int fd = open("/system/share/../share/./hello/greeting.txt", O_RDONLY);
 	if (fd < 0)
 		return 0;
 	int copy = dup(fd);
@@ -125,13 +125,13 @@ static int open_fails_as_it_should(void)
 {
 	char byte;
 	errno = 0;
-	if (open("/usr/share/hello/missing", O_RDONLY) != -1 || errno != ENOENT)
+	if (open("/system/share/hello/missing", O_RDONLY) != -1 || errno != ENOENT)
 		return 0;
 	/* The boot file system is read-only. */
 	errno = 0;
 	if (open(GREETING, O_WRONLY) != -1 || errno != EACCES)
 		return 0;
-	int dir = open("/usr/share", O_RDONLY | O_DIRECTORY);
+	int dir = open("/system/share", O_RDONLY | O_DIRECTORY);
 	if (dir < 0)
 		return 0;
 	errno = 0;
@@ -162,11 +162,11 @@ static int stat_reports_attributes(void)
 	    || st.st_size != (off_t)strlen(GREETING_TEXT) || st.st_nlink < 1
 	    || st.st_ino == 0 || st.st_blksize != 4096)
 		return 0;
-	if (stat("/usr/share/hello", &dir) != 0 || !S_ISDIR(dir.st_mode)
+	if (stat("/system/share/hello", &dir) != 0 || !S_ISDIR(dir.st_mode)
 	    || dir.st_dev != st.st_dev || dir.st_ino == st.st_ino)
 		return 0;
 	int fd = open(GREETING, O_RDONLY);
-	int dirfd = open("/usr/share/hello", O_RDONLY | O_DIRECTORY);
+	int dirfd = open("/system/share/hello", O_RDONLY | O_DIRECTORY);
 	int ok = fd >= 0 && dirfd >= 0 && fstat(fd, &opened) == 0
 		&& opened.st_ino == st.st_ino && opened.st_dev == st.st_dev
 		&& opened.st_size == st.st_size
@@ -176,7 +176,7 @@ static int stat_reports_attributes(void)
 		&& S_ISFIFO(out.st_mode);
 	close(fd);
 	close(dirfd);
-	return ok && stat("/usr/share/hello/missing", &at) == -1
+	return ok && stat("/system/share/hello/missing", &at) == -1
 		&& errno == ENOENT;
 }
 
@@ -184,7 +184,7 @@ static int stat_reports_attributes(void)
    seekdir returns to where telldir was. */
 static int directory_lists_its_entries(void)
 {
-	DIR *d = opendir("/usr/share/hello");
+	DIR *d = opendir("/system/share/hello");
 	if (!d)
 		return 0;
 	int seen = 0, count = 0;
@@ -219,17 +219,17 @@ static int current_directory_moves(void)
 	char cwd[64];
 	if (!getcwd(cwd, sizeof cwd) || strcmp(cwd, "/") != 0)
 		return 0;
-	int dirfd = open("/usr/share/hello", O_RDONLY | O_DIRECTORY);
-	if (dirfd < 0 || chdir("/usr/share/hello/") != 0
-	    || !getcwd(cwd, sizeof cwd) || strcmp(cwd, "/usr/share/hello") != 0)
+	int dirfd = open("/system/share/hello", O_RDONLY | O_DIRECTORY);
+	if (dirfd < 0 || chdir("/system/share/hello/") != 0
+	    || !getcwd(cwd, sizeof cwd) || strcmp(cwd, "/system/share/hello") != 0)
 		return 0;
 	struct stat st;
 	int ok = stat("greeting.txt", &st) == 0 && S_ISREG(st.st_mode)
 		&& chdir("greeting.txt") == -1 && errno == ENOTDIR
 		&& getcwd(cwd, 4) == 0 && errno == ERANGE && chdir("..") == 0
-		&& getcwd(cwd, sizeof cwd) && strcmp(cwd, "/usr/share") == 0
+		&& getcwd(cwd, sizeof cwd) && strcmp(cwd, "/system/share") == 0
 		&& fchdir(dirfd) == 0 && getcwd(cwd, sizeof cwd)
-		&& strcmp(cwd, "/usr/share/hello") == 0;
+		&& strcmp(cwd, "/system/share/hello") == 0;
 	close(dirfd);
 	return chdir("/") == 0 && ok;
 }
@@ -240,18 +240,18 @@ static int links_resolve(void)
 {
 	char target[32];
 	struct stat file, near, far, link;
-	ssize_t n = readlink("/usr/share/hello/near", target, sizeof target);
+	ssize_t n = readlink("/system/share/hello/near", target, sizeof target);
 	if (n != 12 || memcmp(target, "greeting.txt", 12) != 0)
 		return 0;
-	if (readlink("/usr/share/hello/far", target, 4) != 4
-	    || memcmp(target, "/usr", 4) != 0)
+	if (readlink("/system/share/hello/far", target, 4) != 4
+	    || memcmp(target, "/sys", 4) != 0)
 		return 0;
 	if (readlink(GREETING, target, sizeof target) != -1 || errno != EINVAL)
 		return 0;
-	return stat(GREETING, &file) == 0 && stat("/usr/share/hello/near", &near) == 0
-		&& stat("/usr/share/hello/far", &far) == 0
+	return stat(GREETING, &file) == 0 && stat("/system/share/hello/near", &near) == 0
+		&& stat("/system/share/hello/far", &far) == 0
 		&& near.st_ino == file.st_ino && far.st_ino == file.st_ino
-		&& lstat("/usr/share/hello/far", &link) == 0 && S_ISLNK(link.st_mode)
+		&& lstat("/system/share/hello/far", &link) == 0 && S_ISLNK(link.st_mode)
 		&& link.st_ino != file.st_ino;
 }
 
@@ -262,7 +262,7 @@ static int files_map(void)
 {
 	size_t n = strlen(GREETING_TEXT);
 	int fd = open(GREETING, O_RDONLY);
-	int dirfd = open("/usr/share/hello", O_RDONLY | O_DIRECTORY);
+	int dirfd = open("/system/share/hello", O_RDONLY | O_DIRECTORY);
 	if (fd < 0 || dirfd < 0)
 		return 0;
 	char *view = mmap(0, n, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -296,14 +296,14 @@ static int files_map(void)
    grants for reading and executing only. */
 static int access_checks_rights(void)
 {
-	int dirfd = open("/usr/share/hello", O_RDONLY | O_DIRECTORY);
+	int dirfd = open("/system/share/hello", O_RDONLY | O_DIRECTORY);
 	int ok = dirfd >= 0 && access(GREETING, F_OK) == 0
 		&& access(GREETING, R_OK | X_OK) == 0
 		&& access(GREETING, W_OK) == -1 && errno == EACCES
-		&& access("/usr/share/hello/missing", F_OK) == -1 && errno == ENOENT
+		&& access("/system/share/hello/missing", F_OK) == -1 && errno == ENOENT
 		&& access(GREETING, 8) == -1 && errno == EINVAL
 		&& faccessat(dirfd, "greeting.txt", R_OK, 0) == 0
-		&& faccessat(AT_FDCWD, "/usr/share/hello/far", F_OK,
+		&& faccessat(AT_FDCWD, "/system/share/hello/far", F_OK,
 			     AT_SYMLINK_NOFOLLOW) == 0
 		&& faccessat(dirfd, "near", R_OK, AT_EACCESS) == 0;
 	close(dirfd);
@@ -646,9 +646,9 @@ static int pipes_are_polled(void)
 	return ok;
 }
 
-/* /dev holds only null, which reads nothing and takes every write,
-   and nothing can be created there. */
-static int null_device_works(void)
+/* /dev holds only null, zero, random and urandom: null reads nothing
+   and takes every write, and nothing can be created there. */
+static int dev_files_work(void)
 {
 	char buf[8];
 	struct stat st;
@@ -661,17 +661,43 @@ static int null_device_works(void)
 	close(fd);
 	ok = ok && open("/dev/other", O_WRONLY | O_CREAT, 0644) == -1 && errno == EROFS;
 	ok = ok && open("/dev/other", O_RDONLY) == -1 && errno == ENOENT;
+	/* zero reads as zero bytes, and random and urandom give as many
+	   bytes as asked for; writes to them are discarded. */
+	char zeros[64], noise[64];
+	memset(zeros, 1, sizeof zeros);
+	fd = open("/dev/zero", O_RDWR);
+	ok = ok && fd >= 0 && read(fd, zeros, sizeof zeros) == sizeof zeros
+		&& write(fd, "x", 1) == 1;
+	close(fd);
+	for (size_t i = 0; i < sizeof zeros; i++)
+		ok = ok && zeros[i] == 0;
+	const char *random_files[] = {"/dev/random", "/dev/urandom"};
+	for (int i = 0; i < 2; i++) {
+		memset(noise, 0, sizeof noise);
+		fd = open(random_files[i], O_RDWR);
+		ok = ok && fd >= 0 && read(fd, noise, sizeof noise) == sizeof noise
+			&& write(fd, "x", 1) == 1 && memcmp(noise, zeros, sizeof noise) != 0;
+		close(fd);
+	}
+	const char *names[] = {"null", "zero", "random", "urandom"};
+	int found[4] = {0}, others = 0;
 	DIR *dev = opendir("/dev");
 	struct dirent *e;
-	int found = 0, others = 0;
-	while (dev && (e = readdir(dev)))
-		if (strcmp(e->d_name, "null") == 0)
-			found++;
-		else if (strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
+	while (dev && (e = readdir(dev))) {
+		int known = 0;
+		for (int i = 0; i < 4; i++)
+			if (strcmp(e->d_name, names[i]) == 0) {
+				found[i]++;
+				known = 1;
+			}
+		if (!known && strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
 			others++;
+	}
 	if (dev)
 		closedir(dev);
-	return ok && found == 1 && others == 0;
+	for (int i = 0; i < 4; i++)
+		ok = ok && found[i] == 1;
+	return ok && others == 0;
 }
 
 static void on_wake(int signo)
@@ -752,7 +778,7 @@ static int groups_and_sessions(void)
    with WCONTINUED, each once, before its end. */
 static int stops_are_reported(void)
 {
-	char *args[] = {"/usr/bin/probe", "sleep", 0};
+	char *args[] = {"/system/bin/probe", "sleep", 0};
 	pid_t pid;
 	int status = 0;
 	if (posix_spawn(&pid, args[0], 0, 0, args, environ))
@@ -921,7 +947,7 @@ static int spawn_and_wait(int search, int exec)
 	char *env[] = { "SPAWN_TEST=yes", 0 };
 	pid_t pid;
 	int r = search ? posix_spawnp(&pid, "spawn-child", &fa, 0, args, env)
-		       : posix_spawn(&pid, "/usr/bin/spawn-child", &fa, 0,
+		       : posix_spawn(&pid, "/system/bin/spawn-child", &fa, 0,
 				     exec ? exec_args : args, env);
 	posix_spawn_file_actions_destroy(&fa);
 	close(p[1]);
@@ -966,14 +992,14 @@ static int programs_are_spawned(void)
 	sigaddset(&usr1, SIGUSR1);
 	posix_spawnattr_setsigmask(&attr, &usr1);
 	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK);
-	int masked = posix_spawn(&pid, "/usr/bin/spawn-child", 0, &attr, args, 0);
+	int masked = posix_spawn(&pid, "/system/bin/spawn-child", 0, &attr, args, 0);
 	posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
-	int grouped = posix_spawn(&pid, "/usr/bin/spawn-child", 0, &attr, args, 0);
+	int grouped = posix_spawn(&pid, "/system/bin/spawn-child", 0, &attr, args, 0);
 	const char *failed = !spawn_and_wait(0, 0) ? "spawning by path"
 		: !spawn_and_wait(0, 1) ? "spawning a program that replaces itself"
-		: setenv("PATH", "/nowhere:/usr/bin", 1) != 0 || !spawn_and_wait(1, 0)
+		: setenv("PATH", "/nowhere:/system/bin", 1) != 0 || !spawn_and_wait(1, 0)
 			? "spawning by search"
-		: posix_spawn(&pid, "/usr/bin/missing", 0, 0, args, 0) != ENOENT
+		: posix_spawn(&pid, "/system/bin/missing", 0, 0, args, 0) != ENOENT
 			? "refusing a missing program"
 		: posix_spawnp(&pid, "missing", 0, 0, args, 0) != ENOENT
 			? "refusing a missing program by search"
@@ -1055,7 +1081,7 @@ static int epolls_report_streams(void)
 	pid_t pid;
 	int status;
 	ok = ok && dup2(ep, 9) == 9
-		&& posix_spawn(&pid, "/usr/bin/spawn-child", 0, 0, args, 0) == 0
+		&& posix_spawn(&pid, "/system/bin/spawn-child", 0, 0, args, 0) == 0
 		&& waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 7;
 	close(9);
 	close(ep);
@@ -1134,7 +1160,7 @@ static int timerfds_count_expirations(void)
 	pid_t pid;
 	int status;
 	ok = ok && dup2(t, 9) == 9
-		&& posix_spawn(&pid, "/usr/bin/spawn-child", 0, 0, args, 0) == 0
+		&& posix_spawn(&pid, "/system/bin/spawn-child", 0, 0, args, 0) == 0
 		&& waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 7;
 	close(9);
 	close(t);
@@ -1181,7 +1207,7 @@ static int epolls_nest(void)
 	return ok;
 }
 
-/* The boot image has no /etc/hostname, so the host name is mikros. */
+/* The boot image has no /system/config/hostname, so the host name is mikros. */
 static int host_name_defaults(void)
 {
 	char name[65];
@@ -1252,7 +1278,7 @@ int main(int argc, char **argv)
 		return 26;
 	if (!pipes_are_polled())
 		return 27;
-	if (!null_device_works())
+	if (!dev_files_work())
 		return 28;
 	if (!sleeps_end_in_time())
 		return 29;

@@ -32,7 +32,7 @@ mikros_rt::managed_main!(main);
 const TOKEN_ID: u32 = 1;
 const FACTORY: &str = "mikros.terminal.Factory";
 const TERMINAL: &str = "mikros.terminal.Terminal";
-const BINARY: &str = "/usr/bin/tests/services-terminal";
+const BINARY: &str = "/system/bin/tests/services-terminal";
 const FOREVER: i64 = i64::MAX;
 const MS: i64 = 1_000_000;
 const SECOND: i64 = 1000 * MS;

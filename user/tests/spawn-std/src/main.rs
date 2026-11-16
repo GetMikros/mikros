@@ -21,12 +21,12 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 /// This program, as the boot image holds it.
-const ME: &str = "/usr/bin/spawn-std";
+const ME: &str = "/system/bin/spawn-std";
 /// The C hello world, which prints a greeting for its one argument.
-const HELLO: &str = "/usr/bin/hello";
+const HELLO: &str = "/system/bin/hello";
 const SIGKILL: i32 = 9;
 /// A file of the boot image.
-const GREETING: &str = "/usr/share/hello/greeting.txt";
+const GREETING: &str = "/system/share/hello/greeting.txt";
 
 unsafe extern "C" {
     fn gethostname(name: *mut std::ffi::c_char, len: usize) -> i32;
@@ -123,13 +123,13 @@ fn checks() -> Result<(), u8> {
     // not have.
     let found = Command::new("hello")
         .arg("world")
-        .env("PATH", "/nowhere:/usr/bin")
+        .env("PATH", "/nowhere:/system/bin")
         .output();
     check(found.is_ok_and(|o| o.stdout == b"hello, world\n"))?;
     let missing = Command::new("hello").env("PATH", "/nowhere").status();
     check(missing.is_err_and(|e| e.kind() == ErrorKind::NotFound))?;
     // A missing program.
-    let missing = Command::new("/usr/bin/none").status();
+    let missing = Command::new("/system/bin/none").status();
     check(missing.is_err_and(|e| e.kind() == ErrorKind::NotFound))?;
     // Killing a child, and waiting for it.
     let killed = Command::new(ME).arg("sleep").spawn().and_then(|mut child| {
@@ -157,11 +157,11 @@ fn checks() -> Result<(), u8> {
     // Nor can a child be given a process group.
     check(unsupported(Command::new(ME).process_group(0)))?;
     // A child starts in the folder it is given, or else in its parent's.
-    check(cwd(Command::new(ME).current_dir("/usr/share")).as_deref() == Some("/usr/share"))?;
+    check(cwd(Command::new(ME).current_dir("/system/share")).as_deref() == Some("/system/share"))?;
     check(cwd(Command::new(ME).current_dir("share")).is_none())?;
-    check(std::env::set_current_dir("/usr").is_ok())?;
-    check(cwd(Command::new(ME).current_dir("share")).as_deref() == Some("/usr/share"))?;
-    check(cwd(&mut Command::new(ME)).as_deref() == Some("/usr"))?;
+    check(std::env::set_current_dir("/system").is_ok())?;
+    check(cwd(Command::new(ME).current_dir("share")).as_deref() == Some("/system/share"))?;
+    check(cwd(&mut Command::new(ME)).as_deref() == Some("/system"))?;
     check(std::env::set_current_dir("/").is_ok())?;
     Ok(())
 }

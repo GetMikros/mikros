@@ -7,19 +7,19 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const DEVICES: &str = "/usr/bin/devices";
-const CLEAR: &str = "/usr/bin/clear";
-const LESS: &str = "/usr/bin/less";
-const PS: &str = "/usr/bin/ps";
-const POWER: &str = "/usr/bin/power";
-const LOGS: &str = "/usr/bin/logs";
-const SERVICES: &str = "/usr/bin/services";
-const PERMISSIONS: &str = "/usr/bin/permissions";
-const ACCOUNTS: &str = "/usr/bin/accounts";
+const DEVICES: &str = "/system/bin/devices";
+const CLEAR: &str = "/system/bin/clear";
+const LESS: &str = "/system/bin/less";
+const PS: &str = "/system/bin/ps";
+const POWER: &str = "/system/bin/power";
+const LOGS: &str = "/system/bin/logs";
+const SERVICES: &str = "/system/bin/services";
+const PERMISSIONS: &str = "/system/bin/permissions";
+const ACCOUNTS: &str = "/system/bin/accounts";
 /// An app ID that no program has, whose grants the checks set.
 const NO_APP: &str = "system.no-such-app";
 /// A file that every system holds with devices.
-const DECLARATIONS: &str = "/usr/share/msh/completions/devices.msh";
+const DECLARATIONS: &str = "/system/share/msh/completions/devices.msh";
 
 /// What failed, and the exit status of the utility, or -1 when it did not
 /// exit.
@@ -322,7 +322,7 @@ fn ps_json() -> Result<(), Failure> {
     )?;
     let own = format!("{{\"pid\":{},", std::process::id());
     ensure(&run, "an object for this test", text.contains(&own))?;
-    let ps = "\"app_id\":\"system.ps\",\"path\":\"/usr/bin/ps\"";
+    let ps = "\"app_id\":\"system.ps\",\"path\":\"/system/bin/ps\"";
     ensure(&run, "ps running as system.ps", text.contains(ps))?;
     ensure(&run, "no kernel object IDs", !text.contains("koid"))
 }

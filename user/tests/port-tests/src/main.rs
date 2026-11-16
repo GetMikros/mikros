@@ -54,7 +54,7 @@ mikros_rt::raw_main!(main);
 const CONTROL_ID: u32 = 0;
 const LOG_ID: u32 = 2;
 /// The plan, in the boot image.
-const PLAN: &str = "usr/share/port-tests/plan";
+const PLAN: &str = "system/share/port-tests/plan";
 /// The IDs of the standard output and error, as stream descriptors.
 const STDOUT_STREAM: u32 = 1 | 2 << 28;
 const STDERR_STREAM: u32 = 2 | 2 << 28;

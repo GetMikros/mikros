@@ -1,7 +1,7 @@
 //! A program that the service manager starts as a boot service, from the
-//! root partition of a live system, to check its namespace: `/etc` shows
-//! the root's files and takes changes, which go to tmpfs, and `/usr` is
-//! the root file system's, mounted read only. It exits with 0 when every
+//! root partition of a live system, to check its namespace:
+//! `/system/config` shows the root's files and takes changes, which go
+//! to tmpfs, and `/system` is the root file system's, mounted read only. It exits with 0 when every
 //! check passed, or with the number of the first that failed.
 
 #![no_std]
@@ -20,12 +20,12 @@ mikros_rt::raw_main!(main);
 
 const FOREVER: i64 = i64::MAX;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
-/// The file of the root's `/etc`, what it holds there, and what the probe
-/// writes over it.
+/// The file of the root's `/system/config`, what it holds there, and
+/// what the probe writes over it.
 const CONF: &str = "live-probe.conf";
 const LOWER: &[u8] = b"lower\n";
 const UPPER: &[u8] = b"upper\n";
-/// A file that the probe makes in `/etc`.
+/// A file that the probe makes in `/system/config`.
 const MADE: &str = "live-probe.new";
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
@@ -89,11 +89,11 @@ fn filesystem(dir: &NodeClient) -> Option<(bool, String)> {
 
 fn check(entries: &[(String, NodeClient)]) -> Result<(), i64> {
     let entry = |path: &str| entries.iter().find(|(p, _)| p == path).map(|(_, n)| n);
-    // The root file system serves /usr, mounted read-only.
-    let share = entry("/usr/share/live-probe").ok_or(10)?;
+    // The root file system serves /system, mounted read-only.
+    let share = entry("/system/share/live-probe").ok_or(10)?;
     expect(filesystem(share) == Some((true, "btrfs".into())), 11)?;
-    // /etc shows the root's files, and takes changes.
-    let etc = entry("/etc").ok_or(12)?;
+    // /system/config shows the root's files, and takes changes.
+    let etc = entry("/system/config").ok_or(12)?;
     expect(read(etc, CONF).as_deref() == Some(LOWER), 13)?;
     expect(filesystem(etc).is_some_and(|(read_only, _)| !read_only), 14)?;
     let over = OpenFlags(OpenFlags::TRUNCATE.0);

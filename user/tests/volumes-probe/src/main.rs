@@ -1,11 +1,11 @@
 //! A boot service of the test image of the USB volumes run, which checks
 //! that the FAT, exFAT and btrfs volumes of USB disks with a GPT, an MBR
-//! and no partition table appear in `/Volumes`, can be read and written
+//! and no partition table appear in `/volumes`, can be read and written
 //! there, and go away when the disks are unplugged.
 //!
-//! Started without `/Volumes`, it grants its own app ID and user
+//! Started without `/volumes`, it grants its own app ID and user
 //! `user.volumes.access` through the broker and starts a copy of itself, which
-//! has `/Volumes` in its namespace. For each of the volumes in `LABELS`,
+//! has `/volumes` in its namespace. For each of the volumes in `LABELS`,
 //! the copy waits for it, reads `HELLO.TXT`, which the runner put there,
 //! writes `WRITTEN.TXT` and reads it back. It then kills the xHCI driver
 //! and writes `AGAIN.TXT` on the first volume, which the USB mass storage
@@ -17,7 +17,7 @@
 //! meanwhile; again every other driver must still run as the process it
 //! was, and every volume is used again. It then logs `READY`. The runner then
 //! unplugs the disks, and the copy logs `GONE` once every volume has left
-//! `/Volumes`. A failed check logs `FAILED` with what failed.
+//! `/volumes`. A failed check logs `FAILED` with what failed.
 
 #![no_std]
 #![no_main]
@@ -40,10 +40,10 @@ use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
 
 mikros_rt::raw_main!(main);
 
-const BINARY: &str = "/usr/bin/volumes-probe";
+const BINARY: &str = "/system/services/system.volumes-probe/volumes-probe";
 const BROKER: &str = "mikros.permissions.Broker";
 const VOLUMES_PERMISSION: &str = "user.volumes.access";
-const VOLUMES: &str = "/Volumes";
+const VOLUMES: &str = "/volumes";
 /// The volumes' labels, and the files on them.
 /// The volumes of the GPT disk, those of the MBR disk, its btrfs on a
 /// logical partition of the Linux type, and the FAT on a disk without a
@@ -138,7 +138,7 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
 }
 
 /// Grants `app_id` and `user` `user.volumes.access`, and starts a copy of the
-/// probe, which gets `/Volumes` and the log handle `log`.
+/// probe, which gets `/volumes` and the log handle `log`.
 async fn start_copy(
     directory: &DirectoryAsyncClient,
     launcher: &LauncherAsyncClient,
@@ -258,7 +258,7 @@ async fn use_volume(
     if !matches!(&read, Ok(Ok(r)) if r.data == WRITTEN_TEXT) {
         return Err("reading WRITTEN.TXT back");
     }
-    mikros_rt::log!(Info, "volumes-probe: read and wrote /Volumes/{}", label);
+    mikros_rt::log!(Info, "volumes-probe: read and wrote /volumes/{}", label);
     Ok(())
 }
 
@@ -342,13 +342,13 @@ async fn restart(
     Ok(())
 }
 
-/// Whether `/Volumes` still lists either volume.
+/// Whether `/volumes` still lists either volume.
 async fn listed(volumes: &NodeAsyncClient) -> Result<bool, &'static str> {
     let mut cookie = 0;
     loop {
         let listed = match volumes.read_directory(cookie, false).await {
             Ok(Ok(listed)) => listed,
-            _ => return Err("listing /Volumes"),
+            _ => return Err("listing /volumes"),
         };
         if listed.entries.is_empty() {
             return Ok(false);
