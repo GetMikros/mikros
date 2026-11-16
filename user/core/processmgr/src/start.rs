@@ -92,8 +92,45 @@ impl Started {
 fn loading(e: mikros_loader::Error) -> Status {
     match e {
         mikros_loader::Error::Status(raw) => status(raw),
+        // A file that is no executable at all.
+        mikros_loader::Error::NotElf => Status::NotSupported,
         _ => Status::InvalidArgs,
     }
+}
+
+/// The most bytes of a script's first line, its line feed included.
+const SCRIPT_LINE_MAX: usize = 256;
+
+/// Whether `file` is a native executable's: an ELF file, which the loader
+/// then checks.
+fn native(file: &[u8]) -> bool {
+    file.starts_with(b"\x7fELF")
+}
+
+/// The interpreter, and the argument when there is one, that the first
+/// line of `file` names when it starts with `#!` (MIKSPEC-0034.R44): none
+/// when it does not, and `NOT_SUPPORTED` when the line does not end
+/// within `SCRIPT_LINE_MAX` bytes or names no absolute path.
+fn script_line(file: &[u8]) -> Result<Option<(String, Option<String>)>, Status> {
+    let Some(rest) = file.strip_prefix(b"#!") else {
+        return Ok(None);
+    };
+    let head = &rest[..rest.len().min(SCRIPT_LINE_MAX - 2)];
+    let end = head
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or(Status::NotSupported)?;
+    let line = core::str::from_utf8(&head[..end]).map_err(|_| Status::NotSupported)?;
+    let blank = [' ', '\t'];
+    let line = line.trim_start_matches(blank).trim_end_matches(blank);
+    let (interpreter, argument) = match line.find(blank) {
+        Some(at) => (&line[..at], Some(line[at..].trim_start_matches(blank))),
+        None => (line, None),
+    };
+    if !interpreter.starts_with('/') {
+        return Err(Status::NotSupported);
+    }
+    Ok(Some((interpreter.into(), argument.map(String::from))))
 }
 
 /// Where an image was loaded, and whether it names the dynamic linker.
@@ -319,11 +356,16 @@ async fn resolve_first(
 }
 
 /// Loads the program that the absolute `path` names where `lookup` says
-/// (`resolve_first`), into a new process
+/// (`resolve_first`), or for a script the interpreter that its first line
+/// names, found the same way, into a new process
 /// charged to `budget`, and starts it with
 /// a new bootstrap channel: at the entry of the dynamic linker, which is
 /// loaded from the same namespace, when the program names one, and at
-/// its own entry otherwise. `own` is the process manager's process.
+/// its own entry otherwise. `own` is the process manager's process. For
+/// a script, it also returns the arguments that come before the script's
+/// path: the interpreter's path, and the line's argument when it has one.
+/// A file that is neither fails with `NOT_SUPPORTED`, and so does an
+/// interpreter that is not native; a missing one with `NOT_FOUND`.
 pub async fn load(
     fs: &Rc<Fs>,
     lookup: Lookup<'_>,
@@ -332,8 +374,19 @@ pub async fn load(
     budget: Handle,
     path: &str,
     name: &str,
-) -> Result<Started, Status> {
-    let executable = resolve_first(fs, lookup, own, path, reactor).await?;
+) -> Result<(Started, Option<Vec<String>>), Status> {
+    let mut executable = resolve_first(fs, lookup, own, path, reactor).await?;
+    let mut interpreted = None;
+    if !native(executable.file()) {
+        let (interpreter, argument) =
+            script_line(executable.file())?.ok_or(Status::NotSupported)?;
+        let program = resolve_first(fs, lookup, own, &interpreter, reactor).await?;
+        if !native(program.file()) {
+            return Err(Status::NotSupported);
+        }
+        executable = program;
+        interpreted = Some(core::iter::once(interpreter).chain(argument).collect());
+    }
     // An application makes system calls only through the dynamic linker,
     // which is also the C library, so one that has none is refused.
     let application = !executable.system();
@@ -378,15 +431,18 @@ pub async fn load(
     check(unsafe { sys::process_start(process.raw(), thread.raw(), entry, top, theirs.raw(), 0) })?;
     // The handle moved into the new process's table.
     let _ = theirs.into_raw();
-    Ok(Started {
-        process,
-        thread,
-        bootstrap: BootstrapClient::new(ours),
-        base: loaded.base,
-        phdr: loaded.phdr,
-        phnum: loaded.phnum,
-        interpreter_base,
-    })
+    Ok((
+        Started {
+            process,
+            thread,
+            bootstrap: BootstrapClient::new(ours),
+            base: loaded.base,
+            phdr: loaded.phdr,
+            phnum: loaded.phnum,
+            interpreter_base,
+        },
+        interpreted,
+    ))
 }
 
 /// The `arguments` memory object: the argument and environment counts,
@@ -420,6 +476,36 @@ fn memory(bytes: &[u8]) -> Result<OwnedHandle, Status> {
 /// variable replaces any `TMPDIR` the environment had. An object that
 /// does not hold as many strings as it counts is given as it is.
 pub fn with_tmpdir(arguments: OwnedHandle) -> Result<OwnedHandle, Status> {
+    let bytes = read_arguments(&arguments)?;
+    match set_tmpdir(&bytes) {
+        Some(encoded) => memory(&encoded),
+        None => Ok(arguments),
+    }
+}
+
+/// The `arguments` memory object `arguments` for the interpreter of the
+/// script `script`: `before`, the script's path, and the arguments after
+/// the first (MIKSPEC-0034.R44). `INVALID_ARGS` when the object does not
+/// hold as many strings as it counts.
+pub fn with_interpreter(
+    arguments: OwnedHandle,
+    before: &[String],
+    script: &str,
+) -> Result<OwnedHandle, Status> {
+    let bytes = read_arguments(&arguments)?;
+    let (args, env) = decode(&bytes).ok_or(Status::InvalidArgs)?;
+    let args: Vec<&[u8]> = before
+        .iter()
+        .map(|a| a.as_bytes())
+        .chain([script.as_bytes()])
+        .chain(args.into_iter().skip(1))
+        .collect();
+    memory(&encode(&args, &env))
+}
+
+/// The bytes of the `arguments` memory object `arguments`, at most
+/// `ARGUMENTS_MAX` of them.
+fn read_arguments(arguments: &OwnedHandle) -> Result<Vec<u8>, Status> {
     let mut record = [0u8; 0x18];
     let mut len = 0;
     // SAFETY: the pointers describe `record` and `len`.
@@ -438,16 +524,15 @@ pub fn with_tmpdir(arguments: OwnedHandle) -> Result<OwnedHandle, Status> {
     let mut bytes = alloc::vec![0u8; size as usize];
     // SAFETY: the pointer describes `bytes`.
     check(unsafe { sys::mem_read(arguments.raw(), 0, bytes.as_mut_ptr(), size) })?;
-    match set_tmpdir(&bytes) {
-        Some(encoded) => memory(&encoded),
-        None => Ok(arguments),
-    }
+    Ok(bytes)
 }
 
-/// The encoded arguments `bytes` with `TMPDIR=/tmp` as the last string of
-/// the environment and no other `TMPDIR`, or `None` when they hold fewer
-/// strings than they count.
-fn set_tmpdir(bytes: &[u8]) -> Option<Vec<u8>> {
+/// Strings of an `arguments` memory object.
+type Strings<'a> = Vec<&'a [u8]>;
+
+/// The arguments and the environment that the encoded `bytes` hold, or
+/// `None` when they hold fewer strings than they count.
+fn decode(bytes: &[u8]) -> Option<(Strings<'_>, Strings<'_>)> {
     let count = |at: usize| -> Option<usize> {
         let mut word = [0; 4];
         word.copy_from_slice(bytes.get(at..at + 4)?);
@@ -461,21 +546,33 @@ fn set_tmpdir(bytes: &[u8]) -> Option<Vec<u8>> {
         strings.push(&rest[..end]);
         rest = &rest[end + 1..];
     }
-    let (args, env) = strings.split_at(argc);
-    let env: Vec<&[u8]> = env
-        .iter()
-        .copied()
-        .filter(|var| !var.starts_with(b"TMPDIR="))
-        .chain([&TMPDIR[..]])
-        .collect();
+    let env = strings.split_off(argc);
+    Some((strings, env))
+}
+
+/// `args` and `env` encoded as the `arguments` memory object holds them.
+fn encode(args: &[&[u8]], env: &[&[u8]]) -> Vec<u8> {
     let mut encoded = Vec::new();
-    encoded.extend_from_slice(&(argc as u32).to_le_bytes());
+    encoded.extend_from_slice(&(args.len() as u32).to_le_bytes());
     encoded.extend_from_slice(&(env.len() as u32).to_le_bytes());
-    for string in args.iter().chain(&env) {
+    for string in args.iter().chain(env) {
         encoded.extend_from_slice(string);
         encoded.push(0);
     }
-    Some(encoded)
+    encoded
+}
+
+/// The encoded arguments `bytes` with `TMPDIR=/tmp` as the last string of
+/// the environment and no other `TMPDIR`, or `None` when they hold fewer
+/// strings than they count.
+fn set_tmpdir(bytes: &[u8]) -> Option<Vec<u8>> {
+    let (args, env) = decode(bytes)?;
+    let env: Vec<&[u8]> = env
+        .into_iter()
+        .filter(|var| !var.starts_with(b"TMPDIR="))
+        .chain([&TMPDIR[..]])
+        .collect();
+    Some(encode(&args, &env))
 }
 
 /// What the startup transfer of a process carries besides its loaded

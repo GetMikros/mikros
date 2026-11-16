@@ -264,7 +264,7 @@ impl Shared {
             first: new.programs_first.as_deref(),
             then: &new.programs,
         };
-        let started = start::load(
+        let (started, interpreted) = start::load(
             &self.fs,
             lookup,
             self.process.raw(),
@@ -290,6 +290,14 @@ impl Shared {
             ..
         } = new;
         let process_koid = koid(&started.process).inspect_err(|_| started.kill())?;
+        // A script's interpreter gets its own path, the line's argument
+        // and the script's path before the arguments after the first
+        // (MIKSPEC-0034.R44).
+        let arguments = match interpreted {
+            Some(before) => start::with_interpreter(arguments, &before, &path)
+                .inspect_err(|_| started.kill())?,
+            None => arguments,
+        };
         // A process with `/tmp` uses its own entry (MIKSPEC-0050.R43).
         let arguments = match namespace.iter().any(|e| e.path == "/tmp") {
             true => start::with_tmpdir(arguments).inspect_err(|_| started.kill())?,
