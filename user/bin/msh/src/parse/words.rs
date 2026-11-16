@@ -319,7 +319,8 @@ impl Parser<'_> {
     }
 
     /// The `.name` and `.0` accesses that follow a variable's name or an
-    /// operand, and `."name"` too when `quoted_names`.
+    /// operand, `."name"` too when `quoted_names`, and the computed
+    /// `.$name`, a variable without a path of its own, and `.(expr)`.
     pub(super) fn path(&mut self, quoted_names: bool) -> Result<Vec<Access>> {
         let mut path = Vec::new();
         while self.peek() == Some('.') && !self.looking_at("...") {
@@ -339,6 +340,24 @@ impl Parser<'_> {
                 Some('"' | '\'') if quoted_names => {
                     self.pos += 1;
                     path.push(Access::Field(self.quoted_text("a field's name")?));
+                }
+                Some('$')
+                    if self
+                        .peek_at(2)
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_') =>
+                {
+                    self.pos += 2;
+                    let variable = Variable {
+                        environment: false,
+                        name: self.variable_name()?,
+                        path: Vec::new(),
+                        spread: false,
+                    };
+                    path.push(Access::Computed(Box::new(Expr::Variable(variable))));
+                }
+                Some('(') => {
+                    self.pos += 1;
+                    path.push(Access::Computed(Box::new(self.paren()?)));
                 }
                 _ => break,
             }

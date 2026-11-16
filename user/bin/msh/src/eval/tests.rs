@@ -372,6 +372,45 @@ fn reads_and_changes_fields_with_quoted_names() {
 }
 
 #[test]
+fn reads_and_changes_paths_with_computed_components() {
+    let set = "let el = [{field: 'a'} {field: 'b'}]\nlet i = 1\nlet f = 'field'\n";
+    let out = |source: &str| ok(&format!("{set}{source}"));
+    assert_eq!(out("print $el.$i.field $el.0.$f"), "b a\n");
+    assert_eq!(out("print $el.($i - 1).field"), "a\n");
+    assert_eq!(out("let it = {id: 1}\nprint $el.($it.id).field"), "b\n");
+    assert_eq!(out("print ($el).$i.$f"), "b\n");
+    assert_eq!(out("echo $el.$i.field/x"), "b/x\n");
+    assert_eq!(out("echo \"$el.$i.field! $el.($i - 1).$f\""), "b! a\n");
+    assert_eq!(
+        out(
+            "let cfg = {servers: [{port: 1} {port: 2}]}\ncfg.servers.$i.port = 80\nprint $cfg.servers.1.port"
+        ),
+        "80\n"
+    );
+    assert_eq!(out("el.($i - 1).$f = 'z'\nprint $el.0.field"), "z\n");
+    assert_eq!(out("el.$i.new = 3\nprint $el.1.new"), "3\n");
+    assert_eq!(out("delete $el.$i\nprint ($el | len)"), "1\n");
+    assert_eq!(out("delete $el.0.$f\nprint ($el.0 | to json)"), "{}\n");
+    // `$name` has no path of its own: `.i` reads from `$el.$idx`.
+    assert_eq!(
+        error(&format!("{set}let idx = {{i: 0}}\nprint $el.$idx.i")).message,
+        "a record cannot select an item or a field; a whole number or a string can"
+    );
+    assert_eq!(
+        error(&format!("{set}print $el.(0 - 1)")).message,
+        "-1 cannot select an item"
+    );
+    assert_eq!(
+        error(&format!("{set}print $el.(true)")).message,
+        "a bool cannot select an item or a field; a whole number or a string can"
+    );
+    assert_eq!(
+        error(&format!("{set}print $el.2")).message,
+        error(&format!("{set}let n = 2\nprint $el.$n")).message
+    );
+}
+
+#[test]
 fn keeps_path_a_list_and_passes_the_environment() {
     let mut s = shell();
     run(

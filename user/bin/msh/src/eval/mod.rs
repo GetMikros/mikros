@@ -305,7 +305,7 @@ impl<S: System> Shell<S> {
     }
 
     /// The value of `$name` with its fields and items.
-    fn variable(&self, v: &Variable) -> Result<Value, Flow> {
+    fn variable(&mut self, v: &Variable) -> Result<Value, Flow> {
         let mut value = match v.environment {
             true => self
                 .env(&v.name)
@@ -322,16 +322,43 @@ impl<S: System> Shell<S> {
         Ok(value)
     }
 
-    fn access(&self, value: &Value, access: &Access) -> Result<Value, Flow> {
-        let got = match access {
-            Access::Field(name) => value.field(name),
-            Access::Item(index) => value.item(*index),
+    fn access(&mut self, value: &Value, access: &Access) -> Result<Value, Flow> {
+        let got = match self.component(access)? {
+            Access::Field(name) => value.field(&name).cloned(),
+            Access::Item(index) => value.item(index).cloned(),
+            Access::Computed(_) => unreachable!("a component is computed once"),
         };
-        got.cloned().map_err(|e| self.fail(e))
+        got.map_err(|e| self.fail(e))
+    }
+
+    /// `access`, with a computed component's value as the field or item
+    /// it selects: a whole number of zero or more an item, and a string
+    /// a field.
+    fn component(&mut self, access: &Access) -> Result<Access, Flow> {
+        let Access::Computed(expr) = access else {
+            return Ok(access.clone());
+        };
+        match self.eval(expr)? {
+            Value::Int(index) => match usize::try_from(index) {
+                Ok(index) => Ok(Access::Item(index)),
+                Err(_) => Err(self.fail(format!("{index} cannot select an item"))),
+            },
+            Value::String(name) => Ok(Access::Field(name)),
+            other => Err(self.fail(format!(
+                "a {} cannot select an item or a field; a whole number or a string can",
+                other.kind()
+            ))),
+        }
+    }
+
+    /// `path` with its computed components' values as the fields and
+    /// items they select.
+    fn components(&mut self, path: &[Access]) -> Result<Vec<Access>, Flow> {
+        path.iter().map(|access| self.component(access)).collect()
     }
 
     /// Whether `$name` or `$env.NAME` is set, with its fields and items.
-    fn is_set(&self, v: &Variable) -> bool {
+    fn is_set(&mut self, v: &Variable) -> bool {
         self.variable(v).is_ok()
     }
 
@@ -624,6 +651,7 @@ impl<S: System> Shell<S> {
     /// and `value`. Only `=` creates: an environment variable, or the
     /// last field of the path in a record.
     fn assign(&mut self, target: &Variable, op: AssignOp, value: Value) -> Result<(), Flow> {
+        let path = self.components(&target.path)?;
         let current = match target.environment {
             true => self.env(&target.name).cloned(),
             false => self.lookup(&target.name).cloned(),
@@ -642,7 +670,7 @@ impl<S: System> Shell<S> {
                 return Err(self.fail(format!("`{name}` is not set; `let` creates it")));
             }
         };
-        change(&mut whole, &target.path, op, value).map_err(|e| self.fail(e))?;
+        change(&mut whole, &path, op, value).map_err(|e| self.fail(e))?;
         match target.environment {
             true => self.set_env(&target.name, whole),
             false => *self.lookup_mut(&target.name).expect("looked up") = whole,
@@ -657,7 +685,8 @@ impl<S: System> Shell<S> {
             true => format!("`$env.{}` is not set", target.name),
             false => format!("`${}` is not set", target.name),
         };
-        let Some((last, parents)) = target.path.split_last() else {
+        let path = self.components(&target.path)?;
+        let Some((last, parents)) = path.split_last() else {
             let frame = self
                 .visible()
                 .find(|&i| self.frames[i].variables.contains_key(&target.name));
@@ -751,6 +780,7 @@ fn slot<'a>(value: &'a mut Value, access: &Access) -> Result<&'a mut Value, Stri
             .ok_or_else(|| format!("the list has no item {index}")),
         (Access::Field(_), other) => Err(format!("a {} has no fields", other.kind())),
         (Access::Item(_), other) => Err(format!("a {} has no items", other.kind())),
+        (Access::Computed(_), _) => unreachable!("computed components are resolved first"),
     }
 }
 

@@ -209,11 +209,15 @@ pub struct Variable {
     pub spread: bool,
 }
 
-/// `.name` or `.0`.
+/// `.name`, `.0`, or a component computed when the path is read:
+/// `.$name` or `.(expr)`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Access {
     Field(String),
     Item(usize),
+    /// Selects an item for a whole number of zero or more, and a field
+    /// for a string.
+    Computed(Box<Expr>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
