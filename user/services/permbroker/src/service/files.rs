@@ -1,8 +1,9 @@
 //! The broker's files: once the `device.filesystem` instance `root` is
 //! published, the broker reads the grants and the numbers of app IDs from
 //! `state/permissions/` there, the folder that processes see as
-//! `/system/state/permissions/`, and writes them anew after each change,
-//! through a file `<name>.new` that replaces the old one. A root that
+//! `/system/state/permissions/`, and writes the files that changed anew a
+//! second after a change, with the changes of that second, through a file
+//! `<name>.new` that replaces the old one. A root that
 //! cannot be written, as a live system's, is left as it is: the files are
 //! then in `live/state/permissions/` of the temporary file system, which
 //! processes of a live system see there instead. Missing directories are
@@ -36,6 +37,9 @@ const NUMBERS: &str = "app-numbers";
 /// The most bytes a file holds that the broker reads.
 const FILE_MAX: usize = 16 << 20;
 const WRITE_MAX: usize = 32768;
+/// How long the broker waits after a change before it writes its files,
+/// in nanoseconds, so that the changes of that while go out together.
+const SAVE_DELAY: i64 = 1_000_000_000;
 const MODE: u32 = 0o600;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 
@@ -98,8 +102,8 @@ impl Files {
 }
 
 /// Reads the stored grants and numbers into `store` once the folder can
-/// be reached through `directory`, and writes them anew after each
-/// change from then on. Without the folder, nothing is read or written,
+/// be reached through `directory`, and writes those that changed anew a
+/// second after each change from then on. Without the folder, nothing is read or written,
 /// and numbers wait.
 pub async fn keep(
     store: Rc<RefCell<Store>>,
@@ -152,15 +156,34 @@ pub async fn keep(
     files.set_loaded();
     // Grants made before the files were read are written with the rest.
     files.changed();
+    // What each file holds, so that one that did not change is not
+    // written again.
+    let mut written = [numbers, grants];
     loop {
         files.next_change().await;
+        // The changes of a while go out together, as each file that is
+        // written commits the file system.
+        let mut now = 0;
+        // SAFETY: the out pointer is valid for the call.
+        unsafe { mikros_rt::sys::clock_get_monotonic(&mut now) };
+        if reactor.sleep_until(now + SAVE_DELAY).await.is_err() {
+            return;
+        }
+        files.changed.set(false);
         let (numbers, grants) = {
             let store = store.borrow();
             (store.encode_numbers(), store.encode_grants())
         };
-        for (name, bytes) in [(NUMBERS, numbers), (GRANTS, grants)] {
-            if let Err(e) = replace(&folder, name, &bytes, &reactor).await {
-                mikros_rt::log!(Error, "permbroker: writing {name} failed: {e:?}");
+        for (at, (name, bytes)) in [(NUMBERS, numbers), (GRANTS, grants)]
+            .into_iter()
+            .enumerate()
+        {
+            if bytes == written[at] {
+                continue;
+            }
+            match replace(&folder, name, &bytes, &reactor).await {
+                Ok(()) => written[at] = bytes,
+                Err(e) => mikros_rt::log!(Error, "permbroker: writing {name} failed: {e:?}"),
             }
         }
     }
