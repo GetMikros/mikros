@@ -331,6 +331,7 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                 &[],
             )?;
             println!("built    {}", spawn_child.display());
+            let spawn_c = crate::workspace_root().join("user/tests/spawn-c");
             let greet = c_build(
                 "libgreet",
                 &["user/tests/library-c/greet.c"],
@@ -446,6 +447,17 @@ pub fn build_for(kind: Kind, boot: BootImage) -> Result<Built> {
                     ("system/bin/msh-check", msh_check.as_path()),
                     ("system/share/msh/options.msh", msh_options.as_path()),
                     ("system/bin/spawn-child", spawn_child.as_path()),
+                    // Scripts and a text file, which hello-c starts.
+                    ("system/bin/spawn-script", &spawn_c.join("spawn-script")),
+                    (
+                        "system/bin/script-of-script",
+                        &spawn_c.join("script-of-script"),
+                    ),
+                    (
+                        "system/bin/script-without-interpreter",
+                        &spawn_c.join("script-without-interpreter"),
+                    ),
+                    ("system/bin/not-a-program", &spawn_c.join("not-a-program")),
                     ("system/libraries/ld-mikros.dlib", dynamic_linker.as_path()),
                     ("system/bin/library-user", library_user.as_path()),
                     ("system/libraries/libgreet.1.dlib", greet.as_path()),

@@ -1012,6 +1012,35 @@ static int programs_are_spawned(void)
 	return !failed;
 }
 
+/* Scripts run through the interpreter that their first line names, with
+   its argument and the script's path; a file that is no program, and a
+   script whose interpreter is one, are not executables, and a missing
+   interpreter is missing. */
+static int scripts_are_run(void)
+{
+	pid_t pid;
+	int status;
+	char *args[] = { "spawn-script", "a", 0 };
+	char *other[] = { "x", 0 };
+	const char *failed =
+		posix_spawn(&pid, "/system/bin/spawn-script", 0, 0, args, 0) != 0
+			? "spawning a script"
+		: waitpid(pid, &status, 0) != pid || !WIFEXITED(status)
+				|| WEXITSTATUS(status) != 9
+			? "running its interpreter"
+		: posix_spawn(&pid, "/system/bin/not-a-program", 0, 0, other, 0) != ENOEXEC
+			? "refusing a file that is no program"
+		: posix_spawn(&pid, "/system/bin/script-of-script", 0, 0, other, 0) != ENOEXEC
+			? "refusing a script as an interpreter"
+		: posix_spawn(&pid, "/system/bin/script-without-interpreter", 0, 0, other, 0)
+				!= ENOENT
+			? "refusing a missing interpreter"
+		: 0;
+	if (failed)
+		fprintf(stderr, "scripts_are_run: %s failed\n", failed);
+	return !failed;
+}
+
 /* An epoll instance reports a pipe's ends: a level-triggered entry for
    as long as it is ready, an edge-triggered one once per change, and a
    closed peer as a hang-up. An entry goes with its description. It
@@ -1298,6 +1327,8 @@ int main(int argc, char **argv)
 		return 37;
 	if (!host_name_defaults())
 		return 38;
+	if (!scripts_are_run())
+		return 39;
 	char *copy = malloc(64);
 	if (!copy)
 		return 34;

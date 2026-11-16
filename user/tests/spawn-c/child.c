@@ -3,7 +3,8 @@
  * output, and exits with 7 when every check passed, and otherwise with
  * the number of the first check that failed. Started with the argument
  * "exec", it replaces itself with execve, passing its process ID, which
- * the new program checks it kept. */
+ * the new program checks it kept. It is also the interpreter of the test
+ * scripts. */
 
 #include <errno.h>
 #include <fcntl.h>
@@ -37,6 +38,13 @@ int main(int argc, char **argv)
 	char buf[64];
 	if (argc == 2 && strcmp(argv[1], "exec") == 0)
 		return exec_again();
+	/* As the interpreter of the script spawn-script, whose line gives
+	   "as script", it exits with 9 when it got its own path, the line's
+	   argument, the script's path and the script's one argument. */
+	if (argc > 1 && strcmp(argv[1], "as script") == 0)
+		return argc == 4 && strcmp(argv[0], "/system/bin/spawn-child") == 0
+			&& strcmp(argv[2], "/system/bin/spawn-script") == 0
+			&& strcmp(argv[3], "a") == 0 ? 9 : 1;
 	/* Started with "closed" and a descriptor, it exits with 7 when that
 	   descriptor is not open. */
 	if (argc == 3 && strcmp(argv[1], "closed") == 0)
