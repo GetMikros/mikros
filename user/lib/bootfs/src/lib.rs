@@ -111,7 +111,7 @@ impl Tree {
     /// The tree of the boot image `image`: of its boot modules when it
     /// starts with an index, and otherwise of the archive it holds.
     ///
-    /// Each boot module is at `usr/` followed by its path, as a file of mode
+    /// Each boot module is at `system/` followed by its path, as a file of mode
     /// `MODULE_MODE`, owner 0 and time 0, in directories of the same
     /// attributes. A module whose path is in the way of an earlier one's is
     /// left out, and an index that is not valid gives an empty root.
@@ -139,9 +139,9 @@ impl Tree {
     fn add_modules(&mut self, image: &[u8]) {
         let modules = mikros_bootimage::modules(image).unwrap_or_default();
         for module in modules {
-            let mut components: Vec<&[u8]> = alloc::vec![b"usr"];
+            let mut components: Vec<&[u8]> = alloc::vec![b"system"];
             components.extend(module.path.split(|&b| b == b'/'));
-            let (name, parents) = components.split_last().expect("usr/ comes first");
+            let (name, parents) = components.split_last().expect("system/ comes first");
             let parent = self.directories(parents);
             let Some(parent) = parent.filter(|&p| self.child(p, name).is_none()) else {
                 self.skipped.push((module.path.to_vec(), b'0'));

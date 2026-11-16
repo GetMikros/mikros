@@ -4,7 +4,7 @@
 //! publishes as a service of class `subvolumes` after its `filesystem`
 //! one, so that the directory lets in only callers with the permission
 //! `system.subvolumes.manage`. Paths name subvolumes from the root of the
-//! top-level subvolume, one component at a time, the server's own `usr`
+//! top-level subvolume, one component at a time, the server's own `system`
 //! left aside.
 
 use crate::driver::fs::{Fs, error};

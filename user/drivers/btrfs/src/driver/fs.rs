@@ -3,7 +3,7 @@
 //! connections to the same node share, the tokens of directories, the
 //! byte-range locks and watches of connections, and the `Filesystem`
 //! service (MIKSPEC-0049.R13). Its root is the top-level subvolume. When
-//! that holds `@system`, the root has an entry `usr` of its own as well,
+//! that holds `@system`, the root has an entry `system` of its own as well,
 //! the root of the system version that the partition's `system` property
 //! names, or without one, that `@system/current` names when the file
 //! system is mounted (MIKSPEC-0053.R4, MIKSPEC-0053.R13); any other file
@@ -45,7 +45,7 @@ const PROTOCOL: &str = "device.filesystem";
 
 const NS: i64 = 1_000_000_000;
 /// The entry of the root that the server adds, and where its target is.
-pub const USR: &str = "usr";
+pub const BOOTED: &str = "system";
 const SYSTEM: &[u8] = b"@system";
 const CURRENT: &[u8] = b"current";
 
@@ -78,9 +78,9 @@ impl Open {
 pub struct Fs {
     pub mount: &'static Mount,
     pub root: Rc<Open>,
-    /// The root of the booted system version, which the root's `usr`
+    /// The root of the booted system version, which the root's `system`
     /// names; none when there is none.
-    pub usr: Option<Rc<Open>>,
+    pub booted: Option<Rc<Open>>,
     /// Whether the top-level subvolume holds `@system`.
     pub system_layout: bool,
     opens: RefCell<BTreeMap<Key, Weak<Open>>>,
@@ -171,7 +171,7 @@ pub fn attributes(a: &BtrfsAttributes) -> Attributes {
 }
 
 impl Fs {
-    /// The file system of `mount`, whose root's `usr` is the version that
+    /// The file system of `mount`, whose root's `system` is the version that
     /// `system` names, or else the one that `@system/current` names.
     /// Fails with `NOT_FOUND` when `system` names no version in `@system`.
     pub fn new(
@@ -192,16 +192,16 @@ impl Fs {
             Some(name) => Some(named_version(&root.node, name).ok_or(Error::NotFound)?),
             None => current_version(&root.node),
         };
-        let usr = version.map(|node| {
-            let usr = Rc::new(Open::new(Arc::new(node.0), node.1));
-            usr.names.borrow_mut().push((key, String::from(USR)));
-            opens.insert(usr.key, Rc::downgrade(&usr));
-            usr
+        let booted = version.map(|node| {
+            let booted = Rc::new(Open::new(Arc::new(node.0), node.1));
+            booted.names.borrow_mut().push((key, String::from(BOOTED)));
+            opens.insert(booted.key, Rc::downgrade(&booted));
+            booted
         });
         Ok(Fs {
             mount,
             root,
-            usr,
+            booted,
             system_layout,
             opens: RefCell::new(opens),
             tokens: RefCell::new(BTreeMap::new()),
@@ -218,12 +218,12 @@ impl Fs {
         })
     }
 
-    /// Whether `name` in `dir` is the root's `usr` of the system layout,
+    /// Whether `name` in `dir` is the root's `system` of the system layout,
     /// which the server keeps from being created, removed or renamed. A
     /// file system without `@system/current` has no such entry, and a
-    /// `usr` of its own is like any other.
-    pub fn is_usr(&self, dir: &Open, name: &str) -> bool {
-        self.usr.is_some() && dir.key == self.root.key && name == USR
+    /// `system` of its own is like any other.
+    pub fn is_booted(&self, dir: &Open, name: &str) -> bool {
+        self.booted.is_some() && dir.key == self.root.key && name == BOOTED
     }
 
     /// The open node for `node`, found as `name` in `dir`: the one that

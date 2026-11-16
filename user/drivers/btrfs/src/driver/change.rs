@@ -39,7 +39,7 @@ impl Connection {
             None => (None, String::from(name)),
         };
         let name = name.as_str();
-        if self.fs.is_usr(&self.open, name) {
+        if self.fs.is_booted(&self.open, name) {
             return Err(Error::AccessDenied);
         }
         self.open
@@ -94,8 +94,8 @@ impl Connection {
         };
         let q = NodeRenameRequest { name, ..q };
         let target = replacing.as_deref().unwrap_or(&q.new_name);
-        let usr = self.fs.is_usr(&to, target) || self.fs.is_usr(&to, &q.new_name);
-        if self.fs.is_usr(&self.open, &q.name) || usr {
+        let booted = self.fs.is_booted(&to, target) || self.fs.is_booted(&to, &q.new_name);
+        if self.fs.is_booted(&self.open, &q.name) || booted {
             return Err(Error::AccessDenied);
         }
         let replaced = self.lookup(&to, target).await?;
@@ -146,7 +146,7 @@ impl Connection {
         check_component(&q.name)?;
         check_component(&q.new_name)?;
         let to = self.fs.token_dir(&q.target).ok_or(Error::CrossDevice)?;
-        if self.fs.is_usr(&to, &q.new_name) {
+        if self.fs.is_booted(&to, &q.new_name) {
             return Err(Error::AccessDenied);
         }
         let (node, _) = self
@@ -168,7 +168,7 @@ impl Connection {
         self.require_write()?;
         self.directory()?;
         check_component(name)?;
-        if self.fs.is_usr(&self.open, name) {
+        if self.fs.is_booted(&self.open, name) {
             return Err(Error::AccessDenied);
         }
         if target.is_empty() || target.len() > TARGET_MAX || target.contains('\0') {

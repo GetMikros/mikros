@@ -46,7 +46,7 @@ enum Resolved {
 
 impl Connection {
     /// Looks `name` up in the directory `dir`, as the open node that
-    /// connections share. The root's `usr` is the current system
+    /// connections share. The root's `system` is the current system
     /// version's root. A name that the dentry cache knows is found on the
     /// executor; any other on a thread of the pool, as finding it may
     /// read the disk, while the executor goes on serving the other
@@ -56,10 +56,10 @@ impl Connection {
         dir: &Rc<Open>,
         name: &str,
     ) -> Result<Option<Rc<Open>>, Error> {
-        if self.fs.is_usr(dir, name)
-            && let Some(usr) = &self.fs.usr
+        if self.fs.is_booted(dir, name)
+            && let Some(booted) = &self.fs.booted
         {
-            return Ok(Some(usr.clone()));
+            return Ok(Some(booted.clone()));
         }
         let found = match dir.node.lookup_cached(name.as_bytes()) {
             Err(EAGAIN) => {
@@ -86,14 +86,16 @@ impl Connection {
         dir: &Rc<Open>,
         name: &str,
     ) -> Result<Option<(Rc<Open>, String)>, Error> {
-        let usr = dir.key == self.fs.root.key && self.fs.usr.is_some();
-        if usr && mikros_casefold::equal(fs::USR, name) {
-            let found = self.lookup(dir, fs::USR).await?;
-            return Ok(found.map(|open| (open, String::from(fs::USR))));
+        let booted = dir.key == self.fs.root.key && self.fs.booted.is_some();
+        if booted && mikros_casefold::equal(fs::BOOTED, name) {
+            let found = self.lookup(dir, fs::BOOTED).await?;
+            return Ok(found.map(|open| (open, String::from(fs::BOOTED))));
         }
         let node = dir.node.clone();
         let wanted = String::from(name);
-        let found = blocking(&self.fs.reactor, move || folded_entry(&node, &wanted, usr));
+        let found = blocking(&self.fs.reactor, move || {
+            folded_entry(&node, &wanted, booted)
+        });
         match found.await.map_err(error)? {
             Some(entry) => {
                 let open = self.lookup(dir, &entry).await?;
@@ -148,7 +150,7 @@ impl Connection {
         let walk = Walk {
             start: reached(&self.open),
             root: self.fs.root.key,
-            usr: self.fs.usr.as_ref().map(reached),
+            booted: self.fs.booted.as_ref().map(reached),
             path: String::from(path),
             flags,
         };
@@ -173,12 +175,12 @@ impl Connection {
 
     /// The open node of a node that a walk reached: shared with the
     /// connections that have it open, or this directory or the root's
-    /// `usr`, where the walk started or which it gave.
+    /// `system`, where the walk started or which it gave.
     fn reopen(&self, reached: Reached) -> Rc<Open> {
         match reached.found {
             Some((dir, name)) => self.fs.open_shared(reached.node, reached.key, dir, &name),
-            None => match &self.fs.usr {
-                Some(usr) if usr.key == reached.key => usr.clone(),
+            None => match &self.fs.booted {
+                Some(booted) if booted.key == reached.key => booted.clone(),
                 _ => self.open.clone(),
             },
         }
@@ -200,7 +202,7 @@ impl Connection {
             }
             Resolved::Missing { parent, name } if q.flags.contains(OpenFlags::CREATE) => {
                 self.require_write()?;
-                if self.fs.is_usr(&parent, &name) {
+                if self.fs.is_booted(&parent, &name) {
                     return Err(Error::AccessDenied);
                 }
                 let kind = match q.flags.contains(OpenFlags::DIRECTORY) {
@@ -219,8 +221,8 @@ impl Connection {
             }
             Resolved::Missing { .. } => return Err(Error::NotFound),
             Resolved::Node(open) if q.flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) => {
-                let usr = self.fs.usr.as_ref().is_some_and(|u| u.key == open.key);
-                return Err(if usr {
+                let booted = self.fs.booted.as_ref().is_some_and(|u| u.key == open.key);
+                return Err(if booted {
                     Error::AccessDenied
                 } else {
                     Error::Exists
@@ -262,14 +264,14 @@ impl Connection {
         self.directory()?;
         let mut found: Vec<(String, u64, u32)> = Vec::new();
         let root = self.open.key == self.fs.root.key;
-        // The root's `usr` comes first, and hides any of the subvolume's.
+        // The root's `system` comes first, and hides any of the subvolume's.
         if root
             && cookie == 0
-            && let Some(usr) = &self.fs.usr
+            && let Some(booted) = &self.fs.booted
         {
-            found.push((String::from(fs::USR), usr.key.1, DT_DIR));
+            found.push((String::from(fs::BOOTED), booted.key.1, DT_DIR));
         }
-        let hide_usr = root && self.fs.usr.is_some();
+        let hide_booted = root && self.fs.booted.is_some();
         let node = self.open.node.clone();
         let read = blocking(&self.fs.reactor, move || {
             let mut next = cookie;
@@ -277,7 +279,7 @@ impl Connection {
                 if found.len() == ENTRIES_MAX {
                     return false;
                 }
-                let hidden = hide_usr && name == fs::USR.as_bytes();
+                let hidden = hide_booted && name == fs::BOOTED.as_bytes();
                 if name != b"." && name != b".." && !hidden {
                     let name = String::from_utf8_lossy(name).into_owned();
                     found.push((name, inode, kind));
@@ -329,10 +331,10 @@ impl Connection {
         let mut missed = Vec::new();
         for (at, (name, _, _)) in found.iter().enumerate() {
             if root
-                && name == fs::USR
-                && let Some(usr) = &self.fs.usr
+                && name == fs::BOOTED
+                && let Some(booted) = &self.fs.booted
             {
-                looked[at] = Some(usr.attributes()?);
+                looked[at] = Some(booted.attributes()?);
                 continue;
             }
             match self.open.node.lookup_cached(name.as_bytes()) {
@@ -382,7 +384,7 @@ fn read_target(node: &BtrfsNode<'static>) -> Result<String, Error> {
 
 /// A node that a walk reached: the shim's node, its key, and the
 /// directory and name it was found as, none for where the walk started and
-/// for the root's `usr`.
+/// for the root's `system`.
 #[derive(Clone)]
 struct Reached {
     node: Arc<BtrfsNode<'static>>,
@@ -391,12 +393,12 @@ struct Reached {
 }
 
 /// What resolving a path takes, which a thread of the pool takes as it
-/// is: where it starts, the root's key and `usr`, the path and the flags
+/// is: where it starts, the root's key and `system`, the path and the flags
 /// of `Open`.
 struct Walk {
     start: Reached,
     root: Key,
-    usr: Option<Reached>,
+    booted: Option<Reached>,
     path: String,
     flags: OpenFlags,
 }
@@ -507,14 +509,14 @@ impl Walk {
         Ok((Walked::Node(end), named))
     }
 
-    /// The node `name` of the directory `at`: the root's `usr` there, and
+    /// The node `name` of the directory `at`: the root's `system` there, and
     /// otherwise from the dentry cache alone when `cached`.
     fn child(&self, at: &Reached, name: &str, cached: bool) -> Result<Step, Error> {
-        if let Some(usr) = &self.usr
+        if let Some(booted) = &self.booted
             && at.key == self.root
-            && name == fs::USR
+            && name == fs::BOOTED
         {
-            return Ok(Step::Found(usr.clone()));
+            return Ok(Step::Found(booted.clone()));
         }
         let found = match cached {
             true => at.node.lookup_cached(name.as_bytes()),
@@ -538,10 +540,10 @@ impl Walk {
     /// The first entry of the directory `at` whose name equals `name`
     /// under simple case folding, as `Connection::lookup_folded` finds it.
     fn folded_child(&self, at: &Reached, name: &str) -> Result<Option<Reached>, Error> {
-        let usr = at.key == self.root && self.usr.is_some();
-        let entry = match usr && mikros_casefold::equal(fs::USR, name) {
-            true => Some(String::from(fs::USR)),
-            false => folded_entry(&at.node, name, usr).map_err(error)?,
+        let booted = at.key == self.root && self.booted.is_some();
+        let entry = match booted && mikros_casefold::equal(fs::BOOTED, name) {
+            true => Some(String::from(fs::BOOTED)),
+            false => folded_entry(&at.node, name, booted).map_err(error)?,
         };
         let Some(entry) = entry else {
             return Ok(None);
@@ -555,16 +557,20 @@ impl Walk {
 
 /// The first entry of the directory `node`, in the order in which
 /// `ReadDirectory` lists them, whose name equals `name` under simple case
-/// folding, leaving out the subvolume's own `usr` when `usr`. Names that
+/// folding, leaving out the subvolume's own `system` when `system`. Names that
 /// are not UTF-8 equal none.
-fn folded_entry(node: &BtrfsNode<'static>, name: &str, usr: bool) -> Result<Option<String>, i32> {
+fn folded_entry(
+    node: &BtrfsNode<'static>,
+    name: &str,
+    booted: bool,
+) -> Result<Option<String>, i32> {
     let mut cookie = 0;
     loop {
         let mut found = None;
         let mut seen = false;
         node.read_dir(&mut cookie, |entry, _, _| {
             seen = true;
-            let hidden = usr && entry == fs::USR.as_bytes();
+            let hidden = booted && entry == fs::BOOTED.as_bytes();
             if entry != b"."
                 && entry != b".."
                 && !hidden

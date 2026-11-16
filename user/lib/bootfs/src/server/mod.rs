@@ -169,7 +169,7 @@ pub struct Executable {
     pub file: &'static [u8],
     /// The file's paged memory object, readable and executable.
     pub shared: OwnedHandle,
-    /// Whether the file lies under `/usr` in the boot image, which makes
+    /// Whether the file lies under `/system` in the boot image, which makes
     /// it a system component, whatever path named it.
     pub system: bool,
     /// Where the file starts in the image.
@@ -232,8 +232,8 @@ impl Fs {
             return Err(ACCESS_DENIED);
         }
         let rights = memory::rights(false, true);
-        let usr = self.tree.resolve(0, b"usr", true);
-        let system = matches!(usr, Ok(crate::Resolved::Node(usr)) if self.tree.contains(usr, node));
+        let top = self.tree.resolve(0, b"system", true);
+        let system = matches!(top, Ok(crate::Resolved::Node(top)) if self.tree.contains(top, node));
         Ok(Executable {
             file: &self.image[offset..offset + size],
             shared: self.paged_memory(node, size, rights)?,

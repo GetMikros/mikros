@@ -72,7 +72,7 @@ const OPTIONS_LIVE: &CStr = c"space_cache=v2,compress=zstd,rescue=nologreplay";
 const CACHE: &str = "cache";
 const QUICK_DISCONNECT: &str = "quick-disconnect";
 /// The properties of the root partition (MIKSPEC-0025.R62): the version
-/// to show as `usr`, and whether the system is live.
+/// to show as `system`, and whether the system is live.
 const SYSTEM: &str = "system";
 const LIVE: &str = "live";
 

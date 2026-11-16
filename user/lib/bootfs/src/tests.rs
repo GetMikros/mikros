@@ -194,7 +194,7 @@ fn modules_image(modules: &[(&str, &[u8])]) -> Vec<u8> {
 }
 
 #[test]
-fn shows_boot_modules_in_usr() {
+fn shows_boot_modules_in_system() {
     let image = modules_image(&[
         ("init", b"init"),
         ("bin/processmgr", b"pm"),
@@ -203,7 +203,7 @@ fn shows_boot_modules_in_usr() {
         ("bin", b"in the way too"),
     ]);
     let t = Tree::new(&image);
-    let pm = node(&t, 0, "usr/bin/processmgr");
+    let pm = node(&t, 0, "system/bin/processmgr");
     assert_eq!(
         t.nodes[pm].kind,
         NodeKind::File {
@@ -212,15 +212,15 @@ fn shows_boot_modules_in_usr() {
         }
     );
     assert_eq!((t.nodes[pm].mode, t.nodes[pm].owner), (0o555, 0));
-    let init = node(&t, 0, "usr/init");
+    let init = node(&t, 0, "system/init");
     assert_eq!(t.nodes[init].links, 1);
-    for dir in ["", "usr", "usr/lib", "usr/lib/services"] {
+    for dir in ["", "system", "system/lib", "system/lib/services"] {
         let n = if dir.is_empty() { 0 } else { node(&t, 0, dir) };
         assert!(matches!(t.nodes[n].kind, NodeKind::Directory(_)), "{dir}");
         assert_eq!(t.nodes[n].mode, 0o555, "{dir}");
     }
     let (root, _) = t.read_directory(0, 0, 10);
-    assert_eq!(root.len(), 1, "only usr");
+    assert_eq!(root.len(), 1, "only system");
     assert_eq!(
         t.skipped,
         [
