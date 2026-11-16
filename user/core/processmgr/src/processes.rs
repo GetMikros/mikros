@@ -4,7 +4,7 @@
 use crate::broker::Permissions;
 use crate::devfs::Dev;
 use crate::launcher;
-use crate::namespace::{Namespaces, Programs};
+use crate::namespace::{App, Namespaces, Programs};
 use crate::records::{Exit, Record, Records};
 use crate::start::{self, Transfer, duplicate};
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -277,6 +277,13 @@ impl Shared {
             name,
         )
         .await?;
+        // The path of the executable, and of its package, in the new
+        // namespace, from where its file comes from (MIKSPEC-0034.R46).
+        let executable = interpreted
+            .as_ref()
+            .and_then(|before| before.first())
+            .unwrap_or(&new.path);
+        let (program, bundle) = placed(&new.programs, executable, app.as_ref());
         let NewProcess {
             path,
             parent,
@@ -343,7 +350,7 @@ impl Shared {
                 arguments,
                 handles,
                 namespace,
-                working_directory,
+                (working_directory, program, bundle),
                 umask,
                 control,
             )
@@ -427,7 +434,7 @@ impl Shared {
         arguments: OwnedHandle,
         handles: Vec<StartupHandle>,
         namespace: Vec<NamespaceEntry>,
-        working_directory: String,
+        (working_directory, program, bundle): (String, String, Option<String>),
         umask: u32,
         control: &ProcessDirectoryAsyncClient,
     ) -> Result<(), Status> {
@@ -450,6 +457,8 @@ impl Shared {
             namespace,
             working_directory,
             umask,
+            program,
+            bundle,
         })?;
         bind(control, identity, directory_end).await?;
         started.complete()
@@ -602,4 +611,25 @@ fn exit_of(process: &OwnedHandle) -> Result<Exit, Status> {
         code: i64::from_le_bytes(record[..8].try_into().expect("8 bytes")),
         signal: u32::from_le_bytes(record[0x10..0x14].try_into().expect("4 bytes")),
     })
+}
+
+/// Where the executable at the absolute `path`, which `programs` resolve,
+/// lies in the namespace of a process that runs it as `app`, and the
+/// folder of its package there when it is a program of that installed
+/// app: a file of the package is seen in `/apps/<id>/package`, and
+/// another path is kept as it is, normalized.
+fn placed(programs: &Programs, path: &str, app: Option<&App>) -> (String, Option<String>) {
+    let normal = mikros_manifest::path::normalize(path).unwrap_or_else(|| String::from(path));
+    let Some(app) = app else {
+        return (normal, None);
+    };
+    if let Some(seen) = programs.real_path(&normal).and_then(|real| app.sees(&real)) {
+        return (seen, Some(app.package()));
+    }
+    // Through the app's own view of its folder.
+    let below = normal
+        .strip_prefix(app.folder.as_str())
+        .is_some_and(|rest| rest.starts_with('/'));
+    let bundle = below.then(|| app.package());
+    (normal, bundle)
 }

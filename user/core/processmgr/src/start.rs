@@ -29,7 +29,7 @@ const ARGUMENTS_MAX: u64 = 1 << 20;
 const TMPDIR: [u8; 11] = *b"TMPDIR=/tmp";
 const PERM_READ: u32 = 1 << 0;
 /// The only version of the transfer.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 /// The file creation mask of a program whose spawner asks for the
 /// default, which it does with `DEFAULT_UMASK`.
 pub const UMASK: u32 = 0o022;
@@ -625,6 +625,10 @@ pub struct Transfer {
     pub working_directory: String,
     /// The program's file creation mask.
     pub umask: u32,
+    /// The path the executable was found at, and the folder of its
+    /// package, in the process's namespace.
+    pub program: String,
+    pub bundle: Option<String>,
 }
 
 impl Started {
@@ -639,7 +643,7 @@ impl Started {
             parent: transfer.parent,
             user: transfer.user,
             app_id: transfer.app_id,
-            bundle: None,
+            bundle: transfer.bundle,
             arguments: transfer.arguments,
             handle_count: transfer.handles.len() as u32,
             namespace_count: namespace.len() as u32,
@@ -658,6 +662,7 @@ impl Started {
             interpreter_base: self.interpreter_base,
             working_directory: transfer.working_directory,
             umask: transfer.umask,
+            program: transfer.program,
         };
         sent(self.bootstrap.begin(header))?;
         let mut handles = transfer.handles;

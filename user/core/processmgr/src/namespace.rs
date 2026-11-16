@@ -230,6 +230,12 @@ impl Programs {
     /// system that the entry it lies in comes from, as the system call
     /// gate judges `/system` (MIKSPEC-0101.R39).
     pub fn package_of(&self, path: &str) -> Option<String> {
+        package_of(&self.real_path(path)?).map(String::from)
+    }
+
+    /// The path on the root file system of the file that the absolute
+    /// `path` names, when the entry it lies in is a folder there.
+    pub fn real_path(&self, path: &str) -> Option<String> {
         let normal = path::normalize(path)?;
         let (
             Origin::Dir {
@@ -240,11 +246,10 @@ impl Programs {
         else {
             return None;
         };
-        let file = match (real.trim_end_matches('/'), rest) {
+        Some(match (real.trim_end_matches('/'), rest) {
             (real, "") => String::from(real),
             (real, rest) => format!("{real}/{rest}"),
-        };
-        package_of(&file).map(String::from)
+        })
     }
 }
 
@@ -960,6 +965,7 @@ impl Namespaces {
             folder: at,
             mode,
             executable,
+            installed,
         })
     }
 
@@ -1377,11 +1383,31 @@ async fn connection(dir: &NodeAsyncClient, rights: Rights) -> Result<ClientEnd<N
 /// How an installed app starts (MIKSPEC-0101.R7, MIKSPEC-0101.R9): in
 /// its folder, `/apps/<id>`, which is also its home, with its cache
 /// below it, installed for every user (`global`) or for one (`local`),
-/// and the path of its program there.
+/// the path of its program there, and the path of its package on the
+/// root file system.
 pub struct App {
     pub folder: String,
     pub mode: &'static str,
     pub executable: String,
+    pub installed: String,
+}
+
+impl App {
+    /// The app's package as the app sees it.
+    pub fn package(&self) -> String {
+        format!("{}/package", self.folder)
+    }
+
+    /// The path at which the app sees the file of its package at `real`
+    /// on the root file system.
+    pub fn sees(&self, real: &str) -> Option<String> {
+        match real.strip_prefix(self.installed.as_str())? {
+            "" => Some(self.package()),
+            rest => rest
+                .strip_prefix('/')
+                .map(|rest| format!("{}/{rest}", self.package())),
+        }
+    }
 }
 
 /// The kind of manifest that an app ID has.

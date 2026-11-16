@@ -3729,6 +3729,7 @@ mod managed {
             interpreter_base: 0,
             working_directory: "/".into(),
             umask: 0o022,
+            program: "/tests/managed".into(),
         })
     }
 
@@ -3798,7 +3799,7 @@ mod managed {
         use Step::*;
         let full = [
             Begin {
-                version: 3,
+                version: 4,
                 counts: (3, 2),
             },
             Handles {
@@ -3817,7 +3818,7 @@ mod managed {
         ensure("receiving every batch", run(s, &full)? == 132)?;
         let empty = [
             Begin {
-                version: 3,
+                version: 4,
                 counts: (0, 0),
             },
             Complete,
@@ -3831,7 +3832,7 @@ mod managed {
     pub fn startup_transfer_refused(s: &Startup) -> Result {
         use Step::*;
         let begin = |handles, names| Begin {
-            version: 3,
+            version: 4,
             counts: (handles, names),
         };
         let cases: [(&'static str, Vec<Step>); 10] = [

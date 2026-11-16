@@ -152,7 +152,7 @@ fn receive(bootstrap: sys::Handle) -> *mut usize {
     fs::start_in(&header.working_directory);
     crate::files::start_with_mask(header.umask);
     crate::users::install(header.user);
-    crate::library::install(header.bundle.as_deref());
+    crate::library::install(header.bundle.as_deref(), &header.program);
     SYSTEM_PROCESS.store(
         header.app_id.as_bytes().starts_with(SYSTEM),
         core::sync::atomic::Ordering::Relaxed,

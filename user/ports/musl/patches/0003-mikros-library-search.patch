@@ -1,5 +1,14 @@
 --- a/ldso/dynlink.c
 +++ b/ldso/dynlink.c
+@@ -133,7 +133,7 @@
+ 
+ static struct dso ldso;
+ static struct dso *head, *tail, *fini_head, *syms_tail, *lazy_head;
+-static char *env_path, *sys_path;
++static char *env_path, *sys_path, *package_path;
+ static unsigned long long gencnt;
+ static int runtime;
+ static int ldd_mode;
 @@ -625,20 +625,6 @@
  	}
  }
@@ -21,16 +30,19 @@
  static void *mmap_fixed(void *p, size_t n, int prot, int flags, int fd, off_t off)
  {
  	static int no_map_fixed;
-@@ -896,80 +882,23 @@
+@@ -896,80 +882,26 @@
  	}
  }
  
 +/* Mikros: the Mikros layer keeps only the DT_RUNPATH entries that
-+ * start with $ORIGIN and stay within the app's bundle, and gives the
-+ * directories searched after them. Each returns the size of its list,
-+ * which it writes only when it fits. */
++ * start with $ORIGIN and stay within the program's package, gives the
++ * directories searched after them for a bare name (0) or an <id>:<path>
++ * name (1), and the file that an <id>:<path> name stands for. Each
++ * returns the size of its string, which it writes only when it fits;
++ * the last returns 0 for a name of another form. */
 +hidden size_t __mikros_runpath(const char *, const char *, char *, size_t);
-+hidden size_t __mikros_library_path(char *, size_t);
++hidden size_t __mikros_library_path(int, char *, size_t);
++hidden size_t __mikros_library_file(const char *, char *, size_t);
 +
  static int fixup_rpath(struct dso *p, char *buf, size_t buf_size)
  {
@@ -108,7 +120,7 @@
 -		s = t + 7 + 2*(t[1]=='{');
 -	}
 -	strcpy(d, s);
-+	/* The path of the main program is not known. */
++	/* The main program's path comes from the startup transfer. */
 +	origin = p->kernel_mapped ? 0 : p->name;
 +	n = __mikros_runpath(p->rpath_orig, origin, 0, 0);
 +	if (!(p->rpath = malloc(n))) return -1;
@@ -116,7 +128,7 @@
  	return 0;
  }
  
-@@ -981,8 +910,7 @@
+@@ -981,8 +913,7 @@
  	p->strings = laddr(p, dyn[DT_STRTAB]);
  	if (dyn[0]&(1<<DT_HASH))
  		p->hashtab = laddr(p, dyn[DT_HASH]);
@@ -126,10 +138,45 @@
  	if (dyn[0]&(1<<DT_RUNPATH))
  		p->rpath_orig = p->strings + dyn[DT_RUNPATH];
  	if (dyn[0]&(1<<DT_PLTGOT))
-@@ -1125,41 +1053,12 @@
+@@ -1104,7 +1035,19 @@
+ 		}
+ 		return &ldso;
+ 	}
+-	if (strchr(name, '/')) {
++	/* Mikros: an <id>:<path> name of a library package is looked for
++	 * as the file it stands for, and is never a pathname. */
++	char file[NAME_MAX+1];
++	const char *search = name;
++	if (strchr(name, ':')) {
++		size_t n = __mikros_library_file(name, file, sizeof file);
++		if (!n || n > sizeof file) {
++			errno = ENOENT;
++			return 0;
++		}
++		search = file;
++	}
++	if (search == name && strchr(name, '/')) {
+ 		pathname = name;
+ 		fd = open(name, O_RDONLY|O_CLOEXEC);
+ 	} else {
+@@ -1114,53 +1057,26 @@
+ 				return p;
+ 			}
+ 		}
+-		if (strlen(name) > NAME_MAX) return 0;
++		if (strlen(search) > NAME_MAX) return 0;
+ 		fd = -1;
+-		if (env_path) fd = path_open(name, env_path, buf, sizeof buf);
++		if (env_path) fd = path_open(search, env_path, buf, sizeof buf);
+ 		for (p=needed_by; fd == -1 && p; p=p->needed_by) {
+ 			if (fixup_rpath(p, buf, sizeof buf) < 0)
+ 				fd = -2; /* Inhibit further search. */
+ 			if (p->rpath)
+-				fd = path_open(name, p->rpath, buf, sizeof buf);
++				fd = path_open(search, p->rpath, buf, sizeof buf);
  		}
  		if (fd == -1) {
- 			if (!sys_path) {
+-			if (!sys_path) {
 -				char *prefix = 0;
 -				size_t prefix_len;
 -				if (ldso.name[0]=='/') {
@@ -161,14 +208,39 @@
 -					}
 -					close(fd);
 -				} else if (errno != ENOENT) {
-+				size_t n = __mikros_library_path(0, 0);
-+				if ((sys_path = malloc(n)))
-+					__mikros_library_path(sys_path, n);
-+				else
- 					sys_path = "";
+-					sys_path = "";
 -				}
++			char **path = search == name ? &sys_path : &package_path;
++			int kind = search != name;
++			if (!*path) {
++				size_t n = __mikros_library_path(kind, 0, 0);
++				if ((*path = malloc(n)))
++					__mikros_library_path(kind, *path, n);
++				else
++					*path = "";
  			}
 -			if (!sys_path) sys_path = "/lib:/usr/local/lib:/usr/lib";
- 			fd = path_open(name, sys_path, buf, sizeof buf);
+-			fd = path_open(name, sys_path, buf, sizeof buf);
++			fd = path_open(search, *path, buf, sizeof buf);
  		}
  		pathname = buf;
+ 	}
+@@ -1174,7 +1090,7 @@
+ 			/* If this library was previously loaded with a
+ 			 * pathname but a search found the same inode,
+ 			 * setup its shortname so it can be found by name. */
+-			if (!p->shortname && pathname != name)
++			if (!p->shortname && pathname != name && search == name)
+ 				p->shortname = strrchr(p->name, '/')+1;
+ 			close(fd);
+ 			return p;
+@@ -1225,7 +1141,8 @@
+ 	p->runtime_loaded = runtime;
+ 	strcpy(p->name, pathname);
+ 	/* Add a shortname only if name arg was not an explicit pathname. */
+-	if (pathname != name) p->shortname = strrchr(p->name, '/')+1;
++	if (pathname != name && search == name)
++		p->shortname = strrchr(p->name, '/')+1;
+ 	if (p->tls.image) {
+ 		p->tls_id = ++tls_cnt;
+ 		tls_align = MAXP2(tls_align, p->tls.align);
