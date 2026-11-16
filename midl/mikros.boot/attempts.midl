@@ -1,4 +1,4 @@
-// MIKSPEC-0099.R4
+// MIKSPEC-0099.R8
 
 library mikros.boot;
 using mikros.base;
@@ -13,4 +13,5 @@ type BootState = struct {
 protocol Attempts {
     @1 GetState() -> (state BootState) error base.Status;
     @2 MarkGood() -> () error base.Status;
+    @3 StartTrying() -> () error base.Status;
 };

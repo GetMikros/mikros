@@ -15,6 +15,8 @@ const NAME_MAX: usize = 64;
 const VERSION: u32 = 1;
 const TRYING: u32 = 0;
 const GOOD: u32 = 1;
+/// How many boots of a version the bootloader allows while it is tried.
+const TRIES: u32 = 3;
 
 /// What the variable holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +115,20 @@ pub fn mark_good(booted: &str, record: Option<&Record>) -> Option<Record> {
     })
 }
 
+/// The variable that starting to try the version `booted` again writes:
+/// that version, being tried, with three boots left; `None` for a name
+/// the variable cannot hold.
+pub fn start_trying(booted: &str) -> Option<Record> {
+    if booted.is_empty() || booted.len() > NAME_MAX {
+        return None;
+    }
+    Some(Record {
+        version: booted.as_bytes().to_vec(),
+        good: false,
+        tries_left: TRIES,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +206,12 @@ mod tests {
         assert_eq!(mark_good("2", Some(&record("2", true, 0))), good);
         assert_eq!(mark_good("1", Some(&record("2", false, 0))), None);
         assert_eq!(mark_good(&"x".repeat(65), None), None);
+    }
+
+    #[test]
+    fn starts_trying_the_booted_version_again() {
+        assert_eq!(start_trying("2"), Some(record("2", false, 3)));
+        assert_eq!(start_trying(""), None);
+        assert_eq!(start_trying(&"x".repeat(65)), None);
     }
 }

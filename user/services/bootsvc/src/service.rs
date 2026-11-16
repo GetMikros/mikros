@@ -11,7 +11,7 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::boot::{
     Attempts, AttemptsAsyncServer, AttemptsGetStateResponse, AttemptsMarkGoodResponse,
-    AttemptsRequest, BootState,
+    AttemptsRequest, AttemptsStartTryingResponse, BootState,
 };
 use mikros_rt::interfaces::mikros::service::{Provider, ProviderAsyncServer, ProviderRequest};
 use mikros_rt::sys;
@@ -167,6 +167,15 @@ impl Boot {
             None => Ok(()),
         }
     }
+
+    /// Writes the variable so that the bootloader counts the next boots
+    /// of the booted version again.
+    fn start_trying(&self) -> Result<(), Status> {
+        match attempts::start_trying(self.booted()?) {
+            Some(record) => self.write(&record),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Serves `Attempts` on `end`.
@@ -182,6 +191,10 @@ async fn serve(boot: Rc<Boot>, end: ServerEnd<Attempts>, reactor: Reactor) {
             AttemptsRequest::MarkGood(_, r) => {
                 r.reply(s, boot.mark_good().map(|()| AttemptsMarkGoodResponse {}))
             }
+            AttemptsRequest::StartTrying(_, r) => r.reply(
+                s,
+                boot.start_trying().map(|()| AttemptsStartTryingResponse {}),
+            ),
         };
     }
 }
