@@ -1,0 +1,8 @@
+# The program manifest of pkg, installed as system/programs/system.pkg.yaml:
+# a command, which installs, removes, lists, shows and makes packages. It
+# holds no permissions; the install service asks for those that installs
+# need.
+app_id: system.pkg
+binary: /system/bin/pkg
+command: true
+permissions: []

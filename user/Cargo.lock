@@ -818,6 +818,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pkg"
+version = "0.0.0"
+dependencies = [
+ "mikros-cli",
+ "mikros-mika",
+]
+
+[[package]]
 name = "pkgsvc"
 version = "0.0.0"
 dependencies = [
