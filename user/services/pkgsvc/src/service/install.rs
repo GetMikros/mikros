@@ -1,7 +1,7 @@
 //! `Install`: a package is written into a new subvolume next to where it
 //! is installed, which then takes the place of the old version, if one is
-//! installed (MIKSPEC-0101.R25). A global install asks the broker for the
-//! permission of the package's kind first (MIKSPEC-0101.R27).
+//! installed (MIKSPEC-0101.R36). A global install asks the broker for the
+//! permission of the package's kind first (MIKSPEC-0101.R35).
 
 use super::files::{Root, user_name};
 use super::{Given, Shared, open};

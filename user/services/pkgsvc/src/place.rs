@@ -1,4 +1,4 @@
-//! Where packages are installed (MIKSPEC-0101.R25), as paths from the
+//! Where packages are installed (MIKSPEC-0101.R36), as paths from the
 //! root of the root file system, whose top-level subvolumes are `apps`,
 //! `libraries`, `drivers` and `users` (MIKSPEC-0100.R4).
 
