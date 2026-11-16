@@ -1,7 +1,7 @@
 # The manifest of the basic display driver, installed as
-# usr/lib/drivers/basicdisplay/driver.yaml.
+# system/drivers/system.driver.basicdisplay/driver.yaml.
 name: basicdisplay
-binary: /usr/lib/drivers/basicdisplay/basicdisplay
+binary: /system/drivers/system.driver.basicdisplay/basicdisplay
 # The boot framebuffer's own device, or the PCI function that provides it,
 # which a GPU driver, as a normal driver, takes instead.
 match: [platform:boot-framebuffer, display:boot-framebuffer]

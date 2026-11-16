@@ -1,7 +1,7 @@
 # The service manifest of the boot attempts service, installed as
-# usr/lib/services/bootsvc.yaml.
+# system/services/system.bootsvc/service.yaml.
 name: bootsvc
-binary: /usr/bin/bootsvc
+binary: /system/services/system.bootsvc/bootsvc
 start: boot
 boot_handles: [root_resource, platform_info]
 provides:

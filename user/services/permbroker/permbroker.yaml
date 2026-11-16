@@ -1,7 +1,7 @@
 # The service manifest of the permission broker, installed as
-# usr/lib/services/permbroker.yaml.
+# system/services/system.permbroker/service.yaml.
 name: permbroker
-binary: /usr/bin/permbroker
+binary: /system/services/system.permbroker/permbroker
 start: boot
 provides:
   - protocol: mikros.permissions.Broker

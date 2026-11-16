@@ -1,6 +1,6 @@
 # The manifest of the partition driver, installed as
-# usr/lib/drivers/partition/driver.yaml.
+# system/drivers/system.driver.partition/driver.yaml.
 name: partition
-binary: /usr/lib/drivers/partition/partition
+binary: /system/drivers/system.driver.partition/partition
 match: [storage:disk]
 kind: normal

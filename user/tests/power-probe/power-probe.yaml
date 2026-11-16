@@ -1,8 +1,8 @@
 # The service manifest of the power probe, the boot service of
-# tests/power.img, installed as usr/lib/services/power-probe.yaml. It logs
+# tests/power.img, installed as system/services/system.power-probe/service.yaml. It logs
 # through the kernel log.
 name: power-probe
-binary: /usr/bin/power-probe
+binary: /system/services/system.power-probe/power-probe
 start: boot
 # Started after the device manager, so that it is stopped before it.
 after: [devicemgr]

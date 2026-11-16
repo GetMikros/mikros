@@ -2,7 +2,7 @@
 # the accounts test image, which may authenticate, and for which the
 # authorization stub allows admin.accounts.manage when the broker asks.
 name: accounts-probe
-binary: /usr/bin/accounts-probe
+binary: /system/services/system.accounts-probe/accounts-probe
 start: boot
 after: [tmpfs]
 permissions: [system.users.authenticate]

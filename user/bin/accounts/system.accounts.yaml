@@ -1,9 +1,9 @@
 # The program manifest of accounts, installed as
-# usr/lib/programs/system.accounts.yaml: a command, which lists and
+# system/programs/system.accounts.yaml: a command, which lists and
 # changes the users; the accounts service asks for an administrator
 # before it changes another user. It holds no permissions, so that its
 # prompt names it.
 app_id: system.accounts
-binary: /usr/bin/accounts
+binary: /system/bin/accounts
 command: true
 permissions: []

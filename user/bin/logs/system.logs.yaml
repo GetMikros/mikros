@@ -1,8 +1,8 @@
 # The program manifest of logs, installed as
-# usr/lib/programs/system.logs.yaml: a command, which reads the system
+# system/programs/system.logs.yaml: a command, which reads the system
 # log once an administrator allowed it. It holds no permissions, so that
 # its prompt names it.
 app_id: system.logs
-binary: /usr/bin/logs
+binary: /system/bin/logs
 command: true
 permissions: []

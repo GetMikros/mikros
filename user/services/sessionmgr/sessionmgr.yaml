@@ -1,13 +1,13 @@
 # The service manifest of the session manager, installed as
-# usr/lib/services/sessionmgr.yaml.
+# system/services/system.sessionmgr/service.yaml.
 name: sessionmgr
-binary: /usr/bin/sessionmgr
+binary: /system/services/system.sessionmgr/sessionmgr
 start: boot
 after: [devicemgr, accountsvc]
 # To start the text console, the setup program and users' shells,
 # and the dynamic linker they load.
 namespace:
-  - path: /usr
+  - path: /system
     rights: rx
 permissions:
   - system.user_id.set

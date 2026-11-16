@@ -1,9 +1,9 @@
 # The service manifest of the log service, installed as
-# usr/lib/services/logsvc.yaml.
+# system/services/system.logsvc/service.yaml.
 name: logsvc
-binary: /usr/bin/logsvc
+binary: /system/services/system.logsvc/logsvc
 start: boot
-boot_handles: [log_manage]
+boot_handles: [log_manage, platform_info]
 permissions: [system.filesystems.mount]
 provides:
   - protocol: mikros.log.Writer

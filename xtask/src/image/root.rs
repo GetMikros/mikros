@@ -17,33 +17,38 @@ pub fn version(kind: Kind) -> String {
     format!("{}-{}", env!("CARGO_PKG_VERSION"), kind.name())
 }
 
-/// The directories of the system image.
-const SYSTEM_DIRS: [&str; 6] = [
+/// The directories of a system version (MIKSPEC-0100.R2), with the empty
+/// folders at which the writable entries appear.
+const SYSTEM_DIRS: [&str; 13] = [
     "bin",
-    "lib",
-    "lib/drivers",
-    "lib/services",
-    "include",
+    "services",
+    "drivers",
+    "programs",
+    "libraries",
     "share",
-];
-
-/// The top-level directories whose contents the boot image holds at the
-/// same paths, which the root file system gets too.
-const SHARED_DIRS: [&str; 5] = ["etc", "var", "Users", "Apps", "Libraries"];
-
-/// The directories at the top level, created as directories or as
-/// subvolumes (see `subvolumes`).
-const TOP_DIRS: [&str; 9] = [
-    "etc",
-    "var",
-    "Libraries",
-    "Apps",
-    "Users",
+    "include",
+    "utilities",
+    "config",
+    "state",
+    "logs",
     "tmp",
     "boot/efi",
-    "Volumes",
-    "@system",
 ];
+
+/// The subvolumes at the top level beside `@system` (MIKSPEC-0100.R4),
+/// whose contents an archive holds at the same paths. Each folder directly
+/// below those of `PER_FOLDER` is a subvolume of its own.
+const SHARED_DIRS: [&str; 8] = [
+    "config",
+    "state",
+    "logs",
+    "drivers",
+    "libraries",
+    "apps",
+    "public",
+    "users",
+];
+const PER_FOLDER: [&str; 5] = ["drivers", "libraries", "apps", "public", "users"];
 
 /// The name of the version that `@system/previous` names in a root file
 /// system that `create` makes with one: a copy of the current version.
@@ -52,18 +57,38 @@ pub fn previous_version(kind: Kind) -> String {
 }
 
 /// The `--subvol` values for the tree written by `write_tree` with the
-/// system versions `versions`.
-fn subvolumes(versions: &[&str]) -> Vec<String> {
+/// system versions `versions`, and with the folders `folders` directly
+/// below those of `PER_FOLDER`, by their paths from the top.
+fn subvolumes(versions: &[&str], folders: &[String]) -> Vec<String> {
     let mut all = vec!["@system".to_owned()];
     all.extend(versions.iter().map(|v| format!("ro:@system/{v}")));
-    all.extend(["etc", "var", "Libraries"].map(str::to_owned));
+    all.extend(SHARED_DIRS.map(str::to_owned));
+    all.extend(folders.iter().cloned());
     all
+}
+
+/// The folders directly below those of `PER_FOLDER` in the tree `dir`,
+/// by their paths from the top, sorted.
+fn folders(dir: &Path) -> Result<Vec<String>> {
+    let mut all = Vec::new();
+    for top in PER_FOLDER {
+        for entry in fs::read_dir(dir.join(top))? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_str().context("a folder name is not UTF-8")?;
+                all.push(format!("{top}/{name}"));
+            }
+        }
+    }
+    all.sort();
+    Ok(all)
 }
 
 /// Writes the directory tree of the root file system into `dir`, which must
 /// not exist.
 fn write_tree(dir: &Path, version: &str) -> Result<()> {
-    for top in TOP_DIRS {
+    for top in SHARED_DIRS.iter().chain(&["@system"]) {
         fs::create_dir_all(dir.join(top))?;
     }
     let system = dir.join("@system");
@@ -85,10 +110,10 @@ fn symlink(_target: &str, _link: &Path) -> Result<()> {
 
 /// The mkfs.btrfs arguments that create the file system in `image` from
 /// `tree`, with crc32c checksums, which the bootloader checks.
-fn mkfs_args(tree: &Path, image: &Path, versions: &[&str]) -> Vec<OsString> {
+fn mkfs_args(tree: &Path, image: &Path, versions: &[&str], folders: &[String]) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["-q".into(), "-f".into(), "--csum".into(), "crc32c".into()];
     args.extend(["--rootdir".into(), tree.into()]);
-    for subvolume in subvolumes(versions) {
+    for subvolume in subvolumes(versions, folders) {
         args.push("--subvol".into());
         args.push(subvolume.into());
     }
@@ -97,11 +122,11 @@ fn mkfs_args(tree: &Path, image: &Path, versions: &[&str]) -> Vec<OsString> {
 }
 
 /// Where a member of an archive at `path` goes on the root file system:
-/// into the system version, at its path without `usr/` when it is in
-/// `usr`, and otherwise, outside the shared top-level directories, at the
-/// same path; `None` for those in a shared directory.
+/// into the system version, at its path without `system/` when it is in
+/// `system`, and otherwise, outside the shared top-level directories, at
+/// the same path; `None` for those in a shared directory.
 fn version_path(path: &Path) -> Option<PathBuf> {
-    if let Ok(rest) = path.strip_prefix("usr") {
+    if let Ok(rest) = path.strip_prefix("system") {
         return Some(rest.to_owned());
     }
     match path.components().next() {
@@ -239,7 +264,7 @@ pub fn create(
     File::create(&image)?.set_len(SIZE)?;
     let versions: Vec<&str> = versions.iter().map(String::as_str).collect();
     let status = Command::new("mkfs.btrfs")
-        .args(mkfs_args(&tree, &image, &versions))
+        .args(mkfs_args(&tree, &image, &versions, &folders(&tree)?))
         .status()
         .context("failed to run mkfs.btrfs")?;
     if !status.success() {
@@ -262,7 +287,13 @@ mod tests {
     #[test]
     fn makes_the_system_version_a_read_only_subvolume() {
         let versions = ["1.0-debug", "0.9-debug"];
-        let args = mkfs_args(Path::new("tree"), Path::new("root.btrfs"), &versions);
+        let folders = ["users/ada".to_owned()];
+        let args = mkfs_args(
+            Path::new("tree"),
+            Path::new("root.btrfs"),
+            &versions,
+            &folders,
+        );
         let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,
@@ -280,11 +311,23 @@ mod tests {
                 "--subvol",
                 "ro:@system/0.9-debug",
                 "--subvol",
-                "etc",
+                "config",
                 "--subvol",
-                "var",
+                "state",
                 "--subvol",
-                "Libraries",
+                "logs",
+                "--subvol",
+                "drivers",
+                "--subvol",
+                "libraries",
+                "--subvol",
+                "apps",
+                "--subvol",
+                "public",
+                "--subvol",
+                "users",
+                "--subvol",
+                "users/ada",
                 "root.btrfs"
             ]
         );
@@ -306,15 +349,16 @@ mod tests {
             archive.append_data(&mut header, name, data).unwrap();
         };
         add("init", b"init");
-        add("usr/bin/tool", b"tool");
-        add("usr/lib/services/s.yaml", b"name: s");
-        add("etc/config", b"config");
+        add("system/bin/tool", b"tool");
+        add("system/services/system.s/service.yaml", b"name: s");
+        add("config/hostname", b"config");
+        add("users/ada/documents/a", b"a");
         add("tests/data", b"data");
         let mut link = tar::Header::new_ustar();
         link.set_entry_type(tar::EntryType::Symlink);
         link.set_size(0);
         archive
-            .append_link(&mut link, "usr/bin/alias", "tool")
+            .append_link(&mut link, "system/bin/alias", "tool")
             .unwrap();
         archive.finish().unwrap();
         drop(archive);
@@ -322,36 +366,58 @@ mod tests {
         copy_boot_image(&tree, "v1", &image).unwrap();
         assert_eq!(
             boot_list(&image).unwrap(),
-            "init\nbin/tool\nlib/services/s.yaml\ntests/data\nbin/alias\n"
+            "init\nbin/tool\nservices/system.s/service.yaml\ntests/data\nbin/alias\n"
         );
         assert_eq!(fs::read(tree.join("@system/v1/bin/tool")).unwrap(), b"tool");
         assert_eq!(
-            fs::read(tree.join("@system/v1/lib/services/s.yaml")).unwrap(),
+            fs::read(tree.join("@system/v1/services/system.s/service.yaml")).unwrap(),
             b"name: s"
         );
-        assert_eq!(fs::read(tree.join("etc/config")).unwrap(), b"config");
+        assert_eq!(fs::read(tree.join("config/hostname")).unwrap(), b"config");
+        assert_eq!(folders(&tree).unwrap(), ["users/ada"]);
         assert_eq!(fs::read(tree.join("@system/v1/init")).unwrap(), b"init");
         assert_eq!(
             fs::read(tree.join("@system/v1/tests/data")).unwrap(),
             b"data"
         );
         assert!(!tree.join("init").exists() && !tree.join("tests").exists());
-        assert!(!tree.join("usr").exists());
+        assert!(!tree.join("system").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn writes_the_tree_without_usr() {
+    fn writes_the_tree_of_subvolumes_and_the_version() {
         let dir = std::env::temp_dir().join(format!("xtask-root-{}", std::process::id()));
         write_tree(&dir, "v1").unwrap();
-        assert!(dir.join("@system/v1/lib/services").is_dir());
+        for sub in [
+            "services", "drivers", "config", "state", "logs", "tmp", "boot/efi",
+        ] {
+            assert!(dir.join("@system/v1").join(sub).is_dir(), "{sub}");
+        }
         assert_eq!(
             fs::read_link(dir.join("@system/current")).unwrap(),
             Path::new("v1")
         );
-        assert!(dir.join("boot/efi").is_dir() && dir.join("etc").is_dir());
-        assert!(!dir.join("usr").exists());
+        let mut top: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        top.sort();
+        assert_eq!(
+            top,
+            [
+                "@system",
+                "apps",
+                "config",
+                "drivers",
+                "libraries",
+                "logs",
+                "public",
+                "state",
+                "users"
+            ]
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1,9 +1,9 @@
 # The service manifest of the restart probe as the boot service of
 # tests/acpi-restart.img, installed as
-# usr/lib/services/acpi-restart-probe.yaml. It logs through the kernel
+# system/services/system.acpi-restart-probe/service.yaml. It logs through the kernel
 # log.
 name: acpi-restart-probe
-binary: /usr/bin/restart-probe
+binary: /system/services/system.restart-probe/restart-probe
 start: boot
 after: [devicemgr]
 boot_handles: [log_manage]

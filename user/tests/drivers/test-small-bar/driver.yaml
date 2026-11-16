@@ -2,5 +2,5 @@
 # long, for the PCI bus driver tests: it maps that BAR's page through
 # the resource that GetBar gives. It never enables the watchdog.
 name: test-small-bar
-binary: /usr/lib/drivers/test-small-bar/test-small-bar
+binary: /system/drivers/system.driver.test-small-bar/test-small-bar
 match: [pci:v8086d25ab]

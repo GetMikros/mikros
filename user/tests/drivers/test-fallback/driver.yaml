@@ -1,5 +1,5 @@
 # A fallback driver for PCI host bridges, which the normal one beats.
 name: test-fallback
-binary: /usr/lib/drivers/test-fallback/test-fallback
+binary: /system/drivers/system.driver.test-fallback/test-fallback
 match: [platform:pci-host-ecam]
 kind: fallback

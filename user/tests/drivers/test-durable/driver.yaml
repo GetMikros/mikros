@@ -3,5 +3,5 @@
 # for the runner to find in QEMU's logs of their writes, and declines the
 # others.
 name: test-durable
-binary: /usr/lib/drivers/test-durable/test-durable
+binary: /system/drivers/system.driver.test-durable/test-durable
 match: [storage:partition]

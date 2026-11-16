@@ -1,7 +1,7 @@
 # The service manifest of the diagnostic service, installed as
-# usr/lib/services/diagsvc.yaml in the diagnostic build only.
+# system/services/system.diagsvc/service.yaml in the diagnostic build only.
 name: diagsvc
-binary: /usr/bin/diagsvc
+binary: /system/services/system.diagsvc/diagsvc
 start: boot
 boot_handles: [root_resource]
 # system.permissions.read to check its clients' system.diagnostics.read.

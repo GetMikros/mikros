@@ -1,10 +1,10 @@
 # The manifest of the probe of a live system's namespace, a boot service
 # on the live run's root partition.
 name: live-probe
-binary: /usr/bin/live-probe
+binary: /system/services/system.live-probe/live-probe
 start: boot
 namespace:
-  - path: /usr/share/live-probe
+  - path: /system/share/live-probe
     rights: r
-  - path: /etc
+  - path: /system/config
     rights: rw

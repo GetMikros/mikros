@@ -1,19 +1,19 @@
 # The manifest of the probe of namespaces built from the boot image, a
 # boot service of the namespaces test image.
 name: namespace-probe
-binary: /usr/bin/namespace-probe
+binary: /system/services/system.namespace-probe/namespace-probe
 start: boot
 after: [tmpfs]
 namespace:
-  - path: /usr/share/probe
+  - path: /system/share/probe
     rights: r
-  # Its programs, to start a copy of itself.
-  - path: /usr/bin
+  # Its folder, to start a copy of itself.
+  - path: /system/services/system.namespace-probe
     rights: rx
   # Executable, so that a program copied there can be started.
-  - path: /var/lib/namespace-probe
+  - path: /system/state/namespace-probe
     rights: rwx
-  - path: /etc
+  - path: /system/config
     rights: r
 # To start a copy of itself as a command-line tool, and as a native app.
 permissions: [system.identity.set]

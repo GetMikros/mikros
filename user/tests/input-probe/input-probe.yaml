@@ -1,8 +1,8 @@
 # The service manifest of the input probe as the boot service of
-# tests/input.img, installed as usr/lib/services/input-probe.yaml. It
+# tests/input.img, installed as system/services/system.input-probe/service.yaml. It
 # logs through the kernel log.
 name: input-probe
-binary: /usr/bin/input-probe
+binary: /system/services/system.input-probe/input-probe
 start: boot
 after: [devicemgr]
 boot_handles: [log_manage]

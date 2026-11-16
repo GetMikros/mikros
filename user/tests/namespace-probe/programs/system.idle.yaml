@@ -2,5 +2,5 @@
 # on-demand service idle, which the service manager ignores. Nothing
 # connects to idle, so nothing starts it.
 app_id: system.idle
-binary: /usr/bin/namespace-probe
+binary: /system/bin/namespace-probe
 permissions: [admin.logs.read]

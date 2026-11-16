@@ -2,6 +2,6 @@
 # binary, which holds no permissions, and for which the authorization
 # stub turns down admin.accounts.manage when the broker asks.
 name: accounts-guest
-binary: /usr/bin/accounts-probe
+binary: /system/services/system.accounts-probe/accounts-probe
 start: boot
 after: [tmpfs]

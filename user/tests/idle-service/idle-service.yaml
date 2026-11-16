@@ -1,9 +1,9 @@
 # The service manifest of the idle service, which only the setup run's
-# root holds, installed as usr/lib/services/idle-service.yaml. It is
+# root holds, installed as system/services/system.idle-service/service.yaml. It is
 # restarted whenever it ends, so that it runs again unless the service
 # manager holds it stopped.
 name: idle-service
-binary: /usr/bin/idle-service
+binary: /system/services/system.idle-service/idle-service
 start: boot
 restart: always
 stop_timeout: 1

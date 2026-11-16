@@ -1,7 +1,7 @@
 # The service manifest of the temporary file system, installed as
-# usr/lib/services/tmpfs.yaml.
+# system/services/system.tmpfs/service.yaml.
 name: tmpfs
-binary: /usr/bin/tmpfs
+binary: /system/services/system.tmpfs/tmpfs
 start: boot
 provides:
   - protocol: mikros.fs.Filesystem

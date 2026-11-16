@@ -2,13 +2,14 @@
 //! packages in the `user` workspaces declare them in
 //! `[package.metadata.mikros]`:
 //!
-//! - `kind`: where the program goes. A `core` component or a `program`
-//!   goes to `usr/bin/<name>`, a program with its manifest in
-//!   `usr/lib/programs/`; a `service` goes to `usr/bin/<name>` with its
-//!   manifest in `usr/lib/services/`; a `driver` goes to
-//!   `usr/lib/drivers/<name>/<name>` with its `driver.yaml`; a `test`, a
-//!   system test, which only test images hold, goes to
-//!   `usr/bin/tests/<name>`.
+//! - `kind`: where the program goes. A `core` component goes to
+//!   `system/<name>`; a `program` goes to `system/bin/<name>`, with its
+//!   manifest in `system/programs/`; a `service` goes to
+//!   `system/services/system.<name>/<name>` with its manifest
+//!   `service.yaml` there; a `driver` goes to
+//!   `system/drivers/system.driver.<name>/<name>` with its `driver.yaml`;
+//!   a `test`, a system test, which only test images hold, goes to
+//!   `system/bin/tests/<name>`.
 //! - `image`: `boot` for the boot image, which the system image holds
 //!   as well, `system` for the system image only, or `tests` for test
 //!   images only.
@@ -21,7 +22,7 @@
 //! - `path`: the member name of the program instead, for `init`.
 //! - `completions`: the file name, in its package, of the declarations of
 //!   a program's arguments for msh, installed as
-//!   `usr/share/msh/completions/<name>.msh`.
+//!   `system/share/msh/completions/<name>.msh`.
 
 use crate::build::Kind;
 use anyhow::{Context, Result, bail};
@@ -89,22 +90,24 @@ impl Component {
         let name = &self.name;
         let at = match (&self.path, self.role) {
             (Some(path), _) => path.clone(),
-            (None, Role::Driver) => format!("usr/lib/drivers/{name}/{name}"),
-            (None, Role::Test) => format!("usr/bin/tests/{name}"),
-            (None, _) => format!("usr/bin/{name}"),
+            (None, Role::Driver) => format!("{}/{name}", driver_dir(name)),
+            (None, Role::Service) => format!("{}/{name}", service_dir(name)),
+            (None, Role::Core) => format!("system/{name}"),
+            (None, Role::Test) => format!("system/bin/tests/{name}"),
+            (None, Role::Program) => format!("system/bin/{name}"),
         };
         let mut members = vec![(at, program.to_path_buf())];
         let manifest = match (self.role, &self.manifest) {
             (Role::Driver, _) => Some((
-                format!("usr/lib/drivers/{name}/driver.yaml"),
+                format!("{}/driver.yaml", driver_dir(name)),
                 self.dir.join("driver.yaml"),
             )),
             (Role::Service, Some(file)) => Some((
-                format!("usr/lib/services/{file}"),
+                format!("{}/service.yaml", service_dir(name)),
                 self.manifest_source(kind, file),
             )),
             (Role::Program, Some(file)) => Some((
-                format!("usr/lib/programs/{file}"),
+                format!("system/programs/{file}"),
                 self.manifest_source(kind, file),
             )),
             (Role::Service, None) => bail!("the service {name} names no manifest"),
@@ -114,7 +117,7 @@ impl Component {
         members.extend(manifest);
         if let Some(file) = &self.completions {
             members.push((
-                format!("usr/share/msh/completions/{name}.msh"),
+                format!("system/share/msh/completions/{name}.msh"),
                 self.dir.join(file),
             ));
         }
@@ -133,6 +136,17 @@ impl Component {
             self.dir.join(file)
         }
     }
+}
+
+/// The folder in an image of the service `name`, named by its app ID.
+pub fn service_dir(name: &str) -> String {
+    format!("system/services/system.{name}")
+}
+
+/// The folder in an image of the system's driver `name`, named by its app
+/// ID.
+pub fn driver_dir(name: &str) -> String {
+    format!("system/drivers/system.driver.{name}")
 }
 
 /// Every component, in the order of `cargo metadata`, which is by name.
@@ -311,19 +325,25 @@ mod tests {
         assert_eq!(
             members(0),
             [
-                "usr/lib/drivers/nvme/nvme",
-                "usr/lib/drivers/nvme/driver.yaml"
+                "system/drivers/system.driver.nvme/nvme",
+                "system/drivers/system.driver.nvme/driver.yaml"
             ]
         );
         assert_eq!(
             members(1),
-            ["usr/bin/logsvc", "usr/lib/services/logsvc.yaml"]
+            [
+                "system/services/system.logsvc/logsvc",
+                "system/services/system.logsvc/service.yaml"
+            ]
         );
         assert_eq!(members(2), ["init"]);
-        assert_eq!(members(3), ["usr/bin/msh"]);
+        assert_eq!(members(3), ["system/bin/msh"]);
         assert_eq!(
             members(4),
-            ["usr/bin/devices", "usr/share/msh/completions/devices.msh"]
+            [
+                "system/bin/devices",
+                "system/share/msh/completions/devices.msh"
+            ]
         );
         assert_eq!(components[3].runtime, Runtime::Std);
         assert_eq!(components[0].runtime, Runtime::Rt);
@@ -350,7 +370,7 @@ mod tests {
         let members = components[0]
             .members(Kind::Debug, Path::new("/bin"))
             .unwrap();
-        assert_eq!(members[0].0, "usr/bin/tests/files");
+        assert_eq!(members[0].0, "system/bin/tests/files");
         assert_eq!(members.len(), 1);
         let elsewhere = serde_json::json!({ "packages": [package("files",
             serde_json::json!({"kind": "test", "image": "system"}))]});

@@ -1,7 +1,7 @@
 # The manifest of the ACPI server, installed as
-# usr/lib/drivers/acpi/driver.yaml.
+# system/drivers/system.driver.acpi/driver.yaml.
 name: acpi
-binary: /usr/lib/drivers/acpi/acpi
+binary: /system/drivers/system.driver.acpi/acpi
 match: [platform:acpi]
 kind: normal
 needs: [bus, ioports]

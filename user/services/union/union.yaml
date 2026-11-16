@@ -1,7 +1,7 @@
 # The service manifest of the union server, installed as
-# usr/lib/services/union.yaml.
+# system/services/system.union/service.yaml.
 name: union
-binary: /usr/bin/union
+binary: /system/services/system.union/union
 start: boot
 after: [tmpfs]
 provides:

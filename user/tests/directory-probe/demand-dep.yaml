@@ -1,3 +1,3 @@
 name: demand-dep
-binary: /usr/bin/directory-probe
+binary: /system/services/system.directory-probe/directory-probe
 start: on-demand

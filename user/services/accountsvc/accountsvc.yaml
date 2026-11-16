@@ -1,15 +1,15 @@
 # The service manifest of the accounts service, installed as
-# usr/lib/services/accountsvc.yaml.
+# system/services/system.accountsvc/service.yaml.
 name: accountsvc
-binary: /usr/bin/accountsvc
+binary: /system/services/system.accountsvc/accountsvc
 start: boot
 after: [tmpfs]
 provides:
   - protocol: mikros.session.Accounts
 namespace:
-  - path: /var/lib/accounts
+  - path: /system/state/accounts
     rights: rw
-  - path: /Users
+  - path: /users
     rights: rw
 # system.subvolumes.manage is only for creating and deleting the subvolumes of
 # users' home folders on the root file system.

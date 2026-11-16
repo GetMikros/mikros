@@ -1,10 +1,10 @@
 # The program manifest of the setup program, installed as
-# usr/lib/programs/system.setup.yaml.
+# system/programs/system.setup.yaml.
 app_id: system.setup
-binary: /usr/bin/setup
+binary: /system/bin/setup
 spawned_by:
   - system.sessionmgr
-# It writes the computer's name to /etc/hostname, and nothing else there.
+# It writes the computer's name to /system/config/hostname, and nothing else there.
 namespace:
-  - path: /etc
+  - path: /system/config
     rights: rw

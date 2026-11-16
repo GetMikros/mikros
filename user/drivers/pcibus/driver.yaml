@@ -1,7 +1,7 @@
 # The manifest of the PCI bus driver, installed as
-# usr/lib/drivers/pcibus/driver.yaml.
+# system/drivers/system.driver.pcibus/driver.yaml.
 name: pcibus
-binary: /usr/lib/drivers/pcibus/pcibus
+binary: /system/drivers/system.driver.pcibus/pcibus
 match: [platform:pci-host-ecam]
 kind: normal
 needs: [bus, dma]

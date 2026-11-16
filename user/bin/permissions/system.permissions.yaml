@@ -1,8 +1,8 @@
 # The program manifest of permissions, installed as
-# usr/lib/programs/system.permissions.yaml: a command, which lists and
+# system/programs/system.permissions.yaml: a command, which lists and
 # changes the users' decisions on permissions. The broker asks for an
 # administrator before it allows one or acts for another user.
 app_id: system.permissions
-binary: /usr/bin/permissions
+binary: /system/bin/permissions
 command: true
 permissions: [system.grants.manage]

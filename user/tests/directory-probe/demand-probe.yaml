@@ -1,5 +1,5 @@
 name: demand-probe
-binary: /usr/bin/directory-probe
+binary: /system/services/system.directory-probe/directory-probe
 start: on-demand
 after: [demand-dep]
 provides:

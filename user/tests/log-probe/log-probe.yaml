@@ -1,4 +1,4 @@
 name: log-probe
-binary: /usr/bin/log-probe
+binary: /system/services/system.log-probe/log-probe
 start: boot
 permissions: [admin.logs.read]

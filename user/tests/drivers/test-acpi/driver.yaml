@@ -2,7 +2,7 @@
 # the acpi and rtc services as their client. With no kind, it is a normal
 # driver.
 name: test-acpi
-binary: /usr/lib/drivers/test-acpi/test-acpi
+binary: /system/drivers/system.driver.test-acpi/test-acpi
 match: [platform:pci-host-ecam]
 # To connect to the acpi and rtc services.
 permissions: [system.devices.manage, admin.time.set]

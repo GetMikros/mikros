@@ -2,10 +2,10 @@
 # parent of the accounts service's data directory, so that the process
 # manager refuses to start it. The probe connects to it on demand.
 name: accounts-thief
-binary: /usr/bin/accounts-probe
+binary: /system/services/system.accounts-probe/accounts-probe
 start: on-demand
 provides:
   - protocol: test.accounts.Thief
 namespace:
-  - path: /var/lib
+  - path: /system/state
     rights: r

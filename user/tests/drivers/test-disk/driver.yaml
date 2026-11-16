@@ -3,6 +3,6 @@
 # user.volumes.access through the broker, without an administrator, to
 # reach the device manager's removal service.
 name: test-disk
-binary: /usr/lib/drivers/test-disk/test-disk
+binary: /system/drivers/system.driver.test-disk/test-disk
 match: [storage:partition]
 permissions: [system.grants.manage, admin.grants.manage]

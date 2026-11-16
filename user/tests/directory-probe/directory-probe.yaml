@@ -1,5 +1,5 @@
 name: directory-probe
-binary: /usr/bin/directory-probe
+binary: /system/services/system.directory-probe/directory-probe
 start: boot
 provides:
   - protocol: test.directory.Open

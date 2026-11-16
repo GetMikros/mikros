@@ -1,14 +1,14 @@
 # The manifest of the probe of USB volumes, a boot service of the test
 # image of the USB volumes run.
 name: volumes-probe
-binary: /usr/bin/volumes-probe
+binary: /system/services/system.volumes-probe/volumes-probe
 start: boot
 after: [devicemgr, tmpfs]
 boot_handles: [log_manage]
 # To grant itself user.volumes.access, which its copy then holds, without
 # an administrator, and for the copy to kill the xHCI driver.
 permissions: [system.grants.manage, admin.grants.manage, system.processes.control]
-# Its program, to start the copy.
+# Its folder, to start the copy from its program.
 namespace:
-  - path: /usr/bin
+  - path: /system/services/system.volumes-probe
     rights: rx

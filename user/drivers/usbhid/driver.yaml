@@ -1,6 +1,6 @@
 # The manifest of the USB HID driver, installed as
-# usr/lib/drivers/usbhid/driver.yaml.
+# system/drivers/system.driver.usbhid/driver.yaml.
 name: usbhid
-binary: /usr/lib/drivers/usbhid/usbhid
+binary: /system/drivers/system.driver.usbhid/usbhid
 match: [usb:c03]
 kind: normal

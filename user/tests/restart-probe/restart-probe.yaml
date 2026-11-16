@@ -1,8 +1,8 @@
 # The service manifest of the restart probe, the boot service of
-# tests/bus.img, installed as usr/lib/services/restart-probe.yaml. It
+# tests/bus.img, installed as system/services/system.restart-probe/service.yaml. It
 # logs through the kernel log.
 name: restart-probe
-binary: /usr/bin/restart-probe
+binary: /system/services/system.restart-probe/restart-probe
 start: boot
 after: [devicemgr]
 boot_handles: [log_manage]
@@ -13,5 +13,5 @@ permissions: [system.filesystems.mount, system.processes.control]
 # probe, which starts before the root, and the root's for the copy that
 # it starts once the root is there, which starts a program from it.
 namespace:
-  - path: /usr
+  - path: /system
     rights: rx
