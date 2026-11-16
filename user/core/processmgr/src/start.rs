@@ -483,6 +483,35 @@ pub fn with_tmpdir(arguments: OwnedHandle) -> Result<OwnedHandle, Status> {
     }
 }
 
+/// The `arguments` memory object `arguments` with each of `variables` set
+/// in its environment, replacing a variable of that name it had. An
+/// object that does not hold as many strings as it counts is given as it
+/// is.
+pub fn with_variables(
+    arguments: OwnedHandle,
+    variables: &[(&str, &str)],
+) -> Result<OwnedHandle, Status> {
+    let bytes = read_arguments(&arguments)?;
+    let Some((args, env)) = decode(&bytes) else {
+        return Ok(arguments);
+    };
+    let set: Vec<Vec<u8>> = variables
+        .iter()
+        .map(|(name, value)| format!("{name}={value}").into_bytes())
+        .collect();
+    let env: Vec<&[u8]> = env
+        .into_iter()
+        .filter(|var| {
+            !variables.iter().any(|(name, _)| {
+                var.strip_prefix(name.as_bytes())
+                    .is_some_and(|r| r.starts_with(b"="))
+            })
+        })
+        .chain(set.iter().map(Vec::as_slice))
+        .collect();
+    memory(&encode(&args, &env))
+}
+
 /// The `arguments` memory object `arguments` for the interpreter of the
 /// script `script`: `before`, the script's path, and the arguments after
 /// the first (MIKSPEC-0034.R44). `INVALID_ARGS` when the object does not

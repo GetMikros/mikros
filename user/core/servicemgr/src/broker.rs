@@ -27,6 +27,8 @@ const PROCESS_MANAGER_PERMISSIONS: &[&str] = &[
     "system.filesystems.mount",
     "system.unions.create",
     "system.permissions.read",
+    // For users' folders of installed apps (MIKSPEC-0101.R38).
+    "system.subvolumes.manage",
 ];
 /// The `id` of the manifest among the broker's `USER` startup handles.
 const MANIFEST_ID: u32 = 0;

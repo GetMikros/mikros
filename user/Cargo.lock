@@ -60,6 +60,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-probe"
+version = "0.0.0"
+
+[[package]]
 name = "argon2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -875,6 +879,7 @@ dependencies = [
  "mikros-bootfs",
  "mikros-loader",
  "mikros-manifest",
+ "mikros-mika",
  "mikros-rt",
 ]
 

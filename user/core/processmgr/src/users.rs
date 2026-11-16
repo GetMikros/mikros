@@ -1,6 +1,7 @@
 //! What a user's namespace needs from other services: the user's name,
-//! from the accounts service, and views that merge directories, from
-//! the union service. Both are reached through the process manager's
+//! from the accounts service, views that merge directories, from the
+//! union service, and new subvolumes, from the root file system's
+//! subvolume management. All are reached through the process manager's
 //! own directory.
 
 use crate::processes::Shared;
@@ -8,20 +9,54 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::interfaces::__midl::{ClientEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::fs::{Layer, Node, Rights, Union, UnionAsyncClient};
+use mikros_rt::interfaces::mikros::fs::btrfs::{Subvolumes, SubvolumesAsyncClient};
+use mikros_rt::interfaces::mikros::fs::{Error, Layer, Node, Rights, Union, UnionAsyncClient};
 use mikros_rt::interfaces::mikros::session::{Accounts, AccountsAsyncClient};
 
 const ACCOUNTS: &str = "mikros.session.Accounts";
 const UNION: &str = "mikros.fs.Union";
+/// The root file system's subvolume management, and its instance.
+const SUBVOLUMES: &str = "device.subvolumes";
+const ROOT: &str = "root";
 
 /// A connection to `protocol` through the process manager's directory.
 async fn connect<P>(shared: &Shared, protocol: &str) -> Option<ClientEnd<P>> {
+    connect_to(shared, protocol, None).await
+}
+
+/// A connection to `instance`, or any instance, of `protocol` through
+/// the process manager's directory.
+async fn connect_to<P>(
+    shared: &Shared,
+    protocol: &str,
+    instance: Option<&str>,
+) -> Option<ClientEnd<P>> {
     let directory = shared.permissions.directory()?;
     let (client, server) = endpoints::<P>().ok()?;
     let connected = directory
-        .connect(protocol.into(), None, server.into_handle())
+        .connect(
+            protocol.into(),
+            instance.map(String::from),
+            server.into_handle(),
+        )
         .await;
     matches!(connected, Ok(Ok(_))).then_some(client)
+}
+
+/// Makes `path`, from the root of the root file system, a new subvolume.
+/// Fails with `NOT_SUPPORTED` when the root file system has no subvolume
+/// management to reach, as tmpfs has not.
+pub async fn subvolume(shared: &Shared, path: &str) -> Result<(), Status> {
+    let client = connect_to::<Subvolumes>(shared, SUBVOLUMES, Some(ROOT))
+        .await
+        .ok_or(Status::NotSupported)?;
+    let subvolumes = SubvolumesAsyncClient::new(client, shared.reactor.clone());
+    match subvolumes.create(path.into()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(Error::NotSupported)) => Err(Status::NotSupported),
+        Ok(Err(e)) => Err(crate::namespace::status(e)),
+        Err(_) => Err(Status::PeerClosed),
+    }
 }
 
 /// The name of user `user`, from the record that `ListUsers` of the

@@ -41,7 +41,7 @@ const SESSION_MANAGER: &str = "system.sessionmgr";
 const CALLER_USER: u32 = u32::MAX;
 /// The signal that ends a process at once.
 const SIGKILL: u32 = 9;
-/// App IDs that need no bundle.
+/// App IDs that need no package.
 const SYSTEM_PREFIX: &str = "system.";
 /// The app ID that `user.full_disk.access` lets a caller name, for programs
 /// in `CLI_PROGRAMS`.
@@ -307,12 +307,21 @@ async fn exec(
     Ok(LauncherExecResponse {})
 }
 
+/// Whether `program`, a path relative to the root, lies in the installed
+/// package of `app_id`: below `apps/<id>/` or below
+/// `users/<user>/apps/<id>/package/`, once normalized.
+fn in_package(program: &str, app_id: &str) -> bool {
+    mikros_manifest::path::normalize(&format!("/{program}"))
+        .is_some_and(|normal| crate::namespace::package_of(&normal) == Some(app_id))
+}
+
 /// Checks that process `caller` may give the new process of `program`, a
 /// path relative to the boot file system's root, `app_id`, and returns
 /// it. A caller with `user.full_disk.access` may name `system.cli` for a
 /// program under `/system/bin`. Any other app ID needs
 /// `system.identity.set`, and one outside `system.` needs the program
-/// to lie in the app's bundle under `/apps`. A `system.` app ID with a
+/// to lie in the app's package, under `/apps` or a user's
+/// `apps/<id>/package`. A `system.` app ID with a
 /// program manifest needs a manifest that is valid, the program to be
 /// its `binary`, and the caller's app ID in its `spawned_by`; one whose
 /// manifest cannot be used is refused. A program manifest of a service's
@@ -347,9 +356,11 @@ async fn named_app(
         return Err(Status::AccessDenied);
     }
     let Some(name) = app_id.strip_prefix(SYSTEM_PREFIX) else {
-        // User bundles are not in the boot file system.
+        // The app's package: on the boot file system, or installed for
+        // every user or for one (MIKSPEC-0034.R43).
         let bundle = format!("apps/{app_id}");
-        return match !app_id.contains('/') && shared.fs.lies_in(program, &bundle) {
+        let installed = in_package(program, app_id);
+        return match !app_id.contains('/') && (installed || shared.fs.lies_in(program, &bundle)) {
             true => Ok(app_id.into()),
             false => Err(Status::AccessDenied),
         };

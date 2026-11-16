@@ -80,6 +80,11 @@ const BOOT_EFI: &str = "/system/boot/efi";
 const APPS: &str = "/apps";
 /// The directory of the other volumes, and the permission it needs.
 const VOLUMES: &str = "/volumes";
+/// The folders that apps share (MIKSPEC-0101.R33).
+const PUBLIC: &str = "/public";
+/// The permission that lets an app write its installed package
+/// (MIKSPEC-0101.R7).
+const APPS_WRITE: &str = "admin.apps.write";
 /// The system version, its configuration, and the folders of services'
 /// and drivers' temporary files and state.
 const SYSTEM_ENTRY: &str = "/system";
@@ -216,6 +221,26 @@ impl Programs {
             .max_by_key(|&(len, ..)| len)
             .map(|(_, origin, rest)| (origin, rest))
     }
+}
+
+/// The ID of the installed app whose package holds the normalized
+/// absolute `path`: one below `/apps/<id>/` or below
+/// `/users/<user>/apps/<id>/package/` (MIKSPEC-0101.R36).
+pub fn package_of(path: &str) -> Option<&str> {
+    let (id, below) = match path.strip_prefix("/apps/") {
+        Some(rest) => rest.split_once('/')?,
+        None => {
+            let rest = path.strip_prefix("/users/")?;
+            let (user, rest) = rest.split_once('/')?;
+            let (id, rest) = rest.strip_prefix("apps/")?.split_once('/')?;
+            let below = rest.strip_prefix("package/")?;
+            if user.is_empty() {
+                return None;
+            }
+            (id, below)
+        }
+    };
+    (!below.is_empty() && mikros_mika::id::is_valid(id)).then_some(id)
 }
 
 /// Adds `entry`, with where its programs come from, to `entries` and
@@ -471,7 +496,7 @@ impl Namespaces {
             let app_id = shared.records.borrow().get(pid).map(|r| r.app_id.clone());
             if let Some(app_id) = app_id {
                 match self.of(shared, &app_id, 0, 0, true).await {
-                    Ok((_, programs)) => {
+                    Ok((_, programs, _)) => {
                         if let Some(record) = shared.records.borrow_mut().get_mut(pid) {
                             record.programs = Rc::new(programs);
                         }
@@ -522,7 +547,7 @@ impl Namespaces {
         user: u32,
         admin: u32,
         service_manager: bool,
-    ) -> Result<(Vec<NamespaceEntry>, Programs), Status> {
+    ) -> Result<(Vec<NamespaceEntry>, Programs, Option<App>), Status> {
         let dev = NamespaceEntry {
             path: "/dev".into(),
             directory: shared.dev.directory()?,
@@ -537,11 +562,12 @@ impl Namespaces {
                 },
                 dev
             ];
-            return Ok((entries, Programs::boot()));
+            return Ok((entries, Programs::boot(), None));
         };
         let reactor = &shared.reactor;
         let mut entries = Vec::new();
         let mut origins = Vec::new();
+        let mut app = None;
         if service_manager {
             add(
                 &mut entries,
@@ -598,12 +624,24 @@ impl Namespaces {
                 none(tmp(&tmpfs, &format!("cli/{user}"), "/tmp", budget, reactor).await?),
             );
         } else if !app_id.starts_with("system.") {
-            // A native app.
+            // A native app, which runs for a user.
             if user == 0 {
                 return Err(Status::AccessDenied);
             }
-            // Its profile names the user, whose name is not known yet.
-            return Err(Status::NotSupported);
+            let name = crate::users::name(shared, user).await?;
+            let started = self
+                .app(
+                    shared,
+                    &ready,
+                    app_id,
+                    user,
+                    admin,
+                    &name,
+                    &mut entries,
+                    &mut origins,
+                )
+                .await?;
+            app = Some(started);
         } else {
             let (kind, listed) = manifest_entries(self, shared, app_id).await;
             if kind == Manifest::Program {
@@ -721,7 +759,219 @@ impl Namespaces {
             add(&mut entries, &mut origins, none(volumes));
         }
         add(&mut entries, &mut origins, none(dev));
-        Ok((entries, Programs { entries: origins }))
+        Ok((entries, Programs { entries: origins }, app))
+    }
+
+    /// The entries of the installed app `app_id` for user `user`, named
+    /// `name` (MIKSPEC-0101.R7, MIKSPEC-0050.R45): `/system` and
+    /// `/libraries`, `/apps/<id>`, a view of the installed package below
+    /// the user's `data` folder of the app, its `cache` and its `package`,
+    /// `/public` and, when it exists, `/public/<id>`, and a `/tmp` of its
+    /// own; and how it starts.
+    #[allow(clippy::too_many_arguments)]
+    async fn app(
+        &self,
+        shared: &Shared,
+        ready: &Ready,
+        app_id: &str,
+        user: u32,
+        admin: u32,
+        name: &str,
+        entries: &mut Vec<NamespaceEntry>,
+        origins: &mut Vec<(String, Origin)>,
+    ) -> Result<App, Status> {
+        if !mikros_mika::id::is_valid(app_id) {
+            return Err(Status::InvalidArgs);
+        }
+        let reactor = &shared.reactor;
+        // Installed for every user, or for this one.
+        let global = format!("{APPS}/{app_id}");
+        let local = format!("/users/{name}/apps/{app_id}/package");
+        let (installed, mode) = match self.entry(shared, ready, &global, Rights::READ).await {
+            Ok(_) => (global.clone(), "global"),
+            Err(Status::NotFound) => (local.clone(), "local"),
+            Err(e) => return Err(e),
+        };
+        let manifest = files::read(
+            ready.roots.root(),
+            reactor,
+            &format!("{}/manifest.yaml", installed.trim_start_matches('/')),
+            SYSTEM_FILE_MAX,
+        )
+        .await
+        .map_err(|_| Status::NotFound)?;
+        let manifest =
+            mikros_mika::manifest::Manifest::parse(&manifest).map_err(|_| Status::InvalidArgs)?;
+        if manifest.id != app_id {
+            return Err(Status::InvalidArgs);
+        }
+        add(
+            entries,
+            origins,
+            self.entry(shared, ready, SYSTEM_ENTRY, RX).await?,
+        );
+        add(
+            entries,
+            origins,
+            self.entry(shared, ready, "/libraries", RX).await?,
+        );
+        // The app's own folders of the user, made where they are missing:
+        // the app's folder as a subvolume of its own (MIKSPEC-0101.R38).
+        let folder = format!("/users/{name}/apps/{app_id}");
+        let missing = matches!(
+            self.entry(shared, ready, &folder, Rights::READ).await,
+            Err(Status::NotFound)
+        );
+        if missing && matches!(ready.roots, Roots::Root(_)) {
+            self.apps_folder(shared, ready, name, user).await?;
+            match crate::users::subvolume(shared, folder.trim_start_matches('/')).await {
+                // A root file system without subvolumes gets a folder.
+                Ok(()) | Err(Status::NotSupported) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let (data, _) = self
+            .entry(shared, ready, &format!("{folder}/data"), RWX)
+            .await?;
+        let (cache, _) = self
+            .entry(shared, ready, &format!("{folder}/cache"), RWX)
+            .await?;
+        // They are the user's, as their home folder is.
+        for path in [
+            folder.clone(),
+            format!("{folder}/data"),
+            format!("{folder}/cache"),
+        ] {
+            self.own(shared, ready, &path, user).await;
+        }
+        let (package, _) = self.entry(shared, ready, &installed, RX).await?;
+        let layers = alloc::vec![
+            Layer {
+                directory: data.directory,
+                writable: true,
+            },
+            Layer {
+                directory: package.directory,
+                writable: false,
+            },
+        ];
+        let view = NodeAsyncClient::new(
+            crate::users::view(shared, layers, RWX).await?,
+            reactor.clone(),
+        );
+        let at = format!("{APPS}/{app_id}");
+        add(
+            entries,
+            origins,
+            (
+                NamespaceEntry {
+                    path: at.clone(),
+                    directory: connection(&view, RWX).await?,
+                },
+                Origin::Dir {
+                    dir: Rc::new(view),
+                    system: false,
+                },
+            ),
+        );
+        add(
+            entries,
+            origins,
+            none(NamespaceEntry {
+                path: format!("{at}/cache"),
+                directory: cache.directory,
+            }),
+        );
+        // The package itself, writable for a local install and with
+        // admin.apps.write.
+        let writes = mode == "local" || self.holds(shared, app_id, user, admin, APPS_WRITE).await;
+        let rights = if writes { RWX } else { RX };
+        let (package, origin) = self.entry(shared, ready, &installed, rights).await?;
+        add(
+            entries,
+            origins,
+            (
+                NamespaceEntry {
+                    path: format!("{at}/package"),
+                    directory: package.directory,
+                },
+                origin,
+            ),
+        );
+        add(
+            entries,
+            origins,
+            self.entry(shared, ready, PUBLIC, Rights::READ).await?,
+        );
+        if let Ok(own) = self
+            .entry(shared, ready, &format!("{PUBLIC}/{app_id}"), RW)
+            .await
+        {
+            add(entries, origins, own);
+        }
+        let budget = shared.budget_of(user, app_id)?;
+        let tmpfs = self.tmpfs().await;
+        let path = format!("apps/{user}/{app_id}");
+        add(
+            entries,
+            origins,
+            none(tmp(&tmpfs, &path, "/tmp", budget, reactor).await?),
+        );
+        let executable = manifest
+            .executable
+            .map(|e| format!("{at}/{e}"))
+            .unwrap_or_default();
+        Ok(App {
+            folder: at,
+            mode,
+            executable,
+        })
+    }
+
+    /// The path of the folder of the apps of user `user`, named `name`,
+    /// which is made, owned by the user, when it is missing.
+    async fn apps_folder(
+        &self,
+        shared: &Shared,
+        ready: &Ready,
+        name: &str,
+        user: u32,
+    ) -> Result<String, Status> {
+        let path = format!("/users/{name}/apps");
+        if let Err(Status::NotFound) = self.entry(shared, ready, &path, Rights::READ).await {
+            self.entry(shared, ready, &path, RWX).await?;
+            self.own(shared, ready, &path, user).await;
+        }
+        Ok(path)
+    }
+
+    /// Makes `user` the owner of the folder `path` of the root table, when
+    /// it can be reached; a folder that keeps its owner is still used.
+    async fn own(&self, shared: &Shared, ready: &Ready, path: &str, user: u32) {
+        if let Ok((entry, _)) = self.entry(shared, ready, path, RW).await {
+            let dir = NodeAsyncClient::new(entry.directory, shared.reactor.clone());
+            let _ = dir.set_owner(user).await;
+        }
+    }
+
+    /// Whether the processes of `app_id` and `user`, elevated by `admin`
+    /// unless it is 0, hold `permission`, as the broker says.
+    async fn holds(
+        &self,
+        shared: &Shared,
+        app_id: &str,
+        user: u32,
+        admin: u32,
+        permission: &str,
+    ) -> bool {
+        let client = ClientIdentity {
+            pid: 0,
+            user,
+            app_id: app_id.into(),
+            admin,
+            koid: 0,
+        };
+        shared.permissions.holds(client, false, permission).await
     }
 
     /// Whether the processes of `app_id` and `user`, elevated by `admin`
@@ -740,11 +990,6 @@ impl Namespaces {
             .await
     }
 
-    /// The entry `path` of the root table with `rights`, and where the
-    /// programs below it come from. A path that does not exist is made
-    /// when the rights hold `WRITE` and it lies on tmpfs, and fails with
-    /// `NOT_FOUND` otherwise; rights beyond those of its root fail with
-    /// `ACCESS_DENIED`.
     /// `/libraries` for user `name`: a read-only view of `system`, the
     /// system's, merged with the user's `libraries` folder, or `system`
     /// alone when the user has none.
@@ -774,6 +1019,11 @@ impl Namespaces {
         }))
     }
 
+    /// The entry `path` of the root table with `rights`, and where the
+    /// programs below it come from. A path that does not exist is made
+    /// when the rights hold `WRITE` and it lies on tmpfs, and fails with
+    /// `NOT_FOUND` otherwise; rights beyond those of its root fail with
+    /// `ACCESS_DENIED`.
     async fn entry(
         &self,
         shared: &Shared,
@@ -799,12 +1049,9 @@ impl Namespaces {
             (CONFIG, config, RWX),
             (STATE, state, RWX),
             ("/system/logs", logs, RWX),
-            (APPS, Source::Dir(root.clone(), "apps"), Rights::READ),
-            (
-                "/libraries",
-                Source::Dir(root.clone(), "libraries"),
-                Rights::READ,
-            ),
+            (APPS, Source::Dir(root.clone(), "apps"), RWX),
+            ("/libraries", Source::Dir(root.clone(), "libraries"), RX),
+            (PUBLIC, Source::Dir(root.clone(), "public"), RW),
             ("/users", users, RWX),
         ];
         if let Some(esp) = self.esp.borrow().as_ref() {
@@ -1067,6 +1314,16 @@ async fn connection(dir: &NodeAsyncClient, rights: Rights) -> Result<ClientEnd<N
     let (client, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
     flat(dir.clone(server, rights).await).map_err(status)?;
     Ok(client)
+}
+
+/// How an installed app starts (MIKSPEC-0101.R7, MIKSPEC-0101.R9): in
+/// its folder, `/apps/<id>`, which is also its home, with its cache
+/// below it, installed for every user (`global`) or for one (`local`),
+/// and the path of its program there.
+pub struct App {
+    pub folder: String,
+    pub mode: &'static str,
+    pub executable: String,
 }
 
 /// The kind of manifest that an app ID has.
