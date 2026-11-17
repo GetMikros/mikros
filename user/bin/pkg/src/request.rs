@@ -21,7 +21,14 @@ pub const COMMAND: Command = Command {
         ("--keep-data", "keep the users' data of a removed app"),
         ("--json", "write the list as a JSON array of objects"),
     ],
-    values: &[("-o", "file", "write the package to this file")],
+    values: &[
+        ("-o", "file", "write the package to this file"),
+        (
+            "--sysroot",
+            "path",
+            "find needed libraries in this sysroot, on the build machine",
+        ),
+    ],
 };
 
 /// Where `pkg install` installs: where each manifest prefers, or as an
@@ -52,6 +59,7 @@ pub enum Request {
     Pack {
         folder: String,
         out: Option<String>,
+        sysroot: Option<String>,
     },
     Help,
     Invalid(String),
@@ -85,6 +93,10 @@ pub fn read(arguments: Vec<String>) -> Request {
     let out = value(&values, "-o").map(String::from);
     if out.is_some() && subcommand != "pack" {
         return Request::Invalid(format!("-o does not go with {subcommand}"));
+    }
+    let sysroot = value(&values, "--sysroot").map(String::from);
+    if sysroot.is_some() && subcommand != "pack" {
+        return Request::Invalid(format!("--sysroot does not go with {subcommand}"));
     }
     let one = |what: &str| match operands.len() {
         1 => Ok(operands[0].clone()),
@@ -127,7 +139,11 @@ pub fn read(arguments: Vec<String>) -> Request {
             Err(e) => e,
         },
         _ => match one("a folder") {
-            Ok(folder) => Request::Pack { folder, out },
+            Ok(folder) => Request::Pack {
+                folder,
+                out,
+                sysroot,
+            },
             Err(e) => e,
         },
     }
@@ -175,7 +191,16 @@ mod tests {
             r(&["pack", "dir", "-o", "x.mika"]),
             Request::Pack {
                 folder: "dir".into(),
-                out: Some("x.mika".into())
+                out: Some("x.mika".into()),
+                sysroot: None,
+            }
+        );
+        assert_eq!(
+            r(&["pack", "dir", "--sysroot", "/build/sysroot"]),
+            Request::Pack {
+                folder: "dir".into(),
+                out: None,
+                sysroot: Some("/build/sysroot".into()),
             }
         );
         assert_eq!(r(&["--help"]), Request::Help);
@@ -193,6 +218,7 @@ mod tests {
             &["remove", "a", "b"],
             &["list", "x"],
             &["info", "a", "-o", "b"],
+            &["list", "--sysroot", "s"],
             &["pack"],
         ] {
             assert!(matches!(r(args), Request::Invalid(_)), "{args:?}");

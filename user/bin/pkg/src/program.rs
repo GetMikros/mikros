@@ -3,7 +3,6 @@
 //! terminal before it installs.
 
 use crate::order::order;
-use crate::pack::pack;
 use crate::request::{self, COMMAND, Place, Request};
 use crate::show::{self, Row};
 use mikros_cli::{FAILURE, INVALID, SUCCESS};
@@ -20,8 +19,9 @@ use std::process::ExitCode;
 
 const INSTALLER: &str = "mikros.packages.Installer";
 const FOREVER: i64 = i64::MAX;
-/// The commands of installed packages.
+/// The commands of installed packages, and the library packages.
 const COMMANDS: &str = "/system/commands";
+const LIBRARIES: &str = "/libraries";
 
 fn fail(code: u8, message: &str) -> ExitCode {
     eprintln!("{}", COMMAND.error(message));
@@ -211,20 +211,18 @@ pub fn main() -> ExitCode {
             return ExitCode::from(SUCCESS);
         }
         Request::Invalid(reason) => return fail(INVALID, reason),
-        Request::Pack { folder, out } => {
-            let (bytes, manifest) = match pack(Path::new(folder)) {
-                Ok(packed) => packed,
-                Err(why) => return fail(FAILURE, &why),
+        // On Mikros, the needed libraries' versions are those installed
+        // for every user or for this one (MIKSPEC-0101.R29).
+        Request::Pack {
+            folder,
+            out,
+            sysroot,
+        } => {
+            let libraries = match sysroot {
+                Some(sysroot) => Path::new(sysroot).join("libraries"),
+                None => Path::new(LIBRARIES).to_path_buf(),
             };
-            let version = manifest.version.map(|v| v.to_string()).unwrap_or_default();
-            let out = out
-                .clone()
-                .unwrap_or(format!("{}-{version}.mika", manifest.id));
-            if let Err(e) = std::fs::write(&out, bytes) {
-                return fail(FAILURE, &format!("{out}: {e}"));
-            }
-            println!("{out}");
-            return ExitCode::from(SUCCESS);
+            return ExitCode::from(crate::pack::run(folder, out.as_deref(), &libraries));
         }
         _ => {}
     }
