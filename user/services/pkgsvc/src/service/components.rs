@@ -6,7 +6,7 @@
 //! one by its ID, and `InstallComponent` a component that a caller gives
 //! as a package file.
 
-use super::files::Root;
+use super::files::{Root, Txn};
 use super::install::{
     Component, One, PERMISSION, check_one, installed, installed_any, scope, write_one,
 };
@@ -37,7 +37,7 @@ fn folder(owner: Owner, id: &str) -> String {
 /// Keeps the files of `left_out`, the optional components of the
 /// package `id` of `owner` that are not installed, in place of those kept
 /// before.
-pub fn keep(root: &Root, owner: Owner, id: &str, left_out: &[&Component]) -> Result<(), Status> {
+pub fn keep(root: &Txn<'_>, owner: Owner, id: &str, left_out: &[&Component]) -> Result<(), Status> {
     let at = folder(owner, id);
     let _ = root.remove_all(&at);
     if left_out.is_empty() {
@@ -51,14 +51,14 @@ pub fn keep(root: &Root, owner: Owner, id: &str, left_out: &[&Component]) -> Res
 }
 
 /// Deletes the kept components of the package `id` of `owner`.
-pub fn forget(root: &Root, owner: Owner, id: &str) {
+pub fn forget(root: &Txn<'_>, owner: Owner, id: &str) {
     let _ = root.remove_all(&folder(owner, id));
 }
 
 /// Deletes the kept file of the component `component` of the package
 /// `id` of `owner`, once it is installed, and the folder once it holds
 /// none.
-fn installed_now(root: &Root, owner: Owner, id: &str, component: &str) {
+fn installed_now(root: &Txn<'_>, owner: Owner, id: &str, component: &str) {
     let at = folder(owner, id);
     let _ = root.remove_all(&format!("{at}/{component}.mika"));
     if root.files(&at).is_ok_and(|f| f.is_empty()) {
@@ -84,16 +84,19 @@ fn owner_of(
     }
 }
 
-/// Installs the component of the package `id` of `owner` in `bytes`,
-/// once checked and once the permission of its place is granted:
-/// `admin.packages.install` for every user, `user.components.install`
-/// for the caller's user. `fresh` refuses one installed in the same or a
-/// newer version with `BAD_STATE`.
+/// Installs the component in `bytes` of the package `id`, whose owner
+/// `find` gives, once checked and once the permission of its place is
+/// granted: `admin.packages.install` for every user,
+/// `user.components.install` for the caller's user. `fresh` refuses one
+/// installed in the same or a newer version with `BAD_STATE`. Everything
+/// is checked before the question, which is asked without the change
+/// held, and again once it is held.
 fn install_component(
     shared: &Shared,
     caller: &ClientIdentity,
     root: &Root,
-    (id, owner): (&str, Owner),
+    id: &str,
+    find: &dyn Fn(&Root) -> Result<Owner, Status>,
     bytes: &[u8],
     fresh: bool,
 ) -> Result<(), Status> {
@@ -103,16 +106,8 @@ fn install_component(
     }
     let kind = manifest.kind.ok_or(Status::InvalidArgs)?;
     let (place, _) = scope(shared, caller, manifest.global)?;
-    if fresh
-        && let (Some(old), Some(new)) = (
-            installed(root, kind, &manifest.id, &place),
-            &manifest.version,
-        )
-        && old >= *new
-    {
-        return Err(Status::BadState);
-    }
-    let one = One {
+    let coming = [(manifest.id.as_str(), manifest.version.as_ref())];
+    let one = |owner| One {
         source: bytes,
         package: &package,
         manifest: &manifest,
@@ -121,8 +116,21 @@ fn install_component(
         dev: false,
         commands: &[],
     };
-    let coming = [(manifest.id.as_str(), manifest.version.as_ref())];
-    let checked = check_one(shared, caller, root, &one, &coming)?;
+    let check = |root: &Root| {
+        let owner = find(root)?;
+        if fresh
+            && let (Some(old), Some(new)) = (
+                installed(root, kind, &manifest.id, &place),
+                &manifest.version,
+            )
+            && old >= *new
+        {
+            return Err(Status::BadState);
+        }
+        let checked = check_one(shared, caller, root, &one(owner), &coming)?;
+        Ok((owner, checked))
+    };
+    let (_, checked) = check(root)?;
     let name = manifest.name.as_deref().unwrap_or(&manifest.id);
     let (permission, reason) = match checked.scope {
         Scope::Global => (
@@ -137,10 +145,11 @@ fn install_component(
     if !super::request(shared, caller, permission, &reason)? {
         return Err(Status::AccessDenied);
     }
-    let component = manifest.id.clone();
-    write_one(shared, root, one, checked)?;
-    installed_now(root, owner, id, &component);
-    super::kept::clean(shared, root)
+    let txn = root.begin()?;
+    let (owner, checked) = check(&txn)?;
+    write_one(shared, &txn, one(owner), checked)?;
+    installed_now(&txn, owner, id, &manifest.id);
+    super::kept::clean(shared, &txn)
 }
 
 /// `AddComponent`: installs the kept optional component `component`, by
@@ -155,19 +164,23 @@ pub fn add(
         return Err(Status::InvalidArgs);
     }
     let root = shared.root()?;
-    let owner = owner_of(shared, caller, &root, id)?;
-    let installed = root
-        .records()?
-        .components(owner, id)
-        .into_iter()
-        .any(|(_, c)| c == component);
-    if installed {
-        return Err(Status::AlreadyExists);
-    }
+    let find = |root: &Root| {
+        let owner = owner_of(shared, caller, root, id)?;
+        let installed = root
+            .records()?
+            .components(owner, id)
+            .into_iter()
+            .any(|(_, c)| c == component);
+        match installed {
+            true => Err(Status::AlreadyExists),
+            false => Ok(owner),
+        }
+    };
+    let owner = find(&root)?;
     let bytes = root
         .read(&format!("{}/{component}.mika", folder(owner, id)))
         .map_err(|_| Status::NotFound)?;
-    install_component(shared, caller, &root, (id, owner), &bytes, false)
+    install_component(shared, caller, &root, id, &find, &bytes, false)
 }
 
 /// `InstallComponent`: installs the package that `package` gives as a
@@ -186,6 +199,7 @@ pub fn install_given(
     let mut bytes = vec![0; size as usize];
     given.read_at(0, &mut bytes).map_err(|_| Status::Io)?;
     let root = shared.root()?;
-    let owner = owner_of(shared, caller, &root, id)?;
-    install_component(shared, caller, &root, (id, owner), &bytes, true)
+    let find = |root: &Root| owner_of(shared, caller, root, id);
+    find(&root)?;
+    install_component(shared, caller, &root, id, &find, &bytes, true)
 }

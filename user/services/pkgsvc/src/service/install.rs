@@ -10,7 +10,7 @@
 //! checked, and the permission asked for once, before anything is
 //! written (MIKSPEC-0101.R64, MIKSPEC-0101.R65).
 
-use super::files::{Root, user_name};
+use super::files::{Root, Txn, user_name};
 use super::{Given, Shared, check, open};
 use crate::place::{self, Scope};
 use crate::records::{Owner, Record};
@@ -143,28 +143,11 @@ pub fn install(
         eprintln!("pkgsvc: {} has no component {path}", manifest.id);
         return Err(Status::InvalidArgs);
     }
-    // Every required component, the optional ones it names and those of
-    // it that are installed, which are updated with it (MIKSPEC-0101.R65).
     let (_, owner) = scope(shared, caller, manifest.global)?;
     let root = shared.root()?;
-    let records = root.records()?;
-    let mut components = Vec::new();
-    // The optional components that are left out, whose files are kept
-    // (MIKSPEC-0101.R71).
-    let mut left_out = Vec::new();
+    let mut all = Vec::new();
     for c in &manifest.components {
-        let named = q.components.contains(&c.path);
-        let component = component(&package, &given, &manifest, &c.path, c.optional)?;
-        let installed = records.0.iter().any(|((s, id), r)| {
-            *id == component.manifest.id
-                && r.owner.as_deref() == Some(manifest.id.as_str())
-                && r.owner_in.unwrap_or(*s) == owner
-        });
-        if !c.optional || named || installed {
-            components.push(component);
-        } else {
-            left_out.push(component);
-        }
+        all.push(component(&package, &given, &manifest, &c.path, c.optional)?);
     }
     let package_one = One {
         source: &given,
@@ -175,70 +158,124 @@ pub fn install(
         dev: q.dev,
         commands: &q.commands,
     };
-    let ones: Vec<One<'_, [u8]>> = components
-        .iter()
-        .map(|c| One {
-            source: &c.bytes[..],
-            package: &c.package,
-            manifest: &c.manifest,
-            owner_of: Some((manifest.id.as_str(), owner)),
-            dependency: false,
-            dev: q.dev,
-            commands: &[],
+    let of_component = |c| one_of(c, (&manifest.id, owner), q.dev);
+    let plan = |root: &Root| -> Result<Plan, Status> {
+        // Every required component, the optional ones it names and those
+        // of it that are installed, which are updated with it
+        // (MIKSPEC-0101.R65); the others are left out, and their files
+        // kept (MIKSPEC-0101.R71).
+        let records = root.records()?;
+        let (mut taken, mut left_out) = (Vec::new(), Vec::new());
+        for (c, m) in all.iter().zip(&manifest.components) {
+            let named = q.components.contains(&m.path);
+            let installed = records.0.iter().any(|((s, id), r)| {
+                *id == c.manifest.id
+                    && r.owner.as_deref() == Some(manifest.id.as_str())
+                    && r.owner_in.unwrap_or(*s) == owner
+            });
+            match !c.optional || named || installed {
+                true => taken.push(c),
+                false => left_out.push(c),
+            }
+        }
+        // What this install brings may satisfy what its components need.
+        let coming: Vec<(&str, Option<&Version>)> = core::iter::once(&manifest)
+            .chain(taken.iter().map(|c| &c.manifest))
+            .map(|m| (m.id.as_str(), m.version.as_ref()))
+            .collect();
+        let checked = check_one(shared, caller, root, &package_one, &coming)?;
+        let mut components = Vec::new();
+        for c in taken {
+            components.push((
+                c,
+                check_one(shared, caller, root, &of_component(c), &coming)?,
+            ));
+        }
+        Ok(Plan {
+            checked,
+            components,
+            left_out,
         })
-        .collect();
-    // Everything is checked before anything is written; what this
-    // install brings may satisfy what its components need.
-    let coming: Vec<(&str, Option<&Version>)> = core::iter::once(&manifest)
-        .chain(components.iter().map(|c| &c.manifest))
-        .map(|m| (m.id.as_str(), m.version.as_ref()))
-        .collect();
-    let checked = check_one(shared, caller, &root, &package_one, &coming)?;
-    let mut checked_ones = Vec::new();
-    for one in &ones {
-        checked_ones.push(check_one(shared, caller, &root, one, &coming)?);
-    }
-    // admin.packages.install, asked for once for everything that goes
-    // for every user; an optional component is left out without it.
-    let global: Vec<&Manifest> = core::iter::once((&checked, &manifest))
-        .chain(
-            checked_ones
-                .iter()
-                .zip(components.iter().map(|c| &c.manifest)),
-        )
-        .filter(|(c, _)| c.scope == Scope::Global)
-        .map(|(_, m)| m)
-        .collect();
+    };
+    // Everything is checked before the question, and before anything is
+    // written. admin.packages.install is asked for once for everything
+    // that goes for every user, without the change held, as a question
+    // may stay open long.
+    let asked = plan(&root)?;
+    let global = asked.global(&manifest);
     let allowed =
         global.is_empty() || super::request(shared, caller, PERMISSION, &reason(&global))?;
-    let needed = checked.scope == Scope::Global
-        || checked_ones
+    let granted: Vec<String> = match allowed {
+        true => global.iter().map(|m| m.id.clone()).collect(),
+        false => Vec::new(),
+    };
+    // Checked again while the change is held, as another one may have
+    // changed what is installed meanwhile; the answer covers only what
+    // was asked for. An optional component that goes for every user is
+    // left out without it.
+    let txn = root.begin()?;
+    let Plan {
+        checked,
+        components,
+        left_out,
+    } = plan(&txn)?;
+    let permitted = |m: &Manifest, c: &Checked| c.scope != Scope::Global || granted.contains(&m.id);
+    let needed_and_refused = !permitted(&manifest, &checked)
+        || components
             .iter()
-            .zip(&components)
-            .any(|(c, component)| c.scope == Scope::Global && !component.optional);
-    if !allowed && needed {
+            .any(|(c, checked)| !c.optional && !permitted(&c.manifest, checked));
+    if needed_and_refused {
         return Err(Status::AccessDenied);
     }
-    write_one(shared, &root, package_one, checked)?;
-    let mut refused = Vec::new();
-    for ((one, checked), c) in ones.into_iter().zip(checked_ones).zip(&components) {
-        if !allowed && checked.scope == Scope::Global {
+    write_one(shared, &txn, package_one, checked)?;
+    let mut kept = left_out;
+    for (c, checked) in components {
+        if !permitted(&c.manifest, &checked) {
             eprintln!("pkgsvc: the optional {} is left out", c.manifest.id);
-            refused.push(c.manifest.id.clone());
+            kept.push(c);
             continue;
         }
-        write_one(shared, &root, one, checked)?;
+        write_one(shared, &txn, of_component(c), checked)?;
     }
-    let kept: Vec<&Component> = left_out
-        .iter()
-        .chain(
-            components
-                .iter()
-                .filter(|c| refused.contains(&c.manifest.id)),
-        )
-        .collect();
-    super::components::keep(&root, owner, &manifest.id, &kept)?;
-    super::kept::clean(shared, &root)
+    super::components::keep(&txn, owner, &manifest.id, &kept)?;
+    super::kept::clean(shared, &txn)
+}
+
+/// What installing the component `c` of the package `of` writes.
+fn one_of<'a>(c: &'a Component, of: (&'a str, Owner), dev: bool) -> One<'a, [u8]> {
+    One {
+        source: &c.bytes[..],
+        package: &c.package,
+        manifest: &c.manifest,
+        owner_of: Some(of),
+        dependency: false,
+        dev,
+        commands: &[],
+    }
+}
+
+/// What an install takes: the package as checked, its components that
+/// are installed with it as checked, and those that are left out.
+struct Plan<'a> {
+    checked: Checked,
+    components: Vec<(&'a Component, Checked)>,
+    left_out: Vec<&'a Component>,
+}
+
+impl Plan<'_> {
+    /// The manifests among the package's, `manifest`, and those of its
+    /// components that go for every user.
+    fn global<'m>(&'m self, manifest: &'m Manifest) -> Vec<&'m Manifest> {
+        core::iter::once((&self.checked, manifest))
+            .chain(
+                self.components
+                    .iter()
+                    .map(|(c, checked)| (checked, &c.manifest)),
+            )
+            .filter(|(c, _)| c.scope == Scope::Global)
+            .map(|(_, m)| m)
+            .collect()
+    }
 }
 
 /// The reason given with the question for `admin.packages.install`: the
@@ -319,7 +356,7 @@ pub(super) fn check_one<S: format::Source + ?Sized>(
 /// Writes what `one` installs, checked as `checked`.
 pub(super) fn write_one<S: format::Source + ?Sized>(
     shared: &Shared,
-    root: &Root,
+    root: &Txn<'_>,
     one: One<'_, S>,
     checked: Checked,
 ) -> Result<(), Status> {
@@ -351,17 +388,12 @@ pub(super) fn write_one<S: format::Source + ?Sized>(
         one.dev,
         keep.as_deref(),
     )?;
-    let mut records = root.records()?;
-    records.set(
-        owner,
-        &manifest.id,
-        Record {
-            owner: one.owner_of.map(|(id, _)| id.into()),
-            owner_in: one.owner_of.map(|(_, scope)| scope),
-            dependency: one.dependency,
-        },
-    );
-    root.write_records(&records)?;
+    let record = Record {
+        owner: one.owner_of.map(|(id, _)| id.into()),
+        owner_in: one.owner_of.map(|(_, scope)| scope),
+        dependency: one.dependency,
+    };
+    root.update_records(|records| records.set(owner, &manifest.id, record))?;
     let names: Vec<String> = manifest.bins.iter().map(|b| b.name.clone()).collect();
     super::commands::installed(root, owner, &manifest.id, &names, one.commands, &others)?;
     // A driver marked for boot changes the boot list (MIKSPEC-0101.R20).

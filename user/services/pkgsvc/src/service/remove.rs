@@ -7,7 +7,7 @@
 //! nothing needs any more go too (MIKSPEC-0101.R29).
 
 use super::Shared;
-use super::files::{Root, users};
+use super::files::{Root, Txn, users};
 use super::install::{PERMISSION, installed, scope};
 use crate::place::{self, Scope};
 use crate::records::Owner;
@@ -76,10 +76,13 @@ pub fn remove(
 ) -> Result<(), Status> {
     let root = shared.root()?;
     let (scope, owner) = scope(shared, caller, global)?;
-    let kind = [Kind::App, Kind::Library, Kind::Driver]
-        .into_iter()
-        .find(|kind| installed(&root, *kind, id, &scope).is_some())
-        .ok_or(Status::NotFound)?;
+    let installed_kind = |root: &Root| {
+        [Kind::App, Kind::Library, Kind::Driver]
+            .into_iter()
+            .find(|kind| installed(root, *kind, id, &scope).is_some())
+            .ok_or(Status::NotFound)
+    };
+    installed_kind(&root)?;
     let everything = all(shared, &root)?;
     if needed(&everything, id) {
         return Err(Status::BadState);
@@ -93,6 +96,16 @@ pub fn remove(
         if !super::allowed(shared, caller, PERMISSION, &manifest, "remove")? {
             return Err(Status::AccessDenied);
         }
+    }
+    // Checked again while the change is held, as another one may have
+    // changed what is installed during the question. The questions for
+    // the global components of a local package are asked while it is
+    // held.
+    let root = root.begin()?;
+    let kind = installed_kind(&root)?;
+    let everything = all(shared, &root)?;
+    if needed(&everything, id) {
+        return Err(Status::BadState);
     }
     delete(
         shared,
@@ -137,7 +150,7 @@ pub fn remove(
 fn delete(
     shared: &Shared,
     caller: &ClientIdentity,
-    root: &Root,
+    root: &Txn<'_>,
     everything: &[Installed],
     id: &str,
     kind: Kind,
@@ -146,8 +159,7 @@ fn delete(
     keep_data: bool,
 ) -> Result<(), Status> {
     let subvolumes = shared.subvolumes()?;
-    let mut records = root.records()?;
-    for (in_scope, component) in records.components(owner, id) {
+    for (in_scope, component) in root.records()?.components(owner, id) {
         let Some(c) = everything
             .iter()
             .find(|p| p.manifest.id == component && p.owner == in_scope)
@@ -161,12 +173,12 @@ fn delete(
             && local_owner
             && !super::allowed(shared, caller, PERMISSION, &c.manifest, "remove")?
         {
-            let mut records = root.records()?;
-            let mut record = records.get(in_scope, &component);
-            record.owner = None;
-            record.owner_in = None;
-            records.set(in_scope, &component, record);
-            root.write_records(&records)?;
+            root.update_records(|records| {
+                let mut record = records.get(in_scope, &component);
+                record.owner = None;
+                record.owner_in = None;
+                records.set(in_scope, &component, record);
+            })?;
             continue;
         }
         delete(
@@ -208,7 +220,5 @@ fn delete(
             }
         }
     }
-    records = root.records()?;
-    records.set(owner, id, Default::default());
-    root.write_records(&records)
+    root.update_records(|records| records.set(owner, id, Default::default()))
 }

@@ -14,7 +14,8 @@ use mikros_rt::interfaces::mikros::fs::{
 };
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::interfaces::mikros::session::{Accounts, AccountsClient};
-use std::sync::Mutex;
+use std::ops::Deref;
+use std::sync::{Mutex, MutexGuard};
 
 const FILESYSTEM: &str = "device.filesystem";
 const ROOT: &str = "root";
@@ -56,7 +57,56 @@ fn flat<T>(
 
 /// The root directory of the root file system, read, write and execute. Its
 /// calls go one at a time, as a connection's replies come in order.
-pub struct Root(Mutex<NodeClient>);
+pub struct Root {
+    node: Mutex<NodeClient>,
+    /// Held by the one change of the installed packages under way.
+    changes: Mutex<()>,
+}
+
+/// A change of the installed packages, such as an install or a removal:
+/// while it lasts no other change runs, and only through it are the
+/// records and the commands' owners written, each read, changed and
+/// written back in one step. It gives every other call of the root.
+pub struct Txn<'a> {
+    root: &'a Root,
+    _held: MutexGuard<'a, ()>,
+}
+
+impl Deref for Txn<'_> {
+    type Target = Root;
+
+    fn deref(&self) -> &Root {
+        self.root
+    }
+}
+
+impl Txn<'_> {
+    /// Applies `change` to the records, and writes them when it changed
+    /// them.
+    pub fn update_records<T>(&self, change: impl FnOnce(&mut Records) -> T) -> Result<T, Status> {
+        let mut records = self.records()?;
+        let before = records.encode();
+        let result = change(&mut records);
+        let after = records.encode();
+        if after != before {
+            self.write_state(RECORDS_NAME, &after)?;
+        }
+        Ok(result)
+    }
+
+    /// Applies `change` to the owners of commands (MIKSPEC-0101.R44), and
+    /// writes them when it changed them.
+    pub fn update_owners<T>(&self, change: impl FnOnce(&mut Owners) -> T) -> Result<T, Status> {
+        let mut owners = self.owners()?;
+        let before = owners.encode();
+        let result = change(&mut owners);
+        let after = owners.encode();
+        if after != before {
+            self.write_state(OWNERS_NAME, &after)?;
+        }
+        Ok(result)
+    }
+}
 
 impl Root {
     pub fn connect(directory: &DirectoryClient) -> Result<Root, Status> {
@@ -75,7 +125,20 @@ impl Root {
         let (root, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
         // Execute too, for the files that the folder of commands opens.
         flat(fs.get_root(server, RWX, FOREVER))?;
-        Ok(Root(Mutex::new(NodeClient::new(root))))
+        Ok(Root {
+            node: Mutex::new(NodeClient::new(root)),
+            changes: Mutex::new(()),
+        })
+    }
+
+    /// Starts a change of the installed packages, once the one under way,
+    /// if any, has ended.
+    pub fn begin(&self) -> Result<Txn<'_>, Status> {
+        let held = self.changes.lock().map_err(|_| Status::Internal)?;
+        Ok(Txn {
+            root: self,
+            _held: held,
+        })
     }
 
     /// Opens `path` from the root with `flags` and `rights`.
@@ -87,7 +150,7 @@ impl Root {
         rights: Rights,
     ) -> Result<NodeClient, Status> {
         let (node, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
-        let root = self.0.lock().map_err(|_| Status::Internal)?;
+        let root = self.node.lock().map_err(|_| Status::Internal)?;
         flat(root.open(path.into(), flags, mode, rights, server, FOREVER))?;
         Ok(NodeClient::new(node))
     }
@@ -300,7 +363,7 @@ impl Root {
         rights: Rights,
         server: ServerEnd<Node>,
     ) -> Result<NodeOpenResponse, Status> {
-        let root = self.0.lock().map_err(|_| Status::Internal)?;
+        let root = self.node.lock().map_err(|_| Status::Internal)?;
         flat(root.open(path.into(), flags, 0, rights, server, FOREVER))
     }
 
@@ -326,19 +389,10 @@ impl Root {
         }
     }
 
-    /// Writes `records`.
-    pub fn write_records(&self, records: &Records) -> Result<(), Status> {
-        self.write_state(RECORDS_NAME, &records.encode())
-    }
-
-    /// The records, none when there are none yet.
+    /// The records, none when there are none yet. Each write replaces
+    /// the whole file at once, so the records read are whole.
     pub fn records(&self) -> Result<Records, Status> {
         self.state(RECORDS_NAME).map(|text| Records::parse(&text))
-    }
-
-    /// Writes the owners of commands (MIKSPEC-0101.R43).
-    pub fn write_owners(&self, owners: &Owners) -> Result<(), Status> {
-        self.write_state(OWNERS_NAME, &owners.encode())
     }
 
     /// The owners of commands, none when there are none yet.

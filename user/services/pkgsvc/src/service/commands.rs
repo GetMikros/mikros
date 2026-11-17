@@ -4,9 +4,9 @@
 //! opens the package's file itself for a name, bound to the connection's
 //! subject once it has one.
 
-use super::files::{Root, user_name};
+use super::files::{Root, Txn, user_name};
 use super::{FOREVER, Shared};
-use crate::commands::{self, Command, Owners, Provided};
+use crate::commands::{self, Command, Provided};
 use crate::place::{self, Scope};
 use crate::records::Owner;
 use mikros_mika::format::MANIFEST;
@@ -92,20 +92,14 @@ fn visible(shared: &Shared, user: Option<u32>) -> Result<BTreeMap<String, Comman
 /// those in `taken`. `others` are the commands of the scope's other
 /// packages before the install.
 pub fn installed(
-    root: &Root,
+    txn: &Txn<'_>,
     owner: Owner,
     id: &str,
     names: &[String],
     taken: &[String],
     others: &Provided,
 ) -> Result<(), Status> {
-    let mut owners = root.owners()?;
-    let before = owners.encode();
-    owners.install(owner, id, names, taken, others);
-    match owners.encode() == before {
-        true => Ok(()),
-        false => root.write_owners(&owners),
-    }
+    txn.update_owners(|owners| owners.install(owner, id, names, taken, others))
 }
 
 /// The commands of `scope` but those of the package `id`.
@@ -118,14 +112,8 @@ pub fn others(root: &Root, scope: &Scope, id: &str) -> Result<Provided, Status> 
 }
 
 /// Forgets the commands that the package `id` of `owner` owned.
-pub fn removed(root: &Root, owner: Owner, id: &str) -> Result<(), Status> {
-    let mut owners: Owners = root.owners()?;
-    let before = owners.encode();
-    owners.forget(owner, id);
-    match owners.encode() == before {
-        true => Ok(()),
-        false => root.write_owners(&owners),
-    }
+pub fn removed(txn: &Txn<'_>, owner: Owner, id: &str) -> Result<(), Status> {
+    txn.update_owners(|owners| owners.forget(owner, id))
 }
 
 /// The ID of the package whose command `name` the user `user` sees, for

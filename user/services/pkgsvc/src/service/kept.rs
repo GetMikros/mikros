@@ -6,7 +6,7 @@
 //! only it holds.
 
 use super::Shared;
-use super::files::{Root, users};
+use super::files::{Root, Txn, users};
 use crate::kept::{keeps, still_needed};
 use crate::place::{self, Scope};
 use mikros_mika::format::{Kind as EntryKind, Package};
@@ -85,7 +85,7 @@ pub fn keep_old(
 
 /// Deletes the kept versions that no program of an installed package
 /// needs any more.
-pub fn clean(shared: &Shared, root: &Root) -> Result<(), Status> {
+pub fn clean(shared: &Shared, root: &Txn<'_>) -> Result<(), Status> {
     let ids = root.folders(KEPT)?;
     if ids.is_empty() {
         return Ok(());
