@@ -49,6 +49,8 @@ pub const CONTROL: &str = "mikros.service.Control";
 /// The service manager's list of services, for every process.
 const SERVICES: &str = "mikros.service.Services";
 const CONTROL_PERMISSION: &str = "admin.power.control";
+/// The user permission that `Control` takes as well (MIKSPEC-0036.R45).
+const USER_CONTROL_PERMISSION: &str = "user.power.control";
 /// The protocol that starts and stops services, and the permission it
 /// needs.
 const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
@@ -543,6 +545,21 @@ impl Dir {
         protocol: &str,
         permission: Option<&str>,
     ) -> bool {
+        // Shutting down is for those who hold either power permission, and
+        // the user is asked for theirs otherwise (MIKSPEC-0036.R45).
+        if protocol == CONTROL {
+            if self.allowed(caller, Some(CONTROL_PERMISSION)).await {
+                return true;
+            }
+            let Some(broker) = self.broker.borrow().clone() else {
+                return false;
+            };
+            let reason = alloc::format!("connect to {protocol}");
+            let requested = broker
+                .request(clone(caller), USER_CONTROL_PERMISSION.into(), reason)
+                .await;
+            return matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed);
+        }
         let Some(permission) = permission.filter(|p| p.starts_with(ADMIN_SCOPE)) else {
             return self.allowed(caller, permission).await;
         };

@@ -1,6 +1,6 @@
 //! `mikros.service.Control`, which the service manager serves to
-//! processes with `admin.power.control`, for which the directory has
-//! already asked: `Shutdown` stops every service and powers the machine
+//! processes with `user.power.control` or `admin.power.control`, for which
+//! the directory has already asked (MIKSPEC-0036.R45): `Shutdown` stops every service and powers the machine
 //! off or restarts it, and replies only when that failed.
 
 use crate::directory::Dir;

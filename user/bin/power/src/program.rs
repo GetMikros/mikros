@@ -1,10 +1,12 @@
 //! power on Mikros: it calls `Shutdown` on the service manager's
-//! `Control`, whose connection needs `admin.power.control`, for which the
-//! directory asks an administrator.
+//! `Control`, whose connection needs `user.power.control`, for which the
+//! service manager asks the user, or `admin.power.control`
+//! (MIKSPEC-0098.R29).
 
 use crate::action::{self, Action, COMMAND};
 use mikros_cli::{FAILURE, INVALID, SUCCESS};
 use mikros_command::Directory;
+use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{ControlClient, ShutdownKind};
 use std::io::Write;
 use std::process::ExitCode;
@@ -34,6 +36,7 @@ pub fn main() -> ExitCode {
     // On success the machine goes down before a reply comes.
     match ControlClient::new(client).shutdown(kind, FOREVER) {
         Ok(Ok(_)) => ExitCode::from(SUCCESS),
+        Ok(Err(Status::AccessDenied)) => fail(FAILURE, "not authorized"),
         Ok(Err(status)) => fail(FAILURE, &format!("Shutdown failed: {status:?}")),
         Err(error) => fail(FAILURE, &format!("Shutdown failed: {error:?}")),
     }

@@ -69,10 +69,10 @@ const ANSWER: Duration = Duration::from_secs(12);
 /// with keys read from the terminal, `q`, which quits it, and
 /// `if $status != 0 { exit 8 }`; then `ls /system/bin | less`, Space, which
 /// shows its next screen, `/less` and Enter, which searches, `q` and
-/// `if $status != 0 { exit 10 }`; then `power restart`, a wrong password
-/// on the authorization screen and `if $status != 1 { exit 11 }`, and
-/// `power off`, Escape and `if $status != 1 { exit 12 }`, which refuse
-/// to power the machine off; then `sudo hostname` with ada's password and
+/// `if $status != 0 { exit 10 }`; then `power off`, Escape on the
+/// `[y/N]` question and `if $status != 1 { exit 11 }`, which records
+/// nothing, and `power restart`, `n` and `if $status != 1 { exit 12 }`,
+/// which refuse to power the machine off; then `sudo hostname` with ada's password and
 /// `if $status != 0 { exit 13 }`, and `sudo hostname` with a wrong one and
 /// `if $status != 1 { exit 14 }`; then
 /// `if ((logs -n 3 | lines | len) != 3) { exit 15 }` with ada's password,
@@ -130,15 +130,15 @@ const MSH_KEYS: [(&str, Duration); 55] = [
          shift-bracket_left spc e x i t spc 1 0 spc shift-bracket_right ret",
         QUESTION,
     ),
-    ("p o w e r spc r e s t a r t ret", JOB_START),
-    ("w r o n g ret", ANSWER),
+    ("p o w e r spc o f f ret", JOB_START),
+    ("esc", QUESTION),
     (
         "i f spc shift-4 s t a t u s spc shift-1 equal spc 1 spc \
          shift-bracket_left spc e x i t spc 1 1 spc shift-bracket_right ret",
         QUESTION,
     ),
-    ("p o w e r spc o f f ret", JOB_START),
-    ("esc", QUESTION),
+    ("p o w e r spc r e s t a r t ret", JOB_START),
+    ("n", ANSWER),
     (
         "i f spc shift-4 s t a t u s spc shift-1 equal spc 1 spc \
          shift-bracket_left spc e x i t spc 1 2 spc shift-bracket_right ret",
