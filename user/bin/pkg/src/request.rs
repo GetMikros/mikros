@@ -8,8 +8,6 @@ pub const COMMAND: Command = Command {
     most: usize::MAX,
     about: "Installs, removes, lists, shows and makes .mika packages.",
     options: &[
-        ("--global", "install for every user"),
-        ("--local", "install for this user only"),
         (
             "--dependency",
             "mark the packages as installed only for others",
@@ -31,20 +29,10 @@ pub const COMMAND: Command = Command {
     ],
 };
 
-/// Where `pkg install` installs: where each manifest prefers, or as an
-/// option chooses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Place {
-    Preferred,
-    Global,
-    Local,
-}
-
 #[derive(Debug, PartialEq)]
 pub enum Request {
     Install {
         files: Vec<String>,
-        place: Place,
         dependency: bool,
         dev: bool,
     },
@@ -81,7 +69,7 @@ pub fn read(arguments: Vec<String>) -> Request {
     let subcommand = operands.remove(0);
     // The options that each subcommand takes.
     let allowed: &[&str] = match subcommand.as_str() {
-        "install" => &["--global", "--local", "--dependency", "--dev"],
+        "install" => &["--dependency", "--dev"],
         "remove" => &["--keep-data"],
         "list" => &["--json"],
         "info" | "pack" => &[],
@@ -108,17 +96,8 @@ pub fn read(arguments: Vec<String>) -> Request {
             if operands.is_empty() {
                 return Request::Invalid("install needs a package file".into());
             }
-            let place = match (options.contains(&"--global"), options.contains(&"--local")) {
-                (true, true) => {
-                    return Request::Invalid("--global and --local do not go together".into());
-                }
-                (true, false) => Place::Global,
-                (false, true) => Place::Local,
-                (false, false) => Place::Preferred,
-            };
             Request::Install {
                 files: operands,
-                place,
                 dependency: options.contains(&"--dependency"),
                 dev: options.contains(&"--dev"),
             }
@@ -160,17 +139,9 @@ mod tests {
     #[test]
     fn reads_each_subcommand() {
         assert_eq!(
-            r(&[
-                "install",
-                "a.mika",
-                "b.mika",
-                "--local",
-                "--dependency",
-                "--dev"
-            ]),
+            r(&["install", "a.mika", "b.mika", "--dependency", "--dev"]),
             Request::Install {
                 files: vec!["a.mika".into(), "b.mika".into()],
-                place: Place::Local,
                 dependency: true,
                 dev: true
             }
@@ -212,7 +183,8 @@ mod tests {
             &[][..],
             &["frobnicate"],
             &["install"],
-            &["install", "a", "--global", "--local"],
+            &["install", "a", "--global"],
+            &["install", "a", "--local"],
             &["remove", "--json", "x"],
             &["remove"],
             &["remove", "a", "b"],

@@ -202,7 +202,7 @@ async fn packages(shell: &Shell<'_>, reactor: &mikros_rt::exec::Reactor) -> Resu
             step + 1,
         )?;
         let installed = installer
-            .install(client, false, vec![], false, false, vec![])
+            .install(client, vec![], false, false, vec![])
             .await;
         check(matches!(installed, Ok(Ok(_))), step + 1)?;
         let listed = installer.list(String::new()).await;
@@ -413,7 +413,7 @@ async fn run_command(
     let cloned = file.clone(server, Rights::READ).await;
     check(matches!(cloned, Ok(Ok(_))), 75)?;
     let installed = installer
-        .install(client, false, vec![], false, false, vec![])
+        .install(client, vec![], false, false, vec![])
         .await;
     check(matches!(installed, Ok(Err(Status::AlreadyExists))), 75)?;
     let unlinked = shell.home.unlink("shell.mika".into(), false).await;
@@ -697,7 +697,7 @@ async fn install(
     let cloned = file.clone(server, Rights::READ).await;
     check(matches!(cloned, Ok(Ok(_))), code)?;
     let installed = installer
-        .install(client, false, vec![], false, false, vec![])
+        .install(client, vec![], false, false, vec![])
         .await;
     check(matches!(installed, Ok(Ok(_))), code)?;
     let unlinked = shell.home.unlink(name.into(), false).await;

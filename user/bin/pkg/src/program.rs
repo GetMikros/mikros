@@ -3,7 +3,7 @@
 //! terminal before it installs.
 
 use crate::order::order;
-use crate::request::{self, COMMAND, Place, Request};
+use crate::request::{self, COMMAND, Request};
 use crate::show::{self, Row};
 use mikros_cli::{FAILURE, INVALID, SUCCESS};
 use mikros_command::Directory;
@@ -99,6 +99,17 @@ fn driver_of(file: &str, manifest: &Manifest) -> Option<mikros_manifest::Driver>
         .map(|m| m.driver)
 }
 
+/// The manifest of the component at `path` of the package `file`.
+fn component_of(file: &str, path: &str) -> Option<Manifest> {
+    let bytes = std::fs::read(file).ok()?;
+    let package = mikros_mika::format::Package::open(bytes.as_slice()).ok()?;
+    let inner = package.read(bytes.as_slice(), package.find(path)?).ok()?;
+    let component = mikros_mika::format::Package::open(inner.as_slice()).ok()?;
+    let entry = component.find(mikros_mika::format::MANIFEST)?;
+    let text = component.read(inner.as_slice(), entry).ok()?;
+    Manifest::parse(&text).ok()
+}
+
 fn agrees(question: &str) -> bool {
     print!("{question}");
     let _ = std::io::stdout().flush();
@@ -110,7 +121,6 @@ fn agrees(question: &str) -> bool {
 fn install(
     installer: &InstallerClient,
     files: &[String],
-    place: Place,
     dependency: bool,
     dev: bool,
 ) -> Result<(), String> {
@@ -160,15 +170,13 @@ fn install(
         let mut components = Vec::new();
         for component in &manifest.components {
             println!("component {component} of {}", manifest.id);
+            if let Some(m) = component_of(file, component) {
+                print!("{}", show::describe(&m));
+            }
             if agrees(&format!("install {component}? [y/N] ")) {
                 components.push(component.clone());
             }
         }
-        let global = match place {
-            Place::Global => true,
-            Place::Local => false,
-            Place::Preferred => manifest.global,
-        };
         // A command that another installed package has stays with it
         // unless it goes to this one (MIKSPEC-0101.R44).
         let own = installed_commands(&manifest.id);
@@ -188,7 +196,6 @@ fn install(
             installer
                 .install(
                     connection(file)?,
-                    global,
                     components,
                     dependency,
                     dev,
@@ -236,10 +243,9 @@ pub fn main() -> ExitCode {
     let done = match request {
         Request::Install {
             files,
-            place,
             dependency,
             dev,
-        } => install(&installer, &files, place, dependency, dev),
+        } => install(&installer, &files, dependency, dev),
         Request::Remove { id, keep_data } => installed(&installer).and_then(|all| {
             let package = all
                 .iter()

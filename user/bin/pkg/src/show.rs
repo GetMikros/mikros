@@ -75,8 +75,8 @@ pub fn kind_name(kind: Option<Kind>) -> &'static str {
     }
 }
 
-/// A package's name, ID, version, description and kind, and what it
-/// installs: its program, commands, services, which run only when it is
+/// A package's name, ID, version, description and kind, where it is
+/// installed, and what it installs: its program, commands, services, which run only when it is
 /// installed for every user, components and driver.
 pub fn describe(m: &Manifest) -> String {
     let mut text = String::new();
@@ -91,6 +91,11 @@ pub fn describe(m: &Manifest) -> String {
         text.push_str(&format!("  {description}\n"));
     }
     text.push_str(&format!("  kind: {}\n", kind_name(m.kind)));
+    // Where it goes, which its manifest alone names (MIKSPEC-0101.R57).
+    text.push_str(match m.global {
+        true => "  installed: globally, for every user\n",
+        false => "  installed: locally, for this user\n",
+    });
     if let Some(executable) = &m.executable {
         text.push_str(&format!("  program: {executable}\n"));
     }
@@ -202,7 +207,13 @@ mod tests {
         )
         .unwrap();
         let text = describe(&m);
-        assert!(text.starts_with("Editor (org.example.editor) 1.0.0\n  Edits.\n  kind: app\n"));
+        assert!(text.starts_with(
+            "Editor (org.example.editor) 1.0.0\n  Edits.\n  kind: app\n  \
+             installed: globally, for every user\n"
+        ));
+        let mut local = m.clone();
+        local.global = false;
+        assert!(describe(&local).contains("\n  installed: locally, for this user\n"));
         assert!(text.contains(
             "service: org.example.editor.index, which runs when installed for every user"
         ));

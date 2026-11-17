@@ -40,7 +40,8 @@ pub struct Manifest {
     pub executable: Option<String>,
     pub portable: bool,
     pub installable: bool,
-    /// Whether the package prefers to be installed for every user.
+    /// Whether the package is installed for every user, as `install`
+    /// says, which nothing changes (MIKSPEC-0101.R61).
     pub global: bool,
     pub needs: Vec<(String, Range)>,
     pub components: Vec<String>,
@@ -170,6 +171,9 @@ impl Manifest {
             Some("local") => false,
             Some(_) => return error("install", "is not global or local"),
         };
+        if kind == Some(Kind::Driver) && !global {
+            return error("install", "is local for a driver");
+        }
         let mut needs = Vec::new();
         if let Some(n) = map.get("needs") {
             let Value::Map(entries) = &n.value else {

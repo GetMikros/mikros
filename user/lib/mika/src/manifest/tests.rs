@@ -59,7 +59,9 @@ fn needs_only_an_id_to_parse_and_more_to_check() {
             .key,
         "executable"
     );
-    let driver = FULL.replace("kind: app", "kind: driver");
+    let driver = FULL
+        .replace("kind: app", "kind: driver")
+        .replace("install: local", "install: global");
     assert_eq!(
         Manifest::parse(driver.as_bytes())
             .unwrap()
@@ -89,6 +91,7 @@ fn refuses_keys_in_the_wrong_form() {
         ("icon: share/icon.png", "icon: ../icon.png", "icon"),
         ("portable: false", "portable: maybe", "portable"),
         ("install: local", "install: everywhere", "install"),
+        ("kind: app", "kind: driver", "install"),
         ("'>=1.0.0,<2.0.0'", "'~1.0'", "needs"),
         ("org.example.lib:", "Lib:", "needs"),
         ("name: edit", "name: Edit", "bins"),

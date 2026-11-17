@@ -1,6 +1,7 @@
 //! `Install`: a package is written into a new subvolume next to where it
 //! is installed, which then takes the place of the old version, if one is
-//! installed (MIKSPEC-0101.R36). A global install asks the broker for the
+//! installed (MIKSPEC-0101.R36), for every user or for the caller's user
+//! as its manifest's `install` says (MIKSPEC-0101.R61). A global install asks the broker for the
 //! permission of the package's kind first (MIKSPEC-0101.R43). A package
 //! with a command that a program in `/system/bin` has is refused
 //! (MIKSPEC-0101.R44). The components that `Install` names, and those
@@ -128,7 +129,7 @@ pub fn install(
     let (package, manifest, _) = open(&given)?;
     // The components it names, and those of it that are installed, which
     // are updated with it, all checked before anything is written.
-    let (_, owner) = scope(shared, caller, q.global)?;
+    let (_, owner) = scope(shared, caller, manifest.global)?;
     let records = shared.root()?.records()?;
     let mut components = Vec::new();
     for path in &manifest.components {
@@ -159,7 +160,7 @@ pub fn install(
         source: &given,
         package: &package,
         manifest: &manifest,
-        global: q.global,
+        global: manifest.global,
         owner_of: None,
         dependency: q.dependency,
         dev: q.dev,

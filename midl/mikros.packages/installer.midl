@@ -1,4 +1,4 @@
-// MIKSPEC-0101.R54
+// MIKSPEC-0101.R58
 
 library mikros.packages;
 using mikros.base;
@@ -21,7 +21,7 @@ type PackageService = struct {
 protocol Installer {
     @1 Inspect(package client_end<mikros.fs.Node>)
         -> (manifest vector<u8, 32768>) error base.Status;
-    @2 Install(package client_end<mikros.fs.Node>, global bool,
+    @2 Install(package client_end<mikros.fs.Node>,
                components vector<string<255>, 32>, dependency bool,
                dev bool, commands vector<string<255>, 32>)
         -> () error base.Status;

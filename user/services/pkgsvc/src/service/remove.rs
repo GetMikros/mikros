@@ -1,6 +1,8 @@
-//! `Remove`: a package's subvolume goes, with the components it owns, its
-//! public folder and, unless the data is kept, its users' folders of the
-//! app (MIKSPEC-0101.R15). A package that another installed package needs
+//! `Remove`: a package's subvolume goes, with the components it owns in
+//! either place, its public folder and, unless the data is kept, its
+//! users' folders of the app (MIKSPEC-0101.R60). A global component of a
+//! local package goes only when `admin.packages.install` is granted, and
+//! otherwise stays without an owner. A package that another installed package needs
 //! stays; once one goes, the packages installed only as dependencies that
 //! nothing needs any more go too (MIKSPEC-0101.R29).
 
@@ -94,6 +96,7 @@ pub fn remove(
     }
     delete(
         shared,
+        caller,
         &root,
         &everything,
         id,
@@ -117,6 +120,7 @@ pub fn remove(
         };
         delete(
             shared,
+            caller,
             &root,
             &everything,
             &p.manifest.id,
@@ -132,6 +136,7 @@ pub fn remove(
 #[allow(clippy::too_many_arguments)]
 fn delete(
     shared: &Shared,
+    caller: &ClientIdentity,
     root: &Root,
     everything: &[Installed],
     id: &str,
@@ -142,16 +147,31 @@ fn delete(
 ) -> Result<(), Status> {
     let subvolumes = shared.subvolumes()?;
     let mut records = root.records()?;
-    let components = records.components(owner, id).into_iter();
-    for (_, component) in components.filter(|(s, _)| *s == owner) {
-        if let Some(c) = everything
+    for (in_scope, component) in records.components(owner, id) {
+        let Some(c) = everything
             .iter()
-            .find(|p| p.manifest.id == component && p.owner == owner)
+            .find(|p| p.manifest.id == component && p.owner == in_scope)
+        else {
+            continue;
+        };
+        // A global component of a local package needs the permission; it
+        // stays, without an owner, when that is not granted.
+        let local_owner = matches!(owner, Owner::User(_));
+        if in_scope == Owner::Global
+            && local_owner
+            && !super::allowed(shared, caller, PERMISSION, &c.manifest, "remove")?
         {
-            delete(
-                shared, root, everything, &component, c.kind, scope, owner, keep_data,
-            )?;
+            let mut records = root.records()?;
+            let mut record = records.get(in_scope, &component);
+            record.owner = None;
+            record.owner_in = None;
+            records.set(in_scope, &component, record);
+            root.write_records(&records)?;
+            continue;
         }
+        delete(
+            shared, caller, root, everything, &component, c.kind, &c.scope, in_scope, keep_data,
+        )?;
     }
     let at = place::subvolume(kind, id, scope).ok_or(Status::InvalidArgs)?;
     subvolumes.delete(&at)?;
