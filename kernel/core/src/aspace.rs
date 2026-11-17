@@ -48,6 +48,10 @@ pub struct AddressSpace {
     budget: Arc<Budget>,
     regions: SpinLock<Regions<Arc<MemoryObject>, Mapping>>,
     inner: SpinLock<Inner>,
+    /// Set, with the regions locked, once every region of a terminating
+    /// process is being removed: no region is added after
+    /// (MIKSPEC-0008.R46).
+    closed: core::sync::atomic::AtomicBool,
 }
 
 /// The region type of a user address space.
@@ -154,6 +158,7 @@ impl AddressSpace {
                     charged,
                 },
             ),
+            closed: core::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -308,6 +313,9 @@ impl AddressSpace {
             mem.check_writable()?;
         }
         let mut regions = self.regions.lock();
+        if self.closed.load(core::sync::atomic::Ordering::Relaxed) {
+            return Err(Error::BadState);
+        }
         let start = if options.specific {
             Ok(addr)
         } else {
@@ -367,7 +375,12 @@ impl AddressSpace {
     /// translations made outside regions, whose frames belong to whoever
     /// mapped them and are not freed.
     pub fn remove_all_regions(&self) {
-        let removal = self.regions.lock().begin_removal_of_all(next_removal());
+        let removal = {
+            let mut regions = self.regions.lock();
+            self.closed
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+            regions.begin_removal_of_all(next_removal())
+        };
         self.remove_in_steps(removal);
         let (start, end) = user_range();
         self.unmap_in_steps(start, end - start)

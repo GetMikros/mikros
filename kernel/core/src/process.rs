@@ -18,6 +18,9 @@ pub const NEW: u32 = 0;
 pub const RUNNING: u32 = 1;
 pub const TERMINATED: u32 = 2;
 pub const STOPPED: u32 = 3;
+/// Set first when a process terminates, until its teardown is done
+/// (MIKSPEC-0008.R44, MIKSPEC-0008.R45).
+pub const TERMINATING: u32 = 4;
 
 /// The topic and size of the process information record.
 pub const INFO_PROCESS: u32 = 2;
@@ -405,6 +408,11 @@ impl Process {
         self.state.load(Ordering::Acquire)
     }
 
+    /// Whether the process is `TERMINATING` or `TERMINATED`.
+    pub fn ending(&self) -> bool {
+        matches!(self.state(), TERMINATING | TERMINATED)
+    }
+
     pub fn exit_code(&self) -> i64 {
         self.exit_code.load(Ordering::Acquire)
     }
@@ -620,7 +628,7 @@ impl Process {
         charge: bool,
     ) -> Result<Arc<Thread>, Error> {
         let mut threads = process.threads.lock();
-        if process.state() == TERMINATED {
+        if process.ending() {
             return Err(Error::BadState);
         }
         threads.retain(|t| t.strong_count() > 0);
@@ -716,10 +724,13 @@ impl Process {
         }
     }
 
-    /// Terminates the process with exit code `code`, unless it has
-    /// terminated already: makes every thread DEAD, removes every user
-    /// mapping, closes every handle, and sets the state `TERMINATED` and
-    /// the `TERMINATED` signal on the process and its threads.
+    /// Terminates the process with exit code `code`, unless it is
+    /// terminating or has terminated already: sets the state
+    /// `TERMINATING`, after which the process takes no thread, mapping or
+    /// handle, makes every thread DEAD, removes every user mapping,
+    /// closes every handle, and sets the state `TERMINATED` and the
+    /// `TERMINATED` signal on the process and its threads, in that order
+    /// (MIKSPEC-0008.R45).
     pub fn terminate(&self, code: i64) {
         self.terminate_with(code, 0);
     }
@@ -727,19 +738,24 @@ impl Process {
     /// `terminate` with `signo` recorded as the terminating signal, or
     /// none for 0, by the termination that sets the exit code.
     fn terminate_with(&self, code: i64, signo: u32) {
-        {
+        let mut handles = {
             let mut threads = self.threads.lock();
-            if self.state() == TERMINATED {
+            if self.ending() {
                 return;
             }
             self.term_signal.store(signo, Ordering::Release);
+            self.exit_code.store(code, Ordering::Release);
+            // In one step with adding threads and handles: the table is
+            // swapped for one that takes none under the lock of the
+            // threads (MIKSPEC-0008.R46).
+            self.state.store(TERMINATING, Ordering::Release);
+            let handles = core::mem::replace(&mut *self.handles.lock(), HandleTable::closed());
             threads.retain(|t| t.strong_count() > 0);
             for thread in threads.iter().filter_map(Weak::upgrade) {
                 sched::make_dead(&thread);
             }
-            self.exit_code.store(code, Ordering::Release);
-            self.state.store(TERMINATED, Ordering::Release);
-        }
+            handles
+        };
         terminated(self, code);
         crate::log::diag!(
             "process {} ({}) exits with code {code}, signal {signo}",
@@ -749,14 +765,14 @@ impl Process {
         // This also removes translations made outside regions, whose
         // frames belong to whoever mapped them and are not freed.
         self.aspace.remove_all_regions();
-        // Objects are dropped after the lock is released, as dropping one
-        // can drop further objects.
-        let mut handles = core::mem::take(&mut *self.handles.lock());
+        // Objects are dropped with no lock held, as dropping one can drop
+        // further objects.
         while !handles.destroy_some(crate::publish::ITEM_STEP) {
             crate::sched::preempt_point_if_unlocked();
         }
         crate::wait::process_ended(self);
         drop(core::mem::take(&mut *self.stopped.lock()));
+        self.state.store(TERMINATED, Ordering::Release);
         self.header
             .update_signals(signals::SUSPENDED, signals::TERMINATED);
         // Once TERMINATED, the process gains no threads.

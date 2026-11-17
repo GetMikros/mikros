@@ -48,6 +48,9 @@ pub struct HandleTable {
     /// Indices of free slots.
     free: Vec<u32>,
     count: usize,
+    /// Whether it is the table of a terminating process, which takes no
+    /// handle (MIKSPEC-0008.R46).
+    closed: bool,
 }
 
 fn value(index: usize, generation: u32) -> Handle {
@@ -60,6 +63,18 @@ impl HandleTable {
             slots: Vec::new(),
             free: Vec::new(),
             count: 0,
+            closed: false,
+        }
+    }
+
+    /// The empty table of a terminating process, in which every insert
+    /// fails with `BadState`.
+    pub const fn closed() -> Self {
+        HandleTable {
+            slots: Vec::new(),
+            free: Vec::new(),
+            count: 0,
+            closed: true,
         }
     }
 
@@ -101,6 +116,9 @@ impl HandleTable {
         rights: u32,
         budget: Option<&Arc<Budget>>,
     ) -> Result<Handle, Error> {
+        if self.closed {
+            return Err(Error::BadState);
+        }
         if self.count >= HANDLE_LIMIT {
             return Err(Error::NoResources);
         }
