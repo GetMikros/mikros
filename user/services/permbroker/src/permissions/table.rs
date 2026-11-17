@@ -25,7 +25,6 @@ pub const PERMISSIONS: &[(&str, Scope)] = &[
     ("admin.libraries.install", Scope::Admin),
     ("admin.logs.read", Scope::Admin),
     ("admin.power.control", Scope::Admin),
-    ("admin.public.create", Scope::Admin),
     ("admin.public.write", Scope::Admin),
     ("admin.services.control", Scope::Admin),
     ("admin.services.install", Scope::Admin),

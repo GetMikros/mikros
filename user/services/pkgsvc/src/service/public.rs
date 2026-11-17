@@ -1,4 +1,4 @@
-//! `CreatePublic` and `OpenPublic` (MIKSPEC-0101.R48, MIKSPEC-0101.R49):
+//! `CreatePublic` and `OpenPublic` (MIKSPEC-0101.R48, MIKSPEC-0101.R53):
 //! an installed app makes its public folder, `public/<id>`, a subvolume
 //! of user 0 whose lists let the app write and everyone else read; and a
 //! process that holds `admin.public.write` gets a connection to write an
@@ -15,7 +15,6 @@ use mikros_rt::interfaces::mikros::fs::{AclEntry, AclTag, Node, OpenFlags, Right
 use mikros_rt::interfaces::mikros::permissions::{AppNumbers, AppNumbersClient};
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 
-const CREATE: &str = "admin.public.create";
 const WRITE: &str = "admin.public.write";
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 const RX: Rights = Rights(Rights::READ.0 | Rights::EXECUTE.0);
@@ -72,7 +71,8 @@ fn done<T>(
     }
 }
 
-/// Makes the public folder of the caller's app (MIKSPEC-0101.R49).
+/// Makes the public folder of the caller's app, which needs no permission
+/// (MIKSPEC-0101.R53).
 pub fn create(shared: &Shared, caller: &ClientIdentity) -> Result<(), Status> {
     let id = caller.app_id.as_str();
     let portable = !caller.portable_checksum.is_empty();
@@ -81,14 +81,6 @@ pub fn create(shared: &Shared, caller: &ClientIdentity) -> Result<(), Status> {
     }
     let root = shared.root()?;
     if !installed_for(shared, &root, id, caller.user)? {
-        return Err(Status::AccessDenied);
-    }
-    if !request(
-        shared,
-        caller,
-        CREATE,
-        &format!("create the public folder of {id}"),
-    )? {
         return Err(Status::AccessDenied);
     }
     let at = folder(id);
