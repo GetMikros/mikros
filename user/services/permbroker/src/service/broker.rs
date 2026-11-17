@@ -140,6 +140,7 @@ fn identity(client: &ClientIdentity) -> Identity<'_> {
         app_id: &client.app_id,
         admin: client.admin,
         koid: client.koid,
+        checksum: &client.portable_checksum,
     }
 }
 

@@ -67,6 +67,19 @@ pub struct Identity<'a> {
     pub admin: u32,
     /// The kernel object ID of the client's process, 0 for none.
     pub koid: u64,
+    /// The checksum of the portable app's package, `build` for a build,
+    /// and empty otherwise (MIKSPEC-0036.R41).
+    pub checksum: &'a str,
+}
+
+/// The `portable_checksum` of a build, whose grants are never kept
+/// (MIKSPEC-0037.R35).
+pub const BUILD: &str = "build";
+
+impl Identity<'_> {
+    fn build(&self) -> bool {
+        self.checksum == BUILD
+    }
 }
 
 /// A user's decision on a `user` or `default` permission for an app.
@@ -141,9 +154,10 @@ pub struct Store {
     /// The `system` and `admin` permissions of each app ID, for every
     /// user.
     system: BTreeMap<String, BTreeSet<String>>,
-    /// The grants, by user, app ID and permission. None is
-    /// `Undetermined`.
-    grants: BTreeMap<(u32, String, String), Decision>,
+    /// The grants, by user, app ID, the checksum of a portable app's
+    /// package or nothing for an installed app (MIKSPEC-0101.R46), and
+    /// permission. None is `Undetermined`.
+    grants: BTreeMap<(u32, String, String, String), Decision>,
     /// The `admin` permissions that an administrator allowed, by the
     /// kernel object ID of the process they were allowed to.
     held: BTreeSet<(u64, String)>,
@@ -219,18 +233,24 @@ impl Store {
     }
 
     /// The `user` and `default` grants, a line
-    /// `<user> <app ID> <permission> allowed|denied` each.
+    /// `<user> <app ID> <permission> allowed|denied` each, followed by
+    /// ` <checksum>` for a portable app's.
     pub fn encode_grants(&self) -> Vec<u8> {
         let mut text = String::new();
-        for ((user, app_id, permission), decision) in &self.grants {
+        for ((user, app_id, checksum, permission), decision) in &self.grants {
             let decision = match decision {
                 Decision::Allowed => "allowed",
                 Decision::Denied => "denied",
                 Decision::Undetermined => continue,
             };
-            if storable(app_id) {
-                text.push_str(&alloc::format!("{user} {app_id} {permission} {decision}\n"));
+            if !storable(app_id) || (!checksum.is_empty() && !storable(checksum)) {
+                continue;
             }
+            text.push_str(&alloc::format!("{user} {app_id} {permission} {decision}"));
+            if !checksum.is_empty() {
+                text.push_str(&alloc::format!(" {checksum}"));
+            }
+            text.push('\n');
         }
         text.into_bytes()
     }
@@ -243,9 +263,18 @@ impl Store {
         let mut skipped = 0;
         for line in lines(bytes) {
             let mut words = line.split(' ');
-            let parsed = match (words.next(), words.next(), words.next(), words.next()) {
-                (Some(user), Some(app_id), Some(permission), Some(decision))
-                    if words.next().is_none() =>
+            let words = (
+                words.next(),
+                words.next(),
+                words.next(),
+                words.next(),
+                words.next(),
+                words.next(),
+            );
+            let checksum = words.4.unwrap_or("");
+            let parsed = match words {
+                (Some(user), Some(app_id), Some(permission), Some(decision), _, None)
+                    if checksum != BUILD =>
                 {
                     let decision = match decision {
                         "allowed" => Some(Decision::Allowed),
@@ -264,9 +293,14 @@ impl Store {
                 }
                 _ => None,
             };
-            let key = parsed
-                .as_ref()
-                .map(|g| (g.user, g.app_id.clone(), g.permission.clone()));
+            let key = parsed.as_ref().map(|g| {
+                (
+                    g.user,
+                    g.app_id.clone(),
+                    String::from(checksum),
+                    g.permission.clone(),
+                )
+            });
             match (parsed, key) {
                 (Some(grant), Some(key))
                     if Store::check_grant(&grant).is_ok() && !self.grants.contains_key(&key) =>
@@ -299,11 +333,28 @@ impl Store {
             .is_some_and(|set| set.contains(permission))
     }
 
-    fn grant(&self, user: u32, app_id: &str, permission: &str) -> Decision {
+    /// The kept grant of `permission` for `client`; none for a build.
+    fn grant(&self, client: Identity<'_>, permission: &str) -> Decision {
+        if client.build() {
+            return Decision::Undetermined;
+        }
+        let key = (
+            client.user,
+            client.app_id.into(),
+            client.checksum.into(),
+            permission.into(),
+        );
         self.grants
-            .get(&(user, app_id.into(), permission.into()))
+            .get(&key)
             .copied()
             .unwrap_or(Decision::Undetermined)
+    }
+
+    /// Whether `client` has the `system` or `admin` permission
+    /// `permission` of its app ID, which a portable app or a build never
+    /// has.
+    fn system_of(&self, client: Identity<'_>, permission: &str) -> bool {
+        client.checksum.is_empty() && self.has_system(client.app_id, permission)
     }
 
     /// The decision on `permission` for `client`, without prompting, and
@@ -316,11 +367,13 @@ impl Store {
         permission: &str,
     ) -> Result<(Decision, bool), Failure> {
         let scope = scope(permission).ok_or(Failure::NotFound)?;
-        let grant = self.grant(client.user, client.app_id, permission);
+        // A build holds what it was allowed only while its process runs.
+        let grant = match client.build() && self.holds(client, permission) {
+            true => Decision::Allowed,
+            false => self.grant(client, permission),
+        };
         let decision = match scope {
-            Scope::System | Scope::Admin if self.has_system(client.app_id, permission) => {
-                Decision::Allowed
-            }
+            Scope::System | Scope::Admin if self.system_of(client, permission) => Decision::Allowed,
             Scope::Admin if self.holds(client, permission) => Decision::Allowed,
             Scope::System | Scope::Admin => Decision::Undetermined,
             Scope::User => grant,
@@ -381,16 +434,29 @@ impl Store {
     }
 
     /// Records the prompter's answer to a request, and returns the
-    /// decision it makes.
+    /// decision it makes. A build's is kept only as held by its process
+    /// when it allows, and not at all when it denies (MIKSPEC-0037.R35).
     pub fn record(&mut self, client: Identity<'_>, permission: &str, allowed: bool) -> Decision {
         let decision = if allowed {
             Decision::Allowed
         } else {
             Decision::Denied
         };
+        if client.build() {
+            if allowed && client.koid != 0 {
+                self.held.insert((client.koid, permission.into()));
+            }
+            return decision;
+        }
         // A prompt is only asked for an undetermined permission, so
         // recording its answer takes nothing away.
-        self.put(client.user, client.app_id, permission, decision);
+        let key = (
+            client.user,
+            client.app_id.into(),
+            client.checksum.into(),
+            permission.into(),
+        );
+        self.grants.insert(key, decision);
         decision
     }
 
@@ -413,20 +479,22 @@ impl Store {
 
     /// Stores `decision`, `ALLOWED` or `DENIED`, and returns the one it
     /// replaces.
+    /// The installed app's, whose grants `SetGrant` sets.
     fn put(&mut self, user: u32, app_id: &str, permission: &str, decision: Decision) -> Decision {
-        let key = (user, app_id.into(), permission.into());
+        let key = (user, app_id.into(), String::new(), permission.into());
         let before = self.grants.insert(key, decision);
         before.unwrap_or(Decision::Undetermined)
     }
 
-    /// The grants of `user`, at most `LIST_MAX` of them, by app ID and
-    /// permission.
+    /// The grants of `user` for installed apps, at most `LIST_MAX` of
+    /// them, by app ID and permission.
     pub fn list(&self, user: u32) -> Vec<Grant> {
         self.grants
-            .range((user, String::new(), String::new())..)
-            .take_while(|((u, _, _), _)| *u == user)
+            .range((user, String::new(), String::new(), String::new())..)
+            .take_while(|((u, _, _, _), _)| *u == user)
+            .filter(|((_, _, checksum, _), _)| checksum.is_empty())
             .take(LIST_MAX)
-            .map(|((user, app_id, permission), decision)| Grant {
+            .map(|((user, app_id, _, permission), decision)| Grant {
                 user: *user,
                 app_id: app_id.clone(),
                 permission: permission.clone(),

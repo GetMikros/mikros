@@ -6,6 +6,8 @@ use alloc::vec;
 
 const BROKER: &str = "system.permbroker";
 const APP: &str = "org.example.app";
+const USER_PERMISSION: &str = "user.camera.use";
+const DEFAULT_PERMISSION: &str = "default.network.use";
 
 fn strings(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -24,6 +26,7 @@ fn id(app_id: &str) -> Identity<'_> {
         app_id,
         admin: 0,
         koid: KOID,
+        checksum: "",
     }
 }
 
@@ -188,6 +191,7 @@ fn system_permissions_apply_for_every_user() {
             app_id: APP,
             admin: 0,
             koid: KOID,
+            checksum: "",
         };
         assert_eq!(
             s.check(who, "system.devices.manage").map(|d| d.0),
@@ -254,6 +258,7 @@ fn checks_by_scope() {
         app_id: APP,
         admin: 0,
         koid: KOID,
+        checksum: "",
     };
     assert_eq!(
         s.check(other, "user.camera.use").map(|d| d.0),
@@ -423,6 +428,7 @@ fn elevated_clients_hold_user_and_admin_permissions() {
         app_id: APP,
         admin: 1000,
         koid: KOID,
+        checksum: "",
     };
     // Every user and admin permission, without asking or recording a
     // grant.
@@ -676,4 +682,82 @@ fn app_grant(user: u32, app_id: &str, permission: &str, decision: Decision) -> G
         app_id: app_id.to_string(),
         ..grant(user, permission, decision)
     }
+}
+
+#[test]
+fn keeps_portable_apps_grants_apart_and_never_a_builds() {
+    let mut s = store();
+    let portable = Identity {
+        checksum: "sha256:ab",
+        ..id(APP)
+    };
+    let build = Identity {
+        checksum: BUILD,
+        ..id(APP)
+    };
+    s.record(portable, USER_PERMISSION, true);
+    assert_eq!(
+        s.check(portable, USER_PERMISSION),
+        Ok((Decision::Allowed, false))
+    );
+    // The installed app with the same ID and a build have none of it.
+    assert_eq!(
+        s.check(id(APP), USER_PERMISSION),
+        Ok((Decision::Undetermined, false))
+    );
+    assert_eq!(
+        s.check(build, USER_PERMISSION),
+        Ok((Decision::Undetermined, false))
+    );
+    // A build holds what it was allowed only in its process, and keeps no
+    // denial.
+    s.record(build, USER_PERMISSION, true);
+    assert_eq!(
+        s.check(build, USER_PERMISSION),
+        Ok((Decision::Allowed, false))
+    );
+    let later = Identity {
+        koid: KOID + 1,
+        ..build
+    };
+    assert_eq!(
+        s.check(later, USER_PERMISSION),
+        Ok((Decision::Undetermined, false))
+    );
+    s.record(later, DEFAULT_PERMISSION, false);
+    assert_eq!(
+        s.check(later, DEFAULT_PERMISSION),
+        Ok((Decision::Allowed, false))
+    );
+    // Only the portable app's grant is written, with its checksum, and
+    // read back as its own.
+    let text = String::from_utf8(s.encode_grants()).unwrap();
+    assert_eq!(
+        text,
+        std::format!("1 {APP} {USER_PERMISSION} allowed sha256:ab\n")
+    );
+    let mut loaded = store();
+    assert_eq!(loaded.load_grants(text.as_bytes()), 0);
+    assert_eq!(
+        loaded.check(portable, USER_PERMISSION),
+        Ok((Decision::Allowed, false))
+    );
+    assert_eq!(
+        loaded.check(id(APP), USER_PERMISSION),
+        Ok((Decision::Undetermined, false))
+    );
+    assert_eq!(
+        loaded.load_grants(b"1 org.x user.camera.use allowed build\n"),
+        1
+    );
+    // Neither has the system permissions of an app ID.
+    s.grant_system(APP, &strings(&["admin.logs.read"])).unwrap();
+    assert_eq!(
+        s.check(id(APP), "admin.logs.read"),
+        Ok((Decision::Allowed, false))
+    );
+    assert_eq!(
+        s.check(portable, "admin.logs.read"),
+        Ok((Decision::Undetermined, false))
+    );
 }
