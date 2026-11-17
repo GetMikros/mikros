@@ -1,5 +1,6 @@
 //! Starting the process manager from its boot module, registering with
-//! it as process ID 1, and asking it to start the service manager.
+//! it as process ID 1, and asking it to start the service manager; and
+//! the processes of both, which init watches.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -71,11 +72,18 @@ fn command_line(bytes: &[u8]) -> alloc::string::String {
     alloc::string::String::from(&text[..end])
 }
 
+/// The processes of the process manager and of the service manager.
+pub struct Managers {
+    pub process_manager: OwnedHandle,
+    pub service_manager: OwnedHandle,
+}
+
 /// Starts the process manager, registers with it and asks it to start
 /// the service manager, giving the service manager the boot handles.
-pub fn start(s: &Startup) -> Result<()> {
+pub fn start(s: &Startup) -> Result<Managers> {
     let file = member(s, PROCESS_MANAGER)?;
     let (process, thread, bootstrap) = load(s, &file)?;
+    let process_manager = duplicate(process.raw())?;
     let channel = |e| Failure {
         what: "creating a channel",
         why: Why::Channel(e),
@@ -108,7 +116,10 @@ pub fn start(s: &Startup) -> Result<()> {
         init.start_service_manager(handles, i64::MAX),
     )?;
     mikros_rt::log!(Info, "service manager started as process {}", started.pid);
-    Ok(())
+    Ok(Managers {
+        process_manager,
+        service_manager: started.process,
+    })
 }
 
 fn reply<T>(
