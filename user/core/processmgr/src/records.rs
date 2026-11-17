@@ -72,23 +72,20 @@ pub struct Records {
     by_pid: BTreeMap<u32, Record>,
     /// IDs given to processes that are being started.
     reserved: BTreeSet<u32>,
+    /// The ID given last. The next is the first free one after it, so
+    /// that an ID comes back only once the IDs after it up to the highest
+    /// have been given.
+    last: u32,
 }
 
 impl Records {
-    /// The lowest process ID above every ID in use or reserved, never 0.
-    pub fn next_pid(&self) -> u32 {
-        let used = self.by_pid.keys().next_back().copied().unwrap_or(0);
-        let reserved = self.reserved.last().copied().unwrap_or(0);
-        used.max(reserved) + 1
-    }
-
-    /// Reserves the next process ID for a process being started, or
-    /// returns `None` when none is left.
+    /// Reserves for a process being started the first process ID after
+    /// the one given last that is neither in use nor reserved, going on
+    /// from 1 after the highest, or returns `None` when none is left.
     pub fn reserve(&mut self) -> Option<u32> {
-        let pid = self.next_pid();
-        if pid > PID_MAX {
-            return None;
-        }
+        let free = |pid: &u32| !self.by_pid.contains_key(pid) && !self.reserved.contains(pid);
+        let pid = (self.last + 1..=PID_MAX).chain(1..=self.last).find(free)?;
+        self.last = pid;
         self.reserved.insert(pid);
         Some(pid)
     }
