@@ -5,7 +5,8 @@
 use crate::lock::Lock;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use mikros_rt::interfaces::mikros::process::StartupHandle;
+use mikros_rt::interfaces::__midl::OwnedHandle;
+use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 use mikros_rt::sys;
 
 /// What `mikros_take_startup_handle` returns for a handle it has not.
@@ -24,6 +25,14 @@ pub fn install(handles: Vec<StartupHandle>, directory: sys::Handle) {
 /// The process's `Directory` connection.
 pub fn directory() -> sys::Handle {
     DIRECTORY.load(Ordering::Relaxed)
+}
+
+/// The first startup handle of role `role` that is left, which the
+/// caller then owns.
+pub fn take_role(role: HandleRole) -> Option<OwnedHandle> {
+    let mut handles = HANDLES.lock();
+    let at = handles.iter().position(|h| h.role == role)?;
+    Some(handles.remove(at).handle)
 }
 
 /// `mikros_take_startup_handle`: the startup handle with `role` and `id`

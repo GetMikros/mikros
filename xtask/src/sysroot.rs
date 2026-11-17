@@ -2,7 +2,8 @@
 //! Mikros are built against, laid out like `/usr`.
 //!
 //! It holds the musl headers in `include/`, with the generated
-//! `<mikros/syscalls.h>`, `<mikros/abi.h>`, `<mikros/process.h>` and
+//! `<mikros/syscalls.h>`, `<mikros/abi.h>`, `<mikros/process.h>`,
+//! `<mikros/services.h>` and
 //! `<mikros/startup.h>` in `include/mikros/`;
 //! `libc.slib`, `libc.dlib`, the dynamic linker `ld-mikros.dlib`, which
 //! is the same file, `crt1.o`, `crti.o`, `crtn.o` and LLVM's static
@@ -98,7 +99,7 @@ fn make() -> Result<PathBuf> {
     }
     let header = sysroot.join("include/mikros/syscalls.h");
     write(&header, syscalls_header()?.as_bytes())?;
-    for header in ["abi.h", "process.h", "startup.h"] {
+    for header in ["abi.h", "process.h", "services.h", "startup.h"] {
         let from = crate::workspace_root()
             .join("user/runtime/libc/include/mikros")
             .join(header);
