@@ -201,6 +201,7 @@ fn all() -> Result<(), Failed> {
     kept(&installer)?;
     protocol_names(&installer)?;
     components(&installer)?;
+    at_once()?;
     run_app(&format!("/apps/{DAEMON}/bin/idle"))?;
     grants::revoke_while_open(&format!("/apps/{DAEMON}/bin/idle"))?;
     let _ = std::fs::remove_file("/users/ada/documents/global-check-note");
@@ -436,4 +437,78 @@ fn components(installer: &InstallerClient) -> Result<(), Failed> {
     remove(installer, SUITE, 30)?;
     let gone = !ids(&listed(installer, 30)?).contains(&EXTRA.into());
     ensure(gone, 30, "the part, gone with the suite")
+}
+
+/// Two local packages installed at the same time, through connections
+/// of their own, each with a required component: both installs are
+/// recorded, so that each component is owned by its package
+/// (MIKSPEC-0101.R72). Both are removed again.
+fn at_once() -> Result<(), Failed> {
+    const CODE: u8 = 60;
+    const IDS: [&str; 2] = ["org.example.first", "org.example.second"];
+    for id in IDS {
+        let manifest = format!(
+            "id: {id}\nkind: app\ninstall: local\nversion: 1.0.0\nname: Part\n\
+             description: Parts.\nexecutable: bin/app\ncomponents:\n  - path: part.mika\n"
+        );
+        let part = local_library(&format!("{id}.part"));
+        let files = [
+            ("bin/app", b"app".to_vec(), true),
+            ("part.mika", part, false),
+        ];
+        pack(&format!("{id}.mika"), &manifest, &files)?;
+    }
+    let installs: Vec<_> = IDS
+        .iter()
+        .map(|id| {
+            let name = format!("{id}.mika");
+            std::thread::spawn(move || {
+                let installer = installer()?;
+                let package = connection(&name).ok_or(Failed(CODE, format!("opening {name}")))?;
+                match installer.install(package, vec![], false, false, vec![], FOREVER) {
+                    Ok(Ok(_)) => Ok(()),
+                    other => failed(CODE, format!("installing {name}: {other:?}")),
+                }
+            })
+        })
+        .collect();
+    for install in installs {
+        install
+            .join()
+            .map_err(|_| Failed(CODE, "an install thread panicked".into()))??;
+    }
+    let installer = installer()?;
+    let all = listed(&installer, CODE)?;
+    for id in IDS {
+        let _ = std::fs::remove_file(format!("{id}.mika"));
+        let part = format!("{id}.part");
+        ensure(
+            all.iter()
+                .any(|p| p.id == part && p.owner == id && !p.global),
+            CODE,
+            &format!("{part}, owned by {id}, after both installs"),
+        )?;
+    }
+    for id in IDS {
+        let removed = installer.remove(id.into(), false, false, FOREVER);
+        ensure(
+            matches!(removed, Ok(Ok(_))),
+            CODE,
+            &format!("removing {id} gave {removed:?}"),
+        )?;
+    }
+    Ok(())
+}
+
+/// The bytes of a package of the library `id` for its user alone.
+fn local_library(id: &str) -> Vec<u8> {
+    let mut builder = Builder::default();
+    builder.file("words.txt", b"word".to_vec(), false);
+    let checksum = checksum_text(&builder.checksum(None));
+    let manifest = format!(
+        "id: {id}\nkind: library\ninstall: local\nversion: 1.0.0\nname: Part\n\
+         description: A part.\nchecksum: {checksum}\n"
+    );
+    builder.file(MANIFEST, manifest.into_bytes(), false);
+    builder.finish()
 }
