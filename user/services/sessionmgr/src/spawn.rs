@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
-use mikros_rt::sys;
+use mikros_rt::objects;
 
 /// The descriptor kind of a slave terminal, in the top bits of a
 /// standard handle's `id`.
@@ -27,26 +27,15 @@ pub fn block(arguments: &[&str], environment: &[String]) -> Option<OwnedHandle> 
         bytes.extend_from_slice(a.as_bytes());
         bytes.push(0);
     }
-    let mut mem = 0;
     let size = (bytes.len() as u64).next_multiple_of(4096);
-    // SAFETY: the out pointer is valid for the call.
-    if unsafe { sys::mem_create(size, 0, &mut mem) } != mikros_rt::OK {
-        return None;
-    }
-    // SAFETY: the kernel just created the handle for us.
-    let mem = unsafe { OwnedHandle::from_raw(mem) };
-    // SAFETY: the pointer and length describe `bytes`.
-    let written = unsafe { sys::mem_write(mem.raw(), 0, bytes.as_ptr(), bytes.len() as u64) };
-    (written == mikros_rt::OK).then_some(mem)
+    let mem = objects::memory(size, 0).ok()?;
+    objects::write_memory(mem.raw(), 0, &bytes).ok()?;
+    Some(mem)
 }
 
 /// A copy of `handle` with the same rights.
 pub fn duplicate(handle: &OwnedHandle) -> Option<OwnedHandle> {
-    let mut out = 0;
-    // SAFETY: the out pointer is valid for the call.
-    let status = unsafe { sys::handle_duplicate(handle.raw(), SAME_RIGHTS, &mut out) };
-    // SAFETY: the kernel just created the handle for us.
-    (status == mikros_rt::OK).then(|| unsafe { OwnedHandle::from_raw(out) })
+    objects::duplicate(handle.raw(), SAME_RIGHTS).ok()
 }
 
 /// The terminal of `token` as descriptors 0, 1 and 2.

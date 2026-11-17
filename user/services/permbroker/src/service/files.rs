@@ -163,9 +163,7 @@ pub async fn keep(
         files.next_change().await;
         // The changes of a while go out together, as each file that is
         // written commits the file system.
-        let mut now = 0;
-        // SAFETY: the out pointer is valid for the call.
-        unsafe { mikros_rt::sys::clock_get_monotonic(&mut now) };
+        let now = mikros_rt::objects::now();
         if reactor.sleep_until(now + SAVE_DELAY).await.is_err() {
             return;
         }

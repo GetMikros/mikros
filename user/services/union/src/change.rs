@@ -9,12 +9,11 @@ use mikros_rt::interfaces::__midl::{OwnedHandle, endpoints};
 use mikros_rt::interfaces::mikros::fs::{
     AttributeMask, Error, Node, NodeAsyncClient, NodeType, OpenFlags, Rights,
 };
-use mikros_rt::sys;
+use mikros_rt::objects;
 
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
 /// The most bytes one read or write moves.
 const CHUNK: u32 = 32768;
-const INFO_BASIC: u32 = 1;
 /// The rights of a token: DUPLICATE, TRANSFER and INSPECT.
 const TOKEN_RIGHTS: u32 = 1 << 0 | 1 << 1 | 1 << 9;
 
@@ -267,25 +266,13 @@ impl Dir {
 
     /// A new token that names this directory.
     pub fn token(&self) -> Result<OwnedHandle, Error> {
-        let mut raw = 0;
-        // SAFETY: the out pointer is valid for the call.
-        if unsafe { sys::event_create(0, &mut raw) } != mikros_rt::OK {
-            return Err(Error::Io);
-        }
-        // SAFETY: the kernel just created the handle for us.
-        let event = unsafe { OwnedHandle::from_raw(raw) };
+        let event = objects::event(0).map_err(|_| Error::Io)?;
         let koid = koid(&event).ok_or(Error::Io)?;
-        let mut token = 0;
-        // SAFETY: the out pointer is valid for the call.
-        if unsafe { sys::handle_duplicate(event.raw(), TOKEN_RIGHTS, &mut token) } != mikros_rt::OK
-        {
-            return Err(Error::Io);
-        }
+        let token = objects::duplicate(event.raw(), TOKEN_RIGHTS).map_err(|_| Error::Io)?;
         // The server keeps the event, so that its object ID stays its own.
         core::mem::forget(event);
         self.view.tokens.borrow_mut().insert(koid, self.clone());
-        // SAFETY: the kernel just created the handle for us.
-        Ok(unsafe { OwnedHandle::from_raw(token) })
+        Ok(token)
     }
 
     /// The directory of this view that the token `handle` names.
@@ -338,18 +325,5 @@ impl Dir {
 
 /// The object ID of `handle`.
 fn koid(handle: &OwnedHandle) -> Option<u64> {
-    let mut record = [0u8; 24];
-    let mut len = 0;
-    // SAFETY: the pointers describe `record` and `len`.
-    let status = unsafe {
-        sys::object_get_info(
-            handle.raw(),
-            INFO_BASIC,
-            record.as_mut_ptr(),
-            record.len() as u64,
-            &mut len,
-        )
-    };
-    let id = u64::from_le_bytes(record[..8].try_into().ok()?);
-    (status == mikros_rt::OK).then_some(id)
+    mikros_rt::midl::koid(handle.raw())
 }

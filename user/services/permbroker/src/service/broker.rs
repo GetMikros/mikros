@@ -62,10 +62,7 @@ struct Pending {
 }
 
 fn now() -> i64 {
-    let mut now = 0;
-    // SAFETY: the pointer is valid for the call.
-    unsafe { mikros_rt::sys::clock_get_monotonic(&mut now) };
-    now
+    mikros_rt::objects::now()
 }
 
 /// The broker's state, shared by every connection.

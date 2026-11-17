@@ -19,7 +19,7 @@ use mikros_rt::interfaces::mikros::process::{HandleRole, LauncherAsyncClient, St
 use mikros_rt::interfaces::mikros::service::{
     DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
 };
-use mikros_rt::{PANIC_EXIT_CODE, managed, sys};
+use mikros_rt::{PANIC_EXIT_CODE, managed, objects, sys};
 
 mikros_rt::raw_main!(main);
 
@@ -96,18 +96,8 @@ fn manifest_store(mem: &OwnedHandle) -> Option<Store> {
         return None;
     }
     let mut record = [0u8; INFO_MEMORY_SIZE];
-    let mut len = 0;
-    // SAFETY: the pointers describe `record` and `len`.
-    let status = unsafe {
-        sys::object_get_info(
-            mem.raw(),
-            INFO_MEMORY,
-            record.as_mut_ptr(),
-            record.len() as u64,
-            &mut len,
-        )
-    };
-    if status != mikros_rt::OK || len < INFO_MEMORY_SIZE as u64 {
+    let len = objects::info(mem.raw(), INFO_MEMORY, &mut record).ok()?;
+    if len < INFO_MEMORY_SIZE {
         return None;
     }
     let size = u64::from_le_bytes(record[..8].try_into().ok()?);
@@ -116,11 +106,7 @@ fn manifest_store(mem: &OwnedHandle) -> Option<Store> {
         return None;
     }
     let mut bytes = vec![0u8; size as usize];
-    // SAFETY: the pointer and length describe `bytes`.
-    let status = unsafe { sys::mem_read(mem.raw(), 0, bytes.as_mut_ptr(), size) };
-    if status != mikros_rt::OK {
-        return None;
-    }
+    objects::read_memory(mem.raw(), 0, &mut bytes).ok()?;
     // The object may be larger than the manifest, which then ends at
     // the zero bytes that fill the rest.
     let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);

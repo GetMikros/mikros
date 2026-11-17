@@ -15,7 +15,7 @@ use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Error, Node, NodeAsyncClient, OpenFlags, Rights};
 use mikros_rt::interfaces::mikros::service::ClientIdentity;
 use mikros_rt::interfaces::mikros::session::UserKind;
-use mikros_rt::sys;
+use mikros_rt::objects;
 use mikros_userdb::{Attempts, Kind, LAST_ID, Refusal, Users, hash, valid_name};
 
 /// The permissions that `Authenticate` and changes to other users'
@@ -45,11 +45,8 @@ pub struct Secret(pub String);
 
 impl Drop for Secret {
     fn drop(&mut self) {
-        // SAFETY: zeros are valid UTF-8.
-        for b in unsafe { self.0.as_bytes_mut() } {
-            // SAFETY: `b` is a valid, aligned byte of the string.
-            unsafe { core::ptr::write_volatile(b, 0) };
-        }
+        let mut bytes = core::mem::take(&mut self.0).into_bytes();
+        objects::wipe(&mut bytes);
     }
 }
 
@@ -375,17 +372,10 @@ fn status(refusal: Refusal) -> Status {
 /// A random salt, unless the kernel has no random bytes to give.
 fn salt() -> Result<[u8; hash::SALT_LEN], Status> {
     let mut salt = [0; hash::SALT_LEN];
-    // SAFETY: the buffer is valid for its length.
-    let status = unsafe { sys::system_get_random(salt.as_mut_ptr(), salt.len() as u64) };
-    match status == mikros_rt::OK {
-        true => Ok(salt),
-        false => Err(Status::Internal),
-    }
+    objects::random(&mut salt).map_err(|_| Status::Internal)?;
+    Ok(salt)
 }
 
 fn now() -> i64 {
-    let mut now = 0;
-    // SAFETY: the out pointer is valid for the call.
-    unsafe { sys::clock_get_monotonic(&mut now) };
-    now
+    objects::now()
 }

@@ -12,6 +12,7 @@ pub mod heap;
 pub mod log;
 pub mod managed;
 pub mod midl;
+pub mod objects;
 mod relocate;
 pub mod startup;
 

@@ -10,6 +10,7 @@
 //! every connection reached through them.
 
 #![no_std]
+#![forbid(unsafe_code)]
 #![no_main]
 
 extern crate alloc;

@@ -10,6 +10,7 @@
 
 #![no_std]
 #![no_main]
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
@@ -55,10 +56,7 @@ const CALLER_USER: u32 = u32::MAX;
 pub const SECOND: i64 = 1_000_000_000;
 
 pub fn now() -> i64 {
-    let mut now = 0;
-    // SAFETY: the out pointer is valid for the call.
-    unsafe { sys::clock_get_monotonic(&mut now) };
-    now
+    mikros_rt::objects::now()
 }
 
 fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
