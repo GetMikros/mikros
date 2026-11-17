@@ -224,6 +224,7 @@ async fn packages(shell: &Shell<'_>, reactor: &mikros_rt::exec::Reactor) -> Resu
     run_command(shell, &installer, ID, reactor).await?;
     run_portable(shell, &probe, reactor).await?;
     run_libraries(shell, &installer, reactor).await?;
+    run_components(shell, &installer, reactor).await?;
     let removed = installer.remove(ID.into(), false, false).await;
     check(matches!(removed, Ok(Ok(_))), 28)?;
     let (_, server) = endpoints::<Node>().map_err(|_| 28)?;
@@ -678,6 +679,70 @@ async fn run_libraries(
         check(matches!(removed, Ok(Ok(_))), 69)?;
     }
     Ok(())
+}
+
+/// Installs for the user the app `org.example.editor` with its component
+/// `org.example.editor.spell`, a library package inside it, which `List`
+/// then shows as the app's, and checks that a component that the package
+/// does not have is refused and that removing the app removes the
+/// component too (MIKSPEC-0101.R59, MIKSPEC-0101.R60).
+async fn run_components(
+    shell: &Shell<'_>,
+    installer: &mikros_rt::interfaces::mikros::packages::InstallerAsyncClient,
+    reactor: &mikros_rt::exec::Reactor,
+) -> Result<(), i64> {
+    use mikros_mika::format::{Builder, MANIFEST, checksum_text};
+    use mikros_rt::interfaces::mikros::base::Status;
+    const APP: &str = "org.example.editor";
+    const SPELL: &str = "org.example.editor.spell";
+    const FILE: &str = "editor.mika";
+    const COMPONENT: &str = "plugins/spell.mika";
+    let mut inner = Builder::default();
+    inner.file("words.txt", b"word".to_vec(), false);
+    let checksum = checksum_text(&inner.checksum(None));
+    let manifest = format!(
+        "id: {SPELL}\nkind: library\nversion: 1.0.0\nname: Spelling\n\
+         description: Checks spelling.\ninstall: local\nchecksum: {checksum}\n"
+    );
+    inner.file(MANIFEST, manifest.into_bytes(), false);
+    let app = format!(
+        "id: {APP}\nkind: app\nversion: 1.0.0\nname: Editor\ndescription: Edits.\n\
+         executable: bin/editor\ninstall: local\ncomponents: [{COMPONENT}]\n"
+    );
+    let files = [
+        ("bin/editor", b"editor".to_vec()),
+        (COMPONENT, inner.finish()),
+    ];
+    let file = pack(shell, FILE, &app, &files, 81, reactor).await?;
+    let install = |components: Vec<String>, code: i64| {
+        let file = &file;
+        async move {
+            let (client, server) = endpoints::<Node>().map_err(|_| code)?;
+            let cloned = file.clone(server, Rights::READ).await;
+            check(matches!(cloned, Ok(Ok(_))), code)?;
+            installer
+                .install(client, components, false, false, vec![])
+                .await
+                .map_err(|_| code)
+        }
+    };
+    // A component that the package does not have.
+    let wrong = install(vec!["plugins/none.mika".into()], 81).await?;
+    check(matches!(wrong, Err(Status::InvalidArgs)), 81)?;
+    let installed = install(vec![COMPONENT.into()], 82).await?;
+    check(installed.is_ok(), 82)?;
+    let listed = installer.list(String::new()).await;
+    let owned = matches!(&listed, Ok(Ok(r)) if r.packages.iter().any(|p| {
+        p.id == SPELL && p.owner == APP && !p.global
+    }));
+    check(owned, 83)?;
+    let removed = installer.remove(APP.into(), false, false).await;
+    check(matches!(removed, Ok(Ok(_))), 84)?;
+    let listed = installer.list(String::new()).await;
+    let gone = matches!(&listed, Ok(Ok(r)) if !r.packages.iter().any(|p| p.id == SPELL));
+    check(gone, 84)?;
+    let unlinked = shell.home.unlink(FILE.into(), false).await;
+    check(matches!(unlinked, Ok(Ok(_))), 84)
 }
 
 /// Packs `files`, each executable, with the manifest `manifest` and its
