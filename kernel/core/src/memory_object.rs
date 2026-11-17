@@ -1125,7 +1125,7 @@ impl MemoryObject {
         // A write seal waits until no kernel copy holds the frames, so
         // that no output prepared before it is written after it, and
         // until no supply moves frames out of the object.
-        let _pages = loop {
+        let held = loop {
             if write {
                 self.wait_unpinned();
                 self.wait_supplies();
@@ -1136,6 +1136,12 @@ impl MemoryObject {
             }
         };
         if write && self.mapped_writable() {
+            return Err(Error::BadState);
+        }
+        // Writes through the pages that use a lent frame change the
+        // object (MIKSPEC-0006.R53). Frames are lent with the pages
+        // locked, as they are here.
+        if write && held.any_frame(crate::lend::is_lent) {
             return Err(Error::BadState);
         }
         self.seals.fetch_or(seals, Ordering::AcqRel);

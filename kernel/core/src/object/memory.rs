@@ -123,6 +123,11 @@ impl Pages {
     }
 
     /// The frame of page `index`, if it has one.
+    /// Whether `test` holds for the frame of some page.
+    pub fn any_frame(&self, test: impl Fn(u64) -> bool) -> bool {
+        self.frames.values().any(|&phys| test(phys))
+    }
+
     pub fn frame(&self, index: u64) -> Option<u64> {
         self.frames.get(&index).copied()
     }

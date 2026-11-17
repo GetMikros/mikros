@@ -236,8 +236,9 @@ fn pager_operations(s: &Own) -> Result {
 
 /// `pager_lend` makes absent pages of a paged object use the frames of an
 /// anonymous object, which keeps them: writes through either show in
-/// both, lent pages are clean, a clone copies them, the frames stay while
-/// lent even when the source goes, eviction ends the lend so that the
+/// both, lent pages are clean, a clone copies them, the source takes no
+/// write seal while they are lent, the frames stay while lent even when
+/// the source goes, eviction ends the lend so that the
 /// page is requested again, and a sealed source or a revoked object is
 /// refused.
 fn lending_frames(s: &Own) -> Result {
@@ -291,11 +292,16 @@ fn lending_frames(s: &Own) -> Result {
         "copying lent pages into the clone",
         mem_read_at::<6>(clone, 0)? == *b"LEnt 0",
     )?;
-    // SAFETY: the calls take no pointers.
-    unsafe {
-        sys::vm_unmap(s.process, at, PAGE_SIZE);
-        check("closing the source", sys::handle_close(source))?;
-    }
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::vm_unmap(s.process, at, PAGE_SIZE) };
+    // Unmapped, but writes through the lent pages would still change it
+    // (MIKSPEC-0006.R53).
+    ensure(
+        "refusing a write seal while frames are lent",
+        seal(source, 8) == -20,
+    )?;
+    // SAFETY: the call takes no pointers.
+    unsafe { check("closing the source", sys::handle_close(source))? };
     ensure(
         "keeping lent frames once the source is gone",
         mem_read_at::<6>(mem, 0)? == *b"XEnt 0" && mem_read_at::<6>(mem, PAGE_SIZE)? == *b"lent 1",
