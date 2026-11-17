@@ -1,6 +1,11 @@
-//! The names in an ELF64 image's dynamic section that `pkg pack` needs:
-//! the libraries it names in `DT_NEEDED` and its own `DT_SONAME`
-//! (MIKSPEC-0101.R29, MIKSPEC-0101.R52).
+//! The names in an ELF64 image's dynamic section: the libraries it names
+//! in `DT_NEEDED` and its own `DT_SONAME`, which `pkg pack` writes into a
+//! package's `needs` and pkg-config files (MIKSPEC-0101.R29,
+//! MIKSPEC-0101.R52) and the install service keeps libraries for
+//! (MIKSPEC-0101.R51).
+
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// The names of an image's dynamic section.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -103,13 +108,13 @@ pub fn names(file: &[u8]) -> Option<Names> {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
 
     /// An ELF64 image with one loaded segment that holds its dynamic
     /// section, which names `needed` and `soname`.
     pub fn image(needed: &[&str], soname: Option<&str>) -> Vec<u8> {
-        let mut strings = vec![0u8];
+        let mut strings = alloc::vec![0u8];
         let mut add = |s: &str| {
             let at = strings.len() as u64;
             strings.extend_from_slice(s.as_bytes());
@@ -130,7 +135,7 @@ pub mod tests {
         dynamic.push((DT_STRSZ, strings.len() as u64));
         dynamic.push((DT_NULL, 0));
         let total = str_at + strings.len() as u64;
-        let mut f = vec![0u8; 64];
+        let mut f = alloc::vec![0u8; 64];
         f[..4].copy_from_slice(MAGIC);
         f[4] = CLASS_64;
         f[5] = LITTLE_ENDIAN;
@@ -138,7 +143,7 @@ pub mod tests {
         f[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
         f[0x38..0x3a].copy_from_slice(&2u16.to_le_bytes());
         for (kind, offset, size) in [(PT_LOAD, 0, total), (PT_DYNAMIC, dyn_at, dyn_len)] {
-            let mut ph = vec![0u8; 56];
+            let mut ph = alloc::vec![0u8; 56];
             ph[..4].copy_from_slice(&kind.to_le_bytes());
             ph[8..16].copy_from_slice(&offset.to_le_bytes());
             ph[16..24].copy_from_slice(&(vaddr + offset).to_le_bytes());
@@ -162,7 +167,7 @@ pub mod tests {
         assert_eq!(
             names(&file),
             Some(Names {
-                needed: vec!["org.glfw.dev:3/glfw".into(), "libfreetype.6.dlib".into()],
+                needed: alloc::vec!["org.glfw.dev:3/glfw".into(), "libfreetype.6.dlib".into()],
                 soname: Some("org.example.lib:x".into()),
             })
         );

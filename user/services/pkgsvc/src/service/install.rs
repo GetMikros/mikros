@@ -136,6 +136,16 @@ pub fn install(
     let at = place::subvolume(kind, &manifest.id, &scope).ok_or(Status::InvalidArgs)?;
     // What the scope's other packages have of its commands.
     let others = super::commands::others(&root, &scope, &manifest.id)?;
+    // An old version of a library that a program still needs is kept
+    // (MIKSPEC-0101.R51).
+    let old = installed(&root, kind, &manifest.id, &scope);
+    let keep = match (kind, &scope, old) {
+        (Kind::Library, Scope::Global, Some(old)) => {
+            let new = super::kept::package_files(&package, q.dev);
+            super::kept::keep_old(shared, &root, &manifest.id, &at, &old.to_string(), &new)?
+        }
+        _ => None,
+    };
     write(
         &root,
         shared,
@@ -144,6 +154,7 @@ pub fn install(
         &at,
         place::read_only(kind),
         q.dev,
+        keep.as_deref(),
     )?;
     let mut records = root.records()?;
     records.set(
@@ -161,7 +172,7 @@ pub fn install(
     if kind == Kind::Driver {
         super::drivers::boot_modules_changed(shared, &root)?;
     }
-    Ok(())
+    super::kept::clean(shared, &root)
 }
 
 /// The scope of the caller's own user.
@@ -169,6 +180,7 @@ fn scope_of_caller(shared: &Shared, caller: &ClientIdentity) -> Result<Scope, St
     scope(shared, caller, false).map(|(scope, _)| scope)
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Writes the files of `package`, without `include/` unless `dev`, into a
 /// new subvolume next to `at`, which then takes the place of `at`.
 fn write(
@@ -179,6 +191,7 @@ fn write(
     at: &str,
     read_only: bool,
     dev: bool,
+    keep: Option<&str>,
 ) -> Result<(), Status> {
     let (parent, name) = at.rsplit_once('/').ok_or(Status::InvalidArgs)?;
     root.make_folders(parent)?;
@@ -216,7 +229,7 @@ fn write(
         if read_only {
             subvolumes.set_read_only(&new, true)?;
         }
-        root.replace(parent, &format!(".new-{name}"), name, &subvolumes)
+        root.replace(parent, &format!(".new-{name}"), name, &subvolumes, keep)
     })();
     if written.is_err() {
         let _ = subvolumes.delete(&new);

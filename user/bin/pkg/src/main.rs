@@ -1,14 +1,12 @@
 //! pkg, which installs, removes, lists, shows and makes `.mika` packages
 //! (MIKSPEC-0101.R28). `request` reads the arguments, `order` puts the
 //! packages to install after those they need, `show` makes the output,
-//! `pack` makes packages from folders, reading the images' names with
-//! `elf`, and `program`, left out of the host's build, calls the install
+//! `pack` makes packages from folders, and `program`, left out of the host's build, calls the install
 //! service. On the build machine pkg only packs.
 
 #![cfg_attr(target_os = "mikros", feature(mikros_handles))]
 #![cfg_attr(not(target_os = "mikros"), allow(dead_code))]
 
-mod elf;
 mod order;
 mod pack;
 #[cfg(target_os = "mikros")]

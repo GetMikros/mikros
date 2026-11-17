@@ -4,7 +4,7 @@
 //! (MIKSPEC-0101.R52), and the library packages that its programs and
 //! libraries need added to its `needs` (MIKSPEC-0101.R29).
 
-use crate::elf;
+use mikros_mika::elf;
 use mikros_mika::format::{Builder, MANIFEST, checksum_text};
 use mikros_mika::manifest::Manifest;
 use std::collections::{BTreeMap, BTreeSet};
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn packs_libraries_and_what_they_need() {
-        use crate::elf::tests::image;
+        use super::tests_elf::image;
         let dir = std::env::temp_dir().join(format!("pkg-pack-lib-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("3")).unwrap();
@@ -381,5 +381,59 @@ mod tests {
             ["warning: the library package org.gone.lib is needed but cannot be found"]
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// An ELF64 image to pack in the tests, as `mikros_mika::elf` reads it.
+#[cfg(test)]
+mod tests_elf {
+    const DT_NEEDED: u64 = 1;
+    const DT_STRTAB: u64 = 5;
+    const DT_STRSZ: u64 = 10;
+    const DT_SONAME: u64 = 14;
+
+    /// An ELF64 image with one loaded segment that holds its dynamic
+    /// section, which names `needed` and `soname`.
+    pub fn image(needed: &[&str], soname: Option<&str>) -> Vec<u8> {
+        let mut strings = vec![0u8];
+        let mut add = |s: &str| {
+            let at = strings.len() as u64;
+            strings.extend_from_slice(s.as_bytes());
+            strings.push(0);
+            at
+        };
+        let mut dynamic: Vec<(u64, u64)> = needed.iter().map(|n| (DT_NEEDED, add(n))).collect();
+        if let Some(soname) = soname {
+            dynamic.push((DT_SONAME, add(soname)));
+        }
+        let (phoff, vaddr) = (64u64, 0x1000u64);
+        let dyn_at = phoff + 2 * 56;
+        let dyn_len = (dynamic.len() as u64 + 3) * 16;
+        let str_at = dyn_at + dyn_len;
+        dynamic.push((DT_STRTAB, vaddr + str_at));
+        dynamic.push((DT_STRSZ, strings.len() as u64));
+        dynamic.push((0, 0));
+        let total = str_at + strings.len() as u64;
+        let mut f = vec![0u8; 64];
+        f[..4].copy_from_slice(b"\x7fELF");
+        f[4] = 2;
+        f[5] = 1;
+        f[0x20..0x28].copy_from_slice(&phoff.to_le_bytes());
+        f[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+        f[0x38..0x3a].copy_from_slice(&2u16.to_le_bytes());
+        for (kind, offset, size) in [(1u32, 0, total), (2, dyn_at, dyn_len)] {
+            let mut ph = vec![0u8; 56];
+            ph[..4].copy_from_slice(&kind.to_le_bytes());
+            ph[8..16].copy_from_slice(&offset.to_le_bytes());
+            ph[16..24].copy_from_slice(&(vaddr + offset).to_le_bytes());
+            ph[32..40].copy_from_slice(&size.to_le_bytes());
+            f.extend(ph);
+        }
+        for (tag, value) in dynamic {
+            f.extend(tag.to_le_bytes());
+            f.extend(value.to_le_bytes());
+        }
+        f.extend(strings);
+        f
     }
 }

@@ -7,6 +7,7 @@ mod commands;
 mod drivers;
 mod files;
 mod install;
+mod kept;
 mod list;
 mod package;
 mod public;

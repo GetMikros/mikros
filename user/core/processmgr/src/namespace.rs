@@ -87,6 +87,10 @@ const PUBLIC: &str = "/public";
 /// of the installed ones from the root (MIKSPEC-0100.R19).
 const DRIVERS: &str = "/system/drivers";
 const DRIVERS_SUBVOLUME: &str = "drivers";
+/// The library packages, and their kept versions, from the root
+/// (MIKSPEC-0101.R51).
+const LIBRARIES: &str = "libraries";
+const KEPT: &str = "libraries/.kept";
 /// The folder of the commands of installed packages (MIKSPEC-0101.R44).
 const COMMANDS: &str = "/system/commands";
 /// The permission that lets an app write its installed package
@@ -632,6 +636,50 @@ impl Namespaces {
             .map(<[u8]>::to_vec)
     }
 
+    /// A read and execute view of each library package with kept
+    /// versions, by its ID: its current version over the kept ones, newer
+    /// above older. A library whose view cannot be made is left out.
+    async fn kept_libraries(
+        &self,
+        shared: &Shared,
+        ready: &Ready,
+    ) -> Vec<(String, ClientEnd<Node>)> {
+        let root = ready.roots.root();
+        let reactor = &shared.reactor;
+        let Ok(ids) = files::list(root, reactor, KEPT, NodeType::Directory, "").await else {
+            return Vec::new();
+        };
+        let mut views = Vec::new();
+        for id in ids.into_iter().filter(|id| mikros_mika::id::is_valid(id)) {
+            let kept = format!("{KEPT}/{id}");
+            let Ok(mut versions) = files::list(root, reactor, &kept, NodeType::Directory, "").await
+            else {
+                continue;
+            };
+            versions.sort_by(|a, b| {
+                let parse = mikros_mika::version::Version::parse;
+                parse(b).cmp(&parse(a))
+            });
+            let mut folders = alloc::vec![format!("{LIBRARIES}/{id}")];
+            folders.extend(versions.iter().map(|v| format!("{kept}/{v}")));
+            let mut layers = Vec::new();
+            for folder in folders {
+                if let Ok(dir) = open(root, &folder, OpenFlags::DIRECTORY, 0, RX, reactor).await
+                    && let Ok(layer) = connection(&dir, RX).await
+                {
+                    layers.push(layer);
+                }
+            }
+            if layers.is_empty() {
+                continue;
+            }
+            if let Ok(view) = crate::users::merged(shared, layers, RX).await {
+                views.push((id, view));
+            }
+        }
+        views
+    }
+
     /// The manifest of the installed driver `app_id`, in the root's
     /// subvolume `drivers` (MIKSPEC-0101.R19), when there is one.
     pub async fn installed_driver(&self, shared: &Shared, app_id: &str) -> Option<Vec<u8>> {
@@ -1016,6 +1064,23 @@ impl Namespaces {
                 directory: shared.volumes.directory()?,
             };
             add(&mut entries, &mut origins, none(volumes));
+        }
+        // Libraries with kept versions are views of their versions, newest
+        // first (MIKSPEC-0101.R51).
+        if entries.iter().any(|e| e.path == "/libraries") {
+            for (id, view) in self.kept_libraries(shared, &ready).await {
+                let path = format!("/libraries/{id}");
+                if !entries.iter().any(|e| e.path == path) {
+                    add(
+                        &mut entries,
+                        &mut origins,
+                        none(NamespaceEntry {
+                            path,
+                            directory: view,
+                        }),
+                    );
+                }
+            }
         }
         // Every namespace with /system sees the installed drivers too.
         if entries.iter().any(|e| e.path == SYSTEM_ENTRY)

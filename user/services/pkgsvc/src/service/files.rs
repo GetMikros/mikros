@@ -94,6 +94,11 @@ impl Root {
 
     /// The contents of the file at `path`, at most `FILE_MAX` bytes.
     pub fn read(&self, path: &str) -> Result<Vec<u8>, Status> {
+        self.read_at_most(path, FILE_MAX)
+    }
+
+    /// The contents of the file at `path`, at most `max` bytes.
+    pub fn read_at_most(&self, path: &str, max: usize) -> Result<Vec<u8>, Status> {
         let file = self.open(path, OpenFlags(0), 0, Rights::READ)?;
         let mut bytes = Vec::new();
         loop {
@@ -102,10 +107,52 @@ impl Root {
                 return Ok(bytes);
             }
             bytes.extend_from_slice(&data);
-            if bytes.len() > FILE_MAX {
+            if bytes.len() > max {
                 return Err(Status::OutOfRange);
             }
         }
+    }
+
+    /// The paths, relative to `path`, of the regular files below the
+    /// folder at `path`, at any depth; none when there is no such folder.
+    pub fn files(&self, path: &str) -> Result<Vec<String>, Status> {
+        let mut found = Vec::new();
+        let mut folders = vec![String::new()];
+        while let Some(below) = folders.pop() {
+            let at = match below.is_empty() {
+                true => String::from(path),
+                false => format!("{path}/{below}"),
+            };
+            let dir = match self.open(&at, OpenFlags::DIRECTORY, 0, Rights::READ) {
+                Ok(dir) => dir,
+                Err(Status::NotFound) => continue,
+                Err(e) => return Err(e),
+            };
+            let mut cookie = 0;
+            loop {
+                let listed = flat(dir.read_directory(cookie, false, FOREVER))?;
+                if listed.entries.is_empty() {
+                    break;
+                }
+                for e in listed.entries {
+                    if e.name == "." || e.name == ".." {
+                        continue;
+                    }
+                    let relative = match below.is_empty() {
+                        true => e.name,
+                        false => format!("{below}/{}", e.name),
+                    };
+                    match e.r#type {
+                        NodeType::Directory => folders.push(relative),
+                        NodeType::File => found.push(relative),
+                        _ => {}
+                    }
+                }
+                cookie = listed.next;
+            }
+        }
+        found.sort();
+        Ok(found)
     }
 
     /// The names of the folders in the folder at `path`; none when it is
@@ -177,13 +224,16 @@ impl Root {
     /// Puts `from` of the folder `parent` in the place of `to`: renamed
     /// to it when there is no `to`, and otherwise swapped with it in one
     /// step, after which the old `to`, now at `from`, a subvolume, is
-    /// deleted (MIKSPEC-0101.R36).
+    /// deleted (MIKSPEC-0101.R36), after a read-only snapshot of it is
+    /// made at `keep`, a path from the root, when it is given
+    /// (MIKSPEC-0101.R51).
     pub fn replace(
         &self,
         parent: &str,
         from: &str,
         to: &str,
         subvolumes: &Subvolumes,
+        keep: Option<&str>,
     ) -> Result<(), Status> {
         let dir = self.open(parent, OpenFlags::DIRECTORY, 0, RW)?;
         let token = flat(dir.get_token(FOREVER))?.token;
@@ -199,7 +249,17 @@ impl Root {
             return flat(dir.rename(from.into(), token, to.into(), FOREVER)).map(|_| ());
         }
         flat(dir.exchange(from.into(), token, to.into(), FOREVER))?;
-        subvolumes.delete(&format!("{parent}/{from}"))
+        let Some(keep) = keep else {
+            return subvolumes.delete(&format!("{parent}/{from}"));
+        };
+        // A read-only subvolume cannot move to another folder, and is not
+        // made writable while programs map its files: a read-only snapshot
+        // of it is kept, which shares its data, and it goes.
+        let (folder, _) = keep.rsplit_once('/').ok_or(Status::InvalidArgs)?;
+        self.make_folders(folder)?;
+        let old = format!("{parent}/{from}");
+        subvolumes.snapshot(&old, keep, true)?;
+        subvolumes.delete(&old)
     }
 
     /// Removes `path` and everything below it.
@@ -360,6 +420,13 @@ impl Subvolumes {
     pub fn delete(&self, path: &str) -> Result<(), Status> {
         let client = self.0.lock().map_err(|_| Status::Internal)?;
         flat(client.delete(path.into(), FOREVER)).map(|_| ())
+    }
+
+    /// Makes `path` a snapshot of the subvolume `source`, read-only when
+    /// `read_only`.
+    pub fn snapshot(&self, source: &str, path: &str, read_only: bool) -> Result<(), Status> {
+        let client = self.0.lock().map_err(|_| Status::Internal)?;
+        flat(client.snapshot(source.into(), path.into(), read_only, FOREVER)).map(|_| ())
     }
 
     pub fn set_read_only(&self, path: &str, read_only: bool) -> Result<(), Status> {

@@ -111,7 +111,9 @@ pub fn remove(
             records.get(p.owner, &p.manifest.id).dependency && !needed(&everything, &p.manifest.id)
         });
         let Some(p) = unneeded else {
-            return Ok(());
+            // Kept libraries that only the removed packages needed go too
+            // (MIKSPEC-0101.R51).
+            return super::kept::clean(shared, &root);
         };
         delete(
             shared,
