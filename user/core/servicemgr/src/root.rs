@@ -1,8 +1,9 @@
 //! The root file system, once the process manager says it is available:
 //! the service manager's `/system` and `/system/config` are then the
 //! root's, it registers the permissions of the program manifests in
-//! `/system/programs/`, gives the device manager the root's `/system` for
-//! its drivers, and starts the services whose manifests in
+//! `/system/programs/`, gives the device manager the root's `/system` and
+//! `/system/drivers`, which holds the installed drivers too, for its
+//! drivers (MIKSPEC-0036.R42), and starts the services whose manifests in
 //! `/system/services/` it had not read before.
 
 use crate::broker;
@@ -29,9 +30,10 @@ const ROOT_DRIVERS: &str = "mikros.driver.RootDrivers";
 
 /// Waits for the root file system, and then acts on its manifests.
 pub async fn follow(supervisor: Rc<Supervisor>) {
-    let (system, config) = supervisor.dir.root().await;
+    let (system, config, drivers) = supervisor.dir.root().await;
     let reactor = supervisor.reactor.clone();
     let system = NodeAsyncClient::new(system, reactor.clone());
+    let drivers = NodeAsyncClient::new(drivers, reactor.clone());
     let config = NodeAsyncClient::new(config, reactor);
     mikros_rt::log!(Info, "the root file system is available");
     // Read before any service whose manifest the root holds starts.
@@ -44,7 +46,7 @@ pub async fn follow(supervisor: Rc<Supervisor>) {
         .chain(new.iter().map(|s| s.0.name.clone()))
         .collect();
     register_programs(&supervisor, &system, &names).await;
-    give_drivers(&supervisor, &system).await;
+    give_drivers(&supervisor, &system, &drivers).await;
     start_services(&supervisor, new).await;
     *supervisor.root.borrow_mut() = Some((system, config));
     // Every service that starts at boot runs now.
@@ -53,15 +55,24 @@ pub async fn follow(supervisor: Rc<Supervisor>) {
     }
 }
 
-/// Gives the device manager a new read-only connection to the root's
-/// `/system`, for the drivers there, under the service manager's own
-/// identity. A failure is logged.
-async fn give_drivers(supervisor: &Supervisor, system: &NodeAsyncClient) {
+/// Gives the device manager new read-only connections to the root's
+/// `/system` and `/system/drivers`, for the drivers there, under the
+/// service manager's own identity. A failure is logged.
+async fn give_drivers(
+    supervisor: &Supervisor,
+    system: &NodeAsyncClient,
+    drivers: &NodeAsyncClient,
+) {
     let given = async {
         let (node, server) = endpoints::<Node>().map_err(|e| alloc::format!("{e:?}"))?;
         match system.clone(server, Rights::READ).await {
             Ok(Ok(_)) => {}
             failed => return Err(alloc::format!("opening /system: {failed:?}")),
+        }
+        let (folder, server) = endpoints::<Node>().map_err(|e| alloc::format!("{e:?}"))?;
+        match drivers.clone(server, Rights::READ).await {
+            Ok(Ok(_)) => {}
+            failed => return Err(alloc::format!("opening /system/drivers: {failed:?}")),
         }
         let (client, server) = endpoints::<RootDrivers>().map_err(|e| alloc::format!("{e:?}"))?;
         let me = &supervisor.me;
@@ -71,7 +82,7 @@ async fn give_drivers(supervisor: &Supervisor, system: &NodeAsyncClient) {
             .await;
         connected.map_err(|status| alloc::format!("connecting: {status:?}"))?;
         let client = RootDriversAsyncClient::new(client, supervisor.reactor.clone());
-        match client.root_available(node).await {
+        match client.root_available(node, folder).await {
             Ok(Ok(_)) => Ok(()),
             failed => Err(alloc::format!("{failed:?}")),
         }

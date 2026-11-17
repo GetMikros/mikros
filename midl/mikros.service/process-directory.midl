@@ -1,4 +1,4 @@
-// MIKSPEC-0036.R30
+// MIKSPEC-0036.R43
 
 library mikros.service;
 using mikros.base;
@@ -8,5 +8,6 @@ protocol ProcessDirectory {
     @1 Bind(client ClientIdentity, directory server_end<Directory>)
         -> () error base.Status;
     @2 RootAvailable(usr client_end<mikros.fs.Node>,
-                     etc client_end<mikros.fs.Node>) -> () error base.Status;
+                     etc client_end<mikros.fs.Node>,
+                     drivers client_end<mikros.fs.Node>) -> () error base.Status;
 };

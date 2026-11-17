@@ -1,9 +1,11 @@
-// MIKSPEC-0025.R60
+// MIKSPEC-0025.R66
 
 library mikros.driver;
 using mikros.base;
 using mikros.fs;
 
 protocol RootDrivers {
-    @1 RootAvailable(usr client_end<mikros.fs.Node>) -> () error base.Status;
+    @1 RootAvailable(usr client_end<mikros.fs.Node>,
+                     drivers client_end<mikros.fs.Node>)
+        -> () error base.Status;
 };

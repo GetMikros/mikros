@@ -57,6 +57,10 @@ const PEER_CLOSED: u32 = 1 << 2;
 /// The start of the names of `admin` permissions.
 const ADMIN_SCOPE: &str = "admin.";
 
+/// The root file system's `/system`, `/system/config` and
+/// `/system/drivers`.
+pub type Root = (ClientEnd<Node>, ClientEnd<Node>, ClientEnd<Node>);
+
 /// The directory's state, shared by every connection.
 pub struct Dir {
     reactor: Reactor,
@@ -83,10 +87,11 @@ pub struct Dir {
     manage: RefCell<Option<Manage>>,
     /// The identity each process was bound with last.
     identities: RefCell<BTreeMap<u32, Rc<ClientIdentity>>>,
-    /// The root file system's `/system` and `/system/config` once the
-    /// process manager gave them, until the supervisor takes them, whether
-    /// it has given them, and the task that waits for them.
-    root: RefCell<Option<(ClientEnd<Node>, ClientEnd<Node>)>>,
+    /// The root file system's `/system`, `/system/config` and
+    /// `/system/drivers` once the process manager gave them, until the
+    /// supervisor takes them, whether it has given them, and the task that
+    /// waits for them.
+    root: RefCell<Option<Root>>,
     root_given: Cell<bool>,
     root_waiting: RefCell<Option<Waker>>,
 }
@@ -339,20 +344,21 @@ impl Dir {
         &self,
         system: ClientEnd<Node>,
         config: ClientEnd<Node>,
+        drivers: ClientEnd<Node>,
     ) -> Result<(), Status> {
         if self.root_given.replace(true) {
             return Err(Status::BadState);
         }
-        *self.root.borrow_mut() = Some((system, config));
+        *self.root.borrow_mut() = Some((system, config, drivers));
         if let Some(waker) = self.root_waiting.borrow_mut().take() {
             waker.wake();
         }
         Ok(())
     }
 
-    /// The root file system's `/system` and `/system/config`, once the
-    /// process manager gave them.
-    pub async fn root(&self) -> (ClientEnd<Node>, ClientEnd<Node>) {
+    /// The root file system's `/system`, `/system/config` and
+    /// `/system/drivers`, once the process manager gave them.
+    pub async fn root(&self) -> Root {
         poll_fn(|cx| match self.root.borrow_mut().take() {
             Some(root) => Poll::Ready(root),
             None => {

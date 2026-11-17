@@ -265,8 +265,8 @@ fn check(entries: &[(String, NodeClient)]) -> Result<(), i64> {
 
 /// The entries of a command-line tool of user 0: `/system`,
 /// `/system/config`, `/apps`
-/// and `/libraries` read only, its user's `/tmp` on tmpfs, `/volumes` and
-/// `/dev`.
+/// and `/libraries` read only, its user's `/tmp` on tmpfs, `/volumes`,
+/// the union of `/system/drivers` and `/dev`.
 fn check_cli(entries: &[(String, NodeClient)]) -> Result<(), i64> {
     let paths: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
     expect(
@@ -278,6 +278,7 @@ fn check_cli(entries: &[(String, NodeClient)]) -> Result<(), i64> {
                 "/libraries",
                 "/tmp",
                 "/volumes",
+                "/system/drivers",
                 "/dev",
             ],
         30,

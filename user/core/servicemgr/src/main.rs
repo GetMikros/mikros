@@ -132,7 +132,7 @@ async fn serve_control(end: OwnedHandle, reactor: Reactor, dir: Rc<Dir>) {
                 responder.reply(server.server(), Ok(ProcessDirectoryBindResponse {}))
             }
             ProcessDirectoryRequest::RootAvailable(request, responder) => {
-                let given = dir.give_root(request.usr, request.etc);
+                let given = dir.give_root(request.usr, request.etc, request.drivers);
                 responder.reply(
                     server.server(),
                     given.map(|()| ProcessDirectoryRootAvailableResponse {}),

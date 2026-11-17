@@ -83,6 +83,10 @@ const APPS: &str = "/apps";
 const VOLUMES: &str = "/volumes";
 /// The folders that apps share (MIKSPEC-0101.R33).
 const PUBLIC: &str = "/public";
+/// The drivers: the version's and the installed ones, and the subvolume
+/// of the installed ones from the root (MIKSPEC-0100.R19).
+const DRIVERS: &str = "/system/drivers";
+const DRIVERS_SUBVOLUME: &str = "drivers";
 /// The folder of the commands of installed packages (MIKSPEC-0101.R44).
 const COMMANDS: &str = "/system/commands";
 /// The permission that lets an app write its installed package
@@ -151,6 +155,9 @@ pub struct Namespaces {
     /// The process manager's connection to the folder of commands, once
     /// the install service gave it.
     commands: RefCell<Option<Rc<NodeAsyncClient>>>,
+    /// The union view of `/system/drivers`, once the union service made
+    /// it.
+    drivers: RefCell<Option<Rc<NodeAsyncClient>>>,
 }
 
 /// Where an entry of the root table comes from: a directory and the path
@@ -427,6 +434,46 @@ impl Namespaces {
             tmpfs: RefCell::new(None),
             tmpfs_waiting: RefCell::new(Vec::new()),
             commands: RefCell::new(None),
+            drivers: RefCell::new(None),
+        }
+    }
+
+    /// The union view of `/system/drivers`: the version's `drivers/` over
+    /// the subvolume `drivers`, which holds the installed drivers, read and
+    /// execute (MIKSPEC-0100.R19). It is made once; none while the union
+    /// service cannot make it.
+    async fn drivers(&self, shared: &Shared, ready: &Ready) -> Option<Rc<NodeAsyncClient>> {
+        if let Some(view) = self.drivers.borrow().clone() {
+            return Some(view);
+        }
+        let made = async {
+            let (version, _) = self.entry(shared, ready, DRIVERS, RX).await?;
+            let installed = open(
+                ready.roots.root(),
+                DRIVERS_SUBVOLUME,
+                OpenFlags::DIRECTORY,
+                0,
+                RX,
+                &shared.reactor,
+            )
+            .await
+            .map_err(status)?;
+            let layers = alloc::vec![version.directory, connection(&installed, RX).await?];
+            crate::users::merged(shared, layers, RX).await
+        };
+        match made.await {
+            Ok(view) => {
+                let view = Rc::new(NodeAsyncClient::new(view, shared.reactor.clone()));
+                *self.drivers.borrow_mut() = Some(view.clone());
+                Some(view)
+            }
+            Err(e) => {
+                mikros_rt::log!(
+                    Warning,
+                    "process-manager: no union of {DRIVERS} yet ({e:?})"
+                );
+                None
+            }
         }
     }
 
@@ -610,7 +657,18 @@ impl Namespaces {
     pub fn root_programs(&self) -> Option<Programs> {
         let ready = self.ready.borrow();
         let root = ready.as_deref().map(|r| r.roots.root().clone());
-        root.map(Programs::root)
+        let mut programs = root.map(Programs::root)?;
+        // The installed drivers too (MIKSPEC-0068.R24).
+        if let Some(view) = self.drivers.borrow().clone() {
+            let origin = Origin::Dir {
+                dir: view,
+                system: true,
+                real: None,
+                rights: RX,
+            };
+            programs.add(DRIVERS.into(), origin);
+        }
+        Some(programs)
     }
 
     /// Whether namespaces come from the root file system.
@@ -631,12 +689,23 @@ impl Namespaces {
         };
         let system = self.entry(shared, &ready, SYSTEM_ENTRY, Rights::READ).await;
         let config = self.entry(shared, &ready, CONFIG, Rights::READ).await;
-        let (system, config) = match (system, config) {
-            (Ok((system, _)), Ok((config, _))) => (system.directory, config.directory),
-            (Err(e), _) | (_, Err(e)) => {
+        // The union of /system/drivers, or the version's alone while there
+        // is none (MIKSPEC-0036.R43).
+        let drivers = match self.drivers(shared, &ready).await {
+            Some(view) => connection(&view, Rights::READ).await,
+            None => self
+                .entry(shared, &ready, DRIVERS, Rights::READ)
+                .await
+                .map(|(entry, _)| entry.directory),
+        };
+        let (system, config, drivers) = match (system, config, drivers) {
+            (Ok((system, _)), Ok((config, _)), Ok(drivers)) => {
+                (system.directory, config.directory, drivers)
+            }
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                 mikros_rt::log!(
                     Error,
-                    "process-manager: opening /system and /system/config for the service manager failed: {e:?}"
+                    "process-manager: opening /system, /system/config and /system/drivers for the service manager failed: {e:?}"
                 );
                 return;
             }
@@ -659,7 +728,7 @@ impl Namespaces {
                 }
             }
         }
-        match control.root_available(system, config).await {
+        match control.root_available(system, config, drivers).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => mikros_rt::log!(Error, "process-manager: RootAvailable failed: {e:?}"),
             Err(e) => mikros_rt::log!(Error, "process-manager: RootAvailable failed: {e:?}"),
@@ -935,6 +1004,24 @@ impl Namespaces {
                 directory: shared.volumes.directory()?,
             };
             add(&mut entries, &mut origins, none(volumes));
+        }
+        // Every namespace with /system sees the installed drivers too.
+        if entries.iter().any(|e| e.path == SYSTEM_ENTRY)
+            && !entries.iter().any(|e| e.path == DRIVERS)
+            && let Some(view) = self.drivers(shared, &ready).await
+        {
+            let entry = NamespaceEntry {
+                path: DRIVERS.into(),
+                directory: connection(&view, RX).await?,
+            };
+            // Installed drivers are system components (MIKSPEC-0068.R24).
+            let origin = Origin::Dir {
+                dir: view,
+                system: true,
+                real: None,
+                rights: RX,
+            };
+            add(&mut entries, &mut origins, (entry, origin));
         }
         add(&mut entries, &mut origins, none(dev));
         Ok((entries, Programs { entries: origins }, app))
