@@ -269,6 +269,9 @@ fn request_resource(
     if ![KIND_MMIO, KIND_IOPORT, KIND_IRQ, KIND_MSI, KIND_BTI].contains(&kind) {
         return Err(Status::InvalidArgs);
     }
+    if kind == KIND_MMIO && !may_map(m, &driver.name, base, size) {
+        return Err(Status::AccessDenied);
+    }
     if kind == KIND_BTI {
         let (first, end) = requester_ids(device).ok_or(Status::AccessDenied)?;
         let covered = base
@@ -279,6 +282,26 @@ fn request_resource(
         }
     }
     m.starter.request(kind, base, size, request.shared)
+}
+
+/// The driver of the ACPI server, which alone gets the memory of ACPI.
+const ACPI_SERVER: &str = "acpi";
+
+/// Whether the driver `driver` may have `size` bytes of MMIO at `base`:
+/// the `AcpiReclaimable` and `AcpiNvs` memory only the ACPI server, and
+/// `Reserved` memory only the ACPI server or within device memory that
+/// an ACPI table names (MIKSPEC-0011.R33).
+fn may_map(m: &Manager, driver: &str, base: u64, size: u64) -> bool {
+    let end = base.saturating_add(size);
+    let overlaps = |&(start, len): &(u64, u64)| start < end && base < start.saturating_add(len);
+    let within = |&(start, len): &(u64, u64)| start <= base && end <= start.saturating_add(len);
+    if driver == ACPI_SERVER {
+        return true;
+    }
+    if m.acpi_memory.iter().any(overlaps) {
+        return false;
+    }
+    !m.reserved_memory.iter().any(overlaps) || m.device_memory.iter().any(within)
 }
 
 /// The requester IDs of the buses of `device`, from the first to the one

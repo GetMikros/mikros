@@ -64,6 +64,12 @@ pub struct Manager {
     /// The `AcpiNvs` and `Reserved` ranges of the memory map, as start
     /// and size, adjacent ones merged, in ascending order.
     pub firmware_memory: Vec<(u64, u64)>,
+    /// The `Reserved` ranges, and the `AcpiReclaimable` and `AcpiNvs`
+    /// ones, of the memory map, alike, and the device memory that ACPI
+    /// tables name (MIKSPEC-0011.R33).
+    pub reserved_memory: Vec<(u64, u64)>,
+    pub acpi_memory: Vec<(u64, u64)>,
+    pub device_memory: Vec<(u64, u64)>,
     /// Whether the last kind of shutdown set through
     /// `mikros.driver.Shutdown` was a power-off.
     pub power_off: Cell<bool>,

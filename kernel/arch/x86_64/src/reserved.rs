@@ -12,16 +12,15 @@ const PORTS: [(u64, u64); 4] = [(0x20, 0x22), (0xA0, 0xA2), (0x40, 0x44), (0x61,
 /// The ports of the debug serial port.
 const SERIAL_PORTS: (u64, u64) = (0x3F8, 0x400);
 
-/// The memory map kinds that are never device memory.
-const NOT_DEVICE: [Kind; 8] = [
-    Kind::Usable,
-    Kind::BootloaderReclaimable,
-    Kind::KernelImage,
-    Kind::KernelStack,
-    Kind::BootImage,
-    Kind::PageTables,
-    Kind::ApTrampoline,
-    Kind::Bad,
+/// The memory map kinds that may be device memory; every other kind,
+/// one that a later version of the boot protocol adds included, is not
+/// (MIKSPEC-0011.R33).
+const DEVICE: [Kind; 5] = [
+    Kind::Mmio,
+    Kind::Framebuffer,
+    Kind::Reserved,
+    Kind::AcpiReclaimable,
+    Kind::AcpiNvs,
 ];
 
 /// Ranges by resource kind, start and exclusive end.
@@ -51,7 +50,7 @@ pub fn init(info: &BootInfo) {
         reserve(KIND_IOPORT, SERIAL_PORTS.0, SERIAL_PORTS.1);
     }
     let not_device =
-        memory::memory_map(info).filter(|e| NOT_DEVICE.iter().any(|&k| k as u32 == e.kind));
+        memory::memory_map(info).filter(|e| !DEVICE.iter().any(|&k| k as u32 == e.kind));
     for e in not_device {
         reserve(
             KIND_MMIO,

@@ -89,6 +89,7 @@ const MEMORY_MAP_COUNT: usize = 0x54;
 const MAP_ENTRY_SIZE: usize = 24;
 const ENTRY_PAGES: usize = 0x08;
 const ENTRY_KIND: usize = 0x10;
+const KIND_ACPI_RECLAIMABLE: u32 = 7;
 const KIND_ACPI_NVS: u32 = 8;
 const KIND_RESERVED: u32 = 13;
 const PAGE_SIZE: u64 = 4096;
@@ -134,9 +135,13 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         (Some(memory), Some(header)) => command_line(memory, header),
         _ => String::new(),
     };
-    let firmware_memory = match (&info_memory, &info) {
-        (Some(memory), Some(header)) => firmware_memory(memory, header),
-        _ => Vec::new(),
+    let (firmware_memory, reserved_memory, acpi_memory) = match (&info_memory, &info) {
+        (Some(memory), Some(header)) => (
+            memory_ranges(memory, header, &[KIND_ACPI_NVS, KIND_RESERVED]),
+            memory_ranges(memory, header, &[KIND_RESERVED]),
+            memory_ranges(memory, header, &[KIND_ACPI_RECLAIMABLE, KIND_ACPI_NVS]),
+        ),
+        _ => (Vec::new(), Vec::new(), Vec::new()),
     };
     let mut devices = Devices::new();
     let has_framebuffer = info
@@ -148,6 +153,26 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     };
     let rsdp = info.map(|i| u64_at(&i, FIRMWARE_TABLE)).filter(|&r| r != 0);
     let mcfg = rsdp.and_then(|rsdp| memory.find(rsdp, b"MCFG"));
+    // The device memory that ACPI tables name, which firmware reports as
+    // reserved (MIKSPEC-0011.R33): the configuration space windows, the
+    // HPET and the interrupt controllers.
+    let mut device_memory: Vec<(u64, u64)> = Vec::new();
+    for e in mcfg.as_deref().map(acpi::ecams).into_iter().flatten() {
+        let buses = u64::from(e.bus_end - e.bus_start) + 1;
+        let base = e.base + u64::from(e.bus_start) * BUS_SIZE;
+        device_memory.push((base, buses * BUS_SIZE));
+    }
+    let page = |address: u64| (address & !(PAGE_SIZE - 1), PAGE_SIZE);
+    let hpet = rsdp.and_then(|rsdp| memory.find(rsdp, b"HPET"));
+    device_memory.extend(hpet.as_deref().and_then(acpi::hpet).map(page));
+    let madt = rsdp.and_then(|rsdp| memory.find(rsdp, b"APIC"));
+    for address in madt
+        .as_deref()
+        .map(acpi::interrupt_controllers)
+        .unwrap_or_default()
+    {
+        device_memory.push(page(address));
+    }
     // The framebuffer's PCI function, when the header names one and an
     // MCFG entry covers it.
     let pci = info
@@ -252,6 +277,9 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
         reactor,
         spawner: spawner.clone(),
         firmware_memory,
+        reserved_memory,
+        acpi_memory,
+        device_memory,
         power_off: core::cell::Cell::new(false),
         boot_display,
         root_drivers: core::cell::Cell::new(false),
@@ -392,10 +420,14 @@ fn command_line(mem: &OwnedHandle, header: &[u8; INFO_HEADER_SIZE]) -> String {
 }
 
 /// The ranges of the memory map in the platform information `mem` with
-/// the header `header` whose kind is `AcpiNvs` or `Reserved`, as start
-/// and size, in ascending order, with ranges that touch merged. Empty
-/// when the map cannot be read.
-fn firmware_memory(mem: &OwnedHandle, header: &[u8; INFO_HEADER_SIZE]) -> Vec<(u64, u64)> {
+/// the header `header` of one of `kinds`, as start and size, in
+/// ascending order, with ranges that touch merged. Empty when the map
+/// cannot be read.
+fn memory_ranges(
+    mem: &OwnedHandle,
+    header: &[u8; INFO_HEADER_SIZE],
+    kinds: &[u32],
+) -> Vec<(u64, u64)> {
     let offset = u64::from(u32_at(header, MEMORY_MAP_OFFSET));
     let count = u32_at(header, MEMORY_MAP_COUNT) as usize;
     let mut entries = vec![0u8; count * MAP_ENTRY_SIZE];
@@ -414,7 +446,7 @@ fn firmware_memory(mem: &OwnedHandle, header: &[u8; INFO_HEADER_SIZE]) -> Vec<(u
     let (entries, _) = entries.as_chunks::<MAP_ENTRY_SIZE>();
     let mut ranges: Vec<(u64, u64)> = entries
         .iter()
-        .filter(|e| matches!(u32_at(*e, ENTRY_KIND), KIND_ACPI_NVS | KIND_RESERVED))
+        .filter(|e| kinds.contains(&u32_at(*e, ENTRY_KIND)))
         .filter_map(|e| {
             let size = u64_at(e, ENTRY_PAGES).checked_mul(PAGE_SIZE)?;
             (size != 0).then_some((u64_at(e, 0), size))

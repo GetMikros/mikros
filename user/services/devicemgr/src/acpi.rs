@@ -11,6 +11,10 @@ const CACHED: u32 = 0;
 const PERM_READ: u32 = 1 << 0;
 /// The size of a system description table's header.
 const HEADER_SIZE: usize = 36;
+/// The MADT entry kinds of an I/O APIC and of the local APIC address
+/// override.
+const IO_APIC: u8 = 1;
+const LOCAL_APIC_OVERRIDE: u8 = 5;
 
 /// The physical memory that tables are read from: the `ROOT` resource
 /// and the process to map it into.
@@ -117,6 +121,34 @@ pub fn ecams(mcfg: &[u8]) -> impl Iterator<Item = Ecam> + '_ {
             bus_end: e[11],
         })
         .filter(|e| e.bus_start <= e.bus_end)
+}
+
+/// The base address of the HPET that the HPET table `hpet` names, from
+/// its address structure.
+pub fn hpet(hpet: &[u8]) -> Option<u64> {
+    u64_at(hpet, HEADER_SIZE + 8)
+}
+
+/// The addresses of the interrupt controllers that the MADT `madt`
+/// names: the local APIC's, or its override, and every I/O APIC's.
+pub fn interrupt_controllers(madt: &[u8]) -> Vec<u64> {
+    let mut found = Vec::new();
+    let mut local = u32_at(madt, HEADER_SIZE).map(u64::from);
+    let mut at = HEADER_SIZE + 8;
+    while let (Some(&kind), Some(&len)) = (madt.get(at), madt.get(at + 1)) {
+        let len = usize::from(len);
+        if len < 2 {
+            break;
+        }
+        match kind {
+            IO_APIC => found.extend(u32_at(madt, at + 4).map(u64::from)),
+            LOCAL_APIC_OVERRIDE => local = u64_at(madt, at + 4).or(local),
+            _ => {}
+        }
+        at += len;
+    }
+    found.extend(local);
+    found
 }
 
 fn sums_to_zero(bytes: &[u8]) -> bool {
