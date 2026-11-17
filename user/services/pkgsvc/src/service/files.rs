@@ -5,11 +5,12 @@
 use super::FOREVER;
 use crate::commands::Owners;
 use crate::records::Records;
-use mikros_rt::interfaces::__midl::endpoints;
+use mikros_rt::interfaces::__midl::{ServerEnd, endpoints};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::btrfs::SubvolumesClient;
 use mikros_rt::interfaces::mikros::fs::{
-    Error, Filesystem, FilesystemClient, Node, NodeClient, NodeType, OpenFlags, Rights,
+    Error, Filesystem, FilesystemClient, Node, NodeClient, NodeOpenResponse, NodeType, OpenFlags,
+    Rights,
 };
 use mikros_rt::interfaces::mikros::service::DirectoryClient;
 use mikros_rt::interfaces::mikros::session::{Accounts, AccountsClient};
@@ -29,6 +30,7 @@ const WRITE_MAX: usize = 32768;
 /// The longest records file and manifest that are read.
 const FILE_MAX: usize = 1 << 20;
 const RW: Rights = Rights(Rights::READ.0 | Rights::WRITE.0);
+const RWX: Rights = Rights(Rights::READ.0 | Rights::WRITE.0 | Rights::EXECUTE.0);
 
 /// The status of a file system error.
 pub fn status(e: Error) -> Status {
@@ -52,7 +54,7 @@ fn flat<T>(
     }
 }
 
-/// The root directory of the root file system, read and write. Its
+/// The root directory of the root file system, read, write and execute. Its
 /// calls go one at a time, as a connection's replies come in order.
 pub struct Root(Mutex<NodeClient>);
 
@@ -71,7 +73,8 @@ impl Root {
         }
         let fs = FilesystemClient::new(client);
         let (root, server) = endpoints::<Node>().map_err(|_| Status::NoResources)?;
-        flat(fs.get_root(server, RW, FOREVER))?;
+        // Execute too, for the files that the folder of commands opens.
+        flat(fs.get_root(server, RWX, FOREVER))?;
         Ok(Root(Mutex::new(NodeClient::new(root))))
     }
 
@@ -227,6 +230,18 @@ impl Root {
             self.remove_all(&format!("{path}/{name}"))?;
         }
         flat(dir.unlink(name.into(), true, FOREVER)).map(|_| ())
+    }
+
+    /// Opens `path` from the root with `flags` and `rights` on `server`.
+    pub fn open_on(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        rights: Rights,
+        server: ServerEnd<Node>,
+    ) -> Result<NodeOpenResponse, Status> {
+        let root = self.0.lock().map_err(|_| Status::Internal)?;
+        flat(root.open(path.into(), flags, 0, rights, server, FOREVER))
     }
 
     /// Writes `text` as the file `name` of the records' folder, through a

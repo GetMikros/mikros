@@ -16,8 +16,9 @@ use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd, endpoints
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::{Node, NodeClient};
 use mikros_rt::interfaces::mikros::packages::{
-    Installer, InstallerCommandOwnerResponse, InstallerInspectResponse, InstallerInstallResponse,
-    InstallerListResponse, InstallerRemoveResponse, InstallerRequest, InstallerServer,
+    Installer, InstallerCommandOwnerResponse, InstallerCommandsResponse, InstallerInspectResponse,
+    InstallerInstallResponse, InstallerListResponse, InstallerRemoveResponse, InstallerRequest,
+    InstallerServer,
 };
 use mikros_rt::interfaces::mikros::permissions::{Broker, BrokerClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
@@ -187,7 +188,11 @@ fn serve(shared: Arc<Shared>, end: ServerEnd<Installer>, caller: ClientIdentity)
                 commands::command_owner(&shared, &caller, &q.name, q.user)
                     .map(|id| InstallerCommandOwnerResponse { id }),
             ),
-            R::Commands(_, r) => r.reply(s, Err(Status::NotSupported)),
+            R::Commands(q, r) => r.reply(
+                s,
+                commands::commands(&shared, &caller, q.server)
+                    .map(|()| InstallerCommandsResponse {}),
+            ),
         };
     }
 }
