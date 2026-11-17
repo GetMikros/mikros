@@ -14,7 +14,8 @@ use mikros_rt::interfaces::mikros::driver::{
     DeviceManager, DeviceManagerAddDeviceRequest, DeviceManagerAddDeviceResponse,
     DeviceManagerAsyncServer, DeviceManagerGetKeptChildResponse,
     DeviceManagerPublishServiceResponse, DeviceManagerRemoveDeviceResponse, DeviceManagerRequest,
-    DeviceManagerRequestResourceRequest, DeviceManagerRequestResourceResponse,
+    DeviceManagerRequestResetResponse, DeviceManagerRequestResourceRequest,
+    DeviceManagerRequestResourceResponse,
 };
 
 /// The resource kinds that `RequestResource` creates.
@@ -81,6 +82,10 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
                         resource.map(|resource| DeviceManagerRequestResourceResponse { resource });
                     responder.reply(s, reply)
                 }
+                R::RequestReset(_, responder) => {
+                    let reset = request_reset(&m, caller).await;
+                    responder.reply(s, reset.map(|()| DeviceManagerRequestResetResponse {}))
+                }
                 R::GetKeptChild(request, responder) => {
                     let kept = m
                         .devices
@@ -98,6 +103,34 @@ pub async fn serve(m: Rc<Manager>, caller: u64, end: ServerEnd<DeviceManager>, d
     publish::unregister_all(&m, &published).await;
     crate::volumes::driver_ended(&m, caller).await;
     done.set();
+}
+
+/// `RequestReset` of the driver of device `caller`: `ResetChild` for it
+/// on the driver of its parent, whose result it is, while the caller
+/// keeps running and the device keeps its children; `NOT_SUPPORTED` for
+/// a device without a parent (MIKSPEC-0025.R64).
+async fn request_reset(m: &Manager, caller: u64) -> Result<(), Status> {
+    let client = {
+        let devices = m.devices.borrow();
+        let parent = devices
+            .get(caller)
+            .and_then(|d| d.parent)
+            .ok_or(Status::NotSupported)?;
+        devices
+            .get(parent)
+            .and_then(|p| p.client.clone())
+            .ok_or(Status::BadState)?
+    };
+    let reset = client.reset_child(caller).await;
+    mikros_rt::log!(
+        Info,
+        "device-manager: the driver of device {caller} asked for its reset: {:?}",
+        reset.as_ref().map(|r| r.as_ref().err())
+    );
+    match reset {
+        Ok(result) => result.map(|_| ()),
+        Err(_) => Err(Status::PeerClosed),
+    }
 }
 
 /// What `add_device` did.
