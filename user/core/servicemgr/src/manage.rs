@@ -1,12 +1,13 @@
 //! `mikros.service.ServiceControl`, which the service manager serves to
-//! processes with `admin.services.control`, for which the directory has
-//! already asked: `Start`, `Stop`, `Restart`, `Enable` and `Disable` of a
-//! service by name (MIKSPEC-0036.R46); and
+//! every process: `Start`, `Stop`, `Restart`, `Enable` and `Disable` of a
+//! service by name, each for a caller with `admin.services.control`, for
+//! which it asks, but `Start`, `Stop` and `Restart` of the caller's own
+//! services and its components' (MIKSPEC-0036.R52); and
 //! `mikros.service.PackageServices`, which it serves to the install
 //! service, which tells it that the services of packages changed
 //! (MIKSPEC-0036.R40).
 
-use crate::directory::{Call, Dir};
+use crate::directory::{Call, Dir, SERVICE_CONTROL_PERMISSION};
 use crate::supervisor::Supervisor;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -14,21 +15,36 @@ use alloc::vec::Vec;
 use mikros_rt::interfaces::__midl::ServerEnd;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{
-    PackageServices, PackageServicesAsyncServer, PackageServicesRequest,
+    ClientIdentity, PackageServices, PackageServicesAsyncServer, PackageServicesRequest,
     PackageServicesServicesChangedResponse, ServiceControl, ServiceControlAsyncServer,
     ServiceControlDisableResponse, ServiceControlEnableResponse, ServiceControlRequest,
     ServiceControlRestartResponse, ServiceControlStartResponse, ServiceControlStopResponse,
 };
 
-/// Serves `ServiceControl` on `end` until it closes. Each call is
-/// answered before the next is read.
-pub fn serve(dir: Rc<Dir>, end: ServerEnd<ServiceControl>) {
+/// Serves `ServiceControl` to `caller` on `end` until it closes. Each
+/// call is answered before the next is read; once the broker allowed
+/// `admin.services.control`, it is not asked again on this connection.
+pub fn serve(dir: Rc<Dir>, end: ServerEnd<ServiceControl>, caller: ClientIdentity) {
     let spawner = dir.spawner().clone();
     spawner.spawn(async move {
         let server = ServiceControlAsyncServer::new(end, dir.reactor().clone());
+        let admin = core::cell::Cell::new(false);
         let manage = |call, name: String| {
             let manage = dir.manage();
+            let (dir, caller, admin) = (&dir, &caller, &admin);
             async move {
+                let own = matches!(call, Call::Start | Call::Stop | Call::Restart)
+                    && dir.owns_service(caller, &name).await;
+                if !own && !admin.get() {
+                    let reason = alloc::format!("control the service {name}");
+                    if !dir
+                        .request(caller, SERVICE_CONTROL_PERMISSION, reason)
+                        .await
+                    {
+                        return Err(Status::AccessDenied);
+                    }
+                    admin.set(true);
+                }
                 match manage {
                     Some(manage) => manage(call, name).await,
                     None => Err(Status::BadState),

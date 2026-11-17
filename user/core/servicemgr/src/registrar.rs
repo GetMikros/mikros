@@ -1,5 +1,7 @@
 //! The `Registrar`, through which processes add named instances of
-//! protocols to the directory.
+//! protocols to the directory: those with `system.services.create` any,
+//! and installed apps and drivers those of their own protocols
+//! (MIKSPEC-0036.R50).
 
 use crate::directory::Dir;
 use alloc::rc::Rc;
@@ -9,18 +11,25 @@ use mikros_rt::interfaces::mikros::service::{
     RegistrarUnregisterResponse,
 };
 
-/// Serves `Registrar` on `end` for `caller`, whom the directory has
-/// already checked for the permission, until it closes.
+/// Serves `Registrar` on `end` for `caller` until it closes.
 pub fn serve(dir: Rc<Dir>, end: ServerEnd<Registrar>, caller: ClientIdentity) {
     let spawner = dir.spawner().clone();
     spawner.spawn(async move {
+        let privileged = dir.may_register(&caller).await;
         let server = RegistrarAsyncServer::new(end, dir.reactor().clone());
         while let Ok(request) = server.next().await {
             let s = server.server();
             let _ = match request {
                 RegistrarRequest::Register(q, r) => {
                     let registered = dir
-                        .register(&caller, q.protocol, q.instance, q.permission, q.provider)
+                        .register(
+                            &caller,
+                            q.protocol,
+                            q.instance,
+                            q.permission,
+                            q.provider,
+                            privileged,
+                        )
                         .await;
                     r.reply(s, registered.map(|()| RegistrarRegisterResponse {}))
                 }

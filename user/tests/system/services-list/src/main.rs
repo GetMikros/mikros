@@ -13,7 +13,7 @@ use mikros_rt::Managed;
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::service::{
-    ServiceControl, ServiceEntry, ServiceState, Services, ServicesClient,
+    ServiceControl, ServiceControlClient, ServiceEntry, ServiceState, Services, ServicesClient,
 };
 use mikros_test::*;
 
@@ -98,9 +98,11 @@ fn lists_after_a_name(s: &Own) -> Result {
     ensure("none after the last name", none.is_empty() && !more)
 }
 
-/// `ServiceControl` is refused without `admin.services.control`.
+/// `ServiceControl` connects, but a call on a service that is not the
+/// caller's own is refused without `admin.services.control`, which
+/// nobody here can allow (MIKSPEC-0036.R52).
 fn control_needs_its_permission(s: &Own) -> Result {
-    let (_client, server) = endpoints::<ServiceControl>().map_err(|_| Failure {
+    let (client, server) = endpoints::<ServiceControl>().map_err(|_| Failure {
         what: "making a channel",
         status: 0,
     })?;
@@ -110,8 +112,10 @@ fn control_needs_its_permission(s: &Own) -> Result {
         server.into_handle(),
         FOREVER,
     );
+    ensure("connecting", matches!(connected, Ok(Ok(_))))?;
+    let stopped = ServiceControlClient::new(client).stop("logsvc".into(), FOREVER);
     ensure(
-        "refusing the connection",
-        matches!(connected, Ok(Err(Status::AccessDenied))),
+        "refusing to stop another's service",
+        matches!(stopped, Ok(Err(Status::AccessDenied))),
     )
 }

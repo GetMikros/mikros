@@ -1,7 +1,7 @@
 //! services on Mikros: it pages through the service manager's
-//! `Services`, and for a call on a service calls `ServiceControl`, whose
-//! connection needs `admin.services.control`, for which the directory
-//! asks an administrator.
+//! `Services`, and for a call on a service calls `ServiceControl`, which
+//! asks an administrator for `admin.services.control` unless the service
+//! is the caller's own (MIKSPEC-0036.R52).
 
 use crate::listing::{self, COMMAND, Call, Request, Service};
 use mikros_cli::{FAILURE, INVALID, SUCCESS};
@@ -103,6 +103,7 @@ fn call_on(
     };
     let status = match done {
         Ok(Ok(())) => return Ok(()),
+        Ok(Err(Status::AccessDenied)) => return Err("not authorized".into()),
         Ok(Err(status)) => listing::lowercase(&format!("{status:?}")),
         Err(error) => return Err(format!("{name}: {error:?}")),
     };

@@ -32,6 +32,7 @@ use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::base::Status;
 use mikros_rt::interfaces::mikros::fs::Node;
+use mikros_rt::interfaces::mikros::packages::PackageInfo;
 use mikros_rt::interfaces::mikros::permissions::{BrokerAsyncClient, Decision};
 use mikros_rt::interfaces::mikros::service::{
     ClientIdentity, Directory, DirectoryAsyncServer, DirectoryConnectResponse,
@@ -54,7 +55,11 @@ const USER_CONTROL_PERMISSION: &str = "user.power.control";
 /// The protocol that starts and stops services, and the permission it
 /// needs.
 const SERVICE_CONTROL: &str = "mikros.service.ServiceControl";
-const SERVICE_CONTROL_PERMISSION: &str = "admin.services.control";
+pub const SERVICE_CONTROL_PERMISSION: &str = "admin.services.control";
+/// The prefix of the app IDs of the system's programs and services.
+const SYSTEM_PREFIX: &str = "system.";
+/// The kind of a driver package in `PackageInfo`.
+const DRIVER_KIND: &str = "driver";
 const PACKAGE_SERVICES: &str = "mikros.service.PackageServices";
 /// The only caller of `PackageServices`.
 const INSTALL_SERVICE: &str = "system.pkgsvc";
@@ -95,6 +100,8 @@ pub struct Dir {
     shutdown: RefCell<Option<Shutdown>>,
     listing: RefCell<Option<Listing>>,
     manage: RefCell<Option<Manage>>,
+    packages: RefCell<Option<Packages>>,
+    app_of: RefCell<Option<AppOf>>,
     /// The identity each process was bound with last.
     identities: RefCell<BTreeMap<u32, Rc<ClientIdentity>>>,
     /// The names of the disabled services (MIKSPEC-0036.R49).
@@ -164,6 +171,11 @@ pub type Listing = Rc<dyn Fn(Option<&str>) -> (Vec<ServiceEntry>, bool)>;
 /// of a name.
 pub type Manage = Rc<dyn Fn(Call, String) -> Pin<Box<dyn Future<Output = Result<(), Status>>>>>;
 
+/// The packages installed for every user, with their kinds and owners.
+pub type Packages = Rc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<PackageInfo>>>>>;
+/// The app ID of the service of a package of a name.
+pub type AppOf = Rc<dyn Fn(&str) -> Option<String>>;
+
 /// A call on `ServiceControl`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Call {
@@ -179,6 +191,9 @@ pub enum Call {
 /// A named instance of a protocol.
 struct Instance {
     permission: Option<String>,
+    /// The only app IDs that may connect, or none for any: an installed
+    /// driver's own family (MIKSPEC-0036.R50).
+    admits: Vec<String>,
     provider: ProviderClient,
     /// The pid of the process that registered it.
     owner: u32,
@@ -209,6 +224,8 @@ impl Dir {
             shutdown: RefCell::new(None),
             listing: RefCell::new(None),
             manage: RefCell::new(None),
+            packages: RefCell::new(None),
+            app_of: RefCell::new(None),
             identities: RefCell::new(BTreeMap::new()),
             root: RefCell::new(None),
             root_given: Cell::new(false),
@@ -290,9 +307,11 @@ impl Dir {
                 );
             }
         }
+        // Installed apps and drivers register without a permission, for
+        // their own protocols (MIKSPEC-0036.R50).
         let registrar = Provided {
             service: String::new(),
-            permission: Some(REGISTER_PERMISSION.into()),
+            permission: None,
             admits: Vec::new(),
             provider: Provider::Registrar,
         };
@@ -313,7 +332,9 @@ impl Dir {
         provided.insert(SERVICES.into(), services);
         let service_control = Provided {
             service: String::new(),
-            permission: Some(SERVICE_CONTROL_PERMISSION.into()),
+            // Each call needs the permission, but those for a caller's own
+            // services (MIKSPEC-0036.R52).
+            permission: None,
             admits: Vec::new(),
             provider: Provider::ServiceControl,
         };
@@ -473,6 +494,64 @@ impl Dir {
         *self.listing.borrow_mut() = Some(listing);
     }
 
+    pub fn set_packages(&self, packages: Packages) {
+        *self.packages.borrow_mut() = Some(packages);
+    }
+
+    pub fn set_app_of(&self, app_of: AppOf) {
+        *self.app_of.borrow_mut() = Some(app_of);
+    }
+
+    /// The packages installed for every user, once that is set.
+    pub async fn packages(&self) -> Vec<PackageInfo> {
+        let packages = self.packages.borrow().clone();
+        match packages {
+            Some(packages) => packages().await,
+            None => Vec::new(),
+        }
+    }
+
+    /// The app ID of the service `name` when it is a package's.
+    pub fn app_of(&self, name: &str) -> Option<String> {
+        let app_of = self.app_of.borrow().clone();
+        app_of.and_then(|f| f(name))
+    }
+
+    /// Whether `caller` may start, stop and restart the service `name`
+    /// without `admin.services.control`: a service of the caller's own
+    /// package, or of a package that the caller's package owns
+    /// (MIKSPEC-0036.R52).
+    pub async fn owns_service(&self, caller: &ClientIdentity, name: &str) -> bool {
+        let Some(app) = self.app_of(name) else {
+            return false;
+        };
+        if app == caller.app_id {
+            return true;
+        }
+        let packages = self.packages().await;
+        packages
+            .iter()
+            .any(|p| p.id == app && !p.owner.is_empty() && p.owner == caller.app_id)
+    }
+
+    /// Whether `caller` holds `system.services.create`, with which it
+    /// registers any protocol.
+    pub async fn may_register(&self, caller: &ClientIdentity) -> bool {
+        self.allowed(caller, Some(REGISTER_PERMISSION)).await
+    }
+
+    /// Whether the broker allows `caller` the `admin` permission
+    /// `permission`, asked for with `reason`.
+    pub async fn request(&self, caller: &ClientIdentity, permission: &str, reason: String) -> bool {
+        let Some(broker) = self.broker.borrow().clone() else {
+            return false;
+        };
+        let requested = broker
+            .request(clone(caller), permission.into(), reason)
+            .await;
+        matches!(requested, Ok(Ok(r)) if r.decision == Decision::Allowed)
+    }
+
     /// What answers `List` on `Services`, once it is set.
     pub fn listing(&self) -> Option<Listing> {
         self.listing.borrow().clone()
@@ -614,7 +693,11 @@ impl Dir {
                 let named = instances.get(&protocol).filter(|i| !i.is_empty());
                 let named = named.ok_or(Status::NotFound)?;
                 let name = instance.as_ref().ok_or(Status::InvalidArgs)?;
-                named.get(name).ok_or(Status::NotFound)?.permission.clone()
+                let found = named.get(name).ok_or(Status::NotFound)?;
+                if !found.admits.is_empty() && !found.admits.contains(&caller.app_id) {
+                    return Err(Status::AccessDenied);
+                }
+                found.permission.clone()
             }
         };
         if !self
@@ -663,7 +746,7 @@ impl Dir {
                 }
                 Provider::ServiceControl => {
                     drop(provided);
-                    crate::manage::serve(self.clone(), ServerEnd::new(server));
+                    crate::manage::serve(self.clone(), ServerEnd::new(server), clone(caller));
                     return Ok(());
                 }
                 Provider::PackageServices => {
@@ -747,6 +830,11 @@ impl Dir {
 
     /// Adds `instance` of `protocol` for `owner`, forwarded to
     /// `provider` and protected by `permission`, and tells the watchers.
+    /// An `owner` without `system.services.create`, unless `privileged`,
+    /// is an installed app or driver, which registers only protocols
+    /// named under its app ID, without a permission; an installed
+    /// driver's instances admit only it and the package that owns it
+    /// (MIKSPEC-0036.R50).
     pub async fn register(
         self: &Rc<Self>,
         owner: &ClientIdentity,
@@ -754,7 +842,27 @@ impl Dir {
         instance: String,
         permission: Option<String>,
         provider: ClientEnd<ProviderProtocol>,
+        privileged: bool,
     ) -> Result<(), Status> {
+        let mut admits = Vec::new();
+        if !privileged {
+            let installed =
+                !owner.app_id.starts_with(SYSTEM_PREFIX) && owner.portable_checksum.is_empty();
+            let own = alloc::format!("{}.", owner.app_id);
+            if !installed || !protocol.starts_with(own.as_str()) || permission.is_some() {
+                return Err(Status::AccessDenied);
+            }
+            let packages = self.packages().await;
+            if let Some(driver) = packages
+                .iter()
+                .find(|p| p.id == owner.app_id && p.kind == DRIVER_KIND)
+            {
+                admits.push(driver.id.clone());
+                if !driver.owner.is_empty() {
+                    admits.push(driver.owner.clone());
+                }
+            }
+        }
         self.check_free(&protocol, &instance)?;
         if let Some(permission) = &permission {
             self.known(owner, permission).await?;
@@ -766,6 +874,7 @@ impl Dir {
         let channel = provider.handle().raw();
         let added = Instance {
             permission: permission.clone(),
+            admits,
             provider: ProviderClient::new(provider),
             owner: owner.pid,
             number,

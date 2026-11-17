@@ -128,6 +128,25 @@ pub async fn start(
             }
         })
     }));
+    // The packages, and the app of a service of a package, for the calls
+    // that apps make for their own (MIKSPEC-0036.R50, MIKSPEC-0036.R52).
+    let weak = Rc::downgrade(&supervisor);
+    supervisor.dir.set_packages(Rc::new(move || {
+        let supervisor = weak.upgrade();
+        Box::pin(async move {
+            match supervisor {
+                Some(supervisor) => crate::packages::installed(&supervisor).await,
+                None => Vec::new(),
+            }
+        })
+    }));
+    let weak = Rc::downgrade(&supervisor);
+    supervisor.dir.set_app_of(Rc::new(move |name: &str| {
+        let supervisor = weak.upgrade()?;
+        let i = supervisor.position(name)?;
+        let app_id = supervisor.services.borrow()[i].app_id.clone();
+        (!app_id.starts_with("system.")).then_some(app_id)
+    }));
     let weak = Rc::downgrade(&supervisor);
     supervisor.dir.set_shutdown(Rc::new(move |kind| {
         let supervisor = weak.upgrade();

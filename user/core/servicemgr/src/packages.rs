@@ -14,24 +14,53 @@ use alloc::vec::Vec;
 use mikros_manifest::{Service, Start};
 use mikros_rt::interfaces::__midl::endpoints;
 use mikros_rt::interfaces::mikros::base::Status;
-use mikros_rt::interfaces::mikros::packages::{Installer, InstallerAsyncClient};
+use mikros_rt::interfaces::mikros::packages::{Installer, InstallerAsyncClient, PackageInfo};
 
 const INSTALLER: &str = "mikros.packages.Installer";
 
-/// The services of global packages and their manifests, as the install
-/// service lists them; none without an install service.
-async fn read(supervisor: &Supervisor) -> Result<Vec<(Service, Vec<u8>)>, Status> {
+/// A connection to the install service, or none without one.
+async fn installer(supervisor: &Supervisor) -> Result<Option<InstallerAsyncClient>, Status> {
     let (client, server) = endpoints::<Installer>().map_err(|_| Status::NoResources)?;
     match supervisor
         .dir
         .connect(&supervisor.me, INSTALLER.into(), None, server.into_handle())
         .await
     {
-        Ok(()) => {}
-        Err(Status::NotFound) => return Ok(Vec::new()),
-        Err(e) => return Err(e),
+        Ok(()) => Ok(Some(InstallerAsyncClient::new(
+            client,
+            supervisor.reactor.clone(),
+        ))),
+        Err(Status::NotFound) => Ok(None),
+        Err(e) => Err(e),
     }
-    let installer = InstallerAsyncClient::new(client, supervisor.reactor.clone());
+}
+
+/// The packages installed for every user, with their kinds and owners,
+/// as the install service lists them; none when it cannot.
+pub async fn installed(supervisor: &Supervisor) -> Vec<PackageInfo> {
+    let Ok(Some(installer)) = installer(supervisor).await else {
+        return Vec::new();
+    };
+    let mut all: Vec<PackageInfo> = Vec::new();
+    loop {
+        let after = all.last().map(|p| p.id.clone()).unwrap_or_default();
+        let page = match installer.list(after).await {
+            Ok(Ok(r)) => r.packages,
+            _ => return all,
+        };
+        if page.is_empty() {
+            return all;
+        }
+        all.extend(page);
+    }
+}
+
+/// The services of global packages and their manifests, as the install
+/// service lists them; none without an install service.
+async fn read(supervisor: &Supervisor) -> Result<Vec<(Service, Vec<u8>)>, Status> {
+    let Some(installer) = installer(supervisor).await? else {
+        return Ok(Vec::new());
+    };
     let mut found = Vec::new();
     let mut after = String::new();
     loop {
