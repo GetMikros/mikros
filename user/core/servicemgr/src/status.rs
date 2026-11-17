@@ -73,7 +73,10 @@ impl Supervisor {
     /// name, at most `PAGE` of them, and whether more follow.
     pub fn entries(&self, after: Option<&str>) -> (Vec<ServiceEntry>, bool) {
         let services = self.services.borrow();
+        // A removed package's service has no manifest any more.
+        let removed = self.removed.borrow();
         let mut order: Vec<usize> = (0..services.len())
+            .filter(|i| !removed.contains(i))
             .filter(|&i| after.is_none_or(|after| services[i].name.as_str() > after))
             .collect();
         order.sort_by(|&a, &b| services[a].name.cmp(&services[b].name));
