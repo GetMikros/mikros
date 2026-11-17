@@ -11,6 +11,7 @@ use core::cell::{Cell, RefCell};
 use mikros_rt::exec::{Reactor, Spawner};
 use mikros_rt::interfaces::__midl::OwnedHandle;
 use mikros_rt::interfaces::mikros::base::Status;
+use mikros_rt::interfaces::mikros::driver::DeviceManagerAsyncClient;
 use mikros_rt::sys;
 use mikros_storage::{Contiguous, MS, Mmio, PAGE, PciBus, now};
 
@@ -34,6 +35,9 @@ const IO_QUEUE: u16 = 1;
 /// driver looks for such commands.
 pub const COMMAND_LIMIT: i64 = 30_000 * MS;
 const WATCH_PERIOD: i64 = 1000 * MS;
+/// How long the controller has to confirm that it stopped before its
+/// commands fail, after which it is reset (MIKSPEC-0080.R12).
+const STOP_CONFIRM: i64 = 5000 * MS;
 /// The largest transfer, which a PRP list of one page always covers.
 const TRANSFER_MAX: u64 = 2 << 20;
 const SIGNALED: u32 = 1 << 3;
@@ -76,6 +80,9 @@ pub struct Controller {
     pub failed: Cell<bool>,
     /// The bus channel, which `Reconnect` replaces.
     pub pci: Rc<PciBus>,
+    /// The device manager, once the driver has its channel, through which
+    /// a controller that does not stop is reset.
+    pub manager: RefCell<Option<Rc<DeviceManagerAsyncClient>>>,
     _interrupts: Vec<OwnedHandle>,
 }
 
@@ -165,6 +172,7 @@ impl Controller {
             resetting: Cell::new(false),
             failed: Cell::new(false),
             pci,
+            manager: RefCell::new(None),
             _interrupts: interrupts,
         });
         controller.create_io_queues().await?;
@@ -270,7 +278,25 @@ impl Controller {
         }
         self.io.pause();
         self.admin.pause();
-        let _ = self.regs.disable(reactor).await;
+        // The commands fail only once the controller has stopped, or has
+        // been reset when it does not stop within `STOP_CONFIRM`, which as
+        // for any PCI function counts whatever its result
+        // (MIKSPEC-0047.R13, MIKSPEC-0080.R12, MIKSPEC-0025.R64).
+        if self
+            .regs
+            .disable_within(reactor, STOP_CONFIRM)
+            .await
+            .is_err()
+        {
+            mikros_rt::log!(
+                Error,
+                "nvme: the controller did not stop; asking for its reset"
+            );
+            let manager = self.manager.borrow().clone();
+            if let Some(manager) = manager {
+                let _ = manager.request_reset().await;
+            }
+        }
         self.admin.restart();
         self.io.restart();
         let enabled = enable(&self.regs, &self.admin, reactor).await;

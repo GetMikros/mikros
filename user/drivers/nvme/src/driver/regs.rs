@@ -59,6 +59,24 @@ impl Regs {
         }
     }
 
+    /// Clears `CC.EN` and waits until `CSTS.RDY` clears, for at most
+    /// `limit`.
+    pub async fn disable_within(&self, reactor: &Reactor, limit: i64) -> Result<(), TimedOut> {
+        let cc = self.mmio.read32(CC);
+        self.mmio.write32(CC, cc & !CC_EN);
+        let deadline = now() + limit;
+        loop {
+            let csts = self.mmio.read32(CSTS);
+            if csts != GONE && csts & CSTS_RDY == 0 {
+                return Ok(());
+            }
+            if now() >= deadline {
+                return Err(TimedOut);
+            }
+            let _ = reactor.sleep_until(now() + MS).await;
+        }
+    }
+
     /// Clears `CC.EN` and waits until `CSTS.RDY` clears.
     pub async fn disable(&self, reactor: &Reactor) -> Result<(), TimedOut> {
         let cc = self.mmio.read32(CC);

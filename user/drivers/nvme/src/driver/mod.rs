@@ -181,7 +181,14 @@ async fn start(
     process: sys::Handle,
     reactor: &Reactor,
     spawner: &Spawner,
-) -> Result<(Rc<Controller>, Vec<Rc<Namespace>>, DeviceManagerAsyncClient), Status> {
+) -> Result<
+    (
+        Rc<Controller>,
+        Vec<Rc<Namespace>>,
+        Rc<DeviceManagerAsyncClient>,
+    ),
+    Status,
+> {
     let bus = request.bus.ok_or(Status::InvalidArgs)?;
     let dma = request
         .resources
@@ -211,7 +218,11 @@ async fn start(
             writer: mikros_storage::Writer::default(),
         }));
     }
-    let manager = DeviceManagerAsyncClient::new(request.manager, reactor.clone());
+    let manager = Rc::new(DeviceManagerAsyncClient::new(
+        request.manager,
+        reactor.clone(),
+    ));
+    *controller.manager.borrow_mut() = Some(manager.clone());
     Ok((controller, namespaces, manager))
 }
 
@@ -220,7 +231,7 @@ async fn start(
 /// manager's channel open for as long as the driver runs.
 async fn add_disks(
     namespaces: Vec<Rc<Namespace>>,
-    manager: DeviceManagerAsyncClient,
+    manager: Rc<DeviceManagerAsyncClient>,
     devices: Rc<Devices>,
     reactor: Reactor,
     spawner: Spawner,
