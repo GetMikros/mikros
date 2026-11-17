@@ -73,6 +73,8 @@ pub struct Shared {
     pub identity_setter: Cell<Option<u32>>,
     /// What the permission broker says about permissions.
     pub permissions: Permissions,
+    /// The keys of the folder grants (MIKSPEC-0050.R38).
+    pub grants: crate::grants::Grants,
     /// How many times a process terminated, stopped or was continued.
     changes: Cell<u64>,
     /// The tasks waiting for a process to terminate, stop or be
@@ -158,6 +160,7 @@ impl Shared {
             control: RefCell::new(None),
             identity_setter: Cell::new(None),
             permissions: Permissions::default(),
+            grants: Default::default(),
             changes: Cell::new(0),
             waiters: RefCell::new(Vec::new()),
             killed_sessions: RefCell::new(BTreeSet::new()),

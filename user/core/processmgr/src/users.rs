@@ -25,7 +25,7 @@ const SUBVOLUMES: &str = "device.subvolumes";
 const ROOT: &str = "root";
 
 /// A connection to `protocol` through the process manager's directory.
-async fn connect<P>(shared: &Shared, protocol: &str) -> Option<ClientEnd<P>> {
+pub async fn connect<P>(shared: &Shared, protocol: &str) -> Option<ClientEnd<P>> {
     connect_to(shared, protocol, None).await
 }
 

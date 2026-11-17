@@ -10,8 +10,9 @@
 //! session's text and no log, and while the runner holds Ctrl, Alt and
 //! F12, the log on the whole screen. In the console run it then types a line that the session shell
 //! reads; in the setup run, whose shell is msh, it first runs
-//! global-check, which installs packages for every user once ada allowed
-//! it with her password, then starts a job, stops
+//! global-check, which grants an app a folder and installs packages for
+//! every user once ada allowed each with her password, then starts a job,
+//! stops
 //! it with Ctrl-Z, and has msh count its jobs, continue and kill the
 //! job, check the host name that setup wrote and that it started in
 //! ada's home, and exit with 7 when all of that worked. The test init stops
@@ -36,14 +37,14 @@ const GLOBAL_CHECK: &str = "g l o b a l minus c h e c k ret";
 const GLOBAL_STATUS: &str = "i f spc shift-4 s t a t u s spc shift-1 equal spc 0 spc \
      shift-bracket_left spc e x i t spc shift-9 1 0 0 spc shift-equal spc shift-4 s t a t u s \
      shift-0 spc shift-bracket_right ret";
-/// How long global-check has to make its first package and ask for
-/// authorization.
+/// How long global-check has to ask for authorization, first for a grant
+/// and then, once it made its first package, for an install.
 const GLOBAL_ASKS: Duration = Duration::from_secs(10);
 /// What the service manager logs once global-check removed the package
 /// with a service, its last check but one.
 const GLOBAL_DONE: &str = "the service org.example.daemon.idle of a package was removed";
 /// How many times the run's timeout the setup run may take. Its msh
-/// session also pages with more and less, asks for authorization eleven
+/// session also pages with more and less, asks for authorization twelve
 /// times, and runs global-check, files-c and coreutils-check: in a debug
 /// build under KVM the run takes about 600 s from boot to power-off,
 /// which the test init allows 780 s, and a fuzz build is about 3.3 times
@@ -486,6 +487,11 @@ pub fn run_setup(
     // whose check takes up to ANSWER.
     let mut after = vec![
         Step::Keys(GLOBAL_CHECK),
+        // ada's password for the grant that global-check sets first, and
+        // then for its first install for every user.
+        Step::Sleep(GLOBAL_ASKS),
+        Step::Keys("a d a minus p w ret"),
+        Step::Sleep(ANSWER),
         Step::Sleep(GLOBAL_ASKS),
         Step::Keys("a d a minus p w ret"),
         // msh reads the status line once global-check exits, so that a

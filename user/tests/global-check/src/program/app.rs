@@ -103,7 +103,42 @@ pub fn checks() -> Result<(), Failed> {
     public()?;
     services()?;
     logs()?;
-    protocols()
+    protocols()?;
+    documents()
+}
+
+/// The note that the app writes in ada's documents folder, which it may
+/// once she allowed it (MIKSPEC-0050.R38).
+const NOTE: &str = "/users/ada/documents/global-check-note";
+
+/// The documents folder, which ada allowed the app, at its real path.
+fn documents() -> Result<(), Failed> {
+    std::fs::write(NOTE, b"granted").or(failed(55, "writing to the documents folder"))?;
+    let read = std::fs::read(NOTE).or(failed(55, "reading the note"))?;
+    ensure(read == b"granted", 55, "the note")
+}
+
+/// As a second process of the app: holds the note open, says `ready`,
+/// and once told, after ada denied the folder, finds the open file and
+/// the folder out of reach.
+pub fn hold() -> Result<(), Failed> {
+    use std::io::{BufRead, Read};
+    let mut file = std::fs::File::open(NOTE).or(failed(56, "opening the note"))?;
+    println!("ready");
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    let mut bytes = Vec::new();
+    ensure(
+        file.read_to_end(&mut bytes).is_err(),
+        56,
+        "the open note after the revocation",
+    )?;
+    ensure(
+        std::fs::read(NOTE).is_err(),
+        57,
+        "the folder after the revocation",
+    )?;
+    Ok(())
 }
 
 /// Its public folder, made once, which a later process of the app

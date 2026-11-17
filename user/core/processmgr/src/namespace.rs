@@ -38,6 +38,7 @@
 
 use crate::portable::Portable;
 use crate::processes::Shared;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -995,6 +996,14 @@ impl Namespaces {
                 }
             };
             app = Some(started);
+            // The folders that the app's permissions grant
+            // (MIKSPEC-0050.R38).
+            if user != 0 {
+                let checksum = portable.map_or("", |p| p.checksum.as_str());
+                let grant = (app_id, user, admin, checksum);
+                self.grant_entries(shared, &ready, grant, &mut entries, &mut origins)
+                    .await?;
+            }
         } else {
             let (kind, listed) = manifest_entries(self, shared, app_id).await;
             if kind == Manifest::Program {
@@ -1107,22 +1116,32 @@ impl Namespaces {
                 }
             }
         }
-        if app_id == CLI_APP
-            || self
-                .holds_volumes(
-                    shared,
-                    app_id,
-                    user,
-                    admin,
-                    portable.map_or("", |p| p.checksum.as_str()),
-                )
-                .await
-        {
+        if app_id == CLI_APP {
             let volumes = NamespaceEntry {
                 path: VOLUMES.into(),
                 directory: shared.volumes.directory()?,
             };
             add(&mut entries, &mut origins, none(volumes));
+        } else if self
+            .holds_volumes(
+                shared,
+                app_id,
+                user,
+                admin,
+                portable.map_or("", |p| p.checksum.as_str()),
+            )
+            .await
+        {
+            // A revocable view, as for the folder grants (MIKSPEC-0050.R38).
+            let grant = (user, app_id, crate::grants::VOLUMES);
+            let directory = shared.volumes.directory()?;
+            if let Some(view) = crate::grants::view(shared, grant, directory, RW).await {
+                let volumes = NamespaceEntry {
+                    path: VOLUMES.into(),
+                    directory: view,
+                };
+                add(&mut entries, &mut origins, none(volumes));
+            }
         }
         // Libraries with kept versions are views of their versions, newest
         // first (MIKSPEC-0101.R51).
@@ -1494,6 +1513,61 @@ impl Namespaces {
             portable_checksum: Default::default(),
         };
         shared.permissions.holds(client, false, permission).await
+    }
+
+    /// The entries of the folders that the permissions of `app_id` for
+    /// `user`, elevated by `admin` unless it is 0, grant, each a revocable
+    /// view of the folder at its real path (MIKSPEC-0050.R38), but where
+    /// the namespace has an entry of that path already.
+    async fn grant_entries(
+        &self,
+        shared: &Shared,
+        ready: &Ready,
+        (app_id, user, admin, checksum): (&str, u32, u32, &str),
+        entries: &mut Vec<NamespaceEntry>,
+        origins: &mut Vec<(String, Origin)>,
+    ) -> Result<(), Status> {
+        let name = crate::users::name(shared, user).await?;
+        let client = || ClientIdentity {
+            pid: 0,
+            user,
+            app_id: app_id.into(),
+            admin,
+            koid: 0,
+            portable_checksum: checksum.into(),
+        };
+        let mut held = BTreeMap::new();
+        for (path, rights, permission) in crate::grants::folders(&name) {
+            if entries.iter().any(|e| e.path == path) {
+                continue;
+            }
+            let holds = match held.get(permission) {
+                Some(&holds) => holds,
+                None => {
+                    let holds = shared.permissions.holds(client(), false, permission).await;
+                    held.insert(permission, holds);
+                    holds
+                }
+            };
+            if !holds {
+                continue;
+            }
+            let Ok((folder, _)) = self.entry(shared, ready, &path, rights).await else {
+                continue;
+            };
+            let grant = (user, app_id, permission);
+            if let Some(view) = crate::grants::view(shared, grant, folder.directory, rights).await {
+                add(
+                    entries,
+                    origins,
+                    none(NamespaceEntry {
+                        path,
+                        directory: view,
+                    }),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Whether the processes of `app_id` and `user`, elevated by `admin`

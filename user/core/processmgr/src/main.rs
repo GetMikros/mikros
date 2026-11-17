@@ -13,6 +13,7 @@ mod broker;
 mod commands;
 mod devfs;
 mod elevations;
+mod grants;
 mod init;
 mod launcher;
 mod namespace;

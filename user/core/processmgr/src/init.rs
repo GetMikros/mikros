@@ -279,6 +279,11 @@ impl Manager {
         self.shared.spawner.spawn(async move {
             let reactor = shared.reactor.clone();
             shared.permissions.connect(own, &reactor, me).await;
+            // The folder grants' permissions, revoked with confirmation
+            // (MIKSPEC-0050.R38, MIKSPEC-0037.R34).
+            if let Some(broker) = shared.permissions.watcher(&reactor).await {
+                crate::grants::watch(shared.clone(), broker).await;
+            }
         });
         Ok(InitBootstrapStartServiceManagerResponse { pid, process })
     }

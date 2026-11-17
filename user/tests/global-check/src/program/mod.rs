@@ -4,6 +4,7 @@
 //! for this process, so that the others do not ask again.
 
 mod app;
+mod grants;
 
 use mikros_command::Directory;
 use mikros_mika::format::{Builder, MANIFEST, checksum_text};
@@ -58,6 +59,7 @@ pub fn main() -> ExitCode {
         // As the installed app of the package with the service.
         Some("app") => app::checks(),
         Some("write") => app::write_public(),
+        Some("hold") => app::hold(),
         _ => all(),
     };
     match checked {
@@ -190,6 +192,9 @@ fn wait_service(name: &str, ok: impl Fn(Option<String>) -> bool, code: u8) -> Re
 }
 
 fn all() -> Result<(), Failed> {
+    // First, so that ada's two passwords come one after the other: the
+    // documents folder for the app, which an administrator allows.
+    grants::allow()?;
     let installer = installer()?;
     service(&installer)?;
     driver(&installer)?;
@@ -197,6 +202,8 @@ fn all() -> Result<(), Failed> {
     protocol_names(&installer)?;
     components(&installer)?;
     run_app(&format!("/apps/{DAEMON}/bin/idle"))?;
+    grants::revoke_while_open(&format!("/apps/{DAEMON}/bin/idle"))?;
+    let _ = std::fs::remove_file("/users/ada/documents/global-check-note");
     remove(&installer, DAEMON, 13)?;
     wait_service(SERVICE, |s| s.is_none(), 14)
 }

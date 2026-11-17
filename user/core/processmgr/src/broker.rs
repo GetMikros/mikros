@@ -119,6 +119,17 @@ impl Permissions {
         matches!(checked, Ok(Ok(r)) if r.decision == Decision::Allowed)
     }
 
+    /// A connection of its own to the broker, for watching permissions,
+    /// once the process manager has its directory.
+    pub async fn watcher(&self, reactor: &Reactor) -> Option<BrokerAsyncClient> {
+        let directory = self.directory.borrow().clone()?;
+        let (client, server) = endpoints::<Broker>().ok()?;
+        let connected = directory
+            .connect(PROTOCOL.into(), None, server.into_handle())
+            .await;
+        matches!(connected, Ok(Ok(_))).then(|| BrokerAsyncClient::new(client, reactor.clone()))
+    }
+
     /// Records whether the broker answered on its connection; one that
     /// failed is dropped.
     fn answered(&self, answered: bool) {
