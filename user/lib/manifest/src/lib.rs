@@ -48,6 +48,8 @@ const KEYS: &[&str] = &[
 ];
 /// The keys of an item of `provides`.
 const PROVIDES_KEYS: &[&str] = &["protocol", "permission"];
+/// Those of a package's service, which may also say who may connect.
+const PACKAGE_PROVIDES_KEYS: &[&str] = &["protocol", "permission", "own_app", "allow"];
 /// `priority` when the manifest leaves it out.
 pub const PRIORITY_DEFAULT: i64 = 16;
 /// `stop_timeout`, in seconds, when the manifest leaves it out.
@@ -83,6 +85,12 @@ pub struct Service {
 pub struct Provide {
     pub protocol: String,
     pub permission: Option<String>,
+    /// For a package's service, whether only its own app may connect
+    /// (MIKSPEC-0101.R66).
+    pub own_app: bool,
+    /// For a package's service, the other app IDs that may connect; any
+    /// app may when it is empty and `own_app` is false.
+    pub allow: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +178,9 @@ pub enum ErrorKind {
     /// The manifest of a command has this key, which only other programs'
     /// manifests may have.
     CommandKey(&'static str),
+    /// A package's service provides a protocol whose name does not start
+    /// with the package's ID and `.`.
+    BadProtocol,
 }
 
 impl From<mikros_yaml::Error> for Error {
@@ -210,6 +221,7 @@ pub fn parse(folder: &str, bytes: &[u8]) -> Result<Manifest, Error> {
         String::from(name),
         String::from(folder),
         is_under_system,
+        false,
     )
 }
 
@@ -241,7 +253,19 @@ pub fn parse_package_service(id: &str, key: &str, bytes: &[u8]) -> Result<Manife
         alloc::format!("{id}.{key}"),
         String::from(id),
         in_package,
+        true,
     )?;
+    // Its protocols are named under the package's ID.
+    let own = alloc::format!("{id}.");
+    if let Some(at) = manifest
+        .service
+        .provides
+        .iter()
+        .position(|p| !p.protocol.starts_with(own.as_str()))
+    {
+        let node = list(map, "provides")?.get(at).unwrap_or(&root);
+        return Err(error(node, ErrorKind::BadProtocol));
+    }
     if let Some(node) = map.get("boot_handles") {
         return Err(error(node, ErrorKind::BadBootHandle));
     }
@@ -260,6 +284,7 @@ fn parse_service(
     name: String,
     app_id: String,
     binary_ok: impl Fn(&str) -> bool,
+    package: bool,
 ) -> Result<Manifest, Error> {
     let map = root.map()?;
     let mut unknown = unknown_keys(map, KEYS);
@@ -287,10 +312,26 @@ fn parse_service(
     let mut provides = Vec::new();
     for item in list(map, "provides")? {
         let entry = item.map()?;
-        unknown.extend(unknown_keys(entry, PROVIDES_KEYS));
+        let keys = if package {
+            PACKAGE_PROVIDES_KEYS
+        } else {
+            PROVIDES_KEYS
+        };
+        unknown.extend(unknown_keys(entry, keys));
         let protocol = entry
             .get("protocol")
             .ok_or(error(item, ErrorKind::Missing("protocol")))?;
+        let (own_app, allow) = match package {
+            true => (
+                entry
+                    .get("own_app")
+                    .map(Node::boolean)
+                    .transpose()?
+                    .unwrap_or(false),
+                strings(entry, "allow")?,
+            ),
+            false => (false, Vec::new()),
+        };
         provides.push(Provide {
             protocol: protocol.string()?.into(),
             permission: entry
@@ -298,6 +339,8 @@ fn parse_service(
                 .map(Node::string)
                 .transpose()?
                 .map(Into::into),
+            own_app,
+            allow,
         });
     }
     let mut boot_handles = Vec::new();

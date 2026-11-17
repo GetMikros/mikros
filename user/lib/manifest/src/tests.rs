@@ -75,10 +75,14 @@ stop_timeout: 600
             Provide {
                 protocol: "mikros.net.Stack".to_string(),
                 permission: Some("network.use".to_string()),
+                own_app: false,
+                allow: Vec::new(),
             },
             Provide {
                 protocol: "mikros.net.Admin".to_string(),
                 permission: None,
+                own_app: false,
+                allow: Vec::new(),
             },
         ]
     );
@@ -567,4 +571,28 @@ fn reads_services_of_packages() {
     assert_eq!(kind_of("index", admin), ErrorKind::ReservedPermission);
     let handles = b"name: index\nbinary: /apps/org.example.editor/i\nstart: boot\nboot_handles: [root_budget]\n";
     assert_eq!(kind_of("index", handles), ErrorKind::BadBootHandle);
+}
+
+#[test]
+fn names_package_protocols_under_the_package() {
+    let text = b"name: sync\nbinary: /apps/org.example.editor/sync\nstart: on-demand\n\
+                 provides:\n  - protocol: org.example.editor.Sync\n    own_app: true\n  \
+                 - protocol: org.example.editor.Files\n    allow: [org.example.viewer]\n  \
+                 - protocol: org.example.editor.Open\n";
+    let m = parse_package_service("org.example.editor", "sync", text).unwrap();
+    let provides = &m.service.provides;
+    assert!(provides[0].own_app && provides[0].allow.is_empty());
+    assert!(!provides[1].own_app && provides[1].allow == ["org.example.viewer"]);
+    assert!(!provides[2].own_app && provides[2].allow.is_empty());
+    assert!(m.unknown.is_empty());
+    let other = b"name: sync\nbinary: /apps/org.example.editor/sync\nstart: boot\n\
+                  provides:\n  - protocol: mikros.packages.Installer\n";
+    let refused = parse_package_service("org.example.editor", "sync", other).unwrap_err();
+    assert_eq!(refused.kind, ErrorKind::BadProtocol);
+    // A system service's manifest has no such keys.
+    let system = b"name: x\nbinary: /system/x\nstart: boot\n\
+                   provides:\n  - protocol: mikros.x.X\n    own_app: true\n";
+    let m = parse("system.x", system).unwrap();
+    assert!(!m.service.provides[0].own_app);
+    assert_eq!(m.unknown.len(), 1);
 }

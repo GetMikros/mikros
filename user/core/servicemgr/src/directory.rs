@@ -113,6 +113,9 @@ struct Provided {
     /// The service that provides it.
     service: String,
     permission: Option<String>,
+    /// The only app IDs that may connect, or none for any
+    /// (MIKSPEC-0101.R66).
+    admits: Vec<String>,
     provider: Provider,
 }
 
@@ -268,6 +271,7 @@ impl Dir {
                 Provided {
                     service,
                     permission,
+                    admits: Vec::new(),
                     provider,
                 },
             );
@@ -289,30 +293,35 @@ impl Dir {
         let registrar = Provided {
             service: String::new(),
             permission: Some(REGISTER_PERMISSION.into()),
+            admits: Vec::new(),
             provider: Provider::Registrar,
         };
         provided.insert(REGISTRAR.into(), registrar);
         let control = Provided {
             service: String::new(),
             permission: Some(CONTROL_PERMISSION.into()),
+            admits: Vec::new(),
             provider: Provider::Control,
         };
         provided.insert(CONTROL.into(), control);
         let services = Provided {
             service: String::new(),
             permission: None,
+            admits: Vec::new(),
             provider: Provider::Services,
         };
         provided.insert(SERVICES.into(), services);
         let service_control = Provided {
             service: String::new(),
             permission: Some(SERVICE_CONTROL_PERMISSION.into()),
+            admits: Vec::new(),
             provider: Provider::ServiceControl,
         };
         provided.insert(SERVICE_CONTROL.into(), service_control);
         let package_services = Provided {
             service: String::new(),
             permission: None,
+            admits: Vec::new(),
             provider: Provider::PackageServices,
         };
         provided.insert(PACKAGE_SERVICES.into(), package_services);
@@ -349,11 +358,17 @@ impl Dir {
                 continue;
             };
             let s = &services[*k];
-            let permission = s
-                .provides
-                .iter()
-                .find(|p| p.protocol == protocol)
-                .and_then(|p| p.permission.clone());
+            let provide = s.provides.iter().find(|p| p.protocol == protocol);
+            let permission = provide.and_then(|p| p.permission.clone());
+            // A package's service may admit only its own app, or also
+            // the apps it lists (MIKSPEC-0101.R66).
+            let admits = match provide {
+                Some(p) if p.own_app => alloc::vec![s.app_id.clone()],
+                Some(p) if !p.allow.is_empty() => core::iter::once(s.app_id.clone())
+                    .chain(p.allow.iter().cloned())
+                    .collect(),
+                _ => Vec::new(),
+            };
             let provider = match initially(first + k) {
                 Initially::Starting => Provider::Waiting(Vec::new()),
                 Initially::Idle => Provider::Idle,
@@ -364,6 +379,7 @@ impl Dir {
                 Provided {
                     service: s.name.clone(),
                     permission,
+                    admits,
                     provider,
                 },
             );
@@ -588,6 +604,9 @@ impl Dir {
                 }
                 if matches!(p.provider, Provider::Never) {
                     return Err(Status::NotFound);
+                }
+                if !p.admits.is_empty() && !p.admits.contains(&caller.app_id) {
+                    return Err(Status::AccessDenied);
                 }
                 p.permission.clone()
             } else {
