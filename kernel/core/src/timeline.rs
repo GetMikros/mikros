@@ -66,7 +66,13 @@ impl Timeline {
 
     /// Blocks the running thread until the value is at least `value`, as
     /// `timeline_wait` does.
-    pub fn wait(&self, process: &Process, value: u64, deadline: i64) -> Result<(), Error> {
+    pub fn wait(
+        &self,
+        process: &Process,
+        value: u64,
+        deadline: i64,
+        closed: impl Fn() -> bool,
+    ) -> Result<(), Error> {
         let thread = sched::current().ok_or(Error::BadState)?;
         let koid = self.header.koid();
         let _charge = process.budget().hold_kernel(WAITER_COST)?;
@@ -80,6 +86,9 @@ impl Timeline {
             });
         }
         let result = loop {
+            if closed() {
+                break Err(Error::Canceled);
+            }
             if self.value() >= value {
                 break Ok(());
             }

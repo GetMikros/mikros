@@ -18,6 +18,7 @@ fn main(m: &Managed) -> i64 {
         &[
             ("info_topics", info_topics),
             ("events_and_waits", events_and_waits),
+            ("closing_ends_blocked_calls", closing_ends_blocked_calls),
             ("timers", timers),
             ("ports", ports),
             ("ports_are_readable", ports_are_readable),
@@ -114,6 +115,82 @@ fn events_and_waits(s: &Own) -> Result {
         "cancelling the wait",
         HELPER.load(Ordering::Acquire) as i64 == CANCELED,
     )
+}
+
+/// What the helper thread's blocked call returned.
+static BLOCKED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+extern "sysv64" fn port_wait_forever(port: u64, _: u64) -> ! {
+    let mut packet = [0u8; 48];
+    // SAFETY: the buffer holds a packet.
+    let status = unsafe { sys::port_wait(port as Handle, i64::MAX, packet.as_mut_ptr()) };
+    BLOCKED.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+extern "sysv64" fn timeline_wait_forever(timeline: u64, _: u64) -> ! {
+    // SAFETY: the call takes no pointers.
+    let status = unsafe { sys::timeline_wait(timeline as Handle, 1, i64::MAX) };
+    BLOCKED.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+extern "sysv64" fn call_forever(channel: u64, _: u64) -> ! {
+    let (status, ..) = call(channel as Handle, b"ping", None, 64, i64::MAX);
+    BLOCKED.store(status as u64, Ordering::Release);
+    // SAFETY: the call takes no pointers.
+    unsafe { sys::thread_exit() };
+    unreachable!("thread_exit returned");
+}
+
+/// Closing the handle that a blocked `port_wait`, `timeline_wait` or
+/// `channel_call` names ends it with `ERR_CANCELED` (MIKSPEC-0007.R23),
+/// leaving the port's packet queued, and the call's late reply is
+/// discarded (MIKSPEC-0009.R34).
+fn closing_ends_blocked_calls(s: &Own) -> Result {
+    let blocked = |what: &'static str, object: Handle, f: extern "sysv64" fn(u64, u64) -> !| {
+        let mut copy = 0;
+        // SAFETY: the pointer is valid for the call.
+        check("duplicating", unsafe {
+            sys::handle_duplicate(object, 0x8000_0000, &mut copy)
+        })?;
+        BLOCKED.store(0, Ordering::Release);
+        let thread = spawn(s, f, u64::from(copy))?;
+        sleep_ms(20);
+        // SAFETY: the call takes no pointers.
+        check("closing the handle", unsafe { sys::handle_close(copy) })?;
+        let (status, _) = wait(thread, TERMINATED, now() + 2_000_000_000);
+        ensure("seeing the thread end", status == 0)?;
+        ensure(what, BLOCKED.load(Ordering::Acquire) as i64 == CANCELED)
+    };
+    let mut port = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating a port", unsafe { sys::port_create(0, &mut port) })?;
+    blocked("cancelling port_wait", port, port_wait_forever)?;
+    let mut timeline = 0;
+    // SAFETY: the pointer is valid for the call.
+    check("creating a timeline", unsafe {
+        sys::timeline_create(0, 0, &mut timeline)
+    })?;
+    blocked("cancelling timeline_wait", timeline, timeline_wait_forever)?;
+    let (mut ours, mut theirs) = (0, 0);
+    // SAFETY: the pointers are valid for the call.
+    check("creating a channel", unsafe {
+        sys::channel_create(0, &mut ours, &mut theirs)
+    })?;
+    blocked("cancelling channel_call", ours, call_forever)?;
+    // SAFETY: the calls take no pointers.
+    unsafe {
+        sys::handle_close(port);
+        sys::handle_close(timeline);
+        sys::handle_close(ours);
+        sys::handle_close(theirs);
+    }
+    Ok(())
 }
 
 /// Timers set SIGNALED at their deadline, at once for a past one, and

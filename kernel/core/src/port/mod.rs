@@ -122,7 +122,7 @@ impl Port {
 
     /// Waits until `deadline` for a packet to be queued, leaving it
     /// queued, so that the caller can prepare its output before `take`.
-    pub fn wait_queued(&self, deadline: i64) -> Result<(), Error> {
+    pub fn wait_queued(&self, deadline: i64, closed: impl Fn() -> bool) -> Result<(), Error> {
         let thread = sched::current().ok_or(Error::BadState)?;
         let process = thread.process().cloned().ok_or(Error::BadState)?;
         let _charge = process.budget().hold_kernel(WAITER_COST)?;
@@ -132,6 +132,11 @@ impl Port {
             state.waiters.push(thread.clone());
         }
         let result = loop {
+            // Nothing is taken once the port's handle is closed
+            // (MIKSPEC-0007.R23).
+            if closed() {
+                break Err(Error::Canceled);
+            }
             if !self.state.lock().queue.is_empty() {
                 break Ok(());
             }

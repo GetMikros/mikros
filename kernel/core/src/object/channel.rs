@@ -206,6 +206,9 @@ pub fn endpoints_in(entries: &[Entry]) -> usize {
 
 /// The bit that marks transaction IDs of `channel_call`.
 pub const CALL_ID: u32 = 1 << 31;
+/// The most transaction IDs that an endpoint keeps retired, counting the
+/// outstanding calls, which may become retired (MIKSPEC-0009.R34).
+pub const RETIRED_MAX: usize = 1024;
 
 /// An outstanding `channel_call`, with its reply once it arrives.
 struct Call {
@@ -523,10 +526,20 @@ impl Core {
     /// ID: one with `CALL_ID` set that no outstanding call and no call
     /// ended without its reply uses. `CALL_COST` is charged to `budget`,
     /// if given, until the call ends and its reply is read or discarded.
+    /// Fails with `PeerClosed` once the peer is gone, and with
+    /// `NoResources` when `RETIRED_MAX` calls are retired or outstanding.
     pub fn begin_call(&self, budget: Option<&Arc<Budget>>) -> Result<u32, Error> {
         let charge = budget.map(|b| b.hold_kernel(CALL_COST)).transpose()?;
         let mut shared = self.shared.lock();
+        // Its retired IDs stop counting once the peer is gone, as no
+        // late reply can come (MIKSPEC-0009.R34).
+        if shared.ends[self.peer_side()].strong_count() == 0 {
+            return Err(Error::PeerClosed);
+        }
         let queue = &mut shared.queues[self.side];
+        if queue.abandoned.len() + queue.calls.len() >= RETIRED_MAX {
+            return Err(Error::NoResources);
+        }
         queue.calls.try_reserve(1).map_err(|_| Error::NoMemory)?;
         // Room to record every outstanding call as abandoned, so that
         // `abandon_call` never allocates.
@@ -1249,6 +1262,26 @@ mod tests {
             assert_eq!(b.write(message(&id.to_le_bytes(), vec![])).ok(), Some(None));
         }
         assert_eq!(read(&a), Err(Error::ShouldWait));
+    }
+
+    #[test]
+    fn retires_at_most_a_limit_of_ids_while_the_peer_lives() {
+        let (a, b) = Endpoint::pair(None).unwrap();
+        for _ in 0..RETIRED_MAX {
+            let id = a.begin_call(None).unwrap();
+            assert!(a.abandon_call(id).is_none());
+        }
+        assert_eq!(a.begin_call(None), Err(Error::NoResources));
+        // A late reply frees its ID.
+        let late = CALL_ID;
+        assert_eq!(
+            b.write(message(&late.to_le_bytes(), vec![])).ok(),
+            Some(None)
+        );
+        let id = a.begin_call(None).unwrap();
+        assert!(a.abandon_call(id).is_none());
+        drop(b);
+        assert_eq!(a.begin_call(None), Err(Error::PeerClosed));
     }
 
     #[test]

@@ -71,6 +71,50 @@ pub fn handle_closed(process: &Process, handle: Handle) {
     crate::port::handle_closed(address, Some(handle));
 }
 
+/// A watch on a handle of a process, which a thread holds while it
+/// blocks in a call that names the handle, so that closing the handle
+/// ends the call with `Canceled` (MIKSPEC-0007.R23). Signals never wake
+/// it; only `handle_closed` does.
+pub struct CloseWatch {
+    waiter: Arc<Waiter>,
+    _charge: crate::object::budget::Held,
+}
+
+impl CloseWatch {
+    /// Watches `handle` of `process` for the running thread.
+    pub fn new(process: &Arc<Process>, handle: Handle) -> Result<CloseWatch, Error> {
+        let thread = sched::current().ok_or(Error::BadState)?;
+        let charge = process.budget().hold_kernel(record_cost::<Waiter>())?;
+        let waiter = crate::fallible::try_arc(Waiter {
+            koid: 0,
+            mask: 0,
+            thread,
+            process: Arc::as_ptr(process) as usize,
+            handle,
+            canceled: AtomicBool::new(false),
+        })?;
+        let mut waiters = WAITERS.lock();
+        waiters.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        waiters.push(waiter.clone());
+        drop(waiters);
+        Ok(CloseWatch {
+            waiter,
+            _charge: charge,
+        })
+    }
+
+    /// Whether the handle has been closed.
+    pub fn closed(&self) -> bool {
+        self.waiter.canceled.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for CloseWatch {
+    fn drop(&mut self) {
+        WAITERS.lock().retain(|w| !Arc::ptr_eq(w, &self.waiter));
+    }
+}
+
 /// Removes the asynchronous waits made through the handles of `process`,
 /// which has terminated.
 pub fn process_ended(process: &Process) {
@@ -153,13 +197,16 @@ pub fn reply_delivered(koid: u64, id: u32) {
     }
 }
 
-/// Blocks the running thread until the reply of call `id` on `endpoint`
-/// arrives, and returns it. Fails with `TimedOut` at `deadline`,
-/// `PeerClosed` when the peer goes, and `Interrupted` when a signal ends
-/// the call; the call then stays outstanding for the caller to abandon.
+/// Blocks the running thread until the reply of call `id` on `endpoint`,
+/// which it names by `handle` of `process`, arrives, and returns it.
+/// Fails with `TimedOut` at `deadline`, `PeerClosed` when the peer goes,
+/// `Interrupted` when a signal ends the call, and `Canceled` when the
+/// handle is closed; the call then stays outstanding for the caller to
+/// abandon.
 pub fn wait_call(
     endpoint: &Arc<Endpoint>,
     process: &Arc<Process>,
+    handle: Handle,
     id: u32,
     deadline: i64,
 ) -> Result<Message, Error> {
@@ -174,8 +221,8 @@ pub fn wait_call(
         koid: header.koid(),
         mask: signals::PEER_CLOSED,
         thread: thread.clone(),
-        process: 0,
-        handle: 0,
+        process: Arc::as_ptr(process) as usize,
+        handle,
         canceled: AtomicBool::new(false),
     })?;
     {
@@ -199,6 +246,9 @@ pub fn wait_call(
         }
         if endpoint.peer_closed() {
             break Err(Error::PeerClosed);
+        }
+        if waiter.canceled.load(Ordering::Acquire) {
+            break Err(Error::Canceled);
         }
         if crate::signal::call_interrupted(&thread, process) {
             break Err(Error::Interrupted);

@@ -786,7 +786,8 @@ pub fn channel_call(
         wr_count,
         Some(id),
     );
-    let reply = request.and_then(|()| crate::wait::wait_call(&endpoint, &process, id, deadline));
+    let reply =
+        request.and_then(|()| crate::wait::wait_call(&endpoint, &process, value, id, deadline));
     let reply = match reply {
         Ok(reply) => reply,
         Err(e) => {
@@ -1907,14 +1908,21 @@ pub fn port_wait(port: Checked, deadline: i64, out: UserOut<u8>) -> Result<(), E
         return Err(Error::InvalidArgs);
     }
     let process = current_process()?;
+    let handle = port.value;
     let port = object::<crate::port::Port>(port);
     #[cfg(feature = "diag")]
     let _waiting = kernel_core::diag::Waiting::on(port.header().koid());
+    // Closing the port's handle ends the wait with nothing taken
+    // (MIKSPEC-0007.R23).
+    let watch = crate::wait::CloseWatch::new(&process, handle)?;
     // The packet leaves the queue only once its output is prepared; when
     // another waiter takes it meanwhile, this one waits again.
     loop {
-        port.wait_queued(deadline)?;
+        port.wait_queued(deadline, || watch.closed())?;
         let outputs = prepare(&process, &[out.range(crate::port::PACKET_SIZE as u64)])?;
+        if watch.closed() {
+            return Err(Error::Canceled);
+        }
         if let Some(packet) = port.take() {
             publish(outputs, &[&packet]);
             return Ok(());
@@ -2087,7 +2095,8 @@ pub fn timeline_get(timeline: Checked, out: UserOut<u64>) -> Result<(), Error> {
 
 pub fn timeline_wait(timeline: Checked, value: u64, deadline: i64) -> Result<(), Error> {
     let process = current_process()?;
-    object::<crate::timeline::Timeline>(timeline).wait(&process, value, deadline)
+    let watch = crate::wait::CloseWatch::new(&process, timeline.value)?;
+    object::<crate::timeline::Timeline>(timeline).wait(&process, value, deadline, || watch.closed())
 }
 
 pub fn timeline_wait_async(
