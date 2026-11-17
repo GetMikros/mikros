@@ -1,7 +1,8 @@
 //! The log service: a system service that collects the records of the
 //! kernel log and those that clients write through `mikros.log.Writer`
 //! into one log, kept in memory, and lets clients that hold `admin.logs.read`
-//! read it through `mikros.log.Reader`.
+//! read it through `mikros.log.Reader`, and every client its own app's
+//! records and its components' through `mikros.log.OwnReader`.
 //!
 //! It reads the kernel log with a `LogReader` on the `log_manage` boot
 //! handle, from the oldest record the kernel still holds. A record that
@@ -21,6 +22,7 @@
 mod files;
 mod kernel;
 mod log;
+mod own;
 mod reader;
 mod sources;
 mod writer;
@@ -28,7 +30,7 @@ use crate::service::log::Log;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use mikros_rt::exec::Executor;
-use mikros_rt::interfaces::__midl::{OwnedHandle, ServerEnd};
+use mikros_rt::interfaces::__midl::{ClientEnd, OwnedHandle, ServerEnd};
 use mikros_rt::interfaces::mikros::process::{HandleRole, StartupHandle};
 use mikros_rt::interfaces::mikros::service::{
     DirectoryAsyncClient, ProviderAsyncServer, ProviderRequest,
@@ -40,6 +42,8 @@ mikros_rt::raw_main!(main);
 /// The protocols the service provides.
 const WRITER: &str = "mikros.log.Writer";
 const READER: &str = "mikros.log.Reader";
+const OWN_READER: &str = "mikros.log.OwnReader";
+const SAME_RIGHTS: u32 = 1 << 31;
 const SOURCES: &str = "mikros.log.Sources";
 /// The `id` of the `log_manage` boot handle among the `USER` startup
 /// handles.
@@ -100,6 +104,25 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
     // SAFETY: the call takes no pointers but `old`, which is null.
     unsafe { sys::signal_set_mask(0, TERM, core::ptr::null_mut()) };
     spawner.spawn(stop(log.clone(), reactor.clone()));
+    // A second connection to the directory, for the readers of their own
+    // records, which find the packages that their apps own.
+    let mut raw = 0;
+    // SAFETY: the out pointer is valid for the call.
+    let duplicated = unsafe {
+        sys::handle_duplicate(
+            managed.header.directory.handle().raw(),
+            SAME_RIGHTS,
+            &mut raw,
+        )
+    };
+    let own_directory = (duplicated == mikros_rt::OK).then(|| {
+        // SAFETY: the kernel just made the handle for us.
+        let handle = unsafe { OwnedHandle::from_raw(raw) };
+        Rc::new(DirectoryAsyncClient::new(
+            ClientEnd::new(handle),
+            reactor.clone(),
+        ))
+    });
     let directory = DirectoryAsyncClient::new(managed.header.directory, reactor.clone());
     spawner.spawn(crate::service::files::watch(
         log.clone(),
@@ -131,6 +154,18 @@ fn main(bootstrap: sys::Handle, _arg2: u64) -> i64 {
                     end,
                     reactor.clone(),
                     spawner.clone(),
+                );
+                spawner.spawn(task);
+            } else if c.protocol == OWN_READER
+                && let Some(directory) = own_directory.clone()
+            {
+                let end = ServerEnd::new(c.server);
+                let task = crate::service::own::serve(
+                    log.clone(),
+                    end,
+                    reactor.clone(),
+                    c.client,
+                    directory,
                 );
                 spawner.spawn(task);
             } else if c.protocol == SOURCES {

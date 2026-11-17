@@ -7,6 +7,8 @@ boot_handles: [log_manage, platform_info]
 permissions: [system.filesystems.mount]
 provides:
   - protocol: mikros.log.Writer
+  # Each app's own records and its components' (MIKSPEC-0063.R19).
+  - protocol: mikros.log.OwnReader
   - protocol: mikros.log.Reader
     permission: admin.logs.read
   - protocol: mikros.log.Sources
