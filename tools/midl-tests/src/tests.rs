@@ -534,3 +534,11 @@ fn async_server_serves_a_client() {
     });
     assert_eq!(client.join().unwrap(), CalcAddResponse { sum: 9 });
 }
+
+#[test]
+fn types_without_handles_clone() {
+    // `Everything` holds a structure, a union, a table, vectors and
+    // optional values, none of them with a handle.
+    let original = everything();
+    assert_eq!(original.clone(), original);
+}

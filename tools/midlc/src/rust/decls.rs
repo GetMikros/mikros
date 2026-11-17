@@ -45,7 +45,9 @@ impl Gen<'_> {
     pub(super) fn structure(&self, name: &str, fields: &[Field], out: &mut String) {
         let rt = self.rt();
         let (shape, offsets) = self.layout.struct_shape(fields);
-        writeln!(out, "#[derive(Debug, PartialEq)]\npub struct {name} {{").unwrap();
+        let carries = fields.iter().any(|f| self.layout.carries_handles(&f.ty));
+        let derives = derives(carries, "Debug, PartialEq");
+        writeln!(out, "#[derive({derives})]\npub struct {name} {{").unwrap();
         for f in fields {
             out.push_str(&doc(&f.doc, "    "));
             writeln!(
@@ -185,7 +187,9 @@ impl Gen<'_> {
     ) {
         let rt = self.rt();
         let flexible = strictness == Strictness::Flexible;
-        writeln!(out, "#[derive(Debug, PartialEq)]\npub enum {name} {{").unwrap();
+        let carries = members.iter().any(|m| self.layout.carries_handles(&m.ty));
+        let derives = derives(carries, "Debug, PartialEq");
+        writeln!(out, "#[derive({derives})]\npub enum {name} {{").unwrap();
         let (mut encode, mut decode) = (String::new(), String::new());
         for m in members {
             out.push_str(&doc(&m.doc, "    "));
@@ -232,11 +236,9 @@ impl Gen<'_> {
 
     fn table(&self, name: &str, members: &[OrdinalField], out: &mut String) {
         let rt = self.rt();
-        writeln!(
-            out,
-            "#[derive(Debug, Default, PartialEq)]\npub struct {name} {{"
-        )
-        .unwrap();
+        let carries = members.iter().any(|m| self.layout.carries_handles(&m.ty));
+        let derives = derives(carries, "Debug, Default, PartialEq");
+        writeln!(out, "#[derive({derives})]\npub struct {name} {{").unwrap();
         let (mut count, mut encode, mut decode) = (String::new(), String::new(), String::new());
         for m in members {
             out.push_str(&doc(&m.doc, "    "));
@@ -265,5 +267,14 @@ impl Gen<'_> {
             "}}\n\nimpl {name} {{\n#[doc(hidden)]\npub fn __encode(self, e: &mut {rt}::Encoder, at: usize) -> Result<(), {rt}::Error> {{\nlet {name} {{ {fields} }} = self;\nlet mut count = 0usize;\n{count}e.vector(at, count, u64::MAX)?;\nlet envelopes = e.alloc(count * 16);\nlet _ = envelopes;\n{encode}Ok(())\n}}\n\n#[doc(hidden)]\npub fn __decode(d: &mut {rt}::Decoder<'_>, at: usize) -> Result<{name}, {rt}::Error> {{\nlet count = d.vector(at, u64::MAX)?.ok_or({rt}::Error::Invalid)?;\nlet envelopes = d.claim(count.checked_mul(16).ok_or({rt}::Error::Invalid)?)?;\nlet mut out = {name}::default();\nfor i in 0..count {{\nlet slot = envelopes + i * 16;\nlet bytes = d.u32(slot)?;\nlet handles = d.u32(slot + 4)?;\nif !d.presence(slot + 8)? {{\nif bytes != 0 || handles != 0 || i + 1 == count {{\nreturn Err({rt}::Error::Invalid);\n}}\ncontinue;\n}}\nlet start = d.begin_envelope();\nmatch i + 1 {{\n{decode}_ => {{\nd.skip(bytes, handles)?;\ncontinue;\n}}\n}}\nd.end_envelope(start, bytes, handles)?;\n}}\nOk(out)\n}}\n}}\n"
         )
         .unwrap();
+    }
+}
+
+/// The derives of a generated type: `Clone` too, unless it can carry a
+/// handle, which only one owner may hold.
+fn derives(carries_handles: bool, derives: &str) -> String {
+    match carries_handles {
+        true => derives.to_owned(),
+        false => format!("Clone, {derives}"),
     }
 }

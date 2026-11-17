@@ -197,6 +197,38 @@ impl Layout<'_> {
         })
     }
 
+    /// Whether a value of `ty` can carry a handle.
+    pub fn carries_handles(&self, ty: &Type) -> bool {
+        self.carries_in(ty, &mut Vec::new())
+    }
+
+    fn carries_in(&self, ty: &Type, open: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Bool | Type::Int(_) | Type::F32 | Type::F64 | Type::String { .. } => false,
+            Type::Vector { element, .. } | Type::Array { element, .. } => {
+                self.carries_in(element, open)
+            }
+            Type::Handle { .. } | Type::Endpoint { .. } => true,
+            Type::Named { name, .. } => {
+                // A type being looked at already adds nothing new.
+                if open.contains(name) {
+                    return false;
+                }
+                open.push(name.clone());
+                let carries = match self.decl(name) {
+                    DeclKind::Struct(fields) => fields.iter().any(|f| self.carries_in(&f.ty, open)),
+                    DeclKind::Enum { .. } | DeclKind::Bits { .. } => false,
+                    DeclKind::Union { members, .. } | DeclKind::Table(members) => {
+                        members.iter().any(|m| self.carries_in(&m.ty, open))
+                    }
+                    _ => unreachable!("only data types are named as types"),
+                };
+                open.pop();
+                carries
+            }
+        }
+    }
+
     /// The largest message whose body is a structure with `fields`, or
     /// `None` when there is no bound.
     pub fn message_max(&self, fields: &[Field]) -> Option<Max> {
